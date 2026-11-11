@@ -74,11 +74,11 @@
     <text x="726" y="134" class="t-small">up-verify drives the full flow</text>
   </g>
 
-  <!-- MinIO -->
+  <!-- RustFS -->
   <g>
     <path d="M1305 215 v200 a45 16 0 0 0 90 0 v-200" fill="url(#gCyl)" stroke="#a16207" stroke-width="2"/>
     <ellipse cx="1350" cy="215" rx="45" ry="16" fill="#fefce8" stroke="#a16207" stroke-width="2"/>
-    <text x="1272" y="272" class="t-name" fill="#713f12">MinIO</text>
+    <text x="1272" y="272" class="t-name" fill="#713f12">RustFS</text>
     <text x="1272" y="290" class="t-body">artifact store</text>
     <text x="1272" y="305" class="t-body">golden set per build</text>
     <text x="1272" y="320" class="t-body">+ per-template index</text>

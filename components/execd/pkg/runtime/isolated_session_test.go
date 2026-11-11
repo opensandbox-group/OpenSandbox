@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 
 //go:build !windows
 
@@ -19,6 +19,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,7 +90,9 @@ func newStubIsolator() *stubIsolator {
 			Isolator:               "stub",
 			SetprivAvailable:       true,
 			SetprivSwitchAvailable: true,
+			SetprivNetAvailable:    true,
 			UsernsAvailable:        true,
+			UsernsNetAvailable:     true,
 			CommitSupported:        false,
 			DiffSupported:          false,
 		},
@@ -358,11 +361,17 @@ func TestGetIsolatedSession_ReturnsCreationParams(t *testing.T) {
 	if state.Profile != "balanced" {
 		t.Errorf("Profile = %q, want balanced", state.Profile)
 	}
-	if state.WorkspacePath == "" {
-		t.Error("WorkspacePath is empty")
+	if len(state.Overlays) != 1 {
+		t.Fatalf("Overlays len = %d, want 1", len(state.Overlays))
 	}
-	if state.WorkspaceMode != "overlay" {
-		t.Errorf("WorkspaceMode = %q, want overlay", state.WorkspaceMode)
+	if state.Overlays[0].Path == "" {
+		t.Error("Overlays[0].Path is empty")
+	}
+	if state.Overlays[0].Mode != "overlay" {
+		t.Errorf("Overlays[0].Mode = %q, want overlay", state.Overlays[0].Mode)
+	}
+	if state.Overlays[0].Persist == nil || !*state.Overlays[0].Persist {
+		t.Error("Overlays[0].Persist not defaulted to true")
 	}
 	if len(state.ExtraWritable) != 1 {
 		t.Errorf("ExtraWritable len = %d, want 1", len(state.ExtraWritable))
@@ -423,8 +432,8 @@ func TestGetIsolatedSession_EchoesEffectiveDefaults(t *testing.T) {
 	if state.Profile != "strict" {
 		t.Errorf("Profile = %q, want strict (execd default)", state.Profile)
 	}
-	if state.WorkspaceMode != "overlay" {
-		t.Errorf("WorkspaceMode = %q, want overlay (execd default)", state.WorkspaceMode)
+	if len(state.Overlays) != 1 || state.Overlays[0].Mode != "overlay" {
+		t.Errorf("Overlays = %+v, want a single overlay (execd default mode)", state.Overlays)
 	}
 	if state.EnvPassthroughMode != "deny" {
 		t.Errorf("EnvPassthroughMode = %q, want deny (execd default)", state.EnvPassthroughMode)
@@ -589,6 +598,96 @@ func TestRunInIsolatedSession_ExitCode(t *testing.T) {
 	}
 }
 
+// TestRunInIsolatedSession_StdinDetached verifies that user code cannot read
+// the rest of the run script (including its end marker) from the shell's
+// stdin, with and without envs.
+func TestRunInIsolatedSession_StdinDetached(t *testing.T) {
+	for _, envs := range []map[string]string{nil, {"RUN_ENVELOPE": "1"}} {
+		runner, id := newInterruptTestSession(t)
+		run := func(code string) ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var lines []string
+			err := runner.RunInIsolatedSession(ctx, id, code, envs, func(line string) {
+				lines = append(lines, line)
+			})
+			return lines, err
+		}
+
+		lines, err := run(`read x; echo "got:$x"; false`)
+		if err == nil || !strings.Contains(err.Error(), "code 1") {
+			t.Errorf("envs=%v: read run error = %v, want exit code 1", envs, err)
+		}
+		if len(lines) != 1 || lines[0] != "got:" {
+			t.Errorf("envs=%v: read run output = %v, want [got:]", envs, lines)
+		}
+
+		if _, err := run("cat"); err != nil {
+			t.Errorf("envs=%v: cat run: %v", envs, err)
+		}
+		lines, err = run("echo next")
+		if err != nil || len(lines) != 1 || lines[0] != "next" {
+			t.Errorf("envs=%v: follow-up run = %v, %v; want [next]", envs, lines, err)
+		}
+	}
+}
+
+// TestRunInIsolatedSession_ParsesCodeIncrementally verifies that each
+// command of a run is parsed after the previous ones ran, as at top level, so
+// a shell option set early in the code applies to the lines after it.
+func TestRunInIsolatedSession_ParsesCodeIncrementally(t *testing.T) {
+	if getShell() != bashShell {
+		t.Skip("extglob needs bash")
+	}
+	runner, id := newInterruptTestSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var lines []string
+	code := "shopt -s extglob\ncase aa in +(a)) echo matched;; esac"
+	err := runner.RunInIsolatedSession(ctx, id, code, nil, func(line string) {
+		lines = append(lines, line)
+	})
+	if err != nil || len(lines) != 1 || lines[0] != "matched" {
+		t.Fatalf("run = %v, %v; want [matched]", lines, err)
+	}
+}
+
+// TestRunInIsolatedSession_IgnoresEvalOverrides verifies that a function or
+// alias named eval left behind by one run cannot swallow the code of the
+// next: the runner must still reach the builtin.
+func TestRunInIsolatedSession_IgnoresEvalOverrides(t *testing.T) {
+	if getShell() != bashShell {
+		t.Skip("overriding eval with a function needs bash")
+	}
+	for _, override := range []string{
+		"eval() { :; }",
+		"shopt -s expand_aliases; alias eval=true",
+	} {
+		runner, id := newInterruptTestSession(t)
+		run := func(code string) ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var lines []string
+			err := runner.RunInIsolatedSession(ctx, id, code, nil, func(line string) {
+				lines = append(lines, line)
+			})
+			return lines, err
+		}
+
+		if _, err := run(override); err != nil {
+			t.Fatalf("%s: %v", override, err)
+		}
+		lines, err := run("echo next; false")
+		if err == nil || !strings.Contains(err.Error(), "code 1") {
+			t.Errorf("after %q: error = %v, want exit code 1", override, err)
+		}
+		if len(lines) != 1 || lines[0] != "next" {
+			t.Errorf("after %q: output = %v, want [next]", override, lines)
+		}
+	}
+}
+
 func TestCapabilities(t *testing.T) {
 	runner := newTestRunner(t)
 	caps := runner.Capabilities()
@@ -597,21 +696,6 @@ func TestCapabilities(t *testing.T) {
 	}
 	if caps.Isolator != "stub" {
 		t.Errorf("Isolator = %q, want stub", caps.Isolator)
-	}
-}
-
-func TestIsolatedSessionOptions_Defaults(t *testing.T) {
-	opts := &IsolatedSessionOptions{
-		WorkspacePath: "/ws",
-	}
-	if opts.Profile != "" {
-		t.Error("Profile should default to empty (controller sets strict)")
-	}
-	if opts.WorkspaceMode != "" {
-		t.Error("WorkspaceMode should default to empty (controller sets overlay)")
-	}
-	if opts.ShareNet != nil {
-		t.Error("ShareNet should default to nil (start defaults to true)")
 	}
 }
 
@@ -682,6 +766,76 @@ func TestRunInIsolatedSession_MultiLine(t *testing.T) {
 		if lines[i] != want {
 			t.Errorf("line[%d] = %q, want %q", i, lines[i], want)
 		}
+	}
+}
+
+// The shell runs the script while it reads it, so a script larger than the
+// stdin pipe whose early commands print more than the stdout pipe holds must
+// still complete.
+func TestRunInIsolatedSession_LargeScriptWithEarlyOutput(t *testing.T) {
+	runner := newTestRunner(t)
+
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var lines int
+	code := "seq 1 100000\n#" + strings.Repeat("x", 150*1024) + "\necho done"
+	err = runner.RunInIsolatedSession(ctx, id, code, nil, func(string) { lines++ })
+	if err != nil {
+		t.Fatalf("RunInIsolatedSession: %v", err)
+	}
+	if lines != 100001 {
+		t.Fatalf("got %d output lines, want 100001", lines)
+	}
+}
+
+// A run whose script stops the shell from reading its stdin, while another
+// process keeps stdout open, must report the failed write instead of waiting
+// for an end marker that never comes.
+func TestRunInIsolatedSession_ReportsFailedScriptWrite(t *testing.T) {
+	runner := newTestRunner(t)
+
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	// Simulate a shell that no longer reads its stdin (e.g. it was killed):
+	// the script goes to a pipe whose read end is already closed.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pr.Close()
+	s := runner.lookup(id)
+	s.mu.Lock()
+	shellStdin := s.stdin
+	s.stdin = pw
+	s.mu.Unlock()
+	defer shellStdin.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err = runner.RunInIsolatedSession(ctx, id, "echo unreachable", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "write stdin") {
+		t.Fatalf("RunInIsolatedSession error = %v, want a write stdin error", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("run waited for its deadline instead of reporting the failed write")
 	}
 }
 
@@ -816,5 +970,75 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "must be an existing path") {
 		t.Errorf("expected existing-path rejection, got: %v", err)
+	}
+}
+
+func TestScanUntilMarker_LineLongerThanMaxScanLine(t *testing.T) {
+	const marker = isolatedRunEndMarkerPrefix + "_test"
+	// The output has no trailing newline, so the marker follows it on the
+	// same line and arrives in the last piece.
+	output := strings.Repeat("a", maxScanLineBytes+100*1024)
+	input := output + marker + " 7\nnext run output\n"
+
+	var stdout []string
+	exitCode, err := scanUntilMarker(context.Background(), io.NopCloser(strings.NewReader(input)), marker, func(text string) {
+		stdout = append(stdout, text)
+	})
+	if err != nil {
+		t.Fatalf("scanUntilMarker: %v", err)
+	}
+	if exitCode != 7 {
+		t.Fatalf("exit code = %d, want 7", exitCode)
+	}
+	if got := strings.Join(stdout, ""); got != output {
+		t.Fatalf("stdout has %d bytes, want the %d output bytes before the marker", len(got), len(output))
+	}
+}
+
+func TestScanUntilMarker_KeepsEmptyLines(t *testing.T) {
+	const marker = isolatedRunEndMarkerPrefix + "_test"
+	input := "a\n\nb\n" + marker + " 0\n"
+
+	var stdout []string
+	if _, err := scanUntilMarker(context.Background(), io.NopCloser(strings.NewReader(input)), marker, func(text string) {
+		stdout = append(stdout, text)
+	}); err != nil {
+		t.Fatalf("scanUntilMarker: %v", err)
+	}
+	if got := strings.Join(stdout, "|"); got != "a||b" {
+		t.Fatalf("stdout = %q, want a, empty line, b", got)
+	}
+}
+
+func TestRunOutputScanner_MarkerAtPieceBoundary(t *testing.T) {
+	const marker = isolatedRunEndMarkerPrefix + "_test"
+	output := strings.Repeat("a", 64)
+	cases := []struct {
+		name   string
+		pieces []string
+	}{
+		{"boundary inside the marker", []string{output + marker[:5], marker[5:] + " 17"}},
+		{"boundary right after the marker", []string{output + marker, " 17"}},
+		{"boundary inside the exit code", []string{output + marker + " 1", "7"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout []string
+			scanner := &runOutputScanner{marker: marker, onStdout: func(text string) {
+				stdout = append(stdout, text)
+			}}
+			if !scanner.onLine(tc.pieces[0], false) {
+				t.Fatal("scanner stopped before the marker line was complete")
+			}
+			if scanner.onLine(tc.pieces[1], true) {
+				t.Fatal("scanner kept going after the marker line")
+			}
+			if !scanner.markerSeen || scanner.exitCode != 17 {
+				t.Fatalf("markerSeen = %v, exit code = %d, want true, 17", scanner.markerSeen, scanner.exitCode)
+			}
+			if got := strings.Join(stdout, ""); got != output {
+				t.Fatalf("stdout = %q, want %q", got, output)
+			}
+		})
 	}
 }

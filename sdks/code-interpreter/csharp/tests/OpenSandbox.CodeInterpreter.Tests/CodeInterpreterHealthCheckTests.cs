@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -160,20 +160,92 @@ public class CodeInterpreterHealthCheckTests
             .ReturnsAsync(() =>
             {
                 calls++;
-                return new Execution
+                if (calls <= executionErrorOnFirstAttempts)
                 {
-                    Error = calls <= executionErrorOnFirstAttempts
-                        ? new ExecutionError
+                    // Mirrors CommandsAdapter's inference: numeric error value.
+                    return new Execution
+                    {
+                        Error = new ExecutionError
                         {
                             Name = "CommandExecError",
                             Value = "1",
                             Timestamp = 0,
                             Traceback = Array.Empty<string>()
-                        }
-                        : null
-                };
+                        },
+                        ExitCode = 1
+                    };
+                }
+
+                // Foreground success is a confirmed ExitCode 0.
+                return new Execution { ExitCode = 0 };
             });
         return commands;
+    }
+
+    private static async Task<CodeInterpreter> CreateInterpreterAsync(
+        IExecdCommands commands,
+        bool skipHealthCheck = true)
+    {
+        var sandbox = await CreateConnectedSandboxAsync(commands);
+        var interpreter = await CodeInterpreter.CreateAsync(sandbox, new CodeInterpreterCreateOptions
+        {
+            AdapterFactory = new FakeAdapterFactory(new FakeCodes(pingSucceedsAfter: 1)),
+            SkipHealthCheck = skipHealthCheck
+        });
+        return interpreter;
+    }
+
+    [Fact]
+    public async Task IsHealthyAsync_TreatsNonZeroExitWithoutErrorAsUnhealthy()
+    {
+        // Only reachable via custom IExecdCommands stacks.
+        var commands = new Mock<IExecdCommands>();
+        commands
+            .Setup(x => x.RunAsync(
+                It.IsAny<string>(),
+                It.IsAny<RunCommandOptions?>(),
+                It.IsAny<ExecutionHandlers?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Execution { ExitCode = 1 });
+        var interpreter = await CreateInterpreterAsync(commands.Object);
+
+        Assert.False(await interpreter.IsHealthyAsync());
+        await interpreter.Sandbox.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task IsHealthyAsync_TreatsIndeterminateResultAsUnhealthy()
+    {
+        // Neither Complete nor Error: not proof the runtime is serving.
+        var commands = new Mock<IExecdCommands>();
+        commands
+            .Setup(x => x.RunAsync(
+                It.IsAny<string>(),
+                It.IsAny<RunCommandOptions?>(),
+                It.IsAny<ExecutionHandlers?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Execution());
+        var interpreter = await CreateInterpreterAsync(commands.Object);
+
+        Assert.False(await interpreter.IsHealthyAsync());
+        await interpreter.Sandbox.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task IsHealthyAsync_RequiresConfirmedZeroExit()
+    {
+        var commands = new Mock<IExecdCommands>();
+        commands
+            .Setup(x => x.RunAsync(
+                It.IsAny<string>(),
+                It.IsAny<RunCommandOptions?>(),
+                It.IsAny<ExecutionHandlers?>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Execution { ExitCode = 0 });
+        var interpreter = await CreateInterpreterAsync(commands.Object);
+
+        Assert.True(await interpreter.IsHealthyAsync());
+        await interpreter.Sandbox.DisposeAsync();
     }
 
     private static async Task<Sandbox> CreateConnectedSandboxAsync(IExecdCommands? commands = null)

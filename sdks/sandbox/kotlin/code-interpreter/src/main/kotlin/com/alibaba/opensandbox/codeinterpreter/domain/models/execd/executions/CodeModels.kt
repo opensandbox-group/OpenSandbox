@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,19 +37,18 @@ object SupportedLanguage {
  * Represents an execution context for code interpretation.
  *
  * A CodeContext maintains the execution environment for a specific programming
- * language, including the working directory, language configuration, and
- * persistent state across multiple code executions.
+ * language, including language configuration and persistent state across
+ * multiple code executions.
  *
  * ## Context Lifecycle
  *
- * 1. **Creation**: Context is created with language and working directory
+ * 1. **Creation**: Context is created with a language
  * 2. **Execution**: Code runs within this context, building up state
  * 3. **Persistence**: Variables, imports, and functions persist between executions
  * 4. **Cleanup**: Context can be explicitly destroyed or garbage collected
  *
  * @property id Unique identifier for this execution context
  * @property language Programming language for this context (e.g., "python", "javascript")
- * @property cwd Current working directory for code execution
  */
 class CodeContext private constructor(
     val id: String?,
@@ -89,7 +88,7 @@ class CodeContext private constructor(
  *
  * This model encapsulates all the information needed to execute a piece of
  * code, including the code itself and the execution context. The context
- * determines the language interpreter, working directory, and persistent state.
+ * determines the language interpreter and persistent state.
  *
  * ## Usage Patterns
  *
@@ -105,7 +104,6 @@ class CodeContext private constructor(
  * val context = CodeContext.builder()
  *     .id("session-123")
  *     .language("python")
- *     .cwd("/workspace")
  *     .build()
  * val request = RunCodeRequest.builder()
  *     .code("import pandas as pd; df = pd.read_csv('data.csv')")
@@ -114,7 +112,8 @@ class CodeContext private constructor(
  * ```
  *
  * @property code The source code to execute
- * @property context Optional execution context. If null, a temporary context will be created
+ * @property context Execution context; defaults to a fresh Python context when
+ *   omitted (the server creates/reuses a default session per language)
  */
 class RunCodeRequest private constructor(
     val code: String,

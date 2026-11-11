@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -59,6 +59,12 @@ internal sealed class CommandsAdapter : IExecdCommands
         RunCommandOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        // Shared entry point: covers RunAsync too, with the same whitespace
+        // contract as RunInSessionAsync.
+        if (string.IsNullOrWhiteSpace(command))
+        {
+            throw new InvalidArgumentException("command cannot be empty");
+        }
         ValidateRunOptions(options);
         return RunRequestStreamAsync(BuildRunCommandRequest(command, options), cancellationToken);
     }
@@ -98,7 +104,7 @@ internal sealed class CommandsAdapter : IExecdCommands
     {
         return ConsumeExecutionAsync(
             RunStreamAsync(argv, options, cancellationToken), handlers,
-            inferExitCode: !(options?.Background ?? false), cancellationToken);
+            isBackground: options?.Background ?? false, cancellationToken);
     }
 
     public async Task<Execution> RunAsync(
@@ -107,12 +113,34 @@ internal sealed class CommandsAdapter : IExecdCommands
         ExecutionHandlers? handlers = null,
         CancellationToken cancellationToken = default)
     {
+        var stream = RunStreamAsync(command, options, cancellationToken);
         _logger.LogDebug("Running command (commandLength={CommandLength})", command.Length);
         return await ConsumeExecutionAsync(
-            RunStreamAsync(command, options, cancellationToken),
+            stream,
             handlers,
-            inferExitCode: !(options?.Background ?? false),
+            isBackground: options?.Background ?? false,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task SetEnvAsync(string key, string value, CancellationToken cancellationToken = default)
+    {
+        var command = BuildSetEnvCommand(key, value);
+        var execution = await RunAsync(command, cancellationToken: cancellationToken).ConfigureAwait(false);
+        // A foreground command only reports ExitCode 0 after a confirmed
+        // execution_complete event; a missing exit code (e.g. a dropped
+        // stream) is treated as failure because the append was never confirmed.
+        var failed = execution.Error != null || execution.ExitCode is not 0;
+        if (!failed)
+        {
+            return;
+        }
+
+        var stderr = string.Concat(execution.Logs.Stderr.Select(m => m.Text)).Trim();
+        var detail = stderr.Length > 0 ? stderr : execution.Error?.Value?.Trim() ?? string.Empty;
+        var message = $"commands.SetEnvAsync failed for '{key}'" + (detail.Length > 0 ? $": {detail}" : string.Empty);
+        throw new SandboxException(
+            message,
+            error: new SandboxError(SandboxErrorCodes.InternalUnknownError, message));
     }
 
     public async Task InterruptAsync(string sessionId, CancellationToken cancellationToken = default)
@@ -185,7 +213,7 @@ internal sealed class CommandsAdapter : IExecdCommands
         return await ConsumeExecutionAsync(
             RunInSessionStreamAsync(sessionId, command, options, cancellationToken),
             handlers,
-            inferExitCode: true,
+            isBackground: false,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -273,6 +301,55 @@ internal sealed class CommandsAdapter : IExecdCommands
         }
     }
 
+    private static readonly System.Text.RegularExpressions.Regex EnvKeyPattern =
+        new("^[A-Za-z_][A-Za-z0-9_]*\\z", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Quotes a string as a single POSIX shell word.</summary>
+    private static string ShellQuote(string s) => "'" + s.Replace("'", "'\\''") + "'";
+
+    /// <summary>Escapes a value for the runtime env file's double-quoted form.</summary>
+    private static string EscapeDoubleQuoted(string value) => value
+        .Replace("\\", "\\\\")
+        .Replace("\"", "\\\"")
+        .Replace("\n", "\\n")
+        .Replace("\r", "\\r")
+        .Replace("\t", "\\t");
+
+    /// <summary>
+    /// Builds the sandbox-side snippet that appends KEY=VALUE to the env file named
+    /// by the sandbox's EXECD_ENVS variable. Values without a single quote use the
+    /// runtime env file's lossless single-quoted form; otherwise the double-quoted
+    /// form is used (shell-style $NAME sequences in such values may be expanded
+    /// when the runtime loads the file).
+    /// </summary>
+    private static string BuildSetEnvCommand(string key, string value)
+    {
+        if (key is null)
+        {
+            throw new InvalidArgumentException("setEnv key cannot be null");
+        }
+        if (value is null)
+        {
+            throw new InvalidArgumentException("setEnv value cannot be null");
+        }
+        if (!EnvKeyPattern.IsMatch(key))
+        {
+            throw new InvalidArgumentException($"setEnv key must match [A-Za-z_][A-Za-z0-9_]*, got '{key}'");
+        }
+        if (value.Contains('\0'))
+        {
+            throw new InvalidArgumentException("setEnv value cannot contain NUL bytes");
+        }
+
+        var entry = value.Contains('\'')
+            ? $"{key}=\"{EscapeDoubleQuoted(value)}\""
+            : $"{key}='{value}'";
+        return string.Join("\n",
+            $"if [ -z \"${{EXECD_ENVS:-}}\" ]; then printf '%s\\n' 'EXECD_ENVS is not set; cannot persist environment variable {key}' >&2; exit 1; fi",
+            "mkdir -p \"$(dirname \"$EXECD_ENVS\")\"",
+            $"printf '%s\\n' {ShellQuote(entry)} >> \"$EXECD_ENVS\"");
+    }
+
     private static void ValidateRunOptions(RunCommandOptions? options)
     {
         if (options?.Gid.HasValue == true && options.Uid.HasValue != true)
@@ -342,7 +419,7 @@ internal sealed class CommandsAdapter : IExecdCommands
     private async Task<Execution> ConsumeExecutionAsync(
         IAsyncEnumerable<ServerStreamEvent> stream,
         ExecutionHandlers? handlers,
-        bool inferExitCode,
+        bool isBackground,
         CancellationToken cancellationToken)
     {
         var execution = new Execution();
@@ -352,9 +429,11 @@ internal sealed class CommandsAdapter : IExecdCommands
         {
             PreserveLegacyInitId(ev, execution);
             await dispatcher.DispatchAsync(ev).ConfigureAwait(false);
+            if (isBackground && ev.Type == ServerStreamEventTypes.ExecutionComplete)
+                break;
         }
 
-        if (inferExitCode)
+        if (!isBackground)
         {
             execution.ExitCode = InferForegroundExitCode(execution);
         }

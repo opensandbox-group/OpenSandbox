@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -65,6 +65,38 @@ def test_ensure_metadata_labels_accepts_common_k8s_forms():
 def test_ensure_metadata_labels_allows_none_or_empty():
     assert ensure_metadata_labels(None) is None
     assert ensure_metadata_labels({}) is None
+
+
+@pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\r", "\t", " "])
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("app{}", "web"),
+        ("example.com/app{}", "web"),
+        ("example.com{}/app", "web"),
+        ("app", "web{}"),
+        ("app", "{}"),
+    ],
+    ids=["name", "prefixed-name", "prefix", "value", "empty-value"],
+)
+def test_ensure_metadata_labels_rejects_whitespace(key, value, whitespace):
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_metadata_labels({key.format(whitespace): value.format(whitespace)})
+    assert exc_info.value.status_code == 400
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("code") == SandboxErrorCodes.INVALID_METADATA_LABEL
+
+
+@pytest.mark.parametrize("value", ["we b", "web\nx"])
+def test_ensure_metadata_labels_rejects_embedded_whitespace(value):
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_metadata_labels({"app": value})
+    assert exc_info.value.status_code == 400
+    detail = exc_info.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("code") == SandboxErrorCodes.INVALID_METADATA_LABEL
+
 
 def test_ensure_metadata_labels_rejects_name_too_long():
     long_name = "a" * 64
@@ -207,6 +239,15 @@ class TestEnsureValidVolumeName:
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_VOLUME_NAME
 
+    @pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\r", "\t", " "])
+    def test_name_with_trailing_whitespace_raises(self, whitespace):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_volume_name("data" + whitespace)
+        assert exc_info.value.status_code == 400
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail.get("code") == SandboxErrorCodes.INVALID_VOLUME_NAME
+
 class TestEnsureValidMountPath:
 
     def test_valid_absolute_path(self):
@@ -310,6 +351,36 @@ class TestEnsureValidHostPath:
         allowed = ["/data/opensandbox"]
         assert ensure_valid_host_path("/data/opensandbox", allowed) is None
 
+    @pytest.mark.parametrize("path", ["/", "/data", "/data/opensandbox"])
+    def test_allowed_posix_root_prefix(self, path):
+        assert ensure_valid_host_path(path, ["/"]) is None
+
+    @pytest.mark.parametrize("prefix", ["D:/", "D:\\"])
+    @pytest.mark.parametrize("path", ["d:/", "D:/data", r"d:\data\opensandbox"])
+    def test_allowed_windows_drive_root_prefix(self, path, prefix):
+        assert ensure_valid_host_path(path, [prefix]) is None
+
+    @pytest.mark.parametrize(
+        "path,prefix",
+        [("D:/data", "/"), ("/data", "D:/"), ("E:/data", "D:/")],
+    )
+    def test_root_prefix_does_not_allow_other_roots(self, path, prefix):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_host_path(path, [prefix])
+        assert exc_info.value.status_code == 400
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail.get("code") == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
+
+    @pytest.mark.parametrize("path", ["/data", "D:/data"])
+    def test_empty_allowlist_rejects_host_paths(self, path):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_host_path(path, [])
+        assert exc_info.value.status_code == 400
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail.get("code") == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
+
     def test_allowed_prefix_match_windows_paths(self):
         allowed = [r"D:\sandbox-mnt"]
         assert ensure_valid_host_path(r"D:\sandbox-mnt\ReMe", allowed) is None
@@ -340,30 +411,25 @@ class TestEnsureValidPvcName:
         assert ensure_valid_pvc_name("data-volume") is None
         assert ensure_valid_pvc_name("pvc1") is None
 
-    def test_empty_name_raises(self):
+    @pytest.mark.parametrize(
+        "name",
+        ["", "a" * 254, "MyPVC", "my_pvc"],
+        ids=["empty", "too-long", "uppercase", "underscore"],
+    )
+    def test_invalid_name_raises(self, name):
         with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_pvc_name("")
+            ensure_valid_pvc_name(name)
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
 
-    def test_name_too_long_raises(self):
-        long_name = "a" * 254
+    @pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\r", "\t", " "])
+    def test_name_with_trailing_whitespace_raises(self, whitespace):
         with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_pvc_name(long_name)
+            ensure_valid_pvc_name("my-pvc" + whitespace)
         assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
-
-    def test_uppercase_name_raises(self):
-        with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_pvc_name("MyPVC")
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
-
-    def test_underscore_name_raises(self):
-        with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_pvc_name("my_pvc")
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PVC_NAME
+        detail = exc_info.value.detail
+        assert isinstance(detail, dict)
+        assert detail.get("code") == SandboxErrorCodes.INVALID_PVC_NAME
 
 class TestEnsureVolumesValid:
 
@@ -453,6 +519,23 @@ class TestEnsureVolumesValid:
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.DUPLICATE_VOLUME_NAME
 
+    @pytest.mark.parametrize("mount_path", ["/", "/mnt/data", "/mnt/data/", "/mnt/./data"])
+    def test_mount_destination_constraints_are_runtime_specific(self, mount_path):
+        volumes = [
+            Volume(
+                name="data",
+                pvc=PVC(claim_name="shared-data"),
+                mount_path="/mnt/data",
+            ),
+            Volume(
+                name="other",
+                pvc=PVC(claim_name="shared-data"),
+                mount_path=mount_path,
+            ),
+        ]
+
+        assert ensure_volumes_valid(volumes) is None
+
     def test_invalid_volume_name_rejected_by_pydantic(self):
         from pydantic import ValidationError
 
@@ -503,6 +586,13 @@ class TestEnsureVolumesValid:
             ensure_volumes_valid([volume], allowed_host_prefixes=["/data/opensandbox"])
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
+
+    def test_host_path_root_allowlist_accepts_descendant(self):
+        volume = Volume.model_validate(
+            {"name": "data", "host": {"path": "/data"}, "mountPath": "/mnt/data"}
+        )
+
+        assert ensure_volumes_valid([volume], allowed_host_prefixes=["/"]) is None
 
     def test_ossfs_invalid_version_rejected_by_schema(self):
         from pydantic import ValidationError

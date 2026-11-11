@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -58,10 +58,12 @@ VAULT_PAYLOAD = json.dumps(
                     "methods": ["POST"],
                     "paths": ["/v1/chat/*"],
                 },
-                "headers": [{"name": "x-api-key", "value": "secret-api-key"}],
+                "headers": [
+                    {"name": "Authorization", "value": "Bearer synthetic-token"}
+                ],
             }
         ],
-        "redactions": ["secret-api-key"],
+        "redactions": ["Bearer synthetic-token"],
     }
 ).encode("utf-8")
 
@@ -203,14 +205,22 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
         cls._vault.start()
 
         cls._upstream_hits = 0
+        cls._upstream_authorization: str | None = None
         cls._upstream_lock = threading.Lock()
         cls._upstream_hit = threading.Event()
 
         class UpstreamHandler(http.server.BaseHTTPRequestHandler):
             def do_POST(self) -> None:
-                cls._upstream_hit.set()
                 with cls._upstream_lock:
                     cls._upstream_hits += 1
+                    cls._upstream_authorization = self.headers.get("Authorization")
+                cls._upstream_hit.set()
+                remaining = int(self.headers.get("Content-Length") or 0)
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
                 self.send_response(204)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -228,6 +238,21 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
         cls._upstream_thread.start()
 
         script = Path(__file__).parents[1] / "mitmscripts" / "system.py"
+        # Test-only routing shim, loaded after system.py: the credential
+        # binding matches the code.example.com authority, while the local
+        # upstream listens on an ephemeral port. Reroute matched requests
+        # after the credential proxy ran, keeping injected headers intact.
+        shim = Path(cls._tmp.name) / "reroute_shim.py"
+        shim.write_text(
+            "# Test-only routing shim, loaded after system.py.\n"
+            "import os\n"
+            "\n"
+            "\n"
+            "def requestheaders(flow) -> None:\n"
+            "    if flow.request.host == 'code.example.com':\n"
+            "        flow.request.host = '127.0.0.1'\n"
+            "        flow.request.port = int(os.environ['OPENSANDBOX_TEST_UPSTREAM_PORT'])\n"
+        )
         cls._port = _free_port()
         cls._proc = subprocess.Popen(
             [
@@ -238,6 +263,8 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
                 str(cls._port),
                 "-s",
                 str(script),
+                "-s",
+                str(shim),
                 "--set",
                 "stream_large_bodies=1m",
                 "--set",
@@ -246,6 +273,7 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
             env={
                 **os.environ,
                 "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET": cls._vault_path,
+                "OPENSANDBOX_TEST_UPSTREAM_PORT": str(cls._upstream_port),
             },
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -312,6 +340,7 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
         path: str,
         body_size: int,
         authority: str = "code.example.com",
+        upload_body: bool = False,
     ) -> tuple[int | None, bytes]:
         """Send request headers with ``Expect: 100-continue`` and wait for the
         proxy's decision before uploading the body.
@@ -319,6 +348,10 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
         A killed flow is closed without any response (never sends the 100),
         so this deterministically distinguishes kill from 403 even for bodies
         larger than the client send buffer.
+
+        With ``upload_body=True`` and a ``100 Continue`` decision, the body is
+        uploaded afterwards and the status of the final upstream response is
+        returned instead.
         """
         with socket.create_connection(("127.0.0.1", self._port), timeout=30) as sock:
             sock.settimeout(15)
@@ -343,7 +376,30 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
                 return None, b""
             status_line = response.split(b"\r\n", 1)[0]
             status_code = int(status_line.split(b" ")[1])
-            return status_code, response
+            if not upload_body or status_code != 100:
+                return status_code, response
+            try:
+                body_chunk = b"x" * 65536
+                remaining = body_size
+                while remaining > 0:
+                    size = min(len(body_chunk), remaining)
+                    sock.sendall(body_chunk[:size])
+                    remaining -= size
+            except ConnectionError:
+                return None, b""
+            response = b""
+            try:
+                while b"\r\n\r\n" not in response:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+            except ConnectionError:
+                return None, b""
+            if not response:
+                return None, b""
+            status_line = response.split(b"\r\n", 1)[0]
+            return int(status_line.split(b" ")[1]), response
 
     def _assert_proxy_alive(self) -> None:
         status, _ = self._request("/v1/chat/completions/../admin", SMALL_BODY)
@@ -352,6 +408,10 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
     def _upstream_hit_count(self) -> int:
         with self._upstream_lock:
             return self._upstream_hits
+
+    def _upstream_last_authorization(self) -> str | None:
+        with self._upstream_lock:
+            return self._upstream_authorization
 
     def _wait_for_log(self, needle: str, timeout: float = 10.0) -> bool:
         """Poll the drained mitmdump log; termlog writes are asynchronous."""
@@ -399,15 +459,23 @@ class MitmproxyRuntimeRegressionTest(unittest.TestCase):
         self._assert_no_crash()
 
     def test_large_normal_request_injects_header_at_requestheaders(self) -> None:
-        """Header injection must happen before the streamed body is forwarded;
-        the requestheaders hook fires before the 100-continue is sent, so the
-        addon log line is observable without uploading the body."""
-        status, _ = self._send_expect_continue("/v1/chat/completions", LARGE_BODY_SIZE)
-        self.assertEqual(100, status)
+        """Header injection must happen before the streamed body is forwarded:
+        the proxy answers the ``Expect: 100-continue`` handshake only after the
+        requestheaders hook completes, and the local upstream then observes the
+        injected header on the streamed upload."""
+        with self._upstream_lock:
+            type(self)._upstream_authorization = None
+        self._upstream_hit.clear()
+        status, _ = self._send_expect_continue(
+            "/v1/chat/completions", LARGE_BODY_SIZE, upload_body=True
+        )
+        self.assertEqual(204, status)
+        self.assertTrue(self._upstream_hit.wait(10))
+        self.assertEqual("Bearer synthetic-token", self._upstream_last_authorization())
         self.assertTrue(self._wait_for_log("credential proxy: applied binding="))
         merged = "\n".join(self._log)
-        self.assertIn("headers=x-api-key", merged)
-        self.assertNotIn("secret-api-key", merged)
+        self.assertIn("headers=Authorization", merged)
+        self.assertNotIn("synthetic-token", merged)
         self._assert_no_crash()
 
     def test_lookup_failures_deny_buffered_and_streamed_requests(self) -> None:

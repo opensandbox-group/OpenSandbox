@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -104,6 +104,17 @@ func TestPoolBatchSandboxUpdateFilters(t *testing.T) {
 			update: func(e *event.UpdateEvent) {
 				timestamp := metav1.Now()
 				e.ObjectNew.SetDeletionTimestamp(&timestamp)
+			},
+			want: true,
+		},
+		{
+			name: "task-cleanup-handoff",
+			update: func(e *event.UpdateEvent) {
+				timestamp := metav1.Now()
+				e.ObjectOld.SetDeletionTimestamp(&timestamp)
+				e.ObjectNew.SetDeletionTimestamp(&timestamp)
+				e.ObjectOld.SetFinalizers([]string{finalizerTaskCleanup, finalizerPoolAllocation})
+				e.ObjectNew.SetFinalizers([]string{finalizerPoolAllocation})
 			},
 			want: true,
 		},

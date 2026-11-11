@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,9 +15,10 @@
 """Authenticated Unix IPC endpoint for the OSEP-0023 revision receiver.
 
 The live addon imports this module only when its launcher hands off a complete
-internal session; current egress profiles do not supply one. The future session
-owner must provide a fresh token per proxy process and fence readiness and
-remote teardown.
+internal session through the experimental sidecar revision-runtime gate. Its
+launcher provides a fresh token per proxy process and fences readiness. Wire
+acknowledgements prove installation only, not transport drain or public mutation
+completion.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ import threading
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
+from revision_publication import InstallationReceiver, LiveReceiver
 from revision_receiver import Receiver, Revision, RevisionError
 
 
@@ -251,7 +253,7 @@ class Server:
 
     def __init__(
         self,
-        receiver: Receiver,
+        receiver: Receiver | InstallationReceiver | LiveReceiver,
         socket_path: str,
         session_token: str,
         *,
@@ -264,7 +266,7 @@ class Server:
             and request_timeout > 0
         )
         if (
-            type(receiver) is not Receiver
+            type(receiver) not in (Receiver, InstallationReceiver, LiveReceiver)
             or not os.path.isabs(socket_path)
             or not _valid_token(session_token)
             or type(max_snapshot_bytes) is not int

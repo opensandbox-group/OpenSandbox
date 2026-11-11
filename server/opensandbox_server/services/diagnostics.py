@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,19 @@ from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class DiagnosticContext(BaseModel):
+    """Backend routing context, available independently of execd readiness."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    sandbox_id: str = Field(alias="sandboxId")
+    state: str | None = None
+    backend_type: str = Field(alias="backendType")
+    backend_identifiers: dict[str, str] = Field(alias="backendIdentifiers")
+
 
 DiagnosticKind = Literal["logs", "events"]
 

@@ -1,0 +1,4 @@
+# Keep aligned with the H2 adapter and runtime regression compatibility gates.
+mitmproxy==11.0.2
+h2==4.1.0
+hyperframe==6.0.1

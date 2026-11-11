@@ -38,11 +38,18 @@ class CapabilitiesResponse:
         available (bool | Unset):
         isolator (str | Unset):
         version (str | Unset):
-        message (str | Unset): Diagnostic message when isolation is unavailable
+        message (str | Unset): Diagnostic message when isolation is unavailable or degraded (for example, share_net=true
+            sessions work but no uid mode can create the private network namespace required by share_net=false)
         setpriv_available (bool | Unset): Whether sessions using uid_mode setpriv can be created with execd's default
             UID/GID. Requests that select different UID/GID values may still return 503 NOT_SUPPORTED when identity
             switching is unavailable.
         userns_available (bool | Unset): Whether sessions using uid_mode userns can be created
+        setpriv_net_available (bool | Unset): Whether sessions using uid_mode setpriv can also create the private
+            network namespace required by share_net=false (bwrap --unshare-net; its loopback setup needs CAP_NET_ADMIN in
+            the execd container). Create rejects share_net=false requests with 503 NOT_SUPPORTED when the requested mode's
+            flag is false.
+        userns_net_available (bool | Unset): Whether sessions using uid_mode userns can also create the private network
+            namespace required by share_net=false.
         commit_supported (bool | Unset):
         diff_supported (bool | Unset):
         hardening (CapabilitiesResponseHardening | Unset): execd init-mode and workload-hardening state (OSEP-0018):
@@ -56,6 +63,8 @@ class CapabilitiesResponse:
     message: str | Unset = UNSET
     setpriv_available: bool | Unset = UNSET
     userns_available: bool | Unset = UNSET
+    setpriv_net_available: bool | Unset = UNSET
+    userns_net_available: bool | Unset = UNSET
     commit_supported: bool | Unset = UNSET
     diff_supported: bool | Unset = UNSET
     hardening: CapabilitiesResponseHardening | Unset = UNSET
@@ -73,6 +82,10 @@ class CapabilitiesResponse:
         setpriv_available = self.setpriv_available
 
         userns_available = self.userns_available
+
+        setpriv_net_available = self.setpriv_net_available
+
+        userns_net_available = self.userns_net_available
 
         commit_supported = self.commit_supported
 
@@ -97,6 +110,10 @@ class CapabilitiesResponse:
             field_dict["setpriv_available"] = setpriv_available
         if userns_available is not UNSET:
             field_dict["userns_available"] = userns_available
+        if setpriv_net_available is not UNSET:
+            field_dict["setpriv_net_available"] = setpriv_net_available
+        if userns_net_available is not UNSET:
+            field_dict["userns_net_available"] = userns_net_available
         if commit_supported is not UNSET:
             field_dict["commit_supported"] = commit_supported
         if diff_supported is not UNSET:
@@ -123,6 +140,10 @@ class CapabilitiesResponse:
 
         userns_available = d.pop("userns_available", UNSET)
 
+        setpriv_net_available = d.pop("setpriv_net_available", UNSET)
+
+        userns_net_available = d.pop("userns_net_available", UNSET)
+
         commit_supported = d.pop("commit_supported", UNSET)
 
         diff_supported = d.pop("diff_supported", UNSET)
@@ -141,6 +162,8 @@ class CapabilitiesResponse:
             message=message,
             setpriv_available=setpriv_available,
             userns_available=userns_available,
+            setpriv_net_available=setpriv_net_available,
+            userns_net_available=userns_net_available,
             commit_supported=commit_supported,
             diff_supported=diff_supported,
             hardening=hardening,

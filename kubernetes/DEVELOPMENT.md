@@ -467,8 +467,12 @@ Key flags (see `cmd/controller/main.go`):
 | `--metrics-bind-address` | `0` | Metrics endpoint address |
 | `--health-probe-bind-address` | `:8081` | Health probe address |
 | `--leader-elect` | `false` | Enable leader election |
+| `--leader-elect-lease-duration` | `15s` | How long standby replicas wait before taking over the lease |
+| `--leader-elect-renew-deadline` | `10s` | How long the leader retries renewing before giving up leadership; must be less than the lease duration |
+| `--leader-elect-retry-period` | `2s` | Interval between lease acquire and renew attempts; the renew deadline must be more than 1.2 times this value |
 | `--kube-client-qps` | `100` | K8s client QPS |
 | `--kube-client-burst` | `200` | K8s client burst |
+| `--namespaces` | — | Comma-separated namespaces scoping the informer cache; empty watches the whole cluster |
 | `--concurrency` | — | Per-controller concurrency, e.g. `batchsandbox=32;pool=128` |
 | `--enable-file-log` | `false` | Enable file log rotation |
 
@@ -532,6 +536,10 @@ curl -X POST http://localhost:5758/tasks -d '{"name":"test","process":{"command"
 **Allocation recovery fails on startup**: `InMemoryAllocationStore.Recover` reads all BatchSandbox annotations. If annotations are malformed, the controller will exit. Check `sandbox.opensandbox.io/alloc-status` annotation format.
 
 **Scale expectations blocking creates**: If the controller restarts mid-scale, expectations may be stale. They time out after `expectationTimeout` (default 30s).
+
+## Telemetry
+
+The controller emits OpenTelemetry metrics for the pool allocation path and capacity gauges, with OTLP export configured through standard `OTEL_*` environment variables (e.g. `OTEL_EXPORTER_OTLP_ENDPOINT`). See [docs/telemetry.md](./docs/telemetry.md) for the signal specification and configuration guide.
 
 ## Contributing
 

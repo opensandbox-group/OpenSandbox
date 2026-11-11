@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +34,8 @@ type peer struct {
 	prepareErr, commitErr, abortErr, readErr error
 	loseCommitAck, corruptAck                bool
 	onPrepare                                func(context.Context)
+	onCommit                                 func(context.Context)
+	onAbort                                  func(context.Context)
 }
 
 func (p *peer) Prepare(ctx context.Context, r Identity, data []byte) (Identity, error) {
@@ -47,13 +49,16 @@ func (p *peer) Prepare(ctx context.Context, r Identity, data []byte) (Identity, 
 	}
 	return r, p.prepareErr
 }
-func (p *peer) Commit(_ context.Context, r Identity) (Identity, error) {
+func (p *peer) Commit(ctx context.Context, r Identity) (Identity, error) {
 	p.commits++
 	if p.commitErr != nil {
 		return Identity{}, p.commitErr
 	}
 	committed := r
 	p.active = &committed
+	if p.onCommit != nil {
+		p.onCommit(ctx)
+	}
 	if p.loseCommitAck {
 		return Identity{}, errors.New("secret-bearing transport detail")
 	}
@@ -62,8 +67,11 @@ func (p *peer) Commit(_ context.Context, r Identity) (Identity, error) {
 	}
 	return r, nil
 }
-func (p *peer) Abort(_ context.Context, r Identity) (Identity, error) {
+func (p *peer) Abort(ctx context.Context, r Identity) (Identity, error) {
 	p.aborts++
+	if p.onAbort != nil {
+		p.onAbort(ctx)
+	}
 	if p.badAbortAck {
 		r.DecisionEpoch++
 	}
@@ -100,8 +108,9 @@ func TestApplyAcknowledgementAndVaultRecreation(t *testing.T) {
 func TestLostCommitAckRequiresExactReadback(t *testing.T) {
 	p := &peer{loseCommitAck: true}
 	c := newTestCoordinator(t, p)
-	_, err := c.Apply(context.Background(), 1, 1, []byte("secret"))
+	attempt, err := c.Apply(context.Background(), 1, 1, []byte("secret"))
 	require.ErrorIs(t, err, ErrIndeterminate)
+	require.Equal(t, p.prepared, attempt)
 	require.NotContains(t, err.Error(), "secret")
 	_, err = c.Confirmed()
 	require.ErrorIs(t, err, ErrIndeterminate)
@@ -113,6 +122,7 @@ func TestLostCommitAckRequiresExactReadback(t *testing.T) {
 	p.readErr = nil
 	r, err := c.Reconcile(context.Background())
 	require.NoError(t, err)
+	require.Equal(t, attempt, *r)
 	require.Equal(t, *p.active, *r)
 	require.Equal(t, 1, p.prepares)
 	require.Equal(t, 1, p.commits)
@@ -126,8 +136,9 @@ func TestFailedPrepareMustBeAbortedBeforeNextEpoch(t *testing.T) {
 	require.NoError(t, err)
 	p.prepareErr = errors.New("secret")
 	p.abortErr = errors.New("lost abort ack")
-	_, err = c.Apply(context.Background(), 1, 1, []byte("payload"))
+	attempt, err := c.Apply(context.Background(), 1, 1, []byte("payload"))
 	require.ErrorIs(t, err, ErrIndeterminate)
+	require.Equal(t, p.prepared, attempt)
 	confirmed, err := c.Confirmed()
 	require.NoError(t, err)
 	require.Equal(t, previous, *confirmed)
@@ -137,6 +148,7 @@ func TestFailedPrepareMustBeAbortedBeforeNextEpoch(t *testing.T) {
 	r, err := c.Reconcile(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, previous, *r)
+	require.NotEqual(t, attempt, *r)
 	require.Equal(t, 1, p.commits)
 	p.prepareErr = nil
 	next, err := c.Apply(context.Background(), 1, 1, []byte("payload"))
@@ -147,8 +159,9 @@ func TestFailedPrepareMustBeAbortedBeforeNextEpoch(t *testing.T) {
 func TestBadPrepareAckIsAbortedNotCommitted(t *testing.T) {
 	p := &peer{corruptAck: true}
 	c := newTestCoordinator(t, p)
-	_, err := c.Apply(context.Background(), 1, 1, []byte("payload"))
+	attempt, err := c.Apply(context.Background(), 1, 1, []byte("payload"))
 	require.ErrorIs(t, err, ErrPrepareRejected)
+	require.Equal(t, Identity{}, attempt)
 	require.Equal(t, 1, p.aborts)
 	require.Zero(t, p.commits)
 }
@@ -159,8 +172,9 @@ func TestUnappliedCommitCanBeRetriedWithoutPayload(t *testing.T) {
 	_, err := c.Apply(context.Background(), 1, 1, []byte("first"))
 	require.NoError(t, err)
 	p.commitErr = errors.New("not delivered")
-	_, err = c.Apply(context.Background(), 2, 1, []byte("next"))
+	attempt, err := c.Apply(context.Background(), 2, 1, []byte("next"))
 	require.ErrorIs(t, err, ErrIndeterminate)
+	require.Equal(t, p.prepared, attempt)
 	p.commitErr = nil
 	r, err := c.Reconcile(context.Background())
 	require.NoError(t, err)
@@ -199,6 +213,32 @@ func TestCloseDoesNotWaitForTransportAndFencesCompletion(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 }
 
+func TestCloseBeforeAmbiguousAbortFinalizationReturnsNoAttempt(t *testing.T) {
+	p := &peer{
+		prepareErr: errors.New("prepare outcome uncertain"),
+		abortErr:   errors.New("abort acknowledgement lost"),
+	}
+	c := newTestCoordinator(t, p)
+	p.onAbort = func(context.Context) { c.Close() }
+
+	attempt, err := c.Apply(context.Background(), 1, 1, []byte("payload"))
+	require.ErrorIs(t, err, ErrClosed)
+	require.Equal(t, Identity{}, attempt)
+	require.Equal(t, 1, p.aborts)
+	require.Zero(t, p.commits)
+}
+
+func TestCloseBeforeAmbiguousCommitFinalizationReturnsNoAttempt(t *testing.T) {
+	p := &peer{loseCommitAck: true}
+	c := newTestCoordinator(t, p)
+	p.onCommit = func(context.Context) { c.Close() }
+
+	attempt, err := c.Apply(context.Background(), 1, 1, []byte("payload"))
+	require.ErrorIs(t, err, ErrClosed)
+	require.Equal(t, Identity{}, attempt)
+	require.Equal(t, 1, p.commits)
+}
+
 func TestMismatchedAcknowledgementsRemainIndeterminate(t *testing.T) {
 	for _, prepareFails := range []bool{false, true} {
 		p := &peer{badCommitAck: true, badAbortAck: true}
@@ -206,8 +246,9 @@ func TestMismatchedAcknowledgementsRemainIndeterminate(t *testing.T) {
 			p.prepareErr = errors.New("prepare failed")
 		}
 		c := newTestCoordinator(t, p)
-		_, err := c.Apply(context.Background(), 1, 1, []byte("payload"))
+		attempt, err := c.Apply(context.Background(), 1, 1, []byte("payload"))
 		require.ErrorIs(t, err, ErrIndeterminate)
+		require.Equal(t, p.prepared, attempt)
 		if prepareFails {
 			_, err = c.Reconcile(context.Background())
 			require.ErrorIs(t, err, ErrIndeterminate)

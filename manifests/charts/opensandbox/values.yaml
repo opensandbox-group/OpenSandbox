@@ -1,6 +1,14 @@
 # Default values for opensandbox (all-in-one chart).
 # This chart aggregates values from opensandbox-controller and opensandbox-server sub-charts.
 
+# Cluster-scoped resources component values. This sub-chart installs the
+# OpenSandbox CRDs, the fast-sandbox CRDs (sandbox.fast.io) and their RBAC.
+# Disabling it is only useful when the base chart is installed as its own
+# release; every other component requires the CRDs.
+base:
+  # -- Whether the cluster-scoped resources (CRDs + RBAC) are installed.
+  enabled: true
+
 # Controller component values
 opensandbox-controller:
   # Default values are inherited from the sub-chart.
@@ -13,13 +21,15 @@ opensandbox-controller:
     # -- Pause/Resume snapshot configuration.
     snapshot:
       # -- Image used for commit operations.
-      imageCommitterImage: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.0-rc.1
+      imageCommitterImage: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.2
       # -- PodTemplateSpec overlay for image-committer commit Job Pods.
       imageCommitterPodTemplate: {}
       # -- Timeout duration for commit jobs.
       commitJobTimeout: 10m
       # -- OCI registry prefix used for snapshot images.
       registry: ""
+      # -- Go named-field template for snapshot image URIs. Empty preserves default naming.
+      imageURITemplate: ""
       # -- Use insecure registry mode when pushing snapshot images.
       registryInsecure: false
       # -- Secret name used by commit Jobs to push snapshot images.
@@ -58,9 +68,5 @@ fast-sandbox:
   # -- Whether the fast-sandbox control plane + node runtime is enabled.
   enabled: false
 
-# Global values (passed to both sub-charts)
-# -- Global values passed to both sub-charts.
-global:
-  # Example: shared image pull secrets
-  # imagePullSecrets:
-  #   - name: my-registry-secret
+# -- Global values passed to all sub-charts (e.g. shared imagePullSecrets).
+global: {}

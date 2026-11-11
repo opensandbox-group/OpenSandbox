@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,13 +32,16 @@ import (
 var (
 	meter metric.Meter
 
-	dnsQueryDur       metric.Float64Histogram
-	dnsQueryFailed    metric.Int64Counter
-	dnsReplyFailed    metric.Int64Counter
-	policyDenied      metric.Int64Counter
-	nftUpdates        metric.Int64Counter
-	nftUpdateFailed   metric.Int64Counter
-	tlsShadowRequests metric.Int64Counter
+	dnsQueryDur             metric.Float64Histogram
+	dnsQueryFailed          metric.Int64Counter
+	dnsReplyFailed          metric.Int64Counter
+	policyDenied            metric.Int64Counter
+	nftUpdates              metric.Int64Counter
+	nftUpdateFailed         metric.Int64Counter
+	tlsShadowRequests       metric.Int64Counter
+	tlsAdmissionConnections metric.Int64Counter
+	credentialResolutions   metric.Int64Counter
+	credentialResolutionDur metric.Float64Histogram
 
 	lastNftRuleCount atomic.Int64
 )
@@ -65,9 +68,11 @@ const (
 
 // Bounded operation values for RecordNftablesUpdateFailed.
 const (
-	NftOpStaticApply = "static_apply"
-	NftOpDynamicAdd  = "dynamic_add"
-	NftOpRemove      = "remove"
+	NftOpStaticApply       = "static_apply"
+	NftOpDynamicAdd        = "dynamic_add"
+	NftOpRemove            = "remove"
+	NftOpUpstreamProxyAdd  = "upstream_proxy_add"
+	NftOpUpstreamProxySync = "upstream_proxy_sync"
 	// Fast Sandbox-profile operations (OSEP-0022).
 	NftOpReset     = "reset"
 	NftOpDenyFirst = "deny_first"
@@ -157,6 +162,13 @@ func registerEgressMetrics() error {
 	if err != nil {
 		return err
 	}
+	tlsAdmissionConnections, err = meter.Int64Counter(
+		"egress.mitm.tls.connections_total",
+		metric.WithDescription("Live TLS admission decisions, not successful handshakes, HTTP requests or unique transport lifetimes; best-effort collection."),
+	)
+	if err != nil {
+		return err
+	}
 	policyDenied, err = meter.Int64Counter(
 		"egress.policy.denied_total",
 		metric.WithDescription("DNS policy denials"),
@@ -175,6 +187,25 @@ func registerEgressMetrics() error {
 		"egress.nftables.updates.failed_total",
 		metric.WithDescription("nft updates that failed, by operation. A failed dynamic_add "+
 			"means an allowed destination is unreachable while the policy says otherwise."),
+	)
+	if err != nil {
+		return err
+	}
+	credentialResolutions, err = meter.Int64Counter(
+		"egress.credential.resolutions_total",
+		metric.WithDescription("Credential header resolutions by closed-set outcome (resolved|denied|timeout); "+
+			"credential and binding names are never attached (OSEP-0025 R10)."),
+	)
+	if err != nil {
+		return err
+	}
+	credentialResolutionDur, err = meter.Float64Histogram(
+		"egress.credential.resolution.duration",
+		metric.WithDescription("Credential header resolution latency, outcome-tagged; bounded by the resolver timeout."),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(
+			0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120,
+		),
 	)
 	if err != nil {
 		return err
@@ -337,4 +368,23 @@ func RecordNftablesUpdateFailed(operation string) {
 		return
 	}
 	nftUpdateFailed.Add(context.Background(), 1, egressMetricOptWith(attribute.String("operation", operation)))
+}
+
+// Closed-set credential resolution outcomes (OSEP-0025 R10); tenant-provided
+// names stay in audit logs, never metric dimensions.
+const (
+	ResolutionOutcomeResolved = "resolved"
+	ResolutionOutcomeDenied   = "denied"
+	ResolutionOutcomeTimeout  = "timeout"
+)
+
+// RecordCredentialResolution records one resolve RPC outcome. outcome must be
+// one of the closed-set constants above.
+func RecordCredentialResolution(outcome string, seconds float64) {
+	if credentialResolutions == nil || credentialResolutionDur == nil {
+		return
+	}
+	opt := egressMetricOptWith(attribute.String("resolution", outcome))
+	credentialResolutions.Add(context.Background(), 1, opt)
+	credentialResolutionDur.Record(context.Background(), seconds, opt)
 }

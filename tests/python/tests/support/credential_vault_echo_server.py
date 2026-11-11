@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -95,6 +95,22 @@ class CredentialVaultEchoHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "case": "npm-scoped",
+                    "receivedPath": route,
+                    "authorization": received.get("authorization"),
+                },
+            )
+            return
+
+        # Artifact-store download URLs double-encode their coordinate paths
+        # (e.g. ``%252F``), so the exact route varies with the encoded
+        # coordinates; match on the binding prefix instead.
+        if route.startswith("/pypi-proxy/"):
+            received = {name.lower(): value for name, value in self.headers.items()}
+            self._write_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "case": "pypi-proxy",
                     "receivedPath": route,
                     "authorization": received.get("authorization"),
                 },

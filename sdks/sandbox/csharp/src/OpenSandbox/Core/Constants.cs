@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@ public static class Constants
     /// <summary>
     /// Default user agent string for SDK HTTP requests.
     /// </summary>
-    public const string DefaultUserAgent = "OpenSandbox-CSharp-SDK/0.1.5";
+    public const string DefaultUserAgent = "OpenSandbox-CSharp-SDK/1.2.0";
 
     /// <summary>
     /// Environment variable name for the OpenSandbox domain.
@@ -107,4 +107,28 @@ public static class Constants
     /// (see <see cref="Models.SandboxOrigin"/>).
     /// </summary>
     public const string SandboxOriginHeader = "OPEN-SANDBOX-ORIGIN";
+
+    /// <summary>
+    /// Gateway-owned OSEP-0024 wake marker header. The gateway strips it from
+    /// every upstream response, so its presence on a 503 proves gateway
+    /// origin: the request was parked and never forwarded, which is what
+    /// makes any-method retry safe.
+    /// </summary>
+    public const string WakeMarkerHeader = "OpenSandbox-Wake";
+
+    /// <summary>
+    /// Marked value of <see cref="WakeMarkerHeader"/>.
+    /// </summary>
+    public const string WakeMarkerExpired = "expired";
+
+    /// <summary>
+    /// Default wake-retry attempt budget (OSEP-0024).
+    /// </summary>
+    public const int DefaultWakeMaxAttempts = 5;
+
+    /// <summary>
+    /// Default wall-clock cap in seconds spanning all wake cycles of one
+    /// logical request (OSEP-0024).
+    /// </summary>
+    public const int DefaultWakeOverallDeadlineSeconds = 60;
 }

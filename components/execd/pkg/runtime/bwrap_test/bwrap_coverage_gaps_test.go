@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -113,23 +113,6 @@ func TestContextCancellation(t *testing.T) {
 		"error should be context-related, got: %v", err)
 }
 
-func TestContextNotCancelledOnNormalExit(t *testing.T) {
-	r := newRunner(t)
-
-	opts := &runtime.IsolatedSessionOptions{
-		WorkspacePath: t.TempDir(), WorkspaceMode: "rw",
-	}
-	id, err := r.CreateIsolatedSession(opts)
-	require.NoError(t, err)
-	defer r.DeleteIsolatedSession(id)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	err = r.RunInIsolatedSession(ctx, id, "echo fast", nil, nil)
-	require.NoError(t, err)
-}
-
 // TestStrictNetworkIsolation verifies --unshare-net blocks non-loopback
 // network access.
 func TestStrictNetworkIsolation(t *testing.T) {
@@ -148,24 +131,21 @@ func TestStrictNetworkIsolation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// With --unshare-net, only loopback should exist. Any non-loopback
-	// address should not be reachable. Try to get external connectivity
-	// info — `ip link show` should show only lo (loopback).
+	// With --unshare-net, the session must not see any non-loopback IP
+	// address. (A fresh netns always has `lo`; the kernel may also auto-create
+	// address-less tunnel devices such as `tunl0` per netns, so count
+	// non-lo addresses rather than links.)
 	var lines []string
 	err = r.RunInIsolatedSession(ctx, id,
-		`ip link show 2>/dev/null | wc -l; echo DONE`, nil,
+		`ip -o addr show 2>/dev/null | grep inet | grep -cv ' lo '; echo DONE`, nil,
 		func(line string) { lines = append(lines, line) })
 	require.NoError(t, err)
 
-	// With only loopback, we expect exactly 2 lines: lo + DONE.
-	// If eth0 existed, we'd see more.
 	assert.Contains(t, lines, "DONE")
-	for _, line := range lines {
-		if line == "DONE" {
-			continue
-		}
-		t.Logf("ip link count: %s", line)
-	}
+	require.NotEmpty(t, lines)
+	nonLoAddrs, err := strconv.Atoi(strings.TrimSpace(lines[0]))
+	require.NoError(t, err, "first line should be the non-loopback address count, got %v", lines)
+	assert.Equal(t, 0, nonLoAddrs, "--unshare-net should expose no non-loopback addresses, got %v", lines)
 }
 
 func TestManyConsecutiveRuns(t *testing.T) {

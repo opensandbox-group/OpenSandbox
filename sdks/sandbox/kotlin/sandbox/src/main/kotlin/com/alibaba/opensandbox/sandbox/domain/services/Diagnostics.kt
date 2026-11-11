@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,11 +17,15 @@
 package com.alibaba.opensandbox.sandbox.domain.services
 
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 
 /**
  * Sandbox diagnostics service.
  */
 interface Diagnostics {
+    /** Gets backend routing context without connecting to execd. */
+    fun getContext(sandboxId: String): DiagnosticContext
+
     /**
      * Gets diagnostic log content for a sandbox by ID.
      *

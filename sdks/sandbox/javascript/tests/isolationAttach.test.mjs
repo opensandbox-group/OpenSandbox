@@ -1,6 +1,21 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { SandboxApiException } from "../dist/index.js";
 import { IsolatedSessionsAdapter } from "../dist/internal.js";
 
 function createAdapter(mockFetch) {
@@ -27,7 +42,12 @@ describe("attach", () => {
             last_run_at: "2026-01-02T03:05:06Z",
             idle_remaining_seconds: 30,
             profile: "strict",
-            workspace: { path: "/workspace", mode: "rw" },
+            // workspace echo is only emitted for single-overlay sessions,
+            // so it is deliberately absent from this multi-overlay fixture.
+            overlays: [
+              { path: "/", mode: "overlay" },
+              { path: "/workspace", mode: "overlay", persist: true },
+            ],
             extra_writable: ["/tmp", "/var/tmp"],
             binds: [{ source: "/host/a", dest: "/sbx/a", readonly: true }],
             share_net: false,
@@ -55,7 +75,11 @@ describe("attach", () => {
     assert.strictEqual(info.session_id, "sess-full");
     assert.strictEqual(info.created_at, "2026-01-02T03:04:05Z");
     assert.strictEqual(info.profile, "strict");
-    assert.deepStrictEqual(info.workspace, { path: "/workspace", mode: "rw" });
+    assert.strictEqual(info.workspace, undefined);
+    assert.deepStrictEqual(info.overlays, [
+      { path: "/", mode: "overlay" },
+      { path: "/workspace", mode: "overlay", persist: true },
+    ]);
     assert.deepStrictEqual(info.extra_writable, ["/tmp", "/var/tmp"]);
     assert.strictEqual(info.binds?.length, 1);
     assert.deepStrictEqual(info.binds[0], {
@@ -148,7 +172,10 @@ describe("attach", () => {
             code: "SESSION_NOT_FOUND",
             message: "isolated session not found",
           }),
-          { status: 404, headers: { "content-type": "application/json" } },
+          {
+            status: 404,
+            headers: { "content-type": "application/json", "x-request-id": "req-attach" },
+          },
         );
       }
       return new Response("wrong endpoint", { status: 500 });
@@ -158,9 +185,26 @@ describe("attach", () => {
     await assert.rejects(
       () => adapter.attach("missing-sess"),
       (err) => {
-        assert.ok(err instanceof Error);
-        assert.match(err.message, /404/);
-        assert.match(err.message, /\/v1\/isolated\/session\/missing-sess/);
+        assert.ok(err instanceof SandboxApiException);
+        assert.strictEqual(err.statusCode, 404);
+        assert.strictEqual(err.requestId, "req-attach");
+        assert.strictEqual(err.error.code, "SESSION_NOT_FOUND");
+        assert.strictEqual(err.message, "isolated session not found");
+        return true;
+      },
+    );
+  });
+
+  it("reports an error response without a body with its status", async () => {
+    const adapter = createAdapter(async () => new Response("", { status: 503 }));
+
+    await assert.rejects(
+      () => adapter.attach("sess-1"),
+      (err) => {
+        assert.ok(err instanceof SandboxApiException);
+        assert.strictEqual(err.statusCode, 503);
+        assert.strictEqual(err.error.code, "UNEXPECTED_RESPONSE");
+        assert.strictEqual(err.message, "GET /v1/isolated/session/sess-1 failed (status=503)");
         return true;
       },
     );

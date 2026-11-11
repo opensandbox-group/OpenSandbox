@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -101,6 +101,8 @@ async def resolve_sandbox_image_from_request(
     request.image = ImageSpec(uri=restore_image)
     request.snapshot_id = snapshot_id
     request._resolved_snapshot_backend = (snapshot.restore_config.backend or "").strip() or None
+    if snapshot.restore_config.limits:
+        request._resolved_snapshot_limits = dict(snapshot.restore_config.limits)
     if not request.entrypoint:
         request.entrypoint = list(DEFAULT_SNAPSHOT_RESTORE_ENTRYPOINT)
     return request

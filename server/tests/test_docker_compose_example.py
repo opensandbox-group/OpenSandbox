@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ except ModuleNotFoundError:  # Python 3.10 fallback
 
 def test_compose_example_routes_proxy_through_host_mappings() -> None:
     compose_path = Path(__file__).resolve().parents[1] / "docker-compose.example.yaml"
-    compose = yaml.safe_load(compose_path.read_text())
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
 
     config_content = compose["configs"]["opensandbox-config"]["content"]
     config = AppConfig.model_validate(tomllib.loads(config_content))
@@ -39,3 +39,21 @@ def test_compose_example_routes_proxy_through_host_mappings() -> None:
     expected_host_mapping = "host.docker.internal:host-gateway"
     for service_name in ("opensandbox-server", "sdk-client"):
         assert expected_host_mapping in compose["services"][service_name]["extra_hosts"]
+
+
+def test_compose_example_pins_a_released_server_image() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    compose = yaml.safe_load(
+        (repo_root / "server/docker-compose.example.yaml").read_text(encoding="utf-8")
+    )
+    image = compose["services"]["opensandbox-server"]["image"]
+    repository, tag = image.rsplit(":", 1)
+
+    assert repository == "opensandbox/server"
+    assert tag.startswith("release-"), "Use a fixed umbrella release with the proxy fixes"
+    version = tag.removeprefix("release-")
+    release = yaml.safe_load(
+        (repo_root / "docs/releases" / f"{version}.yaml").read_text(encoding="utf-8")
+    )
+    assert release["metadata"]["channel"] == "stable"
+    assert release["images"]["server"]["tag"] == tag

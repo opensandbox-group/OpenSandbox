@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import partial
 from typing import TYPE_CHECKING, Optional
 
 from redis.exceptions import RedisError
@@ -60,6 +59,7 @@ class RenewWorkItem:
     source: str
     sandbox_id: str
     observed_at: datetime
+    namespace: Optional[str] = None
 
 
 @dataclass
@@ -71,8 +71,8 @@ class _MemSandboxState:
 class RenewIntentConsumer:
     """
     Feeds renew work from Redis BRPOP (optional) and server-proxy ``schedule`` into one queue.
-    Per-sandbox ``asyncio.Lock`` serializes work; without Redis, ``min_interval`` throttles proxy
-    renews (ingress throttling is producer-side).
+    Per-sandbox ``asyncio.Lock`` serializes work, and ``min_interval`` throttles renews from both
+    sources (ingress also throttles on the producer side).
     """
 
     def __init__(
@@ -251,6 +251,7 @@ class RenewIntentConsumer:
                         source=RENEW_SOURCE_REDIS_QUEUE,
                         sandbox_id=intent.sandbox_id,
                         observed_at=intent.observed_at,
+                        namespace=intent.namespace,
                     )
                 )
             except Exception as exc:
@@ -290,22 +291,14 @@ class RenewIntentConsumer:
 
         st = self._ensure_mru_mem(work.sandbox_id)
         async with st.lock:
-            if self._redis is not None:
-                await self._controller.renew_after_gates(work.sandbox_id, source=work.source)
-                return
-
             now = time.monotonic()
             if (
                 st.last_success_monotonic is not None
                 and (now - st.last_success_monotonic) < self._min_interval
             ):
                 return
-            ok = await asyncio.to_thread(
-                partial(
-                    self._controller.attempt_renew_sync,
-                    work.sandbox_id,
-                    source=work.source,
-                )
+            ok = await self._controller.renew_after_gates(
+                work.sandbox_id, source=work.source, namespace=work.namespace
             )
             if ok:
                 st.last_success_monotonic = time.monotonic()

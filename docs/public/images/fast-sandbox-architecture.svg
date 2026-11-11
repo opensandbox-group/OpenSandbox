@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="740" viewBox="0 0 1180 740" role="img" aria-labelledby="title desc">
+<title id="title">Fast Sandbox architecture</title>
+<desc id="desc">OpenSandbox adapters (lifecycle service, ingress provider, egress image) talk to the fast-sandbox control plane over FastPath gRPC. The control plane reconciles Kubernetes CRDs that durably record sandbox intent, placement, and policy, and drives Fastlet pods on nodes. The artifact store keeps golden images and checkpoints content-addressed, and nodes pull blocks peer-to-peer.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="outbound" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#059669"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="740" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Fast Sandbox architecture</text>
+<text x="48" y="96" class="body">OpenSandbox owns the adapters · fast-sandbox owns the platform · CRDs are the durable record</text>
+<path d="M830 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="876" y="60" class="edge" style="fill:#dc6b2e">Control</text>
+<path d="M990 54h36" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="1036" y="60" class="edge" style="fill:#059669">Peer pulls</text>
+<rect x="48" y="128" width="340" height="196" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="158" class="section">OPENSANDBOX</text>
+<text x="72" y="192" class="heading">Adapters in this repo</text>
+<text x="72" y="225" class="body">Lifecycle · FastSandboxService</text>
+<text x="72" y="253" class="body">Ingress · FastSandboxProvider</text>
+<text x="72" y="281" class="body">Egress · fast-sandbox profile</text>
+<text x="72" y="305" class="label">fsb- IDs route here</text>
+<rect x="412" y="128" width="340" height="196" rx="12" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="436" y="158" class="section">FAST-SANDBOX CONTROL PLANE</text>
+<text x="436" y="192" class="heading">Reconcilers + FastPath</text>
+<text x="436" y="225" class="body">FastPath gRPC v2 · mutations</text>
+<text x="436" y="253" class="body">template builder · janitor</text>
+<text x="436" y="281" class="body">in-memory placement</text>
+<text x="436" y="305" class="label">restartable by design</text>
+<rect x="776" y="128" width="356" height="196" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="800" y="158" class="section">KUBERNETES CRDS</text>
+<text x="800" y="192" class="heading">Durable record</text>
+<text x="800" y="225" class="body">SandboxPool · Sandbox</text>
+<text x="800" y="253" class="body">SandboxTemplate · Snapshot</text>
+<text x="800" y="281" class="body">intent · placement · policy</text>
+<text x="800" y="305" class="label">survives any component restart</text>
+<path d="M582 324V378" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="598" y="355" class="edge" style="fill:#dc6b2e">reconcile · actions · endpoints</text>
+<rect x="48" y="384" width="744" height="240" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="414" class="section">NODES · FASTLET PODS</text>
+<text x="72" y="450" class="heading">One pool spans nodes</text>
+<text x="72" y="483" class="body">each Fastlet: many Firecracker microVMs</text>
+<text x="72" y="511" class="body">shared egress process (Sandbox Actions handler)</text>
+<rect x="72" y="535" width="212" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="565" class="heading">Sandbox A</text>
+<text x="88" y="589" class="label">slot · subject</text>
+<rect x="304" y="535" width="212" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="320" y="565" class="heading">Sandbox B</text>
+<text x="320" y="589" class="label">slot · subject</text>
+<rect x="536" y="535" width="212" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="552" y="565" class="heading">agent + DART</text>
+<text x="552" y="589" class="label">socket · P2P blocks</text>
+<rect x="880" y="384" width="252" height="240" rx="12" fill="#f4fbf8" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="904" y="414" class="section">ARTIFACT STORE</text>
+<text x="904" y="450" class="heading">Content-addressed</text>
+<text x="904" y="483" class="body">golden images + kernel</text>
+<text x="904" y="511" class="body">snapshots · resume</text>
+<text x="904" y="535" class="label">S3-compatible</text>
+<text x="904" y="559" class="label">peer-to-peer pulls</text>
+<text x="904" y="583" class="label">≈ once per block</text>
+<path d="M876 504H798" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="800" y="490" class="edge" style="fill:#059669">peer pulls</text>
+<rect x="48" y="648" width="1084" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="675" class="heading">Platform split</text>
+<text x="280" y="675" class="body">adapters here · platform there · CRDs in between</text>
+<text x="72" y="702" class="label">CRDs hold every sandbox's intent, placement, policy bindings and observations — any component can restart.</text>
+</svg>

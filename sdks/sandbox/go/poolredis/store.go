@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -430,7 +430,8 @@ func (s *RedisPoolStateStore) SnapshotCounters(ctx context.Context, poolName str
 	return &opensandbox.StoreCounters{IdleCount: result}, nil
 }
 
-// SnapshotIdleEntries returns all current idle entries in FIFO order.
+// SnapshotIdleEntries returns all current idle entries in FIFO order,
+// excluding expired entries (matching InMemoryPoolStateStore).
 func (s *RedisPoolStateStore) SnapshotIdleEntries(ctx context.Context, poolName string) ([]opensandbox.IdleEntry, error) {
 	ids, err := s.client.LRange(ctx, s.idleListKey(poolName), 0, -1).Result()
 	if err != nil {
@@ -442,6 +443,7 @@ func (s *RedisPoolStateStore) SnapshotIdleEntries(ctx context.Context, poolName 
 		return nil, &opensandbox.PoolStateStoreUnavailableError{Operation: "SnapshotIdleEntries", Cause: err}
 	}
 
+	now := time.Now()
 	var entries []opensandbox.IdleEntry
 	for _, id := range ids {
 		expiresStr, ok := expiresMap[id]
@@ -452,9 +454,16 @@ func (s *RedisPoolStateStore) SnapshotIdleEntries(ctx context.Context, poolName 
 		if err != nil {
 			continue
 		}
+		expiresAt := time.UnixMilli(expiresMs)
+		if expiresMs != 0 && now.After(expiresAt) {
+			// Not yet reaped by Redis; hide it like the in-memory store.
+			// expiresMs is always now_ms+ttl today; handle a "no expiry"
+			// encoding explicitly if ever introduced.
+			continue
+		}
 		entries = append(entries, opensandbox.IdleEntry{
 			SandboxID: id,
-			ExpiresAt: time.UnixMilli(expiresMs),
+			ExpiresAt: expiresAt,
 		})
 	}
 	return entries, nil

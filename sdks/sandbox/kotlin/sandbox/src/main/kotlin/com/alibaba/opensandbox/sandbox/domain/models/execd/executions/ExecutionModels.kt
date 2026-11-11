@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,13 @@ package com.alibaba.opensandbox.sandbox.domain.models.execd.executions
  * @property result List of structured results produced by the code execution
  * @property error Error information if the execution failed
  * @property complete Completion metadata for the streamed execution
- * @property exitCode Command exit code when available; null for code execution or unfinished/background commands
+ * @property exitCode Foreground command exit code: `0` for completed
+ *   foreground commands, the numeric `error.value` when the command failed
+ *   with one, `null` for unfinished/background commands. For streamed code
+ *   runs (code-interpreter SDKs in Kotlin/C#) it is inferred best-effort the
+ *   same way — `0` on completion, or the numeric kernel `error.value` (e.g.
+ *   a `SystemExit` code) — while the Python and JS code-interpreter SDKs do
+ *   not expose an exit code at all and always report `null` there.
  * @property logs Container for stdout and stderr output messages
  */
 class Execution(
@@ -137,12 +143,21 @@ class ExecutionResult(
  * @property timestamp Unix timestamp in milliseconds when the error occurred
  * @property traceback List of traceback lines showing the complete error stack trace
  */
-class ExecutionError(
-    val name: String,
-    val value: String,
-    val timestamp: Long,
-    val traceback: List<String> = emptyList(),
-)
+class ExecutionError
+    @JvmOverloads
+    constructor(
+        val name: String,
+        val value: String,
+        val timestamp: Long,
+        val traceback: List<String> = emptyList(),
+        /**
+         * Exit status reported by execd for a CommandExecError when the command ran
+         * and finished with a non-zero status (-1 when terminated by a signal).
+         * Null when the process failed to start, for non-command errors, and on
+         * servers that predate error.exit_code.
+         */
+        val exitCode: Int? = null,
+    )
 
 /**
  * Execution complete event.
@@ -150,17 +165,25 @@ class ExecutionError(
  * Represents the completion of a code execution,
  * including timing information about when the execution finished.
  */
-class ExecutionComplete(
-    /**
-     * Timestamp when the execution completed.
-     * Unix timestamp in milliseconds indicating when the execution finished.
-     */
-    val timestamp: Long,
-    /**
-     * Execution time in mills
-     */
-    val executionTimeInMillis: Long,
-)
+class ExecutionComplete
+    @JvmOverloads
+    constructor(
+        /**
+         * Timestamp when the execution completed.
+         * Unix timestamp in milliseconds indicating when the execution finished.
+         */
+        val timestamp: Long,
+        /**
+         * Execution time in mills
+         */
+        val executionTimeInMillis: Long,
+        /**
+         * Successful foreground POST /command exit status (0), when present on the
+         * wire execution_complete event. Null for background startup, code
+         * execution, and servers that omit execution_complete.exit_code.
+         */
+        val exitCode: Int? = null,
+    )
 
 /**
  * Execution init event.

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -123,5 +123,114 @@ public class EndpointCacheTests
 
         Assert.Null(cache.Get(new EndpointCacheKey("sb-1", 8080, false)));
         Assert.NotNull(cache.Get(new EndpointCacheKey("sb-0", 8080, false)));
+    }
+
+    [Fact]
+    public async Task GetOrFetchAsync_RemovesEntry_WhenAllWaitersCancelBeforeFault()
+    {
+        // Regression: the old finally-based removal left the entry behind
+        // when all waiters cancelled; a later caller then got the cached
+        // fault instead of a fresh fetch.
+        var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
+        var key = new EndpointCacheKey("sb-1", 8080, false);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fetchCount = 0;
+
+        async Task<Endpoint> Fetcher()
+        {
+            Interlocked.Increment(ref fetchCount);
+            await release.Task;
+            throw new InvalidOperationException("boom");
+        }
+
+        using var cts = new CancellationTokenSource();
+        var waiter = cache.GetOrFetchAsync(key, Fetcher, cts.Token);
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
+
+        // The fetch faults with every waiter gone; the entry must be dropped.
+        release.TrySetResult(true);
+        await Task.Yield();
+        await Task.Delay(50);
+
+        // A cached fault would surface "boom" here instead of refetching.
+        var result = await cache.GetOrFetchAsync(
+            key,
+            () => { Interlocked.Increment(ref fetchCount); return Task.FromResult(Ep("fresh")); });
+        Assert.Equal(2, fetchCount);
+        Assert.Equal("fresh", result.EndpointAddress);
+    }
+
+    [Fact]
+    public async Task GetOrFetchAsync_RemovesSettledEntry_EvenWithoutWaiters()
+    {
+        // Regression: a settled entry used to linger in the inflight map
+        // when its only waiter cancelled, so a later cache-miss caller was
+        // served the stale endpoint instead of triggering a fresh fetch.
+        var cache = new EndpointCache(maxSize: 1, ttlSeconds: 60);
+        var key = new EndpointCacheKey("sb-1", 8080, false);
+        var other = new EndpointCacheKey("sb-2", 8080, false);
+        var fetchCount = 0;
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<Endpoint> Fetcher()
+        {
+            Interlocked.Increment(ref fetchCount);
+            // Gate the fetch so it is still in flight when the waiter cancels.
+            await release.Task;
+            return Ep("first");
+        }
+
+        using (var cts = new CancellationTokenSource())
+        {
+            var waiter = cache.GetOrFetchAsync(key, Fetcher, cts.Token);
+            await cts.CancelAsync();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiter);
+            // The fetch settles with every waiter gone.
+            release.TrySetResult(true);
+        }
+
+        await Task.Delay(50);
+        // Evict the cached endpoint so the next lookup is a cache miss; a
+        // lingering inflight entry would serve "first" without refetching.
+        cache.Put(other, Ep("other"));
+
+        var result = await cache.GetOrFetchAsync(
+            key,
+            () => { Interlocked.Increment(ref fetchCount); return Task.FromResult(Ep("second")); });
+        Assert.Equal(2, fetchCount);
+        Assert.Equal("second", result.EndpointAddress);
+    }
+
+    [Fact]
+    public async Task GetOrFetchAsync_StaleSettledRemoval_DoesNotEvictNewerFetch()
+    {
+        // Invalidate() during a fetch installs a new generation; the stale
+        // removal must only delete its own entry.
+        var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
+        var key = new EndpointCacheKey("sb-1", 8080, false);
+        var firstRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fetchCount = 0;
+
+        Task<Endpoint> Fetcher()
+        {
+            var n = Interlocked.Increment(ref fetchCount);
+            return n == 1
+                ? firstRelease.Task.ContinueWith(_ => Ep("stale"))
+                : Task.FromResult(Ep("fresh"));
+        }
+
+        var stale = cache.GetOrFetchAsync(key, Fetcher);
+        cache.Invalidate("sb-1");
+        var fresh = cache.GetOrFetchAsync(key, Fetcher);
+
+        firstRelease.TrySetResult(true);
+        await stale;
+
+        // Served from the fresh fetch's cache entry; a third fetch here
+        // would mean the stale removal evicted it.
+        var third = await cache.GetOrFetchAsync(key, Fetcher);
+        Assert.Equal(2, fetchCount);
+        Assert.Equal("fresh", third.EndpointAddress);
     }
 }

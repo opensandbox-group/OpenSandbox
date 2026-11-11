@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package com.alibaba.opensandbox.sandbox.domain.services
 
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
@@ -195,6 +196,51 @@ interface Sandboxes {
         )
 
     /**
+     * Creates a sandbox from a fsb golden-image template with an optional idle
+     * policy.
+     *
+     * Overload kept source- and binary-compatible for implementers of this
+     * type: it delegates to [createSandboxFromTemplate] when [idlePolicy] is
+     * null, so overrides of the five-parameter method keep working. Only a
+     * non-null [idlePolicy] requires an implementation.
+     *
+     * Template mode fixes the workload shape on the server: only [metadata],
+     * [networkPolicy], [extensions] and [idlePolicy] may accompany the
+     * [templateId], and the [timeout] is required. The idle policy is
+     * control-plane state (OSEP-0024), not workload shape.
+     *
+     * @param templateId Unique identifier of a `Succeeded` template owned by the requester
+     * @param timeout Sandbox lifetime. Required in template mode.
+     * @param metadata User-defined metadata used for management and filtering
+     * @param networkPolicy Optional outbound network policy (egress)
+     * @param extensions Opaque extension parameters passed through to the server as-is. Prefer namespaced keys
+     * @param idlePolicy Optional idle behavior (OSEP-0024, fast-sandbox only)
+     * @return Sandbox creation response containing the sandbox id
+     * @throws UnsupportedOperationException if requested from an implementation that does not override this method
+     */
+    fun createSandboxFromTemplate(
+        templateId: String,
+        timeout: Duration,
+        metadata: Map<String, String>,
+        networkPolicy: NetworkPolicy?,
+        extensions: Map<String, String>,
+        idlePolicy: IdlePolicy?,
+    ): SandboxCreateResponse {
+        if (idlePolicy == null) {
+            return createSandboxFromTemplate(
+                templateId = templateId,
+                timeout = timeout,
+                metadata = metadata,
+                networkPolicy = networkPolicy,
+                extensions = extensions,
+            )
+        }
+        throw UnsupportedOperationException(
+            "Template-based sandbox creation is not supported by this Sandboxes implementation",
+        )
+    }
+
+    /**
      * Creates a new fsb golden-image template.
      *
      * The build is asynchronous: the response starts at [TemplatePhase.PENDING];
@@ -357,7 +403,8 @@ interface Sandboxes {
     ): SandboxRenewResponse
 
     /**
-     * Terminates a sandbox and releases all associated resources.
+     * Requests irreversible sandbox termination. Returns when deletion is accepted;
+     * runtime cleanup may continue afterward.
      *
      * @param sandboxId Unique identifier of the sandbox
      */

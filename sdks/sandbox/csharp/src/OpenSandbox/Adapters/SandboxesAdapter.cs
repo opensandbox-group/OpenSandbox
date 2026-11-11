@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -569,6 +569,7 @@ internal sealed class SandboxesAdapter : ISandboxes
             Entrypoint = element.TryGetProperty("entrypoint", out var entrypoint) && entrypoint.ValueKind == JsonValueKind.Array
                 ? entrypoint.EnumerateArray().Select(e => e.GetString() ?? string.Empty).ToList()
                 : null,
+            Env = ParseStringMap(element, "env"),
             Metadata = ParseStringMap(element, "metadata"),
             Readiness = element.TryGetProperty("readiness", out var readiness) && readiness.ValueKind == JsonValueKind.Object
                 ? new TemplateReadiness

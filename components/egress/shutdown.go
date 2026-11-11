@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/events"
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
-	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 )
 
 const (
@@ -36,9 +35,14 @@ const (
 	defaultMitmShutdownTimeout   = 5 * time.Second
 )
 
-func waitForShutdown(ctx context.Context, proxy *dnsproxy.Proxy, policySrv *http.Server, exemptDst []netip.Addr, applier nftApplier, mitm *mitmTransparent, broadcaster *events.Broadcaster) {
+func waitForShutdown(ctx context.Context, proxy *dnsproxy.Proxy, policySrv *http.Server, exemptDst []netip.Addr, applier nftApplier, mitm *mitmTransparent, broadcaster *events.Broadcaster, owners ...*policyServer) {
 	<-ctx.Done()
 	log.Infof("received shutdown signal; beginning graceful shutdown")
+	// Retain ordinary enforcement for the experimental runtime owner even on
+	// normal shutdown. Recovery can still arise during drain or session cleanup;
+	// a check-then-delete sequence could otherwise widen an unknown packet state.
+	// This does not install a normal-shutdown fence or promise restart safety.
+	retainEnforcement := len(owners) > 0 && owners[0] != nil && owners[0].quarantine != nil
 
 	// Keep DNS and enforcement alive while accepted notifications finish.
 	if broadcaster != nil {
@@ -65,8 +69,14 @@ func waitForShutdown(ctx context.Context, proxy *dnsproxy.Proxy, policySrv *http
 	}
 
 	if mitm != nil {
-		iptables.RemoveTransparentHTTP(mitm.port, mitm.uid, mitm.dports)
-		mitmproxy.GracefulShutdown(mitm.getRunning(), defaultMitmShutdownTimeout)
+		if !retainEnforcement {
+			iptables.RemoveTransparentHTTP(mitm.port, mitm.uid, mitm.dports)
+		}
+		mitm.shutdown(defaultMitmShutdownTimeout)
+	}
+	if retainEnforcement {
+		log.Infof("experimental runtime shutdown: retaining enforcement; no restart/recovery guarantee")
+		return
 	}
 	iptables.RemoveRedirect(15353, exemptDst)
 

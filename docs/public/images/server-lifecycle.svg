@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="840" viewBox="0 0 1600 840" role="img" aria-labelledby="title desc">
+<title id="title">Sandbox lifecycle states</title>
+<desc id="desc">State machine of a sandbox: create returns Pending, readiness moves it to Running; pause and resume pass through Pausing, Paused and Resuming while keeping the sandbox ID; delete or TTL expiration stops the workload into Terminated on exit code 0, a non-zero exit or crash leads to Failed.</desc>
+<defs>
+<marker id="op" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="prog" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="fail" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#64748b"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1600" height="840" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Sandbox lifecycle states</text>
+<text x="48" y="96" class="body">Creation is asynchronous · pause / resume keeps the sandbox ID · terminal states reflect the workload outcome</text>
+<path d="M1030 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+<text x="1076" y="60" class="edge" style="fill:#dc6b2e">API operation</text>
+<path d="M1226 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#prog)"/>
+<text x="1272" y="60" class="edge" style="fill:#2563eb">Runtime progress</text>
+<path d="M1462 54h36" fill="none" stroke="#64748b" stroke-width="2.3" stroke-dasharray="6 5" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#fail)"/>
+<text x="1508" y="60" class="edge" style="fill:#64748b">Failure</text>
+
+<rect x="48" y="140" width="660" height="290" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="172" class="section">ACTIVE STATES</text>
+<rect x="96" y="220" width="220" height="120" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="116" y="258" class="heading">Pending</text>
+<text x="116" y="290" class="label">Create accepted,</text>
+<text x="116" y="316" class="label">workload provisioning</text>
+<rect x="420" y="220" width="240" height="120" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="440" y="258" class="heading">Running</text>
+<text x="440" y="290" class="label">Workload serving ·</text>
+<text x="440" y="316" class="label">expiration TTL active</text>
+<path d="M206 118V212" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+<text x="222" y="166" class="edge" style="fill:#dc6b2e">create</text>
+<path d="M316 280H414" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#prog)"/>
+<text x="330" y="266" class="edge" style="fill:#2563eb">ready</text>
+
+<rect x="756" y="140" width="796" height="290" rx="12" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="780" y="172" class="section">PAUSE / RESUME · SANDBOX ID PRESERVED</text>
+<rect x="780" y="220" width="210" height="120" rx="10" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="800" y="258" class="heading">Pausing</text>
+<text x="800" y="290" class="label">Snapshot / freeze</text>
+<text x="800" y="316" class="label">in progress</text>
+<rect x="1050" y="220" width="210" height="120" rx="10" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="1070" y="258" class="heading">Paused</text>
+<text x="1070" y="290" class="label">Workload frozen ·</text>
+<text x="1070" y="316" class="label">rootfs persisted</text>
+<rect x="1320" y="220" width="210" height="120" rx="10" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="1340" y="258" class="heading">Resuming</text>
+<text x="1340" y="290" class="label">Restoring</text>
+<text x="1340" y="316" class="label">from snapshot</text>
+<path d="M990 280H1044" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#prog)"/>
+<path d="M1260 280H1314" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#prog)"/>
+<path d="M660 280H774" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+<text x="684" y="266" class="edge" style="fill:#dc6b2e">pause()</text>
+<path d="M1425 340V458H540V348" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+<text x="940" y="450" class="edge" style="fill:#dc6b2e">resume()</text>
+
+<rect x="48" y="480" width="1504" height="250" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="512" class="section">TERMINAL STATES</text>
+<rect x="420" y="560" width="240" height="120" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="440" y="598" class="heading">Stopping</text>
+<text x="440" y="630" class="label">Deletion / TTL expiry,</text>
+<text x="440" y="656" class="label">cleanup running</text>
+<rect x="780" y="560" width="240" height="120" rx="10" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="800" y="598" class="heading">Terminated</text>
+<text x="800" y="630" class="label">Workload exited</text>
+<text x="800" y="656" class="label">exit code 0</text>
+<rect x="1140" y="560" width="240" height="120" rx="10" fill="#fdf4f2" stroke="#ecd2ca" stroke-width="1.5"/>
+<text x="1160" y="598" class="heading">Failed</text>
+<text x="1160" y="630" class="label">Workload exited</text>
+<text x="1160" y="656" class="label">exit code ≠ 0</text>
+<path d="M580 348V552" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+<text x="590" y="430" class="edge" style="fill:#dc6b2e">delete / TTL</text>
+<path d="M660 620H774" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#prog)"/>
+<text x="684" y="606" class="edge" style="fill:#2563eb">cleanup done</text>
+<path d="M620 348C740 470 1020 470 1234 552" fill="none" stroke="#64748b" stroke-width="2.3" stroke-dasharray="6 5" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#fail)"/>
+<text x="880" y="530" class="edge" style="fill:#64748b">exit ≠ 0 / crash</text>
+
+<rect x="48" y="760" width="1504" height="44" rx="10" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="788" class="label">resume() works only from Paused · TTL is absolute and never resets · no restart from terminal states — create a replacement sandbox</text>
+</svg>

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -321,13 +321,6 @@ func brokenConnectionConfig() opensandbox.ConnectionConfig {
 		APIKey:         "broken-e2e-test",
 		RequestTimeout: 1 * time.Second,
 	}
-}
-
-func newPoolManager(t *testing.T) *opensandbox.SandboxManager {
-	t.Helper()
-	mgr := opensandbox.NewSandboxManager(getConnectionConfig(t))
-	t.Cleanup(func() { mgr.Close() })
-	return mgr
 }
 
 func snapshotIdle(pool *opensandbox.DefaultSandboxPool) int {

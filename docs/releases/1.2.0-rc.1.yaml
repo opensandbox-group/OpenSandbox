@@ -1,0 +1,101 @@
+# Umbrella release BOM, rc channel — rendered by create-umbrella-release.sh
+# from this template. The BOM is authoritative for image digests. Entries
+# marked PENDING are pinned by the release-umbrella workflow during the
+# build-publish fan-out.
+# server/cli/sdks are omitted: rc builds do not publish packages; they
+# publish and appear in the BOM at the stable release
+# (umbrella-release.yaml.tmpl).
+# Placeholders (written as ${NAME}): VERSION LINE CHANNEL RELEASE_DATE
+#   GIT_COMMIT SPEC_SANDBOX_LIFECYCLE_SHA256 SPEC_EXECD_API_SHA256
+#   SPEC_EGRESS_API_SHA256 SPEC_DIAGNOSTIC_API_SHA256
+apiVersion: opensandbox.io/v1
+kind: UmbrellaRelease
+metadata:
+  version: 1.2.0-rc.1
+  line: "1.2"
+  channel: rc
+  releaseDate: "2026-10-15"
+  gitCommit: 6505ce570b0bb49cf244d47ef5efb1630d773521
+
+compatibility:
+  kubernetes:
+    minVersion: v1.21
+    maxVersion: v1.34
+  crd:
+    - group: sandbox.opensandbox.io
+      versions: [v1alpha1]
+
+images:
+  server:
+    image: docker.io/opensandbox/server
+    tag: release-1.2.0-rc.1
+    digest: sha256:8801795a7f53b1adb6aacfe951f594f138e213bd13d04e6885ce13a34227086b
+  execd:
+    image: docker.io/opensandbox/execd
+    tag: release-1.2.0-rc.1
+    digest: sha256:dcc70bdc578f7a0660ef6a69550f24e2d6ea42719984ea1673bd97923f8c4557
+  ingress:
+    image: docker.io/opensandbox/ingress
+    tag: release-1.2.0-rc.1
+    digest: sha256:3e8f1156b4f027605f0391a17338775e27820e4dd6dbfaeabe24f6977380d640
+  egress:
+    image: docker.io/opensandbox/egress
+    tag: release-1.2.0-rc.1
+    digest: sha256:579737e1aa4ad088412742a871741e44c62ee712bbf625f69577d821ccfe85be
+  imageCommitter:
+    image: docker.io/opensandbox/image-committer
+    tag: release-1.2.0-rc.1
+    digest: sha256:975dd15e430bbccc241666e8ba5128405832c97970a17dead8038e8e991798de
+  controller:
+    image: docker.io/opensandbox/controller
+    tag: release-1.2.0-rc.1
+    digest: sha256:841b3567c492a236e93df9712eac1a20c6287ed99488b806cdf7a5801a486110
+  taskExecutor:
+    image: docker.io/opensandbox/task-executor
+    tag: release-1.2.0-rc.1
+    digest: sha256:71d721f667efb4e81c6b5a5c19d279d8ae0ff34bbe9aa41a201508f9fa563d12
+  nodeAgent:
+    image: docker.io/opensandbox/nodeagent
+    tag: release-1.2.0-rc.1
+    digest: sha256:71a1a476cb3b3fefdab206494148b00893a158f1993a3d5e5c60810a19a49656
+  # fast-sandbox runtime family (fsb- prefix, linux/amd64; same mirror set)
+  fsbController:
+    image: docker.io/opensandbox/fsb-controller
+    tag: release-1.2.0-rc.1
+    digest: sha256:6a12f46ba3b465b67c31bef6f1eb3a58df37715616b7ea203c744c48f3f30012
+  fsbFastlet:
+    image: docker.io/opensandbox/fsb-fastlet
+    tag: release-1.2.0-rc.1
+    digest: sha256:5301191421688339bd083d51ea865fa9579b226e28d56293ac81e58247697f72
+  fsbFastletProxy:
+    image: docker.io/opensandbox/fsb-fastlet-proxy
+    tag: release-1.2.0-rc.1
+    digest: sha256:872f1e827b80ae0d0e999edea0f0277fbe277f31095be4c2d26b4dcc79e9a43a
+  fsbJanitor:
+    image: docker.io/opensandbox/fsb-janitor
+    tag: release-1.2.0-rc.1
+    digest: sha256:554d696df76d3213aa5af30754972f0f05b39ac01eb7e8a4abe3790d0510ee0a
+  fsbFirecrackerRuntime:
+    image: docker.io/opensandbox/fsb-firecracker-runtime
+    tag: release-1.2.0-rc.1
+    digest: sha256:b6f92ce24e95166deaa0b80e23ebbc5b32b24f3965064ce39966c602763fb664
+  fsbSandboxtemplateBuilder:
+    image: docker.io/opensandbox/fsb-sandboxtemplate-builder
+    tag: release-1.2.0-rc.1
+    digest: sha256:dbcce245c80b45b9f2dfa518eee5b0cb8382f6d087542fc4d5154413db7ab40f
+
+# Charts ship in-repo at the release tag; not published to a chart repo.
+helm:
+  chart: opensandbox
+  version: "1.2.0-rc.1"
+  appVersion: "1.2.0-rc.1"
+
+specs:
+  - path: specs/sandbox-lifecycle.yml
+    sha256: 1fb025cdf76c891a9ad8904404e248e6a66f835d7e921dac644a399b79745917
+  - path: specs/execd-api.yaml
+    sha256: 6111b67eb40833d369bebb017503f151cccfd81a607d3014f613598f9d1a700a
+  - path: specs/egress-api.yaml
+    sha256: 2edefbf81c55e09425edc2e8e836de5a3d9ead8f81b543dc3c0db2254814099f
+  - path: specs/diagnostic-api.yml
+    sha256: 490a40ce4ce3f4decdf53e5457ff0eaf9857306c75e57b22fb3bbb921c0b9213

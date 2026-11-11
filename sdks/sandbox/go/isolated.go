@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,6 +30,16 @@ type IsolatedWorkspaceSpec struct {
 	Mode string `json:"mode,omitempty"` // "rw" | "overlay" | "ro"
 }
 
+// IsolatedOverlaySpec describes one overlay mount. Overlay mode mounts a
+// copy-on-write view: Persist=true (default) uses a host upper directory,
+// Persist=false an ephemeral tmpfs discarded with the session. rw and ro
+// bind directly; Persist must be left unset for them.
+type IsolatedOverlaySpec struct {
+	Path    string `json:"path"`
+	Mode    string `json:"mode,omitempty"`    // "" | "rw" | "overlay" | "ro"; "" defaults to overlay
+	Persist *bool  `json:"persist,omitempty"` // overlay mode only; nil = true
+}
+
 // EnvPassthroughSpec controls environment variable passthrough.
 type EnvPassthroughSpec struct {
 	Mode string   `json:"mode,omitempty"` // "allow" | "deny"
@@ -43,24 +53,28 @@ type BindMount struct {
 	ReadOnly bool   `json:"readonly,omitempty"`
 }
 
-// CreateIsolatedSessionRequest is the request body for creating an isolated session.
+// CreateIsolatedSessionRequest is the request body for creating an isolated
+// session. Workspace is legacy sugar: at least one of Workspace/Overlays is
+// required, and Workspace is prepended when both are set.
 type CreateIsolatedSessionRequest struct {
-	Workspace          IsolatedWorkspaceSpec `json:"workspace"`
-	Profile            string                `json:"profile,omitempty"`
-	ExtraWritable      []string              `json:"extra_writable,omitempty"`
-	Binds              []BindMount           `json:"binds,omitempty"`
-	ShareNet           *bool                 `json:"share_net,omitempty"`
-	EnvPassthrough     *EnvPassthroughSpec   `json:"env_passthrough,omitempty"`
-	Uid                *uint32               `json:"uid,omitempty"`
-	Gid                *uint32               `json:"gid,omitempty"`
-	UidMode            string                `json:"uid_mode,omitempty"` // "setpriv" | "userns"
-	IdleTimeoutSeconds int                   `json:"idle_timeout_seconds,omitempty"`
+	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
+	Overlays           []IsolatedOverlaySpec  `json:"overlays,omitempty"`
+	Profile            string                 `json:"profile,omitempty"`
+	ExtraWritable      []string               `json:"extra_writable,omitempty"`
+	Binds              []BindMount            `json:"binds,omitempty"`
+	ShareNet           *bool                  `json:"share_net,omitempty"`
+	EnvPassthrough     *EnvPassthroughSpec    `json:"env_passthrough,omitempty"`
+	Uid                *uint32                `json:"uid,omitempty"`
+	Gid                *uint32                `json:"gid,omitempty"`
+	UidMode            string                 `json:"uid_mode,omitempty"` // "setpriv" | "userns"
+	IdleTimeoutSeconds int                    `json:"idle_timeout_seconds,omitempty"`
 }
 
 // IsolatedSessionInfo is the response from creating an isolated session.
 //
-// The creation-parameter echo fields (Profile, Workspace, ExtraWritable, Binds,
-// ShareNet, EnvPassthrough, Uid, Gid, UidMode, IdleTimeoutSeconds) are populated
+// The creation-parameter echo fields (Profile, Workspace, Overlays,
+// ExtraWritable, Binds, ShareNet, EnvPassthrough, Uid, Gid, UidMode,
+// IdleTimeoutSeconds) are populated
 // only when the info is built by IsolationAttach against an execd build that
 // echoes creation parameters on GET /v1/isolated/session/{id}. Older execd
 // builds and the POST /v1/isolated/session create response leave them zero
@@ -76,6 +90,7 @@ type IsolatedSessionInfo struct {
 	// Creation-parameter echoes (populated on attach when the server supports it).
 	Profile            string                 `json:"profile,omitempty"`
 	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
+	Overlays           []IsolatedOverlaySpec  `json:"overlays,omitempty"`
 	ExtraWritable      []string               `json:"extra_writable,omitempty"`
 	Binds              []BindMount            `json:"binds,omitempty"`
 	ShareNet           *bool                  `json:"share_net,omitempty"`
@@ -105,6 +120,7 @@ type IsolatedSessionState struct {
 	// Creation-parameter echoes (optional; omitted by older execd builds).
 	Profile            string                 `json:"profile,omitempty"`
 	Workspace          *IsolatedWorkspaceSpec `json:"workspace,omitempty"`
+	Overlays           []IsolatedOverlaySpec  `json:"overlays,omitempty"`
 	ExtraWritable      []string               `json:"extra_writable,omitempty"`
 	Binds              []BindMount            `json:"binds,omitempty"`
 	ShareNet           *bool                  `json:"share_net,omitempty"`
@@ -317,7 +333,7 @@ func (e *ExecdClient) IsolatedRunLogs(ctx context.Context, sessionID, runID stri
 
 	var text string
 	nextCursor := cursor
-	err := e.client.withRetry(ctx, func() error {
+	err := e.client.withRetry(ctx, func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+path, nil)
 		if err != nil {
 			return fmt.Errorf("opensandbox: create request: %w", err)
@@ -331,7 +347,7 @@ func (e *ExecdClient) IsolatedRunLogs(ctx context.Context, sessionID, runID stri
 		}
 		req.Header.Set("Accept", "text/plain")
 
-		resp, err := e.client.httpClient.Do(req)
+		resp, err := doAttempt(e.client.httpClient, req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@ func TestExitedSessionIsCleanedBeforeIdleGC(t *testing.T) {
 	if session == nil {
 		t.Fatal("created session was not published")
 	}
-	upperParent := filepath.Dir(session.upperDir)
+	upperParent := filepath.Dir(session.overlays[0].upperDir)
 
 	// Closing the lifecycle stream and allowing the workload to exit publishes
 	// doneCh. No GC loop is running for this test runner, so only the
@@ -132,7 +132,7 @@ func TestIsolatedRunnerCloseStopsAdmissionAndCleansActiveSessions(
 	if session == nil {
 		t.Fatal("created session was not published")
 	}
-	upperParent := filepath.Dir(session.upperDir)
+	upperParent := filepath.Dir(session.overlays[0].upperDir)
 
 	if err := runner.Close(); err != nil {
 		t.Fatal(err)
@@ -180,8 +180,13 @@ func TestIsolatedRunnerCloseRetriesPendingStartupCleanup(t *testing.T) {
 		processWaited: make(chan struct{}),
 		doneCh:        make(chan struct{}),
 		upperID:       upperID,
-		upperDir:      upperDir,
-		workDir:       workDir,
+		overlays: []sessionOverlay{{
+			path:     "pending-startup-close-retry-ws",
+			mode:     isolation.WorkspaceOverlay,
+			persist:  true,
+			upperDir: upperDir,
+			workDir:  workDir,
+		}},
 		namespacePins: pins,
 	}
 	runner.pendingStartupCleanup.Store(session.id, session)

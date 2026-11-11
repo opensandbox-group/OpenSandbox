@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -59,6 +59,11 @@ type Proxy struct {
 
 	// When set, called synchronously for allowed A/AAAA answers (dns+nft: program nft before client connects).
 	onResolved func(domain string, ips []nftables.ResolvedIP)
+
+	// infraDomains maps normalized infra FQDNs to their resolved-IP callback.
+	// These names resolve without sandbox policy evaluation and bypass
+	// onResolved, so their IPs never land in the sandbox allow sets.
+	infraDomains map[string]func(domain string, ips []nftables.ResolvedIP)
 	// Optional: async fan-out for denied lookups (e.g. webhook).
 	blockedBroadcaster *events.Broadcaster
 
@@ -224,6 +229,16 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	domain := q.Name
 	host := normalizeDNSHost(domain)
 
+	// Infrastructure domains (e.g. a configured upstream CONNECT proxy) resolve
+	// outside the sandbox policy and never populate the sandbox allow sets —
+	// their answers go to the infra callback, which is UID-scoped in nft. An
+	// infra name stays resolvable even under a deny-all policy; reachability
+	// remains gated by the uid-scoped nft rule, not by DNS secrecy.
+	if cb := p.infraCallback(host); cb != nil {
+		p.forwardAndReply(w, r, domain, host, cb)
+		return
+	}
+
 	policyToEval := p.currentPolicy()
 	notifyResolved := p.onResolved
 	if sel := p.queryPolicySelector; sel != nil {
@@ -261,8 +276,15 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
+	p.forwardAndReply(w, r, domain, host, notifyResolved)
+}
+
+// forwardAndReply resolves r upstream and answers w; a successful answer feeds
+// notify (infra callback or the policy's resolved-IP callback) before the
+// reply is written, so nft programming lands before the client can dial.
+func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, notify func(string, []nftables.ResolvedIP)) {
 	start := time.Now()
-	resp, failure, err := p.forward(r)
+	resp, failure, err := p.forward(r, upstreamNetwork(w))
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
 		telemetry.RecordDNSForward(elapsed)
@@ -277,7 +299,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if !p.shouldSkipOutboundLog(host) {
 		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
 	}
-	p.maybeNotifyResolvedWith(domain, resp, notifyResolved)
+	p.maybeNotifyResolvedWith(domain, resp, notify)
 	p.writeReply(w, r, resp, telemetry.DNSReplyStageAnswer)
 }
 
@@ -371,8 +393,18 @@ func (p *Proxy) maybeNotifyResolved(domain string, resp *dns.Msg) {
 // forward returns the response, or the bounded failure reason (a telemetry.DNSFailure*
 // constant) alongside the error. The reason is what the last attempted upstream failed
 // with: the loop keeps trying, so only the final outcome is reported.
-func (p *Proxy) forward(r *dns.Msg) (*dns.Msg, string, error) {
-	return p.forwardContext(context.Background(), r)
+func (p *Proxy) forward(r *dns.Msg, network string) (*dns.Msg, string, error) {
+	return p.forwardContext(context.Background(), r, network)
+}
+
+// upstreamNetwork returns the transport the client used, to forward its query
+// over the same one. A client retries over TCP after a truncated UDP answer,
+// and only a TCP exchange with the upstream returns that answer in full.
+func upstreamNetwork(w dns.ResponseWriter) string {
+	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
+		return "tcp"
+	}
+	return "udp"
 }
 
 func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.ResolvedIP, error) {
@@ -381,7 +413,7 @@ func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.Re
 	for _, queryType := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		query := new(dns.Msg)
 		query.SetQuestion(dns.Fqdn(domain), queryType)
-		response, _, err := p.forwardContext(ctx, query)
+		response, _, err := p.forwardContext(ctx, query, "udp")
 		if err != nil {
 			return nil, err
 		}
@@ -403,7 +435,7 @@ func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.Re
 	return ips, nil
 }
 
-func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg) (*dns.Msg, string, error) {
+func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg, network string) (*dns.Msg, string, error) {
 	list := p.forwardUpstreams()
 	var lastErr error
 	lastFailure := telemetry.DNSFailureNoUpstreams
@@ -417,6 +449,7 @@ func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg) (*dns.Msg, strin
 			query.SetEdns0(upstreamUDPSize, false)
 		}
 		c := &dns.Client{
+			Net:     network,
 			Timeout: p.upstreamExchangeTimeout,
 			Dialer:  p.dialerForUpstream(upstream),
 			UDPSize: upstreamUDPSize,
@@ -492,6 +525,33 @@ func (p *Proxy) CurrentPolicy() *policy.NetworkPolicy {
 	defer p.policyMu.RUnlock()
 
 	return p.userPolicy
+}
+
+// SetInfraDomain registers an infrastructure FQDN that resolves without
+// sandbox policy evaluation. Answers are reported to onResolved (UID-scoped
+// nft programming) instead of the sandbox dyn-allow sets. Register before
+// Start; onResolved may be nil when only reachability — not set updates — is
+// needed.
+func (p *Proxy) SetInfraDomain(domain string, onResolved func(domain string, ips []nftables.ResolvedIP)) {
+	host := normalizeDNSHost(domain)
+	if host == "" {
+		return
+	}
+	if p.infraDomains == nil {
+		p.infraDomains = make(map[string]func(string, []nftables.ResolvedIP))
+	}
+	if onResolved == nil {
+		onResolved = func(string, []nftables.ResolvedIP) {}
+	}
+	p.infraDomains[host] = onResolved
+}
+
+// infraCallback returns the infra-domain callback for host, or nil.
+func (p *Proxy) infraCallback(host string) func(string, []nftables.ResolvedIP) {
+	if p.infraDomains == nil {
+		return nil
+	}
+	return p.infraDomains[host]
 }
 
 // SetOnResolved registers the dns+nft path (nil in dns-only). Invoked on the same goroutine as serveDNS, before WriteMsg.

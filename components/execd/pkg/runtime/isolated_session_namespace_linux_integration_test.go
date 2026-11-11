@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -68,9 +68,15 @@ func testPrivateSessionPinsNamespacesBeforeMarkReady(
 		if !capabilities.SetprivAvailable {
 			t.Skip("bwrap setpriv mode is unavailable")
 		}
+		if !capabilities.SetprivNetAvailable {
+			t.Skip("bwrap setpriv mode cannot create a private network namespace")
+		}
 	case isolation.UidModeUserns:
 		if !capabilities.UsernsAvailable {
 			t.Skip("bwrap user namespace mode is unavailable")
+		}
+		if !capabilities.UsernsNetAvailable {
+			t.Skip("bwrap userns mode cannot create a private network namespace")
 		}
 	default:
 		t.Fatalf("unexpected uid mode %q", uidMode)

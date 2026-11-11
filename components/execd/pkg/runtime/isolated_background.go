@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ import (
 )
 
 // isolatedBackgroundRunDir is the workspace-relative directory for background
-// run log and exit-code files (dot-dir, created by the session shell).
+// run log, exit-code and script files (dot-dir, created by the session shell).
 const isolatedBackgroundRunDir = ".execd/background-runs"
 
 // isolatedBackgroundPollInterval is how often the watcher checks for the
@@ -81,8 +81,8 @@ type IsolatedBackgroundRun struct {
 	running    bool
 }
 
-// relLogPath/relExitPath/relFallbackLogPath/relFallbackExitPath return the
-// run's control files relative to logRoot (the run directory for the primary
+// relLogPath/relExitPath/relScriptPath and their fallbacks return the run's
+// control files relative to logRoot (the run directory for the primary
 // files, the workspace root for the fallbacks).
 func (r *IsolatedBackgroundRun) relLogPath() string {
 	return filepath.Join(isolatedBackgroundRunDir, r.ID+".log")
@@ -98,6 +98,14 @@ func (r *IsolatedBackgroundRun) relFallbackLogPath() string {
 
 func (r *IsolatedBackgroundRun) relFallbackExitPath() string {
 	return r.ID + ".code"
+}
+
+func (r *IsolatedBackgroundRun) relScriptPath() string {
+	return filepath.Join(isolatedBackgroundRunDir, r.ID+".sh")
+}
+
+func (r *IsolatedBackgroundRun) relFallbackScriptPath() string {
+	return r.ID + ".sh"
 }
 
 // IsolatedBackgroundRunSnapshot is a consistent read of a background run.
@@ -184,12 +192,17 @@ func (r *IsolatedRunner) RunInIsolatedSessionBackground(
 		return "", time.Time{}, err
 	}
 
-	// The background job runs under `bash -c` (or `sh -c` when bash is
-	// unavailable) so user code is parsed as its own program: shell syntax
+	// The background job runs the code as a script file under bash (or sh when
+	// bash is unavailable) so it is parsed as its own program: shell syntax
 	// errors in the code cannot break the control wrapper, which would
 	// otherwise leave the run stuck `running` (the wrapper's completion lines
-	// are only parsed after the code). The code's output is redirected to the
-	// log file; its exit code is captured and written to the code file. The
+	// are only parsed after the code). The file is written byte for byte by
+	// the printf builtin, which is not subject to the 128 KiB limit Linux puts
+	// on a single exec argument (and so on `-c`); if the write fails, the code
+	// is not run and the run exits with 126, as `-c` did for oversized code.
+	// The file is removed when the code exits. Unlike with `-c`, the code sees
+	// that file as $0. The code's output is redirected to the log file; its
+	// exit code is captured and written to the code file. The
 	// script's mkdir creates the run dir as the session's own uid (so it is
 	// writable even when the session runs as a different uid than execd); if
 	// the dir cannot be created or is not writable (e.g. a lower-layer .execd
@@ -206,8 +219,10 @@ func (r *IsolatedRunner) RunInIsolatedSessionBackground(
 			script += "export " + shellescape(k) + "=" + shellescape(v) + "; "
 		}
 	}
-	script += shell + " -c " + shellescape(code) + " </dev/null >\"$D/" + runID + ".log\" 2>&1"
-	script += "\ncode=$?; mkdir -p \"$D\" 2>/dev/null && [ -w \"$D\" ] || D=" +
+	scriptFile := "\"$D/" + runID + ".sh\""
+	script += "if printf '%s' " + shellescape(code) + " >" + scriptFile + "; then " +
+		shell + " " + scriptFile + " </dev/null >\"$D/" + runID + ".log\" 2>&1; code=$?" +
+		"\nelse code=126; fi; rm -f " + scriptFile + "; mkdir -p \"$D\" 2>/dev/null && [ -w \"$D\" ] || D=" +
 		shellescape(paths.nsWorkspace)
 	script += "\necho \"$code\" >\"$D/" + runID + ".code\"; } >/dev/null 2>&1 &\n"
 
@@ -462,18 +477,20 @@ func (r *IsolatedRunner) SeekIsolatedBackgroundOutput(
 	return data, newCursor, nil
 }
 
-// removeIsolatedRunFiles best-effort deletes the log/exit-code files of a run
-// (primary and fallback locations). Overlay workspaces lose them with the
-// upper directory anyway; rw workspaces would otherwise keep them in the
-// user's persistent workspace. Removes go through the pinned root so
-// sandbox-created symlinks can never redirect host-side deletion outside the
-// workspace.
+// removeIsolatedRunFiles best-effort deletes the log, exit-code and script
+// files of a run (primary and fallback locations). Overlay workspaces lose
+// them with the upper directory anyway; rw workspaces would otherwise keep
+// them in the user's persistent workspace. Removes go through the pinned root
+// so sandbox-created symlinks can never redirect host-side deletion outside
+// the workspace.
 func removeIsolatedRunFiles(root *os.Root, run *IsolatedBackgroundRun) {
 	for _, rel := range []string{
 		run.relLogPath(),
 		run.relExitPath(),
+		run.relScriptPath(),
 		run.relFallbackLogPath(),
 		run.relFallbackExitPath(),
+		run.relFallbackScriptPath(),
 	} {
 		_ = root.Remove(rel)
 	}
@@ -544,34 +561,42 @@ func (r *IsolatedRunner) removeSessionBackgroundRuns(s *isolatedSession) {
 
 // backgroundRunPaths holds namespace and host paths for a background run.
 type backgroundRunPaths struct {
-	nsRunDir      string // <workspace>/.execd/background-runs
-	nsWorkspace   string // workspace path as seen inside the namespace
+	nsRunDir      string // <primary overlay>/.execd/background-runs
+	nsWorkspace   string // primary overlay path as seen inside the namespace
 	hostRunDir    string // host-side run dir (upper layer for overlay, workspace for rw)
 	hostWorkspace string // host-side workspace root (upper dir for overlay)
 	hostRoot      string // host-side root all control-file ops are pinned to
 }
 
 // backgroundRunPaths returns the namespace and host paths of the background
-// run directory. The host path is the upper layer for overlay workspaces and
-// the workspace itself for rw workspaces; read-only workspaces reject
-// background runs (no host-visible writable location for logs).
+// run directory, rooted at the primary (first) overlay: the workspace itself
+// for rw, the upper layer for persistent overlay mounts. Ephemeral and
+// read-only primaries have no host-visible writable location and reject.
 func (s *isolatedSession) backgroundRunPaths() (backgroundRunPaths, error) {
-	paths := backgroundRunPaths{
-		nsRunDir:      filepath.Join(s.opts.WorkspacePath, isolatedBackgroundRunDir),
-		nsWorkspace:   s.opts.WorkspacePath,
-		hostWorkspace: s.opts.WorkspacePath,
+	if len(s.overlays) == 0 {
+		return backgroundRunPaths{}, fmt.Errorf("background runs unavailable: session has no upper directory")
 	}
-	switch isolation.WorkspaceMode(s.opts.WorkspaceMode) {
+	primary := s.overlays[0]
+	paths := backgroundRunPaths{
+		nsRunDir:      filepath.Join(primary.path, isolatedBackgroundRunDir),
+		nsWorkspace:   primary.path,
+		hostWorkspace: primary.path,
+	}
+	switch primary.mode {
 	case isolation.WorkspaceRW:
 		paths.hostRunDir = paths.nsRunDir
-		paths.hostRoot = s.opts.WorkspacePath
+		paths.hostRoot = primary.path
 	case isolation.WorkspaceOverlay, "":
-		if s.upperDir == "" {
+		if !primary.persist {
+			return backgroundRunPaths{}, fmt.Errorf(
+				"background runs unavailable: primary overlay is ephemeral (persist=false)")
+		}
+		if primary.upperDir == "" {
 			return backgroundRunPaths{}, fmt.Errorf("background runs unavailable: session has no upper directory")
 		}
-		paths.hostRunDir = filepath.Join(s.upperDir, isolatedBackgroundRunDir)
-		paths.hostWorkspace = s.upperDir
-		paths.hostRoot = s.upperDir
+		paths.hostRunDir = filepath.Join(primary.upperDir, isolatedBackgroundRunDir)
+		paths.hostWorkspace = primary.upperDir
+		paths.hostRoot = primary.upperDir
 	default: // WorkspaceRO
 		return backgroundRunPaths{}, fmt.Errorf("background runs not supported in read-only workspace mode")
 	}

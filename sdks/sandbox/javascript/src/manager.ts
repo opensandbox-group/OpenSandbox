@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,9 @@
 import { ConnectionConfig, type ConnectionConfigOptions } from "./config/connection.js";
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 import type { AdapterFactory } from "./factory/adapterFactory.js";
+import type { Diagnostics } from "./services/diagnostics.js";
+import type { DiagnosticContext, DiagnosticContent } from "./models/diagnostics.js";
+import { requireDiagnostics } from "./adapters/diagnosticsAdapter.js";
 
 import type {
   CreateSnapshotRequest,
@@ -70,12 +73,22 @@ export interface SandboxFilter {
  * For interacting *inside* a sandbox, use {@link Sandbox}.
  */
 export class SandboxManager {
+  private readonly diagnostics?: Diagnostics;
   private readonly sandboxes: Sandboxes;
   private readonly connectionConfig: ConnectionConfig;
+  /** True when this manager allocated (and may close) the transport. */
+  private readonly ownsTransport: boolean;
 
-  private constructor(opts: { sandboxes: Sandboxes; connectionConfig: ConnectionConfig }) {
+  private constructor(opts: {
+    sandboxes: Sandboxes;
+    diagnostics?: Diagnostics;
+    connectionConfig: ConnectionConfig;
+    ownsTransport: boolean;
+  }) {
     this.sandboxes = opts.sandboxes;
+    this.diagnostics = opts.diagnostics;
     this.connectionConfig = opts.connectionConfig;
+    this.ownsTransport = opts.ownsTransport;
   }
 
   static create(opts: SandboxManagerOptions = {}): SandboxManager {
@@ -83,19 +96,24 @@ export class SandboxManager {
       ? opts.connectionConfig
       : new ConnectionConfig(opts.connectionConfig);
     const connectionConfig = baseConnectionConfig.withTransportIfMissing();
+    // Caller-initialized transports are closed by their owner (mirrors Sandbox).
+    const ownsTransport = connectionConfig !== baseConnectionConfig;
     const lifecycleBaseUrl = connectionConfig.getBaseUrl();
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
-      void connectionConfig.closeTransport().catch(() => undefined);
+      if (ownsTransport) {
+        void connectionConfig.closeTransport().catch(() => undefined);
+      }
       throw err;
     }
-    return new SandboxManager({ sandboxes, connectionConfig });
+    return new SandboxManager({ sandboxes, diagnostics, connectionConfig, ownsTransport });
   }
 
   listSandboxInfos(filter: SandboxFilter = {}): Promise<ListSandboxesResponse> {
@@ -111,6 +129,18 @@ export class SandboxManager {
     return this.sandboxes.getSandbox(sandboxId);
   }
 
+  getDiagnosticContext(sandboxId: SandboxId): Promise<DiagnosticContext> {
+    return requireDiagnostics(this.diagnostics).getContext(sandboxId);
+  }
+
+  getDiagnosticLogs(sandboxId: SandboxId, scope: string): Promise<DiagnosticContent> {
+    return requireDiagnostics(this.diagnostics).getLogs(sandboxId, scope);
+  }
+
+  getDiagnosticEvents(sandboxId: SandboxId, scope: string): Promise<DiagnosticContent> {
+    return requireDiagnostics(this.diagnostics).getEvents(sandboxId, scope);
+  }
+
   patchSandboxMetadata(
     sandboxId: SandboxId,
     patch: SandboxMetadataPatch,
@@ -118,6 +148,10 @@ export class SandboxManager {
     return this.sandboxes.patchSandboxMetadata(sandboxId, patch);
   }
 
+  /**
+   * Request irreversible sandbox termination. Resolves when deletion is accepted;
+   * runtime cleanup may continue afterward.
+   */
   killSandbox(sandboxId: SandboxId, signal?: AbortSignal): Promise<void> {
     return this.sandboxes.deleteSandbox(sandboxId, signal);
   }
@@ -188,11 +222,13 @@ export class SandboxManager {
   /**
    * Release the HTTP agent resources allocated for this manager instance.
    *
-   * Each manager clone owns a scoped `ConnectionConfig` clone.
-   *
-   * This mirrors the Python SDK's default transport lifecycle.
+   * Caller-initialized configs stay caller-owned — close them yourself via
+   * `connectionConfig.closeTransport()`.
    */
   async close(): Promise<void> {
-    await this.connectionConfig.closeTransport();
+    // Shared (caller-initialized) transports are closed by their owner.
+    if (this.ownsTransport) {
+      await this.connectionConfig.closeTransport();
+    }
   }
 }

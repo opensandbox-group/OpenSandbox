@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,11 +25,13 @@ authors = [
 dependencies = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.21.0",
+    "pytest-rerunfailures>=13.0",
     "pytest-timeout>=2.1.0",
     "pytest-order>=1.2.0",
     "pydantic>=2.0.0",
     "opensandbox",
     "opensandbox-code-interpreter",
+    "opensandbox-cli",
     "redis>=5.0,<6.0",
 ]
 
@@ -43,12 +45,13 @@ dev = [
 # This is a test runner project (no importable package); don't try to build/install it.
 package = false
 constraint-dependencies = [
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.14.0",
 ]
 
 [tool.uv.sources]
 opensandbox = { path = "../../sdks/sandbox/python", editable = true }
 opensandbox-code-interpreter = { path = "../../sdks/code-interpreter/python", editable = true }
+opensandbox-cli = { path = "../../cli", editable = true }
 
 [build-system]
 requires = ["hatchling"]

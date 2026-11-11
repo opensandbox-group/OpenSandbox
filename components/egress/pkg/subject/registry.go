@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 package subject
 
 import (
+	"fmt"
 	"net/netip"
 	"sync"
 
@@ -70,9 +71,14 @@ func NewRegistry(alwaysDeny, alwaysAllow []policy.EgressRule) *MemoryRegistry {
 var _ Registry = (*MemoryRegistry)(nil)
 
 // Register observes a slot for the subject without running platform hooks.
-// See RegisterAndEnforce for the enforced variant.
+// See RegisterAndEnforce for the enforced variant. It cannot take over a held
+// dispatch key (no teardown callback): such a registration fails and returns
+// StateAbsent.
 func (r *MemoryRegistry) Register(s Subject, key SubjectKey, fence Fencing) State {
-	state, _ := r.RegisterAndEnforce(s, key, fence, nil)
+	state, err := r.RegisterAndEnforce(s, key, fence, nil, nil)
+	if err != nil {
+		return StateAbsent
+	}
 	return state
 }
 
@@ -81,17 +87,28 @@ func (r *MemoryRegistry) Register(s Subject, key SubjectKey, fence Fencing) Stat
 // registry write lock. enforce must be idempotent; on failure the subject
 // stays denying (fail-closed) and the caller retries.
 //
+// When the dispatch key is held by a different live subject (slot reuse),
+// onTakeover tears that stale subject down under the same lock before the
+// successor is indexed or installed, and the stale subject is then evicted
+// (OSEP-0022 takeover). onTakeover is required for a takeover — without it
+// the evictee's kernel enforcement would leak — so a nil callback fails the
+// registration instead. A callback failure leaves every touched subject
+// consistent (registered + enforced, or evicted + torn down) for the retry.
+//
 // Returned state is StateDenying for a fresh/rebound subject whose enforce
 // succeeded, StateActive when the subject was already active under the same
 // fencing (deny-first skipped: a policy is already enforced), and
 // StateAbsent when enforce is nil and the subject could not be registered.
-func (r *MemoryRegistry) RegisterAndEnforce(s Subject, key SubjectKey, fence Fencing, enforce func() error) (State, error) {
+func (r *MemoryRegistry) RegisterAndEnforce(s Subject, key SubjectKey, fence Fencing, enforce func() error, onTakeover func(stale Subject) error) (State, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if e, ok := r.bySubject[s]; ok {
 		if e.fence.Matches(fence) {
 			if !keyEquals(e.key, key) {
+				if err := r.takeoverKey(s, key, onTakeover); err != nil {
+					return StateDenying, err
+				}
 				r.dropIndex(e)
 				e.key = key
 				r.addIndex(e)
@@ -106,6 +123,9 @@ func (r *MemoryRegistry) RegisterAndEnforce(s Subject, key SubjectKey, fence Fen
 			delete(r.bySubject, s)
 		}
 	}
+	if err := r.takeoverKey(s, key, onTakeover); err != nil {
+		return StateDenying, err
+	}
 	e := newEntry(s, key, fence)
 	r.bySubject[s] = e
 	r.addIndex(e)
@@ -115,6 +135,65 @@ func (r *MemoryRegistry) RegisterAndEnforce(s Subject, key SubjectKey, fence Fen
 		}
 	}
 	return StateDenying, nil
+}
+
+// takeoverKey evicts the live subjects currently holding the claimed dispatch
+// key fields (OSEP-0022 stale-subject defense: a registration claiming a held
+// key is authoritative that the previous owner is gone). The owner never
+// evicts itself, so a duplicate registration stays an idempotent no-op.
+//
+// onTakeover runs per evictee before any registry mutation; completed
+// teardowns are evicted immediately, so a callback failure leaves every
+// touched subject consistent (registered + enforced, or evicted + torn down).
+// Callers hold the write lock.
+func (r *MemoryRegistry) takeoverKey(owner Subject, key SubjectKey, onTakeover func(stale Subject) error) error {
+	var evictees []*entry
+	seen := map[Subject]bool{owner: true}
+	add := func(st Subject) {
+		if seen[st] {
+			return
+		}
+		e, ok := r.bySubject[st]
+		if !ok || e == nil {
+			return
+		}
+		seen[st] = true
+		evictees = append(evictees, e)
+	}
+	if key.SourceIP.IsValid() {
+		if st, ok := r.byIP[key.SourceIP]; ok {
+			add(st)
+		}
+	}
+	if key.NetNSPath != "" {
+		if st, ok := r.byNetns[key.NetNSPath]; ok {
+			add(st)
+		}
+	}
+	if len(evictees) == 0 {
+		return nil
+	}
+	if onTakeover == nil {
+		// Evicting without a teardown callback would orphan the evictee's
+		// kernel enforcement — fail instead.
+		return fmt.Errorf("dispatch key held by %s and no takeover callback: refusing to evict", evictees[0].subject)
+	}
+	evicted := 0
+	for _, e := range evictees {
+		if err := onTakeover(e.subject); err != nil {
+			for _, done := range evictees[:evicted] {
+				r.dropIndex(done)
+				delete(r.bySubject, done.subject)
+			}
+			return fmt.Errorf("stale-subject takeover of %s: %w", e.subject, err)
+		}
+		evicted++
+	}
+	for _, e := range evictees {
+		r.dropIndex(e)
+		delete(r.bySubject, e.subject)
+	}
+	return nil
 }
 
 func keyEquals(a, b SubjectKey) bool {
@@ -199,7 +278,7 @@ func (r *MemoryRegistry) Resolve(key SubjectKey) (Subject, bool) {
 
 // ApplyPolicy stores the user policy and activates the subject. The subject
 // must have an observed slot; otherwise ErrUnknownSubject is returned and the
-// caller caches the push as pending.
+// caller fails the operation (fail closed).
 func (r *MemoryRegistry) ApplyPolicy(s Subject, pol *policy.NetworkPolicy) error {
 	if pol == nil {
 		pol = policy.DefaultDenyPolicy()

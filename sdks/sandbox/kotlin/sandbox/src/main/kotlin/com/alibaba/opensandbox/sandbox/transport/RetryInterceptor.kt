@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package com.alibaba.opensandbox.sandbox.transport
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxWakeTimeoutException
 import okhttp3.Interceptor
 import okhttp3.Response
 import org.slf4j.LoggerFactory
@@ -68,6 +69,11 @@ class RetryInterceptor
             val start = System.nanoTime()
             var previousSleep: Duration = Duration.ZERO
             var retriesUsed = 0
+            var wakeAttemptsUsed = 0
+            // Shared across the generic and wake paths so RetryEvent.attempt
+            // stays monotonic when a request sees both (e.g. a bare 503 retried
+            // once, then a marked wake 503).
+            var attemptsMade = 0
             var lastException: IOException? = null
 
             while (true) {
@@ -97,7 +103,10 @@ class RetryInterceptor
                 var effectiveChain = chain
                 val perAttemptMs = computePerAttemptTimeoutMs(elapsedBefore)
                 if (perAttemptMs != null) {
-                    val ms = perAttemptMs.toInt().coerceAtLeast(1)
+                    // A remaining deadline above Int.MAX_VALUE millis overflows toInt()
+                    // into a negative value; cap it at OkHttp's limit instead of
+                    // collapsing the per-attempt timeouts to ~1ms.
+                    val ms = minOf(perAttemptMs, Int.MAX_VALUE.toLong()).toInt()
                     effectiveChain = effectiveChain.withConnectTimeout(ms, TimeUnit.MILLISECONDS)
                     effectiveChain = effectiveChain.withReadTimeout(ms, TimeUnit.MILLISECONDS)
                     effectiveChain = effectiveChain.withWriteTimeout(ms, TimeUnit.MILLISECONDS)
@@ -123,8 +132,97 @@ class RetryInterceptor
                         classifyIoException(e)
                     }
 
+                attemptsMade += 1
+
                 val elapsedAfter = Duration.ofNanos(System.nanoTime() - start)
                 val cancelled = chain.call().isCanceled()
+
+                // OSEP-0024 wake-timeout branch: a 503 carrying the gateway-owned
+                // `OpenSandbox-Wake: expired` marker proves the request was parked
+                // and never forwarded, so the original request is resent for any
+                // method after waiting per `Retry-After` — budget permitting. A
+                // non-replayable body falls back to the bare-503 rules below.
+                if (
+                    policy.wakeRetryEnabled &&
+                    !cancelled &&
+                    exception == null &&
+                    response != null &&
+                    isWakeTimeoutResponse(response.code, response.header(WAKE_MARKER_HEADER)) &&
+                    bodyReplayable
+                ) {
+                    wakeAttemptsUsed += 1
+                    val retryAfter = resolveWakeRetryAfter(response.header("Retry-After"))
+                    val elapsedNow = Duration.ofNanos(System.nanoTime() - start)
+                    if (!shouldRetryWake(wakeAttemptsUsed, policy, elapsedNow, retryAfter)) {
+                        val rawBody =
+                            try {
+                                response.body?.string()
+                            } catch (_: IOException) {
+                                null
+                            }
+                        throw SandboxWakeTimeoutException(
+                            message =
+                                "sandbox wake timeout: restore did not finish within the wake retry budget; " +
+                                    "the request was never forwarded and is safe to retry",
+                            attempts = wakeAttemptsUsed,
+                            waited = elapsedNow,
+                            requestId = response.header("X-Request-ID"),
+                            responseBody = rawBody,
+                        )
+                    }
+                    // Clamp the wake sleep to the remaining generic
+                    // overallDeadline exactly like the regular path, so a long
+                    // Retry-After cannot push the request past the caller
+                    // budget and surface as a generic deadline error instead
+                    // of the typed wake exception.
+                    var sleepFor = retryAfter
+                    policy.overallDeadline?.let { deadline ->
+                        val remaining = deadline.minus(elapsedNow)
+                        if (sleepFor > remaining) {
+                            sleepFor = if (remaining.isNegative) Duration.ZERO else remaining
+                        }
+                    }
+
+                    // Mirror the regular retry path: log and fire onRetry before
+                    // each wake sleep so callers with hooks observe the wait.
+                    val wakeRequestId = response.header("X-Request-ID")
+                    val wakeEvent =
+                        RetryEvent(
+                            attempt = attemptsMade + 1,
+                            retriesUsed = wakeAttemptsUsed,
+                            method = method,
+                            url = request.url.toString(),
+                            cause = RetryCause.WAKE_TIMEOUT,
+                            statusCode = response.code,
+                            backoff = sleepFor,
+                            requestId = wakeRequestId,
+                            exception = null,
+                        )
+                    logger.warn(
+                        "wake retrying {} {}: attempt={} cause={} status=503 backoff={}ms request_id={}",
+                        wakeEvent.method,
+                        wakeEvent.url,
+                        wakeEvent.attempt,
+                        wakeEvent.cause.value,
+                        wakeEvent.backoff.toMillis(),
+                        wakeEvent.requestId,
+                    )
+                    policy.onRetry?.let { hook ->
+                        try {
+                            hook(wakeEvent)
+                        } catch (e: Exception) {
+                            logger.warn("RetryPolicy.onRetry callback raised", e)
+                        }
+                    }
+
+                    response.close()
+                    sleeper(sleepFor)
+                    if (Thread.currentThread().isInterrupted) {
+                        throw IOException("call interrupted during wake backoff")
+                    }
+                    continue
+                }
+
                 val retry =
                     shouldRetry(
                         method = method,
@@ -172,7 +270,7 @@ class RetryInterceptor
                 val statusCode = response?.code
                 val event =
                     RetryEvent(
-                        attempt = retriesUsed + 2,
+                        attempt = attemptsMade + 1,
                         retriesUsed = retriesUsed,
                         method = method,
                         url = request.url.toString(),

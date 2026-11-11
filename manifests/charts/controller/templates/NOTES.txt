@@ -19,42 +19,43 @@ To learn more about the release, try:
 
   kubectl get crd batchsandboxes.sandbox.opensandbox.io
   kubectl get crd pools.sandbox.opensandbox.io
+  kubectl get crd sandboxsnapshots.sandbox.opensandbox.io
 
 🚀 Create your first resources:
 
   # Create a resource pool
-  cat <<EOF | kubectl apply -f -
-  apiVersion: sandbox.opensandbox.io/v1alpha1
-  kind: Pool
-  metadata:
-    name: example-pool
-    namespace: {{ include "opensandbox.namespace" . }}
-  spec:
-    template:
-      spec:
-        containers:
-        - name: sandbox-container
-          image: nginx:latest
-          ports:
-          - containerPort: 80
-    capacitySpec:
-      bufferMax: 10
-      bufferMin: 2
-      poolMax: 20
-      poolMin: 5
-  EOF
+cat <<EOF | kubectl apply -f -
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: Pool
+metadata:
+  name: example-pool
+  namespace: {{ include "opensandbox.namespace" . }}
+spec:
+  template:
+    spec:
+      containers:
+      - name: sandbox-container
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+  capacitySpec:
+    bufferMax: 10
+    bufferMin: 2
+    poolMax: 20
+    poolMin: 5
+EOF
 
   # Create a batch sandbox
-  cat <<EOF | kubectl apply -f -
-  apiVersion: sandbox.opensandbox.io/v1alpha1
-  kind: BatchSandbox
-  metadata:
-    name: example-batch-sandbox
-    namespace: {{ include "opensandbox.namespace" . }}
-  spec:
-    replicas: 3
-    poolRef: example-pool
-  EOF
+cat <<EOF | kubectl apply -f -
+apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: example-batch-sandbox
+  namespace: {{ include "opensandbox.namespace" . }}
+spec:
+  replicas: 3
+  poolRef: example-pool
+EOF
 
 📊 Monitor resources:
 

@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1300" viewBox="0 0 1600 1300" role="img" aria-labelledby="title desc">
+<title id="title">Server internal architecture</title>
+<desc id="desc">Clients reach the FastAPI lifecycle server through middleware and thin API routers. The service layer exposes one SandboxService interface dispatching to Docker and to a CompositeSandboxService composing Kubernetes container providers with FastSandboxService, alongside snapshot, template and extension services. Repositories persist only snapshot metadata and the template catalog to SQLite or PostgreSQL. Tenant providers feed authentication, integrations add renew-on-access and telemetry, and the service layer delegates provisioning to runtime backends — Docker containers, Kubernetes resources or Fast Sandbox CRs — which are the source of truth for running sandboxes.</desc>
+<defs>
+<marker id="op" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="prog" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="out" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#059669"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} .chip{font-size:16px;fill:#4d6173} </style>
+</defs>
+<rect width="1600" height="1300" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Server internal architecture</text>
+<text x="48" y="96" class="body">Thin routes · one service interface over pluggable runtimes · persists only what it owns</text>
+<path d="M1160 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+<text x="1206" y="60" class="edge" style="fill:#dc6b2e">Control</text>
+<path d="M1300 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#prog)"/>
+<text x="1346" y="60" class="edge" style="fill:#2563eb">Dispatch</text>
+<path d="M1448 54h36" fill="none" stroke="#059669" stroke-width="2.3" stroke-dasharray="6 5" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#out)"/>
+<text x="1494" y="60" class="edge" style="fill:#059669">Integrations</text>
+
+<rect x="48" y="140" width="1360" height="120" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="172" class="section">CLIENTS</text>
+<rect x="72" y="192" width="330" height="56" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="215" class="heading">Sandbox SDKs</text>
+<text x="88" y="238" class="label">Python · JS · Go · Java · C#</text>
+<rect x="426" y="192" width="330" height="56" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="442" y="215" class="heading">osb CLI</text>
+<text x="442" y="238" class="label">terminal &amp; automation</text>
+<rect x="780" y="192" width="330" height="56" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="796" y="215" class="heading">MCP server</text>
+<text x="796" y="238" class="label">tools for agents</text>
+<path d="M237 248V322" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+<text x="253" y="290" class="edge" style="fill:#dc6b2e">authenticated lifecycle API</text>
+
+<rect x="48" y="330" width="1360" height="660" rx="12" fill="#fafbfd" stroke="#a9bfd8" stroke-width="1.5"/>
+<text x="72" y="362" class="section">LIFECYCLE SERVER · FASTAPI</text>
+
+<rect x="72" y="384" width="908" height="84" rx="10" fill="#f4f8fd" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="92" y="412" class="section">MIDDLEWARE</text>
+<rect x="92" y="424" width="200" height="34" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="192" y="447" class="chip" text-anchor="middle">Auth · API key + tenant</text>
+<rect x="300" y="424" width="120" height="34" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="360" y="447" class="chip" text-anchor="middle">Request ID</text>
+<rect x="428" y="424" width="130" height="34" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="493" y="447" class="chip" text-anchor="middle">Date header</text>
+<rect x="566" y="424" width="140" height="34" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="636" y="447" class="chip" text-anchor="middle">HTTP metrics</text>
+<rect x="714" y="424" width="90" height="34" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="759" y="447" class="chip" text-anchor="middle">CORS</text>
+
+<rect x="72" y="484" width="908" height="120" rx="10" fill="#f4f8fd" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="92" y="512" class="section">API LAYER · THIN ROUTERS</text>
+<rect x="92" y="524" width="130" height="36" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="157" y="547" class="chip" text-anchor="middle">Lifecycle</text>
+<rect x="230" y="524" width="100" height="36" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="280" y="547" class="chip" text-anchor="middle">Proxy</text>
+<rect x="338" y="524" width="90" height="36" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="383" y="547" class="chip" text-anchor="middle">Pool</text>
+<rect x="436" y="524" width="130" height="36" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="501" y="547" class="chip" text-anchor="middle">Templates</text>
+<rect x="574" y="524" width="160" height="36" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="654" y="547" class="chip" text-anchor="middle">Network policy</text>
+<rect x="742" y="524" width="100" height="36" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="792" y="547" class="chip" text-anchor="middle">Devops</text>
+<rect x="850" y="524" width="100" height="36" rx="6" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="900" y="547" class="chip" text-anchor="middle">Metrics</text>
+<text x="92" y="588" class="label">request / response schemas beside routes · all validation happens here</text>
+
+<rect x="72" y="620" width="908" height="330" rx="10" fill="#f4f8fd" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="92" y="650" class="section">SERVICE LAYER</text>
+<rect x="92" y="668" width="250" height="96" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="112" y="698" class="heading">SandboxService</text>
+<text x="112" y="728" class="label">one lifecycle contract,</text>
+<text x="112" y="754" class="label">runtime-agnostic</text>
+<path d="M342 716H394" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#prog)"/>
+<rect x="400" y="668" width="170" height="96" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="420" y="698" class="heading">Docker</text>
+<text x="420" y="728" class="label">containers ·</text>
+<text x="420" y="754" class="label">volumes · ports</text>
+<rect x="600" y="668" width="360" height="136" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="620" y="698" class="heading">CompositeSandboxService</text>
+<text x="620" y="726" class="label">Kubernetes composition · templateId / fsb- routing</text>
+<rect x="620" y="744" width="170" height="40" rx="6" fill="#f4f8fd" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="705" y="770" class="chip" text-anchor="middle">Container providers</text>
+<rect x="802" y="744" width="140" height="40" rx="6" fill="#f0fdfa" stroke="#76c7b6" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="872" y="770" class="chip" text-anchor="middle">FastSandbox</text>
+<rect x="92" y="830" width="280" height="96" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="112" y="862" class="heading">Snapshots</text>
+<text x="112" y="892" class="label">checkpoint records ·</text>
+<text x="112" y="918" class="label">pause / resume support</text>
+<rect x="396" y="830" width="260" height="96" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="416" y="862" class="heading">Templates</text>
+<text x="416" y="892" class="label">catalog serving</text>
+<text x="416" y="918" class="label">FastSandbox creates</text>
+<rect x="680" y="830" width="280" height="96" rx="10" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="700" y="862" class="heading">ExtensionService</text>
+<text x="700" y="892" class="label">workload metadata reads</text>
+<text x="700" y="918" class="label">renew-on-access</text>
+
+<rect x="1000" y="384" width="408" height="120" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="1020" y="414" class="heading">Tenants</text>
+<text x="1020" y="444" class="label">file / HTTP providers resolve</text>
+<text x="1020" y="470" class="label">the tenant from its API key</text>
+<path d="M1000 426H988" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+
+<rect x="1000" y="524" width="408" height="110" rx="10" fill="#ffffff" stroke="#059669" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="1020" y="554" class="heading">Integrations</text>
+<text x="1020" y="584" class="label">renew-on-access consumers</text>
+<text x="1020" y="610" class="label">OpenTelemetry export</text>
+<path d="M1000 579H988" fill="none" stroke="#059669" stroke-width="2.3" stroke-dasharray="6 5" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#out)"/>
+
+<rect x="1000" y="654" width="408" height="296" rx="10" fill="#f4f8fd" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="1020" y="684" class="section">REPOSITORIES · RECORDS ONLY</text>
+<rect x="1020" y="700" width="368" height="104" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="1040" y="730" class="heading">Snapshot metadata</text>
+<text x="1040" y="760" class="label">SQLite / PostgreSQL adapters</text>
+<text x="1040" y="786" class="label">watch-driven state · migration</text>
+<rect x="1020" y="824" width="368" height="104" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="1040" y="854" class="heading">Template catalog</text>
+<text x="1040" y="884" class="label">SQLite / PostgreSQL adapters</text>
+<text x="1040" y="910" class="label">tenant-private definitions</text>
+<path d="M980 800H994" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+
+<path d="M420 950V1002" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#op)"/>
+<text x="436" y="982" class="edge" style="fill:#dc6b2e">delegates provisioning &amp; runtime ops</text>
+
+<rect x="48" y="1010" width="1360" height="180" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5"/>
+<text x="72" y="1042" class="section">RUNTIME BACKENDS · SOURCE OF TRUTH FOR RUNNING SANDBOXES</text>
+<rect x="72" y="1060" width="380" height="104" rx="10" fill="#f7faff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="92" y="1090" class="heading">Docker</text>
+<text x="92" y="1120" class="label">containers · volumes</text>
+<text x="92" y="1146" class="label">public image snapshots</text>
+<rect x="476" y="1060" width="430" height="104" rx="10" fill="#f7faff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="496" y="1090" class="heading">Kubernetes resources</text>
+<text x="496" y="1120" class="label">BatchSandbox · Pool ·</text>
+<text x="496" y="1146" class="label">SandboxSnapshot CRs</text>
+<rect x="930" y="1060" width="400" height="104" rx="10" fill="#f0fdfa" stroke="#76c7b6" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="950" y="1090" class="heading">Fast Sandbox CRs</text>
+<text x="950" y="1120" class="label">FastPath microVMs ·</text>
+<text x="950" y="1146" class="label">template-backed</text>
+
+<rect x="48" y="1220" width="1504" height="56" rx="10" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="1244" class="label">Rule 1 — the API never talks to a runtime directly: everything goes through a service</text>
+<text x="72" y="1268" class="label">Rule 2 — sandboxes are never stored in the server's database: runtime resources are the source of truth</text>
+</svg>

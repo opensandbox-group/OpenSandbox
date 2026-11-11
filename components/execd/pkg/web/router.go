@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
@@ -52,6 +53,16 @@ func NewRouter(accessToken string) *gin.Engine {
 	r.POST("/internal/init", withInit(func(c *controller.InitController) { c.Init() }))
 	r.GET("/ready", withInit(func(c *controller.InitController) { c.Ready() }))
 
+	registerFilesystemRoutes(r.Group(""))
+	registerFilesystemRoutes(r.Group("/v1/filesystem/:uid/:gid", filesystemIdentityMiddleware()))
+
+	registerExecutionRoutes(r)
+	return r
+}
+
+// Both entrypoints use the same handlers. Identity-scoped requests are
+// intercepted before any filesystem access and dispatched to a child process.
+func registerFilesystemRoutes(r *gin.RouterGroup) {
 	files := r.Group("/files")
 	{
 		files.DELETE("", withFilesystem(func(c *controller.FilesystemController) { c.RemoveFiles() }))
@@ -71,6 +82,9 @@ func NewRouter(accessToken string) *gin.Engine {
 		directories.DELETE("", withFilesystem(func(c *controller.FilesystemController) { c.RemoveDirs() }))
 	}
 
+}
+
+func registerExecutionRoutes(r *gin.Engine) {
 	code := r.Group("/code")
 	{
 		code.POST("", withCode(func(c *controller.CodeInterpretingController) { c.RunCode() }))
@@ -136,7 +150,6 @@ func NewRouter(accessToken string) *gin.Engine {
 		isolated.GET("/capabilities", withIsolated(func(c *controller.IsolatedSessionController) { c.Capabilities() }))
 	}
 
-	return r
 }
 
 func withFilesystem(fn func(*controller.FilesystemController)) gin.HandlerFunc {
@@ -187,8 +200,13 @@ func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 			return
 		}
 
+		presented, valid := requestAccessToken(ctx)
+		if !valid {
+			abortUnauthorized(ctx)
+			return
+		}
+
 		if b := binding.Current(); b != nil && b.HasAccessToken {
-			presented := ctx.GetHeader(model.ApiAccessTokenHeader)
 			if presented == "" || !b.VerifyAccessToken(presented) {
 				abortUnauthorized(ctx)
 				return
@@ -208,14 +226,33 @@ func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 			return
 		}
 
-		requestedToken := ctx.GetHeader(model.ApiAccessTokenHeader)
-		if requestedToken == "" || requestedToken != legacyToken {
+		if presented == "" || presented != legacyToken {
 			abortUnauthorized(ctx)
 			return
 		}
 
 		ctx.Next()
 	}
+}
+
+// requestAccessToken selects the existing API-token header or, for PTY
+// WebSocket upgrades only, a browser credential from the subprotocol list.
+func requestAccessToken(ctx *gin.Context) (string, bool) {
+	r := ctx.Request
+	token := ""
+	if r.Method == http.MethodGet && ctx.FullPath() == "/pty/:sessionId/ws" && websocket.IsWebSocketUpgrade(r) {
+		var valid bool
+		token, valid = ptyWebSocketAccessToken(r)
+		if !valid {
+			return "", false
+		}
+	}
+	// Presence, not a non-empty value, determines precedence. A bad explicit
+	// header must not be rescued by a valid subprotocol credential.
+	if _, present := r.Header[http.CanonicalHeaderKey(model.ApiAccessTokenHeader)]; present {
+		return r.Header.Get(model.ApiAccessTokenHeader), true
+	}
+	return token, true
 }
 
 func abortUnauthorized(ctx *gin.Context) {

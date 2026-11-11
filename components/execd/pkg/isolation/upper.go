@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,33 +22,46 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
+const cleanupRegistryName = ".execd-cleanup"
+
+// tmpDirName is the per-session directory backing the namespace /tmp bind.
+const tmpDirName = "tmp"
+
 // UpperManager manages upper directories for overlay workspaces.
 type UpperManager struct {
-	root      string
-	maxBytes  int64
-	removeAll func(string) error
-	mu        sync.Mutex
-	entries   map[string]*UpperEntry
+	root         string
+	cleanupRoot  string
+	maxBytes     int64
+	removeAll    func(string) error
+	removeRecord func(string) error
+	mu           sync.Mutex
+	entries      map[string]*UpperEntry
 }
 
-// UpperEntry tracks one allocated upper directory.
-type UpperEntry struct {
+// UpperDirPair is one allocated upper + work directory pair for a single
+// overlay mount.
+type UpperDirPair struct {
 	UpperDir string
 	WorkDir  string
-	InUse    bool
 }
 
-// NewUpperManager creates an upper directory manager. As part of startup it
-// reclaims stale session directories left under root by a previous execd
-// lifetime: the session table lives only in memory, so every execd-allocated
-// child of root is orphaned by definition and gets removed. Children without
-// the execd session layout are left untouched (root is operator-configured
-// and must stay safe to point at a directory shared with other data).
+// UpperEntry tracks the directory pairs allocated to one session.
+type UpperEntry struct {
+	Pairs []UpperDirPair
+	InUse bool
+	dir   string
+}
+
+// NewUpperManager creates an upper directory manager. A durable cleanup
+// registry under root records every execd-owned session outside the session
+// subtree, so cleanup can resume after partial deletion or process restart.
+// Unrecorded children are operator data and are never reclaimed.
 func NewUpperManager(root string, maxBytes int64) (*UpperManager, error) {
 	if root == "" {
 		return nil, errors.New("upper: root path is required")
@@ -56,105 +69,209 @@ func NewUpperManager(root string, maxBytes int64) (*UpperManager, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("upper: create root %s: %w", root, err)
 	}
-	m := &UpperManager{
-		root:      root,
-		maxBytes:  maxBytes,
-		removeAll: os.RemoveAll,
-		entries:   make(map[string]*UpperEntry),
+	cleanupRoot := filepath.Join(root, cleanupRegistryName)
+	if err := ensurePrivateDir(cleanupRoot); err != nil {
+		return nil, fmt.Errorf("upper: initialize cleanup registry %s: %w", cleanupRoot, err)
 	}
-	m.reclaimStale()
+	m := &UpperManager{
+		root:         root,
+		cleanupRoot:  cleanupRoot,
+		maxBytes:     maxBytes,
+		removeAll:    os.RemoveAll,
+		removeRecord: os.Remove,
+		entries:      make(map[string]*UpperEntry),
+	}
+	if err := m.reclaimStale(); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
-// reclaimStale is a startup-only sweep that removes session directories
-// left under root by a previous execd lifetime (crash, OOM, container
-// restart, or a pooled sandbox whose agent is restarted between occupants).
-// Session state is memory-only and dies with the process, so no correct
-// behavior depends on stale upper directories surviving a restart; leaving
-// them would leak disk and expose one occupant's session data to the next.
-// Call it only before the manager tracks any live entry.
-//
-// Only children with the execd-allocated layout (a directory containing an
-// upper/ subdirectory) are reclaimed: upper_root is operator-configured,
-// and pointing it at a directory shared with other data — valid before this
-// sweep existed — must not erase unrelated children on upgrade.
-//
-// Children whose removal fails — e.g. an upper still referenced by a mount
-// from the previous lifetime — are registered as released entries so the
-// collector retries them once the blocker is gone and usage accounting keeps
-// counting their bytes toward upper_max_bytes.
-func (m *UpperManager) reclaimStale() {
-	children, err := os.ReadDir(m.root)
+// reclaimStale recovers sessions recorded by a previous execd lifetime.
+// Cleanup records are outside the removable session subtree, so an
+// interrupted RemoveAll can no longer erase the only proof of ownership.
+func (m *UpperManager) reclaimStale() error {
+	records, err := os.ReadDir(m.cleanupRoot)
 	if err != nil {
-		log.Warn("upper: list stale entries under %s: %v", m.root, err)
-		return
+		return fmt.Errorf("upper: list cleanup records under %s: %w", m.cleanupRoot, err)
 	}
 
 	var removed int
 	var failed int
 	var skipped int
-	for _, child := range children {
-		path := filepath.Join(m.root, child.Name())
-		if !dirExists(filepath.Join(path, "upper")) {
-			// Not an execd-allocated session directory; never touch it.
+	for _, record := range records {
+		id := record.Name()
+		if !validSessionID(id) {
 			skipped++
 			continue
 		}
-		if err := m.removeAll(path); err != nil {
+
+		recordPath := filepath.Join(m.cleanupRoot, id)
+		info, err := os.Lstat(recordPath)
+		if err != nil {
 			failed++
-			log.Warn("upper: reclaim stale session dir %s: %v", path, err)
-			m.entries[child.Name()] = &UpperEntry{
-				UpperDir: filepath.Join(path, "upper"),
-				WorkDir:  filepath.Join(path, "work"),
-				InUse:    false,
-			}
+			log.Warn("upper: inspect cleanup record %s: %v", recordPath, err)
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			skipped++
+			continue
+		}
+
+		sessionDir := filepath.Join(m.root, id)
+		entry := &UpperEntry{
+			Pairs: sessionPairs(sessionDir),
+			InUse: false,
+			dir:   sessionDir,
+		}
+		m.entries[id] = entry
+		if err := m.cleanupEntryLocked(id, entry); err != nil {
+			failed++
+			log.Warn("upper: reclaim recorded session dir %s: %v", sessionDir, err)
 			continue
 		}
 		removed++
 	}
 	if removed > 0 || failed > 0 || skipped > 0 {
 		log.Info(
-			"upper: reclaimed %d stale session dir(s) under %s (%d failed, %d unrecognized skipped)",
+			"upper: reclaimed %d recorded stale session dir(s) under %s (%d failed, %d unrecognized skipped)",
 			removed, m.root, failed, skipped,
 		)
 	}
+	return nil
 }
 
 var ErrUpperLimitExceeded = errors.New("upper: total usage exceeds configured limit")
 
-// Allocate creates a new upper + work directory pair. Returns the session ID
-// and the directories. Returns ErrUpperLimitExceeded if maxBytes > 0 and
-// current usage already meets or exceeds the limit.
+// Allocate creates a new session directory holding a single upper + work
+// pair. Returns the session ID and the directories. Returns
+// ErrUpperLimitExceeded if maxBytes > 0 and current usage already meets or
+// exceeds the limit.
 func (m *UpperManager) Allocate() (sessionID, upperDir, workDir string, err error) {
+	id, pairs, err := m.AllocateN(1)
+	if err != nil {
+		return "", "", "", err
+	}
+	return id, pairs[0].UpperDir, pairs[0].WorkDir, nil
+}
+
+// TmpDir returns the /tmp backing directory of an allocated session.
+func (m *UpperManager) TmpDir(sessionID string) string {
+	return filepath.Join(m.root, sessionID, tmpDirName)
+}
+
+// allocateTmpDir creates the /tmp backing dir 01777 so uid-switched
+// setpriv sessions keep the old --tmpfs write semantics; the explicit
+// Chmod survives a restrictive umask.
+func allocateTmpDir(sessionDir string) error {
+	tmpDir := filepath.Join(sessionDir, tmpDirName)
+	if err := os.MkdirAll(tmpDir, 0o777); err != nil {
+		return fmt.Errorf("upper: mkdir %s: %w", tmpDir, err)
+	}
+	if err := os.Chmod(tmpDir, 0o777|os.ModeSticky); err != nil {
+		return fmt.Errorf("upper: chmod %s: %w", tmpDir, err)
+	}
+	return nil
+}
+
+// AllocateSessionDir creates a session directory without overlay pairs, for
+// sessions whose mounts need no host uppers. The directory still carries a
+// durable cleanup record and holds the session's /tmp backing directory, so
+// teardown and crash recovery treat it like any allocated session.
+// Returns ErrUpperLimitExceeded if maxBytes > 0 and current usage already
+// meets or exceeds the limit.
+func (m *UpperManager) AllocateSessionDir() (sessionID string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.maxBytes > 0 {
 		usage, usageErr := m.usageLocked()
-		if usageErr == nil && usage >= m.maxBytes {
-			return "", "", "", fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
+		if usageErr != nil {
+			return "", fmt.Errorf("upper: measure usage before allocation: %w", usageErr)
+		}
+		if usage >= m.maxBytes {
+			return "", fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
 		}
 	}
 
-	id := newSessionID()
-	upperDir = filepath.Join(m.root, id, "upper")
-	workDir = filepath.Join(m.root, id, "work")
-
-	if err := os.MkdirAll(upperDir, 0o755); err != nil {
-		return "", "", "", fmt.Errorf("upper: mkdir %s: %w", upperDir, err)
+	id, err := m.createCleanupRecordLocked()
+	if err != nil {
+		return "", err
 	}
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		os.RemoveAll(filepath.Dir(upperDir))
-		return "", "", "", fmt.Errorf("upper: mkdir %s: %w", workDir, err)
+	sessionDir := filepath.Join(m.root, id)
+	if err := allocateTmpDir(sessionDir); err != nil {
+		if rollbackErr := m.rollbackAllocationLocked(id, sessionDir, nil); rollbackErr != nil {
+			return "", errors.Join(
+				fmt.Errorf("upper: allocate session dir %s: %w", sessionDir, err),
+				rollbackErr,
+			)
+		}
+		return "", fmt.Errorf("upper: allocate session dir %s: %w", sessionDir, err)
+	}
+	m.entries[id] = &UpperEntry{InUse: true, dir: sessionDir}
+	return id, nil
+}
+
+// AllocateN creates a new session directory holding n upper + work pairs,
+// one per overlay mount. Pair 0 lives at <root>/<id>/upper and
+// <root>/<id>/work; pair i>0 at <root>/<id>/upper-<i> and work-<i>. The
+// session directory also holds the /tmp backing directory (TmpDir).
+// Returns ErrUpperLimitExceeded if maxBytes > 0 and current usage already
+// meets or exceeds the limit.
+func (m *UpperManager) AllocateN(n int) (sessionID string, pairs []UpperDirPair, err error) {
+	if n <= 0 {
+		return "", nil, fmt.Errorf("upper: pair count must be positive, got %d", n)
 	}
 
-	m.entries[id] = &UpperEntry{
-		UpperDir: upperDir,
-		WorkDir:  workDir,
-		InUse:    true,
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.maxBytes > 0 {
+		usage, usageErr := m.usageLocked()
+		if usageErr != nil {
+			return "", nil, fmt.Errorf("upper: measure usage before allocation: %w", usageErr)
+		}
+		if usage >= m.maxBytes {
+			return "", nil, fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
+		}
 	}
 
-	return id, upperDir, workDir, nil
+	id, err := m.createCleanupRecordLocked()
+	if err != nil {
+		return "", nil, err
+	}
+	sessionDir := filepath.Join(m.root, id)
+	pairs = make([]UpperDirPair, 0, n)
+	failAllocation := func(cause error) (string, []UpperDirPair, error) {
+		rollbackErr := m.rollbackAllocationLocked(id, sessionDir, pairs)
+		if rollbackErr != nil {
+			return "", nil, errors.Join(cause, rollbackErr)
+		}
+		return "", nil, cause
+	}
+	if err := allocateTmpDir(sessionDir); err != nil {
+		return failAllocation(err)
+	}
+	for i := range n {
+		upperName, workName := "upper", "work"
+		if i > 0 {
+			upperName = fmt.Sprintf("upper-%d", i)
+			workName = fmt.Sprintf("work-%d", i)
+		}
+		upperDir := filepath.Join(sessionDir, upperName)
+		workDir := filepath.Join(sessionDir, workName)
+
+		if err := os.MkdirAll(upperDir, 0o755); err != nil {
+			return failAllocation(fmt.Errorf("upper: mkdir %s: %w", upperDir, err))
+		}
+		if err := os.MkdirAll(workDir, 0o755); err != nil {
+			return failAllocation(fmt.Errorf("upper: mkdir %s: %w", workDir, err))
+		}
+		pairs = append(pairs, UpperDirPair{UpperDir: upperDir, WorkDir: workDir})
+	}
+
+	m.entries[id] = &UpperEntry{Pairs: pairs, InUse: true, dir: sessionDir}
+	return id, pairs, nil
 }
 
 // Release marks an upper directory as available for GC.
@@ -167,7 +284,20 @@ func (m *UpperManager) Release(sessionID string) {
 	}
 }
 
-// Remove immediately deletes an upper directory.
+// sessionDir returns the session directory holding the entry's pairs.
+// Caller must hold m.mu.
+func (e *UpperEntry) sessionDir() string {
+	if e.dir != "" {
+		return e.dir
+	}
+	if len(e.Pairs) == 0 {
+		return ""
+	}
+	return filepath.Dir(e.Pairs[0].UpperDir)
+}
+
+// Remove immediately deletes a session directory and retires its cleanup
+// record. Failures leave the released entry and record tracked for retry.
 func (m *UpperManager) Remove(sessionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -176,15 +306,9 @@ func (m *UpperManager) Remove(sessionID string) error {
 	if !ok {
 		return fmt.Errorf("upper: session %s not found", sessionID)
 	}
-
-	// Mark the entry released before removal. A transient filesystem error must
-	// leave the directory tracked so CollectWithErrors can retry it later.
-	e.InUse = false
-	upperParent := filepath.Dir(e.UpperDir)
-	if err := m.removeAll(upperParent); err != nil {
-		return err
+	if err := m.cleanupEntryLocked(sessionID, e); err != nil {
+		return fmt.Errorf("upper: remove session %s: %w", sessionID, err)
 	}
-	delete(m.entries, sessionID)
 	return nil
 }
 
@@ -195,8 +319,8 @@ func (m *UpperManager) Collect() []string {
 }
 
 // CollectWithErrors runs one garbage collection pass and reports every
-// released entry that could not be removed. Failed entries remain tracked for
-// a later retry.
+// released entry that could not be cleaned or retired. Failed entries remain
+// tracked for a later retry.
 func (m *UpperManager) CollectWithErrors() ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -204,18 +328,17 @@ func (m *UpperManager) CollectWithErrors() ([]string, error) {
 	var freed []string
 	var cleanupErr error
 	for id, e := range m.entries {
-		if !e.InUse {
-			upperParent := filepath.Dir(e.UpperDir)
-			if err := m.removeAll(upperParent); err != nil {
-				cleanupErr = errors.Join(
-					cleanupErr,
-					fmt.Errorf("upper: collect session %s: %w", id, err),
-				)
-				continue
-			}
-			freed = append(freed, id)
-			delete(m.entries, id)
+		if e.InUse {
+			continue
 		}
+		if err := m.cleanupEntryLocked(id, e); err != nil {
+			cleanupErr = errors.Join(
+				cleanupErr,
+				fmt.Errorf("upper: collect session %s: %w", id, err),
+			)
+			continue
+		}
+		freed = append(freed, id)
 	}
 	return freed, cleanupErr
 }
@@ -228,20 +351,32 @@ func (m *UpperManager) Usage() (int64, error) {
 }
 
 // usageLocked calculates usage without acquiring the mutex. Caller must hold m.mu.
-// Entries whose upper directory no longer exists (e.g. a stale residue entry
-// partially removed before a GC retry) contribute zero instead of failing the
-// whole sum.
+// Missing released upper directories are tolerated as cleanup residue. A missing
+// in-use upper makes the measurement invalid instead of reporting false zero.
+// The /tmp backing dir counts toward usage so maxBytes bounds its growth.
 func (m *UpperManager) usageLocked() (int64, error) {
 	var total int64
 	for _, e := range m.entries {
-		size, err := dirSize(e.UpperDir)
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
+		for _, p := range e.Pairs {
+			size, err := dirSize(p.UpperDir)
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) && !e.InUse {
+					continue
+				}
+				return 0, err
 			}
-			return 0, err
+			total += size
 		}
-		total += size
+		if dir := e.sessionDir(); dir != "" {
+			size, err := dirSize(filepath.Join(dir, tmpDirName))
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) && !e.InUse {
+					continue
+				}
+				return 0, err
+			}
+			total += size
+		}
 	}
 	return total, nil
 }
@@ -252,6 +387,158 @@ func (m *UpperManager) Root() string {
 
 func (m *UpperManager) MaxBytes() int64 {
 	return m.maxBytes
+}
+
+func (m *UpperManager) cleanupEntryLocked(id string, e *UpperEntry) error {
+	// Mark the entry released before filesystem cleanup. It is only forgotten
+	// after both the session subtree and its durable identity are gone.
+	e.InUse = false
+	if sessionDir := e.sessionDir(); sessionDir != "" {
+		if err := m.removeAll(sessionDir); err != nil {
+			return fmt.Errorf("remove session directory %s: %w", sessionDir, err)
+		}
+	}
+	if err := m.retireCleanupRecord(id); err != nil {
+		return err
+	}
+	delete(m.entries, id)
+	return nil
+}
+
+func (m *UpperManager) createCleanupRecordLocked() (string, error) {
+	for range 16 {
+		id := newSessionID()
+		recordPath := filepath.Join(m.cleanupRoot, id)
+		if err := os.Mkdir(recordPath, 0o700); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				continue
+			}
+			return "", fmt.Errorf("upper: create cleanup record %s: %w", recordPath, err)
+		}
+		return id, nil
+	}
+	return "", errors.New("upper: could not allocate unique session ID")
+}
+
+func (m *UpperManager) rollbackAllocationLocked(
+	id string,
+	sessionDir string,
+	pairs []UpperDirPair,
+) error {
+	var cleanupErr error
+	if err := m.removeAll(sessionDir); err != nil {
+		cleanupErr = fmt.Errorf("remove partial session %s: %w", sessionDir, err)
+	}
+	if cleanupErr == nil {
+		if err := m.retireCleanupRecord(id); err != nil {
+			cleanupErr = err
+		}
+	}
+	if cleanupErr == nil {
+		return nil
+	}
+
+	if len(pairs) == 0 {
+		pairs = sessionPairs(sessionDir)
+	}
+	m.entries[id] = &UpperEntry{Pairs: pairs, InUse: false, dir: sessionDir}
+	return fmt.Errorf("upper: rollback session %s: %w", id, cleanupErr)
+}
+
+func (m *UpperManager) retireCleanupRecord(id string) error {
+	recordPath := filepath.Join(m.cleanupRoot, id)
+	if err := m.removeRecord(recordPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("retire cleanup record %s: %w", recordPath, err)
+	}
+	return nil
+}
+
+func sessionPairs(sessionDir string) []UpperDirPair {
+	pairs := []UpperDirPair{{
+		UpperDir: filepath.Join(sessionDir, "upper"),
+		WorkDir:  filepath.Join(sessionDir, "work"),
+	}}
+	children, err := os.ReadDir(sessionDir)
+	if err != nil {
+		return pairs
+	}
+	for _, child := range children {
+		name := child.Name()
+		if !strings.HasPrefix(name, "upper-") {
+			continue
+		}
+		upperDir := filepath.Join(sessionDir, name)
+		if !dirExists(upperDir) {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, "upper-")
+		pairs = append(pairs, UpperDirPair{
+			UpperDir: upperDir,
+			WorkDir:  filepath.Join(sessionDir, "work-"+suffix),
+		})
+	}
+	return pairs
+}
+
+func ensurePrivateDir(path string) error {
+	info, err := os.Lstat(path)
+	if err == nil {
+		return validatePrivateDir(path, info)
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		if !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			return statErr
+		}
+		return validatePrivateDir(path, info)
+	}
+	return nil
+}
+
+// validatePrivateDir refuses to trust a pre-existing directory that this
+// process cannot prove it owns. The cleanup registry is the sole proof of
+// ownership for the session subtrees reclaimStale removes, so adopting a
+// directory another user can write to would let that user plant records named
+// after their targets and turn execd into a confused deputy. A registry this
+// process created is always 0700 and owned by root or the effective user, so
+// these checks only reject paths execd never created.
+func validatePrivateDir(path string, info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("path exists and is not a real directory")
+	}
+	if perm := info.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("directory %s is writable by group or others (mode %#o); refusing to trust it", path, perm)
+	}
+	if uid, ok := dirOwnerUID(info); ok && uid != 0 && uid != os.Geteuid() {
+		return fmt.Errorf("directory %s is owned by uid %d, which is neither root nor the effective user %d; refusing to trust it", path, uid, os.Geteuid())
+	}
+	return nil
+}
+
+func validSessionID(id string) bool {
+	if len(id) == 32 {
+		for _, c := range id {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	if !strings.HasPrefix(id, "fallback-") || len(id) == len("fallback-") {
+		return false
+	}
+	for _, c := range id[len("fallback-"):] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func newSessionID() string {
@@ -271,9 +558,9 @@ func dirExists(path string) bool {
 
 func dirSize(path string) (int64, error) {
 	var size int64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	err := filepath.Walk(path, func(walkedPath string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return dirSizeWalkError(path, walkedPath, walkErr)
 		}
 		if !info.IsDir() {
 			size += info.Size()
@@ -281,4 +568,13 @@ func dirSize(path string) (int64, error) {
 		return nil
 	})
 	return size, err
+}
+
+// Missing descendants can disappear during a live walk; only a missing root
+// invalidates the upper measurement. Other I/O failures remain fatal.
+func dirSizeWalkError(root, walkedPath string, walkErr error) error {
+	if errors.Is(walkErr, fs.ErrNotExist) && walkedPath != root {
+		return nil
+	}
+	return walkErr
 }

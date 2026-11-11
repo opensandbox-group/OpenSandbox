@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -70,10 +70,10 @@ func (a *defaultAssigner) AssignPool(ctx context.Context, sbx *sandboxv1alpha1.B
 	return best.Name, nil
 }
 
-func (a *defaultAssigner) collectRejections(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, predicates []predicate) poolRejection {
+func (a *defaultAssigner) collectRejections(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool, predicates []Predicate) poolRejection {
 	var rejection poolRejection
 	for _, p := range predicates {
-		if !p.predicate(ctx, sbx, pool) {
+		if !p.Predicate(ctx, sbx, pool) {
 			reason := "predicate failed"
 			if pr, ok := p.(predicateWithReason); ok {
 				if detail := pr.Reason(ctx, sbx, pool); detail != "" {

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -311,14 +311,14 @@ func (s *containerLogSource) Acknowledge(_ context.Context, results []api.AckRes
 			for _, index := range indices {
 				runtime.pending[index].complete = true
 				for _, reason := range value.DropReasons {
-					runtime.pending[index].dropReasons = addReason(runtime.pending[index].dropReasons, reason)
+					runtime.pending[index].dropReasons = api.AddLossReason(runtime.pending[index].dropReasons, reason)
 				}
 				if result.Disposition == api.AckIntentionalDrop {
 					reason := result.Reason
 					if reason == "" {
 						reason = "pipeline-policy-drop"
 					}
-					runtime.pending[index].dropReasons = addReason(runtime.pending[index].dropReasons, reason)
+					runtime.pending[index].dropReasons = api.AddLossReason(runtime.pending[index].dropReasons, reason)
 				}
 			}
 			if runtime.persisted.Guarantee == "" {
@@ -517,7 +517,7 @@ func (s *containerLogSource) commitCompletedLocked(runtime *streamRuntime) error
 		commit.lastSeq = sequence
 		for _, reason := range pending.dropReasons {
 			next.HadDrops = true
-			next.LossReasons = addReason(next.LossReasons, reason)
+			next.LossReasons = api.AddLossReason(next.LossReasons, reason)
 			next.Drops = appendDrop(next.Drops, state.SourceDropRecord{ID: spanResultID(runtime.persisted.StreamRef, pending.span, reason), FileID: pending.span.FileID, Path: pending.span.Path, FromOffset: pending.span.StartOffset, ToOffset: pending.span.EndOffset, Reason: reason})
 		}
 		if pending.span.RepairGapID != "" {
@@ -799,12 +799,12 @@ func (s *containerLogSource) resumeMonitoring(runtime *streamRuntime, leafWatche
 		if !leafWatched {
 			return nil
 		}
-		hadPriorProgress := len(runtime.files) > 0 || next.Revision > 1 || next.AcknowledgedRevision > 0 || next.FinalizingRevision > 0 || len(next.Drops) > 0 || len(next.Gaps) > 0
-		if hadPriorProgress {
+		if hasProgressLocked(runtime) {
 			return api.Permanent(fmt.Errorf("source stream %q has progress without a coverage boundary", next.StreamRef))
 		}
 		next.CoverageStartedAt = canonicalCoverageBoundary(time.Now())
 		next.MonitoringEpoch = s.epochID
+		next.UnadoptedDeadline = nil
 		changed = true
 	} else if next.MonitoringEpoch != s.epochID {
 		reason := "monitor-interrupted"
@@ -1161,13 +1161,46 @@ func (s *containerLogSource) scanAll(ctx context.Context, watcher *fsnotify.Watc
 	return nil
 }
 
+// hasProgressLocked reports whether runtime has read, dropped or finalized
+// anything. The caller holds runtime.mu.
+func hasProgressLocked(runtime *streamRuntime) bool {
+	persisted := runtime.persisted
+	return len(runtime.files) > 0 || persisted.Revision > 1 || persisted.AcknowledgedRevision > 0 || persisted.FinalizingRevision > 0 || len(persisted.Drops) > 0 || len(persisted.Gaps) > 0
+}
+
+// unadoptedExpiredLocked reports whether runtime belongs to a Pod that ended
+// before kubelet created its log directory, and the directory has had the
+// same window to appear that late data gets after an end. Such a stream was
+// never adopted, so it can never end; nothing was observed, so nothing is
+// finalized. The deadline is persisted the first time the stream is seen this
+// way, so restarts do not extend the window. The caller holds runtime.mu.
+func (s *containerLogSource) unadoptedExpiredLocked(runtime *streamRuntime, now time.Time) (bool, error) {
+	if runtime.ended || !runtime.resource.Terminated || !runtime.persisted.CoverageStartedAt.IsZero() || hasProgressLocked(runtime) {
+		return false, nil
+	}
+	if runtime.persisted.UnadoptedDeadline == nil {
+		next := runtime.persisted
+		deadline := now.UTC().Add(s.cfg.EndedStateRetention)
+		next.UnadoptedDeadline = &deadline
+		if err := s.state.PutSourceStream(next); err != nil {
+			return false, err
+		}
+		runtime.persisted = next
+	}
+	return !now.Before(*runtime.persisted.UnadoptedDeadline), nil
+}
+
 func (s *containerLogSource) pruneEndedRuntime(streamRef api.StreamRef, runtime *streamRuntime, now time.Time) (bool, error) {
 	runtime.mu.Lock()
-	eligible := runtime.ended && runtime.endAcked && runtime.persisted.RepairDeadline != nil && !now.Before(*runtime.persisted.RepairDeadline)
+	endedExpired := runtime.ended && runtime.endAcked && runtime.persisted.RepairDeadline != nil && !now.Before(*runtime.persisted.RepairDeadline)
+	unadoptedExpired, err := s.unadoptedExpiredLocked(runtime, now)
 	logDirectory := runtime.resource.LogDirectory
 	podUID := runtime.resource.PodUID
 	runtime.mu.Unlock()
-	if !eligible {
+	if err != nil {
+		return false, err
+	}
+	if !endedExpired && !unadoptedExpired {
 		return false, nil
 	}
 	if _, err := os.Stat(logDirectory); err == nil {
@@ -1176,16 +1209,13 @@ func (s *containerLogSource) pruneEndedRuntime(streamRef api.StreamRef, runtime 
 		return false, err
 	}
 	s.store.Forget(podUID)
-	if !s.cfg.PruneEndedState {
-		s.mu.Lock()
-		if s.streams[streamRef.ID] == runtime {
-			delete(s.streams, streamRef.ID)
+	// A durable-file sink keeps an ended stream's state until it collects the
+	// stream's files. A never-adopted stream sent nothing, so there is nothing
+	// to collect and its state goes now.
+	if s.cfg.PruneEndedState || unadoptedExpired {
+		if err := s.state.DeleteStream(streamRef.ID); err != nil {
+			return false, err
 		}
-		s.mu.Unlock()
-		return true, nil
-	}
-	if err := s.state.DeleteStream(streamRef.ID); err != nil {
-		return false, err
 	}
 	s.mu.Lock()
 	if s.streams[streamRef.ID] == runtime {
@@ -1592,7 +1622,7 @@ func (s *containerLogSource) emit(ctx context.Context, streamRef api.StreamRef, 
 	}
 	for _, reason := range record.dropReasons {
 		runtime.outcome.HadDrops = true
-		runtime.outcome.LossReasons = addReason(runtime.outcome.LossReasons, reason)
+		runtime.outcome.LossReasons = api.AddLossReason(runtime.outcome.LossReasons, reason)
 	}
 	resource := runtime.resource.Resource
 	metadata := streamMetadata(runtime.resource)
@@ -2578,13 +2608,4 @@ func fingerprintFile(f *os.File, requestedHashBytes int) (fileFingerprint, error
 	}
 	digest := sha256.Sum256(prefix[:n])
 	return fileFingerprint{Device: device, Inode: inode, PrefixHash: hex.EncodeToString(digest[:]), HashBytes: n}, nil
-}
-
-func addReason(reasons []string, reason string) []string {
-	for _, existing := range reasons {
-		if existing == reason {
-			return reasons
-		}
-	}
-	return append(reasons, reason)
 }

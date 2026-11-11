@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import type {
 } from "../models/execd.js";
 import type { ExecdCommands } from "../services/execdCommands.js";
 import type { ExecutionHandlers } from "../models/execution.js";
+import { inferExecutionExitCode } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
 
 function joinUrl(baseUrl: string, pathname: string): string {
@@ -51,6 +52,15 @@ interface StreamingExecutionSpec<TBody> {
   fallbackErrorMessage: string;
 }
 
+function toTimeoutMilliseconds(timeoutSeconds: number): number {
+  const milliseconds = timeoutSeconds * 1000;
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0 || !Number.isFinite(milliseconds)) {
+    throw new Error("timeoutSeconds must be finite, non-negative, and representable in milliseconds");
+  }
+  // Zero selects the server default, so never round a positive timeout down to zero.
+  return timeoutSeconds > 0 ? Math.max(1, Math.round(milliseconds)) : 0;
+}
+
 function toRunCommandRequest(command: string | string[], opts?: RunCommandOpts): ApiRunCommandRequest {
   if (opts?.gid != null && opts.uid == null) {
     throw new Error("uid is required when gid is provided");
@@ -62,7 +72,7 @@ function toRunCommandRequest(command: string | string[], opts?: RunCommandOpts):
     background: !!opts?.background,
   };
   if (opts?.timeoutSeconds != null) {
-    body.timeout = Math.round(opts.timeoutSeconds * 1000);
+    body.timeout = toTimeoutMilliseconds(opts.timeoutSeconds);
   }
   if (opts?.uid != null) {
     body.uid = opts.uid;
@@ -87,26 +97,56 @@ function toRunInSessionRequest(
     body.cwd = opts.workingDirectory;
   }
   if (opts?.timeoutSeconds != null) {
-    body.timeout = Math.round(opts.timeoutSeconds * 1000);
+    body.timeout = toTimeoutMilliseconds(opts.timeoutSeconds);
   }
   return body;
-}
-
-function inferForegroundExitCode(execution: CommandExecution): number | null {
-  const errorValue = execution.error?.value?.trim();
-  const parsedExitCode =
-    errorValue && /^-?\d+$/.test(errorValue) ? Number(errorValue) : Number.NaN;
-  return execution.error != null
-    ? (Number.isFinite(parsedExitCode) ? parsedExitCode : null)
-    : execution.complete
-      ? 0
-      : null;
 }
 
 function assertNonBlank(value: string, field: string): void {
   if (!value.trim()) {
     throw new Error(`${field} cannot be empty`);
   }
+}
+
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Quotes a string as a single POSIX shell word. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/** Escapes a value for the runtime env file's double-quoted form. */
+function escapeDoubleQuoted(value: string): string {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("\n", "\\n")
+    .replaceAll("\r", "\\r")
+    .replaceAll("\t", "\\t");
+}
+
+/**
+ * Builds the sandbox-side snippet that appends KEY=VALUE to the env file named
+ * by the sandbox's EXECD_ENVS variable. Values without a single quote use the
+ * runtime env file's lossless single-quoted form; otherwise the double-quoted
+ * form is used (shell-style `$NAME` sequences in such values may be expanded
+ * when the runtime loads the file).
+ */
+function buildSetEnvCommand(key: string, value: string): string {
+  if (!ENV_KEY_PATTERN.test(key)) {
+    throw new Error(`setEnv key must match ${ENV_KEY_PATTERN.source}, got '${key}'`);
+  }
+  if (value.includes("\0")) {
+    throw new Error("setEnv value cannot contain NUL bytes");
+  }
+  const entry = value.includes("'")
+    ? `${key}="${escapeDoubleQuoted(value)}"`
+    : `${key}='${value}'`;
+  return [
+    `if [ -z "\${EXECD_ENVS:-}" ]; then printf '%s\\n' 'EXECD_ENVS is not set; cannot persist environment variable ${key}' >&2; exit 1; fi`,
+    `mkdir -p "$(dirname "$EXECD_ENVS")"`,
+    `printf '%s\\n' ${shellQuote(entry)} >> "$EXECD_ENVS"`,
+  ].join("\n");
 }
 
 function parseOptionalDate(value: unknown, field: string): Date | undefined {
@@ -219,18 +259,28 @@ export class CommandsAdapter implements ExecdCommands {
       await dispatcher.dispatch(ev as any);
       if (isBackground && ev.type === "execution_complete") {
         // Background commands are done once execution_complete arrives; do
-        // not wait for the chunked terminator, which execd sends only after
-        // a graceful-shutdown sleep and can be lost if the connection is
+        // not wait for the chunked terminator, which older execd versions
+        // delay with a grace-period sleep and can be lost if the connection is
         // closed early (#1528).
         break;
       }
     }
 
     if (inferExitCode) {
-      execution.exitCode = inferForegroundExitCode(execution);
+      execution.exitCode = inferExecutionExitCode(execution);
     }
 
     return execution;
+  }
+
+  async setEnv(key: string, value: string): Promise<void> {
+    const command = buildSetEnvCommand(key, value);
+    const execution = await this.run(command);
+    if (execution.error != null || execution.exitCode !== 0) {
+      const stderr = execution.logs.stderr.map((m) => m.text).join("").trim();
+      const detail = stderr.length > 0 ? stderr : (execution.error?.value?.trim() ?? "");
+      throw new Error(`commands.setEnv failed for '${key}'${detail ? `: ${detail}` : ""}`);
+    }
   }
 
   async interrupt(sessionId: string): Promise<void> {

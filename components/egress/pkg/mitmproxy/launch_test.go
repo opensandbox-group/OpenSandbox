@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,11 @@
 package mitmproxy
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/stretchr/testify/require"
 )
 
@@ -107,6 +110,50 @@ func TestBuildMitmdumpArgsSkipsEmptyScriptPaths(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{systemScriptPath, "/scripts/auth.py", "/scripts/logging.py"}, scripts)
+}
+
+func TestBuildMitmdumpArgsUpstreamProxyScriptOrdered(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "https://proxy.example.com:8443")
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"/scripts/auth.py"},
+	})
+	scripts := []string{}
+	for i, a := range args {
+		if a == "-s" {
+			scripts = append(scripts, args[i+1])
+		}
+	}
+	require.Equal(t, []string{systemScriptPath, upstreamProxyScriptPath, "/scripts/auth.py"}, scripts)
+}
+
+func TestBuildMitmdumpArgsNoUpstreamProxyKeepsOrder(t *testing.T) {
+	args := buildMitmdumpArgs(Config{
+		ListenPort:  18081,
+		ScriptPaths: []string{"/scripts/auth.py"},
+	})
+	scripts := []string{}
+	for i, a := range args {
+		if a == "-s" {
+			scripts = append(scripts, args[i+1])
+		}
+	}
+	require.Equal(t, []string{systemScriptPath, "/scripts/auth.py"}, scripts)
+	require.NotContains(t, args, upstreamProxyScriptPath)
+}
+
+func TestLaunchRejectsInvalidUpstreamProxy(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "not-a-url")
+	_, err := Launch(Config{ListenPort: 18081})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OPENSANDBOX_EGRESS_UPSTREAM_PROXY")
+}
+
+func TestLaunchRejectsUpstreamAuthWithoutProxy(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH", "Basic dXNlcjpwYXNz")
+	_, err := Launch(Config{ListenPort: 18081})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH")
 }
 
 func TestBuildMitmdumpEnvSetsMitmproxyHome(t *testing.T) {
@@ -234,4 +281,151 @@ func TestCredentialProxyMessageRejectsNonProxyLines(t *testing.T) {
 	require.False(t, ok)
 	_, ok = credentialProxyMessage("")
 	require.False(t, ok)
+}
+
+func TestBuildMitmdumpArgsTrustDirAndExtraCABothSet(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR", "/etc/ssl/upstream")
+	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA", "/etc/ssl/certs/opensandbox-upstream-extra-ca.pem")
+	args := buildMitmdumpArgs(Config{ListenPort: 18081})
+	joined := strings.Join(args, "\x00")
+	require.Contains(t, joined, "--set\x00ssl_verify_upstream_trusted_confdir=/etc/ssl/upstream")
+	require.Contains(t, joined, "--set\x00ssl_verify_upstream_trusted_ca=/etc/ssl/certs/opensandbox-upstream-extra-ca.pem")
+}
+
+func TestBuildMitmdumpArgsExtraCAWhitespaceOnlyOmitted(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA", "   ")
+	args := buildMitmdumpArgs(Config{ListenPort: 18081})
+	for _, a := range args {
+		require.NotContains(t, a, "ssl_verify_upstream_trusted_ca")
+	}
+}
+
+func TestBuildMitmdumpEnvHandsOffLiveAdmissionBundle(t *testing.T) {
+	cfg := &RevisionIPCConfig{
+		SocketPath:          "/run/opensandbox/revision/receiver.sock",
+		SessionToken:        "0123456789abcdef0123456789abcdef",
+		ControlGeneration:   "control-a",
+		SubjectGeneration:   "subject-a",
+		MaxSnapshotBytes:    4096,
+		LiveAdmission:       true,
+		TLSCapacity:         64,
+		RequestCapacity:     256,
+		DrainTimeoutSeconds: 5,
+	}
+	require.NoError(t, validateRevisionIPCConfig(cfg))
+	env := buildMitmdumpEnv(
+		[]string{
+			"PATH=/usr/bin",
+			revisionIPCTLSCapacityEnv + "=1",
+			revisionIPCDrainTimeoutSecondsEnv + "=999",
+		},
+		"/home/mitmproxy",
+		cfg,
+	)
+	require.Contains(t, env, revisionIPCTLSCapacityEnv+"=64")
+	require.Contains(t, env, revisionIPCRequestCapacityEnv+"=256")
+	require.Contains(t, env, revisionIPCDrainTimeoutSecondsEnv+"=5")
+	require.NotContains(t, env, revisionIPCDrainTimeoutSecondsEnv+"=999")
+}
+
+func TestRevisionIPCConfigRejectsInvalidLiveAdmission(t *testing.T) {
+	base := RevisionIPCConfig{
+		SocketPath:        "/run/opensandbox/revision/receiver.sock",
+		SessionToken:      "0123456789abcdef0123456789abcdef",
+		ControlGeneration: "control-a",
+		SubjectGeneration: "subject-a",
+		MaxSnapshotBytes:  4096,
+	}
+	cases := []RevisionIPCConfig{}
+	for _, mutate := range []func(*RevisionIPCConfig){
+		func(c *RevisionIPCConfig) { c.LiveAdmission, c.TLSCapacity = true, 0 },
+		func(c *RevisionIPCConfig) { c.LiveAdmission, c.RequestCapacity = true, -1 },
+		func(c *RevisionIPCConfig) { c.LiveAdmission, c.DrainTimeoutSeconds = true, 0 },
+		func(c *RevisionIPCConfig) { c.LiveAdmission, c.DrainTimeoutSeconds = true, 301 },
+	} {
+		candidate := base
+		mutate(&candidate)
+		cases = append(cases, candidate)
+	}
+	for _, candidate := range cases {
+		require.Error(t, validateRevisionIPCConfig(&candidate))
+	}
+	// A disabled bundle never carries budgets: validation stays clean without them.
+	require.NoError(t, validateRevisionIPCConfig(&base))
+}
+
+func TestRevisionIPCConfigRejectsSslInsecureOnlyForLiveAdmission(t *testing.T) {
+	base := RevisionIPCConfig{
+		SocketPath:          "/run/opensandbox/revision/receiver.sock",
+		SessionToken:        "0123456789abcdef0123456789abcdef",
+		ControlGeneration:   "control-a",
+		SubjectGeneration:   "subject-a",
+		MaxSnapshotBytes:    4096,
+		LiveAdmission:       true,
+		TLSCapacity:         64,
+		RequestCapacity:     256,
+		DrainTimeoutSeconds: 30,
+	}
+	for _, truthy := range []string{"1", "true", "TRUE", "on", "yes"} {
+		t.Run("insecure-"+truthy, func(t *testing.T) {
+			t.Setenv(constants.EnvMitmproxySslInsecure, truthy)
+			require.Error(t, validateRevisionIPCConfig(&base))
+		})
+	}
+	for _, safe := range []string{"", "0", "false", "off", "bogus"} {
+		t.Run("safe-"+safe, func(t *testing.T) {
+			t.Setenv(constants.EnvMitmproxySslInsecure, safe)
+			require.NoError(t, validateRevisionIPCConfig(&base))
+		})
+	}
+	// The installation-only receiver keeps the legacy escape hatch.
+	t.Setenv(constants.EnvMitmproxySslInsecure, "true")
+	legacy := base
+	legacy.LiveAdmission = false
+	require.NoError(t, validateRevisionIPCConfig(&legacy))
+	require.NoError(t, validateRevisionIPCConfig(nil))
+}
+
+func TestStaticPassthroughControlledHandoff(t *testing.T) {
+	name := constants.EnvMitmproxyPassthroughHosts
+	base := []string{name + `=["inherited.example"]`, name + `=["duplicate.example"]`, "KEEP=yes"}
+	for _, cfg := range []*RevisionIPCConfig{nil, {}, {LiveAdmission: true}} {
+		env := buildMitmdumpEnv(base, "/tmp", cfg)
+		count := 0
+		for _, entry := range env {
+			if strings.HasPrefix(entry, name+"=") {
+				count++
+				require.Equal(t, name+"=[]", entry)
+			}
+		}
+		if cfg != nil && cfg.LiveAdmission {
+			require.Equal(t, 1, count)
+		} else {
+			require.Zero(t, count)
+		}
+		require.Contains(t, env, "KEEP=yes")
+	}
+}
+
+func TestStaticPassthroughNonemptyHandoffAndChainedProxy(t *testing.T) {
+	frozen, err := mitmpassthrough.Parse(`["B.example.com","a.example.com"]`, true)
+	require.NoError(t, err)
+	cfg := RevisionIPCConfig{SocketPath: "/tmp/receiver.sock", SessionToken: strings.Repeat("a", 32), ControlGeneration: "control", SubjectGeneration: "subject", MaxSnapshotBytes: 4096, LiveAdmission: true, TLSCapacity: 64, RequestCapacity: 256, DrainTimeoutSeconds: 30, StaticPassthrough: frozen}
+	name := constants.EnvMitmproxyPassthroughHosts
+	for i := 0; i < 2; i++ {
+		env := buildMitmdumpEnv([]string{name + "=bad", name + "=bad-again"}, "/tmp", &cfg)
+		count := 0
+		for _, value := range env {
+			if strings.HasPrefix(value, name+"=") {
+				count++
+				require.Equal(t, name+`=["a.example.com","b.example.com"]`, value)
+			}
+		}
+		require.Equal(t, 1, count)
+	}
+	t.Setenv(constants.EnvUpstreamProxy, "http://proxy.example:3128")
+	t.Setenv(constants.EnvMitmproxySslInsecure, "")
+	require.Error(t, validateRevisionIPCConfig(&cfg))
+	cfg.StaticPassthrough = mitmpassthrough.Config{}
+	require.NoError(t, validateRevisionIPCConfig(&cfg))
 }

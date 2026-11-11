@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -197,6 +197,9 @@ func MakeDir(dir string, perm model.Permission) error {
 	if err != nil {
 		return err
 	}
+	if err := rejectStagingPath(abs); err != nil {
+		return err
+	}
 
 	_, statErr := os.Stat(abs)
 	existed := statErr == nil
@@ -249,7 +252,7 @@ func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error)
 		Type:       fileType(fileInfo),
 		Size:       fileInfo.Size(),
 		ModifiedAt: fileInfo.ModTime(),
-		CreatedAt:  getFileCreateTime(fileInfo),
+		CreatedAt:  getFileCreateTime(absPath, fileInfo),
 		Permission: model.Permission{
 			Owner: owner,
 			Group: group,
@@ -273,70 +276,4 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 	}
 
 	return buildFileInfo(absPath, fileInfo)
-}
-
-type httpRange struct {
-	start, length int64
-}
-
-func ParseRange(s string, size int64) ([]httpRange, error) {
-	if !strings.HasPrefix(s, "bytes=") {
-		return nil, errors.New("invalid range")
-	}
-
-	ranges := strings.Split(s[6:], ",")
-	result := make([]httpRange, 0, len(ranges))
-
-	for _, ra := range ranges {
-		ra = strings.TrimSpace(ra)
-		if ra == "" {
-			continue
-		}
-		i := strings.Index(ra, "-")
-		if i < 0 {
-			return nil, errors.New("invalid range")
-		}
-		start, end := strings.TrimSpace(ra[:i]), strings.TrimSpace(ra[i+1:])
-		var r httpRange
-
-		if start == "" {
-			// suffix-length
-			n, err := strconv.ParseInt(end, 10, 64)
-			if err != nil || n < 0 {
-				return nil, errors.New("invalid range")
-			}
-			if n > size {
-				n = size
-			}
-			r.start = size - n
-			r.length = size - r.start
-		} else {
-			// start-end
-			i, err := strconv.ParseInt(start, 10, 64)
-			if err != nil || i < 0 {
-				return nil, errors.New("invalid range")
-			}
-			if end == "" {
-				// start-
-				r.start = i
-				r.length = size - i
-			} else {
-				// start-end
-				j, err := strconv.ParseInt(end, 10, 64)
-				if err != nil || j < i {
-					return nil, errors.New("invalid range")
-				}
-				r.start = i
-				r.length = j - i + 1
-			}
-		}
-		if r.start >= size {
-			continue
-		}
-		if r.start+r.length > size {
-			r.length = size - r.start
-		}
-		result = append(result, r)
-	}
-	return result, nil
 }

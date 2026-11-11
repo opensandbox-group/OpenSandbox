@@ -1,7 +1,7 @@
 # pyright: reportAttributeAccessIssue=false
 # protobuf-generated modules expose dynamic attributes.
 
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ from opensandbox_server.api.schema import (
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
+    RenewalPolicy,
     ResourceLimits,
     SandboxLifecycle,
     Volume,
@@ -36,6 +37,7 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
+    map_template_create_request,
 )
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
@@ -106,6 +108,25 @@ def test_create_includes_network_policy_in_atomic_intent():
     }
 
 
+@pytest.mark.parametrize(
+    "target",
+    [None, "", "  ", " 10.0.0.5 ", "10.0.0.0/24", "2001:db8::5", "2001:db8::/64"],
+)
+def test_create_preserves_port_scopes_in_egress_binding(target):
+    policy = NetworkPolicy(
+        defaultAction=" Allow ",
+        egress=[NetworkRule(action=" Deny ", target=target, ports=[65535, 1, 443])],
+    )
+    create = map_create_request(_base_request(network_policy=policy), "sbx-1", "ns-1", now=NOW)
+
+    assert len(create.action_bindings) == 1
+    assert create.action_bindings[0].handler == "egress"
+    assert json.loads(create.action_bindings[0].input) == {
+        "defaultAction": "allow",
+        "egress": [{"action": "deny", "target": (target or "").strip(), "ports": [65535, 1, 443]}],
+    }
+
+
 def test_map_create_request_strips_pool_ref():
     blank = map_create_request(
         _base_request(extensions={"poolRef": "   "}), "sbx-1", "ns-1", now=NOW
@@ -118,13 +139,6 @@ def test_map_create_request_strips_pool_ref():
     assert padded.pool_ref == "ml-pool"
 
 
-def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
-    request = _base_request(extensions={"access.renew.extend.seconds": "300"})
-    with pytest.raises(UnsupportedFieldError) as exc_info:
-        map_create_request(request, "sbx-1", "ns-1", now=NOW)
-    assert exc_info.value.field == "extensions['access.renew.extend.seconds']"
-
-
 @pytest.mark.parametrize(
     "field_name,payload",
     [
@@ -132,15 +146,6 @@ def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
         (
             "resourceRequests",
             {"resource_requests": ResourceLimits(root={"cpu": "1"})},
-        ),
-        (
-            "credentialProxy",
-            {
-                "credential_proxy": CredentialProxyConfig(enabled=True),
-                "network_policy": NetworkPolicy(
-                    egress=[NetworkRule(action="allow", target="a.com")]
-                ),
-            },
         ),
         ("secureAccess", {"secure_access": True}),
         ("volumes", {"volumes": [_host_volume()]}),
@@ -152,6 +157,14 @@ def test_map_create_request_rejects_renew_extension_until_it_has_a_read_path():
                 )
             },
         ),
+        (
+            "lifecycle.renewalPolicy",
+            {
+                "lifecycle": SandboxLifecycle(
+                    renewalPolicy=RenewalPolicy(extendSeconds=300),
+                )
+            },
+        ),
     ],
 )
 def test_map_create_request_rejects_unsupported_fields(field_name, payload):
@@ -159,6 +172,32 @@ def test_map_create_request_rejects_unsupported_fields(field_name, payload):
     with pytest.raises(UnsupportedFieldError) as exc_info:
         map_create_request(request, "sbx-1", "ns-1", now=NOW)
     assert exc_info.value.field == field_name
+
+
+def test_map_create_request_accepts_credential_proxy_ignored():
+    """OSEP-0022: credentialProxy no longer rejects the fsb create; the vault
+    is not carried at create time and rides the relay after creation."""
+    request = _base_request(
+        credential_proxy=CredentialProxyConfig(enabled=True),
+        network_policy=NetworkPolicy(egress=[NetworkRule(action="allow", target="a.com")]),
+    )
+    create = map_create_request(request, "sbx-1", "ns-1", now=NOW)
+    assert create.request_id == "sbx-1"
+    assert len(create.action_bindings) == 1
+    assert create.action_bindings[0].handler == "egress"
+
+
+def test_map_create_request_accepts_idle_policy_only_lifecycle():
+    """idlePolicy is control-plane state; the mapping ignores it, the service persists it."""
+    from opensandbox_server.api.schema import IdlePolicy
+
+    request = _base_request(
+        lifecycle=SandboxLifecycle(
+            idlePolicy=IdlePolicy(idle_timeout_seconds=300, on_idle="pause"),
+        )
+    )
+    create = map_create_request(request, "sbx-1", "ns-1", now=NOW)
+    assert create.request_id == "sbx-1"
 
 
 def test_map_create_request_rejects_image_auth():
@@ -268,14 +307,19 @@ def test_map_create_request_rejects_undefinted_pool_resource_key():
 
 
 def test_map_create_request_compares_quantities_canonically():
-    # Same quantity expressed differently must not be rejected.
+    # Same quantity expressed differently must not be rejected, including
+    # the sub-integer Kubernetes suffixes n/u.
     request = _base_request(resource_limits=ResourceLimits(root={"cpu": "0.5", "memory": "1Gi"}))
     create = map_create_request(
         request,
         "sbx-1",
         "ns-1",
         now=NOW,
-        pool_resources={"cpu": "500m", "memory": "1024Mi", "pids": "256"},
+        pool_resources={
+            "cpu": "500000000n",
+            "memory": "1073741824000000u",
+            "pids": "256",
+        },
     )
     assert create.image == "python:3.11"
 
@@ -284,9 +328,6 @@ def test_map_create_request_skips_pool_check_when_profile_unknown():
     request = _base_request(resource_limits=ResourceLimits(root={"cpu": "1"}))
     create = map_create_request(request, "sbx-1", "ns-1", now=NOW)
     assert create.image == "python:3.11"
-
-
-# -- status mapping -----------------------------------------------------------
 
 
 def _info(
@@ -393,3 +434,204 @@ def test_map_reason(runtime, data_plane, ready, expected):
         map_reason(_info(runtime_state=runtime, data_plane_state=data_plane, ready=ready))
         == expected
     )
+
+
+def _template_request(**overrides):
+    from opensandbox_server.api.schema import CreateSandboxRequest
+
+    payload = {"template_id": "tpl-1", "timeout": 3600}
+    payload.update(overrides)
+    return CreateSandboxRequest(**payload)
+
+
+def _map_template(request, **kwargs):
+    defaults = dict(
+        sandbox_id="sbx-1",
+        namespace="ns-1",
+        image_ref="oci://reg/t@sha256:" + "a" * 64,
+        entrypoint=["tail", "-f", "/dev/null"],
+        now=NOW,
+    )
+    defaults.update(kwargs)
+    return map_template_create_request(request, **defaults)
+
+
+def test_map_template_omits_resources_by_default():
+    """Non-ResourceAware pool → field unset, identical to today."""
+    create = _map_template(_template_request())
+    assert not create.HasField("resources")
+
+
+def test_map_template_omits_resources_on_legacy_pool():
+    create = _map_template(
+        _template_request(),
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=False,
+    )
+    assert not create.HasField("resources")
+
+
+def test_map_template_forwards_machine_verbatim_when_gate_passes():
+    create = _map_template(
+        _template_request(),
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+    assert create.HasField("resources")
+    assert create.resources.limits.cpu == "2"
+    assert create.resources.limits.memory == "1Gi"
+
+
+def test_map_template_accepts_sub_integer_quantity_suffixes():
+    # Kubernetes quantity grammar allows n/u; the fail-fast parser must not
+    # reject a shape fast-sandbox itself would accept.
+    create = _map_template(
+        _template_request(),
+        template_machine={"cpu": "2000000000n", "memory": "1073741824000000u"},
+        pool_is_resource_aware=True,
+    )
+    assert create.resources.limits.cpu == "2000000000n"
+    assert create.resources.limits.memory == "1073741824000000u"
+
+
+def test_map_template_rejects_machine_below_fastpath_minimum():
+    with pytest.raises(UnsupportedFieldError, match="10m"):
+        _map_template(
+            _template_request(),
+            template_machine={"cpu": "5m", "memory": "1Gi"},
+            pool_is_resource_aware=True,
+            )
+
+
+@pytest.mark.parametrize(
+    "machine",
+    [None, {}, {"cpu": "abc", "memory": "1Gi"}, {"cpu": "0", "memory": "1Gi"}],
+)
+def test_map_template_rejects_invalid_machine(machine):
+    with pytest.raises(UnsupportedFieldError):
+        _map_template(
+            _template_request(),
+            template_machine=machine,
+            pool_is_resource_aware=True,
+            )
+
+
+def test_map_template_remap_is_byte_identical_with_same_inputs():
+    """A retry with the same inputs serializes to the identical request."""
+    request = _template_request()
+    first = _map_template(
+        request,
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+    second = _map_template(
+        request,
+        sandbox_id=first.request_id,
+        expires_at_unix_seconds=first.expires_at_unix_seconds,
+        template_machine={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+    assert second.request_id == first.request_id
+    assert second.expires_at_unix_seconds == EXPECTED_EXPIRY
+    assert second.SerializeToString() == first.SerializeToString()
+
+
+def _snapshot_restore_request(limits):
+    from opensandbox_server.api.schema import CreateSandboxRequest as _Request
+
+    payload = {
+        "image": ImageSpec(uri="registry.example.com/fsb/snap-001:index"),
+        "entrypoint": ["tail", "-f", "/dev/null"],
+        "timeout": 3600,
+    }
+    if limits is not None:
+        payload["resource_limits"] = ResourceLimits(root=limits)
+    else:
+        # resourceLimits is only optional when poolRef is present.
+        payload["extensions"] = {"poolRef": "ml-pool"}
+    return _Request(**payload)
+
+
+def test_map_create_replays_snapshot_limits_when_gate_passes():
+    # Pool profile restated (pids, pool-shaped cpu/memory) does not fight the
+    # recorded shape: cpu/memory baseline is the recorded limits, pids stays
+    # pool-owned.
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "pids": "128"})
+    create = map_create_request(
+        request,
+        "sbx-1",
+        "ns-1",
+        now=NOW,
+        pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
+        snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+    assert create.HasField("resources")
+    assert create.resources.limits.cpu == "2"
+    assert create.resources.limits.memory == "1Gi"
+
+
+def test_map_create_accepts_matching_snapshot_limits_on_legacy_pool():
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "pids": "128"})
+    create = map_create_request(
+        request,
+        "sbx-1",
+        "ns-1",
+        now=NOW,
+        pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
+        snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=False,
+    )
+    assert not create.HasField("resources")
+
+
+def test_map_create_rejects_snapshot_limit_mismatch():
+    request = _snapshot_restore_request({"cpu": "1", "memory": "1Gi"})
+    with pytest.raises(UnsupportedFieldError, match="the snapshot's recorded"):
+        map_create_request(
+            request,
+            "sbx-1",
+            "ns-1",
+            now=NOW,
+            snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        )
+
+
+def test_map_create_rejects_pids_mismatched_with_pool_profile():
+    # pids is not part of the recorded shape; its baseline stays the pool.
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "pids": "64"})
+    with pytest.raises(UnsupportedFieldError, match="SandboxPool profile"):
+        map_create_request(
+            request,
+            "sbx-1",
+            "ns-1",
+            now=NOW,
+            pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
+            snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        )
+
+
+def test_map_create_rejects_snapshot_restore_key_outside_both_baselines():
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi", "gpu": "1"})
+    with pytest.raises(UnsupportedFieldError, match="not part of the snapshot"):
+        map_create_request(
+            request,
+            "sbx-1",
+            "ns-1",
+            now=NOW,
+            pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
+            snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        )
+
+
+def test_map_create_snapshot_without_caller_limits_is_valid():
+    create = map_create_request(
+        _snapshot_restore_request(None),
+        "sbx-1",
+        "ns-1",
+        now=NOW,
+        pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
+        snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+    assert create.resources.limits.cpu == "2"

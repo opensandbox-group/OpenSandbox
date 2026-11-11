@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,9 +23,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,6 +57,16 @@ func TestIsTransient(t *testing.T) {
 		if got := apiErr.IsTransient(); got != tt.transient {
 			assert.Fail(t, fmt.Sprintf("status %d: IsTransient() = %v, want %v", tt.status, got, tt.transient))
 		}
+	}
+}
+
+func TestIsIdempotentMethod(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete, http.MethodOptions} {
+		require.True(t, isIdempotentMethod(method), method)
+		require.True(t, isIdempotentMethod(strings.ToLower(method)), "case-insensitive "+method)
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodTrace} {
+		require.Equal(t, false, isIdempotentMethod(method), method)
 	}
 }
 
@@ -262,7 +275,7 @@ func TestRetry_RateLimit429(t *testing.T) {
 	}
 }
 
-func TestRetry_StreamingConnection(t *testing.T) {
+func TestRetry_StreamingWriteStatusOptInNotRetried(t *testing.T) {
 	var attempts atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -279,10 +292,11 @@ func TestRetry_StreamingConnection(t *testing.T) {
 	defer srv.Close()
 
 	client := NewExecdClient(srv.URL, "tok", WithRetry(RetryConfig{
-		MaxRetries:     2,
-		InitialBackoff: 10 * time.Millisecond,
-		MaxBackoff:     100 * time.Millisecond,
-		Multiplier:     2.0,
+		MaxRetries:                        2,
+		InitialBackoff:                    10 * time.Millisecond,
+		MaxBackoff:                        100 * time.Millisecond,
+		Multiplier:                        2.0,
+		RetryableStatusCodesNonIdempotent: []int{http.StatusServiceUnavailable},
 	}))
 
 	var events []StreamEvent
@@ -290,13 +304,12 @@ func TestRetry_StreamingConnection(t *testing.T) {
 		events = append(events, event)
 		return nil
 	})
-	require.NoErrorf(t, err, "expected success after stream retry, got")
-	if len(events) != 1 || events[0].Data != "hello" {
-		assert.Fail(t, fmt.Sprintf("events = %+v, want [{Event:stdout Data:hello}]", events))
-	}
-	if attempts.Load() != 2 {
-		assert.Fail(t, fmt.Sprintf("attempts = %d, want 2", attempts.Load()))
-	}
+	require.Error(t, err, "a POST stream must not be replayed after a 503")
+	require.Len(t, events, 0)
+	require.Equal(t, int32(1), attempts.Load())
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode)
 }
 
 func TestBackoff(t *testing.T) {
@@ -559,6 +572,12 @@ func TestParseRetryAfter(t *testing.T) {
 		expected time.Duration
 	}{
 		{"seconds", "5", 5 * time.Second},
+		{"largest whole seconds", "9223372036", 9223372036 * time.Second},
+		{"duration overflow", "9223372037", time.Duration(math.MaxInt64)},
+		{"int64 maximum", "9223372036854775807", time.Duration(math.MaxInt64)},
+		{"integer overflow", "9223372036854775808", time.Duration(math.MaxInt64)},
+		{"negative integer overflow", "-9223372036854775809", 0},
+		{"malformed large number", "9223372036854775808x", 0},
 		{"zero", "0", 0},
 		{"empty", "", 0},
 		{"negative", "-1", 0},
@@ -586,24 +605,79 @@ func TestParseRetryAfter_NilResponse(t *testing.T) {
 }
 
 func TestIsTransientError(t *testing.T) {
+	idempotentOnlyOptIn := &RetryConfig{
+		RetryableStatusCodes: []int{http.StatusTooManyRequests},
+	}
+	nonIdempotentOptIn := &RetryConfig{
+		RetryableStatusCodesNonIdempotent: []int{http.StatusServiceUnavailable},
+	}
 	tests := []struct {
 		name      string
+		method    string
 		err       error
+		cfg       *RetryConfig
 		transient bool
 	}{
-		{"nil", nil, false},
-		{"api 503", &APIError{StatusCode: 503}, true},
-		{"api 429", &APIError{StatusCode: 429}, true},
-		{"api 404", &APIError{StatusCode: 404}, false},
-		{"api 400", &APIError{StatusCode: 400}, false},
-		{"api 502", &APIError{StatusCode: 502}, true},
-		{"api 504", &APIError{StatusCode: 504}, true},
-		{"api 500", &APIError{StatusCode: 500}, false},
+		{"nil", http.MethodGet, nil, nil, false},
+		{"api 503 GET", http.MethodGet, &APIError{StatusCode: 503}, nil, true},
+		{"api 429 GET", http.MethodGet, &APIError{StatusCode: 429}, nil, true},
+		{"api 404 GET", http.MethodGet, &APIError{StatusCode: 404}, nil, false},
+		{"api 400 GET", http.MethodGet, &APIError{StatusCode: 400}, nil, false},
+		{"api 502 GET", http.MethodGet, &APIError{StatusCode: 502}, nil, true},
+		{"api 504 GET", http.MethodGet, &APIError{StatusCode: 504}, nil, true},
+		{"api 500 GET", http.MethodGet, &APIError{StatusCode: 500}, nil, false},
+		{"api 503 POST default", http.MethodPost, &APIError{StatusCode: 503}, nil, false},
+		{"api 503 PATCH default", http.MethodPatch, &APIError{StatusCode: 503}, nil, false},
+		{"api 503 POST opt-in", http.MethodPost, &APIError{StatusCode: 503}, nonIdempotentOptIn, true},
+		{"api 429 POST not opted in", http.MethodPost, &APIError{StatusCode: 429}, nonIdempotentOptIn, false},
+		{"api 429 POST ignores idempotent opt-in", http.MethodPost, &APIError{StatusCode: 429}, idempotentOnlyOptIn, false},
+		{
+			"dial failure POST",
+			http.MethodPost,
+			&net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("connection refused")},
+			nil,
+			true,
+		},
+		{
+			"read failure POST",
+			http.MethodPost,
+			&net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("connection reset")},
+			nil,
+			false,
+		},
+		{
+			"redirect dial after send POST",
+			http.MethodPost,
+			&requestSentError{err: &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("connection refused")}},
+			nil,
+			false,
+		},
+		{
+			"TLS handshake POST",
+			http.MethodPost,
+			&preSendError{err: fmt.Errorf("tls handshake failed")},
+			nil,
+			true,
+		},
+		{
+			"proxy connect POST",
+			http.MethodPost,
+			&net.OpError{Op: "proxyconnect", Net: "tcp", Err: fmt.Errorf("connection refused")},
+			nil,
+			true,
+		},
+		{
+			"read failure GET",
+			http.MethodGet,
+			&net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("connection reset")},
+			nil,
+			true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isTransientError(tt.err, nil); got != tt.transient {
-				assert.Fail(t, fmt.Sprintf("isTransientError(%v) = %v, want %v", tt.err, got, tt.transient))
+			if got := isTransientErrorForMethod(tt.err, tt.cfg, tt.method); got != tt.transient {
+				assert.Fail(t, fmt.Sprintf("isTransientErrorForMethod(%v, %s) = %v, want %v", tt.err, tt.method, got, tt.transient))
 			}
 		})
 	}
@@ -635,4 +709,96 @@ func TestRetry_CustomRetryableStatusCodes(t *testing.T) {
 	require.NoErrorf(t, err, "expected success with custom retryable status codes")
 	require.Equal(t, "sbx-500-retried", got.ID)
 	require.Equal(t, int32(2), attempts.Load())
+}
+
+func TestBackoff_UnsetMultiplierBehavesAsConstant(t *testing.T) {
+	// Regression: a zero-value Multiplier used to collapse every delay to zero
+	// via math.Pow(0, n), producing an immediate retry hammer.
+	cfg := RetryConfig{
+		InitialBackoff: 500 * time.Millisecond,
+		Jitter:         0,
+	}
+	for _, attempt := range []int{0, 1, 2, 5} {
+		got := cfg.backoff(attempt)
+		if got != 500*time.Millisecond {
+			assert.Fail(t, fmt.Sprintf("backoff(%d) = %v, want 500ms (constant)", attempt, got))
+		}
+	}
+}
+
+func TestBackoff_UnsetMaxBackoffDoesNotCapToZero(t *testing.T) {
+	// Regression: an unset MaxBackoff used to cap every delay to zero.
+	cfg := RetryConfig{
+		InitialBackoff: 100 * time.Millisecond,
+		Multiplier:     2.0,
+		Jitter:         0,
+	}
+	got := cfg.backoff(4) // 100ms * 16 = 1.6s
+	if got != 1600*time.Millisecond {
+		assert.Fail(t, fmt.Sprintf("backoff(4) = %v, want 1.6s (uncapped)", got))
+	}
+}
+
+func TestBackoff_SaturatesInsteadOfOverflowing(t *testing.T) {
+	// Without a MaxBackoff, a long retry run must not wrap to a negative delay.
+	exact := RetryConfig{InitialBackoff: 500 * time.Millisecond, Multiplier: 2.0}
+	jittered := RetryConfig{InitialBackoff: 500 * time.Millisecond, Multiplier: 2.0, Jitter: 0.25}
+	for _, attempt := range []int{35, 40, 64, 2000} {
+		if got := exact.backoff(attempt); got != time.Duration(math.MaxInt64) {
+			t.Errorf("backoff(%d) = %v, want the maximum duration", attempt, got)
+		}
+		if got := jittered.backoff(attempt); got < time.Duration(math.MaxInt64)/2 {
+			t.Errorf("jittered backoff(%d) = %v, want a saturated delay", attempt, got)
+		}
+	}
+}
+
+func TestRetry_LargeWakeRetryAfterExhaustsDeadline(t *testing.T) {
+	wait, present := parseRetryAfterValue("9223372036854775807")
+	client := &Client{retry: &RetryConfig{WakeOverallDeadline: time.Millisecond}}
+	attempts := 0
+	err := client.withRetry(context.Background(), func(context.Context) error {
+		attempts++
+		return &APIError{StatusCode: http.StatusServiceUnavailable, WakeExpired: true,
+			RetryAfter: wait, RetryAfterPresent: present}
+	})
+	if _, ok := err.(*SandboxWakeTimeoutError); !ok {
+		t.Fatalf("expected wake timeout, got %T: %v", err, err)
+	}
+	if attempts != 1 {
+		t.Fatalf("oversized Retry-After should exhaust the deadline before retrying; got %d attempts", attempts)
+	}
+}
+
+func TestParseRetryAfterRejectsOverflowWithTrailingGarbage(t *testing.T) {
+	for _, value := range []string{"999999999999999999999999x", "-999999999999999999999999x"} {
+		if _, present := parseRetryAfterValue(value); present {
+			t.Errorf("malformed Retry-After %q reported as present", value)
+		}
+	}
+}
+
+func TestRetryDelay_CapsRetryAfter(t *testing.T) {
+	cfg := RetryConfig{InitialBackoff: 500 * time.Millisecond, Multiplier: 2.0}
+	slowCfg := RetryConfig{InitialBackoff: 2 * time.Minute, Multiplier: 2.0}
+	tests := []struct {
+		name       string
+		cfg        RetryConfig
+		retryAfter time.Duration
+		expected   time.Duration
+	}{
+		{"no retry-after", cfg, 0, 500 * time.Millisecond},
+		{"retry-after below backoff", cfg, 100 * time.Millisecond, 500 * time.Millisecond},
+		{"retry-after above backoff", cfg, 5 * time.Second, 5 * time.Second},
+		{"retry-after above cap", cfg, 24 * time.Hour, retryAfterCap},
+		{"backoff above cap", slowCfg, 24 * time.Hour, 2 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &APIError{StatusCode: http.StatusServiceUnavailable, RetryAfter: tt.retryAfter}
+			if got := retryDelay(&tt.cfg, 0, err); got != tt.expected {
+				t.Errorf("retryDelay() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
 }

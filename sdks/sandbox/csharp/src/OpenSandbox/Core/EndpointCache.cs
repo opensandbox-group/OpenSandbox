@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -131,26 +131,29 @@ internal sealed class EndpointCache
         lock (_lock) { genBefore = _generation; }
         var lazy = _inflight.GetOrAdd(key, _ => new Lazy<Task<Endpoint>>(() => FetchAndCache(key, fetcher, genBefore)));
 
-        try
+        var fetchTask = lazy.Value;
+        // Drop the entry when the fetch settles, even with no waiters left
+        // (no cached faults, no TTL bypass); value-matched so a newer entry
+        // from Invalidate() is never evicted.
+        _ = fetchTask.ContinueWith(
+            _ => ((ICollection<KeyValuePair<EndpointCacheKey, Lazy<Task<Endpoint>>>>)_inflight)
+                .Remove(new KeyValuePair<EndpointCacheKey, Lazy<Task<Endpoint>>>(key, lazy)),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        if (cancellationToken.CanBeCanceled)
         {
-            var fetchTask = lazy.Value;
-            if (cancellationToken.CanBeCanceled)
+            var tcs = new TaskCompletionSource<bool>();
+            using (cancellationToken.Register(() => tcs.TrySetResult(true)))
             {
-                var tcs = new TaskCompletionSource<bool>();
-                using (cancellationToken.Register(() => tcs.TrySetResult(true)))
+                if (await Task.WhenAny(fetchTask, tcs.Task).ConfigureAwait(false) == tcs.Task)
                 {
-                    if (await Task.WhenAny(fetchTask, tcs.Task).ConfigureAwait(false) == tcs.Task)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                    }
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
             }
-            return await fetchTask.ConfigureAwait(false);
         }
-        finally
-        {
-            _inflight.TryRemove(key, out _);
-        }
+        return await fetchTask.ConfigureAwait(false);
     }
 
     private async Task<Endpoint> FetchAndCache(EndpointCacheKey key, Func<Task<Endpoint>> fetcher, long genBefore)

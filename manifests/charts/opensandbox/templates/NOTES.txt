@@ -1,0 +1,33 @@
+OpenSandbox umbrella chart ({{ .Chart.Version }}) has been deployed to namespace {{ .Release.Namespace }}.
+
+Components:
+  - OpenSandbox CRDs + RBAC (base)
+  - opensandbox-controller (BatchSandbox/Pool reconciler)
+  - opensandbox-server (Lifecycle API server)
+{{- if (index .Values "ingress-gateway" "enabled") }}
+  - ingress-gateway (sandbox traffic proxy)
+{{- end }}
+{{- if (index .Values "opensandbox-node-agent" "enabled") }}
+  - opensandbox-node-agent (node-level data collector)
+{{- end }}
+{{- if (index .Values "fast-sandbox" "enabled") }}
+  - fast-sandbox (Firecracker control plane + node runtime)
+    Next steps: provision the agent registry Secret
+    (fast-sandbox-agent-registry) and KVM-capable nodes; see
+    manifests/HELM-DEPLOYMENT.md "fast-sandbox Runtime".
+{{- end }}
+
+Verify the installation:
+
+  kubectl --namespace {{ .Release.Namespace }} get pods
+
+Server API (port-forward when gateway announcement is off):
+
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/opensandbox-server 8080:80
+
+Documentation: https://github.com/opensandbox-group/OpenSandbox
+{{- if not (index .Values "base" "enabled") }}
+
+WARNING: base is disabled in this release; the OpenSandbox CRDs must come
+from a standalone base chart install or the components cannot start.
+{{- end }}

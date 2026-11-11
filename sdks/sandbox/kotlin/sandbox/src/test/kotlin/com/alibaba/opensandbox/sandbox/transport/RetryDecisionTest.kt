@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -170,5 +170,34 @@ class RetryDecisionTest {
             )
         val delay = computeBackoff(0, policy, Duration.ZERO, Random(0))
         assertTrue(delay <= Duration.ofSeconds(1))
+    }
+
+    @Test
+    fun `wake retry decision respects attempts and budget`() {
+        val policy = RetryPolicy(wakeMaxAttempts = 3, wakeOverallDeadline = Duration.ofSeconds(60))
+        assertTrue(shouldRetryWake(1, policy, Duration.ZERO, Duration.ofSeconds(1)))
+        assertFalse(shouldRetryWake(3, policy, Duration.ZERO, Duration.ofSeconds(1)))
+        // A next wait that does not fit the remaining budget ends the wake retry.
+        assertFalse(shouldRetryWake(1, policy, Duration.ofSeconds(59), Duration.ofSeconds(30)))
+        // Null deadline removes the time bound; attempts still apply.
+        val unbounded = RetryPolicy(wakeMaxAttempts = 2, wakeOverallDeadline = null)
+        assertTrue(shouldRetryWake(1, unbounded, Duration.ofHours(1), Duration.ofSeconds(30)))
+        assertFalse(shouldRetryWake(2, unbounded, Duration.ZERO, Duration.ofSeconds(1)))
+    }
+
+    @Test
+    fun `wake retry-after resolution falls back and caps`() {
+        assertEquals(Duration.ofSeconds(1), resolveWakeRetryAfter(null))
+        assertEquals(Duration.ofSeconds(2), resolveWakeRetryAfter("2"))
+        assertEquals(Duration.ofSeconds(60), resolveWakeRetryAfter("3600"))
+        assertEquals(Duration.ZERO, resolveWakeRetryAfter("-1"))
+    }
+
+    @Test
+    fun `wake recognition is header-only on 503`() {
+        assertTrue(isWakeTimeoutResponse(503, "expired"))
+        assertFalse(isWakeTimeoutResponse(503, "bogus"))
+        assertFalse(isWakeTimeoutResponse(503, null))
+        assertFalse(isWakeTimeoutResponse(500, "expired"))
     }
 }

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="888" viewBox="0 0 1180 888" role="img" aria-labelledby="title desc">
+<title id="title">Egress control flow</title>
+<desc id="desc">The sandbox workload and the egress sidecar share a network namespace. DNS queries are filtered by the sidecar and nftables enforces a default-deny with DNS-learned leases; allowed traffic reaches external services. Policy comes from platform overlays and per-sandbox rules. With transparent TLS interception the sidecar injects credentials that never live in the sandbox.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="outbound" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#059669"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="888" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Egress</text>
+<text x="48" y="96" class="body">Outbound control at two layers · every packet passes the sidecar</text>
+<path d="M880 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="926" y="60" class="edge" style="fill:#2563eb">Traffic</text>
+<path d="M1020 54h36" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="1066" y="60" class="edge" style="fill:#059669">Outbound</text>
+<rect x="48" y="128" width="1084" height="232" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="72" y="158" class="section">SHARED NETWORK NAMESPACE</text>
+<rect x="72" y="176" width="340" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="206" class="heading">Sandbox workload</text>
+<text x="88" y="231" class="label">unprivileged · no NET_ADMIN</text>
+<rect x="620" y="176" width="488" height="64" rx="8" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="636" y="206" class="heading">Layer 1 — DNS filter</text>
+<text x="636" y="231" class="label">denied → NXDOMAIN · resolved IPs feed layer 2</text>
+<rect x="72" y="272" width="340" height="64" rx="8" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="88" y="302" class="heading">Egress sidecar</text>
+<text x="88" y="327" class="label">only NET_ADMIN · exits if unenforced</text>
+<rect x="620" y="272" width="488" height="64" rx="8" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="636" y="302" class="heading">Layer 2 — nftables verdict</text>
+<text x="636" y="327" class="label">default-deny · static rules + bounded leases</text>
+<path d="M412 208H614" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="456" y="196" class="edge" style="fill:#2563eb">DNS :53</text>
+<path d="M412 226H516V306H614" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="530" y="270" class="edge" style="fill:#2563eb">TCP 80/443</text>
+<path d="M864 240V266" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="880" y="259" class="edge" style="fill:#2563eb">resolved IPs</text>
+<path d="M864 336V386" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="880" y="365" class="edge" style="fill:#059669">allowed traffic</text>
+<rect x="620" y="392" width="488" height="64" rx="8" fill="#ffffff" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="636" y="422" class="heading">External network</text>
+<text x="636" y="447" class="label">Models · registries · web endpoints</text>
+<rect x="48" y="480" width="1084" height="180" rx="12" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="72" y="510" class="section">POLICY SOURCES</text>
+<text x="72" y="546" class="heading">First match wins — the platform's deny beats your allow</text>
+<text x="72" y="579" class="body">1 · platform overlays — deny.always / allow.always, hot-reloaded</text>
+<text x="72" y="608" class="body">2 · your policy — per sandbox, FQDN / wildcard / IP / CIDR</text>
+<text x="72" y="632" class="label">mutable at runtime through the API the SDKs expose</text>
+<path d="M240 474V366" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="256" y="425" class="edge" style="fill:#dc6b2e">policy + overlays</text>
+<rect x="48" y="684" width="1084" height="180" rx="12" fill="#f4fbf8" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="72" y="714" class="section">CREDENTIAL VAULT</text>
+<text x="72" y="750" class="heading">Secrets stay outside the sandbox</text>
+<text x="72" y="783" class="body">with transparent TLS interception, the sidecar authenticates</text>
+<text x="72" y="812" class="body">matching outbound requests — the workload never holds the secret</text>
+<text x="72" y="836" class="label">vault is in-memory · bindings are host-scoped</text>
+</svg>

@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,12 +21,13 @@ Uses auto-generated isolated_execution API modules with explicit session_id.
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from io import IOBase, TextIOBase
 from uuid import UUID
 
 import httpx
 
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
@@ -35,14 +36,20 @@ from opensandbox.adapters.converter.response_handler import (
     extract_request_id,
     handle_api_error,
 )
+from opensandbox.adapters.download_response import (
+    create_read_bytes_response,
+    iter_async_response_bytes,
+)
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
+    AsyncReadBytesStream,
     ContentReplaceEntry,
     ContentReplaceResult,
     DirectoryListEntry,
     EntryInfo,
     MoveEntry,
+    ReadBytesResponse,
     SearchEntry,
     SetPermissionEntry,
     WriteEntry,
@@ -88,9 +95,14 @@ class IsolatedFilesystemAdapter(Filesystem):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
 
-        self._client = Client(base_url=base_url, timeout=timeout)
+        self._client = Client(
+            base_url=base_url,
+            timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
+        )
         self._client.set_async_httpx_client(self._httpx_client)
 
     def _get_url(self, path_template: str) -> str:
@@ -120,6 +132,20 @@ class IsolatedFilesystemAdapter(Filesystem):
         offset: int | None = None,
         limit: int | None = None,
     ) -> bytes:
+        return (
+            await self.read_bytes_detailed(
+                path, range_header=range_header, offset=offset, limit=limit
+            )
+        ).body
+
+    async def read_bytes_detailed(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[bytes]:
         try:
             url = self._get_url(self.DOWNLOAD_PATH)
             params: dict[str, str] = {"path": path}
@@ -133,7 +159,11 @@ class IsolatedFilesystemAdapter(Filesystem):
 
             response = await self._httpx_client.get(url, headers=headers, params=params)
             response.raise_for_status()
-            return response.content
+            return create_read_bytes_response(
+                response,
+                response.content,
+                line_based=offset is not None or limit is not None,
+            )
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -145,7 +175,38 @@ class IsolatedFilesystemAdapter(Filesystem):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
+        response = await self.read_bytes_stream_detailed(
+            path,
+            chunk_size=chunk_size,
+            range_header=range_header,
+            offset=offset,
+            limit=limit,
+        )
+
+        async def _iter() -> AsyncGenerator[bytes, None]:
+            try:
+                yield b""
+                async for chunk in response.body:
+                    yield chunk
+            finally:
+                await response.body.aclose()
+
+        # Start the generator so its finally block also runs when it is
+        # closed or dropped before the caller reads the first chunk.
+        chunks = _iter()
+        await anext(chunks)
+        return chunks
+
+    async def read_bytes_stream_detailed(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[AsyncReadBytesStream]:
         try:
             url = self._get_url(self.DOWNLOAD_PATH)
             params: dict[str, str] = {"path": path}
@@ -172,7 +233,15 @@ class IsolatedFilesystemAdapter(Filesystem):
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
-            return response.aiter_bytes(chunk_size=chunk_size)
+            try:
+                return create_read_bytes_response(
+                    response,
+                    iter_async_response_bytes(response, chunk_size),
+                    line_based=offset is not None or limit is not None,
+                )
+            except BaseException:
+                await response.aclose()
+                raise
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -202,7 +271,7 @@ class IsolatedFilesystemAdapter(Filesystem):
                     content_type = "application/octet-stream"
                 elif isinstance(entry.data, str):
                     encoding = entry.encoding or "utf-8"
-                    content = entry.data
+                    content = entry.data.encode(encoding)
                     content_type = f"text/plain; charset={encoding}"
                 elif isinstance(entry.data, IOBase):
                     if isinstance(entry.data, TextIOBase):
@@ -219,7 +288,11 @@ class IsolatedFilesystemAdapter(Filesystem):
                 multipart_parts.append(("file", (entry.path, content, content_type)))
 
             url = self._get_url(self.UPLOAD_PATH)
-            response = await self._httpx_client.post(url, files=multipart_parts)
+            response = await self._httpx_client.post(
+                url,
+                files=multipart_parts,
+                follow_redirects=False,
+            )
             response.raise_for_status()
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e

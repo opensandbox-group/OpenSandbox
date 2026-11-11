@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -357,6 +357,114 @@ class EgressAdapterTest {
         assertEquals(1, state.credentials.size)
         assertFalse(state.credentials.single().javaClass.declaredFields.any { it.name == "value" })
         assertTrue(state.bindings.single().auth?.name == null)
+    }
+
+    @Test
+    fun `create sends exchange credential vault payload and parses sanitized typeless state`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(201)
+                .setBody(
+                    """
+                    {
+                      "revision": 3,
+                      "credentials": [
+                        {"name": "spi-signer", "sourceType": "exchange", "revision": 3,
+                         "source": {"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"}},
+                        {"name": "corp-resolver", "sourceType": "exchange", "revision": 3}
+                      ],
+                      "bindings": [
+                        {"name": "internal-api", "revision": 3, "auth": {"credential": "spi-signer"}}
+                      ]
+                    }
+                    """.trimIndent(),
+                ),
+        )
+
+        val result =
+            egressAdapter.create(
+                credentials =
+                    listOf(
+                        Credential.builder()
+                            .name("spi-signer")
+                            .exchangeSource("unix:///run/spi/spi.sock")
+                            .build(),
+                        Credential.builder()
+                            .name("corp-resolver")
+                            .exchangeSource("https://resolver.internal:8443/prefix")
+                            .build(),
+                    ),
+                bindings =
+                    listOf(
+                        CredentialBinding.builder()
+                            .name("internal-api")
+                            .match(CredentialMatch.builder().hosts("*.internal.example.com").build())
+                            .auth(CredentialAuth.exchange("spi-signer"))
+                            .build(),
+                    ),
+            )
+
+        val request = mockWebServer.takeRequest()
+        val body = request.body.readUtf8()
+        assertFalse(body.contains("\"type\":null"))
+
+        val payload = Json.parseToJsonElement(body).jsonObject
+        val sources = payload["credentials"]!!.jsonArray.map { it.jsonObject["source"]!!.jsonObject }
+        assertEquals("{\"type\":\"exchange\",\"endpoint\":\"unix:///run/spi/spi.sock\"}", sources[0].toString())
+        assertEquals("{\"type\":\"exchange\",\"endpoint\":\"https://resolver.internal:8443/prefix\"}", sources[1].toString())
+        val auth = payload["bindings"]!!.jsonArray[0].jsonObject["auth"]!!.jsonObject
+        assertEquals(setOf("credential"), auth.keys)
+        assertEquals("spi-signer", auth["credential"]!!.jsonPrimitive.content)
+
+        assertEquals(3, result.revision)
+        assertEquals("exchange", result.credentials[0].sourceType)
+        assertEquals("exchange", result.credentials[1].sourceType)
+        val authMetadata = result.bindings.single().auth
+        assertEquals(null, authMetadata?.type)
+        assertEquals("spi-signer", authMetadata?.credential)
+    }
+
+    @Test
+    fun `sanitized read recovers the legacy type null skew shape`() {
+        mockWebServer.enqueue(
+            MockResponse().setBody(
+                """
+                {
+                  "revision": 3,
+                  "credentials": [],
+                  "bindings": [
+                    {"name": "internal-api", "revision": 3, "auth": {"type": null, "credential": "spi-signer"}}
+                  ]
+                }
+                """.trimIndent(),
+            ),
+        )
+
+        val state = egressAdapter.get()
+
+        val authMetadata = state.bindings.single().auth
+        assertEquals(null, authMetadata?.type)
+        assertEquals("spi-signer", authMetadata?.credential)
+    }
+
+    @Test
+    fun `typeless auth metadata with static fields fails closed`() {
+        assertThrows(IllegalStateException::class.java) {
+            """{"name": "internal-api", "revision": 3, "auth": {"credential": "spi-signer", "name": "X-Api-Key"}}"""
+                .toCredentialBindingMetadata()
+        }
+        assertThrows(IllegalStateException::class.java) {
+            """{"name": "internal-api", "revision": 3, "auth": {"credential": "spi-signer", "headers": []}}"""
+                .toCredentialBindingMetadata()
+        }
+    }
+
+    @Test
+    fun `auth metadata without type or credential fails closed`() {
+        assertThrows(IllegalStateException::class.java) {
+            """{"name": "internal-api", "revision": 3, "auth": {"name": "X-Api-Key"}}"""
+                .toCredentialBindingMetadata()
+        }
     }
 
     private fun credential(name: String): Credential =

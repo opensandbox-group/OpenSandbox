@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -65,7 +65,7 @@ test("client pool warms, acquires, drains, and falls back to direct create", asy
     acquired.push(warm);
     const result = await warm.commands.run("echo js-pool-ok");
     expect(result.error).toBeUndefined();
-    expect(result.logs.stdout[0]?.text).toBe("js-pool-ok");
+    expect(result.logs.stdout[0]?.text).toBe("js-pool-ok\n");
 
     await pool.resize(0);
     await pool.releaseAllIdle();

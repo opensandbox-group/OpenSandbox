@@ -1,0 +1,5 @@
+{
+  "name": "opensandbox-release-notes",
+  "version": "2.0.0",
+  "description": "Generate umbrella release notes for the whole OpenSandbox repository (docs/releases/X.Y.Z.md) by analyzing all merged PRs since the previous release baseline, classified by component per docs/releases/TEMPLATE.md."
+}

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="950" viewBox="0 0 1500 950" role="img" aria-labelledby="title desc">
+<title id="title">Pool capacity model</title>
+<desc id="desc">A BatchSandbox claims a warm buffer pod in constant time. Allocated pods are recorded in the alloc-status annotation; starting pods count toward the pool total but are never advertised. When a sandbox is deleted the pod returns and the recycle strategy decides: delete and replace, restart containers, or return as-is. Scaling is paced by maxUnavailable and eviction removes idle labeled pods.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="outbound" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#059669"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1500" height="950" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Pool capacity model</text>
+<text x="48" y="96" class="body">Two-level capacity · paced scaling · recycle on return</text>
+<path d="M900 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="946" y="60" class="edge" style="fill:#dc6b2e">Allocation flow</text>
+<path d="M1120 54h36" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)"/>
+<text x="1166" y="60" class="edge" style="fill:#059669">Release &amp; return</text>
+<path d="M1350 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1396" y="60" class="edge" style="fill:#2563eb">Maturation</text>
+
+<rect x="48" y="128" width="300" height="360" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="158" class="section">CONSUMERS</text>
+<rect x="72" y="180" width="264" height="110" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="210" class="heading">BatchSandbox</text>
+<text x="88" y="240" class="body">waiting replicas</text>
+<text x="88" y="266" class="label">one claim per replica</text>
+<rect x="72" y="330" width="264" height="100" rx="8" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="88" y="360" class="heading">Sandbox deleted</text>
+<text x="88" y="388" class="label">pod must return</text>
+
+<rect x="448" y="128" width="1004" height="360" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="472" y="158" class="section">POOL · TOTAL BOUNDED BY POOLMIN / POOLMAX</text>
+<rect x="472" y="180" width="956" height="104" rx="10" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="492" y="210" class="heading">Warm buffer</text>
+<text x="492" y="240" class="body">Running &amp; Ready · unallocated — what allocations draw from</text>
+<text x="492" y="268" class="label">kept within bufferMin / bufferMax</text>
+<rect x="472" y="312" width="464" height="140" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="492" y="342" class="heading">Allocated</text>
+<text x="492" y="372" class="body">claimed by a BatchSandbox</text>
+<text x="492" y="400" class="label">recorded in the alloc-status annotation</text>
+<rect x="964" y="312" width="464" height="140" rx="10" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="984" y="342" class="heading">Starting</text>
+<text x="984" y="372" class="body">still becoming ready</text>
+<text x="984" y="400" class="label">counts toward the total, never advertised</text>
+
+<path d="M336 232H468" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="350" y="216" class="edge" style="fill:#dc6b2e">claim</text>
+<path d="M620 284V312" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<path d="M1196 312V284" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M1452 634H1482V232H1436" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)"/>
+<text x="1150" y="514" class="edge" style="fill:#059669">recycled pods replenish the buffer</text>
+
+<rect x="448" y="528" width="1004" height="190" rx="12" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="472" y="560" class="section">RECYCLE STRATEGY · WHEN A POD RETURNS</text>
+<rect x="472" y="584" width="300" height="110" rx="8" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="488" y="614" class="heading">Delete</text>
+<text x="488" y="644" class="body">replace with a fresh pod</text>
+<text x="488" y="672" class="label">default</text>
+<rect x="806" y="584" width="300" height="110" rx="8" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="822" y="614" class="heading">Restart</text>
+<text x="822" y="644" class="body">restart containers in place</text>
+<rect x="1140" y="584" width="300" height="110" rx="8" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="1156" y="614" class="heading">Noop</text>
+<text x="1156" y="644" class="body">return as-is</text>
+<text x="1156" y="672" class="label">state may leak</text>
+<path d="M218 430V634H468" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)"/>
+<text x="232" y="540" class="edge" style="fill:#059669">release</text>
+
+<rect x="48" y="766" width="1404" height="64" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="794" class="heading">Scale pacing</text>
+<text x="240" y="794" class="body">each step ≤ maxUnavailable (default 25%), minus pods still starting — a measured ramp, not a thundering herd</text>
+<rect x="48" y="846" width="1404" height="64" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="874" class="heading">Eviction</text>
+<text x="188" y="874" class="body">label an idle pool pod pool.opensandbox.io/evict — allocated pods are protected, replenishment restores the buffer</text>
+</svg>

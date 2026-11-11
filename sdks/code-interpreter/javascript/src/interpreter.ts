@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import {
   SandboxReadyTimeoutException,
 } from "@alibaba-group/opensandbox";
 import { createExecdClient } from "@alibaba-group/opensandbox/internal";
+import { createRedirectSafeExecdFetch } from "./transport.js";
 import type { Sandbox } from "@alibaba-group/opensandbox";
 
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
@@ -149,18 +150,18 @@ export class CodeInterpreter {
     if (typeof this.codes.ping === "function") {
       return await this.codes.ping(signal);
     }
-    const { error } = await this.execdPingClient().GET("/ping", {
+    const { response } = await this.execdPingClient().GET("/ping", {
       parseAs: "text",
       signal,
     });
-    return error == null;
+    return response.ok;
   }
 
   private execdPingClient() {
     return createExecdClient({
       baseUrl: this.execdBaseUrl,
       headers: this.execdHeaders ?? {},
-      fetch: this.sandbox.connectionConfig.fetch,
+      fetch: createRedirectSafeExecdFetch(this.sandbox, this.execdBaseUrl),
     });
   }
 

@@ -20,6 +20,7 @@ Run coding CLIs and AI agent frameworks inside isolated sandboxes.
 | [Claude Code](/examples/claude-code) | Run Claude Code CLI in a sandbox |
 | [Gemini CLI](/examples/gemini-cli) | Run Gemini CLI in a sandbox |
 | [Codex CLI](/examples/codex-cli) | Run OpenAI Codex CLI in a sandbox |
+| [Apply Model Patches](/examples/apply-patch) | Apply Codex-style file patches with a custom sandbox image |
 | [OpenCode](/examples/opencode) | Run the OpenCode coding agent in a sandbox |
 | [Qwen Code](/examples/qwen-code) | Run Qwen Code CLI in a sandbox |
 | [Kimi CLI](/examples/kimi-cli) | Run Kimi CLI (Moonshot AI) in a sandbox |
@@ -27,7 +28,7 @@ Run coding CLIs and AI agent frameworks inside isolated sandboxes.
 | [Deep Agents](/examples/deep-agents) | Deep Agents file/shell tools running in a sandbox |
 | [Google ADK](/examples/google-adk) | Google ADK agent using OpenSandbox tools |
 | [OpenClaw](/examples/openclaw) | OpenClaw Gateway inside a sandbox |
-| [NullClaw](/examples/nullclaw) | NullClaw Gateway sandbox integration |
+| [DeerFlow](/examples/deer-flow) | DeerFlow agent turns with tools running in a sandbox |
 
 ## Browser & Desktop
 
@@ -47,6 +48,7 @@ Fundamental sandbox operations and SDK workflows.
 | Example | Description |
 |---------|-------------|
 | [Code Interpreter](/examples/code-interpreter) | End-to-end Code Interpreter SDK workflow |
+| [Scheduled Client Pool](/examples/client-pool-schedule) | Adjust idle capacity by business hours using Go's pool Resize API |
 | [AIO Sandbox](/examples/aio-sandbox) | All-in-One sandbox setup |
 | [Agent Sandbox](/examples/agent-sandbox) | Kubernetes agent-sandbox integration |
 | [AKS + Kata](/examples/aks-kata) | AKS deployment with Kata VM isolation, ingress, egress, and Credential Vault |
@@ -62,6 +64,7 @@ Persistent and shared storage patterns for sandboxes.
 | [Host Volume Mount](/examples/host-volume-mount) | Mount host directories into sandboxes |
 | [Docker PVC Volume](/examples/docker-pvc-volume-mount) | Docker named volume mounts |
 | [Docker OSSFS Volume](/examples/docker-ossfs-volume-mount) | Docker OSSFS (OSS FUSE) mounts |
+| [rclone Volume Mount](/examples/rclone-volume-mount) | Remote storage through external Docker plugins or Kubernetes CSI volumes |
 | [Kubernetes PVC](/examples/kubernetes-pvc-volume-mount) | Kubernetes PersistentVolumeClaim mounts |
 
 ## How to Run
@@ -72,5 +75,5 @@ Persistent and shared storage patterns for sandboxes.
 4. Navigate to the example directory and run: `python main.py`
 
 ::: tip
-Each example includes a `main.py` entry point. Some also include a `Dockerfile` for containerized execution.
+Most examples include a `main.py` entry point. Follow each example's run instructions for other languages. Some also include a `Dockerfile` for containerized execution.
 :::

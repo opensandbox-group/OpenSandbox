@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,14 +18,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"runtime"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/shirou/gopsutil/cpu"
-	"github.com/shirou/gopsutil/mem"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/resources"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -87,21 +85,19 @@ func (c *MetricController) WatchMetrics() {
 func (c *MetricController) readMetrics() (*model.Metrics, error) {
 	metric := model.NewMetrics()
 
-	metric.CpuCount = float64(runtime.GOMAXPROCS(-1))
-	cpuPercent, err := cpu.Percent(time.Second, false)
+	metric.CpuCount = resources.CPUCount()
+	cpuPercent, err := resources.CPUPercent(time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get CPU percent: %w", err)
 	}
-	if len(cpuPercent) > 0 {
-		metric.CpuUsedPct = cpuPercent[0]
-	}
+	metric.CpuUsedPct = cpuPercent
 
-	vmStat, err := mem.VirtualMemory()
+	memStats, err := resources.MemoryStats()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get memory info: %w", err)
 	}
-	metric.MemTotalMiB = float64(vmStat.Total) / 1024 / 1024
-	metric.MemUsedMiB = float64(vmStat.Used) / 1024 / 1024
+	metric.MemTotalMiB = float64(memStats.TotalBytes) / 1024 / 1024
+	metric.MemUsedMiB = float64(memStats.UsedBytes) / 1024 / 1024
 
 	return metric, nil
 }

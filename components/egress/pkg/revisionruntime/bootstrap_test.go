@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -161,6 +162,70 @@ func TestProcessSessionBootstrapPreservesIndeterminateCommit(t *testing.T) {
 	require.Equal(t, 1, commits)
 }
 
+func TestProcessSessionReconcileBootstrapConfirmsLostCommitAck(t *testing.T) {
+	session, server := newBootstrapSession(t)
+	server.rejectCommitResponse = true
+	_, err := session.Bootstrap(context.Background(), credentialvault.ActiveSnapshot{}, 0)
+	require.ErrorIs(t, err, revision.ErrIndeterminate)
+	server.rejectCommitResponse = false
+
+	resolved, err := session.ReconcileBootstrap(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	require.Equal(t, server.activeIdentity(), resolved)
+	again, err := session.ReconcileBootstrap(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, resolved, again)
+	_, err = session.Bootstrap(context.Background(), credentialvault.ActiveSnapshot{}, 0)
+	require.ErrorIs(t, err, revision.ErrIndeterminate)
+	prepares, commits := server.commandCounts()
+	require.Equal(t, 1, prepares)
+	require.Equal(t, 1, commits)
+}
+
+func TestProcessSessionReconcileBootstrapPreservesConfirmedOutcomeAfterLocalFenceFailure(t *testing.T) {
+	parent := processSessionParent(t)
+	session, err := NewProcessSession(processSessionConfig(parent))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, session.Close()) })
+	server := serveBootstrapReceiver(t, session)
+	server.rejectCommitResponse = true
+	_, err = session.Bootstrap(context.Background(), credentialvault.ActiveSnapshot{}, 0)
+	require.ErrorIs(t, err, revision.ErrIndeterminate)
+
+	require.NoError(t, os.Chmod(parent, 0o777))
+	t.Cleanup(func() { require.NoError(t, os.Chmod(parent, 0o700)) })
+	_, err = session.ReconcileBootstrap(context.Background())
+	require.ErrorIs(t, err, revision.ErrTransportUnavailable)
+	require.NoError(t, os.Chmod(parent, 0o700))
+
+	readbacks := server.readbackCount()
+	_, err = session.Bootstrap(context.Background(), credentialvault.ActiveSnapshot{}, 0)
+	require.ErrorIs(t, err, revision.ErrIndeterminate)
+	require.Equal(t, readbacks, server.readbackCount())
+}
+
+func TestProcessSessionReconcileBootstrapClearsLostAbortAckForRetry(t *testing.T) {
+	session, server := newBootstrapSession(t)
+	server.rejectPrepareResponse = true
+	server.rejectAbortResponse = true
+	_, err := session.Bootstrap(context.Background(), credentialvault.ActiveSnapshot{}, 0)
+	require.ErrorIs(t, err, revision.ErrIndeterminate)
+	server.rejectAbortResponse = false
+
+	resolved, err := session.ReconcileBootstrap(context.Background())
+	require.NoError(t, err)
+	require.Nil(t, resolved)
+	server.rejectPrepareResponse = false
+	identity, err := session.Bootstrap(context.Background(), credentialvault.ActiveSnapshot{}, 0)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), identity.DecisionEpoch)
+	prepares, commits := server.commandCounts()
+	require.Equal(t, 2, prepares)
+	require.Equal(t, 1, commits)
+	require.Equal(t, 2, server.abortCount())
+}
+
 type bootstrapReceiver struct {
 	mu                    sync.Mutex
 	token                 string
@@ -173,7 +238,15 @@ type bootstrapReceiver struct {
 	staleSecondReadback   bool
 	secondReadbackSeen    chan struct{}
 	releaseSecondReadback chan struct{}
+	rejectPrepareResponse bool
 	rejectCommitResponse  bool
+	rejectAbortResponse   bool
+	prepareSeen           chan struct{}
+	releasePrepare        chan struct{}
+	commitSeen            chan struct{}
+	releaseCommit         chan struct{}
+	aborted               *revision.Identity
+	aborts                int
 }
 
 func newBootstrapSession(t *testing.T) (*ProcessSession, *bootstrapReceiver) {
@@ -239,7 +312,21 @@ func (r *bootstrapReceiver) ServeHTTP(w http.ResponseWriter, request *http.Reque
 		r.pending = &value.Revision
 		r.data = append([]byte(nil), value.Payload...)
 		r.prepares++
+		prepareSeen := r.prepareSeen
+		r.prepareSeen = nil
+		releasePrepare := r.releasePrepare
+		r.releasePrepare = nil
 		r.mu.Unlock()
+		if prepareSeen != nil {
+			close(prepareSeen)
+		}
+		if releasePrepare != nil {
+			<-releasePrepare
+		}
+		if r.rejectPrepareResponse {
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"revision": value.Revision})
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/revisions/commit":
 		var value struct {
@@ -250,15 +337,51 @@ func (r *bootstrapReceiver) ServeHTTP(w http.ResponseWriter, request *http.Reque
 			return
 		}
 		r.mu.Lock()
-		defer r.mu.Unlock()
 		if r.pending == nil || *r.pending != value.Revision {
+			r.mu.Unlock()
 			http.Error(w, "conflict", http.StatusConflict)
 			return
 		}
 		r.active = r.pending
 		r.pending = nil
 		r.commits++
-		if r.rejectCommitResponse {
+		rejectResponse := r.rejectCommitResponse
+		commitSeen := r.commitSeen
+		r.commitSeen = nil
+		releaseCommit := r.releaseCommit
+		r.releaseCommit = nil
+		r.mu.Unlock()
+		if commitSeen != nil {
+			close(commitSeen)
+		}
+		if releaseCommit != nil {
+			<-releaseCommit
+		}
+		if rejectResponse {
+			http.Error(w, "unavailable", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"revision": value.Revision})
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/revisions/abort":
+		var value struct {
+			Revision revision.Identity `json:"revision"`
+		}
+		if json.NewDecoder(request.Body).Decode(&value) != nil {
+			http.Error(w, "malformed", http.StatusBadRequest)
+			return
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.pending != nil && *r.pending == value.Revision {
+			r.pending = nil
+			copy := value.Revision
+			r.aborted = &copy
+		} else if r.aborted == nil || *r.aborted != value.Revision {
+			http.Error(w, "conflict", http.StatusConflict)
+			return
+		}
+		r.aborts++
+		if r.rejectAbortResponse {
 			http.Error(w, "unavailable", http.StatusInternalServerError)
 			return
 		}
@@ -266,6 +389,18 @@ func (r *bootstrapReceiver) ServeHTTP(w http.ResponseWriter, request *http.Reque
 	default:
 		http.Error(w, "missing", http.StatusNotFound)
 	}
+}
+
+func (r *bootstrapReceiver) abortCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.aborts
+}
+
+func (r *bootstrapReceiver) readbackCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.readbacks
 }
 
 func (r *bootstrapReceiver) commandCounts() (int, int) {

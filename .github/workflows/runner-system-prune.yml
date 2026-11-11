@@ -5,6 +5,9 @@ permissions:
 
 on:
   workflow_dispatch:
+  schedule:
+    # Every Monday 01:00 (UTC+8) = Sunday 17:00 UTC
+    - cron: '0 17 * * 0'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -59,12 +59,18 @@ def _parse_response(
         return response_200
 
     if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+        try:
+            response_400 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_400
 
     if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
+        try:
+            response_500 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_500
 
@@ -91,11 +97,17 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     body: RunInSessionRequest,
 ) -> Response[ErrorResponse | ServerStreamEvent]:
-    """Run command in bash session (run_in_session)
+    r"""Run command in bash session (run_in_session)
 
      Executes a shell command in an existing bash session and streams the output in real-time via SSE
     (Server-Sent Events). The session must have been created by create_session. Supports
     optional working directory override and timeout (milliseconds).
+    The run streams a single merged `stdout` event stream (session stderr is merged into it).
+    Stdout event text preserves the original line endings (`\n`, `\r`, or `\r\n`). Concatenate
+    text from the stdout events to recover the run's output; blank lines appear as events
+    containing only the line ending, and the final event may be an unterminated fragment.
+    A line longer than 16 MiB is split across several events, and only the last of them
+    ends with the line ending.
 
     Args:
         session_id (str):
@@ -127,11 +139,17 @@ def sync(
     client: AuthenticatedClient | Client,
     body: RunInSessionRequest,
 ) -> ErrorResponse | ServerStreamEvent | None:
-    """Run command in bash session (run_in_session)
+    r"""Run command in bash session (run_in_session)
 
      Executes a shell command in an existing bash session and streams the output in real-time via SSE
     (Server-Sent Events). The session must have been created by create_session. Supports
     optional working directory override and timeout (milliseconds).
+    The run streams a single merged `stdout` event stream (session stderr is merged into it).
+    Stdout event text preserves the original line endings (`\n`, `\r`, or `\r\n`). Concatenate
+    text from the stdout events to recover the run's output; blank lines appear as events
+    containing only the line ending, and the final event may be an unterminated fragment.
+    A line longer than 16 MiB is split across several events, and only the last of them
+    ends with the line ending.
 
     Args:
         session_id (str):
@@ -158,11 +176,17 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     body: RunInSessionRequest,
 ) -> Response[ErrorResponse | ServerStreamEvent]:
-    """Run command in bash session (run_in_session)
+    r"""Run command in bash session (run_in_session)
 
      Executes a shell command in an existing bash session and streams the output in real-time via SSE
     (Server-Sent Events). The session must have been created by create_session. Supports
     optional working directory override and timeout (milliseconds).
+    The run streams a single merged `stdout` event stream (session stderr is merged into it).
+    Stdout event text preserves the original line endings (`\n`, `\r`, or `\r\n`). Concatenate
+    text from the stdout events to recover the run's output; blank lines appear as events
+    containing only the line ending, and the final event may be an unterminated fragment.
+    A line longer than 16 MiB is split across several events, and only the last of them
+    ends with the line ending.
 
     Args:
         session_id (str):
@@ -192,11 +216,17 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     body: RunInSessionRequest,
 ) -> ErrorResponse | ServerStreamEvent | None:
-    """Run command in bash session (run_in_session)
+    r"""Run command in bash session (run_in_session)
 
      Executes a shell command in an existing bash session and streams the output in real-time via SSE
     (Server-Sent Events). The session must have been created by create_session. Supports
     optional working directory override and timeout (milliseconds).
+    The run streams a single merged `stdout` event stream (session stderr is merged into it).
+    Stdout event text preserves the original line endings (`\n`, `\r`, or `\r\n`). Concatenate
+    text from the stdout events to recover the run's output; blank lines appear as events
+    containing only the line ending, and the final event may be an unterminated fragment.
+    A line longer than 16 MiB is split across several events, and only the last of them
+    ends with the line ending.
 
     Args:
         session_id (str):

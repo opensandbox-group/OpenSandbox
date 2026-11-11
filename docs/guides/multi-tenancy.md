@@ -40,7 +40,7 @@ When multi-tenancy is active:
 2. The tenant's namespace is injected into a request-scoped `ContextVar`.
 3. Sandbox lifecycle operations (create/list/get/delete) use the resolved namespace.
 4. List operations only return sandboxes within the authenticated tenant's namespace.
-5. Proxy routes (`/sandboxes/{id}/proxy/...`) also require `OPEN-SANDBOX-API-KEY` in multi-tenant mode.
+5. Create stamps `opensandbox.io/tenant=<name>` on the workload. When several tenants share one namespace, list/get/delete hide other tenants' labeled sandboxes (`404`). Unlabeled legacy sandboxes stay visible until they expire.
 
 ## Configuration
 
@@ -137,7 +137,7 @@ Response (401):
 The HTTP provider caches results per key using the server-suggested `ttl`. On TTL expiry it re-fetches synchronously. If the endpoint is unreachable, stale entries are served up to `max_stale_seconds`, after which requests fail with 503.
 
 ::: warning HTTP provider skips startup namespace validation
-The HTTP provider resolves tenants per API key and cannot enumerate all tenants at startup, so the OSEP-0014 fail-fast namespace check is skipped for it (a warning is logged instead). The file provider, which loads the full `tenants.toml` at startup, still fails fast when any tenant namespace is missing or inaccessible. With the HTTP provider, ensure namespaces exist and are accessible before issuing tenant API keys.
+The HTTP provider resolves tenants per API key and cannot enumerate all tenants at startup, so the fail-fast namespace check is skipped for it (a warning is logged instead). The file provider, which loads the full `tenants.toml` at startup, still fails fast when any tenant namespace is missing or inaccessible. With the HTTP provider, ensure namespaces exist and are accessible before issuing tenant API keys.
 :::
 
 ## Namespace Setup

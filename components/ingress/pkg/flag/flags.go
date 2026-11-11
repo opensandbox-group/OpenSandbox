@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,6 +39,41 @@ var (
 	RenewIntentQueueKey       string
 	RenewIntentQueueMaxLen    int
 	RenewIntentMinIntervalSec int
+)
+
+// Activity tracking and wake-on-access (OSEP-0024 auto-pause): the ingress
+// records per-sandbox last-traffic observations in Redis, and requests that
+// hit a paused fast sandbox park while a resume flight restores it.
+var (
+	// ActivityEnabled turns on per-request activity recording.
+	ActivityEnabled bool
+	// ActivityRedisDSN is the Redis DSN for activity keys.
+	ActivityRedisDSN string
+	// ActivityMinInterval coalesces writes per sandbox.
+	ActivityMinInterval time.Duration
+	// ActivityTTLSeconds bounds how long an observation stays fresh; the
+	// server's idle threshold must never exceed it, and both sides must
+	// agree on this value.
+	ActivityTTLSeconds int
+
+	// WakeEnabled turns on pause detection, resume flights, and parking.
+	WakeEnabled bool
+	// WakeParkBudget is the per-flight park budget Y.
+	WakeParkBudget time.Duration
+	// WakeParkMax is the parking lot capacity per replica.
+	WakeParkMax int
+	// WakeRestoreMax bounds concurrent resume flights per replica; a flight
+	// holds its permit until the restore reaches a terminal outcome.
+	WakeRestoreMax int
+	// WakeMaxFlightLifetime caps one flight's establish+poll phase, so a
+	// stuck restore frees its permit instead of holding it forever.
+	WakeMaxFlightLifetime time.Duration
+	// WakeRetryInterval is the first readiness-poll interval.
+	WakeRetryInterval time.Duration
+	// WakeRetryFactor grows the poll interval exponentially.
+	WakeRetryFactor float64
+	// WakeRetryJitter randomizes the poll interval relatively.
+	WakeRetryJitter float64
 )
 
 // Secure access (signed routes) and FastPath (Fast Sandbox) routing.

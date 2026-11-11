@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,9 +38,6 @@ func TestGetImageDigestReturnsErrorOnInspectFailure(t *testing.T) {
 	}
 	if digest != "" {
 		t.Fatalf("expected empty digest on error, got %q", digest)
-	}
-	if digest == "sha256:placeholder" {
-		t.Fatal("digest extraction must not return placeholder")
 	}
 }
 

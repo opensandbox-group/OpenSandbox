@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import timedelta
 
 import httpx
@@ -43,7 +44,8 @@ LITERAL_ARGV = [
 
 
 class _SseTransport(httpx.BaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, explicit_exit_code: bool = False) -> None:
+        self.explicit_exit_code = explicit_exit_code
         self.last_request: httpx.Request | None = None
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -57,6 +59,8 @@ class _SseTransport(httpx.BaseTransport):
                 b'data: {"type":"stdout","text":"hi","timestamp":2}\n\n'
                 b'data: {"type":"execution_complete","timestamp":4,"execution_time":5}\n\n'
             )
+            if self.explicit_exit_code:
+                sse = sse.replace(b'"execution_time":5}', b'"execution_time":5,"exit_code":0}')
             return httpx.Response(
                 200,
                 headers={"Content-Type": "text/event-stream"},
@@ -177,8 +181,9 @@ def test_sync_run_command_rejects_negative_timeout(timeout: timedelta) -> None:
         adapter.run("pwd", opts=RunCommandOpts(timeout=timeout))
 
 
-def test_sync_run_command_streaming_happy_path_updates_execution() -> None:
-    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport())
+@pytest.mark.parametrize("explicit_exit_code", [False, True])
+def test_sync_run_command_streaming_happy_path_updates_execution(explicit_exit_code: bool) -> None:
+    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport(explicit_exit_code))
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CommandsAdapterSync(cfg, endpoint)
 
@@ -374,3 +379,107 @@ def test_run_rejects_unsupported_command_types(command) -> None:
 
     with pytest.raises(InvalidArgumentException, match="shell text or an argv list"):
         adapter.run(command)
+
+
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("late_output", [False, True])
+def test_foreground_drains_terminal_response_and_closes_stream(
+    failure: bool, late_output: bool
+) -> None:
+    """Handle immediate EOF from fixed execd and trailing output from older execd."""
+    terminal = (
+        {"type": "error", "error": {"ename": "CommandExecError", "evalue": "7", "traceback": []}}
+        if failure else
+        {"type": "execution_complete", "execution_time": 5}
+    )
+    output = [
+        {"type": "stdout", "text": "last stdout"},
+        {"type": "stderr", "text": "last stderr"},
+    ]
+    events = [terminal, *output] if late_output else [*output, terminal]
+
+    class Stream(httpx.SyncByteStream):
+        closed = False
+        exhausted = False
+
+        def __iter__(self) -> Iterator[bytes]:
+            for timestamp, event in enumerate(events, start=1):
+                frame = f"data: {json.dumps({'timestamp': timestamp, **event})}\n\n".encode()
+                # Split frames across reads to exercise incremental SSE decoding.
+                yield frame[:7]
+                yield frame[7:]
+            self.exhausted = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = Stream()
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"}, stream=stream
+        )
+    )
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    execution = adapter.run("echo test")
+
+    assert [item.text for item in execution.logs.stdout] == ["last stdout"]
+    assert [item.text for item in execution.logs.stderr] == ["last stderr"]
+    assert execution.exit_code == (7 if failure else 0)
+    assert (execution.complete is None) == failure
+    assert stream.exhausted
+    assert stream.closed
+
+
+class _ErrorEventTransport(httpx.BaseTransport):
+    """Replies to any request with a single CommandExecError event."""
+
+    def __init__(self, error: dict) -> None:
+        self._error = error
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        sse = (
+            b'data: {"type":"init","text":"exec-err","timestamp":1}\n\n'
+            + b"data: "
+            + json.dumps({"type": "error", "error": self._error, "timestamp": 2}).encode()
+            + b"\n\n"
+        )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=sse,
+            request=request,
+        )
+
+
+@pytest.mark.parametrize("in_session", [False, True])
+@pytest.mark.parametrize(
+    ("error", "expected_error_exit_code", "expected_exit_code"),
+    [
+        ({"ename": "CommandExecError", "evalue": "3", "exit_code": 3}, 3, 3),
+        ({"ename": "CommandExecError", "evalue": "-1", "exit_code": -1}, -1, -1),
+        ({"ename": "CommandExecError", "evalue": "fork/exec /bin/sh: argument list too long"}, None, None),
+        ({"ename": "CommandExecError", "evalue": "7"}, None, 7),
+    ],
+)
+def test_error_exit_code_propagates_to_execution(
+    error: dict,
+    expected_error_exit_code: int | None,
+    expected_exit_code: int | None,
+    in_session: bool,
+) -> None:
+    cfg = ConnectionConfigSync(protocol="http", transport=_ErrorEventTransport(error))
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    if in_session:
+        execution = adapter.run_in_session("sess-err", "cmd")
+    else:
+        execution = adapter.run("cmd")
+
+    assert execution.error is not None
+    assert execution.error.exit_code == expected_error_exit_code
+    assert execution.exit_code == expected_exit_code
+    assert execution.complete is None

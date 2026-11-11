@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -68,8 +68,7 @@ def _get_template_service() -> FastSandboxTemplateService:
             detail=_TEMPLATE_NOT_K8S_DETAIL,
         )
     _service = FastSandboxTemplateService(config)
-    # Watch-driven convergence: DB rows track the CRD build phase even when
-    # nobody polls the read API.
+    # The watch is the only CR->DB phase path; reads trust the DB.
     _service.start_background_sync()
     return _service
 
@@ -137,7 +136,8 @@ def list_templates(
     """
     from urllib.parse import parse_qsl
 
-    metadata_filter = dict(parse_qsl(metadata)) if metadata else None
+    # keep "env=" as {"env": ""}: empty label values are valid filters
+    metadata_filter = dict(parse_qsl(metadata, keep_blank_values=True)) if metadata else None
     items, total_items = _get_template_service().list_templates(
         metadata=metadata_filter,
         page=page,

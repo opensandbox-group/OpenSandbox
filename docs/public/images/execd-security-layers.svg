@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
+<title id="title">Layered execution security</title>
+<desc id="desc">Security layers compose: the sandbox boundary chosen at create time always applies, the hardening floor wraps every user process, isolated sessions add a private namespace per execution, and an optional eBPF observer records exec, connect and privilege events as a JSONL audit log. Every layer reports whether it is active, degraded or unsupported.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1600" height="720" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Layered execution security</text>
+<text x="48" y="96" class="body">Layers compose: the sandbox boundary always applies, the floor applies to every user process, isolated sessions add a namespace per execution.</text>
+
+<!-- layer 1 -->
+<rect x="48" y="128" width="1080" height="470" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="162" class="section">LAYER 1 — SANDBOX BOUNDARY</text>
+<text x="72" y="190" class="label">runtime isolation set by the platform at create time</text>
+
+<!-- layer 2 -->
+<rect x="88" y="214" width="1000" height="348" rx="12" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="112" y="248" class="section">LAYER 2 — HARDENING FLOOR (EVERY USER PROCESS)</text>
+<text x="112" y="276" class="label">capabilities dropped · no_new_privs · seccomp denylist · Landlock allowlist</text>
+
+<!-- layer 3 -->
+<rect x="128" y="300" width="920" height="230" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="152" y="334" class="section">LAYER 3 — ISOLATED SESSION (OPTIONAL, PER EXECUTION)</text>
+<text x="152" y="362" class="label">private namespace · read-only binds · writable allowlist</text>
+<rect x="168" y="388" width="840" height="110" rx="10" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="188" y="424" class="heading">Your process</text>
+<text x="188" y="456" class="body">the actual workload — everything above constrains it</text>
+
+<!-- eBPF observer -->
+<rect x="1180" y="214" width="372" height="290" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="1204" y="250" class="heading">eBPF observer</text>
+<text x="1204" y="282" class="body">optional, off by default</text>
+<text x="1204" y="310" class="body">exec · connect · privilege events</text>
+<text x="1204" y="340" class="label">separate execd-ebpf build variant</text>
+<text x="1204" y="368" class="label">JSONL audit log</text>
+<path d="M1128 340H1172" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1132" y="322" class="edge" style="fill:#2563eb">events</text>
+
+<!-- bottom note -->
+<rect x="48" y="634" width="1504" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="661" class="heading">Every layer reports its state</text>
+<text x="470" y="661" class="body">active · degraded · unsupported — clients verify what is actually enforced</text>
+</svg>

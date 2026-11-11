@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -137,7 +137,7 @@ const (
 	   assigned -- "when task state is FAILED && policy is allowed" --> releasing
 	   assigned -- "set Task"
 
-	   releasing -- "when endpoint returns nil task or endpoint lost too many times  (e.g., force-deleted), endpoint is nil(unassigned)" --> released
+	   releasing -- "when endpoint returns nil task or the assigned pod is gone (e.g., force-deleted), endpoint is nil(unassigned)" --> released
 
 	   released --> $end
 	*/
@@ -295,14 +295,35 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	if len(ips) == 0 {
 		return
 	}
+	// Failed queries are logged by the collector and left out of the result.
 	tasks, _ := sch.taskStatusCollector.Collect(context.Background(), ips)
 	for _, tNode := range taskNodes {
 		task, ok := tasks[tNode.IP]
+		if !ok {
+			// A failed query does not mean the task is gone, so keep the last
+			// known status. Only a missing pod proves the task has stopped.
+			if !sch.assignedPodExists(tNode) {
+				tNode.Status = nil
+			}
+			continue
+		}
 		tNode.Status = task
-		if ok && task != nil {
+		if task != nil {
 			tNode.transTaskState(parseTaskState(task), sch.logger)
 		}
 	}
+}
+
+// assignedPodExists reports whether the pod the task node is bound to still
+// exists with the same IP. A pod recreated under the same name gets a new IP
+// and does not count.
+func (sch *defaultTaskScheduler) assignedPodExists(tNode *taskNode) bool {
+	for _, pod := range sch.allPods {
+		if pod.Name == tNode.PodName && pod.Status.PodIP == tNode.IP {
+			return true
+		}
+	}
+	return false
 }
 
 func parseTaskState(task *api.Task) TaskState {
@@ -376,8 +397,13 @@ func (sch *defaultTaskScheduler) refreshFreePods() {
 	// Rebuild freePods list with only unassigned pods that have IP addresses
 	sch.freePods = make([]*corev1.Pod, 0, len(sch.allPods)/2)
 	for _, pod := range sch.allPods {
-		// Only consider pods with IP addresses as free for assignment
-		if !assignedPods[pod.Name] && pod.Status.PodIP != "" {
+		// Only consider pods with IP addresses as free for assignment, and skip
+		// any pod the control plane has explicitly declared not ready (ConditionFalse,
+		// or ConditionUnknown while the node is degraded): the task is bound to the
+		// pod IP immediately and is not retried, so admitting such a pod sends the
+		// task to an endpoint that cannot accept it and consumes a healthy sibling's
+		// free slot. A pod with no PodReady condition at all stays free.
+		if !assignedPods[pod.Name] && pod.Status.PodIP != "" && !utils.IsPodExplicitlyNotReady(pod.Status) {
 			sch.freePods = append(sch.freePods, pod)
 		}
 	}

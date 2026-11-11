@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,11 @@ import (
 // PathMatch is filepath.Match compatible but honors doublestar semantics.
 func PathMatch(pattern, name string) (bool, error) {
 	return matchWithSeparator(pattern, name, filepath.Separator, true)
+}
+
+// ValidPattern reports whether pattern is well formed for PathMatch.
+func ValidPattern(pattern string) bool {
+	return globutil.ValidatePathPattern(pattern)
 }
 
 func matchWithSeparator(pattern, name string, separator rune, validate bool) (matched bool, err error) {

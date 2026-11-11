@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="660" viewBox="0 0 1500 660" role="img" aria-labelledby="title desc">
+<title id="title">Controller resource model</title>
+<desc id="desc">Pool holds warm unallocated pods that BatchSandbox claims for allocation. Pausing a BatchSandbox writes a SandboxSnapshot checkpoint; resuming restores from the snapshot with the same sandbox ID. Notes describe task execution inside allocated pods and the status contract.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1500" height="660" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Controller resource model</text>
+<text x="48" y="96" class="body">Keep warm capacity, allocate sandboxes from it, checkpoint them when idle</text>
+<path d="M1040 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="1086" y="60" class="edge" style="fill:#dc6b2e">Allocation</text>
+<path d="M1230 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1276" y="60" class="edge" style="fill:#2563eb">Pause / resume</text>
+
+<rect x="48" y="128" width="1404" height="380" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="158" class="section">CUSTOM RESOURCES · SANDBOX.OPENSANDBOX.IO/V1ALPHA1</text>
+<rect x="72" y="180" width="380" height="150" rx="10" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="92" y="212" class="heading">Pool</text>
+<text x="92" y="244" class="body">warm, unallocated pods, held ready</text>
+<text x="92" y="272" class="body">bufferMin/Max · poolMin/Max · eviction</text>
+<text x="92" y="302" class="label">recycle: Delete · Restart · Noop</text>
+<rect x="560" y="180" width="380" height="150" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="580" y="212" class="heading">BatchSandbox</text>
+<text x="580" y="244" class="body">one or many sandboxes (replicas)</text>
+<text x="580" y="272" class="body">direct from template, or via Pool</text>
+<text x="580" y="302" class="label">tasks · expireTime · pause</text>
+<rect x="1048" y="180" width="380" height="150" rx="10" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="1068" y="212" class="heading">SandboxSnapshot</text>
+<text x="1068" y="244" class="body">pause/resume checkpoint</text>
+<text x="1068" y="272" class="body">committed rootfs image (digest-pinned)</text>
+<text x="1068" y="302" class="label">rootfs-v1 · qemu-v1</text>
+
+<path d="M456 232H556" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="460" y="216" class="edge" style="fill:#dc6b2e">allocation</text>
+<path d="M940 232H1044" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="950" y="216" class="edge" style="fill:#2563eb">pause</text>
+<path d="M1238 330V360H750V334" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="790" y="352" class="edge" style="fill:#2563eb">resume · same sandbox ID</text>
+
+<rect x="72" y="416" width="820" height="88" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="444" class="heading">Inside an allocated pod</text>
+<text x="88" y="470" class="body">a task executor runs the request's entrypoint —</text>
+<text x="88" y="496" class="body">the warm pod spec is never rewritten</text>
+<rect x="916" y="416" width="512" height="88" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="932" y="444" class="heading">Status contract</text>
+<text x="932" y="470" class="body">phase + conditions = sandbox health;</text>
+<text x="932" y="496" class="body">task counters = task progress</text>
+
+<rect x="48" y="548" width="1404" height="64" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="576" class="heading">Trust rule</text>
+<text x="210" y="576" class="body">count a condition only when it exists with status True — trust status only when observedGeneration matches generation</text>
+<text x="72" y="600" class="label">Succeed = a sandbox pod is Running and Ready — the steady state, not task completion</text>
+</svg>

@@ -5,8 +5,7 @@ description: Integrate Google Agent Development Kit (ADK) with OpenSandbox for t
 
 # Google ADK + OpenSandbox Example
 
-Integrate Google Agent Development Kit (ADK) with OpenSandbox. The ADK agent
-drives tool calls that execute inside a sandbox.
+Integrate Google Agent Development Kit (ADK) with OpenSandbox. The ADK agent drives tool calls that execute inside a sandbox.
 
 ## Start OpenSandbox server [local]
 
@@ -37,9 +36,7 @@ uv pip install opensandbox google-adk
 uv run python examples/google-adk/main.py
 ```
 
-The script uses ADK to create an agent with OpenSandbox tools (`write_file`,
-`read_file`, `run_in_sandbox`). It runs a few prompts, prints tool events, and
-cleans up the sandbox.
+The script uses ADK to create an agent with OpenSandbox tools (`write_file`, `read_file`, `run_in_sandbox`). It runs a few prompts, prints tool events, and cleans up the sandbox.
 
 ## Environment Variables
 

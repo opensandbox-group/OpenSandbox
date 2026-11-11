@@ -41,6 +41,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.0'
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Run core e2e tests
         working-directory: kubernetes
@@ -59,12 +60,18 @@ jobs:
           - variant: direct
             script: scripts/python-k8s-e2e.sh
             e2e_gateway_route_mode: ""
+            # Shipped-default topology leg: the production server default is
+            # execd_run_as_init = false, so one K8s leg stays on the non-init
+            # path while init mode soaks elsewhere.
+            execd_run_as_init: "false"
           - variant: ingress-header
             script: scripts/python-k8s-e2e-ingress.sh
             e2e_gateway_route_mode: ""
+            execd_run_as_init: "true"
           - variant: ingress-uri
             script: scripts/python-k8s-e2e-ingress.sh
             e2e_gateway_route_mode: uri
+            execd_run_as_init: "true"
     env:
       KIND_CLUSTER: opensandbox-e2e
       KIND_K8S_VERSION: v1.30.4
@@ -85,6 +92,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25.0"
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -103,6 +111,7 @@ jobs:
       - name: Run Kubernetes runtime E2E
         env:
           E2E_GATEWAY_ROUTE_MODE: ${{ matrix.e2e_gateway_route_mode }}
+          E2E_EXECD_RUN_AS_INIT: ${{ matrix.execd_run_as_init }}
         run: bash "./${{ matrix.script }}"
 
       - name: Dump kind diagnostics
@@ -162,6 +171,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25.0"
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -224,6 +234,14 @@ jobs:
       OPENSANDBOX_E2E_SANDBOX_MEMORY: 512Mi
       E2E_TEST_SUITE: pool
       E2E_GATEWAY_ROUTE_MODE: ""
+      # Catch event-loop cross-thread misuse in the pool warmup loop.
+      PYTHONASYNCIODEBUG: "1"
+      # Lifecycle-stress test round count (tests/python POOL_STRESS_ROUNDS).
+      # Keep this within what a single-node Kind on a 4-core runner can
+      # sustain: higher round counts saturate the node with Pending sandbox
+      # pods, and every failed create blocks the server for 180s
+      # (POD_READY_TIMEOUT), cascading into recovery-assertion timeouts.
+      POOL_STRESS_ROUNDS: "3"
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -237,6 +255,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25.0"
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
         run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -287,6 +306,143 @@ jobs:
         if: always()
         run: |
           kind delete cluster --name "${KIND_CLUSTER}" || true
+
+  # Full-stack nightly check for node-agent log collection: controller + server
+  # + node-agent (file sink) deployed on Kind, then a real sandbox created
+  # through the server is used to verify the agent collects the sandbox
+  # container stdout and finalizes the stream after the sandbox is deleted.
+  nodeagent-k8s-log-collection-e2e:
+    name: Node Agent K8s Log Collection E2E
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      KIND_CLUSTER: opensandbox-e2e
+      KIND_K8S_VERSION: v1.30.4
+      KUBECONFIG_PATH: /tmp/opensandbox-kind-kubeconfig
+      KUBECONFIG: /tmp/opensandbox-kind-kubeconfig
+      OPENSANDBOX_E2E_SANDBOX_CPU: 250m
+      OPENSANDBOX_E2E_SANDBOX_MEMORY: 512Mi
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.0"
+          cache-dependency-path: kubernetes/go.sum
+
+      - name: Add Go bin to PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "latest"
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Run node-agent full-stack log collection E2E
+        run: bash scripts/nodeagent-k8s-smoke.sh
+
+      - name: Dump kind diagnostics
+        if: always()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get batchsandboxes -A || true
+          kubectl logs -n opensandbox-system -l app.kubernetes.io/component=node-agent --all-containers --tail=-1 || true
+
+      - name: Clean up Kind cluster
+        if: always()
+        run: |
+          kind delete cluster --name "${KIND_CLUSTER}" || true
+
+  # Full fast-sandbox stack (OSEP-0024 idle-pause profile included);
+  # nightly/dispatch only, KVM runner.
+  fast-sandbox-full-stack:
+    name: Fast Sandbox Full-Stack E2E (KVM)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: kvm
+    timeout-minutes: 180
+    env:
+      # Covers up, both e2e steps, and the failure diagnostics.
+      IDLE_PAUSE: "1"
+      # LegacySlot E2E regression lives here on purpose: the PR integration
+      # lane (fast-sandbox-test.yml) switched to the ResourceAware profile
+      # (OSEP-0026); keep this nightly on the legacy pool shape.
+      POOL_MODE: "legacy"
+    steps:
+      # actions/checkout always executes as the runner user; the script
+      # steps below run as root and leave root-owned files (venv, pycache)
+      # in the workspace, so hand ownership back before every checkout.
+      - name: Reset workspace ownership
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run integration tests (idle-pause profile)
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
+
+      - name: Run native template verify
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
+
+      - name: Run overlaybd template verify
+        # Builds the overlaybd template first; no-op when OCI_STACK=0.
+        timeout-minutes: 90
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
+
+      - name: Run base SDK e2e
+        timeout-minutes: 30
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
+
+      - name: Run idle-pause SDK e2e
+        timeout-minutes: 45
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
+
+      # Collect the env's own failure dump ($WORK/logs/failure-*.txt) plus
+      # live status, BEFORE teardown removes the cluster.
+      - name: Collect failure diagnostics
+        if: failure()
+        run: |
+          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
+          mkdir -p diagnostics
+          sudo cp -a "$work/logs" "$work/run.log" diagnostics/ 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" diagnostics || true
+          sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh status \
+            > diagnostics/live-status.txt 2>&1 || true
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-sandbox-full-stack-diagnostics-${{ github.run_attempt }}
+          path: diagnostics/
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh down
 
   publish-nightly-latest:
     name: Publish latest (${{ matrix.component }} nightly)

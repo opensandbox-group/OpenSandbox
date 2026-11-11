@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,6 +46,10 @@ class ConnectionConfig private constructor(
      * Use sandbox server as proxy for process execd requests.
      * Useful when the client SDK cannot access the created sandbox directly.
      */
+    @Deprecated(
+        "The server-proxied data path is in maintenance mode (security and bug fixes only). " +
+            "Route data-plane traffic through the ingress gateway instead.",
+    )
     val useServerProxy: Boolean = false,
     /** TTL for cached endpoint entries. Default: 10 minutes. */
     val endpointCacheTtl: Duration = Duration.ofSeconds(600),
@@ -207,7 +211,7 @@ class ConnectionConfig private constructor(
         private const val ENV_DOMAIN = "OPEN_SANDBOX_DOMAIN"
         internal const val ENV_DISABLE_METRICS = "OPENSANDBOX_DISABLE_METRICS"
 
-        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.0.19"
+        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.2.0"
         private const val API_VERSION = "v1"
 
         @JvmStatic
@@ -307,6 +311,10 @@ class ConnectionConfig private constructor(
          * Use sandbox server as proxy for process execd requests.
          * Useful when the client SDK cannot access the created sandbox directly.
          */
+        @Deprecated(
+            "The server-proxied data path is in maintenance mode (security and bug fixes only). " +
+                "Route data-plane traffic through the ingress gateway instead.",
+        )
         fun useServerProxy(useServerProxy: Boolean): Builder {
             this.useServerProxy = useServerProxy
             return this

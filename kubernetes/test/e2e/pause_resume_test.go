@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -970,15 +970,20 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			imageDigest := strings.TrimSpace(digestOutput)
 			Expect(imageDigest).NotTo(BeEmpty())
-			statusPatch := fmt.Sprintf(
-				`{"status":{"containers":[{"containerName":"sandbox-container","imageUri":"invalid.registry/unreachable/image:nonexistent","imageDigest":%q}]}}`,
-				imageDigest,
-			)
-			cmd = exec.Command("kubectl", "patch", "sandboxsnapshot", sandboxName+"-pause",
-				"-n", pauseResumeNamespace, "--type=merge", "--subresource=status",
-				"-p", statusPatch)
-			_, err = utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred())
+			// `kubectl patch --subresource=status` requires kubectl v1.24+, so write
+			// the tampered status through the raw status subresource endpoint
+			// instead; that keeps the suite runnable against older kubectl (e.g.
+			// v1.22) with identical semantics: a JSON merge patch of
+			// status.containers replaces the whole array.
+			tamperedContainers := []interface{}{
+				map[string]interface{}{
+					"containerName": "sandbox-container",
+					"imageUri":      "invalid.registry/unreachable/image:nonexistent",
+					"imageDigest":   imageDigest,
+				},
+			}
+			Expect(patchSandboxSnapshotStatusContainers(
+				pauseResumeNamespace, sandboxName+"-pause", tamperedContainers)).To(Succeed())
 
 			By("triggering resume with tampered snapshot")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
@@ -1036,6 +1041,58 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 
 	})
 })
+
+// patchSandboxSnapshotStatusContainers replaces status.containers of the named
+// SandboxSnapshot through the raw status subresource endpoint. It is the
+// equivalent of `kubectl patch --type=merge --subresource=status` for kubectl
+// versions older than v1.24, where the --subresource flag does not exist: read
+// the current object, swap in the new containers array, and PUT it back with
+// `kubectl replace --raw`, which has been available since well before v1.22.
+// The read-modify-write round trip is retried so that a concurrent controller
+// status update (409 Conflict) between the GET and the PUT cannot flake the
+// caller.
+func patchSandboxSnapshotStatusContainers(namespace, name string, containers []interface{}) error {
+	rawPath := fmt.Sprintf("/apis/sandbox.opensandbox.io/v1alpha1/namespaces/%s/sandboxsnapshots/%s/status",
+		namespace, name)
+	bodyFile, err := os.CreateTemp("", "sandboxsnapshot-status-*.json")
+	if err != nil {
+		return fmt.Errorf("create temp file for the status body: %w", err)
+	}
+	defer os.Remove(bodyFile.Name())
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		current, err := utils.Run(exec.Command("kubectl", "get", "sandboxsnapshot", name,
+			"-n", namespace, "-o", "json"))
+		if err != nil {
+			return fmt.Errorf("get sandboxsnapshot %s: %w", name, err)
+		}
+		var obj map[string]interface{}
+		if err := json.Unmarshal([]byte(current), &obj); err != nil {
+			return fmt.Errorf("parse sandboxsnapshot %s: %w", name, err)
+		}
+		status, ok := obj["status"].(map[string]interface{})
+		if !ok {
+			status = map[string]interface{}{}
+			obj["status"] = status
+		}
+		status["containers"] = containers
+		updated, err := json.Marshal(obj)
+		if err != nil {
+			return fmt.Errorf("serialize sandboxsnapshot %s: %w", name, err)
+		}
+		if err := os.WriteFile(bodyFile.Name(), updated, 0600); err != nil {
+			return fmt.Errorf("write the status body: %w", err)
+		}
+		if _, err := utils.Run(exec.Command("kubectl", "replace", "--raw", rawPath,
+			"-f", bodyFile.Name())); err != nil {
+			lastErr = fmt.Errorf("put the status of sandboxsnapshot %s: %w", name, err)
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
 
 // createHtpasswdSecret creates the htpasswd secret for registry authentication.
 // Docker Registry v2 only supports bcrypt hashes, not MD5 ($apr1$) or SHA1.

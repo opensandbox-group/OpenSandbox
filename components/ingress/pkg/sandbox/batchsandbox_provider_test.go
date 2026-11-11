@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -346,8 +346,9 @@ func TestBatchSandboxProvider_StartCacheSyncFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to sync")
 }
 
-// TestBatchSandboxProvider_GetEndpointNonNotFoundError tests non-IsNotFound K8s errors
-func TestBatchSandboxProvider_GetEndpointNonNotFoundError(t *testing.T) {
+// TestBatchSandboxProvider_GetEndpointFromInformerCache verifies a Ready
+// sandbox surfaces its endpoint annotation through the informer-backed lister.
+func TestBatchSandboxProvider_GetEndpointFromInformerCache(t *testing.T) {
 	namespace := "test-namespace"
 
 	// Create a sandbox with Ready status but missing endpoint annotation

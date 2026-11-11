@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.isolated import (
     BindMount,
     EnvPassthroughSpec,
+    IsolatedOverlaySpec,
     IsolatedWorkspaceSpec,
 )
 from opensandbox.sync.adapters.isolated_adapter import IsolatedSessionsAdapterSync
@@ -38,6 +39,10 @@ _FULL_STATE_PAYLOAD = {
     "idle_remaining_seconds": 30,
     "profile": "strict",
     "workspace": {"path": "/workspace", "mode": "rw"},
+    "overlays": [
+        {"path": "/", "mode": "overlay"},
+        {"path": "/workspace", "mode": "overlay", "persist": True},
+    ],
     "extra_writable": ["/tmp", "/var/tmp"],
     "binds": [{"source": "/host/a", "dest": "/sbx/a", "readonly": True}],
     "share_net": False,
@@ -108,6 +113,12 @@ async def test_attach_populates_full_info_when_execd_returns_all_fields(
     assert isinstance(info.workspace, IsolatedWorkspaceSpec)
     assert info.workspace.path == "/workspace"
     assert info.workspace.mode == "rw"
+    assert info.overlays is not None
+    assert isinstance(info.overlays[0], IsolatedOverlaySpec)
+    assert info.overlays[0].path == "/"
+    assert info.overlays[0].mode == "overlay"
+    assert info.overlays[1].path == "/workspace"
+    assert info.overlays[1].persist is True
     assert info.extra_writable == ["/tmp", "/var/tmp"]
     assert info.binds is not None
     assert len(info.binds) == 1

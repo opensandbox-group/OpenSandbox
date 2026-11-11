@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -200,6 +200,12 @@ public class SandboxCreateFromTemplateOptions
     /// Prefer namespaced keys (e.g. "storage.id").
     /// </summary>
     public IReadOnlyDictionary<string, string>? Extensions { get; set; }
+
+    /// <summary>
+    /// Gets or sets the optional idle behavior (OSEP-0024, fast-sandbox only).
+    /// Control-plane state, not workload shape, so template mode accepts it.
+    /// </summary>
+    public IdlePolicy? IdlePolicy { get; set; }
 
     /// <summary>
     /// Gets or sets whether to skip health checks during creation.

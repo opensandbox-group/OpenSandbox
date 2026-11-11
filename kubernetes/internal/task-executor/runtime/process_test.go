@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -591,6 +591,48 @@ func TestProcessExecutor_StopSkipsStalePIDWhenExitMarkerExists(t *testing.T) {
 		t.Errorf("unrelated process referenced by stale PID was terminated: %v", waitErr)
 	case <-time.After(200 * time.Millisecond):
 	}
+}
+
+// writeTaskFiles fakes the shim's pid and exit files for a task.
+func writeTaskFiles(t *testing.T, rootDir, name string, pid int, exitData string) {
+	t.Helper()
+	taskDir, err := utils.SafeJoin(rootDir, name)
+	assert.NoError(t, err)
+	assert.NoError(t, os.MkdirAll(taskDir, 0755))
+	assert.NoError(t, os.WriteFile(filepath.Join(taskDir, pidFile), []byte(strconv.Itoa(pid)), 0644))
+	assert.NoError(t, os.WriteFile(filepath.Join(taskDir, exitFile), []byte(exitData), 0644))
+}
+
+func TestProcessExecutor_InspectEmptyExitFileWhileRunning(t *testing.T) {
+	executor, _ := setupTestExecutor(t)
+	pExecutor := executor.(*processExecutor)
+
+	// The shim has created the exit file but not written the code yet.
+	task := &types.Task{Name: "exit-file-being-written"}
+	writeTaskFiles(t, pExecutor.rootDir, task.Name, os.Getpid(), "")
+
+	status, err := executor.Inspect(context.Background(), task)
+	assert.NoError(t, err)
+	assert.Equal(t, types.TaskStateRunning, status.State)
+}
+
+func TestProcessExecutor_InspectEmptyExitFileAfterCrash(t *testing.T) {
+	skipIfBinaryMissing(t, "true")
+
+	executor, _ := setupTestExecutor(t)
+	pExecutor := executor.(*processExecutor)
+
+	exited := exec.Command("true")
+	assert.NoError(t, exited.Run())
+
+	// The shim was killed between creating the exit file and writing to it.
+	task := &types.Task{Name: "exit-file-left-empty"}
+	writeTaskFiles(t, pExecutor.rootDir, task.Name, exited.Process.Pid, "")
+
+	status, err := executor.Inspect(context.Background(), task)
+	assert.NoError(t, err)
+	assert.Equal(t, types.TaskStateFailed, status.State)
+	assert.Equal(t, "ProcessCrashed", status.SubStatuses[0].Reason)
 }
 
 func TestProcessExecutor_LifecycleExecModeLocal(t *testing.T) {

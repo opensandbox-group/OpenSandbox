@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -109,6 +109,83 @@ func TestRunCommand_CancelKillsChildren(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("child pid %d still alive 2s after cancel — process leak", childPid)
+}
+
+// TestRunBackgroundCommand_ExitDoesNotKillProcessGroup verifies that a
+// background command exiting normally does not SIGKILL its process group,
+// matching the foreground path. A child started with `&` must keep running.
+func TestRunBackgroundCommand_ExitDoesNotKillProcessGroup(t *testing.T) {
+	requireBash(t)
+
+	marker := filepath.Join(t.TempDir(), "child.done")
+
+	c := NewController("", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var session string
+	req := &ExecuteCodeRequest{
+		// The leader exits right away; the child writes the marker once
+		// the leader is gone.
+		Code: `(sleep 1; echo ok > "` + marker + `") >/dev/null 2>&1 &`,
+		Cwd:  t.TempDir(),
+		Hooks: ExecuteResultHook{
+			OnExecuteInit: func(s string) { session = s },
+		},
+	}
+	req.SetDefaultHooks()
+
+	require.NoError(t, c.runBackgroundCommand(ctx, cancel, req))
+	require.Eventually(t, func() bool {
+		status, err := c.GetCommandStatus(session)
+		return err == nil && !status.Running
+	}, 5*time.Second, 10*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, 5*time.Second, 50*time.Millisecond, "child was killed when the background command exited")
+}
+
+// TestRunBackgroundCommand_CancelKillsChildren verifies that cancelling a
+// running background command (e.g. timeout) still kills its whole group.
+func TestRunBackgroundCommand_CancelKillsChildren(t *testing.T) {
+	requireBash(t)
+
+	dir := t.TempDir()
+	started := filepath.Join(dir, "child.started")
+	marker := filepath.Join(dir, "child.done")
+
+	c := NewController("", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var session string
+	req := &ExecuteCodeRequest{
+		// The leader waits, so the command is still running when cancelled.
+		Code: `(touch "` + started + `"; sleep 1; echo ok > "` + marker + `") >/dev/null 2>&1 & wait`,
+		Cwd:  t.TempDir(),
+		Hooks: ExecuteResultHook{
+			OnExecuteInit: func(s string) { session = s },
+		},
+	}
+	req.SetDefaultHooks()
+
+	require.NoError(t, c.runBackgroundCommand(ctx, cancel, req))
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	}, 5*time.Second, 10*time.Millisecond, "child did not start")
+	cancel()
+	require.Eventually(t, func() bool {
+		status, err := c.GetCommandStatus(session)
+		return err == nil && !status.Running
+	}, 5*time.Second, 10*time.Millisecond)
+
+	// Give a surviving child time to write the marker.
+	time.Sleep(2 * time.Second)
+	_, err := os.Stat(marker)
+	require.True(t, os.IsNotExist(err), "child survived cancellation of the background command")
 }
 
 // TestInterrupt_AfterFinished_ReturnsError verifies that an Interrupt

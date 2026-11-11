@@ -1,0 +1,20 @@
+{{- if .Values.controller.podRecovery }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: feature-flags
+  namespace: {{ include "opensandbox.namespace" . }}
+  labels:
+    {{- include "opensandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller-manager
+data:
+  {{- with .Values.controller.podRecovery.stuckThreshold }}
+  pod-recovery-stuck-threshold: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.controller.podRecovery.maxAttempts }}
+  pod-recovery-max-attempts: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.controller.podRecovery.admissionReasons }}
+  pod-recovery-admission-reasons: {{ . | quote }}
+  {{- end }}
+{{- end }}

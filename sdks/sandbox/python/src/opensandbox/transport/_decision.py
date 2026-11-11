@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -98,6 +98,34 @@ def should_retry(
     if not body_replayable:
         return False
     return outcome.status_code in policy.retryable_statuses_for(method)
+
+
+def should_retry_wake(
+    *,
+    wake_attempts_used: int,
+    policy: RetryPolicy,
+    elapsed: timedelta,
+    retry_after: timedelta,
+) -> bool:
+    """
+    Decide whether to retry a gateway wake-timeout response (OSEP-0024).
+
+    ``wake_attempts_used`` counts the marked ``503`` responses received so
+    far, including the current one. ``elapsed`` is the wall-clock time
+    since the logical request started (waits, retries, and request time
+    all count against ``wake_overall_deadline``); ``retry_after`` is the
+    wait the gateway asked for. A next wait that does not fit the
+    remaining budget ends the wake retry — the in-flight server-side
+    resume is never canceled, so a later attempt typically finds the
+    sandbox ``Running``.
+    """
+    if wake_attempts_used >= policy.wake_max_attempts:
+        return False
+    if policy.wake_overall_deadline is not None:
+        remaining = policy.wake_overall_deadline - elapsed
+        if retry_after > remaining:
+            return False
+    return True
 
 
 def compute_backoff(

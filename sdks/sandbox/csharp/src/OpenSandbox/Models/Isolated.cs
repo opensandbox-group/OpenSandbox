@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,18 @@ public record IsolatedWorkspaceSpec(
     [property: JsonPropertyName("mode")] string? Mode = null
 );
 
+/// <summary>
+/// One overlay mount. Overlay mode mounts a copy-on-write view:
+/// Persist=true (default) uses a host upper directory, Persist=false an
+/// ephemeral tmpfs discarded with the session. rw and ro bind directly;
+/// Persist must be left unset for them.
+/// </summary>
+public record IsolatedOverlaySpec(
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("mode")] string? Mode = null,
+    [property: JsonPropertyName("persist")] bool? Persist = null
+);
+
 public record EnvPassthroughSpec(
     [property: JsonPropertyName("mode")] string? Mode = "deny",
     [property: JsonPropertyName("keys")] List<string>? Keys = null
@@ -33,7 +45,9 @@ public record BindMount(
 );
 
 public record CreateIsolatedSessionRequest(
-    [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec Workspace,
+    // Legacy sugar; prepended to Overlays. At least one is required.
+    // Overlays is appended last so positional call sites keep compiling.
+    [property: JsonPropertyName("workspace")] IsolatedWorkspaceSpec? Workspace = null,
     [property: JsonPropertyName("profile")] string? Profile = null,
     [property: JsonPropertyName("extra_writable")] List<string>? ExtraWritable = null,
     [property: JsonPropertyName("binds")] List<BindMount>? Binds = null,
@@ -42,7 +56,8 @@ public record CreateIsolatedSessionRequest(
     [property: JsonPropertyName("uid")] long? Uid = null,
     [property: JsonPropertyName("gid")] long? Gid = null,
     [property: JsonPropertyName("uid_mode")] string? UidMode = null,
-    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
+    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null
 );
 
 public record IsolatedSessionInfo(
@@ -58,7 +73,8 @@ public record IsolatedSessionInfo(
     [property: JsonPropertyName("uid")] long? Uid = null,
     [property: JsonPropertyName("gid")] long? Gid = null,
     [property: JsonPropertyName("uid_mode")] string? UidMode = null,
-    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
+    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null
 );
 
 public record IsolatedSessionState(
@@ -76,7 +92,8 @@ public record IsolatedSessionState(
     [property: JsonPropertyName("uid")] long? Uid = null,
     [property: JsonPropertyName("gid")] long? Gid = null,
     [property: JsonPropertyName("uid_mode")] string? UidMode = null,
-    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null
+    [property: JsonPropertyName("idle_timeout_seconds")] int? IdleTimeoutSeconds = null,
+    [property: JsonPropertyName("overlays")] List<IsolatedOverlaySpec>? Overlays = null
 );
 
 public record IsolatedSessionSummary(

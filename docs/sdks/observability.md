@@ -5,31 +5,20 @@ description: Configure SDK creation metrics and OpenTelemetry pool warmup traces
 
 # SDK Observability
 
-Use creation metrics to track sandbox startup latency and pool warmup traces to
-locate slow phases. They have separate controls and export paths:
+Use creation metrics to track sandbox startup latency and pool warmup traces to locate slow phases. They have separate controls and export paths:
 
 | Signal | Use it to | SDK support | Default | Export path |
 | --- | --- | --- | --- | --- |
 | [Pool warmup traces](#pool-warmup-tracing) | Inspect creation, readiness, preparation, renewal, and idle publication | Python, JavaScript/TypeScript, Kotlin/Java | Off; enable tracing in the connection config | Application-owned OpenTelemetry provider and exporter |
 | [Creation metrics](#creation-metrics) | Measure sandbox create latency and success | All five SDKs | On; disable through config or `OPENSANDBOX_DISABLE_METRICS=1` | SDK posts to the lifecycle server, which exports metrics when `[otel]` is enabled |
 
-OpenTelemetry (OTel) provides the tracing and metrics infrastructure; enabling
-tracing does not enable or disable creation metrics. For remote sandbox logs and
-events, see the [diagnostics API](/api/#diagnostics).
+OpenTelemetry (OTel) provides the tracing and metrics infrastructure; enabling tracing does not enable or disable creation metrics. For remote sandbox logs and events, see the [diagnostics API](/api/#diagnostics).
 
 ## Pool warmup tracing
 
-The Python, JavaScript/TypeScript, and Kotlin/Java SDKs can emit
-[OpenTelemetry](https://opentelemetry.io/) traces for the client-side
-`SandboxPool` warmup path. Each warmup task becomes one trace that covers the
-full lifecycle — from the moment the reconcile loop submits the task until the
-warmed sandbox is committed to the idle buffer — with per-phase spans so you
-can find the actual warmup bottleneck.
+The Python, JavaScript/TypeScript, and Kotlin/Java SDKs can emit [OpenTelemetry](https://opentelemetry.io/) traces for the client-side `SandboxPool` warmup path. Each warmup task becomes one trace that covers the full lifecycle — from the moment the reconcile loop submits the task until the warmed sandbox is committed to the idle buffer — with per-phase spans so you can find the actual warmup bottleneck.
 
-Tracing is **opt-in** (`enable_tracing=True` in Python or
-`enableTracing: true` in JavaScript, or `.enableTracing(true)` on the JVM) and **best-effort**: without an OpenTelemetry
-SDK + exporter in the application, all span calls are no-ops and nothing is
-exported. Tracing never affects pool behavior.
+Tracing is **opt-in** (`enable_tracing=True` in Python or `enableTracing: true` in JavaScript, or `.enableTracing(true)` on the JVM) and **best-effort**: without an OpenTelemetry SDK + exporter in the application, all span calls are no-ops and nothing is exported. Tracing never affects pool behavior.
 
 ### SDK support
 
@@ -40,24 +29,19 @@ exported. Tracing never affects pool behavior.
 | Kotlin/Java | Phase spans, sandbox identity, terminal classification, readiness counters, SLF4J MDC |
 | Go / C# | No built-in pool warmup tracing |
 
-This guide describes the default branch. Check your installed SDK's
-`ConnectionConfig` for `enable_tracing` / `enableTracing` before enabling it.
-Tracing defaults to **off**, independently of [create-latency telemetry](/sdks/observability#creation-metrics),
-which defaults to **on**.
+This guide describes the default branch. Check your installed SDK's `ConnectionConfig` for `enable_tracing` / `enableTracing` before enabling it. Tracing defaults to **off**, independently of [create-latency telemetry](/sdks/observability#creation-metrics), which defaults to **on**.
 
 ### Enabling tracing
 
 #### 1. Add an OpenTelemetry SDK + exporter to your application
 
-These SDKs depend only on the OpenTelemetry API (no-op by default). To actually
-export traces you bring your own SDK and exporter. For Python:
+These SDKs depend only on the OpenTelemetry API (no-op by default). To actually export traces you bring your own SDK and exporter. For Python:
 
 ```bash
 pip install opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 ```
 
-For Node.js, install an OpenTelemetry SDK and exporter compatible with your
-application. See the [OpenTelemetry Node.js setup](https://opentelemetry.io/docs/languages/js/getting-started/nodejs/).
+For Node.js, install an OpenTelemetry SDK and exporter compatible with your application. See the [OpenTelemetry Node.js setup](https://opentelemetry.io/docs/languages/js/getting-started/nodejs/).
 
 For Kotlin/Java:
 
@@ -71,11 +55,7 @@ dependencies {
 
 #### 2. Configure the global OpenTelemetry provider
 
-Warmup spans use the language's global provider. Configure it at application
-startup, before creating or starting the pool. In JavaScript, register the provider,
-async context manager, and W3C propagator with the global `@opentelemetry/api`
-instance (a Node.js OpenTelemetry SDK can configure these together). For Python, use `opentelemetry.trace.set_tracer_provider(...)`; for
-Kotlin/Java, configure `GlobalOpenTelemetry`, for example:
+Warmup spans use the language's global provider. Configure it at application startup, before creating or starting the pool. In JavaScript, register the provider, async context manager, and W3C propagator with the global `@opentelemetry/api` instance (a Node.js OpenTelemetry SDK can configure these together). For Python, use `opentelemetry.trace.set_tracer_provider(...)`; for Kotlin/Java, configure `GlobalOpenTelemetry`, for example:
 
 ```java
 import io.opentelemetry.api.GlobalOpenTelemetry;
@@ -99,10 +79,7 @@ GlobalOpenTelemetry.set(sdk);
 ```
 
 ::: tip Propagators
-`OpenTelemetrySdk.builder()` defaults to **noop propagators**. If you want the
-SDK to inject the W3C `traceparent` header into lifecycle requests (so the
-lifecycle server can join the same trace once it supports tracing), configure
-W3C propagation explicitly:
+`OpenTelemetrySdk.builder()` defaults to **noop propagators**. If you want the SDK to inject the W3C `traceparent` header into lifecycle requests (so the lifecycle server can join the same trace once it supports tracing), configure W3C propagation explicitly:
 
 ```java
 .setPropagators(ContextPropagators.create(W3CTraceContextPropagator.getInstance()))
@@ -110,9 +87,7 @@ W3C propagation explicitly:
 :::
 
 ::: tip Sampling
-To keep trace volume bounded, use a sampling strategy such as
-`parentbased_traceidratio(0.1)` on the `SdkTracerProvider`. Trace-id-ratio
-sampling keeps client and server spans consistent for the same warmup.
+To keep trace volume bounded, use a sampling strategy such as `parentbased_traceidratio(0.1)` on the `SdkTracerProvider`. Trace-id-ratio sampling keeps client and server spans consistent for the same warmup.
 :::
 
 #### 3. Turn tracing on for the pool
@@ -150,16 +125,11 @@ SandboxPool pool = SandboxPool.builder()
     .build();
 ```
 
-Pass this connection config to the pool. The SDK flag defaults to `false`;
-OpenTelemetry exporter and sampling configuration remain application-owned.
-Shut down the pool before flushing and closing the application tracer provider.
+Pass this connection config to the pool. The SDK flag defaults to `false`; OpenTelemetry exporter and sampling configuration remain application-owned. Shut down the pool before flushing and closing the application tracer provider.
 
 ### What is traced
 
-Each warmup task produces **one trace** with a root span and six possible phase
-types (siblings under the root, so each phase duration stands alone for
-comparison). Each readiness stage is summarized by one span across all of its
-delayed attempts; optional stages are absent when they are not configured:
+Each warmup task produces **one trace** with a root span and six possible phase types (siblings under the root, so each phase duration stands alone for comparison). Each readiness stage is summarized by one span across all of its delayed attempts; optional stages are absent when they are not configured:
 
 | Span name | Covers |
 |-----------|--------|
@@ -173,11 +143,7 @@ delayed attempts; optional stages are absent when they are not configured:
 
 #### Attributes by language
 
-All three SDKs emit `pool.name`, `pool.owner`, `pool.run.generation`, and
-`pool.leader.epoch`. JavaScript currently adds `warmup.result` (`success` or
-`failure`) and `warmup.error.type`; it does not emit the sandbox identity,
-terminal-stage classification, or readiness-attempt counters below. Its success
-flag alone does not prove that the sandbox was committed to idle.
+All three SDKs emit `pool.name`, `pool.owner`, `pool.run.generation`, and `pool.leader.epoch`. JavaScript currently adds `warmup.result` (`success` or `failure`) and `warmup.error.type`; it does not emit the sandbox identity, terminal-stage classification, or readiness-attempt counters below. Its success flag alone does not prove that the sandbox was committed to idle.
 
 The following richer root attributes apply to **Python and Kotlin/Java**:
 
@@ -195,33 +161,22 @@ The following richer root attributes apply to **Python and Kotlin/Java**:
 | `warmup.error.category` | Stable error category such as `rate_limit`, `http_4xx`, `http_5xx`, `timeout`, `connection`, `callback`, or `state_store` |
 | `warmup.error.type` | Exception class when an error is available |
 
-Python/JVM readiness summary spans additionally expose
-`warmup.health.attempt_count`, `warmup.health.false_count`,
-`warmup.health.exception_count`, and `warmup.scheduler.delay_ms`. Failures are
-recorded with `recordException` on the affected phase span. The root span keeps
-the classified terminal stage, result, reason, and OpenTelemetry error status
-without duplicating the phase exception event.
+Python/JVM readiness summary spans additionally expose `warmup.health.attempt_count`, `warmup.health.false_count`, `warmup.health.exception_count`, and `warmup.scheduler.delay_ms`. Failures are recorded with `recordException` on the affected phase span. The root span keeps the classified terminal stage, result, reason, and OpenTelemetry error status without duplicating the phase exception event.
 
 ::: warning Development snapshot attribute migration
-Earlier development snapshots used the unnamespaced `result` and
-`drop.reason` attributes. The supported schema uses `warmup.result` and
-`warmup.reason` consistently across traces and structured logs. The old keys
-are not emitted in parallel; update any dashboards created against a
-development snapshot.
+Earlier development snapshots used the unnamespaced `result` and `drop.reason` attributes. The supported schema uses `warmup.result` and `warmup.reason` consistently across traces and structured logs. The old keys are not emitted in parallel; update any dashboards created against a development snapshot.
 :::
 
 ### Correlating logs to traces
 
-In Kotlin/Java, while a warmup trace is in progress, the pool publishes trace IDs to the
-SLF4J [MDC](https://www.slf4j.org/api/org/slf4j/MDC.html):
+In Kotlin/Java, while a warmup trace is in progress, the pool publishes trace IDs to the SLF4J [MDC](https://www.slf4j.org/api/org/slf4j/MDC.html):
 
 | MDC key | Value |
 |---------|-------|
 | `trace_id` | Current trace id |
 | `span_id` | Current span id |
 
-MDC requires a real SLF4J provider (logback, log4j2, ...). Add the keys to
-your log pattern once, and every pool log line carries the trace context:
+MDC requires a real SLF4J provider (logback, log4j2, ...). Add the keys to your log pattern once, and every pool log line carries the trace context:
 
 ```xml
 <pattern>%d %-5level [%thread] %logger{36} trace_id=%X{trace_id} span_id=%X{span_id} - %msg%n</pattern>
@@ -229,26 +184,15 @@ your log pattern once, and every pool log line carries the trace context:
 
 ### Querying traces
 
-The trace id is random, so a warmup trace cannot be looked up "by pool name"
-directly. The reliable paths are:
+The trace id is random, so a warmup trace cannot be looked up "by pool name" directly. The reliable paths are:
 
-1. **JVM log correlation.** With MDC configured, the pool logs `pool_name` and
-   `sandbox_id` on its warmup lines (e.g. `Pool warmup sandbox entered idle`).
-   Search your logs for a `sandbox_id` — the matching log lines carry
-   `trace_id`, which you can open directly in your trace backend.
-2. **Attribute query in the trace backend.** Filter spans by time window and
-   attribute, e.g. TraceQL `{ span.pool.name = "demo-pool" }` (Grafana Tempo),
-   or Jaeger tag search on `pool.name=...`. Backends that derive metrics from
-   spans (Tempo metrics, Datadog span analytics) let you look at
-   `pool.warmup` duration percentiles per `pool.name` first, then drill into
-   slow traces.
-3. **Trace-id-ratio sampling.** With sampled traces, `trace_id` in logs and
-   the backend are consistent for the same warmup.
+1. **JVM log correlation.** With MDC configured, the pool logs `pool_name` and `sandbox_id` on its warmup lines (e.g. `Pool warmup sandbox entered idle`). Search your logs for a `sandbox_id` — the matching log lines carry `trace_id`, which you can open directly in your trace backend.
+2. **Attribute query in the trace backend.** Filter spans by time window and attribute, e.g. TraceQL `{ span.pool.name = "demo-pool" }` (Grafana Tempo), or Jaeger tag search on `pool.name=...`. Backends that derive metrics from spans (Tempo metrics, Datadog span analytics) let you look at `pool.warmup` duration percentiles per `pool.name` first, then drill into slow traces.
+3. **Trace-id-ratio sampling.** With sampled traces, `trace_id` in logs and the backend are consistent for the same warmup.
 
 #### Bottleneck drill-down
 
-The readiness counters and backdated queue timing below apply to Python/JVM.
-For JavaScript, compare phase durations and the four pool identity attributes.
+The readiness counters and backdated queue timing below apply to Python/JVM. For JavaScript, compare phase durations and the four pool identity attributes.
 
 ```
 pool.warmup root duration (p50/p95/p99) per pool.name
@@ -269,8 +213,7 @@ pool.warmup root duration (p50/p95/p99) per pool.name
 
 ## Creation metrics
 
-OpenSandbox SDKs report sandbox creation latency to the configured lifecycle server
-by default. This reporting is separate from opt-in [pool warmup tracing](/sdks/observability#pool-warmup-tracing). Reporting is best-effort: failures never affect `Sandbox.create`, and the payload contains no user content.
+OpenSandbox SDKs report sandbox creation latency to the configured lifecycle server by default. This reporting is separate from opt-in [pool warmup tracing](/sdks/observability#pool-warmup-tracing). Reporting is best-effort: failures never affect `Sandbox.create`, and the payload contains no user content.
 
 ### Requirements
 
@@ -287,8 +230,7 @@ The `POST /v1/metrics/events` endpoint and the SDK reporters described below req
 
 #### Version skew
 
-Reporting is fire-and-forget in every SDK: the POST runs on a background task/thread, and reporting failures are ignored. Debug logging varies by SDK; JavaScript, for example,
-does not log these failures. This means you can upgrade the SDK and the server independently:
+Reporting is fire-and-forget in every SDK: the POST runs on a background task/thread, and reporting failures are ignored. Debug logging varies by SDK; JavaScript, for example, does not log these failures. This means you can upgrade the SDK and the server independently:
 
 - **New SDK, old server (`< 0.2.2`)**: the server returns `404` for `/v1/metrics/events`. The SDK ignores the response. `Sandbox.create` behavior is unchanged and no user-visible error is raised. A debug message may be emitted depending on the SDK.
 - **Old SDK, new server**: the SDK does not emit events. The server histogram simply records nothing for that client.
@@ -324,16 +266,9 @@ The server accepts the event with `204` and, when `[otel]` is enabled, records a
 | Kotlin | After standalone `Sandbox.builder()...build()` or a pool direct-create fallback completes or fails |
 
 ::: info Kotlin staged pool warmup
-Kotlin staged warmup deliberately does **not** emit the legacy
-`sandbox.create` event. Its create phase returns before readiness polling,
-optional preparation, post-prepare validation, renewal, and idle commit, so
-reporting that partial phase as the existing end-to-end create histogram would
-give the metric a different meaning from standalone create.
+Kotlin staged warmup deliberately does **not** emit the legacy `sandbox.create` event. Its create phase returns before readiness polling, optional preparation, post-prepare validation, renewal, and idle commit, so reporting that partial phase as the existing end-to-end create histogram would give the metric a different meaning from standalone create.
 
-This exclusion applies only to staged warmup. Standalone create and pool
-direct-create fallback keep reporting normally. Use the pool's structured
-summary logs and optional [warmup tracing](/sdks/observability#pool-warmup-tracing) to observe the
-complete staged-warmup lifecycle.
+This exclusion applies only to staged warmup. Standalone create and pool direct-create fallback keep reporting normally. Use the pool's structured summary logs and optional [warmup tracing](/sdks/observability#pool-warmup-tracing) to observe the complete staged-warmup lifecycle.
 :::
 
 ### How to disable
@@ -405,5 +340,4 @@ val sandbox = Sandbox.builder()
 
 :::
 
-These requests go to your configured lifecycle server. Use opt-out when you do
-not want this additional traffic or create-latency data recorded there.
+These requests go to your configured lifecycle server. Use opt-out when you do not want this additional traffic or create-latency data recorded there.

@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,32 @@ from opensandbox_server.api.schema import (
     PaginationInfo,
     Sandbox,
 )
+from opensandbox_server.services.constants import SANDBOX_ID_LABEL
 from opensandbox_server.services.helpers import matches_filter
+from opensandbox_server.services.validators import (
+    is_valid_label_key,
+    is_valid_label_value,
+)
+
+
+def build_sandbox_label_selector(metadata: dict[str, str] | None = None) -> str:
+    """Build a Kubernetes label selector query appending valid metadata equality terms."""
+    terms = [SANDBOX_ID_LABEL]
+    if metadata:
+        for key in sorted(metadata.keys()):
+            val = metadata[key]
+            if (
+                isinstance(key, str)
+                and isinstance(val, str)
+                and is_valid_label_key(key)
+                and is_valid_label_value(val)
+                and val != ""
+            ):
+                if key == SANDBOX_ID_LABEL:
+                    terms[0] = f"{key}={val}"
+                else:
+                    terms.append(f"{key}={val}")
+    return ",".join(terms)
 
 
 def _build_list_sandboxes_response(

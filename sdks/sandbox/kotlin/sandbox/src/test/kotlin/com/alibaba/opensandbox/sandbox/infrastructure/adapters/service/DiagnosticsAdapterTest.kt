@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,6 +50,23 @@ class DiagnosticsAdapterTest {
     fun tearDown() {
         mockWebServer.shutdown()
         httpClientProvider.close()
+    }
+
+    @Test
+    fun `getContext parses backend identifiers without state`() {
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"sandboxId":"sbx-1","backendType":"kubernetes","backendIdentifiers":{"namespace":"tenant-ns"}}""",
+            ),
+        )
+        val result = diagnosticsAdapter.getContext("sbx-1")
+        val request = mockWebServer.takeRequest()
+        assertEquals("/v1/sandboxes/sbx-1/diagnostics/context", request.path)
+        assertEquals("test-api-key", request.getHeader("OPEN-SANDBOX-API-KEY"))
+        assertEquals("application/json", request.getHeader("Accept"))
+        assertEquals("kubernetes", result.backendType)
+        assertEquals(mapOf("namespace" to "tenant-ns"), result.backendIdentifiers)
+        assertEquals(null, result.state)
     }
 
     @Test

@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,15 +49,27 @@ fastSandbox:
     # -- Additional annotations to add to CRDs (merged with resource-policy when keep is true)
     annotations: {}
   namespaces:
+    # -- Specifies whether the shared system namespace (the
+    # fastSandbox.namespaces.system namespace, default opensandbox-system)
+    # should be created. The fast-sandbox control-plane ServiceAccounts
+    # installed by this chart live there, and the controller/server
+    # releases use it as their release namespace, so creating it here lets
+    # the documented per-component install order work without a preceding
+    # `kubectl create namespace` or --create-namespace. Set false when the
+    # namespace is managed externally and already exists: a pre-existing
+    # namespace without Helm ownership metadata cannot be adopted into
+    # this release. The created namespace carries
+    # helm.sh/resource-policy: keep, so it survives `helm uninstall` of
+    # this chart and must be deleted manually.
+    createSystem: true
     # -- Specifies whether the fast-sandbox dataplane namespace should be
-    # created. The system namespace (opensandbox-system) is NOT created
-    # here: it is owned by the install flow (--create-namespace or the
-    # controller/server releases), and a pre-existing namespace without
-    # Helm ownership metadata cannot be adopted into this release.
+    # created. The created namespace carries helm.sh/resource-policy: keep,
+    # so it survives `helm uninstall` of this chart and must be deleted
+    # manually.
     create: true
     # -- Namespace the fast-sandbox control-plane RBAC targets (the shared
     # OpenSandbox system namespace where the fast-sandbox chart's workloads
-    # run). Referenced only; not created by this chart.
+    # run). Created by this chart when createSystem is true.
     system: opensandbox-system
     # -- Namespace for fast-sandbox resource objects (pools, templates,
     # sandboxes and the fastlet/builder Pods they spawn)

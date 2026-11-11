@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ import logging
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.diagnostic_model_converter import (
     DiagnosticModelConverter,
 )
@@ -28,7 +29,7 @@ from opensandbox.adapters.converter.response_handler import (
     require_parsed,
 )
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.sync.services.diagnostics import DiagnosticsSync
 
 logger = logging.getLogger(__name__)
@@ -59,17 +60,45 @@ class DiagnosticsAdapterSync(DiagnosticsSync):
             prefix="",
             auth_header_name="OPEN-SANDBOX-API-KEY",
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._httpx_client = httpx.Client(
             base_url=self.connection_config.get_base_url(),
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(
+                self.connection_config,
+                self.connection_config.get_base_url(),
+            ),
         )
         self._client.set_httpx_client(self._httpx_client)
 
     def _get_client(self):
         return self._client
+
+    def get_context(self, sandbox_id: str) -> DiagnosticContext:
+        try:
+            from opensandbox.api.diagnostic.api.diagnostics import (
+                get_sandboxes_sandbox_id_diagnostics_context,
+            )
+            from opensandbox.api.diagnostic.models import DiagnosticContextResponse
+
+            response = get_sandboxes_sandbox_id_diagnostics_context.sync_detailed(
+                sandbox_id=sandbox_id,
+                client=self._get_client(),
+            )
+            operation = f"Get diagnostic context for sandbox {sandbox_id}"
+            handle_api_error(response, operation)
+            parsed = require_parsed(response, DiagnosticContextResponse, operation)
+            return DiagnosticContext.model_validate(parsed.to_dict())
+        except Exception as e:
+            logger.error(
+                "Failed to get diagnostic context for sandbox %s",
+                sandbox_id,
+                exc_info=e,
+            )
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_logs(
         self,

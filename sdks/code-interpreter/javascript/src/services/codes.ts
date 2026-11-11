@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,7 +45,10 @@ export interface Codes {
     signal?: AbortSignal,
   ): AsyncIterable<ServerStreamEvent>;
 
-  interrupt(contextId: string): Promise<void>;
+  /**
+   * Interrupt a running code execution by its execution id.
+   */
+  interrupt(executionId: string): Promise<void>;
 
   /**
    * Optional execd daemon ping capability.

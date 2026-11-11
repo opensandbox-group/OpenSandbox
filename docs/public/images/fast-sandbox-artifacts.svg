@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="674" viewBox="0 0 1180 674" role="img" aria-labelledby="title desc">
+<title id="title">Artifact storage and delivery</title>
+<desc id="desc">The template builder publishes content-addressed golden-image artifacts to an S3-compatible store. Nodes keep a private state-root cache fed by DART daemons in pull order cache, peer, origin; sandboxes start from node-local artifacts, and pause or resume checkpoints round-trip through the same store.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="674" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Artifact storage and delivery</text>
+<text x="48" y="96" class="body">everything a sandbox runs or resumes from is one content-addressed artifact</text>
+<path d="M1050 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1096" y="60" class="edge" style="fill:#2563eb">Flow</text>
+<rect x="48" y="128" width="1084" height="150" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="158" class="section">ORIGIN</text>
+<rect x="72" y="176" width="420" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="206" class="heading">Template builder</text>
+<text x="88" y="231" class="label">OCI image → golden-image artifact (+ kernel)</text>
+<rect x="532" y="176" width="576" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="548" y="206" class="heading">Artifact store · S3-compatible</text>
+<text x="548" y="231" class="label">content-addressed · digest-referenced · single origin</text>
+<path d="M492 208H526" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="434" y="196" class="edge" style="fill:#2563eb">publish</text>
+<path d="M590 278V328" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="606" y="307" class="edge" style="fill:#2563eb">first pull · 4 MiB blocks</text>
+<rect x="48" y="328" width="1084" height="210" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="72" y="358" class="section">NODE · STATE-ROOT AND PEER DELIVERY</text>
+<rect x="72" y="376" width="420" height="88" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="406" class="heading">Node state-root cache</text>
+<text x="88" y="435" class="body">per-node private cache · XFS reflink</text>
+<text x="88" y="459" class="label">never shared across nodes</text>
+<rect x="532" y="376" width="576" height="88" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="548" y="406" class="heading">DART · P2P delivery</text>
+<text x="548" y="435" class="body">roster via headless Service</text>
+<text x="548" y="459" class="label">peer-to-peer between node state roots</text>
+<text x="72" y="500" class="label">pull order: cache → peer → origin · the origin is fetched ≈ once per block cluster-wide</text>
+<path d="M590 538V576" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<rect x="48" y="582" width="1084" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="609" class="heading">Sandboxes on any node</text>
+<text x="380" y="609" class="body">started from node-local artifacts — instant starts</text>
+<text x="72" y="636" class="label">pause/resume checkpoints round-trip through the same store, digest-pinned.</text>
+</svg>

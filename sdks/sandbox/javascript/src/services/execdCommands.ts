@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,6 +33,26 @@ export interface ExecdCommands {
   run(command: string | string[], opts?: RunCommandOpts, handlers?: ExecutionHandlers, signal?: AbortSignal): Promise<CommandExecution>;
 
   /**
+   * Persist an environment variable for future commands and sessions.
+   *
+   * Appends `KEY=VALUE` to the sandbox env file that the runtime loads for every
+   * command and session (the file pointed to by the sandbox's `EXECD_ENVS`
+   * variable, resolved inside the sandbox). Keys must match
+   * `[A-Za-z_][A-Za-z0-9_]*`; values are stored verbatim with proper escaping.
+   * The file is append-only: when a key is written multiple times, the last
+   * entry wins.
+   *
+   * @param key Environment variable name
+   * @param value Environment variable value
+   * @remarks Values without a single quote are stored verbatim; values
+   * containing a single quote use the env file's double-quoted form, in which
+   * shell-style `$NAME` sequences may be expanded when the runtime loads the
+   * file.
+   * @throws If arguments are invalid or the sandbox fails to persist the variable
+   */
+  setEnv(key: string, value: string): Promise<void>;
+
+  /**
    * Interrupt the current execution in the given context/session.
    *
    * Note: Execd spec uses `DELETE /command?id=<sessionId>`.
@@ -58,6 +78,8 @@ export interface ExecdCommands {
   /**
    * Run a shell command in an existing bash session (SSE stream, same event shape as run).
    * Optional workingDirectory and timeout apply to this run only; session state (e.g. env) persists.
+   * timeoutSeconds is rounded to the nearest millisecond (minimum 1 ms for positive values)
+   * and must be finite and non-negative.
    */
   runInSession(
     sessionId: string,

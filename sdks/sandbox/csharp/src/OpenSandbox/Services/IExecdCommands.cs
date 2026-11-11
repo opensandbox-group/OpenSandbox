@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -64,6 +64,27 @@ public interface IExecdCommands
         string command,
         RunCommandOptions? options = null,
         ExecutionHandlers? handlers = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Persists an environment variable for future commands and sessions.
+    /// Appends <c>KEY=VALUE</c> to the sandbox env file that the runtime loads for
+    /// every command and session (the file named by the sandbox's <c>EXECD_ENVS</c>
+    /// variable, resolved inside the sandbox). Keys must match
+    /// <c>[A-Za-z_][A-Za-z0-9_]*</c>. Values without a single quote are stored
+    /// verbatim; values containing a single quote use the env file's double-quoted
+    /// form, in which shell-style <c>$NAME</c> sequences may be expanded when the
+    /// runtime loads the file. The env file is append-only: the last write for a
+    /// key wins.
+    /// </summary>
+    /// <param name="key">Environment variable name.</param>
+    /// <param name="value">Environment variable value.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <exception cref="InvalidArgumentException">Thrown when <paramref name="key"/> or <paramref name="value"/> is invalid.</exception>
+    /// <exception cref="SandboxException">Thrown when the sandbox fails to persist the variable.</exception>
+    Task SetEnvAsync(
+        string key,
+        string value,
         CancellationToken cancellationToken = default);
 
     /// <summary>

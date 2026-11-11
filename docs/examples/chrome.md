@@ -41,9 +41,7 @@ opensandbox-server
 
 ## Create and access a Chrome sandbox
 
-Build/pull the image above, then create a sandbox with image `opensandbox/chrome:latest` and an entrypoint that keeps it
-alive (e.g., `["/bin/sh", "-c", "sleep infinity"]`), or reuse `tail -f /dev/null`. Make sure the runtime exposes ports
-`5901` and `9222` for VNC/DevTools.
+Build/pull the image above, then create a sandbox with image `opensandbox/chrome:latest` and an entrypoint that keeps it alive (e.g., `["/bin/sh", "-c", "sleep infinity"]`), or reuse `tail -f /dev/null`. Make sure the runtime exposes ports `5901` and `9222` for VNC/DevTools.
 
 ```shell
 uv pip install opensandbox
@@ -71,8 +69,7 @@ DevTools running with endpoint='127.0.0.1:48379/proxy/9222'/json
 } ]
 ```
 
-Or you can use it by MCP client, more information please refer
-to: [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp).
+Or you can use it by MCP client, more information please refer to: [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp).
 
 ## References
 

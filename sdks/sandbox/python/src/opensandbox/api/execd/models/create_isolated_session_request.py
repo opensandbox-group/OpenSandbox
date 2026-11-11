@@ -29,6 +29,7 @@ from ..types import UNSET, Unset
 if TYPE_CHECKING:
     from ..models.bind_mount import BindMount
     from ..models.env_passthrough_spec import EnvPassthroughSpec
+    from ..models.isolated_overlay_spec import IsolatedOverlaySpec
     from ..models.isolated_workspace_spec import IsolatedWorkspaceSpec
 
 
@@ -37,27 +38,46 @@ T = TypeVar("T", bound="CreateIsolatedSessionRequest")
 
 @_attrs_define
 class CreateIsolatedSessionRequest:
-    """
-    Attributes:
-        workspace (IsolatedWorkspaceSpec):
-        profile (CreateIsolatedSessionRequestProfile | Unset):
-        extra_writable (list[str] | Unset):
-        binds (list[BindMount] | Unset): Additional host paths bind-mounted into the namespace with an explicit source-
-            to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map
-            a distinct destination path and be mounted read-only. The source path of every entry must fall within the
-            configured writable allowlist.
-        share_net (bool | Unset):
-        env_passthrough (EnvPassthroughSpec | Unset):
-        uid (int | Unset):
-        gid (int | Unset):
-        uid_mode (CreateIsolatedSessionRequestUidMode | Unset): Controls how user identity is established inside the
-            namespace. "setpriv" (default) uses real setuid via setpriv(1). "userns" creates a user namespace via --unshare-
-            user --disable-userns.
-        idle_timeout_seconds (int | Unset):
+    """Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a
+    single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are
+    present `workspace` is prepended to `overlays`. The session files API serves exactly the overlay and bind mounts:
+    paths under each mount resolve as the namespace sees them, and absolute paths outside every overlay or bind are
+    rejected instead of resolving against the workspace (unlike binds, extra_writable paths are not served by the files
+    API unless an overlay covers them). The strict profile's private `/tmp` is a session-owned bind under the upper root
+    and is part of that view; a caller bind or overlay on `/tmp` shadows it as inside the namespace.
+
+        Attributes:
+            profile (CreateIsolatedSessionRequestProfile | Unset): Isolation profile. `strict` (default) gives the session a
+                private `/tmp` backed by a host directory that the session files API also serves; `balanced` shares the
+                sandbox's own `/tmp`, which the files API does not serve.
+            workspace (IsolatedWorkspaceSpec | Unset):
+            overlays (list[IsolatedOverlaySpec] | Unset): Independent overlay mounts inside one namespace. Each entry gets
+                its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a
+                nested overlay (for example `/workspace` on top of a `/` root overlay) shadows its ancestors within its own
+                subtree. Paths must be absolute, unique, and clean (no trailing slash, `.` or `..` segments); at most 16 mounts
+                per session (including the legacy `workspace`).
+            extra_writable (list[str] | Unset):
+            binds (list[BindMount] | Unset): Additional host paths bind-mounted into the namespace with an explicit source-
+                to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map
+                a distinct destination path and be mounted read-only. The source path of every entry must fall within the
+                configured writable allowlist. The session files API also serves paths under each dest from the host source
+                directory: reads and writes are live in both directions, symlinked entries are followed like the namespace view,
+                and writes are rejected for readonly binds. Destinations must be unique across entries and must not be a strict
+                ancestor of another mount destination (binds, overlays, extra_writable) or fall under /run, /dev, or /proc; such
+                overlapping configurations are rejected at session creation.
+            share_net (bool | Unset):
+            env_passthrough (EnvPassthroughSpec | Unset):
+            uid (int | Unset):
+            gid (int | Unset):
+            uid_mode (CreateIsolatedSessionRequestUidMode | Unset): Controls how user identity is established inside the
+                namespace. "setpriv" (default) uses real setuid via setpriv(1). "userns" creates a user namespace via --unshare-
+                user --disable-userns.
+            idle_timeout_seconds (int | Unset):
     """
 
-    workspace: IsolatedWorkspaceSpec
     profile: CreateIsolatedSessionRequestProfile | Unset = UNSET
+    workspace: IsolatedWorkspaceSpec | Unset = UNSET
+    overlays: list[IsolatedOverlaySpec] | Unset = UNSET
     extra_writable: list[str] | Unset = UNSET
     binds: list[BindMount] | Unset = UNSET
     share_net: bool | Unset = UNSET
@@ -69,11 +89,20 @@ class CreateIsolatedSessionRequest:
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        workspace = self.workspace.to_dict()
-
         profile: str | Unset = UNSET
         if not isinstance(self.profile, Unset):
             profile = self.profile.value
+
+        workspace: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.workspace, Unset):
+            workspace = self.workspace.to_dict()
+
+        overlays: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.overlays, Unset):
+            overlays = []
+            for overlays_item_data in self.overlays:
+                overlays_item = overlays_item_data.to_dict()
+                overlays.append(overlays_item)
 
         extra_writable: list[str] | Unset = UNSET
         if not isinstance(self.extra_writable, Unset):
@@ -104,13 +133,13 @@ class CreateIsolatedSessionRequest:
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
-        field_dict.update(
-            {
-                "workspace": workspace,
-            }
-        )
+        field_dict.update({})
         if profile is not UNSET:
             field_dict["profile"] = profile
+        if workspace is not UNSET:
+            field_dict["workspace"] = workspace
+        if overlays is not UNSET:
+            field_dict["overlays"] = overlays
         if extra_writable is not UNSET:
             field_dict["extra_writable"] = extra_writable
         if binds is not UNSET:
@@ -134,17 +163,32 @@ class CreateIsolatedSessionRequest:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.bind_mount import BindMount
         from ..models.env_passthrough_spec import EnvPassthroughSpec
+        from ..models.isolated_overlay_spec import IsolatedOverlaySpec
         from ..models.isolated_workspace_spec import IsolatedWorkspaceSpec
 
         d = dict(src_dict)
-        workspace = IsolatedWorkspaceSpec.from_dict(d.pop("workspace"))
-
         _profile = d.pop("profile", UNSET)
         profile: CreateIsolatedSessionRequestProfile | Unset
         if isinstance(_profile, Unset):
             profile = UNSET
         else:
             profile = CreateIsolatedSessionRequestProfile(_profile)
+
+        _workspace = d.pop("workspace", UNSET)
+        workspace: IsolatedWorkspaceSpec | Unset
+        if isinstance(_workspace, Unset):
+            workspace = UNSET
+        else:
+            workspace = IsolatedWorkspaceSpec.from_dict(_workspace)
+
+        _overlays = d.pop("overlays", UNSET)
+        overlays: list[IsolatedOverlaySpec] | Unset = UNSET
+        if _overlays is not UNSET:
+            overlays = []
+            for overlays_item_data in _overlays:
+                overlays_item = IsolatedOverlaySpec.from_dict(overlays_item_data)
+
+                overlays.append(overlays_item)
 
         extra_writable = cast(list[str], d.pop("extra_writable", UNSET))
 
@@ -180,8 +224,9 @@ class CreateIsolatedSessionRequest:
         idle_timeout_seconds = d.pop("idle_timeout_seconds", UNSET)
 
         create_isolated_session_request = cls(
-            workspace=workspace,
             profile=profile,
+            workspace=workspace,
+            overlays=overlays,
             extra_writable=extra_writable,
             binds=binds,
             share_net=share_net,

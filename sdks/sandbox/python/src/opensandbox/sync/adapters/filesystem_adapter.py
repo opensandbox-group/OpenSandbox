@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from typing import TypedDict
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -37,6 +38,11 @@ from opensandbox.adapters.converter.response_handler import (
     extract_request_id,
     handle_api_error,
 )
+from opensandbox.adapters.download_response import (
+    create_read_bytes_response,
+    iter_response_bytes,
+)
+from opensandbox.adapters.filesystem_identity import filesystem_identity_path
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
 from opensandbox.models.filesystem import (
@@ -45,6 +51,8 @@ from opensandbox.models.filesystem import (
     DirectoryListEntry,
     EntryInfo,
     MoveEntry,
+    ReadBytesResponse,
+    ReadBytesStream,
     SearchEntry,
     SetPermissionEntry,
     WriteEntry,
@@ -81,10 +89,12 @@ class FilesystemAdapterSync(FilesystemSync):
     FILESYSTEM_DOWNLOAD_PATH = "/files/download"
 
     def __init__(
-        self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint
+        self, connection_config: ConnectionConfigSync, execd_endpoint: SandboxEndpoint,
+        *, _identity_prefix: str = "",
     ) -> None:
         self.connection_config = connection_config
         self.execd_endpoint = execd_endpoint
+        self._identity_prefix = _identity_prefix
         from opensandbox.api.execd import Client
 
         base_url = self._get_execd_base_url()
@@ -97,16 +107,32 @@ class FilesystemAdapterSync(FilesystemSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
-        self._client = Client(base_url=base_url, timeout=timeout)
+        self._client = Client(
+            base_url=base_url,
+            timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
+        )
         self._client.set_httpx_client(self._httpx_client)
 
+    def with_identity(self, uid: int, gid: int) -> "FilesystemAdapterSync":
+        """Create an independent filesystem client with explicit Linux credentials."""
+        return FilesystemAdapterSync(
+            self.connection_config,
+            self.execd_endpoint,
+            _identity_prefix=filesystem_identity_path(uid, gid),
+        )
+
     def _get_execd_base_url(self) -> str:
-        return f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}"
+        return (
+            f"{self.connection_config.protocol}://"
+            f"{self.execd_endpoint.endpoint.rstrip('/')}{self._identity_prefix}"
+        )
 
     def _get_execd_url(self, path: str) -> str:
         return (
-            f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}{path}"
+            f"{self._get_execd_base_url()}{path}"
         )
 
     def _build_download_request(
@@ -150,6 +176,18 @@ class FilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> bytes:
+        return self.read_bytes_detailed(
+            path, range_header=range_header, offset=offset, limit=limit
+        ).body
+
+    def read_bytes_detailed(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[bytes]:
         logger.debug(f"Reading file as bytes: {path}")
         try:
             request_data = self._build_download_request(
@@ -161,7 +199,11 @@ class FilesystemAdapterSync(FilesystemSync):
                 params=request_data["params"],
             )
             response.raise_for_status()
-            return response.content
+            return create_read_bytes_response(
+                response,
+                response.content,
+                line_based=offset is not None or limit is not None,
+            )
         except Exception as e:
             logger.error(f"Failed to read file {path}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -175,40 +217,59 @@ class FilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> Iterator[bytes]:
+        return self.read_bytes_stream_detailed(
+            path,
+            chunk_size=chunk_size,
+            range_header=range_header,
+            offset=offset,
+            limit=limit,
+        ).body
+
+    def read_bytes_stream_detailed(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[ReadBytesStream]:
         logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
-        request_data = self._build_download_request(
-            path, range_header, offset=offset, limit=limit
-        )
-        url = request_data["url"]
-        params = request_data["params"]
-        headers = request_data["headers"]
-
-        request = self._httpx_client.build_request(
-            "GET",
-            url,
-            headers=headers,
-            params=params,
-        )
-        response = self._httpx_client.send(request, stream=True)
-
-        if response.status_code >= 300:
-            try:
-                response.read()
-            finally:
-                response.close()
-            raise SandboxApiException(
-                f"Failed to stream file {path}: {response.status_code}",
-                status_code=response.status_code,
-                request_id=extract_request_id(response.headers),
+        try:
+            request_data = self._build_download_request(
+                path, range_header, offset=offset, limit=limit
             )
+            url = request_data["url"]
+            params = request_data["params"]
+            headers = request_data["headers"]
 
-        def _iter() -> Iterator[bytes]:
-            try:
-                yield from response.iter_bytes(chunk_size=chunk_size)
-            finally:
-                response.close()
+            request = self._httpx_client.build_request(
+                "GET",
+                url,
+                headers=headers,
+                params=params,
+            )
+            response = self._httpx_client.send(request, stream=True)
 
-        return _iter()
+            if response.status_code >= 300:
+                try:
+                    response.read()
+                finally:
+                    response.close()
+                raise SandboxApiException(
+                    f"Failed to stream file {path}: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
+
+            return create_read_bytes_response(
+                response,
+                iter_response_bytes(response, chunk_size),
+                line_based=offset is not None or limit is not None,
+            )
+        except Exception as e:
+            logger.error(f"Failed to stream file {path}", exc_info=e)
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def write_files(self, entries: list[WriteEntry]) -> None:
         """Write multiple files in a single operation using multipart upload.
@@ -283,7 +344,11 @@ class FilesystemAdapterSync(FilesystemSync):
 
             multipart_parts.append(("file", (entry.path, content, content_type)))
 
-        return self._httpx_client.post(url, files=multipart_parts)
+        return self._httpx_client.post(
+            url,
+            files=multipart_parts,
+            follow_redirects=False,
+        )
 
     def _write_files_chunked(
         self,
@@ -368,6 +433,7 @@ class FilesystemAdapterSync(FilesystemSync):
             url,
             content=_body(),
             headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+            follow_redirects=False,
         )
 
     def write_file(
@@ -446,18 +512,13 @@ class FilesystemAdapterSync(FilesystemSync):
 
     def replace_contents(self, entries: list[ContentReplaceEntry]) -> None:
         try:
-            from json import JSONDecodeError
-
             from opensandbox.api.execd.api.filesystem import replace_content
 
-            try:
-                response_obj = replace_content.sync_detailed(
-                    client=self._client,
-                    body=FilesystemModelConverter.to_api_replace_content_body(entries),
-                )
-                handle_api_error(response_obj, "Replace contents")
-            except JSONDecodeError:
-                pass
+            response_obj = replace_content.sync_detailed(
+                client=self._client,
+                body=FilesystemModelConverter.to_api_replace_content_body(entries),
+            )
+            handle_api_error(response_obj, "Replace contents")
         except Exception as e:
             logger.error("Failed to replace contents", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e

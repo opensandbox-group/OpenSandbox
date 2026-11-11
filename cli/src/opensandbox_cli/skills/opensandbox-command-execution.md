@@ -50,12 +50,9 @@ osb command session run <sandbox-id> <session-id> -o raw -- sh -lc 'pwd'
 
 Treat these as three distinct execution paths:
 
-- `osb command run` without `--background`
-  Use for foreground one-shot commands when the result should stream directly to the terminal
-- `osb command run --background`
-  Use when the user needs an execution ID, later status checks, or log retrieval
-- `osb command session ...`
-  Use when shell state must persist across commands, such as exported variables or a working directory
+- `osb command run` without `--background` Use for foreground one-shot commands when the result should stream directly to the terminal
+- `osb command run --background` Use when the user needs an execution ID, later status checks, or log retrieval
+- `osb command session ...` Use when shell state must persist across commands, such as exported variables or a working directory
 
 ## Golden Paths
 
@@ -149,7 +146,8 @@ Only suggest interruption when the user explicitly wants to stop work or the pro
 
 - foreground `osb command run` streams output directly and requires `-o raw`
 - background `osb command run --background` returns tracked execution metadata and supports structured output
-- `session run` also exits non-zero on execution error
+- foreground `command run` and `session run` exit non-zero on an execution error, or when the output stream ends before the command finishes
+- background `command run` exits non-zero without success metadata on an execution error or when the output stream ends before startup confirmation
 - tracked background commands should be checked with `status` and `logs`
 - if the command failure is caused by an unhealthy sandbox rather than the command itself, switch to `sandbox-troubleshooting`
 

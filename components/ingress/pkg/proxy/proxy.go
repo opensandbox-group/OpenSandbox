@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,9 +16,11 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,11 +29,13 @@ import (
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 
+	"github.com/alibaba/opensandbox/ingress/pkg/activity"
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
 	"github.com/alibaba/opensandbox/ingress/pkg/routescope"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
+	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
 const httpScheme = "http"
@@ -50,6 +54,8 @@ type Proxy struct {
 	sandboxProvider      sandbox.Provider
 	mode                 Mode
 	renewIntentPublisher renewintent.Publisher
+	activity             activity.Recorder
+	waker                *wake.Waker
 
 	secure *signature.Verifier
 	scope  *routescope.Verifier
@@ -64,11 +70,16 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 	for _, opt := range opts {
 		opt(&options)
 	}
+	if options.activity == nil {
+		options.activity = activity.Noop{}
+	}
 
 	return &Proxy{
 		sandboxProvider:           sandboxProvider,
 		mode:                      mode,
 		renewIntentPublisher:      renewIntentPublisher,
+		activity:                  options.activity,
+		waker:                     options.waker,
 		secure:                    secure,
 		scope:                     scope,
 		httpTransport:             newObservedHTTPTransport(options.connectObserver),
@@ -119,11 +130,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		telemetry.RecordHTTPRequest(r.Method, sw.statusCode, proxyType, float64(time.Since(start))/float64(time.Millisecond))
 	}()
 
+	p.handle(sw, r)
+}
+
+func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 	host, status, err := p.getSandboxHostDefinition(r)
 	if err != nil {
 		var detailed interface{ InternalCause() error }
 		if errors.As(err, &detailed) {
 			Logger.With(slogger.Field{Key: "error", Value: detailed.InternalCause()}).Errorf("ingress: provider resolution failed")
+		}
+		if respondWakeTimeout(sw, err) {
+			return
 		}
 		if status == 0 {
 			status = http.StatusBadRequest
@@ -135,16 +153,100 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// OSEP-0024: every routed request feeds the sandbox idle clock, renewal
+	// skip included. The activity-probe sentinel is the one opt-out.
+	// Fire-and-forget; failures are dropped.
+	if p.activity != nil && !IsSkipActivity(r.Header) {
+		p.activity.Record(host.namespace, host.ingressKey)
+	}
+
 	targetURL, code, err := p.resolveRealHost(host, r.URL)
 	if err != nil {
 		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
 		return
 	}
 
-	if p.renewIntentPublisher != nil {
+	// OSEP-0009 per-request opt-out: a request carrying
+	// "OpenSandbox-Access-Renew: skip" is proxied normally but must not
+	// publish a renew intent (and must not touch throttle state).
+	if p.renewIntentPublisher != nil && !IsAccessRenewSkip(r.Header) {
 		p.renewIntentPublisher.PublishIntent(host.namespace, host.ingressKey, host.port, host.requestURI)
 	}
 
+	// Keep the client-facing URL so a stale-route replay can restore and
+	// re-resolve from the original request shape.
+	originalURL := *r.URL
+	originalHost := r.Host
+
+	p.applyUpstreamRequest(r, host, targetURL)
+
+	target := sandbox.EndpointTarget{RouteKind: host.routeKind, Namespace: host.namespace, SandboxID: host.ingressKey, Port: host.port}
+
+	Logger.With(
+		slogger.Field{Key: "target", Value: targetURL.String()},
+		slogger.Field{Key: "client", Value: p.getClientIP(r)},
+		slogger.Field{Key: "uri", Value: r.RequestURI},
+		slogger.Field{Key: "method", Value: r.Method},
+	).Infof("ingress requested")
+
+	// OSEP-0024 stale-route re-entry: a cached route can be paused between
+	// the cache hit and the forward. The wakeReplay writer parks such a
+	// request on the waker and the request is replayed once below.
+	var replay *wakeReplay
+	if p.waker != nil && host.routeKind == sandbox.RouteKindFastSandbox && !p.isWebSocketRequest(r) {
+		replay = newWakeReplay(p, sw, host, r, target)
+	}
+	if replay != nil {
+		p.serve(replay, r, target, replay.observeStale()) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+	} else {
+		p.serve(sw, r, target) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+	}
+
+	if replay == nil || !replay.intercepted.Load() {
+		return
+	}
+	if replay.wakeErr != nil {
+		if status := httpStatusForWakeErr(replay.wakeErr); status != 0 {
+			if status == http.StatusServiceUnavailable {
+				sw.Header().Set("Retry-After", "1")
+			}
+			http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", replay.wakeErr), status)
+		}
+		return
+	}
+
+	// The sandbox resumed while the request was parked. Replay once on a
+	// fresh route: nothing was written to the client and the body was fully
+	// buffered (replayable()).
+	*r.URL = originalURL
+	r.Host = originalHost
+	r.Body = io.NopCloser(bytes.NewReader(replay.copied))
+	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), target)
+	if err != nil {
+		status := providerErrHTTPStatus(err)
+		if status == http.StatusServiceUnavailable {
+			// A not-ready answer right after a resumed sandbox is exactly
+			// the window clients land in; keep the retry invitation every
+			// other 503 branch carries.
+			sw.Header().Set("Retry-After", "1")
+		}
+		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+		return
+	}
+	host.info = endpoint
+	targetURL, code, err = p.resolveRealHost(host, r.URL)
+	if err != nil {
+		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
+		return
+	}
+	p.applyUpstreamRequest(r, host, targetURL)
+	p.serve(sw, r, target)
+}
+
+// applyUpstreamRequest rewrites r for the resolved upstream. It is
+// idempotent: headers are deleted before being re-added and URL fields are
+// assigned, so a stale-route replay can apply it a second time.
+func (p *Proxy) applyUpstreamRequest(r *http.Request, host *sandboxHost, targetURL *url.URL) {
 	r.URL.Scheme = targetURL.Scheme
 	r.URL.Host = targetURL.Host
 	r.URL.Path = targetURL.Path
@@ -153,6 +255,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Host = targetURL.Host
 	r.Header.Del(SandboxIngress)
 	r.Header.Del(DeprecatedSandboxIngress)
+	r.Header.Del(AccessRenew)
+	r.Header.Del(SkipActivity)
 	r.Header.Del(signature.OpenSandboxSecureAccessCanonical)
 	r.Header.Del(sandbox.FastSandboxCredential)
 	// Host is carried by r.Host, not r.Header. The Phase 1a Fast Sandbox provider
@@ -163,17 +267,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Header.Add(name, value)
 		}
 	}
-
-	Logger.With(
-		slogger.Field{Key: "target", Value: targetURL.String()},
-		slogger.Field{Key: "client", Value: p.getClientIP(r)},
-		slogger.Field{Key: "uri", Value: r.RequestURI},
-		slogger.Field{Key: "method", Value: r.Method},
-	).Infof("ingress requested")
-	p.serve(sw, r, sandbox.EndpointTarget{RouteKind: host.routeKind, Namespace: host.namespace, SandboxID: host.ingressKey, Port: host.port})
 }
 
-func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget) {
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget, extraResponseObservers ...func(*http.Response)) {
 	if p.isWebSocketRequest(r) {
 		if r.URL == nil {
 			http.Error(w, "invalid request URL", http.StatusBadRequest)
@@ -205,7 +301,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 				r.URL.Scheme = httpScheme
 			}
 		}
-		httpProxy := NewHTTPProxy(p.upstreamResponseObserver(target)) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		httpProxy := NewHTTPProxy(append([]func(*http.Response){stripWakeMarkerObserver()}, append(extraResponseObservers, p.upstreamResponseObserver(target))...)...) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 		httpProxy.errorObserver = p.upstreamErrorObserver(target)
 		httpProxy.transport = p.httpTransport
 		httpProxy.ServeHTTP(w, r)
@@ -353,7 +449,10 @@ type statusCapturingResponseWriter struct {
 }
 
 func (w *statusCapturingResponseWriter) WriteHeader(code int) {
-	if !w.written {
+	// A 1xx other than 101, such as 103 Early Hints forwarded by
+	// ReverseProxy, is informational: the final status is still to come.
+	informational := code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
+	if !w.written && !informational {
 		w.statusCode = code
 		w.written = true
 	}
@@ -389,10 +488,10 @@ func (w *statusCapturingResponseWriter) Flush() {
 // finally falls back to the remote address.
 func (p *Proxy) getClientIP(r *http.Request) string {
 	if xff := r.Header.Get(XForwardedFor); xff != "" {
-		if idx := strings.Index(xff, ", "); idx != -1 {
-			return xff[:idx]
+		first, _, _ := strings.Cut(xff, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
 		}
-		return xff
 	}
 	if realIP := r.Header.Get(XRealIP); realIP != "" {
 		return realIP

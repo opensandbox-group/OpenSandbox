@@ -58,17 +58,25 @@ def _parse_response(
     *, client: AuthenticatedClient | Client, response: httpx.Response
 ) -> ErrorResponse | ReplaceContentResponse200 | None:
     if response.status_code == 200:
+        if not response.content:
+            return None
         response_200 = ReplaceContentResponse200.from_dict(response.json())
 
         return response_200
 
     if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+        try:
+            response_400 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_400
 
     if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
+        try:
+            response_500 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_500
 

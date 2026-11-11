@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -125,9 +125,11 @@ class TemplateStatus(
  * reaches [TemplatePhase.SUCCEEDED] or [TemplatePhase.FAILED].
  *
  * @property image Source OCI image reference
- * @property publish S3-compatible publish target (e.g. `s3://bucket/publish`)
+ * @property publish `s3://bucket/publish` (native) or `oci://registry/repository` (overlaybd, without a tag or digest)
  * @property resourceLimits Runtime resource constraints (e.g. cpu/memory/disk)
  * @property entrypoint Guest business command (argv); defaults server-side when omitted
+ * @property env Environment variables baked into the golden image (literal values only;
+ *   the source image's OCI Config.Env is inherited and same-name entries override it)
  * @property metadata User-defined metadata used for management and filtering
  * @property readiness Optional build readiness probe configuration
  * @property format Snapshot storage encoding; server defaults to overlaybd when omitted
@@ -137,6 +139,7 @@ class CreateTemplateRequest private constructor(
     val publish: String,
     val resourceLimits: Map<String, String>?,
     val entrypoint: List<String>?,
+    val env: Map<String, String>?,
     val metadata: Map<String, String>?,
     val readiness: TemplateReadiness?,
     val format: TemplateFormat?,
@@ -151,6 +154,7 @@ class CreateTemplateRequest private constructor(
         private var publish: String? = null
         private var resourceLimits: Map<String, String>? = null
         private var entrypoint: List<String>? = null
+        private var env: Map<String, String>? = null
         private var metadata: Map<String, String>? = null
         private var readiness: TemplateReadiness? = null
         private var format: TemplateFormat? = null
@@ -186,6 +190,18 @@ class CreateTemplateRequest private constructor(
 
         fun entrypoint(vararg entrypoint: String): Builder {
             this.entrypoint = entrypoint.toList()
+            return this
+        }
+
+        fun env(env: Map<String, String>): Builder {
+            this.env = env
+            return this
+        }
+
+        fun env(configure: MutableMap<String, String>.() -> Unit): Builder {
+            val map = mutableMapOf<String, String>()
+            map.configure()
+            this.env = map
             return this
         }
 
@@ -226,6 +242,7 @@ class CreateTemplateRequest private constructor(
                 publish = publishValue,
                 resourceLimits = resourceLimits,
                 entrypoint = entrypoint,
+                env = env,
                 metadata = metadata,
                 readiness = readiness,
                 format = format,
@@ -239,13 +256,14 @@ class CreateTemplateRequest private constructor(
  *
  * @property templateId Server-generated template ID (`tpl_<uuid>`)
  * @property image Source OCI image reference
- * @property publish S3-compatible publish target
+ * @property publish S3-compatible or repository-only OCI publish target
  * @property format Snapshot storage encoding
  * @property status Current build status
  * @property createdAt Timestamp when the template was created
  * @property updatedAt Timestamp when the template was last updated
  * @property resourceLimits Runtime resource constraints
  * @property entrypoint Guest business command (argv)
+ * @property env Environment variables baked into the golden image
  * @property metadata Custom metadata attached to the template
  * @property readiness Build readiness probe configuration
  */
@@ -259,6 +277,7 @@ class TemplateInfo(
     val updatedAt: OffsetDateTime,
     val resourceLimits: Map<String, String>? = null,
     val entrypoint: List<String>? = null,
+    val env: Map<String, String>? = null,
     val metadata: Map<String, String>? = null,
     val readiness: TemplateReadiness? = null,
 )

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -146,6 +146,7 @@ func (s *Sandbox) IsolationAttach(ctx context.Context, sessionID string) (*Isola
 		CreatedAt:          state.CreatedAt,
 		Profile:            state.Profile,
 		Workspace:          state.Workspace,
+		Overlays:           state.Overlays,
 		ExtraWritable:      state.ExtraWritable,
 		Binds:              state.Binds,
 		ShareNet:           state.ShareNet,
@@ -159,15 +160,22 @@ func (s *Sandbox) IsolationAttach(ctx context.Context, sessionID string) (*Isola
 }
 
 // newIsolationSession wraps an IsolatedSessionInfo into an IsolationSession
-// handle, constructing the session-scoped files ExecdClient the same way
-// IsolationCreate does.
+// handle, constructing the session-scoped files ExecdClient from the sandbox's
+// ConnectionConfig plus the parent execd client's endpoint headers.
 func (s *Sandbox) newIsolationSession(info *IsolatedSessionInfo) *IsolationSession {
 	sessionBaseURL := s.execd.client.baseURL + "/v1/isolated/session/" + info.SessionID
-	var filesOpts []Option
-	if len(s.execd.client.headers) > 0 {
-		filesOpts = append(filesOpts, WithHeaders(s.execd.client.headers))
+	var filesClient *ExecdClient
+	if s.config != nil {
+		filesClient = s.config.execdClient(sessionBaseURL, s.execd.client.headers)
+	} else {
+		// Defensive fallback for Sandboxes built without a ConnectionConfig:
+		// keep the previous headers-only construction.
+		var filesOpts []Option
+		if len(s.execd.client.headers) > 0 {
+			filesOpts = append(filesOpts, WithHeaders(s.execd.client.headers))
+		}
+		filesClient = NewExecdClient(sessionBaseURL, s.execd.client.apiKey, filesOpts...)
 	}
-	filesClient := NewExecdClient(sessionBaseURL, s.execd.client.apiKey, filesOpts...)
 	return &IsolationSession{info: info, sandbox: s, files: filesClient}
 }
 

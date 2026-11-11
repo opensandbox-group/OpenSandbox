@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.response_handler import (
     handle_api_error,
@@ -117,12 +118,14 @@ class EgressAdapterSync(EgressSync):
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._httpx_client = httpx.Client(
             base_url=base_url,
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -136,6 +139,7 @@ class EgressAdapterSync(EgressSync):
     ) -> object:
         response = self._httpx_client.request(method, path, json=json_body)
         if response.status_code >= 400:
+            logger.debug(f"{operation} failed with HTTP {response.status_code}")
             response.raise_for_status()
         if response.status_code == 204 or not response.content:
             return None
@@ -324,13 +328,16 @@ class EgressAdapterSync(EgressSync):
             from opensandbox.api.egress.models.network_rule_action import (
                 NetworkRuleAction,
             )
+            from opensandbox.api.egress.types import UNSET
 
             response_obj = patch_policy.sync_detailed(
                 client=self._client,
                 body=[
                     ApiNetworkRule(
                         action=NetworkRuleAction(rule.action),
-                        target=rule.target,
+                        # None here means UNSET (omit the field) in the client.
+                        target=rule.target if rule.target is not None else UNSET,
+                        ports=rule.ports if rule.ports is not None else UNSET,
                     )
                     for rule in rules
                 ],

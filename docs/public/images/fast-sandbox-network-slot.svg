@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="774" viewBox="0 0 1180 774" role="img" aria-labelledby="title desc">
+<title id="title">Fast Sandbox network slots</title>
+<desc id="desc">Fastlet pods carry pre-provisioned network slots — one netns and veth pair per sandbox. Prerouting NAT per subject redirects ports 80 and 443 to the shared mitmdump and port 53 to the DNS proxy, keyed by source IP; the forward chain drops unmarked traffic. SET_BINDING delivers the slot and policy bindings before the runtime exists.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="outbound" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#059669"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="774" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Network slots</text>
+<text x="48" y="96" class="body">one pod netns · one slot per sandbox · pre-provisioned before the runtime exists</text>
+<path d="M1000 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1046" y="60" class="edge" style="fill:#2563eb">Traffic</text>
+<path d="M860 54h36" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="906" y="60" class="edge" style="fill:#059669">Allowed</text>
+<rect x="48" y="128" width="1084" height="330" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5" stroke-dasharray="6 5"/>
+<text x="72" y="158" class="section">FASTLET POD NETWORK NAMESPACE</text>
+<text x="420" y="158" class="label">bridge topology · enforcement by source IP</text>
+<rect x="72" y="176" width="300" height="128" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="206" class="heading">Sandbox guests</text>
+<text x="88" y="239" class="body">A: 10.30.0.5 · B: 10.30.0.6</text>
+<text x="88" y="263" class="label">one netns + veth per slot</text>
+<text x="88" y="287" class="label">no NET_ADMIN in the pod netns</text>
+<rect x="420" y="176" width="330" height="128" rx="8" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="436" y="206" class="heading">prerouting nat · per subject</text>
+<text x="436" y="239" class="body">tcp 80/443 → DNAT :18081 (MITM)</text>
+<text x="436" y="263" class="label">tcp/udp 53 → DNS redirect :15353</text>
+<text x="436" y="287" class="label">one rule pair per slot, keyed by src IP</text>
+<rect x="798" y="176" width="310" height="128" rx="8" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="814" y="206" class="heading">Shared services</text>
+<text x="814" y="239" class="body">DNS proxy :15353</text>
+<text x="814" y="267" class="body">mitmdump :18081</text>
+<text x="814" y="291" class="label">policy lookup = f(src IP)</text>
+<rect x="420" y="328" width="330" height="110" rx="8" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="436" y="358" class="heading">forward · authoritative</text>
+<text x="436" y="391" class="body">marked → allow · unmarked → drop</text>
+<text x="436" y="415" class="label">privateCidr isolates siblings</text>
+<rect x="798" y="328" width="310" height="110" rx="8" fill="#f8f4ff" stroke="#ccb6f0" stroke-width="1.5"/>
+<text x="814" y="358" class="heading">Egress control plane</text>
+<text x="814" y="391" class="body">Sandbox Actions handler</text>
+<text x="814" y="415" class="label">absent → denying → active</text>
+<path d="M372 240H414" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="330" y="228" class="edge" style="fill:#2563eb">80/443 · 53</text>
+<path d="M750 240H792" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M585 304V322" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="601" y="317" class="edge" style="fill:#2563eb">non-intercepted flows</text>
+<path d="M585 438V476" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="601" y="461" class="edge" style="fill:#059669">allowed traffic</text>
+<rect x="420" y="482" width="688" height="64" rx="8" fill="#ffffff" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="436" y="512" class="heading">External network</text>
+<text x="436" y="537" class="label">Models · registries · web endpoints</text>
+<rect x="48" y="570" width="640" height="180" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="600" class="heading">SET_BINDING envelope</text>
+<text x="72" y="633" class="body">sandbox.uid → subject identity</text>
+<text x="72" y="661" class="body">revision · runtimeInstanceId · attachmentId → fencing</text>
+<text x="72" y="689" class="body">ip → dispatch key · gateway → DNS / MITM targets</text>
+<text x="72" y="713" class="label">privateCidr isolates siblings · the slot ships with the envelope</text>
+<rect x="712" y="570" width="468" height="180" rx="12" fill="#f4fbf8" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="736" y="600" class="heading">Slot pre-provisioning</text>
+<text x="736" y="633" class="body">netns · veth · MASQUERADE exist before create</text>
+<text x="736" y="661" class="body">attachment arrives with SET_BINDING</text>
+<text x="736" y="689" class="label">→ no per-create network setup window</text>
+</svg>

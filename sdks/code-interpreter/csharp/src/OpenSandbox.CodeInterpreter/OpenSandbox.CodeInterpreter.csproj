@@ -15,7 +15,7 @@
     <Company>Alibaba Group Holding Ltd.</Company>
     <Product>OpenSandbox Code Interpreter SDK</Product>
     <Description>A C# SDK for code interpretation with OpenSandbox. Provides high-level APIs for executing code in multiple languages (Python, JavaScript, TypeScript, Go, Java, Bash) within secure sandbox environments.</Description>
-    <Copyright>Copyright 2026 Alibaba Group Holding Ltd.</Copyright>
+    <Copyright>Copyright 2026 The OpenSandbox Authors</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://open-sandbox.ai</PackageProjectUrl>
     <RepositoryUrl>https://github.com/opensandbox-group/OpenSandbox.git</RepositoryUrl>

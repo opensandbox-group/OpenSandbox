@@ -1,0 +1,8 @@
+dist/
+.env
+.env.*
+!.env.example
+
+# CI and Docker build use npm + package-lock.json; ignore local pnpm outputs
+pnpm-lock.yaml
+pnpm-workspace.yaml

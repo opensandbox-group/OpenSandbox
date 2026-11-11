@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@ export interface TemplateStatus extends Record<string, unknown> {
    */
   phase: TemplatePhase;
   /**
-   * S3 manifest reference of the published artifacts; present when the phase is `Succeeded`.
+   * Published S3 manifest reference or immutable OCI reference; present when the phase is `Succeeded`.
    */
   manifestRef?: string;
   /**
@@ -68,7 +68,7 @@ export interface CreateTemplateRequest extends Record<string, unknown> {
    */
   image: string;
   /**
-   * S3-compatible publish target for the built artifacts, e.g. `s3://bucket/publish`.
+   * Publish destination: `s3://bucket/publish` (native) or `oci://registry/repository` (overlaybd, no tag or digest).
    */
   publish: string;
   /**
@@ -80,6 +80,13 @@ export interface CreateTemplateRequest extends Record<string, unknown> {
    * Guest business command (argv); empty defaults to `["tail", "-f", "/dev/null"]`.
    */
   entrypoint?: string[];
+  /**
+   * Environment variables baked into the golden image (injected as
+   * `/etc/sandbox-init.env` in the guest; literal values only). The source
+   * image's own OCI `Config.Env` is inherited; an env with the same name
+   * overrides the inherited value. Names must be valid shell variable names.
+   */
+  env?: Record<string, string>;
   /**
    * Custom key-value metadata for management, filtering, and tagging.
    */
@@ -104,7 +111,7 @@ export interface TemplateInfo extends Record<string, unknown> {
    */
   image: string;
   /**
-   * S3-compatible publish target.
+   * S3-compatible or repository-only OCI publish target.
    */
   publish: string;
   /**
@@ -131,6 +138,10 @@ export interface TemplateInfo extends Record<string, unknown> {
    * Guest business command (argv).
    */
   entrypoint?: string[];
+  /**
+   * Environment variables baked into the golden image.
+   */
+  env?: Record<string, string>;
   /**
    * Custom metadata from the creation request.
    */

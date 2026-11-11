@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -127,5 +128,66 @@ func TestReportSandboxCreateMetricDisabledByEnv(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got.Load() {
 		t.Fatal("expected metrics POST to be skipped when OPENSANDBOX_DISABLE_METRICS=1")
+	}
+}
+
+func TestReportSandboxCreateMetricRedirectProtection(t *testing.T) {
+	t.Setenv(disableMetricsEnv, "0")
+	for _, authHeader := range []string{"", "X-API-Key", "X-Custom-Auth"} {
+		for _, customClient := range []bool{false, true} {
+			for _, sameOrigin := range []bool{false, true} {
+				t.Run(fmt.Sprintf("auth=%s/custom=%t/same=%t", authHeader, customClient, sameOrigin), func(t *testing.T) {
+					observed := make(chan http.Header, 2)
+					handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						observed <- r.Header.Clone()
+						if r.URL.Path == "/hop" {
+							http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+							return
+						}
+						w.WriteHeader(http.StatusNoContent)
+					})
+					target := httptest.NewServer(handler)
+					defer target.Close()
+					destination := target.URL + "/hop"
+					source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.URL.Path == "/hop" || r.URL.Path == "/final" {
+							handler.ServeHTTP(w, r)
+							return
+						}
+						_, _ = io.Copy(io.Discard, r.Body)
+						http.Redirect(w, r, destination, http.StatusTemporaryRedirect)
+					}))
+					defer source.Close()
+					if sameOrigin {
+						destination = source.URL + "/hop"
+					}
+					cfg := ConnectionConfig{Domain: source.URL, APIKey: "tenant", AuthHeader: authHeader,
+						Headers: map[string]string{"OpenSandbox-Secure-Access": "endpoint", "X-Custom": "keep"}}
+					if customClient {
+						cfg.HTTPClient = &http.Client{Timeout: time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+							req.Header.Set(cfg.GetAuthHeader(), "tenant")
+							req.Header.Set("OpenSandbox-Secure-Access", "endpoint")
+							return nil
+						}}
+					}
+					reportSandboxCreateMetric(cfg, "sbx", "image", 42, true)
+					for i := 0; i < 2; i++ {
+						select {
+						case headers := <-observed:
+							require.Equal(t, "keep", headers.Get("X-Custom"))
+							for _, name := range []string{cfg.GetAuthHeader(), "OpenSandbox-Secure-Access"} {
+								if sameOrigin {
+									require.NotEmpty(t, headers.Get(name))
+								} else {
+									require.Equal(t, "", headers.Get(name))
+								}
+							}
+						case <-time.After(3 * time.Second):
+							t.Fatal("redirected metric was not received")
+						}
+					}
+				})
+			}
+		}
 	}
 }

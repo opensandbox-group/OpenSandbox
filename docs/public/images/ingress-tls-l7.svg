@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="1020" viewBox="0 0 1180 1020" role="img" aria-labelledby="title desc">
+<title id="title">Ingress behind TLS</title>
+<desc id="desc">A browser connects with TLS to an L7 front proxy, which terminates TLS and forwards cleartext HTTP/1.1, including WebSocket upgrades, to the ingress. The ingress never terminates TLS and must never receive HTTP/2. The sandbox workload sees ordinary HTTP/1.1 requests with X-Forwarded headers preserved.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="1020" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Ingress behind TLS</text>
+<text x="48" y="96" class="body">The ingress speaks cleartext HTTP/1.1 only · a front proxy terminates TLS</text>
+<path d="M988 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1034" y="60" class="edge" style="fill:#2563eb">Traffic</text>
+<rect x="48" y="128" width="1084" height="136" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="158" class="section">CLIENTS</text>
+<rect x="72" y="176" width="500" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="206" class="heading">Browser / client</text>
+<text x="88" y="231" class="label">TLS + ALPN (h2, http/1.1)</text>
+<rect x="596" y="176" width="512" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="612" y="206" class="heading">WebSocket constraint</text>
+<text x="612" y="231" class="label">Upgrades must arrive as HTTP/1.1</text>
+<path d="M590 264V326" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="606" y="299" class="edge" style="fill:#2563eb">TLS</text>
+<rect x="48" y="326" width="1084" height="180" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="72" y="359" class="section">TLS FRONT PROXY · L7</text>
+<text x="72" y="395" class="heading">Terminates TLS, speaks HTTP/1.1 downstream</text>
+<text x="72" y="428" class="body">Delivers WebSocket upgrades as classic HTTP/1.1</text>
+<text x="72" y="457" class="body">Never forwards HTTP/2 to the ingress</text>
+<rect x="760" y="350" width="348" height="132" rx="10" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="780" y="383" class="heading">Why not h2?</text>
+<text x="780" y="416" class="body">RFC 8441 (WS over h2): rejected</text>
+<text x="780" y="443" class="body">RFC 7540 forbids Upgrade on h2</text>
+<text x="780" y="467" class="label">translate or drop h2</text>
+<path d="M590 506V566" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="606" y="539" class="edge" style="fill:#2563eb">Cleartext HTTP/1.1 · WS upgrades</text>
+<rect x="48" y="566" width="1084" height="142" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5"/>
+<text x="72" y="597" class="section">INGRESS</text>
+<rect x="72" y="620" width="420" height="64" rx="8" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="88" y="650" class="heading">Ingress gateway</text>
+<text x="88" y="675" class="label">Cleartext HTTP/1.1 · no TLS</text>
+<text x="528" y="645" class="body">Subprotocols, cookies, and close codes</text>
+<text x="528" y="673" class="body">cross the handshake untouched</text>
+<path d="M590 708V768" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="606" y="741" class="edge" style="fill:#2563eb">Ordinary HTTP/1.1</text>
+<rect x="48" y="768" width="1084" height="136" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="799" class="section">SANDBOX</text>
+<rect x="72" y="816" width="560" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="846" class="heading">Sandbox workload</text>
+<text x="88" y="871" class="label">Ordinary HTTP/1.1 · X-Forwarded-* preserved</text>
+<text x="668" y="846" class="body">WebSocket streams both directions</text>
+<text x="668" y="874" class="label">no buffering of the peer</text>
+<rect x="48" y="928" width="1084" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="955" class="heading">WebSocket strategies, in order</text>
+<text x="460" y="955" class="body">1 · drop h2 from browser-facing ALPN</text>
+<text x="72" y="982" class="label">2 · per-WebSocket HTTP/1.1 fallback · 3 · RFC 8441 → RFC 6455 translation — verify with a real browser first</text>
+</svg>

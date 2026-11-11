@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,10 @@
 
 package opensandbox
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // SandboxReadyTimeoutError is returned when WaitUntilReady exceeds the deadline.
 type SandboxReadyTimeoutError struct {
@@ -70,3 +73,30 @@ type InvalidArgumentError struct {
 func (e *InvalidArgumentError) Error() string {
 	return fmt.Sprintf("invalid argument %q: %s", e.Field, e.Message)
 }
+
+// SandboxWakeTimeoutError is returned when the OSEP-0024 wake retry budget is
+// exhausted.
+//
+// The gateway answered 503 with the "OpenSandbox-Wake: expired" marker on
+// every attempt: the sandbox restore did not finish within the wake retry
+// budget. The request was never forwarded, so retrying later is safe — the
+// server-side resume continues in the background regardless.
+type SandboxWakeTimeoutError struct {
+	// Attempts is the number of marked wake-timeout responses received.
+	Attempts int
+	// Waited is the total wall-clock time spent across waits, retries, and
+	// request time.
+	Waited time.Duration
+	// LastErr is the last marked 503 APIError, carrying the status code,
+	// request id, and parsed body.
+	LastErr error
+}
+
+func (e *SandboxWakeTimeoutError) Error() string {
+	return fmt.Sprintf(
+		"sandbox wake timeout: restore did not finish within the wake retry budget after %d attempt(s) and %s; the request was never forwarded and is safe to retry",
+		e.Attempts, e.Waited,
+	)
+}
+
+func (e *SandboxWakeTimeoutError) Unwrap() error { return e.LastErr }

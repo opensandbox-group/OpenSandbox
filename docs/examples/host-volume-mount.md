@@ -196,7 +196,6 @@ Sandbox sandbox = Sandbox.builder()
 
 ## References
 
-- [OSEP-0003: Volume and VolumeBinding Support](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0003-volume-and-volumebinding-support.md) -- Design proposal
 - [Sandbox Lifecycle API Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml) -- OpenAPI schema for volume definitions
 - [Server Configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/opensandbox_server/examples/example.config.toml) -- `[storage]` section for `allowed_host_paths`
 - [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/host-volume-mount)

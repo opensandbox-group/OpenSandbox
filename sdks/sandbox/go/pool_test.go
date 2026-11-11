@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -356,6 +356,61 @@ func TestPool_Shutdown_NotStarted(t *testing.T) {
 
 // ---------- Acquire Tests ----------
 
+func TestPool_Create_MetricsDisabledForWarmupOnly(t *testing.T) {
+	execdSrv := newMockExecdServer(t)
+	lifecycleSrv := newMockLifecycleServer(t, execdSrv.URL)
+
+	var mu sync.Mutex
+	got := map[PooledSandboxCreateReason]ConnectionConfig{}
+	creator := &mockSandboxCreator{createFn: func(ctx context.Context, createCtx PooledSandboxCreateContext) (*Sandbox, error) {
+		mu.Lock()
+		got[createCtx.Reason] = createCtx.ConnectionConfig
+		mu.Unlock()
+		return CreateSandbox(ctx, createCtx.ConnectionConfig, SandboxCreateOptions{
+			Image:           "python:3.12",
+			TimeoutSeconds:  func() *int { v := 60; return &v }(),
+			SkipHealthCheck: true,
+		})
+	}}
+
+	withCreator := func(b *SandboxPoolBuilder) { b.SandboxCreator(creator) }
+	warmupPool := newTestPool(t, lifecycleSrv.URL, withCreator)
+	acquirePool := newTestPool(t, lifecycleSrv.URL, withCreator, func(b *SandboxPoolBuilder) { b.MaxIdle(0) })
+
+	ctx := context.Background()
+	if err := warmupPool.Start(ctx); err != nil {
+		t.Fatalf("warmupPool Start failed: %v", err)
+	}
+	defer warmupPool.Shutdown(ctx, false)
+	if err := acquirePool.Start(ctx); err != nil {
+		t.Fatalf("acquirePool Start failed: %v", err)
+	}
+	defer acquirePool.Shutdown(ctx, false)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		_, warmupSeen := got[CreateReasonWarmup]
+		mu.Unlock()
+		if warmupSeen {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := acquirePool.Acquire(ctx, AcquireOptions{SkipHealthCheck: true}); err != nil {
+		t.Fatalf("Acquire failed: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !got[CreateReasonWarmup].DisableMetrics {
+		t.Errorf("warmup create ConnectionConfig.DisableMetrics = false, want true")
+	}
+	if got[CreateReasonAcquire].DisableMetrics {
+		t.Errorf("acquire create ConnectionConfig.DisableMetrics = true, want false")
+	}
+}
+
 func TestPool_Acquire_FromIdle(t *testing.T) {
 	execdSrv := newMockExecdServer(t)
 	lifecycleSrv := newMockLifecycleServer(t, execdSrv.URL)
@@ -434,7 +489,7 @@ func TestPool_Acquire_Empty_FailFast(t *testing.T) {
 		t.Fatal("expected PoolEmptyError, got nil")
 	}
 	var poolEmptyErr *PoolEmptyError
-	if !isPoolEmptyError(err, &poolEmptyErr) {
+	if !errors.As(err, &poolEmptyErr) {
 		t.Errorf("error type = %T, want *PoolEmptyError; error = %v", err, err)
 	}
 }
@@ -589,7 +644,7 @@ func TestPool_Acquire_PoolNotRunning(t *testing.T) {
 		t.Fatal("expected PoolNotRunningError, got nil")
 	}
 	var notRunning *PoolNotRunningError
-	if !isPoolNotRunningError(err, &notRunning) {
+	if !errors.As(err, &notRunning) {
 		t.Errorf("error type = %T, want *PoolNotRunningError; error = %v", err, err)
 	}
 }
@@ -1194,24 +1249,4 @@ func TestPoolStateStoreUnavailableError(t *testing.T) {
 		t.Errorf("Operation = %q, want %q", target.Operation, "TryTakeIdle")
 	}
 
-}
-
-// ---------- Helpers ----------
-
-// isPoolEmptyError checks if err is or wraps a *PoolEmptyError.
-func isPoolEmptyError(err error, target **PoolEmptyError) bool {
-	if e, ok := err.(*PoolEmptyError); ok {
-		*target = e
-		return true
-	}
-	return false
-}
-
-// isPoolNotRunningError checks if err is or wraps a *PoolNotRunningError.
-func isPoolNotRunningError(err error, target **PoolNotRunningError) bool {
-	if e, ok := err.(*PoolNotRunningError); ok {
-		*target = e
-		return true
-	}
-	return false
 }

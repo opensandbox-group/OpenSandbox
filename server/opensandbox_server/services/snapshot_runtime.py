@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,6 +37,14 @@ class SnapshotRuntimeStatus:
     # Backend marker persisted into restore_config on READY (e.g. "fsb") so
     # create-time routing can send restores to the owning backend.
     backend: Optional[str] = None
+    # Source sandbox's per-sandbox limits, persisted and replayed on restore.
+    resource_limits: Optional[dict] = None
+
+
+# Reason on a FAILED SnapshotRuntimeStatus when the runtime refused the create
+# because the source sandbox is already held by another snapshot (re-entry
+# fence). Surfaced as 409 instead of 500 by the synchronous create path.
+SNAPSHOT_CREATE_CONFLICT_REASON = "snapshot_runtime_create_conflict"
 
 
 class SnapshotRuntimePreflightError(RuntimeError):
@@ -51,6 +59,12 @@ class SnapshotRuntime(Protocol):
     def supports_create_snapshot(self) -> bool:
         """
         Whether this runtime supports creating snapshots.
+        """
+
+    def supports_synchronous_create(self) -> bool:
+        """
+        Whether ``create_snapshot`` is a fast, idempotent submit that can run
+        inline before the snapshot row is persisted.
         """
 
     def create_snapshot_unsupported_message(self) -> str:
@@ -137,6 +151,9 @@ class NoopSnapshotRuntime:
     def supports_create_snapshot(self) -> bool:
         return False
 
+    def supports_synchronous_create(self) -> bool:
+        return False
+
     def create_snapshot_unsupported_message(self) -> str:
         return "Snapshot management is not implemented for this runtime."
 
@@ -188,6 +205,7 @@ class NoopSnapshotRuntime:
 
 
 __all__ = [
+    "SNAPSHOT_CREATE_CONFLICT_REASON",
     "SnapshotRuntime",
     "SnapshotRuntimePreflightError",
     "SnapshotRuntimeStatus",

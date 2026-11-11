@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,6 +24,8 @@ import socket
 from typing import Optional
 from uuid import uuid4
 
+from fastapi import HTTPException
+
 from opensandbox_server.api.schema import (
     CreateSandboxRequest,
     CreateSandboxResponse,
@@ -35,7 +37,7 @@ from opensandbox_server.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
 )
-from opensandbox_server.services.diagnostics import DiagnosticResult
+from opensandbox_server.services.diagnostics import DiagnosticContext, DiagnosticResult
 from opensandbox_server.services.validators import ensure_valid_port
 
 
@@ -261,6 +263,16 @@ class SandboxService(ABC):
 
     # Diagnostics (DevOps)
     # ------------------------------------------------------------------
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        """Return backend context; extensions may override this capability."""
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "code": "DIAGNOSTICS_NOT_IMPLEMENTED",
+                "message": "Diagnostic context is not implemented by this backend.",
+            },
+        )
 
     @abstractmethod
     def get_sandbox_log_diagnostics(

@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,10 +37,11 @@ from opensandbox.internal.readiness import (
     ReadinessBudget,
     validate_polling_interval,
 )
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
+    IdlePolicy,
     NetworkPolicy,
     NetworkRule,
     PlatformSpec,
@@ -216,6 +217,20 @@ class Sandbox:
         """
         return self._filesystem_service
 
+    def files_with_identity(self, uid: int, gid: int) -> Filesystem:
+        """Return a separate filesystem client running as the given Linux UID/GID.
+
+        Requires identity-aware Execd. Unsupported servers fail without falling
+        back to the default identity. The existing files client is unchanged.
+        """
+        from opensandbox.adapters.filesystem_adapter import FilesystemAdapter
+
+        if not isinstance(self._filesystem_service, FilesystemAdapter):
+            raise NotImplementedError(
+                "The selected filesystem adapter does not support execution identity"
+            )
+        return self._filesystem_service.with_identity(uid, gid)
+
     @property
     def commands(self) -> Commands:
         """
@@ -239,15 +254,13 @@ class Sandbox:
         """
         Provides access to sandbox-scoped Credential Vault operations.
 
-        Raises:
-            SandboxException: for template-backed sandboxes (they have no
-                sandbox-side egress sidecar).
+        Sidecar-backed sandboxes write straight to the egress sidecar.
+        Template-backed sandboxes route through the lifecycle server, which
+        relays vault revisions to the egress-held vault (OSEP-0022): the ack
+        is synchronous and values never appear on any read. A ``412`` patch
+        failure means another writer won the revision — re-read and retry
+        with the fresh ``expected_revision``.
         """
-        if self._origin == SandboxOrigin.TEMPLATE:
-            raise SandboxException(
-                "Credential Vault is not available for template-backed "
-                "sandboxes: they have no sandbox-side egress sidecar."
-            )
         return self._egress_service
 
     @property
@@ -321,6 +334,10 @@ class Sandbox:
         """
         return await self._metrics_service.get_metrics(self.id)
 
+    async def get_diagnostic_context(self) -> DiagnosticContext:
+        """Get the sandbox's runtime backend and diagnostic identifiers."""
+        return await self._diagnostics_service.get_context(self.id)
+
     async def get_diagnostic_logs(self, scope: str) -> DiagnosticContent:
         """
         Get diagnostic log content for this sandbox.
@@ -341,9 +358,11 @@ class Sandbox:
 
     async def renew(self, timeout: timedelta) -> SandboxRenewResponse:
         """
-        Renew the sandbox expiration time to delay automatic termination.
+        Set the sandbox expiration time.
 
         The new expiration time will be set to the current time plus the provided duration.
+        This may shorten or extend the remaining lifetime. The creation-time
+        server timeout limit does not apply.
 
         Args:
             timeout: Duration to add to the current time to set the new expiration
@@ -423,9 +442,8 @@ class Sandbox:
 
     async def kill(self) -> None:
         """
-        Send a termination signal to the remote sandbox instance.
-
-        This is an irreversible operation that stops the sandbox immediately.
+        Request irreversible termination of the remote sandbox. Returns when
+        deletion is accepted; runtime cleanup may continue afterward.
 
         Note: This method does NOT close the local resources. Use close() or
         async context manager to clean up local resources.
@@ -644,6 +662,7 @@ class Sandbox:
         metadata: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
+        idle_policy: IdlePolicy | None = None,
         connection_config: ConnectionConfig | None = None,
         health_check: Callable[["Sandbox"], Awaitable[bool]] | None = None,
         health_check_polling_interval: timedelta = timedelta(milliseconds=200),
@@ -653,10 +672,11 @@ class Sandbox:
         Create a new sandbox from a ``Succeeded`` fsb template.
 
         Template mode fixes the workload shape on the server: the entrypoint,
-        env, resources, volumes, platform and lifecycle of the sandbox come
+        env, resources, volumes, platform and lifecycle hooks of the sandbox come
         from the template's golden image and cannot be overridden here. Only
-        metadata, network policy and extensions may accompany the template id,
-        and the timeout is required.
+        metadata, network policy, extensions and the control-plane
+        ``idle_policy`` (OSEP-0024 ``lifecycle.idlePolicy``) may accompany the
+        template id, and the timeout is required.
 
         Args:
             template_id: ID of a ``Succeeded`` fsb template (see
@@ -667,6 +687,7 @@ class Sandbox:
             network_policy: Optional outbound network policy (egress).
             extensions: Opaque extension parameters passed through to the server as-is.
                 Prefer namespaced keys (e.g. ``storage.id``).
+            idle_policy: Optional idle behavior (OSEP-0024, fast-sandbox only).
             connection_config: Connection configuration
             health_check: Custom async health check function
             health_check_polling_interval: Polling interval used while waiting for endpoint publication and readiness/health.
@@ -704,6 +725,7 @@ class Sandbox:
                 metadata=metadata,
                 network_policy=network_policy,
                 extensions=extensions,
+                idle_policy=idle_policy,
             ),
             origin=SandboxOrigin.TEMPLATE,
         )

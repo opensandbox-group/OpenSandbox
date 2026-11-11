@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -212,6 +212,12 @@ func (r *BatchSandboxReconciler) dispatchPauseResume(ctx context.Context, bs *sa
 	if generation > pauseObservedGen {
 		if pause != nil {
 			if *pause {
+				if bs.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused {
+					// Already paused: a generation bump (for example a renew-only spec
+					// change) is not a new pause request.
+					log.Info("Dispatch: already Paused, skipping pause", "generation", generation, "pauseObservedGeneration", pauseObservedGen)
+					return ctrl.Result{}, false, nil
+				}
 				log.Info("Dispatch: handlePause", "generation", generation, "pauseObservedGeneration", pauseObservedGen)
 				result, err := r.handlePause(ctx, bs)
 				return result, true, err

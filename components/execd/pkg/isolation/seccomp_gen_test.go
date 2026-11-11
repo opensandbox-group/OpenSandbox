@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -57,12 +57,6 @@ func TestGenerateSeccompDenyBPF_EmptyOverride(t *testing.T) {
 	bpf, err := generateSeccompDenyBPF(override)
 	require.NoError(t, err)
 	assert.Nil(t, bpf, "empty deny list should produce nil BPF")
-}
-
-func TestGenerateSeccompDenyBPF_ArchSpecific(t *testing.T) {
-	bpf, err := generateSeccompDenyBPF(nil)
-	require.NoError(t, err)
-	t.Logf("generated %d BPF instructions (%d bytes)", len(bpf)/8, len(bpf))
 }
 
 func TestFilterKnownSyscalls(t *testing.T) {

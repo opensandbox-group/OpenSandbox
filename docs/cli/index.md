@@ -112,6 +112,8 @@ osb file cat <sandbox-id> /tmp/hello.txt -o raw
 osb sandbox kill <sandbox-id> -o json
 ```
 
+`kill` now returns `status: "deletion_requested"` instead of `terminated`; update scripts that match this value. It confirms request acceptance. To wait for deletion, see [cleanup completion](/architecture/control-plane/server#asynchronous-lifecycle-with-absolute-expiration).
+
 ## Common Tasks
 
 ### Create sandboxes
@@ -162,6 +164,49 @@ Create with Credential Vault proxy enabled:
 osb sandbox create --image python:3.12 --network-policy-file network-policy.json --credential-proxy -o json
 ```
 
+Create from a template (golden image):
+
+```bash
+osb sandbox create --template <template-id> --timeout 30m -o json
+```
+
+Template mode fixes the workload shape on the server: `--image`, `--env`, `--resource`, `--entrypoint`, `--volumes-file`, and `--credential-proxy` cannot be combined with `--template`. Only `--timeout` (required), `--metadata`, `--extension`, and `--network-policy-file` may accompany it. Only templates in the `Succeeded` phase can be used. See [Manage templates](#manage-templates).
+
+Create from a snapshot:
+
+```bash
+osb sandbox create --snapshot-id <snapshot-id> --timeout 30m -o json
+```
+
+`--image`, `--template`, and `--snapshot-id` are mutually exclusive.
+
+### Manage templates
+
+Templates are golden-image builds; the build runs asynchronously, so poll `template get` until the status phase is `Succeeded`. Template management requires a Kubernetes-backed runtime.
+
+```bash
+osb template create --image python:3.12 --publish s3://bucket/publish --format native -o json
+osb template create --image python:3.12 --publish oci://registry.example.com/sandbox/templates --format overlaybd -o json
+osb template get <template-id> -o json
+osb template list -o json
+osb template delete <template-id> -o json
+```
+
+`template create` also accepts `--resource cpu=1 memory=512Mi disk=2Gi`, `--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe`, and `--warmup-seconds`.
+
+OCI publishing requires a repository-only target without a tag or digest. The builder generates unique tags and returns an immutable `oci://...@sha256:...` in `status.manifestRef`. Use `overlaybd` (the default) for OCI and explicitly select `native` for S3. Configure the builder's Registry Secret and an OCI-enabled Fast Sandbox pool before building; see [OCI template setup](/guides/oci-templates).
+
+### Manage snapshots
+
+Snapshots capture a sandbox's state and can back new sandboxes.
+
+```bash
+osb snapshot create <sandbox-id> --name golden -o json
+osb snapshot get <snapshot-id> -o json
+osb snapshot list --sandbox-id <sandbox-id> -o json
+osb snapshot delete <snapshot-id> -o json
+```
+
 ### List and inspect sandboxes
 
 ```bash
@@ -184,8 +229,7 @@ osb sandbox resume <sandbox-id> --resume-timeout 60s -o json
 osb sandbox renew <sandbox-id> --timeout 30m -o json
 ```
 
-Pause is asynchronous. A successful pause response means the request was accepted.
-See [Pause and Resume](/guides/pause-resume) for runtime-specific behavior.
+Pause is asynchronous. A successful pause response means the request was accepted. See [Pause and Resume](/guides/pause-resume) for runtime-specific behavior.
 
 ### Expose a service
 
@@ -193,8 +237,7 @@ See [Pause and Resume](/guides/pause-resume) for runtime-specific behavior.
 osb sandbox endpoint <sandbox-id> --port 8080 -o json
 ```
 
-Use the returned endpoint and headers together. The command resolves a route;
-it does not start a service or prove that the application is healthy.
+Use the returned endpoint and headers together. The command resolves a route; it does not start a service or prove that the application is healthy.
 
 ### Run commands
 
@@ -212,24 +255,22 @@ osb command status <sandbox-id> <execution-id> -o json
 osb command logs <sandbox-id> <execution-id> -o json
 ```
 
-By default the CLI shell-quotes each argument and joins them into a command
-string. To use pipelines, redirection, or sandbox-side variable expansion, pass
-an explicit shell and script:
+By default the CLI shell-quotes each argument and joins them into a command string. To use pipelines, redirection, or sandbox-side variable expansion, pass an explicit shell and script:
 
 ```bash
 osb command run <sandbox-id> -o raw -- sh -c 'echo "$HOME"; printf "ready\n" | cat'
 ```
 
-Use `--argv` for native execution without a shell. It requires execd support for
-the `argv` request field:
+Use `--argv` for native execution without a shell. It requires execd support for the `argv` request field:
 
 ```bash
 osb command run <sandbox-id> -o raw --argv -- python3 -c "import sys; print(sys.argv[1:])" "a b" '$HOME' "x'y" ""
 osb command interrupt <sandbox-id> <execution-id> -o json
 ```
 
-Foreground `command run` accepts `-o raw`; background execution accepts
-`table`, `json`, or `yaml`.
+Foreground `command run` accepts `-o raw`; background execution accepts `table`, `json`, or `yaml`.
+
+Background execution metadata is returned only after execd confirms startup. An execution error or a stream that ends before this confirmation makes the CLI exit non-zero without printing success metadata. A successful background start does not mean the process has finished; use `command status` and `command logs` to check its eventual result.
 
 Persistent shell session:
 
@@ -240,6 +281,17 @@ osb command session run <sandbox-id> <session-id> -o raw -- export FOO=bar
 osb command session run <sandbox-id> <session-id> -o raw -- sh -c 'echo $FOO'
 osb command session delete <sandbox-id> <session-id> -o json
 ```
+
+### Open an interactive terminal
+
+`osb terminal` attaches your current terminal to a real PTY inside the sandbox (colors, `stty`, and resize all behave like a local shell). Exit the remote shell (or press Ctrl-D) to leave; the remote exit code becomes the command's exit code.
+
+```bash
+osb terminal <sandbox-id>
+osb terminal <sandbox-id> -w /workspace
+```
+
+Requires an interactive TTY, and is supported on Unix, macOS, and Linux. If the connection drops while the shell is still running, the session is kept server-side and its id is printed so it can be inspected or removed via the execd API; a clean exit tears the session down.
 
 ### Work with files
 
@@ -252,19 +304,11 @@ osb file replace <sandbox-id> /workspace/app.py --old old --new new -o json
 osb file chmod <sandbox-id> /workspace/script.sh --mode 755 -o json
 ```
 
-For regular files, `file download` replaces the local destination only after the entire download
-succeeds. If the download fails or you interrupt it, an existing file stays
-unchanged and temporary download files are removed. The destination directory
-must be writable so the CLI can stage the download before replacing the file.
+For regular files, `file download` replaces the local destination only after the entire download succeeds. If the download fails or you interrupt it, an existing file stays unchanged and temporary download files are removed. The destination directory must be writable so the CLI can stage the download before replacing the file.
 
-Existing devices (such as `/dev/null`) and named pipes receive the download
-directly. They are not replaced, and bytes already written cannot be rolled back
-if the download fails or is interrupted.
+Existing devices (such as `/dev/null`) and named pipes receive the download directly. They are not replaced, and bytes already written cannot be rolled back if the download fails or is interrupted.
 
-Destinations that refer to standard output, such as `/dev/stdout` and `/dev/fd/1`,
-stream directly even when stdout is redirected to a regular file. These downloads
-omit the success message in all output formats so stdout contains only file bytes;
-errors still go to stderr. A failed or interrupted stream can contain partial data.
+Destinations that refer to standard output, such as `/dev/stdout` and `/dev/fd/1`, stream directly even when stdout is redirected to a regular file. These downloads omit the success message in all output formats so stdout contains only file bytes; errors still go to stderr. A failed or interrupted stream can contain partial data.
 
 ### Manage runtime egress policy
 
@@ -288,10 +332,7 @@ osb command run <sandbox-id> -o raw -- curl -I https://pypi.org
 
 ### Manage Credential Vault
 
-Credential Vault operations call the sandbox egress sidecar through the Python SDK.
-Create the sandbox with `--credential-proxy` and an explicit network policy before
-writing vault state. Template-backed sandboxes do not support Credential Vault.
-See [Credential Vault](/guides/credential-vault) for payload examples and revision checks.
+Credential Vault operations call the sandbox egress sidecar through the Python SDK. Create the sandbox with `--credential-proxy` and an explicit network policy before writing vault state. Template-backed sandboxes do not support Credential Vault. See [Credential Vault](/guides/credential-vault) for payload examples and revision checks.
 
 ```bash
 osb credential-vault create <sandbox-id> --file vault.yaml -o json
@@ -308,9 +349,10 @@ Use `--file -` to read a JSON/YAML payload from stdin. Do not pass plaintext cre
 
 ### Collect diagnostics
 
-Use the stable diagnostics commands for API-backed log and event descriptors.
+Use context to identify the runtime backend, then collect log and event descriptors.
 
 ```bash
+osb diagnostics context <sandbox-id> -o json
 osb diagnostics events <sandbox-id> --scope runtime -o raw
 osb diagnostics events <sandbox-id> --scope all -o raw
 osb diagnostics logs <sandbox-id> --scope container -o raw
@@ -319,7 +361,9 @@ osb diagnostics events <sandbox-id> --scope runtime -o json
 osb diagnostics logs <sandbox-id> --scope container -o yaml
 ```
 
-`--scope` is required for stable diagnostics. The built-in server supports
+`context` returns backend routing information without connecting to execd and
+supports table, JSON, and YAML output. `--scope` is required for logs/events.
+The built-in server supports
 `container` and `all` for logs, and `runtime` and `all` for events. Docker/Kubernetes return
 `DIAGNOSTICS_SCOPE_UNSUPPORTED` for unavailable scopes, including lifecycle events.
 Best-effort scopes may include a `warnings` field when the backend can only
@@ -364,7 +408,10 @@ Not every command supports every format. Use `--help` on the specific command wh
 The main command groups are:
 
 - `osb sandbox`: lifecycle management
+- `osb template`: golden-image template builds
+- `osb snapshot`: snapshot management
 - `osb command`: command execution and persistent sessions
+- `osb terminal`: interactive PTY terminal into a sandbox
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
 - `osb credential-vault`: sandbox-local credentials and bindings
@@ -373,14 +420,14 @@ The main command groups are:
 - `osb config`: local CLI configuration
 - `osb skills`: bundled skills for AI tools
 
-The CLI currently exposes image-backed creation. It does not provide snapshot or
-template management, Client Pool, or pool tracing commands; use the SDK/API for
-those workflows. A feature in the Python SDK is not automatically a CLI command.
+The CLI does not provide Client Pool or pool tracing commands; use the SDK/API for those workflows. A feature in the Python SDK is not automatically a CLI command.
 
 Explore them directly:
 
 ```bash
 osb sandbox --help
+osb template --help
+osb snapshot --help
 osb command --help
 osb file --help
 osb skills --help
@@ -402,12 +449,12 @@ Supported targets:
 
 | Target | Install location |
 | --- | --- |
-| `claude` | `./.claude/skills/` or `~/.claude/skills/` |
+| `claude` | `./.claude/skills/<name>/SKILL.md` or `~/.claude/skills/<name>/SKILL.md` |
 | `cursor` | `./.cursor/rules/` or `~/.cursor/rules/` |
 | `codex` | `./.codex/skills/<name>/SKILL.md` or `~/.codex/skills/<name>/SKILL.md` |
-| `copilot` | `./.github/copilot-instructions.md` or `~/.github/copilot-instructions.md` |
+| `copilot` | `./.github/copilot-instructions.md` or `~/.copilot/copilot-instructions.md` |
 | `windsurf` | `./.windsurfrules` or `~/.windsurfrules` |
-| `cline` | `./.clinerules` or `~/.clinerules` |
+| `cline` | `./.clinerules` or `~/.cline/rules/opensandbox-<name>.md` |
 | `opencode` | `./.agents/skills/<name>/SKILL.md` or `~/.agents/skills/<name>/SKILL.md` |
 
 Common flows:
@@ -446,6 +493,8 @@ osb config set defaults.image python:3.12
 osb config set defaults.timeout 30m
 ```
 
+The optional `connection`, `output`, and `defaults` sections must be TOML tables (for example, `[connection]`), not scalar values or arrays. Invalid section types produce a configuration error naming the section. Omitted sections use defaults.
+
 Example config file:
 
 ```toml
@@ -454,7 +503,6 @@ api_key = "your-api-key"
 domain = "localhost:8080"
 protocol = "http"
 request_timeout = 30
-use_server_proxy = false
 
 [output]
 color = true

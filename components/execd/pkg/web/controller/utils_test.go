@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -180,6 +180,30 @@ func TestParseRange(t *testing.T) {
 			header: "bytes=-5",
 			size:   10,
 			want:   []httpRange{{start: 5, length: 5}},
+		},
+		{
+			name:   "end past size is clamped",
+			header: "bytes=5-100",
+			size:   10,
+			want:   []httpRange{{start: 5, length: 5}},
+		},
+		{
+			name:   "end at max int64",
+			header: "bytes=0-9223372036854775807",
+			size:   10,
+			want:   []httpRange{{start: 0, length: 10}},
+		},
+		{
+			name:   "start past size is skipped",
+			header: "bytes=20-30",
+			size:   10,
+			want:   []httpRange{},
+		},
+		{
+			name:   "start plus end overflows",
+			header: "bytes=1-9223372036854775807",
+			size:   10,
+			want:   []httpRange{{start: 1, length: 9}},
 		},
 		{
 			name:      "invalid",

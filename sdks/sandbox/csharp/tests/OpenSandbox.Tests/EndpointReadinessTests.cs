@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -160,6 +160,43 @@ public class EndpointReadinessTests
         health.Verify(h => h.PingAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
+    [Fact]
+    public async Task CreateSharesOneBudgetAcrossEndpointsAndHealth()
+    {
+        // Same one-budget contract as the connect test, for the create flow.
+        var lifecycle = new Mock<ISandboxes>();
+        lifecycle.Setup(s => s.CreateSandboxAsync(It.IsAny<CreateSandboxRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new CreateSandboxResponse
+            {
+                Id = "sb",
+                Status = new SandboxStatus { State = "Running" },
+                CreatedAt = DateTime.UtcNow,
+                Entrypoint = ["/bin/sh"],
+            });
+        lifecycle.Setup(s => s.GetSandboxEndpointAsync("sb", It.IsAny<int>(), false, It.IsAny<CancellationToken>()))
+            .Returns(async (string _, int port, bool _, CancellationToken token) =>
+            {
+                if (port == Constants.DefaultExecdPort) await Task.Delay(600, token);
+                return new Endpoint { EndpointAddress = "localhost:44772" };
+            });
+        var health = new Mock<IExecdHealth>();
+        health.Setup(h => h.PingAsync(It.IsAny<CancellationToken>())).Returns(async (CancellationToken token) =>
+        {
+            await Task.Delay(Timeout.Infinite, token);
+            return true;
+        });
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        await Assert.ThrowsAsync<SandboxReadyTimeoutException>(() => Sandbox.CreateFromTemplateAsync(new SandboxCreateFromTemplateOptions
+        {
+            TemplateId = "tpl",
+            TimeoutSeconds = 60,
+            AdapterFactory = Factory(lifecycle.Object, health.Object).Object,
+            ReadyTimeoutSeconds = 1
+        }));
+        Assert.True(started.ElapsedMilliseconds < 1400);
+        health.Verify(h => h.PingAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
     private static Mock<IAdapterFactory> Factory(ISandboxes sandboxes, IExecdHealth? health = null)
     {
         var factory = new Mock<IAdapterFactory>();
@@ -170,6 +207,9 @@ public class EndpointReadinessTests
             Metrics = Mock.Of<IExecdMetrics>(), Isolation = Mock.Of<IIsolatedSessions>()
         });
         factory.Setup(f => f.CreateEgressStack(It.IsAny<CreateEgressStackOptions>())).Returns(new EgressStack { Egress = Mock.Of<IEgress>() });
+        // Template-backed create flows route egress through this stack.
+        factory.Setup(f => f.CreateNetworkPolicyStack(It.IsAny<CreateNetworkPolicyStackOptions>()))
+            .Returns(new NetworkPolicyStack { Egress = Mock.Of<IEgress>() });
         return factory;
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -262,11 +262,17 @@ class PlatformSpec private constructor(
  * Egress rule for matching network targets.
  *
  * @property action Whether to allow or deny matching targets.
- * @property target FQDN or wildcard domain (e.g., "example.com", "*.example.com")
+ * @property target FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP address, or
+ * CIDR. May be null when [ports] is set; otherwise required.
+ * @property ports Restricts this rule to specific TCP destination ports (1-65535, max 256, no
+ * duplicates). A null [target] with [ports] set applies to all IPv4/IPv6 destinations. A domain
+ * [target] combined with [ports] is rejected by the server/sidecar: domain rules are evaluated at
+ * the DNS layer, which has no port dimension.
  */
 class NetworkRule private constructor(
     val action: Action,
-    val target: String,
+    val target: String?,
+    val ports: List<Int>?,
 ) {
     enum class Action {
         ALLOW,
@@ -274,13 +280,30 @@ class NetworkRule private constructor(
     }
 
     companion object {
+        private const val MAX_PORTS_PER_RULE = 256
+
         @JvmStatic
         fun builder(): Builder = Builder()
+
+        /**
+         * Lenient wire-shape factory for READ-BACK paths only (policy
+         * GET/EffectiveOf results): it skips the write-path validation so
+         * contract drift on the server can never turn a policy read into an
+         * uncaught [IllegalArgumentException]. Callers normalize wire
+         * artifacts first (blank target, empty ports list) — see the
+         * model converters.
+         */
+        internal fun fromWire(
+            action: Action,
+            target: String?,
+            ports: List<Int>?,
+        ): NetworkRule = NetworkRule(action = action, target = target, ports = ports)
     }
 
     class Builder {
         private var action: Action? = null
         private var target: String? = null
+        private var ports: List<Int>? = null
 
         fun action(action: Action): Builder {
             this.action = action
@@ -293,13 +316,82 @@ class NetworkRule private constructor(
             return this
         }
 
+        fun ports(ports: List<Int>): Builder {
+            require(ports.isNotEmpty()) { "Ports cannot be empty" }
+            require(ports.size <= MAX_PORTS_PER_RULE) { "Ports cannot exceed $MAX_PORTS_PER_RULE entries" }
+            require(ports.toSet().size == ports.size) { "Ports cannot contain duplicates" }
+            for (port in ports) {
+                require(port in 1..65535) { "Port $port out of range 1-65535" }
+            }
+            // Snapshot at set time: later caller mutation must not bypass
+            // the checks above.
+            this.ports = ports.toList()
+            return this
+        }
+
         fun build(): NetworkRule {
             val actionValue = action ?: throw IllegalArgumentException("Action must be specified")
-            val targetValue = target ?: throw IllegalArgumentException("Target must be specified")
+            val targetValue = target
+            val portsValue = ports
+            require(targetValue != null || portsValue != null) { "Either target or ports must be specified" }
+            if (portsValue != null && targetValue != null && !isIpOrCidr(targetValue)) {
+                throw IllegalArgumentException(
+                    "Ports are not supported for domain targets: \"$targetValue\" " +
+                        "(domain rules are evaluated at the DNS layer, which has no port dimension)",
+                )
+            }
             return NetworkRule(
                 action = actionValue,
                 target = targetValue,
+                ports = portsValue?.toList(),
             )
+        }
+
+        /**
+         * Mirrors the sidecar's netip-based IP-vs-domain classification,
+         * on the trimmed target.
+         */
+        private fun isIpOrCidr(target: String): Boolean {
+            val t = target.trim()
+            if (t.count { it == '/' } > 1) return false
+            val addr = t.substringBefore('/')
+            val prefix = t.substringAfter('/', missingDelimiterValue = "")
+            if (prefix.isNotEmpty()) {
+                if (t.contains('%')) return false // scoped prefixes: netip rejects
+                if (prefix.any { it !in '0'..'9' }) return false
+                val limit = if (addr.contains(':')) 128 else 32
+                if (prefix.toInt() > limit) return false
+            }
+            return if (addr.contains(':')) isIpv6Literal(addr) else isIpv4Literal(addr)
+        }
+
+        private fun isIpv4Literal(addr: String): Boolean {
+            val octets = addr.split('.')
+            return octets.size == 4 &&
+                octets.all { octet ->
+                    // Leading zeros are rejected (server-side too).
+                    octet.length in 1..3 && octet.all { it in '0'..'9' } &&
+                        (octet.length == 1 || octet[0] != '0') && octet.toInt() <= 255
+                }
+        }
+
+        private fun isIpv6Literal(addr: String): Boolean {
+            val host = addr.substringBefore('%')
+            if (host.isEmpty() || host.contains(":::")) return false
+            val halves = host.split("::")
+            if (halves.size > 2) return false
+            var groups = halves.flatMap { half -> half.split(':').filter(String::isNotEmpty) }
+            if (groups.lastOrNull()?.contains('.') == true) {
+                // Embedded IPv4 tail counts as two groups.
+                if (!isIpv4Literal(groups.last())) return false
+                groups = groups.dropLast(1) + listOf("0", "0")
+            }
+            if (groups.any { group -> group.length > 4 || group.any { ch -> ch !in '0'..'9' && ch !in 'a'..'f' && ch !in 'A'..'F' } }) {
+                return false
+            }
+            // "::" compresses one or more all-zero groups; without it the
+            // address must carry exactly eight groups.
+            return if (halves.size == 2) groups.size <= 7 else groups.size == 8
         }
     }
 }

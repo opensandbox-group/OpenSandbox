@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 apiVersion: v2
 name: base
 description: Helm chart for deploying OpenSandbox cluster resources and CRDs
-version: 1.1.0-rc.1
+version: 1.2.1-rc.2
 
 keywords:
   - sandbox
@@ -29,7 +29,6 @@ sources:
 
 maintainers:
   - name: OpenSandbox Team
-    email: opensandbox@example.com
 
 # Kubernetes version constraints
 kubeVersion: ">=1.21.1-0"

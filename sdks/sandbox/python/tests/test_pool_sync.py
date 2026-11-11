@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -31,7 +32,11 @@ from opensandbox.exceptions import (
     PoolEmptyException,
     PoolNotRunningException,
 )
-from opensandbox.models.sandboxes import PlatformSpec
+from opensandbox.models.sandboxes import (
+    CredentialProxyConfig,
+    NetworkPolicy,
+    PlatformSpec,
+)
 from opensandbox.pool import (
     AcquirePolicy,
     InMemoryPoolStateStore,
@@ -362,6 +367,98 @@ def test_acquire_direct_create_forwards_pool_creation_platform() -> None:
         pool.shutdown(False)
 
 
+@pytest.mark.parametrize("warmup", [False, True], ids=["direct", "warmup"])
+@pytest.mark.parametrize(
+    "credential_proxy",
+    [None, CredentialProxyConfig(enabled=False), CredentialProxyConfig(enabled=True)],
+    ids=["omitted", "disabled", "enabled"],
+)
+def test_pool_creation_forwards_credential_proxy(
+    warmup: bool, credential_proxy: CredentialProxyConfig | None
+) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    class CapturingSandbox(FakeSandbox):
+        @classmethod
+        def create(cls, *args: Any, **kwargs: Any) -> CapturingSandbox:
+            captured_kwargs.update(kwargs)
+            return cls("created-with-credential-proxy")
+
+    network_policy = NetworkPolicy(defaultAction="deny")
+    spec_kwargs = {"credential_proxy": credential_proxy} if credential_proxy else {}
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        max_idle=1 if warmup else 0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(
+            image="ubuntu:22.04", network_policy=network_policy, **spec_kwargs
+        ),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=CapturingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        if warmup:
+            _eventually(lambda: pool.snapshot().idle_count == 1)
+        else:
+            pool.acquire()
+
+        if credential_proxy is None:
+            assert "credential_proxy" not in captured_kwargs
+        else:
+            assert captured_kwargs["credential_proxy"] is credential_proxy
+        assert captured_kwargs["network_policy"] is network_policy
+    finally:
+        pool.shutdown(False)
+
+
+@pytest.mark.parametrize("warmup", [False, True], ids=["direct", "warmup"])
+def test_pool_creation_supports_legacy_factory(warmup: bool) -> None:
+    class LegacySandbox(FakeSandbox):
+        @classmethod
+        def create(
+            cls,
+            image: Any,
+            *,
+            timeout: Any,
+            ready_timeout: Any,
+            env: Any,
+            metadata: Any,
+            resource: Any,
+            network_policy: Any,
+            platform: Any,
+            extensions: Any,
+            secure_access: Any,
+            entrypoint: Any,
+            volumes: Any,
+            connection_config: Any,
+            health_check: Any,
+            health_check_polling_interval: Any,
+            skip_health_check: Any,
+        ) -> LegacySandbox:
+            return cls("legacy-factory-sandbox")
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        max_idle=1 if warmup else 0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=LegacySandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        if warmup:
+            _eventually(lambda: pool.snapshot().idle_count == 1)
+        else:
+            sandbox = pool.acquire()
+            assert sandbox.id == "legacy-factory-sandbox"
+    finally:
+        pool.shutdown(False)
+
+
 def test_acquire_direct_create_kills_and_closes_when_renew_fails() -> None:
     FakeSandbox.reset()
     FakeSandbox.fail_renew = True
@@ -595,6 +692,139 @@ def test_forced_shutdown_cleans_create_that_finishes_after_warmup_loop_retired(
         pool.shutdown(False)
 
 
+def test_forced_shutdown_orphans_warmup_loop_until_stuck_stage_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for issue #2056: a warmup still in flight past the bounded
+    teardown wait must not get its event loop closed underneath it. The loop is
+    orphaned instead, the stuck warmup finishes and cleans up its uncommitted
+    sandbox, and the orphaned loop stops itself once nothing is left on it.
+    """
+    FakeSandbox.reset()
+    entered_preparer = threading.Event()
+    release_preparer = threading.Event()
+
+    def blocking_preparer(sandbox: FakeSandbox) -> None:
+        entered_preparer.set()
+        assert release_preparer.wait(timeout=5)
+
+    class StuckWarmupSandbox(FakeSandbox):
+        pass
+
+    monkeypatch.setattr(
+        sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.05
+    )
+    pool = SandboxPoolSync(
+        pool_name="stuck-warmup-pool",
+        owner_id="owner-1",
+        max_idle=1,
+        warmup_concurrency=1,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        warmup_sandbox_preparer=blocking_preparer,  # type: ignore[arg-type]
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=StuckWarmupSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        assert entered_preparer.wait(timeout=2)
+        loop_thread = pool._warmup_loop_thread
+        loop = pool._warmup_loop
+        assert loop_thread is not None
+        assert loop is not None
+
+        started = time.monotonic()
+        pool.shutdown(graceful=False)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 2.0
+        assert pool.snapshot().lifecycle_state.value == "STOPPED"
+        assert pool._warmup_loop is None
+        assert not loop.is_closed()
+        assert loop_thread.is_alive()
+
+        release_preparer.set()
+
+        assert StuckWarmupSandbox.last_created is not None
+        stuck_sandbox = StuckWarmupSandbox.last_created
+        _eventually(lambda: stuck_sandbox.killed and stuck_sandbox.closed)
+        _eventually(lambda: not loop_thread.is_alive())
+        loop_thread.join(timeout=2)
+        assert not loop_thread.is_alive()
+        assert not loop.is_running()
+    finally:
+        release_preparer.set()
+        pool.shutdown(False)
+
+
+def test_restart_after_stuck_warmup_shutdown_closes_new_loop_normally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanently stuck warmup from an earlier run must not poison later
+    runs: token bookkeeping is scoped to the run generation, so a later run
+    still gets its loop closed by shutdown() even though the stale token from
+    the orphaned run never drains.
+    """
+    FakeSandbox.reset()
+    entered_preparer = threading.Event()
+    release_first_preparer = threading.Event()
+    preparer_calls = 0
+
+    def preparer(sandbox: FakeSandbox) -> None:
+        nonlocal preparer_calls
+        preparer_calls += 1
+        if preparer_calls == 1:
+            entered_preparer.set()
+            # Block without a timeout so this preparer cannot raise: a raised
+            # error would be recorded as a reconcile failure and put the pool
+            # into backoff, starving run 2's warmups.
+            release_first_preparer.wait()
+
+    monkeypatch.setattr(
+        sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.05
+    )
+    pool = SandboxPoolSync(
+        pool_name="restart-after-stuck-pool",
+        owner_id="owner-1",
+        max_idle=1,
+        warmup_concurrency=1,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        warmup_sandbox_preparer=preparer,  # type: ignore[arg-type]
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=FakeSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        assert entered_preparer.wait(timeout=2)
+        pool.shutdown(graceful=False)
+        assert pool._warmup_loop is None
+        # The stuck warmup keeps its token registered (its cleanup cannot run
+        # while the preparer holds the single warmup worker), so the restart
+        # below tears down a run whose generation owns no tokens of its own.
+        assert 1 in pool._warmup_tokens
+
+        pool.start()
+        loop_thread = pool._warmup_loop_thread
+        loop = pool._warmup_loop
+        assert loop_thread is not None
+        assert loop is not None
+
+        started = time.monotonic()
+        pool.shutdown(graceful=False)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 2.0
+        loop_thread.join(timeout=5)
+        assert not loop_thread.is_alive()
+        assert loop.is_closed()
+    finally:
+        release_first_preparer.set()
+        pool.shutdown(False)
+
+
 def test_graceful_shutdown_restart_does_not_reuse_stop_event() -> None:
     pool = _create_pool(max_idle=0)
     pool.start()
@@ -698,10 +928,36 @@ def test_default_warmup_owns_transport_while_manager_uses_shared(
         assert manager_configs[0]._owns_transport
         assert sandbox_configs[0]._owns_transport
         assert sandbox_configs[0].retry_policy.max_retries == 0
+        assert sandbox_configs[0].disable_metrics is True
         another_warmup_config = pool._connection_for_warmup_create()
         assert another_warmup_config is not sandbox_configs[0]
         assert another_warmup_config.transport is None
         assert another_warmup_config._owns_transport
+        assert another_warmup_config.disable_metrics is True
+    finally:
+        pool.shutdown(False)
+
+
+def test_warmup_connection_disables_metrics_with_shared_transport() -> None:
+    transport = _SyncTransport()
+    connection_config = ConnectionConfigSync(transport=transport)
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=connection_config,
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=FakeSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        warmup_config = pool._connection_for_warmup_create()
+        assert warmup_config is not connection_config
+        assert warmup_config.disable_metrics is True
+        assert warmup_config.transport is transport
+        assert connection_config.disable_metrics is False
     finally:
         pool.shutdown(False)
 
@@ -936,6 +1192,148 @@ def _create_pool(
         sandbox_manager_factory=lambda config: manager or FakeManager(),  # type: ignore[arg-type,return-value]
         sandbox_factory=FakeSandbox,  # type: ignore[arg-type]
     )
+
+
+def test_concurrent_shutdown_closes_warmup_loop_once() -> None:
+    """Regression for issue #2025: concurrent shutdown() calls must not race past
+    the lifecycle check and double-close the shared warmup event loop
+    (ValueError: Invalid file descriptor: -1 / 'NoneType' object has no
+    attribute 'close').
+    """
+    pool = _create_pool(max_idle=0)
+    pool.start()
+    loop = pool._warmup_loop
+    assert loop is not None
+    original_close = loop.close
+    close_threads: list[int] = []
+
+    def slow_close() -> None:
+        close_threads.append(threading.get_ident())
+        # Keep close() in flight so a racing teardown that captured the same
+        # loop would call close() on it concurrently before this one returns.
+        time.sleep(0.2)
+        original_close()
+
+    loop.close = slow_close  # type: ignore[method-assign]
+    barrier = threading.Barrier(4)
+    errors: list[Exception] = []
+
+    def worker(graceful: bool) -> None:
+        barrier.wait()
+        try:
+            pool.shutdown(graceful)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(index % 2 == 0,)) for index in range(4)
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        assert len(close_threads) == 1
+    finally:
+        pool.shutdown(False)
+
+
+def test_stop_reconcile_bounded_when_warmup_stage_blocks_on_lifecycle_lock() -> None:
+    """Regression: start()'s failure path calls _stop_reconcile() while holding
+    _lifecycle_lock. A warmup commit-stage worker blocked on that lock must not
+    deadlock an unbounded executor wait in teardown — every wait must be
+    bounded so the failing start() can release the lock again.
+    """
+    pool = _create_pool(max_idle=0)
+    pool.start()
+    worker_entered = threading.Event()
+    worker_released = threading.Event()
+    lock_held = threading.Event()
+    teardown_done = threading.Event()
+
+    def blocked_commit_stage() -> None:
+        worker_entered.set()
+        # Mimics the commit stage: _can_commit_locally takes _lifecycle_lock,
+        # which the failing-start thread below already holds, so this blocks.
+        pool._can_commit_locally(0, 0)
+        worker_released.set()
+
+    def failing_start_failure_path() -> None:
+        # Mirrors start()'s failure path: teardown runs while _lifecycle_lock
+        # is held by this same thread.
+        with pool._lifecycle_lock:
+            lock_held.set()
+            assert worker_entered.wait(timeout=10)
+            pool._stop_reconcile(wait_for_warmup=True)
+        teardown_done.set()
+
+    # Daemon so a deadlocked teardown (the regression under test) cannot hang
+    # the interpreter after this test has already failed.
+    teardown_thread = threading.Thread(target=failing_start_failure_path, daemon=True)
+    teardown_thread.start()
+    assert lock_held.wait(timeout=10)
+    assert pool._warmup_executor is not None
+    pool._warmup_executor.submit(blocked_commit_stage)
+    assert worker_entered.wait(timeout=10)
+    teardown_thread.join(timeout=40)
+    assert not teardown_thread.is_alive(), "teardown deadlocked on lifecycle lock"
+    assert teardown_done.is_set()
+    assert worker_released.wait(timeout=5)
+
+
+def test_concurrent_start_shutdown_interleaved_closes_every_loop_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: teardown must be mutually exclusive with start()'s resource
+    installation. Interleaved start()/shutdown() from multiple threads must
+    never capture a half-installed run and must close every created warmup
+    loop exactly once.
+    """
+    created: list[asyncio.AbstractEventLoop] = []
+    closed: set[int] = set()
+    original_new_event_loop = sync_pool_module.asyncio.new_event_loop
+
+    def tracking_new_event_loop() -> asyncio.AbstractEventLoop:
+        loop = original_new_event_loop()
+        created.append(loop)
+        original_close = loop.close
+
+        def tracking_close() -> None:
+            closed.add(id(loop))
+            original_close()
+
+        loop.close = tracking_close  # type: ignore[method-assign]
+        return loop
+
+    monkeypatch.setattr(
+        sync_pool_module.asyncio, "new_event_loop", tracking_new_event_loop
+    )
+    pool = _create_pool(max_idle=0)
+    errors: list[Exception] = []
+
+    def worker(worker_index: int) -> None:
+        for round_index in range(10):
+            try:
+                pool.start()
+                pool.shutdown(graceful=(round_index + worker_index) % 2 == 0)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                return
+
+    threads = [
+        threading.Thread(target=worker, args=(index,)) for index in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(closed) == len(created)
+    assert pool._warmup_loop is None
+    assert pool.snapshot().lifecycle_state == PoolLifecycleState.STOPPED
 
 
 def test_acquire_retry_next_idle_empty_raises_pool_empty() -> None:

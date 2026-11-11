@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ from opensandbox_cli.utils import handle_errors, output_option, prepare_output
 def _parse_rule(value: str) -> NetworkRule:
     """Parse ACTION=TARGET into a NetworkRule."""
     action, sep, target = value.partition("=")
-    if not sep:
+    if not sep or not target.strip():
         raise click.BadParameter(
             f"Invalid rule '{value}'. Use ACTION=TARGET, for example allow=pypi.org."
         )

@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,25 +21,32 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import click
+from opensandbox.adapters.converter import MetricsModelConverter
+from opensandbox.api.execd.models import Metrics
 from opensandbox.models.sandboxes import (
     CredentialProxyConfig,
     NetworkPolicy,
+    PlatformSpec,
     SandboxFilter,
     SandboxImageAuth,
     SandboxImageSpec,
+    SandboxLifecycle,
     SandboxMetrics,
     SandboxState,
     Volume,
 )
+from pydantic import BaseModel, ValidationError
 
 from opensandbox_cli.client import ClientContext
 from opensandbox_cli.utils import (
     DURATION,
     KEY_VALUE,
     handle_errors,
+    load_json_object,
     output_option,
     parse_nullable_duration,
     prepare_output,
+    validation_message,
 )
 
 
@@ -50,9 +57,6 @@ def sandbox_group(ctx: click.Context) -> None:
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
-
-# Alias: osb sb ...
-sandbox_group.name = "sandbox"
 
 _SANDBOX_STATE_CANONICAL = {
     state.lower(): state for state in SandboxState.values()
@@ -76,8 +80,6 @@ def _normalize_sandbox_states(states: tuple[str, ...]) -> list[str] | None:
     return normalized
 
 
-# ---- create ---------------------------------------------------------------
-
 @sandbox_group.command("create")
 @click.option("--image", "-i", required=False, help="Container image (e.g. python:3.11). Defaults to config value if set.")
 @click.option(
@@ -89,6 +91,30 @@ def _normalize_sandbox_states(states: tuple[str, ...]) -> list[str] | None:
     "--image-auth-password",
     default=None,
     help="Registry password or token for pulling a private image.",
+)
+@click.option(
+    "--template",
+    default=None,
+    help="Template ID (tpl_...) of a Succeeded template to create the sandbox from. Mutually exclusive with --image and --snapshot-id.",
+)
+@click.option(
+    "--snapshot-id",
+    "snapshot_id",
+    default=None,
+    help="Snapshot ID to restore the sandbox from. Mutually exclusive with --image and --template.",
+)
+@click.option(
+    "--file",
+    "-f",
+    "request_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help=(
+        "JSON request file in the public CreateSandboxRequest wire format "
+        "(camelCase keys: image/templateId/snapshotId, timeout in seconds, resourceLimits, "
+        "networkPolicy, volumes, ...). Mutually exclusive with request-building flags; "
+        "--skip-health-check, --ready-timeout and -o still apply."
+    ),
 )
 @click.option(
     "--timeout",
@@ -125,6 +151,9 @@ def sandbox_create(
     image: str | None,
     image_auth_username: str | None,
     image_auth_password: str | None,
+    template: str | None,
+    snapshot_id: str | None,
+    request_file: str | None,
     timeout_raw: str | None,
     envs: tuple[tuple[str, str], ...],
     metadata_kv: tuple[tuple[str, str], ...],
@@ -138,96 +167,554 @@ def sandbox_create(
     ready_timeout: timedelta | None,
     output_format: str | None,
 ) -> None:
-    """Create a new sandbox."""
+    """Create a new sandbox from an image, a template, a snapshot, or a request file."""
     from opensandbox.sync.sandbox import SandboxSync
+
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
 
-    if image is None:
-        image = obj.resolved_config.get("default_image")
-    if not image:
-        raise click.ClickException(
-            "Sandbox image is required. Pass --image or set defaults.image in the CLI config."
-        )
-
-    if bool(image_auth_username) != bool(image_auth_password):
-        raise click.ClickException(
-            "Pass both --image-auth-username and --image-auth-password together."
-        )
-    if credential_proxy and not network_policy_file:
-        raise click.ClickException(
-            "--credential-proxy requires --network-policy-file because Credential Vault injection needs egress policy."
-        )
-
-    timeout: timedelta | None
-    timeout_is_set = False
-    if timeout_raw is not None:
-        timeout = parse_nullable_duration(timeout_raw)
-        timeout_is_set = True
-    else:
-        timeout = None
-
-    if timeout_raw is None:
-        default_timeout = obj.resolved_config.get("default_timeout")
-        if default_timeout:
-            timeout = parse_nullable_duration(default_timeout)
-            timeout_is_set = True
-
-    image_spec: SandboxImageSpec | str = image
-    if image_auth_username and image_auth_password:
-        image_spec = SandboxImageSpec(
-            image=image,
-            auth=SandboxImageAuth(
-                username=image_auth_username,
-                password=image_auth_password,
-            ),
-        )
-
-    kwargs: dict = {
-        "connection_config": obj.connection_config,
-        "skip_health_check": skip_health_check,
-    }
-    if timeout_is_set:
-        kwargs["timeout"] = timeout
-    if ready_timeout is not None:
-        kwargs["ready_timeout"] = ready_timeout
-    if envs:
-        kwargs["env"] = dict(envs)
-    if metadata_kv:
-        kwargs["metadata"] = dict(metadata_kv)
-    if extensions_kv:
-        kwargs["extensions"] = dict(extensions_kv)
-    if resources_kv:
-        kwargs["resource"] = dict(resources_kv)
-    if entrypoint:
-        kwargs["entrypoint"] = list(entrypoint)
-    if network_policy_file:
-        with open(network_policy_file) as f:
-            kwargs["network_policy"] = NetworkPolicy(**json.load(f))
-    if credential_proxy:
-        kwargs["credential_proxy"] = CredentialProxyConfig(enabled=True)
-    if volumes_file:
-        with open(volumes_file) as f:
-            raw_volumes = json.load(f)
-        if not isinstance(raw_volumes, list):
+    if request_file is not None:
+        file_conflicts: list[str] = []
+        if image is not None:
+            file_conflicts.append("--image")
+        if image_auth_username or image_auth_password:
+            file_conflicts.append("--image-auth-username/--image-auth-password")
+        if template:
+            file_conflicts.append("--template")
+        if snapshot_id:
+            file_conflicts.append("--snapshot-id")
+        if timeout_raw is not None:
+            file_conflicts.append("--timeout")
+        if envs:
+            file_conflicts.append("--env")
+        if metadata_kv:
+            file_conflicts.append("--metadata")
+        if extensions_kv:
+            file_conflicts.append("--extension")
+        if resources_kv:
+            file_conflicts.append("--resource")
+        if entrypoint:
+            file_conflicts.append("--entrypoint")
+        if network_policy_file:
+            file_conflicts.append("--network-policy-file")
+        if credential_proxy:
+            file_conflicts.append("--credential-proxy")
+        if volumes_file:
+            file_conflicts.append("--volumes-file")
+        if file_conflicts:
             raise click.ClickException(
-                f"Volumes file must contain a JSON array, got {type(raw_volumes).__name__}."
+                f"--file cannot be combined with: {', '.join(file_conflicts)}."
             )
-        kwargs["volumes"] = [Volume(**item) for item in raw_volumes]
+        file_req = _parse_sandbox_request_file(request_file)
+        if (
+            file_req["image"] is None
+            and file_req["template"] is None
+            and file_req["snapshot_id"] is None
+        ):
+            raise click.ClickException(
+                f"Request file '{request_file}' must set one of 'image', 'templateId', or 'snapshotId'."
+            )
+        image_spec: SandboxImageSpec | str | None = file_req["image"]
+        template = file_req["template"]
+        snapshot_id = file_req["snapshot_id"]
+        timeout = file_req["timeout"]
+        timeout_is_set = file_req["timeout_is_set"]
+        if not timeout_is_set:
+            default_timeout = obj.resolved_config.get("default_timeout")
+            if default_timeout:
+                timeout = parse_nullable_duration(default_timeout)
+                timeout_is_set = True
+        env = file_req["env"]
+        metadata = file_req["metadata"]
+        extensions = file_req["extensions"]
+        resource = file_req["resource"]
+        resource_requests = file_req["resource_requests"]
+        entrypoint_argv = file_req["entrypoint"]
+        platform = file_req["platform"]
+        network_policy = file_req["network_policy"]
+        credential_proxy_config = file_req["credential_proxy"]
+        volumes = file_req["volumes"]
+        secure_access = file_req["secure_access"]
+        lifecycle = file_req["lifecycle"]
+    else:
+        if template and snapshot_id:
+            raise click.ClickException("--template and --snapshot-id are mutually exclusive.")
+
+        if template:
+            conflicts: list[str] = []
+            if image is not None:
+                conflicts.append("--image")
+            if image_auth_username or image_auth_password:
+                conflicts.append("--image-auth-username/--image-auth-password")
+            if envs:
+                conflicts.append("--env")
+            if resources_kv:
+                conflicts.append("--resource")
+            if entrypoint:
+                conflicts.append("--entrypoint")
+            if volumes_file:
+                conflicts.append("--volumes-file")
+            if credential_proxy:
+                conflicts.append("--credential-proxy")
+            if conflicts:
+                raise click.ClickException(
+                    "Template mode fixes the workload shape on the server; "
+                    f"{', '.join(conflicts)} cannot be combined with --template."
+                )
+        elif snapshot_id:
+            if image is not None:
+                raise click.ClickException("--snapshot-id and --image are mutually exclusive.")
+            if image_auth_username or image_auth_password:
+                raise click.ClickException(
+                    "--snapshot-id cannot be combined with image auth options."
+                )
+        else:
+            if image is None:
+                image = obj.resolved_config.get("default_image")
+            if not image:
+                raise click.ClickException(
+                    "Sandbox image is required. Pass --image, use --file, or set defaults.image in the CLI config."
+                )
+
+        if bool(image_auth_username) != bool(image_auth_password):
+            raise click.ClickException(
+                "Pass both --image-auth-username and --image-auth-password together."
+            )
+        if credential_proxy and not network_policy_file:
+            raise click.ClickException(
+                "--credential-proxy requires --network-policy-file because Credential Vault injection needs egress policy."
+            )
+
+        timeout_is_set = False
+        if timeout_raw is not None:
+            timeout = parse_nullable_duration(timeout_raw)
+            timeout_is_set = True
+        else:
+            timeout = None
+            default_timeout = obj.resolved_config.get("default_timeout")
+            if default_timeout:
+                timeout = parse_nullable_duration(default_timeout)
+                timeout_is_set = True
+
+        image_spec = image
+        if image_auth_username and image_auth_password:
+            image_spec = SandboxImageSpec(
+                image=image,
+                auth=SandboxImageAuth(
+                    username=image_auth_username,
+                    password=image_auth_password,
+                ),
+            )
+        env = dict(envs) if envs else None
+        metadata = dict(metadata_kv) if metadata_kv else None
+        extensions = dict(extensions_kv) if extensions_kv else None
+        resource = dict(resources_kv) if resources_kv else None
+        resource_requests = None
+        entrypoint_argv = list(entrypoint) if entrypoint else None
+        platform = None
+        network_policy = (
+            _load_network_policy(network_policy_file) if network_policy_file else None
+        )
+        credential_proxy_config = (
+            CredentialProxyConfig(enabled=True) if credential_proxy else None
+        )
+        volumes = None
+        if volumes_file:
+            with open(volumes_file) as f:
+                raw_volumes = json.load(f)
+            if not isinstance(raw_volumes, list):
+                raise click.ClickException(
+                    f"Volumes file must contain a JSON array, got {type(raw_volumes).__name__}."
+                )
+            volumes = [Volume(**item) for item in raw_volumes]
+        secure_access = False
+        lifecycle = None
+
+    if template and not timeout_is_set:
+        if request_file is not None:
+            raise click.ClickException(
+                f"'timeout' is required in request file '{request_file}' "
+                "when 'templateId' is set (in seconds)."
+            )
+        raise click.ClickException(
+            "--timeout is required when creating a sandbox from a template (e.g. --timeout 30m)."
+        )
 
     with obj.output.spinner("Creating sandbox..."):
-        sandbox = SandboxSync.create(image_spec, **kwargs)
+        if template:
+            if timeout is None:
+                if request_file is not None:
+                    raise click.ClickException(
+                        "'timeout': null (manual cleanup) is not supported in template mode."
+                    )
+                raise click.ClickException(
+                    "--timeout none (manual cleanup) is not supported in template mode."
+                )
+            template_kwargs: dict = {}
+            if ready_timeout is not None:
+                template_kwargs["ready_timeout"] = ready_timeout
+            if metadata is not None:
+                template_kwargs["metadata"] = metadata
+            if extensions is not None:
+                template_kwargs["extensions"] = extensions
+            if network_policy is not None:
+                template_kwargs["network_policy"] = network_policy
+            sandbox = SandboxSync.create_from_template(
+                template,
+                timeout=timeout,
+                connection_config=obj.connection_config,
+                skip_health_check=skip_health_check,
+                **template_kwargs,
+            )
+        else:
+            kwargs: dict = {
+                "connection_config": obj.connection_config,
+                "skip_health_check": skip_health_check,
+            }
+            if snapshot_id:
+                kwargs["snapshot_id"] = snapshot_id
+            if timeout_is_set:
+                kwargs["timeout"] = timeout
+            if ready_timeout is not None:
+                kwargs["ready_timeout"] = ready_timeout
+            if env is not None:
+                kwargs["env"] = env
+            if metadata is not None:
+                kwargs["metadata"] = metadata
+            if extensions is not None:
+                kwargs["extensions"] = extensions
+            if resource is not None:
+                kwargs["resource"] = resource
+            if resource_requests is not None:
+                kwargs["resource_requests"] = resource_requests
+            if entrypoint_argv is not None:
+                kwargs["entrypoint"] = entrypoint_argv
+            if platform is not None:
+                kwargs["platform"] = platform
+            if network_policy is not None:
+                kwargs["network_policy"] = network_policy
+            if credential_proxy_config is not None:
+                kwargs["credential_proxy"] = credential_proxy_config
+            if volumes is not None:
+                kwargs["volumes"] = volumes
+            if secure_access:
+                kwargs["secure_access"] = True
+            if lifecycle is not None:
+                kwargs["lifecycle"] = lifecycle
+
+            sandbox = SandboxSync.create(image_spec, **kwargs)
+
+    details: dict[str, Any] = {
+        "id": sandbox.id,
+        "status": "created",
+        "timeout": _describe_create_timeout(timeout_is_set, timeout),
+    }
+    if request_file is not None:
+        details["request_file"] = request_file
+    if template:
+        details["template"] = template
+    elif snapshot_id:
+        details["snapshot_id"] = snapshot_id
+    else:
+        details["image"] = (
+            image_spec.image if isinstance(image_spec, SandboxImageSpec) else image_spec
+        )
     obj.output.success_panel(
-        {
-            "id": sandbox.id,
-            "image": image,
-            "status": "created",
-            "timeout": _describe_create_timeout(timeout_is_set, timeout),
-        },
+        details,
         title="Sandbox Created",
     )
 
 
-# ---- list -----------------------------------------------------------------
+def _load_network_policy(path: str) -> NetworkPolicy:
+    with open(path) as f:
+        return NetworkPolicy(**json.load(f))
+
+
+_SANDBOX_REQUEST_FILE_FIELDS = (
+    "image",
+    "templateId",
+    "snapshotId",
+    "platform",
+    "timeout",
+    "resourceLimits",
+    "resourceRequests",
+    "env",
+    "metadata",
+    "lifecycle",
+    "entrypoint",
+    "networkPolicy",
+    "credentialProxy",
+    "secureAccess",
+    "volumes",
+    "extensions",
+)
+
+# Fields rejected alongside templateId: template mode fixes the workload shape
+# on the server (metadata, extensions, networkPolicy and timeout stay allowed).
+_TEMPLATE_MODE_FORBIDDEN_FILE_FIELDS = (
+    "resourceLimits",
+    "resourceRequests",
+    "env",
+    "entrypoint",
+    "volumes",
+    "platform",
+    "credentialProxy",
+    "secureAccess",
+    "lifecycle",
+)
+
+
+def _file_str_dict(data: dict, key: str, path: str) -> dict[str, str] | None:
+    """Extract a string-to-string object field from a request file."""
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    ):
+        raise click.ClickException(
+            f"Request file field '{key}' in '{path}' must be an object with string values."
+        )
+    return dict(value)
+
+
+def _file_model(data: dict, key: str, path: str, model_type: type[BaseModel]) -> Any:
+    """Extract a model field from a request file, wrapping validation errors."""
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise click.ClickException(
+            f"Request file field '{key}' in '{path}' must be an object."
+        )
+    try:
+        return model_type.model_validate(value)
+    except ValidationError as exc:
+        raise click.ClickException(
+            f"Invalid '{key}' in request file '{path}': {validation_message(exc)}"
+        ) from exc
+
+
+def _file_image_spec(value: object, path: str) -> SandboxImageSpec | str:
+    """Parse the request file 'image' field (string or {uri, auth} object)."""
+    if isinstance(value, str):
+        if not value.strip():
+            raise click.ClickException(
+                f"Request file field 'image' in '{path}' must not be blank."
+            )
+        return value
+    if isinstance(value, dict):
+        uri = value.get("uri")
+        if not isinstance(uri, str) or not uri.strip():
+            raise click.ClickException(
+                f"Request file field 'image' in '{path}' must be a string or an object "
+                "with a non-empty 'uri'."
+            )
+        auth = value.get("auth")
+        if auth is None:
+            return uri
+        if not isinstance(auth, dict):
+            raise click.ClickException(
+                f"Request file field 'image.auth' in '{path}' must be an object."
+            )
+        try:
+            return SandboxImageSpec(image=uri, auth=SandboxImageAuth(**auth))
+        except ValidationError as exc:
+            raise click.ClickException(
+                f"Invalid 'image.auth' in request file '{path}': {validation_message(exc)}"
+            ) from exc
+    raise click.ClickException(
+        f"Request file field 'image' in '{path}' must be a string or an object with 'uri'."
+    )
+
+
+def _parse_sandbox_request_file(path: str) -> dict[str, Any]:
+    """Parse a CreateSandboxRequest wire-format JSON file into create variables."""
+    data = load_json_object(path)
+
+    unknown = sorted(set(data) - set(_SANDBOX_REQUEST_FILE_FIELDS))
+    if unknown:
+        raise click.ClickException(
+            f"Request file '{path}' has unsupported fields: {', '.join(unknown)}. "
+            f"Supported fields: {', '.join(_SANDBOX_REQUEST_FILE_FIELDS)}."
+        )
+
+    image = data.get("image")
+    template_id = data.get("templateId")
+    snapshot_id = data.get("snapshotId")
+    sources = [
+        name
+        for name, value in (
+            ("image", image),
+            ("templateId", template_id),
+            ("snapshotId", snapshot_id),
+        )
+        if value is not None
+    ]
+    if len(sources) > 1:
+        raise click.ClickException(
+            f"Request file '{path}' must set only one of 'image', 'templateId', "
+            f"'snapshotId'; got {', '.join(sources)}."
+        )
+
+    req: dict[str, Any] = {
+        "image": None,
+        "template": None,
+        "snapshot_id": None,
+        "timeout": None,
+        "timeout_is_set": False,
+        "env": None,
+        "metadata": None,
+        "extensions": None,
+        "resource": None,
+        "resource_requests": None,
+        "entrypoint": None,
+        "platform": None,
+        "network_policy": None,
+        "credential_proxy": None,
+        "volumes": None,
+        "secure_access": False,
+        "lifecycle": None,
+    }
+
+    if image is not None:
+        req["image"] = _file_image_spec(image, path)
+
+    if template_id is not None:
+        if not isinstance(template_id, str) or not template_id.strip():
+            raise click.ClickException(
+                f"Request file field 'templateId' in '{path}' must be a non-empty string."
+            )
+        req["template"] = template_id
+
+    if snapshot_id is not None:
+        if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+            raise click.ClickException(
+                f"Request file field 'snapshotId' in '{path}' must be a non-empty string."
+            )
+        req["snapshot_id"] = snapshot_id
+
+    if "timeout" in data:
+        raw_timeout = data["timeout"]
+        if raw_timeout is None:
+            req["timeout"] = None
+            req["timeout_is_set"] = True
+        elif isinstance(raw_timeout, int) and not isinstance(raw_timeout, bool):
+            if raw_timeout <= 0:
+                raise click.ClickException(
+                    f"Request file field 'timeout' in '{path}' must be a positive integer "
+                    "of seconds, or null for manual cleanup."
+                )
+            req["timeout"] = timedelta(seconds=raw_timeout)
+            req["timeout_is_set"] = True
+        else:
+            raise click.ClickException(
+                f"Request file field 'timeout' in '{path}' must be a positive integer of "
+                "seconds, or null for manual cleanup."
+            )
+
+    if req["template"] is not None:
+        def _is_set(name: str) -> bool:
+            # Mirror the server: explicit `secureAccess: false` is the documented
+            # default and stays allowed alongside templateId.
+            if name == "secureAccess":
+                return data.get(name) is True
+            return data.get(name) is not None
+
+        fixed_fields = [
+            f"'{name}'"
+            for name in _TEMPLATE_MODE_FORBIDDEN_FILE_FIELDS
+            if _is_set(name)
+        ]
+        if fixed_fields:
+            raise click.ClickException(
+                "Template mode fixes the workload shape on the server; "
+                f"request file cannot combine 'templateId' with {', '.join(fixed_fields)}."
+            )
+
+    req["env"] = _file_str_dict(data, "env", path)
+    req["metadata"] = _file_str_dict(data, "metadata", path)
+    req["extensions"] = _file_str_dict(data, "extensions", path)
+    req["resource"] = _file_str_dict(data, "resourceLimits", path)
+    req["resource_requests"] = _file_str_dict(data, "resourceRequests", path)
+
+    entrypoint = data.get("entrypoint")
+    if entrypoint is not None:
+        if (
+            not isinstance(entrypoint, list)
+            or not entrypoint
+            or not all(isinstance(item, str) for item in entrypoint)
+        ):
+            raise click.ClickException(
+                f"Request file field 'entrypoint' in '{path}' must be a non-empty array "
+                "of strings."
+            )
+        req["entrypoint"] = list(entrypoint)
+
+    secure_access = data.get("secureAccess")
+    if secure_access is not None:
+        if not isinstance(secure_access, bool):
+            raise click.ClickException(
+                f"Request file field 'secureAccess' in '{path}' must be a boolean."
+            )
+        req["secure_access"] = secure_access
+
+    req["platform"] = _file_model(data, "platform", path, PlatformSpec)
+    req["network_policy"] = _file_model(data, "networkPolicy", path, NetworkPolicy)
+    req["lifecycle"] = _file_model(data, "lifecycle", path, SandboxLifecycle)
+
+    credential_proxy = data.get("credentialProxy")
+    if credential_proxy is not None:
+        if isinstance(credential_proxy, bool):
+            req["credential_proxy"] = CredentialProxyConfig(enabled=credential_proxy)
+        elif isinstance(credential_proxy, dict):
+            try:
+                req["credential_proxy"] = CredentialProxyConfig.model_validate(
+                    credential_proxy
+                )
+            except ValidationError as exc:
+                raise click.ClickException(
+                    f"Invalid 'credentialProxy' in request file '{path}': "
+                    f"{validation_message(exc)}"
+                ) from exc
+        else:
+            raise click.ClickException(
+                f"Request file field 'credentialProxy' in '{path}' must be a boolean "
+                "or an object."
+            )
+
+    if (
+        req["credential_proxy"] is not None
+        and req["credential_proxy"].enabled
+        and req["network_policy"] is None
+    ):
+        raise click.ClickException(
+            f"Request file field 'credentialProxy' in '{path}' requires 'networkPolicy' "
+            "because Credential Vault injection needs egress policy."
+        )
+
+    volumes = data.get("volumes")
+    if volumes is not None:
+        if not isinstance(volumes, list):
+            raise click.ClickException(
+                f"Request file field 'volumes' in '{path}' must be an array."
+            )
+        parsed_volumes: list[Volume] = []
+        for item in volumes:
+            if not isinstance(item, dict):
+                raise click.ClickException(
+                    f"Request file field 'volumes' in '{path}' must contain volume objects."
+                )
+            try:
+                parsed_volumes.append(Volume.model_validate(item))
+            except ValidationError as exc:
+                raise click.ClickException(
+                    f"Invalid 'volumes' entry in request file '{path}': "
+                    f"{validation_message(exc)}"
+                ) from exc
+        req["volumes"] = parsed_volumes
+
+    return req
+
 
 @sandbox_group.command("list")
 @click.option("--state", "-s", "states", multiple=True, help="Filter by state (Pending, Running, Paused, ...). Repeatable.")
@@ -271,7 +758,6 @@ def sandbox_list(
 
     raw_rows = [info.model_dump(mode="json") for info in result.sandbox_infos]
 
-    # For machine-readable formats, preserve the original structure
     if obj.output.fmt in ("json", "yaml"):
         obj.output.print_dict(
             {
@@ -282,7 +768,6 @@ def sandbox_list(
         )
         return
 
-    # Flatten nested status/image objects for clean table display
     rows = []
     for d in raw_rows:
         flat = dict(d)
@@ -301,8 +786,6 @@ def sandbox_list(
     )
 
 
-# ---- get ------------------------------------------------------------------
-
 @sandbox_group.command("get")
 @click.argument("sandbox_id")
 @output_option("table", "json", "yaml")
@@ -311,17 +794,14 @@ def sandbox_list(
 def sandbox_get(obj: ClientContext, sandbox_id: str, output_format: str | None) -> None:
     """Get sandbox details."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     mgr = obj.get_manager()
     info = mgr.get_sandbox_info(sandbox_id)
     d = info.model_dump(mode="json")
 
-    # For machine-readable formats, preserve the original structure
     if obj.output.fmt in ("json", "yaml"):
         obj.output.print_dict(d, title="Sandbox Info")
         return
 
-    # Flatten nested objects for clean table display
     status_val = d.get("status")
     if isinstance(status_val, dict):
         d["status"] = status_val.get("state", str(status_val))
@@ -335,8 +815,6 @@ def sandbox_get(obj: ClientContext, sandbox_id: str, output_format: str | None) 
     obj.output.print_dict(d, title="Sandbox Info")
 
 
-# ---- kill -----------------------------------------------------------------
-
 @sandbox_group.command("kill")
 @click.argument("sandbox_ids", nargs=-1, required=True)
 @output_option("table", "json", "yaml")
@@ -345,19 +823,16 @@ def sandbox_get(obj: ClientContext, sandbox_id: str, output_format: str | None) 
 def sandbox_kill(
     obj: ClientContext, sandbox_ids: tuple[str, ...], output_format: str | None
 ) -> None:
-    """Terminate one or more sandboxes."""
+    """Request deletion of one or more sandboxes; cleanup may continue."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     mgr = obj.get_manager()
     rows: list[dict[str, str]] = []
     for sid in sandbox_ids:
-        resolved = obj.resolve_sandbox_id(sid)
-        with obj.output.spinner(f"Killing sandbox {resolved}..."):
-            mgr.kill_sandbox(resolved)
-        rows.append({"sandbox_id": resolved, "status": "terminated"})
+        with obj.output.spinner(f"Killing sandbox {sid}..."):
+            mgr.kill_sandbox(sid)
+        rows.append({"sandbox_id": sid, "status": "deletion_requested"})
     obj.output.print_rows(rows, columns=["sandbox_id", "status"], title="Sandboxes")
 
-
-# ---- pause ----------------------------------------------------------------
 
 @sandbox_group.command("pause")
 @click.argument("sandbox_id")
@@ -367,14 +842,11 @@ def sandbox_kill(
 def sandbox_pause(obj: ClientContext, sandbox_id: str, output_format: str | None) -> None:
     """Pause a running sandbox."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     mgr = obj.get_manager()
     with obj.output.spinner("Pausing sandbox..."):
         mgr.pause_sandbox(sandbox_id)
     obj.output.success(f"Pause request accepted: {sandbox_id}")
 
-
-# ---- resume ---------------------------------------------------------------
 
 @sandbox_group.command("resume")
 @click.argument("sandbox_id")
@@ -392,9 +864,9 @@ def sandbox_resume(
 ) -> None:
     """Resume a paused sandbox."""
     from opensandbox.sync.sandbox import SandboxSync
+
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
 
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     sandbox = None
     try:
         kwargs = {
@@ -412,8 +884,6 @@ def sandbox_resume(
             sandbox.close()
 
 
-# ---- renew ----------------------------------------------------------------
-
 @sandbox_group.command("renew")
 @click.argument("sandbox_id")
 @click.option("--timeout", "-t", required=True, type=DURATION, help="New TTL duration (e.g. 30m, 2h).")
@@ -428,7 +898,6 @@ def sandbox_renew(
 ) -> None:
     """Renew sandbox expiration."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     mgr = obj.get_manager()
     with obj.output.spinner("Renewing sandbox..."):
         resp = mgr.renew_sandbox(sandbox_id, timeout)
@@ -437,8 +906,6 @@ def sandbox_renew(
         title="Sandbox Renewed",
     )
 
-
-# ---- endpoint -------------------------------------------------------------
 
 @sandbox_group.command("endpoint")
 @click.argument("sandbox_id")
@@ -458,8 +925,6 @@ def sandbox_endpoint(
     finally:
         sandbox.close()
 
-
-# ---- health ---------------------------------------------------------------
 
 @sandbox_group.command("health")
 @click.argument("sandbox_id")
@@ -487,8 +952,6 @@ def sandbox_health(
     finally:
         sandbox.close()
 
-
-# ---- metrics --------------------------------------------------------------
 
 @sandbox_group.command("metrics")
 @click.argument("sandbox_id")
@@ -555,6 +1018,8 @@ def _parse_metric_stream_line(line: str) -> tuple[SandboxMetrics | None, str | N
     decoded: Any = json.loads(payload)
     if isinstance(decoded, dict) and decoded.get("error"):
         return None, f"Metrics stream error: {decoded['error']}"
+    if isinstance(decoded, dict) and "cpu_used_pct" in decoded:
+        return MetricsModelConverter.to_sandbox_metrics(Metrics.from_dict(decoded)), None
     return SandboxMetrics.model_validate(decoded), None
 
 
@@ -589,6 +1054,4 @@ def _render_stream_metric(obj: ClientContext, metric: SandboxMetrics) -> None:
         click.echo(json.dumps(metric.model_dump(mode="json"), default=str))
         return
 
-    if obj.output.fmt == "yaml":
-        obj.output.print_model(metric)
-        return
+    obj.output.print_model(metric)

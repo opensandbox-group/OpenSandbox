@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -67,9 +67,7 @@ kubeconfig_path = "~/.kube/config"
 # Namespace for sandbox workloads
 namespace = "opensandbox"
 
-# [Beta] 启用 informer 缓存以减少 API 调用。
-# 如需关闭 watch 缓存，将该项设为 false。
-informer_enabled = true
+# [Beta] informer 缓存的 resync 与 watch 调优参数。
 informer_resync_seconds = 300
 informer_watch_timeout_seconds = 60
 
@@ -101,6 +99,14 @@ mode = "dns"
 # 按配置的 host 精确匹配，而解析器会把部分服务名（如 otel-collector.observability）
 # 扩展成规则匹配不到的 FQDN。
 # otlp_endpoint = "http://otel-collector.observability.svc.cluster.local:4318"
+# 可选：将 sidecar 出口流量经上游 HTTP(S) CONNECT 代理链式转发。要求 mode = "dns+nft"，
+# 且每个 sandbox 启用透明 MITM（credentialProxy.enabled 或 OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true）。
+# [egress.upstream_proxy]
+# url = "http://proxy.example.com:3128"
+# authorization = "Basic <base64>"
+# 可选：包含额外上游 CA bundle 的 Secret（固定键名 "ca.crt"）；
+# 仅以只读方式挂载到 egress sidecar。
+# ca_secret_name = "corp-proxy-ca"
 
 # 按访问续期。默认关闭 — 见 server/README_zh.md。
 [renew_intent]

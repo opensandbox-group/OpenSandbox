@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,17 +16,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
+	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
 
@@ -39,34 +40,143 @@ type exitEvent struct {
 }
 
 type mitmTransparent struct {
-	mu         sync.Mutex
-	running    *mitmproxy.Running
-	currentGen uint64 // generation of the mitmdump currently considered live
-	port       int
-	uid        uint32
-	dports     string           // iptables --dports list (e.g. "80,443" or "80,443,8080")
-	cfg        mitmproxy.Config // OnExit must NOT be set here; built per-Launch
-	nextGen    uint64           // atomic; monotonic gen counter handed to each Launch
-	restartCh  chan exitEvent
-	shutdownCh chan struct{} // closed by watchMitmproxy on ctx cancel; lets OnExit unblock during shutdown
+	mu              sync.RWMutex
+	running         *mitmproxy.Running
+	revisionSession revisionProcessSession
+	currentGen      uint64 // generation of the mitmdump currently considered live
+	stopping        bool
+	port            int
+	uid             uint32
+	dports          string           // iptables --dports list (e.g. "80,443" or "80,443,8080")
+	cfg             mitmproxy.Config // OnExit must NOT be set here; built per-Launch
+	subjectOwner    *fastSandboxSubjectLaunchOwner
+	revisionOwner   *revisionLaunchOwner
+	nextGen         uint64 // owned by mu; monotonic gen counter handed to each Launch
+	launchGen       uint64 // unpublished attempt; the launch caller owns its resources
+	launchExited    bool   // OnExit and publication serialize under mu
+	pending         *revisionLaunchResult
+	shutdownOnce    sync.Once
+	restartCh       chan exitEvent
+	shutdownCh      chan struct{} // closed on ctx cancel or shutdown; unblocks OnExit and backoff
+	watchDone       chan struct{}
 }
 
-func (m *mitmTransparent) getRunning() *mitmproxy.Running {
+func (m *mitmTransparent) publishRunning(
+	r *mitmproxy.Running,
+	session revisionProcessSession,
+	gen uint64,
+) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.running
-}
-
-func (m *mitmTransparent) setRunning(r *mitmproxy.Running, gen uint64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.stopping || (m.revisionOwner != nil && m.revisionOwner.server != nil) ||
+		(m.subjectOwner != nil && (m.launchExited || m.launchGen != gen)) {
+		return false
+	}
 	m.running = r
+	m.revisionSession = session
 	m.currentGen = gen
+	m.launchGen, m.pending = 0, nil
+	m.subjectOwner.published(r)
+	return true
+}
+
+func (m *mitmTransparent) claimForShutdown() (*mitmproxy.Running, revisionProcessSession) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopping = true
+	if m.revisionOwner != nil && m.revisionOwner.server != nil {
+		m.revisionOwner.server.mitmGate.SetReady(false)
+	}
+	running, session := m.running, m.revisionSession
+	m.running = nil
+	m.revisionSession = nil
+	return running, session
+}
+
+func (m *mitmTransparent) signalShutdown() {
+	m.shutdownOnce.Do(func() {
+		if m.shutdownCh != nil {
+			close(m.shutdownCh)
+		}
+	})
+}
+
+func (m *mitmTransparent) stopChild(running *mitmproxy.Running, timeout time.Duration) {
+	if running == nil {
+		return
+	}
+	if m.subjectOwner != nil && m.subjectOwner.stop != nil {
+		m.subjectOwner.stop(running)
+	} else if m.revisionOwner != nil && m.revisionOwner.stop != nil {
+		m.revisionOwner.stop(running)
+	} else {
+		mitmproxy.GracefulShutdown(running, timeout)
+	}
+}
+
+func (m *mitmTransparent) shutdown(timeout time.Duration) {
+	running, session := m.claimForShutdown()
+	m.signalShutdown()
+	m.subjectOwner.stopDrain()
+	m.stopChild(running, timeout)
+	if err := m.subjectOwner.close(running); err != nil {
+		log.Errorf("[mitmproxy] subject session cleanup failed: %v", err)
+	}
+	if err := m.revisionOwner.closeSession(session); err != nil {
+		log.Errorf("[mitmproxy] revision session cleanup failed: %v", err)
+	}
+	if m.watchDone != nil {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-m.watchDone:
+		case <-timer.C:
+			log.Errorf("[mitmproxy] restart watcher did not stop within %s", timeout)
+		}
+	}
+}
+
+// OnExit runs after cmd.Wait has reaped the child. Detach that generation before
+// closing its session so shutdown can never claim the same child a second time.
+func (m *mitmTransparent) closeRevisionSession(gen uint64) {
+	var server *policyServer
+	if m.revisionOwner != nil {
+		server = m.revisionOwner.server
+	}
+	if server != nil {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+	}
+	m.mu.Lock()
+	if m.currentGen != gen {
+		m.mu.Unlock()
+		return
+	}
+	session := m.revisionSession
+	running := m.running
+	m.running, m.revisionSession = nil, nil
+	if server != nil {
+		server.mitmGate.SetReady(false)
+	}
+	m.mu.Unlock()
+	if err := m.subjectOwner.close(running); err != nil {
+		log.Errorf("[mitmproxy] subject session cleanup failed: %v", err)
+	}
+	// Keep the policy barrier until cleanup is known, excluding fresh bootstrap
+	// and publication. Never reacquire it while holding the lifecycle lock.
+	if session != nil {
+		if err := session.Close(); err != nil {
+			if server != nil {
+				server.requireRevisionRecoveryLocked(revisionRecoverySessionCleanupFailed)
+			}
+			log.Errorf("[mitmproxy] revision session cleanup failed")
+		}
+	}
 }
 
 func (m *mitmTransparent) getCurrentGen() uint64 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.currentGen
 }
 
@@ -86,8 +196,192 @@ func launchTagged(cfg mitmproxy.Config, restartCh chan<- exitEvent, shutdownCh <
 	return mitmproxy.Launch(cfg)
 }
 
+// mitmLaunchDependencies are the process and listener boundaries used by both
+// startup and restart. They do not replace readiness or lifecycle decisions.
+type mitmLaunchDependencies struct {
+	launch func(mitmproxy.Config) (*mitmproxy.Running, error)
+	listen func(context.Context, string, time.Duration) error
+	retry  func(context.Context, <-chan struct{}, time.Duration) bool
+}
+
+func defaultMitmLaunchDependencies() mitmLaunchDependencies {
+	return mitmLaunchDependencies{launch: mitmproxy.Launch, listen: mitmproxy.WaitListenPortContext, retry: waitMitmRetry}
+}
+
+func waitMitmRetry(ctx context.Context, shutdown <-chan struct{}, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-shutdown:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (m *mitmTransparent) recordExit(gen uint64) {
+	m.mu.Lock()
+	var failedOwner *policyServer
+	if m.launchGen == gen {
+		m.launchExited = true
+	}
+	if m.currentGen == gen && m.revisionOwner != nil && m.revisionOwner.server != nil {
+		m.revisionOwner.server.mitmGate.SetReady(false)
+		if !m.stopping && m.running != nil && m.revisionOwner.server.quarantine != nil {
+			failedOwner = m.revisionOwner.server
+		}
+	}
+	m.mu.Unlock()
+	// Preserve s.mu -> m.mu lock order. The sticky recovery latch invalidates
+	// bootstrap tickets before any retry can publish readiness.
+	if failedOwner != nil {
+		failedOwner.mu.Lock()
+		m.mu.Lock()
+		stillOwned := !m.stopping && m.running != nil && m.currentGen == gen && m.revisionOwner != nil && m.revisionOwner.server == failedOwner
+		m.mu.Unlock()
+		if stillOwned {
+			failedOwner.requireRevisionRecoveryLocked(revisionRecoveryUnknown)
+		}
+		failedOwner.mu.Unlock()
+	}
+}
+
+func (m *mitmTransparent) launchTaggedWithRevision(
+	ctx context.Context, launchProcess func(mitmproxy.Config) (*mitmproxy.Running, error),
+) (*revisionLaunchResult, error) {
+	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		return nil, revision.ErrClosed
+	}
+	if m.launchGen != 0 {
+		m.mu.Unlock()
+		return nil, revision.ErrBusy
+	}
+	m.nextGen++
+	gen := m.nextGen
+	m.launchGen, m.launchExited = gen, false
+	m.mu.Unlock()
+	cfg := m.cfg
+	cfg.OnExit = func(err error) {
+		// This record is serialized with the final ready write. The watcher may be
+		// busy launching, so queuing an event alone cannot guard publication.
+		m.recordExit(gen)
+		select {
+		case m.restartCh <- exitEvent{gen: gen, err: err}:
+		case <-m.shutdownCh:
+		}
+	}
+	var result *revisionLaunchResult
+	var err error
+	if m.subjectOwner != nil {
+		if m.revisionOwner != nil {
+			err = revision.ErrInvalid
+		} else {
+			var running *mitmproxy.Running
+			running, err = m.subjectOwner.launch(ctx, cfg, launchProcess)
+			if err == nil {
+				result = &revisionLaunchResult{running: running}
+			}
+		}
+	} else if m.revisionOwner == nil {
+		var running *mitmproxy.Running
+		running, err = launchProcess(cfg)
+		if err == nil {
+			result = &revisionLaunchResult{running: running}
+		}
+	} else {
+		result, err = m.revisionOwner.launch(ctx, cfg, launchProcess)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err != nil {
+		m.launchGen = 0
+		return nil, err
+	}
+	result.generation = gen
+	m.pending = result
+	return result, nil
+}
+
+// cleanupLaunch disposes only the caller's unpublished attempt. Shutdown owns
+// published resources exclusively; this result was never attached to m.running.
+func (m *mitmTransparent) cleanupLaunch(result *revisionLaunchResult) {
+	m.stopChild(result.running, time.Second)
+	if err := m.subjectOwner.close(result.running); err != nil {
+		log.Errorf("[mitmproxy] subject session cleanup failed: %v", err)
+	}
+	if err := m.revisionOwner.closeSession(result.session); err != nil {
+		log.Errorf("[mitmproxy] revision session cleanup failed: %v", err)
+	}
+	m.mu.Lock()
+	if m.pending == result {
+		m.pending, m.launchGen = nil, 0
+	}
+	m.mu.Unlock()
+}
+
+func (m *mitmTransparent) launchAndListen(ctx context.Context, deps mitmLaunchDependencies) (*revisionLaunchResult, error) {
+	launchCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	result, err := m.launchTaggedWithRevision(launchCtx, deps.launch)
+	if err != nil {
+		return nil, err
+	}
+	waitAddr := fmt.Sprintf("127.0.0.1:%d", m.cfg.ListenPort)
+	if err := deps.listen(launchCtx, waitAddr, 15*time.Second); err != nil {
+		m.cleanupLaunch(result)
+		return nil, fmt.Errorf("wait listen %s: %w", waitAddr, err)
+	}
+	return result, nil
+}
+
+// startInitial includes redirect and CA preparation before the same readiness
+// checkpoint used by restart. Publication uses the live caller context, not the
+// now-cancelled launch/listen timeout context.
+func (m *mitmTransparent) startInitial(ctx context.Context, deps mitmLaunchDependencies, prepare func() error) error {
+	// The always-rule reload starts before MITM and can invalidate a clean
+	// capture. Bound retries below restartCh's capacity: the watcher starts only
+	// after initial startup, so rejected children leave queued exit events.
+	const maxAttempts = 3
+	prepared := false
+	for attempt := 1; ; attempt++ {
+		result, err := m.launchAndListen(ctx, deps)
+		if err != nil {
+			return err
+		}
+		if !prepared {
+			if err := prepare(); err != nil {
+				m.cleanupLaunch(result)
+				return err
+			}
+			// Redirect installation appends rules; never repeat its side effects.
+			prepared = true
+		}
+		if m.revisionOwner != nil && m.revisionOwner.server != nil {
+			err = publishRevisionReady(ctx, m, result)
+		} else if !m.publishRunning(result.running, result.session, result.generation) {
+			err = revision.ErrClosed
+		}
+		if err == nil {
+			return nil
+		}
+		m.cleanupLaunch(result)
+		if !errors.Is(err, errStaleRevisionBootstrap) || attempt == maxAttempts {
+			return err
+		}
+		// The next launch recaptures only after cleanup and rechecks shutdown,
+		// cancellation, and sticky recovery before creating another session.
+	}
+}
+
 // startMitmproxyTransparentIfEnabled starts mitmdump in transparent mode, waits for the listener, and installs OUTPUT REDIRECT, then syncs the CA.
-func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
+func startMitmproxyTransparentIfEnabled(
+	ctx context.Context,
+	policyServer *policyServer,
+) (*mitmTransparent, error) {
 	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		return nil, nil
 	}
@@ -108,39 +402,28 @@ func startMitmproxyTransparentIfEnabled() (*mitmTransparent, error) {
 		UserName:    mitmproxy.RunAsUser,
 		ScriptPaths: parseScriptPaths(os.Getenv(constants.EnvMitmproxyScript)),
 	}
-	// Buffer absorbs a retry storm; correctness does not depend on the size
-	// (launchTagged sends block, so events are never silently dropped).
-	restartCh := make(chan exitEvent, 64)
-	shutdownCh := make(chan struct{})
-	const initialGen uint64 = 1
-	running, err := launchTagged(cfg, restartCh, shutdownCh, initialGen)
+	revisionOwner, err := newSidecarRevisionLaunchOwner(policyServer)
 	if err != nil {
-		return nil, fmt.Errorf("start mitmdump: %w", err)
+		return nil, fmt.Errorf("configure revision runtime: %w", err)
 	}
-
-	waitAddr := fmt.Sprintf("127.0.0.1:%d", mpPort)
-	if err := mitmproxy.WaitListenPort(waitAddr, 15*time.Second); err != nil {
-		return nil, fmt.Errorf("wait listen %s: %w", waitAddr, err)
+	m := &mitmTransparent{
+		port: mpPort, uid: mpUID, dports: dports, cfg: cfg, revisionOwner: revisionOwner,
+		restartCh: make(chan exitEvent, 64), shutdownCh: make(chan struct{}), watchDone: make(chan struct{}),
 	}
-	if err := iptables.SetupTransparentHTTP(mpPort, mpUID, dports); err != nil {
-		return nil, fmt.Errorf("iptables transparent: %w", err)
+	err = m.startInitial(ctx, defaultMitmLaunchDependencies(), func() error {
+		if err := iptables.SetupTransparentHTTP(mpPort, mpUID, dports); err != nil {
+			return fmt.Errorf("iptables transparent: %w", err)
+		}
+		log.Infof("mitmproxy: transparent intercept active (OUTPUT tcp %s -> %d; trust mitm CA in clients)", dports, mpPort)
+		if err := mitmproxy.SyncRootCA("", mpHome); err != nil {
+			return fmt.Errorf("mitm CA export: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	log.Infof("mitmproxy: transparent intercept active (OUTPUT tcp %s -> %d; trust mitm CA in clients)", dports, mpPort)
-
-	if err := mitmproxy.SyncRootCA("", mpHome); err != nil {
-		return nil, fmt.Errorf("mitm CA export: %w", err)
-	}
-	return &mitmTransparent{
-		running:    running,
-		currentGen: initialGen,
-		port:       mpPort,
-		uid:        mpUID,
-		dports:     dports,
-		cfg:        cfg,
-		nextGen:    initialGen,
-		restartCh:  restartCh,
-		shutdownCh: shutdownCh,
-	}, nil
+	return m, nil
 }
 
 // watchMitmproxy monitors mitmdump for unexpected exits, logs the error, and restarts it.
@@ -150,10 +433,14 @@ func (m *mitmTransparent) watchMitmproxy(ctx context.Context, gate *mitmproxy.He
 	// parked on the (now-unread) restartCh send so they don't leak past
 	// shutdown.
 	safego.Go(func() {
-		<-ctx.Done()
-		close(m.shutdownCh)
+		select {
+		case <-ctx.Done():
+			m.signalShutdown()
+		case <-m.shutdownCh:
+		}
 	})
 	safego.Go(func() {
+		defer close(m.watchDone)
 		for {
 			select {
 			case ev := <-m.restartCh:
@@ -173,9 +460,12 @@ func (m *mitmTransparent) watchMitmproxy(ctx context.Context, gate *mitmproxy.He
 
 				log.Errorf("[mitmproxy] mitmdump exited (gen=%d): %v; restarting...", ev.gen, ev.err)
 				gate.SetReady(false)
+				m.closeRevisionSession(ev.gen)
 				m.restartWithBackoff(ctx, gate)
 
 			case <-ctx.Done():
+				return
+			case <-m.shutdownCh:
 				return
 			}
 		}
@@ -190,45 +480,55 @@ func (m *mitmTransparent) watchMitmproxy(ctx context.Context, gate *mitmproxy.He
 // generations are filtered by watchMitmproxy, so restartCh must not be drained
 // here — doing so could swallow a real death of the freshly-restarted mitmdump.
 func (m *mitmTransparent) restartWithBackoff(ctx context.Context, gate *mitmproxy.HealthGate) {
-	const (
-		initialBackoff = time.Second
-		maxBackoff     = 30 * time.Second
-	)
-	backoff := initialBackoff
-	waitAddr := fmt.Sprintf("127.0.0.1:%d", m.cfg.ListenPort)
+	m.restartWithBackoffUsing(ctx, gate, defaultMitmLaunchDependencies())
+}
 
+func (m *mitmTransparent) restartWithBackoffUsing(ctx context.Context, gate *mitmproxy.HealthGate, deps mitmLaunchDependencies) {
+	const maxBackoff = 30 * time.Second
+	backoff := time.Second
 	for attempt := 1; ; attempt++ {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
-
-		gen := atomic.AddUint64(&m.nextGen, 1)
-		newRunning, launchErr := launchTagged(m.cfg, m.restartCh, m.shutdownCh, gen)
-		if launchErr == nil {
-			if waitErr := mitmproxy.WaitListenPort(waitAddr, 15*time.Second); waitErr == nil {
-				m.setRunning(newRunning, gen)
-				gate.SetReady(true)
-				log.Infof("[mitmproxy] mitmdump restarted (pid %d, gen %d, attempt %d)", newRunning.Cmd.Process.Pid, gen, attempt)
-				return
+		result, err := m.launchAndListen(ctx, deps)
+		if err == nil {
+			if m.revisionOwner != nil && m.revisionOwner.server != nil {
+				err = publishRevisionReady(ctx, m, result)
+			} else if !m.publishRunning(result.running, result.session, result.generation) {
+				// A subject child can exit after readiness but before publication.
+				// Retry that attempt; only shutdown makes rejection terminal.
+				err = revision.ErrTransportUnavailable
+				m.mu.RLock()
+				if m.stopping {
+					err = revision.ErrClosed
+				}
+				m.mu.RUnlock()
 			} else {
-				log.Errorf("[mitmproxy] restart attempt %d (gen %d): wait listen %s: %v", attempt, gen, waitAddr, waitErr)
-				// GracefulShutdown SIGTERMs then SIGKILLs and waits for reap, so
-				// the listen port is released before the next attempt's Launch
-				// races to bind it. Direct Process.Kill returns immediately and
-				// can cause spurious WaitListenPort failures on port contention.
-				mitmproxy.GracefulShutdown(newRunning, time.Second)
+				gate.SetReady(true)
 			}
-		} else {
-			log.Errorf("[mitmproxy] restart attempt %d (gen %d): launch failed: %v", attempt, gen, launchErr)
+			if err == nil {
+				log.Infof("[mitmproxy] mitmdump restarted (gen %d, attempt %d)", result.generation, attempt)
+				return
+			}
+			m.cleanupLaunch(result)
 		}
-
-		log.Warnf("[mitmproxy] restart attempt %d failed; retrying in %s", attempt, backoff)
-		select {
-		case <-ctx.Done():
+		if errors.Is(err, errRevisionRecoveryRequired) || errors.Is(err, revision.ErrClosed) || ctx.Err() != nil {
 			return
-		case <-time.After(backoff):
+		}
+		// Cleanup itself may have introduced uncertainty. Stop, rather than making
+		// another launch (or spinning on a permanently rejected capture).
+		if m.revisionOwner != nil && m.revisionOwner.server != nil {
+			s := m.revisionOwner.server
+			s.mu.Lock()
+			recoveryErr := s.revisionRecovery.recoveryErrorLocked()
+			s.mu.Unlock()
+			if recoveryErr != nil {
+				return
+			}
+		}
+		log.Warnf("[mitmproxy] restart attempt %d failed: %v; retrying in %s", attempt, err, backoff)
+		if !deps.retry(ctx, m.shutdownCh, backoff) {
+			return
 		}
 		if backoff < maxBackoff {
 			backoff *= 2

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -190,4 +190,26 @@ public interface ISandboxFiles
     Task SetPermissionsAsync(
         IEnumerable<SetPermissionEntry> entries,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>Optional filesystem capability for HTTP download response metadata.</summary>
+public interface IDownloadSandboxFiles : ISandboxFiles
+{
+    /// <summary>Reads a file as bytes together with HTTP response metadata.</summary>
+    Task<ReadBytesResponse<byte[]>> ReadBytesDetailedAsync(
+        string path,
+        ReadBytesOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Reads a file as a byte stream together with HTTP response metadata.</summary>
+    Task<ReadBytesResponse<IAsyncReadBytesStream>> ReadBytesStreamDetailedAsync(
+        string path,
+        ReadBytesOptions? options = null,
+        CancellationToken cancellationToken = default);
+}
+
+/// <summary>Filesystem capability for explicit execution identities.</summary>
+public interface IIdentitySandboxFiles : ISandboxFiles
+{
+    ISandboxFiles WithIdentity(uint uid, uint gid);
 }

@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import shlex
 import sys
+from collections.abc import Callable
 from datetime import timedelta
 
 import click
-from opensandbox.models.execd import OutputMessage, RunCommandOpts
+from opensandbox.models.execd import Execution, OutputMessage, RunCommandOpts
 from opensandbox.models.execd_sync import ExecutionHandlersSync
 
 from opensandbox_cli.client import ClientContext
@@ -41,7 +42,29 @@ def command_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-# ---- run ------------------------------------------------------------------
+def _stream_handlers() -> tuple[ExecutionHandlersSync, Callable[[], None]]:
+    """Create stdout/stderr streaming handlers and a trailing-newline flusher."""
+    last_text = ""
+
+    def on_stdout(msg: OutputMessage) -> None:
+        nonlocal last_text
+        last_text = msg.text
+        sys.stdout.write(msg.text)
+        sys.stdout.flush()
+
+    def on_stderr(msg: OutputMessage) -> None:
+        nonlocal last_text
+        last_text = msg.text
+        sys.stderr.write(msg.text)
+        sys.stderr.flush()
+
+    def flush_newline() -> None:
+        if last_text and not last_text.endswith("\n"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+    return ExecutionHandlersSync(on_stdout=on_stdout, on_stderr=on_stderr), flush_newline
+
 
 def _run_command(
     obj: ClientContext,
@@ -55,15 +78,10 @@ def _run_command(
 ) -> None:
     """Shared implementation for ``command run``.
 
-    Mode contract:
-    - foreground (default): stream output directly, allow only ``-o raw``
-    - background (``--background``): return a tracked execution object, allow structured output
-
-    Payload contract:
-    - default: join the arguments into one shell command string (works against
-      every deployed execd)
-    - ``--argv``: send the arguments as a literal argv list, no shell; needs an
-      execd that accepts the ``argv`` request field
+    Foreground mode streams output and allows only ``-o raw``; background mode
+    returns a tracked execution object and allows structured output. The payload
+    is joined into one shell command string unless ``argv`` sends it as a
+    literal argv list (needs an argv-capable execd).
     """
     allowed = ("table", "json", "yaml") if background else ("raw",)
     fallback = "table" if background else "raw"
@@ -84,6 +102,7 @@ def _run_command(
 
         if background:
             execution = sandbox.commands.run(payload, opts=opts)
+            _handle_execution_error(obj, execution, background=True)
             obj.output.success_panel(
                 {
                     "execution_id": execution.id,
@@ -94,40 +113,31 @@ def _run_command(
             )
             return
 
-        # Foreground: stream stdout/stderr to terminal
-        last_text = ""
-
-        def on_stdout(msg: OutputMessage) -> None:
-            nonlocal last_text
-            last_text = msg.text
-            sys.stdout.write(msg.text)
-            sys.stdout.flush()
-
-        def on_stderr(msg: OutputMessage) -> None:
-            nonlocal last_text
-            last_text = msg.text
-            sys.stderr.write(msg.text)
-            sys.stderr.flush()
-
-        handlers = ExecutionHandlersSync(on_stdout=on_stdout, on_stderr=on_stderr)
+        handlers, flush_newline = _stream_handlers()
         execution = sandbox.commands.run(payload, opts=opts, handlers=handlers)
-
-        # Ensure terminal prompt starts on a new line
-        if last_text and not last_text.endswith("\n"):
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-
+        flush_newline()
         _handle_execution_error(obj, execution)
     finally:
         sandbox.close()
 
 
-def _handle_execution_error(obj: ClientContext, execution) -> None:
-    """Exit non-zero if the execution finished with an error."""
+def _handle_execution_error(
+    obj: ClientContext, execution: Execution, *, background: bool = False
+) -> None:
+    """Exit non-zero on execution errors or missing completion/startup confirmation."""
     if execution.error:
         obj.output.error_panel(
             f"{execution.error.name}: {execution.error.value}",
             title="Execution Error",
+        )
+        sys.exit(1)
+    if execution.complete is None:
+        confirmation = (
+            "background command startup was confirmed" if background else "the command finished"
+        )
+        obj.output.error_panel(
+            f"The output stream ended before {confirmation}, so its result is unknown.",
+            title="Execution Incomplete",
         )
         sys.exit(1)
 
@@ -137,9 +147,12 @@ def _handle_execution_error(obj: ClientContext, execution) -> None:
     help="Run a command in a sandbox. Use `--` before the sandbox command payload.",
     epilog=(
         "Separator rule: use `--` before the sandbox command payload.\n\n"
-        "By default the payload is joined into one shell command string. Add "
-        "`--argv` to pass the arguments to the executable as-is (no shell), so "
-        "literal `$HOME`, quotes, and empty strings are preserved; this needs a "
+        "By default each payload word is quoted as a single shell token and "
+        "the tokens are joined into one shell command line, so shell syntax "
+        "such as redirects or pipes must ride inside an explicit word "
+        "(for example: -- sh -c 'echo hi > /tmp/x'). Add `--argv` to pass "
+        "the arguments to the executable as-is (no shell), so literal "
+        "`$HOME`, quotes, and empty strings are preserved; this needs a "
         "sandbox image whose execd accepts argv requests."
     ),
 )
@@ -185,8 +198,6 @@ def command_run(
     )
 
 
-# ---- status ---------------------------------------------------------------
-
 @command_group.command("status")
 @click.argument("sandbox_id")
 @click.argument("execution_id")
@@ -208,8 +219,6 @@ def command_status(
     finally:
         sandbox.close()
 
-
-# ---- logs -----------------------------------------------------------------
 
 @command_group.command("logs")
 @click.argument("sandbox_id")
@@ -241,8 +250,6 @@ def command_logs(
     finally:
         sandbox.close()
 
-
-# ---- interrupt ------------------------------------------------------------
 
 @command_group.command("interrupt")
 @click.argument("sandbox_id")
@@ -330,21 +337,7 @@ def session_run(
     cmd_str = " ".join(shlex.quote(arg) for arg in command)
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
-        last_text = ""
-
-        def on_stdout(msg: OutputMessage) -> None:
-            nonlocal last_text
-            last_text = msg.text
-            sys.stdout.write(msg.text)
-            sys.stdout.flush()
-
-        def on_stderr(msg: OutputMessage) -> None:
-            nonlocal last_text
-            last_text = msg.text
-            sys.stderr.write(msg.text)
-            sys.stderr.flush()
-
-        handlers = ExecutionHandlersSync(on_stdout=on_stdout, on_stderr=on_stderr)
+        handlers, flush_newline = _stream_handlers()
         execution = sandbox.commands.run_in_session(
             session_id,
             cmd_str,
@@ -352,11 +345,7 @@ def session_run(
             timeout=timeout,
             handlers=handlers,
         )
-
-        if last_text and not last_text.endswith("\n"):
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-
+        flush_newline()
         _handle_execution_error(obj, execution)
     finally:
         sandbox.close()

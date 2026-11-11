@@ -27,7 +27,21 @@ metadata:
 data:
   runtime-environments.yaml: |
     {{- .Values.runtimeEnvironments | nindent 4 }}
-{{- if .Values.routeKeys.create }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fast-sandbox-builder-pod-template
+  namespace: {{ include "fast-sandbox.namespace" . }}
+  labels:
+    {{- include "fast-sandbox.labels" . | nindent 4 }}
+    app.kubernetes.io/component: config
+{{- with .Values.controller.sandboxtemplateBuilderPodSpec }}
+data:
+  podSpec.yaml: |
+    {{- . | nindent 4 }}
+{{- end }}
+{{- if and .Values.routeKeys.create (not .Values.routeKeys.existingSecret) }}
 ---
 apiVersion: v1
 kind: Secret

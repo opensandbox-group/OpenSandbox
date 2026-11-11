@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package proxy
 import (
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
@@ -66,7 +65,7 @@ func parseHostRoute(s string) (parsedRoute, error) {
 		return parsedRoute{}, fmt.Errorf("invalid host: %s", s)
 	}
 	sandboxID := strings.Join(ingressAndPort[:len(ingressAndPort)-1], "-")
-	port, err := strconv.Atoi(ingressAndPort[len(ingressAndPort)-1])
+	port, err := signature.ParsePortSegment(ingressAndPort[len(ingressAndPort)-1])
 	if err != nil {
 		return parsedRoute{}, fmt.Errorf("invalid port format: %w", err)
 	}

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -87,7 +87,8 @@ func LoadInitialPolicyDetailed(policyFile, envName string) (*NetworkPolicy, Poli
 	return pol, PolicyFromFile, nil
 }
 
-// SavePolicyFile rewrites the policy file atomically (JSON indent, fsync) when path is set.
+// SavePolicyFile retains legacy in-place persistence (JSON indent, fsync).
+// Experimental revision owners use AtomicPolicyFile instead.
 func SavePolicyFile(path string, p *NetworkPolicy) error {
 	path = strings.TrimSpace(path)
 	if path == "" {

@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -69,9 +69,7 @@ kubeconfig_path = "~/.kube/config"
 # Namespace for sandbox workloads
 namespace = "opensandbox"
 
-# [Beta] Enable informer-backed cache to reduce API calls.
-# Set to false to disable the watch-based cache.
-informer_enabled = true
+# [Beta] Informer cache resync and watch tuning.
 informer_resync_seconds = 300
 informer_watch_timeout_seconds = 60
 
@@ -102,6 +100,14 @@ mode = "dns"
 # rule matches the configured host exactly, while the resolver expands partial
 # service names (e.g. otel-collector.observability) to FQDNs the rule misses.
 # otlp_endpoint = "http://otel-collector.observability.svc.cluster.local:4318"
+# Optional: chain sidecar egress through an upstream HTTP(S) CONNECT proxy. Requires mode = "dns+nft"
+# and transparent MITM per sandbox (credentialProxy.enabled or OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true).
+# [egress.upstream_proxy]
+# url = "http://proxy.example.com:3128"
+# authorization = "Basic <base64>"
+# Optional: Secret holding an extra upstream CA bundle under the fixed key
+# "ca.crt"; mounted read-only into the egress sidecar only.
+# ca_secret_name = "corp-proxy-ca"
 
 # Renew-on-access. Off by default — see server/README.md.
 [renew_intent]

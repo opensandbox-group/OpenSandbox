@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 """Strict validator for the OSEP-0023 canonical decision payload.
 
 The live addon imports this module only for a launcher-provided internal
-revision session; current egress profiles do not supply one. Go owns
+revision session through the experimental sidecar revision-runtime gate. Go owns
 construction and host normalization; this validator verifies the exact
 payload/envelope agreement before the revision receiver may stage those
 immutable bytes.

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import type { ExecdHealth } from "../services/execdHealth.js";
 import type { ExecdMetrics } from "../services/execdMetrics.js";
 import type { IsolationService } from "../services/isolatedSessions.js";
 import type { Sandboxes } from "../services/sandboxes.js";
+import type { Diagnostics } from "../services/diagnostics.js";
 
 export interface CreateLifecycleStackOptions {
   connectionConfig: ConnectionConfig;
@@ -29,6 +30,7 @@ export interface CreateLifecycleStackOptions {
 
 export interface LifecycleStack {
   sandboxes: Sandboxes;
+  diagnostics?: Diagnostics;
 }
 
 export interface CreateExecdStackOptions {

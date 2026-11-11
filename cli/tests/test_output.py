@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,20 +23,11 @@ from pydantic import BaseModel
 
 from opensandbox_cli.output import OutputFormatter
 
-# ---------------------------------------------------------------------------
-# Test models
-# ---------------------------------------------------------------------------
-
 
 class FakeItem(BaseModel):
     id: str
     name: str
     score: int
-
-
-# ---------------------------------------------------------------------------
-# JSON output
-# ---------------------------------------------------------------------------
 
 
 class TestJsonOutput:
@@ -78,11 +69,6 @@ class TestJsonOutput:
         assert data == {"status": "ok", "message": "done"}
 
 
-# ---------------------------------------------------------------------------
-# YAML output
-# ---------------------------------------------------------------------------
-
-
 class TestYamlOutput:
     def test_print_dict(self, capsys: pytest.CaptureFixture[str]) -> None:
         fmt = OutputFormatter("yaml", color=False)
@@ -100,11 +86,6 @@ class TestYamlOutput:
         assert "score: 5" in captured.out
 
 
-# ---------------------------------------------------------------------------
-# Table output
-# ---------------------------------------------------------------------------
-
-
 class TestTableOutput:
     def test_print_dict_contains_values(self, capsys: pytest.CaptureFixture[str]) -> None:
         fmt = OutputFormatter("table", color=False)
@@ -120,6 +101,16 @@ class TestTableOutput:
         captured = capsys.readouterr()
         assert "-" in captured.out
 
+    def test_print_rows_none_renders_dash(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=False)
+        fmt.print_rows(
+            [{"id": "sb-1", "image": None, "expires_at": None}],
+            columns=["id", "image", "expires_at"],
+        )
+        captured = capsys.readouterr()
+        assert "None" not in captured.out
+        assert captured.out.split().count("-") >= 2
+
     def test_print_models_shows_headers(self, capsys: pytest.CaptureFixture[str]) -> None:
         fmt = OutputFormatter("table", color=False)
         items = [FakeItem(id="1", name="a", score=10)]
@@ -134,3 +125,37 @@ class TestTableOutput:
         fmt.print_text("hello world")
         captured = capsys.readouterr()
         assert captured.out.strip() == "hello world"
+
+
+class TestTextIsNotMarkup:
+    """User and server text must print as-is, even when it looks like markup."""
+
+    TEXT = "/tmp/notes[draft]/a[/]b"
+
+    def test_messages(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=True)
+        fmt.success(self.TEXT)
+        fmt.error(self.TEXT)
+        captured = capsys.readouterr()
+        assert self.TEXT in captured.out
+        assert self.TEXT in captured.err
+
+    def test_error_panel(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=True)
+        fmt.error_panel(self.TEXT)
+        assert self.TEXT in capsys.readouterr().err
+
+    def test_success_panel(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=True)
+        fmt.success_panel({"path": self.TEXT})
+        assert self.TEXT in capsys.readouterr().out
+
+    def test_panel(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=True)
+        fmt.panel(self.TEXT, title="Logs")
+        assert self.TEXT in capsys.readouterr().out
+
+    def test_table_cells(self, capsys: pytest.CaptureFixture[str]) -> None:
+        fmt = OutputFormatter("table", color=False)
+        fmt.print_rows([{"path": self.TEXT}], columns=["path"])
+        assert self.TEXT in capsys.readouterr().out

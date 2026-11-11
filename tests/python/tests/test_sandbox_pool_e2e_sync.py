@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -102,7 +102,7 @@ class TestSandboxPoolSingleNodeE2ESync:
 
         result = sandbox.commands.run("echo py-pool-basic-ok")
         assert result.error is None
-        assert result.logs.stdout[0].text == "py-pool-basic-ok"
+        assert result.logs.stdout[0].text == "py-pool-basic-ok\n"
 
     @pytest.mark.timeout(240)
     def test_resize_release_fail_fast_and_direct_create_fallback(self) -> None:
@@ -294,35 +294,44 @@ class TestSandboxPoolSingleNodeE2ESync:
 
         assert not race_errors
 
-    @pytest.mark.timeout(360)
+    @pytest.mark.timeout(600)
     def test_concurrent_start_shutdown_stress_single_node(self) -> None:
         errors: list[BaseException] = []
-        start = threading.Event()
+        rounds = max(1, int(os.environ.get("POOL_STRESS_ROUNDS", "3")))
+        worker_count = 4
+        # Deterministically align all workers at the top of every round so
+        # start/shutdown calls overlap as much as possible, instead of relying
+        # on sleep timing. If a worker dies mid-run, the bounded timeout turns
+        # the stuck barrier into BrokenBarrierError instead of a hang.
+        barrier = threading.Barrier(worker_count, timeout=180)
 
         def worker(index: int) -> None:
             try:
-                start.wait()
-                for _ in range(3):
+                for _ in range(rounds):
+                    barrier.wait()
                     if index % 2 == 0:
                         self.pool.start()
                     else:
                         self.pool.shutdown(index % 3 == 0)
-                    time.sleep(0.05)
             except BaseException as exc:
                 errors.append(exc)
                 raise
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = [executor.submit(worker, i) for i in range(4)]
-            start.set()
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(worker, i) for i in range(worker_count)]
             for future in as_completed(futures, timeout=180):
                 future.result()
 
         assert not errors
         self.pool.start()
+        # The recovery wait must exceed the server-side create timeout (180s):
+        # a warmup submitted right after the stress can still be parked on a
+        # slow create that only fails with a 504 after 180s before a retry
+        # succeeds, so the default 2-minute window is not enough.
         _eventually(
             "pool remains usable after lifecycle stress",
             lambda: self.pool.snapshot().idle_count >= 1,
+            timeout=timedelta(minutes=5),
         )
 
     @pytest.mark.timeout(300)

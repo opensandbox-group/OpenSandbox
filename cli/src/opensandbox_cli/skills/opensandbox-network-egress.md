@@ -56,10 +56,8 @@ osb config show -o json
 
 Runtime egress policy consists of:
 
-- `defaultAction`
-  The fallback action when no rule matches
-- `egress`
-  An ordered list of allow or deny rules
+- `defaultAction` The fallback action when no rule matches
+- `egress` An ordered list of allow or deny rules
 
 Important semantics:
 

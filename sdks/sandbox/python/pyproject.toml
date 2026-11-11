@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,7 +54,7 @@ dependencies = [
 [project.optional-dependencies]
 pool-redis = [
     "redis>=5.0,<6.0",
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.14.0",
 ]
 
 [project.urls]
@@ -114,7 +114,7 @@ typeCheckingMode = "standard"
 pythonVersion = "3.10"
 pythonPlatform = "All"
 
-include = ["src"]
+include = ["src", "tests/typecheck"]
 
 exclude = [
     "**/node_modules",
@@ -142,7 +142,7 @@ asyncio_mode = "auto"
 
 [tool.uv]
 constraint-dependencies = [
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.14.0",
 ]
 
 [tool.coverage.run]

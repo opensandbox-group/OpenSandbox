@@ -78,10 +78,12 @@ ClusterRole name for gateway
 {{- end }}
 
 {{/*
-Gateway image with tag (prepend v to semver if missing)
+Gateway image with tag. Empty tag uses the release-<appVersion> image tag
+published for this chart version; plain semver keeps the legacy 'v' prefix
+(e.g., 1.0.2 -> v1.0.2); other tags pass through as-is.
 */}}
 {{- define "opensandbox-ingress-gateway.image" -}}
-{{- $tag := .Values.gateway.image.tag | default "v1.0.2" }}
+{{- $tag := .Values.gateway.image.tag | default (printf "release-%s" .Chart.AppVersion) }}
 {{- $finalTag := $tag }}
 {{- if and (not (hasPrefix "v" $tag)) (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+" $tag) }}
 {{- $finalTag = printf "v%s" $tag }}
@@ -101,10 +103,21 @@ RBAC apiVersion
 {{- end }}
 
 {{/*
-Validate secureAccess: keys and existingSecret are mutually exclusive.
+Validate secureAccess: keys and existingSecret are mutually exclusive, and
+the fast-sandbox provider requires a signing key ring (FastPath routing
+serves only authenticated route scopes; the binary panics at startup without
+--secure-access-keys) and a FastPath gRPC endpoint (the gateway fails startup
+without a FastPath connection). Failing at render time beats a
+CrashLoopBackOff.
 */}}
 {{- define "opensandbox-ingress-gateway.secureAccess.validate" -}}
 {{- if and .Values.gateway.secureAccess.keys .Values.gateway.secureAccess.existingSecret }}
 {{- fail "gateway.secureAccess: set either keys or existingSecret, not both" }}
+{{- end }}
+{{- if and (eq .Values.gateway.providerType "fast-sandbox") (empty .Values.gateway.secureAccess.keys) (empty .Values.gateway.secureAccess.existingSecret) }}
+{{- fail "gateway.secureAccess: providerType=fast-sandbox requires a signing key ring (set gateway.secureAccess.keys or gateway.secureAccess.existingSecret); FastPath routing requires --secure-access-keys for authenticated route scopes" }}
+{{- end }}
+{{- if and (eq .Values.gateway.providerType "fast-sandbox") (empty .Values.gateway.fastpathEndpoint) }}
+{{- fail "gateway.fastpathEndpoint: providerType=fast-sandbox requires a FastPath gRPC endpoint (e.g. fast-sandbox-fastpath.opensandbox-system.svc:9090); the gateway fails startup without a FastPath connection" }}
 {{- end }}
 {{- end }}

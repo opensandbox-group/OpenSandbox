@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/stretchr/testify/require"
 )
@@ -350,4 +351,24 @@ func serveProcessSessionReadback(
 		require.NoError(t, server.Close())
 	})
 	return server
+}
+
+func TestProcessSessionFrozenStaticPassthrough(t *testing.T) {
+	frozen, err := mitmpassthrough.Parse(`["B.example.com","a.example.com"]`, true)
+	require.NoError(t, err)
+	cfg := processSessionConfig(processSessionParent(t))
+	cfg.LiveAdmission = true
+	cfg.StaticPassthrough = frozen
+	for i := 0; i < 2; i++ {
+		session, err := NewProcessSession(cfg)
+		require.NoError(t, err)
+		first, err := session.MitmproxyConfig()
+		require.NoError(t, err)
+		require.Equal(t, `["a.example.com","b.example.com"]`, first.StaticPassthrough.JSON())
+		first.StaticPassthrough = mitmpassthrough.Config{}
+		second, err := session.MitmproxyConfig()
+		require.NoError(t, err)
+		require.Equal(t, frozen.JSON(), second.StaticPassthrough.JSON())
+		require.NoError(t, session.Close())
+	}
 }

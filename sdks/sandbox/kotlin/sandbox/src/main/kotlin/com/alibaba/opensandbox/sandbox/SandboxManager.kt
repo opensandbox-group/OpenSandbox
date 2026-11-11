@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SnapshotFailedException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
@@ -63,7 +64,7 @@ import java.time.OffsetDateTime
  *
  * // List all running sandboxes
  * val runningSandboxes = manager.listSandboxInfos(
- *     SandboxFilter.builder().state("RUNNING").build()
+ *     SandboxFilter.builder().states(SandboxState.RUNNING).build()
  * )
  *
  * // Individual operations
@@ -109,6 +110,11 @@ class SandboxManager internal constructor(
 
     fun listSandboxInfos(filter: SandboxFilter): PagedSandboxInfos {
         return sandboxService.listSandboxes(filter)
+    }
+
+    /** Gets backend routing context without connecting to execd. */
+    fun getDiagnosticContext(sandboxId: String): DiagnosticContext {
+        return diagnosticsService.getContext(sandboxId)
     }
 
     /**
@@ -170,7 +176,8 @@ class SandboxManager internal constructor(
     }
 
     /**
-     * Terminates a single sandbox.
+     * Requests irreversible sandbox termination. Returns when deletion is accepted;
+     * runtime cleanup may continue afterward.
      *
      * @param sandboxId Sandbox ID to terminate
      * @throws SandboxException if the operation fails
@@ -178,7 +185,7 @@ class SandboxManager internal constructor(
     fun killSandbox(sandboxId: String) {
         logger.info("Terminating sandbox: {}", sandboxId)
         sandboxService.killSandbox(sandboxId)
-        logger.info("Successfully terminated sandbox: {}", sandboxId)
+        logger.info("Sandbox deletion accepted: {}", sandboxId)
     }
 
     /**

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ using OpenSandbox.CodeInterpreter.Factory;
 using OpenSandbox.CodeInterpreter.Services;
 using OpenSandbox.Config;
 using OpenSandbox.Core;
+using OpenSandbox.Factory;
 using OpenSandbox.Internal;
 using OpenSandbox.Services;
 using Microsoft.Extensions.Logging;
@@ -180,7 +181,7 @@ public sealed class CodeInterpreter
         logger.LogInformation("Creating code interpreter for sandbox: {SandboxId}", sandbox.Id);
         var protocol = sandbox.ConnectionConfig.Protocol == ConnectionProtocol.Https ? "https" : "http";
         var execdBaseUrl = $"{protocol}://{endpoint.EndpointAddress}";
-        var execdHeaders = MergeHeaders(sandbox.ConnectionConfig.Headers, endpoint.Headers);
+        var execdHeaders = DefaultAdapterFactory.BuildDataPlaneHeaders(sandbox.ConnectionConfig, endpoint.Headers);
         var adapterFactory = options?.AdapterFactory ?? DefaultCodeInterpreterAdapterFactory.Create();
 
         var codes = adapterFactory.CreateCodes(new CreateCodesStackOptions
@@ -283,7 +284,10 @@ public sealed class CodeInterpreter
             var execution = await Sandbox.Commands.RunAsync(
                 CodeInterpreterHealthCheck.RuntimeCheckCommand,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
-            return execution?.Error == null;
+            // A non-zero exit without an error event is still a failure;
+            // an indeterminate result (neither Complete nor Error observed,
+            // e.g. a dropped stream) is not proof of health either.
+            return execution is { Error: null, ExitCode: 0 };
         }
         catch (Exception ex)
         {
@@ -351,21 +355,5 @@ public sealed class CodeInterpreter
             var delay = pollingInterval < remaining ? pollingInterval : remaining;
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
         }
-    }
-
-    private static IReadOnlyDictionary<string, string> MergeHeaders(
-        IReadOnlyDictionary<string, string> baseHeaders,
-        IReadOnlyDictionary<string, string>? overrideHeaders)
-    {
-        var merged = baseHeaders.ToDictionary(header => header.Key, header => header.Value);
-        if (overrideHeaders != null)
-        {
-            foreach (var header in overrideHeaders)
-            {
-                merged[header.Key] = header.Value;
-            }
-        }
-
-        return merged;
     }
 }

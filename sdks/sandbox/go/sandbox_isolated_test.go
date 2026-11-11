@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestIsolatedCapabilities_ModeAvailabilityWireFormat(t *testing.T) {
@@ -49,7 +50,7 @@ func TestIsolatedCapabilities_ModeAvailabilityWireFormat(t *testing.T) {
 // uid_mode serialize to the expected execd wire format.
 func TestCreateIsolatedSessionRequest_BindsWireFormat(t *testing.T) {
 	req := CreateIsolatedSessionRequest{
-		Workspace: IsolatedWorkspaceSpec{Path: "/workspace", Mode: "rw"},
+		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace", Mode: "rw"},
 		Binds: []BindMount{
 			{Source: "/data/in", Dest: "/mnt/in", ReadOnly: true},
 			{Source: "/data/out"},
@@ -75,13 +76,52 @@ func TestCreateIsolatedSessionRequest_BindsWireFormat(t *testing.T) {
 // uid_mode are omitted when unset (backward compatible with existing callers).
 func TestCreateIsolatedSessionRequest_BindsOmittedWhenEmpty(t *testing.T) {
 	req := CreateIsolatedSessionRequest{
-		Workspace: IsolatedWorkspaceSpec{Path: "/workspace"},
+		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace"},
 	}
 	b, err := json.Marshal(req)
 	require.NoError(t, err)
 	s := string(b)
 	require.True(t, !strings.Contains(s, "binds"), "binds should be omitted: %s", s)
 	require.True(t, !strings.Contains(s, "uid_mode"), "uid_mode should be omitted: %s", s)
+}
+
+// TestCreateIsolatedSessionRequest_OverlaysWireFormat verifies overlays
+// serialize to the execd wire format alongside the legacy workspace sugar.
+func TestCreateIsolatedSessionRequest_OverlaysWireFormat(t *testing.T) {
+	ephemeral := false
+	req := CreateIsolatedSessionRequest{
+		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace", Mode: "overlay"},
+		Overlays: []IsolatedOverlaySpec{
+			{Path: "/"},
+			{Path: "/data", Mode: "rw"},
+			{Path: "/ephemeral", Mode: "overlay", Persist: &ephemeral},
+		},
+	}
+
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	s := string(b)
+
+	assert.Contains(t, s, `"workspace":{"path":"/workspace","mode":"overlay"}`)
+	assert.Contains(t, s, `"overlays":[`)
+	assert.Contains(t, s, `{"path":"/"}`)
+	assert.Contains(t, s, `{"path":"/data","mode":"rw"}`)
+	assert.Contains(t, s, `{"path":"/ephemeral","mode":"overlay","persist":false}`)
+}
+
+// TestCreateIsolatedSessionRequest_OverlaysOnlyOmitsWorkspace verifies a
+// request carrying only overlays omits the legacy workspace field entirely.
+func TestCreateIsolatedSessionRequest_OverlaysOnlyOmitsWorkspace(t *testing.T) {
+	req := CreateIsolatedSessionRequest{
+		Overlays: []IsolatedOverlaySpec{{Path: "/workspace", Mode: "rw"}},
+	}
+
+	b, err := json.Marshal(req)
+	require.NoError(t, err)
+	s := string(b)
+
+	require.True(t, !strings.Contains(s, `"workspace":`), "workspace should be omitted: %s", s)
+	assert.Contains(t, s, `"overlays":[{"path":"/workspace","mode":"rw"}]`)
 }
 
 func TestIsolationRunOnce_CreatesRunsDeletes(t *testing.T) {
@@ -117,7 +157,7 @@ func TestIsolationRunOnce_CreatesRunsDeletes(t *testing.T) {
 	sb := &Sandbox{id: "sbx-test", execd: execd}
 
 	req := CreateIsolatedSessionRequest{
-		Workspace: IsolatedWorkspaceSpec{Path: "/workspace", Mode: "overlay"},
+		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace", Mode: "overlay"},
 	}
 	run := IsolatedRunRequest{Code: "echo hello"}
 
@@ -222,7 +262,7 @@ func TestIsolationRunOnce_DeletesOnRunError(t *testing.T) {
 	sb := &Sandbox{id: "sbx-test", execd: execd}
 
 	req := CreateIsolatedSessionRequest{
-		Workspace: IsolatedWorkspaceSpec{Path: "/workspace"},
+		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace"},
 	}
 	run := IsolatedRunRequest{Code: "bad cmd"}
 
@@ -262,7 +302,7 @@ func TestIsolationWithSession_CallbackAndCleanup(t *testing.T) {
 	sb := &Sandbox{id: "sbx-test", execd: execd}
 
 	req := CreateIsolatedSessionRequest{
-		Workspace: IsolatedWorkspaceSpec{Path: "/workspace"},
+		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace"},
 	}
 
 	err := sb.IsolationWithSession(context.Background(), req, func(s *IsolationSession) error {
@@ -295,7 +335,11 @@ func TestIsolationAttach_PopulatesFullInfo(t *testing.T) {
 				"idle_remaining_seconds": 42,
 				"profile":                "python",
 				"workspace":              map[string]any{"path": "/workspace", "mode": "overlay"},
-				"extra_writable":         []string{"/tmp", "/var/tmp"},
+				"overlays": []map[string]any{
+					{"path": "/", "mode": "overlay"},
+					{"path": "/workspace", "mode": "overlay", "persist": false},
+				},
+				"extra_writable": []string{"/tmp", "/var/tmp"},
 				"binds": []map[string]any{
 					{"source": "/data/in", "dest": "/mnt/in", "readonly": true},
 					{"source": "/data/out"},
@@ -332,6 +376,14 @@ func TestIsolationAttach_PopulatesFullInfo(t *testing.T) {
 	require.NotNil(t, info.Workspace)
 	require.Equal(t, "/workspace", info.Workspace.Path)
 	require.Equal(t, "overlay", info.Workspace.Mode)
+
+	require.Len(t, info.Overlays, 2)
+	require.Equal(t, "/", info.Overlays[0].Path)
+	require.Equal(t, "overlay", info.Overlays[0].Mode)
+	require.True(t, info.Overlays[0].Persist == nil, "Overlays[0].Persist should be nil")
+	require.Equal(t, "/workspace", info.Overlays[1].Path)
+	require.NotNil(t, info.Overlays[1].Persist)
+	require.True(t, !*info.Overlays[1].Persist, "Overlays[1].Persist should be false")
 
 	require.Len(t, info.ExtraWritable, 2)
 	require.Equal(t, "/tmp", info.ExtraWritable[0])
@@ -444,9 +496,6 @@ func TestIsolationAttach_ToleratesMissingCreationParams(t *testing.T) {
 	}
 }
 
-// TestIsolationAttach_NotFound verifies that a 404 from the server surfaces
-// as an *APIError with StatusCode 404, matching the error type used by
-// IsolatedGet for a missing session.
 // TestIsolationAttach_PreservesIdleTimeoutZero verifies that a session
 // created with idle_timeout_seconds=0 (idle GC disabled — the long-window
 // stateless-recovery configuration) round-trips through attach as a
@@ -484,6 +533,9 @@ func TestIsolationAttach_PreservesIdleTimeoutZero(t *testing.T) {
 	require.Equal(t, 0, *info.IdleTimeoutSeconds)
 }
 
+// TestIsolationAttach_NotFound verifies that a 404 from the server surfaces
+// as an *APIError with StatusCode 404, matching the error type used by
+// IsolationGet for a missing session.
 func TestIsolationAttach_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/isolated/session/missing" {
@@ -545,7 +597,7 @@ func TestIsolationWithSession_DeletesOnCallbackError(t *testing.T) {
 	sb := &Sandbox{id: "sbx-test", execd: execd}
 
 	req := CreateIsolatedSessionRequest{
-		Workspace: IsolatedWorkspaceSpec{Path: "/workspace"},
+		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace"},
 	}
 
 	err := sb.IsolationWithSession(context.Background(), req, func(s *IsolationSession) error {
@@ -557,5 +609,41 @@ func TestIsolationWithSession_DeletesOnCallbackError(t *testing.T) {
 
 	if atomic.LoadInt32(&deleteCalled) != 1 {
 		assert.Fail(t, "delete should still be called on callback error")
+	}
+}
+
+// Regression: the session-scoped files client used to drop the parent
+// sandbox's ConnectionConfig (retry, request timeout, custom transport), so
+// session file operations ran with untuned defaults.
+func TestNewIsolationSession_ForwardsConnectionConfig(t *testing.T) {
+	cfg := ConnectionConfig{
+		Domain:         "127.0.0.1:8080",
+		Protocol:       "http",
+		RequestTimeout: 42 * time.Second,
+		Retry:          &RetryConfig{MaxRetries: 2},
+	}
+	sandbox := &Sandbox{
+		id:     "sbx-iso",
+		config: &cfg,
+		execd: NewExecdClient("http://127.0.0.1:8080", "",
+			WithHeaders(map[string]string{"X-EXECD-ACCESS-TOKEN": "tok"}),
+			WithRetry(RetryConfig{MaxRetries: 2}),
+			WithTimeout(42*time.Second),
+		),
+	}
+
+	session := sandbox.newIsolationSession(&IsolatedSessionInfo{SessionID: "sess-1"})
+
+	if session.files.client.baseURL != "http://127.0.0.1:8080/v1/isolated/session/sess-1" {
+		assert.Fail(t, fmt.Sprintf("unexpected files baseURL: %s", session.files.client.baseURL))
+	}
+	if session.files.client.retry == nil || session.files.client.retry.MaxRetries != 2 {
+		assert.Fail(t, "files client lost the retry config")
+	}
+	if session.files.client.timeout == nil || *session.files.client.timeout != 42*time.Second {
+		assert.Fail(t, "files client lost the request timeout")
+	}
+	if session.files.client.headers["X-EXECD-ACCESS-TOKEN"] != "tok" {
+		assert.Fail(t, "files client lost the endpoint auth headers")
 	}
 }

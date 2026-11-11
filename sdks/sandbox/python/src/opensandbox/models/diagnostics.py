@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,17 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class DiagnosticContext(BaseModel):
+    """Runtime backend and identifiers used to route sandbox diagnostics."""
+
+    sandbox_id: str = Field(alias="sandboxId")
+    state: str | None = None
+    backend_type: str = Field(alias="backendType")
+    backend_identifiers: dict[str, str] = Field(alias="backendIdentifiers")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class DiagnosticContent(BaseModel):

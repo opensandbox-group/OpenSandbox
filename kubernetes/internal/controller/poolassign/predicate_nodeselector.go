@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,11 +28,11 @@ import (
 
 type nodeSelectorPredicate struct{}
 
-func newNodeSelectorPredicate(_ map[string]interface{}) (predicate, error) {
+func newNodeSelectorPredicate(_ map[string]interface{}) (Predicate, error) {
 	return &nodeSelectorPredicate{}, nil
 }
 
-func (p *nodeSelectorPredicate) predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+func (p *nodeSelectorPredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
 	if sbx.Spec.Template == nil {
 		return true
 	}

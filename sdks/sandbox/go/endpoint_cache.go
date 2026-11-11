@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -45,6 +45,17 @@ type endpointCacheEntry struct {
 	expiresAt time.Time
 }
 
+// endpointFlight identifies one inflight cache-miss fetch and tracks the
+// callers waiting on it. The fetch runs with ctx, which is cancelled once the
+// last waiter leaves so an abandoned request does not outlive every caller.
+// The record is retained only while that fetch is current, so invalidations do
+// not accumulate sandbox IDs.
+type endpointFlight struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
+	waiters int
+}
+
 func cloneEndpoint(ep *Endpoint) *Endpoint {
 	headers := make(map[string]string, len(ep.Headers))
 	for k, v := range ep.Headers {
@@ -61,7 +72,8 @@ type EndpointCache struct {
 	maxSize int
 	ttl     time.Duration
 
-	group singleflight.Group
+	group   singleflight.Group
+	flights map[endpointCacheKey]*endpointFlight
 }
 
 // NewEndpointCache creates a cache with the given max size and TTL.
@@ -77,6 +89,7 @@ func NewEndpointCache(maxSize int, ttl time.Duration) *EndpointCache {
 	return &EndpointCache{
 		entries: make(map[endpointCacheKey]*list.Element),
 		order:   list.New(),
+		flights: make(map[endpointCacheKey]*endpointFlight),
 		maxSize: maxSize,
 		ttl:     ttl,
 	}
@@ -104,7 +117,10 @@ func (c *EndpointCache) Get(key endpointCacheKey) (*Endpoint, bool) {
 func (c *EndpointCache) Put(key endpointCacheKey, ep *Endpoint) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.putLocked(key, ep)
+}
 
+func (c *EndpointCache) putLocked(key endpointCacheKey, ep *Endpoint) {
 	if elem, ok := c.entries[key]; ok {
 		c.order.MoveToFront(elem)
 		entry := elem.Value.(*endpointCacheEntry)
@@ -138,6 +154,11 @@ func (c *EndpointCache) Invalidate(sandboxID string) {
 	for key, elem := range c.entries {
 		if key.sandboxID == sandboxID {
 			c.removeLocked(elem)
+		}
+	}
+	for key := range c.flights {
+		if key.sandboxID == sandboxID {
+			delete(c.flights, key)
 			c.group.Forget(key.String())
 		}
 	}
@@ -160,22 +181,52 @@ func (c *EndpointCache) removeLocked(elem *list.Element) {
 // and calls fetch on miss. The caller's context is respected: if ctx is
 // cancelled while waiting for a shared inflight request, the caller returns
 // immediately with the context error (the shared fetch continues for other waiters).
-func (c *EndpointCache) GetOrFetch(ctx context.Context, key endpointCacheKey, fetch func() (*Endpoint, error)) (*Endpoint, error) {
+// fetch receives a context shared by all waiters of the inflight request; it is
+// cancelled when the last waiter leaves, so later callers start a fresh fetch.
+func (c *EndpointCache) GetOrFetch(ctx context.Context, key endpointCacheKey, fetch func(context.Context) (*Endpoint, error)) (*Endpoint, error) {
 	if ep, ok := c.Get(key); ok {
 		return ep, nil
 	}
 
+	// Joining the flight and starting or joining the singleflight call happen
+	// under c.mu, the same lock used by Invalidate, so every call for key is
+	// owned by the flight currently registered for key and a new caller cannot
+	// join a forgotten generation. DoChan runs fn in its own goroutine.
+	c.mu.Lock()
+	flight, ok := c.flights[key]
+	if !ok {
+		flightCtx, cancel := context.WithCancel(context.Background())
+		flight = &endpointFlight{ctx: flightCtx, cancel: cancel}
+		c.flights[key] = flight
+	}
+	flight.waiters++
 	ch := c.group.DoChan(key.String(), func() (interface{}, error) {
+		defer func() {
+			c.mu.Lock()
+			// Forget before dropping the flight: singleflight removes its own
+			// entry only after this function returns.
+			if c.flights[key] == flight {
+				c.group.Forget(key.String())
+				delete(c.flights, key)
+			}
+			c.mu.Unlock()
+		}()
 		if ep, ok := c.Get(key); ok {
 			return ep, nil
 		}
-		ep, err := fetch()
+		ep, err := fetch(flight.ctx)
 		if err != nil {
 			return nil, err
 		}
-		c.Put(key, ep)
+		c.mu.Lock()
+		if c.flights[key] == flight {
+			c.putLocked(key, ep)
+		}
+		c.mu.Unlock()
 		return ep, nil
 	})
+	c.mu.Unlock()
+	defer c.leaveFlight(key, flight)
 
 	select {
 	case <-ctx.Done():
@@ -185,5 +236,23 @@ func (c *EndpointCache) GetOrFetch(ctx context.Context, key endpointCacheKey, fe
 			return nil, result.Err
 		}
 		return cloneEndpoint(result.Val.(*Endpoint)), nil
+	}
+}
+
+// leaveFlight drops one waiter from flight. When no waiters remain, the shared
+// fetch is cancelled and forgotten so the next lookup starts a new one instead
+// of joining an abandoned request.
+func (c *EndpointCache) leaveFlight(key endpointCacheKey, flight *endpointFlight) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	flight.waiters--
+	if flight.waiters > 0 {
+		return
+	}
+	flight.cancel()
+	if c.flights[key] == flight {
+		delete(c.flights, key)
+		c.group.Forget(key.String())
 	}
 }

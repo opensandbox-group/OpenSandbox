@@ -14,16 +14,47 @@ janitor DaemonSet (containerd runtimes) is omitted for the same reason;
 the firecracker-runtime pod's janitor sidecar uses the runtime
 ServiceAccount above.
 */}}
+{{- if .Values.fastSandbox.namespaces.createSystem }}
+---
+# The shared system namespace hosts the fast-sandbox control-plane
+# ServiceAccounts installed below and doubles as the release namespace of
+# the controller/server charts. Creating it here lets the documented
+# per-component install order work without a preceding
+# `kubectl create namespace` or --create-namespace (rendered-manifest
+# flows driven by kubectl apply have no namespace bootstrap at all).
+# Set fastSandbox.namespaces.createSystem=false when the namespace already
+# exists and is managed externally; a pre-existing namespace without Helm
+# ownership metadata cannot be adopted into this release.
+#
+# The namespace carries helm.sh/resource-policy: keep: uninstalling the base
+# release must not destroy the shared system namespace together with the
+# controller/server workloads running in it. Delete it manually once nothing
+# needs it anymore.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.fastSandbox.namespaces.system }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+{{- end }}
 {{- if .Values.fastSandbox.namespaces.create }}
 ---
-# Only the dataplane namespace is chart-created. The system namespace
-# (opensandbox-system) is owned by the install flow (--create-namespace or
-# the controller/server releases); a pre-existing namespace without Helm
-# ownership metadata cannot be adopted into this release.
+# Only the dataplane namespace is chart-created alongside the system
+# namespace above.
+#
+# The namespace carries helm.sh/resource-policy: keep: uninstalling the base
+# release must not destroy the dataplane namespace together with every
+# fast-sandbox object and fastlet Pod in it (same policy as the CRDs).
+# Delete it manually when its data is no longer needed.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.fastSandbox.namespaces.resources }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "opensandbox-base.labels" . | nindent 4 }}
     app.kubernetes.io/component: fast-sandbox

@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,6 +46,12 @@ def load(name):
 
 
 receiver = load("revision_receiver")
+load("host_selectors")
+load("decision_snapshot")
+load("static_passthrough")
+load("tls_decision")
+load("tls_registry")
+publication = load("revision_publication")
 ipc = load("revision_ipc")
 
 
@@ -280,6 +286,60 @@ class RevisionIPCTest(unittest.TestCase):
         with self.assertRaises(receiver.RevisionError):
             self.receiver.readback()
         self.server.close()
+
+
+class InstallationIPCTest(unittest.TestCase):
+    def test_exact_backend_types_reject_subclasses_and_duck_typing_before_socket_creation(self):
+        class Subclass(publication.InstallationReceiver):
+            pass
+        class ReceiverSubclass(receiver.Receiver):
+            pass
+        invalid = (
+            Subclass("control-a", "subject-a", max_snapshot_bytes=65536),
+            ReceiverSubclass("control-a", "subject-a", lambda value: None, max_snapshot_bytes=65536),
+            publication.RevisionPublisher("control-a", "subject-a", max_snapshot_bytes=65536, capacity=1),
+            object(),
+        )
+        with tempfile.TemporaryDirectory(prefix="osri-", dir="/tmp") as directory:
+            for backend in invalid:
+                with (
+                    self.subTest(backend=type(backend).__name__),
+                    self.assertRaisesRegex(ipc.ServerError, "^invalid revision IPC configuration$"),
+                ):
+                    ipc.Server(backend, os.path.join(directory, "receiver.sock"), TOKEN,
+                               max_snapshot_bytes=65536, request_timeout=1)
+
+    def test_joint_backend_over_real_unix_socket(self):
+        from test_tls_registry import TLSRegistryTest
+        fixture = TLSRegistryTest()
+        backend = publication.InstallationReceiver("control-a", "subject-a", max_snapshot_bytes=65536)
+        with tempfile.TemporaryDirectory(prefix="osri-", dir="/tmp") as directory:
+            path = os.path.join(directory, "receiver.sock")
+            server = ipc.Server(backend, path, TOKEN, max_snapshot_bytes=65536, request_timeout=1)
+            try:
+                server.start()
+                for snapshot in (fixture.snapshot(host=None), fixture.snapshot(epoch=2, secret="private-old"),
+                                 fixture.snapshot(epoch=3, secret="private-new"), fixture.snapshot(epoch=4, host=None)):
+                    wire = ipc._to_wire(snapshot.revision)
+                    for operation in ("prepare", "commit"):
+                        value = {"revision": wire}
+                        if operation == "prepare":
+                            value["payload"] = base64.b64encode(snapshot.payload).decode()
+                        connection = UnixConnection(path)
+                        try:
+                            connection.request("POST", "/v1/revisions/" + operation, json.dumps(value),
+                                               {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json"})
+                            response = connection.getresponse()
+                            self.assertEqual((response.status, json.loads(response.read())), (200, {"revision": wire}))
+                        finally:
+                            connection.close()
+                    self.assertEqual(backend.acquire(), snapshot)
+                    self.assertEqual(backend._publisher.registry._view.revision, snapshot.revision)
+            finally:
+                server.close()
+            self.assertFalse(os.path.exists(path))
+            self.assertTrue(backend._publisher.registry._closed)
+            self.assertTrue(backend._publisher._receiver._closed)
 
 
 if __name__ == "__main__":

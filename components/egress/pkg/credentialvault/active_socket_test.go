@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,7 +107,10 @@ func TestStartActiveSocketServerRequestAwareDispatch(t *testing.T) {
 			return
 		}
 		http.Error(w, "no subject for clientIp", http.StatusNotFound)
-	}, socketPath, -1)
+	}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"headers":[]}`))
+	}), socketPath, -1)
 	require.NoError(t, err)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -124,4 +128,63 @@ func TestStartActiveSocketServerRequestAwareDispatch(t *testing.T) {
 	resp, _ = httpGetUnix(t, socketPath, "/credential-vault/_active")
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.NotEmpty(t, resp.Status)
+}
+
+func TestStartActiveSocketServerResolveRoute(t *testing.T) {
+	socketPath := shortSocketPath(t)
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	_, cleanup, err := StartActiveSocketServerRequestAware(
+		func(http.ResponseWriter, *http.Request) {},
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"revision":1}`))
+		}), socketPath, -1)
+	require.NoError(t, err)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cleanup(shutdownCtx))
+	}()
+
+	resp, body := httpPostUnix(t, socketPath, "/credential-vault/_resolve", "application/json", `{}`)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, `{"revision":1}`, body)
+
+	// Non-POST on the same path is 405 with an Allow header.
+	resp, _ = httpGetUnix(t, socketPath, "/credential-vault/_resolve")
+	require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+	require.Equal(t, "POST", resp.Header.Get("Allow"))
+}
+
+func TestStartActiveSocketServerResolveHandlerNilForbidden(t *testing.T) {
+	socketPath := shortSocketPath(t)
+	t.Cleanup(func() { _ = os.Remove(socketPath) })
+	_, cleanup, err := StartActiveSocketServerRequestAware(
+		func(http.ResponseWriter, *http.Request) {}, nil, socketPath, -1)
+	require.NoError(t, err)
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cleanup(shutdownCtx))
+	}()
+
+	resp, _ := httpPostUnix(t, socketPath, "/credential-vault/_resolve", "application/json", `{}`)
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+// httpPostUnix performs a POST over a unix socket (the addon's transport).
+func httpPostUnix(t *testing.T, socketPath, target, contentType, body string) (*http.Response, string) {
+	t.Helper()
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", socketPath)
+		},
+	}
+	client := &http.Client{Transport: tr, Timeout: 2 * time.Second}
+	resp, err := client.Post("http://credential-proxy"+target, contentType, strings.NewReader(body))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp, string(raw)
 }

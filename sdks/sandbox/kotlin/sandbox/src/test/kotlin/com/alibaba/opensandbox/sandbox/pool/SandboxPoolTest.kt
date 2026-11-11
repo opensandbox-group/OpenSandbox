@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@ import com.alibaba.opensandbox.sandbox.domain.pool.PoolConfig
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolCreationSpec
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolLifecycleState
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolSnapshot
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolStateStore
 import com.alibaba.opensandbox.sandbox.domain.pool.PooledSandboxCreator
@@ -102,14 +103,24 @@ class SandboxPoolTest {
         val pool = buildPool()
         pool.start()
         val inFlight = currentRunInFlight(pool)
-        inFlight.set(3)
-        val snap =
-            try {
-                pool.snapshot()
-            } finally {
-                inFlight.set(0)
-                pool.shutdown(graceful = false)
+        // A background operation that started before our write can end in
+        // between and persistently decrement the counter; retry until the
+        // snapshot observes the value we set.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        var snap: PoolSnapshot
+        try {
+            while (true) {
+                inFlight.set(3)
+                val candidate = pool.snapshot()
+                if (candidate.inFlightOperations == 3 || System.nanoTime() > deadline) {
+                    snap = candidate
+                    break
+                }
             }
+        } finally {
+            inFlight.set(0)
+            pool.shutdown(graceful = false)
+        }
 
         assertEquals(3, snap.inFlightOperations)
     }

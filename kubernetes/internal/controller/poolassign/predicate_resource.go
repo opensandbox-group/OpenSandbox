@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,11 +27,11 @@ import (
 
 type resourcePredicate struct{}
 
-func newResourcePredicate(_ map[string]interface{}) (predicate, error) {
+func newResourcePredicate(_ map[string]interface{}) (Predicate, error) {
 	return &resourcePredicate{}, nil
 }
 
-func (p *resourcePredicate) predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+func (p *resourcePredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
 	if sbx.Spec.Template == nil {
 		return true
 	}

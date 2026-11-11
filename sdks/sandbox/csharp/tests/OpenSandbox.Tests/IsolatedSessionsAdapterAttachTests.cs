@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,10 +14,12 @@
 
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using OpenSandbox.Adapters;
 using OpenSandbox.Core;
+using OpenSandbox.Models;
 using Xunit;
 
 namespace OpenSandbox.Tests;
@@ -40,6 +42,11 @@ public class IsolatedSessionsAdapterAttachTests
                   "idle_remaining_seconds": 30,
                   "profile": "strict",
                   "workspace": { "path": "/workspace", "mode": "rw" },
+                  "overlays": [
+                    { "path": "/", "mode": "overlay" },
+                    { "path": "/workspace", "mode": "overlay", "persist": true },
+                    { "path": "/ephemeral", "mode": "overlay", "persist": false }
+                  ],
                   "extra_writable": ["/tmp", "/var/tmp"],
                   "binds": [{ "source": "/host/a", "dest": "/sbx/a", "readonly": true }],
                   "share_net": false,
@@ -73,6 +80,15 @@ public class IsolatedSessionsAdapterAttachTests
         info.Workspace.Should().NotBeNull();
         info.Workspace!.Path.Should().Be("/workspace");
         info.Workspace.Mode.Should().Be("rw");
+        info.Overlays.Should().NotBeNull();
+        info.Overlays!.Should().HaveCount(3);
+        info.Overlays![0].Path.Should().Be("/");
+        info.Overlays![0].Mode.Should().Be("overlay");
+        info.Overlays![0].Persist.Should().BeNull();
+        info.Overlays![1].Path.Should().Be("/workspace");
+        info.Overlays![1].Persist.Should().Be(true);
+        info.Overlays![2].Path.Should().Be("/ephemeral");
+        info.Overlays![2].Persist.Should().Be(false);
         info.ExtraWritable.Should().Equal("/tmp", "/var/tmp");
         info.Binds.Should().NotBeNull();
         info.Binds!.Should().ContainSingle();
@@ -87,6 +103,98 @@ public class IsolatedSessionsAdapterAttachTests
         info.Gid.Should().Be(2000);
         info.UidMode.Should().Be("userns");
         info.IdleTimeoutSeconds.Should().Be(300);
+    }
+
+    [Fact]
+    public async Task CreateAsync_SerializesOverlaysWithWorkspaceSugar()
+    {
+        var handler = new RouteHandler(request =>
+        {
+            if (request.Method == HttpMethod.Post &&
+                request.RequestUri!.PathAndQuery == "/v1/isolated/session")
+            {
+                return new RouteResponse(HttpStatusCode.Created, """
+                {
+                  "session_id": "sess-overlays",
+                  "created_at": "2026-01-02T03:04:05Z"
+                }
+                """);
+            }
+            return new RouteResponse(HttpStatusCode.InternalServerError, "wrong endpoint");
+        });
+        var adapter = CreateAdapter(handler);
+
+        var session = await adapter.CreateAsync(new CreateIsolatedSessionRequest(
+            Workspace: new IsolatedWorkspaceSpec(Path: "/workspace", Mode: "overlay"),
+            Overlays: new List<IsolatedOverlaySpec>
+            {
+                new(Path: "/"),
+                new(Path: "/data", Mode: "rw"),
+                new(Path: "/ephemeral", Mode: "overlay", Persist: false),
+            }));
+
+        session.SessionId.Should().Be("sess-overlays");
+        var body = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(handler.Requests[0].Body!);
+        body!["workspace"].GetProperty("path").GetString().Should().Be("/workspace");
+        body["workspace"].GetProperty("mode").GetString().Should().Be("overlay");
+        var overlays = body["overlays"];
+        overlays.GetArrayLength().Should().Be(3);
+        overlays[0].GetProperty("path").GetString().Should().Be("/");
+        overlays[0].TryGetProperty("persist", out _).Should().BeFalse();
+        overlays[1].GetProperty("mode").GetString().Should().Be("rw");
+        overlays[2].GetProperty("persist").GetBoolean().Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task CreateAsync_SerializesOverlaysOnly_WithoutWorkspace()
+    {
+        var handler = new RouteHandler(request =>
+        {
+            if (request.Method == HttpMethod.Post &&
+                request.RequestUri!.PathAndQuery == "/v1/isolated/session")
+            {
+                return new RouteResponse(HttpStatusCode.Created, """
+                { "session_id": "sess-overlays-only" }
+                """);
+            }
+            return new RouteResponse(HttpStatusCode.InternalServerError, "wrong endpoint");
+        });
+        var adapter = CreateAdapter(handler);
+
+        await adapter.CreateAsync(new CreateIsolatedSessionRequest(
+            Overlays: new List<IsolatedOverlaySpec>
+            {
+                new(Path: "/workspace", Mode: "rw"),
+            }));
+
+        var body = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(handler.Requests[0].Body!);
+        body!.Should().NotContainKey("workspace");
+        body!["overlays"].GetArrayLength().Should().Be(1);
+        body["overlays"][0].GetProperty("path").GetString().Should().Be("/workspace");
+    }
+
+    [Fact]
+    public async Task CreateAsync_WorkspaceOnlyOmitsOverlays()
+    {
+        var handler = new RouteHandler(request =>
+        {
+            if (request.Method == HttpMethod.Post &&
+                request.RequestUri!.PathAndQuery == "/v1/isolated/session")
+            {
+                return new RouteResponse(HttpStatusCode.Created, """
+                { "session_id": "sess-ws-only" }
+                """);
+            }
+            return new RouteResponse(HttpStatusCode.InternalServerError, "wrong endpoint");
+        });
+        var adapter = CreateAdapter(handler);
+
+        await adapter.CreateAsync(new CreateIsolatedSessionRequest(
+            Workspace: new IsolatedWorkspaceSpec(Path: "/workspace", Mode: "rw")));
+
+        var body = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(handler.Requests[0].Body!);
+        body!.Should().NotContainKey("overlays");
+        body!["workspace"].GetProperty("path").GetString().Should().Be("/workspace");
     }
 
     [Fact]
@@ -138,6 +246,7 @@ public class IsolatedSessionsAdapterAttachTests
         info.CreatedAt.Should().Be(DateTimeOffset.Parse("2026-01-02T03:04:05Z"));
         info.Profile.Should().BeNull();
         info.Workspace.Should().BeNull();
+        info.Overlays.Should().BeNull();
         info.ExtraWritable.Should().BeNull();
         info.Binds.Should().BeNull();
         info.ShareNet.Should().BeNull();

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -29,6 +29,96 @@ namespace OpenSandbox.Tests;
 
 public class CommandsAdapterTests
 {
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task RunStreamAsync_ShouldPreserveOptionalSuccessExitCode(bool explicitExitCode, bool background)
+    {
+        var eventJson = explicitExitCode
+            ? "{\"type\":\"execution_complete\",\"exit_code\":0}"
+            : "{\"type\":\"execution_complete\"}";
+        var handler = new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"data: {eventJson}\n\n", Encoding.UTF8, "text/event-stream")
+            }));
+        IExecdCommands commands = CreateAdapter(handler);
+        var events = new List<ServerStreamEvent>();
+
+        await foreach (var streamEvent in commands.RunStreamAsync("exit 0", new RunCommandOptions { Background = background }))
+        {
+            events.Add(streamEvent);
+        }
+
+        var complete = events.Should().ContainSingle().Which;
+        complete.Type.Should().Be(ServerStreamEventTypes.ExecutionComplete);
+        complete.ExitCode.Should().Be(explicitExitCode ? 0 : (int?)null);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BackgroundCommand_StopsAtCompleteAndDisposesStream(bool argv)
+    {
+        using var stream = new CommandEventStream("data: {\"type\":\"execution_complete\"}\n\n", failAtEnd: true);
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) })));
+        var options = new RunCommandOptions { Background = true };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var execution = argv
+            ? await adapter.RunAsync(new[] { "sleep", "30" }, options, cancellationToken: timeout.Token)
+            : await adapter.RunAsync("sleep 30", options, cancellationToken: timeout.Token);
+        execution.Complete.Should().NotBeNull();
+        execution.ExitCode.Should().BeNull();
+        stream.Disposed.Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task ForegroundCommand_DrainsAndDisposesStream(bool failure, bool lateOutput)
+    {
+        var terminal = failure
+            ? "data: {\"type\":\"error\",\"error\":{\"ename\":\"CommandExecError\",\"evalue\":\"7\"}}\n\n"
+            : "data: {\"type\":\"execution_complete\"}\n\n";
+        var output = "data: {\"type\":\"stdout\",\"text\":\"tail\"}\n\ndata: {\"type\":\"stderr\",\"text\":\"error-tail\"}\n\n";
+        using var stream = new CommandEventStream(lateOutput ? terminal + output : output + terminal);
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) })));
+        var execution = await adapter.RunAsync("echo test");
+        execution.Logs.Stdout.Should().ContainSingle().Which.Text.Should().Be("tail");
+        execution.Logs.Stderr.Should().ContainSingle().Which.Text.Should().Be("error-tail");
+        execution.ExitCode.Should().Be(failure ? 7 : 0);
+        stream.Exhausted.Should().BeTrue();
+        stream.Disposed.Should().BeTrue();
+    }
+
+    private sealed class CommandEventStream(string text, bool failAtEnd = false)
+        : MemoryStream(Encoding.UTF8.GetBytes(text))
+    {
+        public bool Disposed { get; private set; }
+        public bool Exhausted { get; private set; }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (Position == Length)
+            {
+                if (failAtEnd) throw new IOException("Stream interrupted after terminal event");
+                Exhausted = true;
+            }
+            return base.ReadAsync(buffer[..Math.Min(buffer.Length, 7)], cancellationToken);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Disposed = true;
+            base.Dispose(disposing);
+        }
+    }
+
     [Fact]
     public async Task NativeArgv_ShouldRejectInvalidInputsBeforeSending()
     {
@@ -46,6 +136,183 @@ public class CommandsAdapterTests
             Assert.Throws<InvalidArgumentException>(() => commands.RunStreamAsync(argv));
         }
         requests.Should().Be(0);
+    }
+
+    private static string? s_capturedSetEnvBody;
+
+    private static StubHttpMessageHandler SetEnvCaptureHandler()
+    {
+        s_capturedSetEnvBody = null;
+        return new StubHttpMessageHandler(async (request, _) =>
+        {
+            s_capturedSetEnvBody = await request.Content!.ReadAsStringAsync();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new CommandEventStream(
+                    "data: {\"type\":\"execution_complete\",\"execution_time\":1,\"timestamp\":1}\n\n"))
+            };
+        });
+    }
+
+    private static string CapturedSetEnvCommand => JsonDocument.Parse(s_capturedSetEnvBody!).RootElement
+        .GetProperty("command").GetString()!;
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldAppendEnvEntryViaSandboxEnvFile()
+    {
+        var adapter = CreateAdapter(SetEnvCaptureHandler());
+
+        await adapter.SetEnvAsync("MY_TOKEN", "value");
+
+        // Hand-written golden literal (not derived from the implementation).
+        CapturedSetEnvCommand.Should().Be(
+            "if [ -z \"${EXECD_ENVS:-}\" ]; then printf '%s\\n' " +
+            "'EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN' >&2; exit 1; fi\n" +
+            "mkdir -p \"$(dirname \"$EXECD_ENVS\")\"\n" +
+            "printf '%s\\n' 'MY_TOKEN='\\''value'\\''' >> \"$EXECD_ENVS\"");
+    }
+
+    public static TheoryData<string, string, string> SetEnvRoundTripCases => new()
+    {
+        { "MY_TOKEN", "value", "MY_TOKEN='value'" },
+        { "MY_VAR", "line1\nline2 $HOME \\path", "MY_VAR='line1\nline2 $HOME \\path'" },
+        { "KV", "a=b=c", "KV='a=b=c'" },
+        { "EMPTY", "", "EMPTY=''" },
+        { "GREETING", "it's fine \"quoted\"\ttab", "GREETING=\"it's fine \\\"quoted\\\"\\ttab\"" },
+        { "PATHY", "it's\nC:\\path", "PATHY=\"it's\\nC:\\\\path\"" },
+    };
+
+    [Theory]
+    [MemberData(nameof(SetEnvRoundTripCases))]
+    public async Task SetEnvAsync_ShouldAppendWellFormedLinesRoundTrippedThroughSh(
+        string key, string value, string expectedLine)
+    {
+        var adapter = CreateAdapter(SetEnvCaptureHandler());
+
+        await adapter.SetEnvAsync(key, value);
+
+        if (!File.Exists("/bin/sh"))
+        {
+            return; // POSIX round-trip test
+        }
+        var envFile = Path.Combine(Path.GetTempPath(), $"opensandbox-setenv-{Guid.NewGuid():N}.env");
+        try
+        {
+            var startInfo = new System.Diagnostics.ProcessStartInfo("/bin/sh")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add(CapturedSetEnvCommand);
+            startInfo.EnvironmentVariables["EXECD_ENVS"] = envFile;
+            var process = System.Diagnostics.Process.Start(startInfo)!;
+            process.WaitForExit(10_000).Should().BeTrue();
+            process.ExitCode.Should().Be(0, string.Concat(process.StandardError.ReadToEnd(), process.StandardOutput.ReadToEnd()));
+            File.ReadAllText(envFile).Should().Be(expectedLine + "\n");
+        }
+        finally
+        {
+            File.Delete(envFile);
+        }
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("1ABC")]
+    [InlineData("MY-TOKEN")]
+    [InlineData("MY TOKEN")]
+    [InlineData("A=B")]
+    [InlineData("A.B")]
+    [InlineData("A\n")]
+    public async Task SetEnvAsync_ShouldRejectInvalidKeysBeforeSending(string key)
+    {
+        var requests = 0;
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            requests++;
+            throw new InvalidOperationException("Unexpected request");
+        });
+        IExecdCommands commands = CreateAdapter(handler);
+
+        await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.SetEnvAsync(key, "value"));
+        requests.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldRejectNullKeyAndValue()
+    {
+        IExecdCommands commands = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            throw new InvalidOperationException("Unexpected request")));
+
+        (await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.SetEnvAsync(null!, "value")))
+            .Message.Should().Contain("key cannot be null");
+        (await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.SetEnvAsync("MY_TOKEN", null!)))
+            .Message.Should().Contain("value cannot be null");
+    }
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldRejectNulBytesInValue()
+    {
+        var requests = 0;
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            requests++;
+            throw new InvalidOperationException("Unexpected request");
+        });
+        IExecdCommands commands = CreateAdapter(handler);
+
+        await Assert.ThrowsAsync<InvalidArgumentException>(() => commands.SetEnvAsync("MY_TOKEN", "a\0b"));
+        requests.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldThrowWithStderrWhenAppendFails()
+    {
+        var sse =
+            "data: {\"type\":\"init\",\"text\":\"cmd-1\"}\n\n" +
+            "data: {\"type\":\"stderr\",\"text\":\"EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN\"}\n\n" +
+            "data: {\"type\":\"error\",\"error\":{\"ename\":\"CommandExecError\",\"evalue\":\"1\"}}\n\n";
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new CommandEventStream(sse))
+            })));
+
+        var ex = await Assert.ThrowsAsync<SandboxException>(() => adapter.SetEnvAsync("MY_TOKEN", "value"));
+        ex.Message.Should().Contain("commands.SetEnvAsync failed for 'MY_TOKEN'");
+        ex.Message.Should().Contain("EXECD_ENVS is not set");
+    }
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldFallBackToErrorValueWhenStderrIsEmpty()
+    {
+        var sse = "data: {\"type\":\"error\",\"error\":{\"ename\":\"CommandExecError\",\"evalue\":\"7\"}}\n\n";
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new CommandEventStream(sse))
+            })));
+
+        var ex = await Assert.ThrowsAsync<SandboxException>(() => adapter.SetEnvAsync("MY_TOKEN", "value"));
+        ex.Message.Should().Contain("commands.SetEnvAsync failed for 'MY_TOKEN': 7");
+    }
+
+    [Fact]
+    public async Task SetEnvAsync_ShouldTreatDroppedStreamWithoutCompletionAsFailure()
+    {
+        // Stream ends after init only: no execution_complete and no error
+        // event, so the append was never confirmed and must not report success.
+        var sse = "data: {\"type\":\"init\",\"text\":\"cmd-1\"}\n\n";
+        var adapter = CreateAdapter(new StubHttpMessageHandler((_, _) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StreamContent(new CommandEventStream(sse))
+            })));
+
+        (await Assert.ThrowsAsync<SandboxException>(() => adapter.SetEnvAsync("MY_TOKEN", "value")))
+            .Message.Should().Contain("commands.SetEnvAsync failed for 'MY_TOKEN'");
     }
 
     [Theory]

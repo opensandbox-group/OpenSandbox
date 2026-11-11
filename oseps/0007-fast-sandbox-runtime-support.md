@@ -5,7 +5,7 @@ authors:
   - "@Pangjiping"
 creation-date: 2026-02-08
 last-updated: 2026-09-11
-status: provisional
+status: implemented
 ---
 # OSEP-0007: Fast Sandbox Runtime Integration
 

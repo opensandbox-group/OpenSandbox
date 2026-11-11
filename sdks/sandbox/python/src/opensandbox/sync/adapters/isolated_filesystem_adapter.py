@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from uuid import UUID
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
@@ -34,6 +35,10 @@ from opensandbox.adapters.converter.filesystem_model_converter import (
 from opensandbox.adapters.converter.response_handler import (
     extract_request_id,
     handle_api_error,
+)
+from opensandbox.adapters.download_response import (
+    create_read_bytes_response,
+    iter_response_bytes,
 )
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
@@ -43,6 +48,8 @@ from opensandbox.models.filesystem import (
     DirectoryListEntry,
     EntryInfo,
     MoveEntry,
+    ReadBytesResponse,
+    ReadBytesStream,
     SearchEntry,
     SetPermissionEntry,
     WriteEntry,
@@ -88,9 +95,14 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
 
-        self._client = Client(base_url=base_url, timeout=timeout)
+        self._client = Client(
+            base_url=base_url,
+            timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
+        )
         self._client.set_httpx_client(self._httpx_client)
 
     def _get_url(self, path_template: str) -> str:
@@ -120,6 +132,18 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> bytes:
+        return self.read_bytes_detailed(
+            path, range_header=range_header, offset=offset, limit=limit
+        ).body
+
+    def read_bytes_detailed(
+        self,
+        path: str,
+        *,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[bytes]:
         try:
             url = self._get_url(self.DOWNLOAD_PATH)
             params: dict[str, str] = {"path": path}
@@ -133,7 +157,11 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
 
             response = self._httpx_client.get(url, headers=headers, params=params)
             response.raise_for_status()
-            return response.content
+            return create_read_bytes_response(
+                response,
+                response.content,
+                line_based=offset is not None or limit is not None,
+            )
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
@@ -146,39 +174,57 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
         offset: int | None = None,
         limit: int | None = None,
     ) -> Iterator[bytes]:
-        url = self._get_url(self.DOWNLOAD_PATH)
-        params: dict[str, str] = {"path": path}
-        headers: dict[str, str] = {}
-        if range_header:
-            headers["Range"] = range_header
-        if offset is not None:
-            params["offset"] = str(offset)
-        if limit is not None:
-            params["limit"] = str(limit)
+        return self.read_bytes_stream_detailed(
+            path,
+            chunk_size=chunk_size,
+            range_header=range_header,
+            offset=offset,
+            limit=limit,
+        ).body
 
-        request = self._httpx_client.build_request(
-            "GET", url, headers=headers, params=params
-        )
-        response = self._httpx_client.send(request, stream=True)
+    def read_bytes_stream_detailed(
+        self,
+        path: str,
+        *,
+        chunk_size: int = 64 * 1024,
+        range_header: str | None = None,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> ReadBytesResponse[ReadBytesStream]:
+        try:
+            url = self._get_url(self.DOWNLOAD_PATH)
+            params: dict[str, str] = {"path": path}
+            headers: dict[str, str] = {}
+            if range_header:
+                headers["Range"] = range_header
+            if offset is not None:
+                params["offset"] = str(offset)
+            if limit is not None:
+                params["limit"] = str(limit)
 
-        if response.status_code >= 300:
-            try:
-                response.read()
-            finally:
-                response.close()
-            raise SandboxApiException(
-                f"Failed to stream file {path}: {response.status_code}",
-                status_code=response.status_code,
-                request_id=extract_request_id(response.headers),
+            request = self._httpx_client.build_request(
+                "GET", url, headers=headers, params=params
             )
+            response = self._httpx_client.send(request, stream=True)
 
-        def _iter() -> Iterator[bytes]:
-            try:
-                yield from response.iter_bytes(chunk_size=chunk_size)
-            finally:
-                response.close()
+            if response.status_code >= 300:
+                try:
+                    response.read()
+                finally:
+                    response.close()
+                raise SandboxApiException(
+                    f"Failed to stream file {path}: {response.status_code}",
+                    status_code=response.status_code,
+                    request_id=extract_request_id(response.headers),
+                )
 
-        return _iter()
+            return create_read_bytes_response(
+                response,
+                iter_response_bytes(response, chunk_size),
+                line_based=offset is not None or limit is not None,
+            )
+        except Exception as e:
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def write_files(self, entries: list[WriteEntry]) -> None:
         if not entries:
@@ -206,7 +252,7 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
                     content_type = "application/octet-stream"
                 elif isinstance(entry.data, str):
                     encoding = entry.encoding or "utf-8"
-                    content = entry.data
+                    content = entry.data.encode(encoding)
                     content_type = f"text/plain; charset={encoding}"
                 elif isinstance(entry.data, IOBase):
                     if isinstance(entry.data, TextIOBase):
@@ -223,7 +269,11 @@ class IsolatedFilesystemAdapterSync(FilesystemSync):
                 multipart_parts.append(("file", (entry.path, content, content_type)))
 
             url = self._get_url(self.UPLOAD_PATH)
-            response = self._httpx_client.post(url, files=multipart_parts)
+            response = self._httpx_client.post(
+                url,
+                files=multipart_parts,
+                follow_redirects=False,
+            )
             response.raise_for_status()
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e

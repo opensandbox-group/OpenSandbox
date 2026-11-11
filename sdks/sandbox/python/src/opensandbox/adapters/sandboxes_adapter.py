@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from urllib.parse import quote
 
 import httpx  # type: ignore[reportMissingImports]
 
+from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -45,6 +46,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
+    IdlePolicy,
     NetworkPolicy,
     PagedSandboxInfos,
     PagedSnapshotInfos,
@@ -134,6 +136,7 @@ class SandboxesAdapter(Sandboxes):
             prefix="",  # No prefix, just the token
             auth_header_name="OPEN-SANDBOX-API-KEY",  # Custom header name
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         # Inject httpx client (adapter-owned)
@@ -142,6 +145,10 @@ class SandboxesAdapter(Sandboxes):
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_async_redirect_client_options(
+                self.connection_config,
+                self.connection_config.get_base_url(),
+            ),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 
@@ -223,6 +230,7 @@ class SandboxesAdapter(Sandboxes):
         metadata: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
+        idle_policy: IdlePolicy | None = None,
     ) -> SandboxCreateResponse:
         """Create a sandbox from a Succeeded fsb template."""
         logger.info(f"Creating sandbox from template: {template_id}")
@@ -236,6 +244,7 @@ class SandboxesAdapter(Sandboxes):
                 metadata=metadata,
                 network_policy=network_policy,
                 extensions=extensions,
+                idle_policy=idle_policy,
             )
 
             client = await self._get_client()
@@ -740,7 +749,7 @@ class SandboxesAdapter(Sandboxes):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def kill_sandbox(self, sandbox_id: str) -> None:
-        """Permanently terminate a sandbox and clean up its resources."""
+        """Request termination; returns on accepted deletion. Cleanup may continue."""
         logger.info(f"Terminating sandbox: {sandbox_id}")
 
         try:
@@ -756,7 +765,7 @@ class SandboxesAdapter(Sandboxes):
 
             handle_api_error(response_obj, f"Kill sandbox {sandbox_id}")
 
-            logger.info(f"Successfully terminated sandbox: {sandbox_id}")
+            logger.info(f"Sandbox deletion accepted: {sandbox_id}")
 
         except Exception as e:
             logger.warning(f"Failed to terminate sandbox {sandbox_id}: {e}")

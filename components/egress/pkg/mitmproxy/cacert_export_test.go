@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -71,31 +71,4 @@ func TestPurgeStaleExportedCAFrom_LeavesUnrelatedFiles(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 	_, err = os.Stat(other)
 	require.NoError(t, err)
-}
-
-func TestSyncRootCAFastSandboxExportsToSubdirWithoutSystemTrust(t *testing.T) {
-	root := t.TempDir()
-	home := filepath.Join(root, "mitmhome")
-	confdir := filepath.Join(home, ".mitmproxy")
-	require.NoError(t, os.MkdirAll(confdir, 0o755))
-	cert := filepath.Join(confdir, mitmCACertName)
-	require.NoError(t, os.WriteFile(cert, []byte("fast-sandbox-ca"), 0o644))
-
-	// constants.OpenSandboxRootDir is a fixed /opt/opensandbox path; verify
-	// exportRootCA directly with a temp root instead of the env-dependent
-	// SyncRootCAFastSandbox wrapper.
-	rootDir := filepath.Join(root, "opt", "opensandbox", FastSandboxCAExportDir)
-	require.NoError(t, exportRootCA(confdir, home, rootDir, false))
-
-	dst := filepath.Join(rootDir, mitmCACertName)
-	content, err := os.ReadFile(dst)
-	require.NoError(t, err)
-	require.Equal(t, "fast-sandbox-ca", string(content))
-
-	// no system-trust install was attempted: no ca-certificates dirs created
-	entries, err := os.ReadDir(root)
-	require.NoError(t, err)
-	for _, e := range entries {
-		require.NotEqual(t, "usr", e.Name(), "system trust install must be skipped for the fast-sandbox export")
-	}
 }

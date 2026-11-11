@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -99,3 +99,28 @@ def test_template_id_still_routes_to_fsb() -> None:
 
     assert result == "created-by-fsb"
     assert fsb.requests and kubernetes.requests == []
+
+
+def test_list_sandboxes_passes_metadata_filter_to_kubernetes_backend() -> None:
+    from unittest.mock import Mock
+    from opensandbox_server.api.schema import (
+        ListSandboxesRequest,
+        PaginationRequest,
+        SandboxFilter,
+    )
+
+    kubernetes = Mock()
+    kubernetes.list_sandbox_objects.return_value = []
+    fsb = Mock()
+    fsb.list_sandbox_objects.return_value = []
+    composite = CompositeSandboxService(kubernetes=kubernetes, fsb=fsb)
+
+    request = ListSandboxesRequest(
+        filter=SandboxFilter(metadata={"team": "infra"}),
+        pagination=PaginationRequest(page=1, page_size=10),
+    )
+    composite.list_sandboxes(request)
+
+    kubernetes.list_sandbox_objects.assert_called_once_with(metadata={"team": "infra"})
+    fsb.list_sandbox_objects.assert_called_once_with()
+

@@ -29,8 +29,7 @@ dependencies {
 </dependency>
 ```
 
-The `code-interpreter` artifact remains a separate dependency. It is published
-with the Kotlin/JVM SDK release train and is version-aligned by `sandbox-bom`.
+The `code-interpreter` artifact remains a separate dependency. It is published with the Kotlin/JVM SDK release train and is version-aligned by `sandbox-bom`.
 
 ## Quick Start
 
@@ -108,10 +107,7 @@ For detailed information about supported languages and versions, please refer to
 
 ### Troubleshooting: `pip: command not found`
 
-If you are using the Kotlin/Java client and run shell commands such as
-`pip install pandas`, make sure the sandbox is created from the
-`opensandbox/code-interpreter` image (or a derivative) and uses the
-Code Interpreter entrypoint:
+If you are using the Kotlin/Java client and run shell commands such as `pip install pandas`, make sure the sandbox is created from the `opensandbox/code-interpreter` image (or a derivative) and uses the Code Interpreter entrypoint:
 
 ```java
 Sandbox sandbox = Sandbox.builder()
@@ -121,12 +117,7 @@ Sandbox sandbox = Sandbox.builder()
     .build();
 ```
 
-The plain Sandbox SDK can also talk to generic sandbox images, but those
-images are not guaranteed to include Python or `pip`. In that case,
-commands such as `pip install ...` will fail with `pip: command not found`.
-Use the package manager that matches the image you launched, or switch to the
-Code Interpreter image when you need Python package installation/runtime
-behavior.
+The plain Sandbox SDK can also talk to generic sandbox images, but those images are not guaranteed to include Python or `pip`. In that case, commands such as `pip install ...` will fail with `pip: command not found`. Use the package manager that matches the image you launched, or switch to the Code Interpreter image when you need Python package installation/runtime behavior.
 
 ### Language Version Selection
 
@@ -152,9 +143,7 @@ Sandbox sandbox = Sandbox.builder()
 
 ### 0. Run with `language` (default language context)
 
-If you don't need to manage explicit session IDs, you can run code by specifying only `language`.
-When `context.id` is omitted, **execd will create/reuse a default session for that language**, so
-state can persist across runs:
+If you don't need to manage explicit session IDs, you can run code by specifying only `language`. When `context.id` is omitted, **execd will create/reuse a default session for that language**, so state can persist across runs:
 
 ```java
 import com.alibaba.opensandbox.codeinterpreter.domain.models.execd.executions.SupportedLanguage;

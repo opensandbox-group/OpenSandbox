@@ -1,3 +1,17 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -67,7 +81,7 @@ test("Sandbox.create aborts the in-flight Lifecycle API request", async () => {
   assert.equal(calls[0].signal.aborted, true);
 });
 
-test("Sandbox.connect aborts the in-flight endpoint request", async () => {
+test("Sandbox.connect abort fails the caller without poisoning the shared fetch", async () => {
   const { calls, connectionConfig, started } = createPendingConnectionConfig();
   const controller = new AbortController();
 
@@ -83,7 +97,11 @@ test("Sandbox.connect aborts the in-flight endpoint request", async () => {
 
   await assert.rejects(connecting, assertAbortError);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].signal.aborted, true);
+  // The deduped fetch carries no caller signal (only the SDK's timeout
+  // signal): an abort fails only this waiter, not the shared request.
+  assert.notEqual(calls[0].signal, controller.signal);
+  assert.equal(calls[0].signal.aborted, false);
+  await connectionConfig.closeTransport();
 });
 
 test("Sandbox.create rejects a pre-aborted signal before issuing a request", async () => {

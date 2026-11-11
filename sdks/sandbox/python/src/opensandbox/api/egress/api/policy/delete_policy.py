@@ -64,6 +64,10 @@ def _parse_response(
         response_500 = response.text
         return response_500
 
+    if response.status_code == 503:
+        response_503 = response.text
+        return response_503
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -86,13 +90,18 @@ def sync_detailed(
     client: AuthenticatedClient | Client,
     body: list[str],
 ) -> Response[PolicyStatusResponse | str]:
-    """Delete egress rules
+    r"""Delete egress rules
 
      Remove specific egress rules from the currently enforced policy by target.
 
-    - Accepts a list of target strings (FQDNs or wildcard domains).
+    - Accepts a list of target strings (FQDNs, wildcard domains, IPs, or
+      CIDRs).
     - Matching rules are removed; targets not found in the current policy
       are silently ignored (idempotent).
+    - An explicit empty string (\"\") addresses port-only rules (rules with
+      `ports` and no `target`): listing it removes every port-only rule.
+      Port-only rules cannot be addressed individually by target since
+      they have none.
 
     Args:
         body (list[str]):  Example: ['bad.example.com', '*.blocked.org'].
@@ -121,13 +130,18 @@ def sync(
     client: AuthenticatedClient | Client,
     body: list[str],
 ) -> PolicyStatusResponse | str | None:
-    """Delete egress rules
+    r"""Delete egress rules
 
      Remove specific egress rules from the currently enforced policy by target.
 
-    - Accepts a list of target strings (FQDNs or wildcard domains).
+    - Accepts a list of target strings (FQDNs, wildcard domains, IPs, or
+      CIDRs).
     - Matching rules are removed; targets not found in the current policy
       are silently ignored (idempotent).
+    - An explicit empty string (\"\") addresses port-only rules (rules with
+      `ports` and no `target`): listing it removes every port-only rule.
+      Port-only rules cannot be addressed individually by target since
+      they have none.
 
     Args:
         body (list[str]):  Example: ['bad.example.com', '*.blocked.org'].
@@ -151,13 +165,18 @@ async def asyncio_detailed(
     client: AuthenticatedClient | Client,
     body: list[str],
 ) -> Response[PolicyStatusResponse | str]:
-    """Delete egress rules
+    r"""Delete egress rules
 
      Remove specific egress rules from the currently enforced policy by target.
 
-    - Accepts a list of target strings (FQDNs or wildcard domains).
+    - Accepts a list of target strings (FQDNs, wildcard domains, IPs, or
+      CIDRs).
     - Matching rules are removed; targets not found in the current policy
       are silently ignored (idempotent).
+    - An explicit empty string (\"\") addresses port-only rules (rules with
+      `ports` and no `target`): listing it removes every port-only rule.
+      Port-only rules cannot be addressed individually by target since
+      they have none.
 
     Args:
         body (list[str]):  Example: ['bad.example.com', '*.blocked.org'].
@@ -184,13 +203,18 @@ async def asyncio(
     client: AuthenticatedClient | Client,
     body: list[str],
 ) -> PolicyStatusResponse | str | None:
-    """Delete egress rules
+    r"""Delete egress rules
 
      Remove specific egress rules from the currently enforced policy by target.
 
-    - Accepts a list of target strings (FQDNs or wildcard domains).
+    - Accepts a list of target strings (FQDNs, wildcard domains, IPs, or
+      CIDRs).
     - Matching rules are removed; targets not found in the current policy
       are silently ignored (idempotent).
+    - An explicit empty string (\"\") addresses port-only rules (rules with
+      `ports` and no `target`): listing it removes every port-only rule.
+      Port-only rules cannot be addressed individually by target since
+      they have none.
 
     Args:
         body (list[str]):  Example: ['bad.example.com', '*.blocked.org'].

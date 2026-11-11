@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,113 +20,43 @@ import importlib.resources
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from click import Command, Group, Option
 from click.testing import CliRunner
 
-from opensandbox_cli.commands.skills import _TARGETS, skills_group
+from opensandbox_cli.commands.skills import _TARGETS, TargetConfig, skills_group
 from opensandbox_cli.main import cli
 from opensandbox_cli.output import OutputFormatter
 from opensandbox_cli.skill_registry import list_builtin_skills
 
 
+def _rebase(path: Path, root: Path) -> Path:
+    """Rebase a target path (absolute home-based or relative) under root."""
+    relative = path.relative_to(Path.home()) if path.is_absolute() else path
+    return root / relative
+
+
 @pytest.fixture()
 def isolated_skill_targets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    patched = {
-        "claude": {
-            **_TARGETS["claude"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["claude"]["scopes"]["project"],
-                    "dest_dir": tmp_path / ".claude" / "skills",
-                },
-                "global": {
-                    **_TARGETS["claude"]["scopes"]["global"],
-                    "dest_dir": tmp_path / "home" / ".claude" / "skills",
-                },
-            },
-        },
-        "cursor": {
-            **_TARGETS["cursor"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["cursor"]["scopes"]["project"],
-                    "dest_dir": tmp_path / ".cursor" / "rules",
-                },
-                "global": {
-                    **_TARGETS["cursor"]["scopes"]["global"],
-                    "dest_dir": tmp_path / "home" / ".cursor" / "rules",
-                },
-            },
-        },
-        "codex": {
-            **_TARGETS["codex"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["codex"]["scopes"]["project"],
-                    "dest_dir": tmp_path / ".codex" / "skills",
-                },
-                "global": {
-                    **_TARGETS["codex"]["scopes"]["global"],
-                    "dest_dir": tmp_path / "home" / ".codex" / "skills",
-                },
-            },
-        },
-        "copilot": {
-            **_TARGETS["copilot"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["copilot"]["scopes"]["project"],
-                    "dest_file": tmp_path / ".github" / "copilot-instructions.md",
-                },
-                "global": {
-                    **_TARGETS["copilot"]["scopes"]["global"],
-                    "dest_file": tmp_path / "home" / ".github" / "copilot-instructions.md",
-                },
-            },
-        },
-        "windsurf": {
-            **_TARGETS["windsurf"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["windsurf"]["scopes"]["project"],
-                    "dest_file": tmp_path / ".windsurfrules",
-                },
-                "global": {
-                    **_TARGETS["windsurf"]["scopes"]["global"],
-                    "dest_file": tmp_path / "home" / ".windsurfrules",
-                },
-            },
-        },
-        "cline": {
-            **_TARGETS["cline"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["cline"]["scopes"]["project"],
-                    "dest_file": tmp_path / ".clinerules",
-                },
-                "global": {
-                    **_TARGETS["cline"]["scopes"]["global"],
-                    "dest_file": tmp_path / "home" / ".clinerules",
-                },
-            },
-        },
-        "opencode": {
-            **_TARGETS["opencode"],
-            "scopes": {
-                "project": {
-                    **_TARGETS["opencode"]["scopes"]["project"],
-                    "dest_dir": tmp_path / ".agents" / "skills",
-                },
-                "global": {
-                    **_TARGETS["opencode"]["scopes"]["global"],
-                    "dest_dir": tmp_path / "home" / ".agents" / "skills",
-                },
-            },
-        },
-    }
-    monkeypatch.setattr("opensandbox_cli.commands.skills._TARGETS", patched)
+    """Point project scope at tmp_path and global scope at tmp_path/home."""
+    patched: dict[str, object] = {}
+    for name, cfg in _TARGETS.items():
+        scopes = {}
+        for scope, scope_cfg in cfg["scopes"].items():
+            root = tmp_path if scope == "project" else tmp_path / "home"
+            new_cfg = dict(scope_cfg)
+            if "dest_dir" in new_cfg:
+                new_cfg["dest_dir"] = _rebase(new_cfg["dest_dir"], root)
+            if "dest_file" in new_cfg:
+                new_cfg["dest_file"] = _rebase(new_cfg["dest_file"], root)
+            scopes[scope] = new_cfg
+        patched[name] = {**cfg, "scopes": scopes}
+    monkeypatch.setattr(
+        "opensandbox_cli.commands.skills._TARGETS",
+        cast(dict[str, TargetConfig], patched),
+    )
 
 
 class TestSkillsCommands:
@@ -176,7 +106,9 @@ class TestSkillsCommands:
         assert result.exit_code != 0
         assert "Install guidance:" in result.output
         assert "osb skills install <skill-name> --target <tool> --scope <scope>" in result.output
-        assert not (tmp_path / ".claude" / "skills" / "sandbox-troubleshooting.md").exists()
+        assert not (
+            tmp_path / ".claude" / "skills" / "sandbox-troubleshooting" / "SKILL.md"
+        ).exists()
 
     def test_install_with_skill_but_without_target_prints_guidance(
         self,
@@ -212,8 +144,9 @@ class TestSkillsCommands:
         )
 
         assert result.exit_code == 0
-        dest = tmp_path / ".claude" / "skills" / "sandbox-troubleshooting.md"
+        dest = tmp_path / ".claude" / "skills" / "sandbox-troubleshooting" / "SKILL.md"
         assert dest.exists()
+        assert not (tmp_path / ".claude" / "skills" / "sandbox-troubleshooting.md").exists()
         content = dest.read_text(encoding="utf-8")
         assert content.startswith("---\nname: sandbox-troubleshooting")
 
@@ -318,6 +251,54 @@ class TestSkillsCommands:
         assert result.exit_code == 0
         assert (tmp_path / "home" / ".codex" / "skills" / "sandbox-troubleshooting" / "SKILL.md").exists()
 
+    def test_install_to_global_cline_uses_documented_rules_directory(
+        self,
+        runner: CliRunner,
+        isolated_skill_targets: None,
+        tmp_path: Path,
+    ) -> None:
+        user_rule = tmp_path / "home" / ".cline" / "rules" / "network-egress.md"
+        user_rule.parent.mkdir(parents=True, exist_ok=True)
+        user_rule.write_text("user-owned egress rule\n", encoding="utf-8")
+
+        result = runner.invoke(
+            skills_group,
+            ["install", "network-egress", "--target", "cline", "--scope", "global"],
+        )
+
+        assert result.exit_code == 0
+        dest = tmp_path / "home" / ".cline" / "rules" / "opensandbox-network-egress.md"
+        assert dest.exists()
+        assert dest.read_text(encoding="utf-8").startswith("# OpenSandbox Network Egress")
+        assert user_rule.read_text(encoding="utf-8") == "user-owned egress rule\n"
+        assert not (tmp_path / "home" / ".clinerules").exists()
+
+        uninstall = runner.invoke(
+            skills_group,
+            ["uninstall", "network-egress", "--target", "cline", "--scope", "global"],
+        )
+
+        assert uninstall.exit_code == 0
+        assert not dest.exists()
+        assert user_rule.read_text(encoding="utf-8") == "user-owned egress rule\n"
+
+    def test_install_to_global_copilot_uses_documented_user_file(
+        self,
+        runner: CliRunner,
+        isolated_skill_targets: None,
+        tmp_path: Path,
+    ) -> None:
+        result = runner.invoke(
+            skills_group,
+            ["install", "network-egress", "--target", "copilot", "--scope", "global"],
+        )
+
+        assert result.exit_code == 0
+        dest = tmp_path / "home" / ".copilot" / "copilot-instructions.md"
+        assert dest.exists()
+        assert "# OpenSandbox Network Egress" in dest.read_text(encoding="utf-8")
+        assert not (tmp_path / "home" / ".github" / "copilot-instructions.md").exists()
+
     def test_install_to_project_opencode_creates_skill_directory(
         self,
         runner: CliRunner,
@@ -350,29 +331,21 @@ class TestSkillsCommands:
         assert "Full Skill:" in result.output
         assert "osb file cat" in result.output
 
-    def test_show_supports_new_network_egress_skill(
+    def test_show_prints_network_and_vault_skills(
         self,
         runner: CliRunner,
         isolated_skill_targets: None,
     ) -> None:
-        result = runner.invoke(skills_group, ["show", "network-egress"])
+        network = runner.invoke(skills_group, ["show", "network-egress"])
+        assert network.exit_code == 0
+        assert "Skill: network-egress" in network.output
+        assert "Quick Start:" in network.output
+        assert "osb egress patch" in network.output
 
-        assert result.exit_code == 0
-        assert "Skill: network-egress" in result.output
-        assert "Quick Start:" in result.output
-        assert "osb egress patch" in result.output
-
-    def test_show_supports_credential_vault_skill(
-        self,
-        runner: CliRunner,
-        isolated_skill_targets: None,
-    ) -> None:
-        result = runner.invoke(skills_group, ["show", "credential-vault"])
-
-        assert result.exit_code == 0
-        assert "Skill: credential-vault" in result.output
-        assert "Credential Vault" in result.output
-        assert "osb credential-vault create" in result.output
+        vault = runner.invoke(skills_group, ["show", "credential-vault"])
+        assert vault.exit_code == 0
+        assert "Skill: credential-vault" in vault.output
+        assert "osb credential-vault create" in vault.output
 
     def test_show_surfaces_json_shapes_for_lifecycle_skill(
         self,
@@ -496,8 +469,8 @@ class TestSkillsCommands:
         assert result.exit_code == 0
         assert "Install plan:" in result.output
         assert "install one file per skill" in result.output
-        assert (tmp_path / ".claude" / "skills" / "network-egress.md").exists()
-        assert (tmp_path / ".claude" / "skills" / "sandbox-troubleshooting.md").exists()
+        assert (tmp_path / ".claude" / "skills" / "network-egress" / "SKILL.md").exists()
+        assert (tmp_path / ".claude" / "skills" / "sandbox-troubleshooting" / "SKILL.md").exists()
 
 
 def _read_builtin_skill(package_file: str) -> str:
@@ -563,6 +536,8 @@ class TestSkillContentQuality:
     def test_lifecycle_skill_keeps_json_shapes_and_health_guidance(self) -> None:
         content = _read_builtin_skill("opensandbox-sandbox-lifecycle.md")
 
+        assert "`kill` returns `deletion_requested` when accepted" in content
+        assert "Pool `Noop` preserves processes" in content
         assert "## JSON Shapes" in content
         assert '"defaultAction": "deny"' in content
         assert '"mountPath": "/workspace/data"' in content
@@ -595,15 +570,21 @@ class TestSkillCliAlignment:
         resume_cmd = _command(["sandbox", "resume"])
         endpoint_cmd = _command(["sandbox", "endpoint"])
         metrics_cmd = _command(["sandbox", "metrics"])
+        template_group = _command(["template"])
+        snapshot_group = _command(["snapshot"])
 
         assert {
             "-i", "--image", "-t", "--timeout", "--entrypoint", "--network-policy-file",
             "--credential-proxy", "--volumes-file", "--skip-health-check",
-            "--ready-timeout", "-o", "--output",
+            "--ready-timeout", "--template", "--snapshot-id", "-o", "--output",
         } <= _option_names(create_cmd)
         assert {"--skip-health-check", "--resume-timeout", "-o", "--output"} <= _option_names(resume_cmd)
         assert {"-p", "--port", "-o", "--output"} <= _option_names(endpoint_cmd)
         assert {"--watch", "-o", "--output"} <= _option_names(metrics_cmd)
+        assert isinstance(template_group, Group)
+        assert {"create", "get", "list", "delete"} <= set(template_group.commands)
+        assert isinstance(snapshot_group, Group)
+        assert {"create", "get", "list", "delete"} <= set(snapshot_group.commands)
 
     def test_file_operations_skill_matches_file_cli(self) -> None:
         expected_subcommands = {

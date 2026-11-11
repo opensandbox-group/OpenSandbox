@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import click
@@ -32,11 +33,10 @@ from opensandbox_cli.commands.egress import egress_group
 from opensandbox_cli.commands.file import file_group
 from opensandbox_cli.commands.sandbox import sandbox_group
 from opensandbox_cli.commands.skills import skills_group
+from opensandbox_cli.commands.snapshot import snapshot_group
+from opensandbox_cli.commands.template import template_group
+from opensandbox_cli.commands.terminal import terminal
 from opensandbox_cli.config import resolve_config
-
-# ---------------------------------------------------------------------------
-# Banner
-# ---------------------------------------------------------------------------
 
 BANNER = r"""[bold cyan]
    ____                   _____                 _ _
@@ -50,8 +50,45 @@ BANNER = r"""[bold cyan]
 """
 
 
+# A representative icon: any encoding that cannot render it would raise on output.
+_OUTPUT_PROBE = "\u2705"
+
+
+def _configure_output_streams() -> None:
+    """Keep CLI output writable when the active encoding cannot represent it.
+
+    Click and Rich print emoji and box-drawing characters. On a legacy Windows
+    code page (cp936, cp1252, ...) or a POSIX ``C`` locale writing them raises
+    ``UnicodeEncodeError``, which aborts the command - even after the work is
+    done - so streams whose encoding cannot represent that output escape the
+    characters instead of raising.
+
+    Escaping (``backslashreplace``) keeps payload writes - raw command and
+    file data, machine-readable output - recoverable; ``errors="replace"``
+    would silently corrupt them into ``?``. CPython uses the same handler for
+    Windows stderr.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = getattr(stream, "encoding", None)
+        if reconfigure is None or encoding is None:
+            continue
+        try:
+            _OUTPUT_PROBE.encode(encoding)
+        except (LookupError, UnicodeEncodeError):
+            try:
+                reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):  # pragma: no cover - detached stream
+                pass
+
+
 class BannerGroup(click.Group):
     """Custom Click group that shows a banner before help text."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        """Configure output streams before Click renders help or runs a command."""
+        _configure_output_streams()
+        return super().parse_args(ctx, args)
 
     def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
         console = Console(stderr=False)
@@ -67,7 +104,10 @@ class BannerGroup(click.Group):
 @click.option(
     "--use-server-proxy/--no-use-server-proxy",
     default=None,
-    help="Route execd and endpoint traffic through the sandbox server proxy.",
+    help=(
+        "DEPRECATED: the server proxy is in maintenance mode (security/bugfix only); "
+        "route data-plane traffic through the ingress gateway instead."
+    ),
 )
 @click.option("--config", "config_path", type=click.Path(exists=False, path_type=Path), default=None, help="Config file path.")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose/debug output.")
@@ -121,6 +161,14 @@ def cli(
         )
     resolved["color"] = not no_color and resolved.get("color", True)
 
+    if ctx.invoked_subcommand != "config" and resolved.get("use_server_proxy"):
+        click.echo(
+            "Warning: connection.use_server_proxy is deprecated: the server proxy "
+            "data path is in maintenance mode (security and bug fixes only); route "
+            "data-plane traffic through the ingress gateway instead.",
+            err=True,
+        )
+
     effective_config_path = config_path or Path.home() / ".opensandbox" / "config.toml"
     ctx.obj = ClientContext(
         resolved_config=resolved,
@@ -130,9 +178,11 @@ def cli(
     ctx.call_on_close(lambda: ctx.obj.close())
 
 
-# Register sub-command groups
 cli.add_command(sandbox_group)
+cli.add_command(template_group)
+cli.add_command(snapshot_group)
 cli.add_command(command_group)
+cli.add_command(terminal)
 cli.add_command(file_group)
 cli.add_command(egress_group)
 cli.add_command(credential_vault_group)

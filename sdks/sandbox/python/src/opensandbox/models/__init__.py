@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ OpenSandbox data models.
 Core Pydantic models for sandbox operations.
 """
 
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.execd import (
     CommandLogs,
     CommandStatus,
@@ -32,11 +32,15 @@ from opensandbox.models.execd import (
     OutputMessage,
 )
 from opensandbox.models.filesystem import (
+    AsyncReadBytesStream,
+    ByteRange,
     ContentReplaceEntry,
     ContentReplaceResult,
     DirectoryListEntry,
     EntryInfo,
     MoveEntry,
+    ReadBytesResponse,
+    ReadBytesStream,
     SearchEntry,
     SetPermissionEntry,
     WriteEntry,
@@ -46,6 +50,7 @@ from opensandbox.models.isolated import (
     CreateIsolatedSessionRequest,
     EnvPassthroughSpec,
     IsolatedCapabilities,
+    IsolatedOverlaySpec,
     IsolatedRunOpts,
     IsolatedSessionInfo,
     IsolatedSessionState,
@@ -54,6 +59,7 @@ from opensandbox.models.isolated import (
 )
 from opensandbox.models.sandboxes import (
     PVC,
+    ActivityProbe,
     Credential,
     CredentialAuth,
     CredentialBinding,
@@ -69,7 +75,9 @@ from opensandbox.models.sandboxes import (
     CredentialVaultPatchRequest,
     CredentialVaultState,
     CustomHeaderEntry,
+    ExchangeCredentialSource,
     Host,
+    IdlePolicy,
     InlineCredentialSource,
     LifecycleHook,
     NetworkPolicy,
@@ -78,6 +86,7 @@ from opensandbox.models.sandboxes import (
     PaginationInfo,
     PeriodicLifecycleHook,
     PlatformSpec,
+    RenewalPolicy,
     SandboxAllocation,
     SandboxCreateResponse,
     SandboxEndpoint,
@@ -95,6 +104,7 @@ from opensandbox.models.sandboxes import (
 __all__ = [
     # Execution models
     "DiagnosticContent",
+    "DiagnosticContext",
     "Execution",
     "ExecutionLogs",
     "OutputMessage",
@@ -109,12 +119,17 @@ __all__ = [
     "CreateIsolatedSessionRequest",
     "EnvPassthroughSpec",
     "IsolatedCapabilities",
+    "IsolatedOverlaySpec",
     "IsolatedRunOpts",
     "IsolatedSessionInfo",
     "IsolatedSessionState",
     "IsolatedSessionSummary",
     "IsolatedWorkspaceSpec",
     # Filesystem models
+    "ByteRange",
+    "AsyncReadBytesStream",
+    "ReadBytesResponse",
+    "ReadBytesStream",
     "EntryInfo",
     "WriteEntry",
     "MoveEntry",
@@ -132,10 +147,14 @@ __all__ = [
     "NetworkRule",
     "CredentialProxyConfig",
     "CredentialSubstitution",
+    "ExchangeCredentialSource",
     "InlineCredentialSource",
     "LifecycleHook",
     "PeriodicLifecycleHook",
     "SandboxLifecycle",
+    "IdlePolicy",
+    "ActivityProbe",
+    "RenewalPolicy",
     "Credential",
     "CredentialMatch",
     "CustomHeaderEntry",

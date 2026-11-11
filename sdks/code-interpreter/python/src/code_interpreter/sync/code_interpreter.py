@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 Synchronous Code Interpreter SDK.
 """
 
+import contextlib
 import logging
 import time
 from datetime import timedelta
@@ -73,14 +74,18 @@ class CodeInterpreterSync:
     ```python
     from opensandbox.sync.sandbox import SandboxSync
     from code_interpreter.sync.code_interpreter import CodeInterpreterSync
-    from code_interpreter.models.code import SupportedLanguage
+    from code_interpreter.models.code_sync import SupportedLanguageSync
 
-    sandbox = SandboxSync.create("python:3.11")
+    sandbox = SandboxSync.create(
+        "opensandbox/code-interpreter:latest",
+        entrypoint=["/opt/code-interpreter/code-interpreter.sh"],
+    )
     interpreter = CodeInterpreterSync.create(sandbox=sandbox)
 
-    ctx = interpreter.codes.create_context(SupportedLanguage.PYTHON)
+    ctx = interpreter.codes.create_context(SupportedLanguageSync.PYTHON)
     result = interpreter.codes.run("print('hi')", context=ctx)
 
+    interpreter.close()
     sandbox.kill()
     sandbox.close()
     ```
@@ -138,6 +143,24 @@ class CodeInterpreterSync:
             Service for command execution
         """
         return self._sandbox.commands
+
+    def close(self) -> None:
+        """
+        Release resources owned by the code interpreter.
+
+        Closes the HTTP clients used by the code execution service. The
+        underlying sandbox is NOT affected; manage its lifecycle separately
+        (``sandbox.kill()`` / ``sandbox.close()``). Safe to call multiple times.
+        """
+        close = getattr(self._code_service, "close", None)
+        if close is not None:
+            close()
+
+    def __enter__(self) -> "CodeInterpreterSync":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
     @property
     def metrics(self):
@@ -289,9 +312,14 @@ class CodeInterpreterSync:
             code_service = factory.create_code_execution_service(endpoint)
 
             interpreter = cls(sandbox, code_service)
-
-            if not skip_health_check:
-                interpreter.check_ready(ready_timeout, health_check_polling_interval)
+            try:
+                if not skip_health_check:
+                    interpreter.check_ready(ready_timeout, health_check_polling_interval)
+            except Exception:
+                # Don't leak the service's clients on a failed creation.
+                with contextlib.suppress(Exception):
+                    interpreter.close()
+                raise
 
             logger.info(f"Code interpreter {sandbox.id} created successfully")
             return interpreter

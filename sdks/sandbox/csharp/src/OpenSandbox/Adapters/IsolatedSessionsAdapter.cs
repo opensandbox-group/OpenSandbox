@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using OpenSandbox.Config;
 using OpenSandbox.Core;
 using OpenSandbox.Internal;
 using OpenSandbox.Models;
@@ -75,6 +76,8 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
     private const string TailCursorHeader = "EXECD-ISOLATED-TAIL-CURSOR";
 
     private readonly HttpClient _httpClient;
+    private readonly HttpClient? _transferHttpClient;
+    private readonly TimeSpan? _transferHeaderTimeout;
     private readonly HttpClient _sseHttpClient;
     internal readonly string _baseUrl;
     internal readonly IReadOnlyDictionary<string, string> _headers;
@@ -86,18 +89,60 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
     };
 
+    /// <summary>
+    /// Like <see cref="Internal.HttpClientWrapper"/>, raises a typed
+    /// <see cref="SandboxApiException"/> on an empty or malformed body.
+    /// </summary>
+    private static T DeserializeBody<T>(string body, string operation) where T : class
+    {
+        if (string.IsNullOrEmpty(body))
+        {
+            throw new SandboxApiException(
+                message: $"{operation} returned an unexpected empty response body",
+                statusCode: 200,
+                error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Unexpected empty response body"),
+                rawBody: body);
+        }
+        try
+        {
+            return JsonSerializer.Deserialize<T>(body, JsonOptions)
+                ?? throw new SandboxApiException(
+                    message: $"{operation} returned an unexpected response body",
+                    statusCode: 200,
+                    error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Unexpected response body"),
+                    rawBody: body);
+        }
+        catch (JsonException ex)
+        {
+            throw new SandboxApiException(
+                message: $"{operation} returned a malformed response body: {ex.Message}",
+                statusCode: 200,
+                error: new SandboxError(SandboxErrorCodes.UnexpectedResponse, "Malformed response body"),
+                rawBody: body,
+                innerException: ex);
+        }
+    }
+
+    private readonly WakeRetryOptions? _wakeRetry;
+
     public IsolatedSessionsAdapter(
         HttpClient httpClient,
         HttpClient sseHttpClient,
         string baseUrl,
         IReadOnlyDictionary<string, string> headers,
-        ILogger logger)
+        ILogger logger,
+        HttpClient? transferHttpClient = null,
+        TimeSpan? transferHeaderTimeout = null,
+        WakeRetryOptions? wakeRetry = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _transferHttpClient = transferHttpClient;
+        _transferHeaderTimeout = transferHeaderTimeout;
         _sseHttpClient = sseHttpClient ?? throw new ArgumentNullException(nameof(sseHttpClient));
         _baseUrl = baseUrl?.TrimEnd('/') ?? throw new ArgumentNullException(nameof(baseUrl));
         _headers = headers ?? new Dictionary<string, string>();
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _wakeRetry = wakeRetry;
     }
 
     public async Task<IIsolationSession> CreateAsync(
@@ -113,7 +158,7 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
         await EnsureSuccessAsync(response, "create isolated session");
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-        var info = JsonSerializer.Deserialize<IsolatedSessionInfo>(body, JsonOptions)!;
+        var info = DeserializeBody<IsolatedSessionInfo>(body, "create isolated session");
         return new IsolationSessionHandle(info, this);
     }
 
@@ -137,6 +182,7 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
             CreatedAt: state.CreatedAt,
             Profile: state.Profile,
             Workspace: state.Workspace,
+            Overlays: state.Overlays,
             ExtraWritable: state.ExtraWritable,
             Binds: state.Binds,
             ShareNet: state.ShareNet,
@@ -162,7 +208,7 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
         await EnsureSuccessAsync(response, operation);
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-        return JsonSerializer.Deserialize<IsolatedSessionState>(body, JsonOptions)!;
+        return DeserializeBody<IsolatedSessionState>(body, operation);
     }
 
     internal async Task<Execution> RunInternalAsync(
@@ -229,7 +275,7 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
                 (int)response.StatusCode);
         }
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-        return JsonSerializer.Deserialize<IsolatedBackgroundRun>(body, JsonOptions)!;
+        return DeserializeBody<IsolatedBackgroundRun>(body, "start isolated background run");
     }
 
     internal async Task<IsolatedRunStatus> RunStatusInternalAsync(
@@ -253,7 +299,7 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
             httpRequest, cancellationToken).ConfigureAwait(false);
         await EnsureSuccessAsync(response, "get isolated run status").ConfigureAwait(false);
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-        return JsonSerializer.Deserialize<IsolatedRunStatus>(body, JsonOptions)!;
+        return DeserializeBody<IsolatedRunStatus>(body, "get isolated run status");
     }
 
     internal async Task<RunLogs> RunLogsInternalAsync(
@@ -316,7 +362,7 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
         await EnsureSuccessAsync(response, "get isolated capabilities");
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-        return JsonSerializer.Deserialize<IsolatedCapabilities>(body, JsonOptions)!;
+        return DeserializeBody<IsolatedCapabilities>(body, "get isolation capabilities");
     }
 
     public async Task<IReadOnlyList<IsolatedSessionSummary>> ListAsync(
@@ -329,7 +375,7 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
         await EnsureSuccessAsync(response, "list isolated sessions");
         var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-        var result = JsonSerializer.Deserialize<ListIsolatedSessionsResponse>(body, JsonOptions)!;
+        var result = DeserializeBody<ListIsolatedSessionsResponse>(body, "list isolated sessions");
         return result.Sessions ?? new List<IsolatedSessionSummary>();
     }
 
@@ -338,8 +384,8 @@ internal sealed class IsolatedSessionsAdapter : IIsolatedSessions
         var sessionBaseUrl = $"{_baseUrl}/v1/isolated/session/{Uri.EscapeDataString(sessionId)}";
         var clientWrapper = new HttpClientWrapper(
             _httpClient, sessionBaseUrl, _headers,
-            _logger);
-        return new FilesystemAdapter(clientWrapper, _httpClient, sessionBaseUrl, _headers);
+            _logger, _transferHttpClient, _transferHeaderTimeout, _wakeRetry);
+        return new FilesystemAdapter(clientWrapper, sessionBaseUrl, _headers);
     }
 
     private void ApplyHeaders(HttpRequestMessage request)

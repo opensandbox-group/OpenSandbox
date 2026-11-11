@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,10 +38,10 @@ class Codes(Protocol):
     Supported Languages:
 
     - Python: Full Python 3.x support with package management
-    - JavaScript/Node.js: ES6+ with npm package support
+    - JavaScript: ES6+ with npm package support
+    - TypeScript
+    - Go
     - Bash: Shell scripting with full system access
-    - Java: Compilation and execution with classpath management
-    - Kotlin: Script and compiled Kotlin execution
 
     Key Features:
 

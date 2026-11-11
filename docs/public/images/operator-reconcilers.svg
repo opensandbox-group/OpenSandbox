@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1140" viewBox="0 0 1500 1140" role="img" aria-labelledby="title desc">
+<title id="title">Kubernetes controller reconcilers</title>
+<desc id="desc">API clients and the lifecycle server create three custom resources. Three reconcilers watch them: BatchSandboxReconciler scales and manages sandbox pods and dispatches tasks, PoolReconciler schedules warm pods and manages pool capacity, and the snapshot reconciler runs commit jobs that push images to the registry.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="outbound" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#059669"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1500" height="1140" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Kubernetes controller</text>
+<text x="48" y="96" class="body">Reconcilers · pool-backed delivery, task orchestration, snapshot pause/resume</text>
+<path d="M900 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="946" y="60" class="edge" style="fill:#dc6b2e">Lifecycle control</text>
+<path d="M1130 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1176" y="60" class="edge" style="fill:#2563eb">Execution / data</text>
+<path d="M1350 54h36" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)"/>
+<text x="1396" y="60" class="edge" style="fill:#059669">Registry</text>
+
+<rect x="48" y="128" width="1404" height="150" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="158" class="section">API CLIENTS &amp; LIFECYCLE SERVER</text>
+<rect x="72" y="180" width="360" height="72" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="208" class="heading">API clients</text>
+<text x="88" y="234" class="label">SDKs · CLI · MCP</text>
+<rect x="464" y="180" width="440" height="72" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="480" y="208" class="heading">Lifecycle server</text>
+<text x="480" y="234" class="label">create / watch · endpoint discovery</text>
+<rect x="936" y="180" width="492" height="72" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="952" y="208" class="heading">kubectl &amp; GitOps</text>
+<text x="952" y="234" class="label">resources are plain Kubernetes objects</text>
+<path d="M684 252V326" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="700" y="295" class="edge" style="fill:#dc6b2e">create / manage</text>
+
+<rect x="48" y="326" width="1404" height="168" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="358" class="section">CUSTOM RESOURCES · SANDBOX.OPENSANDBOX.IO/V1ALPHA1</text>
+<rect x="72" y="376" width="424" height="94" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="406" class="heading">BatchSandbox</text>
+<text x="88" y="434" class="body">replicas · template / poolRef</text>
+<text x="88" y="460" class="body">taskTemplate · expireTime · pause</text>
+<rect x="522" y="376" width="424" height="94" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="538" y="406" class="heading">Pool</text>
+<text x="538" y="434" class="body">template · capacitySpec</text>
+<text x="538" y="460" class="body">scale · update · recycle strategy</text>
+<rect x="972" y="376" width="424" height="94" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="988" y="406" class="heading">SandboxSnapshot</text>
+<text x="988" y="434" class="body">spec: target sandbox name</text>
+<text x="988" y="460" class="body">status: images · source pod &amp; node</text>
+<path d="M284 494V546" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<path d="M734 494V546" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<path d="M1184 494V546" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="750" y="527" class="edge" style="fill:#dc6b2e">watch &amp; reconcile</text>
+
+<rect x="48" y="546" width="1404" height="196" rx="12" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="72" y="578" class="section">CONTROLLER MANAGER</text>
+<rect x="72" y="602" width="424" height="112" rx="8" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="88" y="632" class="heading">BatchSandboxReconciler</text>
+<text x="88" y="662" class="body">scale pods · parse pool allocations</text>
+<text x="88" y="690" class="body">tasks · expireTime · pause/resume handoff</text>
+<rect x="522" y="602" width="424" height="112" rx="8" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="538" y="632" class="heading">PoolReconciler</text>
+<text x="538" y="662" class="body">schedule warm pods to sandboxes</text>
+<text x="538" y="690" class="body">scale buffer · rolling update · eviction</text>
+<rect x="972" y="602" width="424" height="112" rx="8" fill="#ffffff" stroke="#e7d5c8" stroke-width="1.5"/>
+<text x="988" y="632" class="heading">Snapshot reconciler</text>
+<text x="988" y="662" class="body">commit Job on the source node</text>
+<text x="988" y="690" class="body">record pushed images in status</text>
+<path d="M284 742V818" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="300" y="786" class="edge" style="fill:#2563eb">create / scale · dispatch tasks</text>
+<path d="M734 742V818" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="750" y="786" class="edge" style="fill:#dc6b2e">claim / replenish</text>
+<path d="M1184 742V818" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)"/>
+<text x="1200" y="786" class="edge" style="fill:#059669">push snapshot images</text>
+
+<rect x="48" y="818" width="1404" height="212" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5"/>
+<text x="72" y="850" class="section">DATA PLANE</text>
+<rect x="72" y="874" width="560" height="124" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="92" y="906" class="heading">Sandbox pod</text>
+<text x="92" y="938" class="body">user workload · task-executor sidecar</text>
+<text x="92" y="968" class="label">runs Local or Remote (nsenter) tasks</text>
+<rect x="656" y="874" width="340" height="124" rx="10" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="676" y="906" class="heading">Pool warm pod</text>
+<text x="676" y="938" class="body">pre-warmed, unallocated</text>
+<text x="676" y="968" class="label">pool-name · pool-revision labels</text>
+<rect x="1020" y="874" width="432" height="124" rx="10" fill="#f4fbf8" stroke="#8bcbb0" stroke-width="1.5"/>
+<text x="1040" y="906" class="heading">Commit Job → registry</text>
+<text x="1040" y="938" class="body">image-committer on the source node</text>
+<text x="1040" y="968" class="label">rootfs-v1 / qemu-v1 snapshot images</text>
+
+<rect x="48" y="1054" width="1404" height="64" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="1082" class="heading">Allocation contract</text>
+<text x="290" y="1082" class="body">sandbox.opensandbox.io/alloc-status · alloc-release · endpoints — annotations on BatchSandbox</text>
+<text x="72" y="1106" class="label">Written by the reconcilers · read by the lifecycle server</text>
+</svg>

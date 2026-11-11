@@ -37,31 +37,15 @@ status: implementing
 
 ## Summary
 
-Adds sandbox-level lifecycle hooks: `preStart`, `prePause`, `postResume`,
-`preTerminate`, and cron-driven `periodic`. Declared declaratively in
-`CreateSandboxRequest.lifecycle`; all hooks except `preStart` are updatable at
-runtime via `PATCH /sandboxes/{sandboxId}/lifecycle`. Execution is split into
-four channels chosen by event type (see [Execution Channels](#execution-channels));
-the contract is identical on Docker and Kubernetes backends when the provider
-topology satisfies the hook's capability requirements (R13).
+Adds sandbox-level lifecycle hooks: `preStart`, `prePause`, `postResume`, `preTerminate`, and cron-driven `periodic`. Declared declaratively in `CreateSandboxRequest.lifecycle`; all hooks except `preStart` are updatable at runtime via `PATCH /sandboxes/{sandboxId}/lifecycle`. Execution is split into four channels chosen by event type (see [Execution Channels](#execution-channels)); the contract is identical on Docker and Kubernetes backends when the provider topology satisfies the hook's capability requirements (R13).
 
 ## Motivation
 
-Agent sandboxes must persist application/filesystem state before pause or
-termination and restore it after resume. Today only task-level
-`preStart`/`postStop` hooks exist (Kubernetes task-executor scope), which do not
-cover the sandbox lifecycle.
+Agent sandboxes must persist application/filesystem state before pause or termination and restore it after resume. Today only task-level `preStart`/`postStop` hooks exist (Kubernetes task-executor scope), which do not cover the sandbox lifecycle.
 
-Key events the hooks must cover (TTL expiry, idle-pause, error termination)
-happen **without the user in the loop** — only declarative configuration can
-guarantee a hook runs.
+Key events the hooks must cover (TTL expiry, idle-pause, error termination) happen **without the user in the loop** — only declarative configuration can guarantee a hook runs.
 
-Related: [#1458](https://github.com/opensandbox-group/OpenSandbox/issues/1458) (request),
-[#1366](https://github.com/opensandbox-group/OpenSandbox/issues/1366) (credential re-injection after resume),
-[#1355](https://github.com/opensandbox-group/OpenSandbox/issues/1355) (fs sync before pause/snapshot),
-[#1448](https://github.com/opensandbox-group/OpenSandbox/issues/1448) (idle-pause),
-[openkruise/agents#743](https://github.com/openkruise/agents/issues/743),
-[kubernetes-sigs/agent-sandbox#1237](https://github.com/kubernetes-sigs/agent-sandbox/issues/1237).
+Related: [#1458](https://github.com/opensandbox-group/OpenSandbox/issues/1458) (request), [#1366](https://github.com/opensandbox-group/OpenSandbox/issues/1366) (credential re-injection after resume), [#1355](https://github.com/opensandbox-group/OpenSandbox/issues/1355) (fs sync before pause/snapshot), [#1448](https://github.com/opensandbox-group/OpenSandbox/issues/1448) (idle-pause), [openkruise/agents#743](https://github.com/openkruise/agents/issues/743), [kubernetes-sigs/agent-sandbox#1237](https://github.com/kubernetes-sigs/agent-sandbox/issues/1237).
 
 ### Goals
 
@@ -125,21 +109,7 @@ signal-driven: execd catches SIGTERM
 timer-driven: execd cron ticker → periodic
 ```
 
-Why: `preStart` is owned by the long-running execd process and runs after its
-HTTP server starts, so hook duration does not consume the execd health-check
-startup window. `/ping` therefore indicates liveness, not lifecycle readiness.
-In normal mode, bootstrap waits for execd's private startup status before
-launching the user process. In init mode, execd runs `preStart` before launching
-the supervised entrypoint. It runs again on every boot, including K8s resume.
-`preTerminate` is signal-driven —
-every platform termination path (K8s pod delete for TTL/eviction/user delete,
-Docker `stop`) ends in a SIGTERM to the container. Dedicated containers reach
-execd through PID 1 bootstrap signal forwarding; Pool mode requires
-`execd_run_as_init` so the task shim reaches execd directly (R13).
-`prePause`/`postResume` are state-machine semantics: the server is the only
-component that sees both the config and the transition, and it must wait for
-the hook result before advancing. execd runs commands from its effective
-lifecycle config on startup, trigger, ticker, or signal.
+Why: `preStart` is owned by the long-running execd process and runs after its HTTP server starts, so hook duration does not consume the execd health-check startup window. `/ping` therefore indicates liveness, not lifecycle readiness. In normal mode, bootstrap waits for execd's private startup status before launching the user process. In init mode, execd runs `preStart` before launching the supervised entrypoint. It runs again on every boot, including K8s resume. `preTerminate` is signal-driven — every platform termination path (K8s pod delete for TTL/eviction/user delete, Docker `stop`) ends in a SIGTERM to the container. Dedicated containers reach execd through PID 1 bootstrap signal forwarding; Pool mode requires `execd_run_as_init` so the task shim reaches execd directly (R13). `prePause`/`postResume` are state-machine semantics: the server is the only component that sees both the config and the transition, and it must wait for the hook result before advancing. execd runs commands from its effective lifecycle config on startup, trigger, ticker, or signal.
 
 ### Risks and Mitigations
 
@@ -180,11 +150,9 @@ lifecycle:
       command: ["/opt/hooks/checkpoint.sh"]
 ```
 
-`command` is an argv array (no shell expansion), matching the task-executor
-`LifecycleHandler`. Event enum stays open (unknown events ignored).
+`command` is an argv array (no shell expansion), matching the task-executor `LifecycleHandler`. Event enum stays open (unknown events ignored).
 
-**PATCH /sandboxes/{sandboxId}/lifecycle** — JSON Merge Patch (RFC 7396);
-`null` removes a hook. Semantics:
+**PATCH /sandboxes/{sandboxId}/lifecycle** — JSON Merge Patch (RFC 7396); `null` removes a hook. Semantics:
 
 - `400 PreStartNotPatchable`; `400` for `failurePolicy: Abort` on `preTerminate`/`periodic`; `400 GraceTooSmall` when raising `preTerminate.timeoutSeconds` beyond provisioned grace − buffer (TTL/eviction use the pod's original grace and bypass the server).
 - `409 SandboxNotRunning` — non-`Running` sandboxes cannot receive the live execd update; deferred application would leave persisted config and live schedule inconsistent.
@@ -194,8 +162,7 @@ lifecycle:
 
 ### 2. Config Persistence
 
-No general server-side sandbox record exists today (only snapshot records), so
-config rides the existing per-provider state:
+No general server-side sandbox record exists today (only snapshot records), so config rides the existing per-provider state:
 
 | Provider | Storage | Rationale |
 |---|---|---|
@@ -203,23 +170,11 @@ config rides the existing per-provider state:
 | K8s | `sandbox.opensandbox.io/lifecycle` annotation on BatchSandbox **or AgentSandbox** — whichever workload CR the configured provider manages (`provider_factory.py` registers both) | schemaless, no CRD change; controller ignores the key (server-only contract; add to `kubernetes/AGENTS.md` annotation list) |
 | Both | env `OPENSANDBOX_LIFECYCLE` (JSON content) at create | **transport only** — execd validates it and atomically persists the effective config; failure to persist aborts lifecycle startup, while provider-held config remains the recovery source |
 
-**Pod-creation source stays current.** On PATCH, the server also updates the
-pod-creation source — BatchSandbox `spec.template` / `taskTemplate` env, or
-AgentSandbox `spec.podTemplate` env, whichever provider manages the sandbox —
-so a **replacement** pod created by eviction, node drain, or pod failure
-materializes the current config; creation-time env is a bootstrap default,
-never the source of truth. The env change must not recycle the running pod:
-the running pod receives the update via the live execd push only, and
-implementation must verify the controller does not recreate the pod for this
-env change (if it does, the update must be applied so its pod effect is
-deferred to replacement).
+**Pod-creation source stays current.** On PATCH, the server also updates the pod-creation source — BatchSandbox `spec.template` / `taskTemplate` env, or AgentSandbox `spec.podTemplate` env, whichever provider manages the sandbox — so a **replacement** pod created by eviction, node drain, or pod failure materializes the current config; creation-time env is a bootstrap default, never the source of truth. The env change must not recycle the running pod: the running pod receives the update via the live execd push only, and implementation must verify the controller does not recreate the pod for this env change (if it does, the update must be applied so its pod effect is deferred to replacement).
 
 ### 3. In-Sandbox Config File
 
-`$HOME/.execd/lifecycle.toml` is the default in-sandbox lifecycle config
-(atomic write, `version` key). Operators may set `EXECD_LIFECYCLE_CONFIG` to
-an explicit path; execd and bootstrap use that value as-is and do not fall
-back to the default path:
+`$HOME/.execd/lifecycle.toml` is the default in-sandbox lifecycle config (atomic write, `version` key). Operators may set `EXECD_LIFECYCLE_CONFIG` to an explicit path; execd and bootstrap use that value as-is and do not fall back to the default path:
 
 ```toml
 version = 1
@@ -247,28 +202,10 @@ command = ["/opt/hooks/checkpoint.sh"]
 timeout_seconds = 60
 ```
 
-- **Location**: resolving from `HOME` makes the default writable for root and
-  normal non-root images. Platform deployments must ensure the default HOME
-  participates in the sandbox persistence/snapshot contract. An operator that
-  selects an explicit path owns the same durability requirement. Do not use the
-  K8s `opensandbox-bin` emptyDir (`/opt/opensandbox`).
-- **Current startup load order** (`preStart` + `periodic`, no PATCH): a nonblank
-  injected env is authoritative, is validated, and atomically refreshes the
-  persisted file; when the env is absent, execd loads the file. Failure to
-  resolve or persist either the default or an explicit path is fatal when a
-  transport config is present. Runtime PATCH persistence/reconciliation is
-  deferred with the PATCH phase.
-- **Trust boundary**: hooks run as execd's OS user in the sandbox's existing
-  container namespaces and do not use isolated-session confinement. The same
-  identity (and any root workload) can modify or remove the persisted file.
-  Hooks are trusted setup/maintenance code, not a tamper-resistant audit or
-  mandatory-policy mechanism.
-- **Persistence principles** (apply to any future daemon state): config files
-  are TOML (matching `--isolation-config`); config vs. rebuildable runtime
-  state are separated (hook run results/counters stay in memory —
-  `GET /v1/lifecycle/status` reflects the current process only); one concern =
-  one file/dir, events use append-only JSONL. Invalid transport or persisted
-  config and transport persistence failures fail closed.
+- **Location**: resolving from `HOME` makes the default writable for root and normal non-root images. Platform deployments must ensure the default HOME participates in the sandbox persistence/snapshot contract. An operator that selects an explicit path owns the same durability requirement. Do not use the K8s `opensandbox-bin` emptyDir (`/opt/opensandbox`).
+- **Current startup load order** (`preStart` + `periodic`, no PATCH): a nonblank injected env is authoritative, is validated, and atomically refreshes the persisted file; when the env is absent, execd loads the file. Failure to resolve or persist either the default or an explicit path is fatal when a transport config is present. Runtime PATCH persistence/reconciliation is deferred with the PATCH phase.
+- **Trust boundary**: hooks run as execd's OS user in the sandbox's existing container namespaces and do not use isolated-session confinement. The same identity (and any root workload) can modify or remove the persisted file. Hooks are trusted setup/maintenance code, not a tamper-resistant audit or mandatory-policy mechanism.
+- **Persistence principles** (apply to any future daemon state): config files are TOML (matching `--isolation-config`); config vs. rebuildable runtime state are separated (hook run results/counters stay in memory — `GET /v1/lifecycle/status` reflects the current process only); one concern = one file/dir, events use append-only JSONL. Invalid transport or persisted config and transport persistence failures fail closed.
 
 ### 4. execd Lifecycle API
 
@@ -294,28 +231,12 @@ GET  /v1/lifecycle/status
 
 Design notes:
 
-- `run` reuses the command runtime (`pkg/runtime/command.go`) synchronously
-  (not `/command`'s background+poll shape — hooks need a hard deadline) and
-  serves only `prePause`/`postResume`. **The request carries only the event,
-  never the command** — execd's effective lifecycle config is the in-sandbox
-  source of truth for every hook (the persisted file and the current process's
-  matching validated startup config); the server stores config only for
-  validation/display/re-provisioning.
-- `executed: false` is explicit and differentiated: a hook the server believes
-  is configured reporting `not_configured`/`config_unavailable` is treated as
-  hook failure (R5) — the configured state flush must not silently vanish.
-- `status.startup.state` is scoped to the current execd process. It becomes
-  `succeeded` after `preStart` completes successfully, or immediately when no
-  `preStart` is configured. `/ping` may already succeed while this state is
-  `pending` or `running`; resume must not use `/ping` as its readiness gate.
+- `run` reuses the command runtime (`pkg/runtime/command.go`) synchronously (not `/command`'s background+poll shape — hooks need a hard deadline) and serves only `prePause`/`postResume`. **The request carries only the event, never the command** — execd's effective lifecycle config is the in-sandbox source of truth for every hook (the persisted file and the current process's matching validated startup config); the server stores config only for validation/display/re-provisioning.
+- `executed: false` is explicit and differentiated: a hook the server believes is configured reporting `not_configured`/`config_unavailable` is treated as hook failure (R5) — the configured state flush must not silently vanish.
+- `status.startup.state` is scoped to the current execd process. It becomes `succeeded` after `preStart` completes successfully, or immediately when no `preStart` is configured. `/ping` may already succeed while this state is `pending` or `running`; resume must not use `/ping` as its readiness gate.
 - `preTerminate` has **no endpoint** — execd runs it in a SIGTERM handler (§6).
-- Periodic scheduling is a `robfig/cron/v3` ticker inside execd (5-field cron +
-  descriptors, container-local timezone), started from the injected env and
-  replaced live by `POST /v1/lifecycle/config`. One in-flight run per `name`;
-  Docker pause freezes the ticker naturally; K8s resume reconstructs it from
-  the provider-injected or persisted effective config.
-- `prePause` does not wait for in-flight periodic runs — the final flush is
-  `prePause`'s own responsibility.
+- Periodic scheduling is a `robfig/cron/v3` ticker inside execd (5-field cron + descriptors, container-local timezone), started from the injected env and replaced live by `POST /v1/lifecycle/config`. One in-flight run per `name`; Docker pause freezes the ticker naturally; K8s resume reconstructs it from the provider-injected or persisted effective config.
+- `prePause` does not wait for in-flight periodic runs — the final flush is `prePause`'s own responsibility.
 
 ### 5. Orchestrated Transitions
 
@@ -327,38 +248,15 @@ Design notes:
 | Docker TTL expiry | server timer routes expiration through a **grace-bounded `container.stop(timeout)`** (SIGTERM → hook → SIGKILL), then `remove` — never `kill` + `remove(force=True)` (the current `_expire_sandbox` path, which would skip the hook) |
 | K8s TTL/eviction/node drain | controller/kubelet deletes the pod; SIGTERM path — no server involvement |
 
-**K8s resume state gating**: the controller sets the CR phase to `Succeed`
-as soon as the pod is ready, independently of execd's lifecycle startup state
-and the server-side `postResume` call, so the CR phase cannot express
-"resuming, hooks in progress". The server owns the public `SandboxState`
-mapping: after `/ping` confirms liveness, it waits for
-`GET /v1/lifecycle/status` to report startup `succeeded`, then triggers
-`postResume`, and keeps reporting `Resuming` until both complete. Startup
-failure, lifecycle-status unreachability, or an `Abort` result causes the server
-to re-patch `spec.pause=true` so the controller re-pauses → public `Paused`. No
-controller or CRD change needed.
+**K8s resume state gating**: the controller sets the CR phase to `Succeed` as soon as the pod is ready, independently of execd's lifecycle startup state and the server-side `postResume` call, so the CR phase cannot express "resuming, hooks in progress". The server owns the public `SandboxState` mapping: after `/ping` confirms liveness, it waits for `GET /v1/lifecycle/status` to report startup `succeeded`, then triggers `postResume`, and keeps reporting `Resuming` until both complete. Startup failure, lifecycle-status unreachability, or an `Abort` result causes the server to re-patch `spec.pause=true` so the controller re-pauses → public `Paused`. No controller or CRD change needed.
 
-Client visibility is unchanged: transitions surface as
-`Pausing`/`Resuming`/`Stopping`, hook results in `reason`/`message`.
+Client visibility is unchanged: transitions surface as `Pausing`/`Resuming`/`Stopping`, hook results in `reason`/`message`.
 
-**preStart**: execd loads and persists the lifecycle config,
-starts its HTTP server, then runs `[preStart]` with the configured timeout. In
-normal mode, bootstrap starts execd first and waits on a private,
-watchdog-bounded startup status channel; only a successful result releases the
-user entrypoint. In init mode, execd is PID 1 and launches the supervised
-entrypoint only after `preStart` succeeds. The public lifecycle startup status
-tracks the same result for orchestrated resume; `/ping` remains responsive while
-the hook runs. A failure or timeout aborts startup in both modes.
+**preStart**: execd loads and persists the lifecycle config, starts its HTTP server, then runs `[preStart]` with the configured timeout. In normal mode, bootstrap starts execd first and waits on a private, watchdog-bounded startup status channel; only a successful result releases the user entrypoint. In init mode, execd is PID 1 and launches the supervised entrypoint only after `preStart` succeeds. The public lifecycle startup status tracks the same result for orchestrated resume; `/ping` remains responsive while the hook runs. A failure or timeout aborts startup in both modes.
 
 ### 6. Signal-Driven preTerminate
 
-Every platform termination converges on SIGTERM to the container (K8s:
-kubelet during pod deletion; Docker: `docker stop`). In dedicated normal-mode
-containers PID 1 bootstrap forwards TERM to execd (`_shutdown_children`); in
-init mode execd is PID 1 and receives it directly. The legacy Pool task shape
-backgrounds bootstrap behind a task shim and does not provide this guarantee,
-so `preTerminate` is unavailable there unless `execd_run_as_init` is enabled
-(R13). execd:
+Every platform termination converges on SIGTERM to the container (K8s: kubelet during pod deletion; Docker: `docker stop`). In dedicated normal-mode containers PID 1 bootstrap forwards TERM to execd (`_shutdown_children`); in init mode execd is PID 1 and receives it directly. The legacy Pool task shape backgrounds bootstrap behind a task shim and does not provide this guarantee, so `preTerminate` is unavailable there unless `execd_run_as_init` is enabled (R13). execd:
 
 ```go
 // main.go: intercept SIGTERM, run preTerminate to completion, then shut down.
@@ -421,9 +319,7 @@ Properties:
 
 ## Upgrade & Migration Strategy
 
-**Backward compatible**: all fields optional; sandboxes without `lifecycle`
-behave exactly as today; no existing endpoint/schema/CRD change (K8s config
-rides a new, controller-ignored annotation).
+**Backward compatible**: all fields optional; sandboxes without `lifecycle` behave exactly as today; no existing endpoint/schema/CRD change (K8s config rides a new, controller-ignored annotation).
 
 **Phased rollout**:
 
@@ -433,6 +329,4 @@ rides a new, controller-ignored annotation).
 4. Docker and K8s provider orchestration, grace-period wiring, and transition E2E coverage.
 5. Pool-mode parity via per-sandbox `spec.taskTemplate` injection (R11), with `preTerminate` gated on `execd_run_as_init` until another explicit TERM route exists (R13).
 
-**Docs**: `docs/` lifecycle hook guide (hooks, failure policies, idempotency,
-cron reference), `kubernetes/AGENTS.md` annotation contract note, SDK
-regeneration for the `lifecycle` field and PATCH endpoint.
+**Docs**: `docs/` lifecycle hook guide (hooks, failure policies, idempotency, cron reference), `kubernetes/AGENTS.md` annotation contract note, SDK regeneration for the `lifecycle` field and PATCH endpoint.

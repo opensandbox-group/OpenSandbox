@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +23,18 @@ data class IsolatedWorkspaceSpec(
     val mode: String? = null,
 )
 
+/**
+ * One overlay mount. `mode = "overlay"` mounts a copy-on-write view:
+ * `persist = true` (default) uses a host upper directory, `persist = false`
+ * an ephemeral tmpfs discarded with the session. `rw` and `ro` bind
+ * directly; `persist` must be left unset for them.
+ */
+data class IsolatedOverlaySpec(
+    val path: String,
+    val mode: String? = null,
+    val persist: Boolean? = null,
+)
+
 data class EnvPassthroughSpec(
     val mode: String = "deny",
     val keys: List<String> = emptyList(),
@@ -34,8 +46,14 @@ data class BindMount(
     val readonly: Boolean? = null,
 )
 
+/**
+ * Request to create an isolated bash session. [workspace] is legacy sugar:
+ * at least one of [workspace]/[overlays] is required, and [workspace] is
+ * prepended when both are set.
+ */
 data class CreateIsolatedSessionRequest(
-    val workspace: IsolatedWorkspaceSpec,
+    val workspace: IsolatedWorkspaceSpec? = null,
+    val overlays: List<IsolatedOverlaySpec>? = null,
     val profile: String? = null,
     val extraWritable: List<String>? = null,
     val binds: List<BindMount>? = null,
@@ -53,6 +71,7 @@ data class IsolatedSessionInfo(
     // Creation-parameter fields echoed by execd (may be absent on older builds).
     val profile: String? = null,
     val workspace: IsolatedWorkspaceSpec? = null,
+    val overlays: List<IsolatedOverlaySpec>? = null,
     val extraWritable: List<String>? = null,
     val binds: List<BindMount>? = null,
     val shareNet: Boolean? = null,
@@ -71,6 +90,7 @@ data class IsolatedSessionState(
     // Creation-parameter fields echoed by execd (may be absent on older builds).
     val profile: String? = null,
     val workspace: IsolatedWorkspaceSpec? = null,
+    val overlays: List<IsolatedOverlaySpec>? = null,
     val extraWritable: List<String>? = null,
     val binds: List<BindMount>? = null,
     val shareNet: Boolean? = null,
@@ -104,6 +124,11 @@ data class IsolatedRunRequest(
  */
 data class IsolatedRunOpts(
     val envs: Map<String, String>? = null,
+    /**
+     * Foreground-only: applies to [IsolationSession.run]. Background runs are
+     * deliberately not time-limited, so this value is ignored by
+     * [IsolationSession.runBackground].
+     */
     val timeoutSeconds: Int? = null,
 )
 

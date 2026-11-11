@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,6 +48,7 @@ enum class RetryCause(val value: String) {
     STATUS_503("status_503"),
     STATUS_504("status_504"),
     STATUS_OTHER("status_other"),
+    WAKE_TIMEOUT("wake_timeout"),
     ;
 
     companion object {
@@ -111,6 +112,27 @@ class RetryPolicy
         val overallDeadline: Duration? = null,
         /** Non-blocking hook fired synchronously before each backoff sleep. */
         val onRetry: ((RetryEvent) -> Unit)? = null,
+        /**
+         * Auto-retry gateway wake-timeout responses (OSEP-0024): a `503`
+         * carrying the `OpenSandbox-Wake: expired` marker proves the request
+         * was never forwarded, so the original request is resent for any
+         * method after waiting per `Retry-After` — provided the body is
+         * replayable. Bare `503` responses are never affected by this knob.
+         */
+        val wakeRetryEnabled: Boolean = true,
+        /**
+         * Maximum wake-timeout responses (marked `503`) consumed before the
+         * wake retry gives up and raises [com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxWakeTimeoutException].
+         */
+        val wakeMaxAttempts: Int = DEFAULT_WAKE_MAX_ATTEMPTS,
+        /**
+         * Wall-clock cap spanning all wake cycles of one logical request:
+         * waits, retries, and request time. Wake retries never reset it; a
+         * next `Retry-After` that does not fit the remaining budget ends the
+         * wake retry with a typed exception. `null` removes the time bound
+         * (the attempt count still applies).
+         */
+        val wakeOverallDeadline: Duration? = DEFAULT_WAKE_OVERALL_DEADLINE,
     ) {
         /** Statuses that trigger retry for `GET/HEAD/PUT/DELETE/OPTIONS`. */
         val retryableStatusCodesIdempotent: Set<Int> =
@@ -131,6 +153,13 @@ class RetryPolicy
             require(overallDeadline == null || (!overallDeadline.isNegative && !overallDeadline.isZero)) {
                 "overallDeadline must be > 0 when set, got $overallDeadline"
             }
+            require(wakeMaxAttempts >= 1) { "wakeMaxAttempts must be >= 1, got $wakeMaxAttempts" }
+            require(
+                wakeOverallDeadline == null ||
+                    (!wakeOverallDeadline.isNegative && !wakeOverallDeadline.isZero),
+            ) {
+                "wakeOverallDeadline must be > 0 when set, got $wakeOverallDeadline"
+            }
         }
 
         /**
@@ -138,13 +167,15 @@ class RetryPolicy
          *
          * Even `maxRetries == 0` needs the interceptor when the caller uses it
          * purely to enforce [perAttemptTimeout] or [overallDeadline] on a single
-         * attempt, or to observe failures through [onRetry].
+         * attempt, to observe failures through [onRetry], or to keep the
+         * wake-timeout retry contract active.
          */
         fun wrapsTransport(): Boolean =
             maxRetries > 0 ||
                 perAttemptTimeout != null ||
                 overallDeadline != null ||
-                onRetry != null
+                onRetry != null ||
+                wakeRetryEnabled
 
         internal fun retryableStatusesFor(method: String): Set<Int> =
             if (isIdempotentMethod(method)) {
@@ -155,6 +186,13 @@ class RetryPolicy
 
         companion object {
             const val DEFAULT_MAX_RETRIES = 3
+
+            /** Default wake-retry attempt budget (OSEP-0024). */
+            const val DEFAULT_WAKE_MAX_ATTEMPTS = 5
+
+            /** Default wall-clock cap spanning all wake cycles of one logical request (OSEP-0024). */
+            @JvmField
+            val DEFAULT_WAKE_OVERALL_DEADLINE: Duration = Duration.ofSeconds(60)
 
             /**
              * Default idempotent retryable set: 429 (Too Many Requests), 502
@@ -174,7 +212,7 @@ class RetryPolicy
 
             /** Disable SDK-policy retries and fall back to OkHttp's built-in connection recovery. */
             @JvmStatic
-            fun disabled(): RetryPolicy = RetryPolicy(maxRetries = 0)
+            fun disabled(): RetryPolicy = RetryPolicy(maxRetries = 0, wakeRetryEnabled = false)
         }
     }
 

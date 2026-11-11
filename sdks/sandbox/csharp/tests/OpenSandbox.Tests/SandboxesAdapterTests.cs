@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -359,6 +359,7 @@ public class SandboxesAdapterTests
           "updatedAt": "2026-03-14T12:00:00Z",
           "resourceLimits": { "cpu": "1", "memory": "512Mi" },
           "entrypoint": ["tail", "-f", "/dev/null"],
+          "env": { "LOG_LEVEL": "info" },
           "metadata": { "team": "platform" },
           "readiness": { "probe": "tcp://127.0.0.1:44772", "warmupSeconds": 30 }
         }
@@ -372,6 +373,7 @@ public class SandboxesAdapterTests
         {
             Image = "python:3.11",
             Publish = "s3://bucket/publish",
+            Env = new Dictionary<string, string> { ["LOG_LEVEL"] = "info" },
             Metadata = new Dictionary<string, string> { ["team"] = "platform" }
         });
 
@@ -381,6 +383,7 @@ public class SandboxesAdapterTests
         using var json = JsonDocument.Parse(handler.RequestBody!);
         json.RootElement.GetProperty("image").GetString().Should().Be("python:3.11");
         json.RootElement.GetProperty("publish").GetString().Should().Be("s3://bucket/publish");
+        json.RootElement.GetProperty("env").GetProperty("LOG_LEVEL").GetString().Should().Be("info");
         json.RootElement.GetProperty("metadata").GetProperty("team").GetString().Should().Be("platform");
 
         template.TemplateId.Should().Be("tpl-1");
@@ -391,6 +394,7 @@ public class SandboxesAdapterTests
         template.Status.ManifestRef.Should().BeNull();
         template.ResourceLimits.Should().ContainKey("cpu").WhoseValue.Should().Be("1");
         template.Entrypoint.Should().Equal("tail", "-f", "/dev/null");
+        template.Env.Should().ContainKey("LOG_LEVEL").WhoseValue.Should().Be("info");
         template.Metadata.Should().ContainKey("team").WhoseValue.Should().Be("platform");
         template.Readiness.Should().NotBeNull();
         template.Readiness!.Probe.Should().Be("tcp://127.0.0.1:44772");

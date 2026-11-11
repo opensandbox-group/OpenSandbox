@@ -5,12 +5,9 @@ A C# SDK for code interpretation with OpenSandbox. Provides high-level APIs for 
 
 ## Prerequisites
 
-This SDK requires a Docker image containing the Code Interpreter runtime environment. You must use
-`opensandbox/code-interpreter` (or a derivative image) with pre-installed runtimes for Python, Java, Go,
-Node.js, and others.
+This SDK requires a Docker image containing the Code Interpreter runtime environment. You must use `opensandbox/code-interpreter` (or a derivative image) with pre-installed runtimes for Python, Java, Go, Node.js, and others.
 
-For supported languages and versions, see the
-[Environment Documentation](https://github.com/opensandbox-group/sandbox-images).
+For supported languages and versions, see the [Environment Documentation](https://github.com/opensandbox-group/sandbox-images).
 
 ## Installation
 
@@ -71,8 +68,7 @@ catch (SandboxException ex)
 
 ## Logging (ILogger)
 
-The SDK uses `Microsoft.Extensions.Logging` abstractions. Pass your own `ILoggerFactory`
-through diagnostics options when creating the sandbox/code interpreter:
+The SDK uses `Microsoft.Extensions.Logging` abstractions. Pass your own `ILoggerFactory` through diagnostics options when creating the sandbox/code interpreter:
 
 ```csharp
 using Microsoft.Extensions.Logging;
@@ -108,8 +104,7 @@ var interpreter = await CodeInterpreter.CreateAsync(sandbox, new CodeInterpreter
 
 ### Docker Image
 
-The Code Interpreter SDK relies on a specialized runtime image. Ensure your sandbox provider has
-`opensandbox/code-interpreter` available.
+The Code Interpreter SDK relies on a specialized runtime image. Ensure your sandbox provider has `opensandbox/code-interpreter` available.
 
 ### Language Version Selection
 
@@ -126,8 +121,7 @@ You can specify language versions through environment variables when creating th
 
 ### Run with `Language` (default language context)
 
-If you do not need explicit context IDs, run code by setting only `Language`.
-When `Context` is omitted, execd creates/reuses a default session for that language, so state can persist across runs.
+If you do not need explicit context IDs, run code by setting only `Language`. When `Context` is omitted, execd creates/reuses a default session for that language, so state can persist across runs.
 
 ```csharp
 await interpreter.Codes.RunAsync(
@@ -322,7 +316,7 @@ Console.WriteLine($"CPU: {metrics.CpuUsedPercentage}%, Memory: {metrics.MemoryUs
 
 - **Lifecycle**: `CodeInterpreter` wraps an existing `Sandbox` and reuses its connection and services.
 - **Default context behavior**: `RunAsync(..., new RunCodeOptions { Language = ... })` uses the language default context.
-- **Cleanup**: `DisposeAsync` only cleans local resources. Call `KillAsync()` to terminate the remote sandbox instance.
+- **Cleanup**: `CodeInterpreter` itself implements no `DisposeAsync`/`IAsyncDisposable`; local resources live on the wrapped `Sandbox` (it is `IAsyncDisposable`). Call `KillAsync()` to terminate the remote sandbox instance.
 
 ## License
 

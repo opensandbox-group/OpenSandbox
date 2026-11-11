@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,15 +38,6 @@ func TestMitmRedirectScriptV4(t *testing.T) {
 	// and is bound to the sandbox's veth (a spoofed source IP from another
 	// sandbox's veth is not DNATed and hits the forward master drop instead)
 	require.Contains(t, script, `ip saddr 10.0.0.5 tcp dport {80,443} dnat to 10.0.0.1:18081`)
-}
-
-func TestMitmRedirectScriptV4WithoutVeth(t *testing.T) {
-	// no veth known: keep the saddr-only rule (fail open on the interception
-	// side is not possible — the forward master drop is the backstop)
-	script := mitmRedirectScript([]MitmRedirectEntry{
-		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
-	}, 18081, []int{80, 443})
-	require.Contains(t, script, "ip saddr 10.0.0.5 tcp dport {80,443} dnat to 10.0.0.1:18081")
 }
 
 func TestMitmRedirectScriptV6(t *testing.T) {

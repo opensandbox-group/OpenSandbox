@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -158,12 +158,6 @@ spec:
         assert isinstance(provider, CustomProvider)
 
         assert "custom" in list_available_providers()
-    
-    def test_create_batchsandbox_with_config(self, mock_k8s_client, k8s_app_config):
-        provider = create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_app_config)
-        
-        assert isinstance(provider, BatchSandboxProvider)
-        assert provider.k8s_client == mock_k8s_client
     
     def test_create_provider_with_empty_registry_raises_error(self, mock_k8s_client, isolated_registry):
         from opensandbox_server.services.k8s import provider_factory

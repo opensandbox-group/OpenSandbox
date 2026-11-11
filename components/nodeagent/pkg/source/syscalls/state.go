@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/alibaba/opensandbox/nodeagent/pkg/api"
@@ -53,7 +54,7 @@ func (s *source) loadStreams() (map[string]*streamRuntime, error) {
 				return err
 			}
 			outcome := persisted.Outcome
-			if !persisted.EndEmitted && !contains(outcome.LossReasons, lossReasonRestart) {
+			if !persisted.EndEmitted && !slices.Contains(outcome.LossReasons, lossReasonRestart) {
 				outcome.HadSourceGaps = true
 				outcome.LossReasons = append(outcome.LossReasons, lossReasonRestart)
 			}

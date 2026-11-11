@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -63,7 +63,8 @@ class ExecutionConverter:
         if opts.timeout is not None:
             if opts.timeout < timedelta(0):
                 raise InvalidArgumentException("timeout must be positive")
-            timeout_milliseconds = int(opts.timeout.total_seconds() * 1000)
+            # Round up using integer microseconds to preserve whole milliseconds exactly.
+            timeout_milliseconds = (opts.timeout // timedelta(microseconds=1) + 999) // 1000
 
         uid = UNSET
         if opts.uid is not None:

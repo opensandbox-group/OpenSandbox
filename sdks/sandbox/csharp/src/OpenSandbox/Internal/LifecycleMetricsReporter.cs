@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,6 +33,15 @@ namespace OpenSandbox.Internal;
 /// </summary>
 internal static class LifecycleMetricsReporter
 {
+    // Shared: a per-event HttpClient churns sockets on a fire-and-forget path.
+    // Deliberately capped at 5s regardless of RequestTimeoutSeconds: telemetry
+    // must never block the create/connect path.
+    private static readonly HttpClient TelemetryClient = new HttpClient(
+        new ProtectedRedirectHandler(new HttpClientHandler { AllowAutoRedirect = false }))
+    {
+        Timeout = TimeSpan.FromSeconds(5),
+    };
+
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -88,10 +97,6 @@ internal static class LifecycleMetricsReporter
         {
             try
             {
-                using var client = new HttpClient
-                {
-                    Timeout = TimeSpan.FromSeconds(Math.Max(1, connectionConfig.RequestTimeoutSeconds)),
-                };
                 using var content = new ByteArrayContent(body);
                 content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
@@ -107,13 +112,13 @@ internal static class LifecycleMetricsReporter
                     }
                     request.Headers.TryAddWithoutValidation(header.Key, header.Value);
                 }
-                if (!string.IsNullOrEmpty(connectionConfig.ApiKey))
+                if (!string.IsNullOrEmpty(connectionConfig.ApiKey) &&
+                    !request.Headers.Contains(Constants.ApiKeyHeader))
                 {
-                    request.Headers.Remove(Constants.ApiKeyHeader);
                     request.Headers.TryAddWithoutValidation(Constants.ApiKeyHeader, connectionConfig.ApiKey);
                 }
 
-                using var response = await client.SendAsync(request).ConfigureAwait(false);
+                using var response = await TelemetryClient.SendAsync(request).ConfigureAwait(false);
                 // Drain content to allow connection reuse; ignore status.
                 _ = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
             }

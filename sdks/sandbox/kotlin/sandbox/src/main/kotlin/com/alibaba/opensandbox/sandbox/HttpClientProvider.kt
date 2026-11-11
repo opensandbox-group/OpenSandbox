@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -82,6 +82,30 @@ class HttpClientProvider(
         }
 
     val httpClient: OkHttpClient by httpClientLazy
+
+    // File uploads and downloads are transfers that legitimately outlive the
+    // request timeout while they keep making progress, so this client clones the
+    // regular one without the default whole-call deadline. The connect, write,
+    // and read timeouts stay in place, and an explicit
+    // RetryPolicy.overallDeadline remains the wall-clock cap for the transfer: a
+    // stalled transfer, or one that runs past the caller's deadline, still fails
+    // instead of hanging (the Go SDK's ResponseHeaderTimeout contract).
+    private val transferClientLazy =
+        lazy {
+            // OkHttp rejects a call timeout above Int.MAX_VALUE millis, and a
+            // positive deadline that truncates to 0 would silently disable the
+            // cap, so the conversion is clamped instead of passed through.
+            val transferDeadlineMillis =
+                config.retryPolicy.overallDeadline
+                    ?.toMillis()
+                    ?.coerceIn(1L, Int.MAX_VALUE.toLong())
+                    ?: 0L
+            httpClient.newBuilder()
+                .callTimeout(transferDeadlineMillis, TimeUnit.MILLISECONDS)
+                .build()
+        }
+
+    val transferClient: OkHttpClient by transferClientLazy
 
     // A staged warmup already retries health through its DelayQueue. Clone the
     // regular client so the warmup-only probe shares its dispatcher, connection
@@ -200,8 +224,14 @@ class HttpClientProvider(
 
     private class AuthenticationInterceptor(private val apiKey: String) : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            // An explicit header from ConnectionConfig.headers (matched
+            // case-insensitively by OkHttp) wins over the configured API key.
+            if (apiKey.isBlank() || request.header("OPEN-SANDBOX-API-KEY") != null) {
+                return chain.proceed(request)
+            }
             return chain.proceed(
-                chain.request().newBuilder()
+                request.newBuilder()
                     .header("OPEN-SANDBOX-API-KEY", apiKey)
                     .build(),
             )

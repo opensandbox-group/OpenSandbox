@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,12 +46,23 @@ class CredentialProxyConfig private constructor(
 }
 
 /**
+ * Write-only Credential Vault credential source. Exactly one variant is set,
+ * selected by [type]: inline material via value, or a header-resolver
+ * endpoint via exchange (OSEP-0025). The egress rejects sources that mix or
+ * omit both.
+ */
+sealed interface CredentialSource {
+    /** Stable wire discriminator: `inline` or `exchange`. */
+    val type: String
+}
+
+/**
  * Write-only inline credential material for Credential Vault.
  */
 class InlineCredentialSource private constructor(
     val value: String,
-    val type: String,
-) {
+    override val type: String,
+) : CredentialSource {
     companion object {
         const val TYPE_INLINE = "inline"
 
@@ -61,6 +72,9 @@ class InlineCredentialSource private constructor(
         @JvmStatic
         fun of(value: String): InlineCredentialSource = builder().value(value).build()
     }
+
+    /** Inline material is secret; the value never rides the string form. */
+    override fun toString(): String = "InlineCredentialSource(type=$type)"
 
     class Builder {
         private var value: String? = null
@@ -86,11 +100,55 @@ class InlineCredentialSource private constructor(
 }
 
 /**
+ * Exchange credential source (OSEP-0025): no local material. The egress
+ * resolves header sets per request from the header-resolver endpoint;
+ * [endpoint] is configuration, not secret material.
+ */
+class ExchangeCredentialSource private constructor(
+    val endpoint: String,
+    override val type: String,
+) : CredentialSource {
+    companion object {
+        const val TYPE_EXCHANGE = "exchange"
+
+        @JvmStatic
+        fun builder(): Builder = Builder()
+
+        @JvmStatic
+        fun of(endpoint: String): ExchangeCredentialSource = builder().endpoint(endpoint).build()
+    }
+
+    override fun toString(): String = "ExchangeCredentialSource(type=$type, endpoint=$endpoint)"
+
+    class Builder {
+        private var endpoint: String? = null
+        private var type: String = TYPE_EXCHANGE
+
+        fun endpoint(endpoint: String): Builder {
+            require(endpoint.isNotBlank()) { "Credential source endpoint cannot be blank" }
+            this.endpoint = endpoint
+            return this
+        }
+
+        fun type(type: String): Builder {
+            require(type == TYPE_EXCHANGE) { "Credential source type must be exchange" }
+            this.type = type
+            return this
+        }
+
+        fun build(): ExchangeCredentialSource {
+            val endpointValue = endpoint ?: throw IllegalArgumentException("Credential source endpoint must be specified")
+            return ExchangeCredentialSource(endpoint = endpointValue, type = type)
+        }
+    }
+}
+
+/**
  * Sandbox-local Credential Vault credential.
  */
 class Credential private constructor(
     val name: String,
-    val source: InlineCredentialSource,
+    val source: CredentialSource,
 ) {
     companion object {
         @JvmStatic
@@ -99,7 +157,7 @@ class Credential private constructor(
 
     class Builder {
         private var name: String? = null
-        private var source: InlineCredentialSource? = null
+        private var source: CredentialSource? = null
 
         fun name(name: String): Builder {
             require(name.isNotBlank()) { "Credential name cannot be blank" }
@@ -107,13 +165,18 @@ class Credential private constructor(
             return this
         }
 
-        fun source(source: InlineCredentialSource): Builder {
+        fun source(source: CredentialSource): Builder {
             this.source = source
             return this
         }
 
         fun inlineSource(value: String): Builder {
             this.source = InlineCredentialSource.of(value)
+            return this
+        }
+
+        fun exchangeSource(endpoint: String): Builder {
+            this.source = ExchangeCredentialSource.of(endpoint)
             return this
         }
 
@@ -307,10 +370,13 @@ class CredentialSubstitution private constructor(
 }
 
 /**
- * Typed Credential Vault auth rule.
+ * Credential Vault auth rule. [type] selects one of the five static kinds;
+ * leaving it null selects the typeless exchange form (OSEP-0025), which
+ * carries only a [credential] reference to an exchange-sourced credential.
+ * The egress rejects shapes mixing the two.
  */
 class CredentialAuth private constructor(
-    val type: Type,
+    val type: Type?,
     val credential: String?,
     val name: String?,
     val headers: List<CustomHeaderEntry>?,
@@ -346,6 +412,10 @@ class CredentialAuth private constructor(
         @JvmStatic
         fun passthrough(substitutions: List<CredentialSubstitution> = emptyList()): CredentialAuth =
             builder().type(Type.PASSTHROUGH).substitutions(substitutions).build()
+
+        /** Typeless exchange form (OSEP-0025): only a credential reference. */
+        @JvmStatic
+        fun exchange(credential: String): CredentialAuth = builder().credential(credential).build()
     }
 
     class Builder {
@@ -390,7 +460,18 @@ class CredentialAuth private constructor(
         fun substitution(substitution: CredentialSubstitution): Builder = substitutions((substitutions ?: emptyList()) + substitution)
 
         fun build(): CredentialAuth {
-            val typeValue = type ?: throw IllegalArgumentException("Credential auth type must be specified")
+            val typeValue = type
+            if (typeValue == null) {
+                if (credential == null) {
+                    throw IllegalArgumentException("Credential auth requires either a static type or an exchange credential reference")
+                }
+                if (name != null || headers != null || substitutions != null) {
+                    throw IllegalArgumentException(
+                        "The typeless exchange auth form carries only credential; name, headers, and substitutions require a static type",
+                    )
+                }
+                return CredentialAuth(type = null, credential = credential, name = null, headers = null, substitutions = null)
+            }
             when (typeValue) {
                 Type.BEARER, Type.BASIC -> {
                     if (credential == null) {
@@ -616,7 +697,9 @@ class CredentialVaultPatchRequest private constructor(
 }
 
 /**
- * Sanitized credential metadata returned by Credential Vault.
+ * Sanitized credential metadata returned by Credential Vault. [sourceType] is
+ * the source kind (`inline` or `exchange`); source material never rides this
+ * model.
  */
 class CredentialMetadata(
     val name: String,
@@ -625,11 +708,14 @@ class CredentialMetadata(
 )
 
 /**
- * Sanitized auth metadata returned for a Credential Vault binding.
+ * Sanitized auth metadata returned for a Credential Vault binding. Static
+ * kinds carry [type] (plus [name] for apiKey); the typeless exchange form
+ * carries only [credential], a credential reference (never material).
  */
 class CredentialAuthMetadata(
-    val type: String,
+    val type: String?,
     val name: String?,
+    val credential: String? = null,
 )
 
 /**

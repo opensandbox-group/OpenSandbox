@@ -1,0 +1,1 @@
+{"v":1,"incarnation":"rt-1","attachmentId":"att-1","revision":1,"vault":{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],"bindings":[{"name":"api","match":{"hosts":["api.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}}

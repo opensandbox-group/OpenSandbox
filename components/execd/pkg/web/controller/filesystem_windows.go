@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -198,6 +198,10 @@ func (c *FilesystemController) RemoveDirs() {
 			)
 			return
 		}
+		if err := rejectStagingPath(resolvedDir); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		if err := os.RemoveAll(resolvedDir); err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,
@@ -304,6 +308,9 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 		}
 
 		for _, entry := range dirEntries {
+			if isAnyStagingName(entry.Name()) {
+				continue
+			}
 			entryPath := filepath.Join(dir, entry.Name())
 			info, err := entry.Info()
 			if err != nil {
@@ -362,6 +369,14 @@ func (c *FilesystemController) SearchFiles() {
 	if pattern == "" {
 		pattern = "**"
 	}
+	if !glob.ValidPattern(pattern) {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("invalid pattern %s", pattern),
+		)
+		return
+	}
 
 	files := make([]model.FileInfo, 0, 16)
 	err = filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
@@ -372,6 +387,9 @@ func (c *FilesystemController) SearchFiles() {
 			return fmt.Errorf("error accessing path %s: %w", filePath, err)
 		}
 		if info.IsDir() {
+			return nil
+		}
+		if isAnyStagingName(info.Name()) {
 			return nil
 		}
 
@@ -429,6 +447,10 @@ func (c *FilesystemController) ReplaceContent() {
 		origPath := file
 		file, err := pathutil.ExpandAbsPath(file)
 		if err != nil {
+			c.handleFileError(err)
+			return
+		}
+		if err := rejectStagingPath(file); err != nil {
 			c.handleFileError(err)
 			return
 		}

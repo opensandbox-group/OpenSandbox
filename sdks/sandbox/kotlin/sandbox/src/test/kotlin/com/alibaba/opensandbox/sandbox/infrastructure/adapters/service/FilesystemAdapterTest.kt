@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,13 +20,17 @@ import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
+import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ByteRange
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
+import com.alibaba.opensandbox.sandbox.domain.services.IdentityFilesystem
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.isFileNotFound
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -56,10 +60,101 @@ class FilesystemAdapterTest {
         filesystemAdapter = FilesystemAdapter(httpClientProvider, endpoint)
     }
 
+    @Test
+    fun identityClientPreservesProxyPathHeadersAndOriginalClient() {
+        val endpoint =
+            SandboxEndpoint(
+                mockWebServer.hostName + ":" + mockWebServer.port + "/proxy-prefix",
+                headers = mapOf("X-EXECD-ACCESS-TOKEN" to "secret"),
+            )
+        val original = FilesystemAdapter(httpClientProvider, endpoint)
+        val scoped = original.withIdentity(1001, 2000)
+        mockWebServer.enqueue(MockResponse().setBody("scoped"))
+        mockWebServer.enqueue(MockResponse().setBody("original"))
+
+        assertEquals("scoped", scoped.readFile("/file", "UTF-8", null))
+        val scopedRequest = mockWebServer.takeRequest()
+        assertEquals(
+            "/proxy-prefix/v1/filesystem/1001/2000/files/download",
+            scopedRequest.requestUrl?.encodedPath,
+        )
+        assertEquals("secret", scopedRequest.getHeader("X-EXECD-ACCESS-TOKEN"))
+
+        assertEquals("original", original.readFile("/file", "UTF-8", null))
+        assertEquals("/proxy-prefix/files/download", mockWebServer.takeRequest().requestUrl?.encodedPath)
+
+        mockWebServer.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("{}"))
+        assertTrue(scoped.readFileInfo(listOf("/file")).isEmpty())
+        val infoRequest = mockWebServer.takeRequest()
+        assertEquals("/proxy-prefix/v1/filesystem/1001/2000/files/info", infoRequest.requestUrl?.encodedPath)
+        assertEquals("secret", infoRequest.getHeader("X-EXECD-ACCESS-TOKEN"))
+    }
+
+    @Test
+    fun identityClientNeverFallsBackToDefaultIdentity() {
+        mockWebServer.enqueue(MockResponse().setResponseCode(404).setBody("unsupported"))
+        val scoped = filesystemAdapter.withIdentity(1001, 2000)
+        assertThrows<SandboxApiException> { scoped.readFile("/file", "UTF-8", null) }
+        assertEquals(1, mockWebServer.requestCount)
+        assertEquals(
+            "/v1/filesystem/1001/2000/files/download",
+            mockWebServer.takeRequest().requestUrl?.encodedPath,
+        )
+        assertThrows<IllegalArgumentException> { filesystemAdapter.withIdentity(-1, 0) }
+        assertThrows<IllegalArgumentException> { filesystemAdapter.withIdentity(0, 4294967295L) }
+    }
+
     @AfterEach
     fun tearDown() {
         mockWebServer.shutdown()
         httpClientProvider.close()
+    }
+
+    @Test
+    fun identityClientNormalizesScopedEndpointSuffixes() {
+        for (suffix in listOf("", "/", "/v1/filesystem", "/v1/filesystem/", "/v1/filesystem/1/2")) {
+            val endpoint =
+                SandboxEndpoint(
+                    mockWebServer.hostName + ":" + mockWebServer.port + "/proxy-prefix" + suffix,
+                )
+            val original = FilesystemAdapter(httpClientProvider, endpoint)
+            val scoped = original.withIdentity(1, 2) as IdentityFilesystem
+            val rebound = scoped.withIdentity(0, IdentityFilesystem.MAX_IDENTITY_ID)
+            mockWebServer.enqueue(MockResponse().setBody("rebound"))
+            assertEquals("rebound", rebound.readFile("/file", "UTF-8", null))
+            assertEquals(
+                "/proxy-prefix/v1/filesystem/0/4294967294/files/download",
+                mockWebServer.takeRequest().requestUrl?.encodedPath,
+            )
+        }
+    }
+
+    @Test
+    fun identityClientValidatesBothIdsBeforeTransport() {
+        for (invalid in listOf(-1L, IdentityFilesystem.MAX_IDENTITY_ID + 1, Long.MAX_VALUE)) {
+            assertThrows<IllegalArgumentException> { filesystemAdapter.withIdentity(invalid, 0) }
+            assertThrows<IllegalArgumentException> { filesystemAdapter.withIdentity(0, invalid) }
+        }
+        assertEquals(0, mockWebServer.requestCount)
+    }
+
+    @Test
+    fun `line reads report unknown total size`() {
+        for ((offset, limit) in listOf(2 to null, null to 2)) {
+            mockWebServer.enqueue(MockResponse().setBody("hello"))
+            val bytes = filesystemAdapter.readByteArrayDetailed("/data.txt", offset = offset, limit = limit)
+            assertFalse(bytes.isPartial)
+            assertEquals(5, bytes.contentLength)
+            assertEquals(-1, bytes.totalSize)
+
+            mockWebServer.enqueue(MockResponse().setBody("hello"))
+            val stream = filesystemAdapter.readStreamDetailed("/data.txt", offset = offset, limit = limit)
+            stream.body.use {
+                assertFalse(stream.isPartial)
+                assertEquals(5, stream.contentLength)
+                assertEquals(-1, stream.totalSize)
+            }
+        }
     }
 
     @Test
@@ -95,6 +190,80 @@ class FilesystemAdapterTest {
         val content = filesystemAdapter.readFile("/tmp/hello.txt", "UTF-8", null)
 
         assertEquals("hello world", content)
+    }
+
+    @Test
+    fun `readByteArrayDetailed exposes partial response metadata`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(206)
+                .setHeader("Content-Type", "application/octet-stream")
+                .setHeader("Content-Disposition", "attachment; filename=\"data.bin\"")
+                .setHeader("Content-Range", "bytes 0-4/10")
+                .setBody("hello"),
+        )
+
+        val response = filesystemAdapter.readByteArrayDetailed("/data.bin", "bytes=0-4")
+
+        assertArrayEquals("hello".toByteArray(), response.body)
+        assertEquals(206, response.statusCode)
+        assertTrue(response.isPartial)
+        assertEquals("application/octet-stream", response.contentType)
+        assertEquals("attachment; filename=\"data.bin\"", response.contentDisposition)
+        assertEquals(5, response.contentLength)
+        assertEquals(10, response.totalSize)
+        assertEquals(ByteRange(0, 4, 10, "bytes 0-4/10"), response.contentRange)
+        assertEquals("bytes=0-4", mockWebServer.takeRequest().getHeader("Range"))
+    }
+
+    @Test
+    fun `readByteArrayDetailed identifies an ignored Range request`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("whole file"),
+        )
+
+        val response = filesystemAdapter.readByteArrayDetailed("/data.bin", "bytes=5-")
+
+        assertFalse(response.isPartial)
+        assertNull(response.contentRange)
+        assertEquals(10, response.contentLength)
+        assertEquals(10, response.totalSize)
+    }
+
+    @Test
+    fun `readByteArrayDetailed reports unknown total size`() {
+        for ((raw, expected) in listOf(
+            null to null,
+            "garbage" to ByteRange(-1, -1, -1, "garbage"),
+            "bytes 5-9/*" to ByteRange(5, 9, -1, "bytes 5-9/*"),
+        )) {
+            val response = MockResponse().setResponseCode(206).setBody("hello")
+            if (raw != null) response.setHeader("Content-Range", raw)
+            mockWebServer.enqueue(response)
+
+            val download = filesystemAdapter.readByteArrayDetailed("/data.bin")
+
+            assertTrue(download.isPartial)
+            assertEquals(expected, download.contentRange)
+            assertEquals(-1, download.totalSize)
+        }
+    }
+
+    @Test
+    fun `detailed and legacy reads return response bodies`() {
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("hello"))
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("hello"))
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("hello"))
+
+        filesystemAdapter.readStreamDetailed("/data.bin").body.use { stream ->
+            assertArrayEquals("hello".toByteArray(), stream.readBytes())
+        }
+        assertArrayEquals("hello".toByteArray(), filesystemAdapter.readByteArray("/data.bin"))
+        filesystemAdapter.readStream("/data.bin").use { stream ->
+            assertArrayEquals("hello".toByteArray(), stream.readBytes())
+        }
     }
 
     @Test

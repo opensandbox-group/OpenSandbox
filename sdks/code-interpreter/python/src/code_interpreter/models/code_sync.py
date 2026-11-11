@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ class SupportedLanguageSync:
     GO = "go"
     TYPESCRIPT = "typescript"
     BASH = "bash"
+    JAVASCRIPT = "javascript"
 
 
 class CodeContextSync(BaseModel):

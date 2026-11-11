@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentExceptio
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SnapshotFailedException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedTemplateInfos
@@ -72,6 +73,15 @@ class SandboxManagerTest {
     @BeforeEach
     fun setUp() {
         sandboxManager = SandboxManager(sandboxService, httpClientProvider, diagnosticsService)
+    }
+
+    @Test
+    fun `diagnostic context uses diagnostics service`() {
+        val id = "sandbox-id"
+        val expected = mockk<DiagnosticContext>()
+        every { diagnosticsService.getContext(id) } returns expected
+        assertSame(expected, sandboxManager.getDiagnosticContext(id))
+        verify { diagnosticsService.getContext(id) }
     }
 
     @Test

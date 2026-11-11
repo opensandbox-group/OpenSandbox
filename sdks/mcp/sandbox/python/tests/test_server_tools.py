@@ -1,0 +1,364 @@
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+"""Regression tests for the MCP server transport-ownership fix (#1768)."""
+
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import pytest
+from opensandbox.config import ConnectionConfig
+
+from opensandbox_mcp.server import ServerState, register_tools
+
+
+class _FakeMCP:
+    """Captures tools registered via the ``@tool()`` decorator."""
+
+    def __init__(self) -> None:
+        self.tools: dict[str, object] = {}
+
+    def tool(self):
+        def decorator(func):
+            self.tools[func.__name__] = func
+            return func
+
+        return decorator
+
+
+class _FakeManager:
+    instances: list[_FakeManager] = []
+
+    def __init__(self, config) -> None:
+        self.config = config
+        self.closed = False
+        self.killed: list[str] = []
+        _FakeManager.instances.append(self)
+
+    @classmethod
+    async def create(cls, connection_config=None):
+        return cls(connection_config)
+
+    async def kill_sandbox(self, sandbox_id: str) -> None:
+        self.killed.append(sandbox_id)
+
+    async def list_sandbox_infos(self, filter=None):
+        return None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _SpyTransport(httpx.AsyncBaseTransport):
+    """Wraps a transport and records whether aclose() was invoked."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.closed = False
+
+    async def handle_async_request(self, request):
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class _FakeSandbox:
+    def __init__(self, sandbox_id: str) -> None:
+        self.id = sandbox_id
+        self.closed = False
+        self.killed = False
+
+    async def kill(self) -> None:
+        self.killed = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.fixture()
+def server(monkeypatch):
+    monkeypatch.setattr("opensandbox_mcp.server.SandboxManager", _FakeManager)
+    _FakeManager.instances = []
+    fake = _FakeMCP()
+    state = register_tools(
+        fake, connection_config=ConnectionConfig().with_transport_if_missing()
+    )
+    return fake, state
+
+
+@pytest.mark.asyncio
+async def test_kill_manager_fallback_keeps_shared_transport_open(server) -> None:
+    """The manager fallback path must not close the server-wide transport."""
+    fake, state = server
+    spy = _SpyTransport(state.connection_config.transport)
+    state.connection_config.transport = spy
+
+    response = await fake.tools["sandbox_kill"]("sbx-unknown")
+
+    assert response.status == "killed"
+    manager = _FakeManager.instances[-1]
+    assert manager.killed == ["sbx-unknown"]
+    assert manager.closed
+    assert spy.closed is False
+
+
+def test_borrowed_config_shares_transport_without_ownership() -> None:
+    from opensandbox_mcp.server import _borrowed_config
+
+    state = ServerState(
+        connection_config=ConnectionConfig().with_transport_if_missing()
+    )
+    borrowed = _borrowed_config(state)
+
+    assert borrowed is not state.connection_config
+    assert borrowed.transport is state.connection_config.transport
+    assert borrowed._owns_transport is False
+    assert state.connection_config._owns_transport is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_connect_creates_single_registry_entry(
+    server, monkeypatch
+) -> None:
+    """Two concurrent tool calls for one sandbox must not both run connect."""
+    fake, state = server
+    connect_calls: list[str] = []
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            connect_calls.append(sandbox_id)
+            await asyncio.sleep(0.01)
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    await asyncio.gather(
+        fake.tools["sandbox_get_metrics"]("sbx-race", connect_if_missing=True),
+        fake.tools["sandbox_get_metrics"]("sbx-race", connect_if_missing=True),
+    )
+
+    assert connect_calls == ["sbx-race"], (
+        "concurrent calls raced past the registry and connected twice"
+    )
+    assert state.sandboxes["sbx-race"].id == "sbx-race"
+
+
+@pytest.mark.asyncio
+async def test_slow_connect_does_not_block_unrelated_registry_ops(
+    server, monkeypatch
+) -> None:
+    """A hanging connect for one sandbox id must not stall other ids' tool calls.
+
+    The connect runs outside the registry lock, coalesced per id via an
+    in-flight task.
+    """
+    fake, state = server
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            entered.set()
+            await release.wait()
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    slow = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-slow", connect_if_missing=True)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    # sbx-slow's connect is hanging; an unrelated kill must not wait on it.
+    response = await asyncio.wait_for(
+        fake.tools["sandbox_kill"]("sbx-other"), timeout=1
+    )
+    assert response.status == "killed"
+    assert _FakeManager.instances[-1].killed == ["sbx-other"]
+
+    release.set()
+    metrics = await asyncio.wait_for(slow, timeout=1)
+    assert metrics == "metrics"
+    assert state.sandboxes["sbx-slow"].id == "sbx-slow"
+
+
+@pytest.mark.asyncio
+async def test_failed_connect_is_not_sticky(server, monkeypatch) -> None:
+    """After a failed connect, a later call must start a fresh attempt."""
+    fake, state = server
+    attempts: list[str] = []
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            attempts.append(sandbox_id)
+            if len(attempts) == 1:
+                raise RuntimeError("transient connect failure")
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    with pytest.raises(RuntimeError, match="transient connect failure"):
+        await fake.tools["sandbox_get_metrics"]("sbx-flaky", connect_if_missing=True)
+
+    metrics = await fake.tools["sandbox_get_metrics"](
+        "sbx-flaky", connect_if_missing=True
+    )
+    assert metrics == "metrics"
+    assert attempts == ["sbx-flaky", "sbx-flaky"]
+    assert state.connecting == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_does_not_cancel_coalesced_connect(
+    server, monkeypatch
+) -> None:
+    """Cancelling one tool call must not fail others waiting on the same connect.
+
+    MCP cancels a tool call's handler when the client cancels the request.
+    """
+    fake, state = server
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    connect_calls: list[str] = []
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            connect_calls.append(sandbox_id)
+            entered.set()
+            await release.wait()
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    cancelled = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-shared", connect_if_missing=True)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    waiting = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-shared", connect_if_missing=True)
+    )
+    await asyncio.sleep(0)
+
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+
+    assert await asyncio.wait_for(waiting, timeout=1) == "metrics"
+    assert connect_calls == ["sbx-shared"]
+    assert state.sandboxes["sbx-shared"].id == "sbx-shared"
+
+
+@pytest.mark.asyncio
+async def test_connect_finished_after_its_caller_cancelled_is_registered(
+    server, monkeypatch
+) -> None:
+    """A connect whose only caller was cancelled still registers the sandbox,
+    so the next call reuses it instead of connecting again."""
+    fake, state = server
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    connect_calls: list[str] = []
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            connect_calls.append(sandbox_id)
+            entered.set()
+            await release.wait()
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    cancelled = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-orphan", connect_if_missing=True)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    connect_task = state.connecting["sbx-orphan"]
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+    await asyncio.wait_for(connect_task, timeout=1)
+
+    metrics = await fake.tools["sandbox_get_metrics"](
+        "sbx-orphan", connect_if_missing=True
+    )
+    assert metrics == "metrics"
+    assert connect_calls == ["sbx-orphan"]
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_after_its_caller_cancelled_is_not_logged(
+    server, monkeypatch
+) -> None:
+    """A connect that fails after its only caller was cancelled is not
+    reported to the loop exception handler: no request is waiting for it, and
+    the next call simply connects again."""
+    fake, state = server
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            entered.set()
+            await release.wait()
+            raise RuntimeError("transient connect failure")
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+    loop = asyncio.get_running_loop()
+    reported: list[dict] = []
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+
+    cancelled = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-orphan", connect_if_missing=True)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    connect_task = state.connecting["sbx-orphan"]
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+    await asyncio.wait_for(connect_task, timeout=1)
+    await asyncio.sleep(0)
+
+    assert reported == []

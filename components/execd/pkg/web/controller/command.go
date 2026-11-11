@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -77,9 +77,14 @@ func (c *CodeInterpretingController) RunCommand() {
 			close(completeCh)
 		})
 	}
-	origComplete := eventsHandler.OnExecuteComplete
 	eventsHandler.OnExecuteComplete = func(executionTime time.Duration) {
-		origComplete(executionTime)
+		var exitCode *int
+		if !request.Background {
+			// The foreground runtime invokes this hook only after a successful wait.
+			code := 0
+			exitCode = &code
+		}
+		c.writeExecutionComplete(executionTime, exitCode)
 		recordExecution("success")
 		signalComplete()
 	}
@@ -103,11 +108,7 @@ func (c *CodeInterpretingController) RunCommand() {
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
 		recordExecution("failure")
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error running commands %v", err),
-		)
+		c.respondRunError(runCodeRequest.Hooks, completeCh, fmt.Sprintf("error running commands %v", err))
 		return
 	}
 

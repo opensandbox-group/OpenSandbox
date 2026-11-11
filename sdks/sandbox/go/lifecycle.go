@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -92,6 +92,14 @@ func (c *LifecycleClient) ListSandboxes(ctx context.Context, opts ListOptions) (
 
 // CreateSandbox creates a new sandbox from a container image.
 func (c *LifecycleClient) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (*SandboxInfo, error) {
+	if req.Lifecycle != nil {
+		if err := req.Lifecycle.IdlePolicy.Validate(); err != nil {
+			return nil, err
+		}
+		if err := req.Lifecycle.RenewalPolicy.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	var resp SandboxInfo
 	if err := c.doRequest(ctx, "POST", "/sandboxes", req, &resp); err != nil {
 		return nil, err
@@ -193,6 +201,90 @@ func (c *LifecycleClient) DeleteNetworkPolicyRules(ctx context.Context, sandboxI
 	return &resp, nil
 }
 
+// vaultPath builds the server-routed Credential Vault path for a sandbox.
+func vaultPath(sandboxID, suffix string) string {
+	return "/sandboxes/" + url.PathEscape(sandboxID) + "/credential-vault" + suffix
+}
+
+// CreateCredentialVault creates the initial server-routed Credential Vault
+// revision (create-only: 409 when a vault already exists). Inline credential
+// values are write-only and are never returned on any read. This is the
+// template-backed path for the vault (OSEP-0022): the server relays to the
+// egress-held vault and the relay response is the synchronous ack.
+func (c *LifecycleClient) CreateCredentialVault(ctx context.Context, sandboxID string, req CredentialVaultCreateRequest) (*CredentialVaultState, error) {
+	var resp CredentialVaultState
+	if err := c.doRequest(ctx, "POST", vaultPath(sandboxID, ""), req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetCredentialVault returns the sanitized server-routed Credential Vault
+// state. Credential values are never returned on any read surface; readback
+// after a lost mutation ack resolves the current revision (retry anchor 412).
+func (c *LifecycleClient) GetCredentialVault(ctx context.Context, sandboxID string) (*CredentialVaultState, error) {
+	var resp CredentialVaultState
+	if err := c.doRequest(ctx, "GET", vaultPath(sandboxID, ""), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// PatchCredentialVault atomically mutates server-routed credentials and
+// bindings (delete → replace → add per set; every mentioned name must resolve
+// exactly once). expectedRevision, when set, must match the current revision
+// (412 otherwise): re-read and retry with the fresh revision.
+func (c *LifecycleClient) PatchCredentialVault(ctx context.Context, sandboxID string, req CredentialVaultPatchRequest) (*CredentialVaultState, error) {
+	var resp CredentialVaultState
+	if err := c.doRequest(ctx, "PATCH", vaultPath(sandboxID, ""), req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// DeleteCredentialVault deletes the server-routed Credential Vault; the
+// network policy is kept.
+func (c *LifecycleClient) DeleteCredentialVault(ctx context.Context, sandboxID string) error {
+	return c.doRequest(ctx, "DELETE", vaultPath(sandboxID, ""), nil, nil)
+}
+
+// ListCredentialVaultCredentials returns sanitized credential metadata; values
+// are never returned.
+func (c *LifecycleClient) ListCredentialVaultCredentials(ctx context.Context, sandboxID string) (*CredentialListResponse, error) {
+	var resp CredentialListResponse
+	if err := c.doRequest(ctx, "GET", vaultPath(sandboxID, "/credentials"), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetCredentialVaultCredential returns sanitized metadata for one credential.
+func (c *LifecycleClient) GetCredentialVaultCredential(ctx context.Context, sandboxID, name string) (*CredentialMetadata, error) {
+	var resp CredentialMetadata
+	if err := c.doRequest(ctx, "GET", vaultPath(sandboxID, "/credentials/"+url.PathEscape(name)), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ListCredentialVaultBindings returns sanitized binding metadata.
+func (c *LifecycleClient) ListCredentialVaultBindings(ctx context.Context, sandboxID string) (*CredentialBindingListResponse, error) {
+	var resp CredentialBindingListResponse
+	if err := c.doRequest(ctx, "GET", vaultPath(sandboxID, "/bindings"), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// GetCredentialVaultBinding returns sanitized metadata for one binding.
+func (c *LifecycleClient) GetCredentialVaultBinding(ctx context.Context, sandboxID, name string) (*CredentialBindingMetadata, error) {
+	var resp CredentialBindingMetadata
+	if err := c.doRequest(ctx, "GET", vaultPath(sandboxID, "/bindings/"+url.PathEscape(name)), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // ListSnapshots returns a paginated list of snapshots with optional filtering.
 func (c *LifecycleClient) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (*ListSnapshotsResponse, error) {
 	params := url.Values{}
@@ -266,19 +358,38 @@ func (c *LifecycleClient) PatchSandboxMetadata(ctx context.Context, id string, p
 	return &resp, nil
 }
 
-// DeleteSandbox deletes a sandbox, scheduling it for termination.
+// DeleteSandbox requests irreversible sandbox termination.
+// Returns when deletion is accepted; runtime cleanup may continue afterward.
 func (c *LifecycleClient) DeleteSandbox(ctx context.Context, id string) error {
-	return c.doRequest(ctx, "DELETE", "/sandboxes/"+url.PathEscape(id), nil, nil)
+	if err := c.doRequest(ctx, "DELETE", "/sandboxes/"+url.PathEscape(id), nil, nil); err != nil {
+		return err
+	}
+	if c.cache != nil {
+		c.cache.Invalidate(id)
+	}
+	return nil
 }
 
 // PauseSandbox pauses a running sandbox while preserving its state.
 func (c *LifecycleClient) PauseSandbox(ctx context.Context, id string) error {
-	return c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(id)+"/pause", nil, nil)
+	if err := c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(id)+"/pause", nil, nil); err != nil {
+		return err
+	}
+	if c.cache != nil {
+		c.cache.Invalidate(id)
+	}
+	return nil
 }
 
 // ResumeSandbox resumes a paused sandbox.
 func (c *LifecycleClient) ResumeSandbox(ctx context.Context, id string) error {
-	return c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(id)+"/resume", nil, nil)
+	if err := c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(id)+"/resume", nil, nil); err != nil {
+		return err
+	}
+	if c.cache != nil {
+		c.cache.Invalidate(id)
+	}
+	return nil
 }
 
 // RenewExpiration renews the sandbox's absolute expiration time.
@@ -298,6 +409,10 @@ func (c *LifecycleClient) RenewExpiration(ctx context.Context, id string, expire
 // on the specified port inside the sandbox. Results are cached with LRU+TTL
 // and deduplicated via singleflight. If useServerProxy is non-nil,
 // the server proxy query parameter is included.
+//
+// The useServerProxy option is deprecated: the server-proxied data path is in
+// maintenance mode and only receives security fixes and bug fixes. Route
+// data-plane traffic through the ingress gateway instead.
 func (c *LifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*Endpoint, error) {
 	if c.cache == nil {
 		return c.getEndpointFromServer(ctx, sandboxID, port, useServerProxy)
@@ -309,11 +424,12 @@ func (c *LifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, por
 		useServerProxy: useServerProxy != nil && *useServerProxy,
 	}
 
-	// The shared fetch uses a background context so one caller's deadline
-	// doesn't cancel the request for all waiters. Each caller's ctx is
-	// respected via DoChan select in GetOrFetch.
-	return c.cache.GetOrFetch(ctx, key, func() (*Endpoint, error) {
-		return c.getEndpointFromServer(context.Background(), sandboxID, port, useServerProxy)
+	// The shared fetch uses the cache's flight context rather than ctx so one
+	// caller's deadline doesn't cancel the request for all waiters. It is
+	// cancelled once every waiter has left. Each caller's ctx is respected via
+	// DoChan select in GetOrFetch.
+	return c.cache.GetOrFetch(ctx, key, func(fetchCtx context.Context) (*Endpoint, error) {
+		return c.getEndpointFromServer(fetchCtx, sandboxID, port, useServerProxy)
 	})
 }
 

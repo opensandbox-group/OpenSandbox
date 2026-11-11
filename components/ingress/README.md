@@ -1,4 +1,4 @@
 # OpenSandbox Ingress
 
-Documentation: [docs/components/ingress.md](../../docs/components/ingress.md)
+Documentation: [docs/architecture/network/ingress.md](../../docs/architecture/network/ingress.md)
 

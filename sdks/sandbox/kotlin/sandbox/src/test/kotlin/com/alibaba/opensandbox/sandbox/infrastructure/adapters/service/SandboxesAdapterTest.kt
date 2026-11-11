@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,11 +19,14 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.ActivityProbe
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.LifecycleHook
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OnIdleAction
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PeriodicLifecycleHook
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
@@ -781,5 +784,97 @@ class SandboxesAdapterTest {
         assertEquals("key=value", url.queryParameter("metadata"))
         assertEquals("1", url.queryParameter("page"))
         assertEquals("20", url.queryParameter("pageSize"))
+    }
+
+    @Test
+    fun `createSandbox forwards lifecycle idle policy on the wire`() {
+        val responseBody =
+            """
+            {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "status": { "state": "Running" },
+                "createdAt": "2023-01-01T10:00:00Z",
+                "entrypoint": ["bash"]
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        sandboxesAdapter.createSandbox(
+            spec = SandboxImageSpec.builder().image("ubuntu:latest").build(),
+            entrypoint = listOf("bash"),
+            env = emptyMap(),
+            metadata = emptyMap(),
+            timeout = Duration.ofSeconds(600),
+            resource = mapOf("cpu" to "1"),
+            platform = null,
+            networkPolicy = null,
+            extensions = emptyMap(),
+            volumes = null,
+            secureAccess = false,
+            snapshotId = null,
+            credentialProxy = null,
+            lifecycle =
+                SandboxLifecycle.builder()
+                    .idlePolicy(
+                        IdlePolicy.builder()
+                            .idleTimeoutSeconds(300)
+                            .onIdle(OnIdleAction.PAUSE)
+                            .wakeOnAccess(true)
+                            .activeProbe(
+                                ActivityProbe.builder().port(8080).path("/active").build(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+        )
+
+        val requestBody = mockWebServer.takeRequest().body.readUtf8()
+        val lifecycle = Json.parseToJsonElement(requestBody).jsonObject["lifecycle"]!!.jsonObject
+        val idlePolicy = lifecycle["idlePolicy"]!!.jsonObject
+        assertEquals(300, idlePolicy["idleTimeoutSeconds"]!!.jsonPrimitive.content.toInt())
+        assertEquals("pause", idlePolicy["onIdle"]!!.jsonPrimitive.content)
+        assertEquals("true", idlePolicy["wakeOnAccess"]!!.jsonPrimitive.content)
+        val probe = idlePolicy["activeProbe"]!!.jsonObject
+        assertEquals(8080, probe["port"]!!.jsonPrimitive.content.toInt())
+        assertEquals("/active", probe["path"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `createSandboxFromTemplate forwards the idle policy as lifecycle idlePolicy`() {
+        val responseBody =
+            """
+            {
+                "id": "550e8400-e29b-41d4-a716-446655440000",
+                "status": { "state": "Running" },
+                "createdAt": "2023-01-01T10:00:00Z",
+                "entrypoint": ["bash"]
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        sandboxesAdapter.createSandboxFromTemplate(
+            templateId = "tpl_123",
+            timeout = Duration.ofSeconds(600),
+            metadata = emptyMap(),
+            networkPolicy = null,
+            extensions = emptyMap(),
+            idlePolicy =
+                IdlePolicy.builder()
+                    .idleTimeoutSeconds(300)
+                    .onIdle(OnIdleAction.PAUSE)
+                    .build(),
+        )
+
+        val request = mockWebServer.takeRequest()
+        assertEquals("/v1/sandboxes", request.path)
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("tpl_123", payload["templateId"]!!.jsonPrimitive.content)
+        assertEquals(
+            "pause",
+            payload["lifecycle"]!!
+                .jsonObject["idlePolicy"]!!
+                .jsonObject["onIdle"]!!
+                .jsonPrimitive.content,
+        )
     }
 }

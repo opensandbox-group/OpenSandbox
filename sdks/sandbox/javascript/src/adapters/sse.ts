@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -63,7 +63,8 @@ export async function* parseJsonEventStream<T>(
       buf += decoder.decode(value, { stream: true });
       let idx: number;
 
-      while ((idx = buf.indexOf("\n")) >= 0) {
+      // SSE permits CRLF, LF, and CR. Empty lines from a split CRLF are skipped below.
+      while ((idx = buf.search(/[\r\n]/)) >= 0) {
         const rawLine = buf.slice(0, idx);
         buf = buf.slice(idx + 1);
 
@@ -101,5 +102,6 @@ export async function* parseJsonEventStream<T>(
     // instead of staying locked and holding the transport connection
     // open (#1528, #1532).
     await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
 }

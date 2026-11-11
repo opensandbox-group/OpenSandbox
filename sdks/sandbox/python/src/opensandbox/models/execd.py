@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 class OutputMessage(BaseModel):
@@ -82,6 +82,15 @@ class ExecutionError(BaseModel):
         description="Unix timestamp in milliseconds when error occurred"
     )
     traceback: list[str] = Field(default_factory=list, description="Stack trace lines")
+    exit_code: int | None = Field(
+        default=None,
+        description=(
+            "Exit status reported by execd for a CommandExecError when the command ran "
+            "and finished with a non-zero status (-1 when it was terminated by a signal). "
+            "None when the process failed to start, for non-command errors, and on "
+            "servers that predate error.exit_code."
+        ),
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -108,6 +117,28 @@ class ExecutionLogs(BaseModel):
     def add_stderr(self, message: OutputMessage) -> None:
         """Add a message to standard error log."""
         self.stderr.append(message)
+
+
+def _format_output_messages(
+    messages: list[OutputMessage], *, preserve_fragments: bool = False
+) -> str:
+    """Format command lines or code fragments, normalizing line endings for display."""
+    parts: list[str] = []
+    last_char = ""
+    for message in messages:
+        text = message.text
+        if (
+            not preserve_fragments
+            and text
+            and last_char
+            and last_char not in "\r\n"
+            and text[0] not in "\r\n"
+        ):
+            parts.append("\n")
+        parts.append(text)
+        if text:
+            last_char = text[-1]
+    return "".join(parts).replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
 
 
 class ExecutionComplete(BaseModel):
@@ -148,6 +179,8 @@ class Execution(BaseModel):
     for all execution-related data that is exposed to users.
     """
 
+    _is_code_execution: bool = PrivateAttr(default=False)
+
     id: str | None = Field(default=None, description="Unique execution identifier")
     execution_count: int | None = Field(
         default=None,
@@ -180,15 +213,16 @@ class Execution(BaseModel):
     def text(self) -> str:
         """Return combined stdout and result text.
 
-        Includes both stdout log messages and execution results,
-        stripping trailing newlines from each chunk to avoid double
-        line breaks when messages already contain trailing newlines
-        (e.g. code-interpreter streaming output).
+        Includes both stdout log messages and execution results, preserving
+        blank lines while normalizing line endings for display.
         """
         chunks: list[str] = []
 
-        for msg in self.logs.stdout:
-            chunks.append(msg.text.rstrip("\n"))
+        stdout_text = _format_output_messages(
+            self.logs.stdout, preserve_fragments=self._is_code_execution
+        )
+        if stdout_text:
+            chunks.append(stdout_text)
 
         for res in self.result:
             if res.text:
@@ -204,7 +238,9 @@ class Execution(BaseModel):
             parts.append(self.text)
 
         if self.logs.stderr:
-            stderr_text = "\n".join(msg.text.rstrip("\n") for msg in self.logs.stderr)
+            stderr_text = _format_output_messages(
+                self.logs.stderr, preserve_fragments=self._is_code_execution
+            )
             parts.append(f"[stderr]\n{stderr_text}")
 
         if self.error:
@@ -233,9 +269,12 @@ class ExecutionHandlers(BaseModel):
             # Can perform async operations
             await log_to_database(msg.text)
 
+        async def handle_stderr(msg: OutputMessage):
+            print(f"Error: {msg.text}")
+
         handlers = ExecutionHandlers(
             on_stdout=handle_stdout,
-            on_stderr=lambda msg: print(f"Error: {msg.text}"),
+            on_stderr=handle_stderr,
         )
         ```
     """

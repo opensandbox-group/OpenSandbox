@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionHandlers
@@ -40,10 +41,13 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
+import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import java.io.File
 import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -81,10 +85,55 @@ class CommandsAdapterTest {
     }
 
     @Test
+    fun `background returns before EOF for shell and argv commands`() {
+        val complete = """data: {"timestamp":1,"type":"execution_complete","execution_time":1}""" + "\n\n"
+        for (argv in listOf(false, true)) {
+            mockWebServer.enqueue(
+                MockResponse().setBody(complete + "unread tail")
+                    .throttleBody(complete.toByteArray().size.toLong(), 3, TimeUnit.SECONDS),
+            )
+            val request = RunCommandRequest.builder().background(true)
+            if (argv) request.argv(listOf("sleep", "30")) else request.command("sleep 30")
+            assertTimeoutPreemptively(Duration.ofSeconds(2)) {
+                val result = commandsAdapter.run(request.build())
+                assertTrue(result.complete != null)
+                assertEquals(null, result.exitCode)
+            }
+            val pool = httpClientProvider.sseClient.connectionPool
+            assertEquals(pool.idleConnectionCount(), pool.connectionCount(), "response still holds a connection")
+        }
+    }
+
+    @Test
+    fun `foreground drains immediate EOF and output after terminal`() {
+        for (failure in listOf(false, true)) {
+            for (late in listOf(false, true)) {
+                val terminal =
+                    if (failure) {
+                        """data: {"timestamp":1,"type":"error","error":{"ename":"CommandExecError","evalue":"7"}}"""
+                    } else {
+                        """data: {"timestamp":1,"type":"execution_complete","execution_time":1}"""
+                    }
+                val output =
+                    listOf(
+                        """data: {"timestamp":1,"type":"stdout","text":"tail"}""",
+                        """data: {"timestamp":1,"type":"stderr","text":"error-tail"}""",
+                    )
+                val frames = if (late) listOf(terminal) + output else output + terminal
+                mockWebServer.enqueue(MockResponse().setChunkedBody(frames.joinToString("\n\n") + "\n\n", 7))
+                val result = commandsAdapter.run(RunCommandRequest.builder().command("echo test").build())
+                assertEquals(listOf("tail"), result.logs.stdout.map { it.text })
+                assertEquals(listOf("error-tail"), result.logs.stderr.map { it.text })
+                assertEquals(if (failure) 7 else 0, result.exitCode)
+            }
+        }
+    }
+
+    @Test
     fun `native argv preserves arguments and omits shell command`() {
         val argv = listOf("tool", "", "a b", "$" + "HOME", "x'y")
         mockWebServer.enqueue(
-            MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1}""" + "\n"),
+            MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1,"timestamp":1}""" + "\n"),
         )
         commandsAdapter.run(RunCommandRequest.builder().argv(argv).workingDirectory("$" + "DIR").build())
         val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
@@ -454,6 +503,34 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
     }
 
     @Test
+    fun `run should not send a positive sub-millisecond timeout as zero`() {
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("""{"type":"init","text":"cmd-123","timestamp":1672531200000}""" + "\n"),
+        )
+
+        commandsAdapter.run(
+            RunCommandRequest.builder()
+                .command("sleep 10")
+                .timeout(Duration.ofNanos(500_000))
+                .build(),
+        )
+
+        val requestBodyJson = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        assertEquals(1L, requestBodyJson["timeout"]?.jsonPrimitive?.content?.toLong())
+    }
+
+    @Test
+    fun `command timeout conversion should round partial milliseconds up`() {
+        assertEquals(0L, Duration.ZERO.toCommandTimeoutMillis())
+        assertEquals(1L, Duration.ofNanos(1).toCommandTimeoutMillis())
+        assertEquals(1L, Duration.ofMillis(1).toCommandTimeoutMillis())
+        assertEquals(2L, Duration.ofNanos(1_000_001).toCommandTimeoutMillis())
+        assertEquals(5000L, Duration.ofSeconds(5).toCommandTimeoutMillis())
+    }
+
+    @Test
     fun `runInSession should infer non-zero exit code from command error event`() {
         val initEvent = """data: {"type":"init","text":"cmd-123","timestamp":1672531200000}"""
         val errorEvent =
@@ -505,5 +582,102 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
     fun `deleteSession should reject blank session id`() {
         val ex = assertThrows(InvalidArgumentException::class.java) { commandsAdapter.deleteSession(" ") }
         assertEquals("session_id cannot be empty", ex.message)
+    }
+
+    // Round-trip cases: key/value to the exact line the snippet must append.
+    // Expected lines are hand-written literals.
+    private val roundTripCases =
+        listOf(
+            Triple("MY_TOKEN", "value", "MY_TOKEN='value'"),
+            Triple("MY_VAR", "line1\nline2 $" + "HOME \\path", "MY_VAR='line1\nline2 $" + "HOME \\path'"),
+            Triple("KV", "a=b=c", "KV='a=b=c'"),
+            Triple("EMPTY", "", "EMPTY=''"),
+            Triple("GREETING", "it's fine \"quoted\"\ttab", "GREETING=\"it's fine \\\"quoted\\\"\\ttab\""),
+            Triple("PATHY", "it's\nC:\\path", "PATHY=\"it's\\nC:\\\\path\""),
+        )
+
+    private fun runSetEnvSnippet(command: String): String {
+        Assumptions.assumeTrue(File("/bin/sh").exists(), "/bin/sh exists for POSIX round-trip test")
+        val envFile = File.createTempFile("opensandbox-setenv", ".env")
+        try {
+            val builder = ProcessBuilder("/bin/sh", "-c", command)
+            builder.environment()["EXECD_ENVS"] = envFile.absolutePath
+            builder.redirectErrorStream(true)
+            val process = builder.start()
+            val output = process.inputStream.readBytes().decodeToString()
+            check(process.waitFor(10, TimeUnit.SECONDS)) { "snippet timed out" }
+            check(process.exitValue() == 0) { "snippet failed: $output" }
+            return envFile.readText()
+        } finally {
+            envFile.delete()
+        }
+    }
+
+    @Test
+    fun `setEnv should append the env entry via the sandbox env file`() {
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1,"timestamp":1}""" + "\n"),
+        )
+
+        commandsAdapter.setEnv("MY_TOKEN", "value")
+
+        val body = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject
+        // Hand-written golden literal (not derived from the implementation).
+        val expected =
+            "if [ -z \"\${EXECD_ENVS:-}\" ]; then printf '%s\\n' " +
+                "'EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN' >&2; exit 1; fi\n" +
+                "mkdir -p \"\$(dirname \"\$EXECD_ENVS\")\"\n" +
+                "printf '%s\\n' 'MY_TOKEN='\\''value'\\''' >> \"\$EXECD_ENVS\""
+        assertEquals(expected, body["command"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun `setEnv snippet should append well-formed lines round-tripped through sh`() {
+        for ((key, value, expectedLine) in roundTripCases) {
+            mockWebServer.enqueue(
+                MockResponse().setResponseCode(200).setBody("""{"type":"execution_complete","execution_time":1,"timestamp":1}""" + "\n"),
+            )
+            commandsAdapter.setEnv(key, value)
+            val command = Json.parseToJsonElement(mockWebServer.takeRequest().body.readUtf8()).jsonObject["command"]?.jsonPrimitive?.content
+            assertEquals(expectedLine + "\n", runSetEnvSnippet(command!!), "round-trip failed for $key")
+        }
+    }
+
+    @Test
+    fun `setEnv should reject invalid keys before any transport call`() {
+        for (key in listOf("", "1ABC", "MY-TOKEN", "MY TOKEN", "A=B", "A.B", "A\n")) {
+            val ex = assertThrows(InvalidArgumentException::class.java) { commandsAdapter.setEnv(key, "value") }
+            assertTrue(ex.message!!.contains("setEnv key must match"))
+        }
+        assertEquals(0, mockWebServer.requestCount)
+    }
+
+    @Test
+    fun `setEnv should throw with stderr when the append command fails`() {
+        val initEvent = """data: {"type":"init","text":"cmd-1","timestamp":1672531200000}"""
+        val stderrEvent =
+            """data: {"type":"stderr","text":"EXECD_ENVS is not set; cannot persist environment variable MY_TOKEN",""" +
+                """"timestamp":1672531200001}"""
+        val errorEvent =
+            """data: {"type":"error","error":{"ename":"CommandExecError","evalue":"1",""" +
+                """"traceback":["exit status 1"]},"timestamp":1672531200002}"""
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("$initEvent\n\n$stderrEvent\n\n$errorEvent\n\n"),
+        )
+
+        val ex = assertThrows(SandboxInternalException::class.java) { commandsAdapter.setEnv("MY_TOKEN", "value") }
+        assertTrue(ex.message!!.contains("commands.setEnv failed for 'MY_TOKEN'"))
+        assertTrue(ex.message!!.contains("EXECD_ENVS is not set"))
+    }
+
+    @Test
+    fun `setEnv should treat a dropped stream without completion as failure`() {
+        // Stream ends after init only: no execution_complete and no error
+        // event, so the append was never confirmed and must not report success.
+        mockWebServer.enqueue(
+            MockResponse().setResponseCode(200).setBody("""data: {"type":"init","text":"cmd-1","timestamp":1}""" + "\n\n"),
+        )
+
+        assertThrows(SandboxInternalException::class.java) { commandsAdapter.setEnv("MY_TOKEN", "value") }
     }
 }

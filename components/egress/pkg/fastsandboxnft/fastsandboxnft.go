@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@
 //	    tcp/udp dport 853 drop                        <- DoT bypass blocked
 //	    ip saddr <ip> jump subj_<id>                  <- one rule per subject
 //	    meta mark & 0x2 != 0x2 drop                   <- fail-closed tail
-//	  chain subj_<id> (regular chain)                 <- deny sets only
+//	  chain subj_<id> (regular chain)                 <- deny sets and port rules
 //	    ip daddr @subj_<id>_deny_v4/v6 drop
 //
 // Dispatch matches the sandbox source IP only — never iifname: with
@@ -103,6 +103,9 @@ const (
 
 	dohBlockV4Set = "doh_block_v4"
 	dohBlockV6Set = "doh_block_v6"
+
+	upstreamProxyV4Set = "upstream_proxy_v4"
+	upstreamProxyV6Set = "upstream_proxy_v6"
 )
 
 // Runner executes an nft script; the default invokes `nft -f -`.
@@ -142,6 +145,17 @@ type Options struct {
 	// executes the same policy on it using the conntrack ORIGINAL
 	// destination. 0 disables the input chain entirely (no MITM).
 	MitmRedirectPort int
+	// UpstreamProxy, when set, drops the chained upstream CONNECT proxy
+	// endpoint for EVERY subject profile-wide (forward and — with MITM —
+	// input path), ahead of the per-subject chains. The mitmdump dial is
+	// locally generated and never policed by this table (the profile
+	// installs no OUTPUT enforcement), so no accept-side exception is
+	// needed; the drop is the source-IP-model equivalent of the sidecar
+	// profile's uid-scoped upstream rules.
+	UpstreamProxy *UpstreamProxyEndpoint
+	// PortFloorDenyRanges carries the platform port cap (reachable.ports.cap
+	// complement), enforced profile-wide in the master chains.
+	PortFloorDenyRanges []policy.PortRange
 }
 
 // installedSubject tracks the enforcement state the applier owns in memory;
@@ -169,6 +183,20 @@ type Applier struct {
 	conntrack  func(context.Context) ([]conntrackEntry, error) // injectable for tests
 	now        func() time.Time                                // injectable for tests
 	sandboxMir func(context.Context, subject.Subject, []nftables.ResolvedIP) error
+
+	// upstreamIPs mirrors the DNS-learned upstream-proxy drop-set elements
+	// and counts successful refreshes missing each address. Elements are
+	// permanent; SyncUpstreamProxyIPs owns expiry, not kernel timeouts. Rebuilds
+	// (subject removal, startup reset) re-seed them deterministically
+	// instead of losing the hostname containment until the next refresh
+	// tick. Literal endpoints are not mirrored: they are re-emitted from
+	// Options on every rebuild.
+	upstreamIPs map[netip.Addr]uint8
+
+	// upstreamSeedTimeout bounds the first-seed retry window of
+	// SeedUpstreamProxyIPs (injectable for tests). Past it the caller
+	// fails startup: fail closed, like every other initialization step.
+	upstreamSeedTimeout time.Duration
 }
 
 // NewApplier returns an Applier using r (nil selects DefaultRunner). Pass
@@ -178,11 +206,13 @@ func NewApplier(r Runner, opts ...Options) *Applier {
 		r = DefaultRunner
 	}
 	a := &Applier{
-		run:       r,
-		subjects:  make(map[subject.Subject]installedSubject),
-		states:    make(map[subject.Subject]*refreshState),
-		conntrack: readConntrack,
-		now:       time.Now,
+		run:                 r,
+		subjects:            make(map[subject.Subject]installedSubject),
+		states:              make(map[subject.Subject]*refreshState),
+		upstreamIPs:         make(map[netip.Addr]uint8),
+		upstreamSeedTimeout: upstreamProxySeedTimeout,
+		conntrack:           readConntrack,
+		now:                 time.Now,
 	}
 	if len(opts) > 0 {
 		a.opts = opts[0]
@@ -377,33 +407,26 @@ func (a *Applier) trackDynamicIPs(s subject.Subject, ips []nftables.ResolvedIP) 
 // is fine at the target density (removals are rare). Removing the last
 // subject swaps in the empty master drop chain (fail-closed, never a bare
 // table).
+//
+// The in-memory state mutates only AFTER the transaction commits: a failed
+// removal must stay retryable, since a subject forgotten from the map while
+// its kernel rules survive would turn the retry into a no-op that leaves the
+// stale same-IP dispatch rule first-match ahead of any successor.
 func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, ok := a.subjects[s]; !ok {
 		return nil
 	}
-	delete(a.subjects, s)
-	delete(a.states, s)
-	if len(a.subjects) == 0 {
-		var b strings.Builder
-		if err := a.writeTableHeader(&b); err != nil {
-			return err
-		}
-		if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
-			telemetry.RecordNftablesUpdateFailed(telemetry.NftOpRemove)
-			return err
-		}
-		a.tableReady = true
-		a.recordRuleCountLocked()
-		telemetry.RecordNftablesUpdate()
-		return nil
-	}
 	var b strings.Builder
 	if err := a.writeTableHeader(&b); err != nil {
 		return err
 	}
+	now := a.now()
 	for subj, inst := range a.subjects {
+		if subj == s {
+			continue
+		}
 		var err error
 		if inst.pol == nil {
 			err = writeSubjectDenyFirstFragment(&b, subj, inst.att, a.opts.MitmRedirectPort)
@@ -413,11 +436,14 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 		if err != nil {
 			return err
 		}
+		writeRemainingLeasesFragment(&b, subj, a.states[subj], now)
 	}
-	if _, err := a.run(ctx, b.String()); err != nil {
+	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpRemove)
 		return err
 	}
+	delete(a.subjects, s)
+	delete(a.states, s)
 	a.tableReady = true
 	a.recordRuleCountLocked()
 	telemetry.RecordNftablesUpdate()
@@ -467,6 +493,9 @@ func (a *Applier) writeTableHeader(b *strings.Builder) error {
 		TableName, markChain, markPriority)
 	fmt.Fprintf(b, "add chain inet %s %s { type filter hook forward priority %d; policy accept; }\n",
 		TableName, dispatchChain, dispatchPriority)
+	if a.opts.UpstreamProxy != nil {
+		a.writeUpstreamProxyStatic(b)
+	}
 	fmt.Fprintf(b, "add rule inet %s %s ct state established,related accept\n", TableName, dispatchChain)
 	fmt.Fprintf(b, "add rule inet %s %s tcp dport 853 drop\n", TableName, dispatchChain)
 	fmt.Fprintf(b, "add rule inet %s %s udp dport 853 drop\n", TableName, dispatchChain)
@@ -476,17 +505,43 @@ func (a *Applier) writeTableHeader(b *strings.Builder) error {
 	if a.opts.MitmRedirectPort > 0 {
 		fmt.Fprintf(b, "add chain inet %s %s { type filter hook input priority %d; policy accept; }\n",
 			TableName, inputChain, inputPriority)
+		if a.opts.UpstreamProxy != nil {
+			a.writeUpstreamProxyInputRules(b)
+		}
 		fmt.Fprintf(b, "add rule inet %s %s ct state established,related accept\n", TableName, inputChain)
 	}
 	if !a.opts.BlockDoH443 {
+		a.writePortFloorFragment(b)
 		writeFailClosedTail(b)
 		return nil
 	}
 	if err := a.writeDoHBlockFragment(b); err != nil {
 		return err
 	}
+	a.writePortFloorFragment(b)
 	writeFailClosedTail(b)
 	return nil
+}
+
+// writePortFloorFragment emits the cap complement as one drop rule per
+// master chain. The input rule only fires on MITM-redirected flows
+// (tcp dport <MitmRedirectPort>); fsb DNS shares the same DNAT gate
+// (REDIRECT to :15353) and must not match, and the original — not the
+// redirect — port is evaluated via ct.
+func (a *Applier) writePortFloorFragment(b *strings.Builder) {
+	if len(a.opts.PortFloorDenyRanges) == 0 {
+		return
+	}
+	members := make([]string, 0, len(a.opts.PortFloorDenyRanges))
+	for _, rg := range a.opts.PortFloorDenyRanges {
+		members = append(members, fmt.Sprintf("%d-%d", rg.Lo, rg.Hi))
+	}
+	fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } drop\n", TableName, dispatchChain, strings.Join(members, ", "))
+	if a.opts.MitmRedirectPort > 0 {
+		fmt.Fprintf(b,
+			"add rule inet %s %s ct status dnat tcp dport %d ct original proto-dst { %s } drop\n",
+			TableName, inputChain, a.opts.MitmRedirectPort, strings.Join(members, ", "))
+	}
 }
 
 // writeFailClosedTail appends the master-chain rule that drops every
@@ -552,8 +607,8 @@ func writeSubjectDenyFirstFragment(b *strings.Builder, s subject.Subject, att ac
 	}
 	writeSubjectChain(b, s, mitmPort)
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, true)
-	writeSubjectInputVerdictRules(b, s, policy.ActionDeny, mitmPort)
+	writeSubjectForwardDenyRules(b, s, nil, true)
+	writeSubjectInputVerdictRules(b, s, nil, mitmPort)
 	return nil
 }
 
@@ -565,9 +620,9 @@ func writeSubjectInitialPolicyFragment(b *strings.Builder, s subject.Subject, at
 	}
 	writeSubjectChain(b, s, mitmPort)
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, false)
-	writeSubjectMarkRules(b, s, pol.DefaultAction)
-	writeSubjectInputVerdictRules(b, s, pol.DefaultAction, mitmPort)
+	writeSubjectForwardDenyRules(b, s, pol, false)
+	writeSubjectMarkRules(b, s, pol)
+	writeSubjectInputVerdictRules(b, s, pol, mitmPort)
 	return nil
 }
 
@@ -590,8 +645,8 @@ func writeSubjectResetFragment(b *strings.Builder, s subject.Subject, att action
 		fmt.Fprintf(b, "flush set inet %s %s\n", TableName, name)
 	}
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, true)
-	writeSubjectInputVerdictRules(b, s, policy.ActionDeny, mitmPort)
+	writeSubjectForwardDenyRules(b, s, nil, true)
+	writeSubjectInputVerdictRules(b, s, nil, mitmPort)
 	return nil
 }
 
@@ -625,9 +680,9 @@ func writeSubjectPolicySwapFragment(b *strings.Builder, s subject.Subject, pol *
 	if err := writeSetElements(b, denySetName(s, "v6"), denyV6); err != nil {
 		return err
 	}
-	writeSubjectForwardDenyRules(b, s, false)
-	writeSubjectMarkRules(b, s, pol.DefaultAction)
-	writeSubjectInputVerdictRules(b, s, pol.DefaultAction, mitmPort)
+	writeSubjectForwardDenyRules(b, s, pol, false)
+	writeSubjectMarkRules(b, s, pol)
+	writeSubjectInputVerdictRules(b, s, pol, mitmPort)
 	return nil
 }
 
@@ -692,14 +747,16 @@ func writeSubjectChain(b *strings.Builder, s subject.Subject, mitmPort int) {
 }
 
 // writeSubjectForwardDenyRules emits the forward-path subject chain content:
-// the deny-set drops ONLY. No accept verdicts exist in the forward path
+// the deny-set and port-scoped drops ONLY. No accept verdicts exist in the forward path
 // (bridge-netfilter semantics — an explicit accept would return the frame to
 // the bridge L2 path and drop it); allowed traffic is marked in prerouting
 // and simply not dropped by the master-chain tail. denyFirst additionally
 // appends a bare drop so a deny-first subject is blocked even before any
 // marks could exist.
-func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, denyFirst bool) {
+func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy, denyFirst bool) {
 	chain := subjectChain(s)
+	deny, _ := pol.PortScopedRules()
+	writeSubjectPortRules(b, chain, deny, false, "drop")
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s drop\n", TableName, chain, denySetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s drop\n", TableName, chain, denySetName(s, "v6"))
 	if denyFirst {
@@ -712,12 +769,14 @@ func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, denyFir
 // unmarked and is dropped by the master-chain tail); default-allow policies
 // mark EVERY outbound packet (the deny sets still drop). Deny-first subjects
 // carry no mark rules at all.
-func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, defaultAction string) {
+func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy) {
 	chain := markChainName(s)
-	if defaultAction == policy.ActionAllow {
+	if pol.DefaultAction == policy.ActionAllow {
 		fmt.Fprintf(b, "add rule inet %s %s meta mark set 0x%x\n", TableName, chain, allowMark)
 		return
 	}
+	_, allow := pol.PortScopedRules()
+	writeSubjectPortRules(b, chain, allow, false, fmt.Sprintf("meta mark set 0x%x", allowMark))
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s meta mark set 0x%x\n", TableName, chain, allowSetName(s, "v4"), allowMark)
 	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s meta mark set 0x%x\n", TableName, chain, allowSetName(s, "v6"), allowMark)
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s meta mark set 0x%x\n", TableName, chain, dynSetName(s, "v4"), allowMark)
@@ -730,21 +789,53 @@ func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, defaultAction 
 // accept semantics are normal for local delivery, and the conntrack ORIGINAL
 // destination is matched. The trailing rule carries the default action: drop
 // for default-deny (deny-first and enforcing), accept for default-allow.
-func writeSubjectInputVerdictRules(b *strings.Builder, s subject.Subject, defaultAction string, mitmPort int) {
+func writeSubjectInputVerdictRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy, mitmPort int) {
 	if mitmPort <= 0 {
 		return
 	}
 	in := subjectChainIn(s)
+	deny, allow := pol.PortScopedRules()
+	writeSubjectPortRules(b, in, deny, true, "drop")
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s drop\n", TableName, in, denySetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s drop\n", TableName, in, denySetName(s, "v6"))
+	writeSubjectPortRules(b, in, allow, true, "accept")
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s accept\n", TableName, in, dynSetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s accept\n", TableName, in, dynSetName(s, "v6"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s accept\n", TableName, in, allowSetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s accept\n", TableName, in, allowSetName(s, "v6"))
-	if defaultAction == policy.ActionDeny {
+	if pol == nil || pol.DefaultAction == policy.ActionDeny {
 		fmt.Fprintf(b, "add rule inet %s %s drop\n", TableName, in)
 	} else {
 		fmt.Fprintf(b, "add rule inet %s %s accept\n", TableName, in)
+	}
+}
+
+func writeSubjectPortRules(b *strings.Builder, chain string, rules []policy.PortScopedRule, original bool, verdict string) {
+	for _, r := range rules {
+		// PortRanges-only rules are the platform cap, already enforced in the master chains.
+		if len(r.Ports) == 0 {
+			continue
+		}
+		members := make([]string, 0, len(r.Ports))
+		for _, port := range r.Ports {
+			members = append(members, fmt.Sprintf("%d", port))
+		}
+		target := ""
+		if r.Target != "" {
+			daddr := "ip daddr"
+			if r.IsV6 {
+				daddr = "ip6 daddr"
+			}
+			if original {
+				daddr = "ct original " + daddr
+			}
+			target = daddr + " " + r.Target + " "
+		}
+		dport := "tcp dport"
+		if original {
+			dport = "meta l4proto tcp ct original proto-dst"
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s%s { %s } %s\n", TableName, chain, target, dport, strings.Join(members, ", "), verdict)
 	}
 }
 
@@ -795,25 +886,45 @@ func writeDispatchRule(b *strings.Builder, s subject.Subject, att actionhandler.
 	}
 }
 
-// writeResolvedIPsFragment adds DNS-learned IPs to a subject's dynamic sets
-// with clamped TTLs (mirrors pkg/nftables lease behavior).
+// writeResolvedIPsFragment adds or renews DNS-learned IPs in a subject's
+// dynamic sets with clamped TTLs (mirrors pkg/nftables lease behavior).
 func writeResolvedIPsFragment(b *strings.Builder, s subject.Subject, ips []nftables.ResolvedIP) {
-	var v4, v6 []string
 	for _, r := range ips {
 		addr := r.Addr.Unmap()
-		ttl := clampTTL(r.TTL)
-		value := fmt.Sprintf("%s timeout %ds", addr, int(ttl/time.Second))
+		var set string
 		if addr.Is4() {
-			v4 = append(v4, value)
+			set = dynSetName(s, "v4")
 		} else if addr.Is6() {
-			v6 = append(v6, value)
+			set = dynSetName(s, "v6")
+		} else {
+			continue
 		}
+		nftables.WriteTimedElement(b, TableName, set, addr, clampTTL(r.TTL))
 	}
-	if len(v4) > 0 {
-		fmt.Fprintf(b, "add element inet %s %s { %s }\n", TableName, dynSetName(s, "v4"), strings.Join(v4, ", "))
+}
+
+// writeRemainingLeasesFragment re-adds a subject's unexpired DNS-learned IPs
+// to its freshly rebuilt dynamic sets with the time each lease has left, so
+// rebuilding the table to remove another subject keeps them allowed.
+func writeRemainingLeasesFragment(b *strings.Builder, s subject.Subject, st *refreshState, now time.Time) {
+	if st == nil {
+		return
 	}
-	if len(v6) > 0 {
-		fmt.Fprintf(b, "add element inet %s %s { %s }\n", TableName, dynSetName(s, "v6"), strings.Join(v6, ", "))
+	for addr, expiresAt := range st.dyn {
+		left := expiresAt.Sub(now)
+		if left <= 0 {
+			continue
+		}
+		var set string
+		if addr.Is4() {
+			set = dynSetName(s, "v4")
+		} else if addr.Is6() {
+			set = dynSetName(s, "v6")
+		} else {
+			continue
+		}
+		seconds := int((left + time.Second - 1) / time.Second)
+		fmt.Fprintf(b, "add element inet %s %s { %s timeout %ds }\n", TableName, set, addr, seconds)
 	}
 }
 

@@ -51,10 +51,22 @@ spec:
         command:
         - /workspace/server
         args:
-        {{- if .Values.controller.leaderElection.enabled }}
+        {{- $healthPort := .Values.controller.livenessProbe.httpGet.port }}
+        {{- with .Values.controller.leaderElection }}
+        {{- if .enabled }}
         - --leader-elect
+        {{- with .leaseDuration }}
+        - --leader-elect-lease-duration={{ . }}
         {{- end }}
-        - --health-probe-bind-address=:8081
+        {{- with .renewDeadline }}
+        - --leader-elect-renew-deadline={{ . }}
+        {{- end }}
+        {{- with .retryPeriod }}
+        - --leader-elect-retry-period={{ . }}
+        {{- end }}
+        {{- end }}
+        {{- end }}
+        - --health-probe-bind-address=:{{ $healthPort }}
         - --zap-log-level={{ .Values.controller.logLevel }}
         {{- if $metrics.enabled }}
         - --metrics-bind-address=:{{ $metrics.port | default 8080 }}
@@ -65,6 +77,9 @@ spec:
         {{- end }}
         {{- if and .Values.controller.kubeClient (gt (int .Values.controller.kubeClient.burst) 0) }}
         - --kube-client-burst={{ .Values.controller.kubeClient.burst }}
+        {{- end }}
+        {{- if .Values.controller.namespaces }}
+        - --namespaces={{ join "," .Values.controller.namespaces }}
         {{- end }}
         {{- if .Values.controller.snapshot.imageCommitterImage }}
         - --image-committer-image={{ .Values.controller.snapshot.imageCommitterImage }}
@@ -81,6 +96,9 @@ spec:
         {{- if .Values.controller.snapshot.registry }}
         - --snapshot-registry={{ .Values.controller.snapshot.registry }}
         {{- end }}
+        {{- if .Values.controller.snapshot.imageURITemplate }}
+        - {{ printf "--snapshot-image-uri-template=%s" .Values.controller.snapshot.imageURITemplate | quote }}
+        {{- end }}
         {{- if .Values.controller.snapshot.registryInsecure }}
         - --snapshot-registry-insecure={{ .Values.controller.snapshot.registryInsecure }}
         {{- end }}
@@ -93,9 +111,12 @@ spec:
         {{- if .Values.controller.snapshot.resumePullSecret }}
         - --resume-pull-secret={{ .Values.controller.snapshot.resumePullSecret }}
         {{- end }}
+        {{- with .Values.controller.extraArgs }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         ports:
         - name: health
-          containerPort: 8081
+          containerPort: {{ .Values.controller.livenessProbe.httpGet.port }}
           protocol: TCP
         {{- if $metrics.enabled }}
         - name: metrics
@@ -130,8 +151,12 @@ spec:
         {{- end }}
         resources:
           {{- toYaml .Values.controller.resources | nindent 10 }}
-        {{- if .Values.extraEnv }}
         env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        {{- if .Values.extraEnv }}
         {{- toYaml .Values.extraEnv | nindent 8 }}
         {{- end }}
         {{- if or .Values.controller.snapshot.imageCommitterPodTemplate .Values.extraVolumeMounts }}

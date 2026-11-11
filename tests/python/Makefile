@@ -1,4 +1,4 @@
-.PHONY: sync sync-dev test test-k8s test-sandbox test-manager test-code test-pool test-credential-vault test-fsb lint fmt
+.PHONY: sync sync-dev test test-k8s test-sandbox test-manager test-code test-pool test-credential-vault test-fsb test-fsb-idle-pause lint fmt
 
 sync:
 	uv sync
@@ -7,7 +7,7 @@ sync-dev:
 	uv sync --group dev
 
 test:
-	uv run pytest --ignore=tests/test_execd_init_e2e.py --ignore=tests/test_execd_hardening_e2e.py --ignore=tests/test_fsb_e2e.py
+	uv run pytest --ignore=tests/test_execd_init_e2e.py --ignore=tests/test_execd_hardening_e2e.py --ignore=tests/test_fsb_e2e.py --ignore=tests/test_fsb_idle_pause_e2e.py
 
 test-kubernetes-mini:
 	uv run pytest \
@@ -35,8 +35,14 @@ test-credential-vault:
 test-fsb:
 	uv run pytest tests/test_fsb_e2e.py
 
+# OSEP-0024 idle-pause/wake suite: requires the stack brought up with
+# IDLE_PAUSE=1 plus OPENSANDBOX_TEST_FSB_TEMPLATE_ID and
+# OPENSANDBOX_TEST_IDLE_PAUSE=1; skipped everywhere else.
+test-fsb-idle-pause:
+	uv run pytest tests/test_fsb_idle_pause_e2e.py
+
 lint:
-	uv run ruff check tests
+	uv run ruff check tests benchmarks
 
 fmt:
-	uv run ruff format tests
+	uv run ruff format tests benchmarks

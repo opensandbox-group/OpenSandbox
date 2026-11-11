@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,13 @@ from urllib.parse import quote
 
 import httpx
 
+from opensandbox._httpx import build_async_redirect_client_options
+from opensandbox.adapters.converter.credential_payload import (
+    dump_binding_mutation_set,
+    dump_bindings,
+    dump_credential_mutation_set,
+    dump_credentials,
+)
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.response_handler import (
     handle_api_error,
@@ -47,58 +54,6 @@ from opensandbox.services.egress import Egress
 logger = logging.getLogger(__name__)
 
 
-def _dump_credentials(
-    items: list[Credential | dict[str, object]],
-) -> list[dict[str, object]]:
-    return [
-        Credential.model_validate(item).model_dump(by_alias=True, exclude_none=True)
-        for item in items
-    ]
-
-
-def _dump_bindings(
-    items: list[CredentialBinding | dict[str, object]],
-) -> list[dict[str, object]]:
-    return [
-        CredentialBinding.model_validate(item).model_dump(
-            by_alias=True, exclude_none=True
-        )
-        for item in items
-    ]
-
-
-def _dump_credential_mutations(
-    mutations: CredentialMutationSet | dict[str, object] | None,
-) -> dict[str, object] | None:
-    if mutations is None:
-        return None
-    parsed = CredentialMutationSet.model_validate(mutations)
-    out: dict[str, object] = {}
-    if parsed.add is not None:
-        out["add"] = _dump_credentials(parsed.add)
-    if parsed.replace is not None:
-        out["replace"] = _dump_credentials(parsed.replace)
-    if parsed.delete is not None:
-        out["delete"] = list(parsed.delete)
-    return out
-
-
-def _dump_binding_mutations(
-    mutations: CredentialBindingMutationSet | dict[str, object] | None,
-) -> dict[str, object] | None:
-    if mutations is None:
-        return None
-    parsed = CredentialBindingMutationSet.model_validate(mutations)
-    out: dict[str, object] = {}
-    if parsed.add is not None:
-        out["add"] = _dump_bindings(parsed.add)
-    if parsed.replace is not None:
-        out["replace"] = _dump_bindings(parsed.replace)
-    if parsed.delete is not None:
-        out["delete"] = list(parsed.delete)
-    return out
-
-
 class EgressAdapter(Egress):
     """Direct egress sidecar adapter using the generated egress client."""
 
@@ -117,12 +72,14 @@ class EgressAdapter(Egress):
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._httpx_client = httpx.AsyncClient(
             base_url=base_url,
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_async_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_async_httpx_client(self._httpx_client)
 
@@ -136,6 +93,7 @@ class EgressAdapter(Egress):
     ) -> object:
         response = await self._httpx_client.request(method, path, json=json_body)
         if response.status_code >= 400:
+            logger.debug(f"{operation} failed with HTTP {response.status_code}")
             response.raise_for_status()
         if response.status_code == 204 or not response.content:
             return None
@@ -149,8 +107,8 @@ class EgressAdapter(Egress):
     ) -> CredentialVaultState:
         try:
             body = {
-                "credentials": _dump_credentials(credentials),
-                "bindings": _dump_bindings(bindings),
+                "credentials": dump_credentials(credentials),
+                "bindings": dump_bindings(bindings),
             }
             payload = await self._request_json(
                 "POST",
@@ -192,10 +150,10 @@ class EgressAdapter(Egress):
             body: dict[str, object] = {}
             if expected_revision is not None:
                 body["expectedRevision"] = expected_revision
-            credential_mutations = _dump_credential_mutations(credentials)
+            credential_mutations = dump_credential_mutation_set(credentials)
             if credential_mutations is not None:
                 body["credentials"] = credential_mutations
-            binding_mutations = _dump_binding_mutations(bindings)
+            binding_mutations = dump_binding_mutation_set(bindings)
             if binding_mutations is not None:
                 body["bindings"] = binding_mutations
             payload = await self._request_json(
@@ -324,13 +282,16 @@ class EgressAdapter(Egress):
             from opensandbox.api.egress.models.network_rule_action import (
                 NetworkRuleAction,
             )
+            from opensandbox.api.egress.types import UNSET
 
             response_obj = await patch_policy.asyncio_detailed(
                 client=self._client,
                 body=[
                     ApiNetworkRule(
                         action=NetworkRuleAction(rule.action),
-                        target=rule.target,
+                        # None here means UNSET (omit the field) in the client.
+                        target=rule.target if rule.target is not None else UNSET,
+                        ports=rule.ports if rule.ports is not None else UNSET,
                     )
                     for rule in rules
                 ],

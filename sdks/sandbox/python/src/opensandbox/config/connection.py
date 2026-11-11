@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,8 @@ Connection configuration for OpenSandbox operations.
 """
 
 import os
+import ssl
+import warnings
 from datetime import timedelta
 
 import httpx  # type: ignore[reportMissingImports]
@@ -29,6 +31,7 @@ from pydantic import (  # type: ignore[reportMissingImports]
     field_validator,
 )
 
+from opensandbox._httpx import AsyncEventHook
 from opensandbox.transport import RetryAsyncTransport, RetryPolicy
 
 
@@ -51,6 +54,7 @@ class ConnectionConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _owns_transport: bool = PrivateAttr(default=True)
+    _ssl_context: ssl.SSLContext | None = PrivateAttr(default=None)
 
     api_key: str | None = Field(
         default=None, description="API key for authentication with sandbox service"
@@ -67,10 +71,25 @@ class ConnectionConfig(BaseModel):
         default=False, description="Enable debug logging for HTTP requests"
     )
     user_agent: str = Field(
-        default="OpenSandbox-Python-SDK/0.1.17.dev0", description="User agent string"
+        default="OpenSandbox-Python-SDK/1.2.0", description="User agent string"
     )
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"
+    )
+    follow_redirects: bool = Field(
+        default=False,
+        description=(
+            "Whether HTTP clients should follow redirects. Cross-origin redirects strip "
+            "headers prefixed OPEN-SANDBOX- or OPENSANDBOX-, but other sensitive custom "
+            "headers may still be forwarded."
+        ),
+    )
+    event_hooks: dict[str, list[AsyncEventHook]] = Field(
+        default_factory=dict,
+        description=(
+            "Additional httpx event hooks for SDK-created async clients. SDK security "
+            "hooks run after configured request hooks."
+        ),
     )
     transport: httpx.AsyncBaseTransport | None = Field(
         default=None,
@@ -85,15 +104,18 @@ class ConnectionConfig(BaseModel):
     retry_policy: RetryPolicy = Field(
         default_factory=RetryPolicy,
         description=(
-            "Retry policy applied to non-streaming requests going through "
-            "the shared transport. Pass RetryPolicy.disabled() for fast-fail."
+            "Retry policy applied to requests going through the shared "
+            "transport. Streaming (SSE) requests only get its wake-timeout "
+            "retry. Pass RetryPolicy.disabled() for fast-fail."
         ),
     )
     use_server_proxy: bool = Field(
         default=False,
         description=(
-            "Using sandbox server as proxy for process execd requests"
-            "It's useful when client sdk can't access the created sandbox directly"
+            "Deprecated: the server-proxied data path is in maintenance mode "
+            "(security and bug fixes only); route data-plane traffic through the "
+            "ingress gateway instead. Routes execd/endpoint requests through the "
+            "sandbox server; useful when the client cannot access the sandbox directly."
         ),
     )
     endpoint_cache_ttl: timedelta = Field(
@@ -136,6 +158,39 @@ class ConnectionConfig(BaseModel):
 
         client_ip.apply_client_ip(self.headers)
 
+    @property
+    def owns_transport(self) -> bool:
+        """True when this config created (and may close) its transport."""
+        return self._owns_transport
+
+    def new_owned_transport(
+        self,
+        *,
+        max_connections: int | None = 100,
+        max_keepalive_connections: int = 20,
+        keepalive_expiry: float = 30.0,
+    ) -> httpx.AsyncBaseTransport:
+        """
+        Build a fresh transport stack owned by the caller.
+
+        Same stack as `with_transport_if_missing` builds by default; the
+        shared `transport` on this config is never touched. Callers that
+        close what they build (e.g. adapter clients) can do so safely.
+        """
+        if self._ssl_context is None:
+            self._ssl_context = httpx.create_ssl_context()
+        inner = httpx.AsyncHTTPTransport(
+            verify=self._ssl_context,
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+                keepalive_expiry=keepalive_expiry,
+            ),
+        )
+        if self.retry_policy.wraps_transport():
+            return RetryAsyncTransport(inner, self.retry_policy, owns_inner=True)
+        return inner
+
     def with_transport_if_missing(
         self,
         *,
@@ -154,19 +209,15 @@ class ConnectionConfig(BaseModel):
         """
         if self.transport is not None:
             return self
-        inner = httpx.AsyncHTTPTransport(
-            limits=httpx.Limits(
-                max_connections=max_connections,
-                max_keepalive_connections=max_keepalive_connections,
-                keepalive_expiry=keepalive_expiry,
-            ),
+        config = self.model_copy(
+            update={
+                "transport": self.new_owned_transport(
+                    max_connections=max_connections,
+                    max_keepalive_connections=max_keepalive_connections,
+                    keepalive_expiry=keepalive_expiry,
+                )
+            }
         )
-        wrapped: httpx.AsyncBaseTransport
-        if self.retry_policy.wraps_transport():
-            wrapped = RetryAsyncTransport(inner, self.retry_policy, owns_inner=True)
-        else:
-            wrapped = inner
-        config = self.model_copy(update={"transport": wrapped})
         config._owns_transport = True
         return config
 
@@ -179,6 +230,19 @@ class ConnectionConfig(BaseModel):
         except Exception:
             # Avoid raising during cleanup paths.
             pass
+
+    @field_validator("use_server_proxy")
+    @classmethod
+    def _warn_deprecated_use_server_proxy(cls, v: bool) -> bool:
+        if v:
+            warnings.warn(
+                "use_server_proxy is deprecated: the server proxy data path is in "
+                "maintenance mode (security and bug fixes only). Route data-plane "
+                "traffic through the ingress gateway instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return v
 
     @field_validator("protocol")
     @classmethod
@@ -211,7 +275,12 @@ class ConnectionConfig(BaseModel):
 
     def get_base_url(self) -> str:
         """Get the full base URL for API requests."""
-        domain = self.get_domain()
+        # Ignore a trailing "/" or "/v1" like the other SDKs, so the version
+        # prefix is never doubled ("//v1", "/v1/v1").
+        domain = self.get_domain().rstrip("/")
+        version_suffix = f"/{self._API_VERSION}"
+        if domain.endswith(version_suffix):
+            domain = domain[: -len(version_suffix)]
         # Allow domain to override protocol if it explicitly starts with a scheme
         if domain.startswith("http://") or domain.startswith("https://"):
             return f"{domain}/{self._API_VERSION}"

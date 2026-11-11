@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@
 #   5. mint the umbrella tag + the Go companion tag on C_bom
 #   6. optional: push, create the GitHub Release
 #
-# The build-hold-publish fan-out lives in .github/workflows/release-umbrella.yml.
+# The build-publish fan-out lives in .github/workflows/release-umbrella.yml.
 
 set -euo pipefail
 

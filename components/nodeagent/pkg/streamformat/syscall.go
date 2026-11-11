@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,8 @@ type syscallFormat struct{}
 
 func init() { Register(syscallFormat{}) }
 
+// SyscallStreamID returns the stable Source-owned identity for one container
+// syscall stream below the syscalls namespace.
 func SyscallStreamID(podUID, container string) string {
 	return path.Join(api.SourceNameSyscalls, podUID, container)
 }

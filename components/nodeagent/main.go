@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -40,6 +40,7 @@ import (
 	sourcegroup "github.com/alibaba/opensandbox/nodeagent/pkg/source"
 	_ "github.com/alibaba/opensandbox/nodeagent/pkg/source/containerlogs"
 	_ "github.com/alibaba/opensandbox/nodeagent/pkg/source/syscalls"
+	_ "github.com/alibaba/opensandbox/nodeagent/pkg/source/vmconsole"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/state"
 	"github.com/alibaba/opensandbox/nodeagent/pkg/store"
 	"k8s.io/client-go/kubernetes"
@@ -131,41 +132,45 @@ func run() (exitCode int) {
 		return
 	}
 
-	restConfig, err := rest.InClusterConfig()
-	if err != nil {
-		readiness.Replace("kubernetes-config-unavailable")
-		log.Errorf("Kubernetes configuration unavailable: %v", err)
-		<-signalCtx.Done()
-		return
-	}
-	restConfig.UserAgent = "opensandbox-nodeagent/" + version.GitCommit
-	client, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		readiness.Replace("kubernetes-client-unavailable")
-		log.Errorf("Kubernetes client unavailable: %v", err)
-		<-signalCtx.Done()
-		return
-	}
-	identityStore := store.New(client, cfg.NodeName, cfg.ClusterID)
-	if err := identityStore.Start(runCtx); err != nil {
-		readiness.Replace("store-not-synced")
-		log.Errorf("Sandbox Store failed to sync: %v", err)
-		<-signalCtx.Done()
-		return
-	}
-	staleThreshold := max(3*config.InternalReconcileInterval, time.Minute)
-	safego.Go(func() {
-		ticker := time.NewTicker(min(config.InternalReconcileInterval, time.Minute))
-		defer ticker.Stop()
-		for {
-			select {
-			case <-runCtx.Done():
-				return
-			case now := <-ticker.C:
-				readiness.Set("store-stale", identityStore.Stale(now, staleThreshold))
-			}
+	var identityStore *store.Store
+	if len(cfg.Sources) != 1 || cfg.Sources[0] != api.SourceNameVMConsole {
+		restConfig, err := rest.InClusterConfig()
+		if err != nil {
+			readiness.Replace("kubernetes-config-unavailable")
+			log.Errorf("Kubernetes configuration unavailable: %v", err)
+			<-signalCtx.Done()
+			return
 		}
-	})
+		restConfig.UserAgent = "opensandbox-nodeagent/" + version.GitCommit
+		client, err := kubernetes.NewForConfig(restConfig)
+		if err != nil {
+			readiness.Replace("kubernetes-client-unavailable")
+			log.Errorf("Kubernetes client unavailable: %v", err)
+			<-signalCtx.Done()
+			return
+		}
+		identityStore = store.New(client, cfg.NodeName, cfg.ClusterID)
+		if err := identityStore.Start(runCtx); err != nil {
+			readiness.Replace("store-not-synced")
+			log.Errorf("Sandbox Store failed to sync: %v", err)
+			<-signalCtx.Done()
+			return
+		}
+		staleThreshold := max(3*config.InternalReconcileInterval, time.Minute)
+		safego.Go(func() {
+			ticker := time.NewTicker(min(config.InternalReconcileInterval, time.Minute))
+			defer ticker.Stop()
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case now := <-ticker.C:
+					readiness.Set("store-stale", identityStore.Stale(now, staleThreshold))
+				}
+			}
+		})
+
+	}
 
 	onRuntimeError := func(err error) {
 		readiness.Set("runtime-error", true)
@@ -173,12 +178,16 @@ func run() (exitCode int) {
 	}
 	sourceChildren := make([]sourcegroup.Child, 0, len(cfg.Sources))
 	for _, sourceName := range cfg.Sources {
-		sourceStore, viewErr := identityStore.ForSource(sourceName)
-		if viewErr != nil {
-			readiness.Replace("source-unavailable")
-			log.Errorf("source Store view failed: %v", viewErr)
-			<-signalCtx.Done()
-			return
+		var sourceStore store.View
+		if sourceName != api.SourceNameVMConsole {
+			var viewErr error
+			sourceStore, viewErr = identityStore.ForSource(sourceName)
+			if viewErr != nil {
+				readiness.Replace("source-unavailable")
+				log.Errorf("source Store view failed: %v", viewErr)
+				<-signalCtx.Done()
+				return
+			}
 		}
 		sourceState, stateErr := checkpoint.SourceState(sourceName)
 		if stateErr != nil {
@@ -287,6 +296,9 @@ func run() (exitCode int) {
 	return 0
 }
 
+// errPipelinePanicked is the sentinel runPipeline reports when the pipeline
+// goroutine panics: runErr is pre-assigned so a panic (which skips the
+// assignment) is distinguishable from a nil return.
 var errPipelinePanicked = errors.New("pipeline goroutine panicked")
 
 func runPipeline(done chan<- error, run func() error) {
@@ -301,6 +313,12 @@ func waitForSignal() {
 	<-ctx.Done()
 }
 
+// serverAddresses picks the health and pprof listen addresses. Even with an
+// invalid configuration the health server must come up so readiness can
+// report the failure; the fallback therefore re-validates the raw
+// NODEAGENT_SERVER_ADDR value (or defaults to :8080) instead of trusting the
+// config, while pprof is disabled because its loopback-only rule cannot be
+// verified without a valid config.
 func serverAddresses(cfg config.Config, cfgErr error) (healthAddr, pprofAddr string) {
 	if cfgErr == nil {
 		return cfg.ServerAddr, cfg.PprofAddr

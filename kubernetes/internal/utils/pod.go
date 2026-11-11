@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,6 +34,20 @@ func IsPodReady(pod *v1.Pod) bool {
 func IsPodReadyConditionTrue(status v1.PodStatus) bool {
 	condition := getPodReadyCondition(status)
 	return condition != nil && condition.Status == v1.ConditionTrue
+}
+
+// IsPodExplicitlyNotReady reports whether the pod carries a PodReady condition
+// whose status is anything other than ConditionTrue.
+//
+// It deliberately returns false when the pod carries no PodReady condition at
+// all, so a pod whose readiness has simply not been observed yet is not treated
+// as blocked. Only an explicit verdict from the control plane - ConditionFalse,
+// or ConditionUnknown, which kubelet reports when the node is degraded or
+// partitioned and the pod may still hold its PodIP - removes a pod from
+// consideration.
+func IsPodExplicitlyNotReady(status v1.PodStatus) bool {
+	condition := getPodReadyCondition(status)
+	return condition != nil && condition.Status != v1.ConditionTrue
 }
 
 // getPodReadyCondition extracts the pod ready condition from the given status and returns that.

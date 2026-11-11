@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -136,16 +136,25 @@ function sanitizeCredentialAuthMetadata(
 ): CredentialBindingMetadata["auth"] {
   if (value == null) return undefined;
   const raw = expectObject(value, context);
-  const auth: NonNullable<CredentialBindingMetadata["auth"]> = {
-    type: expectString(raw.type, `${context}.type`),
-  };
-  if (raw.name != null) {
-    auth.name = expectString(raw.name, `${context}.name`);
+  if (raw.type != null) {
+    const auth: NonNullable<CredentialBindingMetadata["auth"]> = {
+      type: expectString(raw.type, `${context}.type`),
+    };
+    if (raw.name != null) {
+      auth.name = expectString(raw.name, `${context}.name`);
+    }
+    return auth;
   }
-  return auth;
+  // Typeless exchange form: credential reference only.
+  if (raw.credential != null) {
+    return {
+      credential: expectString(raw.credential, `${context}.credential`),
+    };
+  }
+  throw new Error(`${context}: expected "type" or "credential"`);
 }
 
-function sanitizeCredentialMetadata(value: unknown, context: string): CredentialMetadata {
+export function sanitizeCredentialMetadata(value: unknown, context: string): CredentialMetadata {
   const raw = expectObject(value, context);
   return {
     name: expectString(raw.name, `${context}.name`),
@@ -154,7 +163,7 @@ function sanitizeCredentialMetadata(value: unknown, context: string): Credential
   };
 }
 
-function sanitizeCredentialBindingMetadata(
+export function sanitizeCredentialBindingMetadata(
   value: unknown,
   context: string,
 ): CredentialBindingMetadata {
@@ -170,7 +179,7 @@ function sanitizeCredentialBindingMetadata(
   return binding;
 }
 
-function sanitizeCredentialVaultState(
+export function sanitizeCredentialVaultState(
   value: unknown,
   operation: string,
 ): CredentialVaultState {
@@ -190,7 +199,7 @@ function sanitizeCredentialVaultState(
   };
 }
 
-function sanitizeCredentialListResponse(
+export function sanitizeCredentialListResponse(
   value: unknown,
   operation: string,
 ): CredentialMetadata[] {
@@ -206,7 +215,7 @@ function sanitizeCredentialListResponse(
   return response.credentials;
 }
 
-function sanitizeCredentialBindingListResponse(
+export function sanitizeCredentialBindingListResponse(
   value: unknown,
   operation: string,
 ): CredentialBindingMetadata[] {

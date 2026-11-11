@@ -5,14 +5,9 @@ description: Run a Deep Agent with its file and shell tools executing inside an 
 
 # Deep Agents + OpenSandbox Example
 
-Run a [Deep Agent](https://github.com/langchain-ai/deepagents) whose file and shell tools
-execute inside an OpenSandbox sandbox. The
-[`langchain-sandbox-opensandbox`](https://pypi.org/project/langchain-sandbox-opensandbox/)
-backend adapts the OpenSandbox Python SDK to the Deep Agents `BaseSandbox` interface, so every
-`ls` / `read_file` / `write_file` / `glob` / `grep` / command the agent performs is sandboxed.
+Run a [Deep Agent](https://github.com/langchain-ai/deepagents) whose file and shell tools execute inside an OpenSandbox sandbox. The [`langchain-sandbox-opensandbox`](https://pypi.org/project/langchain-sandbox-opensandbox/) backend adapts the OpenSandbox Python SDK to the Deep Agents `BaseSandbox` interface, so every `ls` / `read_file` / `write_file` / `glob` / `grep` / command the agent performs is sandboxed.
 
-The backend passes the full `langchain-tests` `SandboxIntegrationTests` conformance suite
-(86/86) against a live server.
+The backend passes the full `langchain-tests` `SandboxIntegrationTests` conformance suite (86/86) against a live server.
 
 ## Start OpenSandbox server [local]
 
@@ -34,9 +29,7 @@ uv pip install deepagents langchain-sandbox-opensandbox
 uv run python examples/deep-agents/main.py
 ```
 
-The agent writes a Python script into the sandbox, runs it, and reports the output — all file
-and shell operations happen inside the sandbox rather than on the host. The sandbox is destroyed
-on exit (terminated and local resources closed).
+The agent writes a Python script into the sandbox, runs it, and reports the output — all file and shell operations happen inside the sandbox rather than on the host. The sandbox is destroyed on exit (terminated and local resources closed).
 
 ## Environment Variables
 

@@ -32,6 +32,7 @@ from ..types import UNSET, Unset
 if TYPE_CHECKING:
     from ..models.bind_mount import BindMount
     from ..models.env_passthrough_spec import EnvPassthroughSpec
+    from ..models.isolated_overlay_spec import IsolatedOverlaySpec
     from ..models.isolated_workspace_spec import IsolatedWorkspaceSpec
 
 
@@ -41,9 +42,11 @@ T = TypeVar("T", bound="SessionState")
 @_attrs_define
 class SessionState:
     """State of an isolated session. Runtime status fields (status, created_at, last_run_at, idle_remaining_seconds) are
-    always present. Creation-parameter fields (profile, workspace, binds, share_net, env_passthrough, uid, gid,
-    uid_mode, extra_writable, idle_timeout_seconds) echo the parameters used to create the session and let a stateless
-    client rebuild a session handle from just a session ID (e.g. after a client restart or in serverless workers). Older
+    always present. Creation-parameter fields (profile, workspace, overlays, binds, share_net, env_passthrough, uid,
+    gid, uid_mode, extra_writable, idle_timeout_seconds) echo the parameters used to create the session and let a
+    stateless client rebuild a session handle from just a session ID (e.g. after a client restart or in serverless
+    workers). `overlays` lists the effective mounts; for sessions created via the legacy `workspace` field it repeats
+    that workspace as a single element, and `workspace` itself is only echoed for such single-overlay sessions. Older
     execd builds may omit the creation-parameter fields; clients must tolerate them being absent.
 
         Attributes:
@@ -53,6 +56,7 @@ class SessionState:
             idle_remaining_seconds (int | None | Unset):
             profile (SessionStateProfile | Unset): Profile the session was created with.
             workspace (IsolatedWorkspaceSpec | Unset):
+            overlays (list[IsolatedOverlaySpec] | Unset): Effective overlay mounts of the session.
             extra_writable (list[str] | Unset):
             binds (list[BindMount] | Unset):
             share_net (bool | Unset):
@@ -69,6 +73,7 @@ class SessionState:
     idle_remaining_seconds: int | None | Unset = UNSET
     profile: SessionStateProfile | Unset = UNSET
     workspace: IsolatedWorkspaceSpec | Unset = UNSET
+    overlays: list[IsolatedOverlaySpec] | Unset = UNSET
     extra_writable: list[str] | Unset = UNSET
     binds: list[BindMount] | Unset = UNSET
     share_net: bool | Unset = UNSET
@@ -105,6 +110,13 @@ class SessionState:
         workspace: dict[str, Any] | Unset = UNSET
         if not isinstance(self.workspace, Unset):
             workspace = self.workspace.to_dict()
+
+        overlays: list[dict[str, Any]] | Unset = UNSET
+        if not isinstance(self.overlays, Unset):
+            overlays = []
+            for overlays_item_data in self.overlays:
+                overlays_item = overlays_item_data.to_dict()
+                overlays.append(overlays_item)
 
         extra_writable: list[str] | Unset = UNSET
         if not isinstance(self.extra_writable, Unset):
@@ -148,6 +160,8 @@ class SessionState:
             field_dict["profile"] = profile
         if workspace is not UNSET:
             field_dict["workspace"] = workspace
+        if overlays is not UNSET:
+            field_dict["overlays"] = overlays
         if extra_writable is not UNSET:
             field_dict["extra_writable"] = extra_writable
         if binds is not UNSET:
@@ -171,6 +185,7 @@ class SessionState:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.bind_mount import BindMount
         from ..models.env_passthrough_spec import EnvPassthroughSpec
+        from ..models.isolated_overlay_spec import IsolatedOverlaySpec
         from ..models.isolated_workspace_spec import IsolatedWorkspaceSpec
 
         d = dict(src_dict)
@@ -218,6 +233,15 @@ class SessionState:
         else:
             workspace = IsolatedWorkspaceSpec.from_dict(_workspace)
 
+        _overlays = d.pop("overlays", UNSET)
+        overlays: list[IsolatedOverlaySpec] | Unset = UNSET
+        if _overlays is not UNSET:
+            overlays = []
+            for overlays_item_data in _overlays:
+                overlays_item = IsolatedOverlaySpec.from_dict(overlays_item_data)
+
+                overlays.append(overlays_item)
+
         extra_writable = cast(list[str], d.pop("extra_writable", UNSET))
 
         _binds = d.pop("binds", UNSET)
@@ -258,6 +282,7 @@ class SessionState:
             idle_remaining_seconds=idle_remaining_seconds,
             profile=profile,
             workspace=workspace,
+            overlays=overlays,
             extra_writable=extra_writable,
             binds=binds,
             share_net=share_net,

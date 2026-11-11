@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,6 +27,9 @@ import type { SandboxFiles } from "./services/filesystem.js";
 import type { CredentialVault, Egress } from "./services/egress.js";
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 import type { AdapterFactory } from "./factory/adapterFactory.js";
+import type { Diagnostics } from "./services/diagnostics.js";
+import type { DiagnosticContext, DiagnosticContent } from "./models/diagnostics.js";
+import { requireDiagnostics } from "./adapters/diagnosticsAdapter.js";
 
 import type { Sandboxes } from "./services/sandboxes.js";
 import type { ExecdCommands } from "./services/execdCommands.js";
@@ -40,6 +43,7 @@ import type {
   CreateSandboxRequest,
   CredentialProxyConfig,
   Endpoint,
+  IdlePolicy,
   NetworkPolicy,
   NetworkRule,
   PlatformSpec,
@@ -52,11 +56,13 @@ import type {
 } from "./models/sandboxes.js";
 import { SandboxOrigin } from "./models/sandboxes.js";
 import { ReadinessBudget, validatePollingInterval } from "./internal/readiness.js";
+import { validateIdlePolicy } from "./internal/idlePolicy.js";
+import { validateRenewalPolicy } from "./internal/renewalPolicy.js";
 
 const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
 
 const TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE =
-  "Credential Vault is not available for template-backed sandboxes: they have no sandbox-side egress sidecar.";
+  "Credential Vault is not available: the adapter factory's network policy stack does not provide credentialVault for template-backed sandboxes.";
 
 const unavailableIsolation: IsolationService = {
   create(): Promise<IsolationSession> {
@@ -236,6 +242,13 @@ export interface SandboxConnectOptions {
    */
   connectionConfig?: ConnectionConfig | ConnectionConfigOptions;
   /**
+   * Declare that the SDK owns (and may close) the connection config's
+   * transport on cleanup paths. Set when the config's transport was
+   * allocated for this connect (e.g. `sandbox.resume()`), or to transfer
+   * ownership of a caller-initialized config.
+   */
+  ownsTransport?: boolean;
+  /**
    * Advanced override: inject a custom adapter factory (custom transports, dependency injection).
    */
   adapterFactory?: AdapterFactory;
@@ -299,6 +312,11 @@ export interface SandboxCreateFromTemplateOptions {
    * Prefer namespaced keys (e.g. `storage.id`).
    */
   extensions?: Record<string, string>;
+  /**
+   * Optional idle behavior (OSEP-0024, fast-sandbox only). Control-plane
+   * state, not workload shape, so template mode accepts it.
+   */
+  idlePolicy?: IdlePolicy;
   /**
    * Optional signal used to cancel creation and readiness requests.
    */
@@ -369,7 +387,9 @@ async function resolveEgressStack(
     }
     return {
       egress: stack.egress,
-      credentialVault: unavailableCredentialVault(TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE),
+      credentialVault:
+        stack.credentialVault ??
+        unavailableCredentialVault(TEMPLATE_CREDENTIAL_VAULT_UNAVAILABLE),
       origin: SandboxOrigin.TEMPLATE,
     };
   }
@@ -445,16 +465,31 @@ export class Sandbox {
       lifecycleBaseUrl: string;
       execdBaseUrl: string;
       egress: Egress;
+      ownsTransport: boolean;
+      diagnostics?: Diagnostics;
     }
   >();
+
+  /**
+   * Return an independent filesystem client using explicit Linux credentials.
+   * Requires identity-aware Execd; unsupported servers never trigger fallback.
+   */
+  filesWithIdentity(uid: number, gid: number): SandboxFiles {
+    if (typeof this.files.withIdentity !== "function") {
+      throw new Error("The selected filesystem adapter does not support execution identity");
+    }
+    return this.files.withIdentity(uid, gid);
+  }
 
   private constructor(opts: {
     id: SandboxId;
     connectionConfig: ConnectionConfig;
     adapterFactory: AdapterFactory;
+    ownsTransport: boolean;
     lifecycleBaseUrl: string;
     execdBaseUrl: string;
     sandboxes: Sandboxes;
+    diagnostics?: Diagnostics;
     commands: ExecdCommands;
     files: SandboxFiles;
     health: ExecdHealth;
@@ -477,6 +512,8 @@ export class Sandbox {
       lifecycleBaseUrl: opts.lifecycleBaseUrl,
       execdBaseUrl: opts.execdBaseUrl,
       egress: opts.egress,
+      ownsTransport: opts.ownsTransport,
+      diagnostics: opts.diagnostics,
     });
 
     this.origin = opts.origin ?? SandboxOrigin.UNKNOWN;
@@ -495,6 +532,12 @@ export class Sandbox {
     }
     if (!(opts.skipHealthCheck ?? false) && opts.healthCheckPollingInterval !== undefined) {
       validatePollingInterval(opts.healthCheckPollingInterval);
+    }
+    if (opts.lifecycle?.idlePolicy) {
+      validateIdlePolicy(opts.lifecycle.idlePolicy);
+    }
+    if (opts.lifecycle?.renewalPolicy) {
+      validateRenewalPolicy(opts.lifecycle.renewalPolicy);
     }
 
     // Validate volumes before allocating transport resources.
@@ -529,13 +572,16 @@ export class Sandbox {
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
-      await connectionConfig.closeTransport();
+      if (connectionConfig !== baseConnectionConfig) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
 
@@ -622,9 +668,11 @@ export class Sandbox {
         id: sandboxId,
         connectionConfig,
         adapterFactory,
+        ownsTransport: connectionConfig !== baseConnectionConfig,
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -671,7 +719,9 @@ export class Sandbox {
           } catch {
             // Preserve the caller's abort error if sandbox cleanup fails.
           } finally {
-            await connectionConfig.closeTransport().catch(() => undefined);
+            if (connectionConfig !== baseConnectionConfig) {
+              await connectionConfig.closeTransport().catch(() => undefined);
+            }
           }
         })();
         throw err;
@@ -683,7 +733,9 @@ export class Sandbox {
           // Preserve the original creation error if sandbox cleanup fails.
         }
       }
-      await connectionConfig.closeTransport();
+      if (connectionConfig !== baseConnectionConfig) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
   }
@@ -692,14 +744,18 @@ export class Sandbox {
    * Create a new sandbox from a `Succeeded` fsb template.
    *
    * Template mode fixes the workload shape on the server: the entrypoint,
-   * env, resources, volumes, platform and lifecycle of the sandbox come
-   * from the template's golden image and cannot be overridden here. Only
-   * metadata, network policy and extensions may accompany the template id,
+   * env, resources, volumes, platform and lifecycle hooks of the sandbox
+   * come from the template's golden image and cannot be overridden here.
+   * Only metadata, network policy, extensions and the OSEP-0024 idle policy
+   * (control-plane state, not workload shape) may accompany the template id,
    * and the timeout is required.
    *
-   * The returned sandbox routes egress policy operations through the
-   * lifecycle control plane and has no Credential Vault (template-backed
-   * sandboxes have no sandbox-side egress sidecar).
+   * The returned sandbox routes egress policy operations and the Credential
+   * Vault through the lifecycle control plane: the server relays vault
+   * revisions to the egress-held vault over the FastPath handler relay, so
+   * the ack is synchronous and credential values never appear on any read
+   * (OSEP-0022). A 412 patch failure means another writer won the revision —
+   * re-read and retry with the fresh `expectedRevision`.
    */
   static async createFromTemplate(opts: SandboxCreateFromTemplateOptions): Promise<Sandbox> {
     if (!opts.templateId?.trim()) {
@@ -713,6 +769,9 @@ export class Sandbox {
     if (!(opts.skipHealthCheck ?? false) && opts.healthCheckPollingInterval !== undefined) {
       validatePollingInterval(opts.healthCheckPollingInterval);
     }
+    if (opts.idlePolicy) {
+      validateIdlePolicy(opts.idlePolicy, "idlePolicy");
+    }
     throwIfAborted(opts.signal);
 
     const baseConnectionConfig =
@@ -724,13 +783,16 @@ export class Sandbox {
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
-      await connectionConfig.closeTransport();
+      if (connectionConfig !== baseConnectionConfig) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
 
@@ -745,6 +807,7 @@ export class Sandbox {
           }
         : undefined,
       extensions: opts.extensions ?? {},
+      ...(opts.idlePolicy == null ? {} : { idlePolicy: opts.idlePolicy }),
     };
 
     let sandboxId: SandboxId | undefined;
@@ -789,9 +852,11 @@ export class Sandbox {
         id: sandboxId,
         connectionConfig,
         adapterFactory,
+        ownsTransport: connectionConfig !== baseConnectionConfig,
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -838,7 +903,9 @@ export class Sandbox {
           } catch {
             // Preserve the caller's abort error if sandbox cleanup fails.
           } finally {
-            await connectionConfig.closeTransport().catch(() => undefined);
+            if (connectionConfig !== baseConnectionConfig) {
+              await connectionConfig.closeTransport().catch(() => undefined);
+            }
           }
         })();
         throw err;
@@ -850,7 +917,9 @@ export class Sandbox {
           // Preserve the original creation error if sandbox cleanup fails.
         }
       }
-      await connectionConfig.closeTransport();
+      if (connectionConfig !== baseConnectionConfig) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
   }
@@ -864,17 +933,24 @@ export class Sandbox {
         ? opts.connectionConfig
         : new ConnectionConfig(opts.connectionConfig);
     const connectionConfig = baseConnectionConfig.withTransportIfMissing();
+    // Reference equality can't tell a resume-allocated config from a
+    // caller-initialized one; an explicit option wins.
+    const ownsTransport =
+      opts.ownsTransport === true || connectionConfig !== baseConnectionConfig;
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
     const lifecycleBaseUrl = connectionConfig.getBaseUrl();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
-      await connectionConfig.closeTransport();
+      if (ownsTransport) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
 
@@ -916,9 +992,11 @@ export class Sandbox {
         id: opts.sandboxId,
         connectionConfig,
         adapterFactory,
+        ownsTransport,
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -936,16 +1014,32 @@ export class Sandbox {
       return sbx;
     } catch (err) {
       if (opts.signal?.aborted) {
-        void connectionConfig.closeTransport().catch(() => undefined);
+        if (ownsTransport) {
+          void connectionConfig.closeTransport().catch(() => undefined);
+        }
         throw err;
       }
-      await connectionConfig.closeTransport();
+      if (ownsTransport) {
+        await connectionConfig.closeTransport();
+      }
       throw err;
     }
   }
 
   async getInfo(): Promise<SandboxInfo> {
     return await this.sandboxes.getSandbox(this.id);
+  }
+
+  getDiagnosticContext(): Promise<DiagnosticContext> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getContext(this.id);
+  }
+
+  getDiagnosticLogs(scope: string): Promise<DiagnosticContent> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getLogs(this.id, scope);
+  }
+
+  getDiagnosticEvents(scope: string): Promise<DiagnosticContent> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getEvents(this.id, scope);
   }
 
   async isHealthy(): Promise<boolean> {
@@ -982,9 +1076,13 @@ export class Sandbox {
       validatePollingInterval(opts.healthCheckPollingInterval);
     }
     await this.sandboxes.resumeSandbox(this.id);
+    const resumeConfig = this.connectionConfig.withFreshTransport();
     return await Sandbox.connect({
       sandboxId: this.id,
-      connectionConfig: this.connectionConfig,
+      // Allocated here for the resumed instance; without ownsTransport the
+      // dispatcher would leak (connect marks initialized configs caller-owned).
+      connectionConfig: resumeConfig,
+      ownsTransport: true,
       adapterFactory: Sandbox._priv.get(this)!.adapterFactory,
       skipHealthCheck: opts.skipHealthCheck ?? false,
       readyTimeoutSeconds: opts.readyTimeoutSeconds,
@@ -1004,25 +1102,30 @@ export class Sandbox {
         ? opts.connectionConfig
         : new ConnectionConfig(opts.connectionConfig);
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
-    const resumeConnectionConfig = baseConnectionConfig.withTransportIfMissing();
-    const lifecycleBaseUrl = resumeConnectionConfig.getBaseUrl();
+    // Resume through a dedicated transport released right after the call.
+    const resumeOnlyConfig = baseConnectionConfig.withFreshTransport();
+    const lifecycleBaseUrl = resumeOnlyConfig.getBaseUrl();
 
     let sandboxes: Sandboxes;
     try {
       sandboxes = adapterFactory.createLifecycleStack({
-        connectionConfig: resumeConnectionConfig,
+        connectionConfig: resumeOnlyConfig,
         lifecycleBaseUrl,
       }).sandboxes;
       await sandboxes.resumeSandbox(opts.sandboxId);
     } catch (err) {
-      await resumeConnectionConfig.closeTransport();
+      await resumeOnlyConfig.closeTransport();
       throw err;
     }
 
-    await resumeConnectionConfig.closeTransport();
+    await resumeOnlyConfig.closeTransport();
     return await Sandbox.connect({ ...opts, connectionConfig: baseConnectionConfig, adapterFactory });
   }
 
+  /**
+   * Request irreversible sandbox termination. Resolves when deletion is accepted;
+   * runtime cleanup may continue afterward.
+   */
   async kill(): Promise<void> {
     this.sandboxes.invalidateEndpointCache?.(this.id);
     await this.sandboxes.deleteSandbox(this.id);
@@ -1030,13 +1133,22 @@ export class Sandbox {
 
   /**
    * Release any client-side resources (e.g. Node.js HTTP agents) owned by this Sandbox instance.
+   *
+   * The transport is closed only when the SDK allocated it for this
+   * instance; caller-initialized `ConnectionConfig`s stay caller-owned —
+   * call `connectionConfig.closeTransport()` yourself when done.
    */
   async close(): Promise<void> {
-    await this.connectionConfig.closeTransport();
+    // Shared (caller-initialized) transports are closed by their owner.
+    if (Sandbox._priv.get(this)!.ownsTransport) {
+      await this.connectionConfig.closeTransport();
+    }
   }
 
   /**
    * Renew expiration by setting expiresAt to now + timeoutSeconds.
+   * This may shorten or extend the remaining lifetime. The creation-time
+   * server timeout limit does not apply.
    */
   async renew(timeoutSeconds: number): Promise<RenewSandboxExpirationResponse> {
     const expiresAt = new Date(

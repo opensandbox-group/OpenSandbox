@@ -1,9 +1,10 @@
 # Umbrella release BOM, rc channel — rendered by create-umbrella-release.sh
 # from this template. The BOM is authoritative for image digests. Entries
 # marked PENDING are pinned by the release-umbrella workflow during the
-# build-hold-publish fan-out.
-# server/cli/sdks are omitted: rc builds hold packages; they publish and
-# appear in the BOM at the stable release (umbrella-release.yaml.tmpl).
+# build-publish fan-out.
+# server/cli/sdks are omitted: rc builds do not publish packages; they
+# publish and appear in the BOM at the stable release
+# (umbrella-release.yaml.tmpl).
 # Placeholders (written as ${NAME}): VERSION LINE CHANNEL RELEASE_DATE
 #   GIT_COMMIT SPEC_SANDBOX_LIFECYCLE_SHA256 SPEC_EXECD_API_SHA256
 #   SPEC_EGRESS_API_SHA256 SPEC_DIAGNOSTIC_API_SHA256

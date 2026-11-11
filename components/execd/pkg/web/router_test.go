@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -176,7 +176,7 @@ func TestNewRouterServesInitRoutes(t *testing.T) {
 
 	// /internal/init routes through to the handler: an invalid payload
 	// fails validation (400) instead of a routing error (404), and the
-	// failed request does not consume the one-shot slot.
+	// failed request does not initialize the runtime.
 	w = doRequest(t, r, http.MethodPost, "/internal/init", `{"sandboxId":"s","generation":0}`)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }

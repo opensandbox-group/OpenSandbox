@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,7 +54,8 @@ def check_openclaw(sbx: SandboxSync, port: int = DEFAULT_PORT) -> bool:
                     elapsed = time.perf_counter() - start
                     print(f"[check] sandbox ready after {elapsed:.1f}s")
                     return True
-            except Exception as exc:
+            except Exception:
+                # The gateway may still be starting; retry quietly until polling times out.
                 pass
             time.sleep(0.2)
         return False

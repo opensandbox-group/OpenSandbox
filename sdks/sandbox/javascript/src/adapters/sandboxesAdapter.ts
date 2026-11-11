@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -212,13 +212,18 @@ export class SandboxesAdapter implements Sandboxes {
     signal?: AbortSignal,
   ): Promise<CreateSandboxResponse> {
     // Template mode fixes the workload shape server-side; only the template id,
-    // timeout, metadata, networkPolicy and extensions are forwarded.
+    // timeout, metadata, networkPolicy, extensions and the idle policy are
+    // forwarded. The idle policy is control-plane state (OSEP-0024), so it
+    // rides the lifecycle object while hooks stay template-owned.
     const body: ApiCreateSandboxRequest = {
       templateId: req.templateId,
       timeout: req.timeout,
       metadata: req.metadata,
       networkPolicy: req.networkPolicy,
       extensions: req.extensions,
+      ...(req.idlePolicy == null
+        ? {}
+        : { lifecycle: { idlePolicy: req.idlePolicy } }),
     } as unknown as ApiCreateSandboxRequest;
     const { data, error, response } = await this.client.POST("/sandboxes", {
       body,
@@ -439,24 +444,35 @@ export class SandboxesAdapter implements Sandboxes {
     signal?: AbortSignal,
   ): Promise<Endpoint> {
     signal?.throwIfAborted();
-    if (signal) {
-      const cached = this.endpointCache?.get(sandboxId, port, useServerProxy);
-      if (cached) return cached;
-      const endpoint = await this.fetchSandboxEndpoint(
-        sandboxId,
-        port,
-        useServerProxy,
-        signal,
-      );
-      this.endpointCache?.put(sandboxId, port, useServerProxy, endpoint);
-      return endpoint;
+    const cached = this.endpointCache?.get(sandboxId, port, useServerProxy);
+    if (cached) return cached;
+    if (!this.endpointCache) {
+      return this.fetchSandboxEndpoint(sandboxId, port, useServerProxy, signal);
     }
-    if (this.endpointCache) {
-      return this.endpointCache.getOrFetch(sandboxId, port, useServerProxy, () =>
-        this.fetchSandboxEndpoint(sandboxId, port, useServerProxy)
-      );
+    // Signal-less dedup fetch: no single caller's signal may abort the
+    // shared request; signal callers race it locally instead.
+    const shared = this.endpointCache.getOrFetch(sandboxId, port, useServerProxy, () =>
+      this.fetchSandboxEndpoint(sandboxId, port, useServerProxy)
+    );
+    if (!signal) return shared;
+    return this.raceSignal(shared, signal);
+  }
+
+  private async raceSignal(
+    promise: Promise<Endpoint>,
+    signal: AbortSignal,
+  ): Promise<Endpoint> {
+    if (signal.aborted) throw signal.reason ?? new Error("Aborted");
+    let onAbort: (() => void) | undefined;
+    const abortPromise = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error("Aborted"));
+      signal.addEventListener("abort", onAbort, { once: true } as any);
+    });
+    try {
+      return await Promise.race([promise, abortPromise]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort as any);
     }
-    return this.fetchSandboxEndpoint(sandboxId, port, useServerProxy);
   }
 
   private async fetchSandboxEndpoint(

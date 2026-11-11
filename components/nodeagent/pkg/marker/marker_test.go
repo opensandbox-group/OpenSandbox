@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ func TestEncodeMarkerIsDeterministic(t *testing.T) {
 	if !bytes.Equal(first, second) || bytes.HasSuffix(first, []byte("\n")) {
 		t.Fatalf("non-canonical output: %q", first)
 	}
-	if value.Status != "complete-with-drops" || value.FinalizedAt != "2026-07-23T10:05:00Z" {
+	if value.status != "complete-with-drops" || value.FinalizedAt != "2026-07-23T10:05:00Z" {
 		t.Fatalf("unexpected marker: %+v", value)
 	}
 	want := `{"schema_version":1,"target_id":"sha256:target","finalize_id":"sha256:final","revision":1,"stream_ref":"container-logs/u123/sandbox","resource":{"sandbox_id":"sb-abc","k8s.namespace.name":"team-a","k8s.pod.name":"pod","k8s.pod.uid":"u123","k8s.container.name":"sandbox","k8s.node.name":"node-1","k8s.cluster.name":"prod-a"},"coverage_started_at":"2026-07-23T09:58:00Z","status":"complete-with-drops","had_drops":true,"had_source_gaps":false,"loss_reasons":["a","z"],"finalized_at":"2026-07-23T10:05:00Z","objects":[{"key":"key","generation":0,"size":5,"crc64":"7"}]}`
@@ -48,7 +48,7 @@ func TestEncodeMarkerIsDeterministic(t *testing.T) {
 }
 
 func TestStatusPriority(t *testing.T) {
-	if got := Status(api.SourceOutcome{HadDrops: true, HadSourceGaps: true}); got != "incomplete" {
+	if got := status(api.SourceOutcome{HadDrops: true, HadSourceGaps: true}); got != "incomplete" {
 		t.Fatalf("status=%q", got)
 	}
 }
@@ -145,5 +145,21 @@ func TestDecodeRejectsExcessiveUnknownMemberNesting(t *testing.T) {
 	withDeepUnknown := strings.Replace(string(raw), `"target_id":"t"`, `"target_id":"t","future":`+nested, 1)
 	if _, err := Decode([]byte(withDeepUnknown)); err == nil || !strings.Contains(err.Error(), "nesting is too deep") {
 		t.Fatalf("deep nesting error=%v", err)
+	}
+}
+
+func TestVMConsoleMarkerWithoutPodIdentity(t *testing.T) {
+	request := api.FinalizeRequest{FinalizeID: "f", TargetID: "t", StreamRef: api.StreamRef{ID: "vm-console/uid", Kind: api.RecordKindVMConsole}, Revision: 1, CoverageStartedAt: time.Date(2026, 11, 2, 1, 0, 0, 0, time.UTC), FinalizedAt: time.Date(2026, 11, 2, 1, 1, 0, 0, time.UTC), Resource: api.Resource{SandboxID: "sandbox", ClusterName: "cluster", Namespace: "ns", NodeName: "node"}}
+	data, err := Encode(New(request, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(data)
+	if err != nil || decoded.Resource != request.Resource {
+		t.Fatalf("VM identity did not round-trip: %v", err)
+	}
+	request.StreamRef = api.StreamRef{ID: "container-logs/pod/sandbox", Kind: api.RecordKindContainerLog}
+	if _, err := Encode(New(request, nil)); err == nil {
+		t.Fatal("container marker accepted missing Pod identity")
 	}
 }

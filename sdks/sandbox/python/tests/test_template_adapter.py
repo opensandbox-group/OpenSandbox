@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ class _Resp:
 
 def _api_template(template_id: str = "tpl_1", phase: str = "Succeeded"):
     from opensandbox.api.lifecycle.models.fsb_template import FsbTemplate
+    from opensandbox.api.lifecycle.models.fsb_template_env import FsbTemplateEnv
     from opensandbox.api.lifecycle.models.fsb_template_format import FsbTemplateFormat
     from opensandbox.api.lifecycle.models.fsb_template_metadata import (
         FsbTemplateMetadata,
@@ -73,6 +74,7 @@ def _api_template(template_id: str = "tpl_1", phase: str = "Succeeded"):
         updated_at=datetime(2025, 1, 2, tzinfo=timezone.utc),
         resource_limits=ResourceLimits.from_dict({"cpu": "2", "disk": "10Gi"}),
         entrypoint=["/bin/sh", "-c", "sleep 1"],
+        env=FsbTemplateEnv.from_dict({"LOG_LEVEL": "info"}),
         metadata=FsbTemplateMetadata.from_dict({"env": "prod"}),
         readiness=FsbTemplateReadiness(probe="tcp://127.0.0.1:44772", warmup_seconds=30),
     )
@@ -118,6 +120,7 @@ async def test_create_template_maps_request_and_response(
             publish="s3://bucket/publish",
             resourceLimits={"cpu": "2", "disk": "10Gi"},
             entrypoint=["/bin/sh", "-c", "sleep 1"],
+            env={"LOG_LEVEL": "info"},
             metadata={"env": "prod"},
             readiness=TemplateReadiness(probe="tcp://127.0.0.1:44772", warmupSeconds=30),
         )
@@ -128,6 +131,7 @@ async def test_create_template_maps_request_and_response(
         "publish": "s3://bucket/publish",
         "resourceLimits": {"cpu": "2", "disk": "10Gi"},
         "entrypoint": ["/bin/sh", "-c", "sleep 1"],
+        "env": {"LOG_LEVEL": "info"},
         "metadata": {"env": "prod"},
         "readiness": {"probe": "tcp://127.0.0.1:44772", "warmupSeconds": 30},
     }
@@ -135,6 +139,7 @@ async def test_create_template_maps_request_and_response(
     assert created.status.phase == TemplatePhase.PENDING
     assert created.status.manifest_ref is None
     assert created.resource_limits == {"cpu": "2", "disk": "10Gi"}
+    assert created.env == {"LOG_LEVEL": "info"}
     assert created.readiness is not None
     assert created.readiness.warmup_seconds == 30
 
@@ -162,6 +167,7 @@ async def test_get_template_converts_succeeded_status(
     assert loaded.format == "overlaybd"
     assert loaded.status.phase == TemplatePhase.SUCCEEDED
     assert loaded.status.manifest_ref == "s3://bucket/publish/manifest.json"
+    assert loaded.env == {"LOG_LEVEL": "info"}
     assert loaded.metadata == {"env": "prod"}
     assert loaded.created_at == datetime(2025, 1, 1, tzinfo=timezone.utc)
 

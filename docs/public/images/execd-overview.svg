@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720" role="img" aria-labelledby="title desc">
+<title id="title">execd — the entrypoint into a sandbox</title>
+<desc id="desc">SDKs, the osb CLI, MCP server and the lifecycle server all call the execd API. execd runs inside the sandbox next to the user workload, enforces the shared access token, supervises the workload, and exposes command execution, code execution, interactive terminals, file operations and metrics.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<marker id="neutral" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#597080"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1600" height="720" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">execd — the entrypoint into a sandbox</text>
+<text x="48" y="96" class="body">Every client talks to one daemon; every capability is one API away.</text>
+<path d="M1180 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1226" y="60" class="edge" style="fill:#2563eb">Execution</text>
+<path d="M1380 54h36" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#neutral)"/>
+<text x="1426" y="60" class="edge" style="fill:#597080">Supervision</text>
+
+<!-- clients -->
+<rect x="48" y="128" width="400" height="420" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="162" class="section">CLIENTS</text>
+<rect x="72" y="186" width="352" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="92" y="226" class="heading">SDKs</text>
+<rect x="72" y="270" width="352" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="92" y="310" class="heading">osb CLI</text>
+<rect x="72" y="354" width="352" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="92" y="394" class="heading">MCP server</text>
+<rect x="72" y="438" width="352" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="92" y="478" class="heading">Lifecycle server</text>
+
+<!-- sandbox -->
+<rect x="520" y="128" width="540" height="560" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5"/>
+<text x="544" y="162" class="section">SANDBOX</text>
+<text x="700" y="162" class="label">container · pod · microVM</text>
+<rect x="560" y="186" width="460" height="130" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="580" y="222" class="heading">execd</text>
+<text x="580" y="254" class="body">in-sandbox daemon · port 44772</text>
+<text x="580" y="284" class="label">shared access token enforced</text>
+<rect x="560" y="470" width="460" height="140" rx="10" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="580" y="506" class="heading">Your workload</text>
+<text x="580" y="538" class="body">your image &amp; entrypoint</text>
+<text x="580" y="568" class="label">supervised: signals · exit codes · reaping</text>
+<path d="M790 320V462" fill="none" stroke="#597080" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#neutral)"/>
+<text x="806" y="396" class="edge" style="fill:#597080">supervision</text>
+
+<!-- capabilities -->
+<rect x="1132" y="128" width="420" height="560" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1156" y="162" class="section">CAPABILITIES</text>
+<rect x="1156" y="186" width="372" height="64" rx="8" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1176" y="226" class="heading">Command execution</text>
+<rect x="1156" y="268" width="372" height="64" rx="8" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1176" y="308" class="heading">Code execution</text>
+<rect x="1156" y="350" width="372" height="64" rx="8" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1176" y="390" class="heading">Interactive terminals</text>
+<rect x="1156" y="432" width="372" height="64" rx="8" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1176" y="472" class="heading">Files and directories</text>
+<rect x="1156" y="514" width="372" height="64" rx="8" fill="#ffffff" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="1176" y="554" class="heading">Metrics</text>
+
+<!-- arrows: clients to execd -->
+<path d="M424 218L556 230" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M424 302L556 250" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M424 386L556 270" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M424 470L556 290" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="452" y="196" class="edge" style="fill:#2563eb">execd API</text>
+
+<!-- arrows: execd to capabilities -->
+<path d="M1020 216L1152 218" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M1020 236L1152 300" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M1020 256L1152 382" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M1020 276L1152 464" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<path d="M1020 296L1152 546" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+</svg>

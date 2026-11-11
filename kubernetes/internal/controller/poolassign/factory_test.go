@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -65,20 +65,6 @@ func TestNewPredicates(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, predicates, 1)
 		assert.IsType(t, &imagePredicate{}, predicates[0])
-	})
-
-	t.Run("creator error propagates", func(t *testing.T) {
-		profile := &Profile{
-			Name: "bad-scorer-as-pred",
-			Plugins: PluginsSpec{
-				Predicate: []string{"image"},
-			},
-			PluginConf: []PluginConf{
-				{Name: "image", Args: map[string]interface{}{}},
-			},
-		}
-		_, err := newPredicates(profile)
-		assert.NoError(t, err)
 	})
 }
 

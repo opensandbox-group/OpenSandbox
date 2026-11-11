@@ -37,10 +37,17 @@ class CreateSandboxRequestExtensions:
     - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
 
     **Well-known keys**:
-    - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24 hours
-    inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit to disable.
-    Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint via
-    `validate_extensions` in server `src/extensions/validation.py`).
+    - `access.renew.extend.seconds` (**deprecated**): Decimal integer
+      string from **300** to **86400** (5 minutes to 24 hours
+      inclusive). Opts the sandbox into OSEP-0009 renew-on-access and
+      sets per-renewal extension seconds. Omit to disable. Invalid
+      values are rejected at creation with HTTP 400 (validated on the
+      lifecycle create endpoint via `validate_extensions` in server
+      `src/extensions/validation.py`). Superseded by
+      `lifecycle.renewalPolicy.extendSeconds`: prefer the structured
+      field in new code. The extensions key remains supported
+      throughout 1.x and is removed in 2.0; when both are set, their
+      parsed values must match or creation fails with HTTP 400.
 
     """
 

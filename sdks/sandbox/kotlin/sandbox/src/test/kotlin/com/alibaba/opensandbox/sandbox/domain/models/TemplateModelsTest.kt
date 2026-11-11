@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -77,6 +77,7 @@ class TemplateModelsTest {
 
         assertNull(request.resourceLimits)
         assertNull(request.entrypoint)
+        assertNull(request.env)
         assertNull(request.metadata)
         assertNull(request.readiness)
         assertNull(request.format)
@@ -94,6 +95,9 @@ class TemplateModelsTest {
                     put("memory", "4Gi")
                 }
                 .entrypoint("tail", "-f", "/dev/null")
+                .env {
+                    put("LOG_LEVEL", "info")
+                }
                 .metadata(mapOf("team" to "backend"))
                 .readiness {
                     probe("tcp://127.0.0.1:44772")
@@ -104,6 +108,7 @@ class TemplateModelsTest {
 
         assertEquals(mapOf("cpu" to "2", "memory" to "4Gi"), request.resourceLimits)
         assertEquals(listOf("tail", "-f", "/dev/null"), request.entrypoint)
+        assertEquals(mapOf("LOG_LEVEL" to "info"), request.env)
         assertEquals(mapOf("team" to "backend"), request.metadata)
         assertEquals("tcp://127.0.0.1:44772", request.readiness?.probe)
         assertEquals(30, request.readiness?.warmupSeconds)

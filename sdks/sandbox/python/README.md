@@ -90,16 +90,11 @@ finally:
     sandbox.destroy()
 ```
 
-Use `destroy()` for create-use-discard workflows. It calls `kill()` before
-`close()` and still closes local resources if remote termination fails. Context
-managers continue to call only `close()`, so the remote sandbox remains available
-for later `connect()` calls unless you explicitly kill or destroy it.
+Use `destroy()` for create-use-discard workflows. It calls `kill()` before `close()` and still closes local resources if remote termination fails. Context managers continue to call only `close()`, so the remote sandbox remains available for later `connect()` calls unless you explicitly kill or destroy it.
 
 ### Synchronous Sandbox Pool
 
-`SandboxPoolSync` keeps a buffer of ready sandboxes to reduce acquire latency. The
-pool API is synchronous and aligned with the Kotlin `SandboxPool` semantics: acquire
-is allowed on any node, while replenish/shrink is gated by the store's primary lock.
+`SandboxPoolSync` keeps a buffer of ready sandboxes to reduce acquire latency. The pool API is synchronous and aligned with the Kotlin `SandboxPool` semantics: acquire is allowed on any node, while replenish/shrink is gated by the store's primary lock.
 
 ```python
 from datetime import timedelta
@@ -138,8 +133,7 @@ finally:
     pool.shutdown(graceful=True)
 ```
 
-Use `SandboxPoolAsync` in asyncio applications so pool acquire, warmup, health
-checks, and lifecycle calls do not block the event loop:
+Use `SandboxPoolAsync` in asyncio applications so pool acquire, warmup, health checks, and lifecycle calls do not block the event loop:
 
 ```python
 from datetime import timedelta
@@ -176,15 +170,13 @@ finally:
     await pool.shutdown(graceful=True)
 ```
 
-For Python production services with multiple processes or pods, use Redis-backed
-pool state. Install the optional dependency:
+For Python production services with multiple processes or pods, use Redis-backed pool state. Install the optional dependency:
 
 ```bash
 pip install "opensandbox[pool-redis]"
 ```
 
-Create and configure the Redis client yourself, then pass it to `RedisPoolStateStore`.
-The store does not create or close Redis clients.
+Create and configure the Redis client yourself, then pass it to `RedisPoolStateStore`. The store does not create or close Redis clients.
 
 ```python
 import redis
@@ -213,31 +205,16 @@ For async pools, pass a `redis.asyncio` client to `AsyncRedisPoolStateStore`.
 
 Notes:
 
-- `InMemoryPoolStateStore` is for single-process development and tests. It is not
-  a process-wide or pod-wide pool for gunicorn, uvicorn workers, Celery, or Kubernetes.
-- `max_idle` is the target/cap for ready idle sandboxes. It is not a global limit
-  on borrowed or directly-created sandboxes.
-- For distributed deployment, all nodes in one logical pool must share the same
-  `key_prefix` and `pool_name`.
-- Each running process should use a unique `owner_id`; it identifies the primary
-  lock owner and is not the pool identifier.
-- All nodes sharing one pool must use the same creation and warmup definition. If
-  that definition changes, use a new `pool_name` or `key_prefix` and drain the old pool.
-- `resize(max_idle)` can be called from any node. The call returns after the new
-  idle target is stored in the shared state store; the current primary applies
-  replenish or shrink work during periodic reconcile.
-- Use `resize(0)` and wait for `snapshot().idle_count == 0` to drain a distributed
-  idle buffer. `release_all_idle()` is only a best-effort cleanup pass in distributed
-  mode because another primary may put new idle sandboxes concurrently unless the
-  shared target has already been reduced.
-- `release_all_idle()` preserves the original serial cleanup behavior. Use
-  `release_all_idle_parallel(max_workers=50)` for bounded parallel cleanup. The
-  parallel method requires a positive worker count and returns only after every ID
-  drained from the store has received a best-effort kill attempt.
-- Configure `primary_lock_ttl` greater than `warmup_ready_timeout` plus expected
-  warmup preparer time and buffer.
-- Redis outages are surfaced as pool state store errors. The pool fails closed; it
-  does not bypass shared state.
+- `InMemoryPoolStateStore` is for single-process development and tests. It is not a process-wide or pod-wide pool for gunicorn, uvicorn workers, Celery, or Kubernetes.
+- `max_idle` is the target/cap for ready idle sandboxes. It is not a global limit on borrowed or directly-created sandboxes.
+- For distributed deployment, all nodes in one logical pool must share the same `key_prefix` and `pool_name`.
+- Each running process should use a unique `owner_id`; it identifies the primary lock owner and is not the pool identifier.
+- All nodes sharing one pool must use the same creation and warmup definition. If that definition changes, use a new `pool_name` or `key_prefix` and drain the old pool.
+- `resize(max_idle)` can be called from any node. The call returns after the new idle target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile.
+- Use `resize(0)` and wait for `snapshot().idle_count == 0` to drain a distributed idle buffer. `release_all_idle()` is only a best-effort cleanup pass in distributed mode because another primary may put new idle sandboxes concurrently unless the shared target has already been reduced.
+- `release_all_idle()` preserves the original serial cleanup behavior. Use `release_all_idle_parallel(max_workers=50)` for bounded parallel cleanup. The parallel method requires a positive worker count and returns only after every ID drained from the store has received a best-effort kill attempt.
+- Configure `primary_lock_ttl` greater than `warmup_ready_timeout` plus expected warmup preparer time and buffer.
+- Redis outages are surfaced as pool state store errors. The pool fails closed; it does not bypass shared state.
 
 ## Usage Examples
 
@@ -267,14 +244,48 @@ print(f"State: {info.status.state}")
 print(f"Expires: {info.expires_at}")  # None when no automatic expiration is configured
 ```
 
-Create a non-expiring sandbox by omitting `timeout`:
+Create a non-expiring sandbox by passing `timeout=None` explicitly — omitting the argument falls back to the 10-minute default, not manual cleanup:
 
 ```python
 manual = await Sandbox.create(
     "ubuntu",
     connection_config=config,
+    timeout=None,
 )
 ```
+
+Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewal_policy` moves the expiration to `max(now + extend_seconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects the field outright (HTTP 400); on Docker and Kubernetes it takes effect only when the operator enables the `[renew_intent]` integration.
+
+```python
+from opensandbox.models.sandboxes import RenewalPolicy, SandboxLifecycle
+
+sandbox = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+    lifecycle=SandboxLifecycle(
+        renewal_policy=RenewalPolicy(extend_seconds=3600),
+    ),
+)
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `lifecycle.idle_policy` pauses the sandbox after `idle_timeout_seconds` continuously idle seconds (30–86400, `on_idle="pause"` is the only action today). Incoming traffic then wakes it:
+
+```python
+from opensandbox.models.sandboxes import IdlePolicy, SandboxLifecycle
+
+sandbox = await Sandbox.create(
+    "ubuntu",
+    connection_config=config,
+    lifecycle=SandboxLifecycle(
+        idle_policy=IdlePolicy(
+            idle_timeout_seconds=600,
+            on_idle="pause",
+        ),
+    ),
+)
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (default 5 attempts / 60 seconds overall, `RetryPolicy.wake_retry_enabled` / `wake_max_attempts` / `wake_overall_deadline`; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. The request that starts a stream wake-retries too; an established stream is never replayed.
 
 ### 2. Custom Health Check
 
@@ -366,8 +377,7 @@ await sandbox.files.delete_files(["/tmp/hello.txt"])
 
 ### 5. Snapshots
 
-Capture a sandbox's state and restore new sandboxes from it. Snapshots are
-administered through `SandboxManager`:
+Capture a sandbox's state and restore new sandboxes from it. Snapshots are administered through `SandboxManager`:
 
 ```python
 from opensandbox.manager import SandboxManager
@@ -401,13 +411,11 @@ async with await SandboxManager.create(connection_config=config) as manager:
     await manager.delete_snapshot(snapshot.id)
 ```
 
-A `Sandbox` can also snapshot itself directly:
-`await sandbox.create_snapshot(name="checkpoint-1")`.
+A `Sandbox` can also snapshot itself directly: `await sandbox.create_snapshot(name="checkpoint-1")`.
 
 ### 6. Isolated Sessions
 
-Isolated sessions run multi-step code in a hardened, resource-bounded
-namespace with bind mounts — reachable through `sandbox.isolation`:
+Isolated sessions run multi-step code in a hardened, resource-bounded namespace with bind mounts — reachable through `sandbox.isolation`:
 
 ```python
 from opensandbox.models.isolated import (
@@ -476,6 +484,43 @@ async with await SandboxManager.create(connection_config=config) as manager:
         await manager.kill_sandbox(info.id)
 ```
 
+### 8. Build reusable base images with templates
+
+`SandboxManager` builds golden images ("templates") from an OCI image and publishes them; sandboxes then boot from a `template_id` instead of a plain image:
+
+```python
+import asyncio
+from datetime import timedelta
+
+from opensandbox.manager import SandboxManager
+from opensandbox.models.templates import CreateTemplateRequest
+
+manager = await SandboxManager.create(connection_config=config)
+
+template = await manager.create_template(
+    CreateTemplateRequest(
+        image="python:3.11",
+        publish="s3://bucket/templates/py311",
+        format="native",
+    )
+)
+
+# Poll get_template until the build finishes (or fails).
+while template.status.phase not in ("Succeeded", "Failed"):
+    await asyncio.sleep(5)
+    template = await manager.get_template(template.template_id)
+if template.status.phase == "Failed":
+    raise RuntimeError(f"template build failed: {template.status.message}")
+
+sandbox = await Sandbox.create_from_template(
+    template.template_id,
+    connection_config=config,
+    timeout=timedelta(hours=1),
+)
+```
+
+`format` selects the snapshot storage encoding: `"native"` publishes to an S3-compatible target (`s3://bucket/publish`), `"overlaybd"` to an OCI repository (`oci://registry/repository`). It defaults to `"overlaybd"`.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -487,11 +532,19 @@ The `ConnectionConfig` class manages API server connection settings.
 | `api_key`         | API Key for authentication                 | Required                     | `OPEN_SANDBOX_API_KEY` |
 | `domain`          | The endpoint domain of the sandbox service | Required (or localhost:8080) | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`        | HTTP protocol (http/https)                 | `http`                       | -                      |
-| `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
+| `request_timeout` | Timeout for API requests; command streams (SSE) wait at most `max(request_timeout, 30s)` for the response and between stream bytes | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
+| `follow_redirects` | Follow HTTP redirects for SDK requests      | `False`                      | -                      |
+| `event_hooks`     | Additional httpx hooks for adapter clients   | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry)  | SDK-created per instance     | -                      |
 | `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
+
+When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
+
+File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. This applies to both direct chunked uploads and uploads through the server proxy. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
+
+`ConnectionConfig.event_hooks` accepts async httpx hooks, while `ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured request hooks run before the SDK safety hook, so they cannot re-add protected OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors `follow_redirects` and the SDK safety hook, but does not invoke configured user hooks.
 
 ```python
 from datetime import timedelta
@@ -541,11 +594,11 @@ The `Sandbox.create()` allows configuring the sandbox environment.
 | `env`           | Environment variables                    | Empty                           |
 | `metadata`      | Custom metadata tags                     | Empty                           |
 | `network_policy` | Optional outbound network policy (egress) | -                             |
+| `lifecycle`      | Pre-start and periodic hooks, `idle_policy` (OSEP-0024) and `renewal_policy` (OSEP-0009) | - |
 | `credential_proxy` | Optional Credential Vault proxy startup settings | -                     |
 | `ready_timeout` | Max time to wait for sandbox to be ready | 30 seconds                      |
 
-Note: metadata keys under `opensandbox.io/` are reserved for system-managed
-labels and will be rejected by the server.
+Note: metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.
 
 ```python
 from datetime import timedelta
@@ -566,10 +619,22 @@ sandbox = await Sandbox.create(
 )
 ```
 
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected. Docker, Kubernetes, and Fast Sandbox backends all enforce `ports` rules; a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
+
+```python
+sandbox = await Sandbox.create(
+    "python:3.11",
+    connection_config=config,
+    network_policy=NetworkPolicy(
+        defaultAction="deny",
+        egress=[NetworkRule(action="allow", ports=[443, 8443])],
+    ),
+)
+```
+
 ### 3. Runtime Egress Policy Updates
 
-Runtime egress policy reads and patches are sent directly to the sandbox egress sidecar.
-The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+Runtime egress policy reads and patches are sent directly to the sandbox egress sidecar. The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
 
 Patch uses merge semantics:
 - Incoming rules take priority over existing rules with the same `target`.
@@ -590,10 +655,7 @@ await sandbox.patch_egress_rules(
 
 ### 4. Credential Vault
 
-Credential Vault injects outbound credentials from the egress sidecar while
-keeping real secrets out of sandbox environment variables, commands, files, and
-logs. Create the sandbox with `credential_proxy` enabled, then write credentials
-and bindings through `sandbox.credential_vault`.
+Credential Vault injects outbound credentials from the egress sidecar while keeping real secrets out of sandbox environment variables, commands, files, and logs. Create the sandbox with `credential_proxy` enabled, then write credentials and bindings through `sandbox.credential_vault`.
 
 ```python
 from opensandbox.models.sandboxes import (
@@ -630,5 +692,28 @@ await sandbox.credential_vault.create(
 )
 ```
 
-See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
-binding guidance, and Git/curl examples.
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — an `auth` dict with only `"credential"` and no `"type"`.
+
+```python
+from opensandbox.models.sandboxes import Credential, CredentialBinding
+
+await sandbox.credential_vault.create(
+    credentials=[
+        Credential(
+            name="spi-signer",
+            source={"type": "exchange", "endpoint": "unix:///run/spi/spi.sock"},
+        )
+    ],
+    bindings=[
+        CredentialBinding(
+            name="internal-api",
+            match={"hosts": ["*.internal.example.com"]},
+            auth={"credential": "spi-signer"},
+        )
+    ],
+)
+```
+
+See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.

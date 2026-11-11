@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,36 @@
 using System.Text.Json.Serialization;
 
 namespace OpenSandbox.Models;
+
+/// <summary>
+/// Parsed Content-Range response header.
+/// </summary>
+public sealed record ByteRange(long Start, long End, long Total, string Raw);
+
+/// <summary>
+/// Downloaded body and its HTTP response metadata.
+/// </summary>
+public sealed record ReadBytesResponse<T>(
+    T Body,
+    int StatusCode,
+    string? ContentType,
+    string? ContentDisposition,
+    long ContentLength,
+    long TotalSize,
+    ByteRange? ContentRange)
+{
+    /// <summary>
+    /// Gets whether the server returned 206 Partial Content.
+    /// </summary>
+    public bool IsPartial => StatusCode == 206;
+}
+
+/// <summary>
+/// A single-use download body that can be disposed without consuming it.
+/// </summary>
+public interface IAsyncReadBytesStream : IAsyncEnumerable<byte[]>, IAsyncDisposable
+{
+}
 
 /// <summary>
 /// Information about a file in the sandbox.

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -91,8 +91,21 @@ func (m *SandboxPoolManager) Destroy(ctx context.Context, poolName string, optio
 	drained := 0
 	killed := 0
 	deadline := time.Now().Add(drainTimeout)
+	drainCtx := ctx
+	if drainTimeout > 0 {
+		var cancelDrain context.CancelFunc
+		drainCtx, cancelDrain = context.WithDeadline(ctx, deadline)
+		defer cancelDrain()
+	}
 	for {
-		sandboxID, err := m.stateStore.TryTakeIdle(ctx, poolName)
+		if err := drainCtx.Err(); err != nil {
+			return nil, &PoolDestroyIncompleteError{
+				PoolName: poolName,
+				Reason:   fmt.Sprintf("drain interrupted after %d idle sandboxes drained", drained),
+				Cause:    err,
+			}
+		}
+		sandboxID, err := m.stateStore.TryTakeIdle(drainCtx, poolName)
 		if err != nil {
 			return nil, &PoolDestroyIncompleteError{
 				PoolName: poolName,
@@ -104,7 +117,24 @@ func (m *SandboxPoolManager) Destroy(ctx context.Context, poolName string, optio
 			break
 		}
 		drained++
-		if err := m.manager.KillSandbox(ctx, sandboxID); err != nil {
+		// Bound each kill by the remaining drain budget.
+		killCtx := ctx
+		var cancelKill context.CancelFunc
+		if drainTimeout > 0 {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, &PoolDestroyIncompleteError{
+					PoolName: poolName,
+					Reason:   fmt.Sprintf("drain timed out after %v with %d idle sandboxes drained", drainTimeout, drained),
+				}
+			}
+			killCtx, cancelKill = context.WithTimeout(ctx, remaining)
+		}
+		err = m.manager.KillSandbox(killCtx, sandboxID)
+		if cancelKill != nil {
+			cancelKill()
+		}
+		if err != nil {
 			m.logger.Warn("pool destroy failed to kill idle sandbox (best-effort)",
 				"pool_name", poolName,
 				"sandbox_id", sandboxID,

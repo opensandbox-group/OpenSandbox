@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -81,8 +81,8 @@ async def test_foreground_command_stream_completion(stream_sandbox, scenario):
     if scenario != "empty":
         # Exceed small HTTP/pipe buffers, keep every line distinguishable, and
         # finish with unterminated lines to exercise the final output drain.
-        expected_stdout = [f"out-{i:04d}-" + "x" * 4096 for i in range(512)]
-        expected_stderr = [f"err-{i:04d}-" + "y" * 4096 for i in range(512)]
+        expected_stdout = [f"out-{i:04d}-" + "x" * 4096 + "\n" for i in range(512)]
+        expected_stderr = [f"err-{i:04d}-" + "y" * 4096 + "\n" for i in range(512)]
         expected_stdout.append("stdout-tail-你好")
         expected_stderr.append("stderr-tail-世界")
         script = (

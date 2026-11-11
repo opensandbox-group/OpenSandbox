@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,29 @@
 package com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem
 
 import java.time.OffsetDateTime
+
+/** Parsed Content-Range response header. */
+data class ByteRange(
+    val start: Long,
+    val end: Long,
+    val total: Long,
+    val raw: String,
+)
+
+/** Downloaded body and its HTTP response metadata. */
+data class ReadBytesResponse<T>(
+    val body: T,
+    val statusCode: Int,
+    val contentType: String?,
+    val contentDisposition: String?,
+    val contentLength: Long,
+    val totalSize: Long,
+    val contentRange: ByteRange?,
+) {
+    /** Whether the server returned 206 Partial Content. */
+    val isPartial: Boolean
+        get() = statusCode == 206
+}
 
 /**
  * Metadata information for a file or directory entry.

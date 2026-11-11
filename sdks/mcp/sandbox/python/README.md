@@ -2,9 +2,7 @@
 
 ## 1. Overview
 
-OpenSandbox MCP Server exposes the OpenSandbox Python SDK as MCP tools for
-Claude Code, Cursor, and other MCP-capable clients. It provides focused
-sandbox lifecycle management, command execution, and text file operations.
+OpenSandbox MCP Server exposes the OpenSandbox Python SDK as MCP tools for Claude Code, Cursor, and other MCP-capable clients. It provides focused sandbox lifecycle management, command execution, and text file operations.
 
 ## 2. Installation & Startup
 
@@ -53,10 +51,7 @@ opensandbox-mcp \
   --port 8000
 ```
 
-The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when
-the MCP server must be reached from another container, and use `--port` to
-select a different listening port. Keep the default loopback host unless the
-container network or an upstream gateway protects the exposed endpoint.
+The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when the MCP server must be reached from another container, and use `--port` to select a different listening port. Keep the default loopback host unless the container network or an upstream gateway protects the exposed endpoint.
 
 ## 3. Integrations
 
@@ -125,6 +120,8 @@ Notes:
 ### Command Execution
 
 - `command_run`: run a command inside a sandbox
+- `command_get_status`: get a command's running state, exit code, and error
+- `command_get_logs`: read combined stdout/stderr of a background command, with an optional `cursor` for incremental reads
 - `command_interrupt`: interrupt a running command
 
 ### Filesystem
@@ -146,6 +143,16 @@ Notes:
 4. `sandbox_get_endpoint` if you expose a port.
 5. `sandbox_kill` when finished.
 
+### Background Commands
+
+1. `command_run` with `background=true` -> keep the execution `id`.
+2. `command_get_status` until `running` is `false`; check `exit_code` and `error`.
+3. Between status checks, `command_get_logs` with the `cursor` from the previous call to read only new output.
+4. After `running` is `false`, call `command_get_logs` once more to read the remaining output.
+5. `command_interrupt` to stop a command early.
+
+The `cursor` is a server-side position: pass back the returned value instead of computing it from the content length. Empty `content` does not mean the command finished.
+
 ## 6. Usage Examples
 
 Here are some examples of what you can ask an LLM to do:
@@ -153,6 +160,7 @@ Here are some examples of what you can ask an LLM to do:
 - "Create a Python sandbox and run a quick health command."
 - "Write a Python script into the sandbox and run it."
 - "Download a GitHub repo, install dependencies, and run its tests."
+- "Run the test suite in the background, report progress, and tell me whether it passed."
 - "Generate a CSV file with fake sales data and run a simple summary script."
 - "Start a tiny web server on port 8000 and return the public URL."
 - "Build a minimal REST API (hello + health) and expose it on port 8000."

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -77,7 +77,7 @@ public class TemplateStatus
     public required string Phase { get; set; }
 
     /// <summary>
-    /// Gets or sets the S3 manifest reference of the published artifacts;
+    /// Gets or sets the published S3 manifest reference or immutable OCI reference;
     /// present when the phase is Succeeded.
     /// </summary>
     [JsonPropertyName("manifestRef")]
@@ -108,8 +108,8 @@ public class CreateTemplateRequest
     public required string Image { get; set; }
 
     /// <summary>
-    /// Gets or sets the S3-compatible publish target for the built artifacts,
-    /// e.g. "s3://bucket/publish".
+    /// Gets or sets s3://bucket/publish (native) or oci://registry/repository
+    /// (overlaybd, without a tag or digest).
     /// </summary>
     [JsonPropertyName("publish")]
     public required string Publish { get; set; }
@@ -127,6 +127,15 @@ public class CreateTemplateRequest
     /// </summary>
     [JsonPropertyName("entrypoint")]
     public IReadOnlyList<string>? Entrypoint { get; set; }
+
+    /// <summary>
+    /// Gets or sets environment variables baked into the golden image (injected
+    /// as /etc/sandbox-init.env in the guest; literal values only). The source
+    /// image's own OCI Config.Env is inherited; an env with the same name
+    /// overrides the inherited value. Names must be valid shell variable names.
+    /// </summary>
+    [JsonPropertyName("env")]
+    public IReadOnlyDictionary<string, string>? Env { get; set; }
 
     /// <summary>
     /// Gets or sets custom key-value metadata for management, filtering, and tagging.
@@ -166,7 +175,7 @@ public class TemplateInfo
     public required string Image { get; set; }
 
     /// <summary>
-    /// Gets or sets the S3-compatible publish target.
+    /// Gets or sets the S3-compatible or repository-only OCI publish target.
     /// </summary>
     [JsonPropertyName("publish")]
     public required string Publish { get; set; }
@@ -206,6 +215,12 @@ public class TemplateInfo
     /// </summary>
     [JsonPropertyName("entrypoint")]
     public IReadOnlyList<string>? Entrypoint { get; set; }
+
+    /// <summary>
+    /// Gets or sets the environment variables baked into the golden image.
+    /// </summary>
+    [JsonPropertyName("env")]
+    public IReadOnlyDictionary<string, string>? Env { get; set; }
 
     /// <summary>
     /// Gets or sets the custom metadata from the creation request.

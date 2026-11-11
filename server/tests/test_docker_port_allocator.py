@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -61,7 +61,11 @@ def test_allocate_host_port_probes_docker_publish_address(monkeypatch) -> None:
 
 
 def test_allocate_port_bindings_keep_docker_publish_host(monkeypatch) -> None:
-    monkeypatch.setattr(port_allocator, "allocate_host_port", lambda min_port=40000, max_port=60000, attempts=50: 45678)
+    monkeypatch.setattr(
+        port_allocator,
+        "allocate_host_port",
+        lambda min_port=40000, max_port=60000, attempts=50, probe_host=port_allocator.PORT_PROBE_HOST: 45678,
+    )
 
     bindings = port_allocator.allocate_port_bindings(["8080"])
 
@@ -91,7 +95,7 @@ def test_allocate_port_bindings_passes_custom_range(monkeypatch) -> None:
     """allocate_port_bindings forwards custom range to allocate_host_port."""
     calls: list[tuple[int, int, int]] = []
 
-    def tracked_allocate(min_port=40000, max_port=60000, attempts=50):
+    def tracked_allocate(min_port=40000, max_port=60000, attempts=50, probe_host=port_allocator.PORT_PROBE_HOST):
         calls.append((min_port, max_port, attempts))
         return 41000
 

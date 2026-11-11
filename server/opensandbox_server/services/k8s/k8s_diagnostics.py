@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,8 @@ by querying K8s Pod state and events. Mixed into KubernetesSandboxService.
 from __future__ import annotations
 
 import re
-from typing import Any
+import logging
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, status
 from kubernetes.client.exceptions import ApiException
@@ -32,12 +33,23 @@ from opensandbox_server.services.constants import (
     SandboxErrorCodes,
 )
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     limit_diagnostic_lines,
     unsupported_scope_error,
 )
+from opensandbox_server.services.k8s.workload_access import _get_owned_workload_or_404
+from opensandbox_server.services.k8s.error_helpers import _build_k8s_api_error
+from opensandbox_server.services.k8s.workload_mapper import (
+    _build_sandbox_from_workload,
+    allocated_pod_names,
+)
+
+if TYPE_CHECKING:
+    from opensandbox_server.services.k8s.client import K8sClient
 
 _SUPPORTED_LOG_SCOPES = ("container", "all")
+logger = logging.getLogger(__name__)
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
 _STABLE_LOG_LINE_LIMIT = 100
 _STABLE_EVENT_LINE_LIMIT = 50
@@ -62,6 +74,34 @@ def _parse_since(since: str) -> int:
 
 class K8sDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Kubernetes backend."""
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        try:
+            namespace = self._resolve_namespace_for_lookup(sandbox_id)
+            workload = _get_owned_workload_or_404(self.workload_provider, namespace, sandbox_id)
+            sandbox = _build_sandbox_from_workload(workload, self.workload_provider)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Error getting sandbox diagnostic context %s", sandbox_id)
+            raise _build_k8s_api_error("get sandbox diagnostic context", exc) from exc
+        metadata = workload.get("metadata", {}) if isinstance(workload, dict) else workload.metadata
+        name = metadata.get("name") if isinstance(metadata, dict) else metadata.name
+        uid = metadata.get("uid") if isinstance(metadata, dict) else metadata.uid
+        identifiers = {"namespace": namespace}
+        if name:
+            identifiers["workloadName"] = name
+        if uid:
+            identifiers["workloadUid"] = str(uid)
+        pod_names = allocated_pod_names(workload)
+        if len(pod_names) == 1:
+            identifiers["podName"] = pod_names[0]
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            state=sandbox.status.state,
+            backend_type="kubernetes",
+            backend_identifiers=identifiers,
+        )
 
     def get_sandbox_log_diagnostics(
         self,
@@ -130,12 +170,32 @@ class K8sDiagnosticsMixin:
         )
 
     def _find_pod_for_sandbox(self, sandbox_id: str):
+        namespace = self._resolve_namespace()
+        workload = None
+        workload_provider = getattr(self, "workload_provider", None)
+        if workload_provider is not None:
+            from opensandbox_server.services.k8s.workload_access import (
+                _get_owned_workload_or_404,
+            )
+
+            workload = _get_owned_workload_or_404(
+                workload_provider,
+                namespace,
+                sandbox_id,
+            )
         label_selector = f"{SANDBOX_ID_LABEL}={sandbox_id}"
         try:
             pods = self.k8s_client.list_pods(
-                namespace=self._resolve_namespace(),
+                namespace=namespace,
                 label_selector=label_selector,
             )
+            if not pods:
+                # Pool-allocated pods don't carry the sandbox ID label.
+                pods = [
+                    pod
+                    for name in allocated_pod_names(workload)
+                    if (pod := self.k8s_client.read_pod(namespace, name)) is not None
+                ]
         except Exception as exc:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -348,6 +408,143 @@ class K8sDiagnosticsMixin:
                 f"[{ts}] {ev.type:8s} {ev.reason or 'N/A':20s} {ev.message or ''}"
             )
         return "\n".join(lines)
+
+
+_STARTUP_DETAIL_MAX_PODS = 3
+_STARTUP_DETAIL_MAX_EVENTS = 5
+_STARTUP_DETAIL_MAX_ITEM_CHARS = 300
+_STARTUP_DETAIL_MAX_CHARS = 1500
+
+
+def _clip(text: Any, limit: int = _STARTUP_DETAIL_MAX_ITEM_CHARS) -> str:
+    value = " ".join(str(text).split())
+    return value if len(value) <= limit else value[: limit - 3] + "..."
+
+
+def _describe_reason(reason: Any, message: Any) -> str:
+    text = _clip(reason or "Unknown")
+    if message:
+        text += f" ({_clip(message)})"
+    return text
+
+
+def _pod_status_details(pod: Any) -> list[str]:
+    """Summarize why a Pod is not ready from its status alone."""
+    details: list[str] = []
+    pod_status = getattr(pod, "status", None)
+    if pod_status is None:
+        return details
+    for cond in getattr(pod_status, "conditions", None) or []:
+        if getattr(cond, "type", None) == "PodScheduled" and getattr(cond, "status", None) == "False":
+            details.append(
+                "not scheduled: " + _describe_reason(cond.reason, cond.message)
+            )
+    for kind, statuses in (
+        ("init container", getattr(pod_status, "init_container_statuses", None)),
+        ("container", getattr(pod_status, "container_statuses", None)),
+    ):
+        for cs in statuses or []:
+            state = getattr(cs, "state", None)
+            waiting = getattr(state, "waiting", None) if state else None
+            terminated = getattr(state, "terminated", None) if state else None
+            if waiting is not None and getattr(waiting, "reason", None):
+                details.append(
+                    f"{kind} {cs.name} waiting: "
+                    + _describe_reason(waiting.reason, waiting.message)
+                )
+            elif terminated is not None and (
+                getattr(terminated, "exit_code", 0) or kind == "container"
+            ):
+                details.append(
+                    f"{kind} {cs.name} terminated (exit={terminated.exit_code}): "
+                    + _describe_reason(terminated.reason, terminated.message)
+                )
+    return details
+
+
+class K8sStartupDiagnosticsMixin:
+    """Best-effort details for sandboxes that did not become ready in time."""
+
+    k8s_client: "K8sClient"
+
+    def _warning_events_for(self, namespace: str, name: str) -> list[str]:
+        core_v1 = self.k8s_client.get_core_v1_api()
+        resp = core_v1.list_namespaced_event(
+            namespace=namespace,
+            field_selector=f"involvedObject.name={name},type=Warning",
+            limit=50,
+        )
+        events = list(getattr(resp, "items", None) or [])
+        # Latest first; repeated events are folded by reason and message.
+        events.sort(
+            key=lambda ev: str(
+                getattr(ev, "last_timestamp", None)
+                or getattr(ev, "event_time", None)
+                or getattr(ev, "first_timestamp", None)
+                or ""
+            ),
+            reverse=True,
+        )
+        seen: set[tuple[str, str]] = set()
+        lines: list[str] = []
+        for ev in events:
+            key = (str(ev.reason or ""), str(ev.message or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.append("event " + _describe_reason(ev.reason, ev.message))
+            if len(lines) >= _STARTUP_DETAIL_MAX_EVENTS:
+                break
+        return lines
+
+    def collect_startup_failure_details(
+        self,
+        sandbox_id: str,
+        namespace: str,
+        workload: Any = None,
+    ) -> str:
+        """Describe why a sandbox's Pod has not started.
+
+        Reads Pod status (scheduling, container waiting/terminated reasons)
+        and recent Warning events for the Pod, or for the workload when no
+        Pod exists yet. Kubernetes API errors are raised to the caller, which
+        must treat them as non-fatal.
+        """
+        pods = list(
+            self.k8s_client.list_pods(
+                namespace=namespace,
+                label_selector=f"{SANDBOX_ID_LABEL}={sandbox_id}",
+            )
+            or []
+        )
+        if not pods:
+            # Pool-allocated pods don't carry the sandbox ID label.
+            pods = [
+                pod
+                for name in allocated_pod_names(workload)
+                if (pod := self.k8s_client.read_pod(namespace, name)) is not None
+            ]
+
+        parts: list[str] = []
+        if not pods:
+            parts.append("no pod found for sandbox")
+            metadata = workload.get("metadata") if isinstance(workload, dict) else None
+            workload_name = metadata.get("name") if isinstance(metadata, dict) else None
+            if workload_name:
+                events = self._warning_events_for(namespace, workload_name)
+                if events:
+                    parts.append(f"workload {workload_name}: " + "; ".join(events))
+        for pod in pods[:_STARTUP_DETAIL_MAX_PODS]:
+            pod_name = pod.metadata.name
+            details = _pod_status_details(pod)
+            details.extend(
+                self._warning_events_for(pod.metadata.namespace or namespace, pod_name)
+            )
+            if details:
+                parts.append(f"pod {pod_name}: " + "; ".join(details))
+            else:
+                parts.append(f"pod {pod_name}: no failure reason reported")
+        return _clip(" | ".join(parts), _STARTUP_DETAIL_MAX_CHARS)
 
 
 def _map_pod_log_error(pod_name: str, container: str, exc: ApiException) -> HTTPException:

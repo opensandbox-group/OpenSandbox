@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,18 +16,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import click
 from opensandbox.models.diagnostics import DiagnosticContent
 
 from opensandbox_cli.client import ClientContext
 from opensandbox_cli.utils import handle_errors, output_option, prepare_output
-
-
-def _diagnostic_to_dict(content: DiagnosticContent) -> dict[str, Any]:
-    """Convert SDK diagnostics content to a CLI-friendly dict."""
-    return content.model_dump(mode="json")
 
 
 def render_diagnostic_content(
@@ -60,7 +53,7 @@ def render_diagnostic_content(
             "Diagnostic response did not include inline content or a content URL."
         )
 
-    output.print_dict(_diagnostic_to_dict(content), title=title)
+    output.print_dict(content.model_dump(mode="json"), title=title)
 
 
 @click.group("diagnostics", invoke_without_command=True)
@@ -69,6 +62,24 @@ def diagnostics_group(ctx: click.Context) -> None:
     """Stable sandbox diagnostics backed by the OpenSandbox SDK."""
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
+
+
+@diagnostics_group.command("context")
+@click.argument("sandbox_id")
+@output_option("table", "json", "yaml")
+@click.pass_obj
+@handle_errors
+def diagnostics_context(
+    obj: ClientContext,
+    sandbox_id: str,
+    output_format: str | None,
+) -> None:
+    """Identify the sandbox backend and its diagnostic identifiers."""
+    context = obj.get_manager().get_diagnostic_context(sandbox_id)
+    output = prepare_output(
+        obj, output_format, allowed=("table", "json", "yaml"), fallback="table"
+    )
+    output.print_dict(context.model_dump(mode="json"), title="Diagnostic Context")
 
 
 @diagnostics_group.command("logs")
@@ -98,7 +109,6 @@ def diagnostics_logs(
     output_format: str | None,
 ) -> None:
     """Retrieve diagnostic logs for a sandbox."""
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     content = obj.get_manager().get_diagnostic_logs(sandbox_id, scope=scope)
     render_diagnostic_content(obj, content, output_format, title="Diagnostic Logs")
 
@@ -130,6 +140,5 @@ def diagnostics_events(
     output_format: str | None,
 ) -> None:
     """Retrieve diagnostic events for a sandbox."""
-    sandbox_id = obj.resolve_sandbox_id(sandbox_id)
     content = obj.get_manager().get_diagnostic_events(sandbox_id, scope=scope)
     render_diagnostic_content(obj, content, output_format, title="Diagnostic Events")

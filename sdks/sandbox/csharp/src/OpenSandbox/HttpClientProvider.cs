@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,12 +33,14 @@ public sealed class HttpClientProvider : IDisposable
         _logger.LogDebug("Creating HTTP clients for SDK instance");
         HttpClient = connectionConfig.CreateHttpClient();
         SseHttpClient = connectionConfig.CreateSseHttpClient();
+        TransferHttpClient = connectionConfig.CreateTransferHttpClient();
 
         // These clients are shared by lifecycle and data-plane adapters. Keep
         // tenant credentials request-scoped so direct execd/egress calls cannot
         // inherit them through DefaultRequestHeaders.
         HttpClient.DefaultRequestHeaders.Remove(Constants.ApiKeyHeader);
         SseHttpClient.DefaultRequestHeaders.Remove(Constants.ApiKeyHeader);
+        TransferHttpClient.DefaultRequestHeaders.Remove(Constants.ApiKeyHeader);
     }
 
     /// <summary>
@@ -50,6 +52,12 @@ public sealed class HttpClientProvider : IDisposable
     /// Gets the HTTP client used for streaming requests.
     /// </summary>
     public HttpClient SseHttpClient { get; }
+
+    /// <summary>
+    /// Gets the HTTP client used for file uploads and downloads. Unlike <see cref="HttpClient"/>
+    /// it has no whole-call timeout, so a transfer that keeps making progress is not aborted.
+    /// </summary>
+    public HttpClient TransferHttpClient { get; }
 
     /// <summary>
     /// Releases HTTP client resources.
@@ -65,5 +73,6 @@ public sealed class HttpClientProvider : IDisposable
         _logger.LogDebug("Disposing HTTP clients for SDK instance");
         HttpClient.Dispose();
         SseHttpClient.Dispose();
+        TransferHttpClient.Dispose();
     }
 }

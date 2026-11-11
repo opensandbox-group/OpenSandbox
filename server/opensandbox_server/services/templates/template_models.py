@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ class FastSandboxTemplateRecord:
     template_id: str
     namespace: str
     crd_name: str
-    spec: dict  # normalized build intent (image, entrypoint, resourceLimits, readiness, publish, format)
+    spec: dict  # normalized build intent (image, entrypoint, resourceLimits, machine, readiness, publish, format)
     metadata: dict[str, str] = field(default_factory=dict)
     phase: FastSandboxTemplatePhase = FastSandboxTemplatePhase.PENDING
     manifest_ref: Optional[str] = None

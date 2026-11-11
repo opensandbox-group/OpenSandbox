@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>netstandard2.0;netstandard2.1;net6.0;net7.0;net8.0;net9.0;net10.0</TargetFrameworks>
+    <TargetFrameworks>netstandard2.0;netstandard2.1;net5.0;net6.0;net7.0;net8.0;net9.0;net10.0</TargetFrameworks>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -15,7 +15,7 @@
     <Company>Alibaba Group Holding Ltd.</Company>
     <Product>OpenSandbox SDK</Product>
     <Description>A C# SDK for low-level interaction with OpenSandbox. It provides the ability to create, manage, and interact with secure sandbox environments, including executing shell commands, managing files, and reading resource metrics.</Description>
-    <Copyright>Copyright 2026 Alibaba Group Holding Ltd.</Copyright>
+    <Copyright>Copyright 2026 The OpenSandbox Authors</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://open-sandbox.ai</PackageProjectUrl>
     <RepositoryUrl>https://github.com/opensandbox-group/OpenSandbox.git</RepositoryUrl>
@@ -29,9 +29,16 @@
     <TreatWarningsAsErrors Condition="'$(Configuration)' == 'Release'">true</TreatWarningsAsErrors>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net5.0'">
+    <!-- Keep the existing dependency versions used by .NET 5's netstandard fallback.
+         This asset supplies HttpMessageHandler.Send; dependency support remains .NET 6+. -->
+    <SuppressTfmSupportBuildWarnings>true</SuppressTfmSupportBuildWarnings>
+  </PropertyGroup>
+
   <!-- Expose internals to test project and code interpreter SDK -->
   <ItemGroup>
     <InternalsVisibleTo Include="OpenSandbox.Tests" />
+    <InternalsVisibleTo Include="OpenSandbox.NetStandardCompat.Tests" />
     <InternalsVisibleTo Include="OpenSandbox.CodeInterpreter" />
     <InternalsVisibleTo Include="OpenSandbox.CodeInterpreter.Tests" />
   </ItemGroup>

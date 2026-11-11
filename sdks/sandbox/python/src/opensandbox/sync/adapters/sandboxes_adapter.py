@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
 )
@@ -42,6 +43,7 @@ from opensandbox.internal.readiness import constrain_readiness_request
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
+    IdlePolicy,
     NetworkPolicy,
     PagedSandboxInfos,
     PagedSnapshotInfos,
@@ -101,14 +103,19 @@ class SandboxesAdapterSync(SandboxesSync):
             prefix="",
             auth_header_name="OPEN-SANDBOX-API-KEY",
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
 
         self._httpx_client = httpx.Client(
-            event_hooks={"request": [constrain_readiness_request]},
             base_url=self.connection_config.get_base_url(),
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(
+                self.connection_config,
+                self.connection_config.get_base_url(),
+                additional_request_hooks=(constrain_readiness_request,),
+            ),
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -181,6 +188,7 @@ class SandboxesAdapterSync(SandboxesSync):
         metadata: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
+        idle_policy: IdlePolicy | None = None,
     ) -> SandboxCreateResponse:
         try:
             from opensandbox.api.lifecycle.api.sandboxes import post_sandboxes
@@ -194,6 +202,7 @@ class SandboxesAdapterSync(SandboxesSync):
                 metadata=metadata,
                 network_policy=network_policy,
                 extensions=extensions,
+                idle_policy=idle_policy,
             )
             response_obj = post_sandboxes.sync_detailed(
                 client=self._get_client(), body=create_request

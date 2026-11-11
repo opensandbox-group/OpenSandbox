@@ -21,10 +21,7 @@ set -euo pipefail
 
 LICENSE_YEAR=$(date +%Y)
 LICENSE_OWNER="The OpenSandbox Authors"
-# Dual acceptance is intentional during the transition period following donation to AAIF.
-# Newly added files receive The OpenSandbox Authors header, while existing files retain their headers.
-# TODO: Once legacy files across the codebase are migrated, remove the Alibaba Group Holding Ltd. fallback branch.
-LICENSE_MARKER_REGEX="Copyright [0-9]{4} (${LICENSE_OWNER// / }|Alibaba Group Holding Ltd\.)"
+LICENSE_MARKER_REGEX="Copyright [0-9]{4} ${LICENSE_OWNER// / }"
 LICENSE_TEXT_TEMPLATE=$(
   cat <<'EOF'
 Copyright __YEAR__ The OpenSandbox Authors
@@ -71,10 +68,10 @@ comment_header() {
   local text="$2"
   case "$style" in
     "line:#")
-      printf '%s\n' "$text" | sed 's/^/# /'
+      printf '%s\n' "$text" | sed -e 's/^/# /' -e 's/[[:space:]]*$//'
       ;;
     "line://")
-      printf '%s\n' "$text" | sed 's:^:// :'
+      printf '%s\n' "$text" | sed -e 's:^:// :' -e 's/[[:space:]]*$//'
       ;;
     "block:html")
       printf "<!--\n%s\n-->\n" "$text"
@@ -136,6 +133,22 @@ is_generated_go() {
   return 1
 }
 
+is_generated_python() {
+  local file="${1-}"
+  [[ -z "$file" ]] && return 1
+  [[ "${file##*.}" != "py" ]] && return 1
+
+  local base
+  base="$(basename "$file")"
+  case "$base" in
+    *_pb2.py|*_pb2_grpc.py|*_pb.py|*_pb_grpc.py)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
 style_for_file() {
   local file="${1-}"
   [[ -z "$file" ]] && { echo ""; return; }
@@ -180,6 +193,10 @@ process_file() {
     return
   fi
 
+  if is_generated_python "$file"; then
+    return
+  fi
+
   if has_license "$file"; then
     return
   fi
@@ -188,21 +205,29 @@ process_file() {
   license_text="${LICENSE_TEXT_TEMPLATE/__YEAR__/$LICENSE_YEAR}"
   header="$(comment_header "$style" "$license_text")"
 
+  # Preserve whether the file ends with a newline: "$(cat)" strips it.
+  # tail -c1 prints nothing for a file ending in newline, so the captured
+  # last byte is non-empty only when the final newline is missing.
+  local trailing_newline=""
+  if [[ -s "$file" && -z "$(tail -c 1 "$file")" ]]; then
+    trailing_newline=$'\n'
+  fi
+
   # Respect shebang: insert after the first line if it starts with #!
   if head -n1 "$file" | grep -q "^#!"; then
     local first rest
     first="$(head -n1 "$file")"
     rest="$(tail -n +2 "$file")"
-    printf '%s\n\n%s\n\n%s' "$first" "$header" "$rest" >"$file"
+    printf '%s\n\n%s\n\n%s%s' "$first" "$header" "$rest" "$trailing_newline" >"$file"
   # Place before DOCTYPE for HTML to avoid breaking rendering.
   elif head -n1 "$file" | grep -qi "^<!doctype"; then
     local body
     body="$(cat "$file")"
-    printf '%s\n\n%s' "$header" "$body" >"$file"
+    printf '%s\n\n%s%s' "$header" "$body" "$trailing_newline" >"$file"
   else
     local body
     body="$(cat "$file")"
-    printf '%s\n\n%s' "$header" "$body" >"$file"
+    printf '%s\n\n%s%s' "$header" "$body" "$trailing_newline" >"$file"
   fi
   echo "Added license: $file"
 }

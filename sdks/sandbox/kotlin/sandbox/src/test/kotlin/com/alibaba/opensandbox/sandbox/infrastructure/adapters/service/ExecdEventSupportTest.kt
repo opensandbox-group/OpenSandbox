@@ -1,0 +1,208 @@
+/*
+ * Copyright 2026 The OpenSandbox Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
+
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionComplete
+import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionError
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotNull
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
+
+class ExecdEventSupportTest {
+    private val reported = mutableListOf<Pair<String, Throwable>>()
+
+    private fun decode(line: String): com.alibaba.opensandbox.sandbox.api.models.execd.EventNode? =
+        ExecdEventSupport.decodeEventLine(line) { line, error -> reported.add(line to error) }
+
+    @Test
+    fun `decodes bare NDJSON payload lines`() {
+        val node = decode("""{"type":"stdout","timestamp":1,"text":"hi"}""")
+        assertNotNull(node)
+        assertEquals("stdout", node!!.type)
+        assertEquals("hi", node.text)
+        assertTrue(reported.isEmpty())
+    }
+
+    @Test
+    fun `decodes data-prefixed frames with and without the single space`() {
+        val noSpace = decode("""data:{"type":"stdout","timestamp":1,"text":"a"}""")
+        assertNotNull(noSpace)
+        assertEquals("a", noSpace!!.text)
+
+        val oneSpace = decode("""data: {"type":"stdout","timestamp":2,"text":"b"}""")
+        assertNotNull(oneSpace)
+        assertEquals("b", oneSpace!!.text)
+        assertTrue(reported.isEmpty())
+    }
+
+    @Test
+    fun `preserves interior whitespace after the data prefix`() {
+        // Only one leading space is SSE framing; the payload keeps its whitespace.
+        val node = decode("""data:  {"type":"stdout","timestamp":3,"text":"  spaced  "}""")
+        assertNotNull(node)
+        assertEquals("  spaced  ", node!!.text)
+        assertTrue(reported.isEmpty())
+    }
+
+    @Test
+    fun `skips SSE framing lines`() {
+        assertNull(decode(": keep-alive comment"))
+        assertNull(decode("event: stdout"))
+        assertNull(decode("id: 42"))
+        assertNull(decode("retry: 3000"))
+        assertTrue(reported.isEmpty())
+    }
+
+    @Test
+    fun `skips blank lines`() {
+        assertNull(decode(""))
+        assertNull(decode("   "))
+        assertTrue(reported.isEmpty())
+    }
+
+    @Test
+    fun `reports malformed payload lines through onError and returns null`() {
+        val node = decode("data: {not json")
+        assertNull(node)
+        assertEquals(1, reported.size)
+        assertEquals("data: {not json", reported[0].first)
+        assertTrue(reported[0].second is Exception)
+    }
+
+    @Test
+    fun `reports linkage errors through onError and rethrows them`() {
+        val boom = AbstractMethodError("missing typeParametersSerializers()")
+        val linkageReported = mutableListOf<Pair<String, Throwable>>()
+        val rawLine = """data: {"type":"error","timestamp":1}"""
+
+        val thrown =
+            assertThrows<AbstractMethodError> {
+                ExecdEventSupport.decodeEventLine(
+                    rawLine,
+                    decodePayload = { throw boom },
+                ) { line, error -> linkageReported.add(line to error) }
+            }
+
+        assertEquals(boom, thrown)
+        assertEquals(1, linkageReported.size)
+        assertEquals(rawLine, linkageReported[0].first)
+        assertEquals(boom, linkageReported[0].second)
+    }
+
+    @Test
+    fun `decodes payload lines the same way regardless of line endings`() {
+        // Adapters feed reader.lineSequence() output: CRLF is already stripped.
+        val node = decode("""{"type":"complete","timestamp":4}""")
+        assertNotNull(node)
+        assertEquals("complete", node!!.type)
+        assertTrue(reported.isEmpty())
+    }
+
+    @Test
+    fun `foreground exit code is zero only on completion without error`() {
+        val complete = Execution().apply { complete = ExecutionComplete(timestamp = 1, executionTimeInMillis = 1) }
+        assertEquals(0, ExecdEventSupport.inferForegroundExitCode(complete))
+
+        val unfinished = Execution()
+        assertNull(ExecdEventSupport.inferForegroundExitCode(unfinished))
+
+        val failed =
+            Execution().apply {
+                error = ExecutionError(name = "SystemExit", value = "3", timestamp = 1)
+            }
+        assertEquals(3, ExecdEventSupport.inferForegroundExitCode(failed))
+
+        val nonNumeric =
+            Execution().apply {
+                error = ExecutionError(name = "ValueError", value = "division by zero", timestamp = 1)
+            }
+        assertNull(ExecdEventSupport.inferForegroundExitCode(nonNumeric))
+    }
+
+    @Test
+    fun `foreground exit code prefers authoritative error exitCode over evalue`() {
+        val mismatched =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "99",
+                        timestamp = 1,
+                        exitCode = 3,
+                    )
+            }
+        assertEquals(3, ExecdEventSupport.inferForegroundExitCode(mismatched))
+
+        val signalKill =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "-1",
+                        timestamp = 1,
+                        exitCode = -1,
+                    )
+            }
+        assertEquals(-1, ExecdEventSupport.inferForegroundExitCode(signalKill))
+
+        val startFailure =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "fork/exec /bin/sh: argument list too long",
+                        timestamp = 1,
+                    )
+            }
+        assertNull(ExecdEventSupport.inferForegroundExitCode(startFailure))
+    }
+
+    @Test
+    fun `foreground exit code prefers wire complete exitCode when present`() {
+        val withWire =
+            Execution().apply {
+                complete = ExecutionComplete(timestamp = 1, executionTimeInMillis = 1, exitCode = 0)
+            }
+        assertEquals(0, ExecdEventSupport.inferForegroundExitCode(withWire))
+    }
+
+    @Test
+    fun `decodes execution_complete and error exit_code wire fields`() {
+        val complete =
+            decode(
+                """{"type":"execution_complete","timestamp":10,"execution_time":5,"exit_code":0}""",
+            )
+        assertNotNull(complete)
+        assertEquals("execution_complete", complete!!.type)
+        assertEquals(0L, complete.exitCode)
+
+        val error =
+            decode(
+                """{"type":"error","timestamp":11,"error":{"ename":"CommandExecError","evalue":"3",""" +
+                    """"traceback":["exit status 3"],"exit_code":3}}""",
+            )
+        assertNotNull(error)
+        assertEquals("error", error!!.type)
+        assertNotNull(error.error)
+        assertEquals(3L, error.error!!.exitCode)
+        assertTrue(reported.isEmpty())
+    }
+}

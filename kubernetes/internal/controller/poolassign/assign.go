@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,19 +22,19 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
-type predicate interface {
-	predicate(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool
+type Predicate interface {
+	Predicate(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool
 }
 
 // predicateWithReason extends predicate with rejection diagnostics.
 type predicateWithReason interface {
-	predicate
+	Predicate
 	Reason(ctx context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) string
 }
 
 // predicateWithFailureCode exposes a stable identifier for a rejected predicate.
 type predicateWithFailureCode interface {
-	predicate
+	Predicate
 	FailureCode() string
 }
 

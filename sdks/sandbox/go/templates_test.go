@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ func TestCreateTemplate(t *testing.T) {
 		Status:     TemplateStatus{Phase: TemplatePhasePending},
 		CreatedAt:  now,
 		UpdatedAt:  now,
+		Env:        map[string]string{"LOG_LEVEL": "info"},
 	}
 
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +59,9 @@ func TestCreateTemplate(t *testing.T) {
 		if req.ResourceLimits["cpu"] != "1" {
 			assert.Fail(t, fmt.Sprintf("expected resourceLimits cpu=1, got %v", req.ResourceLimits))
 		}
+		if req.Env["LOG_LEVEL"] != "info" {
+			assert.Fail(t, fmt.Sprintf("expected env LOG_LEVEL=info, got %v", req.Env))
+		}
 		if req.Readiness == nil || req.Readiness.Probe != "tcp://127.0.0.1:44772" {
 			assert.Fail(t, fmt.Sprintf("unexpected readiness: %+v", req.Readiness))
 		}
@@ -69,6 +73,7 @@ func TestCreateTemplate(t *testing.T) {
 		Image:          "alpine:3.19",
 		Publish:        "s3://bucket/publish",
 		ResourceLimits: ResourceLimits{"cpu": "1", "memory": "512Mi", "disk": "2Gi"},
+		Env:            map[string]string{"LOG_LEVEL": "info"},
 		Readiness:      &TemplateReadiness{Probe: "tcp://127.0.0.1:44772"},
 	})
 	require.NoErrorf(t, err, "CreateTemplate")
@@ -77,6 +82,9 @@ func TestCreateTemplate(t *testing.T) {
 	}
 	if got.Status.Phase != TemplatePhasePending {
 		assert.Fail(t, fmt.Sprintf("Phase = %q, want %q", got.Status.Phase, TemplatePhasePending))
+	}
+	if got.Env["LOG_LEVEL"] != "info" {
+		assert.Fail(t, fmt.Sprintf("Env = %v, want LOG_LEVEL=info", got.Env))
 	}
 	if got.CreatedAt.UTC() != now {
 		assert.Fail(t, fmt.Sprintf("CreatedAt = %v, want %v", got.CreatedAt, now))

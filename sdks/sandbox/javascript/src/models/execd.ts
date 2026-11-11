@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -60,7 +60,9 @@ export interface RunCommandOpts {
   background?: boolean;
   /**
    * Maximum execution time in seconds; server will terminate the command when reached.
-   * If omitted, the server will not enforce any timeout.
+   * Rounded to the nearest millisecond, with a minimum of 1 ms for positive values.
+   * Must be finite and non-negative.
+   * If omitted or zero, the server will not enforce any timeout.
    */
   timeoutSeconds?: number;
   /**

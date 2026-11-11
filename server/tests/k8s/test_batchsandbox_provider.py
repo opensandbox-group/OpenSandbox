@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import pytest
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -30,13 +31,18 @@ from opensandbox_server.config import (
     AppConfig,
     EGRESS_MODE_DNS,
     EGRESS_MODE_DNS_NFT,
+    EgressUpstreamProxyConfig,
     ExecdInitResources,
     KubernetesRuntimeConfig,
     RuntimeConfig,
 )
 from opensandbox_server.services.constants import (
+    EGRESS_UPSTREAM_EXTRA_CA_PATH,
+    EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY,
+    EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME,
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
     OPENSANDBOX_RUNTIME_VOLUME_NAME,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
@@ -50,6 +56,21 @@ from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
 )
 from opensandbox_server.services.k8s.volume_helper import apply_volumes_to_pod_spec
+
+
+class _CapturingHandler(logging.Handler):
+    """Collect records directly on the target logger.
+
+    The app's dictConfig disables propagation, so pytest's caplog cannot see
+    app records; attach our own (same pattern as test_renew_intent_restart.py).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
 
 
 def _app_config_with_template(template_file_path: str) -> AppConfig:
@@ -93,6 +114,7 @@ def _egress_settings(
     auth_token: str | None = None,
     credential_proxy_enabled: bool = False,
     disable_ipv6: bool = True,
+    upstream_proxy: EgressUpstreamProxyConfig | None = None,
 ) -> EgressWorkloadSettings:
     return EgressWorkloadSettings(
         network_policy=network_policy,
@@ -104,6 +126,7 @@ def _egress_settings(
         disable_ipv6=disable_ipv6,
         resource_requests=None,
         resource_limits=None,
+        upstream_proxy=upstream_proxy,
     )
 
 
@@ -129,12 +152,75 @@ class TestBatchSandboxProvider:
 
         assert provider.template_manager._template is not None
 
+    def test_init_warns_when_template_opts_into_restartable_policy(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n  template:\n    spec:\n      restartPolicy: Always\n"
+        )
+
+        handler = _CapturingHandler()
+        provider_logger = logging.getLogger(
+            "opensandbox_server.services.k8s.batchsandbox_provider"
+        )
+        provider_logger.addHandler(handler)
+        try:
+            BatchSandboxProvider(
+                mock_k8s_client, _app_config_with_template(str(template_file))
+            )
+        finally:
+            provider_logger.removeHandler(handler)
+
+        assert any(
+            "restartPolicy=Always" in record.getMessage() for record in handler.records
+        )
+
+    @pytest.mark.parametrize("restart_policy", [None, "Never"])
+    def test_init_stays_silent_without_restartable_template_policy(
+        self, mock_k8s_client, tmp_path, restart_policy
+    ):
+        template_spec = f"    spec:\n      restartPolicy: {restart_policy}\n" if restart_policy else "    spec: {}\n"
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(f"spec:\n  template:\n{template_spec}")
+
+        handler = _CapturingHandler()
+        provider_logger = logging.getLogger(
+            "opensandbox_server.services.k8s.batchsandbox_provider"
+        )
+        provider_logger.addHandler(handler)
+        try:
+            BatchSandboxProvider(
+                mock_k8s_client, _app_config_with_template(str(template_file))
+            )
+        finally:
+            provider_logger.removeHandler(handler)
+
+        assert handler.records == []
+
     def test_init_sets_crd_constants_correctly(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
 
         assert provider.group == "sandbox.opensandbox.io"
         assert provider.version == "v1alpha1"
         assert provider.plural == "batchsandboxes"
+
+    def test_list_workloads_all_namespaces_delegates_to_client(self, mock_k8s_client):
+        """Cluster-wide lookup for the renew fallback must not no-op for batch."""
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.list_custom_objects_all_namespaces.return_value = [
+            {"metadata": {"namespace": "tenant-alpha"}}
+        ]
+
+        result = provider.list_workloads_all_namespaces("opensandbox.io/id=sbx-1")
+
+        assert result == [{"metadata": {"namespace": "tenant-alpha"}}]
+        mock_k8s_client.list_custom_objects_all_namespaces.assert_called_once_with(
+            group="sandbox.opensandbox.io",
+            version="v1alpha1",
+            plural="batchsandboxes",
+            label_selector="opensandbox.io/id=sbx-1",
+        )
 
     # ===== Workload Creation Tests =====
 
@@ -171,9 +257,44 @@ class TestBatchSandboxProvider:
         assert body["spec"]["expireTime"] == "2025-12-31T10:00:00+00:00"
         assert "template" in body["spec"]
         assert body["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+        assert body["spec"]["template"]["spec"]["restartPolicy"] == "Never"
         assert "initContainers" in body["spec"]["template"]["spec"]
         assert "containers" in body["spec"]["template"]["spec"]
         assert "volumes" in body["spec"]["template"]["spec"]
+
+    def test_create_workload_template_restart_policy_wins_over_never_default(
+        self, mock_k8s_client, tmp_path
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      restartPolicy: Always
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        assert body["spec"]["template"]["spec"]["restartPolicy"] == "Always"
 
     def test_create_workload_injects_platform_node_selector(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
@@ -220,6 +341,10 @@ class TestBatchSandboxProvider:
 
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         pod_spec = body["spec"]["template"]["spec"]
+
+        # dockur/windows relies on container restart for multi-phase install;
+        # the windows profile must keep Always despite the Never default.
+        assert pod_spec["restartPolicy"] == "Always"
 
         # windows profile should enforce requested arch, but not force os=windows.
         node_selector = pod_spec.get("nodeSelector", {})
@@ -1041,24 +1166,6 @@ spec:
 
         assert exc_info.value.status == 500
 
-    def test_get_workload_returns_object_from_client(self, mock_k8s_client):
-        cached = {"metadata": {"name": "test-id"}}
-        mock_k8s_client.get_custom_object.return_value = cached
-
-        provider = BatchSandboxProvider(mock_k8s_client)
-
-        result = provider.get_workload("test-id", "test-ns")
-
-        assert result == cached
-        mock_k8s_client.get_custom_object.assert_called()
-
-    def test_get_workload_logs_unexpected_errors(self, mock_k8s_client):
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.side_effect = RuntimeError("Unexpected")
-
-        with pytest.raises(RuntimeError, match="Unexpected"):
-            provider.get_workload("test-id", "test-ns")
-
     def test_create_workload_updates_informer_cache(self, mock_k8s_client):
         created_body = {"metadata": {"name": "test-id", "uid": "test-uid"}}
         mock_k8s_client.create_custom_object.return_value = created_body
@@ -1102,11 +1209,14 @@ spec:
 
     # ===== Workload Deletion Tests =====
 
+    @pytest.mark.parametrize("task_template, propagation", [(None, "Foreground"), ({}, "Background")])
     def test_delete_workload_deletes_existing_sandbox(
-        self, mock_k8s_client, mock_batchsandbox_list_response
+        self, mock_k8s_client, mock_batchsandbox_list_response, task_template, propagation
     ):
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.get_custom_object.return_value = mock_batchsandbox_list_response["items"][0]
+
+        mock_k8s_client.get_custom_object.return_value.setdefault("spec", {})["taskTemplate"] = task_template
 
         provider.delete_workload("test-id", "test-ns")
 
@@ -1117,6 +1227,7 @@ spec:
             plural="batchsandboxes",
             name="test-id",
             grace_period_seconds=0,
+            propagation_policy=propagation,
         )
 
     def test_delete_workload_raises_when_not_found(self, mock_k8s_client):
@@ -2361,6 +2472,78 @@ class TestBatchSandboxProviderEgress:
         assert policy_json["egress"][0]["action"] == "allow"
         assert policy_json["egress"][0]["target"] == "pypi.org"
 
+    def test_create_workload_mounts_upstream_proxy_ca_secret_only_on_egress(
+        self, mock_k8s_client
+    ):
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+        network_policy = NetworkPolicy(
+            default_action="deny",
+            egress=[NetworkRule(action="allow", target="pypi.org")],
+        )
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, 10, 0, 0, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+            egress_settings=_egress_settings(
+                network_policy,
+                credential_proxy_enabled=True,
+                upstream_proxy=EgressUpstreamProxyConfig(
+                    url="https://proxy.local:8443",
+                    ca_secret_name="corp-proxy-ca",
+                ),
+            ),
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pod_spec = body["spec"]["template"]["spec"]
+        containers = pod_spec["containers"]
+
+        ca_volume = {
+            "name": EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME,
+            "secret": {
+                "secretName": "corp-proxy-ca",
+                "items": [
+                    {
+                        "key": EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY,
+                        "path": EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY,
+                    }
+                ],
+            },
+        }
+        assert ca_volume in pod_spec["volumes"]
+
+        sidecar = next(c for c in containers if c["name"] == "egress")
+        assert {
+            "name": EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME,
+            "mountPath": EGRESS_UPSTREAM_EXTRA_CA_PATH,
+            "subPath": EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY,
+            "readOnly": True,
+        } in sidecar["volumeMounts"]
+        env_vars = {e["name"]: e["value"] for e in sidecar["env"]}
+        assert (
+            env_vars[OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA]
+            == EGRESS_UPSTREAM_EXTRA_CA_PATH
+        )
+
+        main = next(c for c in containers if c["name"] == "sandbox")
+        assert EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME not in {
+            m["name"] for m in main.get("volumeMounts", [])
+        }
+        assert (
+            OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA
+            not in {e["name"] for e in main.get("env", [])}
+        )
+
     def test_main_container_no_security_context_without_network_policy(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
@@ -2533,73 +2716,31 @@ spec:
         assert third_call == ("test-id", "test-ns", {"spec": {"pause": True}})
         provider.get_workload.assert_called_once_with("test-id", "test-ns")
 
-    def test_pause_sandbox_pausing_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Pausing."""
+    @pytest.mark.parametrize(
+        "phase,conditions,expected_match",
+        [
+            ("Pausing", [], "operation in progress"),
+            ("Resuming", [], "operation in progress"),
+            ("Paused", [], "already paused"),
+            ("Failed", [], "not available"),
+            (
+                "Failed",
+                [{"type": "PauseFailed", "status": "True", "reason": "PodNotFound"}],
+                "pause caused pod loss",
+            ),
+            ("Pending", [], "being created"),
+        ],
+        ids=["pausing", "resuming", "paused", "failed", "failed-pause-failed", "pending"],
+    )
+    def test_pause_sandbox_rejects_non_pausable_phase(self, mock_k8s_client, phase, conditions, expected_match):
+        """Pause is rejected unless the workload phase is Succeed/Running."""
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.get_custom_object.return_value = {
             "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Pausing", "conditions": []},
+            "status": {"phase": phase, "conditions": conditions},
         }
 
-        with pytest.raises(ValueError, match="operation in progress"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_resuming_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Resuming."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Resuming", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="operation in progress"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_paused_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Paused."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Paused", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="already paused"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_failed_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Failed."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Failed", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="not available"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_failed_with_pause_failed_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Failed + PauseFailed=True (pod loss scenario)."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {
-                "phase": "Failed",
-                "conditions": [{"type": "PauseFailed", "status": "True", "reason": "PodNotFound"}],
-            },
-        }
-
-        with pytest.raises(ValueError, match="pause caused pod loss"):
-            provider.pause_sandbox("test-id", "test-ns")
-
-    def test_pause_sandbox_pending_rejects(self, mock_k8s_client):
-        """Test pause rejected when Phase=Pending."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Pending", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="being created"):
+        with pytest.raises(ValueError, match=expected_match):
             provider.pause_sandbox("test-id", "test-ns")
 
     def test_resume_sandbox_paused_allows(self, mock_k8s_client):
@@ -2639,42 +2780,57 @@ spec:
         assert first_patch == {"spec": {"pause": None}}
         assert second_patch == {"spec": {"pause": False}}
 
-    def test_resume_sandbox_resuming_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Resuming."""
+    @pytest.mark.parametrize(
+        "phase,conditions,expected_match",
+        [
+            ("Resuming", [], "operation in progress"),
+            ("Pausing", [], "operation in progress"),
+            ("Succeed", [], "Cannot resume sandbox in state Running, expected Paused"),
+            ("Failed", [], "not available"),
+            (
+                "Failed",
+                [{"type": "ResumeFailed", "status": "True", "reason": "PodStartFailed"}],
+                "resume caused pod start failure",
+            ),
+            ("Pending", [], "being created"),
+        ],
+        ids=["resuming", "pausing", "running", "failed", "failed-resume-failed", "pending"],
+    )
+    def test_resume_sandbox_rejects_non_resumable_phase(self, mock_k8s_client, phase, conditions, expected_match):
+        """Resume is rejected unless the workload phase is Paused."""
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.get_custom_object.return_value = {
             "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Resuming", "conditions": []},
+            "status": {"phase": phase, "conditions": conditions},
         }
 
-        with pytest.raises(ValueError, match="operation in progress"):
+        with pytest.raises(ValueError, match=expected_match):
             provider.resume_sandbox("test-id", "test-ns")
 
-    def test_resume_sandbox_pausing_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Pausing."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Pausing", "conditions": []},
+    @pytest.mark.parametrize("phase", ["", "Pending", "Succeed", "Running", "Failed", "Pausing", "Paused", "Resuming"])
+    @pytest.mark.parametrize("task_failed", [0, 1])
+    def test_get_status_deleting_overrides_runtime_status(self, phase, task_failed):
+        provider = BatchSandboxProvider(MagicMock())
+        deletion_timestamp = "2026-10-08T10:00:00Z"
+        workload = {
+            "metadata": {
+                "creationTimestamp": "2026-10-08T09:00:00Z",
+                "deletionTimestamp": deletion_timestamp,
+            },
+            "status": {
+                "phase": phase,
+                "ready": 1,
+                "taskFailed": task_failed,
+                "conditions": [{"type": "PoolAllocationPending", "status": "True"}],
+            },
         }
 
-        with pytest.raises(ValueError, match="operation in progress"):
-            provider.resume_sandbox("test-id", "test-ns")
-
-    def test_resume_sandbox_running_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Succeed."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Succeed", "conditions": []},
+        assert provider.get_status(workload) == {
+            "state": "Stopping",
+            "reason": "DELETING",
+            "message": "Sandbox is being deleted",
+            "last_transition_at": deletion_timestamp,
         }
-
-        with pytest.raises(ValueError) as exc_info:
-            provider.resume_sandbox("test-id", "test-ns")
-
-        assert str(exc_info.value) == (
-            "Cannot resume sandbox in state Running, expected Paused"
-        )
 
     def test_get_status_succeed_phase_maps_to_running_state(self):
         provider = BatchSandboxProvider(MagicMock())
@@ -2711,44 +2867,6 @@ spec:
         assert result["state"] == "Failed"
         assert result["reason"] == "FAILED"
         assert result["message"] == "Pod sandbox-abc-0: ImagePullBackOff - image not found"
-
-    def test_resume_sandbox_failed_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Failed."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Failed", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="not available"):
-            provider.resume_sandbox("test-id", "test-ns")
-
-    def test_resume_sandbox_failed_with_resume_failed_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Failed + ResumeFailed=True (pod start failure)."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {
-                "phase": "Failed",
-                "conditions": [
-                    {"type": "ResumeFailed", "status": "True", "reason": "PodStartFailed"}
-                ],
-            },
-        }
-
-        with pytest.raises(ValueError, match="resume caused pod start failure"):
-            provider.resume_sandbox("test-id", "test-ns")
-
-    def test_resume_sandbox_pending_rejects(self, mock_k8s_client):
-        """Test resume rejected when Phase=Pending."""
-        provider = BatchSandboxProvider(mock_k8s_client)
-        mock_k8s_client.get_custom_object.return_value = {
-            "metadata": {"name": "test-id", "namespace": "test-ns"},
-            "status": {"phase": "Pending", "conditions": []},
-        }
-
-        with pytest.raises(ValueError, match="being created"):
-            provider.resume_sandbox("test-id", "test-ns")
 
     # ===== Image Auth Tests =====
 
@@ -2834,10 +2952,18 @@ spec:
         body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         assert "imagePullSecrets" not in body["spec"]["template"]["spec"]
 
+    @pytest.mark.parametrize("task_mode", [False, True])
     def test_create_workload_with_image_auth_secret_failure_rolls_back_batchsandbox(
-        self, mock_k8s_client
+        self, mock_k8s_client, tmp_path, task_mode
     ):
-        provider = BatchSandboxProvider(mock_k8s_client)
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            "spec:\n  taskTemplate:\n    spec:\n      process:\n        command: [sleep, '3600']\n"
+            if task_mode else "spec: {}\n"
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
         mock_k8s_client.create_custom_object.return_value = {
             "metadata": {"name": "test-id", "uid": "uid-123"}
         }
@@ -2866,6 +2992,7 @@ spec:
             plural=provider.plural,
             name="test-id",
             grace_period_seconds=0,
+            propagation_policy="Background" if task_mode else "Foreground",
         )
 
     # ===== Volume Support Tests =====

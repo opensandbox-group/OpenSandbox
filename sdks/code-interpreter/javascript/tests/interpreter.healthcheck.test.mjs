@@ -1,3 +1,17 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -162,4 +176,19 @@ test("CodeInterpreter.create skips the health check when skipHealthCheck is set"
 
   assert.equal(interpreter.id, "sandbox-id");
   assert.equal(commands.calls.length, 0);
+});
+
+test("CodeInterpreter.isHealthy is false when execd answers ping with an empty error response", async () => {
+  // No codes.ping, so isHealthy falls back to probing execd directly.
+  const adapterFactory = { createCodes: () => ({}) };
+  const { sandbox } = fakeSandbox();
+  sandbox.connectionConfig.fetch = async () =>
+    new Response(null, { status: 503, headers: { "Content-Length": "0" } });
+
+  const interpreter = await CodeInterpreter.create(sandbox, {
+    adapterFactory,
+    skipHealthCheck: true,
+  });
+
+  assert.equal(await interpreter.isHealthy(), false);
 });

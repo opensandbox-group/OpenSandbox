@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,10 +16,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import click
 import pytest
+from click.testing import CliRunner
 
+from opensandbox_cli import main as cli_main
 from opensandbox_cli.config import (
     DEFAULT_CONFIG_TEMPLATE,
     init_config_file,
@@ -37,15 +41,6 @@ class TestLoadConfigFile:
         result = load_config_file(tmp_path / "nonexistent.toml")
         assert result == {}
 
-    def test_parses_toml_file(self, tmp_path: Path) -> None:
-        cfg = tmp_path / "config.toml"
-        cfg.write_text(
-            '[connection]\napi_key = "abc"\ndomain = "example.com"\n'
-        )
-        result = load_config_file(cfg)
-        assert result["connection"]["api_key"] == "abc"
-        assert result["connection"]["domain"] == "example.com"
-
     def test_parses_all_sections(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.toml"
         cfg.write_text(
@@ -58,6 +53,48 @@ class TestLoadConfigFile:
         assert result["defaults"]["image"] == "alpine"
         assert result["defaults"]["timeout"] == "5m"
 
+    def test_invalid_toml_is_a_click_error(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("[connection]\ndomain = localhost:8080\n")
+        with pytest.raises(click.ClickException, match="not valid TOML"):
+            load_config_file(cfg)
+
+    def test_unreadable_file_is_a_click_error(self, tmp_path: Path) -> None:
+        with pytest.raises(click.ClickException, match="Cannot read config file"):
+            load_config_file(tmp_path)
+
+    def test_non_utf8_file_is_a_click_error(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_bytes(b"\xff\xfe = 1\n")
+        with pytest.raises(click.ClickException, match="not valid TOML"):
+            load_config_file(cfg)
+
+    def test_unsearchable_directory_is_a_click_error(self, tmp_path: Path) -> None:
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        (locked / "config.toml").write_text("[connection]\n")
+        locked.chmod(0)
+        try:
+            if os.access(locked, os.X_OK):
+                pytest.skip("running with permissions that bypass directory modes")
+            with pytest.raises(click.ClickException, match="Cannot read config file"):
+                load_config_file(locked / "config.toml")
+        finally:
+            locked.chmod(0o755)
+
+    def test_path_under_a_file_is_treated_as_missing(self, tmp_path: Path) -> None:
+        not_a_dir = tmp_path / "file"
+        not_a_dir.write_text("")
+        assert load_config_file(not_a_dir / "config.toml") == {}
+
+    def test_cli_reports_invalid_toml_without_traceback(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("[connection]\ndomain = localhost:8080\n")
+        result = CliRunner().invoke(cli_main.cli, ["--config", str(cfg), "sandbox", "list"])
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+        assert "not valid TOML" in result.stderr
+
 
 # ---------------------------------------------------------------------------
 # resolve_config — priority: CLI > env > file > defaults
@@ -65,6 +102,42 @@ class TestLoadConfigFile:
 
 
 class TestResolveConfig:
+    @pytest.mark.parametrize("section", ["connection", "output", "defaults"])
+    @pytest.mark.parametrize("value", ['"private-value"', "false", "42", "[]", '["private-value"]'])
+    @pytest.mark.parametrize("command", [["skills", "list", "-o", "json"], ["config", "show"]])
+    def test_non_table_section_is_a_cli_error(
+        self, tmp_path: Path, section: str, value: str, command: list[str]
+    ) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(f"{section} = {value}\n")
+        result = CliRunner().invoke(cli_main.cli, ["--config", str(cfg), *command])
+        assert result.exit_code == 1
+        assert isinstance(result.exception, SystemExit)
+        assert f"'{section}' must be a TOML table" in result.stderr
+        assert f"[{section}]" in result.stderr
+        assert "private-value" not in result.output
+        assert "Traceback" not in result.output
+
+    @pytest.mark.parametrize("section", ["connection", "output", "defaults"])
+    def test_array_of_tables_is_a_config_error(self, tmp_path: Path, section: str) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(f"[[{section}]]\n")
+        with pytest.raises(click.ClickException, match="must be a TOML table"):
+            resolve_config(config_path=cfg)
+
+    def test_inline_tables_and_unknown_sections_remain_supported(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            'connection = { domain = "localhost:8080" }\n'
+            'output = { color = false }\n'
+            'defaults = { timeout = 300 }\n'
+            'custom = "ignored"\n'
+        )
+        resolved = resolve_config(config_path=cfg)
+        assert resolved["domain"] == "localhost:8080"
+        assert resolved["color"] is False
+        assert resolved["default_timeout"] == "300"
+
     def test_defaults_when_nothing_configured(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "empty.toml"
         cfg_path.write_text("")
@@ -144,6 +217,42 @@ class TestResolveConfig:
         monkeypatch.setenv("OPEN_SANDBOX_USE_SERVER_PROXY", "not-a-bool")
         result = resolve_config(config_path=cfg)
         assert result["use_server_proxy"] is False
+
+    def test_numeric_file_scalars_stay_strings(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[connection]\napi_key = 1234567890\ndomain = 12345\n\n"
+            "[defaults]\ntimeout = 300\n"
+        )
+        result = resolve_config(config_path=cfg)
+        # A numeric-looking string field must not become an int.
+        assert result["api_key"] == "1234567890"
+        assert result["domain"] == "12345"
+        assert result["default_timeout"] == "300"
+
+    def test_stringly_typed_file_scalars_are_coerced(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            '[connection]\nrequest_timeout = "45"\nuse_server_proxy = "true"\n\n'
+            '[output]\ncolor = "false"\n'
+        )
+        result = resolve_config(config_path=cfg)
+        assert result["request_timeout"] == 45
+        assert result["use_server_proxy"] is True
+        assert result["color"] is False
+
+    def test_numeric_file_scalars_are_coerced_for_typed_keys(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text(
+            "[connection]\nrequest_timeout = 45.5\nuse_server_proxy = 1\n\n"
+            "[output]\ncolor = 0\n"
+        )
+        result = resolve_config(config_path=cfg)
+        assert result["request_timeout"] == 45
+        assert result["use_server_proxy"] is True
+        assert result["color"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,7 @@ yarn add @alibaba-group/opensandbox
 
 The following example shows how to create a sandbox and execute a shell command.
 
-> **Note**: Before running this example, ensure the OpenSandbox service is running. See the root [README.md](../../../README.md) for startup instructions.
+> **Note**: Before running this example, ensure the OpenSandbox service is running. See the root [README](https://github.com/opensandbox-group/OpenSandbox#readme) for startup instructions.
 
 ```ts
 import { ConnectionConfig, Sandbox, SandboxException } from "@alibaba-group/opensandbox";
@@ -66,10 +66,7 @@ try {
 
 ## Client-side sandbox pool
 
-`SandboxPool` maintains a best-effort buffer of clean, ready sandboxes. An
-acquired sandbox becomes caller-owned and is never returned to the pool; kill
-it when the work is complete. The pool replenishes the idle buffer in the
-background.
+`SandboxPool` maintains a best-effort buffer of clean, ready sandboxes. An acquired sandbox becomes caller-owned and is never returned to the pool; kill it when the work is complete. The pool replenishes the idle buffer in the background.
 
 ```ts
 import {
@@ -101,9 +98,7 @@ try {
 }
 ```
 
-`InMemoryPoolStateStore` is process-local. For a distributed pool, install a
-Redis client only in the application that needs it and import the optional
-pool subpath:
+`InMemoryPoolStateStore` is process-local. For a distributed pool, install a Redis client only in the application that needs it and import the optional pool subpath:
 
 ```bash
 npm install redis
@@ -119,25 +114,11 @@ await redis.connect();
 const stateStore = new RedisPoolStateStore({ client: redis });
 ```
 
-The SDK does not import `redis` from its main entry point and does not create,
-connect, or close the injected client. Any compatible client that implements
-`sendCommand(string[])` can be used.
+The SDK does not import `redis` from its main entry point and does not create, connect, or close the injected client. Any compatible client that implements `sendCommand(string[])` can be used.
 
-Pool warmup is admitted at `warmupCreateQps` per one-second reconcile tick.
-Creation is asynchronous; `warmupConcurrency` limits the post-create readiness,
-preparation, renewal, and commit stages. Use `warmupSandboxPreparer`,
-`warmupPostPrepareHealthCheck`, and the corresponding timeout/polling options
-for staged warmup. Set `connectionConfig.enableTracing` to emit OpenTelemetry
-`pool.warmup` traces with one child span per stage.
+Pool warmup is admitted at `warmupCreateQps` per one-second reconcile tick. Creation is asynchronous; `warmupConcurrency` limits the post-create readiness, preparation, renewal, and commit stages. Use `warmupSandboxPreparer`, `warmupPostPrepareHealthCheck`, and the corresponding timeout/polling options for staged warmup. Set `connectionConfig.enableTracing` to emit OpenTelemetry `pool.warmup` traces with one child span per stage.
 
-`SandboxPoolManager.destroy(poolName)` writes a shared `DESTROYING` fence,
-drains and best-effort kills visible idle sandboxes, clears persistent pool
-state, and writes a `DESTROYED` tombstone. `drainTimeoutSeconds` is checked
-before each drain attempt and bounds in-flight sandbox deletion; set it to `0`
-to disable that bound. State-store calls remain subject to the store client's
-own request timeout. If drain or persistent-state cleanup cannot finish, the
-namespace remains fenced as `DESTROYING`. Retry `destroy()` with the same pool
-name to finish cleanup.
+`SandboxPoolManager.destroy(poolName)` writes a shared `DESTROYING` fence, drains and best-effort kills visible idle sandboxes, clears persistent pool state, and writes a `DESTROYED` tombstone. `drainTimeoutSeconds` is checked before each drain attempt and bounds in-flight sandbox deletion; set it to `0` to disable that bound. State-store calls remain subject to the store client's own request timeout. If drain or persistent-state cleanup cannot finish, the namespace remains fenced as `DESTROYING`. Retry `destroy()` with the same pool name to finish cleanup.
 
 ## Usage Examples
 
@@ -169,6 +150,30 @@ const manual = await Sandbox.create({
   timeoutSeconds: null,
 });
 ```
+
+Renew on access instead of on a timer (OSEP-0009): `lifecycle.renewalPolicy` moves the expiration to `max(now + extendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects the field outright (HTTP 400); on Docker and Kubernetes it takes effect only when the operator enables the `[renew_intent]` integration.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  lifecycle: { renewalPolicy: { extendSeconds: 3600 } },
+});
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `lifecycle.idlePolicy` pauses the sandbox after `idleTimeoutSeconds` continuously idle seconds (30–86400, `onIdle: "pause"` is the only action today). Incoming traffic then wakes it:
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu",
+  lifecycle: {
+    idlePolicy: { idleTimeoutSeconds: 600, onIdle: "pause" },
+  },
+});
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`wakeRetryEnabled` / `wakeMaxAttempts` / `wakeOverallDeadlineSeconds` on the connection config; defaults 5 attempts / 60 seconds; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. The request that starts a stream wake-retries too; an established stream is never replayed.
 
 ### 2. Custom Health Check
 
@@ -241,8 +246,7 @@ const url = await sandbox.getEndpointUrl(44772);
 
 ### 6. Snapshots (Manager)
 
-`SandboxManager` administers sandbox snapshots — capture a sandbox's
-state and restore new sandboxes from it via `snapshotId`:
+`SandboxManager` administers sandbox snapshots — capture a sandbox's state and restore new sandboxes from it via `snapshotId`:
 
 ```ts
 import { SandboxManager } from "@alibaba-group/opensandbox";
@@ -275,8 +279,7 @@ await manager.deleteSnapshot(snapshot.id);
 
 ### 7. Isolated Sessions
 
-Isolated sessions run multi-step code in a hardened, resource-bounded
-environment with bind mounts — reachable through `sandbox.isolation`:
+Isolated sessions run multi-step code in a hardened, resource-bounded environment with bind mounts — reachable through `sandbox.isolation`:
 
 ```ts
 const session = await sandbox.isolation.create({
@@ -347,6 +350,37 @@ console.log(list.items.map((s) => s.id));
 await manager.close();
 ```
 
+### 10. Build reusable base images with templates
+
+`SandboxManager` builds golden images ("templates") from an OCI image and publishes them; sandboxes then boot from a `templateId` instead of a plain image:
+
+```ts
+const manager = SandboxManager.create({ connectionConfig: config });
+
+let template = await manager.createTemplate({
+  image: "python:3.11",
+  publish: "s3://bucket/templates/py311",
+  format: "native",
+});
+
+// Poll getTemplate until the build finishes (or fails).
+while (template.status.phase !== "Succeeded" && template.status.phase !== "Failed") {
+  await new Promise((r) => setTimeout(r, 5000));
+  template = await manager.getTemplate(template.templateId);
+}
+if (template.status.phase === "Failed") {
+  throw new Error(`template build failed: ${template.status.message}`);
+}
+
+const sandbox = await Sandbox.createFromTemplate({
+  connectionConfig: config,
+  templateId: template.templateId,
+  timeoutSeconds: 3600,
+});
+```
+
+`format` selects the snapshot storage encoding: `"native"` publishes to an S3-compatible target (`s3://bucket/publish`), `"overlaybd"` to an OCI repository (`oci://registry/repository`). It defaults to `"overlaybd"`.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -356,17 +390,23 @@ The `ConnectionConfig` class manages API server connection settings.
 Runtime notes:
 
 - In browsers, the SDK uses the global `fetch` implementation.
-- In Node.js, every `Sandbox` and `SandboxManager` clones the base `ConnectionConfig` via `withTransportIfMissing()`, so each instance gets an isolated `undici` keep-alive pool. Call `sandbox.close()` or `manager.close()` when you are done so the SDK can release the associated agent.
+- `requestTimeoutSeconds` bounds the wait for a response: it stops applying once the response headers arrive (streaming responses are not cut off). It never caps a healthy file upload body, which can legitimately take longer than the timeout; on Node.js a stalled upload, or an upload that gets no response headers within the timeout once the body has been sent, is aborted instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract).
+- In Node.js, every `Sandbox` and `SandboxManager` gets its own transport via `withTransportIfMissing()` unless you pass an already-initialized `ConnectionConfig`; shared configs are reused, and the SDK only closes transports it allocated itself. Call `sandbox.close()` or `manager.close()` when you are done so the SDK can release the agent it owns.
 
 | Parameter               | Description                                                                                                  | Default          | Environment Variable   |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------- | ---------------------- |
 | `apiKey`                | API key for authentication                                                                                   | Optional         | `OPEN_SANDBOX_API_KEY` |
-| `domain`                | Sandbox service domain (`host[:port]`)                                                                       | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
+| `domain`                | Sandbox service domain (`host[:port]`), or a full base URL including a path prefix (e.g. `https://gw.example.com/opensandbox`) | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`              | HTTP protocol (`http`/`https`)                                                                               | `http`           | -                      |
 | `requestTimeoutSeconds` | Request timeout applied to SDK HTTP calls                                                                    | `30`             | -                      |
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
 | `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
+| `endpointCacheTtlMs`    | How long a cached sandbox endpoint stays valid                                                               | `600000`         | -                      |
+| `endpointCacheSize`     | Maximum number of cached endpoints                                                                           | `1024`           | -                      |
+| `endpointCacheDisabled` | Disable endpoint caching entirely                                                                            | `false`          | -                      |
+| `disableMetrics`        | Opt out of create-latency telemetry                                                                          | `false`          | `OPENSANDBOX_DISABLE_METRICS=1` |
+| `enableTracing`         | Emit pool trace context headers                                                                              | `false`          | -                      |
 
 ```ts
 import { ConnectionConfig } from "@alibaba-group/opensandbox";
@@ -399,6 +439,7 @@ const config2 = new ConnectionConfig({
 | `env`                        | Environment variables                            | `{}`                         |
 | `metadata`                   | Custom metadata tags                             | `{}`                         |
 | `networkPolicy`              | Optional outbound network policy (egress)        | -                            |
+| `lifecycle`                  | Pre-start and periodic hooks, `idlePolicy` (OSEP-0024) and `renewalPolicy` (OSEP-0009) | - |
 | `credentialProxy`            | Optional Credential Vault proxy startup settings | -                            |
 | `extensions`                 | Extra server-defined fields                      | `{}`                         |
 | `skipHealthCheck`            | Skip readiness checks (`Running` + health check) | `false`                      |
@@ -407,8 +448,7 @@ const config2 = new ConnectionConfig({
 | `healthCheckPollingInterval` | Poll interval while waiting (milliseconds)       | 200 ms                       |
 | `signal`                     | Abort creation and readiness requests             | -                            |
 
-Note: metadata keys under `opensandbox.io/` are reserved for system-managed
-labels and will be rejected by the server.
+Note: metadata keys under `opensandbox.io/` are reserved for system-managed labels and will be rejected by the server.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -421,10 +461,22 @@ const sandbox = await Sandbox.create({
 });
 ```
 
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected. Docker, Kubernetes, and Fast Sandbox backends all enforce `ports` rules; a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "python:3.11",
+  networkPolicy: {
+    defaultAction: "deny",
+    egress: [{ action: "allow", ports: [443, 8443] }],
+  },
+});
+```
+
 ### 3. Runtime Egress Policy Updates
 
-Runtime egress reads and patches go directly to the sandbox egress sidecar.
-The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
+Runtime egress reads and patches go directly to the sandbox egress sidecar. The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
 
 Patch uses merge semantics:
 - Incoming rules take priority over existing rules with the same `target`.
@@ -443,10 +495,7 @@ await sandbox.patchEgressRules([
 
 ### 4. Credential Vault
 
-Credential Vault injects outbound credentials from the egress sidecar while
-keeping real secrets out of sandbox environment variables, commands, files, and
-logs. Create the sandbox with `credentialProxy` enabled, then write credentials
-and bindings through `sandbox.credentialVault`.
+Credential Vault injects outbound credentials from the egress sidecar while keeping real secrets out of sandbox environment variables, commands, files, and logs. Create the sandbox with `credentialProxy` enabled, then write credentials and bindings through `sandbox.credentialVault`.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -475,18 +524,37 @@ await sandbox.credentialVault.create({
 });
 ```
 
-See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
-binding guidance, and Git/curl examples.
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — `{ credential }` with no `type` (the static-only fields are compile errors in that form).
+
+```ts
+await sandbox.credentialVault.create({
+  credentials: [
+    {
+      name: "spi-signer",
+      source: { type: "exchange", endpoint: "unix:///run/spi/spi.sock" },
+    },
+  ],
+  bindings: [
+    {
+      name: "internal-api",
+      match: { hosts: ["*.internal.example.com"] },
+      auth: { credential: "spi-signer" },
+    },
+  ],
+});
+```
+
+See [Credential Vault](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.
 
 ### 5. Resource cleanup
 
-Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js
-so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting
-with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to
-release the underlying agent.
+Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to release the underlying agent.
 
 ## Browser Notes
 
 - The SDK can run in browsers, but **streaming file uploads are Node-only**.
 - If you pass `ReadableStream` or `AsyncIterable` for `writeFiles`, the browser will fall back to **buffering in memory** before upload.
 - Reason: browsers do not support streaming `multipart/form-data` bodies with custom boundaries (required by the execd upload API).
+- Redirects: same-origin redirects keep request headers, while cross-origin redirects drop `OPEN-SANDBOX-*` / `OPENSANDBOX-*` headers (plus `Authorization`, `Cookie`, and `Proxy-Authorization`) so credentials are never replayed. File uploads never follow redirects. Browsers cannot inspect a manual redirect target, so a request carrying protected headers fails closed when a redirect is received; Node.js is unaffected. See [Redirects and protected headers](../../../docs/sdks/javascript.md#redirects-and-protected-headers).

@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="FluentAssertions" Version="6.12.2" />
+    <!-- Declared by the netstandard2.0 asset of the SDK; flow it so its public surface compiles. -->
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Reference the netstandard2.0 asset explicitly: the transfer-deadline tests then run the
+      compile-time branches that only exist below .NET 5 (the token-less
+      SerializeToStreamAsync overload and the array-based copy loop). A net472 test host would
+      need a Windows runner, so the netstandard2.0 assembly is hosted on net10.0 instead and the
+      coverage travels with the existing Linux CI job.
+    -->
+    <ProjectReference Include="..\..\src\OpenSandbox\OpenSandbox.csproj" SetTargetFramework="TargetFramework=netstandard2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\OpenSandbox.Tests\AssemblyInfo.cs" Link="AssemblyInfo.cs" />
+    <Compile Include="..\OpenSandbox.Tests\FilesystemTransferTimeoutTests.cs" Link="FilesystemTransferTimeoutTests.cs" />
+  </ItemGroup>
+
+</Project>

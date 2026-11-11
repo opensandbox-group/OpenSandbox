@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ class OSSFSMixin:
                     "message": "OSSFS bucket name cannot be empty.",
                 },
             )
-        if not re.match(r'^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$', bucket):
+        if not re.fullmatch(r'^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$', bucket):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={

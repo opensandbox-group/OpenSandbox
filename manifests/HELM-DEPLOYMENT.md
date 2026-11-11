@@ -1,112 +1,140 @@
-# Helm Chart Deployment
+# OpenSandbox Helm Deployment
 
-This document describes how to deploy the OpenSandbox Controller using Helm Chart.
+This document describes how to deploy OpenSandbox with Helm: the cluster foundation (CRDs), the controller, the lifecycle server, and the optional ingress gateway, node agent, and fast-sandbox runtime.
+
+> **Where charts come from.** Charts are versioned sources in this repository. They are not published as standalone `.tgz` packages — the release flow is umbrella-based (see [Release Process](#release-process-maintainers)). Install from a checkout of the version you want. The legacy per-component `helm/{component}/{version}` chart releases are frozen at `0.2.x` and no longer produced.
 
 ## Prerequisites
 
-- Kubernetes 1.22.4+
+- Kubernetes 1.21.1+ (matching the charts' `kubeVersion`)
 - Helm 3.0+
 - kubectl configured and able to access the target cluster
 
 ## Quick Start
 
-### Option 1: Install from GitHub Release (Recommended)
+Check out the version you want to deploy (use the latest `release-X.Y.Z` tag, or `main` for development), then install.
 
-Download and install the published chart package directly. The controller
-chart no longer bundles the CRDs; install the base chart once per cluster
-first:
+### Option 1: Umbrella Chart (Recommended)
+
+Everything in one release — CRDs, controller, server, and optional components:
 
 ```bash
-# Install the latest version (0.1.0)
-# The helm/base release becomes available right after the chart restructure
-# merges; until then install from source: helm install base manifests/charts/base
-helm install base \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/base/0.1.0/base-0.1.0.tgz
+cd manifests/charts
 
-helm install opensandbox-controller \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
+# Package the sub-charts (charts/ is git-ignored, rebuilt every time)
+helm dependency build opensandbox
+
+# Install all components
+helm install opensandbox opensandbox \
   --namespace opensandbox-system \
   --create-namespace
 ```
 
-To use a custom image:
+Optional components default to off; enable what you need:
 
 ```bash
-helm install opensandbox-controller \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz \
+helm install opensandbox opensandbox \
+  --namespace opensandbox-system \
+  --create-namespace \
+  --set ingress-gateway.enabled=true \
+  --set fast-sandbox.enabled=true
+```
+
+To announce the gateway from the server, also set `opensandbox-server.server.gateway.*` (see [Ingress Gateway](#ingress-gateway) below).
+
+### Option 2: Per-Component Releases
+
+Install the foundation first, then the components you need:
+
+```bash
+# 1. Cluster-scoped resources: OpenSandbox CRDs, fast-sandbox CRDs, RBAC
+helm install base manifests/charts/base
+
+# 2. Controller (control plane)
+helm install opensandbox-controller manifests/charts/controller \
+  --namespace opensandbox-system \
+  --create-namespace
+
+# 3. Optional: fast-sandbox runtime — install BEFORE the ingress gateway and
+#    the server when the server will serve sandboxes through the fsb runtime
+#    (its [runtime] config points at the FastPath endpoint this chart creates)
+helm install fast-sandbox manifests/charts/fast-sandbox
+
+# 4. Ingress gateway — REQUIRED on Kubernetes deployments: sandbox Pods are
+#    ClusterIP-only and client traffic routes through the gateway. Install
+#    BEFORE the server so the announcement is configured from the first
+#    install. providerType/fastpathEndpoint/secureAccess are required when
+#    serving sandboxes through fast-sandbox — see the
+#    [fast-sandbox runtime](#fast-sandbox-runtime-firecracker) section.
+helm install ingress-gateway manifests/charts/ingress-gateway \
+  --namespace opensandbox-system
+
+# 5. Lifecycle API server
+helm install opensandbox-server manifests/charts/server \
+  --namespace opensandbox-system \
+  --create-namespace
+
+# 6. Optional: node agent
+helm install opensandbox-node-agent manifests/charts/node-agent \
+  --namespace opensandbox-system
+```
+
+### Using Custom Images
+
+Every chart defaults to the images published for its `appVersion` (`release-<appVersion>` tags). To use your own registry:
+
+```bash
+helm install opensandbox-controller manifests/charts/controller \
   --set controller.image.repository=<your-registry>/controller \
-  --set controller.image.tag=v0.0.1 \
+  --set controller.image.tag=<your-tag> \
   --namespace opensandbox-system \
   --create-namespace
 ```
 
-### Option 2: Install from Local Chart
-
-If building from source, you can use the local chart:
-
-#### 1. Build Images
-
-First build the controller and task-executor images:
+If you build images from source:
 
 ```bash
-# Build controller image
 cd kubernetes
-COMPONENT=controller TAG=v0.0.1 ./build.sh
-
-# Build task-executor image
-COMPONENT=task-executor TAG=v0.0.1 ./build.sh
+COMPONENT=controller TAG=<your-tag> ./build.sh
+COMPONENT=task-executor TAG=<your-tag> ./build.sh
 ```
 
-#### 2. Install the Local Helm Chart
+Or via the Makefile (VERSION must be plain semver; the chart adds the `v` prefix for image tags automatically):
 
 ```bash
-helm install opensandbox-controller ../manifests/charts/controller \
-  --set controller.image.repository=<your-registry>/controller \
-  --set controller.image.tag=v0.0.1 \
-  --namespace opensandbox-system \
-  --create-namespace
+cd manifests
+make helm-install IMAGE_TAG_BASE=<your-registry>/controller VERSION=0.0.1
 ```
 
-Or using Makefile:
-
-```bash
-make helm-install \
-  IMAGE_TAG_BASE=<your-registry>/controller \
-  VERSION=v0.0.1
-```
-
-### 3. Verify Installation
+### Verify Installation
 
 ```bash
 # Check Pod status
 kubectl get pods -n opensandbox-system
 
-# Check CRDs
+# Check CRDs (three from the base chart)
 kubectl get crd | grep opensandbox
 
-# View installation status
-helm status opensandbox-controller -n opensandbox-system
-
-# View installed Chart version
+# View installation status and chart version
+helm status opensandbox -n opensandbox-system
 helm list -n opensandbox-system
 ```
 
 ## Version Management
 
-### View Available Versions
-
-Visit GitHub Releases to see all available versions:
-https://github.com/opensandbox-group/OpenSandbox/releases
-
-Look for tags starting with `helm/opensandbox-controller/`, such as `helm/opensandbox-controller/0.1.0`
+- Umbrella releases are tagged `release-X.Y.Z` in this repository (plus a Go SDK companion tag `sdks/sandbox/go/vX.Y.Z` on the same commit). Check out the tag to deploy that exact version.
+- Chart `version` and image `appVersion` move together per umbrella release; individual charts are not released separately.
+- To see available versions: `git tag -l 'release-*'` or the [releases page](https://github.com/opensandbox-group/OpenSandbox/releases).
 
 ### Upgrade to a Specific Version
 
 ```bash
-# Upgrade directly from GitHub Release
-helm upgrade opensandbox-controller \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
-  --namespace opensandbox-system
+git fetch --tags
+git checkout release-1.2.0
+
+cd manifests/charts
+helm dependency build opensandbox
+helm upgrade opensandbox opensandbox --namespace opensandbox-system
 ```
 
 ## Custom Configuration
@@ -116,26 +144,33 @@ helm upgrade opensandbox-controller \
 Create a custom values file `custom-values.yaml`:
 
 ```yaml
-controller:
-  image:
-    repository: myregistry.example.com/opensandbox-controller
-    tag: v0.1.0
+opensandbox-controller:
+  controller:
+    image:
+      repository: myregistry.example.com/opensandbox-controller
+      tag: v0.1.0
 
-  resources:
-    limits:
-      cpu: 1000m
-      memory: 512Mi
-    requests:
-      cpu: 100m
-      memory: 128Mi
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
 
-  logLevel: debug
+    logLevel: debug
 
-  snapshot:
-    registry: myregistry.example.com/opensandbox/snapshots
-    snapshotPushSecret: registry-snapshot-push-secret
-    imageCommitterPullSecret: registry-image-committer-pull-secret
-    resumePullSecret: registry-pull-secret
+    # Scope the controller informer cache to the sandbox workload
+    # namespaces (OOM avoidance on large shared clusters); empty or
+    # omitted watches the whole cluster
+    namespaces:
+      - opensandbox
+
+    snapshot:
+      registry: myregistry.example.com/opensandbox/snapshots
+      snapshotPushSecret: registry-snapshot-push-secret
+      imageCommitterPullSecret: registry-image-committer-pull-secret
+      resumePullSecret: registry-pull-secret
 
 imagePullSecrets:
   - name: myregistrykey
@@ -144,18 +179,19 @@ imagePullSecrets:
 Install with custom configuration:
 
 ```bash
-helm install opensandbox-controller ../manifests/charts/controller \
-  -f custom-values.yaml \
+helm install opensandbox opensandbox -f custom-values.yaml \
   --namespace opensandbox-system \
   --create-namespace
 ```
+
+Per-chart equivalents use the unprefixed keys (e.g. `controller.image.*` with `manifests/charts/controller`).
 
 ### Common Configuration Examples
 
 #### 1. Adjust Resource Configuration
 
 ```bash
-helm install opensandbox-controller ../manifests/charts/controller \
+helm install opensandbox-controller manifests/charts/controller \
   --set controller.resources.limits.cpu=1000m \
   --set controller.resources.limits.memory=512Mi \
   --namespace opensandbox-system
@@ -167,10 +203,6 @@ Create `affinity-values.yaml`:
 
 ```yaml
 controller:
-  resources:
-    limits:
-      cpu: 1000m
-      memory: 512Mi
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -181,7 +213,7 @@ controller:
 ```
 
 ```bash
-helm install opensandbox-controller ../manifests/charts/controller \
+helm install opensandbox-controller manifests/charts/controller \
   -f affinity-values.yaml \
   --namespace opensandbox-system
 ```
@@ -189,7 +221,7 @@ helm install opensandbox-controller ../manifests/charts/controller \
 #### 3. Configure Pause/Resume
 
 ```bash
-helm install opensandbox-controller ../manifests/charts/controller \
+helm install opensandbox-controller manifests/charts/controller \
   --set controller.snapshot.registry=myregistry.example.com/opensandbox/snapshots \
   --set controller.snapshot.snapshotPushSecret=registry-snapshot-push-secret \
   --set controller.snapshot.imageCommitterPullSecret=registry-image-committer-pull-secret \
@@ -197,23 +229,74 @@ helm install opensandbox-controller ../manifests/charts/controller \
   --namespace opensandbox-system
 ```
 
-## Upgrade
-
-### Upgrade Helm Release
-
-Upgrade from GitHub Release:
+#### 4. Configure the Ingress Gateway
 
 ```bash
-# Upgrade to a specific version
-helm upgrade opensandbox-controller \
-  https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.2.0/opensandbox-controller-0.2.0.tgz \
+helm install ingress-gateway manifests/charts/ingress-gateway \
+  --namespace opensandbox-system \
+  --set gateway.service.type=LoadBalancer
+```
+
+#### 5. Scope the Controller Cache on Large Shared Clusters
+
+The controller watches Pods and Jobs through its informer cache. On large shared clusters a cluster-wide cache can exceed the controller's memory limit during startup (the Pod gets OOM-killed before Ready). Scope the cache to the namespaces that hold your Pool/BatchSandbox workloads:
+
+```bash
+helm install opensandbox-controller manifests/charts/controller \
+  --set controller.namespaces='{opensandbox}' \
   --namespace opensandbox-system
 ```
 
-Upgrade from local chart:
+With the umbrella chart, use `--set opensandbox-controller.controller.namespaces='{opensandbox}'` (same key nested under the sub-chart prefix).
+
+Every watched namespace must be listed — the CRs, their Pods, and snapshot commit Jobs are only reconciled inside the scope. Multi-tenant deployments with BatchSandboxes spread across many namespaces should leave this empty (cluster-wide, the default). The equivalent controller flag is `--namespaces=ns-a,ns-b`.
+
+## Rendered-Manifests (GitOps) Deployment
+
+Instead of `helm install` / `helm upgrade`, render each chart to plain YAML with `helm template` and apply it with `kubectl`. The rendered manifests and values files live in your own Git repository, giving reviewable, reproducible deployments.
 
 ```bash
-helm upgrade opensandbox-controller ../manifests/charts/controller \
+git checkout release-1.1.0   # deploy a specific release
+mkdir -p out
+
+# Render each component (namespace flag matters: templates resolve
+# .Release.Namespace)
+helm template base manifests/charts/base > out/base.yaml
+helm template opensandbox-controller manifests/charts/controller \
+  -n opensandbox-system > out/controller.yaml
+helm template ingress-gateway manifests/charts/ingress-gateway \
+  -n opensandbox-system > out/ingress-gateway.yaml
+helm template opensandbox-server manifests/charts/server \
+  -n opensandbox-system -f values-server.yaml > out/server.yaml
+
+# Review, then apply (Server-Side Apply: OpenSandbox CRDs are large and can
+# exceed the client-side apply annotation limit)
+kubectl diff -f out/base.yaml
+kubectl apply --server-side -f out/base.yaml
+```
+
+Rules and caveats:
+
+- **No mixing.** Do not run `helm install` / `helm upgrade` against a cluster deployed this way — the two flows overwrite each other. The `app.kubernetes.io/managed-by: Helm` labels in rendered output are inert; kubectl ignores them.
+- **Namespace bootstrap is your job.** `helm template` only renders; nothing creates namespaces. Create `opensandbox-system` (and the sandbox workload namespace) before the first apply. On chart versions that ship `fastSandbox.namespaces.createSystem` (base), the system namespace is part of the rendered `base` and needs no manual step.
+- **`helm.sh/resource-policy: keep` is helm-only.** kubectl does not honor it: deleting the rendered `base` deletes the CRDs and cascades every Sandbox/Pool custom resource. Keep CRDs across component-only rollouts by not deleting `out/base.yaml`.
+- **Upgrades** are re-renders: `git checkout release-X.Y.Z`, render again, `kubectl diff` to review the delta, then apply per component.
+- `kubectl diff` exits `1` when there are differences and `0` when clean — do not treat a nonzero exit as a failure in scripts.
+
+## Upgrade
+
+Upgrade from a checked-out version:
+
+```bash
+git checkout release-1.2.0
+cd manifests/charts && helm dependency build opensandbox
+helm upgrade opensandbox opensandbox -n opensandbox-system
+```
+
+Upgrade from a local chart with a new image:
+
+```bash
+helm upgrade opensandbox-controller manifests/charts/controller \
   --set controller.image.tag=v0.0.2 \
   --namespace opensandbox-system
 ```
@@ -221,31 +304,29 @@ helm upgrade opensandbox-controller ../manifests/charts/controller \
 Or using Makefile:
 
 ```bash
-make helm-upgrade VERSION=v0.0.2
+make helm-upgrade VERSION=0.0.2
 ```
 
 ### View Upgrade History
 
 ```bash
-helm history opensandbox-controller -n opensandbox-system
+helm history opensandbox -n opensandbox-system
 ```
 
 ### Rollback
 
 ```bash
-# Rollback to the previous version
-helm rollback opensandbox-controller -n opensandbox-system
+# Rollback to the previous revision
+helm rollback opensandbox -n opensandbox-system
 
 # Rollback to a specific revision
-helm rollback opensandbox-controller 1 -n opensandbox-system
+helm rollback opensandbox 1 -n opensandbox-system
 ```
 
 ## Uninstall
 
-### Uninstall Helm Release
-
 ```bash
-helm uninstall opensandbox-controller -n opensandbox-system
+helm uninstall opensandbox -n opensandbox-system
 ```
 
 Or using Makefile:
@@ -254,7 +335,7 @@ Or using Makefile:
 make helm-uninstall
 ```
 
-**Note**: By default, CRDs are retained. To delete CRDs:
+**Note**: By default, CRDs are retained (`helm.sh/resource-policy: keep`). To delete them:
 
 ```bash
 kubectl delete crd batchsandboxes.sandbox.opensandbox.io
@@ -262,47 +343,50 @@ kubectl delete crd pools.sandbox.opensandbox.io
 kubectl delete crd sandboxsnapshots.sandbox.opensandbox.io
 ```
 
+The `opensandbox-dataplane` namespace created by the base chart is also kept on uninstall; delete it manually once its data is no longer needed.
+
 ### Clean Up Namespace
 
 To completely clean up:
 
 ```bash
 kubectl delete namespace opensandbox-system
+kubectl delete namespace opensandbox-dataplane   # fast-sandbox dataplane, if used
 ```
 
 ## Makefile Commands
 
-The project provides a set of Makefile commands to simplify Helm operations:
+The `manifests/Makefile` provides targets to simplify Helm operations:
 
 ```bash
-# Lint the Helm Chart
+# Lint all Helm charts and verify umbrella dependencies
 make helm-lint
 
-# Generate Kubernetes manifests (without installing)
+# Generate Kubernetes manifests (controller chart) without installing
 make helm-template
 
 # Generate manifests with debug output
 make helm-template-debug
 
-# Package the Helm Chart
+# Package a chart (chart version comes from its Chart.yaml)
 make helm-package
 
-# Install the Helm Chart
+# Install base + controller
 make helm-install
 
-# Upgrade the Helm Chart
+# Upgrade the controller release
 make helm-upgrade
 
-# Uninstall the Helm Chart
+# Uninstall the controller release
 make helm-uninstall
-
-# Test the installed Chart
-make helm-test
 
 # Perform a dry-run install
 make helm-dry-run
 
-# Run all Helm-related tasks
+# Regenerate chart READMEs (requires helm-docs)
+make helm-docs
+
+# Run lint + package
 make helm-all
 ```
 
@@ -321,16 +405,19 @@ kubectl logs -n opensandbox-system -l control-plane=controller-manager -f
 ```bash
 kubectl get crd batchsandboxes.sandbox.opensandbox.io -o yaml
 kubectl get crd pools.sandbox.opensandbox.io -o yaml
+kubectl get crd sandboxsnapshots.sandbox.opensandbox.io -o yaml
 ```
 
 ### 3. Create Test Resources
 
+From the repository root:
+
 ```bash
 # Create a Pool
-kubectl apply -f config/samples/sandbox_v1alpha1_pool.yaml
+kubectl apply -f kubernetes/config/samples/sandbox_v1alpha1_pool.yaml
 
 # Create a BatchSandbox
-kubectl apply -f config/samples/sandbox_v1alpha1_batchsandbox.yaml
+kubectl apply -f kubernetes/config/samples/sandbox_v1alpha1_batchsandbox.yaml
 
 # View status
 kubectl get pools -n opensandbox-system
@@ -376,34 +463,61 @@ kubectl create secret docker-registry myregistrykey \
   -n opensandbox-system
 
 # Reinstall with the secret
-helm upgrade opensandbox-controller ../manifests/charts/controller \
+helm upgrade opensandbox-controller manifests/charts/controller \
   --set imagePullSecrets[0].name=myregistrykey \
   --namespace opensandbox-system
 ```
 
+## Ingress Gateway
+
+The ingress gateway (`components/ingress`) proxies sandbox traffic and is deployed by its own chart. The lifecycle server only *announces* it: set `server.gateway.enabled=true` (chart `server`) so the server returns the gateway address to clients. Install the gateway **before the server** so the announcement is configured from the first install. It is required on Kubernetes deployments: sandbox Pods are ClusterIP-only and client traffic routes through the gateway.
+
+```bash
+helm install ingress-gateway manifests/charts/ingress-gateway \
+  --namespace opensandbox-system
+
+helm install opensandbox-server manifests/charts/server \
+  --namespace opensandbox-system \
+  --set server.gateway.enabled=true \
+  --set server.gateway.host=gateway.example.com
+```
+
+Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode` of the ingress-gateway chart.
+
+When serving sandboxes through the **fast-sandbox** runtime, set the provider, the FastPath endpoint, and the secure-access key ring (the chart fails at render time without the key ring — FastPath routing serves only authenticated route scopes):
+
+```bash
+KEY=$(openssl rand -base64 32)   # share with server.gateway.secureAccess
+
+helm install ingress-gateway manifests/charts/ingress-gateway \
+  --namespace opensandbox-system \
+  --set gateway.providerType=fast-sandbox \
+  --set gateway.fastpathEndpoint=fast-sandbox-fastpath.opensandbox-system.svc:9090 \
+  --set 'gateway.secureAccess.keys[0].key_id=a' \
+  --set "gateway.secureAccess.keys[0].key=$KEY"
+```
+
+### Secure-Access Keys (OSEP-0011)
+
+For signed, expiring sandbox routes, the server signs route tokens and the gateway verifies them with the **same symmetric key ring**. Provide the ring to both charts, either inline (plaintext in values — dev only):
+
+```bash
+--set server.gateway.secureAccess.activeKey=a \
+--set 'server.gateway.secureAccess.keys[0].key_id=a' \
+--set 'server.gateway.secureAccess.keys[0].key=<base64-secret>'
+```
+
+or from an existing Secret (`secureAccess.existingSecret`) with two entries: `keys` (`a=<base64-secret>[,b=...]`) and `active-key` (`a`). The charts wire it in as environment variables so key material never appears in values, the server ConfigMap, or pod args. The two forms are mutually exclusive; after rotating the Secret, `kubectl rollout restart` the server Deployment.
+
 ## fast-sandbox Runtime (Firecracker)
 
-The optional `fast-sandbox` chart deploys the fast-sandbox Firecracker chain
-(`sandbox.fast.io`): the all-in-one control plane (reconcilers + FastPath
-gRPC), the janitor, and the node-side firecracker runtime (UDS management
-API, DART P2P delivery, janitor sidecar, and the node readiness loop that
-installs the Firecracker assets and self-labels the nodes). Only
-Firecracker is covered; boxlite and other non-Firecracker runtimes are out
-of scope, and the upstream central sandbox-proxy is not deployed
-(OpenSandbox reaches fastlets through the ingress gateway's direct route
-resolution).
+The optional `fast-sandbox` chart deploys the fast-sandbox Firecracker chain (`sandbox.fast.io`): the all-in-one control plane (reconcilers + FastPath gRPC), the janitor, and the node-side firecracker runtime (UDS management API, DART P2P delivery, janitor sidecar, and the node readiness loop that installs the Firecracker assets and self-labels the nodes). Only Firecracker is covered; boxlite and other non-Firecracker runtimes are out of scope, and the upstream central sandbox-proxy is not deployed (OpenSandbox reaches fastlets through the ingress gateway's direct route resolution).
 
-The CRDs (`sandbox.fast.io`) and the component RBAC ship in the `base` chart
-(gated by `fastSandbox.*` values), so install `base` first.
+The CRDs (`sandbox.fast.io`) and the component RBAC ship in the `base` chart (gated by `fastSandbox.*` values), so install `base` first.
 
 ### 1. Build the companion images from the pinned source
 
-The upstream source is pinned Git-LFS-pointer style in
-[`manifests/third-party/fast-sandbox.commit`](third-party/fast-sandbox.commit)
-(repo + commit). The build script materializes a checkout of exactly that
-commit and builds the six Firecracker-scope images (controller, fastlet,
-fastlet-proxy, janitor, firecracker-runtime,
-sandboxtemplate-builder):
+The upstream source is pinned Git-LFS-pointer style in [`manifests/third-party/fast-sandbox.commit`](third-party/fast-sandbox.commit) (repo + commit). The build script materializes a checkout of exactly that commit and builds the six Firecracker-scope images (controller, fastlet, fastlet-proxy, janitor, firecracker-runtime, sandboxtemplate-builder):
 
 ```bash
 # Build all images; --load-kind also pushes them into a kind cluster
@@ -413,17 +527,11 @@ manifests/release/build-fast-sandbox.sh --load-kind <kind-cluster>
 manifests/release/build-fast-sandbox.sh --list-images
 ```
 
-`REGISTRY` / `TAG` environment variables override the default
-`fast-sandbox/<component>:dev` refs — keep the chart `image.*` values in
-sync when you override them. To publish, `--push` follows the
-`components/*/build.sh` convention: bare `--push` retags and pushes to
-`docker.io/opensandbox` and
-`sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox` (plus
-`$GHCR_REPO/<component>` when `GHCR_REPO` is set), `--push r1[,r2...]`
-pushes to exactly the listed registries, and a `v*` `TAG` additionally
-pushes `:latest`. Images are linux/amd64 only.
+`REGISTRY` / `TAG` environment variables override the default `fast-sandbox/<component>:dev` refs — keep the chart `image.*` values in sync when you override them. To publish, `--push` follows the `components/*/build.sh` convention: bare `--push` retags and pushes to `docker.io/opensandbox` and `sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox` (plus `$GHCR_REPO/<component>` when `GHCR_REPO` is set), `--push r1[,r2...]` pushes to exactly the listed registries, and a `v*` `TAG` additionally pushes `:latest`. Images are linux/amd64 only.
 
 ### 2. Prepare the cluster
+
+Prepare each node's `runtime.stateRoot` (`fast-sandbox.runtime.stateRoot` in the umbrella chart) on a filesystem with reflink support before deploying the runtime. See the [state-disk operations guide](../docs/architecture/fast-sandbox/storage.md#prepare-the-node-state-disk) for dedicated-disk setup, the loop-backed XFS helper, sizing, and readiness checks.
 
 ```bash
 # Nodes need bare-metal KVM (/dev/kvm); no manual labeling — the
@@ -439,6 +547,8 @@ kubectl -n opensandbox-system create secret generic fast-sandbox-agent-registry 
 
 ### 3. Install
 
+Install `base` first, then this chart — and both **before the lifecycle server** when the server will serve sandboxes through this runtime (its `[runtime]`/fsb configuration points at the FastPath endpoint created here):
+
 ```bash
 helm install base manifests/charts/base          # sandbox.fast.io CRDs + RBAC
 helm install fast-sandbox manifests/charts/fast-sandbox
@@ -453,22 +563,10 @@ helm install opensandbox manifests/charts/opensandbox \
 
 Two key systems apply (do not conflate them):
 
-- The fast-sandbox controller's Ed25519 route keys default to the published
-  development-only test keys (`fast-sandbox.io/development-only: "true"`
-  label). For production, set `routeKeys.existingSecret` or
-  `routeKeys.privateKey` / `routeKeys.publicKey` with
-  `routeKeys.developmentOnly=false`.
-- The OpenSandbox f1.* route-scope ring is HMAC-SHA256 and independent: the
-  server signs with `[ingress.secure_access]` (`server.gateway.secureAccess`
-  in charts/server) and the ingress gateway verifies with the same symmetric
-  ring (`gateway.secureAccess` in charts/ingress-gateway). Configure both
-  with matching key material for production.
+- The fast-sandbox controller's Ed25519 route keys default to the published development-only test keys (`fast-sandbox.io/development-only: "true"` label). For production, set `routeKeys.existingSecret` or `routeKeys.privateKey` / `routeKeys.publicKey` with `routeKeys.developmentOnly=false`.
+- The OpenSandbox f1.* route-scope ring is HMAC-SHA256 and independent: the server signs with `[ingress.secure_access]` (`server.gateway.secureAccess` in charts/server) and the ingress gateway verifies with the same symmetric ring (`gateway.secureAccess` in charts/ingress-gateway). Configure both with matching key material for production.
 
-Point the OpenSandbox server's
-`[runtime]`/fsb configuration and the ingress gateway's
-`--provider-type=fast-sandbox` at the deployed FastPath endpoint to
-serve sandboxes through this runtime (see
-`scripts/fast-sandbox-env` for a working reference).
+Point the OpenSandbox server's `[runtime]`/fsb configuration and the ingress gateway's `gateway.providerType=fast-sandbox` / `gateway.fastpathEndpoint` values at the deployed FastPath endpoint to serve sandboxes through this runtime (see [Ingress Gateway](#ingress-gateway) for the complete gateway install command, and `scripts/fast-sandbox-env` for a working reference).
 
 ### Bumping the pinned fast-sandbox commit
 
@@ -489,184 +587,98 @@ Create dedicated values files for different environments:
 
 #### values-dev.yaml
 ```yaml
-controller:
-  logLevel: debug
-  resources:
-    limits:
-      cpu: 200m
-      memory: 128Mi
+opensandbox-controller:
+  controller:
+    logLevel: debug
+    resources:
+      limits:
+        cpu: 200m
+        memory: 128Mi
 ```
 
 #### values-prod.yaml
 ```yaml
-controller:
-  logLevel: warn
-  replicaCount: 3
-  resources:
-    limits:
-      cpu: 1000m
-      memory: 512Mi
-  affinity:
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchExpressions:
-          - key: control-plane
-            operator: In
-            values:
-            - controller-manager
-        topologyKey: kubernetes.io/hostname
+opensandbox-controller:
+  controller:
+    logLevel: warn
+    replicaCount: 3
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+            - key: control-plane
+              operator: In
+              values:
+              - controller-manager
+          topologyKey: kubernetes.io/hostname
 ```
 
 Deploy to different environments:
 
 ```bash
 # Development environment
-helm install opensandbox-controller ../manifests/charts/controller \
+helm install opensandbox-dev manifests/charts/opensandbox \
   -f values-dev.yaml \
-  --namespace opensandbox-dev
+  --namespace opensandbox-dev \
+  --create-namespace
 
 # Production environment
-helm install opensandbox-controller ../manifests/charts/controller \
+helm install opensandbox-prod manifests/charts/opensandbox \
   -f values-prod.yaml \
-  --namespace opensandbox-prod
+  --namespace opensandbox-prod \
+  --create-namespace
 ```
 
-## Publishing Helm Charts (Maintainers)
+> Note: the controller chart currently uses fixed resource names (see the `controller` chart README). Running multiple controller releases in one cluster is not supported; separate **clusters** per environment.
 
-### Automated Publishing
+## Release Process (Maintainers)
 
-Publish Helm Charts automatically via GitHub Actions:
+OpenSandbox releases are umbrella releases: one version, one tag family for the whole platform (see `docs/community/release-automation.md`).
 
-#### Option 1: Trigger via Git Tag
+1. Prepare the release branch:
+
+   ```bash
+   # One-shot version bump: chart versions/appVersions, image tags, SDK
+   # versions, Chart.lock, chart READMEs — then commits the result
+   manifests/release/create-umbrella-release.sh --version X.Y.Z --bump-only
+   ```
+
+2. Write the hand-authored release notes at `docs/releases/X.Y.Z.md` and commit them on the release branch.
+3. Cut the release:
+
+   ```bash
+   manifests/release/create-umbrella-release.sh --version X.Y.Z --push --release
+   ```
+
+   This verifies version consistency, renders the BOM (`docs/releases/X.Y.Z.yaml`), and mints the `release-X.Y.Z` tag plus the Go companion tag `sdks/sandbox/go/vX.Y.Z` on the BOM commit.
+4. CI (`.github/workflows/release-umbrella.yml`) builds and pushes `opensandbox/<component>:release-X.Y.Z` images, pins their digests into the BOM, and publishes the GitHub Release. `rc` versions (`X.Y.Z-rc.N`) follow the same flow with the `-rc` template; SDK artifacts only move at stable releases.
+
+Pull requests that touch the umbrella chart, release workflows, release-smoke scripts, or Python lifecycle clients are gated by the **Helm Release Smoke** workflow (`.github/workflows/helm-release-test.yml`), which installs the exact umbrella package in Kind and verifies the core controller, server, authentication, and BatchSandbox lifecycle.
+
+### Adding a New Chart
+
+1. Create the chart under `manifests/charts/<name>/` with a `README.md` (add a `README.md.gotmpl` so `helm-docs` manages it).
+2. Add it as a dependency of the umbrella chart (`manifests/charts/opensandbox/Chart.yaml`) with an `enabled`-style condition if it is optional.
+3. Add the chart name to the chart lists in `manifests/release/bump-versions.sh` and `manifests/release/create-umbrella-release.sh` so version bumps cover it.
+
+### Local Testing
 
 ```bash
-# Publish opensandbox-controller chart version 0.1.0
-git tag helm/opensandbox-controller/0.1.0
-git push origin helm/opensandbox-controller/0.1.0
-```
-
-Tag naming convention: `helm/{component}/{version}`
-- `helm`: Prefix indicating this is a Helm Chart release
-- `{component}`: Component name, e.g. `opensandbox-controller`
-- `{version}`: Version number, e.g. `0.1.0`
-
-This automatically triggers the workflow to:
-1. Parse the tag to extract component and version
-2. Verify the tag version matches the chart `version`
-3. Preserve the committed chart `appVersion`
-4. Package the Helm chart once and hold that exact `.tgz` with its SHA-256
-5. Re-download and statically verify the held package
-6. For the `opensandbox` umbrella chart, install the same `.tgz` in Kind and
-   verify the core controller, server, authentication, and BatchSandbox
-   lifecycle
-7. Request approval through the `release` environment
-8. Attest the tested package and checksum, upload them to a draft GitHub
-   Release, verify the uploaded bytes, and publish the stable Release
-
-Important versioning note:
-
-- The Helm chart `version` is the chart package version and is released through
-  `helm/{component}/{version}` tags.
-- Stable publication accepts `X.Y.Z` chart and app versions. Pre-release
-  versions require an explicit pre-release publication flow and are not marked
-  `production-ready` by this workflow.
-- The chart `appVersion` is the default image/application version used by that
-  chart release.
-- Tag-triggered publishing preserves the committed chart `appVersion` and
-  verifies that the tag matches the committed chart `version`. Manual runs
-  confirm the committed `appVersion` instead of rewriting release source, and
-  must run from the exact existing Helm release tag.
-- If you need a specific server image release, set the image tag explicitly
-  (for example `--set server.image.tag=v0.1.13`) or publish a new Helm chart
-  package version for the chart itself.
-
-#### Option 2: Manual Trigger
-
-Create and push the protected Helm tag first, then dispatch the workflow from
-that exact tag ref. For example:
-
-```bash
-# Helm charts are no longer published; deploy from the repo at a
-# release tag:
-# gh workflow run release-umbrella.yml \
-  --repo opensandbox-group/OpenSandbox \
-  --ref helm/opensandbox-controller/0.1.0 \
-  -f component=opensandbox-controller \
-  -f chart_version=0.1.0 \
-  -f app_version=0.0.1
-```
-
-The workflow rejects a manual run whose selected `--ref` is not exactly
-`helm/{component}/{chart_version}`, or whose `app_version` does not match the
-committed chart metadata. This keeps the environment deployment, attestation
-source ref, packaged bytes, and GitHub Release tied to the same protected tag.
-
-Only the stable umbrella `opensandbox` Release is marked `production-ready`,
-and only after its exact package passes the Kind core-lifecycle gate.
-Standalone chart Releases are marked `package-verified`.
-
-Pull requests that change the release workflows, release-smoke scripts,
-umbrella chart, or Python lifecycle clients run the same exact-package Kind
-smoke through the `Helm Release Smoke` workflow before merge.
-
-### Published URL Format
-
-After publishing, users can access the Helm Chart at:
-
-```
-https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/{COMPONENT}/{VERSION}/{COMPONENT}-{VERSION}.tgz
-```
-
-Example:
-```
-https://github.com/opensandbox-group/OpenSandbox/releases/download/helm/opensandbox-controller/0.1.0/opensandbox-controller-0.1.0.tgz
-```
-
-### Adding a New Helm Chart Component
-
-To add Helm Chart publishing support for a new component:
-
-1. Create a new chart directory under `charts/`
-2. Charts are not published; version changes land via the release prep commit (`create-umbrella-release.sh --bump-only`):
-   - Add the new component to `workflow_dispatch.inputs.component.options`
-   - Add the component path mapping in the "Set chart path" step
-
-Example:
-```yaml
-# Add to workflow_dispatch inputs
-options:
-  - opensandbox-controller
-  - new-component  # new entry
-
-# Add to Set chart path step
-if [ "$COMPONENT" == "opensandbox-controller" ]; then
-  CHART_PATH="manifests/charts/controller"
-elif [ "$COMPONENT" == "new-component" ]; then
-  CHART_PATH="path/to/new-component/chart"
-fi
-```
-
-### Local Test of the Publishing Process
-
-Before publishing, test locally:
-
-```bash
-# Package the Chart
-make helm-package
-
-# Validate the packaged Chart
-helm lint opensandbox-controller-*.tgz
-
-# Test installation
-helm install test-release opensandbox-controller-*.tgz \
-  --namespace test \
-  --create-namespace \
-  --dry-run
+cd manifests
+make helm-lint        # lint every chart + umbrella dependency check
+make helm-template    # render the controller chart
+make helm-docs        # regenerate chart READMEs (CI fails on drift)
 ```
 
 ## References
 
-- [Helm Chart README](../../manifests/charts/controller/README.md) - Full parameter list
-- [OpenSandbox Documentation](../README.md) - Project documentation
-- [Configuration Examples](../config/samples/) - Resource configuration examples
+- [Charts README](README.md) — chart layout and source-of-truth rules
+- [Controller chart](charts/controller/README.md) — full parameter list
+- [Server chart](charts/server/README.md)
+- [Kubernetes deployment guide](../docs/deployment/index.md)
+- [Release automation](../docs/community/release-automation.md)

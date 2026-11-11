@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -66,6 +66,11 @@ class CompositeSnapshotRuntime:
             self._fsb is not None and self._fsb.supports_create_snapshot()
         )
 
+    def supports_synchronous_create(self) -> bool:
+        if not self._default.supports_synchronous_create():
+            return False
+        return self._fsb is None or self._fsb.supports_synchronous_create()
+
     def create_snapshot_unsupported_message(self) -> str:
         return self._default.create_snapshot_unsupported_message()
 
@@ -119,6 +124,7 @@ class CompositeSnapshotRuntime:
             snapshot_id,
             image,
             namespace=namespace,
+            source_sandbox_id=source_sandbox_id,
         )
 
     def inspect_snapshot(
@@ -133,6 +139,7 @@ class CompositeSnapshotRuntime:
             snapshot_id,
             image,
             namespace=namespace,
+            source_sandbox_id=source_sandbox_id,
         )
 
     def start_status_watch(

@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from ..models.fsb_template_format import FsbTemplateFormat
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
+    from ..models.fsb_template_env import FsbTemplateEnv
     from ..models.fsb_template_metadata import FsbTemplateMetadata
     from ..models.fsb_template_readiness import FsbTemplateReadiness
     from ..models.fsb_template_status import FsbTemplateStatus
@@ -44,7 +45,7 @@ class FsbTemplate:
         Attributes:
             template_id (str): Server-generated template ID (`tpl_<uuid>`).
             image (str): Source OCI image reference.
-            publish (str): S3-compatible publish target.
+            publish (str): S3-compatible or repository-only OCI publish target.
             format_ (FsbTemplateFormat): Snapshot storage encoding.
             status (FsbTemplateStatus): Status of a fsb template build.
             created_at (datetime.datetime): Creation timestamp (RFC 3339 UTC).
@@ -59,6 +60,7 @@ class FsbTemplate:
                 New resource types can be added without API changes.
                  Example: {'cpu': '500m', 'memory': '512Mi', 'gpu': '1'}.
             entrypoint (list[str] | Unset): Guest business command (argv).
+            env (FsbTemplateEnv | Unset): Environment variables baked into the golden image.
             metadata (FsbTemplateMetadata | Unset): Custom metadata from the creation request.
             readiness (FsbTemplateReadiness | Unset): Build-side readiness gate for a fsb template.
     """
@@ -72,6 +74,7 @@ class FsbTemplate:
     updated_at: datetime.datetime
     resource_limits: ResourceLimits | Unset = UNSET
     entrypoint: list[str] | Unset = UNSET
+    env: FsbTemplateEnv | Unset = UNSET
     metadata: FsbTemplateMetadata | Unset = UNSET
     readiness: FsbTemplateReadiness | Unset = UNSET
 
@@ -98,6 +101,10 @@ class FsbTemplate:
         if not isinstance(self.entrypoint, Unset):
             entrypoint = self.entrypoint
 
+        env: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.env, Unset):
+            env = self.env.to_dict()
+
         metadata: dict[str, Any] | Unset = UNSET
         if not isinstance(self.metadata, Unset):
             metadata = self.metadata.to_dict()
@@ -123,6 +130,8 @@ class FsbTemplate:
             field_dict["resourceLimits"] = resource_limits
         if entrypoint is not UNSET:
             field_dict["entrypoint"] = entrypoint
+        if env is not UNSET:
+            field_dict["env"] = env
         if metadata is not UNSET:
             field_dict["metadata"] = metadata
         if readiness is not UNSET:
@@ -132,6 +141,7 @@ class FsbTemplate:
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        from ..models.fsb_template_env import FsbTemplateEnv
         from ..models.fsb_template_metadata import FsbTemplateMetadata
         from ..models.fsb_template_readiness import FsbTemplateReadiness
         from ..models.fsb_template_status import FsbTemplateStatus
@@ -161,6 +171,13 @@ class FsbTemplate:
 
         entrypoint = cast(list[str], d.pop("entrypoint", UNSET))
 
+        _env = d.pop("env", UNSET)
+        env: FsbTemplateEnv | Unset
+        if isinstance(_env, Unset):
+            env = UNSET
+        else:
+            env = FsbTemplateEnv.from_dict(_env)
+
         _metadata = d.pop("metadata", UNSET)
         metadata: FsbTemplateMetadata | Unset
         if isinstance(_metadata, Unset):
@@ -185,6 +202,7 @@ class FsbTemplate:
             updated_at=updated_at,
             resource_limits=resource_limits,
             entrypoint=entrypoint,
+            env=env,
             metadata=metadata,
             readiness=readiness,
         )

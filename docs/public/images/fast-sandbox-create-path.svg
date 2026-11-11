@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="634" viewBox="0 0 1180 634" role="img" aria-labelledby="title desc">
+<title id="title">The create hot path</title>
+<desc id="desc">Per-pod backends pay the full Kubernetes scheduling machinery for every sandbox. Fast Sandbox writes one durable CR, places in memory, admits atomically into a warm Fastlet, and starts the runtime from pre-pulled artifacts.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="634" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">The create hot path</text>
+<text x="48" y="96" class="body">Both paths persist durable intent · only the per-sandbox scheduling machinery differs</text>
+<path d="M1050 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="1096" y="60" class="edge" style="fill:#dc6b2e">Path</text>
+<rect x="48" y="128" width="1084" height="140" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="158" class="section">PER-POD BACKEND · PER SANDBOX</text>
+<text x="72" y="194" class="heading">Full Kubernetes machinery every time</text>
+<text x="72" y="227" class="body">API write → scheduler → watch → kubelet → reconcile → runtime start (± image pull)</text>
+<text x="72" y="251" class="label">pools remove the pod start, not the per-sandbox write path</text>
+<path d="M590 268V318" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="606" y="297" class="edge" style="fill:#dc6b2e">same durability, less machinery</text>
+<rect x="48" y="318" width="1084" height="200" rx="12" fill="#f4fbf8" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="72" y="348" class="section">FAST SANDBOX · PER SANDBOX</text>
+<text x="72" y="384" class="heading">One CRD write, warm admission</text>
+<text x="72" y="417" class="body">durable intent → in-memory placement → atomic admission</text>
+<text x="72" y="445" class="body">into a warm Fastlet → containerd starts the runtime</text>
+<text x="72" y="469" class="label">no scheduler, no watch wait, no kubelet</text>
+<rect x="720" y="368" width="388" height="132" rx="10" fill="#ffffff" stroke="#c6e4d7" stroke-width="1.5"/>
+<text x="736" y="396" class="heading">Admission steps</text>
+<text x="736" y="424" class="body">1 · rank: affinity · load · hash</text>
+<text x="736" y="450" class="body">2 · persist one Sandbox CR</text>
+<text x="736" y="476" class="body">3 · admit on Fastlet · slot first</text>
+<rect x="48" y="542" width="1084" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="569" class="heading">The cluster keeps what it is good at</text>
+<text x="520" y="569" class="body">Fastlet pods · accounting · pool scheduling</text>
+<text x="72" y="596" class="label">warm images are protected from eviction — and the slot exists before the runtime: policy can be late but never open.</text>
+</svg>

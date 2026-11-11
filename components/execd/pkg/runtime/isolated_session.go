@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,21 +23,35 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/sessionresource"
 )
 
+// IsolatedOverlayOptions describes one overlay mount requested for a
+// session. Mode defaults to overlay; Persist (overlay mode only) defaults
+// to true.
+type IsolatedOverlayOptions struct {
+	Path    string
+	Mode    string // "" (default overlay) | "rw" | "overlay" | "ro"
+	Persist *bool  // overlay mode only; nil defaults to true
+}
+
 // IsolatedSessionOptions bundles the parameters for creating an isolated session.
 type IsolatedSessionOptions struct {
-	Profile            string
+	Profile string
+	// Legacy single-workspace sugar, merged into Overlays by
+	// normalizeIsolatedOptions.
 	WorkspacePath      string
 	WorkspaceMode      string
+	Overlays           []IsolatedOverlayOptions
 	ExtraWritable      []string
 	Binds              []isolation.BindMount
 	ShareNet           *bool
@@ -47,6 +61,41 @@ type IsolatedSessionOptions struct {
 	Gid                *uint32
 	UidMode            string // "setpriv" (default) or "userns"
 	IdleTimeoutSeconds int
+}
+
+// sessionOverlay is one resolved overlay mount of a live session. For
+// overlay-mode mounts persist reports whether a host upper directory was
+// requested; upperDir/workDir are otherwise empty.
+type sessionOverlay struct {
+	path     string
+	mode     isolation.WorkspaceMode
+	persist  bool
+	upperDir string
+	workDir  string
+}
+
+// resolveSessionOverlays merges the legacy workspace fields into Overlays
+// and applies the same defaults as normalizeIsolatedOptions.
+func resolveSessionOverlays(opts *IsolatedSessionOptions) []sessionOverlay {
+	raw := make([]IsolatedOverlayOptions, 0, len(opts.Overlays)+1)
+	if opts.WorkspacePath != "" {
+		raw = append(raw, IsolatedOverlayOptions{Path: opts.WorkspacePath, Mode: opts.WorkspaceMode})
+	}
+	raw = append(raw, opts.Overlays...)
+
+	overlays := make([]sessionOverlay, 0, len(raw))
+	for _, ov := range raw {
+		mode := isolation.WorkspaceOverlay
+		switch isolation.WorkspaceMode(ov.Mode) {
+		case isolation.WorkspaceRW:
+			mode = isolation.WorkspaceRW
+		case isolation.WorkspaceRO:
+			mode = isolation.WorkspaceRO
+		}
+		persist := mode == isolation.WorkspaceOverlay && (ov.Persist == nil || *ov.Persist)
+		overlays = append(overlays, sessionOverlay{path: ov.Path, mode: mode, persist: persist})
+	}
+	return overlays
 }
 
 type sessionNamespacePins interface {
@@ -82,13 +131,16 @@ type isolatedSession struct {
 	doneCh               chan struct{} // closed after process wait and lifecycle drain
 	lifecycleMonitorDone chan struct{} // closed after drain-failure monitor exits
 	upperID              string        // key in UpperManager, used for Release/Remove
-	upperDir             string
-	workDir              string
-	createdAt            time.Time
-	lastRunAt            time.Time
-	isolator             isolation.Isolator
-	lifecycle            isolation.WorkloadLifecycle
-	identity             isolation.WorkloadIdentity
+	// tmpDir is the host dir backing the namespace /tmp bind (strict
+	// profile); empty when /tmp is not hosted. Served by the files view.
+	// Immutable after allocation.
+	tmpDir    string
+	overlays  []sessionOverlay
+	createdAt time.Time
+	lastRunAt time.Time
+	isolator  isolation.Isolator
+	lifecycle isolation.WorkloadLifecycle
+	identity  isolation.WorkloadIdentity
 	// activeBackgroundRuns: in-flight detached runs. While non-zero, idle GC
 	// must not collect the session (background processes die with the bwrap
 	// process group).
@@ -98,6 +150,16 @@ type isolatedSession struct {
 }
 
 const isolatedSessionStartupTimeout = 10 * time.Second
+
+const (
+	// Startup evidence bounds: bwrap's stderr is merged into the session
+	// stdout pipe and its exit code lands in the JSON status stream, but both
+	// are otherwise lost when a failed startup tears the session down. The
+	// limits keep failed-create handling fast and the reported evidence small.
+	startupStderrTailBytes      = 2 * 1024
+	startupStderrReadTimeout    = 250 * time.Millisecond
+	startupEvidenceDrainTimeout = time.Second
+)
 
 var (
 	isolatedSessionStopTimeout = 5 * time.Second
@@ -115,6 +177,7 @@ func newIsolatedSession(
 	return &isolatedSession{
 		id:              id,
 		opts:            opts,
+		overlays:        resolveSessionOverlays(opts),
 		isolator:        iso,
 		namespacePinner: namespacePinner,
 		processWaited:   make(chan struct{}),
@@ -134,7 +197,10 @@ func (s *isolatedSession) start() error {
 	wrapOpts := isolation.WrapOptions{
 		ExtraWritable: s.opts.ExtraWritable,
 		Binds:         s.opts.Binds,
-		ShareNet:      true,
+		// Empty when /tmp is not hosted; bwrap falls back to the profile
+		// segment.
+		TmpDir:   s.tmpDir,
+		ShareNet: true,
 	}
 
 	switch s.opts.Profile {
@@ -146,14 +212,15 @@ func (s *isolatedSession) start() error {
 		return fmt.Errorf("unknown isolation profile %q", s.opts.Profile)
 	}
 
-	wrapOpts.Workspace.Path = s.opts.WorkspacePath
-	switch isolation.WorkspaceMode(s.opts.WorkspaceMode) {
-	case isolation.WorkspaceRW:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceRW
-	case isolation.WorkspaceRO:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceRO
-	default:
-		wrapOpts.Workspace.Mode = isolation.WorkspaceOverlay
+	// One mount segment per resolved overlay.
+	wrapOpts.Overlays = make([]isolation.OverlaySpec, 0, len(s.overlays))
+	for _, ov := range s.overlays {
+		wrapOpts.Overlays = append(wrapOpts.Overlays, isolation.OverlaySpec{
+			Path:     ov.path,
+			Mode:     ov.mode,
+			UpperDir: ov.upperDir,
+			WorkDir:  ov.workDir,
+		})
 	}
 
 	if s.opts.ShareNet != nil {
@@ -170,8 +237,6 @@ func (s *isolatedSession) start() error {
 	if s.opts.UidMode != "" {
 		wrapOpts.UidMode = isolation.UidMode(s.opts.UidMode)
 	}
-	wrapOpts.UpperDir = s.upperDir
-	wrapOpts.WorkDir = s.workDir
 
 	lifecycleIsolator, ok := s.isolator.(isolation.LifecycleIsolator)
 	if !ok {
@@ -630,10 +695,87 @@ func (s *isolatedSession) waitForOperations(timeout time.Duration) error {
 }
 
 func (s *isolatedSession) failStartup(startErr error) error {
+	startErr = s.attachStartupEvidence(startErr)
+	log.Error("isolated session startup failed: %v", startErr)
 	if cleanupErr := s.stop(); cleanupErr != nil {
 		return errors.Join(startErr, fmt.Errorf("clean up failed session startup: %w", cleanupErr))
 	}
 	return startErr
+}
+
+// attachStartupEvidence augments a startup failure with bubblewrap's exit
+// code and the stderr tail buffered in the session output pipe. bwrap writes
+// its setup failures (loopback setup, mount and overlay errors, execvp
+// failures) to stderr, which start() merges into the session stdout pipe;
+// without this, teardown closes the pipe and aborts the status drain before
+// anyone reads them, leaving workload-gate EOFs without root-cause evidence.
+func (s *isolatedSession) attachStartupEvidence(startErr error) error {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return startErr
+	}
+	var evidence []error
+	if code, ok := s.workloadExitCode(); ok {
+		evidence = append(evidence, fmt.Errorf("bwrap exit code %d", code))
+	}
+	if tail := s.readStartupStderrTail(); tail != "" {
+		evidence = append(evidence, fmt.Errorf("session output tail (bwrap stderr merged): %s", tail))
+	}
+	if len(evidence) == 0 {
+		return startErr
+	}
+	return errors.Join(append([]error{startErr}, evidence...)...)
+}
+
+// workloadExitCode waits briefly for bubblewrap's JSON status stream to
+// finish and returns its reported exit code. Setup-stage deaths end the
+// stream without an exit-code document, in which case ok is false; the stderr
+// tail is the surviving evidence for those.
+func (s *isolatedSession) workloadExitCode() (int, bool) {
+	if s.lifecycle == nil {
+		return 0, false
+	}
+	timer := time.NewTimer(startupEvidenceDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-s.lifecycle.DrainDone():
+	case <-timer.C:
+		return 0, false
+	}
+	return s.lifecycle.ExitCode()
+}
+
+// readStartupStderrTail returns the buffered session output tail (bwrap's
+// stderr is merged into it), bounded by a short read deadline so a still-
+// writing child cannot stall startup failure handling.
+func (s *isolatedSession) readStartupStderrTail() string {
+	file, ok := s.stdout.(*os.File)
+	if !ok {
+		return ""
+	}
+	// Never leave a still-open session pipe with an expired deadline.
+	defer func() { _ = file.SetReadDeadline(time.Time{}) }()
+	if err := file.SetReadDeadline(time.Now().Add(startupStderrReadTimeout)); err != nil {
+		return ""
+	}
+	var collected []byte
+	buf := make([]byte, 512)
+	for {
+		n, err := file.Read(buf)
+		collected = append(collected, buf[:n]...)
+		// Keep only the tail so early output cannot evict the root-cause
+		// lines at the end of the stream. Advance the head cut to a rune
+		// boundary so truncation cannot split a multi-byte character.
+		if excess := len(collected) - startupStderrTailBytes; excess > 0 {
+			for excess < len(collected) && !utf8.RuneStart(collected[excess]) {
+				excess++
+			}
+			collected = collected[excess:]
+		}
+		if err != nil {
+			break
+		}
+	}
+	return strings.TrimSpace(string(collected))
 }
 
 func closeCommandExtraFiles(cmd *exec.Cmd) {

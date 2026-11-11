@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -170,6 +170,208 @@ class TestWorkloadInformerInvalidation:
         assert informer._cache["foo"] is cached
         assert informer._resource_version == cursor
         assert informer._invalidation_generation == 1
+
+
+def _obj(name: str, resource_version: str) -> dict:
+    return {"metadata": {"name": name, "resourceVersion": resource_version}}
+
+
+class TestWorkloadInformerPendingWrites:
+    """Writes hold back only the written object until LIST/WATCH reflects them."""
+
+    def _synced_informer(self, *items: dict) -> WorkloadInformer:
+        informer = _make_informer(
+            list_fn=MagicMock(return_value={"metadata": {"resourceVersion": "42"}, "items": list(items)})
+        )
+        assert informer._full_resync() is True
+        return informer
+
+    def test_write_hides_only_written_object_until_watch_confirms(self):
+        other = _obj("other", "1")
+        informer = self._synced_informer(_obj("foo", "1"), other)
+
+        informer.track_write(_obj("foo", "rv-b"))
+
+        assert informer.get_if_synced("foo") is None
+        assert informer.get_if_synced("other") is other
+        assert informer.list_if_synced() is None
+        assert informer._has_synced is True
+        assert informer._invalidation_generation == 0
+
+        # An earlier write by someone else does not confirm this one.
+        informer._handle_event({"type": "MODIFIED", "object": _obj("foo", "rv-a")})
+        assert informer.get_if_synced("foo") is None
+
+        confirmed = _obj("foo", "rv-b")
+        informer._handle_event({"type": "MODIFIED", "object": confirmed})
+        assert informer.get_if_synced("foo") is confirmed
+        assert informer.list_if_synced() is not None
+
+    def test_write_response_after_its_watch_event_does_not_block(self):
+        informer = self._synced_informer(_obj("foo", "1"))
+        informer._handle_event({"type": "MODIFIED", "object": _obj("foo", "2")})
+        informer._handle_event({"type": "MODIFIED", "object": _obj("foo", "3")})
+
+        informer.track_write(_obj("foo", "2"))
+
+        assert informer.get_if_synced("foo") == _obj("foo", "3")
+        assert informer.list_if_synced() is not None
+
+    def test_noop_patch_with_cached_resource_version_does_not_block(self):
+        cached = _obj("foo", "1")
+        informer = self._synced_informer(cached)
+
+        informer.track_write(_obj("foo", "1"))
+
+        assert informer.get_if_synced("foo") is cached
+
+    def test_concurrent_writes_wait_for_every_watch_event(self):
+        informer = self._synced_informer(_obj("foo", "1"))
+        informer.track_write(_obj("foo", "3"))
+        informer.track_write(_obj("foo", "2"))
+
+        informer._handle_event({"type": "MODIFIED", "object": _obj("foo", "2")})
+        assert informer.get_if_synced("foo") is None
+
+        informer._handle_event({"type": "MODIFIED", "object": _obj("foo", "3")})
+        assert informer.get_if_synced("foo") == _obj("foo", "3")
+
+    def test_status_delete_waits_for_deleted_event(self):
+        informer = self._synced_informer(_obj("foo", "1"), _obj("other", "1"))
+
+        informer.track_delete("foo", {"kind": "Status", "status": "Success"})
+
+        assert informer.get_if_synced("foo") is None
+        assert informer.get_if_synced("other") == _obj("other", "1")
+        assert informer.list_if_synced() is None
+
+        informer._handle_event({"type": "DELETED", "object": _obj("foo", "2")})
+        assert informer.list_if_synced() == [_obj("other", "1")]
+        assert informer._pending_writes == {}
+
+    def test_pending_delete_of_absent_object_does_not_block_list(self):
+        informer = self._synced_informer(_obj("other", "1"))
+        informer._handle_event({"type": "ADDED", "object": _obj("foo", "2")})
+        informer._handle_event({"type": "DELETED", "object": _obj("foo", "3")})
+
+        informer.track_delete("foo", None)
+
+        assert informer.get_if_synced("foo") is None
+        assert informer.list_if_synced() == [_obj("other", "1")]
+
+        # A same-name object that shows up before the next LIST is not served.
+        informer._handle_event({"type": "ADDED", "object": _obj("foo", "4")})
+        assert informer.get_if_synced("foo") is None
+        assert informer.list_if_synced() is None
+
+    def test_delete_returning_object_is_confirmed_by_resource_version(self):
+        informer = self._synced_informer(_obj("foo", "1"))
+        terminating = _obj("foo", "2")
+        terminating["metadata"]["deletionTimestamp"] = "2026-10-09T07:00:00Z"
+
+        informer.track_delete("foo", terminating)
+        assert informer.get_if_synced("foo") is None
+
+        informer._handle_event({"type": "MODIFIED", "object": terminating})
+        assert informer.get_if_synced("foo") is terminating
+
+    @pytest.mark.parametrize("response", [None, {"kind": "Status"}, {"metadata": {"name": "foo"}}])
+    def test_unidentifiable_write_response_invalidates_whole_cache(self, response):
+        informer = self._synced_informer(_obj("foo", "1"))
+
+        informer.track_write(response)
+
+        assert informer.list_if_synced() is None
+        assert informer._invalidation_generation == 1
+
+    def test_list_started_after_write_clears_it(self):
+        list_fn = MagicMock(return_value={"metadata": {"resourceVersion": "42"}, "items": [_obj("foo", "1")]})
+        informer = _make_informer(list_fn=list_fn)
+        assert informer._full_resync() is True
+        informer.track_write(_obj("foo", "2"))
+        informer.track_delete("gone", None)
+        list_fn.return_value = {
+            "metadata": {"resourceVersion": "50"},
+            "items": [_obj("foo", "3")],
+        }
+
+        assert informer._full_resync() is True
+
+        assert informer._pending_writes == {}
+        assert informer.get_if_synced("foo") == _obj("foo", "3")
+
+    def test_write_returning_during_list_stays_pending_unless_snapshot_shows_it(self):
+        list_started = threading.Event()
+        release_list = threading.Event()
+        snapshot = {
+            "metadata": {"resourceVersion": "50"},
+            "items": [_obj("foo", "2"), _obj("bar", "1")],
+        }
+
+        def list_fn():
+            list_started.set()
+            assert release_list.wait(timeout=2)
+            return snapshot
+
+        informer = _make_informer(list_fn=list_fn)
+        result = []
+        thread = threading.Thread(target=lambda: result.append(informer._full_resync()))
+
+        thread.start()
+        assert list_started.wait(timeout=2)
+        informer.track_write(_obj("foo", "2"))
+        informer.track_write(_obj("bar", "2"))
+        release_list.set()
+        thread.join(timeout=2)
+
+        assert result == [True]
+        assert informer.get_if_synced("foo") == _obj("foo", "2")
+        assert informer.get_if_synced("bar") is None
+        assert informer.list_if_synced() is None
+
+        informer._handle_event({"type": "MODIFIED", "object": _obj("bar", "2")})
+        assert informer.get_if_synced("bar") == _obj("bar", "2")
+        assert informer.list_if_synced() is not None
+
+    def test_steady_confirmed_writes_do_not_trigger_relist(self):
+        """Writes confirmed by WATCH keep the cache published without a LIST."""
+        list_fn = MagicMock(return_value=_list_response("foo", "other"))
+        informer = WorkloadInformer(
+            list_fn=list_fn,
+            enable_watch=True,
+            resync_period_seconds=300,
+            watch_timeout_seconds=1,
+        )
+        streams = []
+        published = []
+        fake_watch = MagicMock()
+
+        def stream(*args, **kwargs):
+            streams.append(kwargs["resource_version"])
+            resource_version = f"w{len(streams)}"
+            try:
+                informer.track_write(_obj("foo", resource_version))
+                published.append(informer.get_if_synced("other") is not None)
+                yield {"type": "MODIFIED", "object": _obj("foo", resource_version)}
+                published.append(informer.list_if_synced() is not None)
+            except Exception:
+                informer.stop()
+                raise
+            if len(streams) == 5:
+                informer.stop()
+
+        fake_watch.stream.side_effect = stream
+
+        with patch(
+            "opensandbox_server.services.k8s.informer.watch.Watch",
+            return_value=fake_watch,
+        ):
+            informer._run()
+
+        assert list_fn.call_count == 1
+        assert streams == ["42", "w1", "w2", "w3", "w4"]
+        assert all(published)
+
 
 class TestWorkloadInformerHandleEvent:
     """_handle_event applies watch events to the cache."""
@@ -596,3 +798,76 @@ class TestWorkloadInformerEventHandlers:
         informer._dispatch_event("ADDED", {"metadata": {"name": "snap-1"}})
 
         assert seen == ["ADDED"]
+
+
+@pytest.mark.parametrize("event_type", ["ADDED", "MODIFIED", "DELETED", "SYNC"])
+def test_named_subscriptions_are_isolated_and_removable(event_type):
+    informer = _make_informer(list_fn=MagicMock(return_value=_list_response("alpha")))
+    alpha, beta, second_alpha = MagicMock(), MagicMock(), MagicMock()
+    unsubscribe = informer.subscribe(["alpha", "alpha"], alpha)
+    remove_second = informer.subscribe(["alpha"], second_alpha)
+    remove_beta = informer.subscribe(["beta"], beta)
+
+    def dispatch():
+        if event_type == "SYNC":
+            informer._full_resync()
+        else:
+            informer._handle_event({
+                "type": event_type,
+                "object": {"metadata": {"name": "alpha", "resourceVersion": "2"}},
+            })
+
+    dispatch()
+    assert alpha.call_count == 1
+    assert second_alpha.call_count == 1
+    assert alpha.call_args.args[0] == event_type
+    assert alpha.call_args.args[1]["metadata"]["name"] == "alpha"
+    beta.assert_not_called()
+    unsubscribe()
+    unsubscribe()
+    dispatch()
+    assert alpha.call_count == 1
+    assert second_alpha.call_count == 2
+    remove_second()
+    remove_beta()
+    assert informer._subscribers == {}
+
+
+def test_subscriber_can_read_updated_cache_and_unregister():
+    informer = _make_informer(list_fn=MagicMock(return_value=_list_response("alpha")))
+    informer._full_resync()
+    observed = []
+
+    def callback(event_type, obj):
+        observed.append(informer.get_if_synced("alpha"))
+        unsubscribe()
+
+    unsubscribe = informer.subscribe(["alpha"], callback)
+    obj = {"metadata": {"name": "alpha", "resourceVersion": "2"}}
+    informer._handle_event({"type": "MODIFIED", "object": obj})
+    assert observed == [obj]
+    assert informer._subscribers == {}
+
+
+def test_subscriber_failure_does_not_block_other_waiters():
+    informer = _make_informer()
+    informer.subscribe(["alpha"], MagicMock(side_effect=RuntimeError("closed loop")))
+    callback = MagicMock()
+    informer.subscribe(["alpha"], callback)
+    informer._handle_event({
+        "type": "MODIFIED",
+        "object": {"metadata": {"name": "alpha", "resourceVersion": "2"}},
+    })
+    callback.assert_called_once_with("MODIFIED", {"metadata": {"name": "alpha", "resourceVersion": "2"}})
+
+
+def test_subscriber_receives_object_while_cache_is_invalid():
+    informer = _make_informer(list_fn=MagicMock(return_value=_list_response("alpha")))
+    informer._full_resync()
+    informer.invalidate()
+    callback = MagicMock()
+    informer.subscribe(["alpha"], callback)
+    obj = {"metadata": {"name": "alpha", "uid": "uid-1", "resourceVersion": "2"}}
+    informer._handle_event({"type": "MODIFIED", "object": obj})
+    callback.assert_called_once_with("MODIFIED", obj)
+    assert informer.get_if_synced("alpha") is None

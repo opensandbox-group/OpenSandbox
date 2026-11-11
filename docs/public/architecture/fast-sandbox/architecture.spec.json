@@ -1,0 +1,482 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "OpenSandbox × fast-sandbox Integration Architecture",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1360,
+      460
+    ],
+    "output": "opensandbox-fast-sandbox-architecture.html",
+    "views": [
+      {
+        "id": "template-flow",
+        "label": "Template artifact flow",
+        "focus": [
+          "server_db",
+          "server",
+          "fastpath",
+          "builder",
+          "s3_store"
+        ],
+        "note": "FastPath reconciles SandboxTemplate CRs into privileged builder Pods; golden images land in S3"
+      },
+      {
+        "id": "sandbox-create",
+        "label": "Sandbox creation",
+        "focus": [
+          "clients",
+          "server",
+          "fastpath",
+          "fastlet",
+          "state_root"
+        ],
+        "note": "Hot: reflink clone from node cache; cold: agent pull via DART, then boot"
+      },
+      {
+        "id": "access-path",
+        "label": "Traffic access",
+        "focus": [
+          "clients",
+          "ingress",
+          "fastpath",
+          "fastlet"
+        ],
+        "note": "ResolveEndpoint signs Ed25519 credentials; traffic hits fastlet-proxy :5780"
+      },
+      {
+        "id": "artifacts",
+        "label": "Artifacts & storage acceleration",
+        "focus": [
+          "s3_store",
+          "dart",
+          "state_root",
+          "node_rt",
+          "builder"
+        ],
+        "note": "Digest-first publish; DART block cache + P2P; XFS reflink restore"
+      },
+      {
+        "id": "pause-resume",
+        "label": "Pause / resume lifecycle",
+        "focus": [
+          "server",
+          "fastpath",
+          "fastlet",
+          "node_rt",
+          "state_root",
+          "dart",
+          "s3_store"
+        ],
+        "note": "Pause: reflink before pause, dump vmstate/memory, digest-first publish to S3. Resume: pull by digest via P2P or S3, restore anywhere"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "SDK · CLI · MCP",
+      "sublabel": "Python·TS·Go·Java·C#·osb",
+      "tag": "Client-side",
+      "pos": [
+        20,
+        150
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "server_db",
+      "type": "database",
+      "label": "Server DB",
+      "sublabel": "Template · snapshot metadata",
+      "tag": "SQLite/PG",
+      "pos": [
+        20,
+        312
+      ],
+      "size": [
+        170,
+        72
+      ]
+    },
+    {
+      "id": "ingress",
+      "type": "backend",
+      "label": "ingress-gateway",
+      "sublabel": "Traffic :28888 · Ed25519 routes",
+      "tag": "Deployment ×2",
+      "pos": [
+        280,
+        32
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "opensandbox-server",
+      "sublabel": "FastAPI /v1 · runtime routing",
+      "tag": "Deployment",
+      "pos": [
+        280,
+        150
+      ],
+      "size": [
+        175,
+        80
+      ]
+    },
+    {
+      "id": "fastpath",
+      "type": "backend",
+      "label": "fsb-controller · FastPath",
+      "sublabel": "gRPC :9090 · admit/pause/resume",
+      "tag": "Deployment ×1",
+      "pos": [
+        565,
+        150
+      ],
+      "size": [
+        180,
+        80
+      ]
+    },
+    {
+      "id": "fastlet",
+      "type": "cloud",
+      "label": "Fastlet Pod",
+      "sublabel": "HTTP :5758 · netns slots",
+      "tag": "Pod · pre-warmed",
+      "pos": [
+        855,
+        150
+      ],
+      "size": [
+        190,
+        100
+      ]
+    },
+    {
+      "id": "node_rt",
+      "type": "cloud",
+      "label": "firecracker-runtime",
+      "sublabel": "agent · SigV4 S3 · FC api.sock",
+      "tag": "DaemonSet",
+      "pos": [
+        855,
+        312
+      ],
+      "size": [
+        190,
+        76
+      ]
+    },
+    {
+      "id": "builder",
+      "type": "backend",
+      "label": "Template Builder",
+      "sublabel": "KVM Pod · FastPath-built",
+      "tag": "Pod · on demand",
+      "pos": [
+        855,
+        32
+      ],
+      "size": [
+        190,
+        80
+      ]
+    },
+    {
+      "id": "state_root",
+      "type": "database",
+      "label": "XFS StateRoot",
+      "sublabel": "reflink CoW · digest cache",
+      "tag": "hostPath · shared",
+      "pos": [
+        1155,
+        312
+      ],
+      "size": [
+        180,
+        76
+      ]
+    },
+    {
+      "id": "dart",
+      "type": "messagebus",
+      "label": "P2P block cache",
+      "sublabel": "peer :9000 · miss→S3",
+      "tag": "node daemon",
+      "pos": [
+        1155,
+        150
+      ],
+      "size": [
+        180,
+        76
+      ]
+    },
+    {
+      "id": "s3_store",
+      "type": "database",
+      "label": "S3 Artifact Store",
+      "sublabel": "s3://sandbox-images/publish",
+      "tag": "MinIO/S3",
+      "pos": [
+        1160,
+        32
+      ],
+      "size": [
+        170,
+        80
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "opensandbox-system · Control Plane",
+      "wraps": [
+        "ingress",
+        "server",
+        "fastpath"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "Nodes · Data Plane (fsb CRs: opensandbox-dataplane)",
+      "wraps": [
+        "fastlet",
+        "node_rt",
+        "state_root",
+        "dart"
+      ],
+      "pad": 20
+    },
+    {
+      "kind": "region",
+      "label": "Template Pipeline & Artifact Storage",
+      "wraps": [
+        "builder",
+        "s3_store"
+      ],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "from": "clients",
+      "to": "server",
+      "label": "HTTP /v1 · API Key",
+      "variant": "emphasis",
+      "labelAt": [
+        235,
+        240
+      ]
+    },
+    {
+      "from": "server",
+      "to": "server_db",
+      "label": "Templates · snapshot metadata",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "right",
+      "via": [
+        [
+          367.5,
+          269
+        ],
+        [
+          250,
+          269
+        ],
+        [
+          250,
+          348
+        ]
+      ],
+      "labelAt": [
+        300,
+        269
+      ]
+    },
+    {
+      "from": "ingress",
+      "to": "fastpath",
+      "label": "ResolveEndpoint",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          370,
+          131
+        ],
+        [
+          655,
+          131
+        ]
+      ],
+      "labelAt": [
+        511,
+        131
+      ]
+    },
+    {
+      "from": "server",
+      "to": "fastpath",
+      "label": "gRPC :9090",
+      "variant": "emphasis"
+    },
+    {
+      "from": "ingress",
+      "to": "fastlet",
+      "label": "Signed :5780 routes",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          370,
+          16
+        ],
+        [
+          800,
+          16
+        ],
+        [
+          800,
+          131
+        ],
+        [
+          950,
+          131
+        ]
+      ],
+      "labelAt": [
+        560,
+        16
+      ]
+    },
+    {
+      "from": "fastpath",
+      "to": "fastlet",
+      "label": "HTTP :5758 · admit/snapshot",
+      "variant": "emphasis",
+      "labelAt": [
+        750,
+        244
+      ]
+    },
+    {
+      "from": "fastlet",
+      "to": "node_rt",
+      "label": "UDS · checkpoint publish/pull",
+      "labelAt": [
+        920,
+        289
+      ]
+    },
+    {
+      "from": "node_rt",
+      "to": "dart",
+      "label": ":8145 GET /dart/",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          1090,
+          350
+        ],
+        [
+          1090,
+          188
+        ]
+      ],
+      "labelAt": [
+        1090,
+        269
+      ]
+    },
+    {
+      "from": "builder",
+      "to": "s3_store",
+      "label": "Golden images"
+    },
+    {
+      "from": "node_rt",
+      "to": "state_root",
+      "label": "commit cache",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          950,
+          430
+        ],
+        [
+          1245,
+          430
+        ]
+      ],
+      "labelAt": [
+        1100,
+        405
+      ]
+    },
+    {
+      "from": "dart",
+      "to": "s3_store",
+      "label": "Origin GET on miss",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        1245,
+        131
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Control plane & access",
+      "items": [
+        "Control plane: Helm Deployments; FastPath co-hosts Reconciler + gRPC :9090",
+        "Create persists a Sandbox CRD intent, then Top-K selects a Fastlet",
+        "ResolveEndpoint signs Ed25519 route credentials for ingress",
+        "Server DB: template catalog + snapshot metadata"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Template artifact flow",
+      "items": [
+        "FastPath reconciles SandboxTemplate CR → privileged builder Pod (KVM)",
+        "Golden set: rootfs.ext4 + vmstate + memory + manifest + SHA256SUMS",
+        "S3 digest16(manifest) namespace; index (template ID) written last"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Storage acceleration & checkpoints",
+      "items": [
+        "Hot path: XFS reflink clone from node cache; LoadSnapshot restore only",
+        "Cold path: agent pulls whole files via P2P cache or direct S3; sha256 + atomic commit",
+        "P2P cache-miss → origin S3 (presigned GET); block transfer on :9000 (DNS dart:9000)",
+        "Agent fallback: direct SigV4 S3 pull/publish when P2P cache is down",
+        "Resume: placement prefers same Fastlet; cross-node pulls checkpoint by digest",
+        "Pause: reflink before pause; digest-first ManifestRef+Digest; then release"
+      ]
+    }
+  ]
+}

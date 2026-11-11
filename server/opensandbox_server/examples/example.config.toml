@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -64,12 +64,21 @@ path = "~/.opensandbox/opensandbox.db"
 # Use only one active server process per PostgreSQL database.
 
 [docker]
+# Network attachment for sandbox containers: "host", "bridge", "none", "pasta",
+# "slirp4netns", or the name of a user-defined Docker network that already exists.
+# "pasta" / "slirp4netns" are passed through to runtimes that support them (podman) and are
+# the fallback where bridge networking is unavailable, e.g. rootless podman inside WSL2.
+# Egress sidecar + networkPolicy require "bridge".
 network_mode = "bridge"
 # Host port range for bridge-mode sandbox port allocation.
 # Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar).
 # Narrow the range to match your firewall policy — e.g., 100 concurrent sandboxes ≈ 300 ports.
 port_range_min = 40000
 port_range_max = 60000
+# The host address sandbox ports are published on (0.0.0.0 = every interface). Set an IP to keep
+# execd and the sandbox ports off public interfaces: 127.0.0.1 when the server runs on the host,
+# or the Docker bridge gateway (e.g. 172.17.0.1) when the server runs in a container.
+# publish_host = "127.0.0.1"
 # Drop dangerous capabilities and block privilege escalation
 drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
 no_new_privileges = true
@@ -95,6 +104,14 @@ mode = "dns"
 readiness_timeout_seconds = 30.0
 # Optional: export the egress sidecar's OpenTelemetry metrics (OTLP/HTTP only).
 # otlp_endpoint = "http://otel-collector.observability:4318"
+# Optional: chain sidecar egress through an upstream HTTP(S) CONNECT proxy. Requires mode = "dns+nft"
+# and transparent MITM per sandbox (credentialProxy.enabled or OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true).
+# [egress.upstream_proxy]
+# url = "http://proxy.example.com:3128"
+# authorization = "Basic <base64>"
+# Optional: absolute path on the Docker daemon host to a PEM CA bundle trusted in
+# addition to the system roots; mounted read-only into the egress sidecar only.
+# ca_cert_path = "/etc/ssl/private-ca/upstream-proxy-ca.pem"
 
 # Renew-on-access. Off by default — see server/README.md.
 [renew_intent]

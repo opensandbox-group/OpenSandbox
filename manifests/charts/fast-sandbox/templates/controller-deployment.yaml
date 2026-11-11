@@ -1,4 +1,5 @@
 {{- if .Values.controller.enabled }}
+{{- $builderImage := .Values.controller.sandboxtemplateBuilderImage | default (printf "opensandbox/fsb-sandboxtemplate-builder:release-%s" .Chart.AppVersion) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -19,6 +20,13 @@ spec:
     metadata:
       labels:
         {{- include "fast-sandbox.controllerSelectorLabels" . | nindent 8 }}
+        {{- with .Values.controller.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.controller.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -32,7 +40,8 @@ spec:
         - --metrics-bind-address=:9091
         - --health-probe-bind-address=:5758
         - --fastpath-bind-address=:9090
-        - --sandboxtemplate-builder-image={{ .Values.controller.sandboxtemplateBuilderImage }}
+        - --sandboxtemplate-builder-image={{ $builderImage }}
+        - --fastlet-proxy-image={{ .Values.controller.fastletProxyImage }}
         # The controller's default namespace for the platform
         # runtime-environment ConfigMap is the upstream-hardcoded
         # fast-sandbox-system; pin it to this chart's system namespace so
@@ -40,6 +49,21 @@ spec:
         # (falling back to the built-in catalog would inject /usr/local/bin
         # asset paths the node readiness loop never installs).
         - --runtime-environment-namespace={{ include "fast-sandbox.namespace" . }}
+        # Informer-cache scoping and API-client tuning (opt-in; empty/0 keeps
+        # cluster-wide watching and the client-go defaults). Upstream requires
+        # kubeClientQPS and kubeClientBurst as a pair and a namespaces set
+        # that covers every namespace holding SandboxPool/Sandbox objects
+        # plus the runtime environment namespace; the controller refuses to
+        # start when either is violated.
+        {{- with .Values.controller.namespaces }}
+        - --namespaces={{ join "," . }}
+        {{- end }}
+        {{- if gt (.Values.controller.kubeClientQPS | float64) 0.0 }}
+        - --kube-client-qps={{ .Values.controller.kubeClientQPS }}
+        {{- end }}
+        {{- if gt (.Values.controller.kubeClientBurst | int) 0 }}
+        - --kube-client-burst={{ .Values.controller.kubeClientBurst }}
+        {{- end }}
         env:
         - name: FAST_SANDBOX_ROUTE_SIGNING_PRIVATE_KEY
           valueFrom:
@@ -51,7 +75,8 @@ spec:
             secretKeyRef:
               name: {{ .Values.routeKeys.existingSecret | default "fast-sandbox-route-keys" }}
               key: public-key
-        image: {{ include "fast-sandbox.image" .Values.controller.image }}
+        {{- $appVersion := .Chart.AppVersion }}
+        image: {{ include "fast-sandbox.image" (dict "repository" .Values.controller.image.repository "tag" .Values.controller.image.tag "appVersion" $appVersion) }}
         imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
         livenessProbe:
           httpGet:
@@ -74,11 +99,30 @@ spec:
         - name: artifact-store
           mountPath: /etc/fast-sandbox/artifact-store
           readOnly: true
+        - name: builder-pod-template
+          mountPath: /etc/fast-sandbox/builder-pod-template
+          readOnly: true
       serviceAccountName: fast-sandbox-controller
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
       - name: artifact-store
         configMap:
           name: fast-sandbox-artifact-store
+          optional: true
+      - name: builder-pod-template
+        configMap:
+          name: fast-sandbox-builder-pod-template
           optional: true
 ---
 apiVersion: policy/v1

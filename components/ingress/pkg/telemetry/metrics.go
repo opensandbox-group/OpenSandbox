@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package telemetry
 import (
 	"context"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -34,6 +35,14 @@ var (
 
 	upstreamConnectCount    metric.Int64Counter
 	upstreamConnectDuration metric.Float64Histogram
+
+	wakeFlights           metric.Int64Counter
+	parkActive            metric.Int64UpDownCounter
+	parkWaitDuration      metric.Float64Histogram
+	parkShed              metric.Int64Counter
+	restoreActive         metric.Int64UpDownCounter
+	policyReads           metric.Int64Counter
+	activityWritesDropped metric.Int64Counter
 
 	connectivityProviderMu sync.RWMutex
 	connectivityProvider   func() ConnectivitySnapshot
@@ -99,6 +108,67 @@ func registerIngressMetrics() error {
 		"ingress.upstream.connect.duration",
 		metric.WithDescription("Ingress upstream TCP connection duration"),
 		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		return err
+	}
+
+	wakeFlights, err = meter.Int64Counter(
+		"ingress.wake.flights",
+		metric.WithDescription("Wake flight count by outcome (triggered, joined, none)"),
+	)
+	if err != nil {
+		return err
+	}
+
+	parkActive, err = meter.Int64UpDownCounter(
+		"ingress.park.active",
+		metric.WithDescription("Currently parked requests"),
+	)
+	if err != nil {
+		return err
+	}
+
+	parkWaitDuration, err = meter.Float64Histogram(
+		"ingress.park.wait.duration",
+		metric.WithDescription("Per-parked-request wait duration by outcome (served, budget_exhausted, canceled, error)"),
+		metric.WithUnit("s"),
+		// Sized around the default 5s park budget: the interesting signal is
+		// a ~200ms same-node resume versus a near-exhaustion wait, which the
+		// SDK default second-scale buckets would collapse into one bucket.
+		metric.WithExplicitBucketBoundaries(0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 7.5, 10),
+	)
+	if err != nil {
+		return err
+	}
+
+	parkShed, err = meter.Int64Counter(
+		"ingress.park.shed",
+		metric.WithDescription("Requests shed because the parking lot was full"),
+	)
+	if err != nil {
+		return err
+	}
+
+	restoreActive, err = meter.Int64UpDownCounter(
+		"ingress.wake.restore.active",
+		metric.WithDescription("Wake flights currently holding a restore permit (the concurrent-restore gauge)"),
+	)
+	if err != nil {
+		return err
+	}
+
+	policyReads, err = meter.Int64Counter(
+		"ingress.idlep.policy.reads",
+		metric.WithDescription("Idle-policy gate outcomes (allowed, denied, error); sustained error means an RBAC or apiserver problem"),
+	)
+	if err != nil {
+		return err
+	}
+
+	activityWritesDropped, err = meter.Int64Counter(
+		"ingress.activity.writes_dropped",
+		metric.WithDescription("Activity observations dropped before reaching Redis"),
 	)
 	if err != nil {
 		return err
@@ -272,4 +342,69 @@ func RecordUpstreamConnect(result, proxyType string, durationMs float64) {
 	)
 	upstreamConnectCount.Add(context.Background(), 1, attrs)
 	upstreamConnectDuration.Record(context.Background(), durationMs, attrs)
+}
+
+// RecordWakeFlight counts wake flights by outcome: "triggered" (this request
+// started the flight), "joined" (an existing flight absorbed it), or "none"
+// (the sandbox was already running on first check).
+func RecordWakeFlight(outcome string) {
+	if wakeFlights == nil {
+		return
+	}
+	wakeFlights.Add(context.Background(), 1, metric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// RecordParkDelta adjusts the count of currently parked requests.
+func RecordParkDelta(delta int64) {
+	if parkActive == nil {
+		return
+	}
+	parkActive.Add(context.Background(), delta)
+}
+
+// RecordParkWait records one parked request's wait duration by outcome.
+func RecordParkWait(outcome string, duration time.Duration) {
+	if parkWaitDuration == nil {
+		return
+	}
+	parkWaitDuration.Record(
+		context.Background(),
+		duration.Seconds(),
+		metric.WithAttributes(attribute.String("outcome", outcome)),
+	)
+}
+
+// RecordRestoreDelta adjusts the count of flights currently holding a
+// restore permit — the concurrent-restore gauge.
+func RecordRestoreDelta(delta int64) {
+	if restoreActive == nil {
+		return
+	}
+	restoreActive.Add(context.Background(), delta)
+}
+
+// RecordPolicyRead counts one idle-policy gate decision by outcome.
+func RecordPolicyRead(outcome string) {
+	if policyReads == nil {
+		return
+	}
+	policyReads.Add(context.Background(), 1, metric.WithAttributes(attribute.String("outcome", outcome)))
+}
+
+// RecordParkShed counts requests shed by parking-lot admission control.
+func RecordParkShed() {
+	if parkShed == nil {
+		return
+	}
+	parkShed.Add(context.Background(), 1)
+}
+
+// RecordActivityWriteDropped counts activity observations that never reached
+// Redis (buffer full, Redis error, or shutdown). Dropped writes can only
+// delay a pause, never accelerate one.
+func RecordActivityWriteDropped(count int64) {
+	if activityWritesDropped == nil {
+		return
+	}
+	activityWritesDropped.Add(context.Background(), count)
 }

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -101,6 +101,15 @@ func (s *Sandbox) DownloadFile(ctx context.Context, remotePath, rangeHeader stri
 		return nil, fmt.Errorf("opensandbox: execd client not initialized")
 	}
 	return s.execd.DownloadFile(ctx, remotePath, rangeHeader, opts...)
+}
+
+// DownloadFileResponse downloads a file and returns its body and response
+// metadata. The caller must close the response body.
+func (s *Sandbox) DownloadFileResponse(ctx context.Context, remotePath, rangeHeader string, opts ...DownloadFileOptions) (*DownloadFileResponse, error) {
+	if s.execd == nil {
+		return nil, fmt.Errorf("opensandbox: execd client not initialized")
+	}
+	return s.execd.DownloadFileResponse(ctx, remotePath, rangeHeader, opts...)
 }
 
 // CreateDirectory creates a directory in the sandbox.

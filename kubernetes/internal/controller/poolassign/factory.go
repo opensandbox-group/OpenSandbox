@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ type weightedScorer struct {
 	weight int64
 }
 
-type predicateCreator func(args map[string]interface{}) (predicate, error)
+type predicateCreator func(args map[string]interface{}) (Predicate, error)
 type scorerCreator func(args map[string]interface{}) (scorer, error)
 
 var (
@@ -37,8 +37,8 @@ func registerScorer(name string, creator scorerCreator) {
 	scorerRegistry[name] = creator
 }
 
-func newPredicates(profile *Profile) ([]predicate, error) {
-	var predicates []predicate
+func newPredicates(profile *Profile) ([]Predicate, error) {
+	var predicates []Predicate
 	for _, name := range profile.Plugins.Predicate {
 		creator, ok := predicateRegistry[name]
 		if !ok {

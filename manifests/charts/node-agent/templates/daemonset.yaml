@@ -3,6 +3,7 @@
 {{- $sources := .Values.config.sources }}
 {{- $containerLogsEnabled := has "container-logs" $sources }}
 {{- $syscallsEnabled := has "syscalls" $sources }}
+{{- $vmConsoleEnabled := has "vm-console" $sources }}
 {{- $containerSecurityContext := deepCopy (default dict .Values.containerSecurityContext) }}
 {{- if $syscallsEnabled }}
 {{- $capabilities := deepCopy (default dict $containerSecurityContext.capabilities) }}
@@ -59,6 +60,10 @@ spec:
               value: {{ join "," $sources | quote }}
             - name: NODEAGENT_SINKS
               value: {{ .Values.sink.type | quote }}
+            {{- if $vmConsoleEnabled }}
+            - name: NODEAGENT_VM_CONSOLE_ROOT
+              value: {{ required "hostPaths.vmConsole is required when vm-console is enabled" .Values.hostPaths.vmConsole | quote }}
+            {{- end }}
             - name: NODEAGENT_STATE_DIR
               value: {{ .Values.config.stateDir | quote }}
             - name: NODEAGENT_STATE_MAX_BYTES
@@ -147,6 +152,11 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            {{- if $vmConsoleEnabled }}
+            - name: vm-console
+              mountPath: {{ .Values.hostPaths.vmConsole | quote }}
+              readOnly: true
+            {{- end }}
             {{- if $containerLogsEnabled }}
             - name: pod-logs
               mountPath: {{ required "hostPaths.logs is required when the container-logs Source is enabled" .Values.hostPaths.logs | quote }}
@@ -167,6 +177,12 @@ spec:
               mountPath: {{ .Values.sink.file.path | quote }}
             {{- end }}
       volumes:
+        {{- if $vmConsoleEnabled }}
+        - name: vm-console
+          hostPath:
+            path: {{ .Values.hostPaths.vmConsole | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
         {{- if $containerLogsEnabled }}
         - name: pod-logs
           hostPath:

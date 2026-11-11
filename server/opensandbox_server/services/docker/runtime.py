@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -46,7 +46,6 @@ SESSION_GATE_SOURCE_PATH = "/usr/local/libexec/opensandbox-session-gate"
 SESSION_GATE_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-session-gate")
 LAUNCHER_SOURCE_PATH = "/usr/local/libexec/opensandbox-launcher"
 LAUNCHER_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-launcher")
-DEFAULT_EXECD_ENVS_PATH = posixpath.join(OPENSANDBOX_DIR, ".env")
 
 
 class DockerRuntimeMixin:
@@ -82,7 +81,22 @@ class DockerRuntimeMixin:
                         "name": f"sandbox-execd-{uuid4()}",
                         "detach": True,
                         "auto_remove": False,
+                        # Pass the configured network mode explicitly. Without it the Docker
+                        # API falls back to `bridge`, which fails on hosts where netavark
+                        # cannot apply its ruleset (e.g. rootless podman in WSL2) even when
+                        # the sandbox itself is configured for a working mode like `pasta`.
+                        "network_mode": self.network_mode,
                     }
+                    # Honor the same [docker] security profiles and [secure_runtime] OCI
+                    # runtime as sandbox containers. Without this, a host whose default
+                    # seccomp/AppArmor profile blocks the execd image can not be fixed
+                    # through configuration: this container is created first, fails to
+                    # start, and no sandbox can ever be created.
+                    security_opt = self._profile_security_opts()
+                    if security_opt:
+                        create_kwargs["security_opt"] = security_opt
+                    if self.docker_runtime:
+                        create_kwargs["runtime"] = self.docker_runtime
                     if docker_platform is not None:
                         create_kwargs["platform"] = docker_platform
                     container = self.docker_client.containers.create(**create_kwargs)

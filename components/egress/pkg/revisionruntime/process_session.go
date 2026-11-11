@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 )
@@ -48,27 +49,36 @@ type ProcessSessionConfig struct {
 	GID               int
 	SubjectGeneration string
 	MaxSnapshotBytes  int
+	// LiveAdmission and its budgets are copied into the child handoff; the
+	// Python addon selects its live receiver only when they are present.
+	StaticPassthrough   mitmpassthrough.Config
+	LiveAdmission       bool
+	TLSCapacity         int
+	RequestCapacity     int
+	DrainTimeoutSeconds int
 }
 
 // ProcessSession owns the local resources that bind one mitmdump process to
 // one transport and coordinator. It is not connected to a running egress
 // profile; the future launcher owner must stop the child before Close.
 type ProcessSession struct {
-	mu            sync.Mutex
-	bootstrapMu   sync.Mutex
-	bootstrap     bootstrapState
-	parentPath    string
-	parentRoot    *os.Root
-	parentInfo    os.FileInfo
-	targetUID     int
-	targetGID     int
-	directoryName string
-	directoryInfo os.FileInfo
-	launch        mitmproxy.RevisionIPCConfig
-	transport     *revision.UnixTransport
-	coordinator   *revision.Coordinator
-	closed        bool
-	cleaned       bool
+	mu             sync.Mutex
+	bootstrapMu    sync.Mutex
+	bootstrap      bootstrapState
+	pendingUpdate  *revision.Identity // guarded by bootstrapMu
+	previousUpdate *revision.Identity // guarded by bootstrapMu
+	parentPath     string
+	parentRoot     *os.Root
+	parentInfo     os.FileInfo
+	targetUID      int
+	targetGID      int
+	directoryName  string
+	directoryInfo  os.FileInfo
+	launch         mitmproxy.RevisionIPCConfig
+	transport      *revision.UnixTransport
+	coordinator    *revision.Coordinator
+	closed         bool
+	cleaned        bool
 }
 
 func (*ProcessSession) String() string { return "revisionruntime.ProcessSession" }
@@ -164,6 +174,13 @@ func NewProcessSession(cfg ProcessSessionConfig) (*ProcessSession, error) {
 		ControlGeneration: control,
 		SubjectGeneration: cfg.SubjectGeneration,
 		MaxSnapshotBytes:  cfg.MaxSnapshotBytes,
+	}
+	if cfg.LiveAdmission {
+		launch.LiveAdmission = true
+		launch.StaticPassthrough = cfg.StaticPassthrough
+		launch.TLSCapacity = cfg.TLSCapacity
+		launch.RequestCapacity = cfg.RequestCapacity
+		launch.DrainTimeoutSeconds = cfg.DrainTimeoutSeconds
 	}
 	transport, err := revision.NewUnixTransport(launch.SocketPath, launch.SessionToken, launch.MaxSnapshotBytes)
 	if err != nil {

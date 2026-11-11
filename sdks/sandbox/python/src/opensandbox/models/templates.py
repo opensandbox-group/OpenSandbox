@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -83,7 +83,7 @@ class TemplateStatus(BaseModel):
         default=None,
         alias="manifestRef",
         description=(
-            "S3 manifest reference of the published artifacts; "
+            "Published S3 manifest reference or immutable OCI reference; "
             "present when the phase is Succeeded."
         ),
     )
@@ -110,8 +110,8 @@ class CreateTemplateRequest(BaseModel):
     )
     publish: str = Field(
         description=(
-            "S3-compatible publish target for the built artifacts, "
-            "e.g. 's3://bucket/publish'."
+            "Publish destination: s3://bucket/publish (native) or "
+            "oci://registry/repository (overlaybd, no tag or digest)."
         )
     )
     resource_limits: dict[str, str] | None = Field(
@@ -128,6 +128,16 @@ class CreateTemplateRequest(BaseModel):
         description=(
             "Guest business command (argv); empty defaults to "
             "['tail', '-f', '/dev/null']."
+        ),
+    )
+    env: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Environment variables baked into the golden image (injected as "
+            "'/etc/sandbox-init.env' in the guest; literal values only). The "
+            "source image's own OCI Config.Env is inherited; an env with the "
+            "same name overrides the inherited value. Names must be valid "
+            "shell variable names."
         ),
     )
     metadata: dict[str, str] | None = Field(
@@ -164,7 +174,7 @@ class TemplateInfo(BaseModel):
         alias="templateId",
     )
     image: str = Field(description="Source OCI image reference.")
-    publish: str = Field(description="S3-compatible publish target.")
+    publish: str = Field(description="S3-compatible or repository-only OCI publish target.")
     format: Literal["native", "overlaybd"] = Field(
         description="Snapshot storage encoding."
     )
@@ -179,6 +189,10 @@ class TemplateInfo(BaseModel):
     entrypoint: list[str] | None = Field(
         default=None,
         description="Guest business command (argv).",
+    )
+    env: dict[str, str] | None = Field(
+        default=None,
+        description="Environment variables baked into the golden image.",
     )
     metadata: dict[str, str] | None = Field(
         default=None,

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,16 +33,6 @@ const (
 	waitCACert     = 20 * time.Second
 )
 
-// FastSandboxCAExportDir is the dedicated subdir (under constants.OpenSandboxRootDir)
-// where the fast-sandbox profile exports the mitm CA. The fastlet bind-mounts this
-// directory read-only into every sandbox at creation, so sandbox bootstrap can
-// seed the trust store with the CA (OSEP-0022 A1; see fast-sandbox issue #19).
-// The directory-level mount (not file-level) keeps the export visible across
-// egress's atomic rename-based CA rotation. Deliberately NOT the whole
-// OpenSandboxRootDir: a read-only mount of the parent would shadow the
-// fastlet-placed execd binary and is shared-writable across sandboxes.
-const FastSandboxCAExportDir = "mitm-ca"
-
 // candidateCACertPaths: mitm may place mitmproxy-ca-cert.pem in confdir, .mitmproxy under confdir, or home.
 func candidateCACertPaths(confDirEnv, home string) []string {
 	confDirEnv = strings.TrimSpace(confDirEnv)
@@ -76,15 +66,14 @@ func waitMitmCACertPath(confDirEnv, home string) (string, error) {
 // volume by a previous egress generation: a restart rotates the CA in the
 // ephemeral confdir, and the stale cert would let an agent pass its bootstrap
 // readiness check and install a CA mitmproxy no longer signs with (issue #1370).
-// The fast-sandbox export subdir is purged the same way, so a sandbox holding the
-// mount never reads a stale generation's CA (fast-sandbox issue #19).
-// Must be called as early as possible in main().
+// Sidecar-only: the fast-sandbox profile pins its CA from a seed mount
+// (cacert_seed.go) and exports nothing. Must be called as early as possible
+// in main().
 func PurgeStaleExportedCA() {
 	if !constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		return
 	}
 	purgeStaleExportedCAFrom(constants.OpenSandboxRootDir)
-	purgeStaleExportedCAFrom(filepath.Join(constants.OpenSandboxRootDir, FastSandboxCAExportDir))
 }
 
 // purgeStaleExportedCAFrom is the testable core of PurgeStaleExportedCA.
@@ -107,18 +96,16 @@ func purgeStaleExportedCAFrom(rootDir string) {
 }
 
 func SyncRootCA(confDirEnv, home string) error {
-	return exportRootCA(confDirEnv, home, constants.OpenSandboxRootDir, true)
+	return exportRootCA(confDirEnv, home, constants.OpenSandboxRootDir)
 }
 
-// SyncRootCAFastSandbox exports the CA into the dedicated fast-sandbox subdir (the fastlet
-// mount point). The egress container's own system trust store is NOT touched:
-// upstream validation uses the public roots, and the CA is only meaningful to
-// the sandbox clients downstream.
-func SyncRootCAFastSandbox(confDirEnv, home string) error {
-	return exportRootCA(confDirEnv, home, filepath.Join(constants.OpenSandboxRootDir, FastSandboxCAExportDir), false)
-}
-
-func exportRootCA(confDirEnv, home, rootDir string, installSystemTrust bool) error {
+// exportRootCA is the sidecar-only export path (the fast-sandbox profile
+// seeds its pinned CA from a read-only mount instead — cacert_seed.go — and
+// exports nothing: the guest trusts the template-baked certificate, so there
+// is no per-sandbox CA delivery, trust seeding, or stale-export purge,
+// OSEP-0022). It also installs the CA into the egress container's own system
+// trust store: sidecar upstream validation uses it.
+func exportRootCA(confDirEnv, home, rootDir string) error {
 	src, err := waitMitmCACertPath(confDirEnv, home)
 	if err != nil {
 		return err
@@ -132,9 +119,6 @@ func exportRootCA(confDirEnv, home, rootDir string, installSystemTrust bool) err
 	}
 	log.Infof("[mitmproxy] copied root CA to %s", dst)
 
-	if !installSystemTrust {
-		return nil
-	}
 	if err := installMitmCAInSystemTrust(dst); err != nil {
 		return fmt.Errorf("install mitm CA into system trust store: %w", err)
 	}

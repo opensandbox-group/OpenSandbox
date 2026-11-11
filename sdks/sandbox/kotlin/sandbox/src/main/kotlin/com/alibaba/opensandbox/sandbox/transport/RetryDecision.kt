@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -162,4 +162,67 @@ internal fun parseRetryAfter(
 internal fun applyRetryAfterCap(retryAfter: Duration?): Duration? {
     if (retryAfter == null) return null
     return if (retryAfter > RETRY_AFTER_CAP) RETRY_AFTER_CAP else retryAfter
+}
+
+/**
+ * OSEP-0024 wake-timeout marker. The gateway strips this header from every
+ * upstream response, so its presence on a 503 proves gateway origin: the
+ * request was parked and never forwarded, which is what makes any-method
+ * retry safe.
+ */
+internal const val WAKE_MARKER_HEADER: String = "OpenSandbox-Wake"
+
+/** See [WAKE_MARKER_HEADER]. */
+internal const val WAKE_MARKER_VALUE: String = "expired"
+
+/**
+ * The gateway emits `Retry-After: 1` on wake-timeout responses. Used as the
+ * fallback wait when a marked response arrives without the header.
+ */
+internal val WAKE_DEFAULT_RETRY_AFTER: Duration = Duration.ofSeconds(1)
+
+/**
+ * Whether the response is the OSEP-0024 wake-timeout answer.
+ *
+ * Recognition is header-only on a 503: the gateway strips
+ * `OpenSandbox-Wake` from every upstream response, so a matching marker
+ * proves the gateway parked the request and never forwarded it. The JSON
+ * `code` in the body is documentation for humans, not a recognition
+ * signal — a forged body without the header follows the SDK's existing
+ * (bare 503) retry rules untouched.
+ */
+internal fun isWakeTimeoutResponse(
+    statusCode: Int,
+    wakeMarker: String?,
+): Boolean = statusCode == 503 && wakeMarker == WAKE_MARKER_VALUE
+
+/**
+ * Effective wake retry wait for a marked response: the parsed `Retry-After`
+ * (delta-seconds or HTTP-date) capped at the operational ceiling, or the
+ * 1-second fallback when the header is missing or unparseable.
+ */
+internal fun resolveWakeRetryAfter(headerValue: String?): Duration =
+    applyRetryAfterCap(parseRetryAfter(headerValue)) ?: WAKE_DEFAULT_RETRY_AFTER
+
+/**
+ * Decide whether to retry a gateway wake-timeout response (OSEP-0024).
+ *
+ * [wakeAttemptsUsed] counts the marked `503` responses received so far,
+ * including the current one. [elapsed] is the wall-clock time since the
+ * logical request started (waits, retries, and request time all count
+ * against [RetryPolicy.wakeOverallDeadline]); [retryAfter] is the wait the
+ * gateway asked for. A next wait that does not fit the remaining budget
+ * ends the wake retry — the in-flight server-side resume is never canceled,
+ * so a later attempt typically finds the sandbox `Running`.
+ */
+internal fun shouldRetryWake(
+    wakeAttemptsUsed: Int,
+    policy: RetryPolicy,
+    elapsed: Duration,
+    retryAfter: Duration,
+): Boolean {
+    if (wakeAttemptsUsed >= policy.wakeMaxAttempts) return false
+    val deadline = policy.wakeOverallDeadline ?: return true
+    val remaining = deadline.minus(elapsed)
+    return retryAfter <= remaining
 }

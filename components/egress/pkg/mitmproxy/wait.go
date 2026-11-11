@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
 package mitmproxy
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -22,14 +24,38 @@ import (
 
 // WaitListenPort polls until addr accepts TCP or d elapses.
 func WaitListenPort(addr string, d time.Duration) error {
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", addr, 150*time.Millisecond)
+	return WaitListenPortContext(context.Background(), addr, d)
+}
+
+// WaitListenPortContext polls until addr accepts TCP, d elapses, or ctx is
+// cancelled. Cancellation lets process supervisors fence a half-launched child
+// before shutdown returns.
+func WaitListenPortContext(ctx context.Context, addr string, d time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	for {
+		c, err := (&net.Dialer{Timeout: 150 * time.Millisecond}).DialContext(ctx, "tcp", addr)
 		if err == nil {
 			_ = c.Close()
 			return nil
 		}
-		time.Sleep(40 * time.Millisecond)
+		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for %s", addr)
+			}
+			return err
+		}
+		timer := time.NewTimer(40 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("timeout waiting for %s", addr)
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
-	return fmt.Errorf("timeout waiting for %s", addr)
 }

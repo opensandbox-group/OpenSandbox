@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,102 +23,144 @@ import (
 type alwaysRuleFileState struct {
 	path    string
 	action  string
+	load    func(path string) ([]EgressRule, error)
 	exists  bool
 	modTime time.Time
 	size    int64
 	rules   []EgressRule
 }
 
-// AlwaysRuleLoader polls the standard always-deny/allow file paths at most once per refreshInterval.
+// AlwaysRuleLoader polls the standard always-deny/allow file paths (plus the
+// reachable.ports.cap floor) at most once per refreshInterval.
 type AlwaysRuleLoader struct {
 	mu              sync.RWMutex
 	refreshInterval time.Duration
 	lastCheck       time.Time
 	denyState       alwaysRuleFileState
 	allowState      alwaysRuleFileState
+	// portsState owns the floor rules: appended to the published deny set,
+	// and stripped from SetCurrentRules input so reseeding never duplicates.
+	portsState alwaysRuleFileState
 }
 
 func NewAlwaysRuleLoader(refreshInterval time.Duration) *AlwaysRuleLoader {
-	return newAlwaysRuleLoader(refreshInterval, alwaysDenyFilePath, alwaysAllowFilePath)
+	return newAlwaysRuleLoader(refreshInterval, alwaysDenyFilePath, alwaysAllowFilePath, reachablePortsFilePath)
 }
 
-func newAlwaysRuleLoader(refreshInterval time.Duration, denyPath, allowPath string) *AlwaysRuleLoader {
+func newAlwaysRuleLoader(refreshInterval time.Duration, denyPath, allowPath, portsPath string) *AlwaysRuleLoader {
 	if refreshInterval <= 0 {
 		refreshInterval = time.Minute
 	}
 	return &AlwaysRuleLoader{
 		refreshInterval: refreshInterval,
-		denyState:       alwaysRuleFileState{path: denyPath, action: ActionDeny},
-		allowState:      alwaysRuleFileState{path: allowPath, action: ActionAllow},
+		denyState:       alwaysRuleFileState{path: denyPath, action: ActionDeny, load: loadAlwaysRuleFileWithAction(ActionDeny)},
+		allowState:      alwaysRuleFileState{path: allowPath, action: ActionAllow, load: loadAlwaysRuleFileWithAction(ActionAllow)},
+		portsState:      alwaysRuleFileState{path: portsPath, load: loadPortFloorRules},
 	}
 }
 
 // RefreshIfDue reloads from disk when the interval elapsed; changed is true only if file content actually differed.
 func (l *AlwaysRuleLoader) RefreshIfDue(now time.Time) (deny, allow []EgressRule, changed bool, err error) {
+	return l.RefreshIfDueWithApply(now, nil)
+}
+
+// RefreshIfDueWithApply stages all three files and invokes apply with an isolated candidate before publishing it.
+// Parse or apply errors leave the active rules, file metadata, and refresh deadline unchanged so the same
+// candidate can be retried immediately.
+func (l *AlwaysRuleLoader) RefreshIfDueWithApply(
+	now time.Time,
+	apply func(deny, allow []EgressRule) error,
+) (deny, allow []EgressRule, changed bool, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if !l.lastCheck.IsZero() && now.Sub(l.lastCheck) < l.refreshInterval {
-		return cloneRules(l.denyState.rules), cloneRules(l.allowState.rules), false, nil
+		deny, allow := l.publishedRules()
+		return deny, allow, false, nil
 	}
-	l.lastCheck = now
 
-	denyChanged, err := l.refreshOne(&l.denyState)
+	nextDenyState, denyChanged, err := refreshOneCandidate(l.denyState)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	allowChanged, err := l.refreshOne(&l.allowState)
+	nextAllowState, allowChanged, err := refreshOneCandidate(l.allowState)
 	if err != nil {
 		return nil, nil, false, err
 	}
-	changed = denyChanged || allowChanged
-	return cloneRules(l.denyState.rules), cloneRules(l.allowState.rules), changed, nil
+	nextPortsState, portsChanged, err := refreshOneCandidate(l.portsState)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	changed = denyChanged || allowChanged || portsChanged
+	if changed && apply != nil {
+		candidateDeny := append(cloneRules(nextDenyState.rules), cloneRules(nextPortsState.rules)...)
+		if err := apply(candidateDeny, cloneRules(nextAllowState.rules)); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	l.denyState = nextDenyState
+	l.allowState = nextAllowState
+	l.portsState = nextPortsState
+	l.lastCheck = now
+	deny, allow = l.publishedRules()
+	return deny, allow, changed, nil
+}
+
+// publishedRules is the active view: deny.always rules plus the derived port
+// floor from the ports state.
+func (l *AlwaysRuleLoader) publishedRules() (deny, allow []EgressRule) {
+	return append(cloneRules(l.denyState.rules), cloneRules(l.portsState.rules)...), cloneRules(l.allowState.rules)
 }
 
 func (l *AlwaysRuleLoader) CurrentRules() (deny, allow []EgressRule) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	return cloneRules(l.denyState.rules), cloneRules(l.allowState.rules)
+	return l.publishedRules()
 }
 
 func (l *AlwaysRuleLoader) SetCurrentRules(deny, allow []EgressRule) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.denyState.rules = cloneRules(deny)
+	// Re-seed the floor here, or a reseed racing startup would briefly
+	// publish without it.
+	l.portsState.rules = cloneRulesKeepingPortRanges(deny)
+	l.denyState.rules = cloneRulesWithoutPortRanges(deny)
 	l.allowState.rules = cloneRules(allow)
 }
 
-func (l *AlwaysRuleLoader) refreshOne(state *alwaysRuleFileState) (bool, error) {
+func refreshOneCandidate(state alwaysRuleFileState) (alwaysRuleFileState, bool, error) {
 	info, err := os.Stat(state.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if !state.exists {
-				return false, nil
+				return state, false, nil
 			}
-			state.exists = false
-			state.modTime = time.Time{}
-			state.size = 0
-			state.rules = nil
-			return true, nil
+			next := state
+			next.exists = false
+			next.modTime = time.Time{}
+			next.size = 0
+			next.rules = nil
+			return next, true, nil
 		}
-		return false, err
+		return state, false, err
 	}
 
 	if state.exists && info.ModTime().Equal(state.modTime) && info.Size() == state.size {
-		return false, nil
+		return state, false, nil
 	}
 
-	rules, err := loadAlwaysRuleFile(state.path, state.action)
+	rules, err := state.load(state.path)
 	if err != nil {
-		return false, err
+		return state, false, err
 	}
-	state.exists = true
-	state.modTime = info.ModTime()
-	state.size = info.Size()
-	state.rules = rules
-	return true, nil
+	next := state
+	next.exists = true
+	next.modTime = info.ModTime()
+	next.size = info.Size()
+	next.rules = cloneRules(rules)
+	return next, true, nil
 }
 
 func cloneRules(in []EgressRule) []EgressRule {
@@ -127,5 +169,28 @@ func cloneRules(in []EgressRule) []EgressRule {
 	}
 	out := make([]EgressRule, len(in))
 	copy(out, in)
+	return out
+}
+
+// cloneRulesWithoutPortRanges drops floor rules (owned by the ports state).
+func cloneRulesWithoutPortRanges(in []EgressRule) []EgressRule {
+	out := cloneRules(in)
+	kept := out[:0]
+	for _, r := range out {
+		if len(r.PortRanges) == 0 {
+			kept = append(kept, r)
+		}
+	}
+	return kept
+}
+
+// cloneRulesKeepingPortRanges keeps only floor rules (seeds the ports state).
+func cloneRulesKeepingPortRanges(in []EgressRule) []EgressRule {
+	var out []EgressRule
+	for _, r := range cloneRules(in) {
+		if len(r.PortRanges) > 0 {
+			out = append(out, r)
+		}
+	}
 	return out
 }

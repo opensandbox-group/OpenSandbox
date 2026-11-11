@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -48,6 +48,12 @@ def stub_workload_informer(monkeypatch):
             return None
 
         def invalidate(self):
+            return None
+
+        def track_write(self, response):
+            return None
+
+        def track_delete(self, name, response):
             return None
 
     monkeypatch.setattr(

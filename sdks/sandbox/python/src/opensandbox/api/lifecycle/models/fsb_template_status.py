@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -33,8 +33,8 @@ class FsbTemplateStatus:
 
     Attributes:
         phase (FsbTemplateStatusPhase): Build lifecycle phase.
-        manifest_ref (str | Unset): S3 manifest reference of the published artifacts; present when
-            Succeeded.
+        manifest_ref (str | Unset): Published S3 manifest reference or immutable OCI reference
+            (`oci://registry/repository@sha256:...`); present when Succeeded.
         message (str | Unset): Failure reason when phase is Failed.
     """
 

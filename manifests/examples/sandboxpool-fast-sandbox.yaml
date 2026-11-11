@@ -1,0 +1,74 @@
+# Example: a shared fast-sandbox SandboxPool (sandbox.fast.io/v1alpha2).
+#
+# A SandboxPool is the unit of capacity and policy for fastlets: it sizes the
+# warm fleet (capacity), pins the immutable runtime profile and per-sandbox
+# resource shape (runtime / sandboxResources), and constrains placement via a
+# standard pod template (fastletTemplate). All sandboxes served from the pool
+# share these settings.
+#
+# Requires the fast-sandbox chart (controller + firecracker-runtime
+# DaemonSet). Namespace must match fast-sandbox chart's `resourceNamespace`
+# (default opensandbox-dataplane, created by the base chart).
+#
+# Shape mirrors scripts/fast-sandbox-env/manifests/pool/firecracker-egress-pool.yaml
+# (the integration environment's default pool, which adds the egress sidecar
+# and its infraComponents/actionHandlers wiring).
+apiVersion: sandbox.fast.io/v1alpha2
+kind: SandboxPool
+metadata:
+  name: shared-pool
+  namespace: opensandbox-dataplane
+spec:
+  # Immutable runtime profile; must exist in the agents' runtime-environments
+  # config (the chart default ships the `firecracker` profile).
+  runtime: firecracker
+  # Resource shape of every sandbox the pool produces.
+  sandboxResources:
+    cpu: "1"
+    memory: 2Gi
+    pids: 256
+  # Warm-fleet sizing: poolMin/poolMax bound total fastlets, bufferMin/
+  # bufferMax bound the idle (pre-warmed) ones. poolMin keeps a warm floor.
+  capacity:
+    poolMin: 5
+    poolMax: 10
+    bufferMin: 0
+    bufferMax: 2
+  # Sandbox density per fastlet.
+  maxSandboxesPerPod: 4
+  # Ordinary pod template for the fastlet Pods themselves. The
+  # `fastlet` container (companion image of the fast-sandbox chart) and the
+  # node-local runtime-agent UDS socket mount are required. The readiness
+  # loop labels KVM-capable nodes with fast-sandbox.io/firecracker-node=true.
+  fastletTemplate:
+    spec:
+      containers:
+      - name: fastlet
+        image: opensandbox/fsb-fastlet:release-1.1.1-rc.1
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
+          value: /run/fast-sandbox/firecracker/runtime.sock
+        volumeMounts:
+        - name: agent-socket
+          mountPath: /run/fast-sandbox/firecracker
+      volumes:
+      - name: agent-socket
+        hostPath:
+          path: /run/fast-sandbox/firecracker
+          type: DirectoryOrCreate
+      nodeSelector:
+        fast-sandbox.io/firecracker-node: "true"
+      # Spread fastlets one per node so warm capacity survives a node loss
+      # and artifact pulls exercise the DART peer on the other node.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app: sandbox-fastlet
+              topologyKey: kubernetes.io/hostname
+  # Artifacts to pre-pull and pin in the image cache (optional).
+  warmImages: []

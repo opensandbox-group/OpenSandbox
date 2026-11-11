@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"strings"
@@ -24,17 +26,22 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
 // createNftManager is non-nil only when mode includes the nft token (e.g. dns+nft).
-func createNftManager(mode string) nftApplier {
+func createNftManager(mode string, upstream *mitmproxy.UpstreamProxySpec) (nftApplier, error) {
 	if !constants.ModeUsesNft(mode) {
-		return nil
+		return nil, nil
 	}
-	return nftables.NewManagerWithOptions(parseNftOptions())
+	opts, err := parseNftOptions(upstream)
+	if err != nil {
+		return nil, err
+	}
+	return nftables.NewManagerWithOptions(opts), nil
 }
 
 // setupNft: apply static policy to nft, then wire allowed DNS answers to AddResolvedDomain (dynamic allow sets).
@@ -63,7 +70,7 @@ func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.Netw
 	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) {
 		addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := nftMgr.AddResolvedDomain(addCtx, domain, ips); err != nil {
+		if err := nftMgr.AddResolvedDomain(addCtx, domain, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
 			log.Warnf("[dns] record resolved domain %q failed: %v", domain, err)
 		}
 	})
@@ -102,13 +109,32 @@ func parseDoHBlocklist(raw string) (v4, v6 []string) {
 	return v4, v6
 }
 
-func parseNftOptions() nftables.Options {
-	opts := nftables.Options{BlockDoT: true}
+func parseNftOptions(upstream *mitmproxy.UpstreamProxySpec) (nftables.Options, error) {
+	opts := nftables.Options{
+		BlockDoT:              true,
+		QuiesceOnApplyFailure: constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)),
+	}
+	// Transparent MITM: exempt the REDIRECT target dport ahead of port-scoped
+	// rules (issue #2423). Same port derivation as startMitmproxyTransparentIfEnabled.
+	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
+		opts.MitmRedirectPort = constants.EnvIntOrDefault(constants.EnvMitmproxyPort, constants.DefaultMitmproxyPort)
+	}
 	if constants.IsTruthy(os.Getenv(constants.EnvBlockDoH443)) {
 		opts.BlockDoH443 = true
 	}
 	if raw := os.Getenv(constants.EnvDoHBlocklist); strings.TrimSpace(raw) != "" {
 		opts.DoHBlocklistV4, opts.DoHBlocklistV6 = parseDoHBlocklist(raw)
 	}
-	return opts
+	if upstream != nil {
+		uid, _, _, err := mitmproxy.LookupUser(mitmproxy.RunAsUser)
+		if err != nil {
+			return opts, fmt.Errorf("lookup user %q for upstream proxy nft scope: %w", mitmproxy.RunAsUser, err)
+		}
+		ep := &nftables.UpstreamProxyEndpoint{Port: upstream.Port, UID: uid}
+		if ip, err := netip.ParseAddr(upstream.Host); err == nil {
+			ep.IPs = []netip.Addr{ip.Unmap()}
+		}
+		opts.UpstreamProxy = ep
+	}
+	return opts, nil
 }

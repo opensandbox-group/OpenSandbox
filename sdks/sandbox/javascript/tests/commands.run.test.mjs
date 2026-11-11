@@ -1,3 +1,17 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -21,23 +35,25 @@ function createAdapter(responseBody, opts = {}) {
   );
 }
 
-test("CommandsAdapter.run populates complete and exitCode for successful foreground commands", async () => {
-  const adapter = createAdapter(
-    [
-      'data: {"type":"init","text":"cmd-1","timestamp":1}',
-      'data: {"type":"stdout","text":"hi","timestamp":2}',
-      'data: {"type":"execution_complete","timestamp":3,"execution_time":4}',
-      "",
-    ].join("\n"),
-  );
+for (const explicitExitCode of [false, true]) {
+  test(`CommandsAdapter.run populates complete and exitCode for successful foreground commands (explicit exit code: ${explicitExitCode})`, async () => {
+    const adapter = createAdapter(
+      [
+        'data: {"type":"init","text":"cmd-1","timestamp":1}',
+        'data: {"type":"stdout","text":"hi","timestamp":2}',
+        `data: ${JSON.stringify({ type: "execution_complete", timestamp: 3, execution_time: 4, ...(explicitExitCode ? { exit_code: 0 } : {}) })}`,
+        "",
+      ].join("\n"),
+    );
 
-  const execution = await adapter.run("echo hi");
+    const execution = await adapter.run("echo hi");
 
-  assert.equal(execution.id, "cmd-1");
-  assert.equal(execution.logs.stdout[0].text, "hi");
-  assert.equal(execution.complete?.executionTimeMs, 4);
-  assert.equal(execution.exitCode, 0);
-});
+    assert.equal(execution.id, "cmd-1");
+    assert.equal(execution.logs.stdout[0].text, "hi");
+    assert.equal(execution.complete?.executionTimeMs, 4);
+    assert.equal(execution.exitCode, 0);
+  });
+}
 
 test("CommandsAdapter.run infers non-zero exitCode from final error state", async () => {
   const adapter = createAdapter(
@@ -231,6 +247,98 @@ test("CommandsAdapter.runInSession infers non-zero exitCode from final error sta
   assert.equal(execution.exitCode, 7);
 });
 
+test("CommandsAdapter.run propagates error.exit_code and prefers it over evalue", async () => {
+  // evalue and exit_code deliberately disagree so the evalue fallback cannot satisfy the test.
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-exit","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"9","traceback":["exit status 3"],"exit_code":3},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("exit 3");
+
+  assert.equal(execution.error?.exitCode, 3);
+  assert.equal(execution.exitCode, 3);
+});
+
+test("CommandsAdapter.run reports a signal kill (exit_code -1) as a failure", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-sig","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"signal: terminated","traceback":["signal: terminated"],"exit_code":-1},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("kill -TERM $$");
+
+  assert.equal(execution.error?.exitCode, -1);
+  assert.equal(execution.exitCode, -1);
+  assert.equal(execution.complete, undefined);
+});
+
+test("CommandsAdapter.run leaves exitCode null for start failures without exit_code", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-start","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"fork/exec /bin/sh: argument list too long","traceback":["fork/exec /bin/sh: argument list too long"]},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("huge");
+
+  assert.equal(execution.error?.exitCode, undefined);
+  assert.equal(execution.exitCode, null);
+});
+
+test("CommandsAdapter.runInSession propagates error.exit_code", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"sess-exit","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"signal: killed","traceback":["signal: killed"],"exit_code":-1},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.runInSession("sess-3", "kill -KILL $$");
+
+  assert.equal(execution.error?.exitCode, -1);
+  assert.equal(execution.exitCode, -1);
+});
+
+test("CommandsAdapter.run ignores a non-integer exit_code and falls back to evalue", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-frac","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"7","traceback":["exit status 7"],"exit_code":3.5},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("exit 7");
+
+  assert.equal(execution.error?.exitCode, undefined);
+  assert.equal(execution.exitCode, 7);
+});
+
+test("CommandsAdapter.run ignores a string exit_code and leaves exitCode null without a numeric evalue", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-str","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"signal: killed","traceback":["signal: killed"],"exit_code":"3"},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("kill -KILL $$");
+
+  assert.equal(execution.error?.exitCode, undefined);
+  assert.equal(execution.exitCode, null);
+});
+
 test("execd client error message carries unstructured JSON error body", async () => {
   const adapter = new CommandsAdapter(
     createExecdClient({
@@ -288,3 +396,32 @@ test("native argv rejects invalid inputs before transport", async () => {
   }
   assert.equal(requests, 0);
 });
+
+for (const failure of [false, true]) {
+  for (const lateOutput of [false, true]) {
+    test(`foreground drains and releases stream: failure=${failure}, lateOutput=${lateOutput}`, async () => {
+      const terminal = failure
+        ? {type: "error", error: {ename: "CommandExecError", evalue: "7", traceback: []}}
+        : {type: "execution_complete", execution_time: 1};
+      const output = [{type: "stdout", text: "tail"}, {type: "stderr", text: "error-tail"}];
+      const events = lateOutput ? [terminal, ...output] : [...output, terminal];
+      const chunks = events.flatMap((event) => {
+        const frame = new TextEncoder().encode(`data: ${JSON.stringify({...event, timestamp: 1})}\n\n`);
+        return [frame.slice(0, 7), frame.slice(7)];
+      });
+      let exhausted = false;
+      const stream = new ReadableStream({
+        pull(controller) {
+          if (chunks.length) controller.enqueue(chunks.shift());
+          else { exhausted = true; controller.close(); }
+        },
+      });
+      const execution = await createAdapter(stream).run("echo test");
+      assert.deepEqual(execution.logs.stdout.map((item) => item.text), ["tail"]);
+      assert.deepEqual(execution.logs.stderr.map((item) => item.text), ["error-tail"]);
+      assert.equal(execution.exitCode, failure ? 7 : 0);
+      assert.equal(exhausted, true);
+      assert.equal(stream.locked, false);
+    });
+  }
+}

@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -56,6 +56,7 @@ func newTestReconciler(objs ...client.Object) *BatchSandboxReconciler {
 		Build()
 	return &BatchSandboxReconciler{
 		Client:              fakeClient,
+		APIReader:           fakeClient,
 		Scheme:              testscheme,
 		Recorder:            record.NewFakeRecorder(10),
 		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
@@ -187,6 +188,43 @@ func TestDispatchPauseResume_Case1_PauseTrue(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePausing, updated.Status.Phase)
 	assert.Equal(t, int64(2), updated.Status.PauseObservedGeneration)
+}
+
+func TestDispatchPauseResume_Case1_PauseTrue_AlreadyPaused(t *testing.T) {
+	// Paused, pause=true, gen > pauseObservedGen (for example a renew-only spec change)
+	// → the paused state is left alone; handlePause must not run again.
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-bs",
+			Namespace:  "default",
+			Generation: 3,
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause:    ptr.To(true),
+			Replicas: ptr.To(int32(1)),
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "img"}},
+				},
+			},
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                   sandboxv1alpha1.BatchSandboxPhasePaused,
+			PauseObservedGeneration: 2,
+		},
+	}
+	r := newTestReconciler(bs)
+	_, handled, err := r.dispatchPauseResume(context.Background(), bs)
+	require.NoError(t, err)
+	assert.False(t, handled, "an already Paused sandbox must not be re-paused")
+
+	updated := &sandboxv1alpha1.BatchSandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, updated.Status.Phase)
+
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{}
+	err = r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: internalPauseSnapshotName("test-bs")}, snapshot)
+	assert.True(t, apierrors.IsNotFound(err), "no new pause snapshot should be created")
 }
 
 func TestDispatchPauseResume_Case2_PauseFalse(t *testing.T) {
@@ -3000,101 +3038,6 @@ func TestSyncPauseOrClear_NoSnapshot(t *testing.T) {
 	snap := &sandboxv1alpha1.SandboxSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-pause"}, snap))
 	assert.Equal(t, "test-bs", snap.Spec.SandboxName)
-}
-
-// ---------- Phase update bug fix verification ----------
-
-func TestPhaseUpdate_Succeed(t *testing.T) {
-	// When pods are Running+Ready, phase should be Succeed (not stuck at Pending)
-	// This verifies the Bug 2 fix: phase judgment switch moved AFTER the pod counting loop.
-	bs := &sandboxv1alpha1.BatchSandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "test-bs",
-			Namespace:  "default",
-			Generation: 1,
-			UID:        "test-uid",
-		},
-		Spec: sandboxv1alpha1.BatchSandboxSpec{
-			Replicas: ptr.To(int32(1)),
-			Template: &corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main", Image: "img"}},
-				},
-			},
-		},
-		Status: sandboxv1alpha1.BatchSandboxStatus{},
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-bs-0",
-			Namespace: "default",
-			Labels: map[string]string{
-				labelBatchSandboxPodIndexKey: "0",
-				labelBatchSandboxNameKey:     "test-bs",
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: sandboxv1alpha1.GroupVersion.String(),
-					Kind:       "BatchSandbox",
-					Name:       "test-bs",
-					UID:        "test-uid",
-					Controller: ptr.To(true),
-				},
-			},
-		},
-		Spec: corev1.PodSpec{
-			NodeName:   "node-1",
-			Containers: []corev1.Container{{Name: "main", Image: "img"}},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			PodIP: "10.0.0.1",
-			Conditions: []corev1.PodCondition{
-				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-			},
-		},
-	}
-	_ = newTestReconciler(bs, pod)
-
-	// Verify the logic inline (same code path as Reconcile)
-	newStatus := bs.Status.DeepCopy()
-	newStatus.ObservedGeneration = bs.Generation
-	newStatus.Replicas = 0
-	newStatus.Ready = 0
-	newStatus.Allocated = 0
-
-	// Phase judgment AFTER counting (Bug 2 fix verification)
-	pods := []*corev1.Pod{pod}
-	for _, p := range pods {
-		newStatus.Replicas++
-		if p.Spec.NodeName != "" {
-			newStatus.Allocated++
-		}
-		if p.Status.Phase == corev1.PodRunning && p.Status.Conditions != nil {
-			for _, c := range p.Status.Conditions {
-				if c.Type == corev1.PodReady && c.Status == corev1.ConditionTrue {
-					newStatus.Ready++
-				}
-			}
-		}
-	}
-
-	// Phase should be Succeed because Ready > 0
-	switch bs.Status.Phase {
-	case sandboxv1alpha1.BatchSandboxPhasePausing, sandboxv1alpha1.BatchSandboxPhasePaused,
-		sandboxv1alpha1.BatchSandboxPhaseResuming:
-		// Don't override
-	default:
-		if newStatus.Ready > 0 {
-			newStatus.Phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
-		} else {
-			newStatus.Phase = sandboxv1alpha1.BatchSandboxPhasePending
-		}
-	}
-
-	assert.Equal(t, int32(1), newStatus.Ready, "Ready should be 1")
-	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, newStatus.Phase,
-		"Phase should be Succeed when Ready > 0")
 }
 
 // ---------- ackPauseWithPhase behavior ----------

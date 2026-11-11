@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -344,7 +344,7 @@ func applyResumingRuntimePhase(status *sandboxv1alpha1.BatchSandboxStatus, pods 
 func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod) {
 	summary, hasFailures := summarizePodFailures(pods)
 	if batchSbx.Status.Phase == "" || batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePending {
-		summary, hasFailures = summarizeTerminalPodFailures(pods)
+		summary, hasFailures = summarizeTerminalPodFailures(excludeAdmissionRecovery(pods))
 	}
 	if hasFailures {
 		if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseFailed {
@@ -369,6 +369,19 @@ func applySteadyRuntimePhase(batchSbx *sandboxv1alpha1.BatchSandbox, status *san
 		return
 	}
 	status.Phase = sandboxv1alpha1.BatchSandboxPhasePending
+}
+
+// excludeAdmissionRecovery drops pods recoverable by pod recovery, so stuck
+// kubelet admission rejections do not freeze a never-Ready sandbox.
+func excludeAdmissionRecovery(pods []*corev1.Pod) []*corev1.Pod {
+	filtered := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if isRecoverableAdmissionFailure(pod) {
+			continue
+		}
+		filtered = append(filtered, pod)
+	}
+	return filtered
 }
 
 func hasTerminalPodFailureCondition(conditions []sandboxv1alpha1.BatchSandboxCondition) bool {
@@ -413,6 +426,12 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 	batchSbx *sandboxv1alpha1.BatchSandbox,
 	view runtimeView,
 ) (time.Duration, []error) {
+	// Task cleanup runs before persistence and must continue during deletion.
+	// Its runtime view no longer describes a live sandbox, so do not publish it.
+	if batchSbx.DeletionTimestamp != nil {
+		return 0, nil
+	}
+
 	var aggErrors []error
 	log := logf.FromContext(ctx)
 	if err := r.patchBatchSandboxEndpoints(ctx, batchSbx, view.endpointIPs); err != nil {

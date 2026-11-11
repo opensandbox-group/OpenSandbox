@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,10 +34,11 @@ func (s *Sandbox) RunCommandWithOpts(ctx context.Context, req RunCommandRequest,
 	err := s.execd.RunCommand(ctx, req, func(event StreamEvent) error {
 		return processStreamEvent(exec, event, handlers)
 	})
-	if err != nil {
-		return exec, err
+	if req.Background {
+		// Completion acknowledges startup, not the background process exit.
+		exec.ExitCode = nil
 	}
-	return exec, nil
+	return exec, err
 }
 
 // ExecuteCode executes code in a context and streams output via SSE.
@@ -46,6 +47,15 @@ func (s *Sandbox) ExecuteCode(ctx context.Context, req RunCodeRequest, handlers 
 		return nil, fmt.Errorf("opensandbox: execd client not initialized")
 	}
 	exec := &Execution{}
+	if req.Context != nil {
+		// An omitted language selects shell execution in execd, as do the
+		// explicit command modes. Keep their legacy line separators.
+		switch req.Context.Language {
+		case "", "command", "background-command":
+		default:
+			exec.codeExecution = true
+		}
+	}
 	err := s.execd.ExecuteCode(ctx, req, func(event StreamEvent) error {
 		return processStreamEvent(exec, event, handlers)
 	})

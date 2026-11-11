@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -140,6 +140,38 @@ class SandboxRateLimitException
             requestId = requestId,
             responseBody = responseBody,
             isRetryable = isRetryable,
+        )
+
+/**
+ * Thrown when the OSEP-0024 wake retry budget is exhausted.
+ *
+ * The gateway answered `503` with the `OpenSandbox-Wake: expired` marker on
+ * every attempt: the sandbox restore did not finish within the wake retry
+ * policy's budget. The request was never forwarded, so retrying later is
+ * safe — the server-side resume continues in the background regardless.
+ *
+ * [attempts] carries the number of marked wake-timeout responses received;
+ * [waited] carries the total wall-clock time spent across waits, retries, and
+ * request time.
+ */
+class SandboxWakeTimeoutException
+    @JvmOverloads
+    constructor(
+        message: String? = null,
+        cause: Throwable? = null,
+        val attempts: Int = 0,
+        val waited: Duration = Duration.ZERO,
+        error: SandboxError = SandboxError(SandboxError.WAKE_TIMEOUT, message),
+        requestId: String? = null,
+        responseBody: String? = null,
+    ) : SandboxApiException(
+            message = message,
+            cause = cause,
+            statusCode = 503,
+            error = error,
+            requestId = requestId,
+            responseBody = responseBody,
+            isRetryable = false,
         )
 
 /**
@@ -427,6 +459,14 @@ data class SandboxError(
 
         /** The API returned HTTP 429 (Too Many Requests). */
         const val RATE_LIMIT = "RATE_LIMIT"
+
+        /**
+         * The OSEP-0024 wake retry budget was exhausted: every attempt answered
+         * `503` with the `OpenSandbox-Wake: expired` marker and the sandbox
+         * restore did not finish in time. The request was never forwarded, so
+         * a later manual retry is safe.
+         */
+        const val WAKE_TIMEOUT = "WAKE_TIMEOUT"
 
         /** A snapshot reached the `Failed` state while waiting for it to become ready. */
         const val SNAPSHOT_FAILED = "SNAPSHOT_FAILED"

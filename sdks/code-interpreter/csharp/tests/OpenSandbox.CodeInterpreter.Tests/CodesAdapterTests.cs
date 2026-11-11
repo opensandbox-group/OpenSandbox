@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -130,6 +130,114 @@ public class CodesAdapterTests
         Assert.Contains(httpHandler.RequestUris, uri => uri.Contains("/code?id=exec-123", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public async Task RunAsync_AcceptsMatchingContextAndLanguage()
+    {
+        var sseHandler = CompletingSseHandler();
+
+        var adapter = CreateAdapter(
+            new StubHttpMessageHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK))),
+            sseHandler);
+
+        var execution = await adapter.RunAsync("print('hello')", new RunCodeOptions
+        {
+            Context = new CodeContext { Id = "ctx-1", Language = SupportedLanguage.Python },
+            Language = SupportedLanguage.Python,
+        });
+
+        // Regression: a matching pair used to be rejected as "both provided".
+        Assert.Equal(0, execution.ExitCode);
+        Assert.Contains(
+            sseHandler.RequestBodies,
+            body => body.Contains("\"id\":\"ctx-1\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RunAsync_ThrowsOnLanguageMismatch()
+    {
+        var adapter = CreateAdapter(
+            new StubHttpMessageHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK))),
+            new StubHttpMessageHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK))));
+
+        await Assert.ThrowsAsync<InvalidArgumentException>(() => adapter.RunAsync("print('hello')", new RunCodeOptions
+        {
+            Context = new CodeContext { Language = SupportedLanguage.Python },
+            Language = SupportedLanguage.Go,
+        }));
+    }
+
+    [Fact]
+    public async Task RunAsync_SetsExitCodeZeroOnComplete()
+    {
+        var adapter = CreateAdapter(
+            new StubHttpMessageHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK))),
+            CompletingSseHandler());
+
+        var execution = await adapter.RunAsync("print('hello')");
+
+        Assert.Null(execution.Error);
+        Assert.NotNull(execution.Complete);
+        Assert.Equal(0, execution.ExitCode);
+    }
+
+    [Fact]
+    public async Task RunAsync_InfersExitCodeFromNumericErrorValue()
+    {
+        var adapter = CreateAdapter(
+            new StubHttpMessageHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK))),
+            ErrorSseHandler(evalue: "42"));
+
+        var execution = await adapter.RunAsync("import sys; sys.exit(42)");
+
+        Assert.NotNull(execution.Error);
+        Assert.Equal(42, execution.ExitCode);
+    }
+
+    [Fact]
+    public async Task RunAsync_KeepsExitCodeNullForNonNumericErrorValue()
+    {
+        var adapter = CreateAdapter(
+            new StubHttpMessageHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK))),
+            ErrorSseHandler(evalue: "division by zero"));
+
+        var execution = await adapter.RunAsync("1 / 0");
+
+        Assert.NotNull(execution.Error);
+        Assert.Null(execution.ExitCode);
+    }
+
+    private static StubHttpMessageHandler CompletingSseHandler()
+    {
+        return new StubHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "data: {\"type\":\"stdout\",\"text\":\"hello\",\"timestamp\":1}\n\n" +
+                    "data: {\"type\":\"execution_complete\",\"timestamp\":2,\"execution_time\":3}\n\n",
+                    Encoding.UTF8,
+                    "text/event-stream")
+            };
+            return Task.FromResult(response);
+        });
+    }
+
+    private static StubHttpMessageHandler ErrorSseHandler(string evalue)
+    {
+        return new StubHttpMessageHandler((_, _) =>
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "data: {\"type\":\"error\",\"timestamp\":1," +
+                    "\"error\":{\"ename\":\"SystemExit\",\"evalue\":\"" + evalue + "\",\"traceback\":[]}}\n\n",
+                    Encoding.UTF8,
+                    "text/event-stream")
+            };
+            return Task.FromResult(response);
+        });
+    }
+
     private static async Task DrainAsync<T>(IAsyncEnumerable<T> source)
     {
         await foreach (var _ in source)
@@ -158,11 +266,16 @@ public class CodesAdapterTests
 
         public List<string> RequestUris { get; } = new();
         public List<string> AcceptHeaders { get; } = new();
+        public List<string> RequestBodies { get; } = new();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             RequestUris.Add(request.RequestUri?.ToString() ?? string.Empty);
             AcceptHeaders.Add(string.Join(",", request.Headers.Accept.Select(MediaTypeToString)));
+            if (request.Content != null)
+            {
+                RequestBodies.Add(await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
+            }
             return await _handler(request, cancellationToken).ConfigureAwait(false);
         }
 

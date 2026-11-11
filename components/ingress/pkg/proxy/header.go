@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,6 +30,24 @@ var (
 	// Deprecated: use SandboxIngress instead.
 	DeprecatedSandboxIngress = http.CanonicalHeaderKey("OPEN-SANDBOX-INGRESS")
 
+	// AccessRenew is the per-request opt-out header for OSEP-0009
+	// auto-renew-on-access. The exact sentinel value AccessRenewSkipValue
+	// ("skip") suppresses publishing a renew intent for that one request;
+	// unknown values are ignored for forward compatibility. Like
+	// SandboxIngress, it is stripped before forwarding upstream so backend
+	// applications never observe it.
+	AccessRenew          = http.CanonicalHeaderKey("OpenSandbox-Access-Renew")
+	AccessRenewSkipValue = "skip"
+
+	// SkipActivity is the OSEP-0024 activity-probe sentinel. The exact value
+	// SkipActivitySkipValue ("skip") suppresses the activity observation for
+	// that one request, so the sweeper's probe never resets the clock it
+	// measures. A client forging it only hurts itself: its own sandbox looks
+	// idle sooner and may be paused mid-use, recovered by the next ordinary
+	// request. Stripped before forwarding upstream, like AccessRenew.
+	SkipActivity          = http.CanonicalHeaderKey("OpenSandbox-Skip-Activity")
+	SkipActivitySkipValue = "skip"
+
 	ReverseProxyServerPowerBy = http.CanonicalHeaderKey("Reverse-Proxy-Server-PowerBy")
 
 	// WebSocket handshake headers passed through to the upgrader.
@@ -51,3 +69,15 @@ var (
 	HopByHopUpgrade          = http.CanonicalHeaderKey("Upgrade")
 	HopByHopProxyConnection  = http.CanonicalHeaderKey("Proxy-Connection")
 )
+
+// IsAccessRenewSkip reports whether the request opts out of access renew
+// intents for this single request (OSEP-0009 per-request opt-out).
+func IsAccessRenewSkip(header http.Header) bool {
+	return header.Get(AccessRenew) == AccessRenewSkipValue
+}
+
+// IsSkipActivity reports whether the request opted out of activity tracking
+// for this single request (OSEP-0024 activity-probe sentinel).
+func IsSkipActivity(header http.Header) bool {
+	return header.Get(SkipActivity) == SkipActivitySkipValue
+}

@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,6 +38,28 @@ func TestLoadFileConfig(t *testing.T) {
 	}
 	if got, want := strings.Join(cfg.Sources, ","), "container-logs"; got != want {
 		t.Fatalf("Sources = %q, want %q", got, want)
+	}
+}
+
+func TestLoadContainerAndVMConsoleSources(t *testing.T) {
+	t.Setenv("NODE_NAME", "node-a")
+	t.Setenv("NODEAGENT_CLUSTER_ID", "test")
+	t.Setenv("NODEAGENT_SOURCES", "container-logs,vm-console")
+	t.Setenv("NODEAGENT_SINKS", "file")
+	t.Setenv("NODEAGENT_LOG_ROOT", t.TempDir())
+	t.Setenv("NODEAGENT_VM_CONSOLE_ROOT", t.TempDir())
+	t.Setenv("NODEAGENT_STATE_DIR", t.TempDir())
+	t.Setenv("NODEAGENT_FILE_PATH", t.TempDir())
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HasSource(api.SourceNameContainerLogs) || !cfg.HasSource(api.SourceNameVMConsole) {
+		t.Fatal("both backends must be enabled")
+	}
+	t.Setenv("NODEAGENT_VM_CONSOLE_ROOT", cfg.StateDir)
+	if _, err := Load(); err == nil {
+		t.Fatal("console and checkpoint paths must not overlap")
 	}
 }
 

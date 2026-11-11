@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ class EventNodeError(BaseModel):
     name: str | None = Field(default=None, alias="ename")
     value: str | None = Field(default=None, alias="evalue")
     traceback: list[str] = Field(default_factory=list)
+    exit_code: int | None = Field(default=None, alias="exit_code")
 
     @field_validator("traceback", mode="before")
     @classmethod

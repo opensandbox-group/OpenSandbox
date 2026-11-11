@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,9 @@ import (
 
 type containerLogFormat struct{}
 
+// ContainerLogDirectoryMetadata is the stream metadata key carrying the
+// container's log directory relative to the node log root. It pins the
+// object family to the CRI directory the records were read from.
 const ContainerLogDirectoryMetadata = "log-directory"
 
 func init() { Register(containerLogFormat{}) }

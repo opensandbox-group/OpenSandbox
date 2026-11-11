@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,11 +17,15 @@
 
 from typing import Protocol
 
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 
 
 class DiagnosticsSync(Protocol):
     """Synchronous sandbox diagnostics service."""
+
+    def get_context(self, sandbox_id: str) -> DiagnosticContext:
+        """Get backend routing context without connecting to execd."""
+        ...
 
     def get_logs(
         self,

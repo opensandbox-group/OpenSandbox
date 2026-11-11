@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -241,6 +241,7 @@ export class SandboxPool {
   private createSemaphore: AsyncSemaphore;
   private postCreateSemaphore: AsyncSemaphore;
   private readonly tracer: PoolTracer;
+  private warmupCreateConfig?: ConnectionConfig;
 
   private constructor(options: SandboxPoolOptions) {
     const poolName = options.poolName?.trim();
@@ -864,9 +865,13 @@ export class SandboxPool {
     signal?: AbortSignal,
     injectTraceContext = false,
   ): Promise<Sandbox> {
+    const baseCreateConfig =
+      reason === PooledSandboxCreateReason.WARMUP
+        ? (this.warmupCreateConfig ??= this.options.connectionConfig.withCreateMetricsDisabled())
+        : this.options.connectionConfig;
     const createConnectionConfig = injectTraceContext
-      ? this.tracer.createConnectionConfig(this.options.connectionConfig)
-      : this.options.connectionConfig;
+      ? this.tracer.createConnectionConfig(baseCreateConfig)
+      : baseCreateConfig;
     if (this.options.sandboxCreator) {
       return await this.options.sandboxCreator({
         poolName: this.options.poolName,

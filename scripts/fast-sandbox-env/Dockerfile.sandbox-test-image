@@ -1,0 +1,102 @@
+# syntax=docker/dockerfile:1
+
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Realistic sandbox test image for the fast-sandbox integration environment
+# (refs #1981), meant to replace alpine:3.19 as SBX_IMAGE: layer
+# overwrites/whiteouts, symlinks/hardlinks, setuid, FIFO/socket, mixed file
+# sizes, tini + non-root user, HTTP :8080, multi-layer ENV with PATH override.
+#
+#   docker build -f scripts/fast-sandbox-env/Dockerfile.sandbox-test-image \
+#     -t opensandbox/fsb-sandbox-golden:latest scripts/fast-sandbox-env
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ca-certificates curl openssl tini netcat-openbsd procps python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 --version >/etc/sandbox-test-python-version \
+    && test -x /usr/bin/tini || { echo "tini not at /usr/bin/tini"; exit 1; }
+
+# non-root users with fixed UIDs
+RUN groupadd -g 1000 app && useradd -u 1000 -g 1000 -m -s /bin/bash app \
+    && useradd -u 1001 -M -s /usr/sbin/nologin svc \
+    && mkdir -p /srv/app /srv/data /opt/sandbox-bin \
+    && chown -R app:app /srv /opt/sandbox-bin
+
+# whiteouts: files overwritten/deleted by the next layer
+RUN printf 'v1\n' > /srv/data/overwritten.txt \
+    && printf 'v1\n' > /srv/data/deleted.txt \
+    && dd if=/dev/urandom of=/srv/data/blob-v1.bin bs=1M count=8 status=none
+RUN printf 'v2-final\n' > /srv/data/overwritten.txt \
+    && rm /srv/data/deleted.txt /srv/data/blob-v1.bin \
+    && dd if=/dev/urandom of=/srv/data/blob-final.bin bs=1M count=8 status=none
+
+# symlinks, hardlinks, setuid
+RUN ln -s /srv/data/blob-final.bin /srv/data/blob-link \
+    && ln -s link-loop-b /srv/link-loop-a && ln -s link-loop-a /srv/link-loop-b \
+    && printf '#!/bin/sh\necho sandbox-test-setuid\n' > /opt/sandbox-bin/elevator \
+    && chown app:app /opt/sandbox-bin/elevator \
+    && chmod 4755 /opt/sandbox-bin/elevator \
+    && printf 'a\n' > /srv/data/hardlink-src \
+    && ln /srv/data/hardlink-src /srv/data/hardlink-1 \
+    && ln /srv/data/hardlink-src /srv/data/hardlink-2
+
+# special files
+RUN mkfifo /srv/data/pipe \
+    && python3 -c 'import socket; socket.socket(socket.AF_UNIX).bind("/srv/data/sock")' \
+    && chown app:app /srv/data/pipe /srv/data/sock
+
+# content profile: 4000 small files + large blobs
+RUN python3 - <<'EOF'
+import hashlib, os
+base = "/srv/data/small"
+os.makedirs(base, exist_ok=True)
+for i in range(4000):
+    payload = f"file-{i:05d}\n".encode()
+    name = hashlib.sha256(payload).hexdigest()[:16]
+    with open(os.path.join(base, name), "wb") as f:
+        f.write(payload)
+EOF
+RUN dd if=/dev/urandom of=/srv/data/random-1.bin bs=1M count=32 status=none \
+    && dd if=/dev/urandom of=/srv/data/random-2.bin bs=1M count=32 status=none \
+    && dd if=/dev/zero of=/srv/data/zeros-64.bin bs=1M count=64 status=none
+
+# HTTP workload: /health + info endpoint on :8080
+COPY sandbox-test-image/server.py /srv/app/server.py
+COPY sandbox-test-image/entrypoint.sh /srv/app/entrypoint.sh
+RUN chmod 0755 /srv/app/entrypoint.sh /srv/app/server.py \
+    && chown -R app:app /srv/app \
+    && printf 'sandbox-test\n' > /etc/sandbox-test-release
+
+# OCI config semantics: multi-layer ENV with PATH override,
+# exec-form ENTRYPOINT + shell-form CMD
+ENV SANDBOX_TEST_IMAGE=1
+ENV SANDBOX_TEST_VERSION=0.1.0
+ENV SANDBOX_TEST_USER=app
+ENV PATH=/opt/sandbox-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WORKDIR /srv/app
+USER app
+EXPOSE 8080
+ENTRYPOINT ["/usr/bin/tini", "--", "/srv/app/entrypoint.sh"]
+CMD python3 /srv/app/server.py
+
+# pin mtimes of created files
+USER root
+RUN find /srv /opt/sandbox-bin /etc/sandbox-test-release /etc/sandbox-test-python-version \
+        -exec touch -h -d "@1767225600" {} + \
+    && chmod 0755 /srv/app /srv/app/entrypoint.sh /srv/app/server.py
+USER app

@@ -1,9 +1,9 @@
 # Helm chart tooling for OpenSandbox. All charts live under manifests/charts.
 
-# VERSION feeds the Helm chart version and image tags. To build for a specific
-# version, pass it as an arg (e.g make helm-package VERSION=0.0.2) or export it
-# (e.g export VERSION=0.0.2).
-VERSION ?= 0.1.0
+# VERSION feeds the image tag overrides for the helm-template / helm-install /
+# helm-upgrade / helm-dry-run targets below (rendered as v$(VERSION)). Leave
+# it empty to use each chart's default image tag (release-<appVersion>).
+VERSION ?=
 
 # IMAGE_TAG_BASE defines the registry namespace and part of the image name for
 # remote images. Used by the helm-template/install targets below.
@@ -11,7 +11,11 @@ IMAGE_TAG_BASE ?= sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/co
 
 # Helm chart configuration
 HELM_CHART_PATH ?= charts/controller
-HELM_CHART_VERSION ?= $(VERSION)
+# Chart/app versions are derived from the chart's Chart.yaml so packaging never
+# drifts from the committed versions. Override HELM_CHART_VERSION to repackage
+# under a different version.
+HELM_CHART_VERSION ?= $(shell sed -n 's/^version:[[:space:]]*//p' $(HELM_CHART_PATH)/Chart.yaml | head -n1)
+HELM_CHART_APP_VERSION ?= $(shell sed -n 's/^appVersion:[[:space:]]*"\(.*\)".*/\1/p' $(HELM_CHART_PATH)/Chart.yaml | head -n1)
 
 .PHONY: help
 help: ## Display this help.
@@ -29,7 +33,7 @@ helm-gen-crds: ## Sync generated CRDs from kubernetes/config/crd/bases into char
 
 .PHONY: helm-gen-fast-sandbox-crds
 helm-gen-fast-sandbox-crds: ## Sync fast-sandbox CRDs from the pinned checkout into charts/base/files/fast-sandbox-crds.yaml.
-	@../manifests/release/build-fast-sandbox.sh --no-build --sync-crds
+	@release/build-fast-sandbox.sh --no-build --sync-crds
 
 ##@ Helm
 
@@ -46,25 +50,25 @@ helm-lint: ## Lint all Helm charts and verify dependencies
 	helm lint charts/opensandbox
 
 .PHONY: helm-template
-helm-template: ## Generate Kubernetes manifests from Helm chart
+helm-template: ## Generate Kubernetes manifests from the controller chart
 	@echo "Generating manifests from Helm chart..."
 	helm template opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION)
+		$(if $(VERSION),--set controller.image.tag=v$(VERSION),)
 
 .PHONY: helm-template-debug
 helm-template-debug: ## Generate Kubernetes manifests with debug output
 	@echo "Generating manifests from Helm chart with debug..."
 	helm template opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION) \
+		$(if $(VERSION),--set controller.image.tag=v$(VERSION),) \
 		--debug
 
 .PHONY: helm-package
-helm-package: ## Package the Helm chart
+helm-package: ## Package the Helm chart (version derived from Chart.yaml)
 	@echo "Packaging Helm chart..."
 	@mkdir -p dist
-	helm package $(HELM_CHART_PATH) -d dist/ --version $(HELM_CHART_VERSION) --app-version $(VERSION)
+	helm package $(HELM_CHART_PATH) -d dist/ --version $(HELM_CHART_VERSION) $(if $(HELM_CHART_APP_VERSION),--app-version $(HELM_CHART_APP_VERSION),)
 
 .PHONY: helm-install
 helm-install: ## Install the Helm charts (base CRDs first, then the controller)
@@ -72,27 +76,32 @@ helm-install: ## Install the Helm charts (base CRDs first, then the controller)
 	helm upgrade --install base charts/base
 	helm install opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION) \
+		$(if $(VERSION),--set controller.image.tag=v$(VERSION),) \
 		--namespace opensandbox-system \
 		--create-namespace
 
 .PHONY: helm-upgrade
-helm-upgrade: ## Upgrade the Helm chart
+helm-upgrade: ## Upgrade the controller release
 	@echo "Upgrading Helm chart..."
 	helm upgrade opensandbox-controller $(HELM_CHART_PATH) \
 		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION) \
+		$(if $(VERSION),--set controller.image.tag=v$(VERSION),) \
 		--namespace opensandbox-system
 
 .PHONY: helm-uninstall
-helm-uninstall: ## Uninstall the Helm chart
+helm-uninstall: ## Uninstall the controller release
 	@echo "Uninstalling Helm chart..."
 	helm uninstall opensandbox-controller --namespace opensandbox-system
 
-.PHONY: helm-test
-helm-test: ## Run Helm chart tests
-	@echo "Running Helm chart tests..."
-	helm test opensandbox-controller --namespace opensandbox-system
+.PHONY: helm-dry-run
+helm-dry-run: ## Perform a dry-run install of the controller chart
+	@echo "Performing dry-run installation..."
+	helm install opensandbox-controller $(HELM_CHART_PATH) \
+		--set controller.image.repository=$(IMAGE_TAG_BASE) \
+		$(if $(VERSION),--set controller.image.tag=v$(VERSION),) \
+		--namespace opensandbox-system \
+		--create-namespace \
+		--dry-run --debug
 
 .PHONY: helm-docs
 helm-docs: ## Generate Helm chart documentation for all charts (requires helm-docs)
@@ -118,16 +127,6 @@ helm-docs-check: ## Verify Helm chart documentation is up to date (requires helm
 		echo "helm-docs is not installed. Install it with: go install github.com/norwoodj/helm-docs/cmd/helm-docs@latest"; \
 		exit 1; \
 	fi
-
-.PHONY: helm-dry-run
-helm-dry-run: ## Perform a dry-run install of the Helm chart
-	@echo "Performing dry-run installation..."
-	helm install opensandbox-controller $(HELM_CHART_PATH) \
-		--set controller.image.repository=$(IMAGE_TAG_BASE) \
-		--set controller.image.tag=v$(VERSION) \
-		--namespace opensandbox-system \
-		--create-namespace \
-		--dry-run --debug
 
 .PHONY: helm-all
 helm-all: helm-lint helm-package ## Run all Helm-related tasks (lint and package)

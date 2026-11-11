@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -844,7 +844,7 @@ describe("IsolatedSession E2E", () => {
       workspace: { path: "/tmp", mode: "rw" },
     });
     try {
-      await expect(session.getRunStatus("no-such-run")).rejects.toThrow(/404/);
+      await expect(session.getRunStatus("no-such-run")).rejects.toMatchObject({ statusCode: 404 });
     } finally {
       await session.delete();
     }

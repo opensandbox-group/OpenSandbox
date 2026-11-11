@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="820" viewBox="0 0 1180 820" role="img" aria-labelledby="title desc">
+<title id="title">Single-host routing</title>
+<desc id="desc">On a single Docker host, the client calls a host-mapped proxy port; iptables forwards it to execd inside the sandbox container, and execd's reverse proxy forwards /proxy/{port} requests to 127.0.0.1:{port}. The lifecycle server resolves endpoints from port labels. One host port per sandbox fronts every container port.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="820" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Single-host routing</text>
+<text x="48" y="96" class="body">One host port per sandbox · execd's reverse proxy fronts every container port</text>
+<path d="M810 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="856" y="60" class="edge" style="fill:#2563eb">Traffic</text>
+<path d="M950 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="996" y="60" class="edge" style="fill:#dc6b2e">Endpoint lookup</text>
+<rect x="48" y="128" width="1084" height="256" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="158" class="section">DOCKER HOST</text>
+<rect x="72" y="176" width="300" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="206" class="heading">Client</text>
+<text x="88" y="231" class="label">host:50428/proxy/5900</text>
+<rect x="412" y="176" width="340" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="428" y="206" class="heading">Lifecycle server</text>
+<text x="428" y="231" class="label">get_endpoint(port=5900)</text>
+<rect x="792" y="176" width="316" height="160" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="812" y="206" class="heading">get_endpoint()</text>
+<text x="812" y="239" class="body">bridge: /proxy/{port} path</text>
+<text x="812" y="267" class="body">host mode: port per sandbox</text>
+<text x="812" y="291" class="label">resolve_internal: sandbox IP</text>
+<rect x="72" y="296" width="680" height="64" rx="8" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="88" y="326" class="heading">Port mapping · iptables</text>
+<text x="88" y="351" class="label">127.0.0.1:50428 → container 44772 (execd proxy)</text>
+<path d="M222 240V290" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="238" y="270" class="edge" style="fill:#2563eb">host port 50428</text>
+<path d="M582 240V290" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="598" y="270" class="edge" style="fill:#dc6b2e">reads port labels</text>
+<rect x="48" y="416" width="1084" height="288" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5"/>
+<text x="72" y="446" class="section">SANDBOX CONTAINER</text>
+<text x="640" y="446" class="label">bridge network · container ports stay private</text>
+<rect x="72" y="476" width="488" height="100" rx="10" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="88" y="508" class="heading">execd · reverse proxy</text>
+<text x="88" y="539" class="body">container port 44772</text>
+<text x="88" y="563" class="label">forwards /proxy/{port} → 127.0.0.1:{port}</text>
+<rect x="72" y="616" width="488" height="64" rx="8" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="88" y="646" class="heading">Sandbox service</text>
+<text x="88" y="671" class="label">127.0.0.1:5900 · e.g. VNC or app</text>
+<rect x="620" y="476" width="488" height="180" rx="10" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="636" y="506" class="heading">One host port per sandbox</text>
+<text x="636" y="539" class="body">all container ports share the proxy</text>
+<text x="636" y="567" class="body">Upgrade / Connection preserved</text>
+<text x="636" y="591" class="label">HTTP · SSE · WebSocket · VNC</text>
+<text x="636" y="615" class="label">missing mapping → HTTP 500</text>
+<text x="636" y="639" class="label">keep the /proxy/{port} prefix in URLs</text>
+<path d="M412 360V470" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="428" y="446" class="edge" style="fill:#2563eb">DNAT → container 44772</text>
+<path d="M316 576V610" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="332" y="597" class="edge" style="fill:#2563eb">HTTP · SSE · WebSocket</text>
+<rect x="48" y="728" width="1084" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="755" class="heading">Why one port is enough</text>
+<text x="360" y="755" class="body">the proxy multiplexes every container port</text>
+<text x="72" y="782" class="label">many sandboxes per host, no overlapping ports — only the proxy port (optionally 8080) is published.</text>
+</svg>

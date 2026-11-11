@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -95,6 +95,14 @@ func runQEMUSnapshot(request snapshot.Request, recovery *snapshotRecovery) error
 	defer os.RemoveAll(capture.workDir)
 
 	for _, container := range request.Containers {
+		// The QEMU virtual machine has already been stopped and its migration stream
+		// captured via QMP in captureQEMUState. On cgroup v2 kernels, pausing the
+		// container cgroup hosting KVM can hang indefinitely waiting for kernel worker
+		// threads (e.g. kvm-nx-lpage-recovery) which do not process freeze signals.
+		// Therefore, we only pause non-QEMU companion containers.
+		if container.Name == request.QEMU.ContainerName {
+			continue
+		}
 		containerID := containerIDs[container.Name]
 		if err := pauseContainer(containerID); err != nil {
 			return fmt.Errorf("pause container %q after QEMU checkpoint: %w", container.Name, err)
@@ -158,8 +166,12 @@ func runQEMUSnapshot(request snapshot.Request, recovery *snapshotRecovery) error
 	}
 
 	if request.LeaveSourceFrozen {
-		// The source Pod is deleted by the pause controller after it observes this
-		// result. Keep it frozen so a supervisor cannot restart the postmigrate VM.
+		// For internal BatchSandbox pause, the source Pod will be deleted by the
+		// controller after observing this result. Companion containers remain
+		// cgroup-frozen, while the QEMU container itself is left unfrozen to avoid
+		// kernel worker freeze deadlocks. The guest VM remains quiesced in postmigrate
+		// state under the workload requirement that, until Pod deletion, workload-controlled
+		// processes must not independently resume the source VM via QMP or restart QEMU.
 		recovery.disarm()
 		return nil
 	}

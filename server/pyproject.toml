@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -85,6 +85,13 @@ fallback_version = "0.1.0.dev0"
 include = [
     "LICENSE",
     "opensandbox_server",
+]
+# The committed FastPath gRPC stubs must ship in the wheel/sdist. Hatchling
+# applies the repo-root .gitignore as VCS excludes with paths relative to this
+# package root, so the repo-root negation (!server/.../generated/) cannot
+# match and the blanket `**/generated/**` pattern would silently drop them.
+artifacts = [
+    "opensandbox_server/services/fast_sandbox/generated/**",
 ]
 
 [tool.hatch.build.targets.wheel]

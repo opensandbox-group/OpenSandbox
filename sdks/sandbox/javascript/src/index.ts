@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ export {
   SandboxInternalException,
   SandboxReadyTimeoutException,
   SandboxUnhealthyException,
+  SandboxWakeTimeoutException,
   PoolAcquireFailedException,
   PoolEmptyException,
   PoolNotRunningException,
@@ -30,6 +31,8 @@ export {
 
 // Factory pattern (stable public interface; does NOT expose OpenAPI generated models).
 export type { AdapterFactory } from "./factory/adapterFactory.js";
+export type { DiagnosticContext, DiagnosticContent } from "./models/diagnostics.js";
+export type { Diagnostics } from "./services/diagnostics.js";
 export { DefaultAdapterFactory, createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 
 export { ConnectionConfig } from "./config/connection.js";
@@ -62,6 +65,10 @@ export type {
   CustomHeaderEntry,
   Endpoint,
   Host,
+  ActivityProbe,
+  IdlePolicy,
+  RenewalPolicy,
+  ExchangeCredentialSource,
   InlineCredentialSource,
   LifecycleHook,
   ListSnapshotsParams,
@@ -108,12 +115,15 @@ export type { SandboxFilter, SandboxManagerOptions } from "./manager.js";
 export type { ExecdHealth } from "./services/execdHealth.js";
 export type { ExecdMetrics } from "./services/execdMetrics.js";
 export type {
+  ByteRange,
   FileEntryType,
   FileInfo,
   FileMetadata,
   Permission,
   RenameFileItem,
   ReplaceFileContentItem,
+  ReadBytesResponse,
+  ReadBytesStream,
   SearchFilesResponse,
   FilesInfoResponse,
 } from "./models/filesystem.js";
@@ -206,6 +216,7 @@ export type { IsolationService, IsolationSession, RunOnceOpts } from "./services
 export type {
   CreateIsolatedSessionRequest,
   IsolatedWorkspaceSpec,
+  IsolatedOverlaySpec,
   EnvPassthroughSpec,
   BindMount,
   IsolatedSessionInfo,

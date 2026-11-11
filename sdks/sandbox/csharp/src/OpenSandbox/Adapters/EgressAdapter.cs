@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -35,6 +35,9 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
         IReadOnlyList<CredentialBinding> bindings,
         CancellationToken cancellationToken = default)
     {
+        CredentialVaultShapeGuard.ValidateCredentials(credentials);
+        CredentialVaultShapeGuard.ValidateBindings(bindings);
+
         var request = new CredentialVaultCreateRequest
         {
             Credentials = credentials,
@@ -62,6 +65,8 @@ internal sealed class EgressAdapter : IEgress, ICredentialVault
         {
             throw new ArgumentNullException(nameof(request));
         }
+
+        CredentialVaultShapeGuard.ValidatePatchRequest(request);
 
         return await _client.PatchAsync<CredentialVaultState>(
             "/credential-vault",

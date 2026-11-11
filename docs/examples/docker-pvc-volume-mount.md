@@ -8,7 +8,11 @@ description: Mount Docker named volumes into sandbox containers using the OpenSa
 This example demonstrates how to mount Docker named volumes into sandbox containers using the OpenSandbox `pvc` backend. In Docker runtime, `pvc.claimName` maps to a Docker named volume -- providing a more convenient and secure alternative to host-path bind mounts for sharing data across sandboxes.
 
 ::: info What is `pvc`?
-The `pvc` backend is a runtime-neutral abstraction. In Kubernetes it maps to a PersistentVolumeClaim; in Docker it maps to a named volume. The same API request works on both runtimes. See [OSEP-0003](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0003-volume-and-volumebinding-support.md) for the design.
+The `pvc` backend is a runtime-neutral abstraction. In Kubernetes it maps to a PersistentVolumeClaim; in Docker it maps to a named volume. The same API request works on both runtimes.
+:::
+
+::: info Docker mount destinations
+For all Docker volume backends (`host`, `pvc`, and `ossfs`), `mountPath` must resolve to a non-root path, must not contain `:`, and must be unique after POSIX path normalization, both within the request and against paths the server mounts itself (`docker.sandbox_binds` destinations, the execd isolation directory when isolation is enabled, and `/oem` for Windows sandboxes). For example, `/mnt/data`, `/mnt/data/`, and `/mnt/./data` identify the same destination. Invalid destinations return HTTP 400 with `VOLUME::INVALID_MOUNT_PATH` before volume provisioning. Nested destinations such as `/mnt/data` and `/mnt/data/cache`, and the same source mounted at distinct destinations, are supported.
 :::
 
 ## Why Named Volumes over Host Paths?
@@ -194,7 +198,6 @@ docker volume rm opensandbox-pvc-demo
 
 ## References
 
-- [OSEP-0003: Volume and VolumeBinding Support](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0003-volume-and-volumebinding-support.md) -- Design proposal
 - [Sandbox Lifecycle API Spec](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/sandbox-lifecycle.yml) -- OpenAPI schema for volume definitions
 - [Host Volume Mount Example](/examples/host-volume-mount) -- Host path bind mount example (alternative approach)
 - [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/docker-pvc-volume-mount)

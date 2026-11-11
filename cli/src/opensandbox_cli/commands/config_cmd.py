@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,9 +20,13 @@ from collections.abc import Mapping
 from typing import Any
 
 import click
+import tomlkit
+from tomlkit.container import OutOfOrderTableProxy
+from tomlkit.exceptions import ParseError
+from tomlkit.items import InlineTable, Table
 
 from opensandbox_cli.client import ClientContext
-from opensandbox_cli.config import init_config_file, resolve_config
+from opensandbox_cli.config import STRING_KEYS, init_config_file, resolve_config
 from opensandbox_cli.utils import handle_errors, output_option, prepare_output
 
 
@@ -34,13 +38,11 @@ def config_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
-# ---- init -----------------------------------------------------------------
-
 @config_group.command("init")
 @click.option("--force", is_flag=True, default=False, help="Overwrite existing config file.")
 @output_option("table", "json", "yaml")
-@handle_errors
 @click.pass_obj
+@handle_errors
 def config_init(obj: ClientContext, force: bool, output_format: str | None) -> None:
     """Create a default configuration file."""
     output = prepare_output(
@@ -53,8 +55,6 @@ def config_init(obj: ClientContext, force: bool, output_format: str | None) -> N
     except FileExistsError as exc:
         output.warning(str(exc))
 
-
-# ---- show -----------------------------------------------------------------
 
 _SENSITIVE_CONFIG_KEYS = {
     "api_key",
@@ -79,6 +79,7 @@ def _sanitize_config_for_display(data: Mapping[str, Any]) -> dict[str, Any]:
             continue
         sanitized[key] = value
     return sanitized
+
 
 @config_group.command("show")
 @output_option("table", "json", "yaml")
@@ -105,14 +106,34 @@ def config_show(obj: ClientContext, output_format: str | None) -> None:
     )
 
 
-# ---- set ------------------------------------------------------------------
+def _parse_toml_value(raw: str) -> Any:
+    """Infer a TOML scalar type from a raw CLI string.
+
+    Booleans, integers, and floats are recognized so values like ``false`` or
+    ``30`` keep their native TOML type; anything else is stored as a string.
+    The value is always serialized by tomlkit, so quotes, escapes, and
+    whitespace in string values are encoded correctly.
+    """
+    normalized = raw.lower()
+    if normalized in ("true", "false"):
+        return normalized == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
 
 @config_group.command("set")
 @click.argument("key")
 @click.argument("value")
 @output_option("table", "json", "yaml")
-@handle_errors
 @click.pass_obj
+@handle_errors
 def config_set(
     obj: ClientContext,
     key: str,
@@ -125,59 +146,27 @@ def config_set(
     if not path.exists():
         raise click.ClickException(f"Config file not found: {path}. Run 'osb config init' first.")
 
-    content = path.read_text()
-
-    # TODO: Replace this regex-based TOML editing with a parser-backed update
-    # path so formatting/comments survive reliably as config complexity grows.
-    # Simple key replacement in TOML
-    # Supports dotted keys like connection.domain
-    parts = key.split(".", 1)
-    if len(parts) == 2:
-        section, field = parts
-        # Try to find and update existing value
-        import re
-
-        section_pattern = rf"(\[{re.escape(section)}\].*?)(?=\n\[|\Z)"
-        section_match = re.search(section_pattern, content, re.DOTALL)
-
-        # Infer TOML value type: bool > int > float > string
-        def _toml_value(raw: str) -> str:
-            if raw.lower() in ("true", "false"):
-                return raw.lower()
-            try:
-                int(raw)
-                return raw
-            except ValueError:
-                pass
-            try:
-                float(raw)
-                return raw
-            except ValueError:
-                pass
-            return f'"{raw}"'
-
-        toml_val = _toml_value(value)
-
-        if section_match:
-            section_text = section_match.group(1)
-            field_pattern = rf'^(#?\s*{re.escape(field)}\s*=\s*).*$'
-            field_match = re.search(field_pattern, section_text, re.MULTILINE)
-            if field_match:
-                new_line = f'{field} = {toml_val}'
-                new_section = section_text[:field_match.start()] + new_line + section_text[field_match.end():]
-                content = content[:section_match.start()] + new_section + content[section_match.end():]
-            else:
-                # Add field to section
-                insert_pos = section_match.end()
-                content = content[:insert_pos] + f'\n{field} = {toml_val}' + content[insert_pos:]
-        else:
-            # Add new section
-            content += f'\n[{section}]\n{field} = {toml_val}\n'
-    else:
+    section, _, field = key.partition(".")
+    if not section or not field or "." in field:
         raise click.ClickException(
             "Key must be in 'section.field' format (e.g. connection.domain)."
         )
 
-    path.write_text(content)
+    try:
+        document = tomlkit.parse(path.read_text(encoding="utf-8"))
+    except ParseError as exc:
+        raise click.ClickException(
+            f"Config file is not valid TOML ({path}): {exc}"
+        ) from exc
+
+    table = document.get(section)
+    if table is None:
+        table = tomlkit.table()
+        document[section] = table
+    if not isinstance(table, (Table, InlineTable, OutOfOrderTableProxy)):
+        raise click.ClickException(f"Cannot set {key}: '{section}' is not a TOML table.")
+
+    table[field] = value if key in STRING_KEYS else _parse_toml_value(value)
+    path.write_text(tomlkit.dumps(document), encoding="utf-8")
 
     obj.output.success(f"Set {key} = {value}")

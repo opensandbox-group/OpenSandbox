@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="952" viewBox="0 0 1180 952" role="img" aria-labelledby="title desc">
+<title id="title">Ingress routing</title>
+<desc id="desc">A client request carrying a sandbox id and port reaches the ingress gateway, which resolves the route, looks up the endpoint in a live workload cache, and forwards to the sandbox port. Errors are 404, 503, or 502. Routing state comes from what workloads already publish.</desc>
+<defs>
+<marker id="data" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#2563eb"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="952" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Ingress routing</text>
+<text x="48" y="96" class="body">From request to sandbox port · resolved against a live workload cache</text>
+<path d="M988 54h36" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="1034" y="60" class="edge" style="fill:#2563eb">Request</text>
+<rect x="48" y="128" width="1084" height="136" rx="12" fill="#f7faff" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="158" class="section">CLIENTS</text>
+<rect x="72" y="176" width="320" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="206" class="heading">Header mode</text>
+<text x="88" y="231" class="label">OpenSandbox-Ingress-To: id-port</text>
+<rect x="416" y="176" width="320" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="432" y="206" class="heading">URI mode</text>
+<text x="432" y="231" class="label">/&lt;sandbox-id&gt;/&lt;port&gt;/&lt;path&gt;</text>
+<rect x="760" y="176" width="348" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="776" y="206" class="heading">Secure access</text>
+<text x="776" y="231" class="label">Signed route token, no lookup</text>
+<path d="M590 264V326" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="606" y="299" class="edge" style="fill:#2563eb">Route = sandbox ID + port</text>
+<rect x="48" y="326" width="1084" height="180" rx="12" fill="#f5f9ff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="72" y="359" class="section">INGRESS GATEWAY</text>
+<text x="72" y="395" class="heading">Reverse proxy in front of every sandbox</text>
+<text x="72" y="428" class="body">1 · resolve route from header, URI, or token</text>
+<text x="72" y="457" class="body">2 · look up endpoint in the live workload cache</text>
+<text x="72" y="486" class="body">3 · forward — strip routing headers, add X-Forwarded-*</text>
+<rect x="760" y="350" width="348" height="132" rx="10" fill="#ffffff" stroke="#c9dbf1" stroke-width="1.5"/>
+<text x="780" y="383" class="heading">Endpoint sources</text>
+<text x="780" y="416" class="body">BatchSandbox annotations</text>
+<text x="780" y="443" class="body">agent-sandbox FQDN · FastPath</text>
+<text x="780" y="467" class="label">no per-sandbox config</text>
+<path d="M590 506V566" fill="none" stroke="#2563eb" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#data)"/>
+<text x="606" y="539" class="edge" style="fill:#2563eb">HTTP / WebSocket · path preserved</text>
+<rect x="48" y="566" width="1084" height="142" rx="12" fill="#ffffff" stroke="#a9bfd8" stroke-width="1.5"/>
+<text x="72" y="597" class="section">SANDBOX</text>
+<rect x="72" y="620" width="420" height="64" rx="8" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="88" y="650" class="heading">User workload port</text>
+<text x="88" y="675" class="label">HTTP · WebSocket · streamed both ways</text>
+<text x="528" y="645" class="body">Responses pass through verbatim</text>
+<text x="528" y="673" class="body">Redirects are never followed</text>
+<text x="48" y="756" class="section">WHEN ROUTING CANNOT PROCEED</text>
+<rect x="72" y="772" width="320" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="88" y="802" class="heading">404</text>
+<text x="88" y="827" class="label">No such sandbox</text>
+<rect x="416" y="772" width="320" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="432" y="802" class="heading">503</text>
+<text x="432" y="827" class="label">Exists but not ready</text>
+<rect x="760" y="772" width="348" height="64" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="776" y="802" class="heading">502</text>
+<text x="776" y="827" class="label">Infrastructure failure</text>
+<rect x="48" y="860" width="1084" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="887" class="heading">State-driven routing</text>
+<text x="430" y="887" class="body">workloads already publish the endpoints</text>
+<text x="72" y="914" class="label">Routing state comes from what workloads publish — nothing is configured per sandbox.</text>
+</svg>

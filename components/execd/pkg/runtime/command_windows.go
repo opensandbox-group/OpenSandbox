@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -97,6 +97,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		var eName, eValue string
 		eCode := 1
+		var exitCodePtr *int
 		var traceback []string
 
 		var exitError *exec.ExitError
@@ -105,6 +106,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
 			eCode = exitCode
+			exitCodePtr = &exitCode
 		} else {
 			eName = "CommandExecError"
 			eValue = err.Error()
@@ -115,6 +117,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EName:     eName,
 			EValue:    eValue,
 			Traceback: traceback,
+			ExitCode:  exitCodePtr,
 		})
 
 		log.Error("command: run failed: %v", err)
@@ -142,6 +145,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
+		pipe.Close() // best-effort
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 

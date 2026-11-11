@@ -42,6 +42,21 @@ uv run pyright                                   # type check
 uv run pytest --cov=opensandbox_server --cov-report=term  # with coverage
 ```
 
+### FastPath stub regeneration
+
+The gRPC stubs under `opensandbox_server/services/fast_sandbox/generated/` are generated from the fast-sandbox repo's `api/proto/v2/fastpath.proto`. Regenerate them after fast-sandbox proto changes (version must match `grpcio-tools` in `pyproject.toml` — currently protobuf Python 7.35.x / grpcio 1.83.x):
+
+```bash
+# from the server/ directory; <proto-dir> holds fastpath.proto
+uv run python -m grpc_tools.protoc \
+  -I <proto-dir> \
+  --python_out=opensandbox_server/services/fast_sandbox/generated \
+  --grpc_python_out=opensandbox_server/services/fast_sandbox/generated \
+  <proto-dir>/fastpath.proto
+```
+
+Then post-process both files to match the checked-in style: prepend the pyright banner (`# pyright: reportAttributeAccessIssue=false` + "protobuf-generated modules expose dynamic attributes.") and rewrite the grpc module's `import fastpath_pb2 as fastpath__pb2` to `from . import fastpath_pb2 as fastpath__pb2` (relative import).
+
 ## Architecture
 
 Layered architecture:

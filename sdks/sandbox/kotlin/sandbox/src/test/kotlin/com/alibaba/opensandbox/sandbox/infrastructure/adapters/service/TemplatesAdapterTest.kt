@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Alibaba Group Holding Ltd.
+ * Copyright 2026 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -96,6 +96,7 @@ class TemplatesAdapterTest {
                 "format": "overlaybd",
                 "status": { "phase": "Pending" },
                 "resourceLimits": { "cpu": "2", "memory": "512Mi", "disk": "10Gi" },
+                "env": { "LOG_LEVEL": "info" },
                 "readiness": { "probe": "tcp://127.0.0.1:44772", "warmupSeconds": 30 },
                 "createdAt": "2026-09-17T10:00:00Z",
                 "updatedAt": "2026-09-17T10:00:00Z"
@@ -111,6 +112,7 @@ class TemplatesAdapterTest {
                 .publish("s3://bucket/publish")
                 .resourceLimits(mapOf("cpu" to "2", "memory" to "512Mi", "disk" to "10Gi"))
                 .entrypoint("tail", "-f", "/dev/null")
+                .env(mapOf("LOG_LEVEL" to "info"))
                 .metadata(mapOf("team" to "backend"))
                 .readiness {
                     probe("tcp://127.0.0.1:44772")
@@ -128,6 +130,7 @@ class TemplatesAdapterTest {
         assertEquals("s3://bucket/publish", payload["publish"]!!.jsonPrimitive.content)
         assertEquals("2", payload["resourceLimits"]!!.jsonObject["cpu"]!!.jsonPrimitive.content)
         assertEquals("tail", payload["entrypoint"]!!.jsonArray[0].jsonPrimitive.content)
+        assertEquals("info", payload["env"]!!.jsonObject["LOG_LEVEL"]!!.jsonPrimitive.content)
         assertEquals("backend", payload["metadata"]!!.jsonObject["team"]!!.jsonPrimitive.content)
         val readiness = payload["readiness"]!!.jsonObject
         assertEquals("tcp://127.0.0.1:44772", readiness["probe"]!!.jsonPrimitive.content)
@@ -142,6 +145,7 @@ class TemplatesAdapterTest {
         assertEquals(TemplatePhase.PENDING, result.status.phase)
         assertNull(result.status.manifestRef)
         assertEquals(mapOf("cpu" to "2", "memory" to "512Mi", "disk" to "10Gi"), result.resourceLimits)
+        assertEquals(mapOf("LOG_LEVEL" to "info"), result.env)
         assertEquals(30, result.readiness?.warmupSeconds)
     }
 
@@ -160,6 +164,7 @@ class TemplatesAdapterTest {
                     "manifestRef": "s3://bucket/publish/tpl_1"
                 },
                 "metadata": { "team": "backend" },
+                "env": { "LOG_LEVEL": "info" },
                 "createdAt": "2026-09-17T10:00:00Z",
                 "updatedAt": "2026-09-17T10:05:00Z"
             }
@@ -179,6 +184,7 @@ class TemplatesAdapterTest {
         assertEquals(TemplateFormat.NATIVE, result.format)
         assertEquals(TemplatePhase.SUCCEEDED, result.status.phase)
         assertEquals("s3://bucket/publish/tpl_1", result.status.manifestRef)
+        assertEquals(mapOf("LOG_LEVEL" to "info"), result.env)
         assertEquals(OffsetDateTime.parse("2026-09-17T10:00:00Z"), result.createdAt)
     }
 

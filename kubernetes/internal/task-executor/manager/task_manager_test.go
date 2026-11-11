@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -410,6 +410,10 @@ func TestTaskManager_List(t *testing.T) {
 	mgr, _ := setupTestManager(t)
 	ctx := context.Background()
 
+	// Start the manager so task deletion is finalized before t.TempDir cleanup.
+	mgr.Start(ctx)
+	defer mgr.Stop()
+
 	// Initially empty
 	tasks, err := mgr.List(ctx)
 	if err != nil {
@@ -431,7 +435,7 @@ func TestTaskManager_List(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
-	defer mgr.Delete(ctx, task.Name)
+	defer cleanupTask(t, mgr, task.Name)
 
 	// List should return 1 task
 	tasks, err = mgr.List(ctx)
@@ -509,38 +513,34 @@ func TestTaskManager_DeleteNonExistent(t *testing.T) {
 
 func TestTaskManager_SyncRestartsRecoveredActiveTaskWhenRuntimeStateIsLost(t *testing.T) {
 	ctx := context.Background()
-	cfg := &config.Config{
-		DataDir:           t.TempDir(),
-		EnableSidecarMode: false,
-		ReconcileInterval: time.Hour,
-	}
+	cfg := &config.Config{DataDir: t.TempDir(), ReconcileInterval: time.Hour}
 	taskStore, err := store.NewFileStore(cfg.DataDir)
 	require.NoError(t, err)
-
-	persisted := &types.Task{
+	desired := &types.Task{
 		Name: "resume-task",
 		Process: &api.Process{
 			Command: []string{"sleep", "3600"},
-		},
-		Status: types.Status{
-			State: types.TaskStateRunning,
+			Lifecycle: &api.ProcessLifecycle{PostStop: &api.LifecycleHandler{
+				Exec: &api.ExecAction{Command: []string{"true"}},
+			}},
 		},
 	}
-	require.NoError(t, taskStore.Create(ctx, persisted))
-
 	exec := newFakeExecutor()
-	mgrIface, err := NewTaskManager(cfg, taskStore, exec)
+	mgr, err := NewTaskManager(cfg, taskStore, exec)
 	require.NoError(t, err)
+	mgr.Start(ctx)
+	_, err = mgr.Create(ctx, desired)
+	require.NoError(t, err)
+	mgr.Stop()
+	assert.Zero(t, exec.StopCount(), "executor shutdown must not finish a still-desired task")
 
-	mgr := mgrIface.(*taskManager)
-	require.NoError(t, mgr.recoverTasks(ctx))
-
-	tasks, err := mgr.Sync(ctx, []*types.Task{{
-		Name: "resume-task",
-		Process: &api.Process{
-			Command: []string{"sleep", "3600"},
-		},
-	}})
+	// A restarted executor sees the lost process but retains the same file store.
+	exec = newFakeExecutor()
+	mgr, err = NewTaskManager(cfg, taskStore, exec)
+	require.NoError(t, err)
+	mgr.Start(ctx)
+	defer mgr.Stop()
+	tasks, err := mgr.Sync(ctx, []*types.Task{desired})
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, 1, exec.StartCount(), "sync should recreate an active task whose recovered runtime state was lost")
@@ -838,36 +838,6 @@ func TestDeletingTaskWithFinishedPostStopWaitsForTerminalState(t *testing.T) {
 	terminal.state = types.TaskStateFailed
 	assert.False(t, decideTaskStop(task, terminal, false).shouldStop)
 	assert.True(t, shouldFinalizeTaskDeletion(task, terminal, false))
-}
-
-func TestTaskManager_InspectAfterStopReturnsExecutorStatus(t *testing.T) {
-	ctx := context.Background()
-	now := time.Now()
-	task := &types.Task{
-		Name: "poststop-inspect",
-		Status: types.Status{
-			State: types.TaskStateRunning,
-			SubStatuses: []types.SubStatus{{
-				Reason:     reasonPostStopHookCompleted,
-				FinishedAt: &now,
-			}},
-		},
-	}
-	expected := &types.Status{
-		State: types.TaskStateSucceeded,
-		SubStatuses: []types.SubStatus{{
-			Reason:     "Succeeded",
-			FinishedAt: &now,
-		}},
-	}
-	exec := newFakeExecutor()
-	exec.inspect[task.Name] = expected
-	mgr := &taskManager{executor: exec}
-
-	status := mgr.inspectAfterStop(ctx, task, task.Name)
-
-	require.NotNil(t, status)
-	assert.Equal(t, *expected, *status)
 }
 
 func TestTaskManager_RetainedFailedTaskPreservesFailureAfterPostStop(t *testing.T) {
@@ -1430,14 +1400,14 @@ func TestTaskManager_CountActiveTasks(t *testing.T) {
 	}
 	defer mgr.Delete(ctx, task1.Name)
 
-	// Wait for task1 to complete
-	time.Sleep(500 * time.Millisecond)
-
-	// Should have 0 active tasks after task1 completes
-	activeCount = activeTaskCount(mgr.(*taskManager))
-	if activeCount != 0 {
-		t.Errorf("Active count after task1 completion = %d, want 0", activeCount)
-	}
+	// Wait for task1 to reach a terminal state. The reconcile loop observes the
+	// exited process asynchronously (once per ReconcileInterval), so poll for the
+	// expected count instead of sleeping a fixed duration: under CI load a
+	// hardcoded 500ms can elapse before the transition lands, spuriously leaving
+	// task1 active and failing both this and the following assertion.
+	require.Eventually(t, func() bool {
+		return activeTaskCount(mgr.(*taskManager)) == 0
+	}, 5*time.Second, 10*time.Millisecond, "task1 should become inactive once it completes")
 
 	// Create a running task
 	task2 := &types.Task{

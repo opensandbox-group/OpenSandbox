@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -92,7 +92,10 @@ def _build_sync_pool(manager: _RecordingSyncManager) -> SandboxPoolSync:
     )
 
 
-def _build_async_pool(manager: _RecordingAsyncManager) -> SandboxPoolAsync:
+def _build_async_pool(
+    manager: _RecordingAsyncManager,
+    drain_timeout: timedelta = timedelta(seconds=30),
+) -> SandboxPoolAsync:
     async def _factory(_: ConnectionConfig) -> _RecordingAsyncManager:
         return manager
 
@@ -103,6 +106,7 @@ def _build_async_pool(manager: _RecordingAsyncManager) -> SandboxPoolAsync:
         connection_config=ConnectionConfig(),
         creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
         sandbox_manager_factory=_factory,  # type: ignore[arg-type]
+        drain_timeout=drain_timeout,
     )
 
 
@@ -410,18 +414,19 @@ async def test_async_create_one_sandbox_renews_before_returning_id() -> None:
 
 @pytest.mark.asyncio
 async def test_async_schedule_kill_discarded_alive_does_not_block_caller() -> None:
-    """Async counterpart: scheduling must return synchronously without awaiting kills."""
+    """Async counterpart: scheduling must not await the kill RPCs."""
     manager = _RecordingAsyncManager(per_call_delay=0.1)
     pool = _build_async_pool(manager)
     pool._sandbox_manager = manager  # type: ignore[assignment]
 
     ids = ("a", "b", "c")
     start = asyncio.get_event_loop().time()
-    pool._schedule_kill_discarded_alive("kill-pool", ids, source="acquire")
+    await pool._schedule_kill_discarded_alive("kill-pool", ids, source="acquire")
     elapsed = asyncio.get_event_loop().time() - start
 
-    # _schedule is sync (asyncio.create_task), so it should return in microseconds.
-    assert elapsed < 0.01, (
+    # The scheduling call only creates a background task, so it should return
+    # in microseconds instead of awaiting the (0.1s each) kill RPCs.
+    assert elapsed < 0.05, (
         f"_schedule_kill_discarded_alive blocked for {elapsed:.3f}s; "
         "expected immediate return via create_task"
     )
@@ -434,3 +439,61 @@ async def test_async_schedule_kill_discarded_alive_does_not_block_caller() -> No
     ):
         await asyncio.sleep(0.02)
     assert sorted(manager.killed) == sorted(ids)
+
+
+async def test_async_schedule_kill_discarded_alive_falls_back_to_inline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: the RuntimeError fallback used to silently drop the cleanup.
+
+    When ``asyncio.create_task`` is unavailable the kills must still run
+    (inline), matching the sync pool's "better to slow the caller than to drop
+    the cleanup" contract.
+    """
+    manager = _RecordingAsyncManager(per_call_delay=0.0)
+    pool = _build_async_pool(manager)
+    pool._sandbox_manager = manager  # type: ignore[assignment]
+
+    def _raise_runtime_error(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no running event loop")
+
+    monkeypatch.setattr(
+        "opensandbox.pool_async.asyncio.create_task", _raise_runtime_error
+    )
+
+    ids = ("x", "y")
+    await pool._schedule_kill_discarded_alive("kill-pool", ids, source="acquire")
+
+    assert sorted(manager.killed) == sorted(ids), (
+        "discarded-alive kill was silently dropped when create_task raised"
+    )
+
+
+
+@pytest.mark.asyncio
+async def test_async_graceful_shutdown_drains_scheduled_kills() -> None:
+    """Scheduled kills target ids already dropped from the store; cancelling
+    them on shutdown would leave those sandboxes running until their TTL."""
+    manager = _RecordingAsyncManager(per_call_delay=0.2)
+    pool = _build_async_pool(manager)
+    await pool.start()
+
+    await pool._schedule_kill_discarded_alive("kill-pool", ("stale-1",), source="acquire")
+    await pool.shutdown(graceful=True)
+
+    assert manager.killed == ["stale-1"]
+
+
+@pytest.mark.asyncio
+async def test_async_graceful_shutdown_bounds_kill_drain_by_drain_timeout() -> None:
+    manager = _RecordingAsyncManager(per_call_delay=5.0)
+    pool = _build_async_pool(manager, drain_timeout=timedelta(milliseconds=50))
+    await pool.start()
+
+    await pool._schedule_kill_discarded_alive("kill-pool", ("stale-1",), source="acquire")
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    await pool.shutdown(graceful=True)
+
+    assert loop.time() - started < 1.0
+    assert manager.killed == []

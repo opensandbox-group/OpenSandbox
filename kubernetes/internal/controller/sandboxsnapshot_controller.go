@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"text/template"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -69,6 +70,11 @@ type SandboxSnapshotReconciler struct {
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
 
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache. It is required when a cached read can be stale (for example the
+	// commit Pod status that lags behind the commit Job status).
+	APIReader client.Reader
+
 	// ImageCommitterImage is the image used for commit and unpause Jobs.
 	ImageCommitterImage string
 
@@ -80,6 +86,9 @@ type SandboxSnapshotReconciler struct {
 
 	// SnapshotRegistry is the OCI registry for snapshot images (from Controller Manager startup params)
 	SnapshotRegistry string
+
+	// SnapshotImageURITemplate overrides image naming; nil uses DefaultSnapshotImageURITemplate.
+	SnapshotImageURITemplate *template.Template
 
 	// SnapshotPushSecret is the K8s Secret name for pushing to registry (from Controller Manager startup params)
 	SnapshotPushSecret string
@@ -165,6 +174,9 @@ func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.APIReader == nil {
+		r.APIReader = mgr.GetAPIReader()
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.SandboxSnapshot{}).
 		Owns(&batchv1.Job{}).

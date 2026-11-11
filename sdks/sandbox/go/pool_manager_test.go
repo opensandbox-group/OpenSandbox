@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -1017,4 +1017,85 @@ func waitForIdleCount(t *testing.T, store PoolStateStore, poolName string, want 
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %d idle entries in pool %q", want, poolName)
+}
+
+// deadlineDrainStore simulates a context-aware state store whose take operation stalls.
+type deadlineDrainStore struct {
+	PoolStateStore
+	takeContext context.Context
+}
+
+func (s *deadlineDrainStore) TryTakeIdle(ctx context.Context, poolName string) (string, error) {
+	s.takeContext = ctx
+	if _, ok := ctx.Deadline(); !ok {
+		return "", nil
+	}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestSandboxPoolManager_Destroy_DrainTimeoutBoundsStateStore(t *testing.T) {
+	store := &deadlineDrainStore{PoolStateStore: NewInMemoryPoolStateStore()}
+	rec := newKillRecorder(t)
+	manager := newTestPoolManager(t, store, rec.srv.URL)
+	_, err := manager.Destroy(context.Background(), "test-pool", PoolDestroyOptions{
+		DrainTimeout: durationPtr(10 * time.Millisecond),
+	})
+	var incomplete *PoolDestroyIncompleteError
+	if !errors.As(err, &incomplete) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Destroy error = %v, want incomplete drain wrapping deadline exceeded", err)
+	}
+	state, err := store.GetDestroyState(context.Background(), "test-pool")
+	if err != nil || state != PoolDestroyStateDestroying {
+		t.Fatalf("state after blocked drain = %s, %v, want DESTROYING", state, err)
+	}
+	// Retrying with no deadline can complete and leaves the store context unbounded.
+	result, err := manager.Destroy(context.Background(), "test-pool", PoolDestroyOptions{
+		DrainTimeout: durationPtr(0),
+	})
+	if err != nil || result.State != PoolDestroyStateDestroyed {
+		t.Fatalf("retry Destroy = %v, %v, want DESTROYED", result, err)
+	}
+	if _, ok := store.takeContext.Deadline(); ok {
+		t.Fatal("zero DrainTimeout must not add a deadline")
+	}
+}
+
+func TestSandboxPoolManager_Destroy_CancelledDrainPreservesIdle(t *testing.T) {
+	store := NewInMemoryPoolStateStore()
+	rec := newKillRecorder(t)
+	seedIdle(t, store, "test-pool", 1)
+	manager := newTestPoolManager(t, store, rec.srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := manager.Destroy(ctx, "test-pool", PoolDestroyOptions{DrainTimeout: durationPtr(0)})
+	var incomplete *PoolDestroyIncompleteError
+	if !errors.As(err, &incomplete) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("Destroy error = %v, want incomplete drain wrapping cancellation", err)
+	}
+	entries, err := store.SnapshotIdleEntries(context.Background(), "test-pool")
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("idle entries after cancelled drain = %v, %v, want original entry", entries, err)
+	}
+	if got := rec.deleted.Load(); got != 0 {
+		t.Fatalf("DELETE requests = %d, want 0", got)
+	}
+}
+
+func TestSandboxPoolManager_Destroy_DrainRespectsEarlierCallerDeadline(t *testing.T) {
+	store := &deadlineDrainStore{PoolStateStore: NewInMemoryPoolStateStore()}
+	rec := newKillRecorder(t)
+	manager := newTestPoolManager(t, store, rec.srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := manager.Destroy(ctx, "test-pool", PoolDestroyOptions{DrainTimeout: durationPtr(time.Minute)})
+	var incomplete *PoolDestroyIncompleteError
+	if !errors.As(err, &incomplete) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Destroy error = %v, want incomplete drain wrapping caller deadline", err)
+	}
+	want, _ := ctx.Deadline()
+	got, ok := store.takeContext.Deadline()
+	if !ok || !got.Equal(want) {
+		t.Fatalf("store deadline = %v, %t, want caller deadline %v", got, ok, want)
+	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ type labelSelectorPredicate struct {
 	keys []string
 }
 
-func newLabelSelectorPredicate(args map[string]interface{}) (predicate, error) {
+func newLabelSelectorPredicate(args map[string]interface{}) (Predicate, error) {
 	return &labelSelectorPredicate{keys: extractStringSlice(args, "keys")}, nil
 }
 
@@ -55,7 +55,7 @@ func extractStringSlice(args map[string]interface{}, key string) []string {
 	return result
 }
 
-func (p *labelSelectorPredicate) predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
+func (p *labelSelectorPredicate) Predicate(_ context.Context, sbx *sandboxv1alpha1.BatchSandbox, pool *sandboxv1alpha1.Pool) bool {
 	if len(p.keys) == 0 {
 		return true
 	}

@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,6 +31,28 @@ class IsolatedWorkspaceSpec(BaseModel):
     mode: str | None = Field(
         default=None,
         description="Bind mode: 'rw' (read-write), 'overlay' (copy-on-write), or 'ro' (read-only). None = server default.",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class IsolatedOverlaySpec(BaseModel):
+    """One overlay mount inside the isolated namespace.
+
+    ``mode='overlay'`` mounts a copy-on-write view: ``persist=True``
+    (default) uses a host upper directory, ``persist=False`` an ephemeral
+    tmpfs discarded with the session. ``rw``/``ro`` bind directly and must
+    leave ``persist`` unset.
+    """
+
+    path: str = Field(description="Mount destination inside the namespace (absolute)")
+    mode: str | None = Field(
+        default=None,
+        description="Mount mode: 'rw' (read-write), 'overlay' (copy-on-write), or 'ro' (read-only). None = server default ('overlay').",
+    )
+    persist: bool | None = Field(
+        default=None,
+        description="Overlay mode only. True (default) allocates a host upper directory; False uses an ephemeral tmpfs upper. None = server default.",
     )
 
     model_config = ConfigDict(populate_by_name=True)
@@ -68,10 +90,24 @@ class BindMount(BaseModel):
 
 
 class CreateIsolatedSessionRequest(BaseModel):
-    """Request to create an isolated bash session."""
+    """Request to create an isolated bash session.
 
-    workspace: IsolatedWorkspaceSpec = Field(
-        description="Workspace bind configuration"
+    ``workspace`` is legacy sugar: at least one of ``workspace`` or
+    ``overlays`` is required, and ``workspace`` is prepended when both are
+    set.
+    """
+
+    workspace: IsolatedWorkspaceSpec | None = Field(
+        default=None,
+        description="Workspace bind configuration (legacy single-workspace sugar)",
+    )
+    overlays: list[IsolatedOverlaySpec] | None = Field(
+        default=None,
+        description=(
+            "Independent overlay mounts inside one namespace. bubblewrap applies "
+            "mounts shallow-first, so a nested overlay shadows its ancestors "
+            "within its own subtree. Paths must be absolute and unique."
+        ),
     )
     profile: str | None = Field(
         default=None,
@@ -134,7 +170,11 @@ class IsolatedSessionInfo(BaseModel):
     )
     workspace: IsolatedWorkspaceSpec | None = Field(
         default=None,
-        description="Workspace bind configuration used at session creation.",
+        description="Workspace bind configuration used at session creation (single-overlay sessions only).",
+    )
+    overlays: list[IsolatedOverlaySpec] | None = Field(
+        default=None,
+        description="Effective overlay mounts of the session.",
     )
     extra_writable: list[str] | None = Field(
         default=None,
@@ -199,7 +239,11 @@ class IsolatedSessionState(BaseModel):
     )
     workspace: IsolatedWorkspaceSpec | None = Field(
         default=None,
-        description="Workspace bind configuration used at session creation.",
+        description="Workspace bind configuration used at session creation (single-overlay sessions only).",
+    )
+    overlays: list[IsolatedOverlaySpec] | None = Field(
+        default=None,
+        description="Effective overlay mounts of the session.",
     )
     extra_writable: list[str] | None = Field(
         default=None,
@@ -276,8 +320,9 @@ class IsolatedRunOpts(BaseModel):
 class IsolatedBackgroundRun(BaseModel):
     """Handle returned when a run is started with background: true.
 
-    Background runs require a writable log location, so sessions with a
-    read-only (``ro``) workspace reject them with an error.
+    Background runs require a writable log location under the first
+    overlay, so sessions whose first overlay is read-only (``ro``) or an
+    ephemeral overlay (``persist=False``) reject them with an error.
     """
 
     session_id: str = Field(description="Session the run was started in")

@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,10 +24,12 @@ import unittest
 from pathlib import Path
 
 PATH = Path(__file__).resolve().parents[1] / "mitmscripts" / "revision_receiver.py"
-SPEC = importlib.util.spec_from_file_location("revision_receiver", PATH)
-receiver = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = receiver
-SPEC.loader.exec_module(receiver)
+receiver = sys.modules.get("revision_receiver")
+if receiver is None:
+    SPEC = importlib.util.spec_from_file_location("revision_receiver", PATH)
+    receiver = importlib.util.module_from_spec(SPEC)
+    sys.modules[SPEC.name] = receiver
+    SPEC.loader.exec_module(receiver)
 
 
 class RevisionReceiverTest(unittest.TestCase):

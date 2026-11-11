@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 import { DEFAULT_USER_AGENT } from "../core/constants.js";
 import type { ConnectionConfig } from "../config/connection.js";
+import { createRedirectSafeFetch } from "../config/redirectFetch.js";
 
 const DISABLE_METRICS_ENV = "OPENSANDBOX_DISABLE_METRICS";
 
@@ -78,14 +79,15 @@ export function reportSandboxCreateMetric(
       payload.image = opts.image;
     }
 
-    const url = `${connectionConfig.getBaseUrl().replace(/\/$/, "")}/metrics/events`;
+    const baseUrl = connectionConfig.getBaseUrl();
+    const url = `${baseUrl.replace(/\/$/, "")}/metrics/events`;
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...(connectionConfig.headers ?? {}),
     };
     if (
       connectionConfig.apiKey &&
-      !headers["OPEN-SANDBOX-API-KEY"]
+      !Object.keys(headers).some((name) => name.toLowerCase() === "open-sandbox-api-key")
     ) {
       headers["OPEN-SANDBOX-API-KEY"] = connectionConfig.apiKey;
     }
@@ -97,12 +99,16 @@ export function reportSandboxCreateMetric(
         connectionConfig.userAgent || DEFAULT_USER_AGENT;
     }
 
-    void connectionConfig
-      .fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-      })
+    // Report through the redirect-safe transport so the API key is never
+    // replayed if the lifecycle endpoint redirects cross-origin.
+    const fetchImpl = createRedirectSafeFetch(baseUrl, connectionConfig.fetch, {
+      overallTimeoutMs: connectionConfig.requestTimeoutSeconds * 1000,
+    });
+    void fetchImpl(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    })
       .then(async (res) => {
         // Drain body to allow connection reuse; ignore status.
         try {

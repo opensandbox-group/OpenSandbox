@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -75,4 +75,46 @@ func TestDispatchExecutionResultHooks_SuccessEmitsComplete(t *testing.T) {
 
 	require.Equal(t, 0, errorCalls)
 	require.Equal(t, 1, completeCalls)
+}
+
+func TestDispatchExecutionResultHooks_TerminalEventFollowsOutput(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		name := "success"
+		terminalEvent := "complete"
+		var errOutput *execute.ErrorOutput
+		if failed {
+			name = "failure"
+			terminalEvent = "error"
+			errOutput = &execute.ErrorOutput{EName: "ValueError", EValue: "failed cell"}
+		}
+		t.Run(name, func(t *testing.T) {
+			var events []string
+			req := &ExecuteCodeRequest{Hooks: ExecuteResultHook{
+				OnExecuteResult: func(_ map[string]interface{}, _ int) {
+					events = append(events, "result")
+				},
+				OnExecuteStdout: func(_ string) { events = append(events, "stdout") },
+				OnExecuteStderr: func(_ string) { events = append(events, "stderr") },
+				OnExecuteError: func(_ *execute.ErrorOutput) {
+					events = append(events, "error")
+				},
+				OnExecuteComplete: func(_ time.Duration) {
+					events = append(events, "complete")
+				},
+			}}
+
+			dispatchExecutionResultHooks(req, &execute.ExecutionResult{
+				ExecutionCount: 1,
+				ExecutionData:  map[string]interface{}{"text/plain": "4"},
+				Stream: []*execute.StreamOutput{
+					{Name: execute.StreamStdout, Text: "output"},
+					{Name: execute.StreamStderr, Text: "diagnostic"},
+				},
+				Error:         errOutput,
+				ExecutionTime: 50 * time.Millisecond,
+			})
+
+			require.Equal(t, []string{"result", "stdout", "stderr", terminalEvent}, events)
+		})
+	}
 }

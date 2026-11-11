@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -77,6 +77,9 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.quiesced.Load() {
+		return ErrQuiesced
+	}
 	if m.domainPolicy == nil {
 		return fmt.Errorf("no nftables policy applied; dropping resolved domain %q", domain)
 	}
@@ -119,6 +122,9 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 }
 
 func (m *Manager) StartDomainRefresh(ctx context.Context, lookup func(context.Context, string) ([]ResolvedIP, error)) {
+	if m.isQuiesced() {
+		return
+	}
 	safego.Go(func() {
 		timer := time.NewTimer(jitteredRefreshDelay())
 		defer timer.Stop()
@@ -127,6 +133,9 @@ func (m *Manager) StartDomainRefresh(ctx context.Context, lookup func(context.Co
 			case <-ctx.Done():
 				return
 			case <-timer.C:
+			}
+			if m.isQuiesced() {
+				return
 			}
 			// Arm the next deadline before the batch: a batch that consumes
 			// part of its budget then delays the following tick by only the
@@ -152,6 +161,10 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 		lastAttempt time.Time
 	}
 	m.mu.Lock()
+	if m.quiesced.Load() {
+		m.mu.Unlock()
+		return
+	}
 	now := m.tracker.now()
 	due := now.Add(domainRefreshLead)
 	candidates := make([]candidate, 0, len(m.domains))
@@ -185,6 +198,10 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 					return
 				}
 				m.mu.Lock()
+				if m.quiesced.Load() {
+					m.mu.Unlock()
+					return
+				}
 				current := m.domains[item.domain] == item.entry
 				if current {
 					item.entry.lastAttempt = m.tracker.now()
@@ -202,6 +219,10 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 				if err != nil {
 					var retryIn time.Duration
 					m.mu.Lock()
+					if m.quiesced.Load() {
+						m.mu.Unlock()
+						return
+					}
 					if m.domains[item.domain] == item.entry {
 						now := m.tracker.now()
 						item.entry.failures++
@@ -237,7 +258,7 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *resolvedDomain, ips []ResolvedIP) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
+	if m.quiesced.Load() || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
 		return
 	}
 	entry.failures = 0
@@ -330,9 +351,17 @@ func buildResolvedIPElementsScript(table string, elements []ResolvedIP) string {
 		} else {
 			continue
 		}
-		fmt.Fprintf(&script, "add element inet %s %s { %s }\n", table, setName, addr)
-		fmt.Fprintf(&script, "delete element inet %s %s { %s }\n", table, setName, addr)
-		fmt.Fprintf(&script, "add element inet %s %s { %s timeout %ds }\n", table, setName, addr, int(element.TTL/time.Second))
+		WriteTimedElement(&script, table, setName, addr, element.TTL)
 	}
 	return script.String()
+}
+
+// WriteTimedElement writes nft commands that leave addr in set with exactly
+// ttl left, whether or not it is already there. Adding an element that already
+// exists succeeds without changing its kernel expiry on some kernels (#1738),
+// so the element is added, deleted and added again within the same script.
+func WriteTimedElement(b *strings.Builder, table, set string, addr netip.Addr, ttl time.Duration) {
+	fmt.Fprintf(b, "add element inet %s %s { %s }\n", table, set, addr)
+	fmt.Fprintf(b, "delete element inet %s %s { %s }\n", table, set, addr)
+	fmt.Fprintf(b, "add element inet %s %s { %s timeout %ds }\n", table, set, addr, int(ttl/time.Second))
 }

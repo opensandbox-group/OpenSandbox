@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -144,6 +144,8 @@ func TestFailureCountersCarryBoundedAttributeWithoutSharingState(t *testing.T) {
 	RecordDNSQueryFailed(DNSFailureRcode)
 	RecordDNSQueryFailed(DNSFailureUpstreamError)
 	RecordNftablesUpdateFailed(NftOpDynamicAdd)
+	RecordNftablesUpdateFailed(NftOpUpstreamProxyAdd)
+	RecordNftablesUpdateFailed(NftOpUpstreamProxySync)
 	RecordDNSReplyFailed(DNSReplyStageAnswer)
 	RecordDNSReplyFailed(DNSReplyStageAnswer)
 	RecordDNSReplyFailed(DNSReplyStageDeny)
@@ -164,7 +166,7 @@ func TestFailureCountersCarryBoundedAttributeWithoutSharingState(t *testing.T) {
 	}, reply, "each stage must be its own stream")
 
 	nft := counterByAttr(t, &rm, "egress.nftables.updates.failed_total", "operation")
-	assert.Equal(t, map[string]int64{NftOpDynamicAdd: 1}, nft)
+	assert.Equal(t, map[string]int64{NftOpDynamicAdd: 1, NftOpUpstreamProxyAdd: 1, NftOpUpstreamProxySync: 1}, nft)
 }
 
 // counterByAttr sums an Int64 counter's data points keyed by one attribute, and asserts
