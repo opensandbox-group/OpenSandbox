@@ -314,6 +314,98 @@ func TestRemoveFailureStaysRetryable(t *testing.T) {
 	assert.Equal(t, before, runner.count())
 }
 
+// TestApplyAlwaysRulesReloadRebuildsTable: one transaction swaps the port
+// floor and re-emits every subject (merged policies, deny-first preserved,
+// DNS leases preserved); the applier adopts the reloaded state only after
+// the transaction commits.
+func TestApplyAlwaysRulesReloadRebuildsTable(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	denyFirst := subject.FromSandboxUID("u-1")
+	active := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, denyFirst, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.ApplyDenyFirst(ctx, active, testSlot("u-2", "10.0.0.6")))
+	oldPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, active, oldPol))
+	require.NoError(t, a.AddResolvedIPs(ctx, active, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0}}))
+
+	newDeny, err := policy.ParseValidatedEgressRule("deny", "203.0.113.0/24")
+	require.NoError(t, err)
+	newPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	merged := policy.MergeAlwaysOverlay(newPol, []policy.EgressRule{newDeny}, nil)
+	floor := []policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 65535}}
+
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, floor, map[subject.Subject]*policy.NetworkPolicy{active: merged}))
+	script := runner.last()
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox", "the reload rebuilds the whole table")
+	require.Contains(t, script, "tcp dport { 1-79, 81-65535 } drop", "the port floor is swapped into the master chains")
+	require.Contains(t, script, "203.0.113.0/24", "the new always-deny CIDR reaches the subject's deny set")
+	assert.NotContains(t, script, "8.8.8.8", "the replaced merged policy must not survive")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop", "deny-first subject keeps its bare drop")
+	require.Contains(t, script, "192.0.2.1 timeout", "dynamic DNS leases survive the reload rebuild")
+
+	// the applier adopted the reloaded policy: a later Remove rebuild (which
+	// re-emits subjects from in-memory state) carries it too
+	a.mu.Lock()
+	adopted := a.subjects[active].pol
+	a.mu.Unlock()
+	require.Same(t, merged, adopted)
+	runner.mu.Lock()
+	runner.scripts = nil
+	runner.mu.Unlock()
+	require.NoError(t, a.Remove(ctx, denyFirst))
+	require.Contains(t, runner.last(), "203.0.113.0/24", "rebuilds reuse the reloaded policy")
+}
+
+// TestApplyAlwaysRulesReloadFailureStaysRetryable: a failed reload leaves
+// the in-memory policies and floor untouched, so the retry re-runs the
+// full rebuild.
+func TestApplyAlwaysRulesReloadFailureStaysRetryable(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	s := subject.FromSandboxUID("u-1")
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	oldPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, oldPol))
+	originalFloor := []policy.PortRange{{Lo: 1, Hi: 79}}
+	a.mu.Lock()
+	a.opts.PortFloorDenyRanges = originalFloor
+	a.mu.Unlock()
+
+	newPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"9.9.9.9"}]}`)
+	require.NoError(t, err)
+	newFloor := []policy.PortRange{{Lo: 81, Hi: 65535}}
+	runner.mu.Lock()
+	runner.fail = func(string) error { return errors.New("nft busy") }
+	runner.mu.Unlock()
+	require.Error(t, a.ApplyAlwaysRulesReload(ctx, newFloor, map[subject.Subject]*policy.NetworkPolicy{s: newPol}))
+	a.mu.Lock()
+	keptPol := a.subjects[s].pol
+	keptFloor := a.opts.PortFloorDenyRanges
+	a.mu.Unlock()
+	require.Same(t, oldPol, keptPol, "a failed reload must keep the installed policy")
+	require.Equal(t, originalFloor, keptFloor, "a failed reload must keep the installed floor")
+
+	// the retry re-runs the rebuild and adopts both
+	runner.mu.Lock()
+	runner.fail = nil
+	runner.mu.Unlock()
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, newFloor, map[subject.Subject]*policy.NetworkPolicy{s: newPol}))
+	script := runner.last()
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
+	require.Contains(t, script, "tcp dport { 81-65535 } drop")
+	require.Contains(t, script, "9.9.9.9")
+	a.mu.Lock()
+	require.Same(t, newPol, a.subjects[s].pol)
+	require.Equal(t, newFloor, a.opts.PortFloorDenyRanges)
+	a.mu.Unlock()
+}
+
 func TestDenyFirstResetsOnReRegistration(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)

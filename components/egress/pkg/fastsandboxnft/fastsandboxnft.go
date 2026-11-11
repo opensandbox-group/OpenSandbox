@@ -126,8 +126,9 @@ func DefaultRunner(ctx context.Context, script string) ([]byte, error) {
 // deny-first rules have not been installed yet.
 var ErrUnknownSubject = fmt.Errorf("fastsandboxnft: subject rules not installed")
 
-// Options carries fast-sandbox-profile-wide enforcement toggles, loaded once at
-// startup and applied to every table (re)build.
+// Options carries fast-sandbox-profile-wide enforcement toggles, applied to
+// every table (re)build; ApplyAlwaysRulesReload also re-swaps
+// PortFloorDenyRanges at runtime.
 type Options struct {
 	// BlockDoH443 drops TCP 443 to the DoH blocklist (or all TCP 443 when
 	// no blocklist is provided — strict mode). Same semantics as the sidecar
@@ -444,6 +445,53 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 	}
 	delete(a.subjects, s)
 	delete(a.states, s)
+	a.tableReady = true
+	a.recordRuleCountLocked()
+	telemetry.RecordNftablesUpdate()
+	return nil
+}
+
+// ApplyAlwaysRulesReload rebuilds the whole table (as Remove does) after an
+// always-rule reload: the port floor is swapped into the master chains and
+// every installed subject re-emitted with the NEW merged policy from pols —
+// subjects absent from pols (or mapped to nil) stay deny-first. In-memory
+// state mutates only after the transaction commits, so a failed reload
+// leaves the applier as the kernel still sees it and stays retryable.
+func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Stage the floor into opts so the script builders emit it; revert on
+	// failure so the applier state matches what the kernel still enforces.
+	previousFloor := a.opts.PortFloorDenyRanges
+	a.opts.PortFloorDenyRanges = portFloor
+	var b strings.Builder
+	if err := a.writeTableHeader(&b); err != nil {
+		a.opts.PortFloorDenyRanges = previousFloor
+		return err
+	}
+	now := a.now()
+	for subj, inst := range a.subjects {
+		var err error
+		if pol := pols[subj]; pol == nil {
+			err = writeSubjectDenyFirstFragment(&b, subj, inst.att, a.opts.MitmRedirectPort)
+		} else {
+			err = writeSubjectInitialPolicyFragment(&b, subj, inst.att, pol, a.opts.MitmRedirectPort)
+		}
+		if err != nil {
+			a.opts.PortFloorDenyRanges = previousFloor
+			return err
+		}
+		writeRemainingLeasesFragment(&b, subj, a.states[subj], now)
+	}
+	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
+		a.opts.PortFloorDenyRanges = previousFloor
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
+		return err
+	}
+	for subj, inst := range a.subjects {
+		inst.pol = pols[subj]
+		a.subjects[subj] = inst
+	}
 	a.tableReady = true
 	a.recordRuleCountLocked()
 	telemetry.RecordNftablesUpdate()

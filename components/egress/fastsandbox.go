@@ -123,6 +123,9 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
 	fastSandboxSrv.SetActionsAPIVersion(actionsAPIVersion)
+	// The always-rule files loaded above are re-staged every minute by the
+	// reload job, so configmap-mounted rule changes need no restart.
+	fastSandboxSrv.SetAlwaysRuleLoader(policy.NewAlwaysRuleLoader(time.Minute))
 
 	// Register the configured state-directory basenames BEFORE either
 	// constructor runs: the volume-root restriction must recognize the
@@ -289,6 +292,8 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		}
 	})
 	log.Infof("fast-sandbox policy server listening on %s (Sandbox Actions Handler)", httpAddr)
+
+	fastSandboxSrv.startAlwaysRuleReloadJob()
 
 	// Per-subject connection refresh: active TCP connections keep their
 	// dynamic leases alive (bucketed by source IP from the Pod netns
