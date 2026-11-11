@@ -140,6 +140,20 @@ fi
 dockerd > /tmp/dockerd.log 2>&1 &
 DOCKERD_PID=$!
 
+# Reap the daemon and unmount the tmpfs before any failure exit: pool
+# tasks run in the pod's long-lived mount namespace (or enter it with
+# nsenter), so a left-behind mount keeps /var/lib/docker data and its
+# memory attached until the pod is restarted or deleted.
+cleanup_dind() {
+    kill -TERM "${DOCKERD_PID:-}" 2>/dev/null
+    for _ in $(seq 1 20); do
+        kill -0 "${DOCKERD_PID:-}" 2>/dev/null || break
+        sleep 0.5
+    done
+    kill -KILL "${DOCKERD_PID:-}" 2>/dev/null
+    umount /var/lib/docker 2>/dev/null
+}
+
 # Arm the trap immediately: a stop signal during the readiness loop below
 # must still reach the daemon (bootstrap signals only the entrypoint PID
 # and execd, so an unarmed background dockerd would just be killed when
@@ -160,6 +174,7 @@ for _ in $(seq 1 30); do
     if ! kill -0 "$DOCKERD_PID" 2>/dev/null; then
         echo "dockerd exited during startup — last log lines:" >&2
         tail -n 20 /tmp/dockerd.log >&2
+        umount /var/lib/docker 2>/dev/null
         exit 1
     fi
     sleep 1
@@ -177,6 +192,7 @@ if [ "$ready" -ne 1 ]; then
         sleep 0.5
     done
     kill -KILL "$DOCKERD_PID" 2>/dev/null
+    umount /var/lib/docker 2>/dev/null
     exit 1
 fi
 
@@ -195,6 +211,7 @@ rc=$?
 # sandbox (bootstrap forwards this exit to BatchSandbox/pool); a delivered
 # stop falls through to the drain loop below.
 if [ "$rc" -ne 0 ] && [ -z "${STOP_DELIVERED:-}" ]; then
+    umount /var/lib/docker 2>/dev/null
     exit "$rc"
 fi
 # After a delivered stop, dockerd is shutting down — stay in the
@@ -203,9 +220,10 @@ for i in $(seq 1 60); do
     kill -0 "$DOCKERD_PID" 2>/dev/null || break
     sleep 0.5
 done
+umount /var/lib/docker 2>/dev/null
 ```
 
-The trailing `wait` is load-bearing, not cleanup: bootstrap considers the sandbox's user command finished once this script returns, and a template-mode pod stops when it returns — without it the sandbox terminates right after a successful readiness check. Waiting in the foreground keeps the sandbox alive for as long as the daemon runs; the trap forwards stop signals (which arrive at this script, not the daemon); and after a signal interrupts the first wait, the bounded loop keeps the script alive until dockerd's graceful shutdown finishes. A daemon crash on its own — any non-zero exit status with no delivered stop, including signal deaths (an OOM kill's 137 or a segfault's 139) — skips the drain loop and propagates a non-zero exit instead of looking like success.
+The trailing `wait` is load-bearing, not cleanup: bootstrap considers the sandbox's user command finished once this script returns, and a template-mode pod stops when it returns — without it the sandbox terminates right after a successful readiness check. Waiting in the foreground keeps the sandbox alive for as long as the daemon runs; the trap forwards stop signals (which arrive at this script, not the daemon); the bounded drain loop waits for that shutdown and unmounts the tmpfs; and a daemon crash on its own — any non-zero exit status with no delivered stop, including signal deaths (an OOM kill's 137 or a segfault's 139) — skips the drain loop, unmounts, and propagates a non-zero exit instead of looking like success. **The graceful-drain guarantee is scoped to template-mode sandboxes**: on the Pool path the outer task-executor shim does not wait for this script's drain, so pool recycling can stop the pod while dockerd is still shutting down — treat pool-mode drains as best-effort (or extend the shim, which is upstream code outside this guide).
 
 Verify the driver actually in use:
 
