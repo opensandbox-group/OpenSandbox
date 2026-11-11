@@ -140,6 +140,12 @@ fi
 dockerd > /tmp/dockerd.log 2>&1 &
 DOCKERD_PID=$!
 
+# Arm the trap immediately: a stop signal during the readiness loop below
+# must still reach the daemon (bootstrap signals only the entrypoint PID
+# and execd, so an unarmed background dockerd would just be killed when
+# the container exits).
+trap 'kill -TERM "$DOCKERD_PID" 2>/dev/null' TERM INT
+
 # Bail out if the daemon dies or the wait exceeds 30s — otherwise a wrong
 # prerequisite (privileges, mount, storage driver, cgroup) hangs the
 # bootstrap forever.
@@ -162,20 +168,26 @@ fi
 # --- keep the sandbox alive ---
 # OpenSandbox's bootstrap treats this script's exit as the user command
 # finishing, so without this the sandbox stops right after readiness
-# succeeds. Stop signals reach this script, not the daemon — forward them,
-# then keep waiting so dockerd's graceful shutdown completes before this
-# script (and the sandbox) exits.
-trap 'kill -TERM "$DOCKERD_PID" 2>/dev/null' TERM INT
+# succeeds. The trap (armed above, right after startup) forwards stop
+# signals to the daemon; the waits below keep this script in the
+# foreground while dockerd runs and while it drains.
 wait "$DOCKERD_PID"
-# A stop signal interrupts the wait above; if dockerd is still shutting
-# down, stay in the foreground (bounded) until it exits.
+rc=$?
+# A signal-interrupted wait (rc > 128) is an expected stop; a daemon crash
+# (rc 1–127) must propagate so a dead daemon is not recorded as a
+# successful sandbox (bootstrap forwards this exit to BatchSandbox/pool).
+if [ "$rc" -gt 0 ] && [ "$rc" -lt 128 ]; then
+    exit "$rc"
+fi
+# If a stop signal interrupted the wait, dockerd is still shutting down —
+# stay in the foreground (bounded) until it exits.
 for i in $(seq 1 60); do
     kill -0 "$DOCKERD_PID" 2>/dev/null || break
     sleep 0.5
 done
 ```
 
-The trailing `wait` is load-bearing, not cleanup: bootstrap considers the sandbox's user command finished once this script returns, and a template-mode pod stops when it returns — without it the sandbox terminates right after a successful readiness check. Waiting in the foreground keeps the sandbox alive for as long as the daemon runs. The trap forwards stop signals (which arrive at this script, not the daemon) so teardown shuts `dockerd` down cleanly, and the bounded loop after it keeps the script alive until that shutdown finishes — on a stop signal the interrupted `wait` returns immediately, and without the loop the script would exit while `dockerd` is still draining.
+The trailing `wait` is load-bearing, not cleanup: bootstrap considers the sandbox's user command finished once this script returns, and a template-mode pod stops when it returns — without it the sandbox terminates right after a successful readiness check. Waiting in the foreground keeps the sandbox alive for as long as the daemon runs; the trap forwards stop signals (which arrive at this script, not the daemon); and after a signal interrupts the first wait, the bounded loop keeps the script alive until dockerd's graceful shutdown finishes — while a daemon crash on its own (wait rc 1–127) propagates a non-zero exit instead of looking like success.
 
 Verify the driver actually in use:
 
