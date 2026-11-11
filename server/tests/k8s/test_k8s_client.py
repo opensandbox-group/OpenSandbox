@@ -173,25 +173,27 @@ class TestK8sClient:
             group="g", version="v1", namespace="ns", plural="foos", body=body
         )
 
-    def test_create_custom_object_invalidates_informer(self, k8s_runtime_config):
-        """A successful create invalidates without writing its direct response."""
+    def test_create_custom_object_tracks_write_in_informer(self, k8s_runtime_config):
+        """A successful create hands its response to the informer, not the cache."""
         c = self._make_client(k8s_runtime_config)
         created = {"metadata": {"name": "foo-1", "resourceVersion": "11"}}
         c._custom_objects_api.create_namespaced_custom_object.return_value = created
         fake_informer = self._attach_informer(c, MagicMock())
         result = c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "foo-1"}})
         assert result == created
-        fake_informer.invalidate.assert_called_once_with()
+        fake_informer.track_write.assert_called_once_with(created)
+        fake_informer.invalidate.assert_not_called()
 
-    def test_patch_custom_object_invalidates_informer(self, k8s_runtime_config):
-        """A successful patch invalidates without writing its direct response."""
+    def test_patch_custom_object_tracks_write_in_informer(self, k8s_runtime_config):
+        """A successful patch hands its response to the informer, not the cache."""
         c = self._make_client(k8s_runtime_config)
         patched = {"metadata": {"name": "foo-1", "resourceVersion": "12"}}
         c._custom_objects_api.patch_namespaced_custom_object.return_value = patched
         fake_informer = self._attach_informer(c, MagicMock())
         result = c.patch_custom_object("g", "v1", "ns", "foos", "foo-1", {"spec": {"x": 1}})
         assert result == patched
-        fake_informer.invalidate.assert_called_once_with()
+        fake_informer.track_write.assert_called_once_with(patched)
+        fake_informer.invalidate.assert_not_called()
 
     @pytest.mark.parametrize(
         "response",
@@ -201,15 +203,16 @@ class TestK8sClient:
             None,
         ],
     )
-    def test_delete_custom_object_invalidates_for_any_response(
+    def test_delete_custom_object_tracks_delete_for_any_response(
         self, k8s_runtime_config, response
     ):
-        """Delete response shape never becomes cache state."""
+        """Every successful delete response is handed to the informer."""
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.delete_namespaced_custom_object.return_value = response
         fake_informer = self._attach_informer(c, MagicMock())
         c.delete_custom_object("g", "v1", "ns", "foos", "foo-1")
-        fake_informer.invalidate.assert_called_once_with()
+        fake_informer.track_delete.assert_called_once_with("foo-1", response)
+        fake_informer.invalidate.assert_not_called()
 
     def test_write_paths_skip_cache_when_no_informer(self, k8s_runtime_config):
         """Write paths must not crash when no informer has been started yet."""
@@ -224,8 +227,8 @@ class TestK8sClient:
         assert c._informers == {}
 
     @pytest.mark.parametrize("operation", ["create", "patch", "delete"])
-    def test_failed_write_does_not_invalidate(self, k8s_runtime_config, operation):
-        """Only mutations confirmed successful invalidate the informer."""
+    def test_failed_write_does_not_touch_informer(self, k8s_runtime_config, operation):
+        """Only mutations confirmed successful are tracked by the informer."""
         c = self._make_client(k8s_runtime_config)
         fake_informer = self._attach_informer(c, MagicMock())
         api_method = getattr(
@@ -247,6 +250,8 @@ class TestK8sClient:
                 c.delete_custom_object("g", "v1", "ns", "foos", "foo")
 
         fake_informer.invalidate.assert_not_called()
+        fake_informer.track_write.assert_not_called()
+        fake_informer.track_delete.assert_not_called()
 
     def test_get_custom_object_returns_none_on_404(self, k8s_runtime_config):
         c = self._make_client(k8s_runtime_config)
@@ -292,26 +297,59 @@ class TestK8sClient:
         assert informer._resource_version == "rv:deleted"
         assert informer._invalidation_generation == generation
 
-    def test_mutation_forces_get_and_list_to_live_api(self, k8s_runtime_config):
-        """Reads cannot serve the pre-mutation cache until LIST republishes it."""
+    @pytest.mark.parametrize("operation", ["create", "patch", "foreground_delete"])
+    def test_write_bypasses_cache_only_for_written_object_until_watch_confirms(
+        self, k8s_runtime_config, operation
+    ):
+        """Reads of the written object and lists go live until WATCH shows the write.
+
+        Untouched objects keep being served from the cache throughout.
+        """
         c = self._make_client(k8s_runtime_config)
         old = {"metadata": {"name": "foo", "resourceVersion": "old"}}
-        informer = self._attach_real_informer(c, [old])
-        c._custom_objects_api.create_namespaced_custom_object.return_value = {
-            "metadata": {"name": "bar"}
-        }
-        live = {"metadata": {"name": "foo", "resourceVersion": "live"}}
-        c._custom_objects_api.get_namespaced_custom_object.return_value = live
-        c._custom_objects_api.list_namespaced_custom_object.return_value = {"items": [live]}
+        other = {"metadata": {"name": "other", "resourceVersion": "other-1"}}
+        informer = self._attach_real_informer(c, [old, other])
+        name = "bar" if operation == "create" else "foo"
+        live = {"metadata": {"name": name, "resourceVersion": "live"}}
+        if operation == "foreground_delete":
+            live["metadata"].update(
+                deletionTimestamp="2026-10-09T07:00:00Z",
+                finalizers=["foregroundDeletion"],
+            )
+        api = MagicMock()
+        c._custom_objects_api = api
+        api.create_namespaced_custom_object.return_value = live
+        api.patch_namespaced_custom_object.return_value = live
+        api.delete_namespaced_custom_object.return_value = live
+        api.get_namespaced_custom_object.return_value = live
+        api.list_namespaced_custom_object.return_value = {"items": [live, other]}
 
-        c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "bar"}})
-        assert c.get_custom_object("g", "v1", "ns", "foos", "foo") is live
-        assert c.list_custom_objects("g", "v1", "ns", "foos") == [live]
-        c._custom_objects_api.get_namespaced_custom_object.assert_called_once()
-        c._custom_objects_api.list_namespaced_custom_object.assert_called_once()
+        if operation == "create":
+            c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "bar"}})
+        elif operation == "patch":
+            c.patch_custom_object("g", "v1", "ns", "foos", "foo", {"spec": {"x": 1}})
+        else:
+            c.delete_custom_object("g", "v1", "ns", "foos", "foo", propagation_policy="Foreground")
+
+        assert c.get_custom_object("g", "v1", "ns", "foos", name) is live
+        assert c.list_custom_objects("g", "v1", "ns", "foos") == [live, other]
+        assert c.get_custom_object("g", "v1", "ns", "foos", "other") is other
+        api.get_namespaced_custom_object.assert_called_once()
+        api.list_namespaced_custom_object.assert_called_once()
         assert informer._cache["foo"] is old
+        assert informer._invalidation_generation == 0
 
-    def test_delete_then_late_patch_response_only_invalidates(self, k8s_runtime_config):
+        watched = {"metadata": dict(live["metadata"])}
+        informer._handle_event(
+            {"type": "ADDED" if operation == "create" else "MODIFIED", "object": watched}
+        )
+
+        assert c.get_custom_object("g", "v1", "ns", "foos", name) is watched
+        assert watched in c.list_custom_objects("g", "v1", "ns", "foos")
+        api.get_namespaced_custom_object.assert_called_once()
+        api.list_namespaced_custom_object.assert_called_once()
+
+    def test_delete_then_late_patch_response_waits_for_watch(self, k8s_runtime_config):
         """A delayed patch response after delete cannot become cache state."""
         c = self._make_client(k8s_runtime_config)
         old = {"metadata": {"name": "foo", "resourceVersion": "rv:10"}}
@@ -347,8 +385,16 @@ class TestK8sClient:
         assert patch_result == [stale_patch]
         assert informer._cache["foo"] is old
         assert informer._resource_version == "cursor"
-        assert informer._invalidation_generation == 2
+        assert informer.get_if_synced("foo") is None
         assert informer.list_if_synced() is None
+
+        informer._handle_event({"type": "MODIFIED", "object": stale_patch})
+        assert informer.list_if_synced() is None
+        informer._handle_event(
+            {"type": "DELETED", "object": {"metadata": {"name": "foo", "resourceVersion": "rv:12"}}}
+        )
+        assert informer.list_if_synced() == []
+        assert informer._invalidation_generation == 0
 
     def test_stopped_informer_is_not_restarted_for_read(self, k8s_runtime_config):
         """An existing stopped informer stays stopped and the read falls back live."""
@@ -493,12 +539,18 @@ class TestK8sClient:
         assert [obj["metadata"]["name"] for obj in result] == ["from-api"]
         c._custom_objects_api.list_namespaced_custom_object.assert_called_once()
 
-    def test_delete_custom_object_delegates_to_api(self, k8s_runtime_config):
+    @pytest.mark.parametrize("propagation_policy", [None, "Foreground"])
+    def test_delete_custom_object_delegates_to_api(
+        self, k8s_runtime_config, propagation_policy
+    ):
         c = self._make_client(k8s_runtime_config)
-        c.delete_custom_object("g", "v1", "ns", "foos", "foo-1", grace_period_seconds=0)
+        c.delete_custom_object(
+            "g", "v1", "ns", "foos", "foo-1",
+            grace_period_seconds=0, propagation_policy=propagation_policy,
+        )
         c._custom_objects_api.delete_namespaced_custom_object.assert_called_once_with(
             group="g", version="v1", namespace="ns", plural="foos",
-            name="foo-1", grace_period_seconds=0
+            name="foo-1", grace_period_seconds=0, propagation_policy=propagation_policy,
         )
 
     def test_patch_custom_object_delegates_to_api(self, k8s_runtime_config):

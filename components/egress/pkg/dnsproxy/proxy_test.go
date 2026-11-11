@@ -17,8 +17,10 @@ package dnsproxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,7 +125,7 @@ func TestForwardAddsEDNS0BufferSize(t *testing.T) {
 	query := new(dns.Msg)
 	query.SetQuestion("example.com.", dns.TypeA)
 
-	resp, failure, err := proxy.forward(query)
+	resp, failure, err := proxy.forward(query, "udp")
 	require.NoError(t, err)
 	require.Empty(t, failure, "a successful forward must not report a failure reason")
 	require.Len(t, resp.Answer, 1)
@@ -200,7 +202,7 @@ func TestForwardClassifiesFailures(t *testing.T) {
 		query := new(dns.Msg)
 		query.SetQuestion("example.com.", dns.TypeA)
 
-		resp, failure, err := proxy.forward(query)
+		resp, failure, err := proxy.forward(query, "udp")
 
 		require.Error(t, err)
 		require.Nil(t, resp)
@@ -222,7 +224,7 @@ func TestForwardClassifiesFailures(t *testing.T) {
 		query := new(dns.Msg)
 		query.SetQuestion("example.com.", dns.TypeA)
 
-		resp, failure, err := proxy.forward(query)
+		resp, failure, err := proxy.forward(query, "udp")
 
 		require.Error(t, err)
 		require.Nil(t, resp)
@@ -259,7 +261,7 @@ func TestForwardClassifiesFailures(t *testing.T) {
 		query := new(dns.Msg)
 		query.SetQuestion("example.com.", dns.TypeA)
 
-		resp, failure, err := proxy.forward(query)
+		resp, failure, err := proxy.forward(query, "udp")
 
 		require.Error(t, err, "SERVFAIL from the only upstream must exhaust the chain")
 		require.Nil(t, resp)
@@ -444,4 +446,91 @@ func TestProxyShouldSkipOutboundLog_ClearedByEmptyList(t *testing.T) {
 	p.SetLogSkip(nil)
 	require.False(t, p.shouldSkipOutboundLog("metadata.internal"),
 		"clearing the list must re-enable logging for all hosts")
+}
+
+// startLargeAnswerUpstream serves the same answer set over UDP and TCP on one
+// port. Over UDP it truncates to the client's EDNS0 size, as resolvers do.
+func startLargeAnswerUpstream(t *testing.T, records int) string {
+	t.Helper()
+	t.Setenv(constants.EnvNameserverExempt, "127.0.0.1")
+	resetNameserverExemptCache(t)
+
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		resp := new(dns.Msg)
+		resp.SetReply(r)
+		for i := range records {
+			resp.Answer = append(resp.Answer, &dns.TXT{
+				Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+				Txt: []string{fmt.Sprintf("record-%03d-%s", i, strings.Repeat("x", 40))},
+			})
+		}
+		if _, udp := w.RemoteAddr().(*net.UDPAddr); udp {
+			size := uint16(dns.MinMsgSize)
+			if opt := r.IsEdns0(); opt != nil {
+				size = opt.UDPSize()
+			}
+			resp.Truncate(int(size))
+		}
+		_ = w.WriteMsg(resp)
+	})
+
+	packetConn, listener := listenUDPAndTCPOnOnePort(t)
+	for _, server := range []*dns.Server{
+		{PacketConn: packetConn, Handler: handler},
+		{Listener: listener, Handler: handler},
+	} {
+		started := make(chan struct{})
+		server.NotifyStartedFunc = func() { close(started) }
+		go func() { _ = server.ActivateAndServe() }()
+		t.Cleanup(func() { _ = server.Shutdown() })
+		<-started
+	}
+	return packetConn.LocalAddr().String()
+}
+
+// listenUDPAndTCPOnOnePort binds UDP and TCP on the same free port, retrying
+// when the TCP side of the port the UDP socket got is already taken.
+func listenUDPAndTCPOnOnePort(t *testing.T) (net.PacketConn, net.Listener) {
+	t.Helper()
+	for range 10 {
+		packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+		require.NoError(t, err)
+		listener, err := net.Listen("tcp", packetConn.LocalAddr().String())
+		if err == nil {
+			return packetConn, listener
+		}
+		_ = packetConn.Close()
+	}
+	t.Fatal("no port free for both UDP and TCP")
+	return nil, nil
+}
+
+// A client retries over TCP after a truncated UDP answer; that retry must
+// reach the upstream over TCP too, or the answer stays truncated.
+func TestServeDNSForwardsTCPQueriesOverTCP(t *testing.T) {
+	t.Cleanup(func() { resetNameserverExemptCache(t) })
+	const records = 100
+	upstream := startLargeAnswerUpstream(t, records)
+	allow, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"big.example.com"}]}`)
+	require.NoError(t, err)
+	proxy := &Proxy{
+		upstreams:               []string{upstream},
+		activeUpstreams:         []string{upstream},
+		upstreamExchangeTimeout: time.Second,
+		effectivePolicy:         allow,
+		userPolicy:              allow,
+	}
+	query := new(dns.Msg)
+	query.SetQuestion("big.example.com.", dns.TypeTXT)
+
+	udpClient := &fakeRespWriter{remote: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 5353}}
+	proxy.serveDNS(udpClient, query)
+	require.Len(t, udpClient.msgs, 1)
+	require.True(t, udpClient.msgs[0].Truncated, "a UDP client gets the truncated answer and retries over TCP")
+
+	tcpClient := &fakeRespWriter{remote: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 5353}}
+	proxy.serveDNS(tcpClient, query)
+	require.Len(t, tcpClient.msgs, 1)
+	require.False(t, tcpClient.msgs[0].Truncated)
+	require.Len(t, tcpClient.msgs[0].Answer, records)
 }

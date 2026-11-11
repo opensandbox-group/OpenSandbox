@@ -8,11 +8,7 @@ description: Deploy OpenSandbox onto an AKS cluster with Kata VM isolation and i
 Deploy OpenSandbox onto an AKS cluster with `kata-vm-isolation`, then interact with a Kata-isolated sandbox step by step.
 
 ::: warning Demo credentials
-The Helm values in this example use **insecure, well-known demo credentials**
-(`api_key = "aks-kata-demo-key"` and a fixed `secureAccess` signing key) so the
-walkthrough works out of the box with local `kubectl port-forward`. **Change
-them before exposing the server or gateway beyond local port-forwarding.** See
-[Security Model](#security-model).
+The Helm values in this example use **insecure, well-known demo credentials** (`api_key = "aks-kata-demo-key"` and a fixed `secureAccess` signing key) so the walkthrough works out of the box with local `kubectl port-forward`. **Change them before exposing the server or gateway beyond local port-forwarding.** See [Security Model](#security-model).
 :::
 
 ## Prerequisites
@@ -327,12 +323,7 @@ The server is configured with:
 ## Security Model
 
 ::: warning
-`server-values.yaml` ships with **demo-only** credentials: `api_key =
-"aks-kata-demo-key"` and a fixed base64 `secureAccess` signing key. They exist so
-the local port-forward walkthrough works without extra setup. Replace both with
-unique secret values (for example a random key and
-`openssl rand -base64 32` for the signing key) before exposing the server or
-gateway to anything other than `127.0.0.1`.
+`server-values.yaml` ships with **demo-only** credentials: `api_key = "aks-kata-demo-key"` and a fixed base64 `secureAccess` signing key. They exist so the local port-forward walkthrough works without extra setup. Replace both with unique secret values (for example a random key and `openssl rand -base64 32` for the signing key) before exposing the server or gateway to anything other than `127.0.0.1`.
 :::
 
 ### Kata VM isolation

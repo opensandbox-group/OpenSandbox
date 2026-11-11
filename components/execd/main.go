@@ -181,6 +181,12 @@ func run() int {
 		}()
 	}
 
+	// Watch the sandbox cgroup for OOM kills (metric + troubleshooting logs,
+	// see components/execd/docs/opentelemetry.md). Runs independently of
+	// OTLP export so OOM logs work even when metrics are disabled.
+	oomWatchStop := telemetry.StartOOMWatch(context.Background())
+	defer oomWatchStop()
+
 	initManager := controller.InitRuntimeInitManager(&controller.RuntimeInitConfig{
 		Ctrl:              ctrl,
 		IsolatedResetter:  isolatedRunner,

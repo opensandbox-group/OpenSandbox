@@ -74,7 +74,9 @@ def test_redis_renew_intent_survives_no_tenant_info(k8s_service, mock_workload):
     extension_service.get_access_renew_extend_seconds.return_value = 600
 
     controller = AccessRenewController(k8s_service, extension_service)
-    ok = controller.attempt_renew_sync("test-sandbox-123", source=RENEW_SOURCE_REDIS_QUEUE)
+    ok = controller._try_renew_sync(
+        "test-sandbox-123", source=RENEW_SOURCE_REDIS_QUEUE, namespace=None
+    )
 
     assert ok is True, "renew intent was silently dropped: sandbox unfindable with no tenant information"
     k8s_service.workload_provider.update_expiration.assert_called_once()
@@ -108,7 +110,9 @@ def test_redis_renew_intent_warns_when_sandbox_unfindable(k8s_service, mock_work
     controller_logger.addHandler(handler)
     try:
         controller = AccessRenewController(k8s_service, MagicMock())
-        ok = controller.attempt_renew_sync("missing-sandbox", source=RENEW_SOURCE_REDIS_QUEUE)
+        ok = controller._try_renew_sync(
+            "missing-sandbox", source=RENEW_SOURCE_REDIS_QUEUE, namespace=None
+        )
     finally:
         controller_logger.removeHandler(handler)
 
@@ -203,7 +207,9 @@ def test_renew_attempt_issues_single_cluster_list(k8s_service, mock_workload):
     extension_service.get_access_renew_extend_seconds.return_value = 600
 
     controller = AccessRenewController(k8s_service, extension_service)
-    ok = controller.attempt_renew_sync("memo-attempt-sbx", source=RENEW_SOURCE_REDIS_QUEUE)
+    ok = controller._try_renew_sync(
+        "memo-attempt-sbx", source=RENEW_SOURCE_REDIS_QUEUE, namespace=None
+    )
 
     assert ok is True
     k8s_service.workload_provider.update_expiration.assert_called_once()
@@ -244,12 +250,16 @@ def test_second_attempt_re_resolves_after_sandbox_moves(k8s_service, mock_worklo
     controller = AccessRenewController(k8s_service, extension_service)
 
     _stage_running_sandbox(k8s_service, mock_workload, namespace=TENANT_NS)
-    assert controller.attempt_renew_sync("moved-sbx", source=RENEW_SOURCE_REDIS_QUEUE)
+    assert controller._try_renew_sync(
+        "moved-sbx", source=RENEW_SOURCE_REDIS_QUEUE, namespace=None
+    )
     assert k8s_service.workload_provider.list_workloads_all_namespaces.call_count == 1
 
     # The sandbox "moves": same id, different namespace.
     _stage_running_sandbox(k8s_service, mock_workload, namespace="tenant-beta")
-    assert controller.attempt_renew_sync("moved-sbx", source=RENEW_SOURCE_REDIS_QUEUE)
+    assert controller._try_renew_sync(
+        "moved-sbx", source=RENEW_SOURCE_REDIS_QUEUE, namespace=None
+    )
     # The second attempt went through a fresh cluster LIST, not the memo.
     assert k8s_service.workload_provider.list_workloads_all_namespaces.call_count == 2
 

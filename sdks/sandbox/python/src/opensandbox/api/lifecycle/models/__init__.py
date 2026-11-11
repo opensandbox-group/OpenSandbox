@@ -16,6 +16,7 @@
 
 """Contains all the data models used in inputs/outputs"""
 
+from .activity_probe import ActivityProbe
 from .allocation_summary import AllocationSummary
 from .allocation_summary_mode import AllocationSummaryMode
 from .allocation_summary_state import AllocationSummaryState
@@ -31,7 +32,28 @@ from .create_sandbox_response import CreateSandboxResponse
 from .create_sandbox_response_extensions import CreateSandboxResponseExtensions
 from .create_sandbox_response_metadata import CreateSandboxResponseMetadata
 from .create_snapshot_request import CreateSnapshotRequest
+from .credential import Credential
+from .credential_auth import CredentialAuth
+from .credential_auth_metadata import CredentialAuthMetadata
+from .credential_auth_type import CredentialAuthType
+from .credential_binding import CredentialBinding
+from .credential_binding_list_response import CredentialBindingListResponse
+from .credential_binding_metadata import CredentialBindingMetadata
+from .credential_binding_mutation_set import CredentialBindingMutationSet
+from .credential_list_response import CredentialListResponse
+from .credential_match import CredentialMatch
+from .credential_match_schemes_item import CredentialMatchSchemesItem
+from .credential_metadata import CredentialMetadata
+from .credential_mutation_set import CredentialMutationSet
 from .credential_proxy_config import CredentialProxyConfig
+from .credential_source import CredentialSource
+from .credential_source_type import CredentialSourceType
+from .credential_substitution import CredentialSubstitution
+from .credential_substitution_in_item import CredentialSubstitutionInItem
+from .credential_vault_create_request import CredentialVaultCreateRequest
+from .credential_vault_mutation_request import CredentialVaultMutationRequest
+from .credential_vault_state import CredentialVaultState
+from .custom_header_entry import CustomHeaderEntry
 from .endpoint import Endpoint
 from .endpoint_headers import EndpointHeaders
 from .error_response import ErrorResponse
@@ -43,6 +65,8 @@ from .fsb_template_readiness import FsbTemplateReadiness
 from .fsb_template_status import FsbTemplateStatus
 from .fsb_template_status_phase import FsbTemplateStatusPhase
 from .host import Host
+from .idle_policy import IdlePolicy
+from .idle_policy_on_idle import IdlePolicyOnIdle
 from .image_spec import ImageSpec
 from .image_spec_auth import ImageSpecAuth
 from .lifecycle_hook import LifecycleHook
@@ -67,6 +91,7 @@ from .policy_status_response import PolicyStatusResponse
 from .pvc import PVC
 from .renew_sandbox_expiration_request import RenewSandboxExpirationRequest
 from .renew_sandbox_expiration_response import RenewSandboxExpirationResponse
+from .renewal_policy import RenewalPolicy
 from .resource_limits import ResourceLimits
 from .sandbox import Sandbox
 from .sandbox_extensions import SandboxExtensions
@@ -78,6 +103,7 @@ from .snapshot_status import SnapshotStatus
 from .volume import Volume
 
 __all__ = (
+    "ActivityProbe",
     "AllocationSummary",
     "AllocationSummaryMode",
     "AllocationSummaryState",
@@ -93,7 +119,28 @@ __all__ = (
     "CreateSandboxResponseExtensions",
     "CreateSandboxResponseMetadata",
     "CreateSnapshotRequest",
+    "Credential",
+    "CredentialAuth",
+    "CredentialAuthMetadata",
+    "CredentialAuthType",
+    "CredentialBinding",
+    "CredentialBindingListResponse",
+    "CredentialBindingMetadata",
+    "CredentialBindingMutationSet",
+    "CredentialListResponse",
+    "CredentialMatch",
+    "CredentialMatchSchemesItem",
+    "CredentialMetadata",
+    "CredentialMutationSet",
     "CredentialProxyConfig",
+    "CredentialSource",
+    "CredentialSourceType",
+    "CredentialSubstitution",
+    "CredentialSubstitutionInItem",
+    "CredentialVaultCreateRequest",
+    "CredentialVaultMutationRequest",
+    "CredentialVaultState",
+    "CustomHeaderEntry",
     "Endpoint",
     "EndpointHeaders",
     "ErrorResponse",
@@ -105,6 +152,8 @@ __all__ = (
     "FsbTemplateStatus",
     "FsbTemplateStatusPhase",
     "Host",
+    "IdlePolicy",
+    "IdlePolicyOnIdle",
     "ImageSpec",
     "ImageSpecAuth",
     "LifecycleHook",
@@ -127,6 +176,7 @@ __all__ = (
     "PlatformSpecOs",
     "PolicyStatusResponse",
     "PVC",
+    "RenewalPolicy",
     "RenewSandboxExpirationRequest",
     "RenewSandboxExpirationResponse",
     "ResourceLimits",

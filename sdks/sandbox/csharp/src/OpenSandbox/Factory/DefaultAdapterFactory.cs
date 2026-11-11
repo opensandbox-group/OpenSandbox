@@ -38,7 +38,8 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             options.HttpClientProvider.HttpClient,
             options.LifecycleBaseUrl,
             options.ConnectionConfig.Headers,
-            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"));
+            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"),
+            wakeRetry: options.ConnectionConfig.WakeRetry);
 
         EndpointCache? endpointCache = null;
         if (!options.ConnectionConfig.EndpointCacheDisabled)
@@ -52,7 +53,8 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
 
         return new LifecycleStack
         {
-            Sandboxes = sandboxes
+            Sandboxes = sandboxes,
+            Diagnostics = new DiagnosticsAdapter(clientWrapper)
         };
     }
 
@@ -60,18 +62,21 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
     public ExecdStack CreateExecdStack(CreateExecdStackOptions options)
     {
         var headers = BuildDataPlaneHeaders(options.ConnectionConfig, options.ExecdHeaders);
+        var transferHeaderTimeout = TimeSpan.FromSeconds(options.ConnectionConfig.RequestTimeoutSeconds);
 
         var clientWrapper = new HttpClientWrapper(
             options.HttpClientProvider.HttpClient,
             options.ExecdBaseUrl,
             headers,
-            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"));
+            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"),
+            options.HttpClientProvider.TransferHttpClient,
+            transferHeaderTimeout,
+            options.ConnectionConfig.WakeRetry);
 
         var health = new HealthAdapter(clientWrapper);
         var metrics = new MetricsAdapter(clientWrapper);
         var files = new FilesystemAdapter(
             clientWrapper,
-            options.HttpClientProvider.HttpClient,
             options.ExecdBaseUrl,
             headers);
         var commands = new CommandsAdapter(
@@ -86,7 +91,10 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             options.HttpClientProvider.SseHttpClient,
             options.ExecdBaseUrl,
             headers,
-            options.LoggerFactory.CreateLogger("OpenSandbox.IsolatedSessionsAdapter"));
+            options.LoggerFactory.CreateLogger("OpenSandbox.IsolatedSessionsAdapter"),
+            options.HttpClientProvider.TransferHttpClient,
+            transferHeaderTimeout,
+            options.ConnectionConfig.WakeRetry);
 
         return new ExecdStack
         {
@@ -107,7 +115,8 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             options.HttpClientProvider.HttpClient,
             options.EgressBaseUrl,
             headers,
-            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"));
+            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"),
+            wakeRetry: options.ConnectionConfig.WakeRetry);
 
         var egress = new EgressAdapter(clientWrapper);
         return new EgressStack
@@ -124,11 +133,14 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
             options.HttpClientProvider.HttpClient,
             options.LifecycleBaseUrl,
             options.ConnectionConfig.Headers,
-            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"));
+            options.LoggerFactory.CreateLogger("OpenSandbox.HttpClientWrapper"),
+            wakeRetry: options.ConnectionConfig.WakeRetry);
+        var networkPolicyAdapter = new NetworkPolicyAdapter(clientWrapper, options.SandboxId);
 
         return new NetworkPolicyStack
         {
-            Egress = new NetworkPolicyAdapter(clientWrapper, options.SandboxId)
+            Egress = networkPolicyAdapter,
+            CredentialVault = networkPolicyAdapter
         };
     }
 

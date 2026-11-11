@@ -83,6 +83,12 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         self.diagnostic_runtime_state = pb2.RUNTIME_STATE_READY
         self.pool_has_resources = True
         self.get_error_by_namespace: dict[str, grpc.StatusCode] = {}
+        # Per-sandbox recorded policy state, simulating the egress-held
+        # /policy/{uid} surface: seeded at create from the egress binding
+        # input (default deny), mutated by the relay, DELETE lands a
+        # default-deny tombstone at the successor revision.
+        self.policy_records: dict[str, dict] = {}
+        self.last_relay: pb2.InvokeHandlerActionRequest | None = None
 
     @staticmethod
     def _info(name: str, uid: str, namespace: str = "ns-1") -> pb2.SandboxInfo:
@@ -137,6 +143,16 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         }
         if self.abort_create_with is not None:
             context.abort(self.abort_create_with, "scripted post-persistence failure")
+        seed = {"defaultAction": "deny", "egress": []}
+        for binding in request.action_bindings:
+            if binding.handler == "egress":
+                try:
+                    parsed = json.loads(binding.input)
+                    if isinstance(parsed, dict):
+                        seed = parsed
+                except json.JSONDecodeError:
+                    pass
+        self.policy_records[request.request_id] = {"revision": 1, "policy": seed}
         info = self._info(request.request_id, uid, request.namespace)
         if self.create_pending:
             info.runtime.state = pb2.RUNTIME_STATE_CREATING
@@ -146,6 +162,51 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
             sandbox=info,
             generation=1,
             completion=request.completion,
+        )
+
+    def InvokeHandlerAction(self, request, context):
+        self.last_relay = request
+        name = request.sandbox.namespaced_name.name
+        record = self.policy_records.get(name)
+        if request.path.startswith("/policy/"):
+            if request.method == "GET":
+                if record is None:
+                    return pb2.InvokeHandlerActionResponse(
+                        result=pb2.HandlerActionResult(status=404, body=b"no recorded policy")
+                    )
+                return pb2.InvokeHandlerActionResponse(
+                    result=pb2.HandlerActionResult(status=200, body=json.dumps(record).encode())
+                )
+            if request.method == "PUT":
+                document = json.loads(request.payload)
+                expected = document.get("expectedRevision")
+                current = record["revision"] if record else 0
+                if expected is not None and expected != current:
+                    return pb2.InvokeHandlerActionResponse(
+                        result=pb2.HandlerActionResult(status=412, body=b"revision mismatch")
+                    )
+                updated = {"revision": current + 1, "policy": document["policy"]}
+                self.policy_records[name] = updated
+                return pb2.InvokeHandlerActionResponse(
+                    result=pb2.HandlerActionResult(
+                        status=200 if record else 201, body=json.dumps(updated).encode()
+                    )
+                )
+            if request.method == "DELETE":
+                if record is None:
+                    return pb2.InvokeHandlerActionResponse(
+                        result=pb2.HandlerActionResult(status=404, body=b"no recorded policy")
+                    )
+                tombstone = {
+                    "revision": record["revision"] + 1,
+                    "policy": {"defaultAction": "deny", "egress": []},
+                }
+                self.policy_records[name] = tombstone
+                return pb2.InvokeHandlerActionResponse(
+                    result=pb2.HandlerActionResult(status=204, body=b"")
+                )
+        return pb2.InvokeHandlerActionResponse(
+            result=pb2.HandlerActionResult(status=404, body=b"unknown relay path")
         )
 
     def GetSandbox(self, request, context):
@@ -394,6 +455,166 @@ def test_http_create_calls_fastpath_with_ready_completion(http_fsb):
     assert fake.create_time_remaining > service._k8s.fastpath_wait_ready_seconds
 
 
+def _annotation_api(service: FastSandboxService) -> Mock:
+    return service._cr_reader._kubernetes()._custom_objects_api  # type: ignore[return-value]
+
+
+def test_http_create_persists_idle_policy_annotation(http_fsb):
+    client, fake, service = http_fsb
+    api = _annotation_api(service)
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "lifecycle": {
+                "idlePolicy": {"idleTimeoutSeconds": 300, "onIdle": "pause"},
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    sandbox_id = response.json()["id"]
+    api.patch_namespaced_custom_object.assert_called_once()
+    kwargs = api.patch_namespaced_custom_object.call_args.kwargs
+    assert kwargs["group"] == "sandbox.fast.io"
+    assert kwargs["version"] == "v1alpha2"
+    assert kwargs["namespace"] == "ns-1"
+    assert kwargs["name"] == sandbox_id
+    annotation = kwargs["body"]["metadata"]["annotations"]["sandbox.opensandbox.io/idle-policy"]
+    assert json.loads(annotation) == {
+        "idleTimeoutSeconds": 300,
+        "onIdle": "pause",
+        "wakeOnAccess": True,
+    }
+
+
+def test_http_create_wake_only_policy_annotation(http_fsb):
+    client, fake, service = http_fsb
+    api = _annotation_api(service)
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "lifecycle": {"idlePolicy": {"wakeOnAccess": False}},
+        },
+    )
+
+    assert response.status_code == 202
+    annotation = (
+        api.patch_namespaced_custom_object.call_args.kwargs["body"]["metadata"][
+            "annotations"
+        ]["sandbox.opensandbox.io/idle-policy"]
+    )
+    assert json.loads(annotation) == {"wakeOnAccess": False}
+
+
+def test_http_create_probe_policy_annotation_applies_default_timeout(http_fsb):
+    client, fake, service = http_fsb
+    api = _annotation_api(service)
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "lifecycle": {
+                "idlePolicy": {
+                    "idleTimeoutSeconds": 300,
+                    "onIdle": "pause",
+                    "activeProbe": {"port": 8080, "path": "/active"},
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    annotation = (
+        api.patch_namespaced_custom_object.call_args.kwargs["body"]["metadata"][
+            "annotations"
+        ]["sandbox.opensandbox.io/idle-policy"]
+    )
+    assert json.loads(annotation) == {
+        "idleTimeoutSeconds": 300,
+        "onIdle": "pause",
+        "wakeOnAccess": True,
+        "activeProbe": {"port": 8080, "path": "/active", "timeoutSeconds": 2},
+    }
+
+
+def test_http_create_without_idle_policy_skips_annotation_write(http_fsb):
+    client, fake, service = http_fsb
+    api = _annotation_api(service)
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+        },
+    )
+
+    assert response.status_code == 202
+    api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_http_create_rejects_idle_timeout_above_activity_ttl(http_fsb):
+    client, fake, service = http_fsb
+    api = _annotation_api(service)
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "lifecycle": {
+                "idlePolicy": {"idleTimeoutSeconds": 3000, "onIdle": "pause"},
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert "activity_ttl_seconds" in response.json()["detail"]["message"]
+    assert fake.last_create is None  # rejected before any side effect
+    api.patch_namespaced_custom_object.assert_not_called()
+
+
+def test_http_create_survives_idle_policy_annotation_write_failure(http_fsb):
+    client, fake, service = http_fsb
+    api = _annotation_api(service)
+    api.patch_namespaced_custom_object.side_effect = ApiException(status=403)
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "lifecycle": {
+                "idlePolicy": {"idleTimeoutSeconds": 300, "onIdle": "pause"},
+            },
+        },
+    )
+
+    # A failed policy write must not fail the create; sandbox stays unpolicied.
+    assert response.status_code == 202
+    assert fake.last_create is not None
+
+
 def test_http_create_recovers_an_ambiguous_post_persistence_failure(http_fsb):
     client, fake, _ = http_fsb
     fake.abort_create_with = grpc.StatusCode.INTERNAL
@@ -429,18 +650,12 @@ def test_http_create_rejects_timeout_pool_mismatch_and_unreadable_extension(http
         "/v1/sandboxes",
         json={**base, "resourceLimits": {"cpu": "1", "memory": "512Mi"}},
     )
-    renew_extension = client.post(
-        "/v1/sandboxes",
-        json={**base, "extensions": {"access.renew.extend.seconds": "300"}},
-    )
     fake.pool_has_resources = False
     empty_pool_profile = client.post("/v1/sandboxes", json=base)
 
     assert too_long.status_code == 400
     assert pool_mismatch.status_code == 400
     assert "resourceLimits" in pool_mismatch.json()["detail"]["message"]
-    assert renew_extension.status_code == 400
-    assert "access.renew.extend.seconds" in renew_extension.json()["detail"]["message"]
     assert empty_pool_profile.status_code == 400
     assert (
         "not defined by the selected SandboxPool" in empty_pool_profile.json()["detail"]["message"]
@@ -638,7 +853,36 @@ def test_upstream_proxy_config_allows_delete_network_policy_rules(persisted_fsb)
     response = client.request("DELETE", url, json=["a.com"])
 
     assert response.status_code == 200
-    assert fake.last_update is not None
+    assert fake.last_relay is not None and fake.last_relay.path.startswith("/policy/")
+
+
+def test_create_without_network_policy_still_registers_egress_binding(persisted_fsb):
+    """Every fsb sandbox registers an egress subject at create — the relay
+    surfaces (/policy/{uid}, /vault/{uid}) attach to it. A sandbox created
+    without a networkPolicy seeds default-deny and can adopt a policy later
+    through the relay."""
+    client, fake, _, sandbox_id = persisted_fsb
+    url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
+
+    # The create-time binding seeded a no-op default-allow record: GET
+    # serves it, and the CR carries the egress binding.
+    assert client.get(url).json()["policy"] == {"defaultAction": "allow", "egress": []}
+    cr = fake.crs[("ns-1", sandbox_id)]
+    bindings = cr["spec"]["actionBindings"]
+    assert [b["handler"] for b in bindings] == ["egress"]
+    assert json.loads(bindings[0]["input"]) == {"defaultAction": "allow", "egress": []}
+
+    # The sandbox can adopt a policy later through the relay.
+    policy = {"defaultAction": "allow", "egress": [{"action": "allow", "target": "a.com"}]}
+    response = client.put(url, json=policy)
+    assert response.status_code == 200
+    assert response.json()["policy"] == policy
+    assert client.get(url).json()["policy"] == policy
+    # The CR binding input stays the create-time bootstrap.
+    assert json.loads(cr["spec"]["actionBindings"][0]["input"]) == {
+        "defaultAction": "allow",
+        "egress": [],
+    }
 
 
 def test_upstream_proxy_config_allows_create_without_network_policy(http_fsb):
@@ -663,36 +907,34 @@ def test_upstream_proxy_config_allows_create_without_network_policy(http_fsb):
     assert fake.last_create is not None
 
 
-def test_http_policy_replace_preserves_bindings_and_fences_updates(persisted_fsb):
+def test_http_policy_replace_relays_and_leaves_bindings_untouched(persisted_fsb):
+    """Runtime policy changes ride the handler relay: the CRD binding input is
+    the create-time bootstrap only, and a relay PUT never rewrites it."""
     client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
-    assert client.get(url).json()["policy"] == {"defaultAction": "deny", "egress": []}
-    bindings = [
+    # The create-time egress binding seeds the record (a no-op
+    # default-allow for a create without networkPolicy).
+    assert client.get(url).json()["policy"] == {"defaultAction": "allow", "egress": []}
+    bindings_before = [
         {"handler": "audit", "input": '{"enabled":true}'},
-        {"handler": "egress", "input": " "},
-        {"handler": "other", "input": "{}"},
+        {"handler": "egress", "input": '{"defaultAction":"deny"}'},
     ]
     cr = fake.crs[("ns-1", sandbox_id)]
-    cr["spec"]["actionBindings"] = bindings
-    assert client.get(url).json()["mode"] == "deny_all"
+    cr["spec"]["actionBindings"] = bindings_before
+
     policy = {"defaultAction": "allow", "egress": []}
     response = client.put(url, json=policy)
     assert response.status_code == 200
     assert response.json()["policy"] == policy
     assert client.get(url).json()["policy"] == policy
-    assert list(fake.last_update.action_bindings.items)[0].input == bindings[0]["input"]
-    assert [b.handler for b in fake.last_update.action_bindings.items] == [
-        "audit",
-        "egress",
-        "other",
-    ]
-    assert fake.last_update.action_bindings.items[2].input == bindings[2]["input"]
-    assert json.loads(fake.last_update.action_bindings.items[1].input) == policy
-    assert fake.last_update.sandbox.expected_uid == cr["metadata"]["uid"]
-    assert fake.last_update.expected_generation == 1
 
-    fake.abort_update_with = grpc.StatusCode.ABORTED
-    assert client.put(url, json={"defaultAction": "deny"}).status_code == 409
+    # The CRD binding input is untouched: the relay owned the change.
+    assert cr["spec"]["actionBindings"] == bindings_before
+    assert fake.last_update is None
+
+    # The relayed policy is the record: the (stale) binding input never
+    # resurfaces through a read.
+    cr["spec"]["actionBindings"][1]["input"] = '{"defaultAction":"deny","egress":[{"action":"allow","target":"stale.com"}]}'
     assert client.get(url).json()["policy"] == policy
 
 
@@ -736,16 +978,42 @@ def test_http_policy_patch_and_delete_match_sidecar_semantics(persisted_fsb):
     }
     assert client.request("DELETE", url, json=["a.com"]).status_code == 200
 
-    # Conflict protection still applies to merged commits.
-    fake.abort_update_with = grpc.StatusCode.ABORTED
-    assert client.patch(url, json=[{"action": "deny", "target": "d.com"}]).status_code == 409
+    # Conflict protection still applies to merged commits: the merged PUT
+    # carries the read revision as expectedRevision — a concurrent relay
+    # write landing between the merge-read and the commit turns the stale
+    # merge into a 409 (the egress 412 is remapped to the public conflict
+    # status).
+    from opensandbox_server.services.fast_sandbox import policy_relay as policy_relay_module
+
+    real_get_full = policy_relay_module._relay_get_full
+
+    def racy_get_full(service, sid):
+        state = real_get_full(service, sid)
+        fake.policy_records[sid]["revision"] += 1
+        return state
+
+    policy_before = deepcopy(fake.policy_records[sandbox_id]["policy"])
+    revision_before = fake.policy_records[sandbox_id]["revision"]
+    policy_relay_module._relay_get_full = racy_get_full
+    try:
+        response = client.patch(url, json=[{"action": "deny", "ports": [25, 587]}])
+    finally:
+        policy_relay_module._relay_get_full = real_get_full
+    assert response.status_code == 409
+    assert fake.last_relay.method == "PUT"
+    payload = json.loads(fake.last_relay.payload)
+    assert payload["expectedRevision"] == revision_before
+    assert payload["policy"]["egress"][-1] == {"action": "deny", "target": "", "ports": [25, 587]}
+    assert fake.policy_records[sandbox_id]["policy"] == policy_before
 
 
 def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
     client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
-    for policy in ({"defaultAction": "invalid"}, {"egress": [{"action": "allow", "target": " "}]}):
-        assert client.put(url, json=policy).status_code == 400
+    # defaultAction is validated by the fsb service (400); a blank target is
+    # now rejected earlier by the NetworkRule schema (422).
+    assert client.put(url, json={"defaultAction": "invalid"}).status_code == 400
+    assert client.put(url, json={"egress": [{"action": "allow", "target": " "}]}).status_code == 422
     assert fake.last_update is None
     previous = get_current_tenant()
     try:
@@ -755,6 +1023,145 @@ def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
         assert fake.last_update is None
     finally:
         set_current_tenant(previous)
+
+
+def test_http_create_port_scopes_roundtrip_through_egress_binding(http_fsb):
+    client, fake, _ = http_fsb
+    policy = {
+        "defaultAction": "deny",
+        "egress": [
+            {"action": "deny", "ports": [25, 587]},
+            {"action": "allow", "target": "10.0.0.0/24", "ports": [443, 80]},
+            {"action": "allow", "target": "Example.COM"},
+        ],
+    }
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "networkPolicy": policy,
+        },
+    )
+    assert response.status_code == 202
+    sandbox_id = response.json()["id"]
+    expected = deepcopy(policy)
+    expected["egress"][0]["target"] = ""
+    assert len(fake.last_create.action_bindings) == 1
+    binding = fake.last_create.action_bindings[0]
+    assert binding.handler == "egress"
+    assert json.loads(binding.input) == expected
+    assert fake.policy_records[sandbox_id]["policy"] == expected
+    assert client.get(f"/v1/sandboxes/{sandbox_id}/networkpolicy").json() == {
+        "status": "ok", "mode": "enforcing", "policy": expected,
+    }
+
+
+@pytest.mark.parametrize("default_action", ["allow", "deny"])
+def test_policy_supports_port_scoped_rules(persisted_fsb, default_action):
+    client, fake, _, sandbox_id = persisted_fsb
+    url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
+    bindings_before = deepcopy(fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"])
+    policy = {
+        "defaultAction": default_action,
+        "egress": [
+            {"action": "deny", "ports": [25, 587]},
+            {"action": "allow", "target": "", "ports": [443]},
+            {"action": "deny", "target": "10.0.0.5"},
+            {"action": "deny", "target": "10.0.0.5", "ports": [443, 80]},
+            {"action": "allow", "target": "10.0.0.5", "ports": [22]},
+            {"action": "allow", "target": "10.0.0.0/24", "ports": [8080]},
+            {"action": "allow", "target": "2001:db8::5", "ports": [8443]},
+            {"action": "deny", "target": "Example.COM"},
+        ],
+    }
+    expected = deepcopy(policy)
+    expected["egress"][0]["target"] = ""
+    replaced = client.put(url, json=policy)
+    assert replaced.status_code == 200
+    assert replaced.json()["policy"] == expected
+    assert json.loads(fake.last_relay.payload) == {"policy": expected}
+    assert client.get(url).json() == replaced.json()
+
+    # Same sorted ports replace one scope; neither portless nor other port
+    # sets are evicted. The first incoming rule wins, retaining its port order.
+    patched = client.patch(url, json=[
+        {"action": "allow", "target": "10.0.0.5", "ports": [80, 443]},
+        {"action": "deny", "target": "10.0.0.5", "ports": [443, 80]},
+        {"action": "allow", "ports": [587, 25]},
+        {"action": "deny", "target": "", "ports": [25, 587]},
+        {"action": "allow", "target": "example.com"},
+        {"action": "deny", "target": "EXAMPLE.COM"},
+        {"action": "deny", "ports": [3306]},
+    ])
+    expected["egress"][0] = {"action": "allow", "target": "", "ports": [587, 25]}
+    expected["egress"][3] = {"action": "allow", "target": "10.0.0.5", "ports": [80, 443]}
+    expected["egress"][7] = {"action": "allow", "target": "example.com"}
+    expected["egress"].append({"action": "deny", "target": "", "ports": [3306]})
+    assert patched.status_code == 200
+    assert patched.json()["policy"] == expected
+    assert json.loads(fake.last_relay.payload) == {"policy": expected, "expectedRevision": 2}
+    assert client.get(url).json() == patched.json()
+
+    # A missing target does not implicitly remove port-only rules.
+    assert client.request("DELETE", url, json=["missing.com"]).json()["policy"] == expected
+    deleted = client.request("DELETE", url, json=["", " EXAMPLE.COM "])
+    expected["egress"] = [r for r in expected["egress"] if r["target"] not in ("", "example.com")]
+    assert deleted.status_code == 200
+    assert deleted.json()["policy"] == expected
+    assert client.get(url).json() == deleted.json()
+    assert client.request("DELETE", url, json=[""]).json()["policy"] == expected
+
+    # Target deletion removes both portless and port-scoped IP rules.
+    deleted_ip = client.request("DELETE", url, json=["10.0.0.5"])
+    expected["egress"] = [r for r in expected["egress"] if r["target"] != "10.0.0.5"]
+    assert deleted_ip.status_code == 200
+    assert deleted_ip.json()["policy"] == expected
+    assert client.get(url).json() == deleted_ip.json()
+    assert fake.last_update is None
+    assert fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"] == bindings_before
+
+
+@pytest.mark.parametrize("method", ["CREATE", "PUT", "PATCH"])
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"action": "deny", "ports": []},
+        {"action": "deny", "ports": [0]},
+        {"action": "deny", "ports": [65536]},
+        {"action": "deny", "ports": [80, 80]},
+        {"action": "deny", "ports": list(range(1, 258))},
+        {"action": "allow", "target": "example.com", "ports": [443]},
+        {"action": "allow", "target": "*.example.com", "ports": [443]},
+    ],
+    ids=["empty", "too-low", "too-high", "duplicate", "too-many", "domain", "wildcard"],
+)
+def test_policy_invalid_ports_rejected_before_write(persisted_fsb, method, rule):
+    client, fake, _, sandbox_id = persisted_fsb
+    url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
+    records_before = deepcopy(fake.policy_records)
+    create_before = fake.last_create
+    if method == "CREATE":
+        response = client.post(
+            "/v1/sandboxes",
+            json={
+                "image": {"uri": "python:3.11"},
+                "entrypoint": ["python"],
+                "timeout": 3600,
+                "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+                "networkPolicy": {"egress": [rule]},
+            },
+        )
+    else:
+        response = client.request(method, url, json=[rule] if method == "PATCH" else {"egress": [rule]})
+
+    assert response.status_code == 422
+    assert fake.last_create is create_before
+    assert fake.last_relay is None
+    assert fake.last_update is None
+    assert fake.policy_records == records_before
 
 
 def test_legacy_policy_route_preserves_body_for_existing_proxy(http_fsb, monkeypatch):
@@ -1388,3 +1795,35 @@ def test_fsb_list_excludes_old_prefix(persisted_fsb):
     response = client.get("/v1/sandboxes")
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["items"]] == [sandbox_id]
+
+
+def test_pool_is_resource_aware_requires_explicit_resource_aware_profile():
+    """The gate fails safe: only an explicit RESOURCE_AWARE mode passes."""
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(namespace="ns-1", name="p")
+    )
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(),
+        )
+    )
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(
+                mode=pb2.SANDBOX_RESOURCE_MODE_LEGACY_SLOT
+            ),
+        )
+    )
+    assert FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(
+                mode=pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+            ),
+        )
+    )

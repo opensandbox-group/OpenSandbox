@@ -18,6 +18,19 @@ from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class DiagnosticContext(BaseModel):
+    """Backend routing context, available independently of execd readiness."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    sandbox_id: str = Field(alias="sandboxId")
+    state: str | None = None
+    backend_type: str = Field(alias="backendType")
+    backend_identifiers: dict[str, str] = Field(alias="backendIdentifiers")
+
 
 DiagnosticKind = Literal["logs", "events"]
 

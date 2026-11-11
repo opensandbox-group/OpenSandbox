@@ -20,8 +20,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/alibaba/opensandbox/internal/safego"
 	"github.com/gin-gonic/gin"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
@@ -123,7 +125,8 @@ func (c *IsolatedSessionController) Create() {
 }
 
 func classifyIsolatedCreateError(err error) (int, model.ErrorCode) {
-	if errors.Is(err, runtime.ErrUidModeUnavailable) {
+	if errors.Is(err, runtime.ErrUidModeUnavailable) ||
+		errors.Is(err, runtime.ErrSessionPrivateNetUnavailable) {
 		return http.StatusServiceUnavailable, model.ErrorCodeNotSupported
 	}
 	if errors.Is(err, runtime.ErrSessionNamespaceUnavailable) ||
@@ -265,6 +268,17 @@ func (c *IsolatedSessionController) Run() {
 	}
 	defer cancel()
 
+	// Unknown-session runs must stay JSON 404s, so probe before the SSE
+	// headers below are committed.
+	if _, err := isolatedRunner.GetIsolatedSession(sessionID); err != nil {
+		if errors.Is(err, runtime.ErrContextNotFound) {
+			c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
+			return
+		}
+		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
+		return
+	}
+
 	// Background mode: submit detached, return a run handle, let the client
 	// poll status/logs. Deliberately independent of this request's context so
 	// a client disconnect cannot cancel detached work. 202 Accepted keeps the
@@ -284,6 +298,18 @@ func (c *IsolatedSessionController) Run() {
 		return
 	}
 
+	// Commit SSE headers up front and ping periodically so gateway idle
+	// timeouts cannot reap the stream while a silent command runs.
+	c.setupSSEResponse()
+
+	pingCtx, pingCancel := context.WithCancel(ctx)
+	var pingWg sync.WaitGroup
+	pingWg.Add(1)
+	safego.Go(func() {
+		defer pingWg.Done()
+		c.ping(pingCtx)
+	})
+
 	onStdout := func(line string) {
 		if line == "" {
 			return
@@ -300,9 +326,17 @@ func (c *IsolatedSessionController) Run() {
 	err := isolatedRunner.RunInIsolatedSession(ctx, sessionID, req.Code, req.Envs, onStdout)
 	durationMs := float64(time.Since(startTime)) / float64(time.Millisecond)
 
+	// Stop pinging before the final event and handler return.
+	pingCancel()
+	pingWg.Wait()
+
 	if err != nil {
 		if errors.Is(err, runtime.ErrContextNotFound) {
-			c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
+			// The session vanished after the probe (e.g. concurrent delete).
+			// SSE headers are already committed, so the failure must go out
+			// as a terminal stream event, not a JSON body.
+			telemetry.RecordIsolatedRun(ctx, "error", durationMs)
+			c.writeIsolatedRunError("SessionNotFound", "session not found")
 			return
 		}
 		telemetry.RecordIsolatedRun(ctx, "error", durationMs)
@@ -312,16 +346,7 @@ func (c *IsolatedSessionController) Run() {
 			ename = "ExitError"
 			evalue = strings.TrimPrefix(evalue, "command exited with code ")
 		}
-		event := model.ServerStreamEvent{
-			Type:      model.StreamEventTypeError,
-			Text:      err.Error(),
-			Timestamp: time.Now().UnixMilli(),
-			Error: &execute.ErrorOutput{
-				EName:  ename,
-				EValue: evalue,
-			},
-		}
-		c.writeSingleEvent("IsolatedError", event.ToJSON(), true, event.Summary())
+		c.writeIsolatedRunError(ename, evalue)
 		return
 	}
 	telemetry.RecordIsolatedRun(ctx, "success", durationMs)
@@ -330,6 +355,21 @@ func (c *IsolatedSessionController) Run() {
 		Timestamp: time.Now().UnixMilli(),
 	}
 	c.writeSingleEvent("IsolatedComplete", event.ToJSON(), true, event.Summary())
+}
+
+// writeIsolatedRunError emits a terminal IsolatedError SSE event; only call
+// after the SSE headers are committed.
+func (c *IsolatedSessionController) writeIsolatedRunError(ename, evalue string) {
+	event := model.ServerStreamEvent{
+		Type:      model.StreamEventTypeError,
+		Text:      evalue,
+		Timestamp: time.Now().UnixMilli(),
+		Error: &execute.ErrorOutput{
+			EName:  ename,
+			EValue: evalue,
+		},
+	}
+	c.writeSingleEvent("IsolatedError", event.ToJSON(), true, event.Summary())
 }
 
 func (c *IsolatedSessionController) respondRunError(err error) {
@@ -483,21 +523,26 @@ func (c *IsolatedSessionController) Capabilities() {
 			resp.Message = isolatedProbeResult.Message
 			resp.SetprivAvailable = isolatedProbeResult.SetprivAvailable
 			resp.UsernsAvailable = isolatedProbeResult.UsernsAvailable
+			resp.SetprivNetAvailable = isolatedProbeResult.SetprivNetAvailable
+			resp.UsernsNetAvailable = isolatedProbeResult.UsernsNetAvailable
 		}
 		c.RespondSuccess(resp)
 		return
 	}
 	caps := isolatedRunner.Capabilities()
 	resp := model.CapabilitiesResponse{
-		Available:        caps.Available,
-		Isolator:         caps.Isolator,
-		Version:          caps.Version,
-		SetprivAvailable: caps.SetprivAvailable,
-		UsernsAvailable:  caps.UsernsAvailable,
-		CommitSupported:  caps.CommitSupported,
-		DiffSupported:    caps.DiffSupported,
-		Hardening:        hardening,
-		RuntimeInit:      runtimeInit,
+		Available:           caps.Available,
+		Isolator:            caps.Isolator,
+		Version:             caps.Version,
+		Message:             caps.Message,
+		SetprivAvailable:    caps.SetprivAvailable,
+		UsernsAvailable:     caps.UsernsAvailable,
+		SetprivNetAvailable: caps.SetprivNetAvailable,
+		UsernsNetAvailable:  caps.UsernsNetAvailable,
+		CommitSupported:     caps.CommitSupported,
+		DiffSupported:       caps.DiffSupported,
+		Hardening:           hardening,
+		RuntimeInit:         runtimeInit,
 	}
 	// Probe results indicate overlay capability, not diff/commit implementation.
 	// Diff and commit are Phase 2; do not advertise them as supported.

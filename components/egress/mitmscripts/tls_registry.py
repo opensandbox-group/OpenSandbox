@@ -27,8 +27,9 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from host_selectors import Selector
+from static_passthrough import StaticPassthrough
 from revision_receiver import Receiver, Revision, Snapshot
-from tls_decision import Generation, Reason, TLSSelectorView, classify, compile_view
+from tls_decision import Generation, Reason, TLSSelectorView, _classify, compile_view
 
 RegistryAction = Literal["deny", "passthrough", "decrypt"]
 RegistryReason = Reason | Literal["registry_exhausted", "admission_disabled"]
@@ -41,6 +42,8 @@ RequestReason = Literal[
     "snapshot_mismatch",
     "receiver_unavailable",
     "request_registry_exhausted",
+    "invalid_client_stream_id",
+    "duplicate_client_stream_id",
 ]
 
 
@@ -82,6 +85,7 @@ class RequestHandle:
     owner: object = field(repr=False)
     connection: AdmissionToken = field(repr=False)
     snapshot: Snapshot = field(repr=False)
+    client_stream_id: int | None = field(default=None, repr=False)
 
     @property
     def revision(self) -> Revision:
@@ -99,6 +103,16 @@ class RequestAdmission:
 
 
 @dataclass(frozen=True, slots=True)
+class DrainState:
+    """Lock-consistent retirement metadata, not proof of transport completion."""
+
+    fenced: bool
+    frozen_last_stream_id: int | None
+    deadline: float | None
+    max_admitted_stream_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class _Activation:
     view: TLSSelectorView
     generation: Generation
@@ -106,6 +120,7 @@ class _Activation:
     fenced: set[int]
     connection_deadlines: dict[int, float]
     request_deadlines: dict[int, float]
+    frozen_last_stream_ids: dict[int, int]
 
 
 class BoundConnectionRegistry:
@@ -141,6 +156,8 @@ class BoundConnectionRegistry:
         self._generation: Generation | None = None
         self._closed = False
         self._publication_owned = False
+        # Installed once by the publication owner before exposing admission.
+        self._static_config: StaticPassthrough | None = None
         # Installation-only IPC owners set this once before exposing the pair.
         self._admission_disabled = False
         self._entries: dict[int, AdmissionToken] = {}
@@ -151,6 +168,10 @@ class BoundConnectionRegistry:
         self._next_request_serial = 0
         self._connection_deadlines: dict[int, float] = {}
         self._request_deadlines: dict[int, float] = {}
+        # At most one high-water mark/frozen bound per live connection. Finished
+        # stream IDs are not retained; duplicate checks use active handles only.
+        self._max_admitted_stream_ids: dict[int, int] = {}
+        self._frozen_last_stream_ids: dict[int, int] = {}
 
     def _owns_connection(self, token: AdmissionToken | None) -> bool:
         """Check exact membership with the Registry lock already held."""
@@ -215,6 +236,11 @@ class BoundConnectionRegistry:
         fenced = self._request_fenced.union(token.serial for token in newly_uncovered)
         connection_deadlines = self._connection_deadlines.copy()
         request_deadlines = self._request_deadlines.copy()
+        frozen_last_stream_ids = self._frozen_last_stream_ids.copy()
+        for token in newly_uncovered:
+            frozen_last_stream_ids.setdefault(
+                token.serial, self._max_admitted_stream_ids.get(token.serial, 0),
+            )
         if previous is not None and new != previous.revision:
             deadline = time.monotonic() + self._drain_timeout
             for token in newly_uncovered:
@@ -224,7 +250,7 @@ class BoundConnectionRegistry:
                     request_deadlines.setdefault(serial, deadline)
         return _Activation(
             view, new_generation, newly_uncovered, fenced,
-            connection_deadlines, request_deadlines,
+            connection_deadlines, request_deadlines, frozen_last_stream_ids,
         )
 
     def _publish_activation(self, activation: _Activation) -> None:
@@ -234,6 +260,7 @@ class BoundConnectionRegistry:
         self._request_fenced = activation.fenced
         self._connection_deadlines = activation.connection_deadlines
         self._request_deadlines = activation.request_deadlines
+        self._frozen_last_stream_ids = activation.frozen_last_stream_ids
 
     def deactivate(self) -> tuple[AdmissionToken, ...]:
         """Fence future decisions and hand existing memberships to the owner.
@@ -256,17 +283,22 @@ class BoundConnectionRegistry:
         sni: str | None,
         ech_hidden: bool,
         static_passthrough: tuple[Selector, ...],
+        destination_port: int | None = None,
     ) -> AdmissionResult:
         """Recheck the active epoch and capacity in one critical section."""
         with self._lock:
             if self._admission_disabled:
                 return AdmissionResult("deny", "admission_disabled")
-            result = classify(
+            if self._closed:
+                return AdmissionResult("deny", "snapshot_missing")
+            result = _classify(
                 identity=identity,
                 sni=sni,
                 ech_hidden=ech_hidden,
                 static_passthrough=static_passthrough,
                 view=self._view,
+                _static_config=self._static_config,
+                destination_port=destination_port,
             )
             if result.action != "needs_registry":
                 return AdmissionResult(result.action, result.reason)
@@ -285,7 +317,9 @@ class BoundConnectionRegistry:
             self._entries[token.serial] = token
             return AdmissionResult("decrypt", "binding_host", token)
 
-    def acquire_request(self, token: AdmissionToken | None) -> RequestAdmission:
+    def acquire_request(
+        self, token: AdmissionToken | None, *, client_stream_id: int | None = None,
+    ) -> RequestAdmission:
         """Pin and register one snapshot while connection eligibility is stable.
 
         Lock order is Registry -> Receiver. The receiver must never call back
@@ -296,6 +330,8 @@ class BoundConnectionRegistry:
         The caller must finish its handle in every completion/cancellation/error
         path. Terminal connection release also removes its request records, but
         does not revoke external handles or cancel work still using them.
+        H2 callers supply the inbound client stream ID, never the upstream ID.
+        Its registration and monotonic high-water mark share this same lock.
 
         Standalone Receiver/Registry publications may temporarily deny requests.
         RevisionPublisher publishes its owned pair jointly; neither path owns
@@ -308,6 +344,18 @@ class BoundConnectionRegistry:
                 return RequestAdmission("deny", "registry_closed")
             if token.serial in self._request_fenced:
                 return RequestAdmission("deny", "connection_fenced")
+            if client_stream_id is not None:
+                if (
+                    type(client_stream_id) is not int
+                    or not 1 <= client_stream_id <= 0x7fffffff
+                    or client_stream_id % 2 != 1
+                ):
+                    return RequestAdmission("deny", "invalid_client_stream_id")
+                if any(
+                    self._requests[serial].client_stream_id == client_stream_id
+                    for serial in self._requests_by_connection.get(token.serial, ())
+                ):
+                    return RequestAdmission("deny", "duplicate_client_stream_id")
             if self._view is None or self._receiver is None:
                 return RequestAdmission("deny", "snapshot_missing")
             born = token.revision
@@ -327,7 +375,7 @@ class BoundConnectionRegistry:
             if snapshot.revision != current:
                 return RequestAdmission("deny", "snapshot_mismatch")
             serial = self._next_request_serial + 1
-            handle = RequestHandle(serial, self._owner, token, snapshot)
+            handle = RequestHandle(serial, self._owner, token, snapshot, client_stream_id)
             result = RequestAdmission("allow", "admitted", snapshot, handle)
             members = self._requests_by_connection.get(token.serial)
             if members is None:
@@ -335,6 +383,15 @@ class BoundConnectionRegistry:
             self._next_request_serial = serial
             registered = True
             try:
+                # Prepare the high-water update before touching request indexes.
+                # Publishing the prepared map cannot fail after registration.
+                high_water = self._max_admitted_stream_ids
+                if (
+                    client_stream_id is not None
+                    and client_stream_id > high_water.get(token.serial, 0)
+                ):
+                    high_water = high_water.copy()
+                    high_water[token.serial] = client_stream_id
                 self._requests[serial] = handle
                 self._requests_by_connection[token.serial] = members
                 members.add(serial)
@@ -347,6 +404,7 @@ class BoundConnectionRegistry:
             if not registered:
                 # Raise outside the handler: no secret-bearing exception context.
                 raise RegistryError("request registration failed")
+            self._max_admitted_stream_ids = high_water
             return result
 
     def finish_request(self, handle: RequestHandle | None) -> bool:
@@ -384,7 +442,35 @@ class BoundConnectionRegistry:
             del self._entries[token.serial]
             self._request_fenced.discard(token.serial)
             self._connection_deadlines.pop(token.serial, None)
+            self._max_admitted_stream_ids.pop(token.serial, None)
+            self._frozen_last_stream_ids.pop(token.serial, None)
             return True
+
+    def drain_state(self, token: AdmissionToken | None) -> DrainState | None:
+        """Read the first fence bound and earliest outstanding retirement.
+
+        Request deadlines remain visible while the transport owner retains its
+        registered handles, including after application response/error hooks.
+        A still-covered rotation has a deadline but no frozen GOAWAY bound.
+        Shutdown fences admission without starting another retirement period.
+        """
+        with self._lock:
+            if not self._owns_connection(token):
+                return None
+            deadline = self._connection_deadlines.get(token.serial)
+            for serial in self._requests_by_connection.get(token.serial, ()):
+                request_deadline = self._request_deadlines.get(serial)
+                if request_deadline is not None:
+                    deadline = (
+                        request_deadline if deadline is None
+                        else min(deadline, request_deadline)
+                    )
+            return DrainState(
+                self._closed or token.serial in self._request_fenced,
+                self._frozen_last_stream_ids.get(token.serial),
+                deadline,
+                self._max_admitted_stream_ids.get(token.serial, 0),
+            )
 
     def expired_connections(
         self, *, after_serial: int = 0, limit: int = 128,
@@ -460,6 +546,11 @@ class BoundConnectionRegistry:
                 if len(result) == limit:
                     break
             return tuple(result)
+
+    @property
+    def request_capacity(self) -> int:
+        """Immutable active-request budget, also bounding pending H2 identity."""
+        return self._request_capacity
 
     @property
     def request_count(self) -> int:

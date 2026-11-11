@@ -9,17 +9,14 @@ PR: [#1014](https://github.com/opensandbox-group/OpenSandbox/pull/1014)
 
 ## Background
 
-OpenSandbox previously installed execd and bootstrap.sh to `/opt/opensandbox/bin/`, creating
-unnecessary nesting. The execd image already places these artifacts at the root:
+OpenSandbox previously installed execd and bootstrap.sh to `/opt/opensandbox/bin/`, creating unnecessary nesting. The execd image already places these artifacts at the root:
 
 ```
 /execd
 /bootstrap.sh
 ```
 
-While bootstrap.sh defaults to `EXECD=/opt/opensandbox/execd` (no `bin/`), the Kubernetes
-provider and Pool CR templates historically injected files into a `bin/` subdirectory. This
-PR flattens the layout:
+While bootstrap.sh defaults to `EXECD=/opt/opensandbox/execd` (no `bin/`), the Kubernetes provider and Pool CR templates historically injected files into a `bin/` subdirectory. This PR flattens the layout:
 
 | Before | After |
 |---|---|
@@ -27,10 +24,7 @@ PR flattens the layout:
 | `/opt/opensandbox/bin/bootstrap.sh` | `/opt/opensandbox/bootstrap.sh` |
 | `/opt/opensandbox/bin/task-executor` | `/opt/opensandbox/task-executor` |
 
-Additionally, the Docker runtime now uses the **full** `bootstrap.sh` from the execd image
-instead of a minimal 15-line inline-generated shim. This gives Docker sandboxes the same
-capabilities as Kubernetes: MITM CA trust setup, SIGTERM forwarding, pre-script sourcing,
-and chained commands.
+Additionally, the Docker runtime now uses the **full** `bootstrap.sh` from the execd image instead of a minimal 15-line inline-generated shim. This gives Docker sandboxes the same capabilities as Kubernetes: MITM CA trust setup, SIGTERM forwarding, pre-script sourcing, and chained commands.
 
 ## Who is affected
 
@@ -47,23 +41,16 @@ and chained commands.
 
 **Must upgrade the image from `v1.0.2` to `v1.1.0`.**
 
-In code-interpreter `v1.0.2`, the entrypoint scripts (`code-interpreter.sh`,
-`code-interpreter-env.sh`) live directly under `/opt/opensandbox/`. Before this PR,
-the emptyDir volume was mounted at `/opt/opensandbox/bin/`, shadowing only that
-subdirectory. Now the emptyDir mounts at `/opt/opensandbox/`, shadowing the entire
-directory — including those scripts. The pod starts but cannot find its own entrypoint.
+In code-interpreter `v1.0.2`, the entrypoint scripts (`code-interpreter.sh`, `code-interpreter-env.sh`) live directly under `/opt/opensandbox/`. Before this PR, the emptyDir volume was mounted at `/opt/opensandbox/bin/`, shadowing only that subdirectory. Now the emptyDir mounts at `/opt/opensandbox/`, shadowing the entire directory — including those scripts. The pod starts but cannot find its own entrypoint.
 
-[PR #1012](https://github.com/opensandbox-group/OpenSandbox/pull/1012) moved all
-code-interpreter scripts from `/opt/opensandbox/` to `/opt/code-interpreter/`,
-avoiding the conflict. Version `v1.1.0` is the first image with that change.
+[PR #1012](https://github.com/opensandbox-group/OpenSandbox/pull/1012) moved all code-interpreter scripts from `/opt/opensandbox/` to `/opt/code-interpreter/`, avoiding the conflict. Version `v1.1.0` is the first image with that change.
 
 ```yaml
 # In your Pool CR or sandbox creation request:
 image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.1.0
 ```
 
-The Python SDK (`opensandbox-code-interpreter`) does not require an upgrade — it
-communicates with execd over the network and does not reference filesystem paths.
+The Python SDK (`opensandbox-code-interpreter`) does not require an upgrade — it communicates with execd over the network and does not reference filesystem paths.
 
 ### 2. Pool CR template
 
@@ -128,32 +115,25 @@ volumeMounts:
 
 ### 3. Custom execd images (Docker)
 
-If you override `[runtime].execd_image` with a custom image, that image must now
-contain `/bootstrap.sh` **in addition to** `/execd`. Previously only `/execd` was
-required because the Docker runtime generated a minimal inline bootstrap script.
+If you override `[runtime].execd_image` with a custom image, that image must now contain `/bootstrap.sh` **in addition to** `/execd`. Previously only `/execd` was required because the Docker runtime generated a minimal inline bootstrap script.
 
-If your custom execd image is built from a Dockerfile that only copies the execd
-binary, add bootstrap.sh:
+If your custom execd image is built from a Dockerfile that only copies the execd binary, add bootstrap.sh:
 
 ```dockerfile
 COPY bootstrap.sh /bootstrap.sh
 ```
 
-The official `opensandbox/execd` image already includes both files and requires
-no change.
+The official `opensandbox/execd` image already includes both files and requires no change.
 
 ### 4. Custom entrypoint scripts
 
-If you hardcode `/opt/opensandbox/bin/execd` or `/opt/opensandbox/bin/bootstrap.sh`
-in entrypoint scripts or build pipelines, update those references to `/opt/opensandbox/`.
+If you hardcode `/opt/opensandbox/bin/execd` or `/opt/opensandbox/bin/bootstrap.sh` in entrypoint scripts or build pipelines, update those references to `/opt/opensandbox/`.
 
 ## Compatibility
 
 ### Old paths are not available
 
-After this change, the paths `/opt/opensandbox/bin/execd` and
-`/opt/opensandbox/bin/bootstrap.sh` no longer exist. Any script, tool, or
-template referencing them will fail with "file not found".
+After this change, the paths `/opt/opensandbox/bin/execd` and `/opt/opensandbox/bin/bootstrap.sh` no longer exist. Any script, tool, or template referencing them will fail with "file not found".
 
 ### How failures manifest
 

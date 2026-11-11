@@ -1,0 +1,43 @@
+# Web SPA：nginx 托管静态资源，/api 反代到同 namespace 的 BFF Service（同域 cookie）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensandbox-console-web
+  namespace: opensandbox-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensandbox-console-web
+  template:
+    metadata:
+      labels:
+        app: opensandbox-console-web
+    spec:
+      containers:
+        - name: web
+          image: YOUR_REGISTRY/opensandbox-console-web:0.1.0
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            allowPrivilegeEscalation: false
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-console-web
+  namespace: opensandbox-system
+spec:
+  selector:
+    app: opensandbox-console-web
+  ports:
+    - port: 80
+      targetPort: 8080

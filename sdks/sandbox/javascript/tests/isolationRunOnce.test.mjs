@@ -96,6 +96,122 @@ describe("runOnce", () => {
   });
 });
 
+function mockFetchStreamingRun(sessionId, events) {
+  return async (url, init) => {
+    const urlStr = typeof url === "string" ? url : url.toString();
+    const method = init?.method ?? "GET";
+    if (method === "POST" && urlStr.includes("/run")) {
+      const body = events.map((ev) => `data: ${JSON.stringify(ev)}\n\n`).join("");
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    if (method === "POST" && urlStr.includes("/v1/isolated/session")) {
+      return new Response(
+        JSON.stringify({ session_id: sessionId, created_at: "2026-01-01T00:00:00Z" }),
+        { status: 201, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (method === "DELETE") {
+      return new Response(null, { status: 204 });
+    }
+    return new Response("not found", { status: 404 });
+  };
+}
+
+describe("isolated session run exit codes", () => {
+  it("prefers error.exit_code over evalue", async () => {
+    const adapter = createAdapter(
+      mockFetchStreamingRun("sess-exit", [
+        { type: "init", text: "run-1", timestamp: 1 },
+        {
+          type: "error",
+          error: { ename: "CommandExecError", evalue: "9", traceback: ["exit status 3"], exit_code: 3 },
+          timestamp: 2,
+        },
+      ]),
+    );
+
+    const execution = await adapter.runOnce("exit 3", "/workspace");
+
+    assert.equal(execution.error?.exitCode, 3);
+    assert.equal(execution.exitCode, 3);
+  });
+
+  it("reports a signal kill (exit_code -1) with a non-numeric evalue", async () => {
+    const adapter = createAdapter(
+      mockFetchStreamingRun("sess-sig", [
+        {
+          type: "error",
+          error: { ename: "CommandExecError", evalue: "signal: killed", traceback: [], exit_code: -1 },
+          timestamp: 1,
+        },
+      ]),
+    );
+
+    const execution = await adapter.runOnce("kill -KILL $$", "/workspace");
+
+    assert.equal(execution.error?.exitCode, -1);
+    assert.equal(execution.exitCode, -1);
+  });
+
+  it("leaves exitCode null for start failures without exit_code", async () => {
+    const adapter = createAdapter(
+      mockFetchStreamingRun("sess-start", [
+        {
+          type: "error",
+          error: {
+            ename: "CommandExecError",
+            evalue: "fork/exec /bin/sh: argument list too long",
+            traceback: ["fork/exec /bin/sh: argument list too long"],
+          },
+          timestamp: 1,
+        },
+      ]),
+    );
+
+    const execution = await adapter.runOnce("huge", "/workspace");
+
+    assert.equal(execution.error?.exitCode, undefined);
+    assert.equal(execution.exitCode, null);
+  });
+
+  it("falls back to evalue for legacy servers without exit_code", async () => {
+    const adapter = createAdapter(
+      mockFetchStreamingRun("sess-legacy", [
+        {
+          type: "error",
+          error: { ename: "CommandExecError", evalue: "7", traceback: ["exit status 7"] },
+          timestamp: 1,
+        },
+      ]),
+    );
+
+    const execution = await adapter.runOnce("exit 7", "/workspace");
+
+    assert.equal(execution.error?.exitCode, undefined);
+    assert.equal(execution.exitCode, 7);
+  });
+
+  it("ignores a non-integer exit_code", async () => {
+    const adapter = createAdapter(
+      mockFetchStreamingRun("sess-frac", [
+        {
+          type: "error",
+          error: { ename: "CommandExecError", evalue: "signal: killed", traceback: [], exit_code: 3.5 },
+          timestamp: 1,
+        },
+      ]),
+    );
+
+    const execution = await adapter.runOnce("exit", "/workspace");
+
+    assert.equal(execution.error?.exitCode, undefined);
+    assert.equal(execution.exitCode, null);
+  });
+});
+
 describe("list", () => {
   it("returns the sessions array from the response", async () => {
     const calls = [];

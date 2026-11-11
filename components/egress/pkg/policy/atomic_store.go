@@ -17,6 +17,7 @@ package policy
 import (
 	"fmt"
 	"io/fs"
+	"path/filepath"
 )
 
 // FileMutationState describes the authoritative policy path, not temporary files.
@@ -30,6 +31,15 @@ const (
 	FileCommitted
 	// FileUnknown means publication was attempted, or its durability/close failed.
 	FileUnknown
+)
+
+// AtomicTempPrefix and AtomicTempSuffix name the staging files the mutation
+// ops create next to the authoritative path before the rename. The pattern is
+// part of the persistence contract: owners pre-scanning for staged leftovers
+// of an interrupted write match on exactly this pair.
+const (
+	AtomicTempPrefix = ".policy-"
+	AtomicTempSuffix = ".tmp"
 )
 
 // FileMutationError identifies an I/O phase without including policy contents.
@@ -65,4 +75,25 @@ type PolicyFileSnapshot struct {
 type policyFileSecurity struct {
 	selinux  string
 	ima, evm bool
+}
+
+// Exists reports whether the snapshot captured a present file. A false return
+// means Restore will durably unlink the path.
+func (s *PolicyFileSnapshot) Exists() bool { return s != nil && s.exists }
+
+// Data returns the captured file bytes, or nil when the snapshot captured
+// absence. The returned slice must be treated as read-only.
+func (s *PolicyFileSnapshot) Data() []byte {
+	if s == nil {
+		return nil
+	}
+	return s.data
+}
+
+// NewFileSnapshot builds an opaque snapshot from exact image bytes — the
+// seam for owners that substitute the atomic file store (and its runtime
+// tests). exists=false produces the absent image, which Restore answers by
+// durably unlinking the path.
+func NewFileSnapshot(path string, data []byte, exists bool) *PolicyFileSnapshot {
+	return &PolicyFileSnapshot{path: filepath.Clean(path), exists: exists, data: data}
 }

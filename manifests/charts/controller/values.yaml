@@ -61,6 +61,14 @@ controller:
     # -- Burst for Kubernetes client rate limiter.
     burst: 200
 
+  # -- Namespaces used to scope the controller informer cache (`--namespaces`).
+  # Empty (default) watches the whole cluster. On large shared clusters, list
+  # the namespaces holding Pool/BatchSandbox workloads to shrink the cache and
+  # avoid startup OOMs. Every watched namespace (CRs and their Pods/Jobs) must
+  # be listed; multi-tenant deployments spread across many namespaces should
+  # keep this empty.
+  namespaces: []
+
   # -- Image pull stuck pod recovery during initial startup (BatchSandbox).
   # Rendered into the `feature-flags` ConfigMap in the controller namespace;
   # the controller hot-reloads it without a restart.
@@ -80,8 +88,8 @@ controller:
   # -- Pause/Resume snapshot configuration
   snapshot:
     # -- Image used for commit operations.
-    # DockerHub: opensandbox/image-committer:release-1.1.1
-    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.1.1"
+    # DockerHub: opensandbox/image-committer:release-1.2.1-rc.2
+    imageCommitterImage: "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/image-committer:release-1.2.1-rc.2"
     # -- PodTemplateSpec overlay for image-committer commit Job Pods.
     imageCommitterPodTemplate: {}
     # -- Containerd socket path of host. Defaults to empty so the controller uses its built-in default (/var/run/containerd/containerd.sock) without passing the `--containerd-socket-path` flag.
@@ -105,6 +113,27 @@ controller:
   # -- Enable leader election for controller manager
   leaderElection:
     enabled: true
+    # -- How long standby replicas wait after the last renewal before taking
+    # over the lease (`--leader-elect-lease-duration`). Empty keeps the binary
+    # default of 15s.
+    leaseDuration: ""
+    # -- How long the leader keeps retrying to renew the lease before giving up
+    # leadership (`--leader-elect-renew-deadline`). Must be less than
+    # leaseDuration. Raise it with leaseDuration if API server stalls make the
+    # leader exit with "leader election lost". Empty keeps the default of 10s.
+    renewDeadline: ""
+    # -- How long candidates wait between attempts to acquire or renew the
+    # lease (`--leader-elect-retry-period`). renewDeadline must be more than
+    # 1.2 times this value. Empty keeps the default of 2s.
+    retryPeriod: ""
+
+  # -- Additional args appended to the controller container command, after
+  # the chart-managed flags. Unlocks binary flags the chart does not model,
+  # e.g. --enable-file-log --log-file-path=/var/log/sandbox-controller/controller.log
+  # (rotating file output alongside stdout) or --concurrency=batchsandbox=32.
+  # Entries are passed to the container directly (no shell), so do not
+  # shell-quote the values.
+  extraArgs: []
 
   # -- Liveness probe configuration. The livenessProbe.httpGet.port below also
   # drives --health-probe-bind-address and the health container port.

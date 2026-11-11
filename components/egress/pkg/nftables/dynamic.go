@@ -351,9 +351,17 @@ func buildResolvedIPElementsScript(table string, elements []ResolvedIP) string {
 		} else {
 			continue
 		}
-		fmt.Fprintf(&script, "add element inet %s %s { %s }\n", table, setName, addr)
-		fmt.Fprintf(&script, "delete element inet %s %s { %s }\n", table, setName, addr)
-		fmt.Fprintf(&script, "add element inet %s %s { %s timeout %ds }\n", table, setName, addr, int(element.TTL/time.Second))
+		WriteTimedElement(&script, table, setName, addr, element.TTL)
 	}
 	return script.String()
+}
+
+// WriteTimedElement writes nft commands that leave addr in set with exactly
+// ttl left, whether or not it is already there. Adding an element that already
+// exists succeeds without changing its kernel expiry on some kernels (#1738),
+// so the element is added, deleted and added again within the same script.
+func WriteTimedElement(b *strings.Builder, table, set string, addr netip.Addr, ttl time.Duration) {
+	fmt.Fprintf(b, "add element inet %s %s { %s }\n", table, set, addr)
+	fmt.Fprintf(b, "delete element inet %s %s { %s }\n", table, set, addr)
+	fmt.Fprintf(b, "add element inet %s %s { %s timeout %ds }\n", table, set, addr, int(ttl/time.Second))
 }

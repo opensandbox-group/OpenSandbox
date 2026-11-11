@@ -50,12 +50,9 @@ osb command session run <sandbox-id> <session-id> -o raw -- sh -lc 'pwd'
 
 Treat these as three distinct execution paths:
 
-- `osb command run` without `--background`
-  Use for foreground one-shot commands when the result should stream directly to the terminal
-- `osb command run --background`
-  Use when the user needs an execution ID, later status checks, or log retrieval
-- `osb command session ...`
-  Use when shell state must persist across commands, such as exported variables or a working directory
+- `osb command run` without `--background` Use for foreground one-shot commands when the result should stream directly to the terminal
+- `osb command run --background` Use when the user needs an execution ID, later status checks, or log retrieval
+- `osb command session ...` Use when shell state must persist across commands, such as exported variables or a working directory
 
 ## Golden Paths
 

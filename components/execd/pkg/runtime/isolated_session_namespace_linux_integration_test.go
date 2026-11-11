@@ -68,9 +68,15 @@ func testPrivateSessionPinsNamespacesBeforeMarkReady(
 		if !capabilities.SetprivAvailable {
 			t.Skip("bwrap setpriv mode is unavailable")
 		}
+		if !capabilities.SetprivNetAvailable {
+			t.Skip("bwrap setpriv mode cannot create a private network namespace")
+		}
 	case isolation.UidModeUserns:
 		if !capabilities.UsernsAvailable {
 			t.Skip("bwrap user namespace mode is unavailable")
+		}
+		if !capabilities.UsernsNetAvailable {
+			t.Skip("bwrap userns mode cannot create a private network namespace")
 		}
 	default:
 		t.Fatalf("unexpected uid mode %q", uidMode)

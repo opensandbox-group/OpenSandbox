@@ -26,6 +26,7 @@ from typing import Protocol
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
+    IdlePolicy,
     NetworkPolicy,
     PagedSandboxInfos,
     PagedSnapshotInfos,
@@ -108,13 +109,14 @@ class SandboxesSync(Protocol):
         metadata: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
+        idle_policy: IdlePolicy | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a sandbox from a ``Succeeded`` fsb template (blocking).
 
         Template mode fixes the workload shape on the server: only metadata,
-        network policy and extensions may accompany the template id, and the
-        timeout is required.
+        network policy, extensions and the control-plane ``idle_policy``
+        may accompany the template id, and the timeout is required.
         """
         ...
 
@@ -175,7 +177,7 @@ class SandboxesSync(Protocol):
         Args:
             sandbox_id: Sandbox id.
             port: Endpoint port number.
-            use_server_proxy: Whether to use server proxy for endpoint.
+            use_server_proxy: Deprecated: the server proxy data path is in maintenance mode (security and bug fixes only); prefer the ingress gateway.
 
         Returns:
             Target sandbox endpoint.
@@ -196,7 +198,7 @@ class SandboxesSync(Protocol):
             sandbox_id: Sandbox id.
             port: Endpoint port number.
             expires: Unix epoch seconds for the signed route token expiry.
-            use_server_proxy: Whether to use server proxy for endpoint.
+            use_server_proxy: Deprecated: the server proxy data path is in maintenance mode (security and bug fixes only); prefer the ingress gateway.
 
         Returns:
             Target sandbox endpoint.
@@ -250,7 +252,8 @@ class SandboxesSync(Protocol):
 
     def kill_sandbox(self, sandbox_id: str) -> None:
         """
-        Terminate a sandbox and release all associated resources.
+        Request irreversible termination of the remote sandbox. Returns when
+        deletion is accepted; runtime cleanup may continue afterward.
 
         Args:
             sandbox_id: Unique identifier of the sandbox.

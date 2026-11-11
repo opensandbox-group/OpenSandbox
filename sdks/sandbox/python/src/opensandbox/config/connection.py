@@ -18,6 +18,8 @@ Connection configuration for OpenSandbox operations.
 """
 
 import os
+import ssl
+import warnings
 from datetime import timedelta
 
 import httpx  # type: ignore[reportMissingImports]
@@ -52,6 +54,7 @@ class ConnectionConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _owns_transport: bool = PrivateAttr(default=True)
+    _ssl_context: ssl.SSLContext | None = PrivateAttr(default=None)
 
     api_key: str | None = Field(
         default=None, description="API key for authentication with sandbox service"
@@ -68,7 +71,7 @@ class ConnectionConfig(BaseModel):
         default=False, description="Enable debug logging for HTTP requests"
     )
     user_agent: str = Field(
-        default="OpenSandbox-Python-SDK/1.1.1", description="User agent string"
+        default="OpenSandbox-Python-SDK/1.2.0", description="User agent string"
     )
     headers: dict[str, str] = Field(
         default_factory=dict, description="User defined headers"
@@ -101,15 +104,18 @@ class ConnectionConfig(BaseModel):
     retry_policy: RetryPolicy = Field(
         default_factory=RetryPolicy,
         description=(
-            "Retry policy applied to non-streaming requests going through "
-            "the shared transport. Pass RetryPolicy.disabled() for fast-fail."
+            "Retry policy applied to requests going through the shared "
+            "transport. Streaming (SSE) requests only get its wake-timeout "
+            "retry. Pass RetryPolicy.disabled() for fast-fail."
         ),
     )
     use_server_proxy: bool = Field(
         default=False,
         description=(
-            "Using sandbox server as proxy for process execd requests"
-            "It's useful when client sdk can't access the created sandbox directly"
+            "Deprecated: the server-proxied data path is in maintenance mode "
+            "(security and bug fixes only); route data-plane traffic through the "
+            "ingress gateway instead. Routes execd/endpoint requests through the "
+            "sandbox server; useful when the client cannot access the sandbox directly."
         ),
     )
     endpoint_cache_ttl: timedelta = Field(
@@ -171,7 +177,10 @@ class ConnectionConfig(BaseModel):
         shared `transport` on this config is never touched. Callers that
         close what they build (e.g. adapter clients) can do so safely.
         """
+        if self._ssl_context is None:
+            self._ssl_context = httpx.create_ssl_context()
         inner = httpx.AsyncHTTPTransport(
+            verify=self._ssl_context,
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_keepalive_connections,
@@ -222,6 +231,19 @@ class ConnectionConfig(BaseModel):
             # Avoid raising during cleanup paths.
             pass
 
+    @field_validator("use_server_proxy")
+    @classmethod
+    def _warn_deprecated_use_server_proxy(cls, v: bool) -> bool:
+        if v:
+            warnings.warn(
+                "use_server_proxy is deprecated: the server proxy data path is in "
+                "maintenance mode (security and bug fixes only). Route data-plane "
+                "traffic through the ingress gateway instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return v
+
     @field_validator("protocol")
     @classmethod
     def protocol_must_be_valid(cls, v: str) -> str:
@@ -253,7 +275,12 @@ class ConnectionConfig(BaseModel):
 
     def get_base_url(self) -> str:
         """Get the full base URL for API requests."""
-        domain = self.get_domain()
+        # Ignore a trailing "/" or "/v1" like the other SDKs, so the version
+        # prefix is never doubled ("//v1", "/v1/v1").
+        domain = self.get_domain().rstrip("/")
+        version_suffix = f"/{self._API_VERSION}"
+        if domain.endswith(version_suffix):
+            domain = domain[: -len(version_suffix)]
         # Allow domain to override protocol if it explicitly starts with a scheme
         if domain.startswith("http://") or domain.startswith("https://"):
             return f"{domain}/{self._API_VERSION}"

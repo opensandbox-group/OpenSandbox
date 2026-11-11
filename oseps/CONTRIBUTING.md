@@ -1,11 +1,9 @@
 # OSEP (OpenSandbox Enhancement Proposals)
 
-Use this directory to draft, review, and store enhancement proposals before they
-undergo broader discussion.
+Use this directory to draft, review, and store enhancement proposals before they undergo broader discussion.
 
 > [!NOTE]
-> The OSEP process and template structure is inspired by
-> [Tekton Enhancement Proposals (TEPs)](https://github.com/tektoncd/community/tree/main/teps).
+> The OSEP process and template structure is inspired by [Tekton Enhancement Proposals (TEPs)](https://github.com/tektoncd/community/tree/main/teps).
 
 > [!IMPORTANT]
 > **When is an OSEP required?**
@@ -15,8 +13,7 @@ undergo broader discussion.
 > - Modify the core sandbox API or runtime behavior
 > - Affect the security model or isolation guarantees
 >
-> Small bug fixes, documentation updates, and minor refactors can be submitted
-> directly as Pull Requests without an OSEP.
+> Small bug fixes, documentation updates, and minor refactors can be submitted directly as Pull Requests without an OSEP.
 
 ## Getting started
 
@@ -26,8 +23,7 @@ undergo broader discussion.
    oseps/init-osep.sh "Proposal Title"
    ```
 
-   This copies the template, fills in metadata, and creates a sequentially
-   numbered `0001-proposal-title.md` draft.
+   This copies the template, fills in metadata, and creates a sequentially numbered `0001-proposal-title.md` draft.
 
 2. Fill in each section from the template (`Summary`, `Motivation`, …).
 3. Once ready, submit the resulting file in a PR for community review.
@@ -41,10 +37,7 @@ oseps/init-osep.sh --status provisional --author "@username" "My Feature"
 
 ## Template
 
-The template used for new proposals lives at `oseps/osep-template.md.template`
-and mirrors Tekton's TEP structure while capturing the key sections needed
-for OpenSandbox planning. Each generated file starts with YAML front matter
-followed by the title and TOC:
+The template used for new proposals lives at `oseps/osep-template.md.template` and mirrors Tekton's TEP structure while capturing the key sections needed for OpenSandbox planning. Each generated file starts with YAML front matter followed by the title and TOC:
 
 ```yaml
 ---
@@ -64,8 +57,7 @@ status: draft
 <!-- /toc -->
 ```
 
-This YAML front matter renders as a table on GitHub and keeps the proposal
-metadata (status, authors, dates) visible at the top of the document.
+This YAML front matter renders as a table on GitHub and keeps the proposal metadata (status, authors, dates) visible at the top of the document.
 
 ## Status lifecycle
 

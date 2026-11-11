@@ -27,10 +27,21 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from opensandbox_server.api.lifecycle import sandbox_service
-from opensandbox_server.services.diagnostics import DiagnosticResult
+from opensandbox_server.services.diagnostics import DiagnosticContext, DiagnosticResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["DevOps"])
+
+
+@router.get(
+    "/sandboxes/{sandbox_id}/diagnostics/context",
+    response_model=DiagnosticContext,
+    response_model_exclude_none=True,
+    responses={404: {"description": "Sandbox not found"}, 501: {"description": "Not implemented"}},
+)
+def get_sandbox_diagnostic_context(sandbox_id: str) -> DiagnosticContext:
+    """Identify the runtime backend and its diagnostic identifiers."""
+    return sandbox_service.get_sandbox_diagnostic_context(sandbox_id)
 
 
 def _diagnostic_inline_response(

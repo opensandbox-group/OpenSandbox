@@ -52,19 +52,26 @@ function readEnvApiKey(): string | undefined {
 }
 
 export function createLifecycleClient(opts: CreateLifecycleClientOptions = {}): LifecycleClient {
+  return createLifecycleApiClient<LifecyclePaths>(opts);
+}
+
+// Shared bootstrap keeps diagnostics and lifecycle auth and URL defaults aligned.
+export function createLifecycleApiClient<Paths extends object>(
+  opts: CreateLifecycleClientOptions = {},
+): Client<Paths> {
   const apiKey = opts.apiKey ?? readEnvApiKey();
 
   const headers: Record<string, string> = {
     ...(opts.headers ?? {}),
   };
 
-  if (apiKey && !headers["OPEN-SANDBOX-API-KEY"]) {
+  if (apiKey && !Object.keys(headers).some((name) => name.toLowerCase() === "open-sandbox-api-key")) {
     headers["OPEN-SANDBOX-API-KEY"] = apiKey;
   }
 
   const createClientFn =
       (createClient as unknown as { default?: typeof createClient }).default ?? createClient;
-  return createClientFn<LifecyclePaths>({
+  return createClientFn<Paths>({
     baseUrl: opts.baseUrl ?? "http://localhost:8080/v1",
     headers,
     fetch: opts.fetch,

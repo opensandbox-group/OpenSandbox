@@ -35,6 +35,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -149,6 +150,7 @@ func main() {
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
+	var leaseDuration, renewDeadline, retryPeriod time.Duration
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
@@ -167,6 +169,9 @@ func main() {
 	var kubeClientQPS float64
 	var kubeClientBurst int
 
+	// Informer cache namespace scoping
+	var cacheNamespaces string
+
 	// Controller concurrency options
 	var concurrencyConfig ConcurrencyConfig
 
@@ -176,6 +181,14 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
+	flag.DurationVar(&leaseDuration, "leader-elect-lease-duration", 15*time.Second,
+		"How long non-leader candidates wait after the last renewal before taking over the lease.")
+	flag.DurationVar(&renewDeadline, "leader-elect-renew-deadline", 10*time.Second,
+		"How long the leader keeps retrying to renew the lease before giving up leadership. "+
+			"Must be less than --leader-elect-lease-duration.")
+	flag.DurationVar(&retryPeriod, "leader-elect-retry-period", 2*time.Second,
+		"How long candidates wait between attempts to acquire or renew the lease. "+
+			"--leader-elect-renew-deadline must be more than 1.2 times this value.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS. Use --metrics-secure=false to use HTTP instead.")
 	flag.StringVar(&webhookCertPath, "webhook-cert-path", "", "The directory that contains the webhook certificate.")
@@ -203,6 +216,8 @@ func main() {
 	flag.BoolVar(&logCompress, "log-compress", true, "Compress determines if the rotated log files should be compressed using gzip")
 	flag.Float64Var(&kubeClientQPS, "kube-client-qps", 100, "QPS for Kubernetes client rate limiter.")
 	flag.IntVar(&kubeClientBurst, "kube-client-burst", 200, "Burst for Kubernetes client rate limiter.")
+	flag.StringVar(&cacheNamespaces, "namespaces", "", "Comma-separated namespaces used to scope the informer cache. "+
+		"Empty watches the whole cluster.")
 	flag.Var(&concurrencyConfig, "concurrency", "Controller concurrency settings in format: controller1=N;controller2=M. "+
 		"Available controllers: batchsandbox, pool. "+
 		"Example: --concurrency='batchsandbox=32;pool=128'")
@@ -422,6 +437,12 @@ func main() {
 		config.Burst = kubeClientBurst
 	}
 
+	cacheOpts := cache.Options{}
+	if defaultNamespaces := parseCacheNamespaces(cacheNamespaces); len(defaultNamespaces) > 0 {
+		cacheOpts.DefaultNamespaces = defaultNamespaces
+		setupLog.Info("scoping informer cache to namespaces", "namespaces", cacheNamespaces)
+	}
+
 	mgr, err := ctrl.NewManager(config, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -429,6 +450,10 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "2fa1c467.opensandbox.io",
+		LeaseDuration:          &leaseDuration,
+		RenewDeadline:          &renewDeadline,
+		RetryPeriod:            &retryPeriod,
+		Cache:                  cacheOpts,
 		// LeaderElectionReleaseOnCancel causes the leader to voluntarily release the lease
 		// when the Manager is stopped, allowing a new leader to acquire it without waiting
 		// for the full LeaseDuration. This is safe because main() exits immediately after
@@ -497,6 +522,7 @@ func main() {
 	}
 	if err := (&controller.SandboxSnapshotReconciler{
 		Client:                    mgr.GetClient(),
+		APIReader:                 mgr.GetAPIReader(),
 		Scheme:                    mgr.GetScheme(),
 		Recorder:                  mgr.GetEventRecorderFor("sandboxsnapshot-controller"),
 		ImageCommitterImage:       imageCommitterImage,
@@ -569,6 +595,25 @@ func setupTelemetry() func(context.Context) error {
 		setupLog.Info("OpenTelemetry export enabled", "endpoint", telemetry.SanitizeEndpoint(endpoint))
 	}
 	return shutdown
+}
+
+// parseCacheNamespaces converts a comma-separated namespace list into a
+// controller-runtime DefaultNamespaces map. An empty or separator-only input
+// returns nil so the cache stays cluster-wide.
+func parseCacheNamespaces(value string) map[string]cache.Config {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	namespaces := make(map[string]cache.Config)
+	for _, name := range strings.Split(value, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			namespaces[name] = cache.Config{}
+		}
+	}
+	if len(namespaces) == 0 {
+		return nil
+	}
+	return namespaces
 }
 
 func loadImageCommitterPodTemplate(path string) (*corev1.PodTemplateSpec, error) {

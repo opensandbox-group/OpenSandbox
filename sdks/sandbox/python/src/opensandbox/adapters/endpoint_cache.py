@@ -47,7 +47,6 @@ class EndpointCache:
         self._cache: OrderedDict[tuple, tuple[SandboxEndpoint, float]] = OrderedDict()
         self._lock = threading.Lock()
         self._inflight: dict[tuple, _InflightEntry] = {}
-        self._generation = 0
 
     def get(self, key: tuple) -> SandboxEndpoint | None:
         with self._lock:
@@ -76,7 +75,6 @@ class EndpointCache:
 
     def invalidate(self, sandbox_id: str) -> None:
         with self._lock:
-            self._generation += 1
             keys_to_remove = [k for k in self._cache if k[0] == sandbox_id]
             for k in keys_to_remove:
                 del self._cache[k]
@@ -98,7 +96,6 @@ class EndpointCache:
                     return endpoint
                 del self._cache[key]
 
-            gen_before = self._generation
             if key in self._inflight:
                 inf = self._inflight[key]
                 is_owner = False
@@ -116,7 +113,7 @@ class EndpointCache:
         try:
             endpoint = fetch()
             with self._lock:
-                if self._generation == gen_before:
+                if self._inflight.get(key) is inf:
                     self._put_locked(key, endpoint)
             inf.result = endpoint
             return endpoint
@@ -140,6 +137,10 @@ class _InflightEntry:
         self.owner: bool = False
 
 
+class _FetchCancelled(Exception):
+    """Set on an inflight future when the caller fetching it is cancelled."""
+
+
 class AsyncEndpointCache:
     """Async LRU+TTL endpoint cache with asyncio.Future-based inflight dedup."""
 
@@ -152,7 +153,6 @@ class AsyncEndpointCache:
         self._ttl = ttl
         self._cache: OrderedDict[tuple, tuple[SandboxEndpoint, float]] = OrderedDict()
         self._inflight: dict[tuple, asyncio.Future[SandboxEndpoint]] = {}
-        self._generation = 0
 
     def get(self, key: tuple) -> SandboxEndpoint | None:
         entry = self._cache.get(key)
@@ -175,7 +175,6 @@ class AsyncEndpointCache:
         self._cache[key] = (endpoint, time.monotonic() + self._ttl)
 
     def invalidate(self, sandbox_id: str) -> None:
-        self._generation += 1
         keys_to_remove = [k for k in self._cache if k[0] == sandbox_id]
         for k in keys_to_remove:
             del self._cache[k]
@@ -188,27 +187,37 @@ class AsyncEndpointCache:
         key: tuple,
         fetch: Callable[[], Awaitable[SandboxEndpoint]],
     ) -> SandboxEndpoint:
-        cached = self.get(key)
-        if cached is not None:
-            return cached
+        while True:
+            cached = self.get(key)
+            if cached is not None:
+                return cached
 
-        if key in self._inflight:
-            return await asyncio.shield(self._inflight[key])
+            inflight = self._inflight.get(key)
+            if inflight is None:
+                break
+            try:
+                return await asyncio.shield(inflight)
+            except _FetchCancelled:
+                # The caller that started the fetch was cancelled, not this one;
+                # fetch again instead of raising its cancellation here.
+                continue
 
-        gen_before = self._generation
         loop = asyncio.get_running_loop()
         future: asyncio.Future[SandboxEndpoint] = loop.create_future()
         self._inflight[key] = future
 
         try:
             endpoint = await fetch()
-            if self._generation == gen_before:
+            if self._inflight.get(key) is future:
                 self.put(key, endpoint)
             future.set_result(endpoint)
             return endpoint
         except BaseException as e:
             if not future.done():
-                future.set_exception(e)
+                # Waiters must not inherit this caller's cancellation.
+                future.set_exception(
+                    _FetchCancelled() if isinstance(e, asyncio.CancelledError) else e
+                )
                 # The owner raises the original exception directly instead of awaiting
                 # this future. Mark the exception as observed so asyncio does not log
                 # "Future exception was never retrieved" when there are no waiters.

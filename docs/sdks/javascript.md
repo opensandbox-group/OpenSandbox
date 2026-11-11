@@ -29,8 +29,7 @@ yarn add @alibaba-group/opensandbox
 
 ## Quick Start
 
-This example uses Node.js 20+ with ES modules and top-level `await`. It creates a
-sandbox, runs a shell command, and releases both remote and local resources.
+This example uses Node.js 20+ with ES modules and top-level `await`. It creates a sandbox, runs a shell command, and releases both remote and local resources.
 
 ::: tip
 Before running this example, ensure the OpenSandbox service is running. See the [Getting Started](/getting-started/) guide for startup instructions.
@@ -102,25 +101,60 @@ const sandbox = await Sandbox.create({
 
 The Server validates `timeoutSeconds`; `preStart` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
 
+### Idle policy (auto-pause and wake-on-access)
+
+`lifecycle.idlePolicy` (OSEP-0024, fast-sandbox only) tells the control plane to auto-pause the sandbox after `idleTimeoutSeconds` (30–86400) of continuously idle ingress-observed traffic, and to wake it on the next request. It is control-plane state: it never reaches the guest, is allowed in template mode (`Sandbox.createFromTemplate({ idlePolicy })`), and is rejected by non-fast-sandbox backends. Omitting it preserves non-automated behavior exactly.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu:24.04",
+  timeoutSeconds: 86400,
+  lifecycle: {
+    idlePolicy: {
+      idleTimeoutSeconds: 300,
+      onIdle: "pause",
+      wakeOnAccess: true,
+    },
+  },
+});
+```
+
+`activeProbe` lets the application veto a pause while real work runs without producing ingress traffic: declare an endpoint answering `{"active": bool, "message"?: string}` and the server polls it when the sandbox is otherwise idle; a busy answer resets the idle clock.
+
+### Renewal policy (renew-on-access)
+
+`lifecycle.renewalPolicy.extendSeconds` (OSEP-0009) opts the sandbox into automatic expiration extension on observed access: each proxied or gateway-observed request moves the expiration to `max(now + extendSeconds, current expiresAt)`. It is control-plane state and never reaches the guest. Requires the server operator to enable `[renew_intent]` — see [Renew-on-Access](/guides/renew-on-access). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported through 1.x and is removed in 2.0.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu:24.04",
+  timeoutSeconds: 3600,
+  lifecycle: {
+    renewalPolicy: { extendSeconds: 3600 },
+  },
+});
+```
+
+### Wake retry
+
+A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` header; the transport recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the SDK throws `SandboxWakeTimeoutException` (carrying `attempts` and `waitedMs`) while the server-side resume continues in the background. Bare `503` responses follow the existing rules untouched. Tune it on the connection config: `wakeRetryEnabled` (default true), `wakeMaxAttempts` (5), `wakeOverallDeadlineSeconds` (60, `null` for unbounded). The SSE transport is wrapped too, so `commands.run()` wakes a paused sandbox like any other request (an established stream is never re-dispatched — only the marked 503 connect replays); the upload transport stays bare because upload bodies are streams and cannot be replayed.
+
 ## Client Pool and observability
 
-`SandboxPool` provides in-memory and Redis-backed stores, four acquire policies,
-and staged warmup controls. The Redis store is exported from
-`@alibaba-group/opensandbox/pool-redis`. See [Client Pool](/guides/client-pool)
-for examples, configuration, and namespace retirement.
+`SandboxPool` provides in-memory and Redis-backed stores, four acquire policies, and staged warmup controls. The Redis store is exported from `@alibaba-group/opensandbox/pool-redis`. See [Client Pool](/guides/client-pool) for examples, configuration, and namespace retirement.
 
 Set `enableTracing: true` in `ConnectionConfig` to enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing).
 JavaScript emits phase spans but fewer diagnostic attributes than Python/JVM.
 Create-latency [telemetry](/sdks/observability#creation-metrics) has a separate opt-out setting.
-Remote diagnostic logs/events are available through [CLI or HTTP](/api/#diagnostics),
-not through the JavaScript SDK.
+Use `SandboxManager.getDiagnosticContext(sandboxId)` to identify the runtime
+backend without connecting to execd. Both the manager and sandbox expose
+`getDiagnosticLogs` / `getDiagnosticEvents`; see [SDK diagnostics](/sdks/#diagnostics).
 
 ## Usage Examples
 
-The snippets below use `config` and a live `sandbox` from the quick start. Run
-them before its cleanup block. Examples use TypeScript with top-level `await` in
-Node.js; omit type annotations in JavaScript. Creation examples are alternatives.
-Terminate each sandbox with `kill()` and release its client with `close()` when done.
+The snippets below use `config` and a live `sandbox` from the quick start. Run them before its cleanup block. Examples use TypeScript with top-level `await` in Node.js; omit type annotations in JavaScript. Creation examples are alternatives. Terminate each sandbox with `kill()` and release its client with `close()` when done.
 
 ### 1. Lifecycle Management
 
@@ -152,9 +186,7 @@ try {
 }
 ```
 
-Pause is asynchronous and runtime-dependent. See [Pause and Resume](/guides/pause-resume).
-Attach to an already running sandbox with
-`Sandbox.connect({ sandboxId, connectionConfig: config })`.
+Pause is asynchronous and runtime-dependent. See [Pause and Resume](/guides/pause-resume). Attach to an already running sandbox with `Sandbox.connect({ sandboxId, connectionConfig: config })`.
 
 Create a non-expiring sandbox by passing `timeoutSeconds: null`:
 
@@ -168,9 +200,7 @@ const manual = await Sandbox.create({
 
 ### 2. Custom Health Check
 
-Resolving an endpoint confirms that a route exists; it does not confirm that the
-application on that port is healthy. For service readiness, make a bounded request
-to the application's health endpoint and include the returned endpoint headers.
+Resolving an endpoint confirms that a route exists; it does not confirm that the application on that port is healthy. For service readiness, make a bounded request to the application's health endpoint and include the returned endpoint headers.
 
 Define custom logic to determine whether the sandbox is ready/healthy. This overrides the default ping check. Checks must not block the event loop and may continue running after timeout.
 
@@ -200,6 +230,10 @@ const sandbox = await Sandbox.create({
 
 Execute commands and handle output streams in real-time.
 
+Command and code-interpreter event streams accept LF, CRLF, and CR line endings, including when a line ending is split across network chunks.
+
+`timeoutSeconds` on `commands.run()` and `commands.runInSession()` is rounded to the nearest whole millisecond, with a minimum of 1 ms for positive values, so a positive sub-millisecond timeout cannot disable the timeout. Omitted timeouts and explicit zero retain the server defaults. Negative or non-finite values, including values that overflow the millisecond conversion, are rejected before a request is sent.
+
 ```ts
 import type { ExecutionHandlers } from "@alibaba-group/opensandbox";
 
@@ -217,8 +251,7 @@ await sandbox.commands.run(
 );
 ```
 
-To execute a native program without shell parsing, pass an argument list. On Linux,
-this example prints literal `$HOME` and keeps `hello world` as one argument:
+To execute a native program without shell parsing, pass an argument list. On Linux, this example prints literal `$HOME` and keeps `hello world` as one argument:
 
 ```ts
 await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"]);
@@ -272,21 +305,15 @@ try {
 
 #### Persistent environment variables
 
-Set environment variables that the runtime injects into every subsequent command
-and session — without hand-writing shell escaping against the sandbox env file.
+Set environment variables that the runtime injects into every subsequent command and session — without hand-writing shell escaping against the sandbox env file.
 
 ```ts
 await sandbox.commands.setEnv("MY_TOKEN", "it's a safe value");
 ```
 
-Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values without a single quote are
-stored verbatim; values containing a single quote use the env file's
-double-quoted form, in which shell-style `$NAME` sequences may be expanded
-when the runtime loads the file. The env file is append-only: the
-last write for a key wins. Throws if the sandbox fails to persist the variable.
+Keys must match `[A-Za-z_][A-Za-z0-9_]*`. Values without a single quote are stored verbatim; values containing a single quote use the env file's double-quoted form, in which shell-style `$NAME` sequences may be expanded when the runtime loads the file. The env file is append-only: the last write for a key wins. Throws if the sandbox fails to persist the variable.
 
-For filesystem/process isolation within a sandbox, see
-[Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
+For filesystem/process isolation within a sandbox, see [Isolation Sessions](/guides/isolation-sessions). These are separate from Bash sessions.
 
 ### 4. File Operations
 
@@ -314,8 +341,22 @@ console.log(files.map((f) => f.path));
 await sandbox.files.deleteDirectories(["/tmp/demo"]);
 ```
 
-For binary files, pass a `Uint8Array` to `writeFiles()` and read with `readBytes()`
-or `readBytesStream()`. Read options support `offset` and `limit` for partial downloads.
+For binary files, pass a `Uint8Array` to `writeFiles()` and read with `readBytes()` or `readBytesStream()`. Read options support `offset` and `limit` for partial downloads.
+
+Use `readBytesDetailed` or `readBytesStreamDetailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Both methods are optional on `SandboxFiles`; check for support before calling them. Close a detailed stream body with `await download.body.close()` if it is not fully consumed.
+
+For content-encoded responses, `contentLength` and `contentRange` describe the encoded HTTP representation. Fetch decodes the body, so `totalSize` is `-1` when its decoded size cannot be determined from those headers.
+
+For cross-origin browser responses, `totalSize` is also `-1` if `Content-Encoding` is not exposed. Without that header the SDK cannot tell whether `Content-Length` describes compressed bytes.
+
+```ts
+if (sandbox.files.readBytesDetailed) {
+  const download = await sandbox.files.readBytesDetailed("/tmp/data.bin", { range: "bytes=5-" });
+  console.log(download.isPartial, download.totalSize, download.contentRange);
+}
+```
+
+Check `isPartial` before appending a resumed download: a `200` response means the server ignored Range and returned the whole file.
 
 #### File operations with an explicit identity
 
@@ -325,17 +366,9 @@ Bind a filesystem client to a Linux UID and GID:
 const files = sandbox.filesWithIdentity(1001, 2000);
 ```
 
-The bound client exposes the usual file operations and shares the sandbox
-connection, authentication, and endpoint routing headers. The existing file
-client retains its default identity. Select the UID/GID separately for command
-execution.
+The bound client exposes the usual file operations and shares the sandbox connection, authentication, and endpoint routing headers. The existing file client retains its default identity. Select the UID/GID separately for command execution.
 
-This requires Linux and an Execd version that supports filesystem execution
-identity. Unsupported servers return an error; requests never fall back to the
-default filesystem routes. Keep sandbox credentials and identity selection in
-the trusted backend. Linux filesystem permissions apply; this feature does not
-create a tenant isolation boundary. See [Execd](/architecture/data-plane/execd)
-for permission and workspace provisioning details.
+This requires Linux and an Execd version that supports filesystem execution identity. Unsupported servers return an error; requests never fall back to the default filesystem routes. Keep sandbox credentials and identity selection in the trusted backend. Linux filesystem permissions apply; this feature does not create a tenant isolation boundary. See [Execd](/architecture/data-plane/execd) for permission and workspace provisioning details.
 
 ### 5. Endpoints
 
@@ -347,9 +380,7 @@ const url = await sandbox.getEndpointUrl(44772);
 console.log(url, Object.keys(endpoint.headers ?? {}));
 ```
 
-When making an HTTP request to a sandbox service, forward `endpoint.headers`,
-including credentials required by secure access. The health-check example above
-shows a request to an application that is actually listening on the target port.
+When making an HTTP request to a sandbox service, forward `endpoint.headers`, including credentials required by secure access. The health-check example above shows a request to an application that is actually listening on the target port.
 
 ### 6. Volume Mounts
 
@@ -397,8 +428,7 @@ try {
 
 ### Resource metrics
 
-Read current sandbox resource usage with `await sandbox.getMetrics()`. This is
-separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
+Read current sandbox resource usage with `await sandbox.getMetrics()`. This is separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
 
 ## Snapshots, templates, and metadata
 
@@ -411,15 +441,9 @@ separate from [SDK creation telemetry](/sdks/observability#creation-metrics).
 | Create from a published template | `Sandbox.createFromTemplate({ templateId, timeoutSeconds, connectionConfig })` |
 | Patch metadata | `sandbox.patchMetadata` or `manager.patchSandboxMetadata` |
 
-Poll snapshot status before restoring. Template builds are asynchronous; wait
-for `status.phase === "Succeeded"` before use. Template-backed creation requires
-a TTL and inherits workload configuration from the published template.
-Metadata patch values add/replace keys; `null` deletes a key.
-See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+Poll snapshot status before restoring. Template builds are asynchronous; wait for `status.phase === "Succeeded"` before use. Template-backed creation requires a TTL and inherits workload configuration from the published template. Metadata patch values add/replace keys; `null` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
 
-Snapshot support depends on the runtime and server configuration. Renew the source
-sandbox first if its remaining TTL may expire during snapshot creation. Wait for
-`Ready` before restoring; the snapshot remains available after this example:
+Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. Wait for `Ready` before restoring; the snapshot remains available after this example:
 
 ```ts
 import { SandboxManager } from "@alibaba-group/opensandbox";
@@ -470,8 +494,12 @@ await sandbox.patchMetadata({ project: "demo", "obsolete-key": null });
 
 The `ConnectionConfig` class manages API server connection settings.
 
+An explicit `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `apiKey` and its environment fallback, regardless of header-name casing. This also applies to the low-level lifecycle and diagnostic clients.
+
 ::: info Runtime Notes
 - In browsers, the SDK uses the global `fetch` implementation.
+- A caller-provided `AbortSignal` remains active while reading the response body, including SSE streams and download responses. Signal composition uses the standard `AbortSignal.any` API, which must be available in the runtime.
+- `requestTimeoutSeconds` bounds the wait for a response: it stops applying once the response headers arrive (streaming responses are not cut off). It never caps a healthy file upload body, which can legitimately take longer than the timeout; on Node.js a stalled upload, or an upload that gets no response headers within the timeout once the body has been sent, is aborted instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract).
 - In Node.js, every `Sandbox` and `SandboxManager` clones the base `ConnectionConfig` via `withTransportIfMissing()`, so each instance gets an isolated `undici` keep-alive pool. Call `sandbox.close()` or `manager.close()` when you are done so the SDK can release the associated agent.
 :::
 
@@ -483,7 +511,6 @@ The `ConnectionConfig` class manages API server connection settings.
 | `requestTimeoutSeconds` | Request timeout applied to SDK HTTP calls                                                                    | `30`             | -                      |
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
-| `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
 | `enableTracing` | Enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing) | `false` | - |
 | `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
@@ -504,6 +531,41 @@ const config2 = new ConnectionConfig({
   headers: { "X-Custom-Header": "value" },
 });
 ```
+
+#### Redirects and protected headers
+
+The SDK strips OpenSandbox credentials before following a cross-origin redirect.
+Same-origin redirects preserve request headers, while cross-origin redirects remove
+every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-`
+(case-insensitive), such as `OPEN-SANDBOX-API-KEY` and `OPENSANDBOX-EGRESS-AUTH`. In
+addition, the standard credential headers `Authorization`, `Cookie`, and
+`Proxy-Authorization` are removed, matching native `fetch`. An origin is the
+combination of scheme, host, and port, so changing any of those values is
+cross-origin. Other custom headers are not stripped automatically. Requests that do
+not carry any protected header keep the runtime's default redirect behavior.
+
+When a guarded request is redirected, the request timeout applies as a single budget
+for the whole chain rather than per hop: the deadline starts with the first dispatch,
+and the caller's abort signal (plus any fetch options set on the `Request`) is carried
+across every hop.
+
+File uploads never follow redirects, because a streamed or in-memory multipart body
+cannot always be replayed. A redirect response from an upload is surfaced as a
+`SandboxApiException` with the original status code on Node.js; in browsers the
+opaque redirect reports status `0`.
+
+::: warning Browser limitation
+Browsers do not expose the target of a `redirect: "manual"` response, so the SDK
+cannot inspect it before following. For a request that carries protected headers, the
+SDK fails closed (throws a `SandboxApiException`) instead of risking a cross-origin
+credential replay. Node.js is unaffected.
+:::
+
+The JavaScript Code Interpreter SDK inherits the sandbox's connection
+configuration. With the deprecated `useServerProxy: true` (maintenance mode), context requests and streamed code
+execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server
+authentication. In direct mode, the SDK does not attach this key to code
+execution requests.
 
 ### 2. Sandbox Creation Configuration
 
@@ -548,11 +610,7 @@ const sandbox = await Sandbox.create({
 
 ### 3. Runtime Egress Policy Updates
 
-Runtime egress policy routing depends on the sandbox origin.
-For image-backed sandboxes, the SDK resolves port `18080` and calls the sidecar
-`/policy` API. For template-backed sandboxes (including restored template snapshots),
-the SDK detects `OPEN-SANDBOX-ORIGIN: template` and routes policy operations through
-the lifecycle `/sandboxes/{sandboxId}/networkpolicy` API.
+Runtime egress policy routing depends on the sandbox origin. For image-backed sandboxes, the SDK resolves port `18080` and calls the sidecar `/policy` API. For template-backed sandboxes (including restored template snapshots), the SDK detects `OPEN-SANDBOX-ORIGIN: template` and routes policy operations through the lifecycle `/sandboxes/{sandboxId}/networkpolicy` API.
 
 Patch uses merge semantics:
 - Incoming rules take priority over existing rules with the same `target`.
@@ -571,11 +629,7 @@ await sandbox.patchEgressRules([
 
 ### 4. Credential Vault
 
-Credential Vault requires a sandbox-side egress service and is unavailable for
-template-backed sandboxes. It injects outbound credentials from the egress sidecar while
-keeping real secrets out of sandbox environment variables, commands, files, and
-logs. Create the sandbox with `credentialProxy` enabled, then write credentials
-and bindings through `sandbox.credentialVault`.
+Credential Vault requires a sandbox-side egress service and is unavailable for template-backed sandboxes. It injects outbound credentials from the egress sidecar while keeping real secrets out of sandbox environment variables, commands, files, and logs. Create the sandbox with `credentialProxy` enabled, then write credentials and bindings through `sandbox.credentialVault`.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -604,15 +658,11 @@ await sandbox.credentialVault.create({
 });
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types, binding
-guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, binding guidance, and Git/curl examples.
 
 ### 5. Resource Cleanup
 
-Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js
-so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting
-with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to
-release the underlying agent.
+Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to release the underlying agent.
 
 The companion `@alibaba-group/opensandbox-code-interpreter` SDK also releases each
 code execution response reader when streaming finishes or fails. Leaving a
@@ -621,6 +671,8 @@ handler also cancels the body and propagates the handler's error. Use
 `codes.interrupt(executionId)` to request interruption of a running code execution.
 
 ## Browser Notes
+
+Uploads copy each consumed byte chunk before requesting the next one, so producers can reuse a `Uint8Array` or Node.js `Buffer` between chunks. A `ReadableStream` producer must still keep a chunk unchanged while it is queued and has not yet been consumed.
 
 ::: warning
 - The SDK can run in browsers, but **streaming file uploads are Node-only**.

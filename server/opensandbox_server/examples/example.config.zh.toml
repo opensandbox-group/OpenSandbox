@@ -59,7 +59,9 @@ path = "~/.opensandbox/opensandbox.db"
 # 每个 PostgreSQL 数据库只能由一个活跃 Server 进程使用。
 
 [docker]
-# Supported values for network_mode: "host", "bridge"
+# Supported values for network_mode: "host", "bridge", "none", "pasta", "slirp4netns",
+# or a user-defined network name ("pasta"/"slirp4netns" require a runtime that supports
+# them, e.g. podman; networkPolicy/egress still requires "bridge")
 network_mode = "bridge"
 # Bridge 模式下沙箱端口映射的宿主机端口范围。
 # 每个沙箱需要 2–3 个宿主机端口（无 egress 需要 2 个，有 egress sidecar 需要 3 个）。

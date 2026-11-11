@@ -104,8 +104,8 @@ type SubjectKey struct {
 }
 
 // ErrUnknownSubject is returned when an operation targets a subject with no
-// observed binding. Callers treat it as the signal to cache the push as
-// pending.
+// observed binding. Callers treat it as a failed operation (fail closed);
+// there is no pending-cache retry.
 var ErrUnknownSubject = errors.New("subject not registered")
 
 // Resolver is the hot path: pure lookup, must be cheap and race-free.
@@ -121,9 +121,14 @@ type Registry interface {
 	// RegisterAndEnforce observes a binding for the subject and runs the
 	// deny-first install (via enforce) under the same lock that ApplyPolicy
 	// uses, so a policy push can never be clobbered by a retried install.
-	// enforce is skipped when the subject is already active. Returns the
+	// enforce is skipped when the subject is already active. When the
+	// dispatch key is held by a different live subject (slot reuse),
+	// onTakeover tears that stale subject down under the same lock before
+	// the successor is indexed or installed (OSEP-0022 takeover); it is
+	// required for a takeover — a nil callback fails the registration
+	// rather than orphaning the evictee's kernel enforcement. Returns the
 	// state after registration.
-	RegisterAndEnforce(s Subject, key SubjectKey, fence Fencing, enforce func() error) (State, error)
+	RegisterAndEnforce(s Subject, key SubjectKey, fence Fencing, enforce func() error, onTakeover func(stale Subject) error) (State, error)
 	// Register is RegisterAndEnforce without platform hooks.
 	Register(s Subject, key SubjectKey, fence Fencing) State
 	// Get returns the current state.
@@ -159,7 +164,7 @@ type Registry interface {
 // the action protocol (the fast-sandbox control plane translates SET_BINDING,
 // LIFECYCLE_HOOK, and REMOVE_BINDING into these calls). The caller installs
 // the platform adapters here (deny-first nft rules, gateway DNS redirect,
-// pending-push flush). A hook error must be treated as fail-closed: the
+// MITM interception). A hook error must be treated as fail-closed: the
 // subject stays denying until the hook succeeds.
 type LifecycleHooks interface {
 	// OnRegistered fires when a binding is observed (SET_BINDING) and the
@@ -169,13 +174,6 @@ type LifecycleHooks interface {
 	// (atomic with ApplyPolicy), so it must not call back into registry
 	// methods.
 	OnRegistered(s Subject, att actionhandler.NetworkAttachment) error
-	// OnRegisteredComplete fires once registration (deny-first install)
-	// succeeded and the registry lock is released. It is the place for
-	// best-effort follow-ups that would deadlock inside OnRegistered, e.g.
-	// flushing a cached pending credential push for this subject. specGen is
-	// the sandbox spec generation recorded at SET_BINDING, used to drop
-	// stale pending pushes (X-Fast-Sandbox-Generation fencing).
-	OnRegisteredComplete(s Subject, att actionhandler.NetworkAttachment, specGen uint64)
 	// OnUnloaded fires when the binding is removed terminally (REMOVE_BINDING
 	// or the sandbox's binding is gone). Enforcement must be removed; att is
 	// the last observed network attachment (for gateway refcounts etc.).

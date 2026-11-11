@@ -77,7 +77,7 @@ Compatibility reflects current upstream `main` only:
 | Docker (`runc`) | Supported | Requires `[docker] network_mode = "bridge"`; use `ca_cert_path` only when a private CA is required. |
 | Kubernetes (`runc`) | Supported | Non-pooled AgentSandbox and BatchSandbox workloads; use `ca_secret_name` only when a private CA is required. |
 | Kubernetes (`Kata`) | Supported | Accepted by egress validation; validate the selected RuntimeClass, CNI, and kernel in your deployment. |
-| gVisor (`secure_runtime.type = "gvisor"`) | Rejected | Sandbox creation returns HTTP 400 because gVisor netstack lacks the required iptables nat redirect. |
+| gVisor (`secure_runtime.type = "gvisor"`) | Rejected | Sandbox creation returns HTTP 400 because gVisor does not support the nftables interface the egress sidecar uses for its redirect and policy rules. |
 | Kubernetes Pool Mode | Unsupported | Rejects per-request `networkPolicy`; cannot attach per-allocation egress sidecars. |
 | Fast Sandbox | Unsupported | Current fast-sandbox profile rejects `networkPolicy` when `upstream_proxy` is set. |
 
@@ -94,6 +94,8 @@ Compatibility reflects current upstream `main` only:
 | UDP and QUIC | No | These flows cannot use HTTP CONNECT and are refused rather than sent directly. |
 | WebSocket (WSS) | Unverified | Dedicated chained-proxy WSS compatibility is not independently verified. |
 | IPv6 Egress | Incomplete | Incomplete Kubernetes dual-stack support; `egress.disable_ipv6` defaults to `true`. |
+
+The default-off experimental OSEP-0023 revision runtime has a narrower live HTTP/2 admission boundary: only the fixed-dependency direct/lazy path is wired, and configured chained upstream proxies remain rejected for that path. Existing HTTP/1 and legacy proxy behavior in the matrix above is unchanged. See the [HTTP/2 integration boundary](/architecture/network/osep-0023-h2-integration) for drain semantics and incomplete client-migration and Linux acceptance.
 
 ## Deployment, rotation, and rollback
 

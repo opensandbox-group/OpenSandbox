@@ -145,12 +145,119 @@ func (s *AtomicPolicyFile) Save(p *NetworkPolicy) (FileMutationState, error) {
 		return FileUnchanged, atomicFileError("serialize", err)
 	}
 	data = append(data, '\n')
+	return s.SaveRaw(data)
+}
+
+// SaveRaw publishes exact bytes with the same guarantees and three-state
+// classification as Save (the vault persistence shares the machinery).
+// Existing mode and ownership are copied to the temporary inode; a new file is
+// 0600. No path is ever opened with O_TRUNC, and the original is never chmodded.
+func (s *AtomicPolicyFile) SaveRaw(data []byte) (FileMutationState, error) {
 	return s.withDirectory(func(dir *os.File) (FileMutationState, error) {
 		current, err := s.ops.snapshot(dir, s.name, s.path)
 		if err != nil {
 			return FileUnchanged, atomicFileError("snapshot", err)
 		}
 		return s.replace(dir, data, current)
+	})
+}
+
+// SaveRawNonDurable publishes exact bytes by rename without any durability
+// barrier: no temporary-file sync, no security/IMA finalize, no directory
+// sync. The three-state classification still describes the namespace effect
+// (rename done = FileCommitted; pre-rename failure = FileUnchanged; a rename
+// error = FileUnknown — the rename may have taken effect).
+//
+// Only valid for content the caller can reconstruct by replay: a crash may
+// roll the file back to its previous content (or lose it entirely), so every
+// publisher here must have an authority that re-derives the bytes — e.g. the
+// fastlet re-issuing SET_BINDING with the binding input. Content that
+// outruns its replay source must go through SaveRaw.
+func (s *AtomicPolicyFile) SaveRawNonDurable(data []byte) (FileMutationState, error) {
+	return s.withDirectory(func(dir *os.File) (FileMutationState, error) {
+		current, err := s.ops.snapshot(dir, s.name, s.path)
+		if err != nil {
+			return FileUnchanged, atomicFileError("snapshot", err)
+		}
+		return s.replaceNonDurable(dir, data, current)
+	})
+}
+
+// replaceNonDurable is replace minus the durability barriers: the temporary
+// inode keeps the same mode/ownership rules and the same deferred cleanup,
+// but the publish is a bare rename — the kernel may lose it (or keep the
+// previous content) across a power failure. No security/IMA finalize: the
+// check exists to guard the durable record; a replayable candidate tolerates
+// a label/digest difference until a durable SaveRaw re-publishes.
+func (s *AtomicPolicyFile) replaceNonDurable(dir *os.File, data []byte, metadata *PolicyFileSnapshot) (state FileMutationState, err error) {
+	temp, err := s.ops.create(dir)
+	if err != nil {
+		return FileUnchanged, atomicFileError("create", err)
+	}
+	tempName := temp.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := temp.Close(); closeErr != nil {
+				err = errors.Join(err, atomicFileError("temporary-close", closeErr))
+			}
+		}
+		if tempName != "" {
+			if removeErr := s.ops.remove(dir, tempName); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+				err = errors.Join(err, atomicFileError("temporary-cleanup", removeErr))
+			}
+		}
+	}()
+	if n, writeErr := temp.Write(data); writeErr != nil || n != len(data) {
+		if writeErr == nil {
+			writeErr = io.ErrShortWrite
+		}
+		return FileUnchanged, atomicFileError("write", writeErr)
+	}
+	mode := fs.FileMode(0o600)
+	if metadata.exists {
+		// Chown can clear set-id bits, so apply mode after ownership.
+		if err := temp.Chown(metadata.uid, metadata.gid); err != nil {
+			return FileUnchanged, atomicFileError("ownership", err)
+		}
+		mode = metadata.mode
+	}
+	if err := temp.Chmod(mode); err != nil {
+		return FileUnchanged, atomicFileError("mode", err)
+	}
+	closed = true
+	if err := temp.Close(); err != nil {
+		return FileUnchanged, atomicFileError("file-close", err)
+	}
+	// From the first publication attempt onward an error is never classified as
+	// unchanged. In particular, remote filesystems can report a failed rename
+	// after the server has already committed it.
+	if err := s.ops.rename(dir, tempName, s.name); err != nil {
+		return FileUnknown, atomicFileError("rename", err)
+	}
+	tempName = ""
+	return FileCommitted, nil
+}
+
+// Delete durably unlinks the authoritative path: an already-absent path is
+// FileUnchanged with a nil error; a failed unlink or directory sync is
+// FileUnknown (the unlink may still have taken effect).
+func (s *AtomicPolicyFile) Delete() (FileMutationState, error) {
+	return s.withDirectory(func(dir *os.File) (FileMutationState, error) {
+		current, err := s.ops.snapshot(dir, s.name, s.path)
+		if err != nil {
+			return FileUnchanged, atomicFileError("snapshot", err)
+		}
+		if !current.exists {
+			return FileUnchanged, nil
+		}
+		if err := s.ops.remove(dir, s.name); err != nil {
+			return FileUnknown, atomicFileError("unlink", err)
+		}
+		if err := s.ops.syncDir(dir); err != nil {
+			return FileUnknown, atomicFileError("directory-sync", err)
+		}
+		return FileCommitted, nil
 	})
 }
 
@@ -505,7 +612,7 @@ func createAtomicPolicyTemp(dir *os.File, readSecurity func(int) (policyFileSecu
 		if _, err := rand.Read(suffix[:]); err != nil {
 			return nil, err
 		}
-		name := ".policy-" + hex.EncodeToString(suffix[:]) + ".tmp"
+		name := AtomicTempPrefix + hex.EncodeToString(suffix[:]) + AtomicTempSuffix
 		fd, err := unix.Openat(int(dir.Fd()), name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 		if errors.Is(err, unix.EEXIST) {
 			continue

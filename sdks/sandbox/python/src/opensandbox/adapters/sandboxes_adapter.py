@@ -46,6 +46,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
+    IdlePolicy,
     NetworkPolicy,
     PagedSandboxInfos,
     PagedSnapshotInfos,
@@ -229,6 +230,7 @@ class SandboxesAdapter(Sandboxes):
         metadata: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
+        idle_policy: IdlePolicy | None = None,
     ) -> SandboxCreateResponse:
         """Create a sandbox from a Succeeded fsb template."""
         logger.info(f"Creating sandbox from template: {template_id}")
@@ -242,6 +244,7 @@ class SandboxesAdapter(Sandboxes):
                 metadata=metadata,
                 network_policy=network_policy,
                 extensions=extensions,
+                idle_policy=idle_policy,
             )
 
             client = await self._get_client()
@@ -746,7 +749,7 @@ class SandboxesAdapter(Sandboxes):
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def kill_sandbox(self, sandbox_id: str) -> None:
-        """Permanently terminate a sandbox and clean up its resources."""
+        """Request termination; returns on accepted deletion. Cleanup may continue."""
         logger.info(f"Terminating sandbox: {sandbox_id}")
 
         try:
@@ -762,7 +765,7 @@ class SandboxesAdapter(Sandboxes):
 
             handle_api_error(response_obj, f"Kill sandbox {sandbox_id}")
 
-            logger.info(f"Successfully terminated sandbox: {sandbox_id}")
+            logger.info(f"Sandbox deletion accepted: {sandbox_id}")
 
         except Exception as e:
             logger.warning(f"Failed to terminate sandbox {sandbox_id}: {e}")

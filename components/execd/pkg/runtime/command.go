@@ -337,6 +337,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		var eName, eValue string
 		var eCode int
+		var exitCodePtr *int
 		var traceback []string
 
 		var exitCodeErr exitCoder
@@ -345,6 +346,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
 			eCode = exitCode
+			exitCodePtr = &exitCode
 		} else {
 			eName = "CommandExecError"
 			eValue = err.Error()
@@ -356,6 +358,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EName:     eName,
 			EValue:    eValue,
 			Traceback: traceback,
+			ExitCode:  exitCodePtr,
 		})
 
 		log.Error("command: run failed: %v", err)
@@ -391,12 +394,14 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		cancel()
+		_ = pipe.Close()
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
 		cancel()
+		_ = pipe.Close()
 		return fmt.Errorf("build credential: %w", err)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -426,6 +431,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	}
 	if err != nil {
 		cancel()
+		_ = pipe.Close()
 		startErr := credentialStartHint(err, cred)
 		log.Error("command: start failed: %v", startErr)
 		kernel.running = false

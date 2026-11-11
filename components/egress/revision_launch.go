@@ -57,26 +57,6 @@ type revisionLaunchResult struct {
 	generation uint64
 }
 
-// revisionBootstrapSnapshot reads the sidecar's current authoritative Vault
-// state while policy mutations are excluded. Vault writes already wait on the
-// mitm health gate, which remains pending throughout bootstrap. Policy epoch 0
-// is reserved until policy/vault mutations join the revision transaction in a
-// later OSEP-0023 phase.
-func (s *policyServer) revisionBootstrapSnapshot(
-	ctx context.Context,
-) (credentialvault.ActiveSnapshot, int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.credentialVault == nil {
-		return credentialvault.ActiveSnapshot{}, 0, revision.ErrTransportUnavailable
-	}
-	snapshot, err := s.credentialVault.ActiveSnapshotWithContext(ctx)
-	if errors.Is(err, credentialvault.ErrNotFound) {
-		return credentialvault.ActiveSnapshot{}, 0, nil
-	}
-	return snapshot, 0, err
-}
-
 // revisionLaunchOwner binds one fresh revision session to one mitmdump child.
 // The caller must retain the returned session until that exact child exits.
 type revisionLaunchOwner struct {
@@ -188,7 +168,7 @@ func newRevisionProcessSession(
 }
 
 func newSidecarRevisionLaunchOwner(server *policyServer) (*revisionLaunchOwner, error) {
-	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+	if server == nil && !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) || server != nil && !server.liveRevision {
 		return nil, nil
 	}
 	if server == nil {
@@ -211,11 +191,16 @@ func newSidecarRevisionLaunchOwner(server *policyServer) (*revisionLaunchOwner, 
 	return &revisionLaunchOwner{
 		server: server,
 		config: revisionruntime.ProcessSessionConfig{
-			ParentDir:         defaultRevisionSessionParent,
-			UID:               int(uid),
-			GID:               int(gid),
-			SubjectGeneration: subjectGeneration,
-			MaxSnapshotBytes:  defaultRevisionMaxSnapshotSize,
+			ParentDir:           defaultRevisionSessionParent,
+			UID:                 int(uid),
+			GID:                 int(gid),
+			SubjectGeneration:   subjectGeneration,
+			MaxSnapshotBytes:    defaultRevisionMaxSnapshotSize,
+			LiveAdmission:       true,
+			StaticPassthrough:   server.staticPassthrough,
+			TLSCapacity:         constants.EnvIntRange(constants.EnvRevisionTLSCapacity, constants.DefaultRevisionTLSCapacity, 1, 1<<20),
+			RequestCapacity:     constants.EnvIntRange(constants.EnvRevisionRequestCapacity, constants.DefaultRevisionRequestCapacity, 1, 1<<20),
+			DrainTimeoutSeconds: constants.EnvIntRange(constants.EnvRevisionDrainTimeoutSeconds, constants.DefaultRevisionDrainTimeoutSeconds, 1, 300),
 		},
 		newSession: newRevisionProcessSession,
 		snapshot:   server.captureRevisionBootstrap,

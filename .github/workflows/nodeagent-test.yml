@@ -41,7 +41,7 @@ jobs:
         working-directory: components/nodeagent
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 libbpf-dev=1:1.3.0-2build2
+          sudo apt-get install -y clang-18 llvm-18 libbpf-dev=1:1.3.0-2build2
           make verify-syscalls-bpf CLANG=clang-18
       - name: Vet, test, and build
         working-directory: components/nodeagent
@@ -59,6 +59,28 @@ jobs:
             > /tmp/nodeagent-default-sources.yaml
           grep -A1 'name: NODEAGENT_SOURCES' /tmp/nodeagent-default-sources.yaml \
             | grep -q 'value: "container-logs"'
+          if grep -Eq 'name: vm-console|sandbox.fast.io' /tmp/nodeagent-default-sources.yaml; then
+            echo "VM console mount or RBAC rendered while disabled" >&2
+            exit 1
+          fi
+          helm template nodeagent manifests/charts/node-agent \
+            --set 'config.sources={container-logs,vm-console}' \
+            > /tmp/nodeagent-mixed-sources.yaml
+          grep -A1 'name: NODEAGENT_SOURCES' /tmp/nodeagent-mixed-sources.yaml \
+            | grep -q 'value: "container-logs,vm-console"'
+          grep -q 'name: NODEAGENT_VM_CONSOLE_ROOT' /tmp/nodeagent-mixed-sources.yaml
+          grep -q 'name: vm-console' /tmp/nodeagent-mixed-sources.yaml
+          if grep -q 'sandbox.fast.io' /tmp/nodeagent-mixed-sources.yaml; then
+            echo "VM console must not require Sandbox CR RBAC" >&2
+            exit 1
+          fi
+          grep -q '^kind: ClusterRole$' /tmp/nodeagent-mixed-sources.yaml
+          grep -q 'resources: \["pods"\]' /tmp/nodeagent-mixed-sources.yaml
+          helm template nodeagent manifests/charts/node-agent --set 'config.sources={vm-console}' > /tmp/nodeagent-vm-only.yaml
+          if grep -q '^kind: ClusterRole' /tmp/nodeagent-vm-only.yaml; then
+            echo "VM-only collection must not require Kubernetes RBAC" >&2
+            exit 1
+          fi
           helm template nodeagent manifests/charts/node-agent \
             --set 'config.sources={source-a,source-b}' \
             > /tmp/nodeagent-non-log-sources.yaml

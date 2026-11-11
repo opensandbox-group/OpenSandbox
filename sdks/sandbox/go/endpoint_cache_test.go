@@ -116,7 +116,7 @@ func TestEndpointCache_GetOrFetch_Dedup(t *testing.T) {
 	key := endpointCacheKey{sandboxID: "sb-1", port: 8080}
 
 	var fetchCount int64
-	fetch := func() (*Endpoint, error) {
+	fetch := func(context.Context) (*Endpoint, error) {
 		atomic.AddInt64(&fetchCount, 1)
 		time.Sleep(50 * time.Millisecond)
 		return &Endpoint{Endpoint: "result"}, nil
@@ -152,7 +152,7 @@ func TestEndpointCache_GetOrFetch_CacheHit(t *testing.T) {
 	c.Put(key, &Endpoint{Endpoint: "cached"})
 
 	var fetchCount int64
-	ep, err := c.GetOrFetch(context.Background(), key, func() (*Endpoint, error) {
+	ep, err := c.GetOrFetch(context.Background(), key, func(context.Context) (*Endpoint, error) {
 		atomic.AddInt64(&fetchCount, 1)
 		return &Endpoint{Endpoint: "fetched"}, nil
 	})
@@ -171,7 +171,7 @@ func TestEndpointCache_GetOrFetch_Error(t *testing.T) {
 	c := NewEndpointCache(10, time.Minute)
 	key := endpointCacheKey{sandboxID: "sb-1", port: 8080}
 
-	_, err := c.GetOrFetch(context.Background(), key, func() (*Endpoint, error) {
+	_, err := c.GetOrFetch(context.Background(), key, func(context.Context) (*Endpoint, error) {
 		return nil, fmt.Errorf("network error")
 	})
 	if err == nil {

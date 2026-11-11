@@ -143,8 +143,10 @@ FSB_COMMIT="$(sed -n 's/^commit:[[:space:]]*//p' "$PIN_FILE")"
 	die "pin file $PIN_FILE must carry a full 40-character commit SHA (got: ${FSB_COMMIT:-<empty>})"
 
 # image-name:make-COMPONENT:make-image-variable — the exact Firecracker scope.
-# sandboxtemplate-builder has no make target (direct docker build, same as
-# scripts/fast-sandbox-env).
+# sandboxtemplate-builder is a direct docker build (same as
+# scripts/fast-sandbox-env). firecracker-runtime and sandboxtemplate-builder
+# both consume the shared oci-tools build-base image; build_images builds it
+# once up front and points every consumer at the same ref.
 IMAGES=(
 	"fsb-controller:controller:CONTROLLER_IMAGE"
 	"fsb-fastlet:fastlet:FASTLET_IMAGE"
@@ -211,6 +213,14 @@ log "fast-sandbox checkout ready @ $(git -C "$FSB_SRC_DIR" rev-parse --short HEA
 
 build_images() {
 	local entry image component var
+	# Shared build base (COPY --from source for the runtime and builder
+	# images). Tagged with $TAG so every consumer references the same build.
+	local oci_tools_ref="$REGISTRY/oci-tools:$TAG"
+	log "building $oci_tools_ref (shared oci build base)"
+	# shellcheck disable=SC2086
+	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		-t "$oci_tools_ref" -f "$FSB_SRC_DIR/build/Dockerfile.oci-tools" \
+		"$FSB_SRC_DIR" >/dev/null || die "oci-tools image build failed"
 	for entry in "${IMAGES[@]}"; do
 		image="$REGISTRY/${entry%%:*}:$TAG"
 		component="$(cut -d: -f2 <<<"$entry")"
@@ -218,12 +228,14 @@ build_images() {
 		if [[ "$component" == "sandboxtemplate-builder" ]]; then
 			# shellcheck disable=SC2086
 			docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+				--build-arg OCI_TOOLS_IMAGE="$oci_tools_ref" \
 				-t "$image" -f "$FSB_SRC_DIR/build/Dockerfile.sandboxtemplate-builder" \
 				"$FSB_SRC_DIR" >/dev/null || die "sandboxtemplate-builder image build failed"
 		else
 			var="$(cut -d: -f3 <<<"$entry")"
 			(make -C "$FSB_SRC_DIR" images "COMPONENT=$component" \
-				"REGISTRY=$REGISTRY" "$var=$image" >/dev/null) ||
+				"REGISTRY=$REGISTRY" "$var=$image" \
+				"OCI_TOOLS_IMAGE=$oci_tools_ref" >/dev/null) ||
 				die "make images COMPONENT=$component failed"
 		fi
 	done

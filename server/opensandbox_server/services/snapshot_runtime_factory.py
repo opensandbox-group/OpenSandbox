@@ -24,6 +24,7 @@ from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig, get_co
 from opensandbox_server.services.snapshot_runtime import (
     SnapshotRuntime,
     SnapshotRuntimeStatus,
+    is_snapshot_source_state_supported,
 )
 
 _FSB_SOURCE_PREFIX = "fsb-"
@@ -73,6 +74,20 @@ class CompositeSnapshotRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return self._default.create_snapshot_unsupported_message()
 
+    def supports_snapshot_source_state(
+        self,
+        sandbox_id: str,
+        state: str,
+        *,
+        namespace: str | None = None,
+    ) -> bool:
+        return is_snapshot_source_state_supported(
+            self._for_source(sandbox_id),
+            sandbox_id,
+            state,
+            namespace=namespace,
+        )
+
     def preflight_create_snapshot(
         self,
         sandbox_id: str,
@@ -109,6 +124,7 @@ class CompositeSnapshotRuntime:
             snapshot_id,
             image,
             namespace=namespace,
+            source_sandbox_id=source_sandbox_id,
         )
 
     def inspect_snapshot(
@@ -123,6 +139,7 @@ class CompositeSnapshotRuntime:
             snapshot_id,
             image,
             namespace=namespace,
+            source_sandbox_id=source_sandbox_id,
         )
 
     def start_status_watch(

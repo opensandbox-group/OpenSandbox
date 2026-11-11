@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -57,14 +58,22 @@ func main() {
 	// fast-sandbox, without dns+nft enforcement) fails startup instead of
 	// being silently ignored.
 	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
+	if err := validateRevisionRuntimeStartup(profile); err != nil {
+		log.Fatalf("invalid live revision runtime configuration: %v", err)
+	}
+	if _, present := os.LookupEnv(constants.EnvMitmproxyPassthroughHosts); present &&
+		(profile == constants.ProfileFastSandbox || !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime))) {
+		log.Fatalf("invalid %s configuration: requires sidecar live revision runtime", constants.EnvMitmproxyPassthroughHosts)
+	}
+
 	upstreamSpec, err := upstreamProxySpecForProfile(profile)
 	if err != nil {
 		log.Fatalf("invalid upstream proxy configuration: %v", err)
 	}
 
-	// Fast Sandbox profile: multi-sandbox control plane over the slot
-	// store and the proxy route. Sidecar stays the default; the two profiles
-	// are mutually exclusive deployment forms.
+	// Fast Sandbox profile: multi-sandbox control plane driven by the
+	// Sandbox Actions Handler protocol. Sidecar stays the default; the two
+	// profiles are mutually exclusive deployment forms.
 	if profile == constants.ProfileFastSandbox {
 		runFastSandboxProfile(ctx, upstreamSpec)
 		return
@@ -201,6 +210,11 @@ func main() {
 	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
 		mitmGate.MarkStackReady()
 	}
+	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) && mitm != nil {
+		// Attach the live mitmdump lifecycle owner before serving revision-gated
+		// Vault writes; until then such writes fail closed with 503.
+		policyHandler.setRevisionMitm(mitm)
+	}
 	if mitm != nil {
 		mitm.watchMitmproxy(ctx, mitmGate)
 	}
@@ -210,6 +224,27 @@ func main() {
 	}
 
 	waitForShutdown(ctx, proxy, policySrv, exemptDst, nftMgr, mitm, blockedBroadcaster, policyHandler)
+}
+
+// validateRevisionRuntimeStartup runs before profile dispatch or network setup.
+func validateRevisionRuntimeStartup(profile string) error {
+	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+		return nil
+	}
+	if profile == constants.ProfileFastSandbox {
+		// Fast Sandbox has no live TLS admission yet; keep this flag a no-op.
+		// The _classify port gate is profile-independent and will also cover
+		// per-subject admission when B3 introduces it.
+		return nil
+	}
+	ports, err := constants.BuildMitmproxyPortList(os.Getenv(constants.EnvMitmproxyExtraPorts))
+	if err != nil {
+		return fmt.Errorf("invalid %s for live revision runtime: %w", constants.EnvMitmproxyExtraPorts, err)
+	}
+	if ports != constants.MitmproxyBasePorts {
+		return fmt.Errorf("%s is not supported with %s", constants.EnvMitmproxyExtraPorts, constants.EnvExperimentalRevisionRuntime)
+	}
+	return nil
 }
 
 func withLogger(ctx context.Context) context.Context {

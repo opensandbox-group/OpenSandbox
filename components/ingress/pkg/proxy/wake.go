@@ -32,6 +32,15 @@ import (
 // 503 instead.
 const wakeReplayBodyMax = 1 << 20 // 1 MiB
 
+// wakeReplayMethods gates post-forward (stale-route) replay to idempotent
+// methods — those bytes already reached the upstream chain.
+var wakeReplayMethods = map[string]bool{
+	http.MethodGet:    true,
+	http.MethodHead:   true,
+	http.MethodPut:    true,
+	http.MethodDelete: true,
+}
+
 // WithActivityRecorder installs the OSEP-0024 activity writer: every routed
 // request feeds the sandbox idle clock, fire-and-forget.
 func WithActivityRecorder(recorder activity.Recorder) Option {
@@ -98,16 +107,17 @@ type wakeReplay struct {
 
 func newWakeReplay(proxy *Proxy, sw *statusCapturingResponseWriter, host *sandboxHost, r *http.Request, target sandbox.EndpointTarget) *wakeReplay {
 	c := &wakeReplay{statusCapturingResponseWriter: sw, proxy: proxy, host: host, r: r, target: target}
-	c.copied = captureBodyForReplay(r)
+	// Non-idempotent methods can never be replayed post-forward; skip the
+	// buffering and leave their body streaming untouched.
+	if wakeReplayMethods[r.Method] {
+		c.copied = captureBodyForReplay(r)
+	}
 	return c
 }
 
-// replayable reports whether the request can be replayed after a wake: the
-// body was fully buffered within the cap. Idempotent methods with bodies too
-// large to buffer are intentionally not replayed — a truncated replay would
-// corrupt the upstream call.
+// replayable: idempotent method plus a body fully buffered within the cap.
 func (c *wakeReplay) replayable() bool {
-	return c.copied != nil
+	return c.copied != nil && wakeReplayMethods[c.r.Method]
 }
 
 // captureBodyForReplay buffers the request body up to the replay cap,

@@ -15,11 +15,7 @@ dependencies {
 
 ## Usage
 
-Create and configure the Jedis client yourself, then pass it to `RedisPoolStateStore`.
-The store does not create, configure, or close the Redis client.
-The client must be safe for concurrent use because pool operations may call Redis from multiple
-threads. `JedisPooled` is recommended; do not share a single non-pooled Jedis connection across
-pool threads.
+Create and configure the Jedis client yourself, then pass it to `RedisPoolStateStore`. The store does not create, configure, or close the Redis client. The client must be safe for concurrent use because pool operations may call Redis from multiple threads. `JedisPooled` is recommended; do not share a single non-pooled Jedis connection across pool threads.
 
 ```java
 import com.alibaba.opensandbox.sandbox.pool.SandboxPool;
@@ -61,27 +57,14 @@ try {
 - `RedisPoolStateStore` supports standalone Redis or Redis-compatible proxy endpoints.
 - Redis Cluster and Redis Sentinel clients are not supported by this store.
 - All nodes in the same logical pool must use the same `keyPrefix` and `poolName`.
-- All nodes sharing the same `keyPrefix` and `poolName` must use the same pool definition, including
-  sandbox creation spec, warmup behavior, idle timeout, and OpenSandbox service endpoint. If a deployment
-  changes the sandbox definition, use a new `poolName` or `keyPrefix` and drain the old pool.
+- All nodes sharing the same `keyPrefix` and `poolName` must use the same pool definition, including sandbox creation spec, warmup behavior, idle timeout, and OpenSandbox service endpoint. If a deployment changes the sandbox definition, use a new `poolName` or `keyPrefix` and drain the old pool.
 - Each process must use a unique `ownerId`.
-- `maxIdle` is the target/cap for ready idle sandboxes. It is not a global limit
-  on borrowed sandboxes or sandboxes created by `AcquirePolicy.DIRECT_CREATE`.
+- `maxIdle` is the target/cap for ready idle sandboxes. It is not a global limit on borrowed sandboxes or sandboxes created by `AcquirePolicy.DIRECT_CREATE`.
 - Configure Redis connection details, TLS, ACL, timeout, pooling, and monitoring through Jedis.
 - Pass a thread-safe Jedis client. `JedisPooled` is recommended for production use.
-- `resize(maxIdle)` can be called from any node. The call returns after the target is written to
-  Redis, and the current primary applies replenish or shrink work during periodic reconcile.
-  `resize(0)` is the recommended way
-  to drain the distributed idle buffer; wait until `snapshot().idleCount` converges to zero.
-- `releaseAllIdle()` is best-effort in distributed mode. It drains idle IDs visible during the call,
-  but a concurrent primary may put new idle sandboxes unless the shared `maxIdle` target has been
-  reduced first.
-- Primary-lock heartbeat is independent from warmup execution and runs at an internal
-  interval no greater than `primaryLockTtl / 3`. A slow warmup therefore does not block
-  lock renewal. Configure the TTL with enough margin for Redis latency, process pauses,
-  and scheduling jitter.
+- `resize(maxIdle)` can be called from any node. The call returns after the target is written to Redis, and the current primary applies replenish or shrink work during periodic reconcile. `resize(0)` is the recommended way to drain the distributed idle buffer; wait until `snapshot().idleCount` converges to zero.
+- `releaseAllIdle()` is best-effort in distributed mode. It drains idle IDs visible during the call, but a concurrent primary may put new idle sandboxes unless the shared `maxIdle` target has been reduced first.
+- Primary-lock heartbeat is independent from warmup execution and runs at an internal interval no greater than `primaryLockTtl / 3`. A slow warmup therefore does not block lock renewal. Configure the TTL with enough margin for Redis latency, process pauses, and scheduling jitter.
 - Redis outages are surfaced as `PoolStateStoreUnavailableException`; the pool does not silently bypass shared state.
 
-If production deployments need stronger protection against accidental mixed pool definitions,
-an optional pool definition version or fingerprint check that fails fast when nodes sharing the
-same Redis namespace disagree would be a natural extension.
+If production deployments need stronger protection against accidental mixed pool definitions, an optional pool definition version or fingerprint check that fails fast when nodes sharing the same Redis namespace disagree would be a natural extension.

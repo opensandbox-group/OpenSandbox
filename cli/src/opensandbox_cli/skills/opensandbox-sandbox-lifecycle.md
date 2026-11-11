@@ -140,7 +140,8 @@ If the user does not specify an image, recommend one that matches the runtime th
 Templates are golden-image builds. The build is asynchronous: `template create` returns a template in `Pending`; poll `template get` until the phase is `Succeeded` (or `Failed`).
 
 ```bash
-osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template create --image python:3.12 --publish s3://bucket/publish --format native -o json
+osb template create --image python:3.12 --publish oci://registry.example.com/sandbox/templates --format overlaybd -o json
 osb template create -f template-request.json -o json
 osb template get <template-id> -o json
 osb template list -o json
@@ -148,6 +149,8 @@ osb template delete <template-id> -o json
 ```
 
 Useful `template create` options: `--resource cpu=1 memory=512Mi disk=2Gi`, `--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe tcp://127.0.0.1:44772`, `--warmup-seconds 60`. `-f <request-file>` reads the full request as public `CreateTemplateRequest` JSON (camelCase: `image`, `publish`, `resourceLimits`, `entrypoint`, `env`, `metadata`, `format`, `readiness.probe`, `readiness.warmupSeconds`), mutually exclusive with those flags.
+
+OCI publication requires a repository-only target without a tag or digest, `overlaybd` format, and a server-configured `.dockerconfigjson` Secret (`kubernetes.template_oci_publish_secret`). Sandbox creation also requires an OCI-enabled Fast Sandbox pool and the OverlayBD node daemon. S3 publication uses `native`. Wait for `Succeeded` before creating a sandbox; the server uses the immutable OCI manifest reference for OCI templates.
 
 Create a sandbox from a succeeded template:
 
@@ -267,7 +270,7 @@ Rules:
 - use `renew` before long-running work instead of waiting for expiry
 - use `pause` only when the workload can tolerate suspension
 - treat the pause result as request acceptance and poll `sandbox get` until the state is `Paused` or `Failed`
-- use `kill` when cleanup is the real goal; do not leave orphaned sandboxes behind
+- `kill` returns `deletion_requested` when accepted; poll `sandbox get` until `404` to confirm resource removal. Pool `Noop` preserves processes even after removal.
 
 ## Runtime Notes
 
@@ -320,7 +323,7 @@ osb sandbox health <sandbox-id> -o json
 Build a template, wait for it, and create from it:
 
 ```bash
-osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template create --image python:3.12 --publish s3://bucket/publish --format native -o json
 osb template get <template-id> -o json
 osb sandbox create --template <template-id> --timeout 30m -o json
 osb sandbox health <sandbox-id> -o json

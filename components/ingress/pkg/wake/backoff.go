@@ -20,10 +20,9 @@ import (
 	"time"
 )
 
-// parkingLot bounds the number of concurrently parked requests (and, because
-// admission precedes flight creation, concurrent resume flights) per replica.
-// Acquisition is non-blocking: overflow is shed immediately with 503 instead
-// of queueing.
+// parkingLot bounds concurrently parked requests. It does not bound
+// restore work: slots belong to requests and are released when a request
+// ends, while a flight outlives it — restores are bounded by permits.
 type parkingLot struct {
 	slots chan struct{}
 }
@@ -48,6 +47,9 @@ func (l *parkingLot) release() {
 	}
 }
 
+// maxBackoffStep caps growth for unbounded (post-budget) flights.
+const maxBackoffStep = 2 * time.Second
+
 // backoff produces the OSEP-0024 retry schedule: exponential growth from the
 // base interval by the given factor, with relative jitter applied on top
 // (k8s wait.Backoff semantics: duration * (1 + rand*jitter)). Jitter is not
@@ -68,37 +70,40 @@ func newBackoff(cfg Config) *backoff {
 }
 
 func (b *backoff) next() time.Duration {
-	delay := time.Duration(float64(b.interval) * pow(b.factor, b.attempt))
+	// Grow and clamp in float64: pow overflows int64 around attempt ~100
+	// and the converted Duration can turn negative before any clamp.
 	b.attempt++
+	delay := float64(b.interval) * pow(b.factor, float64(b.attempt-1))
+	if ceiling := float64(maxBackoffStep); delay > ceiling {
+		delay = ceiling
+	}
+	if floor := float64(b.interval); delay < floor {
+		delay = floor
+	}
 	if b.jitter > 0 {
-		delay = time.Duration(float64(delay) * (1 + rand.Float64()*b.jitter)) //nolint:gosec // G404: jitter only, not security-sensitive
+		delay *= 1 + rand.Float64()*b.jitter //nolint:gosec // G404: jitter only, not security-sensitive
+		if delay > float64(maxBackoffStep) {
+			delay = float64(maxBackoffStep)
+		}
 	}
-	if delay < b.interval {
-		delay = b.interval
-	}
-	return delay
+	return time.Duration(delay)
 }
 
-func pow(base float64, exp int) float64 {
+func pow(base float64, exp float64) float64 {
 	result := 1.0
-	for range exp {
+	for ; exp >= 1; exp-- {
 		result *= base
 	}
 	return result
 }
 
-// sleepBackoff waits for one backoff step, bounded by the flight's remaining
-// budget and cancelable through ctx. The budget timer is shared across steps:
-// once it fires the flight is over. It reports false when the budget (or the
-// context) ended first.
-func sleepBackoff(ctx context.Context, budget *time.Timer, b *backoff) bool {
+// sleepBackoff waits one backoff step; reports false only on ctx done.
+func sleepBackoff(ctx context.Context, b *backoff) bool {
 	timer := time.NewTimer(b.next())
 	defer timer.Stop()
 	select {
 	case <-timer.C:
 		return true
-	case <-budget.C:
-		return false
 	case <-ctx.Done():
 		return false
 	}

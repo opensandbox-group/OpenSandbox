@@ -5,9 +5,7 @@ description: Integrate LangGraph with OpenSandbox using a graph-driven control f
 
 # LangGraph Agent + OpenSandbox Example
 
-Integrate LangGraph with OpenSandbox using a graph-driven control flow. The example uses
-explicit state machine nodes to create, prepare, run, inspect, and clean up a sandbox, plus
-a decision node to retry with a fallback command if the run step fails.
+Integrate LangGraph with OpenSandbox using a graph-driven control flow. The example uses explicit state machine nodes to create, prepare, run, inspect, and clean up a sandbox, plus a decision node to retry with a fallback command if the run step fails.
 
 ## Start OpenSandbox server [local]
 
@@ -38,8 +36,7 @@ uv pip install opensandbox langgraph langchain-anthropic
 uv run python examples/langgraph/main.py
 ```
 
-The workflow writes files, executes a job, retries with a fallback command on failure (default
-`python` vs `python3`), then summarizes results with Claude and cleans up the sandbox instance.
+The workflow writes files, executes a job, retries with a fallback command on failure (default `python` vs `python3`), then summarizes results with Claude and cleans up the sandbox instance.
 
 ![LangGraph + OpenSandbox screenshot](../public/images/langgraph-screenshot.jpg)
 

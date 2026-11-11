@@ -1,105 +1,64 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1260" height="660" viewBox="0 0 1260 660" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif">
-  <defs>
-    <marker id="mB" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#1d4ed8"/></marker>
-    <marker id="mG" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#16a34a"/></marker>
-    <marker id="mO" markerWidth="10" markerHeight="10" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#b45309"/></marker>
-    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.14"/></filter>
-    <linearGradient id="gNode" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f8fbff"/><stop offset="1" stop-color="#e8f0fb"/></linearGradient>
-    <linearGradient id="gBlue" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#dbeafe"/><stop offset="1" stop-color="#bfdbfe"/></linearGradient>
-    <linearGradient id="gGreen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#dcfce7"/><stop offset="1" stop-color="#bbf7d0"/></linearGradient>
-    <linearGradient id="gVM" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fef9c3"/><stop offset="1" stop-color="#fde68a"/></linearGradient>
-    <linearGradient id="gCP" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ede9fe"/><stop offset="1" stop-color="#ddd6fe"/></linearGradient>
-  </defs>
-
-  <rect width="1260" height="660" fill="#ffffff"/>
-  <text x="50" y="34" font-size="20" font-weight="700" fill="#0f172a">Firecracker on fast-sandbox nodes — socket delegation and DART P2P delivery</text>
-  <text x="50" y="56" font-size="12" fill="#475569">The control plane delegates VM operations to a node-local agent over a host unix socket; golden-image blocks flow cache → peer → origin.</text>
-
-  <!-- control plane -->
-  <rect x="440" y="70" width="340" height="76" rx="12" fill="url(#gCP)" stroke="#8b5cf6" stroke-width="1.3" filter="url(#sh)"/>
-  <text x="456" y="98" font-size="14" font-weight="700" fill="#5b21b6">fast-sandbox control plane</text>
-  <text x="456" y="118" font-size="11" fill="#6d28d9">reconcilers + FastPath gRPC · SandboxTemplate builds</text>
-
-  <!-- artifact store -->
-  <rect x="1060" y="70" width="170" height="76" rx="12" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.3" filter="url(#sh)"/>
-  <text x="1074" y="98" font-size="13" font-weight="700" fill="#92400e">Artifact store</text>
-  <text x="1074" y="118" font-size="10.5" fill="#a16207">S3-compatible · 4 MiB blocks</text>
-
-  <!-- node A -->
-  <rect x="50" y="210" width="540" height="380" rx="14" fill="url(#gNode)" stroke="#60a5fa" stroke-width="1.5" filter="url(#sh)"/>
-  <text x="70" y="240" font-size="14" font-weight="700" fill="#1e40af">Cluster node A</text>
-  <text x="70" y="258" font-size="10.5" fill="#64748b">state-root: /var/lib/fast-sandbox/control-plane (node-private)</text>
-
-  <rect x="76" y="282" width="240" height="100" rx="10" fill="url(#gBlue)" stroke="#3b82f6" stroke-width="1.2" filter="url(#sh)"/>
-  <text x="90" y="306" font-size="12.5" font-weight="700" fill="#1e40af">runtime-agent (DaemonSet)</text>
-  <text x="90" y="326" font-size="10.5" fill="#1e3a8a">owns Firecracker VM lifecycle on this node</text>
-  <text x="90" y="344" font-size="10.5" fill="#1e3a8a">unix: /run/fast-sandbox/firecracker/</text>
-  <text x="90" y="360" font-size="10.5" fill="#1e3a8a">  runtime.sock · /v1/health → dartUp</text>
-
-  <rect x="344" y="282" width="240" height="100" rx="10" fill="url(#gGreen)" stroke="#22c55e" stroke-width="1.2" filter="url(#sh)"/>
-  <text x="358" y="306" font-size="12.5" font-weight="700" fill="#166534">DART daemon (node-local)</text>
-  <text x="358" y="326" font-size="10.5" fill="#14532d">artifact delivery · roster peer</text>
-  <text x="358" y="344" font-size="10.5" fill="#14532d">pull order: cache → peer → origin</text>
-
-  <rect x="76" y="430" width="240" height="80" rx="10" fill="url(#gVM)" stroke="#ca8a04" stroke-width="1.2" filter="url(#sh)"/>
-  <text x="90" y="456" font-size="12.5" font-weight="700" fill="#713f12">Firecracker microVM</text>
-  <text x="90" y="476" font-size="10.5" fill="#78350f">golden image from template build</text>
-  <text x="90" y="494" font-size="10.5" fill="#78350f">KVM on the node</text>
-
-  <rect x="344" y="430" width="240" height="80" rx="10" fill="url(#gVM)" stroke="#ca8a04" stroke-width="1.2" filter="url(#sh)"/>
-  <text x="358" y="456" font-size="12.5" font-weight="700" fill="#713f12">Firecracker microVM</text>
-  <text x="358" y="476" font-size="10.5" fill="#78350f">netns + veth from fastlet slot</text>
-  <text x="358" y="494" font-size="10.5" fill="#78350f">egress policy by source IP</text>
-
-  <path d="M196,382 L196,424" stroke="#475569" stroke-width="1.5" marker-end="url(#mB)" fill="none"/>
-  <path d="M464,382 L464,424" stroke="#475569" stroke-width="1.5" marker-end="url(#mB)" fill="none"/>
-  <text x="204" y="410" font-size="10" fill="#64748b">starts / supervises</text>
-  <text x="472" y="410" font-size="10" fill="#64748b">netns attachment</text>
-
-  <!-- node B -->
-  <rect x="670" y="210" width="540" height="380" rx="14" fill="url(#gNode)" stroke="#60a5fa" stroke-width="1.5" filter="url(#sh)"/>
-  <text x="690" y="240" font-size="14" font-weight="700" fill="#1e40af">Cluster node B</text>
-  <text x="690" y="258" font-size="10.5" fill="#64748b">state-root: /var/lib/fast-sandbox/worker (node-private)</text>
-
-  <rect x="696" y="282" width="240" height="100" rx="10" fill="url(#gBlue)" stroke="#3b82f6" stroke-width="1.2" filter="url(#sh)"/>
-  <text x="710" y="306" font-size="12.5" font-weight="700" fill="#1e40af">runtime-agent (DaemonSet)</text>
-  <text x="710" y="326" font-size="10.5" fill="#1e3a8a">owns Firecracker VM lifecycle on this node</text>
-  <text x="710" y="344" font-size="10.5" fill="#1e3a8a">same unix-socket API as node A</text>
-
-  <rect x="964" y="282" width="240" height="100" rx="10" fill="url(#gGreen)" stroke="#22c55e" stroke-width="1.2" filter="url(#sh)"/>
-  <text x="978" y="306" font-size="12.5" font-weight="700" fill="#166534">DART daemon (node-local)</text>
-  <text x="978" y="326" font-size="10.5" fill="#14532d">artifact delivery · roster peer</text>
-  <text x="978" y="344" font-size="10.5" fill="#14532d">pull order: cache → peer → origin</text>
-
-  <rect x="696" y="430" width="240" height="80" rx="10" fill="url(#gVM)" stroke="#ca8a04" stroke-width="1.2" filter="url(#sh)"/>
-  <text x="710" y="456" font-size="12.5" font-weight="700" fill="#713f12">Firecracker microVM</text>
-  <text x="710" y="476" font-size="10.5" fill="#78350f">golden image via DART pull</text>
-
-  <path d="M816,382 L816,424" stroke="#475569" stroke-width="1.5" marker-end="url(#mB)" fill="none"/>
-
-  <!-- delegation arrows -->
-  <path d="M500,146 C380,180 250,220 200,276" stroke="#1d4ed8" stroke-width="2" marker-end="url(#mB)" fill="none"/>
-  <text x="196" y="192" font-size="10.5" font-weight="600" fill="#1d4ed8">socket delegation:</text>
-  <text x="196" y="206" font-size="10.5" fill="#1d4ed8">VM ops via agent API (unix socket)</text>
-  <path d="M720,146 C780,180 800,220 816,272" stroke="#1d4ed8" stroke-width="2" marker-end="url(#mB)" fill="none"/>
-  <text x="800" y="140" font-size="10.5" fill="#1d4ed8">identical delegation</text>
-
-  <!-- peer arrow -->
-  <path d="M958,334 L590,334" stroke="#16a34a" stroke-width="2" marker-end="url(#mG)" fill="none"/>
-  <text x="776" y="412" font-size="10.5" font-weight="600" fill="#16a34a" text-anchor="middle">cache miss → peer serves blocks</text>
-
-  <!-- roster link -->
-  <path d="M630,470 L630,560" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="5,4" fill="none"/>
-  <text transform="rotate(-90 618 515)" x="618" y="515" font-size="10.5" fill="#16a34a" text-anchor="middle">P2P roster — headless Service «dart»</text>
-
-  <!-- origin flows -->
-  <path d="M464,282 C600,190 880,120 1054,104" stroke="#b45309" stroke-width="2" marker-end="url(#mO)" fill="none"/>
-  <text x="800" y="168" font-size="10.5" font-weight="600" fill="#b45309">first create: fetch blocks from origin</text>
-  <path d="M1084,282 C1110,240 1124,200 1136,152" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#mO)" fill="none"/>
-  <text x="1132" y="220" font-size="10" fill="#64748b">only blocks</text>
-  <text x="1132" y="234" font-size="10" fill="#64748b">no peer has</text>
-
-  <!-- bottom bar -->
-  <rect x="50" y="606" width="1160" height="40" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
-  <text x="66" y="631" font-size="11.5" fill="#334155">Pull order: cache → peer → origin · origin fetched ≈ once per block cluster-wide · visibility: dart_block_source_total{source=cache|peer|origin}</text>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="696" viewBox="0 0 1180 696" role="img" aria-labelledby="title desc">
+<title id="title">Firecracker on fast-sandbox nodes</title>
+<desc id="desc">The fast-sandbox control plane delegates Firecracker VM operations to a DaemonSet runtime-agent on each node over a unix socket. Each node runs a DART daemon that fetches golden-image blocks in pull order cache, peer, origin over a headless-Service roster, and the agent starts microVMs from node-local artifacts.</desc>
+<defs>
+<marker id="control" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#dc6b2e"/></marker>
+<marker id="outbound" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0 0L9 4L0 8Z" fill="#059669"/></marker>
+<style>text{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;fill:#182636} .section{font-size:14px;font-weight:700;letter-spacing:1.4px;fill:#597080} .label{font-size:17px;fill:#597080} .body{font-size:18px;fill:#4d6173} .heading{font-size:22px;font-weight:600} .edge{font-size:16px;font-weight:500} </style>
+</defs>
+<rect width="1180" height="696" fill="#ffffff"/>
+<text x="48" y="62" font-size="38" font-weight="700">Firecracker on fast-sandbox nodes</text>
+<text x="48" y="96" class="body">socket delegation to a node-local agent · golden-image blocks flow cache → peer → origin</text>
+<path d="M850 54h36" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="896" y="60" class="edge" style="fill:#dc6b2e">Control</text>
+<path d="M990 54h36" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="1036" y="60" class="edge" style="fill:#059669">Blocks</text>
+<rect x="48" y="128" width="1084" height="110" rx="12" fill="#fff9f3" stroke="#efd7c4" stroke-width="1.5"/>
+<text x="72" y="158" class="section">FAST-SANDBOX CONTROL PLANE</text>
+<text x="72" y="194" class="heading">Reconcilers + FastPath gRPC</text>
+<text x="480" y="194" class="body">SandboxTemplate builds · delegates VM ops to node agents</text>
+<text x="72" y="218" class="body">delegation socket: /run/fast-sandbox/firecracker/runtime.sock · /v1/health reports dartUp</text>
+<path d="M316 238V330" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="332" y="270" class="edge" style="fill:#dc6b2e">socket delegation</text>
+<path d="M880 238V330" fill="none" stroke="#dc6b2e" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#control)"/>
+<text x="896" y="270" class="edge" style="fill:#dc6b2e">identical on both nodes</text>
+<rect x="48" y="288" width="530" height="290" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="72" y="318" class="section">CLUSTER NODE A</text>
+<text x="250" y="318" class="label">state-root · node-private</text>
+<rect x="72" y="336" width="482" height="88" rx="8" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="88" y="366" class="heading">runtime-agent · DaemonSet</text>
+<text x="88" y="395" class="body">owns Firecracker VM lifecycle on this node</text>
+<text x="88" y="419" class="label">unix socket API · /v1/health → dartUp</text>
+<rect x="72" y="448" width="230" height="88" rx="8" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="88" y="478" class="heading">DART · P2P</text>
+<text x="88" y="507" class="body">roster peer</text>
+<text x="88" y="531" class="label">cache → peer → origin</text>
+<rect x="322" y="448" width="232" height="88" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="338" y="478" class="heading">microVMs</text>
+<text x="338" y="507" class="body">golden image + KVM</text>
+<text x="338" y="531" class="label">netns from fastlet slot</text>
+<text x="72" y="562" class="label">the agent starts and supervises the microVMs · DART feeds blocks</text>
+<rect x="626" y="288" width="506" height="290" rx="12" fill="#fafbfd" stroke="#d8e1e8" stroke-width="1.5"/>
+<text x="650" y="318" class="section">CLUSTER NODE B</text>
+<text x="828" y="318" class="label">same unix-socket API</text>
+<rect x="650" y="336" width="458" height="88" rx="8" fill="#f1f6ff" stroke="#a9c7f3" stroke-width="1.5"/>
+<text x="666" y="366" class="heading">runtime-agent · DaemonSet</text>
+<text x="666" y="395" class="body">identical delegation, node-local</text>
+<text x="666" y="419" class="label">same socket API as node A</text>
+<rect x="650" y="448" width="218" height="88" rx="8" fill="#f1fbf5" stroke="#afdcc0" stroke-width="1.5"/>
+<text x="666" y="478" class="heading">DART · P2P</text>
+<text x="666" y="507" class="body">roster peer</text>
+<text x="666" y="531" class="label">serves peers</text>
+<rect x="888" y="448" width="220" height="88" rx="8" fill="#ffffff" stroke="#dae5ef" stroke-width="1.5"/>
+<text x="904" y="478" class="heading">microVMs</text>
+<text x="904" y="507" class="body">golden image via DART</text>
+<text x="904" y="531" class="label">cache → peer → origin</text>
+<text x="650" y="562" class="label">P2P roster: headless Service «dart» links the daemons</text>
+<path d="M622 492H582" fill="none" stroke="#059669" stroke-width="2.3" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#outbound)" stroke-dasharray="5 5"/>
+<text x="588" y="478" class="edge" style="fill:#059669">p2p</text>
+<rect x="48" y="604" width="1084" height="68" rx="10" fill="#f7f9fc" stroke="#d6e1e9" stroke-width="1.5"/>
+<text x="72" y="631" class="heading">Pull order</text>
+<text x="230" y="631" class="body">cache → peer → origin · the origin is fetched ≈ once per block cluster-wide</text>
+<text x="72" y="658" class="label">visibility: dart_block_source_total{source=cache|peer|origin}</text>
 </svg>

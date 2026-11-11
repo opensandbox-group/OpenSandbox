@@ -14,6 +14,10 @@ Covers all three OpenAPI specs:
 go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 ```
 
+## Retry Behavior
+
+Idempotent methods (`GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`) retry `429`, `502`, `503`, and `504` by default. `POST` and `PATCH` retry only dial, proxy-connect, and TLS-handshake failures that are provably pre-send; status-code retries for writes are opt-in because a replay can duplicate a sandbox, session, command, or file mutation. Set `RetryableStatusCodesNonIdempotent` only when the operation is idempotent at the application layer or duplicate execution is acceptable. SSE bootstraps never use the generic retry loop; only the OSEP-0024 wake retry covers the request that starts a stream, because its marker proves the gateway never forwarded it.
+
 ## Quick Start
 
 ### Create and manage a sandbox
@@ -65,6 +69,49 @@ func main() {
     _ = lc.ResumeSandbox(ctx, sbx.ID)
 
     _ = lc.DeleteSandbox(ctx, sbx.ID)
+}
+```
+
+Renew on access instead of on a timer (OSEP-0009): `Lifecycle.RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `extensions["access.renew.extend.seconds"]` key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects `lifecycle.renewalPolicy` outright (HTTP 400); on Docker and Kubernetes the policy takes effect only when the operator enables the `[renew_intent]` integration. Like every image-mode create, the request needs `ResourceLimits`, and the policy only moves an expiration that exists — set `Timeout` too.
+
+```go
+tenMinutes := 600
+sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
+    Image:          &opensandbox.ImageSpec{URI: "ubuntu"},
+    ResourceLimits: opensandbox.ResourceLimits{"cpu": "500m", "memory": "512Mi"},
+    Timeout:        &tenMinutes,
+    Lifecycle: &opensandbox.SandboxLifecycle{
+        RenewalPolicy: &opensandbox.RenewalPolicy{ExtendSeconds: 3600},
+    },
+})
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `Lifecycle.IdlePolicy` pauses the sandbox after `IdleTimeoutSeconds` continuously idle seconds (30–86400; `OnIdle` only takes `"pause"` today). Incoming traffic then wakes it:
+
+```go
+idle := 600
+sbx, err := lc.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
+    Image:          &opensandbox.ImageSpec{URI: "ubuntu"},
+    ResourceLimits: opensandbox.ResourceLimits{"cpu": "500m", "memory": "512Mi"},
+    Lifecycle: &opensandbox.SandboxLifecycle{
+        IdlePolicy: &opensandbox.IdlePolicy{
+            IdleTimeoutSeconds: &idle,
+            OnIdle:              opensandbox.OnIdlePause,
+        },
+    },
+})
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`WakeRetryEnabled` / `WakeMaxAttempts` / `WakeOverallDeadline` on the `RetryConfig` installed via `WithRetry`; defaults `DefaultWakeMaxAttempts` / 60 seconds; bare `503` responses are never affected). Wake retry requires `WithRetry` to be configured — a client built with a plain `NewLifecycleClient` has no retry loop and returns a marked `503` immediately. When the budget runs out, the request fails with `SandboxWakeTimeoutError`; for direct inspection, the non-2xx error type is `*opensandbox.APIError`, whose `WakeExpired` field reports the marker (also reachable as the wrapped last error of `SandboxWakeTimeoutError`). The request that starts a stream wake-retries too; an established stream is never replayed.
+
+A `NetworkRule` can scope by TCP destination ports instead of a target — `Ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `Target` entirely, and combining a domain `Target` with `Ports` is rejected. Docker, Kubernetes, and Fast Sandbox backends all enforce `Ports` rules; a targetless `Ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it:
+
+```go
+policy := &opensandbox.NetworkPolicy{
+    DefaultAction: "deny",
+    Egress: []opensandbox.NetworkRule{
+        {Action: "allow", Ports: []int{443, 8443}},
+    },
 }
 ```
 
@@ -139,8 +186,7 @@ _ = mgr.DeleteSnapshot(ctx, snap.ID)
 
 ### Run code in an isolated session
 
-Isolated sessions run multi-step code in a hardened, resource-bounded
-environment with bind mounts — reachable through `Sandbox.IsolationCreate`:
+Isolated sessions run multi-step code in a hardened, resource-bounded environment with bind mounts — reachable through `Sandbox.IsolationCreate`:
 
 ```go
 shareNet := true
@@ -200,10 +246,7 @@ updated, err := egress.PatchPolicy(ctx, []opensandbox.NetworkRule{
 
 ### Use Credential Vault
 
-Credential Vault injects outbound credentials from the egress sidecar while
-keeping real secrets out of sandbox environment variables, commands, files, and
-logs. Create the sandbox with `CredentialProxy` enabled, then write credentials
-and bindings through the sandbox helpers or `EgressClient`.
+Credential Vault injects outbound credentials from the egress sidecar while keeping real secrets out of sandbox environment variables, commands, files, and logs. Create the sandbox with `CredentialProxy` enabled, then write credentials and bindings through the sandbox helpers or `EgressClient`.
 
 ```go
 sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
@@ -248,13 +291,36 @@ _, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateReq
 })
 ```
 
-See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
-binding guidance, and Git/curl examples.
+#### Exchange-sourced credentials (OSEP-0025)
+
+Exchange-sourced credentials carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form — a `CredentialAuth` with only `Credential` set (the static-only fields stay zero; the typeless form never emits a forced `"type"` key).
+
+```go
+_, err = sandbox.CreateCredentialVault(ctx, opensandbox.CredentialVaultCreateRequest{
+    Credentials: []opensandbox.Credential{
+        {
+            Name:   "spi-signer",
+            Source: opensandbox.CredentialSource{
+                Type:     opensandbox.CredentialSourceExchange,
+                Endpoint: "unix:///run/spi/spi.sock",
+            },
+        },
+    },
+    Bindings: []opensandbox.CredentialBinding{
+        {
+            Name:  "internal-api",
+            Match: opensandbox.CredentialMatch{Hosts: []string{"*.internal.example.com"}},
+            Auth:  opensandbox.CredentialAuth{Credential: "spi-signer"},
+        },
+    },
+})
+```
+
+See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types, binding guidance, and Git/curl examples.
 
 ### Work with files
 
-File helpers live on `Sandbox` (they wrap the `ExecdClient` file operations
-with the sandbox's own access token):
+File helpers live on `Sandbox` (they wrap the `ExecdClient` file operations with the sandbox's own access token):
 
 ```go
 // The examples below need a live handle; the quick start above left `sbx`
@@ -313,8 +379,7 @@ detailed, err := sbx.ReplaceInFilesDetailed(ctx, replaceReq) // per-file Replace
 
 ### Mount volumes into a sandbox
 
-`Volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must
-specify exactly one backend:
+`Volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must specify exactly one backend:
 
 ```go
 sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
@@ -336,9 +401,7 @@ sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreate
 
 ### Build reusable base images with templates
 
-`SandboxManager` builds golden images ("templates") from an OCI image and
-publishes them to an S3-compatible target; sandboxes then boot from a
-`TemplateID` instead of a plain image:
+`SandboxManager` builds golden images ("templates") from an OCI image and publishes them to an S3-compatible target; sandboxes then boot from a `TemplateID` instead of a plain image:
 
 ```go
 mgr := opensandbox.NewSandboxManager(config)
@@ -346,6 +409,7 @@ mgr := opensandbox.NewSandboxManager(config)
 tpl, err := mgr.CreateTemplate(ctx, opensandbox.CreateTemplateRequest{
     Image:   "python:3.11",
     Publish: "s3://bucket/templates/py311",
+    Format:  opensandbox.TemplateFormatNative,
     ResourceLimits: map[string]string{
         "cpu": "1", "memory": "512Mi", "disk": "2Gi",
     },
@@ -369,9 +433,7 @@ err = mgr.DeleteTemplate(ctx, tpl.TemplateID)
 
 ### Wait for readiness with a custom health check
 
-`WaitUntilReady` polls until the sandbox is ready — by default the execd
-`/ping`; a custom `HealthCheck` replaces that (the JS SDK's custom health
-check equivalent):
+`WaitUntilReady` polls until the sandbox is ready — by default the execd `/ping`; a custom `HealthCheck` replaces that (the JS SDK's custom health check equivalent):
 
 ```go
 err := sbx.WaitUntilReady(ctx, opensandbox.ReadyOptions{
@@ -386,12 +448,7 @@ err := sbx.WaitUntilReady(ctx, opensandbox.ReadyOptions{
 
 ### Release idle pool sandboxes
 
-`ReleaseAllIdle(ctx)` preserves the original fire-and-forget behavior: it drains
-idle IDs and returns after scheduling best-effort kills. Call
-`ReleaseAllIdleParallel(ctx, maxWorkers)` on `*DefaultSandboxPool` to bound kill
-concurrency and wait until every drained ID has received a kill attempt.
-`maxWorkers` must be positive. The parallel method is intentionally not part of
-the `SandboxPool` interface, so existing interface implementors remain compatible.
+`ReleaseAllIdle(ctx)` preserves the original fire-and-forget behavior: it drains idle IDs and returns after scheduling best-effort kills. Call `ReleaseAllIdleParallel(ctx, maxWorkers)` on `*DefaultSandboxPool` to bound kill concurrency and wait until every drained ID has received a kill attempt. `maxWorkers` must be positive. The parallel method is intentionally not part of the `SandboxPool` interface, so existing interface implementors remain compatible.
 
 ## API Reference
 
@@ -425,12 +482,7 @@ Created with `NewLifecycleClient(baseURL, apiKey string, opts ...Option)`.
 
 ### SandboxManager
 
-Created with `NewSandboxManager(config ConnectionConfig)`. Administrative
-operations on sandboxes without connecting to a specific one; every method is a
-thin wrapper over the corresponding `LifecycleClient` call (see table above),
-plus `Close()` (a no-op kept for symmetry — it does not terminate
-sandboxes). Manager operations act across sandboxes by ID (the quick-start
-snapshot example is one of these).
+Created with `NewSandboxManager(config ConnectionConfig)`. Administrative operations on sandboxes without connecting to a specific one; every method is a thin wrapper over the corresponding `LifecycleClient` call (see table above), plus `Close()` (a no-op kept for symmetry — it does not terminate sandboxes). Manager operations act across sandboxes by ID (the quick-start snapshot example is one of these).
 
 **Snapshots:**
 | Method | Description |
@@ -507,6 +559,7 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `UploadFile(ctx, file, opts)` | Upload a file to the sandbox |
 | `UploadFiles(ctx, entries)` | Upload multiple files to the sandbox |
 | `DownloadFile(ctx, remotePath, rangeHeader, opts...)` | Download a file from the sandbox (optional `DownloadFileOptions` reads by line) |
+| `DownloadFileResponse(ctx, remotePath, rangeHeader, opts...)` | Download a file with HTTP status and range metadata |
 
 **Directory Operations:**
 | Method | Description |
@@ -539,8 +592,7 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 
 ### Sandbox helpers
 
-Convenience methods on `*Sandbox` (the object `CreateSandbox` returns) — they
-wrap the underlying clients with the sandbox's own credentials:
+Convenience methods on `*Sandbox` (the object `CreateSandbox` returns) — they wrap the underlying clients with the sandbox's own credentials:
 
 | Method | Description |
 |--------|-------------|
@@ -561,15 +613,11 @@ wrap the underlying clients with the sandbox's own credentials:
 | `Close()` | No-op; does not terminate the sandbox |
 | `CreateSnapshot(ctx, req)` | Create a snapshot of this sandbox |
 
-File operations, command execution, code execution, and isolated sessions are
-also reachable as `Sandbox` helpers — see the file and isolated-session
-examples above, and the `ExecdClient` tables for the full list.
+File operations, command execution, code execution, and isolated sessions are also reachable as `Sandbox` helpers — see the file and isolated-session examples above, and the `ExecdClient` tables for the full list.
 
 ### CodeInterpreter
 
-`CreateCodeInterpreter(ctx, config, opts)` creates a sandbox from the
-code-interpreter image and returns a `*CodeInterpreter` that embeds
-`*Sandbox` (all sandbox helpers above work on it):
+`CreateCodeInterpreter(ctx, config, opts)` creates a sandbox from the code-interpreter image and returns a `*CodeInterpreter` that embeds `*Sandbox` (all sandbox helpers above work on it):
 
 | Method | Description |
 |--------|-------------|
@@ -594,6 +642,8 @@ Return a non-nil error from the handler to stop processing the stream early.
 
 ## Client Options
 
+Cross-origin redirects strip protected OpenSandbox headers, including for file transfers and SSE. See [redirect behavior](../../../docs/sdks/go.md#follow-redirects) for details and custom HTTP client behavior.
+
 All client constructors accept optional `Option` functions:
 
 ```go
@@ -606,9 +656,7 @@ client := opensandbox.NewExecdClient(url, token,
 )
 ```
 
-SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by default
-(RSA >= 2048, EC >= 224, DSA P >= 2048/Q >= 224, hash >= 224). If you must interoperate
-with legacy endpoints, set `AllowWeakServerCertKeyLengths: true` in `TransportConfig`.
+SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by default (RSA >= 2048, EC >= 224, DSA P >= 2048/Q >= 224, hash >= 224). If you must interoperate with legacy endpoints, set `AllowWeakServerCertKeyLengths: true` in `TransportConfig`.
 
 ## Error Handling
 

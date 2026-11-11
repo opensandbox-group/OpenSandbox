@@ -17,9 +17,11 @@
 package com.alibaba.opensandbox.sandbox.domain.services
 
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.LifecycleHook
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OnIdleAction
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
@@ -60,6 +62,38 @@ class SandboxesCompatibilityTest {
             )
 
         assertEquals("legacy-sandbox", response.id)
+    }
+
+    @Test
+    fun `idle policy overload delegates to an implementation of the previous template signature`() {
+        val sandboxes = LegacyTemplateSandboxes()
+
+        // A null idle policy must reach an implementation that only knows the
+        // five-parameter method (source and binary compat).
+        val response =
+            sandboxes.createSandboxFromTemplate(
+                templateId = "tpl-1",
+                timeout = Duration.ofSeconds(60),
+                metadata = emptyMap(),
+                networkPolicy = null,
+                extensions = emptyMap(),
+                idlePolicy = null,
+            )
+        assertEquals("legacy-template-sandbox", response.id)
+
+        // A non-null idle policy requires an implementation of the overload.
+        val error =
+            assertThrows(UnsupportedOperationException::class.java) {
+                sandboxes.createSandboxFromTemplate(
+                    templateId = "tpl-1",
+                    timeout = Duration.ofSeconds(60),
+                    metadata = emptyMap(),
+                    networkPolicy = null,
+                    extensions = emptyMap(),
+                    idlePolicy = IdlePolicy.builder().idleTimeoutSeconds(300).onIdle(OnIdleAction.PAUSE).build(),
+                )
+            }
+        assertTrue(error.message!!.contains("Template-based sandbox creation is not supported"))
     }
 
     @Test
@@ -157,6 +191,83 @@ class SandboxesCompatibilityTest {
             snapshotId: String?,
             resourceRequests: Map<String, String>?,
         ): SandboxCreateResponse = SandboxCreateResponse("legacy-sandbox")
+
+        override fun getSandboxInfo(sandboxId: String): SandboxInfo = unsupported()
+
+        override fun listSandboxes(filter: SandboxFilter): PagedSandboxInfos = unsupported()
+
+        override fun patchSandboxMetadata(
+            sandboxId: String,
+            patch: Map<String, String?>,
+        ): SandboxInfo = unsupported()
+
+        override fun renewSandboxExpiration(
+            sandboxId: String,
+            newExpirationTime: OffsetDateTime,
+        ): SandboxRenewResponse = unsupported()
+
+        override fun createSnapshot(
+            sandboxId: String,
+            name: String?,
+        ): SnapshotInfo = unsupported()
+
+        override fun getSnapshot(snapshotId: String): SnapshotInfo = unsupported()
+
+        override fun listSnapshots(filter: SnapshotFilter): PagedSnapshotInfos = unsupported()
+
+        override fun deleteSnapshot(snapshotId: String) = unsupported()
+
+        override fun getSandboxEndpoint(
+            sandboxId: String,
+            port: Int,
+        ): SandboxEndpoint = unsupported()
+
+        override fun getSandboxEndpoint(
+            sandboxId: String,
+            port: Int,
+            useServerProxy: Boolean,
+        ): SandboxEndpoint = unsupported()
+
+        override fun getSignedSandboxEndpoint(
+            sandboxId: String,
+            port: Int,
+            expires: Long,
+            useServerProxy: Boolean,
+        ): SandboxEndpoint = unsupported()
+
+        override fun pauseSandbox(sandboxId: String) = unsupported()
+
+        override fun resumeSandbox(sandboxId: String) = unsupported()
+
+        override fun killSandbox(sandboxId: String) = unsupported()
+
+        private fun unsupported(): Nothing = throw UnsupportedOperationException("not used")
+    }
+
+    private class LegacyTemplateSandboxes : Sandboxes {
+        override fun createSandboxFromTemplate(
+            templateId: String,
+            timeout: Duration,
+            metadata: Map<String, String>,
+            networkPolicy: NetworkPolicy?,
+            extensions: Map<String, String>,
+        ): SandboxCreateResponse = SandboxCreateResponse("legacy-template-sandbox")
+
+        override fun createSandbox(
+            spec: SandboxImageSpec?,
+            entrypoint: List<String>?,
+            env: Map<String, String>,
+            metadata: Map<String, String>,
+            timeout: Duration?,
+            resource: Map<String, String>,
+            networkPolicy: NetworkPolicy?,
+            extensions: Map<String, String>,
+            volumes: List<Volume>?,
+            platform: PlatformSpec?,
+            secureAccess: Boolean,
+            snapshotId: String?,
+            resourceRequests: Map<String, String>?,
+        ): SandboxCreateResponse = unsupported()
 
         override fun getSandboxInfo(sandboxId: String): SandboxInfo = unsupported()
 

@@ -64,6 +64,11 @@ path = "~/.opensandbox/opensandbox.db"
 # Use only one active server process per PostgreSQL database.
 
 [docker]
+# Network attachment for sandbox containers: "host", "bridge", "none", "pasta",
+# "slirp4netns", or the name of a user-defined Docker network that already exists.
+# "pasta" / "slirp4netns" are passed through to runtimes that support them (podman) and are
+# the fallback where bridge networking is unavailable, e.g. rootless podman inside WSL2.
+# Egress sidecar + networkPolicy require "bridge".
 network_mode = "bridge"
 # Host port range for bridge-mode sandbox port allocation.
 # Each sandbox needs 2–3 host ports (2 without egress, 3 with egress sidecar).

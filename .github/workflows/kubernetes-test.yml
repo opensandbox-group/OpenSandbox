@@ -41,6 +41,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Run core e2e tests
         working-directory: kubernetes
@@ -64,6 +65,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Run pause-resume e2e tests
         working-directory: kubernetes
@@ -82,6 +84,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.0'
+          cache-dependency-path: kubernetes/go.sum
 
       - name: Check gofmt
         working-directory: kubernetes

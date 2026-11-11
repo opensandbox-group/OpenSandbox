@@ -75,7 +75,6 @@ A single request can opt out of renew-intent publishing with a control header:
 OpenSandbox-Access-Renew: skip
 ```
 
-- Honored by both proxy paths — the ingress gateway and the server's `/sandboxes/{id}/proxy/{port}/...` route — so behavior does not depend on which path serves the traffic.
 - The exact sentinel value `skip` suppresses the intent for that one request (it bypasses the per-sandbox throttle entirely); unknown values are ignored for forward compatibility.
 - The header is stripped before forwarding upstream, like `OpenSandbox-Ingress-To`, so backend applications never observe it.
 - Typical use: health probes and other background traffic hitting an opted-in sandbox without extending its lifetime.

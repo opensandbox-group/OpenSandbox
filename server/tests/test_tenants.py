@@ -74,9 +74,6 @@ api_keys = []
 """
 
 
-# --- context tests ---
-
-
 def test_context_default_is_none():
     assert get_current_tenant() is None
 
@@ -87,9 +84,6 @@ def test_context_set_and_get():
     assert get_current_tenant() is entry
     set_current_tenant(None)
     assert get_current_tenant() is None
-
-
-# --- resolve_tenants_path ---
 
 
 def test_resolve_tenants_path_explicit():
@@ -106,9 +100,6 @@ def test_resolve_tenants_path_default(monkeypatch):
     monkeypatch.delenv("SANDBOX_TENANTS_CONFIG_PATH", raising=False)
     p = resolve_tenants_path()
     assert p == Path.home() / ".opensandbox" / "tenants.toml"
-
-
-# --- _parse_tenants_file / _build_lookup_dict ---
 
 
 def test_parse_tenants_file(tmp_path):
@@ -146,9 +137,6 @@ def test_build_lookup_dict():
     assert lookup["k2"].name == "a"
     assert lookup["k3"].name == "b"
     assert "k4" not in lookup
-
-
-# --- FileTenantProvider ---
 
 
 def test_file_provider_start_and_lookup(tmp_path):
@@ -249,9 +237,6 @@ def test_file_provider_on_reload_callback(tmp_path):
         assert len(calls[0]) == 2
     finally:
         provider.close()
-
-
-# --- HTTPTenantProvider ---
 
 
 def test_http_provider_start_close():
@@ -463,9 +448,6 @@ def test_http_provider_auth_header():
         provider.close()
 
 
-# --- validate_tenant_config ---
-
-
 def test_validate_tenant_config_no_tenants():
     cfg = MagicMock()
     cfg.tenants = None
@@ -495,9 +477,6 @@ def test_validate_tenant_config_ok():
     cfg.runtime.type = "kubernetes"
     cfg.server.api_key = None
     validate_tenant_config(cfg)
-
-
-# --- validate_tenant_namespaces ---
 
 
 def _tenant(name: str, namespace: str) -> TenantEntry:
@@ -557,9 +536,6 @@ def test_validate_tenant_namespaces_aggregates_failures():
     message = str(exc_info.value)
     assert "missing-1" in message
     assert "missing-2" in message
-
-
-# --- validate_tenant_namespaces_on_startup ---
 
 
 def test_startup_validation_file_provider_validates(tmp_path):

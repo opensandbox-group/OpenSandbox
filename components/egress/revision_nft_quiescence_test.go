@@ -111,7 +111,11 @@ func TestRevisionNftQuiescence_RecoverySources(t *testing.T) {
 				require.Error(t, err)
 				require.False(t, changed)
 			case "vault-session-cleanup":
-				wantReason = revisionRecoverySessionCleanupFailed
+				// The terminal detach cannot prove the remote outcome, so the
+				// sticky latch fires before the session close; the cleanup
+				// failure is a second recovery source but the first reason is
+				// preserved.
+				wantReason = revisionRecoveryExternalEffectsUnknown
 				session := &mutationTestSession{
 					fakeRevisionProcessSession: fakeRevisionProcessSession{config: validFakeRevisionIPCConfig()},
 					update: func(context.Context, credentialvault.ActiveSnapshot, int64) (revision.Identity, error) {

@@ -109,9 +109,7 @@ The script creates a sandbox, writes a marker file under `/mnt/data`, kills it, 
 
 ## Pool mode: pre-mount a shared PVC
 
-Pool pods are created before a sandbox is allocated, so storage shared by a
-pool must be part of the Pool pod template. Create the PVC first, then mount it
-in every warm pod through `Pool.spec.template`:
+Pool pods are created before a sandbox is allocated, so storage shared by a pool must be part of the Pool pod template. Create the PVC first, then mount it in every warm pod through `Pool.spec.template`:
 
 ```yaml
 apiVersion: v1
@@ -152,16 +150,10 @@ spec:
     poolMin: 5
 ```
 
-Apply the Pool manifest to the cluster before allocating sandboxes from it.
-Sandboxes then select the preconfigured Pool with `extensions.poolRef` and do
-not pass a per-sandbox `volumes` list.
+Apply the Pool manifest to the cluster before allocating sandboxes from it. Sandboxes then select the preconfigured Pool with `extensions.poolRef` and do not pass a per-sandbox `volumes` list.
 
 ::: warning Static pool storage only
-The PVC must already exist, and its access mode and storage backend must allow
-all scheduled warm pods to mount it. OpenSandbox does not create, mutate, or
-delete PVCs referenced by a Pool template. A sandbox creation request cannot
-add `volumes` while also using `extensions.poolRef`, because the selected warm
-pod already exists.
+The PVC must already exist, and its access mode and storage backend must allow all scheduled warm pods to mount it. OpenSandbox does not create, mutate, or delete PVCs referenced by a Pool template. A sandbox creation request cannot add `volumes` while also using `extensions.poolRef`, because the selected warm pod already exists.
 :::
 
 ## Mode 2: Server-managed PVC
@@ -241,9 +233,7 @@ Both paths only match server-labeled PVCs, so BYO and opted-out claims are never
 ## Important notes
 
 ::: warning
-- Per-sandbox `volumes` cannot be combined with `extensions.poolRef`. For Pool
-  mode, pre-mount an existing shared PVC in `Pool.spec.template` as described
-  above.
+- Per-sandbox `volumes` cannot be combined with `extensions.poolRef`. For Pool mode, pre-mount an existing shared PVC in `Pool.spec.template` as described above.
 - Multiple sandboxes can mount the same PVC if the access mode allows (e.g. `ReadWriteMany`) — but only when the PVC is **not** opted into auto-cleanup. PVCs created with `deleteOnSandboxTermination=true` are owned exclusively by the creating sandbox; the server rejects attempts by other sandboxes to mount them with `409 CONFLICT`.
 - All mounts of the same `claimName` in a single request must agree on `createIfNotExists` and `deleteOnSandboxTermination`; mismatches are rejected with `400 INVALID_PARAMETER`.
 :::

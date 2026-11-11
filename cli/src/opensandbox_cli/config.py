@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import click
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -49,6 +51,7 @@ DEFAULT_CONFIG_TEMPLATE = """\
 # domain = "localhost:8080"
 # protocol = "http"
 # request_timeout = 30
+# use_server_proxy is deprecated (maintenance mode); prefer the ingress gateway for data-plane traffic.
 # use_server_proxy = false
 
 [output]
@@ -64,14 +67,38 @@ def load_config_file(config_path: Path | None = None) -> dict[str, Any]:
     """Load and parse the TOML config file.
 
     Returns an empty dict if the file doesn't exist or tomllib is unavailable.
+    Raises ``click.ClickException`` if the file cannot be read or parsed.
     """
     path = config_path or DEFAULT_CONFIG_PATH
-    if not path.exists():
-        return {}
     if tomllib is None:
         return {}
-    with open(path, "rb") as f:
-        return tomllib.load(f)
+    # Open directly instead of checking path.exists() first: exists() raises
+    # PermissionError for a path under a directory that cannot be searched.
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+    except OSError as exc:
+        raise click.ClickException(f"Cannot read config file {path}: {exc}") from exc
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise click.ClickException(
+            f"Config file is not valid TOML ({path}): {exc}"
+        ) from exc
+
+
+# Config-file keys resolve_config reads as text. `config set` stores their
+# values verbatim: inferring a TOML number would rewrite an API key such as
+# "007123" as 7123.
+STRING_KEYS = frozenset(
+    {
+        "connection.api_key",
+        "connection.domain",
+        "connection.protocol",
+        "defaults.image",
+        "defaults.timeout",
+    }
+)
 
 
 def resolve_config(
@@ -92,10 +119,15 @@ def resolve_config(
     declared type.
 
     Keys returned:
-      - api_key, domain, protocol, request_timeout (int seconds), use_server_proxy (bool)
+      - api_key, domain, protocol, request_timeout (int seconds), use_server_proxy (bool; deprecated)
       - default_image, default_timeout (str like "10m")
     """
     file_cfg = load_config_file(config_path)
+    for section in ("connection", "output", "defaults"):
+        if section in file_cfg and not isinstance(file_cfg[section], dict):
+            raise click.ClickException(
+                f"Config section '{section}' must be a TOML table (use [{section}])."
+            )
     conn = file_cfg.get("connection", {})
     output_cfg = file_cfg.get("output", {})
     defaults = file_cfg.get("defaults", {})

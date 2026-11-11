@@ -19,6 +19,8 @@ package runtime
 import (
 	"fmt"
 	"os"
+
+	"golang.org/x/sys/windows"
 )
 
 func ensurePrivateCommandOutputDir(path string) error {
@@ -41,6 +43,45 @@ func openNewCommandOutput(path string) (*os.File, error) {
 		return nil, fmt.Errorf("create command output file %s: %w", path, err)
 	}
 	return file, nil
+}
+
+// truncateCommandOutputFile releases the file's data blocks through a write
+// handle instead of a path-based truncate, so a path swapped mid-cleanup is
+// never truncated after being re-resolved. The handle is opened with
+// FILE_FLAG_OPEN_REPARSE_POINT so it stays on the entry itself instead of
+// resolving a symlink swap to its target; an entry carrying a reparse point
+// (name surrogate or otherwise) is skipped and left to the unlink, as is any
+// other non-regular file.
+func truncateCommandOutputFile(path string) error {
+	pathp, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(pathp,
+		windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0)
+	if err != nil {
+		return err
+	}
+
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		_ = windows.CloseHandle(handle)
+		return err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		_ = windows.CloseHandle(handle)
+		return nil
+	}
+
+	file := os.NewFile(uintptr(handle), path)
+	defer file.Close() //nolint:errcheck
+	return file.Truncate(0)
 }
 
 func openCommandOutputForRead(path string) (*os.File, error) {

@@ -185,7 +185,7 @@ func TestSidecarRevisionLaunchOwnerDefaultsOffBeforeRuntimeLookup(t *testing.T) 
 	require.Nil(t, owner)
 }
 
-func TestExperimentalRevisionRuntimeRejectsVaultWrites(t *testing.T) {
+func TestExperimentalRevisionRuntimeRejectsVaultWritesWithoutMitm(t *testing.T) {
 	t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
 	server := &policyServer{
 		credentialVault: credentialvault.NewStore(nil, func() bool { return true }),
@@ -196,7 +196,7 @@ func TestExperimentalRevisionRuntimeRejectsVaultWrites(t *testing.T) {
 			response := httptest.NewRecorder()
 			server.handleCredentialVault(response, request)
 			require.Equal(t, http.StatusServiceUnavailable, response.Code)
-			require.Contains(t, response.Body.String(), "writes are unavailable")
+			require.Contains(t, response.Body.String(), "mutation unavailable")
 		})
 	}
 	_, err := server.credentialVault.Sanitized()
@@ -241,14 +241,17 @@ func TestPolicyServerRevisionBootstrapSnapshotDistinguishesMissingAndEmpty(t *te
 		credentialVault: credentialvault.NewStore(nil, func() bool { return true }),
 	}
 
-	snapshot, policyEpoch, err := server.revisionBootstrapSnapshot(context.Background())
+	require.NoError(t, server.initRevisionRecoveryLocked(effectivePolicyInputs{user: policy.DefaultDenyPolicy()}))
+	snapshot, policyEpoch, _, err := server.captureRevisionBootstrap(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, credentialvault.ActiveSnapshot{}, snapshot)
+	require.Zero(t, snapshot.Revision)
+	require.Empty(t, snapshot.Bindings)
+	require.Empty(t, snapshot.Redactions)
 	require.Zero(t, policyEpoch)
 
 	_, err = server.credentialVault.Create(credentialvault.CreateRequest{}, policy.DefaultDenyPolicy())
 	require.NoError(t, err)
-	snapshot, policyEpoch, err = server.revisionBootstrapSnapshot(context.Background())
+	snapshot, policyEpoch, _, err = server.captureRevisionBootstrap(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(1), snapshot.Revision)
 	require.Empty(t, snapshot.Bindings)

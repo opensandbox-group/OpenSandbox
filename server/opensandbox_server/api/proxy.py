@@ -14,13 +14,19 @@
 
 """
 HTTP and WebSocket proxy routes for reaching services inside sandboxes via the lifecycle API.
+
+DEPRECATED — maintenance mode. The server-proxied data path couples data-plane
+traffic to the control-plane server; it receives no new features and is maintained
+for security fixes and bug fixes only. Deploy the ingress gateway and route
+data-plane traffic through it instead.
 """
 
+import asyncio
 import hmac
 import logging
 from collections.abc import AsyncIterator, Mapping
 from typing import Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import anyio
 import httpx
@@ -67,9 +73,15 @@ SERVER_GENERATED_RESPONSE_HEADERS = {
 ACCESS_RENEW_HEADER = "opensandbox-access-renew"  # "OpenSandbox-Access-Renew"
 ACCESS_RENEW_SKIP_VALUE = "skip"
 
+# OSEP-0024 activity-probe sentinel; the sweeper is the only issuer.
+# Stripped on this hop so a proxy-path client cannot suppress recording at
+# the ingress.
+SKIP_ACTIVITY_HEADER = "opensandbox-skip-activity"  # "OpenSandbox-Skip-Activity"
+
 # Hop-control headers consumed by the proxy itself; never forwarded upstream.
 PROXY_CONTROL_HEADERS = {
     ACCESS_RENEW_HEADER,
+    SKIP_ACTIVITY_HEADER,
 }
 
 SENSITIVE_HEADERS = {
@@ -99,6 +111,25 @@ WEBSOCKET_HANDSHAKE_HEADERS = {
 
 router = APIRouter(tags=["Sandboxes"])
 
+# RFC 9745 Section 2.1: the Deprecation field is a Structured Field Date
+# (@<unix seconds>) recording when the deprecation took effect. The proxy data
+# path was declared deprecated on 2026-11-02T00:00:00Z.
+DEPRECATION_HEADER_VALUE = "@1793577600"
+
+_deprecation_warned = False
+
+
+def _warn_proxy_deprecated() -> None:
+    """Log the maintenance-mode notice once per process."""
+    global _deprecation_warned
+    if not _deprecation_warned:
+        _deprecation_warned = True
+        logger.warning(
+            "The sandbox server proxy (/sandboxes/{id}/proxy/{port}) is deprecated and in "
+            "maintenance mode: no new features, security and bug fixes only. Route "
+            "data-plane traffic through the ingress gateway instead."
+        )
+
 
 def _build_proxy_target_url(
     endpoint: Endpoint,
@@ -109,9 +140,10 @@ def _build_proxy_target_url(
 ) -> str:
     """Build the backend URL from an endpoint plus optional path/query suffix.
 
-    The raw query is appended as-is for both HTTP and WebSocket. Passing it to httpx
-    via ``params=`` would re-serialize it: repeated keys get regrouped, valueless keys
-    gain ``=``, non-UTF-8 escapes become U+FFFD and ``%20`` turns into ``+``.
+    ``full_path`` must already be percent-encoded. The raw query is appended as-is
+    for both HTTP and WebSocket. Passing it to httpx via ``params=`` would
+    re-serialize it: repeated keys get regrouped, valueless keys gain ``=``,
+    non-UTF-8 escapes become U+FFFD and ``%20`` turns into ``+``.
     """
     scheme = "ws" if websocket else "http"
     base = endpoint.endpoint.rstrip("/")
@@ -121,7 +153,25 @@ def _build_proxy_target_url(
         url = f"{url}/{normalized_path}"
     if query_string:
         url = f"{url}?{query_string}"
-    return url
+    # uvicorn can pass a literal '#' through; httpx drops the fragment and the
+    # websockets client rejects it. A '#' in the path also drops the query.
+    return url.partition("#")[0]
+
+
+def _raw_path_suffix(scope: Scope, full_path: str) -> str:
+    """Return the client's still-encoded form of the decoded ``full_path`` match.
+
+    Starlette binds ``{full_path:path}`` from the decoded path, where ``%2F``,
+    ``%3F``, ``%23`` and ``%25`` are indistinguishable from ``/ ? # %``. The
+    raw tail after as many ``/`` as precede the match is used only if it decodes
+    back to ``full_path``; an encoded ``/`` earlier in the path shifts it and
+    falls back to re-encoding the decoded value.
+    """
+    path: str = scope["path"]
+    depth = path[: len(path) - len(full_path)].count("/")
+    raw_path: bytes = scope.get("raw_path") or b""
+    raw_suffix = raw_path.decode("latin-1").split("/", depth)[-1]
+    return raw_suffix if unquote(raw_suffix) == full_path else quote(full_path)
 
 
 def _filter_proxy_headers(
@@ -199,6 +249,20 @@ def _set_forwarded_headers(
         headers["X-Forwarded-For"] = request.client.host
 
 
+def _request_has_body(request: Request) -> bool:
+    """Whether the client request carries a body to forward.
+
+    Any method may carry one; its framing headers (RFC 9112, section 6) say
+    whether it does. Content-Length is forwarded as is, so a declared body
+    must be streamed with it.
+    """
+    return (
+        request.method in ("POST", "PUT", "PATCH", "DELETE")
+        or "content-length" in request.headers
+        or "transfer-encoding" in request.headers
+    )
+
+
 def _rewrite_proxy_location(
     location: str,
     request: Request,
@@ -238,8 +302,6 @@ async def _authenticate_websocket_tenant(websocket: WebSocket) -> bool:
     connections must be authenticated here to establish tenant context.
     Returns True if the request is authorized (or single-tenant mode).
     """
-    import asyncio
-
     provider = getattr(websocket.app.state, "tenant_provider", None)
     if provider is None:
         return True
@@ -350,7 +412,14 @@ async def _proxy_http_request(
     internal: bool = False,
 ) -> StreamingResponse:
     resolve_internal = get_config().proxy.resolve_internal
-    endpoint = lifecycle.sandbox_service.get_endpoint(
+    if not internal:
+        # Only the external /proxy/{port} path is deprecated; internal callers
+        # such as network-policy and credential-vault routes are supported
+        # control-plane operations and must not consume the one-time warning.
+        _warn_proxy_deprecated()
+    # get_endpoint does blocking Docker/Kubernetes I/O; keep it off the event loop.
+    endpoint = await asyncio.to_thread(
+        lifecycle.sandbox_service.get_endpoint,
         sandbox_id,
         port,
         resolve_internal=resolve_internal,
@@ -358,7 +427,7 @@ async def _proxy_http_request(
     )
     _verify_secure_access(endpoint, request.headers)
     _schedule_proxy_renew(request, sandbox_id)
-    query_string = request.url.query
+    query_string = request.scope.get("query_string", b"").decode()
     target_url = _build_proxy_target_url(endpoint, full_path, query_string, websocket=False)
     client: httpx.AsyncClient = request.app.state.http_client
 
@@ -380,12 +449,11 @@ async def _proxy_http_request(
         # observed by this trusted proxy, so clients cannot spoof transport state.
         _set_forwarded_headers(headers, request)
 
-        stream_body = request.method in ("POST", "PUT", "PATCH", "DELETE")
         req = client.build_request(
             method=request.method,
             url=target_url,
             headers=headers,
-            content=request.stream() if stream_body else None,
+            content=request.stream() if _request_has_body(request) else None,
         )
 
         resp = await client.send(req, stream=True)
@@ -412,6 +480,10 @@ async def _proxy_http_request(
                 for key, value in resp.headers.raw
                 if key.decode("latin-1").lower() not in response_header_exclusions
             ]
+            if not internal:
+                response_headers.append(
+                    (b"deprecation", DEPRECATION_HEADER_VALUE.encode())
+                )
 
             return _ProxyStreamingResponse(
                 resp,
@@ -429,6 +501,17 @@ async def _proxy_http_request(
             detail={
                 "code": "BACKEND_CONNECTION_FAILED",
                 "message": f"Could not connect to the backend sandbox {endpoint.endpoint}: {e}",
+            },
+        ) from e
+    except httpx.PoolTimeout as e:
+        # Every connection of the shared client is busy (for example held by
+        # long-lived streamed responses): the server, not the sandbox, is out
+        # of capacity.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "PROXY_POOL_EXHAUSTED",
+                "message": f"No proxy connection to the backend sandbox {endpoint.endpoint} became free in time: {e}",
             },
         ) from e
     except (httpx.ReadTimeout, httpx.WriteTimeout) as e:
@@ -560,9 +643,12 @@ async def _proxy_websocket_request(
     if not await _authenticate_websocket_tenant(websocket):
         return
 
+    _warn_proxy_deprecated()
+
     try:
         resolve_internal = get_config().proxy.resolve_internal
-        endpoint = lifecycle.sandbox_service.get_endpoint(
+        endpoint = await asyncio.to_thread(
+            lifecycle.sandbox_service.get_endpoint,
             sandbox_id,
             port,
             resolve_internal=resolve_internal,
@@ -591,7 +677,7 @@ async def _proxy_websocket_request(
         return
 
     _schedule_proxy_renew(websocket, sandbox_id)
-    query_string = websocket.url.query or ""
+    query_string = websocket.scope.get("query_string", b"").decode()
     target_url = _build_proxy_target_url(
         endpoint,
         full_path,
@@ -667,7 +753,9 @@ async def proxy_sandbox_endpoint_request(
     full_path: str,
 ):
     """Proxy HTTP requests to sandbox-backed services."""
-    return await _proxy_http_request(request, sandbox_id, port, full_path)
+    return await _proxy_http_request(
+        request, sandbox_id, port, _raw_path_suffix(request.scope, full_path)
+    )
 
 
 _PROXY_HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH")
@@ -705,6 +793,7 @@ for _method in _PROXY_HTTP_METHODS:
         methods=[_method],
         response_class=StreamingResponse,
         openapi_extra=_PROXY_OPENAPI_EXTRA,
+        deprecated=True,
     )
 
 router.add_api_route(
@@ -721,6 +810,7 @@ for _method in _PROXY_HTTP_METHODS:
         methods=[_method],
         response_class=StreamingResponse,
         openapi_extra=_PROXY_OPENAPI_EXTRA,
+        deprecated=True,
     )
 
 
@@ -742,4 +832,6 @@ async def proxy_sandbox_endpoint_request_websocket(
     full_path: str,
 ):
     """Proxy WebSocket connections to sandbox-backed services."""
-    await _proxy_websocket_request(websocket, sandbox_id, port, full_path)
+    await _proxy_websocket_request(
+        websocket, sandbox_id, port, _raw_path_suffix(websocket.scope, full_path)
+    )

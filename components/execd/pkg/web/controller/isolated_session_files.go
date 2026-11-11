@@ -113,6 +113,9 @@ func (c *IsolatedSessionController) SearchFiles() {
 
 	files := make([]model.FileInfo, 0, len(results))
 	for _, rel := range results {
+		if isAnyStagingName(filepath.Base(rel)) {
+			continue
+		}
 		info, err := mv.Stat(rel)
 		if err != nil {
 			continue
@@ -157,37 +160,46 @@ func (c *IsolatedSessionController) DownloadFile() {
 	}
 	defer f.Close()
 
-	if hasLineParams {
-		c.serveIsolatedLineRange(f, rawOffset, rawLimit)
-		return
-	}
-
 	fileInfo, err := f.Stat()
 	if err != nil {
 		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
 		return
 	}
 
+	if fileInfo.IsDir() {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("path is a directory: %s", filePath))
+		return
+	}
+
+	if hasLineParams {
+		c.serveIsolatedLineRange(f, rawOffset, rawLimit)
+		return
+	}
+
+	var ranges []httpRange
+	if rangeHeader != "" {
+		ranges, err = ParseRange(rangeHeader, fileInfo.Size())
+		if err != nil {
+			c.RespondError(http.StatusRequestedRangeNotSatisfiable, model.ErrorCodeUnknown,
+				fmt.Sprintf("invalid Range header: %s", rangeHeader))
+			return
+		}
+	}
+
 	c.ctx.Header("Content-Type", "application/octet-stream")
 	c.ctx.Header("Content-Disposition", formatContentDisposition(filepath.Base(filePath)))
 	c.ctx.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 
-	if rangeHeader != "" {
-		ranges, err := ParseRange(rangeHeader, fileInfo.Size())
-		if err != nil {
-			c.RespondError(http.StatusRequestedRangeNotSatisfiable, model.ErrorCodeUnknown)
-			return
-		}
-		if len(ranges) > 0 {
-			r := ranges[0]
-			c.ctx.Status(http.StatusPartialContent)
-			c.ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.start, r.start+r.length-1, fileInfo.Size()))
-			c.ctx.Header("Content-Length", strconv.FormatInt(r.length, 10))
+	if len(ranges) > 0 {
+		r := ranges[0]
+		c.ctx.Status(http.StatusPartialContent)
+		c.ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.start, r.start+r.length-1, fileInfo.Size()))
+		c.ctx.Header("Content-Length", strconv.FormatInt(r.length, 10))
 
-			_, _ = f.Seek(r.start, io.SeekStart)
-			_, _ = io.CopyN(c.ctx.Writer, f, r.length)
-			return
-		}
+		_, _ = f.Seek(r.start, io.SeekStart)
+		_, _ = io.CopyN(c.ctx.Writer, f, r.length)
+		return
 	}
 
 	http.ServeContent(c.ctx.Writer, c.ctx.Request, filepath.Base(filePath), fileInfo.ModTime(), f)
@@ -535,6 +547,9 @@ func (c *IsolatedSessionController) listIsolatedDir(mv vfs.FS, root string, maxD
 			return err
 		}
 		for _, entry := range dirEntries {
+			if isAnyStagingName(entry.Name()) {
+				continue
+			}
 			entryPath := filepath.Join(dir, entry.Name())
 			info, err := entry.Info()
 			if err != nil {

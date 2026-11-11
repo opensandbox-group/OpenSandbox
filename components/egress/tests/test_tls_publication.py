@@ -49,7 +49,63 @@ class RevisionPublicationTest(unittest.TestCase):
             active._aborted.copy(), owner._pending_view, registry._view,
             registry._generation, registry._request_fenced.copy(),
             registry._connection_deadlines.copy(), registry._request_deadlines.copy(),
+            registry._max_admitted_stream_ids.copy(), registry._frozen_last_stream_ids.copy(),
         )
+
+    def test_static_overlap_rejected_without_changing_any_publication_state(self):
+        from static_passthrough import parse_handoff
+        for static, host in (("api.example.com", "api.example.com"),
+                             ("*.example.com", "api.example.com"),
+                             ("api.example.com", "*.example.com"),
+                             ("*.example.com", "*.nested.example.com")):
+            with self.subTest(static=static, host=host):
+                owner = self.owner(static_passthrough=parse_handoff(json.dumps([static])))
+                first = self.snapshot(host="other.example.net")
+                self.install(owner, first)
+                token = self.admit(owner.registry, sni="other.example.net").token
+                request = owner.registry.acquire_request(token)
+                before = self.state(owner)
+                overlap = self.snapshot(epoch=3, host=host)
+                with self.assertRaises(receiver.RevisionError) as raised:
+                    owner.prepare(overlap.revision, overlap.payload)
+                self.assertEqual(str(raised.exception), "static passthrough overlap")
+                self.assertIsNone(raised.exception.__context__)
+                self.assertEqual(self.state(owner), before)
+                self.assertEqual(request.snapshot, first)
+                self.assertEqual(owner.readback(), first.revision)
+                pending = self.snapshot(epoch=2, host="pending.example.net")
+                owner.prepare(pending.revision, pending.payload)
+                before = self.state(owner)
+                with self.assertRaises(receiver.RevisionError):
+                    owner.prepare(overlap.revision, overlap.payload)
+                self.assertEqual(self.state(owner), before)
+                owner.commit(pending.revision)
+
+    def test_static_http_only_empty_and_exact_retry_stay_valid(self):
+        from static_passthrough import parse_handoff
+        owner = self.owner(static_passthrough=parse_handoff('["api.example.com"]'))
+        original = self.snapshot()
+        value = json.loads(original.payload)
+        value["fullRenderedBindings"][0]["match"]["schemes"] = ["http"]
+        value["tlsBindingHostSelectors"] = []
+        payload = json.dumps(value, separators=(",", ":")).encode()
+        revision = replace(original.revision, digest=hashlib.sha256(payload).hexdigest())
+        owner.prepare(revision, payload)
+        owner.commit(revision)
+        before = self.state(owner)
+        owner.prepare(revision, payload)
+        owner.commit(revision)
+        self.assertEqual(self.state(owner), before)
+        empty = self.snapshot(epoch=2, host=None)
+        self.install(owner, empty)
+        self.assertEqual(owner.readback(), empty.revision)
+
+    def test_static_constructor_rejects_mutable_or_forged_selectors(self):
+        from host_selectors import Selector
+        for value in ([], [Selector("api.example.com", False)],
+                      (Selector("API.example.com", False),), (Selector("api.example.com", 0),)):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.owner(static_passthrough=value)
 
     def test_prepare_is_inert_and_commit_publishes_both_views(self):
         owner = self.owner()
@@ -181,6 +237,7 @@ class RevisionPublicationTest(unittest.TestCase):
             try:
                 owner.prepare(next_snapshot.revision, next_snapshot.payload)
             except receiver.RevisionError as error:
+                self.assertEqual(str(error), "snapshot validation failed")
                 self.assertIsNone(error.__context__)
                 self.assertNotIn("TOP-SECRET", "".join(traceback.format_exception(error)))
             else:

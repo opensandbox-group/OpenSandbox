@@ -260,84 +260,60 @@ func TestRevisionRecoveryInitialPublication(t *testing.T) {
 	})
 }
 
-// Publishing the immediate always-rule reload can replace an identical base
-// after initial capture. Retry must dispose that child before recapturing.
+// Always-rule reload must wait for a ready attached generation. It cannot
+// invalidate an in-flight initial bootstrap using the old local-only path.
 func TestRevisionRecoveryInitialStaleRetry(t *testing.T) {
-	t.Run("identical-always-reload-recaptures-after-cleanup", func(t *testing.T) {
+	t.Run("always-reload-waits-for-initial-publication", func(t *testing.T) {
 		f := recoveryPublicationFixture(t)
 		t.Setenv("OTEL_SDK_DISABLED", "true")
 		inputs := policyCandidateInputs(t)
 		inputs.alwaysAllow = []policy.EgressRule{mustRule(t, policy.ActionAllow, "always.example.com")}
 		f.server.mu.Lock()
 		err := f.server.replaceRevisionBaseLocked(inputs)
+		f.server.mitm = f.mitm
 		f.server.mu.Unlock()
 		require.NoError(t, err)
 		f.server.proxy = &stubProxy{updated: inputs.user}
-		f.server.alwaysLoader = &stagedTestAlwaysLoader{
-			allow: inputs.alwaysAllow, candidateAllow: inputs.alwaysAllow, pending: true,
-		}
-		f.server.nft = &stubNft{}
-		var tickets []*revisionBootstrapTicket
+		loader := &stagedTestAlwaysLoader{allow: inputs.alwaysAllow, candidateAllow: inputs.alwaysAllow, pending: true}
+		f.server.alwaysLoader = loader
+		nft := &stubNft{}
+		f.server.nft = nft
+		var ticket *revisionBootstrapTicket
 		capture := f.mitm.revisionOwner.snapshot
 		f.mitm.revisionOwner.snapshot = func(ctx context.Context) (credentialvault.ActiveSnapshot, int64, *revisionBootstrapTicket, error) {
-			f.event(fmt.Sprintf("capture-%d", len(tickets)))
-			snapshot, epoch, ticket, err := capture(ctx)
-			tickets = append(tickets, ticket)
-			return snapshot, epoch, ticket, err
+			snapshot, epoch, captured, err := capture(ctx)
+			ticket = captured
+			return snapshot, epoch, captured, err
 		}
 		entered, release := make(chan struct{}), make(chan struct{})
-		listens := 0
-		f.deps.listen = func(context.Context, string, time.Duration) error {
-			listens++
-			if listens == 1 {
-				close(entered)
-				<-release
-			} else {
-				// A late exit from the rejected generation cannot poison this launch.
-				f.configs[0].OnExit(nil)
-			}
-			return nil
-		}
-		prepareCalls := 0
+		f.deps.listen = func(context.Context, string, time.Duration) error { close(entered); <-release; return nil }
 		done := make(chan error, 1)
-		go func() {
-			done <- f.mitm.startInitial(context.Background(), f.deps, func() error { prepareCalls++; return nil })
-		}()
+		go func() { done <- f.mitm.startInitial(context.Background(), f.deps, func() error { return nil }) }()
 		<-entered
 		changed, err := f.server.reloadAlwaysRules()
-		require.NoError(t, err)
-		require.True(t, changed)
-		require.ErrorIs(t, validateRecoveryTicket(f.server, tickets[0]), errStaleRevisionBootstrap)
+		require.ErrorIs(t, err, revision.ErrTransportUnavailable)
+		require.False(t, changed)
+		require.True(t, loader.pending)
+		require.NoError(t, validateRecoveryTicket(f.server, ticket))
+		require.Zero(t, nft.calls)
 		require.True(t, f.server.mitmGate.MitmPending())
 		close(release)
 		require.NoError(t, <-done)
-		require.Equal(t, 1, prepareCalls)
-		require.Equal(t, []string{"capture-0", "stop-0", "close-0", "capture-1"}, f.events)
-		require.Len(t, tickets, 2)
-		require.NotSame(t, tickets[0].base, tickets[1].base)
-		require.NotSame(t, tickets[0].identity, tickets[1].identity)
-		require.NoError(t, validateRecoveryTicket(f.server, tickets[1]))
-		require.Same(t, f.children[1], f.mitm.running)
-		require.Same(t, f.sessions[1], f.mitm.revisionSession)
+		require.Len(t, f.sessions, 1)
+		require.Empty(t, f.events)
 		require.False(t, f.server.mitmGate.MitmPending())
-		require.Zero(t, f.stops[f.children[1]])
-		require.Zero(t, f.sessions[1].closeCalls)
-
-		// The watcher starts only after initial startup. Keep the old event queued,
-		// and prove a late callback cannot fence or close the published generation.
-		require.Len(t, f.mitm.restartCh, 2)
-		ev := <-f.mitm.restartCh
-		require.Equal(t, uint64(1), ev.gen)
-		f.configs[0].OnExit(nil)
-		f.mitm.closeRevisionSession(ev.gen)
-		require.Equal(t, uint64(2), f.mitm.currentGen)
-		require.False(t, f.server.mitmGate.MitmPending())
-		require.Zero(t, f.sessions[1].closeCalls)
+		f.sessions[0].updateIdentity = mutationIdentity(t, credentialvault.ActiveSnapshot{}, 1)
+		changed, err = f.server.reloadAlwaysRules()
+		require.NoError(t, err)
+		require.True(t, changed)
+		require.False(t, loader.pending)
+		require.Equal(t, int64(1), f.server.revisionRecovery.current.epoch)
+		require.Equal(t, 1, f.sessions[0].updateCalls)
+		require.Equal(t, 1, nft.calls)
+		require.ErrorIs(t, validateRecoveryTicket(f.server, ticket), errStaleRevisionBootstrap)
 		f.mitm.shutdown(time.Second)
 		f.mitm.shutdown(time.Second)
-		require.Equal(t, 1, f.stops[f.children[0]])
-		require.Equal(t, 1, f.sessions[0].closeCalls)
-		f.assertDisposed(t, 1)
+		f.assertDisposed(t, 0)
 	})
 	t.Run("bounded-stale-retries", func(t *testing.T) {
 		f := recoveryPublicationFixture(t)

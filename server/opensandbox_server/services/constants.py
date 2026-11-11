@@ -21,10 +21,14 @@ RESERVED_LABEL_PREFIX = "opensandbox.io/"
 SANDBOX_ID_LABEL = "opensandbox.io/id"
 SANDBOX_TENANT_LABEL = "opensandbox.io/tenant"
 SANDBOX_EXPIRES_AT_LABEL = "opensandbox.io/expires-at"
+SANDBOX_CREATED_AT_LABEL = "opensandbox.io/created-at"
 SANDBOX_MANUAL_CLEANUP_LABEL = "opensandbox.io/manual-cleanup"
 SANDBOX_PLATFORM_OS_LABEL = "opensandbox.io/platform-os"
 SANDBOX_PLATFORM_ARCH_LABEL = "opensandbox.io/platform-arch"
 SANDBOX_SNAPSHOT_ID_LABEL = "opensandbox.io/snapshot-id"
+# JSON list of the user metadata keys set at create (Docker): the container
+# also carries labels inherited from its image, which are not metadata.
+SANDBOX_METADATA_KEYS_LABEL = "opensandbox.io/metadata-keys"
 # Host-mapped ports recorded on containers (bridge mode).
 SANDBOX_EMBEDDING_PROXY_PORT_LABEL = (
     "opensandbox.io/embedding-proxy-port"  # maps container 44772 -> host port
@@ -67,6 +71,16 @@ OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS = (
 OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH = (
     "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH"
 )
+# OSEP-0025 credential resolver tuning env forwarded to the egress sidecar
+# (must match components/egress/pkg/constants/configuration.go
+# EnvCredentialResolver{Timeout,MaxConcurrency}). Resolver caller auth (D5)
+# is deferred: no auth env exists on either side.
+OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT = (
+    "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"
+)
+OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY = (
+    "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY"
+)
 # Server-injected from [egress.upstream_proxy]; admin-only, deliberately not in
 # ALLOWED_EGRESS_ENV_VARS so request env cannot set them.
 # Must match components/egress/pkg/constants/configuration.go EnvUpstreamProxy{,Auth}.
@@ -97,6 +111,8 @@ ALLOWED_EGRESS_ENV_VARS = frozenset({
     "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS",
     OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH,
     OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS,
+    OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT,
+    OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY,
     "OPENSANDBOX_EGRESS_POLICY_FILE",
 })
 OPENSANDBOX_RUNTIME_VOLUME_NAME = "opensandbox-bin"
@@ -202,6 +218,7 @@ __all__ = [
     "SANDBOX_ID_LABEL",
     "SANDBOX_TENANT_LABEL",
     "SANDBOX_EXPIRES_AT_LABEL",
+    "SANDBOX_CREATED_AT_LABEL",
     "SANDBOX_MANUAL_CLEANUP_LABEL",
     "SANDBOX_PLATFORM_OS_LABEL",
     "SANDBOX_PLATFORM_ARCH_LABEL",
@@ -229,6 +246,8 @@ __all__ = [
     "EGRESS_UPSTREAM_EXTRA_CA_PATH",
     "EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME",
     "EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY",
+    "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT",
+    "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY",
     "ALLOWED_EGRESS_ENV_VARS",
     "OPENSANDBOX_RUNTIME_VOLUME_NAME",
     "OPENSANDBOX_RUNTIME_MOUNT_PATH",

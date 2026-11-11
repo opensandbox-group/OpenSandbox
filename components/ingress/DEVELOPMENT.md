@@ -42,7 +42,8 @@ docker build \
 - `pkg/signature/`, `pkg/routescope/` — signed-route and Fast Sandbox route-scope verification.
 - `pkg/renewintent/` — renew-intent event publishing to Redis.
 - `pkg/activity/` — OSEP-0024 per-sandbox activity observations in Redis (auto-pause).
-- `pkg/wake/` — OSEP-0024 wake-on-access: resume flights, parking lot, park budget.
+- `pkg/wake/` — OSEP-0024 wake-on-access: resume flights, parking lot, restore permits, park budget.
+- `pkg/idlepolicy/` — OSEP-0024 per-sandbox idle-policy gating (Sandbox CR annotation reader).
 - `pkg/telemetry/` — OpenTelemetry metrics.
 - `vendor/github.com/alibaba/opensandbox/internal/version` — build metadata (ldflags).
 

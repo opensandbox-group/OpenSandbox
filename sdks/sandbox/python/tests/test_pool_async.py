@@ -30,7 +30,11 @@ from opensandbox.exceptions import (
     PoolEmptyException,
     PoolNotRunningException,
 )
-from opensandbox.models.sandboxes import PlatformSpec
+from opensandbox.models.sandboxes import (
+    CredentialProxyConfig,
+    NetworkPolicy,
+    PlatformSpec,
+)
 from opensandbox.pool import (
     AcquirePolicy,
     AsyncPoolConfig,
@@ -41,6 +45,354 @@ from opensandbox.pool import (
     SandboxPoolAsync,
 )
 from opensandbox.pool_types import PoolLifecycleState
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stage",
+    ["get_destroy_state", "manager", "set_idle_entry_ttl", "set_max_idle"],
+)
+async def test_async_cancelled_start_cleans_up_and_can_restart(
+    stage: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryAsyncPoolStateStore()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    blocked = False
+    managers: list[FakeAsyncManager] = []
+    closed_transports: list[httpx.AsyncHTTPTransport] = []
+    original_close = httpx.AsyncHTTPTransport.aclose
+
+    async def record_close(transport: httpx.AsyncHTTPTransport) -> None:
+        closed_transports.append(transport)
+        await original_close(transport)
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "aclose", record_close)
+
+    async def pause_once() -> None:
+        nonlocal blocked
+        if not blocked:
+            blocked = True
+            entered.set()
+            await release.wait()
+
+    if stage != "manager":
+        original_store_call = getattr(store, stage)
+
+        async def blocking_store_call(*args: Any, **kwargs: Any) -> Any:
+            await pause_once()
+            return await original_store_call(*args, **kwargs)
+
+        monkeypatch.setattr(store, stage, blocking_store_call)
+
+    async def manager_factory(config: ConnectionConfig) -> Any:
+        if stage == "manager":
+            await pause_once()
+        manager = FakeAsyncManager()
+        managers.append(manager)
+        return manager
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=manager_factory,
+        sandbox_factory=FakeAsyncSandbox,  # type: ignore[arg-type]
+    )
+    startup = asyncio.create_task(pool.start())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        startup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(startup, timeout=2)
+
+        assert (await pool.snapshot()).lifecycle_state == PoolLifecycleState.STOPPED
+        assert all(manager.closed for manager in managers)
+        assert len(closed_transports) == (0 if stage == "get_destroy_state" else 1)
+
+        await asyncio.wait_for(pool.start(), timeout=2)
+        assert (await pool.snapshot()).lifecycle_state == PoolLifecycleState.RUNNING
+        assert not managers[-1].closed
+        with pytest.raises(PoolEmptyException):
+            await pool.acquire(policy=AcquirePolicy.FAIL_FAST)
+    finally:
+        release.set()
+        if not startup.done():
+            startup.cancel()
+        await asyncio.gather(startup, return_exceptions=True)
+        await asyncio.wait_for(pool.shutdown(False), timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cleanup_stage", ["release_primary_lock", "manager", "transport"]
+)
+@pytest.mark.parametrize("startup_failure", ["cancelled", "exception"])
+@pytest.mark.parametrize("extra_cancellations", [0, 3])
+async def test_async_failed_start_finishes_cleanup_before_propagating(
+    cleanup_stage: str,
+    startup_failure: str,
+    extra_cancellations: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryAsyncPoolStateStore()
+    start_entered = asyncio.Event()
+    fail_start = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    blocked = False
+    managers: list[FakeAsyncManager] = []
+    closed_transports: list[httpx.AsyncHTTPTransport] = []
+    startup_error = RuntimeError("state store unavailable")
+    original_set_max_idle = store.set_max_idle
+    original_release_lock = store.release_primary_lock
+    original_close = httpx.AsyncHTTPTransport.aclose
+
+    async def pause_cleanup_once() -> None:
+        nonlocal blocked
+        if not blocked:
+            blocked = True
+            cleanup_entered.set()
+            await finish_cleanup.wait()
+
+    async def failing_set_max_idle(*args: Any, **kwargs: Any) -> None:
+        if not start_entered.is_set():
+            start_entered.set()
+            await fail_start.wait()
+            raise startup_error
+        await original_set_max_idle(*args, **kwargs)
+
+    async def release_lock(*args: Any, **kwargs: Any) -> None:
+        if cleanup_stage == "release_primary_lock":
+            await pause_cleanup_once()
+        return await original_release_lock(*args, **kwargs)
+
+    async def close_transport(transport: httpx.AsyncHTTPTransport) -> None:
+        if cleanup_stage == "transport":
+            await pause_cleanup_once()
+        await original_close(transport)
+        closed_transports.append(transport)
+
+    class BlockingManager(FakeAsyncManager):
+        async def close(self) -> None:
+            if cleanup_stage == "manager":
+                await pause_cleanup_once()
+            await super().close()
+
+    async def manager_factory(config: ConnectionConfig) -> Any:
+        manager = BlockingManager()
+        managers.append(manager)
+        return manager
+
+    monkeypatch.setattr(store, "set_max_idle", failing_set_max_idle)
+    monkeypatch.setattr(store, "release_primary_lock", release_lock)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "aclose", close_transport)
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=manager_factory,
+        sandbox_factory=FakeAsyncSandbox,  # type: ignore[arg-type]
+    )
+    startup = asyncio.create_task(pool.start())
+    try:
+        await asyncio.wait_for(start_entered.wait(), timeout=2)
+        if startup_failure == "cancelled":
+            startup.cancel()
+        else:
+            fail_start.set()
+        await asyncio.wait_for(cleanup_entered.wait(), timeout=2)
+        for _ in range(extra_cancellations):
+            startup.cancel()
+            await asyncio.sleep(0)
+            assert not startup.done(), "startup exited before cleanup finished"
+
+        finish_cleanup.set()
+        if startup_failure == "cancelled" or extra_cancellations:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(startup, timeout=2)
+        else:
+            with pytest.raises(RuntimeError) as raised:
+                await asyncio.wait_for(startup, timeout=2)
+            assert raised.value is startup_error
+
+        assert (await pool.snapshot()).lifecycle_state == PoolLifecycleState.STOPPED
+        assert managers[0].closed
+        assert len(closed_transports) == 1
+        await asyncio.wait_for(pool.start(), timeout=2)
+        assert (await pool.snapshot()).lifecycle_state == PoolLifecycleState.RUNNING
+        assert not managers[-1].closed
+        with pytest.raises(PoolEmptyException):
+            await pool.acquire(policy=AcquirePolicy.FAIL_FAST)
+    finally:
+        fail_start.set()
+        finish_cleanup.set()
+        if not startup.done():
+            startup.cancel()
+        await asyncio.gather(startup, return_exceptions=True)
+        await asyncio.wait_for(pool.shutdown(False), timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_stage", ["reconcile", "manager", "transport"])
+@pytest.mark.parametrize("startup_failure", ["cancelled", "exception"])
+@pytest.mark.parametrize(
+    "cleanup_failure_order",
+    ["no_cancel", "after_cancel", "before_cancel_resumes", "timeout"],
+)
+async def test_async_failed_start_preserves_cancellation_when_cleanup_fails(
+    cleanup_stage: str,
+    startup_failure: str,
+    cleanup_failure_order: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = InMemoryAsyncPoolStateStore()
+    start_entered = asyncio.Event()
+    fail_start = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    finish_cleanup = asyncio.Event()
+    startup_error = RuntimeError("state store unavailable")
+    cleanup_error = RuntimeError(f"{cleanup_stage} cleanup failed")
+    original_set_max_idle = store.set_max_idle
+    original_close = ConnectionConfig.close_transport_if_owned
+    managers: list[FakeAsyncManager] = []
+
+    async def failing_set_max_idle(*args: Any, **kwargs: Any) -> None:
+        if start_entered.is_set():
+            await original_set_max_idle(*args, **kwargs)
+            return
+        start_entered.set()
+        await fail_start.wait()
+        raise startup_error
+
+    async def fail_cleanup_once() -> None:
+        if not cleanup_entered.is_set():
+            cleanup_entered.set()
+            await finish_cleanup.wait()
+            raise cleanup_error
+
+    async def close_transport(config: ConnectionConfig) -> None:
+        if cleanup_stage == "transport":
+            await fail_cleanup_once()
+        await original_close(config)
+
+    class FailingManager(FakeAsyncManager):
+        async def close(self) -> None:
+            if cleanup_stage == "manager":
+                await fail_cleanup_once()
+            await super().close()
+
+    async def manager_factory(config: ConnectionConfig) -> Any:
+        manager = FailingManager()
+        managers.append(manager)
+        return manager
+
+    monkeypatch.setattr(store, "set_max_idle", failing_set_max_idle)
+    monkeypatch.setattr(ConnectionConfig, "close_transport_if_owned", close_transport)
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        max_idle=0,
+        state_store=store,
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=manager_factory,
+        sandbox_factory=FakeAsyncSandbox,  # type: ignore[arg-type]
+    )
+    original_stop_reconcile = pool._stop_reconcile
+
+    async def stop_reconcile(*args: Any, **kwargs: Any) -> None:
+        await original_stop_reconcile(*args, **kwargs)
+        if cleanup_stage == "reconcile":
+            await fail_cleanup_once()
+
+    monkeypatch.setattr(pool, "_stop_reconcile", stop_reconcile)
+    propagated_cancellations: list[asyncio.CancelledError] = []
+
+    async def start_pool() -> None:
+        try:
+            await pool.start()
+        except asyncio.CancelledError as exc:
+            # Python 3.10 wait_for can copy this exception and drop its cause.
+            propagated_cancellations.append(exc)
+            raise
+
+    startup = asyncio.create_task(start_pool())
+    timeout_waiter: asyncio.Task[None] | None = None
+    transport_owner: ConnectionConfig | None = None
+    try:
+        await asyncio.wait_for(start_entered.wait(), timeout=2)
+        transport_owner = pool._pool_transport_owner
+        if startup_failure == "cancelled":
+            startup.cancel()
+        else:
+            fail_start.set()
+        await asyncio.wait_for(cleanup_entered.wait(), timeout=2)
+
+        if cleanup_failure_order in ("after_cancel", "before_cancel_resumes"):
+            for _ in range(2):
+                startup.cancel("cancel during cleanup")
+                await asyncio.sleep(0)
+                assert not startup.done(), "startup exited before cleanup finished"
+            if cleanup_failure_order == "before_cancel_resumes":
+                # Queue cleanup first so it fails before the caller resumes.
+                finish_cleanup.set()
+            startup.cancel("cancel during cleanup")
+            if cleanup_failure_order == "after_cancel":
+                await asyncio.sleep(0)
+                assert not startup.done(), "startup exited before cleanup finished"
+        elif cleanup_failure_order == "timeout":
+            timeout_waiter = asyncio.create_task(asyncio.wait_for(startup, timeout=0))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert not timeout_waiter.done()
+
+        finish_cleanup.set()
+        if cleanup_failure_order == "no_cancel":
+            with pytest.raises(RuntimeError) as raised_error:
+                await asyncio.wait_for(startup, timeout=2)
+            assert raised_error.value is cleanup_error
+        elif timeout_waiter is not None:
+            with pytest.raises(asyncio.TimeoutError) as raised_timeout:
+                await asyncio.wait_for(timeout_waiter, timeout=2)
+            assert isinstance(raised_timeout.value.__cause__, asyncio.CancelledError)
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(startup, timeout=2)
+        if cleanup_failure_order != "no_cancel":
+            assert len(propagated_cancellations) == 1
+            cancellation = propagated_cancellations[0]
+            assert cancellation.__cause__ is cleanup_error
+            if cleanup_failure_order != "timeout":
+                assert cancellation.args == ("cancel during cleanup",)
+            assert startup.cancelled()
+
+        assert (await pool.snapshot()).lifecycle_state == PoolLifecycleState.STOPPED
+        await asyncio.wait_for(pool.start(), timeout=2)
+        assert (await pool.snapshot()).lifecycle_state == PoolLifecycleState.RUNNING
+        assert len(managers) == 2
+        assert not managers[-1].closed
+        with pytest.raises(PoolEmptyException):
+            await pool.acquire(policy=AcquirePolicy.FAIL_FAST)
+    finally:
+        fail_start.set()
+        finish_cleanup.set()
+        if not startup.done():
+            startup.cancel()
+        await asyncio.gather(startup, return_exceptions=True)
+        if timeout_waiter is not None:
+            await asyncio.gather(timeout_waiter, return_exceptions=True)
+        await asyncio.wait_for(pool.shutdown(False), timeout=5)
+        # A failed close can leave the first run's resources open; the fixture
+        # owns their final cleanup even after a restart replaces the provider.
+        for manager in managers:
+            await manager.close()
+        if transport_owner is not None:
+            await transport_owner.close_transport_if_owned()
 
 
 @pytest.mark.asyncio
@@ -429,6 +781,100 @@ async def test_async_acquire_direct_create_forwards_pool_creation_platform() -> 
         await pool.acquire()
 
         assert captured_kwargs["platform"] == PlatformSpec(os="linux", arch="arm64")
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warmup", [False, True], ids=["direct", "warmup"])
+@pytest.mark.parametrize(
+    "credential_proxy",
+    [None, CredentialProxyConfig(enabled=False), CredentialProxyConfig(enabled=True)],
+    ids=["omitted", "disabled", "enabled"],
+)
+async def test_async_pool_creation_forwards_credential_proxy(
+    warmup: bool, credential_proxy: CredentialProxyConfig | None
+) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    class CapturingAsyncSandbox(FakeAsyncSandbox):
+        @classmethod
+        async def create(cls, *args: Any, **kwargs: Any) -> CapturingAsyncSandbox:
+            captured_kwargs.update(kwargs)
+            return cls("created-with-credential-proxy")
+
+    network_policy = NetworkPolicy(defaultAction="deny")
+    spec_kwargs = {"credential_proxy": credential_proxy} if credential_proxy else {}
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        max_idle=1 if warmup else 0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(
+            image="ubuntu:22.04", network_policy=network_policy, **spec_kwargs
+        ),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),  # type: ignore[arg-type]
+        sandbox_factory=CapturingAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        if warmup:
+            await _eventually(lambda: _idle_count_equals(pool, 1))
+        else:
+            await pool.acquire()
+
+        if credential_proxy is None:
+            assert "credential_proxy" not in captured_kwargs
+        else:
+            assert captured_kwargs["credential_proxy"] is credential_proxy
+        assert captured_kwargs["network_policy"] is network_policy
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warmup", [False, True], ids=["direct", "warmup"])
+async def test_async_pool_creation_supports_legacy_factory(warmup: bool) -> None:
+    class LegacySandbox(FakeAsyncSandbox):
+        @classmethod
+        async def create(
+            cls,
+            image: Any,
+            *,
+            timeout: Any,
+            ready_timeout: Any,
+            env: Any,
+            metadata: Any,
+            resource: Any,
+            network_policy: Any,
+            platform: Any,
+            extensions: Any,
+            secure_access: Any,
+            entrypoint: Any,
+            volumes: Any,
+            connection_config: Any,
+            health_check: Any,
+            health_check_polling_interval: Any,
+            skip_health_check: Any,
+        ) -> LegacySandbox:
+            return cls("legacy-factory-sandbox")
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        max_idle=1 if warmup else 0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),  # type: ignore[arg-type]
+        sandbox_factory=LegacySandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        if warmup:
+            await _eventually(lambda: _idle_count_equals(pool, 1))
+        else:
+            sandbox = await pool.acquire()
+            assert sandbox.id == "legacy-factory-sandbox"
     finally:
         await pool.shutdown(False)
 
@@ -827,10 +1273,37 @@ async def test_async_default_warmup_owns_transport_while_manager_uses_shared(
         assert manager_configs[0]._owns_transport
         assert sandbox_configs[0]._owns_transport
         assert sandbox_configs[0].retry_policy.max_retries == 0
+        assert sandbox_configs[0].disable_metrics is True
         another_warmup_config = pool._connection_for_warmup_create()
         assert another_warmup_config is not sandbox_configs[0]
         assert another_warmup_config.transport is None
         assert another_warmup_config._owns_transport
+        assert another_warmup_config.disable_metrics is True
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_warmup_connection_disables_metrics_with_shared_transport() -> None:
+    transport = _AsyncTransport()
+    connection_config = ConnectionConfig(transport=transport)
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=connection_config,
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),
+        sandbox_factory=FakeAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        warmup_config = pool._connection_for_warmup_create()
+        assert warmup_config is not connection_config
+        assert warmup_config.disable_metrics is True
+        assert warmup_config.transport is transport
+        assert connection_config.disable_metrics is False
     finally:
         await pool.shutdown(False)
 

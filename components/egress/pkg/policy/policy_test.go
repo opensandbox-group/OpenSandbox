@@ -15,6 +15,7 @@
 package policy
 
 import (
+	"encoding/json"
 	"net/netip"
 	"strings"
 	"testing"
@@ -81,6 +82,94 @@ func TestParsePolicy_InvalidAction(t *testing.T) {
 func TestParsePolicy_EmptyTargetError(t *testing.T) {
 	_, err := ParsePolicy(`{"egress":[{"action":"allow","target":""}]}`)
 	require.Error(t, err, "expected error for empty target")
+}
+
+func TestParsePolicy_PortOnlyRuleAppliesToAllDestinations(t *testing.T) {
+	p, err := ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"deny","ports":[25]},
+			{"action":"allow","ports":[443,80]}
+		]
+	}`)
+	require.NoError(t, err, "a rule with ports and no target should parse")
+
+	deny, allow := p.PortScopedRules()
+	require.Len(t, deny, 1)
+	require.Equal(t, PortScopedRule{Action: ActionDeny, Target: "", Ports: []int{25}}, deny[0])
+	require.Len(t, allow, 1)
+	require.Equal(t, PortScopedRule{Action: ActionAllow, Target: "", Ports: []int{443, 80}}, allow[0])
+
+	// Port-only rules never appear in StaticIPSets: they have no IP/CIDR target.
+	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
+	require.Empty(t, allowV4)
+	require.Empty(t, allowV6)
+	require.Empty(t, denyV4)
+	require.Empty(t, denyV6)
+}
+
+func TestParsePolicy_TargetWithPortsScopesThatTargetOnly(t *testing.T) {
+	p, err := ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"10.0.0.5","ports":[22]},
+			{"action":"deny","target":"2001:db8::/32","ports":[8080]},
+			{"action":"allow","target":"1.1.1.1"}
+		]
+	}`)
+	require.NoError(t, err)
+
+	deny, allow := p.PortScopedRules()
+	require.Equal(t, []PortScopedRule{{Action: ActionDeny, Target: "2001:db8::/32", IsV6: true, Ports: []int{8080}}}, deny)
+	require.Equal(t, []PortScopedRule{{Action: ActionAllow, Target: "10.0.0.5", Ports: []int{22}}}, allow)
+
+	// A rule with Ports set must not also land in StaticIPSets: doing so
+	// would additionally grant/deny the target on every port, defeating the
+	// scoping. The portless "1.1.1.1" rule is unaffected.
+	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
+	require.Equal(t, []string{"1.1.1.1"}, allowV4)
+	require.Empty(t, allowV6)
+	require.Empty(t, denyV4)
+	require.Empty(t, denyV6)
+}
+
+func TestParsePolicy_DomainWithPortsRejected(t *testing.T) {
+	_, err := ParsePolicy(`{"egress":[{"action":"allow","target":"example.com","ports":[443]}]}`)
+	require.Error(t, err, "domain targets do not support ports yet")
+}
+
+func TestParsePolicy_InvalidPortsRejected(t *testing.T) {
+	cases := []string{
+		`{"egress":[{"action":"allow","ports":[0]}]}`,
+		`{"egress":[{"action":"allow","ports":[65536]}]}`,
+		`{"egress":[{"action":"allow","ports":[-1]}]}`,
+		`{"egress":[{"action":"allow","ports":[443,443]}]}`,
+	}
+	for _, raw := range cases {
+		_, err := ParsePolicy(raw)
+		require.Errorf(t, err, "raw %q expected a port validation error", raw)
+	}
+}
+
+func TestParsePolicy_TooManyPortsRejected(t *testing.T) {
+	ports := make([]int, maxPortsPerRule+1)
+	for i := range ports {
+		ports[i] = i + 1
+	}
+	b, err := json.Marshal(map[string]any{
+		"egress": []map[string]any{{"action": "allow", "ports": ports}},
+	})
+	require.NoError(t, err)
+	_, err = ParsePolicy(string(b))
+	require.Error(t, err, "expected a rule with more than maxPortsPerRule ports to be rejected")
+
+	// Exactly at the cap must still be accepted.
+	b, err = json.Marshal(map[string]any{
+		"egress": []map[string]any{{"action": "allow", "ports": ports[:maxPortsPerRule]}},
+	})
+	require.NoError(t, err)
+	_, err = ParsePolicy(string(b))
+	require.NoError(t, err, "expected a rule with exactly maxPortsPerRule ports to be accepted")
 }
 
 func TestWithExtraAllowIPs(t *testing.T) {

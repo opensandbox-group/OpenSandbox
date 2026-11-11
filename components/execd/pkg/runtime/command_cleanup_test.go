@@ -50,6 +50,32 @@ func TestRunCommandRemovesForegroundOutputFiles(t *testing.T) {
 	require.False(t, status.Running)
 }
 
+func TestRunBackgroundCommandClosesOutputFileWhenStartFails(t *testing.T) {
+	const fdDir = "/proc/self/fd"
+	if _, err := os.Stat(fdDir); err != nil {
+		t.Skip("needs /proc/self/fd")
+	}
+	openFDs := func() int {
+		entries, err := os.ReadDir(fdDir)
+		require.NoError(t, err)
+		return len(entries)
+	}
+
+	t.Setenv("TMPDIR", t.TempDir())
+	c := NewController("", "")
+	missingCwd := filepath.Join(t.TempDir(), "missing")
+
+	before := openFDs()
+	for range 20 {
+		ctx, cancel := context.WithCancel(context.Background())
+		req := &ExecuteCodeRequest{Code: "true", Cwd: missingCwd}
+		req.SetDefaultHooks()
+		require.Error(t, c.runBackgroundCommand(ctx, cancel, req))
+		cancel()
+	}
+	require.LessOrEqual(t, openFDs(), before)
+}
+
 func TestCommandOutputDirRejectsSymlink(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("symlink creation requires additional privileges on Windows")
@@ -190,4 +216,51 @@ func TestCleanupFinishedCommandsRetainsRunningAndRecentCommands(t *testing.T) {
 	require.Nil(t, c.getCommandKernel("old"))
 	require.NotNil(t, c.getCommandKernel("recent"))
 	require.NotNil(t, c.getCommandKernel("running"))
+}
+
+// TestRemoveCommandOutputFilesTruncatesBeforeUnlink verifies that removal
+// releases the data blocks even when a forked child still holds the fd: the
+// unlinked inode survives via the held fd, and its size must be zero after
+// cleanup instead of staying allocated until the holder exits (#2291).
+func TestRemoveCommandOutputFilesTruncatesBeforeUnlink(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("Windows refuses to remove a file held open without FILE_SHARE_DELETE")
+	}
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.stderr")
+	require.NoError(t, os.WriteFile(path, []byte("payload the child keeps writing to"), 0o600))
+
+	held, err := os.Open(path)
+	require.NoError(t, err)
+	defer held.Close()
+
+	removeCommandOutputFiles(path)
+
+	require.NoFileExists(t, path)
+	info, err := held.Stat()
+	require.NoError(t, err)
+	require.Zero(t, info.Size(), "data blocks must be released while another fd still holds the file")
+}
+
+// TestRemoveCommandOutputFilesDoesNotFollowSymlink verifies the cleanup-time
+// truncation cannot be redirected at an arbitrary file by swapping the entry
+// for a symlink: the link is unlinked, the target's content is untouched.
+func TestRemoveCommandOutputFilesDoesNotFollowSymlink(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("symlink creation requires additional privileges on Windows")
+	}
+
+	tempDir := t.TempDir()
+	victim := filepath.Join(tempDir, "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("must-not-be-truncated"), 0o600))
+	link := filepath.Join(tempDir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.output")
+	require.NoError(t, os.Symlink(victim, link))
+
+	removeCommandOutputFiles(link)
+
+	require.NoFileExists(t, link)
+	content, err := os.ReadFile(victim)
+	require.NoError(t, err)
+	require.Equal(t, "must-not-be-truncated", string(content))
 }

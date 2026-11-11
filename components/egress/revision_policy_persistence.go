@@ -78,6 +78,10 @@ func (s *policyServer) persistPolicyChangeLocked(pol *policy.NetworkPolicy) (fun
 		return restore, nil
 	}
 	if err == nil {
+		// A contradictory successful return cannot prove no effect, even if
+		// the store labels it Unchanged. Only an explicit failed/no-effect
+		// result permits the retryable branch below.
+		state = policy.FileUnknown
 		err = errors.New("atomic policy save did not confirm durable completion")
 	}
 	if state == policy.FileUnchanged {

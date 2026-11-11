@@ -48,6 +48,7 @@ def load(name):
 receiver = load("revision_receiver")
 load("host_selectors")
 load("decision_snapshot")
+load("static_passthrough")
 load("tls_decision")
 load("tls_registry")
 publication = load("revision_publication")

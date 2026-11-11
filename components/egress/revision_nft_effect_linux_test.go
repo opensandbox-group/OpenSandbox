@@ -28,8 +28,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/stretchr/testify/require"
 )
 
@@ -154,6 +157,52 @@ func TestRevisionNftEffectsRealFileAndKernel(t *testing.T) {
 			})
 		}
 	}
+	// This owner case executes nft in the private namespace above. Receiver
+	// failure is injected after confirmed kernel commit; packet-level fencing
+	// remains covered separately by the quarantine cross-namespace tests.
+	for _, receiver := range []string{"reject", "unknown"} {
+		t.Run("receiver-after-kernel-commit-"+receiver, func(t *testing.T) {
+			s, m, session, _ := revisionPolicyFixture(t)
+			s.policyFile = filepath.Join(t.TempDir(), "policy.json")
+			original := []byte(`{"defaultAction":"deny"}`)
+			require.NoError(t, os.WriteFile(s.policyFile, original, 0600))
+			old := s.revisionRecovery.current
+			manager := nftables.NewManagerWithOptions(nftables.Options{QuiesceOnApplyFailure: true})
+			s.nft = manager
+			require.NoError(t, manager.ApplyStatic(ctx, old.inputs.user))
+			before, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", "opensandbox").CombinedOutput()
+			require.NoError(t, err, "%s", before)
+			fence := runtimeQuarantineFixture(s)
+			stops := 0
+			m.revisionOwner.stop = func(*mitmproxy.Running) { stops++ }
+			var committed []byte
+			session.update = func(_ context.Context, snapshot credentialvault.ActiveSnapshot, epoch int64) (revision.Identity, error) {
+				var err error
+				committed, err = exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", "opensandbox").CombinedOutput()
+				require.NoError(t, err, "%s", committed)
+				require.NotEqual(t, before, committed, "receiver attempt must follow actual changed kernel rules")
+				if receiver == "reject" {
+					return revision.Identity{}, revision.ErrPrepareRejected
+				}
+				return mutationIdentity(t, snapshot, epoch), revision.ErrIndeterminate
+			}
+			session.reconcile = func(context.Context, revision.Identity) (bool, error) { return false, revision.ErrClosed }
+			response := revisionPolicyDo(t, s, http.MethodPost, `{"defaultAction":"allow"}`)
+			require.Equal(t, http.StatusServiceUnavailable, response.Code)
+			require.Same(t, old, s.revisionRecovery.current)
+			require.True(t, s.revisionRecoveryRequired.Load())
+			require.Equal(t, 1, stops)
+			require.Equal(t, 1, session.closeCalls)
+			require.Equal(t, []string{"namespace", "ensure", "namespace"}, fence.calls)
+			after, err := exec.CommandContext(ctx, "nft", "-j", "list", "table", "inet", "opensandbox").CombinedOutput()
+			require.NoError(t, err, "%s", after)
+			require.Equal(t, committed, after, "old policy must not be replayed as a healthy rollback")
+			assertQuiescenceRejectsWrites(t, manager)
+			require.Equal(t, http.StatusServiceUnavailable, revisionPolicyDo(t, s, http.MethodDelete, `["missing.example.com"]`).Code)
+			t.Log("real nft commit and sticky owner cleanup observed; packet isolation requires separate privileged quarantine tests")
+		})
+	}
+
 }
 
 func TestRevisionNftUnchangedRealRestore(t *testing.T) {

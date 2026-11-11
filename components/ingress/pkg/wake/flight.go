@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
+	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
+	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
 type flightKey struct {
@@ -29,14 +31,16 @@ type flightKey struct {
 	sandboxID string
 }
 
-// flight is one per-sandbox resume attempt: at most one concurrent
-// ResumeSandbox per replica per sandbox; all parked requests share its
-// outcome and remaining budget.
+// flight is one per-sandbox resume attempt: while its budget is live it is
+// the only flight for the sandbox on this replica, and all parked requests
+// share its outcome and remaining budget. A flight past its budget may
+// still be polling toward terminal (permit held) alongside a newer one.
 type flight struct {
 	key      flightKey
 	target   sandbox.EndpointTarget
 	epoch    uint64
 	deadline time.Time
+	started  time.Time
 	done     chan struct{}
 	err      error
 
@@ -53,9 +57,13 @@ func (f *flight) requestID(attempt int) string {
 }
 
 // wait blocks until the flight finishes, the caller's context is done, or
-// the shared budget elapses. The flight keeps running in every case.
-func (f *flight) wait(ctx context.Context) error {
-	remaining := time.Until(f.deadline)
+// the shared budget or the caller's own deadline elapses. The flight keeps
+// running in every case.
+func (f *flight) wait(ctx context.Context, deadline time.Time) error {
+	if f.deadline.Before(deadline) {
+		deadline = f.deadline
+	}
+	remaining := time.Until(deadline)
 	if remaining <= 0 {
 		return ErrBudgetExhausted
 	}
@@ -82,31 +90,59 @@ func (f *flight) finish(err error) {
 	})
 }
 
-// run executes the resume flight on a background context. When the budget
-// expires it stops polling; the desired-state resume still converges
-// server-side.
+// run executes the resume flight to a terminal outcome on a background
+// context: never canceled by budget, disconnect, or slot release, so the
+// permit it holds bounds actual restores. MaxFlightLifetime caps the whole
+// phase so a stuck restore frees its permit instead of holding it forever.
 func (f *flight) run(checkpointID string) {
-	ctx := context.Background()
+	defer func() {
+		Logger.With(
+			slogger.Field{Key: "namespace", Value: f.target.Namespace},
+			slogger.Field{Key: "sandbox_id", Value: f.target.SandboxID},
+			slogger.Field{Key: "epoch", Value: f.epoch},
+			slogger.Field{Key: "outcome", Value: flightOutcome(f.err)},
+			slogger.Field{Key: "waited_seconds", Value: time.Since(f.started).Seconds()},
+		).Infof("wake flight finished")
+		f.waker.releasePermit()
+		telemetry.RecordRestoreDelta(-1)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), f.waker.cfg.MaxFlightLifetime)
+	defer cancel()
 	w := f.waker
-	budget := time.NewTimer(time.Until(f.deadline))
-	defer budget.Stop()
 	backoff := newBackoff(w.cfg)
 
-	if !f.establishResume(ctx, budget, backoff, &checkpointID) {
+	if !f.establishResume(ctx, backoff, &checkpointID) {
 		return
 	}
-	f.pollUntilReady(ctx, budget, backoff)
+	f.pollUntilReady(ctx, backoff)
+}
+
+func flightOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "ready"
+	case errors.Is(err, ErrBudgetExhausted):
+		return "budget_exhausted"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "canceled"
+	case errors.Is(err, sandbox.ErrSandboxNotFound):
+		return "not_found"
+	default:
+		return "error"
+	}
 }
 
 // establishResume submits the resume intent, restarting on the checkpoint
 // fence until it is accepted, joined, or the flight ends. It reports false
 // when the flight finished without reaching the poll phase.
-func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backoff *backoff, checkpointID *string) bool {
+func (f *flight) establishResume(ctx context.Context, backoff *backoff, checkpointID *string) bool {
 	w := f.waker
 	attempt := 0
 	for {
 		attempt++
-		outcome, err := w.lifecycle.ResumeSandbox(ctx, f.target, *checkpointID, f.requestID(attempt))
+		requestID := f.requestID(attempt)
+		outcome, err := w.lifecycle.ResumeSandbox(ctx, f.target, *checkpointID, requestID)
 
 		// With an empty fence, "not paused" may also mean the pause is
 		// still in progress — joining a resume that does not exist would
@@ -115,7 +151,22 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 			(outcome == sandbox.ResumeAlreadyRunning && *checkpointID == "")
 
 		if err == nil && !needsReprobe {
+			Logger.With(
+				slogger.Field{Key: "namespace", Value: f.target.Namespace},
+				slogger.Field{Key: "sandbox_id", Value: f.target.SandboxID},
+				slogger.Field{Key: "epoch", Value: f.epoch},
+				slogger.Field{Key: "attempt", Value: attempt},
+				slogger.Field{Key: "request_id", Value: requestID},
+			).Infof("ResumeSandbox accepted")
 			return true
+		}
+		if needsReprobe {
+			Logger.With(
+				slogger.Field{Key: "namespace", Value: f.target.Namespace},
+				slogger.Field{Key: "sandbox_id", Value: f.target.SandboxID},
+				slogger.Field{Key: "epoch", Value: f.epoch},
+				slogger.Field{Key: "attempt", Value: attempt},
+			).Warnf("resume fence conflict or ambiguous join, re-probing")
 		}
 		if err != nil {
 			switch {
@@ -146,16 +197,16 @@ func (f *flight) establishResume(ctx context.Context, budget *time.Timer, backof
 				// the fence fires again and the re-probe repeats.
 			}
 		}
-		if !sleepBackoff(ctx, budget, backoff) {
-			f.finish(ErrBudgetExhausted)
+		if !sleepBackoff(ctx, backoff) {
+			f.finish(ctx.Err())
 			return false
 		}
 	}
 }
 
-// pollUntilReady polls until runtime and data plane are Ready, the sandbox
-// turns terminal, or the budget elapses.
-func (f *flight) pollUntilReady(ctx context.Context, budget *time.Timer, backoff *backoff) {
+// pollUntilReady polls until Ready or terminal; the park budget bounds the
+// waiters, never this loop.
+func (f *flight) pollUntilReady(ctx context.Context, backoff *backoff) {
 	w := f.waker
 	for {
 		probe, err := w.lifecycle.ProbeSandbox(ctx, f.target)
@@ -175,8 +226,8 @@ func (f *flight) pollUntilReady(ctx context.Context, budget *time.Timer, backoff
 			f.finish(err)
 			return
 		}
-		if !sleepBackoff(ctx, budget, backoff) {
-			f.finish(ErrBudgetExhausted)
+		if !sleepBackoff(ctx, backoff) {
+			f.finish(ctx.Err())
 			return
 		}
 	}
@@ -201,18 +252,21 @@ type flightRegistry struct {
 	flights map[flightKey]*flight
 }
 
-func (r *flightRegistry) joinOrCreate(key flightKey, create func() *flight) (*flight, bool) {
+// lookup returns the flight that may absorb a new arrival, or nil: a
+// flight whose budget elapsed no longer absorbs joiners.
+func (r *flightRegistry) lookup(key flightKey) *flight {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.flights == nil {
-		r.flights = make(map[flightKey]*flight)
-	}
+	return r.active(key)
+}
+
+// active returns the flight for key if it still has wait budget left.
+// Callers must hold r.mu.
+func (r *flightRegistry) active(key flightKey) *flight {
 	if existing, ok := r.flights[key]; ok && time.Until(existing.deadline) > 0 {
-		return existing, true
+		return existing
 	}
-	f := create()
-	r.flights[key] = f
-	return f, false
+	return nil
 }
 
 func (r *flightRegistry) remove(f *flight) {

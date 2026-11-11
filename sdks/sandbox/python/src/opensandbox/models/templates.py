@@ -83,7 +83,7 @@ class TemplateStatus(BaseModel):
         default=None,
         alias="manifestRef",
         description=(
-            "S3 manifest reference of the published artifacts; "
+            "Published S3 manifest reference or immutable OCI reference; "
             "present when the phase is Succeeded."
         ),
     )
@@ -110,8 +110,8 @@ class CreateTemplateRequest(BaseModel):
     )
     publish: str = Field(
         description=(
-            "S3-compatible publish target for the built artifacts, "
-            "e.g. 's3://bucket/publish'."
+            "Publish destination: s3://bucket/publish (native) or "
+            "oci://registry/repository (overlaybd, no tag or digest)."
         )
     )
     resource_limits: dict[str, str] | None = Field(
@@ -174,7 +174,7 @@ class TemplateInfo(BaseModel):
         alias="templateId",
     )
     image: str = Field(description="Source OCI image reference.")
-    publish: str = Field(description="S3-compatible publish target.")
+    publish: str = Field(description="S3-compatible or repository-only OCI publish target.")
     format: Literal["native", "overlaybd"] = Field(
         description="Snapshot storage encoding."
     )

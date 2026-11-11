@@ -294,3 +294,7 @@ obj/
 # fast-sandbox pinned source checkout (materialized by
 # manifests/release/build-fast-sandbox.sh from manifests/third-party/fast-sandbox.commit)
 .fast-sandbox/
+
+# Test-only localhost certificate pair for the egress OSEP-0025 resolver stub
+# (fixtures/README.md documents regeneration; these certify nothing).
+!components/egress/tests/resolver/fixtures/*.pem

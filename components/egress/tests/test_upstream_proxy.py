@@ -62,14 +62,13 @@ def _load_addon() -> Any:
     )
     mitmproxy.http = types.SimpleNamespace(HTTPFlow=object)
 
-    sys.modules["mitmproxy"] = mitmproxy
-
     path = Path(__file__).parents[1] / "mitmscripts" / "upstream_proxy.py"
     spec = importlib.util.spec_from_file_location("opensandbox_egress_upstream_addon", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    with mock.patch.dict(sys.modules, {"mitmproxy": mitmproxy}):
+        spec.loader.exec_module(module)
     return module
 
 

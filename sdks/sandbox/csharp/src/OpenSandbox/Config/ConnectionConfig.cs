@@ -69,6 +69,10 @@ public class ConnectionConfigOptions
     /// <summary>
     /// Gets or sets whether to use server-proxied endpoint URLs.
     /// </summary>
+    [Obsolete(
+        "The server-proxied data path is in maintenance mode (security and bug fixes only). "
+            + "Route data-plane traffic through the ingress gateway instead."
+    )]
     public bool? UseServerProxy { get; set; }
 
     /// <summary>
@@ -92,6 +96,70 @@ public class ConnectionConfigOptions
     /// OPENSANDBOX_DISABLE_METRICS=1 environment variable.
     /// </summary>
     public bool? DisableMetrics { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether to auto-retry gateway wake-timeout responses
+    /// (OSEP-0024): a 503 carrying the "OpenSandbox-Wake: expired" marker
+    /// proves the request was never forwarded, so the original request is
+    /// resent for any method after waiting per Retry-After. On by default;
+    /// bare 503 responses are never affected.
+    /// </summary>
+    public bool? WakeRetryEnabled { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum number of wake-timeout responses consumed
+    /// before the wake retry gives up with a
+    /// <see cref="SandboxWakeTimeoutException"/>. Default: 5.
+    /// </summary>
+    public int? WakeMaxAttempts { get; set; }
+
+    /// <summary>
+    /// Gets or sets the wall-clock cap in seconds spanning all wake cycles of
+    /// one logical request (waits, retries, and request time). Set to 0 or a
+    /// negative value to remove the time bound (the attempt count still
+    /// applies). Default: 60.
+    /// </summary>
+    public int? WakeOverallDeadlineSeconds { get; set; }
+}
+
+/// <summary>
+/// OSEP-0024 wake retry policy applied by the HTTP transport.
+/// </summary>
+public sealed class WakeRetryOptions
+{
+    /// <summary>
+    /// Gets a value indicating whether marked wake-timeout responses
+    /// (503 + "OpenSandbox-Wake: expired") are auto-retried. Bare 503
+    /// responses are never affected.
+    /// </summary>
+    public bool Enabled { get; }
+
+    /// <summary>
+    /// Gets the maximum number of marked wake-timeout responses consumed
+    /// before the wake retry gives up with a
+    /// <see cref="SandboxWakeTimeoutException"/>.
+    /// </summary>
+    public int MaxAttempts { get; }
+
+    /// <summary>
+    /// Gets the wall-clock cap spanning all wake cycles of one logical
+    /// request (waits, retries, and request time); <c>null</c> removes the
+    /// time bound.
+    /// </summary>
+    public TimeSpan? OverallDeadline { get; }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="WakeRetryOptions"/> class.
+    /// </summary>
+    /// <param name="enabled">Whether marked wake-timeout responses are retried.</param>
+    /// <param name="maxAttempts">Maximum marked wake-timeout responses consumed.</param>
+    /// <param name="overallDeadline">Wall-clock cap across wake cycles; null removes the bound.</param>
+    public WakeRetryOptions(bool enabled, int maxAttempts, TimeSpan? overallDeadline)
+    {
+        Enabled = enabled;
+        MaxAttempts = maxAttempts;
+        OverallDeadline = overallDeadline;
+    }
 }
 
 /// <summary>
@@ -130,6 +198,8 @@ public sealed class ConnectionConfig
 
     /// <summary>
     /// Gets whether server-proxied endpoint URLs should be requested.
+    /// Deprecated: the server-proxied data path is in maintenance mode (security
+    /// and bug fixes only); route data-plane traffic through the ingress gateway instead.
     /// </summary>
     public bool UseServerProxy { get; }
 
@@ -154,6 +224,11 @@ public sealed class ConnectionConfig
     /// variable in addition to the explicit option.
     /// </summary>
     public bool DisableMetrics { get; }
+
+    /// <summary>
+    /// Gets the OSEP-0024 wake retry policy applied by the HTTP transport.
+    /// </summary>
+    public WakeRetryOptions WakeRetry { get; }
 
     /// <summary>
     /// Gets the user agent string.
@@ -181,10 +256,23 @@ public sealed class ConnectionConfig
         Domain = domainBase;
         ApiKey = options.ApiKey ?? envApiKey;
         RequestTimeoutSeconds = options.RequestTimeoutSeconds ?? Constants.DefaultRequestTimeoutSeconds;
+#pragma warning disable CS0618 // Reading the deprecated option here is intentional.
         UseServerProxy = options.UseServerProxy ?? false;
+#pragma warning restore CS0618
         EndpointCacheTtlSeconds = options.EndpointCacheTtlSeconds ?? 600;
         EndpointCacheSize = options.EndpointCacheSize ?? 1024;
         EndpointCacheDisabled = options.EndpointCacheDisabled ?? false;
+
+        var wakeMaxAttempts = options.WakeMaxAttempts ?? Constants.DefaultWakeMaxAttempts;
+        if (wakeMaxAttempts < 1)
+        {
+            throw new ArgumentException("WakeMaxAttempts must be >= 1.", nameof(options.WakeMaxAttempts));
+        }
+        var wakeDeadlineSeconds = options.WakeOverallDeadlineSeconds ?? Constants.DefaultWakeOverallDeadlineSeconds;
+        WakeRetry = new WakeRetryOptions(
+            options.WakeRetryEnabled ?? true,
+            wakeMaxAttempts,
+            wakeDeadlineSeconds > 0 ? TimeSpan.FromSeconds(wakeDeadlineSeconds) : null);
 
         var envDisableMetrics = Environment.GetEnvironmentVariable(Constants.EnvDisableMetrics);
         var envDisableMetricsFlag = string.Equals(envDisableMetrics?.Trim(), "1", StringComparison.Ordinal);
@@ -192,8 +280,11 @@ public sealed class ConnectionConfig
 
         var headers = new Dictionary<string, string>(options.Headers ?? new Dictionary<string, string>());
 
-        // Add API key header if not already present
-        if (!string.IsNullOrEmpty(ApiKey) && !headers.ContainsKey(Constants.ApiKeyHeader))
+        // Add API key header if not already present. HTTP header names are
+        // case-insensitive, so any casing of the header set by the caller
+        // suppresses the default; an explicit empty value is preserved.
+        if (!string.IsNullOrEmpty(ApiKey) &&
+            !headers.Keys.Any(k => string.Equals(k, Constants.ApiKeyHeader, StringComparison.OrdinalIgnoreCase)))
         {
             headers[Constants.ApiKeyHeader] = ApiKey;
         }
@@ -248,10 +339,11 @@ public sealed class ConnectionConfig
     {
         var handler = new HttpClientHandler
         {
+            AllowAutoRedirect = false,
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
         };
 
-        var client = new HttpClient(handler)
+        var client = new HttpClient(new ProtectedRedirectHandler(handler))
         {
             Timeout = TimeSpan.FromSeconds(RequestTimeoutSeconds)
         };
@@ -283,12 +375,32 @@ public sealed class ConnectionConfig
     /// <returns>A new configured HttpClient instance for SSE.</returns>
     public HttpClient CreateSseHttpClient()
     {
+        return CreateStreamingHttpClient();
+    }
+
+    /// <summary>
+    /// Creates a new HttpClient configured for file uploads and downloads.
+    /// This client has no whole-call timeout, because a file transfer can legitimately take
+    /// longer than <see cref="RequestTimeoutSeconds"/> (large files, slow links) and must not
+    /// be aborted while it is still making progress. Callers can bound a transfer through the
+    /// per-call CancellationToken; the SDK still bounds how long a transfer waits for
+    /// response headers, and never bounds a body that keeps making progress.
+    /// </summary>
+    /// <returns>A new configured HttpClient instance for file transfers.</returns>
+    public HttpClient CreateTransferHttpClient()
+    {
+        return CreateStreamingHttpClient();
+    }
+
+    private HttpClient CreateStreamingHttpClient()
+    {
         var handler = new HttpClientHandler
         {
+            AllowAutoRedirect = false,
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
         };
 
-        var client = new HttpClient(handler)
+        var client = new HttpClient(new ProtectedRedirectHandler(handler))
         {
             Timeout = Timeout.InfiniteTimeSpan
         };

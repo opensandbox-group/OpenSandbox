@@ -73,3 +73,23 @@ export function throwOnOpenApiFetchError(
     rawBody: result.error,
   });
 }
+
+/**
+ * Throws the failed response of a direct `fetch` call as a
+ * `SandboxApiException`, reading its body the same way as
+ * {@link throwOnOpenApiFetchError}. It also throws for a 2xx response, so
+ * callers that expect one specific status can pass any other.
+ */
+export async function throwOnFailedResponse(
+  response: Response,
+  fallbackMessage: string,
+): Promise<never> {
+  const body = await response.text().catch(() => "");
+  throwOnOpenApiFetchError({ error: body, response }, fallbackMessage);
+  // Only an unexpected 2xx status with an empty body gets here.
+  throw new SandboxApiException({
+    message: fallbackMessage,
+    statusCode: response.status,
+    requestId: response.headers.get("x-request-id") ?? undefined,
+  });
+}

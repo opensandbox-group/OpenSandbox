@@ -23,7 +23,9 @@ const EXACT: Record<string, string> = {
   "/server/development": "/architecture/control-plane/server",
   "/specs/readme": "/api/",
   "/secure-container": "/guides/secure-container",
+  "/architecture/network/network-isolation": "/guides/network-isolation",
   "/pause-resume": "/guides/pause-resume",
+  "/guides/component-telemetry": "/guides/telemetry",
   "/execd-path-migration": "/reference/execd-path-migration",
 };
 
@@ -37,7 +39,6 @@ function resolveLegacy(rawPath: string): string {
   p = p.replace(/^\/zh(?=\/|$)/, "");
   if (p === "" || p === "/") return "/";
   if (EXACT[p]) return EXACT[p];
-  if (p.startsWith("/oseps/")) return "/community/oseps";
   // Nested Kubernetes pages (charts, examples) all consolidated under the
   // controller documentation.
   if (p.startsWith("/kubernetes/")) return "/architecture/control-plane/operator";

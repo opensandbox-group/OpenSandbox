@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SnapshotFailedException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
@@ -111,6 +112,11 @@ class SandboxManager internal constructor(
         return sandboxService.listSandboxes(filter)
     }
 
+    /** Gets backend routing context without connecting to execd. */
+    fun getDiagnosticContext(sandboxId: String): DiagnosticContext {
+        return diagnosticsService.getContext(sandboxId)
+    }
+
     /**
      * Gets information for a single sandbox by its ID.
      *
@@ -170,7 +176,8 @@ class SandboxManager internal constructor(
     }
 
     /**
-     * Terminates a single sandbox.
+     * Requests irreversible sandbox termination. Returns when deletion is accepted;
+     * runtime cleanup may continue afterward.
      *
      * @param sandboxId Sandbox ID to terminate
      * @throws SandboxException if the operation fails
@@ -178,7 +185,7 @@ class SandboxManager internal constructor(
     fun killSandbox(sandboxId: String) {
         logger.info("Terminating sandbox: {}", sandboxId)
         sandboxService.killSandbox(sandboxId)
-        logger.info("Successfully terminated sandbox: {}", sandboxId)
+        logger.info("Sandbox deletion accepted: {}", sandboxId)
     }
 
     /**

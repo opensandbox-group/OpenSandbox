@@ -3,20 +3,21 @@ info:
   title: OpenSandbox Diagnostics API
   version: 0.1.0
   description: |
-    The OpenSandbox Diagnostics API exposes best-effort plain-text diagnostic
-    snapshots for a sandbox. It is intended for humans and troubleshooting agents
-    that need to collect runtime troubleshooting material without depending on a
-    stable structured observability model.
+    The OpenSandbox Diagnostics API exposes structured routing context and
+    best-effort plain-text diagnostic snapshots for a sandbox. It is intended for
+    humans and troubleshooting agents that need to locate the runtime backend and
+    collect troubleshooting material without depending on a stable structured
+    observability model.
 
     This API is not an audit log API and does not define the canonical
     observability schema for OpenSandbox. Structured telemetry, long-term
     retention, filtering, pagination, and streaming may be provided separately.
 
-    Successful responses return a JSON descriptor whose diagnostic payload is
-    either embedded inline or made available through a download URL. The diagnostic
-    payload itself is display-oriented `text/plain` content. Clients should not
-    parse individual payload lines as a stable schema. Servers may impose
-    implementation-defined retention and response size limits.
+    Successful log and event responses return a JSON descriptor whose diagnostic
+    payload is either embedded inline or made available through a download URL.
+    The diagnostic payload itself is display-oriented `text/plain` content. Clients
+    should not parse individual payload lines as a stable schema. Servers may
+    impose implementation-defined retention and response size limits.
 
     ## Authentication
 
@@ -40,8 +41,64 @@ security:
   - apiKeyAuth: []
 tags:
   - name: Diagnostics
-    description: Sandbox troubleshooting payload descriptors
+    description: Sandbox troubleshooting context and payload descriptors
 paths:
+  /sandboxes/{sandboxId}/diagnostics/context:
+    get:
+      tags: [Diagnostics]
+      summary: Get diagnostic context
+      description: |
+        Retrieve structured context for routing further diagnostics of a sandbox.
+
+        `backendType` identifies the implementation that currently owns the
+        sandbox. `backendIdentifiers` contains implementation-defined identifiers
+        that may be used to correlate the sandbox with resources in that backend.
+        Identifier keys are scoped to the backend type and are not defined by this
+        API. The map may be empty when the backend does not expose additional
+        identifiers.
+
+        This endpoint does not return diagnostic logs or events. Use the dedicated
+        `logs` and `events` endpoints after resolving the diagnostic context.
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+      responses:
+        '200':
+          description: Sandbox diagnostic context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiagnosticContextResponse'
+              examples:
+                fastSandbox:
+                  summary: Fast Sandbox without additional backend identifiers
+                  value:
+                    sandboxId: fsb-abc123
+                    state: Running
+                    backendType: fast-sandbox
+                    backendIdentifiers: {}
+                kubernetes:
+                  summary: Kubernetes sandbox with backend identifiers
+                  value:
+                    sandboxId: sbx_123
+                    state: Running
+                    backendType: kubernetes
+                    backendIdentifiers:
+                      namespace: default
+                      podName: sandbox-sbx-123
+                      podUid: 86c4fb10-15f7-4c6e-b72e-8dd15d7d5c48
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/XRequestId'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
   /sandboxes/{sandboxId}/diagnostics/logs:
     get:
       tags: [Diagnostics]
@@ -283,6 +340,29 @@ components:
         X-Request-ID:
           $ref: '#/components/headers/XRequestId'
   schemas:
+    DiagnosticContextResponse:
+      type: object
+      description: Structured context for routing sandbox diagnostics.
+      required: [sandboxId, backendType, backendIdentifiers]
+      properties:
+        sandboxId:
+          type: string
+          description: Unique sandbox identifier accepted by the OpenSandbox API.
+        state:
+          type: string
+          description: Current OpenSandbox lifecycle state, when available.
+        backendType:
+          type: string
+          description: Implementation-defined backend type.
+          examples: [fast-sandbox, kubernetes, docker]
+        backendIdentifiers:
+          type: object
+          description: |
+            Backend-defined identifiers used to correlate this sandbox with
+            backend resources. Keys are scoped to `backendType`; values are strings.
+          additionalProperties:
+            type: string
+      additionalProperties: false
     DiagnosticContentResponse:
       type: object
       description: |

@@ -16,6 +16,7 @@ package credentialvault
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -39,6 +40,7 @@ type MutationCandidate struct {
 	owner           *Store
 	baseMutationTag string
 	exists          bool
+	created         bool
 	revision        int64
 	credentials     map[string]record
 	bindings        map[string]Binding
@@ -57,7 +59,7 @@ func (v *Store) PrepareCreate(req CreateRequest, pol *policy.NetworkPolicy) (*Mu
 	if v.exists {
 		return nil, ErrExists
 	}
-	credentials, bindings, err := v.buildCreate(req, pol)
+	credentials, bindings, err := v.buildCreate(req, pol, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -72,13 +74,41 @@ func (v *Store) PreparePatch(req MutationRequest, pol *policy.NetworkPolicy) (*M
 		return nil, ErrNotFound
 	}
 	if req.ExpectedRevision != nil && *req.ExpectedRevision != v.revision {
-		return nil, fmt.Errorf("expectedRevision %d does not match current revision %d", *req.ExpectedRevision, v.revision)
+		return nil, fmt.Errorf("%w: expectedRevision %d does not match current revision %d", ErrRevisionConflict, *req.ExpectedRevision, v.revision)
 	}
 	credentials, bindings, err := v.buildPatch(req, pol, v.revision+1)
 	if err != nil {
 		return nil, err
 	}
 	return v.newCandidate(true, v.revision+1, credentials, bindings), nil
+}
+
+// PrepareReplace validates a full-revision replace without publishing it —
+// the relay PUT transaction: creates at revision 1 when no vault exists,
+// otherwise swaps everything and advances the revision. The precondition
+// follows Store.Replace; Created() reports whether committing would create.
+func (v *Store) PrepareReplace(req ReplaceRequest, pol *policy.NetworkPolicy) (*MutationCandidate, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	expected, err := req.precondition()
+	if err != nil {
+		return nil, err
+	}
+	created := !v.exists
+	if expected != nil && (created || *expected != v.revision) {
+		return nil, fmt.Errorf("%w: expectedRevision %d does not match current revision %d", ErrRevisionConflict, *expected, v.revision)
+	}
+	next := int64(1)
+	if !created {
+		next = v.revision + 1
+	}
+	credentials, bindings, err := v.buildCreate(req.CreateRequest, pol, next)
+	if err != nil {
+		return nil, err
+	}
+	candidate := v.newCandidate(true, next, credentials, bindings)
+	candidate.created = created
+	return candidate, nil
 }
 
 // PrepareDelete creates an authoritative empty tombstone without publishing it.
@@ -123,6 +153,51 @@ func (c *MutationCandidate) Sanitized() (State, error) {
 		return State{}, ErrNotFound
 	}
 	return sanitizedState(c.revision, c.credentials, c.bindings), nil
+}
+
+// Created reports whether committing this candidate would create the vault
+// (only PrepareReplace sets it).
+func (c *MutationCandidate) Created() bool {
+	return c != nil && c.created
+}
+
+// Exists reports whether the candidate describes a live vault revision (a
+// delete tombstone does not).
+func (c *MutationCandidate) Exists() bool {
+	return c != nil && c.exists
+}
+
+// Full returns the complete candidate revision INCLUDING credential values —
+// exactly what gets encoded into the subject's vault file before commit.
+func (c *MutationCandidate) Full() (FullRevision, error) {
+	if c == nil {
+		return FullRevision{}, ErrInvalidCandidate
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return FullRevision{}, ErrCandidateClosed
+	}
+	if !c.exists {
+		return FullRevision{}, ErrNotFound
+	}
+	full := FullRevision{
+		Revision:    c.revision,
+		Credentials: make([]Credential, 0, len(c.credentials)),
+		Bindings:    make([]Binding, 0, len(c.bindings)),
+	}
+	for _, r := range c.credentials {
+		full.Credentials = append(full.Credentials, Credential{
+			Name:   r.Name,
+			Source: append(json.RawMessage(nil), r.raw...),
+		})
+	}
+	for _, b := range c.bindings {
+		full.Bindings = append(full.Bindings, cloneBinding(b))
+	}
+	sort.Slice(full.Credentials, func(i, j int) bool { return full.Credentials[i].Name < full.Credentials[j].Name })
+	sort.Slice(full.Bindings, func(i, j int) bool { return full.Bindings[i].Name < full.Bindings[j].Name })
+	return full, nil
 }
 
 // ActiveSnapshot renders the complete candidate for the proxy transaction.
@@ -207,11 +282,12 @@ func (c *MutationCandidate) closeLocked() {
 func (v *Store) buildCreate(
 	req CreateRequest,
 	pol *policy.NetworkPolicy,
+	revision int64,
 ) (map[string]record, map[string]Binding, error) {
 	credentials := make(map[string]record, len(req.Credentials))
 	bindings := make(map[string]Binding, len(req.Bindings))
 	for _, credential := range req.Credentials {
-		record, err := v.normalizeCredential(credential, 1)
+		record, err := v.normalizeCredential(credential, revision)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -319,6 +395,17 @@ func renderActiveSnapshot(
 	sort.Strings(names)
 	for _, name := range names {
 		binding := bindings[name]
+		if binding.Auth.Type == "" {
+			// Typeless exchange binding: marker-only, no rendering, no network.
+			snapshot.Bindings = append(snapshot.Bindings, ActiveBinding{
+				Name:          binding.Name,
+				Match:         binding.Match,
+				Headers:       []InjectionHeader{},
+				Substitutions: &[]InjectionSubstitution{},
+				Exchange:      &ExchangeRef{Credential: binding.Auth.Credential},
+			})
+			continue
+		}
 		headers, values, err := renderInjectionHeaders(ctx, binding.Auth, credentials)
 		if err != nil {
 			return ActiveSnapshot{}, err
@@ -327,12 +414,15 @@ func renderActiveSnapshot(
 		if err != nil {
 			return ActiveSnapshot{}, err
 		}
-		snapshot.Bindings = append(snapshot.Bindings, ActiveBinding{
-			Name:          binding.Name,
-			Match:         binding.Match,
-			Headers:       headers,
-			Substitutions: substitutions,
-		})
+		rendered := ActiveBinding{
+			Name:    binding.Name,
+			Match:   binding.Match,
+			Headers: headers,
+		}
+		if len(substitutions) > 0 {
+			rendered.Substitutions = &substitutions
+		}
+		snapshot.Bindings = append(snapshot.Bindings, rendered)
 		values = append(values, substitutionValues...)
 		for _, value := range values {
 			if value != "" {
@@ -359,21 +449,38 @@ func cloneActiveSnapshot(snapshot ActiveSnapshot) ActiveSnapshot {
 		Redactions: append([]string(nil), snapshot.Redactions...),
 	}
 	for i, binding := range snapshot.Bindings {
-		clone.Bindings[i] = ActiveBinding{
-			Name:          binding.Name,
-			Match:         cloneMatch(binding.Match),
-			Headers:       append([]InjectionHeader(nil), binding.Headers...),
-			Substitutions: make([]InjectionSubstitution, len(binding.Substitutions)),
+		rendered := ActiveBinding{
+			Name:    binding.Name,
+			Match:   cloneMatch(binding.Match),
+			Headers: cloneInjectionHeaders(binding.Headers),
 		}
-		for j, substitution := range binding.Substitutions {
-			clone.Bindings[i].Substitutions[j] = InjectionSubstitution{
-				Placeholder: substitution.Placeholder,
-				Value:       substitution.Value,
-				In:          append([]string(nil), substitution.In...),
+		if binding.Substitutions != nil {
+			subs := make([]InjectionSubstitution, len(*binding.Substitutions))
+			for j, substitution := range *binding.Substitutions {
+				subs[j] = InjectionSubstitution{
+					Placeholder: substitution.Placeholder,
+					Value:       substitution.Value,
+					In:          append([]string(nil), substitution.In...),
+				}
 			}
+			rendered.Substitutions = &subs
 		}
+		if binding.Exchange != nil {
+			rendered.Exchange = &ExchangeRef{Credential: binding.Exchange.Credential}
+		}
+		clone.Bindings[i] = rendered
 	}
 	return clone
+}
+
+// cloneInjectionHeaders preserves nil-ness: passthrough bindings render null
+// headers while exchange markers carry an explicit empty array — degrading
+// the empty array to null would fail the addon parser closed.
+func cloneInjectionHeaders(headers []InjectionHeader) []InjectionHeader {
+	if headers == nil {
+		return nil
+	}
+	return append(make([]InjectionHeader, 0, len(headers)), headers...)
 }
 
 func cloneMatch(match Match) Match {

@@ -64,6 +64,11 @@ type Options struct {
 	// IP-only and unscoped by UID, so putting the proxy there would let
 	// sandbox workloads CONNECT it directly and bounce to denied destinations.
 	UpstreamProxy *UpstreamProxyEndpoint
+	// MitmRedirectPort, when > 0, is the transparent-MITM listener port the
+	// nat OUTPUT REDIRECT rewrites intercepted dports to; the chain must
+	// exempt that rewritten tuple ahead of port-scoped rules or every
+	// intercepted flow is dropped (see the rule below). 0 emits nothing.
+	MitmRedirectPort int
 }
 
 type Manager struct {
@@ -294,6 +299,14 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	// The ip6 OUTPUT REDIRECTs (DNS → :15353, MITM → :18081) land on ::1 with the original egress
 	// interface still selected, so oifname "lo" does not match them: ::1 is the v6 loopback rule.
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr ::1 accept\n", tableName, chainName)
+	// The v4 MITM redirect lands on 127.0.0.1 with the original egress interface
+	// still selected, so oifname "lo" does not match: exempt the rewritten dport
+	// ahead of port-scoped rules (mirrors the dnsproxy rules above). Enforcement
+	// is intact — mitmproxy's own re-originated connections are not exempt — and
+	// direct workload dials already pass via oifname "lo"; v6 is covered by ::1.
+	if opts.MitmRedirectPort > 0 {
+		fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport %d accept\n", tableName, chainName, opts.MitmRedirectPort)
+	}
 	if ep := opts.UpstreamProxy; ep != nil {
 		b.WriteString(buildUpstreamProxyStatic(tableName, ep))
 	}
@@ -314,8 +327,13 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 			}
 		}
 	}
+	portDeny, portAllow := p.PortScopedRules()
+	// Port-scoped deny before every allow; port-scoped allow after the
+	// plain deny set, before the dynamic/plain allow sets.
+	writePortScopedRules(&b, portDeny, "drop")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s drop\n", tableName, chainName, denyV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s drop\n", tableName, chainName, denyV6Set)
+	writePortScopedRules(&b, portAllow, "accept")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, dynAllowV6Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
@@ -332,6 +350,32 @@ func writeElements(b *strings.Builder, setName string, elems []string) {
 		return
 	}
 	fmt.Fprintf(b, "add element inet %s %s { %s }\n", tableName, setName, strings.Join(elems, ", "))
+}
+
+// writePortScopedRules emits one "add rule" line per rule, preserving
+// declaration order. A rule with no Target applies to all destinations
+// (bare "tcp dport { ... }" covers both address families); the dport set
+// mixes ports and lo-hi intervals. TCP only.
+func writePortScopedRules(b *strings.Builder, rules []policy.PortScopedRule, verb string) {
+	for _, r := range rules {
+		members := make([]string, 0, len(r.Ports)+len(r.Ranges))
+		for _, port := range r.Ports {
+			members = append(members, fmt.Sprintf("%d", port))
+		}
+		for _, rg := range r.Ranges {
+			members = append(members, fmt.Sprintf("%d-%d", rg.Lo, rg.Hi))
+		}
+		portsClause := strings.Join(members, ", ")
+		if r.Target == "" {
+			fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } %s\n", tableName, chainName, portsClause, verb)
+			continue
+		}
+		daddr := "ip daddr"
+		if r.IsV6 {
+			daddr = "ip6 daddr"
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } %s\n", tableName, chainName, daddr, r.Target, portsClause, verb)
+	}
 }
 
 func defaultRunner(ctx context.Context, script string) ([]byte, error) {

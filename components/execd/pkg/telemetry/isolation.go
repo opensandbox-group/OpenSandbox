@@ -25,6 +25,8 @@ import (
 type IsolationStats struct {
 	ActiveSessions  int64
 	UpperUsageBytes int64
+	// UpperUsageValid distinguishes a genuine zero from a failed filesystem scan.
+	UpperUsageValid bool
 }
 
 // IsolationStatsProvider is called by observable gauge callbacks to get

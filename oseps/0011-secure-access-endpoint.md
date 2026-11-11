@@ -35,8 +35,8 @@ OpenSandbox-Secure-Access: <token>
 
 **Ingress rule (secure sandbox):** define **header present** as: the **`OpenSandbox-Secure-Access`** field appears on the HTTP request (any value, including empty). Then:
 
-- If **present** and the value **matches** **`SecureAccessToken`** (constant-time compare) → **allow**; route-signature verification is **not** required.  
-- If **present** and the value **does not match** → **`401` immediately**; ingress **must not** fall through to route-signature verification (prevents “bad/stale header + valid signed URL” from being accepted).  
+- If **present** and the value **matches** **`SecureAccessToken`** (constant-time compare) → **allow**; route-signature verification is **not** required.
+- If **present** and the value **does not match** → **`401` immediately**; ingress **must not** fall through to route-signature verification (prevents “bad/stale header + valid signed URL” from being accepted).
 - If **absent** → ingress may authenticate using the route **`signature`** path (when provided and valid).
 
 ## `expires_b36` encoding
@@ -45,9 +45,9 @@ Let **`expires_sec`** be **`uint64`** **Linux / Unix epoch seconds** (UTC): whol
 
 **`expires_b36`** is the **base-36** encoding of **`expires_sec`** using **lowercase** alphabet **`0-9a-z`**, with **no leading zeros**, except **`expires_sec == 0`** is encoded as **`0`**. Normative reference (Go): **`strconv.FormatUint(expires_sec, 36)`** for minting and **`strconv.ParseUint(segment, 36, 64)`** for ingress.
 
-- **Length:** **1** to **13** characters inclusive for any **`uint64`** value (max is **`18446744073709551615`** → **`3w5e11264sgsf`**).  
-- **Charset:** **`[0-9a-z]`** only; reject uppercase.  
-- **Routing segment** and **`canonical_bytes`** embed the **same** literal string (not decimal seconds).  
+- **Length:** **1** to **13** characters inclusive for any **`uint64`** value (max is **`18446744073709551615`** → **`3w5e11264sgsf`**).
+- **Charset:** **`[0-9a-z]`** only; reject uppercase.
+- **Routing segment** and **`canonical_bytes`** embed the **same** literal string (not decimal seconds).
 - **Ingress:** reject empty, invalid charset, overflow on parse, or length **> 13** → **`400`**. Then **`401`** if **`now > expires_sec`**.
 
 > **Rationale:** Base36 is shorter than decimal for typical timestamps (e.g. **`2000000000`** → **`x2qxvk`**, 6 chars) while staying URL/host friendly without extra escaping.
@@ -103,7 +103,7 @@ signature = hex8 + signed_key_id       // 9 chars total
   - **Without** query **`expires`:** returns the public URL; when secure access is on, the response also carries **`SecureAccessToken`** (and clients use **`OPENSANDBOX-SECURE-ACCESS`**) as in § *Static access token*.
   - **With** query **`expires=<unix_seconds>`:** **mints** a signed route.
     - **`expires`** is a **decimal `uint64`** **Linux / Unix epoch second** (whole seconds since `1970-01-01 00:00:00` UTC; **not** milliseconds). The server **normalizes** to **`expires_b36`** (rules above) for both **`canonical_bytes`** and the returned routing token in the JSON.
-    - **Omitting** **`expires`** does **not** invoke minting (unsigned / legacy response); it is **not** a **`400`** by itself.  
+    - **Omitting** **`expires`** does **not** invoke minting (unsigned / legacy response); it is **not** a **`400`** by itself.
     - If **`expires`** is **present** but **empty, malformed, or out of range** → **`400`**.
 
 Returned **signed** routing material always uses **`{sandbox_id}-{port}-{expires_b36}-{signature}`** (then wrapped into host / path / header as usual).

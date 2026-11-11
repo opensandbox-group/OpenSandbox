@@ -60,6 +60,7 @@ from opensandbox.pool_types import (
     PoolLifecycleState,
     PoolSnapshot,
     PoolState,
+    _extra_create_kwargs,
     effective_max_idle_attempts,
     policy_falls_through_to_direct_create,
 )
@@ -1133,6 +1134,7 @@ class SandboxPoolSync:
             )
 
         spec = self._creation_spec
+        create_kwargs = _extra_create_kwargs(spec)
         return self._sandbox_factory.create(
             spec.image,
             timeout=self._config.idle_timeout,
@@ -1141,6 +1143,7 @@ class SandboxPoolSync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            **create_kwargs,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,
@@ -1184,6 +1187,7 @@ class SandboxPoolSync:
             return sandbox
 
         spec = self._creation_spec
+        create_kwargs = _extra_create_kwargs(spec)
         sandbox = self._sandbox_factory.create(
             spec.image,
             timeout=self._config.idle_timeout,
@@ -1192,6 +1196,7 @@ class SandboxPoolSync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            **create_kwargs,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,
@@ -1406,7 +1411,8 @@ class SandboxPoolSync:
 
     def _connection_for_warmup_create(self) -> ConnectionConfigSync:
         if self._pool_transport_owner is None:
-            return self._pool_connection_config or self._connection_config
+            base = self._pool_connection_config or self._connection_config
+            return base.model_copy(update={"disable_metrics": True})
         # Staged-warmup sandboxes own short-lived transports. Keeping their
         # mutually incompatible endpoint origins out of the pool-wide shared
         # transport prevents lifecycle starvation and connection churn.
@@ -1414,6 +1420,7 @@ class SandboxPoolSync:
             update={
                 "transport": None,
                 "retry_policy": RetryPolicy.disabled(),
+                "disable_metrics": True,
             }
         )
         config._owns_transport = True

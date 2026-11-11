@@ -24,11 +24,15 @@
  */
 
 export { createLifecycleClient } from "./openapi/lifecycleClient.js";
+export { createDiagnosticClient } from "./openapi/diagnosticClient.js";
 export type { LifecycleClient } from "./openapi/lifecycleClient.js";
 export { createExecdClient } from "./openapi/execdClient.js";
 export type { ExecdClient } from "./openapi/execdClient.js";
 export { createEgressClient } from "./openapi/egressClient.js";
 export type { EgressClient } from "./openapi/egressClient.js";
+
+// Data-plane header policy, shared with companion SDKs such as the code interpreter.
+export { createDataPlaneHeaders } from "./factory/defaultAdapterFactory.js";
 
 // OpenAPI schema types (NOT stable public API; internal-only).
 export type { paths as LifecyclePaths } from "./api/lifecycle.js";
@@ -44,7 +48,20 @@ export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
 export { IsolatedSessionsAdapter } from "./adapters/isolatedSessionsAdapter.js";
+export { IsolatedFilesystemAdapter } from "./adapters/isolatedFilesystemAdapter.js";
 export { EndpointCache } from "./core/endpointCache.js";
+
+// Cross-origin redirect protection helpers (advanced/testing).
+export {
+  createRedirectSafeFetch,
+  hasProtectedHeaders,
+  stripProtectedHeaders,
+  stripCredentialHeaders,
+  isSameOrigin,
+  PROTECTED_HEADER_PREFIXES,
+  CROSS_ORIGIN_CREDENTIAL_HEADERS,
+} from "./config/redirectFetch.js";
+export type { RedirectSafeFetchOptions } from "./config/redirectFetch.js";
 
 // Client-IP detection helpers (advanced/testing).
 export {
@@ -57,3 +74,17 @@ export {
   _restartDetectionForTest,
   _resetClientIpCacheForTest,
 } from "./config/clientIp.js";
+
+// Wake retry contract (OSEP-0024) helpers (advanced/testing).
+export {
+  createWakeRetryFetch,
+  parseRetryAfterMs,
+  resolveWakeRetryAfterMs,
+  isWakeTimeoutResponse,
+  WAKE_MARKER_HEADER,
+  WAKE_MARKER_VALUE,
+  WAKE_DEFAULT_RETRY_AFTER_MS,
+  RETRY_AFTER_CAP_MS,
+} from "./config/wakeRetry.js";
+export { validateIdlePolicy } from "./internal/idlePolicy.js";
+export { validateRenewalPolicy } from "./internal/renewalPolicy.js";

@@ -40,10 +40,16 @@ T = TypeVar("T", bound="CreateIsolatedSessionRequest")
 class CreateIsolatedSessionRequest:
     """Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a
     single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are
-    present `workspace` is prepended to `overlays`.
+    present `workspace` is prepended to `overlays`. The session files API serves exactly the overlay and bind mounts:
+    paths under each mount resolve as the namespace sees them, and absolute paths outside every overlay or bind are
+    rejected instead of resolving against the workspace (unlike binds, extra_writable paths are not served by the files
+    API unless an overlay covers them). The strict profile's private `/tmp` is a session-owned bind under the upper root
+    and is part of that view; a caller bind or overlay on `/tmp` shadows it as inside the namespace.
 
         Attributes:
-            profile (CreateIsolatedSessionRequestProfile | Unset):
+            profile (CreateIsolatedSessionRequestProfile | Unset): Isolation profile. `strict` (default) gives the session a
+                private `/tmp` backed by a host directory that the session files API also serves; `balanced` shares the
+                sandbox's own `/tmp`, which the files API does not serve.
             workspace (IsolatedWorkspaceSpec | Unset):
             overlays (list[IsolatedOverlaySpec] | Unset): Independent overlay mounts inside one namespace. Each entry gets
                 its own copy-on-write upper (or a direct/ro bind for rw/ro modes). bubblewrap applies mounts shallow-first, so a
@@ -54,7 +60,11 @@ class CreateIsolatedSessionRequest:
             binds (list[BindMount] | Unset): Additional host paths bind-mounted into the namespace with an explicit source-
                 to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map
                 a distinct destination path and be mounted read-only. The source path of every entry must fall within the
-                configured writable allowlist.
+                configured writable allowlist. The session files API also serves paths under each dest from the host source
+                directory: reads and writes are live in both directions, symlinked entries are followed like the namespace view,
+                and writes are rejected for readonly binds. Destinations must be unique across entries and must not be a strict
+                ancestor of another mount destination (binds, overlays, extra_writable) or fall under /run, /dev, or /proc; such
+                overlapping configurations are rejected at session creation.
             share_net (bool | Unset):
             env_passthrough (EnvPassthroughSpec | Unset):
             uid (int | Unset):

@@ -134,7 +134,7 @@ Server Config                              Backend
 
      The actual hypervisor is determined by the `RuntimeClass` handler configured by the SRE administrator (e.g., `kata-qemu`, `kata-clh`, `kata-fc`).
 
-     > **Note**: Firecracker is not a standalone OCI runtime. In this OSEP, `secure_runtime="firecracker"` maps to Kata Containers with the Firecracker hypervisor backend (`kata-fc`). See [Server Configuration](#server-configuration) for details.
+   > **Note**: Firecracker is not a standalone OCI runtime. In this OSEP, `secure_runtime="firecracker"` maps to Kata Containers with the Firecracker hypervisor backend (`kata-fc`). See [Server Configuration](#server-configuration) for details.
 
 3. **Compatibility**: Not all container images work with all secure runtimes:
    - gVisor: Some syscalls may not be implemented; check [gVisor compatibility](https://gvisor.dev/docs/user_guide/compatibility/)
@@ -443,8 +443,9 @@ Create the gVisor configuration file:
 
 ```bash
 sudo tee /etc/containerd/runsc.toml > /dev/null <<'EOF'
-[runsc]
-  platform = "ptrace"
+[runsc_config]
+  # Example configuration flag to enable GPU support:
+  nvproxy = "true"
 EOF
 ```
 

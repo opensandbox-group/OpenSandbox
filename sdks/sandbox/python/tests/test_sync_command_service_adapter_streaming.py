@@ -44,7 +44,8 @@ LITERAL_ARGV = [
 
 
 class _SseTransport(httpx.BaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, explicit_exit_code: bool = False) -> None:
+        self.explicit_exit_code = explicit_exit_code
         self.last_request: httpx.Request | None = None
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -58,6 +59,8 @@ class _SseTransport(httpx.BaseTransport):
                 b'data: {"type":"stdout","text":"hi","timestamp":2}\n\n'
                 b'data: {"type":"execution_complete","timestamp":4,"execution_time":5}\n\n'
             )
+            if self.explicit_exit_code:
+                sse = sse.replace(b'"execution_time":5}', b'"execution_time":5,"exit_code":0}')
             return httpx.Response(
                 200,
                 headers={"Content-Type": "text/event-stream"},
@@ -178,8 +181,9 @@ def test_sync_run_command_rejects_negative_timeout(timeout: timedelta) -> None:
         adapter.run("pwd", opts=RunCommandOpts(timeout=timeout))
 
 
-def test_sync_run_command_streaming_happy_path_updates_execution() -> None:
-    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport())
+@pytest.mark.parametrize("explicit_exit_code", [False, True])
+def test_sync_run_command_streaming_happy_path_updates_execution(explicit_exit_code: bool) -> None:
+    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport(explicit_exit_code))
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CommandsAdapterSync(cfg, endpoint)
 
@@ -427,3 +431,55 @@ def test_foreground_drains_terminal_response_and_closes_stream(
     assert (execution.complete is None) == failure
     assert stream.exhausted
     assert stream.closed
+
+
+class _ErrorEventTransport(httpx.BaseTransport):
+    """Replies to any request with a single CommandExecError event."""
+
+    def __init__(self, error: dict) -> None:
+        self._error = error
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        sse = (
+            b'data: {"type":"init","text":"exec-err","timestamp":1}\n\n'
+            + b"data: "
+            + json.dumps({"type": "error", "error": self._error, "timestamp": 2}).encode()
+            + b"\n\n"
+        )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=sse,
+            request=request,
+        )
+
+
+@pytest.mark.parametrize("in_session", [False, True])
+@pytest.mark.parametrize(
+    ("error", "expected_error_exit_code", "expected_exit_code"),
+    [
+        ({"ename": "CommandExecError", "evalue": "3", "exit_code": 3}, 3, 3),
+        ({"ename": "CommandExecError", "evalue": "-1", "exit_code": -1}, -1, -1),
+        ({"ename": "CommandExecError", "evalue": "fork/exec /bin/sh: argument list too long"}, None, None),
+        ({"ename": "CommandExecError", "evalue": "7"}, None, 7),
+    ],
+)
+def test_error_exit_code_propagates_to_execution(
+    error: dict,
+    expected_error_exit_code: int | None,
+    expected_exit_code: int | None,
+    in_session: bool,
+) -> None:
+    cfg = ConnectionConfigSync(protocol="http", transport=_ErrorEventTransport(error))
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    if in_session:
+        execution = adapter.run_in_session("sess-err", "cmd")
+    else:
+        execution = adapter.run("cmd")
+
+    assert execution.error is not None
+    assert execution.error.exit_code == expected_error_exit_code
+    assert execution.exit_code == expected_exit_code
+    assert execution.complete is None

@@ -86,6 +86,25 @@ spec:
             # FastPath gRPC endpoint for the fast-sandbox provider.
             - "--fastpath-endpoint={{ .Values.gateway.fastpathEndpoint }}"
             {{- end }}
+            {{- if .Values.gateway.activity.enabled }}
+            # OSEP-0024 activity tracking (same Redis as the server's [automation.idle_pause]).
+            - "--activity-enabled=true"
+            - "--activity-redis-dsn={{ .Values.gateway.activity.redisDsn }}"
+            - "--activity-min-interval={{ .Values.gateway.activity.minInterval }}"
+            - "--activity-ttl-seconds={{ .Values.gateway.activity.ttlSeconds }}"
+            {{- end }}
+            {{- if .Values.gateway.wake.enabled }}
+            # OSEP-0024 wake-on-access. Requires the policy-read RBAC below
+            # and a Fast Sandbox provider.
+            - "--wake-enabled=true"
+            - "--wake-park-budget={{ .Values.gateway.wake.parkBudget }}"
+            - "--wake-park-max={{ .Values.gateway.wake.parkMax }}"
+            - "--wake-restore-max={{ .Values.gateway.wake.restoreMax }}"
+            - "--wake-max-flight-lifetime={{ .Values.gateway.wake.maxFlightLifetime }}"
+            - "--wake-retry-interval={{ .Values.gateway.wake.retryInterval }}"
+            - "--wake-retry-factor={{ .Values.gateway.wake.retryFactor }}"
+            - "--wake-retry-jitter={{ .Values.gateway.wake.retryJitter }}"
+            {{- end }}
 {{- if .Values.gateway.secureAccess.keys }}
             - "--secure-access-keys={{- range $i, $k := .Values.gateway.secureAccess.keys }}{{ if $i }},{{ end }}{{ $k.key_id }}={{ $k.key }}{{- end }}"
 {{- else if .Values.gateway.secureAccess.existingSecret }}

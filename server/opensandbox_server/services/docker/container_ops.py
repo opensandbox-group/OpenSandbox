@@ -21,6 +21,7 @@ Mixed into DockerSandboxService.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -39,8 +40,10 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
 )
 from opensandbox_server.services.constants import (
+    RESERVED_LABEL_PREFIX,
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_ID_LABEL,
+    SANDBOX_METADATA_KEYS_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_PLATFORM_ARCH_LABEL,
     SANDBOX_PLATFORM_OS_LABEL,
@@ -288,6 +291,7 @@ class DockerContainerOpsMixin:
     ) -> tuple[dict[str, str], list[str]]:
         metadata = request.metadata or {}
         labels = {key: str(value) for key, value in metadata.items()}
+        labels[SANDBOX_METADATA_KEYS_LABEL] = json.dumps(sorted(metadata))
         labels[SANDBOX_ID_LABEL] = sandbox_id
         if expires_at is None:
             labels[SANDBOX_MANUAL_CLEANUP_LABEL] = "true"
@@ -299,7 +303,9 @@ class DockerContainerOpsMixin:
         if request.snapshot_id:
             labels[SANDBOX_SNAPSHOT_ID_LABEL] = request.snapshot_id
 
-        apply_access_renew_extend_seconds_to_mapping(labels, request.extensions)
+        apply_access_renew_extend_seconds_to_mapping(
+            labels, request.extensions, lifecycle=request.lifecycle
+        )
         apply_extensions_to_mapping(labels, request.extensions)
 
         env_dict = {**(self.app_config.docker.sandbox_env or {}), **(request.env or {})}
@@ -312,6 +318,29 @@ class DockerContainerOpsMixin:
             environment.append("EXECD_INIT=1")
         environment.append(f"OPENSANDBOX_ID={sandbox_id}")
         return labels, environment
+
+    def _mask_inherited_system_labels(
+        self,
+        image_uri: str,
+        labels: dict[str, str],
+        sandbox_id: str,
+    ) -> dict[str, str]:
+        """Blank reserved labels the image would pass on to the container.
+
+        Docker merges image labels into container labels, and a snapshot image
+        keeps every label of the sandbox it was committed from (expiration,
+        host ports, managed volumes, egress token, ...). Labels can be
+        overridden but not removed, so set the ones this sandbox does not
+        define itself to an empty value.
+        """
+        with self._docker_operation(f"inspect image {image_uri} labels", sandbox_id):
+            image = self.docker_client.images.get(image_uri)
+        image_labels = ((image.attrs or {}).get("Config") or {}).get("Labels") or {}
+        masked = dict(labels)
+        for key in image_labels:
+            if key.startswith(RESERVED_LABEL_PREFIX) and key not in masked:
+                masked[key] = ""
+        return masked
 
     def _resolve_image_auth(
         self, request: CreateSandboxRequest, sandbox_id: str
@@ -359,6 +388,21 @@ class DockerContainerOpsMixin:
             resolved[key] = parsed
         return resolved["memory"], resolved["cpu"], resolved["gpu"]
 
+    def _profile_security_opts(self) -> list[str]:
+        """Return the ``security_opt`` entries for the configured AppArmor/seccomp profiles.
+
+        Shared by every container the server creates (sandbox containers and the execd
+        cache container) so that ``[docker] apparmor_profile`` / ``seccomp_profile`` apply
+        uniformly.
+        """
+        docker_cfg = self.app_config.docker
+        opts: list[str] = []
+        if docker_cfg.apparmor_profile:
+            opts.append(f"apparmor={docker_cfg.apparmor_profile}")
+        if docker_cfg.seccomp_profile:
+            opts.append(f"seccomp={docker_cfg.seccomp_profile}")
+        return opts
+
     def _base_host_config_kwargs(
         self,
         mem_limit: Optional[int],
@@ -371,10 +415,7 @@ class DockerContainerOpsMixin:
         docker_cfg = self.app_config.docker
         if docker_cfg.no_new_privileges:
             security_opts.append("no-new-privileges=true")
-        if docker_cfg.apparmor_profile:
-            security_opts.append(f"apparmor={docker_cfg.apparmor_profile}")
-        if docker_cfg.seccomp_profile:
-            security_opts.append(f"seccomp={docker_cfg.seccomp_profile}")
+        security_opts.extend(self._profile_security_opts())
         if security_opts:
             host_config_kwargs["security_opt"] = security_opts
         if docker_cfg.drop_capabilities:
@@ -425,6 +466,7 @@ class DockerContainerOpsMixin:
         container = None
         container_id: Optional[str] = None
         try:
+            labels = self._mask_inherited_system_labels(image_uri, labels, sandbox_id)
             with self._docker_operation("create sandbox container", sandbox_id):
                 container_kwargs = {
                     "image": image_uri,

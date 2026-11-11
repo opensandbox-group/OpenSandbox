@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="720" viewBox="0 0 1400 720" role="img" aria-labelledby="title desc">
+  <title id="title">Fast Sandbox Auto-Pause / Wake Lifecycle</title>
+  <desc id="desc">State machine of the auto-pause and wake-on-access loop. Created flows to Running; after idle ≥ X passes all gates the sweeper drives Running → Pausing → Paused (checkpoint durable, runtime released, zero footprint); wake-on-access or the resume API drives Paused → Resuming → Running; a wake arriving mid-checkpoint cancels the pause; expiry terminates from Running or Paused.</desc>
+  <defs>
+    <marker id="apw-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1e3a5f"/>
+    </marker>
+    <marker id="apw-arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <marker id="apw-arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b91c1c"/>
+    </marker>
+    <style>
+      text { font-family: Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { font-size: 26px; font-weight: 700; fill: #1e40af; }
+      .subtitle { font-size: 13px; fill: #475569; }
+      .state-name { font-size: 15px; font-weight: 700; fill: #0f172a; }
+      .state-hint { font-size: 11px; fill: #475569; }
+      .edge-label { font-size: 12px; fill: #1e3a5f; font-weight: 600; }
+      .edge-label-red { font-size: 12px; fill: #b91c1c; font-weight: 600; }
+      .edge-label-green { font-size: 12px; fill: #047857; font-weight: 600; }
+      .frame-label { font-size: 13px; font-weight: 700; fill: #92400e; }
+      .caption { font-size: 12px; fill: #475569; font-style: italic; }
+    </style>
+  </defs>
+
+  <text x="700" y="38" class="title" text-anchor="middle">Fast Sandbox Auto-Pause / Wake Lifecycle</text>
+  <text x="700" y="60" class="subtitle" text-anchor="middle">The ingress observes activity; the server pauses at idle ≥ X; traffic wakes the sandbox and parks requests for ≤ Y.</text>
+
+  <!-- initial dot -->
+  <circle cx="110" cy="230" r="9" fill="#0f172a"/>
+
+  <!-- CREATED -->
+  <rect x="170" y="190" width="190" height="80" rx="14" fill="#f1f5f9" stroke="#334155" stroke-width="2"/>
+  <text x="265" y="225" class="state-name" text-anchor="middle">Created</text>
+  <text x="265" y="248" class="state-hint" text-anchor="middle">fsb template</text>
+  <path d="M 119 230 L 166 230" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#apw-arrow)"/>
+
+  <!-- RUNNING -->
+  <rect x="520" y="190" width="200" height="80" rx="14" fill="#eff6ff" stroke="#1e3a5f" stroke-width="2"/>
+  <text x="620" y="225" class="state-name" text-anchor="middle" fill="#1e3a5f">Running</text>
+  <text x="620" y="248" class="state-hint" text-anchor="middle">serving traffic</text>
+
+  <!-- create -->
+  <path d="M 360 230 L 516 230" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#apw-arrow)"/>
+  <text x="438" y="218" class="edge-label" text-anchor="middle">create (fsb template)</text>
+
+  <!-- TERMINATED -->
+  <rect x="1130" y="190" width="200" height="80" rx="14" fill="#fef2f2" stroke="#b91c1c" stroke-width="2"/>
+  <text x="1230" y="225" class="state-name" text-anchor="middle" fill="#b91c1c">Terminated</text>
+  <text x="1230" y="248" class="state-hint" text-anchor="middle">CR retained</text>
+
+  <!-- running -> terminated -->
+  <path d="M 720 230 L 1126 230" stroke="#b91c1c" stroke-width="2" fill="none" marker-end="url(#apw-arrow-red)"/>
+  <text x="923" y="218" class="edge-label-red" text-anchor="middle">expiry · delete</text>
+
+  <!-- hibernation frame -->
+  <rect x="400" y="420" width="700" height="180" rx="14" fill="#fffbeb" stroke="#92400e" stroke-width="1.5"/>
+  <text x="420" y="446" class="frame-label">HIBERNATION</text>
+
+  <!-- PAUSING -->
+  <rect x="430" y="470" width="170" height="80" rx="12" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="515" y="505" class="state-name" text-anchor="middle" fill="#92400e">Pausing</text>
+  <text x="515" y="528" class="state-hint" text-anchor="middle">cancelable checkpoint</text>
+
+  <!-- PAUSED -->
+  <rect x="660" y="470" width="170" height="80" rx="12" fill="#fef3c7" stroke="#92400e" stroke-width="2"/>
+  <text x="745" y="505" class="state-name" text-anchor="middle" fill="#92400e">Paused</text>
+  <text x="745" y="528" class="state-hint" text-anchor="middle">zero footprint</text>
+
+  <!-- RESUMING -->
+  <rect x="890" y="470" width="170" height="80" rx="12" fill="#eff6ff" stroke="#1e3a5f" stroke-width="2"/>
+  <text x="975" y="505" class="state-name" text-anchor="middle" fill="#1e3a5f">Resuming</text>
+  <text x="975" y="528" class="state-hint" text-anchor="middle">restoring runtime</text>
+
+  <!-- running -> pausing (auto-pause) -->
+  <path d="M 620 270 C 620 360 515 385 515 466" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#apw-arrow)"/>
+  <text x="478" y="352" class="edge-label" text-anchor="end">idle ≥ X — all gates pass</text>
+
+  <!-- pausing -> paused -->
+  <path d="M 600 510 L 656 510" stroke="#1e3a5f" stroke-width="2" fill="none" marker-end="url(#apw-arrow)"/>
+  <text x="628" y="455" class="edge-label" text-anchor="middle">checkpoint durable</text>
+
+  <!-- paused -> resuming (wake) -->
+  <path d="M 830 510 L 886 510" stroke="#047857" stroke-width="2" fill="none" marker-end="url(#apw-arrow-green)"/>
+  <text x="875" y="455" class="edge-label-green" text-anchor="middle">wake-on-access · resume API</text>
+
+  <!-- pausing -> running (wake cancels) -->
+  <path d="M 500 470 C 465 390 480 310 554 273" stroke="#047857" stroke-width="2" stroke-dasharray="6,4" fill="none" marker-end="url(#apw-arrow-green)"/>
+  <text x="300" y="378" class="edge-label-green">wake cancels the pause</text>
+
+  <!-- resuming -> running (restore ready) -->
+  <path d="M 975 470 C 975 380 790 290 718 273" stroke="#047857" stroke-width="2" stroke-dasharray="6,4" fill="none" marker-end="url(#apw-arrow-green)"/>
+  <text x="950" y="425" class="edge-label-green" text-anchor="end">restore Ready</text>
+
+  <!-- paused -> terminated (expiry) -->
+  <path d="M 745 470 C 745 395 1150 350 1226 274" stroke="#b91c1c" stroke-width="2" stroke-dasharray="6,4" fill="none" marker-end="url(#apw-arrow-red)"/>
+  <text x="1235" y="335" class="edge-label-red">expiry passes</text>
+
+  <text x="700" y="660" class="caption" text-anchor="middle">Pausing is cancelable — a wake arriving mid-checkpoint returns to Running. Pausing never stops the expiry clock.</text>
+  <text x="700" y="682" class="caption" text-anchor="middle">A sandbox without a declared lifecycle.idlePolicy is never auto-paused and never auto-woken.</text>
+</svg>

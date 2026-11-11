@@ -111,8 +111,7 @@ const sandbox = await Sandbox.create({
 
 ### 0. Run with `language` (default language context)
 
-If you don't need to manage explicit context IDs, you can run code by specifying only `language`.
-When `context.id` is omitted, execd can create/reuse a default session for that language, so state can persist across runs.
+If you don't need to manage explicit context IDs, you can run code by specifying only `language`. When `context.id` is omitted, execd can create/reuse a default session for that language, so state can persist across runs.
 
 ```ts
 import { SupportedLanguages } from "@alibaba-group/opensandbox-code-interpreter";

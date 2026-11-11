@@ -140,6 +140,9 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		if errors.As(err, &detailed) {
 			Logger.With(slogger.Field{Key: "error", Value: detailed.InternalCause()}).Errorf("ingress: provider resolution failed")
 		}
+		if respondWakeTimeout(sw, err) {
+			return
+		}
 		if status == 0 {
 			status = http.StatusBadRequest
 		}
@@ -150,9 +153,10 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		return
 	}
 
-	// OSEP-0024: every routed request feeds the sandbox idle clock, including
-	// requests that skip renewal. Fire-and-forget; failures are dropped.
-	if p.activity != nil {
+	// OSEP-0024: every routed request feeds the sandbox idle clock, renewal
+	// skip included. The activity-probe sentinel is the one opt-out.
+	// Fire-and-forget; failures are dropped.
+	if p.activity != nil && !IsSkipActivity(r.Header) {
 		p.activity.Record(host.namespace, host.ingressKey)
 	}
 
@@ -252,6 +256,7 @@ func (p *Proxy) applyUpstreamRequest(r *http.Request, host *sandboxHost, targetU
 	r.Header.Del(SandboxIngress)
 	r.Header.Del(DeprecatedSandboxIngress)
 	r.Header.Del(AccessRenew)
+	r.Header.Del(SkipActivity)
 	r.Header.Del(signature.OpenSandboxSecureAccessCanonical)
 	r.Header.Del(sandbox.FastSandboxCredential)
 	// Host is carried by r.Host, not r.Header. The Phase 1a Fast Sandbox provider
@@ -296,7 +301,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 				r.URL.Scheme = httpScheme
 			}
 		}
-		httpProxy := NewHTTPProxy(append(extraResponseObservers, p.upstreamResponseObserver(target))...) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		httpProxy := NewHTTPProxy(append([]func(*http.Response){stripWakeMarkerObserver()}, append(extraResponseObservers, p.upstreamResponseObserver(target))...)...) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 		httpProxy.errorObserver = p.upstreamErrorObserver(target)
 		httpProxy.transport = p.httpTransport
 		httpProxy.ServeHTTP(w, r)
@@ -444,7 +449,10 @@ type statusCapturingResponseWriter struct {
 }
 
 func (w *statusCapturingResponseWriter) WriteHeader(code int) {
-	if !w.written {
+	// A 1xx other than 101, such as 103 Early Hints forwarded by
+	// ReverseProxy, is informational: the final status is still to come.
+	informational := code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
+	if !w.written && !informational {
 		w.statusCode = code
 		w.written = true
 	}
@@ -480,10 +488,10 @@ func (w *statusCapturingResponseWriter) Flush() {
 // finally falls back to the remote address.
 func (p *Proxy) getClientIP(r *http.Request) string {
 	if xff := r.Header.Get(XForwardedFor); xff != "" {
-		if idx := strings.Index(xff, ", "); idx != -1 {
-			return xff[:idx]
+		first, _, _ := strings.Cut(xff, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
 		}
-		return xff
 	}
 	if realIP := r.Header.Get(XRealIP); realIP != "" {
 		return realIP

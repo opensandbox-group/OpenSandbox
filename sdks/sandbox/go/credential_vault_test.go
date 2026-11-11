@@ -373,6 +373,70 @@ func TestCredentialVaultStateDoesNotRetainPlaintextSecretFields(t *testing.T) {
 	}
 }
 
+func TestExchangeCredentialVaultRoundTrip(t *testing.T) {
+	// Exchange source and typeless auth (OSEP-0025) marshal losslessly, and
+	// the typeless form never emits a forced `"type"` key.
+	body, err := json.Marshal(CredentialVaultCreateRequest{
+		Credentials: []Credential{{
+			Name:   "spi-signer",
+			Source: CredentialSource{Type: CredentialSourceExchange, Endpoint: "unix:///run/spi/spi.sock"},
+		}},
+		Bindings: []CredentialBinding{{
+			Name:  "internal-api",
+			Match: CredentialMatch{Hosts: []string{"*.internal.example.com"}},
+			Auth:  CredentialAuth{Credential: "spi-signer"},
+		}},
+	})
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(body, &got))
+	require.Equal(t, map[string]any{
+		"credentials": []any{map[string]any{
+			"name": "spi-signer",
+			"source": map[string]any{
+				"type":     "exchange",
+				"endpoint": "unix:///run/spi/spi.sock",
+			},
+		}},
+		"bindings": []any{map[string]any{
+			"name":  "internal-api",
+			"match": map[string]any{"hosts": []any{"*.internal.example.com"}},
+			"auth":  map[string]any{"credential": "spi-signer"},
+		}},
+	}, got)
+	encoded := string(body)
+	require.True(t, !strings.Contains(encoded, `"type":""`), "unexpected empty type key in %s", encoded)
+	require.True(t, !strings.Contains(encoded, `"value"`), "unexpected value key in %s", encoded)
+
+	// Static payloads stay byte-compatible: the inline default-type shortcut
+	// keeps working through the flat CredentialSource model.
+	inline, err := json.Marshal(InlineCredentialSource{Value: "dummy-inline-value"})
+	require.NoError(t, err)
+	var inlineGot map[string]any
+	require.NoError(t, json.Unmarshal(inline, &inlineGot))
+	require.Equal(t, map[string]any{"type": "inline", "value": "dummy-inline-value"}, inlineGot)
+
+	// The endpoint-only zero-value form defaults to exchange instead of
+	// mislabeling the source as inline.
+	exchangeDefault, err := json.Marshal(CredentialSource{Endpoint: "unix:///run/spi/spi.sock"})
+	require.NoError(t, err)
+	require.Equal(t, `{"type":"exchange","endpoint":"unix:///run/spi/spi.sock"}`, string(exchangeDefault))
+
+	// Sanitized typeless metadata round-trips credential-only (no `type`
+	// emitted); static metadata never leaks a credential reference; the
+	// guard is symmetric and also strips name from the typeless form.
+	typeless, err := json.Marshal(CredentialAuthMetadata{Credential: "spi-signer"})
+	require.NoError(t, err)
+	require.Equal(t, `{"credential":"spi-signer"}`, string(typeless))
+	static, err := json.Marshal(CredentialAuthMetadata{Type: "bearer", Credential: "tok"})
+	require.NoError(t, err)
+	require.Equal(t, `{"type":"bearer"}`, string(static))
+	typelessWithName, err := json.Marshal(CredentialAuthMetadata{Name: "X-Api-Key", Credential: "spi-signer"})
+	require.NoError(t, err)
+	require.Equal(t, `{"credential":"spi-signer"}`, string(typelessWithName))
+}
+
 func TestCreateSandboxRequestIncludesCredentialProxy(t *testing.T) {
 	data, err := json.Marshal(CreateSandboxRequest{
 		Image:           &ImageSpec{URI: "python:3.12"},
@@ -428,3 +492,82 @@ func sampleCredentialVaultCreateRequest() CredentialVaultCreateRequest {
 		},
 	}
 }
+
+func TestTemplateBackedCredentialVaultRoutesThroughLifecycle(t *testing.T) {
+	var mu sync.Mutex
+	var got []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		got = append(got, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		if !strings.HasPrefix(r.URL.Path, "/v1/sandboxes/sbx-tpl/credential-vault") {
+			jsonResponse(w, http.StatusNotFound, map[string]string{"code": "NOT_FOUND", "message": "missing"})
+			return
+		}
+		switch {
+		case r.Method == http.MethodPost:
+			var body map[string]any
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+			require.Equal(t, []any{map[string]any{
+				"name":   "tok",
+				"source": map[string]any{"type": "inline", "value": "sekrit"},
+			}}, body["credentials"])
+			jsonResponse(w, http.StatusCreated, CredentialVaultState{Revision: 1})
+		case r.Method == http.MethodPatch:
+			jsonResponse(w, http.StatusOK, CredentialVaultState{Revision: 2})
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/v1/sandboxes/sbx-tpl/credential-vault/credentials/tok name":
+			jsonResponse(w, http.StatusOK, CredentialMetadata{Name: "tok name", SourceType: "inline", Revision: 2})
+		default:
+			jsonResponse(w, http.StatusOK, CredentialVaultState{Revision: 2})
+		}
+	}))
+	defer server.Close()
+
+	sandbox := &Sandbox{
+		id:        "sbx-tpl",
+		origin:    SandboxOriginTemplate,
+		lifecycle: NewLifecycleClient(server.URL+"/v1", "test-api-key"),
+	}
+
+	state, err := sandbox.CreateCredentialVault(context.Background(), CredentialVaultCreateRequest{
+		Credentials: []Credential{{Name: "tok", Source: InlineCredentialSource{Type: "inline", Value: "sekrit"}}},
+	})
+	require.Equal(t, nil, err)
+	require.Equal(t, 1, state.Revision)
+
+	state, err = sandbox.GetCredentialVault(context.Background())
+	require.Equal(t, nil, err)
+	require.Equal(t, 2, state.Revision)
+
+	state, err = sandbox.PatchCredentialVault(context.Background(), CredentialVaultPatchRequest{ExpectedRevision: newInt(2)})
+	require.Equal(t, nil, err)
+	require.Equal(t, 2, state.Revision)
+
+	require.Equal(t, nil, sandbox.DeleteCredentialVault(context.Background()))
+
+	metadata, err := sandbox.GetCredentialVaultCredential(context.Background(), "tok name")
+	require.Equal(t, nil, err)
+	require.Equal(t, "tok name", metadata.Name)
+
+	// The sidecar-bound vault client stays unavailable for template-backed
+	// sandboxes even though the server-routed methods work.
+	_, vaultErr := sandbox.CredentialVault(context.Background())
+	if vaultErr == nil {
+		t.Fatal("expected the sidecar vault client to stay unavailable for template-backed sandboxes")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{
+		"POST /v1/sandboxes/sbx-tpl/credential-vault",
+		"GET /v1/sandboxes/sbx-tpl/credential-vault",
+		"PATCH /v1/sandboxes/sbx-tpl/credential-vault",
+		"DELETE /v1/sandboxes/sbx-tpl/credential-vault",
+		"GET /v1/sandboxes/sbx-tpl/credential-vault/credentials/tok name",
+	}, got)
+}
+
+func newInt(v int) *int { return &v }

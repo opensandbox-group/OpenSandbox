@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import http.server
 import importlib.util
@@ -29,6 +30,7 @@ import types
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 from urllib.parse import unquote
 
 
@@ -121,6 +123,15 @@ class _Flow:
         self.killable = False
 
 
+def _drive_async_hook(hook):
+    """Run the async requestheaders hook synchronously, like mitmproxy."""
+
+    def run(*args, **kwargs):
+        return asyncio.run(hook(*args, **kwargs))
+
+    return run
+
+
 def _load_system_module() -> Any:
     mitmproxy = types.ModuleType("mitmproxy")
     mitmproxy.ctx = types.SimpleNamespace(
@@ -138,15 +149,18 @@ def _load_system_module() -> Any:
     mitmproxy_tls = types.ModuleType("mitmproxy.tls")
     mitmproxy_tls.ClientHelloData = object
 
-    sys.modules["mitmproxy"] = mitmproxy
-    sys.modules["mitmproxy.tls"] = mitmproxy_tls
-
     path = Path(__file__).parents[1] / "mitmscripts" / "system.py"
     spec = importlib.util.spec_from_file_location("opensandbox_egress_system_addon", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(module)
+    # The loaded addon retains its fake context; restore real dependency modules
+    # immediately so later H2 tests can import the pinned mitmproxy package.
+    with mock.patch.dict(
+        sys.modules, {"mitmproxy": mitmproxy, "mitmproxy.tls": mitmproxy_tls}
+    ):
+        spec.loader.exec_module(module)
+    module.requestheaders = _drive_async_hook(module.requestheaders)
     return module
 
 
@@ -1194,7 +1208,10 @@ class SystemAddonRedactionTest(unittest.TestCase):
         self.assertEqual("[REDACTED]", flow.response.headers.get("x-token-echo"))
         self.assertEqual("upstream body includes secret-token", flow.response.body)
         self.assertFalse(flow.response.set_text_called)
-        self.assertFalse(hasattr(system, "response"))
+        # The response hook exists only to release live request handles; in the
+        # legacy path it is a no-op and never touches response content.
+        system.response(flow)
+        self.assertEqual("upstream body includes secret-token", flow.response.body)
 
     def test_responseheaders_uses_injected_flow_redactions(self) -> None:
         system = _load_system_module()
@@ -1227,6 +1244,272 @@ class SystemAddonRedactionTest(unittest.TestCase):
         system.responseheaders(flow)
 
         self.assertEqual("prefix [REDACTED] suffix", flow.response.headers.get("x-token-echo"))
+
+
+def _static_binding_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "revision": 9,
+        "bindings": [
+            {
+                "name": "gitlab-api",
+                "match": {
+                    "schemes": ["https"],
+                    "hosts": ["code.example.com"],
+                    "methods": ["GET"],
+                    "paths": ["/api/v8/*"],
+                },
+                "headers": [{"name": "Private-Token", "value": "secret-token"}],
+            }
+        ],
+        "redactions": ["secret-token"],
+    }
+    for path, value in overrides.items():
+        target: Any = payload
+        keys = path.split("__")
+        for key in keys[:-1]:
+            target = target[int(key)] if key.isdigit() else target[key]
+        target[keys[-1]] = value
+    return payload
+
+
+class SystemAddonActiveVaultStrictParseTest(unittest.TestCase):
+    """OSEP-0025 version-skew gate: unknown snapshot fields fail closed."""
+
+    def test_legacy_static_snapshot_parses_unchanged(self) -> None:
+        system = _load_system_module()
+        vault = system._parse_active_vault(_static_binding_payload())
+
+        self.assertEqual(9, vault.revision)
+        self.assertEqual(["secret-token"], vault.redactions)
+        self.assertEqual(
+            {
+                "name": "gitlab-api",
+                "match": {
+                    "schemes": ["https"],
+                    "hosts": ["code.example.com"],
+                    "methods": ["GET"],
+                    "paths": ["/api/v8/*"],
+                },
+                "headers": [{"name": "Private-Token", "value": "secret-token"}],
+                "substitutions": [],
+            },
+            vault.bindings[0],
+        )
+
+    def test_deprecated_match_ports_stay_allowed_and_ignored(self) -> None:
+        system = _load_system_module()
+        payload = _static_binding_payload()
+        payload["bindings"][0]["match"]["ports"] = [443]
+
+        vault = system._parse_active_vault(payload)
+
+        self.assertNotIn("ports", vault.bindings[0]["match"])
+        self.assertEqual(["code.example.com"], vault.bindings[0]["match"]["hosts"])
+
+    def test_unknown_fields_reject_at_every_level(self) -> None:
+        cases = {
+            "top-level": lambda payload: payload.update({"decisionEpoch": 1}),
+            "binding": lambda payload: payload["bindings"][0].update({"source": "inline"}),
+            "match": lambda payload: payload["bindings"][0]["match"].update({"regions": ["us"]}),
+            "header": lambda payload: payload["bindings"][0]["headers"][0].update({"foo": 1}),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                system = _load_system_module()
+                payload = _static_binding_payload()
+                mutate(payload)
+
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._parse_active_vault(payload)
+
+    def test_unknown_substitution_field_rejects(self) -> None:
+        system = _load_system_module()
+        payload = _static_binding_payload()
+        payload["bindings"][0]["substitutions"] = [
+            {"placeholder": "__p__", "value": "secret-token", "in": ["query"], "kind": "x"}
+        ]
+        payload["redactions"].append("__p__")
+
+        with self.assertRaises(system.ActiveVaultLookupError):
+            system._parse_active_vault(payload)
+
+    def test_exchange_binding_parses_with_marker(self) -> None:
+        system = _load_system_module()
+        payload = _static_binding_payload()
+        payload["bindings"] = [
+            {
+                "name": "internal-api",
+                "match": {
+                    "schemes": ["https"],
+                    "hosts": ["*.internal.example.com"],
+                    "methods": ["GET"],
+                    "paths": ["/*"],
+                },
+                "headers": [],
+                "substitutions": [],
+                "exchange": {"credential": "spi-signer"},
+            }
+        ]
+
+        vault = system._parse_active_vault(payload)
+
+        self.assertEqual(
+            {
+                "name": "internal-api",
+                "match": {
+                    "schemes": ["https"],
+                    "hosts": ["*.internal.example.com"],
+                    "methods": ["GET"],
+                    "paths": ["/*"],
+                },
+                "headers": [],
+                "substitutions": [],
+                "exchange": {"credential": "spi-signer"},
+            },
+            vault.bindings[0],
+        )
+
+    def test_exchange_binding_with_rendered_material_rejects(self) -> None:
+        def with_fields(**fields: Any) -> Any:
+            def mutate(payload: dict[str, Any]) -> None:
+                payload["bindings"][0].update(fields)
+
+            return mutate
+
+        def drop_headers(payload: dict[str, Any]) -> None:
+            del payload["bindings"][0]["headers"]
+
+        def drop_substitutions(payload: dict[str, Any]) -> None:
+            del payload["bindings"][0]["substitutions"]
+
+        def exchange_binding(payload: dict[str, Any]) -> None:
+            payload["bindings"] = [
+                {
+                    "name": "internal-api",
+                    "match": {
+                        "schemes": ["https"],
+                        "hosts": ["api.internal.example.com"],
+                        "methods": ["GET"],
+                        "paths": ["/*"],
+                    },
+                    "headers": [],
+                    "substitutions": [],
+                    "exchange": {"credential": "spi-signer"},
+                }
+            ]
+
+        cases = {
+            "non-empty headers": (exchange_binding, with_fields(
+                headers=[{"name": "x-a", "value": "b"}]
+            )),
+            "missing headers": (exchange_binding, drop_headers),
+            "null headers": (exchange_binding, with_fields(headers=None)),
+            "non-empty substitutions": (exchange_binding, with_fields(
+                substitutions=[
+                    {"placeholder": "__p__", "value": "v", "in": ["query"]}
+                ]
+            )),
+            "missing substitutions": (exchange_binding, drop_substitutions),
+        }
+        for name, (build, mutate) in cases.items():
+            with self.subTest(name=name):
+                system = _load_system_module()
+                payload = _static_binding_payload()
+                build(payload)
+                mutate(payload)
+
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._parse_active_vault(payload)
+
+    def test_exchange_marker_shape_rejects(self) -> None:
+        markers = {
+            "non-object": "spi-signer",
+            "null-object": None,
+            "empty-object": {},
+            "extra-key": {"credential": "spi-signer", "endpoint": "unix:///run/x.sock"},
+            "missing-credential": {"endpoint": "unix:///run/x.sock"},
+            "empty-credential": {"credential": "   "},
+            "non-string-credential": {"credential": 7},
+        }
+        for name, marker in markers.items():
+            with self.subTest(name=name):
+                system = _load_system_module()
+                payload = _static_binding_payload()
+                payload["bindings"][0]["headers"] = []
+                payload["bindings"][0]["exchange"] = marker
+
+                with self.assertRaises(system.ActiveVaultLookupError):
+                    system._parse_active_vault(payload)
+
+    def test_static_binding_in_exchange_vault_still_injects(self) -> None:
+        system = _load_system_module()
+        vault = system.ActiveVault(
+            12,
+            [
+                {
+                    "name": "internal-api",
+                    "match": {"hosts": ["api.internal.example.com"]},
+                    "headers": [],
+                    "substitutions": [],
+                    "exchange": {"credential": "spi-signer"},
+                },
+                {
+                    "name": "gitlab-api",
+                    "match": {"hosts": ["code.example.com"]},
+                    "headers": [{"name": "Private-Token", "value": "secret-token"}],
+                    "substitutions": [],
+                },
+            ],
+            ["secret-token"],
+        )
+        system._load_active_vault = lambda _client_ip=None: vault
+        flow = _Flow()
+        flow.response = None
+        flow.request.headers["Content-Length"] = "0"
+
+        system.requestheaders(flow)
+
+        self.assertEqual("secret-token", flow.request.headers.get("Private-Token"))
+        self.assertFalse(flow.killed)
+        self.assertIsNone(flow.response)
+
+    def test_selected_exchange_binding_fails_closed_buffered_and_streamed(self) -> None:
+        # T3b replaced the 503 placeholder with the resolve branch; without
+        # a connection SNI the resolve cannot be built, so the request still
+        # fails closed — 407 buffered, kill streamed.
+        for streamed in (False, True):
+            with self.subTest(streamed=streamed):
+                system = _load_system_module()
+                vault = system.ActiveVault(
+                    12,
+                    [
+                        {
+                            "name": "internal-api",
+                            "match": {"hosts": ["code.example.com"]},
+                            "headers": [],
+                            "substitutions": [],
+                            "exchange": {"credential": "spi-signer"},
+                        }
+                    ],
+                    [],
+                )
+                system._load_active_vault = lambda _client_ip=None: vault
+                flow = _Flow()
+                flow.response = None
+                flow.request.stream = streamed
+                if not streamed:
+                    flow.request.headers["Content-Length"] = "0"
+
+                system.requestheaders(flow)
+
+                self.assertTrue(flow.metadata[system.FLOW_REJECTION_KEY])
+                self.assertNotIn(system.FLOW_BINDING_KEY, flow.metadata)
+                if streamed:
+                    self.assertTrue(flow.killed)
+                    self.assertIsNone(flow.response)
+                else:
+                    self.assertFalse(flow.killed)
+                    self.assertEqual(407, flow.response.status_code)
 
 
 @unittest.skipUnless(
@@ -2597,3 +2880,46 @@ class SystemAddonTlsClientHelloTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnixSocketHTTPConnectionLeakTest(unittest.TestCase):
+    """A failed connect must close the freshly created socket, not leak it."""
+
+    def test_failed_connect_leaves_no_socket_and_no_resource_warning(self) -> None:
+        import gc
+        import warnings
+
+        system = _load_system_module()
+        connection = system.UnixSocketHTTPConnection("/nonexistent/live-vault.sock", timeout=0.1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with self.assertRaises(OSError):
+                connection.connect()
+            self.assertIsNone(connection.sock)
+            connection = None
+            gc.collect()
+        leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual([], [str(w.message) for w in leaked])
+
+    def test_successful_connect_uses_the_unix_socket(self) -> None:
+        import gc
+        import warnings
+
+        system = _load_system_module()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = os.path.join(temporary.name, "receiver.sock")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(path)
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        connection = system.UnixSocketHTTPConnection(path, timeout=2)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            connection.connect()
+            self.assertIsNotNone(connection.sock)
+            connection.close()
+            connection = None
+            gc.collect()
+        leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        self.assertEqual([], [str(w.message) for w in leaked])

@@ -29,7 +29,7 @@ from opensandbox.adapters.converter.response_handler import (
     require_parsed,
 )
 from opensandbox.config import ConnectionConfig
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.services.diagnostics import Diagnostics
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,31 @@ class DiagnosticsAdapter(Diagnostics):
 
     async def _get_client(self):
         return self._client
+
+    async def get_context(self, sandbox_id: str) -> DiagnosticContext:
+        try:
+            from opensandbox.api.diagnostic.api.diagnostics import (
+                get_sandboxes_sandbox_id_diagnostics_context,
+            )
+            from opensandbox.api.diagnostic.models import DiagnosticContextResponse
+
+            response = (
+                await get_sandboxes_sandbox_id_diagnostics_context.asyncio_detailed(
+                    sandbox_id=sandbox_id,
+                    client=await self._get_client(),
+                )
+            )
+            operation = f"Get diagnostic context for sandbox {sandbox_id}"
+            handle_api_error(response, operation)
+            parsed = require_parsed(response, DiagnosticContextResponse, operation)
+            return DiagnosticContext.model_validate(parsed.to_dict())
+        except Exception as e:
+            logger.error(
+                "Failed to get diagnostic context for sandbox %s",
+                sandbox_id,
+                exc_info=e,
+            )
+            raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_logs(
         self,

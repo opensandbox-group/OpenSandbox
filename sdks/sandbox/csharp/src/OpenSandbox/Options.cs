@@ -202,6 +202,12 @@ public class SandboxCreateFromTemplateOptions
     public IReadOnlyDictionary<string, string>? Extensions { get; set; }
 
     /// <summary>
+    /// Gets or sets the optional idle behavior (OSEP-0024, fast-sandbox only).
+    /// Control-plane state, not workload shape, so template mode accepts it.
+    /// </summary>
+    public IdlePolicy? IdlePolicy { get; set; }
+
+    /// <summary>
     /// Gets or sets whether to skip health checks during creation.
     /// </summary>
     public bool SkipHealthCheck { get; set; }

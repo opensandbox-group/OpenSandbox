@@ -55,32 +55,50 @@ def _parse_response(
         return response_202
 
     if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+        try:
+            response_400 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_400
 
     if response.status_code == 401:
-        response_401 = ErrorResponse.from_dict(response.json())
+        try:
+            response_401 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_401
 
     if response.status_code == 403:
-        response_403 = ErrorResponse.from_dict(response.json())
+        try:
+            response_403 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_403
 
     if response.status_code == 409:
-        response_409 = ErrorResponse.from_dict(response.json())
+        try:
+            response_409 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_409
 
     if response.status_code == 429:
-        response_429 = ErrorResponse.from_dict(response.json())
+        try:
+            response_429 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_429
 
     if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
+        try:
+            response_500 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_500
 

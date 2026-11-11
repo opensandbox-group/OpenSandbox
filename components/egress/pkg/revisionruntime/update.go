@@ -30,10 +30,11 @@ import (
 // identity and permits finalization. If Update returns ErrIndeterminate with a
 // non-zero attempt, only ReconcileUpdate of that exact recorded attempt can
 // permit finalization or discarding. ErrClosed and ErrTransportUnavailable are
-// terminal session failures: callers must stop the exact child, close the
-// session, discard the unpublished candidate, and start a fresh session from
-// the prior public state. They must never finalize the candidate on those
-// errors.
+// terminal session failures with unprovable remote effects: callers must latch
+// recovery, stop the exact child, close the session, and discard the
+// unpublished candidate. The same sidecar must not start a fresh session from
+// the prior public state after them. They must never finalize the candidate on
+// those errors.
 func (s *ProcessSession) Update(
 	ctx context.Context,
 	snapshot credentialvault.ActiveSnapshot,
@@ -104,9 +105,9 @@ func (s *ProcessSession) Update(
 // bool is true only if that attempt is confirmed active, false only if its exact
 // frozen previous identity remains active, and an error means the caller must
 // keep its mutation blocked. ErrClosed and ErrTransportUnavailable are terminal
-// session failures; callers must stop the exact child, close the session,
-// discard the unpublished candidate, and start a fresh session from the prior
-// public state.
+// session failures with unprovable remote effects; callers must latch recovery,
+// stop the exact child, close the session, and discard the unpublished
+// candidate rather than restarting from the prior public state.
 func (s *ProcessSession) ReconcileUpdate(
 	ctx context.Context,
 	attempt revision.Identity,

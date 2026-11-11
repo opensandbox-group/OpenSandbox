@@ -44,6 +44,18 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25.9"
+          # One shared cache for the tidy matrix: any go.sum change rebuilds
+          # it, and whichever matrix leg finishes first populates it for the
+          # rest. examples/chrome has no go.sum and is intentionally omitted.
+          cache-dependency-path: |
+            components/execd/go.sum
+            components/egress/go.sum
+            components/ingress/go.sum
+            components/internal/go.sum
+            components/nodeagent/go.sum
+            kubernetes/go.sum
+            sdks/sandbox/go/go.sum
+            tests/go/go.sum
 
       - name: Check go.mod is tidy
         working-directory: ${{ matrix.module }}

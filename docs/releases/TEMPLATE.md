@@ -17,9 +17,8 @@ Conventions:
 - The GitHub Release mirrors this file verbatim.
 -->
 
-# OpenSandbox X.Y.Z
-
-<!-- One paragraph: the headline of this release and who should upgrade. -->
+<!-- One paragraph: the headline of this release and who should upgrade. No
+     H1 title — the GitHub Release supplies it. -->
 
 ## Highlights
 

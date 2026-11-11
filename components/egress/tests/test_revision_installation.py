@@ -212,6 +212,22 @@ class RevisionInstallationTest(unittest.TestCase):
         alien = self.snapshot(epoch=3, identity=("other", "subject-a"))
         self.assertEqual(self.command("prepare", alien), (409, {"error": "revision_rejected"}))
 
+    def test_live_overlap_and_compile_failures_keep_wire_rejection_contract(self):
+        from static_passthrough import parse_handoff
+        self.backend = publication.LiveReceiver(
+            *self.identity, max_snapshot_bytes=65536, capacity=8,
+            static_passthrough=parse_handoff('["api.example.com"]'),
+        )
+        first = self.snapshot(host="other.example.net")
+        self.install(first)
+        candidate = self.snapshot(epoch=2, secret="private-new")
+        rejected = (409, {"error": "revision_rejected"})
+        self.assertEqual(self.command("prepare", candidate), rejected)
+        with patch.object(publication, "compile_view", side_effect=ValueError("private-new")):
+            self.assertEqual(self.command("prepare", candidate), rejected)
+        self.assertEqual(self.backend.acquire(), first)
+        self.assertIsNone(self.backend._publisher._pending_view)
+
 
 if __name__ == "__main__":
     unittest.main()

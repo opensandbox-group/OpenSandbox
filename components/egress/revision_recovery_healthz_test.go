@@ -39,6 +39,9 @@ func TestRevisionRecoveryHealthzWithoutTransparent(t *testing.T) {
 	nft := &stubNft{err: errors.New("uncertain effect")}
 	srv, s, err := startPolicyServer(&stubProxy{updated: policyCandidateInputs(t).user}, nft, "", "127.0.0.1:0", "", nil, "", nil, nil, gate)
 	require.NoError(t, err)
+	s.mu.Lock()
+	attachPolicyTestSession(t, s)
+	s.mu.Unlock()
 	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.Background())) })
 	w := httptest.NewRecorder()
 	srv.Handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -74,6 +77,9 @@ func recoveryHealthzFixture(t *testing.T, experimental, transparent, withGate bo
 		err := s.initRevisionRecoveryLocked(inputs)
 		s.mu.Unlock()
 		require.NoError(t, err)
+		if withGate {
+			attachPolicyTestSession(t, s)
+		}
 	}
 	return s
 }
@@ -109,6 +115,17 @@ func TestRevisionRecoveryHealthzReadinessMatrix(t *testing.T) {
 			s.mitmGate.SetReady(true)
 			require.Equal(t, http.StatusOK, recoveryHealthzProbe(s).Code)
 
+			if tc.experimental && !tc.withGate {
+				unavailable := httptest.NewRecorder()
+				s.handlePolicy(unavailable, httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader(`{"defaultAction":"allow"}`)))
+				require.Equal(t, http.StatusServiceUnavailable, unavailable.Code)
+				require.False(t, s.revisionRecoveryRequired.Load(), "missing runtime has no new external effects")
+				s.mu.Lock()
+				s.requireRevisionRecoveryLocked(revisionRecoveryExternalEffectsUnknown)
+				s.mu.Unlock()
+				require.Equal(t, http.StatusServiceUnavailable, recoveryHealthzProbe(s).Code)
+				return
+			}
 			invalid := httptest.NewRecorder()
 			s.handlePolicy(invalid, httptest.NewRequest(http.MethodPost, "/policy", strings.NewReader("invalid")))
 			require.Equal(t, http.StatusBadRequest, invalid.Code)

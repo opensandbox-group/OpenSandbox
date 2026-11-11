@@ -17,6 +17,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -60,6 +61,41 @@ func openNewCommandOutput(path string) (*os.File, error) {
 		return nil, fmt.Errorf("create command output file %s: %w", path, err)
 	}
 	return file, nil
+}
+
+// truncateCommandOutputFile releases the file's data blocks through a
+// descriptor opened without following symlinks: cleanup runs on paths a
+// sandbox workload can race with, and a truncate that follows a symlink swap
+// would zero an arbitrary file where os.Remove alone would only remove the
+// link. O_NONBLOCK keeps a FIFO swap from blocking the open, and the
+// descriptor is verified to be a regular file before truncating; anything
+// else (symlink, FIFO, socket) is skipped, leaving the entry to the unlink.
+// Hard links are skipped for the same reason: with Nlink > 1 the inode's
+// content is still visible through other names, and truncating would clear
+// data this name's deletion was never meant to touch. An fd held open by a
+// forked child does not raise Nlink, so the reclaim behavior for ordinary
+// command output files is unaffected.
+func truncateCommandOutputFile(path string) error {
+	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENXIO) {
+			return nil
+		}
+		return err
+	}
+	defer unix.Close(fd) //nolint:errcheck
+
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return err
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return nil
+	}
+	if stat.Nlink > 1 {
+		return nil
+	}
+	return unix.Ftruncate(fd, 0)
 }
 
 func openCommandOutputForRead(path string) (*os.File, error) {

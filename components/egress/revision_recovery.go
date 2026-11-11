@@ -66,7 +66,7 @@ func (revisionBootstrapTicket) String() string   { return "revisionBootstrapTick
 func (revisionBootstrapTicket) GoString() string { return "revisionBootstrapTicket{}" }
 
 // revisionRecoveryState is owned by policyServer under its shared policy/Vault
-// barrier. The base epoch remains zero until active policy epochs are supported.
+// barrier. The immutable current base owns the committed policy epoch.
 // There is deliberately no operation that clears a recovery reason.
 type revisionRecoveryState struct {
 	current  *effectivePolicyBase
@@ -112,47 +112,6 @@ func (s *policyServer) invalidateRevisionBootstrapLocked() {
 	if s.revisionRecovery != nil {
 		s.revisionRecovery.identity = &revisionBootstrapIdentity{}
 	}
-}
-
-// replaceRevisionBaseLocked requires the caller to hold s.mu. A replacement
-// gets a fresh handle even when both policy content and epoch are unchanged.
-func (s *policyServer) replaceRevisionBaseLocked(inputs effectivePolicyInputs) error {
-	if err := s.revisionRecovery.recoveryErrorLocked(); err != nil {
-		return err
-	}
-	if s.revisionRecovery == nil {
-		return errInvalidEffectivePolicyCandidate
-	}
-	base, err := newEffectivePolicyBase(inputs, 0)
-	if err != nil {
-		return err
-	}
-	s.revisionRecovery.current = base
-	s.invalidateRevisionBootstrapLocked()
-	return nil
-}
-
-// prepareRevisionBaseReplacementLocked validates against the actual current
-// base/Store and builds the next immutable base before any external effect.
-// Keep s.mu held through publication. A nil owner preserves legacy behavior.
-func (s *policyServer) prepareRevisionBaseReplacementLocked(inputs effectivePolicyInputs) (*effectivePolicyBase, error) {
-	if s.revisionRecovery == nil {
-		return nil, nil
-	}
-	if err := s.revisionRecovery.recoveryErrorLocked(); err != nil {
-		return nil, err
-	}
-	current := s.revisionRecovery.current
-	candidate, err := current.Prepare(s.credentialVault, inputs)
-	if err != nil {
-		return nil, err
-	}
-	if err := current.Validate(s.credentialVault, candidate); err != nil {
-		return nil, err
-	}
-	// Prepare already froze and validated all inputs. Publication only installs
-	// this private handle; it does not parse again or publish a policy epoch.
-	return &effectivePolicyBase{inputs: candidate.inputs, epoch: 0}, nil
 }
 
 // requireRevisionRecoveryLocked requires the caller to hold s.mu. Preserve the
@@ -207,9 +166,7 @@ func (s *policyServer) captureRevisionBootstrap(ctx context.Context) (credential
 		return credentialvault.ActiveSnapshot{}, 0, nil, fmt.Errorf("%w: %w", errInvalidRevisionBootstrap, cause)
 	}
 	ticket := &revisionBootstrapTicket{owner: s, identity: state.identity, base: state.current, store: s.credentialVault, vault: vault}
-	// Bootstrap's active policyEpoch remains zero; a prospective candidate's
-	// base+1 epoch is neither reserved nor published by this capture.
-	return vault.Snapshot(), 0, ticket, nil
+	return vault.Snapshot(), state.current.epoch, ticket, nil
 }
 
 // validateRevisionBootstrapLocked requires the caller to hold s.mu through the

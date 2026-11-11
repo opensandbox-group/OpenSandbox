@@ -691,3 +691,45 @@ test("acquire disposes a sandbox if forced shutdown retires the pool run", async
   await assert.rejects(acquire, /is not running/);
   await eventually(async () => fixture.calls.some((call) => call.method === "kill" && call.sandboxId === "idle"));
 });
+
+test("pool warmup create uses a metrics-disabled connection config", async (t) => {
+  const captured = [];
+  const fixture = createPoolFixture();
+  const connectionConfig = new ConnectionConfig({ domain: "http://127.0.0.1:8080" });
+  const sandboxCreator = async (context) => {
+    captured.push({
+      reason: context.reason,
+      disableMetrics: context.createConnectionConfig.disableMetrics,
+    });
+    return fixture.sandboxCreator(context);
+  };
+
+  const warmupPool = SandboxPool.create({
+    poolName: "warmup-metrics-pool",
+    maxIdle: 1,
+    stateStore: new InMemoryPoolStateStore(),
+    connectionConfig,
+    creationSpec: { image: "ubuntu" },
+    sandboxCreator,
+  });
+  t.after(() => warmupPool.shutdown(false));
+  await warmupPool.start();
+
+  await eventually(() => captured.some((entry) => entry.reason === PooledSandboxCreateReason.WARMUP));
+
+  const acquirePool = SandboxPool.create({
+    poolName: "acquire-metrics-pool",
+    maxIdle: 0,
+    stateStore: new InMemoryPoolStateStore(),
+    connectionConfig,
+    creationSpec: { image: "ubuntu" },
+    sandboxCreator,
+  });
+  t.after(() => acquirePool.shutdown(false));
+  await acquirePool.start();
+  await acquirePool.acquire({ policy: AcquirePolicy.DIRECT_CREATE, skipHealthCheck: true });
+
+  assert.equal(captured.find((entry) => entry.reason === PooledSandboxCreateReason.WARMUP).disableMetrics, true);
+  assert.equal(captured.find((entry) => entry.reason === PooledSandboxCreateReason.DIRECT_CREATE).disableMetrics, false);
+  assert.equal(connectionConfig.disableMetrics, false);
+});

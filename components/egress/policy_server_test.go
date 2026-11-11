@@ -34,6 +34,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/stretchr/testify/require"
 )
 
@@ -449,6 +450,107 @@ func TestHandlePatch_DomainCaseOverride(t *testing.T) {
 	require.Equal(t, "example.com", proxy.updated.Egress[0].Target, "expected allow example.com to override")
 }
 
+func TestHandlePatch_DistinctPortScopedRulesCoexist(t *testing.T) {
+	// mergeKey used to fold every target-less rule to the same "" key, so a
+	// second port-only rule silently evicted the first instead of coexisting
+	// with it. Two port-only rules with different Ports must both survive a
+	// single PATCH payload.
+	initial := &policy.NetworkPolicy{DefaultAction: policy.ActionDeny}
+	proxy := &stubProxy{updated: initial}
+	nft := &stubNft{}
+	srv := &policyServer{proxy: proxy, nft: nft, enforcementMode: "dns+nft"}
+
+	body := `[{"action":"deny","ports":[25]},{"action":"allow","ports":[443,80]}]`
+	req := httptest.NewRequest(http.MethodPatch, "/policy", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	srv.handlePolicy(w, req)
+
+	resp := w.Result()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "expected 200")
+	require.Len(t, proxy.updated.Egress, 2, "both port-scoped rules should be kept, not deduped against each other")
+
+	// A follow-up PATCH adding a third, differently-scoped port rule must not
+	// evict the two already-applied port rules.
+	body2 := `[{"action":"deny","target":"10.0.0.5","ports":[22]}]`
+	req2 := httptest.NewRequest(http.MethodPatch, "/policy", strings.NewReader(body2))
+	w2 := httptest.NewRecorder()
+	srv.handlePolicy(w2, req2)
+
+	require.Equal(t, http.StatusOK, w2.Result().StatusCode, "expected 200")
+	require.Len(t, proxy.updated.Egress, 3, "the two prior port-scoped rules must survive a later unrelated patch")
+}
+
+// An unrelated PATCH must keep every rule of an untouched scope: nft is
+// deny-wins for IP/CIDR/port rules, so dropping a later same-scope deny would
+// open traffic that was blocked (#2663).
+func TestHandlePatch_UnrelatedPatchKeepsShadowingDeny(t *testing.T) {
+	cases := []struct {
+		name     string
+		scope    string
+		denyIPv4 string
+	}{
+		{"ip", `"target":"10.0.0.5"`, "10.0.0.5"},
+		{"cidr", `"target":"10.0.0.0/24"`, "10.0.0.0/24"},
+		{"ip_ports", `"target":"10.0.0.5","ports":[443]`, ""},
+		{"port_only", `"ports":[443]`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow",` + tc.scope + `},{"action":"deny",` + tc.scope + `}]}`)
+			require.NoError(t, err)
+			proxy := &stubProxy{updated: initial}
+			nft := &stubNft{}
+			srv := &policyServer{proxy: proxy, nft: nft, enforcementMode: "dns+nft"}
+
+			req := httptest.NewRequest(http.MethodPatch, "/policy", strings.NewReader(`[{"action":"allow","target":"192.0.2.1"}]`))
+			w := httptest.NewRecorder()
+			srv.handlePolicy(w, req)
+
+			require.Equal(t, http.StatusOK, w.Result().StatusCode, w.Body.String())
+			require.Len(t, proxy.updated.Egress, 3, "both base rules of the untouched scope must survive")
+			require.Equal(t, "192.0.2.1", proxy.updated.Egress[0].Target, "patch rules keep higher priority")
+			require.Equal(t, policy.ActionAllow, proxy.updated.Egress[1].Action)
+			require.Equal(t, policy.ActionDeny, proxy.updated.Egress[2].Action)
+
+			require.NotNil(t, nft.applied)
+			portDeny, _ := nft.applied.PortScopedRules()
+			_, _, denyV4, _ := nft.applied.StaticIPSets()
+			if tc.denyIPv4 != "" {
+				require.Equal(t, []string{tc.denyIPv4}, denyV4, "the shadowing deny must still reach nft")
+			} else {
+				require.Len(t, portDeny, 1, "the shadowing port-scoped deny must still reach nft")
+				require.Equal(t, []int{443}, portDeny[0].Ports)
+			}
+		})
+	}
+}
+
+func TestHandlePatch_OverrideReplacesEverySameScopeRule(t *testing.T) {
+	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[
+		{"action":"allow","target":"10.0.0.5","ports":[443]},
+		{"action":"allow","target":"10.0.0.9"},
+		{"action":"deny","target":"10.0.0.5","ports":[443]}
+	]}`)
+	require.NoError(t, err)
+	proxy := &stubProxy{updated: initial}
+	nft := &stubNft{}
+	srv := &policyServer{proxy: proxy, nft: nft, enforcementMode: "dns+nft"}
+
+	req := httptest.NewRequest(http.MethodPatch, "/policy", strings.NewReader(`[{"action":"deny","target":"10.0.0.5","ports":[443]},{"action":"allow","target":"10.0.0.5","ports":[443]}]`))
+	w := httptest.NewRecorder()
+	srv.handlePolicy(w, req)
+
+	require.Equal(t, http.StatusOK, w.Result().StatusCode, w.Body.String())
+	require.Len(t, proxy.updated.Egress, 2, "every base rule of the patched scope is replaced by the first patch rule")
+	require.Equal(t, policy.ActionDeny, proxy.updated.Egress[0].Action)
+	require.Equal(t, "10.0.0.5", proxy.updated.Egress[0].Target)
+	require.Equal(t, []int{443}, proxy.updated.Egress[0].Ports)
+	require.Equal(t, "10.0.0.9", proxy.updated.Egress[1].Target)
+	_, portAllow := nft.applied.PortScopedRules()
+	require.Empty(t, portAllow, "the replaced same-scope allow must not survive")
+}
+
 func TestMaxEgressRulesFromEnv(t *testing.T) {
 	old := os.Getenv(constants.EnvMaxEgressRules)
 	defer func() { _ = os.Setenv(constants.EnvMaxEgressRules, old) }()
@@ -719,11 +821,22 @@ func recoveryPolicyFixture(t *testing.T) *policyServer {
 	s.mitmGate = mitmproxy.NewHealthGate()
 	s.mitmGate.SetReady(true)
 	s.alwaysLoader = &stagedTestAlwaysLoader{}
+	attachPolicyTestSession(t, s)
 	return s
 }
 
+func attachPolicyTestSession(t *testing.T, s *policyServer) {
+	t.Helper()
+	session := &mutationTestSession{fakeRevisionProcessSession: fakeRevisionProcessSession{config: validFakeRevisionIPCConfig()}}
+	session.update = func(_ context.Context, snapshot credentialvault.ActiveSnapshot, epoch int64) (revision.Identity, error) {
+		return mutationIdentity(t, snapshot, epoch), nil
+	}
+	s.mitm = &mitmTransparent{running: &mitmproxy.Running{}, revisionSession: session, currentGen: 1,
+		revisionOwner: &revisionLaunchOwner{server: s, stop: func(*mitmproxy.Running) {}}}
+}
+
 func TestRevisionRecoveryPolicyEffectClassification(t *testing.T) {
-	for _, kind := range []string{"json", "binding", "read-file", "invalid-overlay", "persist", "nft-no-file", "nft-restored-file", "success-no-effects", "success-same-content", "success-reset", "success-nft", "success-file", "legacy-failure"} {
+	for _, kind := range []string{"json", "binding", "read-file", "unpublished-overlay-ignored", "persist", "nft-no-file", "nft-restored-file", "success-no-effects", "success-same-content", "success-reset", "success-nft", "success-file", "legacy-failure"} {
 		t.Run(kind, func(t *testing.T) {
 			if runtime.GOOS != "linux" && (kind == "success-file" || kind == "nft-restored-file") {
 				t.Skip("real experimental atomic policy storage requires Linux")
@@ -745,10 +858,9 @@ func TestRevisionRecoveryPolicyEffectClassification(t *testing.T) {
 			case "read-file":
 				s.policyFile = t.TempDir()
 				wantStatus, wantChanged = http.StatusInternalServerError, false
-			case "invalid-overlay":
+			case "unpublished-overlay-ignored":
+				// Only an acknowledged reload can replace the frozen overlay.
 				s.alwaysLoader.SetCurrentRules(nil, []policy.EgressRule{{Action: "invalid", Target: "invalid.example"}})
-				s.policyFile = filepath.Join(t.TempDir(), "policy.json")
-				wantStatus, wantChanged = http.StatusBadRequest, false
 			case "persist":
 				s.policyFile = filepath.Join(t.TempDir(), "missing", "policy.json")
 				wantStatus, wantChanged = http.StatusInternalServerError, false
@@ -830,7 +942,7 @@ func TestRevisionRecoveryPolicyEffectClassification(t *testing.T) {
 					require.ErrorIs(t, validateRecoveryTicket(s, ticket), errStaleRevisionBootstrap)
 					require.ErrorIs(t, validateRecoveryCandidate(s, candidate), errStaleEffectivePolicyCandidate)
 					require.Equal(t, wantDefault, s.revisionRecovery.current.inputs.user.DefaultAction)
-					require.Zero(t, s.revisionRecovery.current.epoch)
+					require.Equal(t, int64(1), s.revisionRecovery.current.epoch)
 					// The proxy exposes a mutable pointer; it must not alias the frozen base.
 					s.proxy.(*stubProxy).updated.DefaultAction = "tampered"
 					require.Equal(t, wantDefault, s.revisionRecovery.current.inputs.user.DefaultAction)
@@ -843,7 +955,7 @@ func TestRevisionRecoveryPolicyEffectClassification(t *testing.T) {
 			if !wantChanged {
 				require.Same(t, original, s.revisionRecovery.current)
 			}
-			if kind == "invalid-overlay" {
+			if kind == "unpublished-overlay-ignored" {
 				_, err := os.Stat(s.policyFile)
 				require.True(t, os.IsNotExist(err), "prebuild failure must occur before saving")
 			}
@@ -883,7 +995,7 @@ func (l *recoveryLockedAlwaysLoader) RefreshIfDueWithApply(now time.Time, apply 
 }
 
 func TestRevisionRecoveryAlwaysCallback(t *testing.T) {
-	for _, kind := range []string{"unchanged", "parse-error", "invalid-overlay", "binding", "nameserver-binding", "nft-failure", "success-nft", "success-no-nft"} {
+	for _, kind := range []string{"unchanged", "parse-error", "unpublished-overlay-ignored", "binding", "nameserver-binding", "nft-failure", "success-nft", "success-no-nft"} {
 		t.Run(kind, func(t *testing.T) {
 			s := recoveryPolicyFixture(t)
 			loader := &recoveryLockedAlwaysLoader{t: t, stagedTestAlwaysLoader: stagedTestAlwaysLoader{
@@ -902,7 +1014,7 @@ func TestRevisionRecoveryAlwaysCallback(t *testing.T) {
 				loader.pending = false
 			case "parse-error":
 				loader.refreshErr = errors.New("parse failed")
-			case "invalid-overlay":
+			case "unpublished-overlay-ignored":
 				loader.candidateAllow = []policy.EgressRule{{Action: "invalid", Target: "invalid.example"}}
 			case "binding", "nameserver-binding":
 				s.credentialVault = policyCandidateStore(t, policyCandidateInputs(t))
@@ -955,7 +1067,7 @@ func TestRevisionRecoveryAlwaysCallback(t *testing.T) {
 					baseAllowV4, _, _, _ := basePolicy.StaticIPSets()
 					require.NotContains(t, baseAllowV4, "192.0.2.53", "nameserver allowances belong only to nft derivation")
 				}
-				require.Zero(t, s.revisionRecovery.current.epoch)
+				require.Equal(t, int64(1), s.revisionRecovery.current.epoch)
 				require.False(t, s.mitmGate.MitmPending())
 			} else {
 				if kind == "unchanged" {
@@ -989,4 +1101,26 @@ type recoveryNoCurrentPolicyProxy struct{ stubProxy }
 
 func (*recoveryNoCurrentPolicyProxy) CurrentPolicy() *policy.NetworkPolicy {
 	panic("legacy nil-nft callback must not request CurrentPolicy")
+}
+
+func TestHandleDelete_PortOnlyRulesViaEmptyTarget(t *testing.T) {
+	// Port-only rules have no target; an explicit empty entry in the DELETE
+	// list addresses them (all of them), so they are not permanently stuck.
+	initial := &policy.NetworkPolicy{
+		DefaultAction: policy.ActionDeny,
+		Egress: []policy.EgressRule{
+			{Action: policy.ActionDeny, Ports: []int{25}},
+			{Action: policy.ActionAllow, Target: "example.com"},
+			{Action: policy.ActionAllow, Ports: []int{53}},
+		},
+	}
+	proxy := &stubProxy{updated: initial}
+	srv := &policyServer{proxy: proxy, nft: &stubNft{}, enforcementMode: "dns+nft"}
+
+	req := httptest.NewRequest(http.MethodDelete, "/policy", strings.NewReader(`["example.com", ""]`))
+	w := httptest.NewRecorder()
+	srv.handlePolicy(w, req)
+
+	require.Equal(t, http.StatusOK, w.Result().StatusCode)
+	require.Len(t, proxy.updated.Egress, 0, "port-only rules go with the empty entry, domain rule with its target")
 }

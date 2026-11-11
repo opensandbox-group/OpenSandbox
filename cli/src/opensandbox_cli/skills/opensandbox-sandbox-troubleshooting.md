@@ -66,10 +66,16 @@ Use this order by default:
 
 ```bash
 osb sandbox get <sandbox-id> -o json
+osb diagnostics context <sandbox-id> -o json
 osb sandbox health <sandbox-id> -o json
 osb diagnostics events <sandbox-id> --scope runtime -o raw
 osb diagnostics logs <sandbox-id> --scope container -o raw
 ```
+
+Use context's `backend_type` and `backend_identifiers` to select backend-specific
+investigation. Context works before execd is ready. Fast Sandbox supports runtime
+events but not container logs; skip log collection for that backend. If context
+is unavailable on an older server, continue with sandbox state and supported diagnostics.
 
 Then drill down only where the stable diagnostics point:
 

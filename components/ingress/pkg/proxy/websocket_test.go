@@ -586,3 +586,26 @@ func Test_WebSocketProxy_BackendHandshake4xxPassthrough(t *testing.T) {
 	assert.Equal(t, "Bearer realm=\"test\"", resp.Header.Get("WWW-Authenticate"),
 		"auth challenge header from the backend must be forwarded")
 }
+
+func Test_WebSocketProxy_BackendHandshakeStripsWakeMarker(t *testing.T) {
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, _ *http.Request) {
+		// A sandbox must not be able to forge gateway-owned wake
+		// provenance, not even on a failed handshake.
+		w.Header().Set(WakeMarkerHeader, WakeMarkerExpired)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+
+	h := http.Header{}
+	h.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
+	conn, resp, err := websocket.Dial(context.Background(), proxyURL+"/ws", &websocket.DialOptions{HTTPHeader: h})
+	require.Error(t, err)
+	if conn != nil {
+		_ = conn.CloseNow()
+	}
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Empty(t, resp.Header.Get(WakeMarkerHeader), "the gateway-owned wake marker must be stripped")
+}

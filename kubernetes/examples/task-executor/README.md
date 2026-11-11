@@ -36,9 +36,9 @@ The `task-executor` exposes a RESTful HTTP API. All API calls expect JSON reques
 
 Creates and starts a single task.
 
-*   **Method:** `POST`
-*   **Path:** `/tasks`
-*   **Request Body (application/json):** An object representing the desired task.
+* **Method:** `POST`
+* **Path:** `/tasks`
+* **Request Body (application/json):** An object representing the desired task.
 
     ```json
     {
@@ -52,7 +52,7 @@ Creates and starts a single task.
     }
     ```
 
-*   **Response Body (application/json):** The created task object with its initial status.
+* **Response Body (application/json):** The created task object with its initial status.
 
     ```json
     {
@@ -91,9 +91,9 @@ curl -X POST -H "Content-Type: application/json" -d '{
 
 Retrieves the current status of a specific task by its name.
 
-*   **Method:** `GET`
-*   **Path:** `/tasks/{taskName}`
-*   **Response Body (application/json):** The task object, including its current status.
+* **Method:** `GET`
+* **Path:** `/tasks/{taskName}`
+* **Response Body (application/json):** The task object, including its current status.
 
     ```json
     {
@@ -124,9 +124,9 @@ curl http://localhost:5758/tasks/my-first-task
 
 Marks a task for deletion. The `task-executor` will attempt to gracefully stop the task and then remove its state.
 
-*   **Method:** `DELETE`
-*   **Path:** `/tasks/{taskName}`
-*   **Response:** `204 No Content` on successful marking for deletion.
+* **Method:** `DELETE`
+* **Path:** `/tasks/{taskName}`
+* **Response:** `204 No Content` on successful marking for deletion.
 
 **Example (using `curl`):**
 
@@ -138,9 +138,9 @@ curl -X DELETE http://localhost:5758/tasks/my-first-task
 
 This endpoint is typically used by controllers to synchronize a desired set of tasks. Tasks not present in the desired list will be marked for deletion; new tasks will be created.
 
-*   **Method:** `POST`
-*   **Path:** `/setTasks`
-*   **Request Body (application/json):** An array of task objects representing the desired state.
+* **Method:** `POST`
+* **Path:** `/setTasks`
+* **Request Body (application/json):** An array of task objects representing the desired state.
 
     ```json
     [
@@ -163,7 +163,7 @@ This endpoint is typically used by controllers to synchronize a desired set of t
     ]
     ```
 
-*   **Response Body (application/json):** The current list of tasks managed by the executor after synchronization.
+* **Response Body (application/json):** The current list of tasks managed by the executor after synchronization.
 
     ```json
     [
@@ -220,9 +220,9 @@ curl -X POST -H "Content-Type: application/json" -d \
 
 Retrieves a list of all tasks currently managed by the `task-executor`.
 
-*   **Method:** `GET`
-*   **Path:** `/getTasks`
-*   **Response Body (application/json):** An array of task objects.
+* **Method:** `GET`
+* **Path:** `/getTasks`
+* **Response Body (application/json):** An array of task objects.
 
     ```json
     [
@@ -272,9 +272,9 @@ curl http://localhost:5758/getTasks
 
 Returns the health status of the `task-executor`.
 
-*   **Method:** `GET`
-*   **Path:** `/health`
-*   **Response Body (application/json):**
+* **Method:** `GET`
+* **Path:** `/health`
+* **Response Body (application/json):**
 
     ```json
     {
@@ -374,9 +374,9 @@ The `status` field within a task object (`internal/task-executor/types/Status` m
 
 **State Types:**
 
-*   `waiting`: Task is pending execution.
-*   `running`: Task is currently executing.
-*   `terminated`: Task has finished (succeeded or failed).
+* `waiting`: Task is pending execution.
+* `running`: Task is currently executing.
+* `terminated`: Task has finished (succeeded or failed).
 
 ## Example Scenario: Running a Sidecar Task
 

@@ -79,8 +79,10 @@ func TestBashSession_NonZeroExitEmitsError(t *testing.T) {
 	require.NotNil(t, gotErr, "expected non-nil error output")
 	require.Equal(t, "CommandExecError", gotErr.EName)
 	require.Equal(t, "7", gotErr.EValue)
+	require.NotNil(t, gotErr.ExitCode, "expected exit_code for a command that ran")
+	require.Equal(t, 7, *gotErr.ExitCode)
 	require.NotEmpty(t, sessionID, "expected session id to be set")
-	require.Equal(t, "before", stdoutLine)
+	require.Equal(t, "before\n", stdoutLine)
 
 	select {
 	case <-completeCh:
@@ -138,7 +140,7 @@ func TestBashSession_FallsBackToSh(t *testing.T) {
 			OnExecuteStdout: func(line string) { stdoutLines = append(stdoutLines, line) },
 		},
 	}))
-	require.Contains(t, stdoutLines, "hello world")
+	require.Contains(t, stdoutLines, "hello world\n")
 }
 
 // Round-trip a value containing a single quote under sh to guard against
@@ -164,7 +166,7 @@ func TestBashSession_FallsBackToSh_PersistsSingleQuotedValue(t *testing.T) {
 			OnExecuteStdout: func(line string) { stdoutLines = append(stdoutLines, line) },
 		},
 	}))
-	require.Contains(t, stdoutLines, want)
+	require.Contains(t, stdoutLines, want+"\n")
 }
 
 func TestParseExportLine_BashAndShFormats(t *testing.T) {
@@ -815,7 +817,7 @@ func TestBashSession_ExecdEnvsFileAppliedToSession(t *testing.T) {
 			OnExecuteStdout: func(line string) { stdoutLines = append(stdoutLines, line) },
 		},
 	}))
-	require.Contains(t, stdoutLines, "bar")
+	require.Contains(t, stdoutLines, "bar\n")
 }
 
 func TestBashSession_ExecdEnvsFileExpandsSessionCwd(t *testing.T) {
@@ -839,7 +841,201 @@ func TestBashSession_ExecdEnvsFileExpandsSessionCwd(t *testing.T) {
 			OnExecuteStdout: func(line string) { stdoutLines = append(stdoutLines, line) },
 		},
 	}))
-	require.Contains(t, stdoutLines, workspace)
+	require.Contains(t, stdoutLines, workspace+"\n")
+}
+
+// Session stdout events must carry their original line endings so that
+// concatenating event text per run reconstructs the exact output bytes,
+// matching the foreground command stream contract. Unterminated output ends
+// without a terminator, and the wrapper's protocol lines never leak into it.
+func TestBashSession_PreservesLineEndings(t *testing.T) {
+	requireBash(t)
+
+	tests := []struct {
+		name string
+		code string
+		want []string
+	}{
+		{
+			name: "plain lines",
+			code: `echo hi`,
+			want: []string{"hi\n"},
+		},
+		{
+			name: "blank lines",
+			code: `printf 'a\n\nb\n'`,
+			want: []string{"a\n", "\n", "b\n"},
+		},
+		{
+			name: "carriage returns",
+			code: `printf 'x\r\ny\rz\n'`,
+			want: []string{"x\r", "\n", "y\r", "z\n"},
+		},
+		{
+			name: "unterminated output",
+			code: `printf 'partial'`,
+			want: []string{"partial"},
+		},
+		{
+			name: "unterminated output ending before carriage return",
+			code: `printf 'a\rb'`,
+			want: []string{"a\r", "b"},
+		},
+		{
+			name: "bare blank line",
+			code: `echo`,
+			want: []string{"\n"},
+		},
+		{
+			name: "no output",
+			code: `true`,
+			want: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			session := newBashSession("", nil)
+			t.Cleanup(func() { _ = session.close() })
+			require.NoError(t, session.start())
+
+			var got []string
+			require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+				Code:    tt.code,
+				Timeout: 5 * time.Second,
+				Hooks: ExecuteResultHook{
+					OnExecuteStdout: func(fragment string) { got = append(got, fragment) },
+				},
+			}))
+
+			require.Equal(t, tt.want, got)
+			for _, fragment := range got {
+				require.NotContains(t, fragment, envDumpStartMarker)
+				require.NotContains(t, fragment, exitMarkerPrefix)
+				require.NotContains(t, fragment, pwdMarkerPrefix)
+				require.NotContains(t, fragment, "declare -x")
+			}
+		})
+	}
+}
+
+// A blank line must be delivered immediately, not held back until the next
+// fragment or process exit.
+func TestBashSession_FlushesBlankLineImmediately(t *testing.T) {
+	requireBash(t)
+
+	session := newBashSession("", nil)
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	var blankAt time.Duration
+	gotBlank := false
+	start := time.Now()
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    `echo; sleep 2`,
+		Timeout: 10 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(fragment string) {
+				if fragment == "\n" && !gotBlank {
+					gotBlank = true
+					blankAt = time.Since(start)
+				}
+			},
+		},
+	}))
+
+	require.True(t, gotBlank, "blank line event was never delivered")
+	require.Less(t, blankAt, 1500*time.Millisecond, "blank line was held back until the run finished")
+}
+
+// Output without any line ending must fail the run at the fragment cap
+// instead of buffering without limit, mirroring the former 16 MiB scanner cap.
+// A line longer than maxScanLineBytes arrives in pieces, and the output after
+// it is still read: a reader that stopped would leave the command blocked on a
+// full pipe until the run timed out.
+func TestBashSession_LineLongerThanMaxScanLine(t *testing.T) {
+	requireBash(t)
+
+	session := newBashSession("", nil)
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	const longLineBytes = maxScanLineBytes + 4*1024*1024
+	var stdout strings.Builder
+	start := time.Now()
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    fmt.Sprintf(`head -c %d /dev/zero | tr '\0' 'x'; echo; seq 1 100000`, longLineBytes),
+		Timeout: 30 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(fragment string) { stdout.WriteString(fragment) },
+		},
+	}))
+	require.Less(t, time.Since(start), 20*time.Second)
+
+	var want strings.Builder
+	want.WriteString(strings.Repeat("x", longLineBytes) + "\n")
+	for i := 1; i <= 100000; i++ {
+		fmt.Fprintf(&want, "%d\n", i)
+	}
+	require.True(t, stdout.String() == want.String(), "stdout has %d bytes, want %d", stdout.Len(), want.Len())
+}
+
+// Output without a trailing newline puts the env-dump marker on the same line.
+// With this length the piece boundary falls inside the marker, which must
+// still be recognized so the env dump is not sent as output.
+func TestBashSession_EnvDumpMarkerSplitByLongLine(t *testing.T) {
+	requireBash(t)
+
+	session := newBashSession("", nil)
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	const outputBytes = maxScanLineBytes - 5
+	var stdout strings.Builder
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    fmt.Sprintf(`export SPLIT_MARKER_VAR=kept; head -c %d /dev/zero | tr '\0' 'x'`, outputBytes),
+		Timeout: 30 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(fragment string) { stdout.WriteString(fragment) },
+		},
+	}))
+	require.True(t, stdout.String() == strings.Repeat("x", outputBytes), "stdout has %d bytes, want %d", stdout.Len(), outputBytes)
+
+	var got strings.Builder
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    `printf '%s' "$SPLIT_MARKER_VAR"`,
+		Timeout: 5 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(fragment string) { got.WriteString(fragment) },
+		},
+	}))
+	require.Equal(t, "kept", got.String())
+}
+
+// Env values may carry a literal CR byte (dash quotes export -p values
+// verbatim); the record must survive session persistence byte-exact.
+func TestBashSession_EnvValueWithCRPersists(t *testing.T) {
+	requireBash(t)
+	useShOnlyPath(t)
+
+	session := newBashSession("", nil)
+	t.Cleanup(func() { _ = session.close() })
+	require.NoError(t, session.start())
+
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    `export CR_VALUE="$(printf 'a\rb')"`,
+		Timeout: 5 * time.Second,
+	}))
+
+	var got []string
+	require.NoError(t, session.run(context.Background(), &ExecuteCodeRequest{
+		Code:    `printf '%s' "$CR_VALUE"`,
+		Timeout: 5 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteStdout: func(fragment string) { got = append(got, fragment) },
+		},
+	}))
+	require.Equal(t, []string{"a\r", "b"}, got, "CR inside the persisted env value was lost")
 }
 
 func TestNewBashSessionEnvOverlaysFileAndKeepsBlacklist(t *testing.T) {
@@ -895,4 +1091,92 @@ func TestBashSession_NormalExitKeepsBackgroundJob(t *testing.T) {
 		_, err := os.Stat(marker)
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond, "background job was killed after a normal run")
+}
+
+func TestBashSession_SignalKillEmitsError(t *testing.T) {
+	requireBash(t)
+
+	c := NewController("", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var (
+		errCh      = make(chan *execute.ErrorOutput, 1)
+		completeCh = make(chan struct{}, 1)
+	)
+
+	req := &ExecuteCodeRequest{
+		Language: Bash,
+		// The shell kills itself before the wrapper can print its exit marker.
+		Code:    `kill -TERM $$`,
+		Cwd:     t.TempDir(),
+		Timeout: 5 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteError: func(err *execute.ErrorOutput) { errCh <- err },
+			OnExecuteComplete: func(_ time.Duration) {
+				completeCh <- struct{}{}
+			},
+		},
+	}
+
+	session, err := c.createBashSession(&CreateContextRequest{})
+	require.NoError(t, err)
+	req.Context = session
+	require.NoError(t, c.runBashSession(ctx, req))
+
+	select {
+	case <-completeCh:
+		require.Fail(t, "did not expect completion hook when the shell was killed by a signal")
+	default:
+	}
+
+	var gotErr *execute.ErrorOutput
+	select {
+	case gotErr = <-errCh:
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "expected error hook to be called for a signal-killed shell")
+	}
+	require.Equal(t, "CommandExecError", gotErr.EName)
+	require.Equal(t, "-1", gotErr.EValue)
+	require.NotNil(t, gotErr.ExitCode, "expected exit_code for a signal-killed shell")
+	require.Equal(t, -1, *gotErr.ExitCode)
+}
+
+func collectLineFragments(t *testing.T, input string) []outputPiece {
+	t.Helper()
+	var fragments []outputPiece
+	err := scanLineFragments(strings.NewReader(input), func(fragment string, complete bool) {
+		fragments = append(fragments, outputPiece{fragment, complete})
+	})
+	require.NoError(t, err)
+	return fragments
+}
+
+func TestScanLineFragments_SplitsLongLine(t *testing.T) {
+	long := strings.Repeat("a", maxScanLineBytes+10)
+	fragments := collectLineFragments(t, long+"\nnext")
+	require.Equal(t, []outputPiece{
+		{long[:maxScanLineBytes], false},
+		{long[maxScanLineBytes:] + "\n", true},
+		{"next", true},
+	}, fragments)
+}
+
+func TestScanLineFragments_LineOfExactlyMaxBytes(t *testing.T) {
+	long := strings.Repeat("a", maxScanLineBytes)
+	fragments := collectLineFragments(t, long+"\r\n")
+	require.Equal(t, []outputPiece{
+		{long + "\r", true},
+		{"\n", true},
+	}, fragments)
+}
+
+func TestScanLineFragments_DoesNotSplitRune(t *testing.T) {
+	// The odd prefix puts the piece boundary inside a two-byte rune.
+	long := "a" + strings.Repeat("é", maxScanLineBytes/2)
+	fragments := collectLineFragments(t, long)
+	require.Len(t, fragments, 2)
+	require.Len(t, fragments[0].text, maxScanLineBytes-1)
+	require.Equal(t, long, fragments[0].text+fragments[1].text)
 }

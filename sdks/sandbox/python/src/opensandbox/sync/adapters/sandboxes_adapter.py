@@ -43,6 +43,7 @@ from opensandbox.internal.readiness import constrain_readiness_request
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
+    IdlePolicy,
     NetworkPolicy,
     PagedSandboxInfos,
     PagedSnapshotInfos,
@@ -187,6 +188,7 @@ class SandboxesAdapterSync(SandboxesSync):
         metadata: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
+        idle_policy: IdlePolicy | None = None,
     ) -> SandboxCreateResponse:
         try:
             from opensandbox.api.lifecycle.api.sandboxes import post_sandboxes
@@ -200,6 +202,7 @@ class SandboxesAdapterSync(SandboxesSync):
                 metadata=metadata,
                 network_policy=network_policy,
                 extensions=extensions,
+                idle_policy=idle_policy,
             )
             response_obj = post_sandboxes.sync_detailed(
                 client=self._get_client(), body=create_request

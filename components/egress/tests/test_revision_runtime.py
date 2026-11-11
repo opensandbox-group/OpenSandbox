@@ -63,13 +63,14 @@ def load_system():
     mitmproxy.http = types.SimpleNamespace(HTTPFlow=object)
     mitmproxy_tls = types.ModuleType("mitmproxy.tls")
     mitmproxy_tls.ClientHelloData = object
-    sys.modules["mitmproxy"] = mitmproxy
-    sys.modules["mitmproxy.tls"] = mitmproxy_tls
     spec = importlib.util.spec_from_file_location(
         "opensandbox_revision_runtime", MITMSCRIPTS / "system.py"
     )
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with mock.patch.dict(
+        sys.modules, {"mitmproxy": mitmproxy, "mitmproxy.tls": mitmproxy_tls}
+    ):
+        spec.loader.exec_module(module)
     return module
 
 

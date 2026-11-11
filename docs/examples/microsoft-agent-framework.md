@@ -5,18 +5,11 @@ description: Run a general-purpose Microsoft Agent Framework agent with OpenSand
 
 # Microsoft Agent Framework Example
 
-Run a general-purpose Microsoft Agent Framework agent alongside an
-OpenSandbox workflow. The example uses Agent Framework's functional workflow
-API to create a sandbox, prepare and execute a Python job, retry with a
-fallback command when needed, ask the agent an English question, and destroy
-the sandbox.
+Run a general-purpose Microsoft Agent Framework agent alongside an OpenSandbox workflow. The example uses Agent Framework's functional workflow API to create a sandbox, prepare and execute a Python job, retry with a fallback command when needed, ask the agent an English question, and destroy the sandbox.
 
-The Python client uses the OpenSandbox SDK. The local OpenSandbox Server
-creates and manages the container through its Docker runtime.
+The Python client uses the OpenSandbox SDK. The local OpenSandbox Server creates and manages the container through its Docker runtime.
 
-The sandbox uses the Docker Hub image
-`opensandbox/code-interpreter:v1.1.0`; no Alibaba Cloud container registry is
-required.
+The sandbox uses the Docker Hub image `opensandbox/code-interpreter:v1.1.0`; no Alibaba Cloud container registry is required.
 
 ## Start OpenSandbox server [local]
 
@@ -26,8 +19,7 @@ Pre-pull the code-interpreter image (includes Python 3.12+):
 docker pull opensandbox/code-interpreter:v1.1.0
 ```
 
-Create a Python 3.10+ environment and install the packages declared by the
-example project:
+Create a Python 3.10+ environment and install the packages declared by the example project:
 
 ```shell
 uv venv
@@ -42,10 +34,7 @@ uv pip install \
   "python-dotenv>=1.0,<2"
 ```
 
-The selective Agent Framework packages provide the workflow, agent, and
-OpenAI/Azure OpenAI client APIs used by this example without installing
-unrelated integrations. The Microsoft package proxy matches the package
-source configured by the example project's `pyproject.toml`.
+The selective Agent Framework packages provide the workflow, agent, and OpenAI/Azure OpenAI client APIs used by this example without installing unrelated integrations. The Microsoft package proxy matches the package source configured by the example project's `pyproject.toml`.
 
 Initialize and start the local Docker runtime:
 
@@ -54,12 +43,9 @@ uv run opensandbox-server init-config ~/.sandbox.toml --example docker
 OPENSANDBOX_INSECURE_SERVER=YES uv run opensandbox-server
 ```
 
-`OPENSANDBOX_INSECURE_SERVER=YES` explicitly acknowledges that this local
-server has no API key. Keep it bound to localhost. For a shared deployment,
-configure `server.api_key` instead.
+`OPENSANDBOX_INSECURE_SERVER=YES` explicitly acknowledges that this local server has no API key. Keep it bound to localhost. For a shared deployment, configure `server.api_key` instead.
 
-The project pins `opensandbox-server==0.2.3`. The upstream `1.1.0` server
-wheel is missing its generated FastPath gRPC modules and fails during startup.
+The project pins `opensandbox-server==0.2.3`. The upstream `1.1.0` server wheel is missing its generated FastPath gRPC modules and fails during startup.
 
 ## Configure the Agent
 
@@ -84,8 +70,7 @@ AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com/
 AZURE_OPENAI_MODEL=<your-deployment-name>
 ```
 
-When both configurations exist, `OPENAI_API_KEY` takes precedence. Remove it
-to use the Azure OpenAI environment fallback.
+When both configurations exist, `OPENAI_API_KEY` takes precedence. Remove it to use the Azure OpenAI environment fallback.
 
 ## Run the Example
 
@@ -108,10 +93,7 @@ AGENT_QUESTION="Explain what OpenSandbox does." \
   uv run python examples/microsoft-agent-framework/main.py
 ```
 
-The workflow writes and executes a small Python job in the sandbox, then
-passes the question, configured model name, and sandbox result to a
-general-purpose Agent Framework agent. The sandbox is stopped and closed even
-when execution or the agent call fails.
+The workflow writes and executes a small Python job in the sandbox, then passes the question, configured model name, and sandbox result to a general-purpose Agent Framework agent. The sandbox is stopped and closed even when execution or the agent call fails.
 
 ## Environment Variables
 
@@ -132,6 +114,6 @@ when execution or the agent call fails.
 ## References
 
 - [Microsoft Agent Framework Python samples](https://github.com/microsoft/agent-framework/tree/main/python/samples)
-- [Functional workflow with agents](https://github.com/microsoft/agent-framework/blob/main/python/samples/01-get-started/05_functional_workflow_with_agents.py)
+- [Functional workflow with agents](https://github.com/microsoft/agent-framework/blob/main/python/samples/01-get-started/05b_functional_workflow_with_agents.py)
 - [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox)
 - [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/microsoft-agent-framework)

@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentRep
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceResult
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.MoveEntry
+import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ReadBytesResponse
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SearchEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SetPermissionEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry
@@ -98,7 +99,7 @@ internal class IsolatedFilesystemAdapter(
     ): String {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            httpClientProvider.transferClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to read file. Status code: $statusCode, Body: $body"
@@ -118,16 +119,24 @@ internal class IsolatedFilesystemAdapter(
         range: String?,
         offset: Int?,
         limit: Int?,
-    ): ByteArray {
+    ): ByteArray = readByteArrayDetailed(path, range, offset, limit).body
+
+    override fun readByteArrayDetailed(
+        path: String,
+        range: String?,
+        offset: Int?,
+        limit: Int?,
+    ): ReadBytesResponse<ByteArray> {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            httpClientProvider.transferClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to read file. Status code: $statusCode, Body: $body"
                     }
                 }
-                return response.body?.bytes() ?: ByteArray(0)
+                val body = response.body?.bytes() ?: ByteArray(0)
+                return response.toReadBytesResponse(body, offset != null || limit != null)
             }
         } catch (e: Exception) {
             logReadFailure("Failed to read file as byte array: $path", e)
@@ -140,10 +149,17 @@ internal class IsolatedFilesystemAdapter(
         range: String?,
         offset: Int?,
         limit: Int?,
-    ): InputStream {
+    ): InputStream = readStreamDetailed(path, range, offset, limit).body
+
+    override fun readStreamDetailed(
+        path: String,
+        range: String?,
+        offset: Int?,
+        limit: Int?,
+    ): ReadBytesResponse<InputStream> {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            val response = httpClientProvider.httpClient.newCall(request).execute()
+            val response = httpClientProvider.transferClient.newCall(request).execute()
             if (!response.isSuccessful) {
                 try {
                     throw response.toSandboxApiException { statusCode, body ->
@@ -154,8 +170,12 @@ internal class IsolatedFilesystemAdapter(
                     throw e
                 }
             }
-            return response.body?.byteStream()
-                ?: throw IllegalStateException("Response body is null")
+            val responseBody =
+                response.body ?: run {
+                    response.close()
+                    throw IllegalStateException("Response body is null")
+                }
+            return response.toReadBytesResponse(responseBody.byteStream(), offset != null || limit != null)
         } catch (e: Exception) {
             logReadFailure("Failed to read file as stream: $path", e)
             throw e.toSandboxException()
@@ -215,7 +235,7 @@ internal class IsolatedFilesystemAdapter(
                     .post(builder.build())
                     .build()
 
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            httpClientProvider.transferClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     throw response.toSandboxApiException { statusCode, body ->
                         "Failed to write files. Status code: $statusCode, Body: $body"

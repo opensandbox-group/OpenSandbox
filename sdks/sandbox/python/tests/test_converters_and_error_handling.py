@@ -19,7 +19,12 @@ from datetime import datetime, timedelta
 
 import pytest
 from httpx import HTTPStatusError, Request, Response
+from pydantic import ValidationError
 
+from opensandbox.adapters.converter.command_execution import (
+    build_run_in_session_request_body,
+    resolve_run_in_session_timeout,
+)
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
     parse_sandbox_error,
@@ -528,6 +533,82 @@ def test_execution_converter_to_api_run_command_request() -> None:
     assert literal_request == {"argv": literal_argv}
 
 
+@pytest.mark.parametrize(
+    ("microseconds", "expected"),
+    [
+        (None, None),
+        (0, 0),
+        (1, 1),
+        (500, 1),
+        (900, 1),
+        (999, 1),
+        (1000, 1),
+        (1001, 2),
+        (1200, 2),
+        (1_001_000, 1001),
+        (2_007_000, 2007),
+        (60_000_000, 60_000),
+    ],
+)
+def test_execution_converter_rounds_timeout_up_to_milliseconds(
+    microseconds: int | None, expected: int | None
+) -> None:
+    timeout = timedelta(microseconds=microseconds) if microseconds is not None else None
+    request = ExecutionConverter.to_api_run_command_request(
+        "sleep 10", RunCommandOpts(timeout=timeout)
+    ).to_dict()
+
+    if expected is None:
+        assert "timeout" not in request
+    else:
+        assert request["timeout"] == expected
+
+
+@pytest.mark.parametrize(
+    ("microseconds", "expected"),
+    [
+        (None, None),
+        (0, 0),
+        (1, 1),
+        (500, 1),
+        (900, 1),
+        (999, 1),
+        (1000, 1),
+        (1001, 2),
+        (1200, 2),
+        (1_001_000, 1001),
+        (2_007_000, 2007),
+        (60_000_000, 60_000),
+    ],
+)
+def test_run_in_session_converter_rounds_timeout_up_to_milliseconds(
+    microseconds: int | None, expected: int | None
+) -> None:
+    timeout = timedelta(microseconds=microseconds) if microseconds is not None else None
+    timeout_ms = resolve_run_in_session_timeout(timeout)
+    assert timeout_ms == expected
+    request = build_run_in_session_request_body("sleep 10", None, timeout_ms).to_dict()
+
+    if expected is None:
+        assert "timeout" not in request
+    else:
+        assert request["timeout"] == expected
+
+
+@pytest.mark.parametrize("microseconds", [-1, -999, -1000])
+def test_execution_converter_rejects_negative_timeout(microseconds: int) -> None:
+    with pytest.raises(InvalidArgumentException, match="^timeout must be positive"):
+        ExecutionConverter.to_api_run_command_request(
+            "sleep 10", RunCommandOpts(timeout=timedelta(microseconds=microseconds))
+        )
+
+
+@pytest.mark.parametrize("microseconds", [-1, -999, -1000])
+def test_run_in_session_converter_rejects_negative_timeout(microseconds: int) -> None:
+    with pytest.raises(InvalidArgumentException, match="^timeout must not be negative"):
+        resolve_run_in_session_timeout(timedelta(microseconds=microseconds))
+
+
 def test_run_command_opts_validates_gid_requires_uid() -> None:
     with pytest.raises(ValueError, match="uid is required when gid is provided"):
         RunCommandOpts(gid=1000)
@@ -619,6 +700,85 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
 
     renew = SandboxModelConverter.to_api_renew_request(datetime(2025, 1, 1))
     assert renew.expires_at.tzinfo is timezone.utc
+
+
+def test_sandbox_model_converter_serializes_port_scoped_rules() -> None:
+    """A domain-only rule, an IP+ports rule, and a target-less port-only rule
+    must all round-trip to the wire shape the egress sidecar expects: the
+    port-only rule's `target` key must be entirely absent (not null), since
+    the generated client uses its own UNSET sentinel to mean "omit this key".
+    """
+    req = SandboxModelConverter.to_api_create_sandbox_request(
+        spec=SandboxImageSpec("python:3.11"),
+        entrypoint=["/bin/sh"],
+        env={},
+        metadata={},
+        timeout=None,
+        resource={},
+        platform=None,
+        network_policy=NetworkPolicy(
+            defaultAction="deny",
+            egress=[
+                NetworkRule(action="allow", target="pypi.org"),
+                NetworkRule(action="allow", target="10.0.0.5", ports=[22, 80]),
+                NetworkRule(action="deny", ports=[25]),
+            ],
+        ),
+        extensions={},
+        volumes=None,
+    )
+    d = req.to_dict()
+    assert d["networkPolicy"]["egress"] == [
+        {"action": "allow", "target": "pypi.org"},
+        {"action": "allow", "target": "10.0.0.5", "ports": [22, 80]},
+        {"action": "deny", "ports": [25]},
+    ]
+
+    # Round-trip back through the reverse converter (as done for GET /policy
+    # responses) must reconstruct the same domain rules, target=None for the
+    # port-only rule instead of the generated client's UNSET sentinel.
+    from opensandbox.api.lifecycle.models.network_policy import (
+        NetworkPolicy as ApiNetworkPolicy,
+    )
+
+    api_policy = ApiNetworkPolicy.from_dict(d["networkPolicy"])
+    roundtripped = SandboxModelConverter.to_sandbox_network_policy(api_policy)
+    assert roundtripped.egress[2].target is None
+    assert roundtripped.egress[2].ports == [25]
+
+
+def test_network_rule_requires_target_or_ports() -> None:
+    with pytest.raises(ValidationError):
+        NetworkRule(action="allow")
+
+
+def test_network_rule_read_back_tolerates_sidecar_blank_target() -> None:
+    """The sidecar marshals target without omitempty, so a port-only rule
+    reads back as {"target": "", "ports": [25]}; the domain model must parse
+    it (blank => omitted) instead of raising a blank-target error."""
+    rule = NetworkRule.model_validate({"action": "deny", "target": "", "ports": [25]})
+    assert rule.target is None
+    assert rule.ports == [25]
+
+
+def test_network_rule_rejects_more_than_256_ports() -> None:
+    with pytest.raises(ValidationError):
+        NetworkRule(action="allow", ports=list(range(1, 258)))
+
+
+def test_network_rule_rejects_invalid_ports() -> None:
+    for bad_ports in ([0], [65536], [443, 443], []):
+        with pytest.raises(ValidationError):
+            NetworkRule(action="allow", target="10.0.0.5", ports=bad_ports)
+
+
+def test_network_rule_rejects_domain_target_with_ports() -> None:
+    """The sidecar rejects domain+ports (DNS-layer rules have no port
+    dimension); surfacing that as a local ValidationError beats a 4xx after
+    the sandbox create request is already in flight."""
+    for target in ("example.com", "*.example.com", "10.0.0.0/255.0.0.0"):
+        with pytest.raises(ValidationError):
+            NetworkRule(action="allow", target=target, ports=[443])
 
 
 def test_sandbox_model_converter_omits_empty_lifecycle() -> None:
@@ -897,3 +1057,22 @@ def test_sandbox_model_converter_supports_windows_platform_request() -> None:
     )
     dumped = req.to_dict()
     assert dumped["platform"] == {"os": "windows", "arch": "amd64"}
+
+
+def test_network_rule_trims_target_before_classification() -> None:
+    """The sidecar trims before classifying; " 10.0.0.5" with ports must be
+    an IP locally too, not a misleading domain+ports rejection."""
+    rule = NetworkRule(action="allow", target="  10.0.0.5  ", ports=[22])
+    assert rule.target == "10.0.0.5"
+    with pytest.raises(ValidationError):
+        NetworkRule(action="allow", target="  example.com  ", ports=[443])
+
+
+def test_network_rule_scoped_ipv6_prefix_with_ports_rejected() -> None:
+    """netip.ParsePrefix rejects scoped prefixes while Python's ipaddress
+    accepts them; the SDK must mirror the sidecar or a valid-looking rule
+    dies remotely as a domain+ports 400."""
+    with pytest.raises(ValidationError):
+        NetworkRule(action="allow", target="fe80::1%eth0/64", ports=[22])
+    rule = NetworkRule(action="allow", target="fe80::1%eth0", ports=[22])
+    assert rule.target == "fe80::1%eth0"

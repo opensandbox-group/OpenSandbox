@@ -67,17 +67,26 @@ def _parse_response(
         return response_200
 
     if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+        try:
+            response_400 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_400
 
     if response.status_code == 401:
-        response_401 = ErrorResponse.from_dict(response.json())
+        try:
+            response_401 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_401
 
     if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
+        try:
+            response_500 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_500
 

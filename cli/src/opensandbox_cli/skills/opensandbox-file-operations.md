@@ -40,14 +40,10 @@ osb config show -o json
 
 Treat these as distinct categories:
 
-- sandbox-only content operations
-  `cat`, `write`, `replace`, `mv`, `mkdir`, `rm`, `rmdir`, `info`, `chmod`
-- host-to-sandbox transfer
-  `upload`
-- sandbox-to-host transfer
-  `download`
-- discovery before modification
-  `search`, then `info`
+- sandbox-only content operations `cat`, `write`, `replace`, `mv`, `mkdir`, `rm`, `rmdir`, `info`, `chmod`
+- host-to-sandbox transfer `upload`
+- sandbox-to-host transfer `download`
+- discovery before modification `search`, then `info`
 
 If the path is uncertain, search first. If the file boundary crosses between host and sandbox, use `upload` or `download` instead of `write` or `cat`.
 

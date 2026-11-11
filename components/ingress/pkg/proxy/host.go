@@ -86,7 +86,7 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 			if wakeErr := p.waker.Wake(r.Context(), target); wakeErr == nil {
 				endpoint, err = p.sandboxProvider.ResolveEndpoint(r.Context(), target)
 			} else {
-				return nil, httpStatusForWakeErr(wakeErr), fmt.Errorf("wake sandbox: %w", wakeErr)
+				return nil, httpStatusForWakeErr(wakeErr), &wakeGateError{target: target, err: fmt.Errorf("wake sandbox: %w", wakeErr)}
 			}
 		}
 		if err != nil {

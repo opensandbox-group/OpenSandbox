@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover
 from pydantic import BaseModel
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.status import Status
 from rich.table import Table
@@ -57,6 +58,18 @@ _STATUS_STYLES: dict[str, tuple[str, str]] = {
 _STATUS_COLUMNS = {"status", "state", "healthy"}
 _DIM_COLUMNS = {"created_at", "expires_at", "modified_at", "updated_at"}
 _ID_COLUMNS = {"id", "sandbox_id", "execution_id", "context_id"}
+
+
+def _stdout_can_encode(text: str) -> bool:
+    """Return whether stdout can represent ``text`` without substitution."""
+    encoding = getattr(sys.stdout, "encoding", None)
+    if encoding is None:
+        return True
+    try:
+        text.encode(encoding)
+    except (LookupError, UnicodeEncodeError):
+        return False
+    return True
 
 
 def _style_value(col: str, value: str) -> Text:
@@ -104,7 +117,7 @@ class OutputFormatter:
             return
         if self.color:
             console = self._err_console if stderr else self.console
-            console.print(f"  [bold {style}]{icon} {msg}[/]")
+            console.print(f"  [bold {style}]{icon} {escape(msg)}[/]")
         else:
             click.echo(f"{plain}: {msg}", err=stderr)
 
@@ -131,7 +144,7 @@ class OutputFormatter:
             self._err_console.print(f"  [bold red]{title}[/]")
             self._err_console.print(f"  [dim]{'─' * (len(title) + 2)}[/]")
             for line in msg.splitlines():
-                self._err_console.print(f"  {line}")
+                self._err_console.print(f"  {escape(line)}")
             self._err_console.print()
         else:
             click.echo(f"ERROR [{title}]: {msg}", err=True)
@@ -140,7 +153,7 @@ class OutputFormatter:
     def spinner(self, msg: str) -> Generator[Status, None, None]:
         """Context manager that shows a spinner while work is in progress."""
         if self.color and self.fmt == "table":
-            with self._err_console.status(f"[bold cyan]⏳ {msg}[/]", spinner="dots") as status:
+            with self._err_console.status(f"[bold cyan]⏳ {escape(msg)}[/]", spinner="dots") as status:
                 yield status
         else:
             yield None  # type: ignore[arg-type]
@@ -149,7 +162,7 @@ class OutputFormatter:
         """Print content inside a styled panel."""
         if self.color:
             self.console.print(Panel(
-                content,
+                Text(content),
                 title=title,
                 title_align="left",
                 border_style=style,
@@ -175,7 +188,7 @@ class OutputFormatter:
             self.console.print(f"  [bold green]✓ {title}[/]")
             self.console.print(f"  [dim]{'─' * (len(title) + 2)}[/]")
             for k, v in data.items():
-                self.console.print(f"  [bold]{k}:[/] [cyan]{v}[/]")
+                self.console.print(f"  [bold]{escape(str(k))}:[/] [cyan]{escape(str(v))}[/]")
             self.console.print()
         else:
             click.echo(f"--- {title} ---")
@@ -248,7 +261,15 @@ class OutputFormatter:
                 "PyYAML is not installed. Use --output json instead.", fg="red", err=True
             )
             sys.exit(1)
-        click.echo(yaml.dump(data, default_flow_style=False, allow_unicode=True).rstrip())
+        text = yaml.dump(data, default_flow_style=False, allow_unicode=True).rstrip()
+        if not _stdout_can_encode(text):
+            # Keep machine-readable output valid on limited code pages: escape
+            # non-ASCII into round-trippable sequences instead of letting the
+            # stream replace characters with "?".
+            text = yaml.dump(
+                data, default_flow_style=False, allow_unicode=False
+            ).rstrip()
+        click.echo(text)
 
     def _print_kv_table(self, data: dict[str, Any], *, title: str | None = None) -> None:
         table = Table(
@@ -296,10 +317,11 @@ class OutputFormatter:
         for row in rows:
             cells: list[Text | str] = []
             for col in columns:
-                val = str(row.get(col, "-"))
+                raw = row.get(col)
+                val = "-" if raw is None else str(raw)
                 if col in _STATUS_COLUMNS:
                     cells.append(_style_value(col, val))
                 else:
-                    cells.append(val)
+                    cells.append(Text(val))
             table.add_row(*cells)
         self.console.print(table)

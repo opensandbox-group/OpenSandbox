@@ -328,13 +328,16 @@ class EgressAdapterSync(EgressSync):
             from opensandbox.api.egress.models.network_rule_action import (
                 NetworkRuleAction,
             )
+            from opensandbox.api.egress.types import UNSET
 
             response_obj = patch_policy.sync_detailed(
                 client=self._client,
                 body=[
                     ApiNetworkRule(
                         action=NetworkRuleAction(rule.action),
-                        target=rule.target,
+                        # None here means UNSET (omit the field) in the client.
+                        target=rule.target if rule.target is not None else UNSET,
+                        ports=rule.ports if rule.ports is not None else UNSET,
                     )
                     for rule in rules
                 ],

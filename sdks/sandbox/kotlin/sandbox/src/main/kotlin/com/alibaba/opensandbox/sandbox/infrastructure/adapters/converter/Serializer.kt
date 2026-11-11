@@ -16,6 +16,7 @@
 
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.descriptors.elementNames
 import kotlinx.serialization.encoding.Decoder
@@ -35,6 +36,32 @@ internal val jsonParser =
         encodeDefaults = true
         coerceInputValues = true
     }
+
+internal const val DECODE_FAILURE_PAYLOAD_LIMIT = 2048
+
+/** Decodes a response body, keeping the raw payload (truncated) in the thrown [SandboxInternalException] on failure. */
+internal fun <T> Json.decodeResponseBody(
+    serializer: KSerializer<T>,
+    payload: String,
+    operation: String,
+): T =
+    try {
+        decodeFromString(serializer, payload)
+    } catch (e: Exception) {
+        throw responseDecodeFailure(operation, payload, e)
+    } catch (e: LinkageError) {
+        throw responseDecodeFailure(operation, payload, e)
+    }
+
+internal fun responseDecodeFailure(
+    operation: String,
+    payload: String,
+    cause: Throwable,
+): SandboxInternalException =
+    SandboxInternalException(
+        message = "$operation: failed to decode response body. Body: ${payload.take(DECODE_FAILURE_PAYLOAD_LIMIT)}",
+        cause = cause,
+    )
 
 abstract class AbstractUnknownPropertiesSerializer<T>(
     private val delegate: KSerializer<T>,

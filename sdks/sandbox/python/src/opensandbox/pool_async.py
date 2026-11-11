@@ -61,6 +61,7 @@ from opensandbox.pool_types import (
     PoolLifecycleState,
     PoolSnapshot,
     PoolState,
+    _extra_create_kwargs,
     effective_max_idle_attempts,
     policy_falls_through_to_direct_create,
 )
@@ -221,10 +222,8 @@ class SandboxPoolAsync:
                     self._run_heartbeat(stop_event, self._run_generation),
                     name=f"sandbox-pool-heartbeat-{self._config.pool_name}",
                 )
-            except Exception:
-                await self._stop_reconcile(wait_for_warmup=True)
-                await self._close_provider()
-                self._lifecycle_state = PoolLifecycleState.STOPPED
+            except (Exception, asyncio.CancelledError):
+                await self._cleanup_failed_start()
                 raise
 
     async def acquire(
@@ -914,6 +913,7 @@ class SandboxPoolAsync:
             )
 
         spec = self._creation_spec
+        create_kwargs = _extra_create_kwargs(spec)
         return await self._sandbox_factory.create(
             spec.image,
             timeout=self._config.idle_timeout,
@@ -922,6 +922,7 @@ class SandboxPoolAsync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            **create_kwargs,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,
@@ -954,6 +955,7 @@ class SandboxPoolAsync:
             return sandbox
 
         spec = self._creation_spec
+        create_kwargs = _extra_create_kwargs(spec)
         sandbox = await self._sandbox_factory.create(
             spec.image,
             timeout=self._config.idle_timeout,
@@ -962,6 +964,7 @@ class SandboxPoolAsync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            **create_kwargs,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,
@@ -1150,7 +1153,8 @@ class SandboxPoolAsync:
 
     def _connection_for_warmup_create(self) -> ConnectionConfig:
         if self._pool_transport_owner is None:
-            return self._pool_connection_config or self._connection_config
+            base = self._pool_connection_config or self._connection_config
+            return base.model_copy(update={"disable_metrics": True})
         # Match the Kotlin staged-warmup ownership model: temporary warmup
         # sandboxes get their own transports, while manager/acquire resources
         # use the pool-wide shared transport. Thousands of unique endpoint
@@ -1159,6 +1163,7 @@ class SandboxPoolAsync:
             update={
                 "transport": None,
                 "retry_policy": RetryPolicy.disabled(),
+                "disable_metrics": True,
             }
         )
         config._owns_transport = True
@@ -1279,17 +1284,28 @@ class SandboxPoolAsync:
                 self._in_flight_condition.notify_all()
 
     async def _await_in_flight_drain(self, timeout: timedelta) -> bool:
-        deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout.total_seconds()
         async with self._in_flight_condition:
             while self._in_flight > 0:
-                remaining = deadline - asyncio.get_running_loop().time()
+                remaining = deadline - loop.time()
                 if remaining <= 0:
                     return False
                 try:
                     await asyncio.wait_for(self._in_flight_condition.wait(), remaining)
                 except (asyncio.TimeoutError, TimeoutError):
-                    return self._in_flight == 0
+                    if self._in_flight > 0:
+                        return False
+        # Kills handed off by those operations target ids already dropped from
+        # the store, so they drain under the same budget.
+        cleanup_tasks = set(self._cleanup_tasks)
+        if not cleanup_tasks:
             return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        _, pending = await asyncio.wait(cleanup_tasks, timeout=remaining)
+        return not pending
 
     async def _stop_reconcile(
         self,
@@ -1346,6 +1362,32 @@ class SandboxPoolAsync:
             logger.warning(
                 f"Async pool primary lock release failed: pool_name={self._config.pool_name} owner_id={self._config.owner_id} error={exc}"
             )
+
+    async def _cleanup_failed_start(self) -> None:
+        async def cleanup() -> None:
+            try:
+                await self._stop_reconcile(wait_for_warmup=True)
+                await self._close_provider()
+            finally:
+                self._lifecycle_state = PoolLifecycleState.STOPPED
+
+        # Keep the lifecycle lock until cleanup finishes, even if the caller
+        # cancels again while closing startup-owned resources.
+        task = asyncio.create_task(cleanup())
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+            await task
+        except Exception as exc:
+            if cancellation is not None:
+                raise cancellation from exc
+            raise
+        if cancellation is not None:
+            raise cancellation
 
     async def _close_provider(self) -> None:
         if self._sandbox_manager is not None:

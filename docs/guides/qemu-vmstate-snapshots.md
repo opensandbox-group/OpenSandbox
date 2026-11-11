@@ -5,20 +5,11 @@ description: Configure and operate process-level pause and resume for QEMU runni
 
 # QEMU VMState Snapshots
 
-This guide explains how to prepare, deploy, and validate a QEMU-in-runc
-workload that supports process-level pause and resume. The workload runs QEMU
-inside a normal runc container; it does not use a virtualized Kubernetes
-`RuntimeClass`.
+This guide explains how to prepare, deploy, and validate a QEMU-in-runc workload that supports process-level pause and resume. The workload runs QEMU inside a normal runc container; it does not use a virtualized Kubernetes `RuntimeClass`.
 
-This mode is experimental. It restores the QEMU Guest memory, vCPU, and
-migratable device state. Other processes in the outer runc container restart
-from the `BatchSandbox` Pod template.
+This mode is experimental. It restores the QEMU Guest memory, vCPU, and migratable device state. Other processes in the outer runc container restart from the `BatchSandbox` Pod template.
 
-The initial `qemu-v1` implementation supports pause and resume of the same
-`BatchSandbox`. The public snapshot clone API does not yet restore QEMU VMState
-because its snapshot record does not persist the complete Pod template and
-QEMU launch plan. A standalone public snapshot operation resumes its source VM
-after publishing the artifacts.
+The initial `qemu-v1` implementation supports pause and resume of the same `BatchSandbox`. The public snapshot clone API does not yet restore QEMU VMState because its snapshot record does not persist the complete Pod template and QEMU launch plan. A standalone public snapshot operation resumes its source VM after publishing the artifacts.
 
 ## State and artifact model
 
@@ -34,26 +25,18 @@ Both images are pushed to the configured image Registry and recorded by manifest
 
 ## Prepare the QEMU workload image
 
-QEMU support is a contract between the workload image and OpenSandbox. The
-image must:
+QEMU support is a contract between the workload image and OpenSandbox. The image must:
 
 1. start QEMU with a QMP Unix socket;
 2. generate an OpenSandbox launch manifest from the effective QEMU settings;
 3. keep each writable Guest overlay captured by v1 in the container rootfs;
 4. recognize the OpenSandbox restore environment and add QEMU `-incoming`;
 5. become Ready only after the QMP socket and Guest service are available;
-6. for an internal BatchSandbox pause snapshot, ensure that workload-controlled
-   processes do not independently resume the source VM via QMP (e.g. `cont`) or
-   restart the source QEMU process after migration export and before the source
-   Pod is deleted (this does not restrict the snapshot worker from resuming the
-   source on failure, or during standalone public snapshots).
+6. for an internal BatchSandbox pause snapshot, ensure that workload-controlled processes do not independently resume the source VM via QMP (e.g. `cont`) or restart the source QEMU process after migration export and before the source Pod is deleted (this does not restrict the snapshot worker from resuming the source on failure, or during standalone public snapshots).
 
 ### Declare the Pod template contract
 
-Set these annotations on the Pod template that creates the QEMU container. For
-a standalone sandbox, use `BatchSandbox.spec.template.metadata`. For a pooled
-sandbox, use `Pool.spec.template.metadata` so the allocated Pod carries the
-contract.
+Set these annotations on the Pod template that creates the QEMU container. For a standalone sandbox, use `BatchSandbox.spec.template.metadata`. For a pooled sandbox, use `Pool.spec.template.metadata` so the allocated Pod carries the contract.
 
 ```yaml
 annotations:
@@ -73,20 +56,13 @@ annotations:
 | `qemu-launch-manifest` | Yes | Clean absolute path of the OpenSandbox launch manifest inside that container. |
 | `qemu-required-node-class` | No | Restricts restore to nodes carrying the matching OpenSandbox QEMU node-class label. |
 
-The paths are container paths. They do not need to be mounted into the
-controller Pod. The snapshot worker reaches the target container through the
-node container runtime.
+The paths are container paths. They do not need to be mounted into the controller Pod. The snapshot worker reaches the target container through the node container runtime.
 
 ### Generate the OpenSandbox launch manifest
 
-The launch manifest is defined by OpenSandbox. It is not a native QEMU file,
-and QEMU does not create it automatically. The workload image owner is
-responsible for producing it before the Pod becomes Ready.
+The launch manifest is defined by OpenSandbox. It is not a native QEMU file, and QEMU does not create it automatically. The workload image owner is responsible for producing it before the Pod becomes Ready.
 
-Generate the file in the container entrypoint from the same effective values
-used to build the QEMU command. Do not bake a static file into the Docker image
-when CPU, memory, disks, or devices can change through environment variables or
-the Pod template.
+Generate the file in the container entrypoint from the same effective values used to build the QEMU command. Do not bake a static file into the Docker image when CPU, memory, disks, or devices can change through environment variables or the Pod template.
 
 Example launch manifest:
 
@@ -122,14 +98,9 @@ Example launch manifest:
 | `qemuConfigDigest` | Workload-generated SHA-256 identity of compatibility-sensitive QEMU configuration. |
 | `disks` | Writable overlays and their capture policy. v1 supports only `capture: rootfs`. |
 
-`qemuConfigDigest` is an opaque compatibility value in v1. Compute it
-deterministically from a canonical representation of machine, CPU, memory,
-firmware, disk, network, and device settings. Exclude transient values such as
-PID, timestamps, QMP paths, and generated socket names. OpenSandbox records the
-digest but does not reconstruct the QEMU command line from it.
+`qemuConfigDigest` is an opaque compatibility value in v1. Compute it deterministically from a canonical representation of machine, CPU, memory, firmware, disk, network, and device settings. Exclude transient values such as PID, timestamps, QMP paths, and generated socket names. OpenSandbox records the digest but does not reconstruct the QEMU command line from it.
 
-Write the manifest atomically so a concurrent snapshot cannot read a partial
-JSON file:
+Write the manifest atomically so a concurrent snapshot cannot read a partial JSON file:
 
 ```bash
 runtime_dir=/run/qemu
@@ -155,9 +126,7 @@ EOF
 mv "$manifest_tmp" "$manifest"
 ```
 
-The reference E2E entrypoint shows the manifest and QEMU arguments being built
-from one set of variables. See the
-[reference entrypoint](https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/test/e2e_qemu/testdata/entrypoint.sh).
+The reference E2E entrypoint shows the manifest and QEMU arguments being built from one set of variables. See the [reference entrypoint](https://github.com/alibaba/OpenSandbox/blob/main/kubernetes/test/e2e_qemu/testdata/entrypoint.sh).
 
 ### Expose QMP and support restore
 
@@ -169,12 +138,9 @@ qemu_args+=(
 )
 ```
 
-QMP controls the live QEMU process and transports the migration stream. The
-launch manifest separately declares compatibility and disk-capture intent that
-cannot be recovered reliably from QMP alone.
+QMP controls the live QEMU process and transports the migration stream. The launch manifest separately declares compatibility and disk-capture intent that cannot be recovered reliably from QMP alone.
 
-The workload entrypoint must detect `OPENSANDBOX_RESTORE_MODE=qemu-v1` and
-start QEMU with the loader stream supplied in `OPENSANDBOX_VMSTATE_DIR`:
+The workload entrypoint must detect `OPENSANDBOX_RESTORE_MODE=qemu-v1` and start QEMU with the loader stream supplied in `OPENSANDBOX_VMSTATE_DIR`:
 
 ```bash
 if [[ "${OPENSANDBOX_RESTORE_MODE:-}" == "qemu-v1" ]]; then
@@ -186,23 +152,13 @@ if [[ "${OPENSANDBOX_RESTORE_MODE:-}" == "qemu-v1" ]]; then
 fi
 ```
 
-OpenSandbox injects the restore directory and loader; the workload still owns
-the complete QEMU command line. It must recreate the same machine, CPU, memory,
-firmware, disks, network, and device topology before consuming the incoming
-stream.
+OpenSandbox injects the restore directory and loader; the workload still owns the complete QEMU command line. It must recreate the same machine, CPU, memory, firmware, disks, network, and device topology before consuming the incoming stream.
 
 ### Keep the writable overlay in the rootfs
 
-Every disk declared with `capture: rootfs` must be a file in the QEMU
-container's writable rootfs. It must not resolve under a Kubernetes
-`volumeMount` or `volumeDevice`, including PVC, hostPath, projected volume, or
-`emptyDir`. `nerdctl commit` does not capture those mounts, and the snapshot
-worker rejects the configuration instead of creating an incomplete snapshot.
+Every disk declared with `capture: rootfs` must be a file in the QEMU container's writable rootfs. It must not resolve under a Kubernetes `volumeMount` or `volumeDevice`, including PVC, hostPath, projected volume, or `emptyDir`. `nerdctl commit` does not capture those mounts, and the snapshot worker rejects the configuration instead of creating an incomplete snapshot.
 
-An immutable base image can come from the original image layer or another
-independently available read-only source. Existing user init containers run
-again before the injected VMState loader on resume, so they must be idempotent
-and must not overwrite the restored writable overlay.
+An immutable base image can come from the original image layer or another independently available read-only source. Existing user init containers run again before the injected VMState loader on resume, so they must be idempotent and must not overwrite the restored writable overlay.
 
 ## Pause and resume sequence
 
@@ -218,10 +174,7 @@ and must not overwrite the restored writable overlay.
 
 ## Production deployment with Helm
 
-There is no QEMU-specific Helm feature switch. Helm installs the cluster-level
-snapshot capability; each `BatchSandbox` or `Pool` Pod template opts in through
-the annotations above. Rootfs-only workloads continue to use the existing
-behavior.
+There is no QEMU-specific Helm feature switch. Helm installs the cluster-level snapshot capability; each `BatchSandbox` or `Pool` Pod template opts in through the annotations above. Rootfs-only workloads continue to use the existing behavior.
 
 ### Prerequisites
 
@@ -232,14 +185,11 @@ behavior.
 - VMState can contain credentials and user data from Guest RAM. Apply the same access control, encryption, retention, and deletion policy as sensitive persistent storage.
 - Plan Registry capacity from measured compressed payload size. Compression depends on Guest memory contents; it is not guaranteed to be small.
 
-The controller image and image-committer image must both come from a version
-that supports `qemu-v1`. In particular, do not rely on an older chart default
-for `controller.snapshot.imageCommitterImage`; override it explicitly.
+The controller image and image-committer image must both come from a version that supports `qemu-v1`. In particular, do not rely on an older chart default for `controller.snapshot.imageCommitterImage`; override it explicitly.
 
 ### Create Registry credentials
 
-The commit Job and resumed Pod run in the sandbox namespace, so the referenced
-Secrets must exist in every namespace that uses snapshot and restore:
+The commit Job and resumed Pod run in the sandbox namespace, so the referenced Secrets must exist in every namespace that uses snapshot and restore:
 
 ```bash
 kubectl -n sandbox-team create secret docker-registry snapshot-registry \
@@ -248,9 +198,7 @@ kubectl -n sandbox-team create secret docker-registry snapshot-registry \
   --docker-password='<password-or-token>'
 ```
 
-One Secret can be used for push, image-committer pull, and resume pull when the
-credential has all three permissions. Production deployments may use separate
-least-privilege Secrets with the same names in each sandbox namespace.
+One Secret can be used for push, image-committer pull, and resume pull when the credential has all three permissions. Production deployments may use separate least-privilege Secrets with the same names in each sandbox namespace.
 
 ### Configure and install the chart
 
@@ -272,8 +220,7 @@ controller:
     resumePullSecret: snapshot-registry
 ```
 
-Install or upgrade the controller. On a fresh cluster, install the base chart
-first — the controller chart no longer ships the CRDs:
+Install or upgrade the controller. On a fresh cluster, install the base chart first — the controller chart no longer ships the CRDs:
 
 ```bash
 helm upgrade --install base ./manifests/charts/base
@@ -285,9 +232,7 @@ helm upgrade --install opensandbox-controller \
   --values qemu-snapshot-values.yaml
 ```
 
-Sync the CRDs into the base chart (`make -C manifests helm-gen-crds`) and
-upgrade `base` so the updated `SandboxSnapshot` CRD lands. Verify the deployed
-capability before creating workloads:
+Sync the CRDs into the base chart (`make -C manifests helm-gen-crds`) and upgrade `base` so the updated `SandboxSnapshot` CRD lands. Verify the deployed capability before creating workloads:
 
 ```bash
 kubectl -n opensandbox-system rollout status \
@@ -298,13 +243,9 @@ kubectl get crd sandboxsnapshots.sandbox.opensandbox.io \
   -o jsonpath='{.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.virtualMachine.type}{"\n"}'
 ```
 
-Confirm that cluster admission permits the node-trusted snapshot Job. QEMU
-mode requires the host PID namespace, `SYS_PTRACE`, and the host containerd
-runtime directory. The QEMU workload itself needs `/dev/kvm` and normally runs
-privileged unless the platform supplies narrower device permissions.
+Confirm that cluster admission permits the node-trusted snapshot Job. QEMU mode requires the host PID namespace, `SYS_PTRACE`, and the host containerd runtime directory. The QEMU workload itself needs `/dev/kvm` and normally runs privileged unless the platform supplies narrower device permissions.
 
-For heterogeneous fleets, label compatible restore nodes and declare the
-matching class on the workload:
+For heterogeneous fleets, label compatible restore nodes and declare the matching class on the workload:
 
 ```bash
 kubectl label node <node> \
@@ -317,13 +258,7 @@ metadata:
     sandbox.opensandbox.io/qemu-required-node-class: shenlong-v1
 ```
 
-By default, snapshot image names are generated below the configured Registry prefix. A
-QEMU sandbox produces normal container rootfs images such as
-`<prefix>/<sandbox>-<container>:<tag>` and a VMState image such as
-`<prefix>/<sandbox>-vmstate:<tag>`. Both artifact names can be customized with
-[`--snapshot-image-uri-template`](/guides/pause-resume#custom-image-names); VM-state
-artifacts receive `ContainerName` and `ArtifactKind` equal to `vmstate`. Resume
-resolves and uses their immutable manifest digests.
+By default, snapshot image names are generated below the configured Registry prefix. A QEMU sandbox produces normal container rootfs images such as `<prefix>/<sandbox>-<container>:<tag>` and a VMState image such as `<prefix>/<sandbox>-vmstate:<tag>`. Both artifact names can be customized with [`--snapshot-image-uri-template`](/guides/pause-resume#custom-image-names); VM-state artifacts receive `ContainerName` and `ArtifactKind` equal to `vmstate`. Resume resolves and uses their immutable manifest digests.
 
 ## Validation
 
@@ -338,18 +273,14 @@ The test requires Linux amd64, Docker, Kind, kubectl, and `/dev/kvm`. By default
 
 ### Reusable Kind validation environment
 
-The E2E harness can build the images, create a dedicated KVM-enabled Kind
-cluster, deploy the controller and Registry, run the reference Pool flow, and
-leave the environment available for manual checks:
+The E2E harness can build the images, create a dedicated KVM-enabled Kind cluster, deploy the controller and Registry, run the reference Pool flow, and leave the environment available for manual checks:
 
 ```bash
 cd kubernetes
 KEEP_QEMU_E2E_CLUSTER=true make test-e2e-qemu
 ```
 
-The resulting context is `kind-opensandbox-qemu-vmstate-e2e`. The controller
-runs in `opensandbox-system`, while the in-cluster `registry:2` Pod and the
-automated test objects run in `qemu-vmstate-e2e`:
+The resulting context is `kind-opensandbox-qemu-vmstate-e2e`. The controller runs in `opensandbox-system`, while the in-cluster `registry:2` Pod and the automated test objects run in `qemu-vmstate-e2e`:
 
 ```bash
 kubectl --context kind-opensandbox-qemu-vmstate-e2e \
@@ -358,9 +289,7 @@ kubectl --context kind-opensandbox-qemu-vmstate-e2e \
   -n qemu-vmstate-e2e get pod,service,pool,batchsandbox
 ```
 
-To exercise an authenticated external Registry instead, provide its repository
-prefix and a local Docker `config.json`; the harness creates the temporary
-Kubernetes pull/push Secret without printing its contents:
+To exercise an authenticated external Registry instead, provide its repository prefix and a local Docker `config.json`; the harness creates the temporary Kubernetes pull/push Secret without printing its contents:
 
 ```bash
 QEMU_E2E_SNAPSHOT_REGISTRY=registry.example.com/team \
@@ -369,15 +298,11 @@ KEEP_QEMU_E2E_CLUSTER=true \
 make test-e2e-qemu
 ```
 
-The commands below use a separate `qemu-manual` namespace, so the retained E2E
-objects do not need to be deleted first.
+The commands below use a separate `qemu-manual` namespace, so the retained E2E objects do not need to be deleted first.
 
 ### Manual validation in a prepared Kind cluster
 
-This flow deliberately leaves lifecycle actions to the operator. It assumes
-the controller, snapshot Registry, image-committer image, and demo QEMU image
-are already installed in a Kind cluster with `/dev/kvm`. From the repository
-root, select that cluster and create only the standalone `BatchSandbox`:
+This flow deliberately leaves lifecycle actions to the operator. It assumes the controller, snapshot Registry, image-committer image, and demo QEMU image are already installed in a Kind cluster with `/dev/kvm`. From the repository root, select that cluster and create only the standalone `BatchSandbox`:
 
 ```bash
 export OSB_QEMU_CONTEXT=kind-opensandbox-qemu-vmstate-e2e
@@ -409,12 +334,9 @@ kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
   cat /run/qemu-e2e/launch.json
 ```
 
-Do not continue if the annotated container, socket path, manifest path, or
-effective QEMU settings disagree.
+Do not continue if the annotated container, socket path, manifest path, or effective QEMU settings disagree.
 
-The demo Guest runs the HTTP server and the mutable memory map in the same PID
-1 process. QEMU user networking forwards the outer container's loopback port
-`18080` to Guest port `8080`; the service is not exposed on the Pod IP.
+The demo Guest runs the HTTP server and the mutable memory map in the same PID 1 process. QEMU user networking forwards the outer container's loopback port `18080` to Guest port `8080`; the service is not exposed on the Pod IP.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -425,8 +347,7 @@ The demo Guest runs the HTTP server and the mutable memory map in the same PID
 | `PUT /disk` | Store a marker in the raw writable Guest disk |
 | `GET /disk` | Read the raw Guest disk marker |
 
-Define a phase waiter and put three independent markers in Guest memory, the
-Guest disk, and the outer container rootfs:
+Define a phase waiter and put three independent markers in Guest memory, the Guest disk, and the outer container rootfs:
 
 ```bash
 wait_for_sandbox_phase() {
@@ -477,10 +398,7 @@ watch -n 1 kubectl --context "$OSB_QEMU_CONTEXT" \
   -n "$OSB_QEMU_NAMESPACE" get batchsandbox,sandboxsnapshot,pod,job
 ```
 
-The initial manifest intentionally omits `spec.pause`: setting it to `false`
-on a brand-new object is interpreted as an explicit resume request. Pause the
-sandbox by adding `spec.pause: true`, then inspect the two immutable image
-artifacts:
+The initial manifest intentionally omits `spec.pause`: setting it to `false` on a brand-new object is interpreted as an explicit resume request. Pause the sandbox by adding `spec.pause: true`, then inspect the two immutable image artifacts:
 
 ```bash
 kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
@@ -494,12 +412,9 @@ kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
   wait --for=delete pod/"$OSB_QEMU_POD" --timeout=120s
 ```
 
-The snapshot must report `status.format: qemu-v1`, a rootfs image digest under
-`status.containers`, and a different VMState image digest plus a non-zero
-compressed size under `status.virtualMachine`.
+The snapshot must report `status.format: qemu-v1`, a rootfs image digest under `status.containers`, and a different VMState image digest plus a non-zero compressed size under `status.virtualMachine`.
 
-Resume by editing `spec.pause` to `false`, then verify process-level
-continuity and both filesystem layers:
+Resume by editing `spec.pause` to `false`, then verify process-level continuity and both filesystem layers:
 
 ```bash
 kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
@@ -537,11 +452,7 @@ kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
   get pod "$OSB_QEMU_POD" -o jsonpath='{range .status.initContainerStatuses[*]}{.name}{"="}{.state.terminated.reason}{"\n"}{end}'
 ```
 
-All assertions must return zero. The Pod UID must change, the Guest boot ID
-must remain the same, the live counter must increase, all three tokens must
-match, and the VMState loader init container must report `Completed`. The
-internal `SandboxSnapshot` is deleted after a successful resume. Remove only
-the test object when finished; the Kind infrastructure remains available:
+All assertions must return zero. The Pod UID must change, the Guest boot ID must remain the same, the live counter must increase, all three tokens must match, and the VMState loader init container must report `Completed`. The internal `SandboxSnapshot` is deleted after a successful resume. Remove only the test object when finished; the Kind infrastructure remains available:
 
 ```bash
 kubectl --context "$OSB_QEMU_CONTEXT" delete \
@@ -550,8 +461,7 @@ kubectl --context "$OSB_QEMU_CONTEXT" delete \
 
 ### Manual validation with a Pool
 
-Create the Pool first and wait for its warm QEMU Pod. Then create a
-`BatchSandbox` that allocates that Pod:
+Create the Pool first and wait for its warm QEMU Pod. Then create a `BatchSandbox` that allocates that Pod:
 
 ```bash
 kubectl --context "$OSB_QEMU_CONTEXT" apply \
@@ -569,8 +479,7 @@ kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
   get batchsandbox qemu-pooled -w
 ```
 
-Read the allocated Pod name from the allocation annotation and write the same
-three markers used by the standalone case:
+Read the allocated Pod name from the allocation annotation and write the same three markers used by the standalone case:
 
 ```bash
 export OSB_POOLED_POD=$(kubectl --context "$OSB_QEMU_CONTEXT" \
@@ -596,8 +505,7 @@ kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
   sh "$OSB_POOL_ROOTFS_TOKEN"
 ```
 
-Run `kubectl edit batchsandbox qemu-pooled -n qemu-manual` and add
-`spec.pause: true`. On successful pause, verify the Pool-specific handoff:
+Run `kubectl edit batchsandbox qemu-pooled -n qemu-manual` and add `spec.pause: true`. On successful pause, verify the Pool-specific handoff:
 
 ```bash
 kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
@@ -607,12 +515,7 @@ kubectl --context "$OSB_QEMU_CONTEXT" -n "$OSB_QEMU_NAMESPACE" \
   get sandboxsnapshot qemu-pooled-pause -o yaml
 ```
 
-The phase must be `Paused`. The controller materializes the allocated Pod's
-template into the `BatchSandbox` and clears `spec.poolRef`; this detach is
-intentional, so resume creates an independent Pod instead of returning to the
-Pool. Edit `spec.pause` back to `false`, wait for `qemu-pooled-0` to become
-Ready, then call `GET /status`, `GET /disk`, and the rootfs marker check against
-it.
+The phase must be `Paused`. The controller materializes the allocated Pod's template into the `BatchSandbox` and clears `spec.poolRef`; this detach is intentional, so resume creates an independent Pod instead of returning to the Pool. Edit `spec.pause` back to `false`, wait for `qemu-pooled-0` to become Ready, then call `GET /status`, `GET /disk`, and the rootfs marker check against it.
 
 Clean up the Pool example without deleting the Kind cluster:
 

@@ -8,7 +8,12 @@ spec:
   expireTime: "{{.ExpireTime}}"
   template:
     spec:
+      terminationGracePeriodSeconds: 15
       containers:
       - name: sandbox-container
         image: {{.SandboxImage}}
         command: ["sleep", "3600"]
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sleep", "5"]

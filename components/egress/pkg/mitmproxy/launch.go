@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -32,6 +33,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
@@ -46,16 +48,26 @@ const (
 	revisionIPCControlGenerationEnv = "OPENSANDBOX_EGRESS_REVISION_CONTROL_GENERATION"
 	revisionIPCSubjectGenerationEnv = "OPENSANDBOX_EGRESS_REVISION_SUBJECT_GENERATION"
 	revisionIPCMaxSnapshotBytesEnv  = "OPENSANDBOX_EGRESS_REVISION_MAX_SNAPSHOT_BYTES"
+	// Live admission bundle: presence of all three values in the child selects
+	// the OSEP-0023 live credential-bound receiver instead of the
+	// installation-only receiver. The launcher owns them; sandbox users cannot.
+	revisionIPCTLSCapacityEnv         = "OPENSANDBOX_EGRESS_REVISION_TLS_CAPACITY"
+	revisionIPCRequestCapacityEnv     = "OPENSANDBOX_EGRESS_REVISION_REQUEST_CAPACITY"
+	revisionIPCDrainTimeoutSecondsEnv = "OPENSANDBOX_EGRESS_REVISION_DRAIN_TIMEOUT_SECONDS"
 )
 
 var (
 	errInvalidRevisionIPCConfig = errors.New("mitmproxy: invalid revision IPC configuration")
 	revisionIPCEnvNames         = []string{
+		constants.EnvMitmproxyPassthroughHosts,
 		revisionIPCSocketEnv,
 		revisionIPCTokenEnv,
 		revisionIPCControlGenerationEnv,
 		revisionIPCSubjectGenerationEnv,
 		revisionIPCMaxSnapshotBytesEnv,
+		revisionIPCTLSCapacityEnv,
+		revisionIPCRequestCapacityEnv,
+		revisionIPCDrainTimeoutSecondsEnv,
 	}
 )
 
@@ -98,6 +110,8 @@ type Config struct {
 	// private socket parent and must not reuse this configuration after the
 	// child exits. Nil keeps the receiver disabled and removes inherited values.
 	RevisionIPC *RevisionIPCConfig
+	// SubjectRevisionIPC selects the independent shared-process installation receiver.
+	SubjectRevisionIPC *SubjectRevisionIPCConfig
 }
 
 // RevisionIPCConfig is handed only to the mitmdump child. The bearer token is
@@ -109,6 +123,96 @@ type RevisionIPCConfig struct {
 	ControlGeneration string
 	SubjectGeneration string
 	MaxSnapshotBytes  int
+	// LiveAdmission selects the OSEP-0023 live credential-bound receiver: the
+	// addon consults the installed decision snapshot for TLS decrypt and
+	// request admission. False keeps the installation-only receiver.
+	StaticPassthrough   mitmpassthrough.Config
+	LiveAdmission       bool
+	TLSCapacity         int
+	RequestCapacity     int
+	DrainTimeoutSeconds int
+}
+
+// SubjectRevisionScriptPath is the bundled installation-only shared receiver addon.
+const SubjectRevisionScriptPath = "/var/egress/mitmscripts/subject_runtime.py"
+
+const subjectRevisionEnvPrefix = "OPENSANDBOX_EGRESS_SUBJECT_REVISION_"
+
+// SubjectRevisionIPCConfig is an internal handoff, never an operator setting.
+// It deliberately has no single SubjectGeneration or live admission fields.
+type SubjectRevisionIPCConfig struct {
+	SocketPath            string
+	SessionToken          string
+	ControlGeneration     string
+	MaxSubjects           int
+	MaxSnapshotBytes      int
+	RetainedPayloadBudget int64
+}
+
+func validateSubjectRevisionIPCConfig(cfg Config) error {
+	subject := cfg.SubjectRevisionIPC
+	if subject == nil {
+		return nil
+	}
+	if cfg.RevisionIPC != nil || !filepath.IsAbs(subject.SocketPath) ||
+		strings.IndexByte(subject.SocketPath, 0) >= 0 || len(subject.SocketPath) > 103 ||
+		!validRevisionIPCToken(subject.SessionToken) || !validRevisionIPCGeneration(subject.ControlGeneration) ||
+		subject.MaxSubjects <= 0 || subject.MaxSnapshotBytes <= 0 ||
+		int64(subject.MaxSubjects) > math.MaxInt64/2/int64(subject.MaxSnapshotBytes) ||
+		subject.RetainedPayloadBudget < 2*int64(subject.MaxSubjects)*int64(subject.MaxSnapshotBytes) {
+		return errInvalidRevisionIPCConfig
+	}
+	count := 0
+	for _, path := range cfg.ScriptPaths {
+		if path == SubjectRevisionScriptPath {
+			count++
+		}
+	}
+	if count != 1 {
+		return errInvalidRevisionIPCConfig
+	}
+	return nil
+}
+
+// WithSubjectRevision returns an owned launch config; the template is reusable
+// only without its per-child session. The system addon receives no v1 bundle.
+func WithSubjectRevision(cfg Config, handoff SubjectRevisionIPCConfig) (Config, error) {
+	if cfg.RevisionIPC != nil || cfg.SubjectRevisionIPC != nil {
+		return Config{}, errInvalidRevisionIPCConfig
+	}
+	cfg.ScriptPaths = append(append([]string(nil), cfg.ScriptPaths...), SubjectRevisionScriptPath)
+	cfg.SubjectRevisionIPC = &handoff
+	if err := validateSubjectRevisionIPCConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Nil subject configuration delegates verbatim to the existing sidecar builder.
+func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
+	env := buildMitmdumpEnv(base, home, cfg.RevisionIPC)
+	if cfg.SubjectRevisionIPC == nil {
+		// Preserve inherited OPENSANDBOX_EGRESS_SUBJECT_REVISION_* values
+		// intentionally: the disabled path has no reader for this prefix.
+		return env
+	}
+	clean := make([]string, 0, len(env)+7)
+	for _, value := range env {
+		name, _, _ := strings.Cut(value, "=")
+		if !strings.HasPrefix(name, subjectRevisionEnvPrefix) {
+			clean = append(clean, value)
+		}
+	}
+	s := cfg.SubjectRevisionIPC
+	return append(clean,
+		subjectRevisionEnvPrefix+"MODE=subject-v2",
+		subjectRevisionEnvPrefix+"SOCKET="+s.SocketPath,
+		subjectRevisionEnvPrefix+"TOKEN="+s.SessionToken,
+		subjectRevisionEnvPrefix+"CONTROL_GENERATION="+s.ControlGeneration,
+		subjectRevisionEnvPrefix+"MAX_SUBJECTS="+strconv.Itoa(s.MaxSubjects),
+		subjectRevisionEnvPrefix+"MAX_SNAPSHOT_BYTES="+strconv.Itoa(s.MaxSnapshotBytes),
+		subjectRevisionEnvPrefix+"RETAINED_PAYLOAD_BUDGET="+strconv.FormatInt(s.RetainedPayloadBudget, 10),
+	)
 }
 
 // Running: child mitmdump; use GracefulShutdown to SIGTERM+reap before process exit.
@@ -151,6 +255,9 @@ func Launch(cfg Config) (*Running, error) {
 	if err := validateRevisionIPCConfig(cfg.RevisionIPC); err != nil {
 		return nil, err
 	}
+	if err := validateSubjectRevisionIPCConfig(cfg); err != nil {
+		return nil, err
+	}
 	uname := cfg.UserName
 	if strings.TrimSpace(uname) == "" {
 		uname = RunAsUser
@@ -175,7 +282,7 @@ func Launch(cfg Config) (*Running, error) {
 	}
 	// HOME determines mitm's confdir (~/.mitmproxy) which holds both the CA
 	// and the baked-in config.yaml.
-	cmd.Env = buildMitmdumpEnv(os.Environ(), home, cfg.RevisionIPC)
+	cmd.Env = buildMitmdumpChildEnv(os.Environ(), home, cfg)
 
 	if err := cmd.Start(); err != nil {
 		_ = mitmIn.Close()
@@ -285,6 +392,14 @@ func buildMitmdumpEnv(base []string, home string, revisionIPC *RevisionIPCConfig
 			revisionIPCSubjectGenerationEnv+"="+revisionIPC.SubjectGeneration,
 			revisionIPCMaxSnapshotBytesEnv+"="+strconv.Itoa(revisionIPC.MaxSnapshotBytes),
 		)
+		if revisionIPC.LiveAdmission {
+			env = append(env,
+				constants.EnvMitmproxyPassthroughHosts+"="+revisionIPC.StaticPassthrough.JSON(),
+				revisionIPCTLSCapacityEnv+"="+strconv.Itoa(revisionIPC.TLSCapacity),
+				revisionIPCRequestCapacityEnv+"="+strconv.Itoa(revisionIPC.RequestCapacity),
+				revisionIPCDrainTimeoutSecondsEnv+"="+strconv.Itoa(revisionIPC.DrainTimeoutSeconds),
+			)
+		}
 	}
 	return env
 }
@@ -297,6 +412,20 @@ func validateRevisionIPCConfig(cfg *RevisionIPCConfig) error {
 		!validRevisionIPCToken(cfg.SessionToken) ||
 		!validRevisionIPCGeneration(cfg.ControlGeneration) ||
 		!validRevisionIPCGeneration(cfg.SubjectGeneration) || cfg.MaxSnapshotBytes <= 0 {
+		return errInvalidRevisionIPCConfig
+	}
+	if cfg.LiveAdmission &&
+		(cfg.TLSCapacity <= 0 || cfg.RequestCapacity <= 0 ||
+			cfg.DrainTimeoutSeconds < 1 || cfg.DrainTimeoutSeconds > 300) {
+		return errInvalidRevisionIPCConfig
+	}
+	// The live credential-bound mode never runs with insecure upstream
+	// verification: credential injection requires the verified origin
+	// identity. The installation-only receiver keeps the legacy escape hatch.
+	if cfg.LiveAdmission && !cfg.StaticPassthrough.Empty() && strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
+		return errInvalidRevisionIPCConfig
+	}
+	if cfg.LiveAdmission && constants.IsTruthy(os.Getenv(constants.EnvMitmproxySslInsecure)) {
 		return errInvalidRevisionIPCConfig
 	}
 	return nil
@@ -333,6 +462,13 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 		if !ok {
 			continue
 		}
+		if strings.HasPrefix(msg, "credential proxy: tls-admission-") {
+			if decision, reason, ok := tlsAdmissionEvent(msg); ok {
+				telemetry.RecordTLSAdmission(decision, reason)
+			}
+			// Consume malformed events too; never forward their raw payload.
+			continue
+		}
 		if strings.HasPrefix(msg, "credential proxy: tls-shadow ") {
 			telemetry.RecordTLSShadow(strings.TrimPrefix(msg, "credential proxy: tls-shadow "))
 			continue
@@ -343,6 +479,22 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 	// early; closing the read end makes the exec copy goroutine fail with
 	// ErrClosedPipe so cmd.Wait returns instead of hanging forever.
 	_ = r.Close()
+}
+
+const tlsAdmissionPrefix = "credential proxy: tls-admission-v1"
+
+// tlsAdmissionEvent validates framing only. The recorder validates the closed
+// decision/reason pairs before creating attributes.
+func tlsAdmissionEvent(msg string) (decision, reason string, ok bool) {
+	payload, found := strings.CutPrefix(msg, tlsAdmissionPrefix+" ")
+	if !found || strings.ContainsAny(payload, "\t\r\n\v\f") {
+		return "", "", false
+	}
+	values := strings.Split(payload, " ")
+	if len(values) != 2 || values[0] == "" || values[1] == "" {
+		return "", "", false
+	}
+	return values[0], values[1], true
 }
 
 // credentialProxyMessage returns the message of a credential proxy log line,

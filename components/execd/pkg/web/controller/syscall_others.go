@@ -22,6 +22,6 @@ import (
 	"time"
 )
 
-func getFileCreateTime(_ os.FileInfo) time.Time {
+func getFileCreateTime(_ string, _ os.FileInfo) time.Time {
 	return time.Now()
 }

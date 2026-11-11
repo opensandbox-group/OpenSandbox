@@ -23,12 +23,15 @@ from opensandbox_server.api.schema import (
     ImageSpec,
     ListSnapshotsRequest,
     LifecycleHook,
+    NetworkPolicy,
+    NetworkRule,
     OSSFS,
     PaginationInfo,
     PaginationRequest,
     PeriodicLifecycleHook,
     PlatformSpec,
     PVC,
+    RenewalPolicy,
     ResourceLimits,
     SandboxLifecycle,
     Snapshot,
@@ -80,13 +83,25 @@ class TestSandboxLifecycle:
             )
 
     def test_create_request_rejects_lifecycle_with_pool_ref(self):
-        with pytest.raises(ValidationError, match="lifecycle cannot be used together with poolRef"):
+        # OSEP-0024: lifecycle hooks conflict with pool mode, but the
+        # hooks-free idlePolicy container is allowed through.
+        with pytest.raises(
+            ValidationError,
+            match="lifecycle hooks cannot be used together with poolRef",
+        ):
             CreateSandboxRequest(
                 extensions={"poolRef": "default/pool"},
                 lifecycle=SandboxLifecycle(
                     preStart=LifecycleHook(command=["true"]),
                 ),
             )
+
+        request = CreateSandboxRequest(
+            extensions={"poolRef": "default/pool"},
+            lifecycle=SandboxLifecycle(idlePolicy={"idleTimeoutSeconds": 300, "onIdle": "pause"}),
+        )
+        assert request.lifecycle is not None
+        assert request.lifecycle.idle_policy is not None
 
     @pytest.mark.parametrize(
         ("hook", "expected"),
@@ -162,6 +177,59 @@ class TestSandboxLifecycle:
     def test_lifecycle_rejects_blank_required_values(self, payload, message):
         with pytest.raises(ValidationError, match=message):
             SandboxLifecycle.model_validate(payload)
+
+
+class TestRenewalPolicy:
+    """lifecycle.renewalPolicy (OSEP-0009) supersedes the deprecated
+    extensions["access.renew.extend.seconds"] key."""
+
+    def test_parses_alias(self):
+        lifecycle = SandboxLifecycle.model_validate(
+            {"renewalPolicy": {"extendSeconds": 3600}}
+        )
+        assert lifecycle.renewal_policy is not None
+        assert lifecycle.renewal_policy.extend_seconds == 3600
+
+    def test_serialization_uses_aliases(self):
+        lifecycle = SandboxLifecycle(renewalPolicy={"extendSeconds": 3600})
+        payload = lifecycle.model_dump(by_alias=True, exclude_none=True)
+        assert payload == {"renewalPolicy": {"extendSeconds": 3600}}
+
+    @pytest.mark.parametrize("value", [299, 86401])
+    def test_rejects_out_of_bounds(self, value):
+        with pytest.raises(ValidationError):
+            RenewalPolicy(extendSeconds=value)
+
+    def test_rejects_unknown_fields(self):
+        with pytest.raises(ValidationError):
+            RenewalPolicy.model_validate({"extendSeconds": 3600, "onAccess": "renew"})
+
+    def test_lifecycle_rejects_unknown_fields(self):
+        with pytest.raises(ValidationError):
+            SandboxLifecycle.model_validate({"renewal": {"extendSeconds": 3600}})
+
+    def test_pool_ref_allows_renewal_policy(self):
+        # renewalPolicy is control-plane state, not a hook: it may accompany
+        # extensions.poolRef like idlePolicy.
+        request = CreateSandboxRequest(
+            extensions={"poolRef": "default/pool"},
+            lifecycle=SandboxLifecycle(renewalPolicy={"extendSeconds": 3600}),
+        )
+        assert request.lifecycle is not None
+        assert request.lifecycle.renewal_policy is not None
+
+    def test_template_mode_allows_renewal_policy_at_schema_level(self):
+        # Template mode rejects workload-shaping fields only; the fsb backend
+        # enforces its own renew-on-access rejection after routing.
+        request = CreateSandboxRequest.model_validate(
+            {
+                "templateId": "tpl-1",
+                "timeout": 600,
+                "lifecycle": {"renewalPolicy": {"extendSeconds": 3600}},
+            }
+        )
+        assert request.lifecycle is not None
+        assert request.lifecycle.renewal_policy is not None
 
 
 class TestHost:
@@ -846,3 +914,195 @@ class TestCreateSandboxRequestPoolMode:
             CreateSandboxRequest(
                 extensions={"poolRef": "   "},
             )
+
+
+class TestNetworkPolicy:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"egress": [{"action": "allow", "target": "10.0.0.0/8", "port": [443]}]},
+            {"egres": []},
+        ],
+    )
+    def test_rejects_unknown_fields(self, payload):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            NetworkPolicy.model_validate(payload)
+
+    @pytest.mark.parametrize("action", ["allow", "deny"])
+    def test_round_trips_valid_policy(self, action):
+        payload = {
+            "defaultAction": action,
+            "egress": [
+                {"action": action, "target": "*.example.com"},
+                {"action": action, "target": "10.0.0.0/8", "ports": [22, 443]},
+                {"action": action, "ports": [25]},
+            ],
+        }
+        policy = NetworkPolicy.model_validate(payload)
+        assert policy.model_dump(by_alias=True, exclude_none=True) == payload
+
+    def test_preserves_omitted_defaults(self):
+        policy = NetworkPolicy()
+        assert policy.default_action is None
+        assert policy.egress == []
+        assert policy.model_dump(by_alias=True, exclude_none=True) == {"egress": []}
+
+    def test_preserves_default_action_field_name(self):
+        policy = NetworkPolicy.model_validate({"default_action": "deny"})
+        assert policy.model_dump(by_alias=True, exclude_none=True) == {
+            "defaultAction": "deny", "egress": [],
+        }
+
+
+class TestNetworkRule:
+    """NetworkRule.target became optional so a rule can be scoped by `ports`
+    alone; these guard the target/ports combinations the API is meant to
+    accept or reject, and that pass-through to the egress sidecar (see
+    server/opensandbox_server/services/{docker/networking,k8s/egress_helper}.py,
+    which serialize with exclude_none=True) drops unset fields instead of
+    sending literal nulls.
+    """
+
+    def test_requires_target_or_ports(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow"})
+
+    def test_rejects_more_than_256_ports(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "ports": list(range(1, 258))})
+
+    def test_accepts_exactly_256_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "ports": list(range(1, 257))})
+        assert len(rule.ports) == 256
+
+    def test_port_only_rule_omits_target(self):
+        rule = NetworkRule.model_validate({"action": "deny", "ports": [25]})
+        assert rule.target is None
+        assert rule.ports == [25]
+
+    def test_target_with_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "10.0.0.5", "ports": [22, 80]})
+        assert rule.target == "10.0.0.5"
+        assert rule.ports == [22, 80]
+
+    def test_cidr_target_with_ports(self):
+        rule = NetworkRule.model_validate({"action": "deny", "target": "10.0.0.0/8", "ports": [22]})
+        assert rule.target == "10.0.0.0/8"
+
+    def test_ipv6_target_with_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "2001:db8::1", "ports": [443]})
+        assert rule.target == "2001:db8::1"
+
+    def test_rejects_domain_target_with_ports(self):
+        """Regression: the sidecar (policy.go normalizePolicy) rejects
+        domain+ports, but the server validator did not mirror it, so an
+        invalid request would pass the API and only fail once Docker/K8s
+        started the egress sidecar with it — surfacing as a sandbox creation
+        failure instead of a clean 422 from the create-sandbox request."""
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "example.com", "ports": [443]})
+
+    def test_rejects_wildcard_domain_target_with_ports(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "*.example.com", "ports": [443]})
+
+    def test_rejects_out_of_range_ports(self):
+        for bad_port in (0, -1, 65536):
+            with pytest.raises(ValidationError):
+                NetworkRule.model_validate({"action": "allow", "ports": [bad_port]})
+
+    def test_rejects_duplicate_ports(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "ports": [443, 443]})
+
+    def test_rejects_empty_ports_list(self):
+        """The specs declare minItems: 1 on ports; an empty list must not be
+        silently treated as unset, or clients could widen a rule's scope by
+        mistake (an allow rule for a target would apply to every port)."""
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "10.0.0.5", "ports": []})
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "ports": []})
+
+    def test_rejects_netmask_cidr_with_ports(self):
+        """Regression: `10.0.0.0/255.0.0.0` parses via ipaddress.ip_network but
+        Go's netip.ParsePrefix rejects netmask notation, so the sidecar would
+        classify it as a domain target and fail startup with a confusing
+        "ports are not supported for domain targets" error."""
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "10.0.0.0/255.0.0.0", "ports": [22]})
+
+    def test_netmask_cidr_without_ports_still_accepted(self):
+        """Netmask notation is not port-scoped: it reaches the sidecar as a
+        domain rule, which both layers accept (evaluated as a literal string
+        by the DNS layer, like any other non-IP target)."""
+        rule = NetworkRule.model_validate({"action": "allow", "target": "10.0.0.0/255.0.0.0"})
+        assert rule.target == "10.0.0.0/255.0.0.0"
+
+    def test_target_is_trimmed_like_the_sidecar(self):
+        """policy.go trims the target before classifying; the server must too,
+        or " 10.0.0.5" would be classified as a domain and rejected with a
+        confusing domain+ports error. The trimmed value is what gets stored
+        and serialized."""
+        rule = NetworkRule.model_validate({"action": "allow", "target": "  10.0.0.5  ", "ports": [22]})
+        assert rule.target == "10.0.0.5"
+
+    def test_whitespace_target_counts_as_omitted(self):
+        """A whitespace-only target trims to empty, mirroring the sidecar:
+        with ports it degrades to a port-only rule; without ports it is
+        rejected like a rule with no target and no ports."""
+        rule = NetworkRule.model_validate({"action": "deny", "target": "   ", "ports": [25]})
+        assert rule.target is None
+        assert rule.ports == [25]
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "   "})
+
+    def test_domain_only_rule_still_requires_target(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "example.com"})
+        assert rule.target == "example.com"
+        assert rule.ports is None
+
+    def test_serialization_omits_unset_target_and_ports(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "example.com"})
+        assert rule.model_dump(by_alias=True, exclude_none=True) == {
+            "action": "allow",
+            "target": "example.com",
+        }
+
+    def test_network_policy_round_trips_port_only_rule(self):
+        policy = NetworkPolicy.model_validate(
+            {"defaultAction": "deny", "egress": [{"action": "deny", "ports": [25]}]}
+        )
+        dumped = policy.model_dump(by_alias=True, exclude_none=True)
+        assert dumped["egress"] == [{"action": "deny", "ports": [25]}]
+
+
+class TestNetworkRuleReadModifyWriteAndClassification:
+    """Review follow-ups: the sidecar marshals port-only rules as
+    "target": "" (no omitempty), so the schema must accept blank targets on
+    input (GET → PUT round-trip), and its IP/CIDR classification must match
+    Go's netip for the shapes the sidecar will re-classify.
+    """
+
+    def test_blank_target_with_ports_round_trips(self):
+        rule = NetworkRule.model_validate({"action": "deny", "target": "", "ports": [25]})
+        assert rule.target is None
+        assert rule.ports == [25]
+        assert NetworkPolicy.model_validate(
+            {"defaultAction": "deny", "egress": [{"action": "deny", "target": "", "ports": [25]}]}
+        ).model_dump(by_alias=True, exclude_none=True)["egress"] == [{"action": "deny", "ports": [25]}]
+
+    def test_blank_target_without_ports_rejected(self):
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": ""})
+
+    def test_zoned_ipv6_prefix_with_ports_rejected(self):
+        """netip.ParsePrefix rejects scoped prefixes; the sidecar would see a
+        domain and fail at provisioning with a confusing error."""
+        with pytest.raises(ValidationError):
+            NetworkRule.model_validate({"action": "allow", "target": "fe80::1%eth0/64", "ports": [22]})
+
+    def test_zoned_ipv6_address_with_ports_accepted(self):
+        """Bare zoned addresses parse in both netip.ParseAddr and ipaddress."""
+        rule = NetworkRule.model_validate({"action": "allow", "target": "fe80::1%eth0", "ports": [22]})
+        assert rule.target == "fe80::1%eth0"

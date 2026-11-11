@@ -14,14 +14,11 @@ permissions:
   packages: write
 
 concurrency:
-  # serialize same-version runs (the weekly schedule shares one group)
-  group: release-umbrella-${{ github.event_name == 'workflow_dispatch' && inputs.version || 'schedule' }}
+  # serialize same-version runs
+  group: release-umbrella-${{ inputs.version }}
   cancel-in-progress: false
 
 on:
-  schedule:
-    # weekly rehearsal: exercises the fan-out with no publish-facing side effects
-    - cron: '0 3 * * 3'
   workflow_dispatch:
     inputs:
       version:
@@ -51,12 +48,7 @@ jobs:
           IN_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ -n "$IN_VERSION" ]]; then
-            version="$IN_VERSION"
-          else
-            # scheduled dry-run: use the chart version carried by this ref
-            version="$(sed -n 's/^version:[[:space:]]*//p' manifests/charts/opensandbox/Chart.yaml | head -1 | tr -d '"'"'"'')"
-          fi
+          version="${IN_VERSION:?version input is required}"
           # channel derives from the version suffix (X.Y.Z-rc.N -> rc)
           if [[ "$version" == *-* ]]; then channel="rc"; else channel="stable"; fi
           # the BOM PR targets the branch the workflow was dispatched on
@@ -66,10 +58,10 @@ jobs:
           echo "release_branch=$branch" >> "$GITHUB_OUTPUT"
           echo "resolved: version=$version channel=$channel branch=$branch"
 
-  # tolerate the scheduled-run scan skip, but never run after a failure
   preflight:
     needs: [resolve, scan]
-    if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
+    # never run after a scan failure
+    if: ${{ !cancelled() && needs.scan.result == 'success' }}
     uses: ./.github/workflows/release-preflight.yml
     with:
       # only stable requires the release-environment approval
@@ -77,7 +69,6 @@ jobs:
 
   scan:
     name: Version-consistency scan
-    if: github.event_name == 'workflow_dispatch'
     needs: resolve
     runs-on: ubuntu-latest
     steps:
@@ -94,8 +85,8 @@ jobs:
   build-images:
     name: Build ${{ matrix.component }} image
     needs: [resolve, preflight, scan]
-    # tolerate the scheduled-run scan skip, but never run after a failure
-    if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
+    # never run after a scan failure
+    if: ${{ !cancelled() && needs.scan.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -194,6 +185,7 @@ jobs:
         if: steps.already_released.outputs.released != 'true'
         env:
           COMPONENT: ${{ matrix.component }}
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.resolve.outputs.version }}
           # release tags once the publish gate opens, run-scoped staging
           # tags before that; dry runs push nothing (PUSH=false)
           IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
@@ -246,7 +238,8 @@ jobs:
   build-fast-sandbox:
     name: Build fast-sandbox images
     needs: [resolve, preflight, scan]
-    if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') }}
+    # never run after a scan failure
+    if: ${{ !cancelled() && needs.scan.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -354,9 +347,10 @@ jobs:
   packages:
     name: SDK / CLI / server packages
     needs: [resolve, preflight, scan, bom]
-    # builds still rehearse when the BOM was skipped, but publish fires
-    # only after the BOM PR has merged — never against a partial release
-    if: ${{ !cancelled() && (needs.scan.result == 'success' || needs.scan.result == 'skipped') && (needs.bom.result == 'success' || needs.bom.result == 'skipped') }}
+    # a skipped BOM (e.g. an image leg failed) still rehearses package
+    # builds, but publish fires only after the BOM PR has merged —
+    # never against a partial release
+    if: ${{ !cancelled() && needs.scan.result == 'success' && (needs.bom.result == 'success' || needs.bom.result == 'skipped') }}
     # the called workflow's jobs declare id-token/attestations
     permissions:
       contents: read
@@ -404,13 +398,9 @@ jobs:
           VERSION: ${{ needs.resolve.outputs.version }}
           CHANNEL: ${{ needs.resolve.outputs.channel }}
           RELEASE_BRANCH: ${{ needs.resolve.outputs.release_branch }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           git config user.name "opensandbox-release-bot"
           git config user.email "opensandbox-release-bot@users.noreply.github.com"
-          # scheduled runs use a non-bumped ref; consistency is exercised on dispatch
-          SKIP=""
-          [[ "$EVENT_NAME" != "schedule" ]] || SKIP="--skip-consistency"
           base_head="$(git rev-parse HEAD)"
           ./manifests/release/create-umbrella-release.sh \
             --version "$VERSION" \
@@ -418,8 +408,7 @@ jobs:
             --release-branch "$RELEASE_BRANCH" \
             --digests-manifest /tmp/digests.json \
             --no-tags \
-            --skip-remote-check \
-            $SKIP
+            --skip-remote-check
           if [[ "$(git rev-parse HEAD)" == "$base_head" ]]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else

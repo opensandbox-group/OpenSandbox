@@ -39,6 +39,15 @@ def test_parse_timestamp_parses_valid_rfc3339():
     assert result == datetime(2024, 1, 1, 12, 34, 56, 123456, tzinfo=timezone.utc)
 
 
+def test_parse_timestamp_pads_short_fraction():
+    assert parse_timestamp("2024-01-01T12:34:56.5Z") == datetime(
+        2024, 1, 1, 12, 34, 56, 500000, tzinfo=timezone.utc
+    )
+    assert parse_timestamp("2024-01-01T12:34:56.12345Z") == datetime(
+        2024, 1, 1, 12, 34, 56, 123450, tzinfo=timezone.utc
+    )
+
+
 def test_parse_timestamp_invalid_falls_back_to_now():
     before = datetime.now(timezone.utc)
     result = parse_timestamp("not-a-time")

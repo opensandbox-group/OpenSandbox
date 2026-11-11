@@ -64,6 +64,24 @@ def diagnostics_group(ctx: click.Context) -> None:
         click.echo(ctx.get_help())
 
 
+@diagnostics_group.command("context")
+@click.argument("sandbox_id")
+@output_option("table", "json", "yaml")
+@click.pass_obj
+@handle_errors
+def diagnostics_context(
+    obj: ClientContext,
+    sandbox_id: str,
+    output_format: str | None,
+) -> None:
+    """Identify the sandbox backend and its diagnostic identifiers."""
+    context = obj.get_manager().get_diagnostic_context(sandbox_id)
+    output = prepare_output(
+        obj, output_format, allowed=("table", "json", "yaml"), fallback="table"
+    )
+    output.print_dict(context.model_dump(mode="json"), title="Diagnostic Context")
+
+
 @diagnostics_group.command("logs")
 @click.argument("sandbox_id")
 @click.option(

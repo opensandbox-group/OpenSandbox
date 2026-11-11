@@ -335,6 +335,8 @@ func TestRunCommand_Error(t *testing.T) {
 	require.NotNil(t, gotErr, "expected error hook to be called")
 	require.Equal(t, "CommandExecError", gotErr.EName)
 	require.Equal(t, "3", gotErr.EValue)
+	require.NotNil(t, gotErr.ExitCode, "expected exit_code for a command that ran")
+	require.Equal(t, 3, *gotErr.ExitCode)
 }
 
 func TestRunCommand_ExpandsHomeInCwd(t *testing.T) {
@@ -493,6 +495,7 @@ func TestRunCommand_StartErrorIncludesTraceback(t *testing.T) {
 	require.Equal(t, "CommandExecError", gotErr.EName)
 	require.NotEmpty(t, gotErr.Traceback, "expected traceback to be populated")
 	require.Equal(t, gotErr.EValue, gotErr.Traceback[0])
+	require.Nil(t, gotErr.ExitCode, "start failure must not report an exit_code")
 	require.False(t, completeCalled, "did not expect completion hook on start failure")
 }
 

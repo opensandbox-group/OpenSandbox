@@ -28,24 +28,31 @@ func handleActiveVaultSnapshot(
 	r *http.Request,
 	store *credentialvault.Store,
 ) {
+	captureActiveVaultSnapshot(r, store)(w)
+}
+
+// captureActiveVaultSnapshot reads an independent memory snapshot before any
+// response output. FastSandbox holds its subject lock only during capture.
+func captureActiveVaultSnapshot(r *http.Request, store *credentialvault.Store) func(http.ResponseWriter) {
 	knownTag, err := parseActiveVaultETag(r.Header.Get("If-None-Match"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+		return func(w http.ResponseWriter) { http.Error(w, err.Error(), http.StatusBadRequest) }
 	}
-
+	if store == nil {
+		return func(w http.ResponseWriter) { http.Error(w, "unknown subject", http.StatusNotFound) }
+	}
 	snapshot, tag, changed, err := store.ActiveSnapshotIfChanged(r.Context(), knownTag)
 	if err != nil {
-		credentialvault.WriteError(w, err)
-		return
+		return func(w http.ResponseWriter) { credentialvault.WriteError(w, err) }
 	}
-
-	w.Header().Set("ETag", formatActiveVaultETag(tag))
-	if !changed {
-		w.WriteHeader(http.StatusNotModified)
-		return
+	return func(w http.ResponseWriter) {
+		w.Header().Set("ETag", formatActiveVaultETag(tag))
+		if !changed {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writeJSON(w, http.StatusOK, snapshot)
 	}
-	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func parseActiveVaultETag(value string) (string, error) {

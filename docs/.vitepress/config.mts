@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 
 const sdkSidebar = [
   {
@@ -45,7 +46,7 @@ const sdkSidebar = [
   },
 ];
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: "OpenSandbox",
   description: "Universal Sandbox Infrastructure for AI Applications",
   cleanUrls: true,
@@ -147,12 +148,16 @@ export default defineConfig({
             { text: "Ingress", link: "/architecture/network/ingress" },
             { text: "Egress", link: "/architecture/network/egress" },
             {
+              text: "Experimental HTTP/2",
+              link: "/architecture/network/osep-0023-h2-integration",
+            },
+            {
               text: "Single-Host Network (Docker)",
               link: "/architecture/network/single-host-network",
             },
             {
-              text: "Network Isolation",
-              link: "/architecture/network/network-isolation",
+              text: "Auto-Pause & Wake-on-Access",
+              link: "/architecture/network/auto-pause-wake-on-access",
             },
           ],
         },
@@ -207,6 +212,7 @@ export default defineConfig({
           text: "Guides",
           items: [
             { text: "Overview", link: "/guides/" },
+            { text: "Developer Console", link: "/guides/developer-console" },
             { text: "Credential Vault", link: "/guides/credential-vault" },
             {
               text: "Chained Upstream Proxy",
@@ -214,9 +220,22 @@ export default defineConfig({
             },
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
+            {
+              text: "Network Isolation on Kubernetes",
+              link: "/guides/network-isolation",
+            },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
+            { text: "OCI Templates", link: "/guides/oci-templates" },
+            {
+              text: "Auto-Pause & Wake-on-Access",
+              link: "/guides/auto-pause-wake",
+            },
+            {
+              text: "Renew-on-Access",
+              link: "/guides/renew-on-access",
+            },
             {
               text: "Kubernetes Resume Benchmark",
               link: "/guides/kubernetes-resume-benchmark",
@@ -235,6 +254,10 @@ export default defineConfig({
             {
               text: "Node Agent Configuration",
               link: "/guides/node-agent",
+            },
+            {
+              text: "Telemetry",
+              link: "/guides/telemetry",
             },
           ],
         },
@@ -333,10 +356,6 @@ export default defineConfig({
           items: [
             { text: "Contributing", link: "/community/contributing" },
             { text: "Code of Conduct", link: "/community/code-of-conduct" },
-            {
-              text: "Enhancement Proposals",
-              link: "/community/oseps",
-            },
           ],
         },
         {
@@ -393,8 +412,10 @@ export default defineConfig({
     ],
 
     footer: {
-      message: "Released under the Apache 2.0 License.",
-      copyright: "Copyright © 2024-present OpenSandbox Contributors",
+      // VitePress renders message first, followed by copyright.
+      message: "Copyright © OpenSandbox a Series of LF Projects, LLC",
+      copyright:
+        'For web site terms of use, trademark policy and other project policies please see <a href="https://lfprojects.org/" target="_blank" rel="noopener noreferrer">https://lfprojects.org/</a>.',
     },
 
     search: {
@@ -405,4 +426,4 @@ export default defineConfig({
       level: [2, 3],
     },
   },
-});
+}));

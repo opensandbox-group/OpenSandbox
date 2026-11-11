@@ -134,6 +134,7 @@ type ServerStreamEvent struct {
 	Type           ServerStreamEventType `json:"type,omitempty"`
 	Text           string                `json:"text,omitempty"`
 	ExecutionCount int                   `json:"execution_count,omitempty"`
+	ExitCode       *int                  `json:"exit_code,omitempty"`
 	ExecutionTime  int64                 `json:"execution_time,omitempty"`
 	Timestamp      int64                 `json:"timestamp,omitempty"`
 	Results        map[string]any        `json:"results,omitempty"`

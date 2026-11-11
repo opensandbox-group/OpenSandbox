@@ -28,16 +28,20 @@ import com.alibaba.opensandbox.sandbox.api.models.RenewSandboxExpirationRequest
 import com.alibaba.opensandbox.sandbox.api.models.RenewSandboxExpirationResponse
 import com.alibaba.opensandbox.sandbox.api.models.Snapshot
 import com.alibaba.opensandbox.sandbox.api.models.execd.Metrics
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.ActivityProbe
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Host
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OnIdleAction
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PVC
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PaginationInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.RenewalPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxAllocation
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxCreateResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -52,8 +56,10 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotStatus
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import java.time.Duration
 import java.time.OffsetDateTime
+import com.alibaba.opensandbox.sandbox.api.models.ActivityProbe as ApiActivityProbe
 import com.alibaba.opensandbox.sandbox.api.models.CredentialProxyConfig as ApiCredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.api.models.Host as ApiHost
+import com.alibaba.opensandbox.sandbox.api.models.IdlePolicy as ApiIdlePolicy
 import com.alibaba.opensandbox.sandbox.api.models.LifecycleHook as ApiLifecycleHook
 import com.alibaba.opensandbox.sandbox.api.models.NetworkPolicy as ApiNetworkPolicy
 import com.alibaba.opensandbox.sandbox.api.models.NetworkRule as ApiNetworkRule
@@ -62,6 +68,7 @@ import com.alibaba.opensandbox.sandbox.api.models.PVC as ApiPVC
 import com.alibaba.opensandbox.sandbox.api.models.PaginationInfo as ApiPaginationInfo
 import com.alibaba.opensandbox.sandbox.api.models.PeriodicLifecycleHook as ApiPeriodicLifecycleHook
 import com.alibaba.opensandbox.sandbox.api.models.PlatformSpec as ApiPlatformSpec
+import com.alibaba.opensandbox.sandbox.api.models.RenewalPolicy as ApiRenewalPolicy
 import com.alibaba.opensandbox.sandbox.api.models.Sandbox as ApiSandbox
 import com.alibaba.opensandbox.sandbox.api.models.SandboxLifecycle as ApiSandboxLifecycle
 import com.alibaba.opensandbox.sandbox.api.models.SandboxStatus as ApiSandboxStatus
@@ -116,6 +123,9 @@ internal object SandboxModelConverter {
                             NetworkRule.Action.DENY -> ApiNetworkRule.Action.deny
                         },
                     target = rule.target,
+                    // The generated model maps the spec's uniqueItems array to Set;
+                    // the domain model keeps List so declaration order survives.
+                    ports = rule.ports?.toSet(),
                 )
             }
         return ApiNetworkPolicy(
@@ -130,7 +140,7 @@ internal object SandboxModelConverter {
                 NetworkRule.Action.ALLOW -> ApiNetworkRule.Action.allow
                 NetworkRule.Action.DENY -> ApiNetworkRule.Action.deny
             }
-        return ApiNetworkRule(action = action, target = this.target)
+        return ApiNetworkRule(action = action, target = this.target, ports = this.ports?.toSet())
     }
 
     fun NetworkRule.toApiEgressNetworkRule(): ApiEgressNetworkRule {
@@ -139,7 +149,7 @@ internal object SandboxModelConverter {
                 NetworkRule.Action.ALLOW -> ApiEgressNetworkRule.Action.allow
                 NetworkRule.Action.DENY -> ApiEgressNetworkRule.Action.deny
             }
-        return ApiEgressNetworkRule(action = action, target = this.target)
+        return ApiEgressNetworkRule(action = action, target = this.target, ports = this.ports?.toSet())
     }
 
     fun ApiNetworkRule.toDomainNetworkRule(): NetworkRule {
@@ -148,11 +158,7 @@ internal object SandboxModelConverter {
                 ApiNetworkRule.Action.allow -> NetworkRule.Action.ALLOW
                 ApiNetworkRule.Action.deny -> NetworkRule.Action.DENY
             }
-        return NetworkRule
-            .builder()
-            .action(action)
-            .target(this.target)
-            .build()
+        return toDomainRule(action, this.target, this.ports)
     }
 
     fun ApiNetworkPolicy.toDomainNetworkPolicy(): NetworkPolicy {
@@ -174,11 +180,26 @@ internal object SandboxModelConverter {
                 ApiEgressNetworkRule.Action.allow -> NetworkRule.Action.ALLOW
                 ApiEgressNetworkRule.Action.deny -> NetworkRule.Action.DENY
             }
-        return NetworkRule
-            .builder()
-            .action(action)
-            .target(this.target)
-            .build()
+        return toDomainRule(action, this.target, this.ports)
+    }
+
+    /**
+     * Shared read-back normalization for both lifecycle and egress rules:
+     * the sidecar emits "target": "" for port-only rules and an empty ports
+     * list is contract-invalid, so both are treated as absent. Builds via
+     * the lenient [NetworkRule.fromWire] — read-back must not run write-path
+     * validation.
+     */
+    private fun toDomainRule(
+        action: NetworkRule.Action,
+        target: String?,
+        ports: Set<Int>?,
+    ): NetworkRule {
+        return NetworkRule.fromWire(
+            action,
+            target?.takeIf { it.isNotBlank() },
+            ports?.takeIf { it.isNotEmpty() }?.toList(),
+        )
     }
 
     fun ApiEgressNetworkPolicy.toDomainEgressNetworkPolicy(): NetworkPolicy {
@@ -307,6 +328,41 @@ internal object SandboxModelConverter {
                         timeoutSeconds = it.timeoutSeconds,
                     )
                 },
+            idlePolicy = idlePolicy?.toApiIdlePolicy(),
+            renewalPolicy = renewalPolicy?.toApiRenewalPolicy(),
+        )
+    }
+
+    /** Converts Domain RenewalPolicy -> API RenewalPolicy (OSEP-0009). */
+    internal fun RenewalPolicy.toApiRenewalPolicy(): ApiRenewalPolicy {
+        return ApiRenewalPolicy(extendSeconds = extendSeconds)
+    }
+
+    /**
+     * Converts Domain IdlePolicy -> API IdlePolicy (OSEP-0024).
+     *
+     * Validation happens in the domain model's builder; this mapping only
+     * translates the values.
+     */
+    internal fun IdlePolicy.toApiIdlePolicy(): ApiIdlePolicy {
+        return ApiIdlePolicy(
+            idleTimeoutSeconds = idleTimeoutSeconds,
+            onIdle =
+                onIdle?.let {
+                    when (it) {
+                        OnIdleAction.PAUSE -> ApiIdlePolicy.OnIdle.pause
+                    }
+                },
+            wakeOnAccess = wakeOnAccess,
+            activeProbe = activeProbe?.toApiActivityProbe(),
+        )
+    }
+
+    private fun ActivityProbe.toApiActivityProbe(): ApiActivityProbe {
+        return ApiActivityProbe(
+            port = port,
+            path = path,
+            timeoutSeconds = timeoutSeconds,
         )
     }
 

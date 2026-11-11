@@ -68,6 +68,10 @@ def _parse_response(
         response_500 = response.text
         return response_500
 
+    if response.status_code == 503:
+        response_503 = response.text
+        return response_503
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -97,7 +101,9 @@ def sync_detailed(
     This endpoint uses merge semantics:
     - Existing rules remain unless overridden by incoming rules.
     - Incoming rules are applied with higher priority than existing rules.
-    - If multiple incoming rules refer to the same `target`, the first one wins.
+    - If multiple incoming rules resolve to the same match scope (same
+      `target` and the same set of `ports`), the first one wins; rules
+      that differ in `target` or in `ports` coexist.
 
     Args:
         body (list[NetworkRule]):
@@ -133,7 +139,9 @@ def sync(
     This endpoint uses merge semantics:
     - Existing rules remain unless overridden by incoming rules.
     - Incoming rules are applied with higher priority than existing rules.
-    - If multiple incoming rules refer to the same `target`, the first one wins.
+    - If multiple incoming rules resolve to the same match scope (same
+      `target` and the same set of `ports`), the first one wins; rules
+      that differ in `target` or in `ports` coexist.
 
     Args:
         body (list[NetworkRule]):
@@ -164,7 +172,9 @@ async def asyncio_detailed(
     This endpoint uses merge semantics:
     - Existing rules remain unless overridden by incoming rules.
     - Incoming rules are applied with higher priority than existing rules.
-    - If multiple incoming rules refer to the same `target`, the first one wins.
+    - If multiple incoming rules resolve to the same match scope (same
+      `target` and the same set of `ports`), the first one wins; rules
+      that differ in `target` or in `ports` coexist.
 
     Args:
         body (list[NetworkRule]):
@@ -198,7 +208,9 @@ async def asyncio(
     This endpoint uses merge semantics:
     - Existing rules remain unless overridden by incoming rules.
     - Incoming rules are applied with higher priority than existing rules.
-    - If multiple incoming rules refer to the same `target`, the first one wins.
+    - If multiple incoming rules resolve to the same match scope (same
+      `target` and the same set of `ports`), the first one wins; rules
+      that differ in `target` or in `ports` coexist.
 
     Args:
         body (list[NetworkRule]):

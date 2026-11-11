@@ -7,9 +7,7 @@ description: OpenSandbox MCP Server exposes sandbox operations as MCP tools for 
 
 ## Overview
 
-OpenSandbox MCP Server exposes the OpenSandbox Python SDK as MCP tools for
-Claude Code, Cursor, and other MCP-capable clients. It provides focused
-sandbox lifecycle management, command execution, and text file operations.
+OpenSandbox MCP Server exposes the OpenSandbox Python SDK as MCP tools for Claude Code, Cursor, and other MCP-capable clients. It provides focused sandbox lifecycle management, command execution, and text file operations.
 
 ## Installation & Startup
 
@@ -58,10 +56,7 @@ opensandbox-mcp \
   --port 8000
 ```
 
-The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when
-the MCP server must be reached from another container, and use `--port` to
-select a different listening port. Keep the default loopback host unless the
-container network or an upstream gateway protects the exposed endpoint.
+The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when the MCP server must be reached from another container, and use `--port` to select a different listening port. Keep the default loopback host unless the container network or an upstream gateway protects the exposed endpoint.
 
 ## Integrations
 
@@ -111,16 +106,11 @@ claude mcp add opensandbox-sandbox --transport http http://localhost:8000/mcp
 ## Tools
 
 ::: info
-- Tools that interact with a sandbox use an ID registered by `sandbox_create` or
-  `sandbox_connect`. `sandbox_list` lists server-side sandboxes without an existing
-  local sandbox registration.
+- Tools that interact with a sandbox use an ID registered by `sandbox_create` or `sandbox_connect`. `sandbox_list` lists server-side sandboxes without an existing local sandbox registration.
 - `file_read`/`file_write` are text-only; use `encoding` and `range_header` for large files.
 :::
 
-The MCP server exposes the tool set below, not the complete Python SDK. It does
-not currently register tools for Client Pool, pool tracing, snapshots, templates,
-Credential Vault, or stable remote diagnostic logs/events. Use the
-[SDK guides](/sdks/) or [CLI](/cli/) for those workflows where supported.
+The MCP server exposes the tool set below, not the complete Python SDK. It does not currently register tools for Client Pool, pool tracing, snapshots, templates, Credential Vault, or stable remote diagnostic logs/events. Use the [SDK guides](/sdks/) or [CLI](/cli/) for those workflows where supported.
 
 ### Sandbox
 
@@ -137,6 +127,8 @@ Credential Vault, or stable remote diagnostic logs/events. Use the
 ### Command Execution
 
 - `command_run`: run a command inside a sandbox
+- `command_get_status`: get a command's running state, exit code, and error
+- `command_get_logs`: read combined stdout/stderr of a background command, with an optional `cursor` for incremental reads
 - `command_interrupt`: interrupt a running command
 
 ### Filesystem
@@ -158,6 +150,18 @@ Credential Vault, or stable remote diagnostic logs/events. Use the
 4. `sandbox_get_endpoint` if you expose a port.
 5. `sandbox_kill` when finished.
 
+### Background Commands
+
+1. `command_run` with `background=true` -> keep the execution `id`.
+2. `command_get_status` until `running` is `false`; check `exit_code` and `error`.
+3. Between status checks, `command_get_logs` with the `cursor` from the previous call to read only new output.
+4. After `running` is `false`, call `command_get_logs` once more to read the remaining output.
+5. `command_interrupt` to stop a command early.
+
+::: tip
+The `cursor` is a server-side position: pass back the returned value instead of computing it from the content length. Empty `content` does not mean the command finished. Completed command records are retained for at least 24 hours, so a "not found" error for an old execution does not mean the command failed.
+:::
+
 ## Usage Examples
 
 Here are some examples of what you can ask an LLM to do:
@@ -165,6 +169,7 @@ Here are some examples of what you can ask an LLM to do:
 - "Create a Python sandbox and run a quick health command."
 - "Write a Python script into the sandbox and run it."
 - "Download a GitHub repo, install dependencies, and run its tests."
+- "Run the test suite in the background, report progress, and tell me whether it passed."
 - "Generate a CSV file with fake sales data and run a simple summary script."
 - "Start a tiny web server on port 8000 and return the public URL."
 - "Build a minimal REST API (hello + health) and expose it on port 8000."

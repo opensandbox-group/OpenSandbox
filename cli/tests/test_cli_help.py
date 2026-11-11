@@ -39,6 +39,7 @@ class TestRootCLI:
             "template",
             "snapshot",
             "command",
+            "terminal",
             "file",
             "egress",
             "credential-vault",
@@ -64,6 +65,12 @@ class TestSandboxHelp:
 
 
 class TestTemplateAndSnapshotHelp:
+    def test_template_create_help_describes_oci_destination(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["template", "create", "--help"])
+        assert result.exit_code == 0
+        assert "oci://registry/repository" in result.output
+        assert "no tag or digest" in " ".join(result.output.split())
+
     @pytest.mark.parametrize("group", ["template", "snapshot"])
     def test_group_help_lists_subcommands(self, runner: CliRunner, group: str) -> None:
         result = runner.invoke(cli, [group, "--help"])
@@ -92,6 +99,14 @@ class TestFileHelp:
         assert result.exit_code == 0
         for subcmd in ("cat", "write", "upload", "download", "rm", "mv", "mkdir", "rmdir", "search", "info", "chmod", "replace"):
             assert subcmd in result.output
+
+
+class TestTerminalHelp:
+    def test_terminal_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["terminal", "--help"])
+        assert result.exit_code == 0
+        assert "SANDBOX_ID" in result.output
+        assert "--workdir" in result.output
 
 
 class TestEgressHelp:
@@ -134,6 +149,12 @@ class TestDevopsHelp:
 
 
 class TestDiagnosticsHelp:
+    def test_context_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["diagnostics", "context", "--help"])
+        assert result.exit_code == 0
+        assert "SANDBOX_ID" in result.output
+        assert "--output" in result.output
+
     def test_diagnostics_help_documents_scopes(self, runner: CliRunner) -> None:
         logs = runner.invoke(cli, ["diagnostics", "logs", "--help"])
         events = runner.invoke(cli, ["diagnostics", "events", "--help"])

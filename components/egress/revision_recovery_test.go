@@ -426,3 +426,22 @@ func TestRevisionRecoveryInitializationCannotResetOwner(t *testing.T) {
 	require.ErrorIs(t, err, errRevisionRecoveryRequired)
 	require.Nil(t, ticket)
 }
+
+// This test-only replacement exercises pointer/ABA fencing without a live owner.
+// replaceRevisionBaseLocked requires the caller to hold s.mu. A replacement
+// gets a fresh handle even when both policy content and epoch are unchanged.
+func (s *policyServer) replaceRevisionBaseLocked(inputs effectivePolicyInputs) error {
+	if err := s.revisionRecovery.recoveryErrorLocked(); err != nil {
+		return err
+	}
+	if s.revisionRecovery == nil {
+		return errInvalidEffectivePolicyCandidate
+	}
+	base, err := newEffectivePolicyBase(inputs, 0)
+	if err != nil {
+		return err
+	}
+	s.revisionRecovery.current = base
+	s.invalidateRevisionBootstrapLocked()
+	return nil
+}

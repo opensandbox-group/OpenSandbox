@@ -16,6 +16,7 @@ import json
 from datetime import datetime, timezone
 
 from opensandbox_server.api.schema import (
+    IdlePolicy,
     LifecycleHook,
     PeriodicLifecycleHook,
     SandboxLifecycle,
@@ -68,3 +69,69 @@ def test_create_context_transports_lifecycle_as_reserved_execd_env(
             }
         ],
     }
+
+
+def test_create_context_never_transports_idle_policy_to_execd(
+    k8s_app_config,
+    create_sandbox_request,
+):
+    """idlePolicy is control-plane state (OSEP-0024); hooks only on the wire."""
+    create_sandbox_request.lifecycle = SandboxLifecycle(
+        preStart=LifecycleHook(command=["/opt/hooks/restore.sh"]),
+        idlePolicy=IdlePolicy(idleTimeoutSeconds=300, onIdle="pause"),
+    )
+
+    context = _build_create_workload_context(
+        k8s_app_config,
+        create_sandbox_request,
+        "sandbox-1",
+        datetime.now(timezone.utc),
+        lambda: "egress-token",
+        lambda: "secure-token",
+    )
+
+    assert "idlePolicy" not in json.loads(context.sandbox_env[OPENSANDBOX_LIFECYCLE])
+
+
+def test_create_context_never_transports_renewal_policy_to_execd(
+    k8s_app_config,
+    create_sandbox_request,
+):
+    """renewalPolicy is control-plane state (OSEP-0009); hooks only on the wire."""
+    create_sandbox_request.lifecycle = SandboxLifecycle(
+        preStart=LifecycleHook(command=["/opt/hooks/restore.sh"]),
+        renewalPolicy={"extendSeconds": 3600},
+    )
+
+    context = _build_create_workload_context(
+        k8s_app_config,
+        create_sandbox_request,
+        "sandbox-1",
+        datetime.now(timezone.utc),
+        lambda: "egress-token",
+        lambda: "secure-token",
+    )
+
+    assert "renewalPolicy" not in json.loads(context.sandbox_env[OPENSANDBOX_LIFECYCLE])
+
+
+def test_create_context_skips_lifecycle_env_for_policy_only_lifecycle(
+    k8s_app_config,
+    create_sandbox_request,
+):
+    """A renewal-only lifecycle must not inject OPENSANDBOX_LIFECYCLE: an
+    empty payload would overwrite hooks persisted in the image/snapshot."""
+    create_sandbox_request.lifecycle = SandboxLifecycle(
+        renewalPolicy={"extendSeconds": 3600},
+    )
+
+    context = _build_create_workload_context(
+        k8s_app_config,
+        create_sandbox_request,
+        "sandbox-1",
+        datetime.now(timezone.utc),
+        lambda: "egress-token",
+        lambda: "secure-token",
+    )
+
+    assert OPENSANDBOX_LIFECYCLE not in context.sandbox_env

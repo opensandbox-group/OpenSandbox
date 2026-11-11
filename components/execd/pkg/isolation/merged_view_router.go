@@ -27,18 +27,22 @@ import (
 )
 
 // ErrPathOutsideOverlays is returned when a path does not fall under any
-// registered overlay mount.
-var ErrPathOutsideOverlays = errors.New("path is outside all overlay mounts")
+// registered session mount (overlay or bind).
+var ErrPathOutsideOverlays = errors.New("path is outside all session mounts")
 
-// OverlayView binds one overlay mount path (the destination inside the
-// namespace) to the view serving it.
+// OverlayView binds one mount path (the destination inside the namespace)
+// to the view serving it.
 type OverlayView struct {
-	// Path must equal the view's own root (for MergedView, its LowerDir):
-	// routing forwards the requested path unchanged, so a view rooted
-	// elsewhere would resolve paths outside its root instead of failing
-	// with ErrPathOutsideOverlays.
+	// Path is the mount destination inside the namespace; routing matches
+	// request paths against it by longest prefix.
 	Path string
 	FS   vfs.FS
+	// Root is the path the view is actually rooted at when it differs from
+	// Path — a bind view serves dest-prefixed namespace paths from the
+	// bind's host source directory. Empty means Root == Path and request
+	// paths are forwarded unchanged; otherwise the matched Path prefix is
+	// stripped and Root is prepended before the operation is delegated.
+	Root string
 	// RelativeBase marks this view as the base for relative paths.
 	// Single-workspace sessions treat relative paths as workspace-relative,
 	// so callers with a workspace overlay mark its view; otherwise a /
@@ -48,23 +52,26 @@ type OverlayView struct {
 	RelativeBase bool
 }
 
-// MultiMergedView routes filesystem operations to the overlay-scoped view
+// MultiMergedView routes filesystem operations to the mount-scoped view
 // whose mount path is the longest prefix of the requested path. It lets one
-// session expose several independent overlay mounts (workspace, system root,
-// extra project directories) through a single vfs.FS.
+// session expose several independent mounts (workspace, system root, extra
+// project directories, bind mounts) through a single vfs.FS.
 //
 // Routing rules:
-//   - Absolute paths route to the longest matching overlay prefix, so
-//     /workspace/a resolves against the /workspace overlay even when a
-//     broader / root overlay is also registered. A view mounted at /
+//   - Absolute paths route to the longest matching mount prefix, so
+//     /workspace/a resolves against the /workspace mount even when a
+//     broader / root mount is also registered. A view mounted at /
 //     matches every absolute path.
+//   - Equal-length prefixes keep registration order: register bind views
+//     before overlay views to mirror bwrap, where a later mount shadows
+//     earlier ones sharing a destination.
 //   - Relative paths resolve against the view marked RelativeBase (the
-//     workspace view), falling back to the shallowest (root-most) overlay
+//     workspace view), falling back to the shallowest (root-most) mount
 //     when none is marked — mirroring single-workspace behavior where
 //     relative paths are workspace-relative.
 //   - Rename is routed by both paths; a rename whose source and
-//     destination resolve to different overlays is rejected.
-//   - Paths outside every overlay return ErrPathOutsideOverlays.
+//     destination resolve to different mounts is rejected.
+//   - Paths outside every mount return ErrPathOutsideOverlays.
 type MultiMergedView struct {
 	routes       []overlayRoute // sorted by prefix length, longest first
 	relativeBase vfs.FS
@@ -72,14 +79,15 @@ type MultiMergedView struct {
 
 type overlayRoute struct {
 	prefix string
+	root   string // view root; empty forwards paths unchanged
 	fs     vfs.FS
 }
 
 var _ vfs.FS = (*MultiMergedView)(nil)
 
-// NewMultiMergedView builds a router from overlay views. Mount paths are
+// NewMultiMergedView builds a router from mount views. Mount paths are
 // cleaned; non-absolute mount paths can never match an absolute request
-// path and are dropped.
+// path and are dropped, as are non-absolute view roots.
 func NewMultiMergedView(views []OverlayView) *MultiMergedView {
 	routes := make([]overlayRoute, 0, len(views))
 	var relativeBase vfs.FS
@@ -91,7 +99,15 @@ func NewMultiMergedView(views []OverlayView) *MultiMergedView {
 		if !filepath.IsAbs(prefix) {
 			continue
 		}
-		routes = append(routes, overlayRoute{prefix: prefix, fs: v.FS})
+		route := overlayRoute{prefix: prefix, fs: v.FS}
+		if v.Root != "" {
+			root := filepath.Clean(v.Root)
+			if !filepath.IsAbs(root) {
+				continue
+			}
+			route.root = root
+		}
+		routes = append(routes, route)
 		if v.RelativeBase {
 			relativeBase = v.FS
 		}
@@ -122,137 +138,178 @@ func prefixDepth(p string) int {
 	return strings.Count(p, "/")
 }
 
-// route resolves the view serving path. Relative paths go to the view
-// marked RelativeBase, or the shallowest registered overlay when none is.
-func (m *MultiMergedView) route(path string) (vfs.FS, error) {
+// route resolves the view serving path and returns the path rewritten to
+// the view's own root. Relative paths go to the view marked RelativeBase,
+// or the shallowest registered mount when none is.
+func (m *MultiMergedView) route(path string) (*overlayRoute, string, error) {
 	cleaned := filepath.Clean(path)
 	if !filepath.IsAbs(cleaned) {
 		if m.relativeBase == nil {
-			return nil, fmt.Errorf("%w: %s", ErrPathOutsideOverlays, path)
+			return nil, "", fmt.Errorf("%w: %s", ErrPathOutsideOverlays, path)
 		}
-		return m.relativeBase, nil
+		// Relative paths only ever reach non-rewritten workspace views;
+		// bind views are never marked RelativeBase.
+		for i := range m.routes {
+			if m.routes[i].fs == m.relativeBase {
+				return &m.routes[i], cleaned, nil
+			}
+		}
+		return &overlayRoute{fs: m.relativeBase}, cleaned, nil
 	}
-	for _, r := range m.routes {
+	for i := range m.routes {
+		r := &m.routes[i]
 		// r.prefix+"/" would be "//" for a "/" prefix, which no cleaned
 		// absolute path starts with; match the root view directly.
 		if cleaned == r.prefix || r.prefix == "/" ||
 			strings.HasPrefix(cleaned, r.prefix+"/") {
-			return r.fs, nil
+			if r.root == "" || r.root == r.prefix {
+				return r, cleaned, nil
+			}
+			rel := strings.TrimPrefix(cleaned, r.prefix) // "" or "/suffix"
+			return r, filepath.Join(r.root, rel), nil
 		}
 	}
-	return nil, fmt.Errorf("%w: %s", ErrPathOutsideOverlays, path)
+	return nil, "", fmt.Errorf("%w: %s", ErrPathOutsideOverlays, path)
 }
 
 func (m *MultiMergedView) Stat(path string) (os.FileInfo, error) {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return nil, err
 	}
-	return fs.Stat(path)
+	return rt.fs.Stat(p)
 }
 
 func (m *MultiMergedView) ReadFile(path string) ([]byte, error) {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return nil, err
 	}
-	return fs.ReadFile(path)
+	return rt.fs.ReadFile(p)
 }
 
 func (m *MultiMergedView) WriteFile(path string, data []byte, perm os.FileMode) error {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return err
 	}
-	return fs.WriteFile(path, data, perm)
+	return rt.fs.WriteFile(p, data, perm)
 }
 
 func (m *MultiMergedView) WriteFileReader(path string, r io.Reader, perm os.FileMode) (int64, error) {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return 0, err
 	}
-	return fs.WriteFileReader(path, r, perm)
+	return rt.fs.WriteFileReader(p, r, perm)
 }
 
 func (m *MultiMergedView) Remove(path string) error {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return err
 	}
-	return fs.Remove(path)
+	if err := rejectMountRootRemoval(rt, path); err != nil {
+		return err
+	}
+	return rt.fs.Remove(p)
 }
 
 func (m *MultiMergedView) RemoveAll(path string) error {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return err
 	}
-	return fs.RemoveAll(path)
+	if err := rejectMountRootRemoval(rt, path); err != nil {
+		return err
+	}
+	return rt.fs.RemoveAll(p)
+}
+
+// rejectMountRootRemoval mirrors mountpoint semantics: a bind-style mount
+// root (caller bind, hosted /tmp) must not be unlinked under a live mount.
+// Overlay views keep their historical behavior.
+func rejectMountRootRemoval(rt *overlayRoute, path string) error {
+	if rt.root != "" && rt.root != rt.prefix && filepath.Clean(path) == rt.prefix {
+		return fmt.Errorf("cannot remove mount root %q", rt.prefix)
+	}
+	return nil
 }
 
 func (m *MultiMergedView) MkdirAll(path string, perm os.FileMode) error {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return err
 	}
-	return fs.MkdirAll(path, perm)
+	return rt.fs.MkdirAll(p, perm)
 }
 
 // Rename routes both paths and rejects a rename whose source and
-// destination resolve to different overlays: delegating to the source view
+// destination resolve to different mounts: delegating to the source view
 // would silently place the destination inside that view's upper.
 func (m *MultiMergedView) Rename(oldPath, newPath string) error {
-	fs, err := m.route(oldPath)
+	rt, oldP, err := m.route(oldPath)
 	if err != nil {
 		return err
 	}
-	dstFS, err := m.route(newPath)
+	dstRT, newP, err := m.route(newPath)
 	if err != nil {
 		return err
 	}
-	if dstFS != fs {
-		return fmt.Errorf("rename across overlays is not supported: %s -> %s", oldPath, newPath)
+	if dstRT.fs != rt.fs {
+		return fmt.Errorf("rename across mounts is not supported: %s -> %s", oldPath, newPath)
 	}
-	return fs.Rename(oldPath, newPath)
+	return rt.fs.Rename(oldP, newP)
 }
 
 func (m *MultiMergedView) Chmod(path string, mode os.FileMode) error {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return err
 	}
-	return fs.Chmod(path, mode)
+	return rt.fs.Chmod(p, mode)
 }
 
 func (m *MultiMergedView) ReadDir(path string) ([]os.DirEntry, error) {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return nil, err
 	}
-	return fs.ReadDir(path)
+	return rt.fs.ReadDir(p)
 }
 
 func (m *MultiMergedView) Open(path string) (*os.File, error) {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return nil, err
 	}
-	return fs.Open(path)
+	return rt.fs.Open(p)
 }
 
+// Search routes by the search root. Views with a rewritten root (binds)
+// return paths relative to that root, so results are rebased onto the
+// namespace mount path and follow-up Stat/Open calls route back to the
+// same view instead of falling to the workspace relative base.
 func (m *MultiMergedView) Search(root, pattern string) ([]string, error) {
-	fs, err := m.route(root)
+	rt, p, err := m.route(root)
 	if err != nil {
 		return nil, err
 	}
-	return fs.Search(root, pattern)
+	results, err := rt.fs.Search(p, pattern)
+	if err != nil || rt.root == "" || rt.root == rt.prefix {
+		return results, err
+	}
+	rebased := make([]string, 0, len(results))
+	for _, rel := range results {
+		rebased = append(rebased, filepath.Join(rt.prefix, rel))
+	}
+	return rebased, nil
 }
 
 func (m *MultiMergedView) ReplaceContent(path, old, newStr string) error {
-	fs, err := m.route(path)
+	rt, p, err := m.route(path)
 	if err != nil {
 		return err
 	}
-	return fs.ReplaceContent(path, old, newStr)
+	return rt.fs.ReplaceContent(p, old, newStr)
 }
