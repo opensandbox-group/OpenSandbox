@@ -173,6 +173,14 @@ class TestConfigShow:
         data = json.loads(result.output)
         assert data["request_timeout"] == 45
 
+    def test_zero_request_timeout_flag_is_rejected(self, runner: CliRunner) -> None:
+        result = runner.invoke(
+            cli, ["--request-timeout", "0", "config", "show", "-o", "json"]
+        )
+        assert result.exit_code != 0
+        assert "positive" in result.output
+        assert '"request_timeout": 30' not in result.output
+
 
 class TestConfigSet:
     def test_set_rejects_flat_key(self, runner: CliRunner, tmp_path: Path) -> None:

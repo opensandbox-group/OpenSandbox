@@ -254,6 +254,27 @@ class TestResolveConfig:
         assert result["use_server_proxy"] is True
         assert result["color"] is False
 
+    def test_non_positive_request_timeout_is_rejected(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("[connection]\nrequest_timeout = 60\n")
+        with pytest.raises(click.ClickException, match="got 0"):
+            resolve_config(cli_timeout=0, config_path=cfg)
+        cfg.write_text("[connection]\nrequest_timeout = 0\n")
+        with pytest.raises(click.ClickException, match="positive"):
+            resolve_config(config_path=cfg)
+        cfg.write_text("[connection]\nrequest_timeout = -5\n")
+        with pytest.raises(click.ClickException, match="got -5"):
+            resolve_config(config_path=cfg)
+
+    def test_zero_timeout_env_does_not_fall_through(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = tmp_path / "config.toml"
+        cfg.write_text("[connection]\nrequest_timeout = 60\n")
+        monkeypatch.setenv("OPEN_SANDBOX_REQUEST_TIMEOUT", "0")
+        with pytest.raises(click.ClickException, match="got 0"):
+            resolve_config(config_path=cfg)
+
 
 # ---------------------------------------------------------------------------
 # init_config_file
