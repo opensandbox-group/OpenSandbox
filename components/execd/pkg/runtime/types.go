@@ -44,7 +44,11 @@ type ExecuteCodeRequest struct {
 	Envs     map[string]string `json:"envs"`
 	Uid      *uint32           `json:"uid,omitempty"`
 	Gid      *uint32           `json:"gid,omitempty"`
-	Hooks    ExecuteResultHook
+	// RequestID is the ingress request id (X-Request-Id header). It is wrapped
+	// into the launched shell argv so runtime audit events (Tetragon
+	// process_exec) can be correlated to the ingress request.
+	RequestID string `json:"request_id,omitempty"`
+	Hooks     ExecuteResultHook
 }
 
 // SetDefaultHooks installs stdout logging fallbacks for unset hooks.

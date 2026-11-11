@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -27,8 +28,48 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
+	"github.com/gin-gonic/gin"
 )
 
+// maxRequestIDLen caps the X-Request-Id value length. Oversized ids are
+// dropped entirely rather than truncated: a truncated id would silently
+// diverge from the id the ingress layer logged, and byte-slicing could split
+// a multi-byte UTF-8 sequence.
+const maxRequestIDLen = 128
+
+// requestIDCharset matches ids composed only of shell- and cmd.exe-safe
+// characters (covers UUID-style ids). Anything else is rejected rather than
+// sanitized, so the propagated id always matches the caller's id exactly.
+var requestIDCharset = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// sanitizeRequestID validates a caller-supplied request id and returns ""
+// for anything that must not be propagated (oversized, wrong charset).
+func sanitizeRequestID(rid string) string {
+	if rid == "" || len(rid) > maxRequestIDLen || !requestIDCharset.MatchString(rid) {
+		return ""
+	}
+	return rid
+}
+
+// requestIDFromHeaders extracts the ingress request id from the X-Request-Id
+// header. A nil ctx (unit-test construction without a request) yields "".
+func requestIDFromHeaders(ctx *gin.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	return sanitizeRequestID(ctx.GetHeader("X-Request-Id"))
+}
+
+// requestIDFromRequest returns the ingress request id of the current
+// request, or "" when the controller has no request context (unit tests).
+func requestIDFromRequest(b *basicController) string {
+	if b == nil {
+		return ""
+	}
+	return requestIDFromHeaders(b.ctx)
+}
+
+// RunCommand executes a shell command and streams the output via SSE.
 func (c *CodeInterpretingController) RunCommand() {
 	var request model.RunCommandRequest
 	if err := c.bindJSON(&request); err != nil {
@@ -178,25 +219,27 @@ func (c *CodeInterpretingController) buildExecuteCommandRequest(request model.Ru
 	timeout := time.Duration(request.TimeoutMs) * time.Millisecond
 	if request.Background {
 		return &runtime.ExecuteCodeRequest{
-			Language: runtime.BackgroundCommand,
-			Code:     request.Command,
-			Argv:     request.Argv,
-			Cwd:      request.Cwd,
-			Timeout:  timeout,
-			Gid:      request.Gid,
-			Uid:      request.Uid,
-			Envs:     request.Envs,
+			Language:  runtime.BackgroundCommand,
+			Code:      request.Command,
+			Argv:      request.Argv,
+			Cwd:       request.Cwd,
+			Timeout:   timeout,
+			Gid:       request.Gid,
+			Uid:       request.Uid,
+			Envs:      request.Envs,
+			RequestID: requestIDFromRequest(c.basicController),
 		}
 	} else {
 		return &runtime.ExecuteCodeRequest{
-			Language: runtime.Command,
-			Code:     request.Command,
-			Argv:     request.Argv,
-			Cwd:      request.Cwd,
-			Timeout:  timeout,
-			Gid:      request.Gid,
-			Uid:      request.Uid,
-			Envs:     request.Envs,
+			Language:  runtime.Command,
+			Code:      request.Command,
+			Argv:      request.Argv,
+			Cwd:       request.Cwd,
+			Timeout:   timeout,
+			Gid:       request.Gid,
+			Uid:       request.Uid,
+			Envs:      request.Envs,
+			RequestID: requestIDFromRequest(c.basicController),
 		}
 	}
 }
