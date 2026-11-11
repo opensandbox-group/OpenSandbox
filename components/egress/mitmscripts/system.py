@@ -74,7 +74,7 @@ import socket
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
-from urllib.parse import quote, quote_plus, unquote
+from urllib.parse import quote, quote_plus, unquote, urlsplit
 
 from mitmproxy import ctx, http
 from mitmproxy.tls import ClientHelloData
@@ -1888,6 +1888,84 @@ def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
     return _apply_vault_binding(flow, vault)
 
 
+def _proxy_policy_status(host: str, port: int) -> int:
+    socket_path = (
+        os.environ.get(CREDENTIAL_PROXY_SOCKET_ENV, "").strip()
+        or DEFAULT_CREDENTIAL_PROXY_SOCKET
+    )
+    connection = UnixSocketHTTPConnection(socket_path, timeout=0.25)
+    try:
+        connection.request("GET", f"/egress/authorize?host={quote(host)}&port={port}")
+        return connection.getresponse().status
+    finally:
+        connection.close()
+
+
+async def _authorize_explicit_proxy(flow: http.HTTPFlow) -> bool:
+    """Gate explicit CONNECT and inner HTTP requests before credential injection.
+
+    DNS/nft cannot check a remotely resolved destination. Consult the egress
+    policy owner on every request and never cache an admission across updates.
+    """
+    client = getattr(flow, "client_conn", None)
+    mode = getattr(client, "proxy_mode", None)
+    if (
+        getattr(mode, "type_name", None) != "regular"
+        or not os.environ.get("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "").strip()
+    ):
+        return True
+    request = flow.request
+    try:
+        host = request.host.encode("idna").decode("ascii").lower().removesuffix(".")
+        port = int(request.port)
+        # Binding selection uses pretty_host, while the dial uses host. They
+        # must agree so a forged Host cannot inject a different host's secret.
+        pretty = request.pretty_host.encode("idna").decode("ascii").lower().removesuffix(".")
+        if host != pretty:
+            raise ValueError("conflicting host")
+        if request.method != "CONNECT":
+            if request.scheme not in {"http", "https"}:
+                raise ValueError("unsupported scheme")
+            default_port = 443 if request.scheme == "https" else 80
+            host_headers = request.headers.get_all("host")
+            if len(host_headers) > 1:
+                raise ValueError("duplicate Host")
+            # HTTP/2 may carry both :authority and Host; validate both.
+            for value in [request.host_header, *host_headers]:
+                authority = urlsplit("//" + (value or ""))
+                if (
+                    authority.username is not None
+                    or authority.password is not None
+                    or authority.path or authority.query or authority.fragment
+                    or not authority.hostname
+                    or authority.hostname.encode("idna").decode("ascii").lower().removesuffix(".") != host
+                    or (authority.port if authority.port is not None else default_port) != port
+                ):
+                    raise ValueError("conflicting authority")
+    except Exception:  # noqa: BLE001 - malformed identities must fail closed
+        _reject_request(flow, b"invalid proxy destination\n")
+        return False
+    try:
+        status = await asyncio.to_thread(_proxy_policy_status, host, port)
+    except Exception:  # noqa: BLE001 - never expose private socket diagnostics
+        status = 503
+    if status != 204:
+        denied = status in {400, 403}
+        _reject_request(
+            flow,
+            b"destination denied\n" if denied else b"egress policy unavailable\n",
+            status_code=403 if denied else 503,
+        )
+        return False
+    # Proxy credentials belong only on the outer upstream CONNECT.
+    request.headers.pop("Proxy-Authorization", None)
+    return True
+
+
+async def http_connect(flow: http.HTTPFlow) -> None:
+    await _authorize_explicit_proxy(flow)
+
+
 async def requestheaders(flow: http.HTTPFlow) -> None:
     """Credential proxy phase 1: binding match and request metadata rewrite.
 
@@ -1902,6 +1980,8 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
     continues: exchange bindings defer resolve I/O to the single await
     below; static and live paths stay inline and never suspend.
     """
+    if not await _authorize_explicit_proxy(flow):
+        return
     live = _live_runtime
     if live is not None:
         _requestheaders_live(live, flow)

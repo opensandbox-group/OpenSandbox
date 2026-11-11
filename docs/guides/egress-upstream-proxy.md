@@ -58,6 +58,27 @@ url = "https://proxy.example.com:8443"
 ca_secret_name = "upstream-proxy-ca"
 ```
 
+## Explicit proxy without external DNS
+
+When an upstream proxy is configured, the sidecar also exposes an explicit HTTP proxy at `http://127.0.0.1:18082` inside the sandbox network namespace. Configure proxy-aware applications to use this listener:
+
+If the transparent listener is explicitly configured on port `18082` using `OPENSANDBOX_EGRESS_MITMPROXY_PORT`, the explicit listener uses port `18083` instead; use that port in the application proxy URLs below. The existing transparent listener keeps its configured port.
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:18082
+export HTTPS_PROXY=http://127.0.0.1:18082
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export NO_PROXY=localhost,127.0.0.1,::1
+export no_proxy="$NO_PROXY"
+```
+
+Applications send the destination hostname to this listener without resolving it locally. The sidecar checks the current network policy, applies Credential Vault bindings, and chains the request through the configured upstream proxy, which resolves the destination. Only the upstream proxy's hostname needs infrastructure DNS; a literal proxy IP needs no lookup. Applications must trust the sidecar's interception CA as with transparent interception. Do not configure applications with the upstream proxy address or its credentials directly.
+
+Domain rules, platform overlays, and TCP port restrictions are checked before CONNECT and again on each HTTP request, including requests on existing connections. Denied requests receive HTTP 403; unavailable policy checks fail closed with HTTP 503. IP/CIDR rules apply to literal destination IPs; zoned IPv6 destinations are rejected. Since remotely resolved addresses are unavailable locally, any IP/CIDR deny applicable to the destination port conservatively rejects hostname requests; put resolved-address restrictions on the upstream proxy if required. With `OPENSANDBOX_EGRESS_BLOCK_DOH_443` enabled, explicit requests to port 443 are conservatively rejected because local DNS cannot classify remotely resolved addresses.
+
+This listener is available for the sidecar profile only, not the shared Fast Sandbox profile. Existing transparent interception remains available and still requires destination DNS. Applications that ignore explicit proxy settings may fail when external DNS is unavailable; no synthetic DNS answers are provided. Set proxy variables through the sandbox environment or application configuration; they are not injected automatically.
+
 ## Traffic and security model
 
 For a detailed overview of egress packet flows, see [/architecture/network/egress](/architecture/network/egress).
@@ -130,7 +151,7 @@ The default-off experimental OSEP-0023 revision runtime has a narrower live HTTP
 
 ## Known limits and references
 
-- **No Per-Request Proxy**: Proxy settings cannot be modified per request or through environment variables.
+- **No Per-Request Upstream Proxy**: The upstream endpoint, credentials, and CA settings cannot be overridden by sandbox request environments. Applications can select the local explicit proxy listener using standard proxy environment variables.
 - **No Hot Reload**: Existing sandbox sidecars cannot reload proxy configurations dynamically.
 - **No Dedicated OTLP Metrics**: There is no dedicated chained-proxy metric family; rely on egress health checks, DNS/nftables metrics, and proxy logs.
 - **Runtime Scope**: No production certification is claimed for every Kata implementation, custom RuntimeClass, CNI, or kernel combination.

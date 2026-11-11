@@ -164,6 +164,53 @@ def _load_system_module() -> Any:
     return module
 
 
+class ExplicitProxyPolicyTest(unittest.TestCase):
+    def _flow(self) -> _Flow:
+        flow = _Flow()
+        flow.response = None
+        flow.client_conn = types.SimpleNamespace(
+            proxy_mode=types.SimpleNamespace(type_name="regular")
+        )
+        flow.request.host_header = "code.example.com"
+        flow.request.headers = mock.MagicMock()
+        flow.request.headers.get_all.return_value = ["code.example.com"]
+        return flow
+
+    def test_policy_failure_prevents_credential_lookup(self) -> None:
+        for result in (403, 503, OSError("private diagnostic")):
+            with self.subTest(result=result), mock.patch.dict(
+                os.environ, {"OPENSANDBOX_EGRESS_UPSTREAM_PROXY": "http://proxy.example.com:3128"}
+            ):
+                system = _load_system_module()
+                flow = self._flow()
+                with mock.patch.object(system, "_proxy_policy_status") as policy_check, mock.patch.object(
+                    system, "_load_active_vault"
+                ) as vault:
+                    if isinstance(result, Exception):
+                        policy_check.side_effect = result
+                    else:
+                        policy_check.return_value = result
+                    system.requestheaders(flow)
+                    vault.assert_not_called()
+                    self.assertEqual(403 if result == 403 else 503, flow.response.status_code)
+                    self.assertNotIn("private diagnostic", flow.response.body)
+
+    def test_conflicting_h2_host_denied_before_policy_or_credentials(self) -> None:
+        with mock.patch.dict(os.environ, {"OPENSANDBOX_EGRESS_UPSTREAM_PROXY": "http://proxy.example.com:3128"}):
+            system = _load_system_module()
+            flow = self._flow()
+            flow.request.http_version = "HTTP/2"
+            # :authority and dial target agree, but the extra Host does not.
+            flow.request.headers.get_all.return_value = ["other.invalid"]
+            with mock.patch.object(system, "_proxy_policy_status") as policy_check, mock.patch.object(
+                system, "_load_active_vault"
+            ) as vault:
+                system.requestheaders(flow)
+                policy_check.assert_not_called()
+                vault.assert_not_called()
+                self.assertTrue(flow.killed)
+
+
 class _ScriptedVaultResponse:
     def __init__(
         self,
