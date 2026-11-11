@@ -118,6 +118,12 @@ def test_parse_nano_cpus():
     assert parse_nano_cpus("bad") is None
 
 
+def test_parse_nano_cpus_millicpu_is_exact():
+    # float(1001)/1000*1e9 truncates to 1000999999 via int().
+    assert parse_nano_cpus("1001m") == 1_001_000_000
+    assert parse_nano_cpus("1025m") == 1_025_000_000
+
+
 @pytest.mark.parametrize(
     "value", ["nan", "inf", "-inf", "1e10", "1e308", "1e309", "-1e309"]
 )
