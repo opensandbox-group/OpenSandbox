@@ -13,10 +13,11 @@
 # limitations under the License.
 
 """
-Kubernetes diagnostics mixin for DevOps API.
+Kubernetes diagnostics mixins for the DevOps API.
 
-Provides get_sandbox_logs, get_sandbox_inspect, and get_sandbox_events
-by querying K8s Pod state and events. Mixed into KubernetesSandboxService.
+K8sDiagnosticsMixin serves sandbox logs, inspect output, and events from
+K8s Pod state; K8sStartupDiagnosticsMixin explains Pods that never became
+ready. Both are mixed into KubernetesSandboxService.
 """
 
 from __future__ import annotations
@@ -174,10 +175,6 @@ class K8sDiagnosticsMixin:
         workload = None
         workload_provider = getattr(self, "workload_provider", None)
         if workload_provider is not None:
-            from opensandbox_server.services.k8s.workload_access import (
-                _get_owned_workload_or_404,
-            )
-
             workload = _get_owned_workload_or_404(
                 workload_provider,
                 namespace,
