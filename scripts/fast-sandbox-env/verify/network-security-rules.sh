@@ -58,12 +58,17 @@ network_security_rules_floor_chain() { # <pod>
 	[[ "$out" == *"tcp dport {"* && "$out" == *"444-65535"* ]]
 }
 
-network_security_rules_subject_deny_set() { # <pod> <sandbox-id>
-	local out subj
-	subj="subj_s_$(printf '%s' "$2" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_' '_')_deny_v4"
-	out="$(kubectl -n "$RESOURCE_NS" exec "pod/$1" -c egress -- \
-		nft list set inet opensandbox-fast-sandbox "$subj" 2>/dev/null)" || return 1
-	[[ "$out" == *"10.0.0.0/8"* && "$out" == *"172.30.0.0/24"* ]]
+network_security_rules_subject_deny_set() { # <sandbox-id>
+	local out subj pod
+	subj="subj_s_$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_' '_')_deny_v4"
+	# POOL_MIN=2: the sandbox may live on any Fastlet — scan them all.
+	for pod in $(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o name 2>/dev/null); do
+		out="$(kubectl -n "$RESOURCE_NS" exec "${pod#pod/}" -c egress -- \
+			nft list set inet opensandbox-fast-sandbox "$subj" 2>/dev/null)" || continue
+		[[ "$out" == *"10.0.0.0/8"* && "$out" == *"172.30.0.0/24"* ]] && return 0
+	done
+	return 1
 }
 
 # network_security_rules_guest_dns <sandbox-id> <must-resolve>: guest curl
@@ -121,7 +126,7 @@ network_security_rules_verify() {
 	[[ -n "$id" && "$id" != "null" ]] || fail "default-deny sandbox create carried no id"
 	VERIFY_ID="$id"
 	wait_for "default-deny sandbox Running" 150 sandbox_running
-	wait_for "deny CIDRs in the subject deny set" 60 network_security_rules_subject_deny_set "$pod" "$id"
+	wait_for "deny CIDRs in the subject deny set" 60 network_security_rules_subject_deny_set "$id"
 	wait_for "example.com answers through allow.always (default-deny sandbox)" 20 \
 		network_security_rules_guest_dns "$id" yes
 	wait_for "github.com NXDOMAIN under the default-deny sandbox" 20 \
