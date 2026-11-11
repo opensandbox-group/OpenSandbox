@@ -336,6 +336,17 @@ class TestEnsureValidHostPath:
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_HOST_PATH
 
+    def test_path_with_trailing_traversal_raises(self):
+        for path in ("/..", "/data/..", r"C:\data\..\etc"):
+            with pytest.raises(HTTPException) as exc_info:
+                ensure_valid_host_path(path)
+            assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_HOST_PATH
+
+    def test_dotdot_inside_a_component_is_allowed(self):
+        assert ensure_valid_host_path("/data/..cache") is None
+        assert ensure_valid_host_path("/data/v1..v2/files") is None
+        assert ensure_valid_host_path(r"D:\data\..cache") is None
+
     def test_path_with_double_slash_raises(self):
         with pytest.raises(HTTPException) as exc_info:
             ensure_valid_host_path("/data//files")
