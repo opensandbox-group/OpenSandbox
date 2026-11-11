@@ -542,3 +542,35 @@ func TestCombinedOutputDescriptor_AutoCreatesTempDir(t *testing.T) {
 	require.NoError(t, err, "expected temp dir to be created, stat error")
 	require.True(t, info.IsDir(), "expected %s to be a directory", missingDir)
 }
+
+func TestExecuteForegroundHonorsCallerCancel(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("foreground cancel signals a unix process group")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c := NewController("", "")
+	req := &ExecuteCodeRequest{
+		Language:    Command,
+		Code:        "sleep 30",
+		Timeout:     30 * time.Second,
+		BaseContext: ctx,
+	}
+	req.SetDefaultHooks()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Execute(req)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Execute did not return after the caller context was cancelled")
+	}
+}

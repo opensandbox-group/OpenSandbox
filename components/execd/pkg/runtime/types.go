@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -38,16 +39,20 @@ type ExecuteResultHook struct {
 
 // ExecuteCodeRequest represents a code execution request with context and hooks.
 type ExecuteCodeRequest struct {
-	Language Language          `json:"language"`
-	Code     string            `json:"code"`
-	Argv     []string          `json:"argv,omitempty"`
-	Context  string            `json:"context"`
-	Timeout  time.Duration     `json:"timeout"`
-	Cwd      string            `json:"cwd"`
-	Envs     map[string]string `json:"envs"`
-	Uid      *uint32           `json:"uid,omitempty"`
-	Gid      *uint32           `json:"gid,omitempty"`
-	Hooks    ExecuteResultHook
+	Language Language      `json:"language"`
+	Code     string        `json:"code"`
+	Argv     []string      `json:"argv,omitempty"`
+	Context  string        `json:"context"`
+	Timeout  time.Duration `json:"timeout"`
+	// BaseContext is the parent of the execution context and is not serialized.
+	// Foreground runs use the caller's context so a disconnect cancels the
+	// process. Background runs leave it nil so the job outlives the request.
+	BaseContext context.Context   `json:"-"`
+	Cwd         string            `json:"cwd"`
+	Envs        map[string]string `json:"envs"`
+	Uid         *uint32           `json:"uid,omitempty"`
+	Gid         *uint32           `json:"gid,omitempty"`
+	Hooks       ExecuteResultHook
 }
 
 // SetDefaultHooks installs stdout logging fallbacks for unset hooks.

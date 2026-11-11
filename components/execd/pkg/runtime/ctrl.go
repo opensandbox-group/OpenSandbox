@@ -81,12 +81,16 @@ func NewController(baseURL, token string) *Controller {
 
 // Execute dispatches a request to the correct backend.
 func (c *Controller) Execute(request *ExecuteCodeRequest) error {
+	parent := request.BaseContext
+	if parent == nil {
+		parent = context.Background()
+	}
 	var cancel context.CancelFunc
 	var ctx context.Context
 	if request.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), request.Timeout)
+		ctx, cancel = context.WithTimeout(parent, request.Timeout)
 	} else {
-		ctx, cancel = context.WithCancel(context.Background())
+		ctx, cancel = context.WithCancel(parent)
 	}
 
 	switch request.Language {

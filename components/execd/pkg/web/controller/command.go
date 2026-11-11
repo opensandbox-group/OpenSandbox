@@ -195,6 +195,8 @@ func (c *CodeInterpretingController) GetBackgroundCommandOutput() {
 func (c *CodeInterpretingController) buildExecuteCommandRequest(request model.RunCommandRequest) *runtime.ExecuteCodeRequest {
 	timeout := time.Duration(request.TimeoutMs) * time.Millisecond
 	if request.Background {
+		// Leave BaseContext nil. The handler returns as soon as the job is
+		// accepted, and that cancels the HTTP request context.
 		return &runtime.ExecuteCodeRequest{
 			Language: runtime.BackgroundCommand,
 			Code:     request.Command,
@@ -205,16 +207,23 @@ func (c *CodeInterpretingController) buildExecuteCommandRequest(request model.Ru
 			Uid:      request.Uid,
 			Envs:     request.Envs,
 		}
-	} else {
-		return &runtime.ExecuteCodeRequest{
-			Language: runtime.Command,
-			Code:     request.Command,
-			Argv:     request.Argv,
-			Cwd:      request.Cwd,
-			Timeout:  timeout,
-			Gid:      request.Gid,
-			Uid:      request.Uid,
-			Envs:     request.Envs,
-		}
 	}
+	return &runtime.ExecuteCodeRequest{
+		Language:    runtime.Command,
+		Code:        request.Command,
+		Argv:        request.Argv,
+		Cwd:         request.Cwd,
+		Timeout:     timeout,
+		Gid:         request.Gid,
+		Uid:         request.Uid,
+		Envs:        request.Envs,
+		BaseContext: c.callerContext(),
+	}
+}
+
+func (c *CodeInterpretingController) callerContext() context.Context {
+	if c == nil || c.basicController == nil || c.ctx == nil || c.ctx.Request == nil {
+		return nil
+	}
+	return c.ctx.Request.Context()
 }

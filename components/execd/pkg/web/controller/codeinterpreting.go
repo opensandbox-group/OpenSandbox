@@ -460,9 +460,10 @@ func (c *CodeInterpretingController) DeleteSession() {
 
 func (c *CodeInterpretingController) buildExecuteCodeRequest(request model.RunCodeRequest) *runtime.ExecuteCodeRequest {
 	req := &runtime.ExecuteCodeRequest{
-		Language: runtime.Language(request.Context.Language),
-		Code:     request.Code,
-		Context:  request.Context.ID,
+		Language:    runtime.Language(request.Context.Language),
+		Code:        request.Code,
+		Context:     request.Context.ID,
+		BaseContext: c.callerContext(),
 	}
 
 	if req.Language == "" {

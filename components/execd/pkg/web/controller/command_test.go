@@ -41,6 +41,18 @@ func TestBuildExecuteCommandRequestForwardsEnvs(t *testing.T) {
 	require.Equal(t, runtime.Command, execReq.Language)
 	require.True(t, reflect.DeepEqual(execReq.Envs, envs), "expected envs to be forwarded")
 	require.Equal(t, "/tmp", execReq.Cwd)
+	require.Nil(t, execReq.BaseContext)
+}
+
+func TestBuildExecuteCommandRequestUsesRequestContext(t *testing.T) {
+	ctx, _ := newTestContext(http.MethodPost, "/command", nil)
+	ctrl := NewCodeInterpretingController(ctx)
+
+	foreground := ctrl.buildExecuteCommandRequest(model.RunCommandRequest{Command: "echo hi"})
+	require.Equal(t, ctx.Request.Context(), foreground.BaseContext)
+
+	background := ctrl.buildExecuteCommandRequest(model.RunCommandRequest{Command: "echo hi", Background: true})
+	require.Nil(t, background.BaseContext)
 }
 
 func TestBuildExecuteCommandRequestForwardsEnvsBackground(t *testing.T) {
