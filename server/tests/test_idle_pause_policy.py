@@ -170,18 +170,18 @@ def test_annotation_parses_ingress_shaped_values():
     [
         "not json",
         '{"idleTimeoutSeconds":300,"onIdle":"pause"} trailing',
-        "[1,2]",  # not an object
+        "[1,2]",
         '{"unknownField":1}',  # unknown field (ingress DisallowUnknownFields)
-        '{"onIdle":"pause"}',  # onIdle without timeout
-        '{"idleTimeoutSeconds":300}',  # timeout without onIdle
-        '{"idleTimeoutSeconds":300,"onIdle":"terminate"}',  # unsupported action
-        '{"idleTimeoutSeconds":29,"onIdle":"pause"}',  # out of range: absent
+        '{"onIdle":"pause"}',
+        '{"idleTimeoutSeconds":300}',
+        '{"idleTimeoutSeconds":300,"onIdle":"terminate"}',
+        '{"idleTimeoutSeconds":29,"onIdle":"pause"}',
         '{"idleTimeoutSeconds":86401,"onIdle":"pause"}',
-        '{"idleTimeoutSeconds":"300","onIdle":"pause"}',  # wrong type
-        '{"wakeOnAccess":"yes"}',  # wrong type
+        '{"idleTimeoutSeconds":"300","onIdle":"pause"}',
+        '{"wakeOnAccess":"yes"}',
         '{"wakeOnAccess":1}',  # int masquerading as bool
-        '{"activeProbe":{"port":0,"path":"/x"}}',  # invalid probe port
-        '{"activeProbe":{"port":8080,"path":"x"}}',  # relative probe path
+        '{"activeProbe":{"port":0,"path":"/x"}}',
+        '{"activeProbe":{"port":8080,"path":"x"}}',
         '{"activeProbe":{"port":8080,"path":"/x","timeoutSeconds":99}}',
         '{"activeProbe":{"nope":1}}',
         # Same path bounds as the validator: kubectl annotate bypasses create.

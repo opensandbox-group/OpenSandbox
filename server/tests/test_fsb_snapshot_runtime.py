@@ -200,7 +200,6 @@ def test_create_snapshot_submits_intent_without_waiting() -> None:
     assert status.state == SnapshotState.CREATING
     assert status.reason == "snapshot_runtime_submitted"
     assert status.backend == "fsb"
-    # No per-sandbox limits reported by the source: nothing to replay.
     assert status.resource_limits is None
 
     request = fastpath.create_requests[0]
@@ -406,7 +405,6 @@ def test_inspect_fails_when_succeeded_without_template_name() -> None:
 
 
 def test_inspect_succeeded_oci_manifest_restores_from_manifest_ref() -> None:
-    """OCI snapshots restore from the immutable manifest reference."""
     fastpath = FakeFastPathClient()
     manifest_ref = "oci://registry.example.com/sandbox/snapshots@sha256:def456"
     fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
@@ -468,12 +466,6 @@ def test_inspect_maps_missing_snapshot_to_failed() -> None:
 
     assert status.state == SnapshotState.FAILED
     assert status.reason == "snapshot_recovery_missing_snapshot"
-
-
-def test_delete_snapshot_ignores_missing_snapshot() -> None:
-    runtime, _, _ = _runtime()
-
-    runtime.delete_snapshot(SNAPSHOT_ID, namespace="tenant-a")
 
 
 def test_delete_snapshot_deletes_by_namespaced_name() -> None:

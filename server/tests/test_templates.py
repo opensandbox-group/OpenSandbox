@@ -520,7 +520,6 @@ def execd_init_service(repo, crs, monkeypatch):
 
 
 def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
-    # A client-provided EXECD_INIT must not win over the server switch.
     record = execd_init_service.create_template(
         _create_request(env={"EXECD_INIT": "0", "LOG_LEVEL": "info"})
     )
@@ -687,7 +686,6 @@ def test_resolve_artifact_requires_succeeded(service, crs):
 
 
 def test_resolve_gate_trusts_db_row_not_crd(service, crs):
-    """The create gate reads the DB projection only."""
     record = service.create_template(_create_request(entrypoint=["sleep", "1"]))
 
     # CR already says Succeeded but the event has not been delivered: 404.

@@ -83,8 +83,6 @@ class TestDockerMetadataStore:
     def _make_store(tmp_path: Path):
         return DockerMetadataStore(root=tmp_path / "metadata")
 
-    # -- get (no overrides) --------------------------------------------------
-
     def test_get_no_overrides_returns_user_labels(self, tmp_path: Path):
         store = self._make_store(tmp_path)
         labels = {
@@ -99,8 +97,6 @@ class TestDockerMetadataStore:
         store = self._make_store(tmp_path)
         result = store.get("sbx-001", {"opensandbox.io/id": "sbx-001"})
         assert result is None
-
-    # -- patch ---------------------------------------------------------------
 
     def test_patch_adds_keys(self, tmp_path: Path):
         store = self._make_store(tmp_path)
@@ -200,8 +196,6 @@ class TestDockerMetadataStore:
         result = store.get("sbx-001", labels)
         assert result == {"hello": "world", "team": "platform"}
 
-    # -- delete --------------------------------------------------------------
-
     def test_delete_removes_file(self, tmp_path: Path):
         store = self._make_store(tmp_path)
         labels = {"team": "infra"}
@@ -218,7 +212,7 @@ class TestDockerMetadataStore:
 
     def test_delete_nonexistent_silent(self, tmp_path: Path):
         store = self._make_store(tmp_path)
-        store.delete("nonexistent")  # Should not raise
+        store.delete("nonexistent")
 
     def test_set_get_expiration_override(self, tmp_path: Path):
         store = self._make_store(tmp_path)
@@ -241,8 +235,6 @@ class TestDockerMetadataStore:
         assert not expiration_file.exists()
         assert store.get_expiration("sbx-001") is None
 
-    # -- crash recovery ------------------------------------------------------
-
     def test_transition_is_state_associated_and_separate_from_user_metadata(self, tmp_path: Path):
         store = self._make_store(tmp_path)
         transitioned_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
@@ -262,7 +254,6 @@ class TestDockerMetadataStore:
         store1 = DockerMetadataStore(root=root)
         store1.patch("sbx-001", {"hello": "world"}, {"team": "platform"})
 
-        # Simulate a leftover .tmp file
         tmp_file = root / "sbx-001.tmp"
         tmp_file.write_text('{"bad": "data"}')
 
@@ -287,8 +278,6 @@ class TestDockerMetadataStore:
 
         assert [p.name for p in root.iterdir()] == ["sbx-001.json"]
         assert store.get("sbx-001", {}) == {"team": "platform"}
-
-    # -- concurrency ---------------------------------------------------------
 
     def test_concurrent_patches_of_distinct_keys_keep_every_key(self, tmp_path: Path):
         """Concurrent patches of one sandbox must neither fail nor drop each other's keys."""

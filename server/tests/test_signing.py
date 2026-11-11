@@ -147,11 +147,6 @@ class TestBuildCanonicalBytes:
         assert result == b"v1\nshort\ns\n80\n\n"
 
 
-# ============================================================
-# compute_hex8 / compute_signature
-# ============================================================
-
-
 class TestComputeHex8:
     def test_length(self) -> None:
         result = compute_hex8(b"secret", b"canonical")
@@ -184,7 +179,6 @@ class TestComputeHex8:
         assert compute_hex8(secret, canonical) == expected_digest
 
     def test_empty_secret(self) -> None:
-        """Empty secret should still produce a valid hex8."""
         result = compute_hex8(b"", b"canonical")
         assert len(result) == 8
         assert all(c in "0123456789abcdef" for c in result)
@@ -204,7 +198,6 @@ class TestComputeSignature:
         assert sig[-1] == "k"
 
     def test_hex8_is_first_eight_of_digest(self) -> None:
-        """verify signature[:8] == compute_hex8(secret, canonical)."""
         secret, canonical = b"my-secret", b"v1\nshort\ns\n80\nabc\n"
         hex8 = compute_hex8(secret, canonical)
         sig = compute_signature(secret, "f", canonical)
@@ -216,15 +209,8 @@ class TestComputeSignature:
         assert sig == compute_hex8(b"secret", b"canonical") + key_id
 
 
-
-# ============================================================
-# Integration: end-to-end signing flow
-# ============================================================
-
-
 class TestEndToEndSigning:
     def test_sign_and_verify_flow(self) -> None:
-        """Verify the full signing pipeline: expires_b36 -> canonical -> signature."""
         sandbox_id = "my-sandbox"
         port = 8080
         expires_sec = 2000000000

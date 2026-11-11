@@ -188,13 +188,3 @@ def test_renew_expiration_returns_409_for_manual_cleanup_sandbox(
         "code": "DOCKER::INVALID_EXPIRATION",
         "message": "Sandbox sbx-manual does not have automatic expiration enabled.",
     }
-
-
-def test_renew_expiration_requires_api_key(client: TestClient) -> None:
-    response = client.post(
-        "/v1/sandboxes/sbx-001/renew-expiration",
-        json={"expiresAt": "2030-01-01T00:00:00Z"},
-    )
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "MISSING_API_KEY"

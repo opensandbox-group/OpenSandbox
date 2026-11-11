@@ -31,6 +31,7 @@ from websockets.typing import Origin
 import opensandbox_server.api.proxy as proxy_api
 from opensandbox_server.api import lifecycle
 from opensandbox_server.api.schema import Endpoint
+from opensandbox_server.main import app
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_INGRESS_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_SECURE_ACCESS_HEADER
@@ -341,12 +342,28 @@ def test_backend_websocket_close_code_maps_only_transmittable_codes(
     assert proxy_api._backend_websocket_close_code(client_code) == expected_code
 
 
-def test_proxy_openapi_operation_ids_are_unique(client: TestClient) -> None:
-    app = cast(Any, client.app)
+@pytest.fixture(scope="module")
+def proxy_openapi() -> tuple[dict, list[str]]:
+    """The proxy OpenAPI schema and the warnings captured while building it.
+
+    Built once for all schema-shape assertions: each rebuild costs ~0.12s
+    and the schema is deterministic for the registered routes.
+    """
     app.openapi_schema = None
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         schema = app.openapi()
+    duplicate_warnings = [
+        str(item.message)
+        for item in caught
+        if "Duplicate Operation ID" in str(item.message)
+        and "proxy_sandbox_endpoint" in str(item.message)
+    ]
+    return schema, duplicate_warnings
+
+
+def test_proxy_openapi_operation_ids_are_unique(proxy_openapi) -> None:
+    schema, duplicate_warnings = proxy_openapi
 
     proxy_paths = {
         "/sandboxes/{sandbox_id}/proxy/{port}",
@@ -360,12 +377,6 @@ def test_proxy_openapi_operation_ids_are_unique(client: TestClient) -> None:
         for path in proxy_paths
         for method in proxy_methods
     ]
-    duplicate_warnings = [
-        str(item.message)
-        for item in caught
-        if "Duplicate Operation ID" in str(item.message)
-        and "proxy_sandbox_endpoint" in str(item.message)
-    ]
 
     assert len(operation_ids) == 20
     assert len(set(operation_ids)) == len(operation_ids)
@@ -376,14 +387,12 @@ def test_proxy_openapi_operation_ids_are_unique(client: TestClient) -> None:
 @pytest.mark.parametrize("suffix", ["", "/{full_path}"])
 @pytest.mark.parametrize("method", ["get", "post", "put", "delete", "patch"])
 def test_proxy_openapi_describes_transparent_responses(
-    client: TestClient,
+    proxy_openapi,
     prefix: str,
     suffix: str,
     method: str,
 ) -> None:
-    app = cast(Any, client.app)
-    app.openapi_schema = None
-    schema = app.openapi()
+    schema, _ = proxy_openapi
     path = f"{prefix}/sandboxes/{{sandbox_id}}/proxy/{{port}}{suffix}"
     responses = schema["paths"][path][method]["responses"]
 
@@ -822,7 +831,7 @@ def test_proxy_rejects_missing_secure_access_header(
     )
 
     assert response.status_code == 401
-    assert fake_client.built is None  # request was never forwarded
+    assert fake_client.built is None
 
 
 def test_proxy_rejects_mismatched_secure_access_header(
@@ -859,7 +868,7 @@ def test_proxy_rejects_mismatched_secure_access_header(
     )
 
     assert response.status_code == 401
-    assert fake_client.built is None  # request was never forwarded
+    assert fake_client.built is None
 
 
 def test_proxy_allows_valid_secure_access_header(
@@ -867,7 +876,6 @@ def test_proxy_allows_valid_secure_access_header(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Valid secure-access token passes; header is stripped from forwarded request."""
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
@@ -901,9 +909,7 @@ def test_proxy_allows_valid_secure_access_header(
     lowered_headers = {
         key.lower(): value for key, value in fake_client.built["headers"].items()
     }
-    # Token is stripped from forwarded headers — sandbox app should not receive it
     assert OPEN_SANDBOX_SECURE_ACCESS_HEADER.lower() not in lowered_headers
-    # Other endpoint headers are still forwarded
     assert lowered_headers["opensandbox-ingress-to"] == "sbx-123-44772"
 
 
@@ -1787,7 +1793,6 @@ def test_networkpolicy_route_forwards_egress_auth_header(
     assert response.status_code == 200
     assert fake_client.built is not None
     assert fake_client.built["url"] == "http://10.57.1.91:18080/policy"
-    # Ensure caller-supplied header was completely replaced and does not duplicate
     egress_headers = [
         (k, v)
         for k, v in fake_client.built["headers"].items()

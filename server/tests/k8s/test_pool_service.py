@@ -115,12 +115,10 @@ class TestPoolFromRaw:
         assert result.status is None
 
     def test_pool_with_empty_status(self):
-        """status key present but empty dict – treat as no status."""
         svc, _ = _make_pool_service()
         raw = _make_raw_pool()
         raw["status"] = {}
         result = svc._pool_from_raw(raw)
-        # Empty dict is falsy – status should be None
         assert result.status is None
 
     def test_pool_capacity_defaults_to_zero_on_missing_fields(self):
@@ -336,7 +334,6 @@ class TestListPools:
         assert result.items == []
 
     def test_list_pools_404_crd_not_installed_returns_empty(self):
-        """If the CRD doesn't exist (404), list should return empty gracefully."""
         svc, mock_api = _make_pool_service()
         mock_api.list_namespaced_custom_object.side_effect = ApiException(status=404)
 
