@@ -48,7 +48,7 @@ Under Kata the sandbox runs as a full VM, so a nested `dockerd` runs against the
 
   The target namespace must also run Pod Security Admission at the `privileged` enforce level (`pod-security.kubernetes.io/enforce=privileged`); `baseline` and `restricted` reject privileged containers and added capabilities.
 
-  The template grant reaches **template-mode** sandboxes only. A request carrying `extensions.poolRef` is served from a Pool instead: the provider builds the sandbox from the Pool's pod spec and returns before the template extras are read, so neither the template's `securityContext` nor the server-injected RuntimeClass reaches a pooled sandbox — following the template route alone still leaves `dockerd` unable to start there. For pool mode, put `privileged: true` and the Kata `runtimeClassName` on the Pool's own pod template (`spec.template.spec` of the `Pool` resource, a standard PodSpec — see the [shipped Pool sample](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/config/samples/sandbox_v1alpha1_pool.yaml)), and set the template container's image there too: the request's image is ignored in pool mode, so the template container must itself be DinD-capable (`docker:27-dind`, or a custom image with `dockerd` and `docker`) or the pod starts without any daemon. **The Pool's `recycleStrategy` must be `Delete` or `Restart` for this recipe**: with `Noop`, the recycler returns the existing pod unchanged, so the task entrypoint runs in the previous allocation's mount namespace — `/var/lib/docker` (tmpfs or directory), the daemon, and every nested image and volume survive release and carry into the next allocation, leaking DinD state (and any credentials it holds) across tenants. Pooled sandboxes also reject `network_policy` and `volumes` requests outright, so the [policy interaction](#dind-and-network-policy-are-mutually-exclusive) below is a template-mode concern.
+  The template grant reaches **template-mode** sandboxes only. A request carrying `extensions.poolRef` is served from a Pool instead: the provider builds the sandbox from the Pool's pod spec and returns before the template extras are read, so neither the template's `securityContext` nor the server-injected RuntimeClass reaches a pooled sandbox — following the template route alone still leaves `dockerd` unable to start there. For pool mode, put `privileged: true` and the Kata `runtimeClassName` on the Pool's own pod template (`spec.template.spec` of the `Pool` resource, a standard PodSpec — see the [shipped Pool sample](https://github.com/opensandbox-group/OpenSandbox/blob/main/kubernetes/config/samples/sandbox_v1alpha1_pool.yaml)), and set the template container's image there too: the request's image is ignored in pool mode, so the template container must itself be DinD-capable (`docker:27-dind`, or a custom image with `dockerd` and `docker`) or the pod starts without any daemon. **The Pool's `recycleStrategy` must be `Delete` or `Restart` for this recipe**: with `Noop`, the recycler returns the existing pod unchanged, so the task entrypoint runs in the previous allocation's mount namespace — `/var/lib/docker` (tmpfs or directory), the daemon, and every nested image and volume survive release and carry into the next allocation, leaking DinD state (and any credentials it holds) across tenants. Pooled sandboxes also reject `network_policy` and `volumes` requests outright, so the [policy interaction](#dind-and-network_policy-are-mutually-exclusive) below is a template-mode concern.
 
   ::: warning Verification status
   This guide documents the standard DinD-on-Kubernetes pattern — a privileged sandbox pod running the official Docker `dind` image, paired with `privileged_without_host_devices = true` on the Kata runtime handler. It has not yet been verified end to end on an OpenSandbox + Kata deployment; capability, storage, and cgroup behavior vary with the Kata, containerd, and kernel versions in your cluster. Create a sandbox, run `docker info` inside, check the storage driver, and run a nested `docker run` before relying on this setup in production.
@@ -167,6 +167,16 @@ done
 if [ "$ready" -ne 1 ]; then
     echo "dockerd not ready after 30s — last log lines:" >&2
     tail -n 20 /tmp/dockerd.log >&2
+    # Stop the daemon before returning the error: on the pool path the
+    # task-executor shim waits only for this script, so an abandoned
+    # dockerd (and its tmpfs mount) would survive until the sandbox is
+    # recycled.
+    kill -TERM "$DOCKERD_PID" 2>/dev/null
+    for _ in $(seq 1 20); do
+        kill -0 "$DOCKERD_PID" 2>/dev/null || break
+        sleep 0.5
+    done
+    kill -KILL "$DOCKERD_PID" 2>/dev/null
     exit 1
 fi
 
@@ -231,7 +241,7 @@ Also avoid pointing the build context at the root of a network mount — scope i
 
 The nested daemon's pulls are ordinary sandbox egress traffic:
 
-- With a `network_policy` (`dns+nft`) in effect, the registry's DNS name and IPs must be reachable under the policy — registries not covered by the allow rules will fail DNS resolution or connection. Note that allow rules alone do not make DinD work under a policy: the policy wiring strips `NET_ADMIN` from the main container, which the default daemon networking requires — see [DinD and `network_policy` are mutually exclusive](#dind-and-network-policy-are-mutually-exclusive).
+- With a `network_policy` (`dns+nft`) in effect, the registry's DNS name and IPs must be reachable under the policy — registries not covered by the allow rules will fail DNS resolution or connection. Note that allow rules alone do not make DinD work under a policy: the policy wiring strips `NET_ADMIN` from the main container, which the default daemon networking requires — see [DinD and `network_policy` are mutually exclusive](#dind-and-network_policy-are-mutually-exclusive).
 - With transparent TLS interception (L7) enabled, HTTPS registry traffic is intercepted. Sandbox bootstrap installs the interception CA into the system trust stores ("trust is delivered, not disabled" — see the [egress architecture doc](/architecture/network/egress)), so a nested daemon using the system CA bundle works as long as it starts **after** bootstrap has delivered the CA. A daemon that bundles its own static CA pool, or one started before CA delivery, will report `x509: certificate signed by unknown authority` on pulls — add the exported CA to that daemon's trust store explicitly.
 
 ## Lifecycle and housekeeping
