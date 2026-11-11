@@ -249,6 +249,24 @@ public class FilesystemAdapterTests
     }
 
     [Theory]
+    [InlineData(HttpStatusCode.OK)]
+    [InlineData(HttpStatusCode.PartialContent)]
+    public async Task ReadBytesDetailedAsync_ShouldNotUseEncodedLengthAsTotalSize(HttpStatusCode status)
+    {
+        var handler = new DownloadHandler();
+        var response = DownloadResponse(status, "hello", contentRange: "bytes 0-4/10");
+        response.Content.Headers.ContentEncoding.Add("gzip");
+        handler.Enqueue(response);
+        using var client = new HttpClient(handler);
+        var adapter = CreateAdapter(client);
+
+        var download = await adapter.ReadBytesDetailedAsync("/data.bin");
+
+        download.ContentLength.Should().Be(5);
+        download.TotalSize.Should().Be(-1);
+    }
+
+    [Theory]
     [InlineData(null, -1, -1)]
     [InlineData("garbage", -1, -1)]
     [InlineData("bytes 5-9/*", 5, 9)]

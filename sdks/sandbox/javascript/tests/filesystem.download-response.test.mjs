@@ -13,7 +13,10 @@
 // limitations under the License.
 
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 
 import { FilesystemAdapter, createExecdClient } from "../dist/internal.js";
 
@@ -29,6 +32,73 @@ async function collect(stream) {
   for await (const chunk of stream) chunks.push(...chunk);
   return new Uint8Array(chunks);
 }
+
+for (const status of [200, 206]) {
+  for (const streaming of [false, true]) {
+    test(`content-encoded ${status} download has unknown total size (streaming: ${streaming})`, async (t) => {
+      const data = Buffer.from("abcdef".repeat(1000));
+      const encoded = gzipSync(data);
+      const server = createServer((_request, response) => {
+        const headers = {
+          "Content-Encoding": "gzip",
+          "Content-Length": String(encoded.length),
+          Connection: "close",
+        };
+        if (status === 206) {
+          headers["Content-Range"] = `bytes 0-${encoded.length - 1}/${encoded.length}`;
+        }
+        response.writeHead(status, headers).end(encoded);
+      });
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+      t.after(() => new Promise((resolve, reject) => server.close((err) => err ? reject(err) : resolve())));
+
+      const localUrl = `http://127.0.0.1:${server.address().port}`;
+      const client = createExecdClient({ baseUrl: localUrl, fetch });
+      const adapter = new FilesystemAdapter(client, { baseUrl: localUrl, fetch });
+      const response = streaming
+        ? await adapter.readBytesStreamDetailed("/data.bin")
+        : await adapter.readBytesDetailed("/data.bin");
+      const body = streaming ? await collect(response.body) : response.body;
+      assert.deepEqual(body, new Uint8Array(data));
+      assert.equal(response.contentLength, encoded.length);
+      assert.equal(response.totalSize, -1);
+      if (status === 206) {
+        assert.deepEqual(response.contentRange, {
+          start: 0,
+          end: encoded.length - 1,
+          total: encoded.length,
+          raw: `bytes 0-${encoded.length - 1}/${encoded.length}`,
+        });
+      }
+    });
+  }
+}
+
+test("a CORS response without an exposed content encoding has unknown total size", async () => {
+  const adapter = createAdapter(async () => {
+    const response = new Response("hello", { headers: { "Content-Length": "5" } });
+    Object.defineProperty(response, "type", { value: "cors" });
+    return response;
+  });
+
+  const response = await adapter.readBytesDetailed("/data.bin");
+  assert.equal(response.contentLength, 5);
+  assert.equal(response.totalSize, -1);
+});
+
+test("an exposed identity content encoding preserves total size", async () => {
+  const adapter = createAdapter(async () => {
+    const response = new Response("hello", {
+      headers: { "Content-Length": "5", "Content-Encoding": "identity" },
+    });
+    Object.defineProperty(response, "type", { value: "cors" });
+    return response;
+  });
+
+  const response = await adapter.readBytesDetailed("/data.bin");
+  assert.equal(response.totalSize, 5);
+});
 
 test("readBytesDetailed exposes partial response metadata", async () => {
   const adapter = createAdapter(async (input, init) => {

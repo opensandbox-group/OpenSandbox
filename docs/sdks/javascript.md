@@ -345,6 +345,10 @@ For binary files, pass a `Uint8Array` to `writeFiles()` and read with `readBytes
 
 Use `readBytesDetailed` or `readBytesStreamDetailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Both methods are optional on `SandboxFiles`; check for support before calling them. Close a detailed stream body with `await download.body.close()` if it is not fully consumed.
 
+For content-encoded responses, `contentLength` and `contentRange` describe the encoded HTTP representation. Fetch decodes the body, so `totalSize` is `-1` when its decoded size cannot be determined from those headers.
+
+For cross-origin browser responses, `totalSize` is also `-1` if `Content-Encoding` is not exposed. Without that header the SDK cannot tell whether `Content-Length` describes compressed bytes.
+
 ```ts
 if (sandbox.files.readBytesDetailed) {
   const download = await sandbox.files.readBytesDetailed("/tmp/data.bin", { range: "bytes=5-" });

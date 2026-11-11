@@ -42,7 +42,11 @@ class ByteRange:
 
 @dataclass(frozen=True)
 class ReadBytesResponse(Generic[_BodyT]):
-    """Downloaded body and its HTTP response metadata."""
+    """Downloaded body and its HTTP response metadata.
+
+    Content length and range describe the HTTP representation, which may be
+    encoded. Total size is the decoded file size, or -1 if unknown.
+    """
 
     body: _BodyT
     status_code: int
