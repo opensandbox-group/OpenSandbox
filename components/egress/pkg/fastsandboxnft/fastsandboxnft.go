@@ -457,8 +457,13 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 // Subjects the applier holds deny-first (inst.pol == nil) stay deny-first
 // even when pols carries a policy for them — a deny-first transition that
 // raced the caller's snapshot must never be resurrected by the rebuild.
-// In-memory state mutates only after the transaction commits, so a failed
-// reload leaves the applier as the kernel still sees it and stays retryable.
+// Every DNS-learned lease is dropped (matching the sidecar profile's static
+// apply, which clears its lease state): a tightened overlay must not keep a
+// revoked domain's resolved IP authorized; existing flows stay alive through
+// the established-state accept and the connection-refresh loop re-learns
+// only currently-active flows. In-memory state mutates only after the
+// transaction commits, so a failed reload leaves the applier as the kernel
+// still sees it and stays retryable.
 func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -471,7 +476,6 @@ func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy
 		a.opts.PortFloorDenyRanges = previousFloor
 		return err
 	}
-	now := a.now()
 	for subj, inst := range a.subjects {
 		// Kernel truth wins over the caller's snapshot: deny-first stays
 		// deny-first (see the doc comment).
@@ -489,7 +493,6 @@ func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy
 			a.opts.PortFloorDenyRanges = previousFloor
 			return err
 		}
-		writeRemainingLeasesFragment(&b, subj, a.states[subj], now)
 	}
 	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
 		a.opts.PortFloorDenyRanges = previousFloor
@@ -504,6 +507,7 @@ func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy
 		inst.pol = pol
 		a.subjects[subj] = inst
 	}
+	a.states = make(map[subject.Subject]*refreshState) // leases cleared with the table; refresh re-learns live flows
 	a.tableReady = true
 	a.recordRuleCountLocked()
 	telemetry.RecordNftablesUpdate()

@@ -2284,9 +2284,6 @@ VOLUMES
 pool_up() {
 	load_mitm_ca_fingerprint
 	[[ -n "$MITM_CA_FINGERPRINT" ]] || die "no pinned MITM CA fingerprint at $MITM_CA_FINGERPRINT_FILE (run up first; mitm_ca_up stores it there)"
-	# Operator network-security baseline: applied before the pool so fastlet
-	# egress containers boot with the rules mounted.
-	kubectl apply -f "$MANIFESTS_DIR/pool/egress-network-security-rules-configmap.yaml" >/dev/null
 	render_pool
 	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
 	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null

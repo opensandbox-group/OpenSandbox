@@ -345,7 +345,7 @@ func TestApplyAlwaysRulesReloadRebuildsTable(t *testing.T) {
 	require.Contains(t, script, "203.0.113.0/24", "the new always-deny CIDR reaches the subject's deny set")
 	assert.NotContains(t, script, "8.8.8.8", "the replaced merged policy must not survive")
 	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop", "deny-first subject keeps its bare drop")
-	require.Contains(t, script, "192.0.2.1 timeout", "dynamic DNS leases survive the reload rebuild")
+	assert.NotContains(t, script, "192.0.2.1", "DNS-learned leases must be dropped with the table (sidecar parity: a tightened overlay must not keep revoked domains authorized)")
 
 	// the applier adopted the reloaded policy: a later Remove rebuild (which
 	// re-emits subjects from in-memory state) carries it too

@@ -88,10 +88,17 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		}()
 	}
 
-	alwaysDeny, alwaysAllow, err := policy.LoadAlwaysRuleFiles()
+	// Startup load goes THROUGH the loader so its file-state snapshot matches
+	// disk from the first tick: a rule file deleted before the first poll is
+	// then recognized as a removal, and startup rules can never outlive their
+	// files. Loader gate (30s) sits under the one-minute reload ticker so
+	// every tick re-stats the files.
+	loader := policy.NewAlwaysRuleLoader(30 * time.Second)
+	alwaysDeny, alwaysAllow, _, err := loader.RefreshIfDue(time.Now())
 	if err != nil {
 		log.Fatalf("failed to load always allow/deny rule files: %v", err)
 	}
+	log.Infof("loaded %d always-deny rule(s), %d always-allow rule(s) from /var/egress/rules", len(alwaysDeny), len(alwaysAllow))
 
 	podNft := fastsandboxnft.NewApplier(nil, fastSandboxNftOptions(upstreamSpec))
 	// Construct the resolver without starting its listener. Seed hostname
@@ -123,11 +130,9 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
 	fastSandboxSrv.SetActionsAPIVersion(actionsAPIVersion)
-	// Operator always-rule files are re-staged by the reload job below; the
-	// loader gate sits UNDER the one-minute ticker (30s < 60s) so every tick
-	// re-stats the files and an edit converges on the next tick instead of
-	// occasionally skipping to the one after.
-	fastSandboxSrv.SetAlwaysRuleLoader(policy.NewAlwaysRuleLoader(30 * time.Second))
+	// The startup snapshot above is re-staged by the reload job every minute,
+	// so configmap-mounted rule changes need no restart.
+	fastSandboxSrv.SetAlwaysRuleLoader(loader)
 
 	// Register the configured state-directory basenames BEFORE either
 	// constructor runs: the volume-root restriction must recognize the
