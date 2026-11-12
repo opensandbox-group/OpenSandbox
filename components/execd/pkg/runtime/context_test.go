@@ -516,3 +516,30 @@ func TestCreateContextDeletesSessionWhenKernelCheckFails(t *testing.T) {
 	require.Equal(t, int32(1), created.Load())
 	require.Equal(t, created.Load(), deleted.Load(), "every session created by a failed attempt is deleted")
 }
+
+func TestCreateContextFailsFastWhenCwdIsAFile(t *testing.T) {
+	var specRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/kernelspecs") {
+			specRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"default":"python","kernelspecs":{"python":{"name":"python","spec":{"language":"python","display_name":"Python"}}}}`))
+			return
+		}
+		require.Failf(t, "unexpected request", "%s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	cwd := filepath.Join(t.TempDir(), "file.txt")
+	require.NoError(t, os.WriteFile(cwd, []byte("x"), 0o644))
+
+	c := NewController(server.URL, "token")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.CreateContext(ctx, &CreateContextRequest{Language: Python, Cwd: cwd})
+	require.ErrorIs(t, err, ErrInvalidContextCwd)
+	require.Less(t, time.Since(start), 500*time.Millisecond)
+	require.Equal(t, int32(1), specRequests.Load(), "an unusable cwd must not be retried")
+}
