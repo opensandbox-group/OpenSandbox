@@ -19,7 +19,11 @@ package runtime
 
 import (
 	"bufio"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -298,6 +302,58 @@ func TestPTYSession_CloseTerminatesProcess(t *testing.T) {
 			t.Fatal("process did not exit within 3s after close()")
 		}
 	}
+}
+
+func TestPTYSession_CloseStopsBackgroundJobs(t *testing.T) {
+	requireBash(t)
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("process liveness check needs /proc")
+	}
+
+	s := newPTYSession(uuidString(), "", "")
+	require.NoError(t, s.StartPTY())
+	t.Cleanup(func() { s.close() })
+	stdoutR, _, detach := s.AttachOutput()
+	defer detach()
+	safego.Go(func() { _, _ = io.Copy(io.Discard, stdoutR) }) //nolint:errcheck
+
+	// Job control puts the background job in its own process group.
+	pidFile := filepath.Join(t.TempDir(), "job.pid")
+	_, err := s.WriteStdin([]byte("sleep 300 & echo $! > " + pidFile + "\n"))
+	require.NoError(t, err)
+	var jobPid int
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		jobPid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && jobPid > 0
+	}, 5*time.Second, 25*time.Millisecond, "background job did not start")
+
+	started := time.Now()
+	s.close()
+
+	select {
+	case <-s.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("session did not end within 3s after close()")
+	}
+	// The job no longer holds the terminal open until ptyDrainTimeout.
+	assert.Less(t, time.Since(started), ptyDrainTimeout, "session end waited for the output drain timeout")
+	assert.Eventually(t, func() bool { return processGone(jobPid) }, 3*time.Second, 25*time.Millisecond,
+		"background job %d survived close()", jobPid)
+}
+
+// processGone reports whether pid no longer exists or is a zombie.
+func processGone(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	// The state follows the parenthesised command name.
+	fields := strings.Fields(string(data[strings.LastIndexByte(string(data), ')')+1:]))
+	return len(fields) > 0 && fields[0] == "Z"
 }
 
 func TestPTYSession_ExitCode(t *testing.T) {
