@@ -16,6 +16,7 @@ on:
     types: [fast-sandbox-pr]
   pull_request:
     branches: [ main ]
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
@@ -37,7 +38,12 @@ jobs:
   integration:
     name: Integration Env (self-hosted kvm)
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      github.event_name != 'pull_request' ||
+      ( needs.changes.outputs.relevant == 'true' &&
+      contains(github.event.pull_request.labels.*.name, 'ok-to-test') &&
+      ( github.event.action != 'labeled' ||
+      github.event.label.name == 'ok-to-test' ) )
     runs-on: kvm
     timeout-minutes: 240
     env:
