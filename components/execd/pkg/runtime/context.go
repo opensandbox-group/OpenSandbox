@@ -74,7 +74,7 @@ func (c *Controller) GetContext(session string) (CodeContext, error) {
 func (c *Controller) ListContext(language string) ([]CodeContext, error) {
 	switch language {
 	case Command.String(), BackgroundCommand.String(), SQL.String():
-		return nil, fmt.Errorf("unsupported language context operation: %s", language)
+		return nil, fmt.Errorf("%w context operation: %s", ErrUnsupportedLanguage, language)
 	case "":
 		return c.listAllContexts()
 	default:

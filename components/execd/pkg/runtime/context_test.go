@@ -88,7 +88,7 @@ func TestNewIpynbPath_ExpandsHome(t *testing.T) {
 func TestListContextUnsupportedLanguage(t *testing.T) {
 	c := NewController("", "")
 	_, err := c.ListContext(Command.String())
-	require.Error(t, err, "expected error for command language")
+	require.ErrorIs(t, err, ErrUnsupportedLanguage, "expected error for command language")
 	_, err = c.ListContext(BackgroundCommand.String())
 	require.Error(t, err, "expected error for background-command language")
 	_, err = c.ListContext(SQL.String())
