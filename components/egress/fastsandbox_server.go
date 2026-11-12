@@ -41,6 +41,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	"github.com/alibaba/opensandbox/internal/safego"
 )
 
 // fastSandboxNftApplier is the per-subject nft surface used by the fast-sandbox control plane
@@ -48,7 +49,18 @@ import (
 type fastSandboxNftApplier interface {
 	ApplyDenyFirst(ctx context.Context, s subject.Subject, att actionhandler.NetworkAttachment) error
 	ApplyPolicy(ctx context.Context, s subject.Subject, pol *policy.NetworkPolicy) error
+	ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error
 	Remove(ctx context.Context, s subject.Subject) error
+}
+
+// alwaysRuleReloadLoader stages the operator always-rule files with an apply
+// veto: a failed apply keeps the previous rules published and the candidate
+// retried next tick (policy.AlwaysRuleLoader's contract). Narrowed from
+// policy.AlwaysRuleLoader for testability.
+type alwaysRuleReloadLoader interface {
+	CurrentRules() (deny, allow []policy.EgressRule)
+	SetCurrentRules(deny, allow []policy.EgressRule)
+	RefreshIfDueWithApply(now time.Time, apply func(deny, allow []policy.EgressRule) error) (deny, allow []policy.EgressRule, changed bool, err error)
 }
 
 // fastSandboxPolicyServer is the multi-subject control plane. It implements
@@ -137,6 +149,10 @@ type fastSandboxPolicyServer struct {
 	mitmGate    *mitmproxy.HealthGate // nil when MITM disabled
 
 	policyMu sync.Mutex // serializes policy applies (registry + nft stay ordered)
+
+	// alwaysLoader polls the operator always-rule files; nil disables the
+	// reload job. Wired by SetAlwaysRuleLoader at profile assembly.
+	alwaysLoader alwaysRuleReloadLoader
 
 	// instanceID identifies this Handler process incarnation; a changed value
 	// makes the Fastlet invalidate Binding readiness and replay SET_BINDING
@@ -501,9 +517,9 @@ func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentia
 // reporting the new policy while the kernel still enforces the old one.
 // The nft swap uses the always-rule MERGED policy (reg.EffectiveOf), so
 // allow.always/deny.always are enforced at the IP layer too — matching the
-// sidecar profile's commitPolicy behavior. The always files are loaded once
-// at startup; runtime file changes are not picked up (sidecar reloads them
-// every minute).
+// sidecar profile's commitPolicy behavior. The operator always-rule overlay
+// hot-reloads atomically (reloadAlwaysRules), so kernel and DNS never
+// disagree about a subject.
 func (s *fastSandboxPolicyServer) applyPolicy(subj subject.Subject, pol *policy.NetworkPolicy) error {
 	s.policyMu.Lock()
 	defer s.policyMu.Unlock()
@@ -521,6 +537,106 @@ func (s *fastSandboxPolicyServer) applyPolicy(subj subject.Subject, pol *policy.
 	}
 	log.Infof("subject %s: policy applied (defaultAction=%s, rules=%d)", subj, pol.DefaultAction, len(pol.Egress))
 	return nil
+}
+
+// SetAlwaysRuleLoader wires the periodic always-rule reloader; nil (the
+// test default) keeps the reload job off.
+func (s *fastSandboxPolicyServer) SetAlwaysRuleLoader(l alwaysRuleReloadLoader) {
+	s.alwaysLoader = l
+}
+
+// startAlwaysRuleReloadJob polls the operator always-rule files every
+// minute (the sidecar cadence, matched to the kubelet ConfigMap sync
+// period); failures log and retry on the next tick.
+func (s *fastSandboxPolicyServer) startAlwaysRuleReloadJob() {
+	if s.alwaysLoader == nil {
+		return
+	}
+	safego.Go(func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-ticker.C:
+				changed, err := s.reloadAlwaysRules()
+				if err != nil {
+					log.Warnf("fast-sandbox: periodic always-rule reload failed (will retry): %v", err)
+					continue
+				}
+				if !changed {
+					continue
+				}
+				deny, allow := s.alwaysLoader.CurrentRules()
+				log.Infof("fast-sandbox: always rules reloaded (deny=%d allow=%d fp=%016x)",
+					len(deny), len(allow), fingerprintRules(deny, allow))
+			}
+		}
+	})
+}
+
+// reloadAlwaysRules applies a changed always overlay fail-closed: kernel
+// rebuild first, registry (DNS dispatch) second; a kernel failure leaves the
+// loader's previous state published and the candidate retries next tick.
+// Unlike the sidecar, no telemetry endpoints join always-allow (startup
+// parity), and the shared dnsproxy needs no update — its per-query selector
+// reads the registry effective policies that SetAlwaysRules recomputes.
+func (s *fastSandboxPolicyServer) reloadAlwaysRules() (bool, error) {
+	if s.alwaysLoader == nil {
+		return false, nil
+	}
+	_, _, changed, err := s.alwaysLoader.RefreshIfDueWithApply(time.Now(), s.applyAlwaysOverlay)
+	return changed, err
+}
+
+// applyAlwaysOverlay is the loader's apply callback. policyCommitMu comes
+// first (the applyPolicy caller order): the SET_BINDING / hook / rollback
+// deny-first transitions hold it but not policyMu, so without it a reload
+// could snapshot an active policy whose deny-first transition commits first
+// and get that stale allow policy re-emitted by the rebuild. A registering
+// subject cannot reach active state (policy application needs policyMu); a
+// subject the applier holds deny-first stays deny-first via the reload's
+// inst.pol guard even if it raced the snapshot.
+func (s *fastSandboxPolicyServer) applyAlwaysOverlay(deny, allow []policy.EgressRule) error {
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+
+	pols := make(map[subject.Subject]*policy.NetworkPolicy)
+	for _, subj := range s.reg.List() {
+		if state, ok := s.reg.Get(subj); !ok || state != subject.StateActive {
+			continue
+		}
+		user := s.reg.UserPolicy(subj)
+		if user == nil {
+			continue
+		}
+		pols[subj] = policy.MergeAlwaysOverlay(user, deny, allow)
+	}
+
+	// Kernel first, bounded like applyPolicy; one atomic transaction swaps
+	// the floor and every subject's merged policy.
+	nftCtx, cancel := context.WithTimeout(s.ctx, policyApplyTimeout)
+	defer cancel()
+	if err := s.nft.ApplyAlwaysRulesReload(nftCtx, alwaysFloorRanges(deny), pols); err != nil {
+		return fmt.Errorf("always-overlay nft rebuild: %w", err)
+	}
+	// Registry second: DNS dispatch picks up the new overlay per query.
+	s.reg.SetAlwaysRules(deny, allow)
+	return nil
+}
+
+// alwaysFloorRanges extracts the port-floor ranges from a candidate deny
+// set: only the reachable.ports.cap floor rules carry PortRanges, so the
+// union is exactly the floor.
+func alwaysFloorRanges(deny []policy.EgressRule) []policy.PortRange {
+	var out []policy.PortRange
+	for _, r := range deny {
+		out = append(out, r.PortRanges...)
+	}
+	return out
 }
 
 // vaultEntry binds a vault store to the registration fence it was

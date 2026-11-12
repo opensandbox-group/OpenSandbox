@@ -3998,6 +3998,8 @@ verify_native() {
 	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
 	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
+	# Lives in verify/network-security-rules.sh, shared with integration.sh.
+	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
 	run_stage "execd-as-init verify (in-guest process topology)" init_mode_verify
 	run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
 	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify

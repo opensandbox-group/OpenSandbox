@@ -88,10 +88,17 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		}()
 	}
 
-	alwaysDeny, alwaysAllow, err := policy.LoadAlwaysRuleFiles()
+	// Startup load goes THROUGH the loader so its file-state snapshot matches
+	// disk from the first tick: a rule file deleted before the first poll is
+	// then recognized as a removal, and startup rules can never outlive their
+	// files. Loader gate (30s) sits under the one-minute reload ticker so
+	// every tick re-stats the files.
+	loader := policy.NewAlwaysRuleLoader(30 * time.Second)
+	alwaysDeny, alwaysAllow, _, err := loader.RefreshIfDue(time.Now())
 	if err != nil {
 		log.Fatalf("failed to load always allow/deny rule files: %v", err)
 	}
+	log.Infof("loaded %d always-deny rule(s), %d always-allow rule(s) from /var/egress/rules", len(alwaysDeny), len(alwaysAllow))
 
 	podNft := fastsandboxnft.NewApplier(nil, fastSandboxNftOptions(upstreamSpec))
 	// Construct the resolver without starting its listener. Seed hostname
@@ -123,6 +130,9 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
 	fastSandboxSrv.SetActionsAPIVersion(actionsAPIVersion)
+	// The startup snapshot above is re-staged by the reload job every minute,
+	// so configmap-mounted rule changes need no restart.
+	fastSandboxSrv.SetAlwaysRuleLoader(loader)
 
 	// Register the configured state-directory basenames BEFORE either
 	// constructor runs: the volume-root restriction must recognize the
@@ -260,7 +270,13 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 			OnResolved: func(domain string, ips []nftables.ResolvedIP) {
 				addCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
-				if err := podNft.AddResolvedIPs(addCtx, s, ips); err != nil {
+				if err := podNft.AddResolvedIPs(addCtx, s, domain, ips); err != nil {
+					if errors.Is(err, fastsandboxnft.ErrLeaseRejected) || errors.Is(err, fastsandboxnft.ErrUnknownSubject) {
+						// Answer was in flight during a rule change: fail
+						// closed, quietly.
+						log.Infof("[dns] resolved IPs for subject %s domain %q not admitted (policy changed during resolution)", s, domain)
+						return
+					}
 					log.Warnf("[dns] add resolved IPs to fast-sandbox nft failed for subject %s domain %q: %v", s, domain, err)
 				}
 			},
@@ -289,6 +305,8 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		}
 	})
 	log.Infof("fast-sandbox policy server listening on %s (Sandbox Actions Handler)", httpAddr)
+
+	fastSandboxSrv.startAlwaysRuleReloadJob()
 
 	// Per-subject connection refresh: active TCP connections keep their
 	// dynamic leases alive (bucketed by source IP from the Pod netns

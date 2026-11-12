@@ -126,8 +126,14 @@ func DefaultRunner(ctx context.Context, script string) ([]byte, error) {
 // deny-first rules have not been installed yet.
 var ErrUnknownSubject = fmt.Errorf("fastsandboxnft: subject rules not installed")
 
-// Options carries fast-sandbox-profile-wide enforcement toggles, loaded once at
-// startup and applied to every table (re)build.
+// ErrLeaseRejected is returned when a DNS answer that was in flight during a
+// rule change (overlay tightened, or the subject reverted to deny-first)
+// carries a domain the installed policy no longer authorizes.
+var ErrLeaseRejected = fmt.Errorf("fastsandboxnft: DNS lease rejected by the installed policy")
+
+// Options carries fast-sandbox-profile-wide enforcement toggles, applied to
+// every table (re)build; ApplyAlwaysRulesReload also re-swaps
+// PortFloorDenyRanges at runtime.
 type Options struct {
 	// BlockDoH443 drops TCP 443 to the DoH blocklist (or all TCP 443 when
 	// no blocklist is provided — strict mode). Same semantics as the sidecar
@@ -353,15 +359,27 @@ func (a *Applier) ApplyPolicy(ctx context.Context, s subject.Subject, pol *polic
 }
 
 // AddResolvedIPs adds DNS-learned IPs to a subject's dynamic allow sets with
-// a bounded timeout (mirrors the sidecar profile's lease behavior).
-func (a *Applier) AddResolvedIPs(ctx context.Context, s subject.Subject, ips []nftables.ResolvedIP) error {
+// a bounded timeout (mirrors the sidecar profile's lease behavior). The
+// domain is re-authorized against the installed policy under the same lock
+// the always-rule reload rebuilds under, so an answer that was in flight
+// while the overlay tightened cannot re-authorize a revoked domain's IP.
+// Returns ErrLeaseRejected (expected race outcome, not an nft failure — the
+// answer still reaches the client) or ErrUnknownSubject.
+func (a *Applier) AddResolvedIPs(ctx context.Context, s subject.Subject, domain string, ips []nftables.ResolvedIP) error {
 	if len(ips) == 0 {
 		return nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, ok := a.subjects[s]; !ok {
+	inst, ok := a.subjects[s]
+	if !ok {
 		return ErrUnknownSubject
+	}
+	// Serialized with ApplyAlwaysRulesReload; inst.pol carries the always
+	// overlay and Evaluate is what the DNS selector used at query time.
+	// Deny-first subjects admit no leases.
+	if inst.pol == nil || inst.pol.Evaluate(domain) == policy.ActionDeny {
+		return ErrLeaseRejected
 	}
 	var b strings.Builder
 	writeResolvedIPsFragment(&b, s, ips)
@@ -444,6 +462,69 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 	}
 	delete(a.subjects, s)
 	delete(a.states, s)
+	a.tableReady = true
+	a.recordRuleCountLocked()
+	telemetry.RecordNftablesUpdate()
+	return nil
+}
+
+// ApplyAlwaysRulesReload rebuilds the whole table (as Remove does) after an
+// always-rule reload: the port floor is swapped into the master chains and
+// every installed subject re-emitted with the NEW merged policy from pols.
+// Subjects the applier holds deny-first (inst.pol == nil) stay deny-first
+// even when pols carries a policy for them — a deny-first transition that
+// raced the caller's snapshot must never be resurrected by the rebuild.
+// Every DNS-learned lease is dropped (sidecar parity): a tightened overlay
+// must not keep a revoked domain's IP authorized, and a late DNS answer
+// cannot re-admit one — AddResolvedIPs re-authorizes under this same lock.
+// Active flows keep passing via the established-state accept; a still-
+// allowed domain recovers with the next DNS lookup (the refresh loop renews
+// only mirrored leases, never re-learns). In-memory state mutates only after
+// the transaction commits, so a failed reload stays retryable.
+func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Stage the floor into opts so the script builders emit it; revert on
+	// failure so the applier state matches what the kernel still enforces.
+	previousFloor := a.opts.PortFloorDenyRanges
+	a.opts.PortFloorDenyRanges = portFloor
+	var b strings.Builder
+	if err := a.writeTableHeader(&b); err != nil {
+		a.opts.PortFloorDenyRanges = previousFloor
+		return err
+	}
+	for subj, inst := range a.subjects {
+		// Kernel truth wins over the caller's snapshot: deny-first stays
+		// deny-first (see the doc comment).
+		pol := pols[subj]
+		if inst.pol == nil {
+			pol = nil
+		}
+		var err error
+		if pol == nil {
+			err = writeSubjectDenyFirstFragment(&b, subj, inst.att, a.opts.MitmRedirectPort)
+		} else {
+			err = writeSubjectInitialPolicyFragment(&b, subj, inst.att, pol, a.opts.MitmRedirectPort)
+		}
+		if err != nil {
+			a.opts.PortFloorDenyRanges = previousFloor
+			return err
+		}
+	}
+	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
+		a.opts.PortFloorDenyRanges = previousFloor
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
+		return err
+	}
+	for subj, inst := range a.subjects {
+		pol := pols[subj]
+		if inst.pol == nil {
+			pol = nil
+		}
+		inst.pol = pol
+		a.subjects[subj] = inst
+	}
+	a.states = make(map[subject.Subject]*refreshState) // leases cleared with the table; the refresh mirror renews, never re-learns
 	a.tableReady = true
 	a.recordRuleCountLocked()
 	telemetry.RecordNftablesUpdate()
