@@ -129,6 +129,7 @@ The following table lists the configurable parameters of the chart and their def
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.2.1-rc.2\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.2.1-rc.2\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. [kubernetes].namespace below is the sandbox workload namespace: the chart does not create it, so create it before submitting workloads (see README). |
+| extraFiles | object | `{}` | Additional non-secret text files mounted read-only at /etc/opensandbox/<name>. Contents are literal strings; config.toml and path names are forbidden. Changes trigger a server rollout. |
 | fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
 | imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |
 | nameOverride | string | `""` | Override the name of the chart |
@@ -146,6 +147,7 @@ The following table lists the configurable parameters of the chart and their def
 | server.image.pullPolicy | string | `"IfNotPresent"` | Server image pull policy. |
 | server.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server"` | Server image repository. |
 | server.image.tag | string | `""` | Server image tag. Empty uses the release-<appVersion> image tag published for this chart version. |
+| server.lifecycle | object | `{}` | Container lifecycle hooks. Hook commands must exist in the server image. |
 | server.nodeSelector | object | `{}` | Node selector for the server pod. |
 | server.podAnnotations | object | `{}` | Extra annotations for the server pod. |
 | server.podLabels | object | `{}` | Extra labels for the server pod. |
@@ -155,6 +157,8 @@ The following table lists the configurable parameters of the chart and their def
 | server.resources | object | `{"limits":{"cpu":"2","memory":"8Gi"},"requests":{"cpu":"1","memory":"4Gi"}}` | Resource requests and limits |
 | server.service.nodePort | string | `""` | Node port to bind when type is not ClusterIP. Empty lets Kubernetes allocate one from the cluster node-port range. |
 | server.service.type | string | `"ClusterIP"` | Service type for the server. Set to NodePort or LoadBalancer to reach the server from outside the cluster. |
+| server.strategy | object | `{"type":"Recreate"}` | Deployment update strategy. Recreate keeps one active server; changing this does not enable general multi-replica HA. |
+| server.terminationGracePeriodSeconds | string | `nil` | Pod termination grace period in seconds. Null keeps the Kubernetes default; zero is honored. |
 | server.tolerations | list | `[]` | Tolerations for the server pod. |
 | server.topologySpreadConstraints | list | `[]` | Topology spread constraints for the server pod. |
 | server.volumeMounts | list | `[]` | Additional volume mounts for the server container. |

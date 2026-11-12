@@ -7,6 +7,7 @@ on:
       - '.github/workflows/helm-release-test.yml'
       - 'manifests/charts/**'
       - 'manifests/release/*helm*.sh'
+      - 'manifests/release/test-helm-options.py'
       - 'sdks/code-interpreter/python/**'
       - 'sdks/sandbox/python/**'
       - 'tests/python/**'
@@ -99,6 +100,13 @@ jobs:
             >/tmp/opensandbox-umbrella-server-rendered.yaml
           grep -qx '  replicas: 1' /tmp/opensandbox-umbrella-server-rendered.yaml
           grep -qx '    type: Recreate' /tmp/opensandbox-umbrella-server-rendered.yaml
+
+      - name: Verify chart rollout and extra-file options
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.package_name }}
+        run: |
+          uv run --no-project --with PyYAML==6.0.2 python \
+            manifests/release/test-helm-options.py --package "dist/$PACKAGE_NAME" -v
 
       - name: Run exact-package Kind smoke
         # The packaged chart defaults to release-<appVersion> images, which only
