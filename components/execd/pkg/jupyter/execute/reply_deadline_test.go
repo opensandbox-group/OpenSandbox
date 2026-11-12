@@ -16,6 +16,7 @@ package execute
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +190,71 @@ func TestReplyDeadlineAndIdleFinalizationDeliverExactlyOneTerminal(t *testing.T)
 		}
 	}
 	require.Equal(t, 1, terminals, "exactly one terminal complete result must be delivered")
+}
+
+// A slow but continuously flowing output relay must not be truncated by the
+// deadline: each delivered output restarts the grace period, so everything the
+// kernel sent before the idle is forwarded, and the idle closes the stream
+// normally.
+func TestExecuteCodeStreamReplyDeadlineExtendsWhileOutputKeepsArriving(t *testing.T) {
+	previous := execdflag.JupyterReplyFinalizeTimeout
+	execdflag.JupyterReplyFinalizeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { execdflag.JupyterReplyFinalizeTimeout = previous })
+
+	const bursts = 5
+	server := createTestServer(t, func(conn *websocket.Conn) {
+		var executeRequest Message
+		if err := conn.ReadJSON(&executeRequest); err != nil {
+			return
+		}
+
+		sendExecuteReply(conn, 1, executeRequest.Header)
+
+		// Keep producing output well past three full grace periods after the
+		// reply; an absolute deadline would truncate here.
+		for i := 0; i < bursts; i++ {
+			time.Sleep(120 * time.Millisecond)
+			streamContent, _ := json.Marshal(StreamOutput{Name: StreamStdout, Text: fmt.Sprintf("burst-%d\n", i)})
+			require.NoError(t, conn.WriteJSON(Message{
+				Header:       Header{MessageID: fmt.Sprintf("stream-msg-id-%d", i), MessageType: string(MsgStream)},
+				ParentHeader: executeRequest.Header,
+				Content:      json.RawMessage(streamContent),
+			}))
+		}
+
+		statusContent, _ := json.Marshal(StatusUpdate{ExecutionState: StateIdle})
+		require.NoError(t, conn.WriteJSON(Message{
+			Header:       Header{MessageID: "status-msg-id", MessageType: string(MsgStatus)},
+			ParentHeader: executeRequest.Header,
+			Content:      json.RawMessage(statusContent),
+		}))
+	})
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/test-kernel-id/channels"
+	client := NewClient("", nil)
+	require.NoError(t, client.Connect(wsURL))
+	defer client.Disconnect()
+
+	resultChan := make(chan *ExecutionResult, bursts+2)
+	require.NoError(t, client.ExecuteCodeStream("for i in range(5): print(i)", resultChan))
+
+	stdouts := 0
+	terminals := 0
+	for result := range resultChan {
+		if result == nil {
+			break
+		}
+		if len(result.Stream) == 1 && strings.HasPrefix(result.Stream[0].Text, "burst-") {
+			stdouts++
+		}
+		if result.ExecutionTime > 0 && result.Error == nil && len(result.Stream) == 0 {
+			terminals++
+		}
+	}
+
+	require.Equal(t, bursts, stdouts, "every output delivered before the idle must be forwarded despite the running deadline")
+	require.Equal(t, 1, terminals, "expected exactly one terminal complete result")
 }
 
 // The normal path is unaffected: idle arrives right after the reply and the

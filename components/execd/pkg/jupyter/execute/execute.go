@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/internal/safego"
@@ -126,6 +127,11 @@ type streamExecutionState struct {
 	// instead of racing a closed channel.
 	chanMutex sync.RWMutex
 	closed    bool
+
+	// outputActivity counts delivered output results (stream and execute_result).
+	// The reply deadline uses it to expire on output silence instead of on
+	// absolute wall-clock time, so a slow relay cannot be cut off mid-delivery.
+	outputActivity atomic.Int64
 }
 
 func newStreamExecutionState(startTime time.Time) *streamExecutionState {
@@ -314,17 +320,30 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState, r
 // remaining IOPub output is pending. Finalizing here closes the results channel
 // with the output collected so far; a late idle is a no-op because executeDone
 // is already set.
+//
+// The bound expires on output silence, not on absolute wall-clock time: while
+// output keeps arriving, each delivery restarts the grace period, so a slow
+// relay cannot be cut off mid-delivery; the execution is finalized only once
+// the output has gone quiet for a full grace period.
 func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan chan *ExecutionResult, timeout time.Duration) {
 	if timeout <= 0 {
 		return
 	}
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 
-	select {
-	case <-state.cancelled:
-		return
-	case <-timer.C:
+	delivered := state.outputActivity.Load()
+	for {
+		timer := time.NewTimer(timeout)
+		select {
+		case <-state.cancelled:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		latest := state.outputActivity.Load()
+		if latest == delivered {
+			break
+		}
+		delivered = latest
 	}
 
 	state.executeMutex.Lock()
@@ -356,6 +375,7 @@ func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, 
 		ExecutionData:  execResult.Data,
 	}
 	state.trySend(resultChan, notify)
+	state.outputActivity.Add(1)
 
 	state.resultMutex.Lock()
 	state.result.ExecutionCount = execResult.ExecutionCount
@@ -381,6 +401,7 @@ func (c *Client) handleStreamOutput(msg *Message, state *streamExecutionState, r
 		Stream: []*StreamOutput{&stream},
 	}
 	state.trySend(resultChan, notify)
+	state.outputActivity.Add(1)
 }
 
 func (c *Client) handleExecutionError(msg *Message, state *streamExecutionState) {
