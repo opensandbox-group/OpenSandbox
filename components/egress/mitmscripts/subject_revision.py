@@ -28,13 +28,14 @@ import json
 import sys
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from types import MappingProxyType
 
 from revision_publication import InstallationReceiver
 from revision_receiver import Revision, RevisionError, Snapshot
 from tls_registry import ConnectionAccounting
-from subject_admission import SubjectRegistry, admit_source
+if TYPE_CHECKING:
+    from subject_admission import SubjectRegistry
 
 LIFECYCLE_BODY_LIMIT = 8192
 RESPONSE_LIMIT = 4096
@@ -182,13 +183,17 @@ class SubjectRevisionOwner:
     def __init__(self, control_generation: str, *, max_subjects: int,
                  max_snapshot_bytes: int, retained_payload_budget: int,
                  tls_capacity: int | None = None, process_tls_capacity: int | None = None,
-                 static_passthrough: tuple = ()) -> None:
+                 static_passthrough: tuple | None = None) -> None:
         if (not valid_identity(control_generation, 128)
                 or not all(_positive_integer(value) for value in
                            (max_subjects, max_snapshot_bytes, retained_payload_budget))
                 or max_subjects > sys.maxsize // 2 // max_snapshot_bytes
                 or 2 * max_subjects * max_snapshot_bytes > retained_payload_budget):
             raise ValueError("invalid subject resource envelope")
+        supplied = (tls_capacity is not None, process_tls_capacity is not None,
+                    static_passthrough is not None)
+        if any(supplied) and not all(supplied):
+            raise ValueError("incomplete subject TLS admission configuration")
         request_body_limit(max_snapshot_bytes)
         self._control = control_generation
         self._max_subjects = max_subjects
@@ -200,16 +205,17 @@ class SubjectRevisionOwner:
         self._operation_lock = threading.Lock()
         self._terminal = False
         self._closed = False
-        if tls_capacity is not None:
-            self._tls_capacity = tls_capacity
-            self._accounting = ConnectionAccounting(process_tls_capacity)
-            self._static_passthrough = static_passthrough
+        self._tls_capacity = tls_capacity
+        self._accounting = None if tls_capacity is None else ConnectionAccounting(process_tls_capacity)
+        self._static_passthrough = () if static_passthrough is None else static_passthrough
 
     @property
     def control_generation(self) -> str:
         return self._control
 
     def admit_tls(self, address, sni, *, ech_hidden=False, destination_port=None):
+        from subject_admission import admit_source
+
         return admit_source(self, address, sni, ech_hidden=ech_hidden,
                             destination_port=destination_port)[0]
 
@@ -348,11 +354,13 @@ class SubjectRevisionOwner:
         try:
             receiver = InstallationReceiver(self._control, target.subject_generation,
                                             max_snapshot_bytes=self._max_snapshot_bytes,
-                                            static_passthrough=getattr(self, "_static_passthrough", ()))
+                                            static_passthrough=self._static_passthrough)
         except Exception:  # noqa: BLE001 - no entry has been inserted yet
             return _Result(503, "subject_failed")
         self._entries[target.subject_key] = _Entry(target, receiver, source_addresses=addresses)
-        if getattr(self, "_accounting", None) is not None:
+        if self._accounting is not None:
+            from subject_admission import SubjectRegistry
+
             self._entries[target.subject_key].registry = SubjectRegistry(
                 capacity=self._tls_capacity, accounting=self._accounting,
                 static_passthrough=self._static_passthrough,

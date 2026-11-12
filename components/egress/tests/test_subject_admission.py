@@ -15,7 +15,7 @@ import test_tls_registry as tls
 
 class SubjectAdmissionTest(unittest.TestCase):
     def setUp(self):
-        self.owner = f.make_owner(tls_capacity=2, process_tls_capacity=3)
+        self.owner = f.make_owner(tls_capacity=2, process_tls_capacity=3, static_passthrough=())
         self.addCleanup(self.owner.close)
         self.sequence = 0
         self.command("register", sourceAddresses=["192.0.2.1"])
@@ -36,6 +36,46 @@ class SubjectAdmissionTest(unittest.TestCase):
 
     def assert_reason(self, result, action, reason):
         self.assertEqual((result.action, result.reason), (action, reason))
+
+    def test_admission_configuration_requires_complete_triple(self):
+        fields = {"tls_capacity": 2, "process_tls_capacity": 3, "static_passthrough": ()}
+        for mask in range(1, 7):
+            supplied = {name: value for i, (name, value) in enumerate(fields.items()) if mask & (1 << i)}
+            with self.subTest(supplied=supplied), self.assertRaises(ValueError):
+                f.make_owner(**supplied)
+
+    def test_admission_configuration_all_or_none_initializes_fixed_state(self):
+        for fields in ({}, dict(tls_capacity=2, process_tls_capacity=3, static_passthrough=())):
+            with self.subTest(fields=fields):
+                owner = f.make_owner(**fields)
+                self.addCleanup(owner.close)
+                enabled = bool(fields)
+                self.assertEqual(owner._tls_capacity, 2 if enabled else None)
+                self.assertEqual(owner._static_passthrough, ())
+                self.assertEqual(owner._accounting is not None, enabled)
+                self.assertEqual(owner.lifecycle("register", f.command(1))["result"]["outcome"], "registered")
+                self.assertEqual(owner._entries[f.A.subject_key].registry is not None, enabled)
+
+    def test_static_selectors_identity_skips_only_startup_validation(self):
+        from subject_admission import SubjectRegistry
+
+        registry = SubjectRegistry(capacity=2, accounting=tls.registry_module.ConnectionAccounting(3),
+                                   static_passthrough=(tls.selectors.parse_canonical("static.example.com"),))
+        selectors = registry.static_selectors
+        equivalent = tuple(list(selectors))
+        self.assertEqual(selectors, equivalent)
+        self.assertIsNot(selectors, equivalent)
+        self.assertIs(registry.static_selectors, selectors)
+        with patch.object(tls.decision, "validate_selectors", wraps=tls.decision.validate_selectors) as validate:
+            for value in (selectors, equivalent):
+                result = registry.admit(identity=(f.CONTROL, f.A.subject_generation),
+                                        sni="static.example.com", ech_hidden=False,
+                                        static_passthrough=value, destination_port=443)
+                self.assert_reason(result, "passthrough", "static_ignore")
+                if value is selectors:
+                    validate.assert_not_called()
+                else:
+                    validate.assert_called_once_with(equivalent)
 
     def test_decision_order_identity_early_bypass_snapshot_binding_and_registry(self):
         self.assert_reason(self.admit("192.0.2.9", ech=True), "deny", "unknown_identity")

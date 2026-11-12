@@ -34,6 +34,7 @@ _ADMISSION_FIELDS = {"TLS_ADMISSION", "TLS_CAPACITY", "PROCESS_TLS_CAPACITY"}
 _ERROR = "credential proxy: invalid revision runtime configuration"
 _owner: SubjectRevisionOwner | None = None
 _server: Server | None = None
+_admission_enabled = False
 
 
 def _fatal() -> NoReturn:
@@ -73,7 +74,7 @@ def _configuration(environ: Mapping[str, str]) -> dict[str, Any]:
 
 
 def load(_loader: Any) -> None:
-    global _owner, _server
+    global _owner, _server, _admission_enabled
     if _owner is not None or _server is not None:
         _fatal()
     owner = server = None
@@ -108,18 +109,21 @@ def load(_loader: Any) -> None:
                 owner.close()
         _fatal()
     _owner, _server = owner, server
-    if admission:
+    _admission_enabled = bool(admission)
+    if _admission_enabled:
         import subject_admission
         subject_admission._runtime = subject_admission.SubjectAdmissionRuntime(owner)
 
 
 def done() -> None:
-    global _owner, _server
+    global _owner, _server, _admission_enabled
     if _server is not None:
         try:
             _server.close()
         except Exception:  # noqa: BLE001 - cleanup failure remains fatal and retryable
             _fatal()
         _owner = _server = None
-        import subject_admission
-        subject_admission._runtime = None
+        if _admission_enabled:
+            import subject_admission
+            subject_admission._runtime = None
+        _admission_enabled = False

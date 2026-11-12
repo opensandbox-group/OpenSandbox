@@ -26,6 +26,12 @@ class SubjectRegistry(BoundConnectionRegistry):
         self._static_config = StaticPassthrough(static_passthrough)
         self._dispatch_revision = None
 
+    @property
+    def static_selectors(self):
+        # admit() skips revalidation only for this exact startup-owned tuple;
+        # an equal but distinct tuple must still take the validation path.
+        return self._static_config.selectors
+
     def publish_dispatch(self, snapshot):
         revision = None if snapshot is None else snapshot.revision
         if revision == self._dispatch_revision:
@@ -55,7 +61,7 @@ def admit_source(owner, address, sni, *, ech_hidden=False, destination_port=None
     return registry.admit(
         identity=(owner.control_generation, dispatch.target.subject_generation),
         sni=sni, ech_hidden=ech_hidden,
-        static_passthrough=registry._static_config.selectors,
+        static_passthrough=registry.static_selectors,
         destination_port=destination_port,
     ), registry
 

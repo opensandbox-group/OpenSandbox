@@ -13,6 +13,9 @@
 
 import json
 import os
+import shutil
+import subprocess
+import textwrap
 from pathlib import Path
 import sys
 import tempfile
@@ -38,6 +41,55 @@ class SubjectRuntimeTest(unittest.TestCase):
     def environment(self, bundle=None):
         return {addon._PREFIX + name: value for name, value in
                 (self.bundle if bundle is None else bundle).items()}
+
+    def isolated_runtime(self, body, *, ship_admission=True):
+        scripts = Path(self.directory.name) / "scripts"
+        scripts.mkdir()
+        for source in (Path(__file__).resolve().parents[1] / "mitmscripts").glob("*.py"):
+            if ship_admission or source.name != "subject_admission.py":
+                shutil.copyfile(source, scripts / source.name)
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(body)], cwd=scripts,
+            env={**os.environ, **self.environment()}, capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_revision_runtime_loads_without_admission_module(self):
+        self.isolated_runtime("""
+            import sys
+            import subject_runtime as addon
+            assert "subject_admission" not in sys.modules
+            addon.load(None)
+            assert addon._owner.lifecycle_status("control")["lastSequence"] == 0
+            assert "subject_admission" not in sys.modules
+            addon.done()
+            assert "subject_admission" not in sys.modules
+        """, ship_admission=False)
+
+    def test_disabled_runtime_never_imports_shipped_admission_module(self):
+        self.isolated_runtime("""
+            import sys
+            import subject_runtime as addon
+            assert "subject_admission" not in sys.modules
+            addon.load(None)
+            assert "subject_admission" not in sys.modules
+            addon.done()
+            assert "subject_admission" not in sys.modules
+        """)
+
+    def test_disabled_done_does_not_import_missing_admission_module(self):
+        self.isolated_runtime("""
+            import sys
+            from pathlib import Path
+            import subject_runtime as addon
+            addon.load(None)
+            Path("subject_admission.py").unlink()
+            sys.modules.pop("subject_admission", None)
+            addon.done()
+            addon.done()
+            assert addon._owner is None and addon._server is None
+            assert "subject_admission" not in sys.modules
+        """)
 
     def test_admission_bundle_is_optional_but_atomic_and_bounded(self):
         fields = dict(TLS_ADMISSION="true", TLS_CAPACITY="32", PROCESS_TLS_CAPACITY="131072")

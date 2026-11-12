@@ -560,9 +560,9 @@ def _record_tls_admission(decision: str, reason: str) -> None:
 
 
 def _subject_admission_runtime() -> Any:
-    # Only subject_runtime.py imports subject_admission, and only when subject
-    # admission is enabled. Never import it here: the disabled path must not
-    # depend on the module being shipped next to this addon.
+    # subject_runtime.load() guards its import with admission; subject_revision
+    # imports lazily on enabled paths. The gate is runtime() is not None, not
+    # module presence. Never import here: disabled deployments may omit it.
     module = sys.modules.get("subject_admission")
     return None if module is None else module.runtime()
 
