@@ -371,7 +371,7 @@ class BoundConnectionRegistry:
                     for serial in self._requests_by_connection.get(token.serial, ())
                 ):
                     return RequestAdmission("deny", "duplicate_client_stream_id")
-            if self._view is None or self._receiver is None:
+            if self._view is None or self._request_snapshot_missing_locked():
                 return RequestAdmission("deny", "snapshot_missing")
             born = token.revision
             current = self._view.revision
@@ -382,7 +382,7 @@ class BoundConnectionRegistry:
             if len(self._requests) >= self._request_capacity:
                 return RequestAdmission("deny", "request_registry_exhausted")
             try:
-                snapshot = self._receiver.acquire()
+                snapshot = self._request_snapshot_locked()
             except Exception:  # noqa: BLE001 - never expose receiver error contents
                 return RequestAdmission("deny", "receiver_unavailable")
             if snapshot is None:
@@ -421,6 +421,13 @@ class BoundConnectionRegistry:
                 raise RegistryError("request registration failed")
             self._max_admitted_stream_ids = high_water
             return result
+
+    def _request_snapshot_missing_locked(self) -> bool:
+        return self._receiver is None
+
+    def _request_snapshot_locked(self) -> Snapshot | None:
+        """Pin request data under the admission lock; subclasses own publication."""
+        return None if self._receiver is None else self._receiver.acquire()
 
     def finish_request(self, handle: RequestHandle | None) -> bool:
         """Idempotently remove an exact live request, leaving its connection open."""

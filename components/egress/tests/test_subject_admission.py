@@ -210,6 +210,105 @@ class SubjectAdmissionTest(unittest.TestCase):
         self.assertEqual(new.budget_observations()[0], ("process", 0, 3))
         self.assert_reason(self.admit(), "decrypt", "binding_host")
 
+    def runtime_connection(self):
+        from subject_admission import SubjectAdmissionRuntime
+        self.install()
+        runtime = SubjectAdmissionRuntime(self.owner)
+        client = types.SimpleNamespace(peername=("192.0.2.1", 1234))
+        token = runtime.admit_tls(client, "api.example.com", destination_port=443).token
+        self.addCleanup(runtime.client_disconnected, client)
+        return runtime, client, token, self.owner.lookup_source("192.0.2.1").registry
+
+    def test_request_routes_to_handshake_registry_without_source_lookup(self):
+        runtime, client, token, registry = self.runtime_connection()
+        client.peername = ("192.0.2.2", 1234)
+        with patch.object(self.owner, "lookup_source", side_effect=AssertionError("no IP lookup")):
+            self.assertIs(runtime.token_for(client), token)
+            self.assertIsNone(runtime.token_for(types.SimpleNamespace()))
+            self.assertIsNone(runtime.h2_for(client))
+            result = runtime.acquire_request(token)
+            self.assertEqual(result.action, "allow")
+            self.assertEqual(result.snapshot.revision, registry._dispatch_revision)
+            self.assertEqual(registry.pending_requests()[0].revision, result.snapshot.revision)
+            runtime.finish_request(result.handle)
+            runtime.finish_request(result.handle)
+            self.assertEqual(registry.pending_requests(), ())
+        self.assertEqual(runtime.acquire_request(None).reason, "invalid_token")
+
+    def test_requests_deny_fenced_deactivated_and_missing_snapshot(self):
+        for state in ("fenced", "deactivated", "missing"):
+            with self.subTest(state=state):
+                runtime, client, token, registry = self.runtime_connection()
+                if state == "fenced":
+                    registry.publish_dispatch(f.snapshot(epoch=2, host=None))
+                elif state == "deactivated":
+                    registry.deactivate()
+                else:
+                    registry.publish_dispatch(None)
+                self.assertEqual(runtime.acquire_request(token).action, "deny")
+                runtime.client_disconnected(client)
+                # Restore a fresh entry lifetime for the next state.
+                self.command("unload")
+                self.command("register", sourceAddresses=["192.0.2.1"])
+
+    def test_rotation_pins_old_handle_new_request_uses_new_snapshot(self):
+        runtime, client, token, registry = self.runtime_connection()
+        first = runtime.acquire_request(token)
+        replacement = tls.TLSRegistryTest().snapshot(
+            epoch=2, identity=(f.CONTROL, f.A.subject_generation), secret="rotated")
+        self.owner.prepare(f.A, replacement.revision, replacement.payload)
+        self.owner.commit(f.A, replacement.revision)
+        second = runtime.acquire_request(token)
+        self.assertEqual(second.action, "allow")
+        self.assertEqual(second.snapshot, replacement)
+        self.assertEqual(first.handle.snapshot, first.snapshot)
+        self.assertNotEqual(first.snapshot.payload, second.snapshot.payload)
+        runtime.finish_request(first.handle)
+        runtime.client_disconnected(client)
+        self.assertEqual(registry.pending_requests(), ())
+        runtime.finish_request(second.handle)
+        self.assertIsNone(runtime.token_for(client))
+
+    def test_request_snapshot_and_dispatch_publication_share_registry_lock(self):
+        runtime, client, token, registry = self.runtime_connection()
+        lock = tls.ObservedLock()
+        registry._lock = lock
+        first = runtime.acquire_request(token)
+        runtime.finish_request(first.handle)
+        replacement = f.snapshot(epoch=2, host="api.example.com")
+        lock.pause_next_exit = True
+        writer = threading.Thread(target=registry.publish_dispatch, args=(replacement,))
+        writer.start()
+        self.assertTrue(lock.before_unlock.wait(5))
+        results, done = [], threading.Event()
+        def acquire():
+            results.append(runtime.acquire_request(token))
+            done.set()
+        lock.attempted.clear()
+        reader = threading.Thread(target=acquire)
+        reader.start()
+        try:
+            self.assertTrue(lock.attempted.wait(5))
+            self.assertFalse(done.is_set())
+        finally:
+            lock.resume.set()
+            writer.join(5)
+            reader.join(5)
+        self.assertTrue(done.is_set())
+        self.assertEqual(results[0].snapshot, replacement)
+        self.assertEqual(results[0].snapshot.revision, registry._dispatch_revision)
+        runtime.finish_request(results[0].handle)
+
+    def test_old_token_cannot_acquire_reused_ip_subject_snapshot(self):
+        runtime, client, token, old = self.runtime_connection()
+        self.command("unload")
+        successor = f.subject.Target(f.A.subject_key, "successor")
+        self.command("register", successor, sourceAddresses=["192.0.2.1"])
+        self.install(successor)
+        with patch.object(self.owner, "lookup_source", side_effect=AssertionError("no IP lookup")):
+            self.assertEqual(runtime.acquire_request(token).action, "deny")
+        self.assertEqual(old.count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

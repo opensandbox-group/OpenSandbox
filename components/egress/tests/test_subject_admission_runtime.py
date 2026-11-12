@@ -19,6 +19,8 @@ import test_credential_bound_runtime as h
 
 class SubjectHarness(h.LiveRuntimeHarness):
     sequence = 0
+    http2 = False
+    untracked = False
 
     def env(self, drain_seconds=1):
         # Mirror buildMitmdumpChildEnv instead of inheriting the sidecar bundle:
@@ -41,7 +43,11 @@ class SubjectHarness(h.LiveRuntimeHarness):
     def start(self, **kwargs):
         popen = subprocess.Popen
         def launch(args, **options):
-            return popen([*args, "-s", str(h.MITMSCRIPTS / "subject_runtime.py")], **options)
+            extras = ["--set", "http2=" + str(self.http2).lower(),
+                      "-s", str(h.MITMSCRIPTS / "subject_runtime.py")]
+            if self.untracked:
+                extras += ["-s", str(h.TESTS / "fixtures" / "subject_untracked.py")]
+            return popen([*args, *extras], **options)
         with patch.object(subprocess, "Popen", side_effect=launch):
             super().start(**kwargs)
 
@@ -58,9 +64,9 @@ class SubjectHarness(h.LiveRuntimeHarness):
         if status != 200:
             raise AssertionError((status, result))
 
-    def install_subject(self, subject="a", epoch=1, bound=True):
-        payload = h.decision_payload([h.binding(h.SECRET_ONE)] if bound else [],
-                                     [h.SECRET_ONE] if bound else [], epoch)
+    def install_subject(self, subject="a", epoch=1, bound=True, secret=h.SECRET_ONE):
+        payload = h.decision_payload([h.binding(secret)] if bound else [],
+                                     [secret] if bound else [], epoch)
         revision = dict(controlGeneration=h.CONTROL, subjectGeneration=subject,
                         decisionEpoch=epoch, vaultRevision=epoch, policyEpoch=0,
                         digest=hashlib.sha256(payload).hexdigest())
@@ -81,6 +87,10 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.h = SubjectHarness(Path(directory.name), origin_port=h.free_port())
         self.addCleanup(self.h.stop)
+        # Exercise the defensive H2 hook with launcher protection deliberately
+        # bypassed; production and all H1 cases disable H2 at launch.
+        self.h.http2 = self._testMethodName == "test_h2_ip_reuse_never_reaches_origin_or_injects_credentials"
+        self.h.untracked = self._testMethodName == "test_decrypted_without_membership_is_denied"
         self.h.start()
         self.requests = []
         requests = self.requests
@@ -88,6 +98,11 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
             def do_GET(self):
                 requests.append(tuple(self.headers.items()))
                 self._serve()
+
+            def send_header(self, name, value):
+                if name.lower() == "content-type":
+                    super().send_header("X-Token-Echo", self.headers.get("Private-Token", ""))
+                super().send_header(name, value)
         self.h.origin.RequestHandlerClass = RecordingOrigin
 
     def assert_denied(self):
@@ -142,6 +157,66 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(self.requests, [])
+
+    def test_same_sni_subject_a_injects_b_passes_through_and_rotation(self):
+        self.h.lifecycle("register")
+        self.h.install_subject()
+        connection = self.h.connect(sni=h.BOUND, trust="mitm")
+        self.addCleanup(connection.close)
+        status, payload = connection.request("GET", "/v1/check", h.BOUND)
+        self.assertEqual((status, payload["private_token"]), (200, h.SECRET_ONE))
+        self.h.install_subject(epoch=2, secret=h.SECRET_TWO)
+        status, payload = connection.request("GET", "/v1/check", h.BOUND)
+        self.assertEqual((status, payload["private_token"]), (200, h.SECRET_TWO))
+        self.h.lifecycle("unload")
+        self.h.lifecycle("register", "b")
+        self.h.install_subject("b", bound=False)
+        opaque = self.h.connect(sni=h.BOUND, trust="origin")
+        self.addCleanup(opaque.close)
+        status, payload = opaque.request("GET", "/v1/check", h.BOUND)
+        self.assertEqual((status, payload["private_token"]), (200, ""))
+        log = self.h.read_log()
+        for forbidden in (h.SECRET_ONE, h.SECRET_TWO, h.BOUND, "subject-a", "subject-b"):
+            self.assertNotIn(forbidden, log)
+
+    def test_wrong_host_is_denied_before_origin(self):
+        self.h.lifecycle("register")
+        self.h.install_subject()
+        connection = self.h.connect(sni=h.BOUND, trust="mitm")
+        self.addCleanup(connection.close)
+        with self.assertRaises((h.ClientError, OSError, ConnectionError)):
+            connection.request("GET", "/v1/check", h.UNBOUND)
+        self.assertEqual(self.requests, [])
+
+    def test_decrypted_without_membership_is_denied(self):
+        self.h.lifecycle("register")
+        self.h.install_subject()
+        connection = self.h.connect(sni=h.BOUND, trust="mitm")
+        self.addCleanup(connection.close)
+        with self.assertRaises((h.ClientError, OSError, ConnectionError)):
+            connection.request("GET", "/v1/check", h.BOUND)
+        self.assertEqual(self.requests, [])
+
+    def test_h2_offer_negotiates_http11_and_injects(self):
+        self.h.lifecycle("register")
+        self.h.install_subject()
+        raw = socket.create_connection(("127.0.0.1", self.h.proxy_port), timeout=5)
+        self.addCleanup(raw.close)
+        raw.sendall(f"CONNECT 127.0.0.1:{self.h.origin_port} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
+        head, surplus = h.TunneledConnection._read_head(raw)
+        self.assertIn(b"200", head)
+        self.assertFalse(surplus)
+        context = ssl.create_default_context(cafile=self.h.mitm_ca())
+        context.set_alpn_protocols(["h2", "http/1.1"])
+        tls = context.wrap_socket(raw, server_hostname=h.BOUND)
+        self.addCleanup(tls.close)
+        self.assertEqual(tls.selected_alpn_protocol(), "http/1.1")
+        tls.sendall(f"GET /v1/check HTTP/1.1\r\nHost: {h.BOUND}\r\nConnection: close\r\n\r\n".encode())
+        head, body = h.TunneledConnection._read_head(tls)
+        self.assertIn(b"200", head)
+        self.assertIn(b"X-Token-Echo: [REDACTED]", head)
+        self.assertNotIn(h.SECRET_ONE.encode(), head)
+        self.assertEqual(dict(self.requests[0])["Private-Token"], h.SECRET_ONE)
 
     def test_h2_ip_reuse_never_reaches_origin_or_injects_credentials(self):
         import h2.config
