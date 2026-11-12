@@ -2282,9 +2282,21 @@ VOLUMES
 }
 
 pool_up() {
+	local live_profile want_profile
 	load_mitm_ca_fingerprint
 	[[ -n "$MITM_CA_FINGERPRINT" ]] || die "no pinned MITM CA fingerprint at $MITM_CA_FINGERPRINT_FILE (run up first; mitm_ca_up stores it there)"
 	render_pool
+	# sandboxResources is an immutable profile (OSEP-0026): apply cannot
+	# converge a pool that was created with a different one, so recreate
+	# the fixture when the live object drifts from the rendered manifest.
+	if kubectl get sandboxpool "$POOL_NAME" >/dev/null 2>&1; then
+		live_profile="$(kubectl get sandboxpool "$POOL_NAME" -o json | jq -S '.spec.sandboxResources')"
+		want_profile="$(jq -S '.spec.sandboxResources' "$GEN_DIR/$POOL_PROFILE.yaml")"
+		if [[ "$live_profile" != "$want_profile" ]]; then
+			log "sandboxResources drifted from the rendered fixture — recreating SandboxPool $POOL_NAME"
+			kubectl delete sandboxpool "$POOL_NAME" --wait --timeout=300s >/dev/null
+		fi
+	fi
 	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
 	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null
 	wait_for "fastlet pods Ready (poolMin=$POOL_MIN)" 300 fastlet_pods_ready
