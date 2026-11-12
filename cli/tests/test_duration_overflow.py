@@ -38,6 +38,18 @@ def test_ordinary_duration_is_unchanged() -> None:
     assert parse_duration("1h30m").total_seconds() == 5400
 
 
+def test_duration_flag_keeps_the_out_of_range_reason(runner: CliRunner) -> None:
+    from opensandbox_cli.main import cli
+
+    result = runner.invoke(
+        cli, ["sandbox", "renew", "sb-1", "--timeout", "9" * 80 + "h"]
+    )
+
+    assert result.exit_code == 2
+    assert "out of range" in result.output
+    assert "Traceback" not in result.output
+
+
 @pytest.mark.parametrize("option", ["--timeout", "--ready-timeout"])
 @pytest.mark.parametrize("value", ["9999999999999999999999999999", "9" * 5000 + "h"])
 def test_oversized_duration_is_reported_by_cli(

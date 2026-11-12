@@ -86,12 +86,9 @@ class DurationType(click.ParamType):
             return value
         try:
             return parse_duration(value)
-        except click.BadParameter:
-            self.fail(
-                f"Invalid duration '{value}'. Use format like 10m, 1h30m, 90s.",
-                param,
-                ctx,
-            )
+        except click.BadParameter as exc:
+            # Keep the specific reason (empty, malformed, out of range).
+            self.fail(exc.format_message(), param, ctx)
 
 
 DURATION = DurationType()
