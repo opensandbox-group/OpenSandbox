@@ -224,8 +224,12 @@ def get_sandbox_diagnostics_summary(
     sections.append("-" * 40)
     try:
         sections.append(sandbox_service.get_sandbox_logs(sandbox_id, tail=tail))
-    except HTTPException:
-        raise
+    except HTTPException as exc:
+        # A backend without sandbox logs (fsb) answers 501; keep the sections
+        # already collected instead of failing the whole summary.
+        if exc.status_code != status.HTTP_501_NOT_IMPLEMENTED:
+            raise
+        sections.append("[unsupported] This backend does not provide sandbox logs.")
     except Exception:
         logger.exception(f"Failed to collect sandbox log diagnostics for {sandbox_id}")
         sections.append("[error] Failed to collect log diagnostics.")
