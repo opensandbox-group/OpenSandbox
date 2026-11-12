@@ -1717,6 +1717,14 @@ class PoolCapacitySpec(BaseModel):
     )
 
 
+def _check_buffer_bounds(capacity_spec: PoolCapacitySpec) -> None:
+    # Checked on requests only: PoolResponse also parses Pools applied with kubectl.
+    # The controller targets bufferMin below the range and bufferMax above it, so
+    # bufferMin > bufferMax makes it create and delete idle pods forever.
+    if capacity_spec.buffer_min > capacity_spec.buffer_max:
+        raise ValueError("capacitySpec.bufferMin must not exceed capacitySpec.bufferMax.")
+
+
 class CreatePoolRequest(BaseModel):
     """
     Request to create a new pre-warmed resource pool.
@@ -1742,6 +1750,11 @@ class CreatePoolRequest(BaseModel):
         description="Capacity configuration controlling pool size and buffer behavior.",
     )
 
+    @model_validator(mode="after")
+    def validate_capacity_spec(self) -> "CreatePoolRequest":
+        _check_buffer_bounds(self.capacity_spec)
+        return self
+
     model_config = ConfigDict(
         alias_generator=to_camel,
         populate_by_name=True,
@@ -1759,6 +1772,11 @@ class UpdatePoolRequest(BaseModel):
         ...,
         description="New capacity configuration for the pool.",
     )
+
+    @model_validator(mode="after")
+    def validate_capacity_spec(self) -> "UpdatePoolRequest":
+        _check_buffer_bounds(self.capacity_spec)
+        return self
 
     model_config = ConfigDict(
         alias_generator=to_camel,
