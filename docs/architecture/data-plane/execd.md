@@ -24,6 +24,7 @@ Execd also fronts a small reverse proxy (`/proxy/{port}`), so one exposed host p
 | Interactive terminals | A real terminal (PTY) over WebSocket, shareable with read-only viewers |
 | Files and directories | Upload, download, list, search, move, chmod, remove, in-place content replace — the sandbox filesystem is fully scriptable |
 | Isolated sessions | Run a shell inside a private namespace for untrusted or exploratory work |
+| MCP proxy bridge | Connect any MCP client to upstream MCP servers through `execd` — HTTP upstreams stream through untouched, stdio upstreams run as managed subprocesses |
 | Metrics | Sandbox CPU and memory as point-in-time snapshots or a live stream |
 
 ## API surface
@@ -41,6 +42,7 @@ Everything execd exposes lives under one API. When the platform configures an ac
 | Terminals | `/pty` | PTY sessions with a WebSocket attach point |
 | Files | `/files`, `/directories` | The whole filesystem surface |
 | Isolated sessions | `/v1/isolated/*` | Private-namespace shells with their own file operations |
+| MCP proxy bridge | `/mcp`, `/mcp/{name}`, `/mcp/servers` | List and manage upstreams; Streamable HTTP endpoint per upstream |
 | Metrics | `/metrics`, `/metrics/watch` | Snapshot and live stream |
 | Reverse proxy | `/proxy/{port}` | Reach any sandbox port through execd |
 
@@ -127,6 +129,19 @@ An isolated session runs a shell inside a per-execution [bubblewrap](https://git
 - Session creation reports what the current environment supports, so callers can adapt instead of guessing.
 
 See the [Isolation Sessions guide](/guides/isolation-sessions) for the full workflow.
+
+## MCP proxy bridge
+
+Execd can act as an MCP (Model Context Protocol) gateway: clients connect with any official MCP SDK over Streamable HTTP at `/mcp/{name}`, and execd forwards to an upstream MCP server registered through the `/mcp/servers` management API. Usage — registration payloads, client snippets, endpoint semantics — is covered in the [MCP Proxy Bridge guide](/guides/mcp-proxy-bridge); this section describes the design.
+
+Two transports are supported:
+
+- **`http`** proxies a Streamable HTTP MCP server as an opaque stream — request/response bodies, SSE streams, status codes, and MCP headers pass through without JSON-RPC inspection, so the bridge stays compatible with any protocol version both sides support. Idle SSE responses receive keepalive comment frames (interval configurable via `EXECD_MCP_SSE_KEEPALIVE`, default 30s, `0` disables), injected only between complete events so a frame can never split one, and serialized with proxied writes so the `ResponseWriter` keeps a single writer.
+- **`stdio`** spawns the registered command as a sandbox-local subprocess — one per MCP session, since stdio servers are single-session by design — and bridges it to Streamable HTTP using the official Go MCP SDK. Children launch through the same managed path as command and PTY workloads: the hardening floor (capability drop, `no_new_privs`, seccomp, Landlock) applies when enabled, the init reaper owns them in init mode, and their environment is the standard user-process environment (blacklisted execd config env stripped, sandbox binding envs and `EXECD_ENVS` layered in) with the registration `env` overlaid — a third-party MCP server can never read execd's control-plane credentials or run with the daemon's privileges. Session teardown (client `DELETE`, idle timeout, child exit, registry reset on full runtime re-init, shutdown) closes both the subprocess (process-group kill, so launchers like `npx` cannot orphan children) and the inbound HTTP session, so clients see `404` and recover instead of talking to a dead bridge.
+
+Credential flow is one-way: the execd access token is stripped before forwarding and client `Authorization` headers pass through, while registration `headers` override client-supplied values — upstream credentials stay inside the sandbox instead of flowing through every MCP call.
+
+The `/mcp` routes sit behind the same runtime-init gate and access-token check as every other execd endpoint, and are reference-implementation extensions outside the published execd API spec.
 
 ## Layered security
 

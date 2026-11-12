@@ -56,6 +56,10 @@ var (
 	// preserving legacy behavior for control planes that never call it.
 	RuntimeInit bool
 
+	// MCPSSEKeepalive is the idle interval for SSE keepalive comment frames
+	// injected by HTTP MCP bridges. Zero disables injection.
+	MCPSSEKeepalive time.Duration
+
 	// SseLegacyCompat omits the exit_code field from execution_complete and
 	// error SSE events so that clients whose EventNode schemas predate the
 	// field never observe an unknown key. Successful foreground commands

@@ -36,6 +36,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/mcpproxy"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web"
@@ -187,9 +188,15 @@ func run() int {
 	oomWatchStop := telemetry.StartOOMWatch(context.Background())
 	defer oomWatchStop()
 
+	// MCP bridges register at runtime via /mcp/servers; the registry starts
+	// empty and a full runtime re-init clears it.
+	mcpRegistry := mcpproxy.NewRegistry(flag.MCPSSEKeepalive)
+	defer mcpRegistry.Close()
+
 	initManager := controller.InitRuntimeInitManager(&controller.RuntimeInitConfig{
 		Ctrl:              ctrl,
 		IsolatedResetter:  isolatedRunner,
+		MCPRegistry:       mcpRegistry,
 		LaunchEntrypoint:  entryLauncher(startInitEntrypoint),
 		EntrypointArgs:    flag.Args(),
 		TemplateLifecycle: lifecycleConfig,
@@ -199,7 +206,7 @@ func run() int {
 	})
 	defer initManager.StopPeriodic()
 
-	engine := web.NewRouter(flag.ServerAccessToken)
+	engine := web.NewRouter(flag.ServerAccessToken, mcpRegistry)
 	if err := runHTTPServer(
 		engine,
 		startInitEntrypoint,

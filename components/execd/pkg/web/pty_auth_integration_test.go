@@ -40,7 +40,7 @@ func TestPTYBrowserWebSocketHandshake(t *testing.T) {
 	withRuntimeInit(t, false)
 	withTestBinding(t, &binding.RuntimeBinding{HasAccessToken: true, AccessTokenHash: mustHash(t, token)})
 	runner := controller.InitCodeRunner()
-	execd := httptest.NewServer(NewRouter("obsolete-startup-token"))
+	execd := httptest.NewServer(NewRouter("obsolete-startup-token", nil))
 	t.Cleanup(execd.Close)
 	// Exercise an HTTP Upgrade proxy as well as the real execd router. Actual
 	// deployment ingress and browser integration are separate acceptance checks.

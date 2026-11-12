@@ -164,7 +164,7 @@ func TestNewRouterServesInitRoutes(t *testing.T) {
 	withTestBinding(t, nil)
 	withRuntimeInit(t, false)
 	withManager(t, false)
-	r := NewRouter("")
+	r := NewRouter("", nil)
 
 	// /ping keeps working.
 	require.Equal(t, http.StatusOK, doRequest(t, r, http.MethodGet, "/ping", "").Code)

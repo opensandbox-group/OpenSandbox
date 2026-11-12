@@ -192,40 +192,63 @@ func (r *reaper) drain() {
 		}
 		pid := int(info.pid)
 		if mp := r.owned[pid]; mp != nil {
-			// The pre-reap barrier runs between the WNOWAIT observe and the
-			// consuming wait, while the kernel still reserves the PID/PGID
-			// (isolated sessions rely on this to avoid signalling a recycled
-			// process group).
-			if mp.preReap != nil {
-				mp.preReap()
-			}
-			ws, err := waitidConsume(pid)
-			if err != nil {
-				if errors.Is(err, unix.EINTR) {
-					continue
-				}
-				log.Error("init: reaper consume pid %d: %v", pid, err)
-				return
-			}
-			// Drop the child from the registry once reaped: stale entries
-			// would grow without bound and shutdown could signal a recycled
-			// process group.
-			delete(r.owned, pid)
-			mp.deliver(ws)
-			continue
-		}
-		// Unknown child: reparented orphan. Reap it so the process table
-		// stays bounded; its status is not delivered to anyone.
-		ws, err := waitidConsume(pid)
-		if err != nil {
-			if errors.Is(err, unix.EINTR) {
+			if r.consumeOwned(pid, mp) {
 				continue
 			}
-			log.Error("init: reaper consume orphan pid %d: %v", pid, err)
 			return
 		}
-		log.Info("init: reaped orphan pid=%d status=%s", pid, ws)
+		if r.consumeOrphan(pid) {
+			continue
+		}
+		return
 	}
+}
+
+// consumeOwned reaps one owned child and delivers its status. It returns
+// true when the drain loop may continue.
+func (r *reaper) consumeOwned(pid int, mp *managedProcess) bool {
+	// The pre-reap barrier runs between the WNOWAIT observe and the
+	// consuming wait, while the kernel still reserves the PID/PGID
+	// (isolated sessions rely on this to avoid signalling a recycled
+	// process group).
+	if mp.preReap != nil {
+		mp.preReap()
+	}
+	ws, err := waitidConsume(pid)
+	if err != nil {
+		if errors.Is(err, unix.EINTR) {
+			return true
+		}
+		if errors.Is(err, unix.ECHILD) {
+			// An external waiter (the MCP SDK's CommandTransport) consumed
+			// the status first; drop the entry instead of leaking it.
+			delete(r.owned, pid)
+			return true
+		}
+		log.Error("init: reaper consume pid %d: %v", pid, err)
+		return false
+	}
+	// Drop the child from the registry once reaped: stale entries would
+	// grow without bound and shutdown could signal a recycled process group.
+	delete(r.owned, pid)
+	mp.deliver(ws)
+	return true
+}
+
+// consumeOrphan reaps one reparented orphan so the process table stays
+// bounded; its status is not delivered to anyone. It returns true when the
+// drain loop may continue.
+func (r *reaper) consumeOrphan(pid int) bool {
+	ws, err := waitidConsume(pid)
+	if err != nil {
+		if errors.Is(err, unix.EINTR) {
+			return true
+		}
+		log.Error("init: reaper consume orphan pid %d: %v", pid, err)
+		return false
+	}
+	log.Info("init: reaped orphan pid=%d status=%s", pid, ws)
+	return true
 }
 
 // managedProcess wraps an exec.Cmd whose status is delivered by the reaper.

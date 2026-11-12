@@ -33,6 +33,7 @@ const (
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
 	runtimeInitEnv             = "EXECD_RUNTIME_INIT"
+	mcpSSEKeepaliveEnv         = "EXECD_MCP_SSE_KEEPALIVE"
 	sseLegacyCompatEnv         = "EXECD_SSE_LEGACY_COMPAT"
 )
 
@@ -114,6 +115,16 @@ func InitFlags() {
 	}
 	flag.BoolVar(&RuntimeInit, "runtime-init", RuntimeInit, "Gate preStart and the entrypoint on POST /internal/init; until then only /ping, /ready, and /internal/init are served")
 
+	MCPSSEKeepalive = 30 * time.Second
+	if keepaliveFromEnv := os.Getenv(mcpSSEKeepaliveEnv); keepaliveFromEnv != "" {
+		duration, err := time.ParseDuration(keepaliveFromEnv)
+		if err != nil || duration < 0 {
+			stdlog.Panicf("Invalid %s=%s: must be a non-negative duration", mcpSSEKeepaliveEnv, keepaliveFromEnv)
+		}
+		MCPSSEKeepalive = duration
+	}
+	flag.DurationVar(&MCPSSEKeepalive, "mcp-sse-keepalive", MCPSSEKeepalive, "Idle interval for SSE keepalive frames on HTTP MCP bridges (0 disables; default: 30s)")
+
 	if sseLegacyCompatFromEnv := os.Getenv(sseLegacyCompatEnv); sseLegacyCompatFromEnv != "" {
 		enabled, err := strconv.ParseBool(sseLegacyCompatFromEnv)
 		if err != nil {
@@ -127,6 +138,9 @@ func InitFlags() {
 	if JupyterIdlePollInterval <= 0 {
 		stdlog.Printf("Invalid --jupyter-idle-poll-interval=%s; fallback to default %s", JupyterIdlePollInterval, 100*time.Millisecond)
 		JupyterIdlePollInterval = 100 * time.Millisecond
+	}
+	if MCPSSEKeepalive < 0 {
+		stdlog.Panicf("Invalid --mcp-sse-keepalive=%s: must be a non-negative duration (0 disables)", MCPSSEKeepalive)
 	}
 
 	log.Info("jupyter: server host=%s", JupyterServerHost)
