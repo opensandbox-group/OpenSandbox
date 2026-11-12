@@ -601,7 +601,10 @@ func parseExportLine(line string) (string, string, bool) {
 	if eq := strings.Index(rest, "="); eq >= 0 {
 		name = rest[:eq]
 		raw := rest[eq+1:]
-		if unquoted, err := strconv.Unquote(raw); err == nil {
+		// Only a double-quoted value is a Go-compatible literal. A single-quoted
+		// one is verbatim shell text: strconv.Unquote would read '\t' or '\\'
+		// as a Go rune literal and turn it into a tab or a single backslash.
+		if unquoted, err := strconv.Unquote(raw); err == nil && strings.HasPrefix(raw, `"`) {
 			value = unquoted
 		} else if unquoted, ok := unquoteShellWord(raw); ok {
 			// POSIX shell word: a concatenation of '...' and "..." segments

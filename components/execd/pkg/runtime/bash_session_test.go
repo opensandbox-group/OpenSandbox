@@ -288,6 +288,12 @@ func TestShellEscapeParseExportLine_RoundTrip(t *testing.T) {
 		"multi\nline",
 		"tab\there",
 		`with\backslash`,
+		// One-escape values that also read as a Go rune literal once quoted.
+		`\t`,
+		`\n`,
+		`\\`,
+		`\x41`,
+		`\u00e9`,
 	}
 
 	for _, v := range values {
