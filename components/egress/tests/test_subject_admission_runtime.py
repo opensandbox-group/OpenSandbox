@@ -158,6 +158,19 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
             connection.close()
         self.assertEqual(self.requests, [])
 
+    def test_suspend_reinstall_old_connection_never_reaches_origin(self):
+        self.h.lifecycle("register")
+        self.h.install_subject()
+        connection = self.h.connect(sni=h.BOUND, trust="mitm")
+        self.h.lifecycle("suspend")
+        self.h.install_subject(epoch=2, secret=h.SECRET_TWO)
+        try:
+            with self.assertRaises((h.ClientError, OSError, ConnectionError)):
+                connection.request("GET", "/v1/check", h.BOUND)
+        finally:
+            connection.close()
+        self.assertEqual(self.requests, [])
+
     def test_same_sni_subject_a_injects_b_passes_through_and_rotation(self):
         self.h.lifecycle("register")
         self.h.install_subject()

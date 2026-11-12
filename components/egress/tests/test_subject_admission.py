@@ -269,6 +269,114 @@ class SubjectAdmissionTest(unittest.TestCase):
         runtime.finish_request(second.handle)
         self.assertIsNone(runtime.token_for(client))
 
+    def test_suspend_reinstall_permanently_fences_old_membership_and_keeps_slot(self):
+        runtime, client, token, registry = self.runtime_connection()
+        first = runtime.acquire_request(token)
+        self.command("suspend")
+        self.assertEqual(runtime.acquire_request(token).action, "deny")
+        self.install(epoch=2)
+        self.assertEqual(runtime.acquire_request(token).reason, "connection_fenced")
+        self.assertEqual(first.handle.snapshot, first.snapshot)
+        self.assertEqual(registry.count, 1)
+        self.assertEqual(registry.budget_observations()[0], ("process", 1, 3))
+        fresh = self.admit()
+        self.assertEqual(registry.acquire_request(fresh.token).action, "allow")
+        registry.release(fresh.token)
+        runtime.finish_request(first.handle)
+        runtime.client_disconnected(client)
+        self.assertEqual(registry.budget_observations()[0], ("process", 0, 3))
+
+    def test_unload_drops_dispatch_snapshot_but_preserves_pinned_request(self):
+        runtime, client, token, registry = self.runtime_connection()
+        admitted = runtime.acquire_request(token)
+        self.command("unload")
+        self.assertIsNone(registry._dispatch_snapshot)
+        self.assertIsNone(registry._dispatch_revision)
+        self.assertIsNotNone(admitted.handle.snapshot)
+        self.assertEqual(admitted.handle.snapshot, admitted.snapshot)
+        self.assertEqual(runtime.acquire_request(token).reason, "registry_closed")
+        self.assertEqual(registry.deactivate(), (token,))
+        self.assertEqual(registry.count, 1)
+        runtime.finish_request(admitted.handle)
+        runtime.client_disconnected(client)
+        self.assertEqual(registry.count, 0)
+
+    def test_repeated_unload_register_retains_no_retired_dispatch_snapshots(self):
+        from subject_admission import SubjectAdmissionRuntime
+        owner = f.make_owner(tls_capacity=1, process_tls_capacity=16, static_passthrough=())
+        self.addCleanup(owner.close)
+        runtime = SubjectAdmissionRuntime(owner)
+        retired = []
+        for i in range(16):
+            owner.lifecycle("register", f.command(2 * i + 1, sourceAddresses=["192.0.2.3"]))
+            snapshot = f.snapshot(epoch=i + 1, host="api.example.com")
+            owner.prepare(f.A, snapshot.revision, snapshot.payload)
+            owner.commit(f.A, snapshot.revision)
+            client = types.SimpleNamespace(peername=("192.0.2.3", 1234))
+            self.addCleanup(runtime.client_disconnected, client)
+            self.assertEqual(runtime.admit_tls(client, "api.example.com", destination_port=443).action,
+                             "decrypt")
+            retired.append(owner.lookup_source("192.0.2.3").registry)
+            owner.lifecycle("unload", f.command(2 * i + 2))
+        self.assertEqual(len(owner._entries), 0)
+        self.assertEqual(sum(registry.count for registry in retired), 16)
+        self.assertEqual(sum(registry._dispatch_snapshot is not None for registry in retired), 0)
+
+    def test_unchanged_or_closed_dispatch_does_not_compile(self):
+        import subject_admission
+        self.install()
+        self.install(f.B)
+        registry = self.owner.lookup_source("192.0.2.1").registry
+        with patch.object(subject_admission, "compile_view", wraps=subject_admission.compile_view) as compile:
+            self.install(f.B, epoch=2)
+            self.assertEqual(compile.call_count, 1)  # A is unchanged when B republishes the index.
+            compile.reset_mock()
+            snapshot = registry._dispatch_snapshot
+            registry.publish_dispatch(snapshot)
+            registry.deactivate()
+            registry.publish_dispatch(snapshot)
+            compile.assert_not_called()
+
+    def test_publish_rechecks_after_compile_when_duplicate_or_deactivated(self):
+        import subject_admission
+        for state in ("duplicate", "deactivated"):
+            with self.subTest(state=state):
+                registry = subject_admission.SubjectRegistry(
+                    capacity=2, accounting=tls.registry_module.ConnectionAccounting(3), static_passthrough=())
+                registry.publish_dispatch(f.snapshot(host="api.example.com"))
+                replacement = f.snapshot(epoch=2, host="api.example.com")
+                entered, resume = threading.Event(), threading.Event()
+                errors = []
+                compile = subject_admission.compile_view
+                def slow(snapshot):
+                    if threading.current_thread() is writer:
+                        entered.set()
+                        if not resume.wait(5):
+                            raise AssertionError("compile resume timed out")
+                    return compile(snapshot)
+                def publish():
+                    try:
+                        registry.publish_dispatch(replacement)
+                    except Exception as error:
+                        errors.append(error)
+                writer = threading.Thread(target=publish)
+                with patch.object(subject_admission, "compile_view", side_effect=slow), \
+                        patch.object(registry, "_publish_activation", wraps=registry._publish_activation) as activate:
+                    writer.start()
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        if state == "duplicate":
+                            registry.publish_dispatch(replacement)
+                        else:
+                            registry.deactivate()
+                    finally:
+                        resume.set()
+                        writer.join(5)
+                    self.assertFalse(writer.is_alive())
+                    self.assertEqual(errors, [])
+                    self.assertEqual(activate.call_count, 1 if state == "duplicate" else 0)
+                self.assertEqual(registry._dispatch_snapshot, replacement if state == "duplicate" else None)
+
     def test_request_snapshot_and_dispatch_publication_share_registry_lock(self):
         runtime, client, token, registry = self.runtime_connection()
         lock = tls.ObservedLock()
@@ -276,10 +384,14 @@ class SubjectAdmissionTest(unittest.TestCase):
         first = runtime.acquire_request(token)
         runtime.finish_request(first.handle)
         replacement = f.snapshot(epoch=2, host="api.example.com")
-        lock.pause_next_exit = True
-        writer = threading.Thread(target=registry.publish_dispatch, args=(replacement,))
-        writer.start()
-        self.assertTrue(lock.before_unlock.wait(5))
+        publish = registry._publish_activation
+        def pause_publication(activation):
+            publish(activation)
+            lock.pause_next_exit = True
+        with patch.object(registry, "_publish_activation", side_effect=pause_publication):
+            writer = threading.Thread(target=registry.publish_dispatch, args=(replacement,))
+            writer.start()
+            self.assertTrue(lock.before_unlock.wait(5))
         results, done = [], threading.Event()
         def acquire():
             results.append(runtime.acquire_request(token))

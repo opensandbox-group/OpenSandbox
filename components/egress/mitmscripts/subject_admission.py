@@ -35,17 +35,37 @@ class SubjectRegistry(BoundConnectionRegistry):
 
     def publish_dispatch(self, snapshot):
         revision = None if snapshot is None else snapshot.revision
-        # Compilation is on the install writer, before the short registry lock.
-        view = None if snapshot is None else compile_view(snapshot)
         with self._lock:
             if self._closed or revision == self._dispatch_revision:
                 return
+        # Compilation is on the install writer, before the short registry lock.
+        view = None if snapshot is None else compile_view(snapshot)
+        with self._lock:
+            # Compilation ran outside the lock; another writer or shutdown may
+            # have published in the meantime. Keep the publication-time check.
+            if self._closed or revision == self._dispatch_revision:
+                return
             if view is None:
+                # Suspension revokes every existing membership permanently.
+                # Activation preserves this fence; only disconnect frees slots.
+                self._request_fenced = self._request_fenced.union(self._entries)
                 self._view = None
             else:
                 self._publish_activation(self._plan_activation(view))
             self._dispatch_revision = revision
             self._dispatch_snapshot = snapshot
+
+    def deactivate(self):
+        # Clear the dispatch payload in the same critical section as shutdown.
+        # External request handles keep their own pinned snapshots alive.
+        with self._lock:
+            self._check_standalone()
+            tokens = tuple(self._entries.values())
+            self._closed = True
+            self._view = None
+            self._dispatch_revision = None
+            self._dispatch_snapshot = None
+            return tokens
 
     def _request_snapshot_missing_locked(self):
         return self._dispatch_snapshot is None

@@ -83,6 +83,23 @@ class SubjectRequestSafetyTest(unittest.TestCase):
                 self.assertNotIn("api.example.com", " ".join(addon.ctx.log.messages))
                 self.assertNotIn("test-secret", " ".join(addon.ctx.log.messages))
 
+    def test_suspend_reinstall_request_hook_denies_old_connection_without_new_secret(self):
+        addon, runtime, registry, flow = self.admitted_flow()
+        runtime.owner.lifecycle("suspend", subject.command(2))
+        replacement = tls.TLSRegistryTest().snapshot(
+            epoch=2, identity=(subject.CONTROL, subject.A.subject_generation), secret="post-suspend-secret")
+        runtime.owner.prepare(subject.A, replacement.revision, replacement.payload)
+        runtime.owner.commit(subject.A, replacement.revision)
+        with patch.dict(sys.modules, {"subject_admission": types.SimpleNamespace(runtime=lambda: runtime)}), \
+                patch.object(addon, "_load_active_vault_for_ip", side_effect=AssertionError("pull forbidden")):
+            addon.requestheaders(flow)
+        self.assertTrue(flow.killed)
+        self.assertIsNone(flow.response)
+        self.assertNotIn("Private-Token", flow.request.headers)
+        self.assertEqual(registry.pending_requests(), ())
+        self.assertEqual(registry.count, 1)  # Only client_disconnected releases the transport slot.
+        self.assertNotIn("post-suspend-secret", " ".join(addon.ctx.log.messages))
+
     def test_subject_reuses_authority_ssl_insecure_path_and_method_gates(self):
         for case in ("missing", "duplicate", "wrong", "port", "sni", "insecure", "path", "method"):
             with self.subTest(case=case):
