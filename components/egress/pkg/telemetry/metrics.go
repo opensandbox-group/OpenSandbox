@@ -40,6 +40,8 @@ var (
 	nftUpdateFailed         metric.Int64Counter
 	tlsShadowRequests       metric.Int64Counter
 	tlsAdmissionConnections metric.Int64Counter
+	tlsRegistryOccupancy    metric.Int64Histogram
+	tlsRegistryBudget       metric.Int64Histogram
 	credentialResolutions   metric.Int64Counter
 	credentialResolutionDur metric.Float64Histogram
 
@@ -166,6 +168,26 @@ func registerEgressMetrics() error {
 		"egress.mitm.tls.connections_total",
 		metric.WithDescription("Live TLS admission decisions, not successful handshakes, HTTP requests or unique transport lifetimes; best-effort collection."),
 	)
+	if err != nil {
+		return err
+	}
+	// The SDK default buckets stop at 10000, below the default process budget
+	// (131072), collapsing process budgets and larger occupancies into +Inf.
+	// Cover the validated 0..1<<20 slot range, with finer steps around the
+	// default subject capacity of 32. Both instruments use the same ladder.
+	tlsSlotBuckets := metric.WithExplicitBucketBoundaries(
+		0, 1, 2, 4, 8, 16, 24, 32, 48, 64, 128, 256, 512, 1024,
+		2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576,
+	)
+	tlsRegistryOccupancy, err = meter.Int64Histogram("egress.mitm.tls.registry.occupancy",
+		metric.WithDescription("Fast Sandbox occupied connection slots observed at admission/release; subject observations are not an aggregate gauge."),
+		metric.WithUnit("{slot}"), tlsSlotBuckets)
+	if err != nil {
+		return err
+	}
+	tlsRegistryBudget, err = meter.Int64Histogram("egress.mitm.tls.registry.configured_budget",
+		metric.WithDescription("Configured connection budget at each Fast Sandbox admission/release observation; per-subject capacity is not reserved."),
+		metric.WithUnit("{slot}"), tlsSlotBuckets)
 	if err != nil {
 		return err
 	}

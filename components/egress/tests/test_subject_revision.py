@@ -282,7 +282,10 @@ class SubjectOwnerTest(unittest.TestCase):
         self.assertEqual(self.owner._entries, {})
         self.assertEqual(self.owner._last.sequence, 20000)
         self.assertLessEqual(len(self.owner._last.raw_body), 8192)
-        self.assertEqual(set(self.owner.__dict__), {"_control", "_max_subjects", "_max_snapshot_bytes", "_entries", "_last", "_operation_lock", "_terminal", "_closed", "_source_index", "_quarantined"})
+        self.assertEqual(set(self.owner.__dict__), {"_control", "_max_subjects", "_max_snapshot_bytes", "_entries", "_last", "_operation_lock", "_terminal", "_closed", "_source_index", "_quarantined", "_tls_capacity", "_accounting", "_static_passthrough"})
+        self.assertIsNone(self.owner._tls_capacity)
+        self.assertIsNone(self.owner._accounting)
+        self.assertEqual(self.owner._static_passthrough, ())
 
     def test_abort_history_limit_does_not_consume_other_subject_budget(self):
         self.register(1)

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Launcher-selected shared subject receiver; installation only, no TLS hooks."""
+"""Launcher-selected subject receiver and optional B3b-1 handshake experiment."""
 
 from __future__ import annotations
 
@@ -30,9 +30,11 @@ _FIELDS = {
     "MODE", "SOCKET", "TOKEN", "CONTROL_GENERATION", "MAX_SUBJECTS",
     "MAX_SNAPSHOT_BYTES", "RETAINED_PAYLOAD_BUDGET",
 }
+_ADMISSION_FIELDS = {"TLS_ADMISSION", "TLS_CAPACITY", "PROCESS_TLS_CAPACITY"}
 _ERROR = "credential proxy: invalid revision runtime configuration"
 _owner: SubjectRevisionOwner | None = None
 _server: Server | None = None
+_admission_enabled = False
 
 
 def _fatal() -> NoReturn:
@@ -43,7 +45,8 @@ def _fatal() -> NoReturn:
 def _configuration(environ: Mapping[str, str]) -> dict[str, Any]:
     values = {name[len(_PREFIX):]: value for name, value in environ.items()
               if name.startswith(_PREFIX)}
-    if set(values) != _FIELDS or values["MODE"] != "subject-v2":
+    fields = _FIELDS | _ADMISSION_FIELDS if "TLS_ADMISSION" in values else _FIELDS
+    if set(values) != fields or values["MODE"] != "subject-v2":
         _fatal()
     if (any(name.startswith("OPENSANDBOX_EGRESS_REVISION_") for name in environ)
             or not os.path.isabs(values["SOCKET"])
@@ -58,20 +61,41 @@ def _configuration(environ: Mapping[str, str]) -> dict[str, Any]:
                 or not 0 < int(text) <= sys.maxsize or str(int(text)) != text):
             _fatal()
         values[name] = int(text)
+    if "TLS_ADMISSION" in values:
+        if values["TLS_ADMISSION"] != "true":
+            _fatal()
+        for name in ("TLS_CAPACITY", "PROCESS_TLS_CAPACITY"):
+            text = values[name]
+            if (not text.isascii() or not text.isdecimal() or len(text) > 7
+                    or not 1 <= int(text) <= 1 << 20 or str(int(text)) != text):
+                _fatal()
+            values[name] = int(text)
     return values
 
 
 def load(_loader: Any) -> None:
-    global _owner, _server
+    global _owner, _server, _admission_enabled
     if _owner is not None or _server is not None:
         _fatal()
     owner = server = None
     try:
         values = _configuration(os.environ)
+        admission = {}
+        if "TLS_ADMISSION" in values:
+            from credential_bound import validate_live_options
+            from static_passthrough import ENV, parse_handoff
+
+            validate_live_options()
+            if os.environ.get("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "").strip():
+                _fatal()
+            admission = dict(tls_capacity=values["TLS_CAPACITY"],
+                             process_tls_capacity=values["PROCESS_TLS_CAPACITY"],
+                             static_passthrough=parse_handoff(os.environ.get(ENV)))
         owner = SubjectRevisionOwner(
             values["CONTROL_GENERATION"], max_subjects=values["MAX_SUBJECTS"],
             max_snapshot_bytes=values["MAX_SNAPSHOT_BYTES"],
             retained_payload_budget=values["RETAINED_PAYLOAD_BUDGET"],
+            **admission,
         )
         server = Server(owner, values["SOCKET"], values["TOKEN"],
                         request_timeout=1, max_concurrent_requests=4)
@@ -85,13 +109,21 @@ def load(_loader: Any) -> None:
                 owner.close()
         _fatal()
     _owner, _server = owner, server
+    _admission_enabled = bool(admission)
+    if _admission_enabled:
+        import subject_admission
+        subject_admission._runtime = subject_admission.SubjectAdmissionRuntime(owner)
 
 
 def done() -> None:
-    global _owner, _server
+    global _owner, _server, _admission_enabled
     if _server is not None:
         try:
             _server.close()
         except Exception:  # noqa: BLE001 - cleanup failure remains fatal and retryable
             _fatal()
         _owner = _server = None
+        if _admission_enabled:
+            import subject_admission
+            subject_admission._runtime = None
+        _admission_enabled = False

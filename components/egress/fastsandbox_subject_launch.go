@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 )
@@ -110,6 +111,11 @@ func newFastSandboxSubjectSession(cfg fastSandboxSubjectSessionConfig) (*fastSan
 		SessionToken: token, ControlGeneration: control,
 		MaxSubjects: fastSandboxRevisionMaxSubjects, MaxSnapshotBytes: defaultRevisionMaxSnapshotSize,
 		RetainedPayloadBudget: fastSandboxRevisionRetainedBudget,
+	}
+	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalFSBTLSAdmission)) {
+		s.handoff.TLSAdmission = true
+		s.handoff.TLSCapacity = constants.EnvIntRange(constants.EnvFSBTLSCapacity, 32, 1, 1<<20)
+		s.handoff.ProcessTLSCapacity = constants.EnvIntRange(constants.EnvFSBProcessTLSCapacity, 131072, 1, 1<<20)
 	}
 	if _, err := mitmproxy.WithSubjectRevision(mitmproxy.Config{}, s.handoff); err != nil {
 		return nil, revision.ErrInvalid

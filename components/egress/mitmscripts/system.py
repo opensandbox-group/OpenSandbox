@@ -71,6 +71,7 @@ import json
 import os
 import re
 import socket
+import sys
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
@@ -332,7 +333,8 @@ def configure(updated: set) -> None:
     """Fence insecure TLS and native pre-TLS bypasses in the live runtime."""
     if not {"ssl_insecure", "ignore_hosts", "allow_hosts"}.intersection(updated):
         return
-    if _live_runtime is None and not _live_admission_requested():
+    if (_live_runtime is None and not _live_admission_requested()
+            and _subject_admission_runtime() is None):
         return
     _validate_live_options()
 
@@ -407,6 +409,16 @@ def tls_clienthello(data: ClientHelloData) -> None:
     MITM remains possible and the escape hatch keeps working. TCP-layer
     enforcement (deny/allow rules) still applies.
     """
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        try:
+            _tls_clienthello_live(subject, data, subject=True)
+        except Exception:  # noqa: BLE001 - hook exceptions must not decrypt by default
+            from credential_bound import terminate_handshake
+
+            _record_tls_admission("deny", "invalid_input")
+            terminate_handshake(data.context.client)
+        return
     live = _live_runtime
     if live is not None:
         _tls_clienthello_live(live, data)
@@ -547,7 +559,15 @@ def _record_tls_admission(decision: str, reason: str) -> None:
             ctx.log.warn(f"credential proxy: tls-admission-v1 {decision} {reason}")
 
 
-def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
+def _subject_admission_runtime() -> Any:
+    # subject_runtime.load() guards its import with admission; subject_revision
+    # imports lazily on enabled paths. The gate is runtime() is not None, not
+    # module presence. Never import here: disabled deployments may omit it.
+    module = sys.modules.get("subject_admission")
+    return None if module is None else module.runtime()
+
+
+def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = False) -> None:
     # The live credential-bound mode must never run with insecure upstream
     # verification; deny the handshake outright instead of trusting an
     # unverified origin identity with a credential.
@@ -574,7 +594,10 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
     from static_passthrough import destination_port
 
     port = destination_port(getattr(getattr(data.context, "server", None), "address", None))
-    result = live.admit_tls(sni, ech_hidden=ech_hidden, destination_port=port)
+    if subject:
+        result = live.admit_tls(data.context.client, sni, ech_hidden=ech_hidden, destination_port=port)
+    else:
+        result = live.admit_tls(sni, ech_hidden=ech_hidden, destination_port=port)
     _record_tls_admission(result.action, result.reason)
     if result.action == "passthrough":
         data.ignore_connection = True
@@ -589,7 +612,8 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
 
         credential_bound.terminate_handshake(data.context.client)
         return
-    live.track(result.token, data.context.client)
+    if not subject:
+        live.track(result.token, data.context.client)
 
 
 def _load_active_vault(client_ip: str | None = None) -> ActiveVault | None:
@@ -1902,6 +1926,21 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
     continues: exchange bindings defer resolve I/O to the single await
     below; static and live paths stay inline and never suspend.
     """
+    if _subject_admission_runtime() is not None:
+        # B3b-1/I6: deliberately incomplete experiment. Never fall back to
+        # clientIp credentials, including on old transports after IP reuse.
+        # B3b-2 adds token-bound HTTP/H2 admission and tracked teardown.
+        client = getattr(flow, "client_conn", None)
+        if (getattr(client, "tls", False) or flow.request.scheme == "https"
+                or getattr(client, "alpn", None) == b"h2"):
+            flow.metadata[FLOW_REJECTION_KEY] = True
+            # killable is always true here: HttpStream sets flow.live = True
+            # before yielding HttpRequestHeadersHook, and an already-killed
+            # flow is not forwarded either. The guard stays defensive.
+            if flow.killable:
+                flow.kill()
+            ctx.log.warn("credential proxy: request denied reason=subject_requests_disabled")
+        return
     live = _live_runtime
     if live is not None:
         _requestheaders_live(live, flow)
@@ -2357,6 +2396,9 @@ def error(flow: http.HTTPFlow) -> None:
 
 def client_disconnected(client_conn: Any) -> None:
     """Release the transport's live admission on confirmed disconnect."""
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        subject.client_disconnected(client_conn)
     live = _live_runtime
     if live is not None:
         live.client_disconnected(client_conn)
