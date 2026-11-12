@@ -1218,6 +1218,17 @@ spec:
               (< 1.25) API servers, so the API server will accept spec edits; do not
               rely on API-level rejection.
             properties:
+              mode:
+                default: Full
+                description: |-
+                  Mode selects what the snapshot persists. RootfsOnly persists only the
+                  writable rootfs layer (consumers boot from disk) and requires the
+                  OverlayBD artifact path; Full (default) also captures memory and
+                  device state. Immutable per the one-shot spec convention.
+                enum:
+                - Full
+                - RootfsOnly
+                type: string
               sandboxRef:
                 description: |-
                   SandboxRef is the running Sandbox to snapshot. The Sandbox must be
@@ -1349,10 +1360,22 @@ spec:
               manifestRef:
                 description: |-
                   ManifestRef is the published s3:// manifest.json or immutable oci://
-                  snapfiles manifest reference (Succeeded only).
+                  snapfiles manifest reference. Set on Succeeded, and also on a Failed
+                  snapshot whose publication already completed (e.g. a mode-drift
+                  rejection) so deletion retains ownership of remote cleanup.
                 type: string
               message:
                 description: Message is the latest progress or failure reason.
+                type: string
+              mode:
+                description: |-
+                  Mode is the artifact class the executing fastlet reported for the
+                  produced snapshot (Full or RootfsOnly). It is the fastlet-confirmed
+                  produced mode, not the request: a success observation whose produced
+                  mode drifts from spec.mode fails the snapshot instead of publishing.
+                enum:
+                - Full
+                - RootfsOnly
                 type: string
               observedGeneration:
                 format: int64
