@@ -50,6 +50,8 @@ def _target_namespaces(settings: Settings, tenant_filter: str | None) -> list[tu
     if tenant_filter:
         tenants = [t for t in tenants if t.name == tenant_filter]
     pairs = [(t.name, t.namespace) for t in tenants]
+    if tenant_filter and tenant_filter != "system":
+        return pairs
     system_ns = settings.bff_k8s_system_namespace
     if not any(ns == system_ns for _, ns in pairs):
         pairs.append(("system", system_ns))
