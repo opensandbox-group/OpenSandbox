@@ -1309,6 +1309,20 @@ class TestTemplateCommands:
         mock_mgr.delete_template.assert_called_once_with("tpl_abc")
         mock_mgr.list_templates.assert_called_once()
 
+    def test_get_table_includes_manifest_ref(self, runner: CliRunner) -> None:
+        mock_mgr = MagicMock()
+        info = _make_template_info("Succeeded")
+        info.status = TemplateStatus(
+            phase="Succeeded",
+            manifest_ref="s3://bucket/publish/manifest.json",
+        )
+        mock_mgr.get_template.return_value = info
+
+        result = _invoke(runner, ["template", "get", "tpl_abc"], manager=mock_mgr)
+
+        assert result.exit_code == 0
+        assert "s3://bucket/publish/manifest.json" in result.output
+
 
 def _make_snapshot_info(state: str = "Succeeded") -> SnapshotInfo:
     return SnapshotInfo(
