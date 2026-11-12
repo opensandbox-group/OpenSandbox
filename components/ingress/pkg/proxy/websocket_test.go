@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -585,6 +586,37 @@ func Test_WebSocketProxy_BackendHandshake4xxPassthrough(t *testing.T) {
 		"backend 401 must reach the client instead of being rewritten as 502/503")
 	assert.Equal(t, "Bearer realm=\"test\"", resp.Header.Get("WWW-Authenticate"),
 		"auth challenge header from the backend must be forwarded")
+}
+
+// coder/websocket keeps only the first 1 KiB of a failed handshake body, so
+// the backend's Content-Length must not be relayed with it: a client that
+// trusts the header would wait for bytes that never arrive.
+func Test_WebSocketProxy_BackendHandshakeLargeBodyIsWellFramed(t *testing.T) {
+	body := strings.Repeat("x", 4096)
+	backendMux := http.NewServeMux()
+	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(body))
+	})
+
+	proxyURL, backendPort := startProxyForBehaviorTest(t, backendMux)
+
+	req, err := http.NewRequest(http.MethodGet, "http"+strings.TrimPrefix(proxyURL, "ws")+"/ws", nil)
+	require.NoError(t, err)
+	req.Header.Set(SandboxIngress, "test-sandbox-"+strconv.Itoa(backendPort))
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "the relayed handshake response must be framed by the bytes actually sent")
+	assert.True(t, strings.HasPrefix(body, string(got)))
 }
 
 func Test_WebSocketProxy_BackendHandshakeStripsWakeMarker(t *testing.T) {
