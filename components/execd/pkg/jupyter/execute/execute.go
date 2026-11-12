@@ -238,7 +238,7 @@ func (c *Client) buildExecuteMessage(code string) (*Message, error) {
 
 func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, resultChan chan *ExecutionResult) {
 	c.registerHandler(MsgExecuteReply, func(msg *Message) {
-		c.handleExecuteReply(msg, state)
+		c.handleExecuteReply(msg, state, resultChan)
 	})
 	c.registerHandler(MsgExecuteResult, func(msg *Message) {
 		c.handleExecuteResult(msg, state, resultChan)
@@ -269,7 +269,7 @@ func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, 
 	c.mu.Unlock()
 }
 
-func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
+func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
 	if msg.ParentHeader.MessageID != state.requestID {
 		return
 	}
@@ -280,7 +280,6 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
 	}
 
 	state.resultMutex.Lock()
-	defer state.resultMutex.Unlock()
 	state.replyReceived = true
 	state.result.ExecutionCount = execReply.ExecutionCount
 	if execReply.Status != "ok" || execReply.EName != "" {
@@ -293,6 +292,49 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
 			state.result.Error = &errOutput
 		}
 	}
+	state.resultMutex.Unlock()
+
+	// The reply means the kernel has finished the cell; everything after it is
+	// output delivery. Finalization still waits for the matching idle, but that
+	// wait must not be unbounded: if the idle is lost or relayed without the
+	// matching parent header, nothing else would ever release this execution --
+	// the results channel never closes, the caller's SSE stream stays open with
+	// keepalive pings, and the session stays locked. Arm a bounded deadline that
+	// finalizes with whatever output has been collected. It coexists with the
+	// idle-triggered finalization in handleExecutionStatus; whoever flips
+	// executeDone first finalizes and the loser exits. The timeout is read here,
+	// on the dispatch path, so the deadline goroutine never touches the flag.
+	replyDeadline := execdflag.JupyterReplyFinalizeTimeout
+	safego.Go(func() { c.finalizeOnReplyDeadline(state, resultChan, replyDeadline) })
+}
+
+// finalizeOnReplyDeadline releases an execution whose matching idle status
+// never arrived although execute_reply did. The kernel sends the reply after it
+// finished the cell, so the outcome is already known and only the delivery of
+// remaining IOPub output is pending. Finalizing here closes the results channel
+// with the output collected so far; a late idle is a no-op because executeDone
+// is already set.
+func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan chan *ExecutionResult, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-state.cancelled:
+		return
+	case <-timer.C:
+	}
+
+	state.executeMutex.Lock()
+	alreadyFinalizing := state.executeDone
+	state.executeDone = true
+	state.executeMutex.Unlock()
+	if alreadyFinalizing {
+		return
+	}
+	c.finalizeExecution(state, resultChan)
 }
 
 func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
