@@ -568,7 +568,7 @@ onUnmounted(() => {
         </p>
       </div>
       <div class="os-control-grid">
-        <a :href="withBase('/guides/network-isolation')" class="os-control-item"
+        <a :href="withBase('/guides/network-security')" class="os-control-item"
           ><svg
             viewBox="0 0 40 40"
             fill="none"

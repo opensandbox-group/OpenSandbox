@@ -45,7 +45,7 @@ This roadmap describes the intended project direction for roughly the next 12 mo
 | eBPF in-sandbox observation | Implementing | [OSEP-0018](oseps/0018-execd-as-sandbox-init.md) | Optional eBPF observation of exec/connect/privilege events in the sandbox cgroup, emitted to a local rotating JSONL audit file (requires the `execd-ebpf` build + `CAP_BPF`). |
 | Agent in-sandbox audit trail | Planned | TBD / OSEP needed | Define auditable records for agent actions inside sandboxes, such as command/session execution, file operations, network access, identity context, retention, and privacy boundaries. |
 | Kubernetes deployment | Ongoing | [kubernetes/](kubernetes/README.md), [Helm charts](manifests/charts/) | Keep self-hosted deployment, chart, and operational documentation current. |
-| Network isolation guidance | Ongoing | [network isolation guide](docs/guides/network-isolation.md) | Continue documenting safe defaults and practical isolation patterns. |
+| Network isolation guidance | Ongoing | [network security guide](docs/guides/network-security.md) | Continue documenting safe defaults and practical isolation patterns. |
 | System-wide high availability | Planned | TBD / OSEP needed | Move beyond the current scoped HA (PostgreSQL-backed snapshot coordination) to full control-plane availability: multi-replica Lifecycle Server on Kubernetes, together with HA posture for ingress, node agent, and fast-sandbox components. |
 
 ### Public Contracts and Governance
