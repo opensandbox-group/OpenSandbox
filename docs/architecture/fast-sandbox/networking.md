@@ -103,6 +103,16 @@ Credential vault revisions are **egress-held** (OSEP-0022): the server pushes co
 - **Server surface**: the user-facing vault API is server-routed (`POST|PATCH|GET|DELETE /v1/sandboxes/{id}/credential-vault[...]`). fsb sandboxes relay over this channel (the server composes `PATCH` as relay GET → in-memory merge → relay PUT carrying the read revision, so a lost cross-replica race answers 412); other backends proxy their sandbox-side sidecar. Values never leave the server on any public read.
 - **Configuration**: persistence is enabled by setting `OPENSANDBOX_EGRESS_VAULT_DIR` (the mounted `emptyDir` subdirectory) on the egress container; unset keeps the vault memory-only. `REMOVE_BINDING` purges memory plus the file (terminal).
 
+### Interception mode
+
+`OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE` selects `all` (the unchanged default) or `credential-bound` for the Fast Sandbox profile only. The switch name is proposed pending maintainer confirmation. It does not change Pool manifests, the sidecar gate, or Actions API version selection. This first-stage contract covers Actions v1; the switch adds no Actions v2 guarantee.
+
+With the switch unset, both legacy gates `OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME=true` and `OPENSANDBOX_EGRESS_EXPERIMENTAL_FSB_TLS_ADMISSION=true` select the same admission path and emit a deprecation warning. The revision gate alone still installs the subject receiver without TLS admission. The admission gate alone, explicit `all` with either true legacy gate, and explicit `credential-bound` with an explicitly disabled legacy gate fail startup. Empty or unknown switch values also fail startup.
+
+Credential-bound startup requires transparent MITM and `dns+nft`; it rejects nondefault extra interception ports, insecure upstream TLS verification, a chained upstream proxy, and nonempty effective mitmproxy `ignore_hosts` or `allow_hosts`. Go reads the runtime user's `.mitmproxy/config.yaml` followed by `config.yml`, matching mitmdump's load order, before profile dispatch or network setup; unreadable or malformed configuration fails closed. The existing child-side checks remain in place. These restrictions apply to both the new switch and its legacy alias; `all` retains the existing configuration behavior.
+
+This R4 switch only wires existing handshake admission and shared budgets. The current implementation still terminates decrypted HTTP/1.1 and HTTP/2 requests before forwarding or credential lookup; HTTP/1.1 forwarding and opaque-transport teardown remain separate increments. See [egress architecture](/architecture/network/egress#transparent-tls-interception-l7) for current limits and configuration.
+
 ### Enforcement
 
 Enforcement is nftables in the Fastlet pod network namespace, dispatched by source IP — the attachment block of each action envelope supplies the subject's IP, gateway, host veth, and private CIDR.

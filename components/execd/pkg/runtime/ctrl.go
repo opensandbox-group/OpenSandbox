@@ -49,7 +49,7 @@ type Controller struct {
 	ptySessionMap           sync.Map // map[sessionID]*ptySession
 	isolatedSessionMap      sync.Map // map[sessionID]*isolatedSession
 	db                      *sql.DB
-	dbOnce                  sync.Once
+	dbMu                    sync.Mutex
 }
 
 type jupyterKernel struct {

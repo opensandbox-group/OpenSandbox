@@ -177,6 +177,7 @@ runtimeEnvironments: |-
         firecracker:
           firecracker:
             binaryPath: /opt/fast-sandbox/firecracker/firecracker
+            vmmDir: /opt/fast-sandbox/firecracker
             jailerPath: /opt/fast-sandbox/firecracker/jailer
             # No kernelPath: restore never boots a kernel (the bundled
             # vmlinux.bin was dropped upstream); direct-boot operators
