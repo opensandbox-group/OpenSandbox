@@ -496,7 +496,7 @@ osb config set defaults.image python:3.12
 osb config set defaults.timeout 30m
 ```
 
-`osb config set` accepts only the keys above and validates the value (for example, `connection.protocol` must be `http` or `https`), so a typo fails immediately instead of breaking every later command.
+`osb config set` validates the key and the value (for example, `connection.protocol` must be `http` or `https`), so a typo fails immediately instead of breaking every later command. Setting an unknown key prints the full list of supported keys.
 
 Example config file:
 
