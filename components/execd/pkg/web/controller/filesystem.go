@@ -162,7 +162,7 @@ func (c *FilesystemController) RenameFiles() {
 		return
 	}
 
-	if err := validateRenameFiles(request); err != nil {
+	if err := validateExpandedRenameFiles(request); err != nil {
 		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
 		return
 	}

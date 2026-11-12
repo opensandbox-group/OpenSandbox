@@ -107,16 +107,22 @@ func TestFilesystemControllerRenameFilesReturnsNotFoundForMissingSource(t *testi
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
-func TestFilesystemControllerRenameFilesRejectsMissingPaths(t *testing.T) {
+func TestFilesystemControllerRenameFilesRejectsEmptyPaths(t *testing.T) {
+	t.Setenv("EXECD_RENAME_EMPTY_PATH", "")
 	tests := []struct {
 		name  string
 		field string
 		omit  bool
+		value string
 	}{
 		{name: "missing_src", field: "src", omit: true},
 		{name: "empty_src", field: "src"},
 		{name: "missing_dest", field: "dest", omit: true},
 		{name: "empty_dest", field: "dest"},
+		{name: "expanded_empty_src", field: "src", value: "${}"},
+		{name: "expanded_empty_dest", field: "dest", value: "${}"},
+		{name: "empty_env_src", field: "src", value: "$EXECD_RENAME_EMPTY_PATH"},
+		{name: "empty_env_dest", field: "dest", value: "$EXECD_RENAME_EMPTY_PATH"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,7 +149,7 @@ func TestFilesystemControllerRenameFilesRejectsMissingPaths(t *testing.T) {
 			if tt.omit {
 				delete(invalid, tt.field)
 			} else {
-				invalid[tt.field] = ""
+				invalid[tt.field] = tt.value
 			}
 			payload, err := json.Marshal([]map[string]string{
 				{"src": firstSrc, "dest": firstDest},
@@ -174,6 +180,35 @@ func TestFilesystemControllerRenameFilesRejectsMissingPaths(t *testing.T) {
 			var resp model.ErrorResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+		})
+	}
+}
+
+func TestFilesystemControllerRenameFilesPreservesExpansionErrors(t *testing.T) {
+	t.Setenv("EXECD_RENAME_UNDEFINED_PATH", "")
+	require.NoError(t, os.Unsetenv("EXECD_RENAME_UNDEFINED_PATH"))
+	for _, field := range []string{"src", "dest"} {
+		t.Run(field, func(t *testing.T) {
+			root := t.TempDir()
+			src := filepath.Join(root, "source.txt")
+			dest := filepath.Join(root, "destination.txt")
+			require.NoError(t, os.WriteFile(src, []byte(src), 0o644))
+			item := map[string]string{"src": src, "dest": dest}
+			item[field] = "$EXECD_RENAME_UNDEFINED_PATH"
+			payload, err := json.Marshal([]map[string]string{item})
+			require.NoError(t, err)
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", payload)
+
+			ctrl.RenameFiles()
+
+			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeRuntimeError, resp.Code)
+			content, err := os.ReadFile(src)
+			require.NoError(t, err)
+			require.Equal(t, src, string(content))
+			require.NoFileExists(t, dest)
 		})
 	}
 }
