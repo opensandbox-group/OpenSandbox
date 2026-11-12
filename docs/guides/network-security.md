@@ -106,7 +106,7 @@ For Fast Sandbox, also deny the Fastlet slot bridge — the default is `172.30.0
 172.30.0.0/24
 ```
 
-How to find your ranges: the Service CIDR is the `--service-cluster-ip-range` flag of kube-controller-manager; the Pod CIDR is set by your CNI plugin or `--pod-network-cidr`; node addresses come from `kubectl get nodes -o wide`. When in doubt, deny broader supersets (the shipped fast-sandbox baseline uses `10.0.0.0/8` to cover both Pod and Service networks) — the cost is only that sandboxes cannot reach RFC1918 space you have not explicitly re-opened via `allow.always`.
+How to find your ranges: the Service CIDR is the `--service-cluster-ip-range` flag of kube-controller-manager; the Pod CIDR is set by your CNI plugin or `--pod-network-cidr`; node addresses come from `kubectl get nodes -o wide`. When in doubt, deny broader supersets (the shipped fast-sandbox baseline uses `10.0.0.0/8` to cover both Pod and Service networks) — the cost is only that sandboxes cannot reach RFC1918 space you have not carved out of the deny list (see [Allowing legitimate in-cluster services](#allowing-legitimate-in-cluster-services)).
 
 Effects in `dns+nft` mode:
 
@@ -203,7 +203,7 @@ mode = "dns+nft"
 
 ### 4. Roll out and maintain
 
-Every sandbox created afterwards injects the hardened sidecar — no change to user SDK calls, and the overlay is invisible to users. To change rules: edit the files, rebuild the image, update `[egress].image`, and roll the server. Running sandboxes keep the image their sidecar started with and pick up nothing until recreated — for rules that must change **without** recreating sandboxes (and without an image rebuild), use the Fast Sandbox path below, or plan sandbox turnover.
+On Kubernetes and Docker alike, the server creates the egress sidecar **only when the sandbox creation request carries a `networkPolicy`** — a request without one gets no sidecar at all (the server logs that egress settings are ignored) and sits outside every control on this page, no matter what image `[egress]` points to. To make the baseline universal for pod sandboxes, require every creation request to include a policy: a permissive `defaultAction: allow` policy is enough to trigger injection and changes nothing for user traffic except where the operator floor applies. Pooled sandboxes cannot carry a per-request policy (`poolRef` + `networkPolicy` is rejected) — their controls must ride the pool template. To change rules afterwards: edit the files, rebuild the image, update `[egress].image`, and roll the server; running sandboxes keep the image their sidecar started with until recreated.
 
 Defense in depth you get for free: the sandbox container's `NET_ADMIN` capability is dropped by the server, and the sidecar is the pod's only holder — the workload cannot uninstall the enforcement it lives under.
 
@@ -280,7 +280,7 @@ Denying internal CIDRs breaks sandbox access to Kubernetes Services — includin
 1. **DNS layer**: allow the service hostname so the DNS proxy does not return `NXDOMAIN`.
 2. **Network layer** (`dns+nft`): allow the Service CIDR (or a narrower ClusterIP range) so nftables does not drop the resolved TCP connection.
 
-Allowing only the hostname is not enough — the ClusterIP of `postgres.data.svc.cluster.local` lives in a denied CIDR like `10.96.0.0/12`, so the connection drops after resolution:
+Allowing only the hostname is not enough — the ClusterIP of `postgres.data.svc.cluster.local` lives in a denied CIDR like `10.96.0.0/12`, so the connection drops after resolution. And the network-layer allowance works **only when the blocking deny is user-declared**, because a sandbox's own allow rules can be ordered ahead of its own deny rules:
 
 ```json
 { "action": "allow", "target": "postgres.data.svc.cluster.local" }
@@ -290,10 +290,21 @@ Allowing only the hostname is not enough — the ClusterIP of `postgres.data.svc
 { "action": "allow", "target": "10.96.0.0/12" }
 ```
 
+When the deny comes from the operator overlay — the recommended baseline puts the Service CIDR in `deny.always` — the same allows do nothing: `deny.always` is evaluated ahead of `allow.always` and every user rule (first match wins), and the nftables deny set drops before the allow set accepts. A denied range can only be reopened by **carving it out of the deny list**.
+
 Recommended patterns:
 
-- **Platform-managed**: for shared internal services, keep the Service CIDR allowance in `allow.always` and let users request only the hostnames they need through their own policy. Users never see your CIDRs.
-- **Per-sandbox**: for tightly scoped access, put both the FQDN and the required CIDR in that sandbox's `networkPolicy`.
+- **Platform-managed carve-out**: reserve a ClusterIP block for sandbox-facing services, structure the deny list around it (deny the surrounding sub-ranges instead of the whole CIDR), put the reserved block in `allow.always`, and pin the approved Services to a ClusterIP inside it (`spec.clusterIP`). Users request only the hostnames through their own policy and never see your CIDRs:
+
+  ```text
+  # deny.always — deny the lower half of the Service CIDR 10.96.0.0/16
+  10.96.0.0/17
+
+  # allow.always — upper half reserved for sandbox-facing services
+  10.96.128.0/17
+  ```
+
+- **Per-sandbox**: for tightly scoped access where the operator floor does not cover the destination, put both the FQDN and the required CIDR in that sandbox's `networkPolicy`.
 - The egress automatically allows nameserver IPs so DNS forwarding works, but never auto-allows arbitrary ClusterIPs for application traffic.
 
 ## Per-sandbox network policies (supplementary)
