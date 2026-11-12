@@ -1530,6 +1530,46 @@ class TestSandboxMetrics:
         assert items[2]["cpu_used_percentage"] == 18.0
 
 
+    def test_metrics_watch_continues_after_a_malformed_line(
+        self, runner: CliRunner
+    ) -> None:
+        class _FakeResponse:
+            def __init__(self) -> None:
+                self.lines = [
+                    'data: {"cpu_count": 2, "cpu_used_pct": 12.5, "mem_total_mib": 1024, "mem_used_mib": 256, "timestamp": 1710000000000}',
+                    "data: {",
+                    'data: {"cpu_used_pct": 1.0}',
+                    'data: {"cpu_count": 2, "cpu_used_pct": 18.0, "mem_total_mib": 1024, "mem_used_mib": 300, "timestamp": 1710000001000}',
+                ]
+
+            def __enter__(self) -> _FakeResponse:
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                return None
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_lines(self):
+                yield from self.lines
+
+        mock_sb = MagicMock()
+        mock_sb.metrics._httpx_client.stream.return_value = _FakeResponse()
+
+        result = _invoke(
+            runner,
+            ["sandbox", "metrics", "sb-1", "--watch", "-o", "json"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert result.output.count("Metrics stream error") >= 2
+        assert "invalid JSON" in result.output
+        assert "12.5" in result.output
+        assert "18.0" in result.output
+
+
 class TestSandboxEndpoint:
     def test_endpoint_passes_valid_port_to_sdk(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
