@@ -58,8 +58,13 @@ func main() {
 	// fast-sandbox, without dns+nft enforcement) fails startup instead of
 	// being silently ignored.
 	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
-	if err := validateRevisionRuntimeStartup(profile); err != nil {
+	fsbMode, err := revisionRuntimeStartup(profile)
+	if err != nil {
 		log.Fatalf("invalid live revision runtime configuration: %v", err)
+	}
+	startupFSBInterceptionMode = &fsbMode
+	if fsbMode.deprecatedAlias {
+		log.Warnf("%s and %s are deprecated for Fast Sandbox TLS admission; use %s=credential-bound", constants.EnvExperimentalRevisionRuntime, constants.EnvExperimentalFSBTLSAdmission, constants.EnvFSBInterceptionMode)
 	}
 	if _, present := os.LookupEnv(constants.EnvMitmproxyPassthroughHosts); present &&
 		(profile == constants.ProfileFastSandbox || !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime))) {
@@ -227,31 +232,31 @@ func main() {
 }
 
 // validateRevisionRuntimeStartup runs before profile dispatch or network setup.
+// Kept for startup-focused callers; main retains the resolved mode for launch.
 func validateRevisionRuntimeStartup(profile string) error {
-	if constants.IsTruthy(os.Getenv(constants.EnvExperimentalFSBTLSAdmission)) {
-		if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
-			return fmt.Errorf("%s requires %s=true", constants.EnvExperimentalFSBTLSAdmission, constants.EnvExperimentalRevisionRuntime)
-		}
-		if profile != constants.ProfileFastSandbox {
-			return fmt.Errorf("%s requires fast-sandbox profile", constants.EnvExperimentalFSBTLSAdmission)
-		}
-	}
-	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
-		return nil
+	_, err := revisionRuntimeStartup(profile)
+	return err
+}
+
+func revisionRuntimeStartup(profile string) (fastSandboxInterceptionMode, error) {
+	mode, err := resolveFastSandboxInterceptionMode(profile)
+	if err != nil {
+		return mode, err
 	}
 	if profile == constants.ProfileFastSandbox {
-		// CR-1: keep extra-port startup behavior; live _classify denies SNI
-		// on noncanonical ports after the ECH/no-SNI exceptions.
-		return nil
+		return mode, validateFastSandboxInterception(mode)
+	}
+	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+		return mode, nil
 	}
 	ports, err := constants.BuildMitmproxyPortList(os.Getenv(constants.EnvMitmproxyExtraPorts))
 	if err != nil {
-		return fmt.Errorf("invalid %s for live revision runtime: %w", constants.EnvMitmproxyExtraPorts, err)
+		return mode, fmt.Errorf("invalid %s for live revision runtime", constants.EnvMitmproxyExtraPorts)
 	}
 	if ports != constants.MitmproxyBasePorts {
-		return fmt.Errorf("%s is not supported with %s", constants.EnvMitmproxyExtraPorts, constants.EnvExperimentalRevisionRuntime)
+		return mode, fmt.Errorf("%s is not supported with %s", constants.EnvMitmproxyExtraPorts, constants.EnvExperimentalRevisionRuntime)
 	}
-	return nil
+	return mode, nil
 }
 
 func withLogger(ctx context.Context) context.Context {
