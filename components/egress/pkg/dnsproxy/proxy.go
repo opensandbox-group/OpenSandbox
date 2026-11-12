@@ -650,7 +650,7 @@ func normalizeEnvUpstreamAddr(s string) (string, error) {
 		return "", fmt.Errorf("empty upstream address")
 	}
 	if host, port, err := net.SplitHostPort(s); err == nil {
-		if port == "" {
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return "", fmt.Errorf("invalid port in %q", s)
 		}
 		if _, err := netip.ParseAddr(host); err != nil {
