@@ -2876,10 +2876,12 @@ components:
       properties:
         src:
           type: string
+          minLength: 1
           description: Source file path
           example: /workspace/old.txt
         dest:
           type: string
+          minLength: 1
           description: Destination file path
           example: /workspace/new.txt
       required: [src, dest]

@@ -340,6 +340,11 @@ func (c *IsolatedSessionController) RenameFiles() {
 		return
 	}
 
+	if err := validateRenameFiles(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
+		return
+	}
+
 	for _, item := range request {
 		if err := mv.Rename(item.Src, item.Dest); err != nil {
 			if os.IsNotExist(err) {
