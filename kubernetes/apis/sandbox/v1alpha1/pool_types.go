@@ -68,6 +68,9 @@ type PoolSpec struct {
 	RecycleStrategy *RecycleStrategy `json:"recycleStrategy,omitempty"`
 }
 
+// A bufferMin above bufferMax makes the controller alternate between growing
+// the idle buffer to bufferMin and shrinking it to bufferMax, churning pods.
+// +kubebuilder:validation:XValidation:rule="self.bufferMin <= self.bufferMax",message="bufferMin must not exceed bufferMax"
 type CapacitySpec struct {
 	// BufferMax is the maximum number of nodes kept in the warm buffer.
 	// +kubebuilder:validation:Minimum=0

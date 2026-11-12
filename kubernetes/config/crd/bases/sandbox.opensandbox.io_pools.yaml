@@ -91,6 +91,9 @@ spec:
                 - poolMax
                 - poolMin
                 type: object
+                x-kubernetes-validations:
+                - message: bufferMin must not exceed bufferMax
+                  rule: self.bufferMin <= self.bufferMax
               recycleStrategy:
                 description: |-
                   RecycleStrategy controls how pods are handled when returned to the pool.
