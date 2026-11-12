@@ -167,7 +167,8 @@ class CodeInterpreter internal constructor(
 
     private fun isRuntimeServing(): Boolean =
         try {
-            sandbox.commands().run(RUNTIME_CHECK_COMMAND).error == null
+            // Only a confirmed exit code 0 counts; a dropped stream is unknown.
+            sandbox.commands().run(RUNTIME_CHECK_COMMAND).let { it.error == null && it.exitCode == 0 }
         } catch (e: Exception) {
             logger.debug("Runtime process check failed for code interpreter {}: {}", id, e.message)
             false
