@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/nftables"
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 	"github.com/stretchr/testify/require"
 )
