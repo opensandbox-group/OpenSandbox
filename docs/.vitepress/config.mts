@@ -221,6 +221,10 @@ export default withMermaid(defineConfig({
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
             {
+              text: "Docker-in-Docker on Kata",
+              link: "/guides/docker-in-docker",
+            },
+            {
               text: "Network Isolation on Kubernetes",
               link: "/guides/network-isolation",
             },
