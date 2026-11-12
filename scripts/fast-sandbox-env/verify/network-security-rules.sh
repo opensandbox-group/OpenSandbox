@@ -61,6 +61,19 @@ network_security_rules_floor_gone() { # <pod>
 	[[ "$out" != *"tcp dport {"* ]]
 }
 
+network_security_rules_floor_gone_all() { # <>
+	# every pool Fastlet syncs the ConfigMap and reloads independently — the
+	# restore wait must converge on all of them, not just the first
+	local pod out
+	for pod in $(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o name 2>/dev/null); do
+		out="$(kubectl -n "$RESOURCE_NS" exec "${pod#pod/}" -c egress -- \
+			nft list chain inet opensandbox-fast-sandbox dispatch 2>/dev/null)" || return 1
+		[[ "$out" != *"tcp dport {"* ]] || return 1
+	done
+	return 0
+}
+
 network_security_rules_subject_deny_set() { # <sandbox-id>
 	local uid out subj pod
 	uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || return 1
@@ -169,7 +182,8 @@ metadata:
   name: $RULES_CONFIGMAP
   namespace: $RESOURCE_NS
 EOF
-	wait_for "baseline unloaded after verify (port-cap complement gone)" 60 network_security_rules_floor_gone "$pod"
+	wait_for "baseline unloaded after verify (port-cap complement gone on every Fastlet)" 60 \
+		network_security_rules_floor_gone_all
 	pass "baseline removed; environment restored"
 	trap - EXIT
 }
