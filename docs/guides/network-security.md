@@ -53,7 +53,7 @@ Independently, the complement of `reachable.ports.cap` is installed as an always
 Two properties make this safe to operate:
 
 - **Fail-closed.** If enforcement cannot be installed, the egress process exits instead of running as a silent pass-through. A policy reload is published only after the kernel accepts the rebuilt rules; a failed reload keeps the previously accepted rules and retries on the next tick.
-- **Hot reload.** All three rule files are re-checked every minute (matched to the kubelet ConfigMap sync period). Edits take effect without restarting any sandbox or pool.
+- **Hot reload.** All three rule files are re-checked every minute (matched to the kubelet ConfigMap sync period). Where the files are mutable at runtime — the Fast Sandbox ConfigMap mount below — edits take effect without restarting any sandbox or pool. In the pod-sandbox deployment the files are baked into the egress image, so a rule change means a new image and recreated sandboxes (see step 4 of the pod-sandbox procedure).
 
 ::: tip Both runtimes, same semantics
 The per-sandbox sidecar (pod sandboxes) and the fast-sandbox profile enforce identical overlay semantics. The fast-sandbox reload (PR [#2727](https://github.com/opensandbox-group/OpenSandbox/pull/2727)) additionally rebuilds its nft table in one atomic transaction across every active subject and drops all DNS-learned leases, so a domain revoked by a reload cannot re-admit its cached address: in-flight DNS answers are re-authorized against the installed policy before their IPs are admitted.
@@ -209,7 +209,7 @@ Defense in depth you get for free: the sandbox container's `NET_ADMIN` capabilit
 
 ## Configuring Fast Sandbox
 
-In Fast Sandbox, the egress process runs inside each Fastlet pod's network namespace (profile `fast-sandbox`) and enforces one nft table (`inet opensandbox-fast-sandbox`) for all subjects on that pod. Operator rules are delivered as a **ConfigMap mounted at `/var/egress/rules`** — no image build, and edits hot-reload within about a minute, no restart.
+In Fast Sandbox, the egress process runs inside each Fastlet pod's network namespace (profile `fast-sandbox`) and enforces one nft table (`inet opensandbox-fast-sandbox`) for all subjects on that pod. Operator rules are delivered as a **ConfigMap mounted at `/var/egress/rules`** — no image build, and edits hot-reload within about two minutes worst case (kubelet propagation + reload tick), no restart.
 
 ### 1. Apply the rules ConfigMap
 
@@ -235,7 +235,7 @@ data:
     443
 ```
 
-Apply it once — every Fastlet picks it up within a minute:
+Apply it once — every Fastlet picks it up within about two minutes worst case, because kubelet ConfigMap propagation and the egress reload tick are independent one-minute intervals that can run serially:
 
 ```bash
 kubectl apply -f egress-network-security-rules-configmap.yaml
