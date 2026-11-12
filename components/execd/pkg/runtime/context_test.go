@@ -131,6 +131,29 @@ func TestDeleteContext_RemovesCacheOnSuccess(t *testing.T) {
 	require.False(t, ok, "expected default session entry to be removed")
 }
 
+func TestDeleteContext_RemovesCacheWhenJupyterSessionIsGone(t *testing.T) {
+	sessionID := "sess-gone"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodDelete, r.Method, "unexpected method")
+		require.True(t, strings.HasSuffix(r.URL.Path, "/api/sessions/"+sessionID), "unexpected path: %s", r.URL.Path)
+		// Jupyter answers 404 for a session it no longer has, for example
+		// after the Jupyter server restarted.
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	c := NewController(server.URL, "token")
+	c.jupyterClientMap.Store(sessionID, &jupyterKernel{language: Python})
+	c.defaultLanguageSessions.Store(Python, sessionID)
+
+	require.NoError(t, c.DeleteContext(sessionID))
+
+	require.Nil(t, c.getJupyterKernel(sessionID), "expected cache to be cleared")
+	_, ok := c.defaultLanguageSessions.Load(Python)
+	require.False(t, ok, "expected default session entry to be removed")
+}
+
 func TestDeleteLanguageContext_RemovesCacheOnSuccess(t *testing.T) {
 	lang := Python
 	session1 := "sess-1"

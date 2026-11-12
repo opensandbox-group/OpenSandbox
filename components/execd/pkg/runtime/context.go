@@ -111,7 +111,9 @@ func (c *Controller) deleteSessionAndCleanup(session string) error {
 	if client == nil {
 		client = c.jupyterClient()
 	}
-	if err := client.DeleteSession(session); err != nil {
+	// A session Jupyter no longer has (e.g. after a Jupyter restart) is
+	// already deleted; drop the stale entry instead of failing forever.
+	if err := client.DeleteSession(session); err != nil && !errors.Is(err, jupytersession.ErrSessionNotFound) {
 		return err
 	}
 	c.jupyterClientMap.Delete(session)
