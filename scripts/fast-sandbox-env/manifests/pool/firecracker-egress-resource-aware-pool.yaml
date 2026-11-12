@@ -15,10 +15,11 @@
 #                    heterogeneous request ledger (pressure-aware admission),
 #                    the Firecracker runtime enforces host cgroup budgets per
 #                    sandbox, and callers may override cpu/memory per create.
-#                    Ratios: CPU 4x (compressible), memory 2x (node RAM is
+#                    Ratios: CPU 2x (compressible), memory 2x (node RAM is
 #                    the hard backstop) — a default-shape sandbox (1 CPU /
-#                    512Mi) commits 250m CPU / 256Mi, so the same node packs
-#                    more sandboxes than the legacy slot accounting.
+#                    512Mi) commits 500m CPU / 256Mi, so the fastlet sells
+#                    2x its aggregate commitment budget (4 CPU / 2Gi) to
+#                    the same slot count.
 #
 # Everything else (fastlet/egress containers, MITM CA seed, volumes,
 # capacity, anti-affinity, infraComponents/actionHandlers wiring) is kept in
@@ -208,9 +209,14 @@ spec:
     memory: 512Mi
     pids: 128
     overcommitRatio:
-      # CPU overcommit 4x: vCPUs are compressible (cgroup cpu.max weights +
-      # throttling), so a default-shape sandbox commits 250m CPU.
-      cpu: "4"
+      # CPU overcommit 2x: vCPUs are compressible (cgroup cpu.max weights +
+      # throttling), so a default-shape sandbox commits 500m CPU and the
+      # per-fastlet budget is 4 CPU (500m x maxSandboxesPerPod) — enough to
+      # cover the verify worst case (two 2-vCPU sandboxes bursting at their
+      # cpu.max) without contention. Keep in sync with the
+      # RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 2 )) fixture math in
+      # integration-env.sh / verify/resourceaware.sh.
+      cpu: "2"
       # Memory overcommit 2x: Firecracker guest RAM is backed by host pages
       # with no swap inside the guest, so the ratio stays conservative — a
       # default-shape sandbox commits 256Mi against its 512Mi limit.

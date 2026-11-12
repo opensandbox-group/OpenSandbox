@@ -4065,10 +4065,10 @@ verify_overlaybd() {
 #   1. distinctly-shaped template (2 vCPU / 1Gi) -> create forwards the recorded
 #      machine as per-sandbox limits: Sandbox CR spec.resources.limits, cgroup
 #      leaf cpu.max (from the limit) and cpu.weight (from the pool-derived
-#      request ceil(2000m/4)=500m), aggregate memory budget (derived from
+#      request ceil(2000m/2)=1000m), aggregate memory budget (derived from
 #      the rendered maxSandboxesPerPod).
-#   2. oversized template (8 vCPU > 1250m per-fastlet budget) -> permanent 400.
-#   3. capacity saturation (5 concurrent 2vCPU sandboxes vs 2x2 slots) -> 429.
+#   2. oversized template (8 vCPU limit > 4 CPU per-fastlet budget) -> permanent 400.
+#   3. capacity saturation (9 concurrent 2vCPU sandboxes vs 2x4 slots) -> 429.
 #   4. template -> snapshot -> restore round-trip: recorded limits replayed
 #      through the composite production path; restore CR carries the same
 #      limits; guest answers /ping.
@@ -4084,8 +4084,10 @@ ra_expected_cpu_weight() { # <milli> — mirrors fastlet cpuWeight (shares [2,26
 	echo $(( 1 + (shares - 2) * 9999 / 262142 ))
 }
 
-# Fixture pool defaults: limits 1 CPU / 512Mi, overcommit ratios 4 / 2.
-RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 4 ))
+# Fixture pool defaults: limits 1 CPU / 512Mi, overcommit ratios cpu 2 / memory 2
+# (keep in sync with manifests/pool/firecracker-egress-resource-aware-pool.yaml):
+# aggregate fastlet budget = 500m x 8 slots = 4000m CPU, 256Mi x 8 = 2Gi memory.
+RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 2 ))
 RA_DEFAULT_REQ_MEM_BYTES=$(( 512 * 1024 * 1024 / 2 ))
 
 ra_aggregate_memory_budget() { # max(defaultRequest * maxSandboxesPerPod, defaultLimit)
@@ -4223,7 +4225,7 @@ ra_forward_verify() {
 	pass "Sandbox CR carries the forwarded limits (cpu=2, memory=1Gi)"
 
 	local cpu_max cpu_weight pids_max want_mem_budget got_mem_budget
-	weight="$(ra_expected_cpu_weight 500)" # request = ceil(2000m / ratio 4) = 500m
+	weight="$(ra_expected_cpu_weight 1000)" # request = ceil(2000m / ratio 2) = 1000m
 	# Reads may legitimately fail (|| true): the debug dump below must run
 	# before the failure is finalized.
 	cpu_max="$(ra_leaf_read "$id" cpu.max || true)"
@@ -4248,7 +4250,7 @@ ra_forward_verify() {
 
 ra_oversized_verify() {
 	local code
-	ra_template_up 8 1Gi # > 1250m per-fastlet sandbox budget
+	ra_template_up 8 1Gi # 8 vCPU limit > 4 CPU per-fastlet sandbox budget
 	code="$(server_api_status POST "/sandboxes" "{\"templateId\": \"$RA_TEMPLATE_ID\", \"timeout\": 600}")"
 	[[ "$code" == "400" ]] \
 		|| fail "oversized template (8 vCPU) create returned HTTP $code (want permanent 400)"
@@ -4258,7 +4260,7 @@ ra_oversized_verify() {
 ra_capacity_verify() {
 	local -a ids=()
 	local i id code total
-	# Committed per sandbox: cpu ceil(2000m/4)=500m, memory ceil(1Gi/2)=512Mi.
+	# Committed per sandbox: cpu ceil(2000m/2)=1000m, memory ceil(1Gi/2)=512Mi.
 	# Per-fastlet slots derive from the RENDERED density (budget =
 	# max(defaultReq * maxSandboxesPerPod, defaultLimit)), not the manifest
 	# literal; total = slots * POOL_MIN fastlets, then one more must 429.
@@ -4266,7 +4268,7 @@ ra_capacity_verify() {
 	(( budget_cpu < 1000 )) && budget_cpu=1000
 	local budget_mem
 	budget_mem="$(ra_aggregate_memory_budget)"
-	local per=$(( budget_cpu / 500 ))
+	local per=$(( budget_cpu / 1000 )) # committed CPU per 2vCPU saturation sandbox
 	local per_mem=$(( budget_mem / (512 * 1024 * 1024) ))
 	(( per_mem < per )) && per=$per_mem
 	(( per > MAX_SANDBOXES_PER_POD )) && per=$MAX_SANDBOXES_PER_POD
