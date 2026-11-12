@@ -56,7 +56,7 @@ Two properties make this safe to operate:
 - **Hot reload.** All three rule files are re-checked every minute (matched to the kubelet ConfigMap sync period). Edits take effect without restarting any sandbox or pool.
 
 ::: tip Both runtimes, same semantics
-The per-sandbox sidecar (pod sandboxes) and the fast-sandbox profile enforce identical overlay semantics. The fast-sandbox reload (PR [#2727](https://github.com/opensandbox-group/OpenSandbox/pull/2727)) additionally rebuilds its nft table in one atomic transaction across every active subject and drops all DNS-learned leases, so a domain revoked by a reload cannot be reached via a cached address: in-flight DNS answers are re-authorized against the installed policy before their IPs are admitted.
+The per-sandbox sidecar (pod sandboxes) and the fast-sandbox profile enforce identical overlay semantics. The fast-sandbox reload (PR [#2727](https://github.com/opensandbox-group/OpenSandbox/pull/2727)) additionally rebuilds its nft table in one atomic transaction across every active subject and drops all DNS-learned leases, so a domain revoked by a reload cannot re-admit its cached address: in-flight DNS answers are re-authorized against the installed policy before their IPs are admitted.
 :::
 
 ## The operator rule files
@@ -115,7 +115,7 @@ Effects in `dns+nft` mode:
 
 ## Baseline 2: block dangerous internet domains
 
-`deny.always` also takes domain targets, which the DNS layer answers with `NXDOMAIN` and the network layer enforces against direct-IP dialing (`dns+nft`). This is your sandbox malware firewall:
+`deny.always` also takes domain targets, which the DNS layer answers with `NXDOMAIN`. Domain denies gate **names only** — they never add the domain's addresses to the kernel deny sets — so pair them with the containment measures below:
 
 ```text
 # Known command-and-control / malware infrastructure (feed from your threat intel)
@@ -132,7 +132,7 @@ bad-actor.example.org
 Properties worth knowing:
 
 - **Operator deny beats user allow.** A sandbox that declares `{"action": "allow", "target": "bad-actor.example.org"}` still gets `NXDOMAIN` — that is the point of the `always` layer.
-- **Pair domains with `dns+nft`.** In `dns`-only mode a domain deny stops name resolution, but code that hardcodes a resolved IP walks around it. With `dns+nft`, learned addresses are lease-bound and revoked domains lose access at the packet layer too.
+- **Domain denies contain names, not packets.** A domain deny stops resolution in every mode; it does not populate nftables deny sets, and the DNS proxy only learns addresses for *allowed* domains. Under a user `defaultAction: deny` whitelist the packet layer contains direct-IP dialing anyway. Under `defaultAction: allow`, code that already knows the IP can still connect — for direct-IP containment of known-bad infrastructure, add explicit IP/CIDR denies to `deny.always` (from your threat-intel feed), or run those sandboxes with default-deny policies.
 - **Encrypted DNS escape hatches are covered.** DoT (`853`) is always dropped; DoH over `443` can be blocked globally.
 - Detect probing via telemetry: the egress exports denied-request and DNS-denied counters with bounded cardinality — see [Telemetry](/guides/telemetry#egress-sidecar).
 
