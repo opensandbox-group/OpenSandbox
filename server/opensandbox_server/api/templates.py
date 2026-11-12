@@ -136,8 +136,22 @@ def list_templates(
     """
     from urllib.parse import parse_qsl
 
-    # keep "env=" as {"env": ""}: empty label values are valid filters
-    metadata_filter = dict(parse_qsl(metadata, keep_blank_values=True)) if metadata else None
+    metadata_filter = None
+    if metadata:
+        try:
+            # keep "env=" as {"env": ""}: empty label values are valid filters;
+            # strict_parsing=True rejects malformed segments like "a=1&broken"
+            metadata_filter = dict(
+                parse_qsl(metadata, keep_blank_values=True, strict_parsing=True)
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_METADATA_FORMAT",
+                    "message": f"Invalid metadata format: {e}",
+                },
+            ) from e
     items, total_items = _get_template_service().list_templates(
         metadata=metadata_filter,
         page=page,
