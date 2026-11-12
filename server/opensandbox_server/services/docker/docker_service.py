@@ -1489,7 +1489,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "code": "INVALID_METADATA_LABEL",
+                        "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
                         "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
                     },
                 )
