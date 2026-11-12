@@ -118,7 +118,7 @@ The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no 
 | `apparmor_profile` | string \| omitted | `null` | AppArmor profile name; empty uses Docker default. Also applied to the execd cache container. |
 | `no_new_privileges` | boolean | `true` | Block privilege escalation. |
 | `seccomp_profile` | string \| omitted | `null` | Seccomp profile name or absolute path; empty uses Docker default. Also applied to the execd cache container (e.g. set `unconfined` on hosts whose default profile blocks execd). |
-| `pids_limit` | integer \| null | `4096` | Max PIDs per sandbox container; `null` disables. |
+| `pids_limit` | integer | `4096` | Max PIDs per sandbox container; `0` disables. |
 | `sandbox_env` | table | `{}` | Env vars injected into every sandbox; create-request keys override same-named ones. |
 | `sandbox_binds` | string[] | `[]` | Bind mounts for every sandbox (`host:container[:mode]`); prepended to request-derived binds. |
 | `port_range_min` / `port_range_max` | integer | `40000` / `60000` | Host port range for bridge-mode allocation. Range must span ≥ 100 ports; each sandbox needs 2–3 ports (3 with egress). |

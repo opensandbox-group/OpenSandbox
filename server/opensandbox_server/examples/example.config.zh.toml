@@ -76,7 +76,7 @@ drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN"
 no_new_privileges = true
 # Optional: set an AppArmor profile name (e.g., "docker-default") when AppArmor is enabled
 apparmor_profile = ""
-# Limit process count to reduce host impact from fork bombs; set to null to disable
+# Limit process count to reduce host impact from fork bombs; set to 0 to disable
 pids_limit = 4096
 # 可选:注入到每个沙箱容器的环境变量(创建请求中的同名键优先)。
 # 与 sandbox_binds 搭配可让所有沙箱信任私有 CA:

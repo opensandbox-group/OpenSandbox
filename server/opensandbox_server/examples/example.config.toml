@@ -84,7 +84,7 @@ drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN"
 no_new_privileges = true
 # Optional: set an AppArmor profile name (e.g., "docker-default") when AppArmor is enabled
 apparmor_profile = ""
-# Limit process count to reduce host impact from fork bombs; set to null to disable
+# Limit process count to reduce host impact from fork bombs; set to 0 to disable
 pids_limit = 4096
 # Optional: environment variables injected into every sandbox container
 # (request env overrides same-named keys). Pair with sandbox_binds to make
