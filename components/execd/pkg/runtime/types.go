@@ -103,7 +103,8 @@ type bashSession struct {
 	env     map[string]string
 	cwd     string
 
-	// currentProcessPid is the pid of the active run's process group leader (bash).
-	// Set after cmd.Start(), cleared when run() returns. Used by close() to kill the process group.
-	currentProcessPid int
+	// runPids holds the process group leader (bash) of each active run. Runs may
+	// overlap, so each run adds its pid after cmd.Start() and removes it when
+	// run() returns. close() kills every group still listed.
+	runPids map[int]struct{}
 }
