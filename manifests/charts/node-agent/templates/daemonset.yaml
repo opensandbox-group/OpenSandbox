@@ -140,7 +140,7 @@ spec:
             {{- end }}
           ports:
             - name: health
-              containerPort: {{ trimPrefix ":" .Values.config.serverAddr | int }}
+              containerPort: {{ splitList ":" .Values.config.serverAddr | last | int }}
           livenessProbe:
             httpGet:
               path: /healthz
