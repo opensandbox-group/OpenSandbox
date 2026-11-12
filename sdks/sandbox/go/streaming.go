@@ -112,16 +112,24 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 		}
 
 		// NDJSON support: if a line starts with '{', treat it as a raw JSON
-		// event. The execd server writes raw JSON blobs separated by blank
-		// lines instead of standard SSE "data:" prefixed lines.
+		// event. The execd server writes raw JSON blobs instead of standard
+		// SSE "data:" prefixed lines. Dispatch each one immediately: command
+		// streams follow it with a blank line, but /metrics/watch writes one
+		// object per line with no blank line, so waiting would never dispatch.
 		if strings.HasPrefix(line, "{") {
-			dataLines = append(dataLines, line)
+			event := current
+			event.Data = line
 			// Extract "type" field to populate Event so downstream handlers
 			// that switch on event.Event work consistently for NDJSON streams.
 			var probe struct{ Type string }
 			if json.Unmarshal([]byte(line), &probe) == nil && probe.Type != "" {
-				current.Event = probe.Type
+				event.Event = probe.Type
 			}
+			if err := handler(event); err != nil {
+				return err
+			}
+			eventCount++
+			current = StreamEvent{}
 			continue
 		}
 
