@@ -2078,6 +2078,12 @@ class TestSecureAccessKey:
         with pytest.raises(ValidationError, match="not valid base64"):
             SecureAccessKey(key_id="a", key="!!!invalid-base64!!!")
 
+    def test_invalid_key_error_does_not_echo_key_material(self) -> None:
+        secret = "c3VwZXItc2VjcmV0LXNpZ25pbmcta2V5!"
+        with pytest.raises(ValidationError, match="not valid base64") as exc_info:
+            SecureAccessKey(key_id="a", key=secret)
+        assert secret not in str(exc_info.value)
+
     def test_key_must_decode_to_at_least_one_byte(self) -> None:
         with pytest.raises(ValidationError):
             SecureAccessKey(key_id="a", key="")
@@ -2446,6 +2452,21 @@ class TestSecureAccessEnvOverride:
 
         with pytest.raises(ValidationError, match="not valid base64"):
             config_module.load_config(config_path)
+
+    def test_env_secure_access_errors_do_not_echo_key_material(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        secret = "c3VwZXItc2VjcmV0LXNpZ25pbmcta2V5"
+        config_path = self._write_config(tmp_path, self._GATEWAY_TOML)
+        for keys_env in (f"a={secret}!", f"a:{secret}"):
+            _reset_config(monkeypatch)
+            monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_KEYS", keys_env)
+            monkeypatch.setenv("OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY", "a")
+            with caplog.at_level("DEBUG"):
+                with pytest.raises(ValueError) as exc_info:
+                    config_module.load_config(config_path)
+            assert secret not in str(exc_info.value)
+            assert secret not in caplog.text
 
     def test_env_secure_access_active_key_must_exist(self, tmp_path, monkeypatch) -> None:
         import base64
