@@ -134,6 +134,7 @@ class TestConfigInit:
         cfg_path = tmp_path / "config.toml"
         cfg_path.write_text("existing")
         result = runner.invoke(cli, ["--config", str(cfg_path), "config", "init"])
+        assert result.exit_code == 1
         assert "already exists" in result.output
 
 
