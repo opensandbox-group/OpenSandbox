@@ -146,7 +146,7 @@ class CodesAdapter(
 
                 response.body?.byteStream()?.bufferedReader(Charsets.UTF_8)?.use { reader ->
                     val dispatcher = ExecutionEventDispatcher(execution, request.handlers)
-                    reader.lineSequence()
+                    ExecdEventSupport.eventLines(reader)
                         .forEach { line ->
                             val eventNode =
                                 ExecdEventSupport.decodeEventLine(line) { failingLine, error ->

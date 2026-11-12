@@ -16,12 +16,30 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.jsonParser
+import java.io.BufferedReader
 
 /**
  * Shared execd SSE-line decoding and foreground exit-code inference for every
  * execd streaming consumer. Not part of the stable public API.
  */
 public object ExecdEventSupport {
+    /**
+     * Lines of an execd SSE/NDJSON response body. SSE allows one UTF-8 BOM at
+     * the start of the stream; Java's UTF-8 decoder keeps it, which would make
+     * the first line (usually the `init` event) unparseable. Drop it once.
+     */
+    public fun eventLines(reader: BufferedReader): Sequence<String> {
+        var first = true
+        return reader.lineSequence().map { line ->
+            if (first) {
+                first = false
+                line.removePrefix("\uFEFF")
+            } else {
+                line
+            }
+        }
+    }
+
     /**
      * Decode one SSE/NDJSON line into an [EventNode], skipping framing lines
      * and unwrapping the `data:` prefix. Returns null for non-payload lines.
