@@ -16,7 +16,7 @@ Use these guides to add capabilities to a working [sandbox application](/getting
 - [Chained upstream proxy](/guides/egress-upstream-proxy)
 - [Secure access](/guides/secure-access)
 - [Secure container runtimes](/guides/secure-container)
-- [Network isolation on Kubernetes](/guides/network-isolation)
+- [Sandbox network security](/guides/network-security)
 - [Multi-tenancy](/guides/multi-tenancy)
 - [Windows sandboxes](/guides/windows-sandbox)
 

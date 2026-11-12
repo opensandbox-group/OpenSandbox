@@ -7,6 +7,8 @@ description: Per-sandbox outbound control — FQDN allowlists enforced at the DN
 
 Egress is how a sandbox gets a network policy instead of open internet access. It runs as a sidecar sharing the sandbox's network namespace, so every outbound packet passes it — no application configuration, and no way around it from inside. Policy is declared at create time (`networkPolicy`) or by the platform, and enforced continuously.
 
+If you are a cluster administrator looking to configure the platform overlays — internal CIDR isolation, dangerous-domain blocking, and reachable-port caps — start with [Sandbox Network Security](/guides/network-security); this page explains how the machinery under those controls works.
+
 ![Egress control flow](../../public/images/egress-control-flow.svg)
 
 ## Capabilities at a glance
