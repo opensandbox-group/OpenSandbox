@@ -268,3 +268,25 @@ func TestEvaluate_CompiledIndexKeepsFirstMatchPriority(t *testing.T) {
 func normalizeQueryForTest(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(domain, "."))
 }
+
+func TestEvaluate_DomainTargetWithTrailingDot(t *testing.T) {
+	p, err := ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"pypi.org."},
+			{"action":"allow","target":"*.github.com."}
+		]
+	}`)
+	require.NoError(t, err)
+
+	for _, q := range []string{"pypi.org.", "pypi.org", "api.github.com.", "api.github.com"} {
+		require.Equalf(t, ActionAllow, p.Evaluate(q), "query=%s", q)
+	}
+	require.Equal(t, ActionDeny, p.Evaluate("github.com."), "wildcard must still not match the apex")
+
+	manual := &NetworkPolicy{
+		DefaultAction: ActionDeny,
+		Egress:        []EgressRule{{Action: ActionAllow, Target: "pypi.org.", targetKind: targetDomain}},
+	}
+	require.Equal(t, ActionAllow, manual.Evaluate("pypi.org."), "linear fallback must agree with the compiled index")
+}
