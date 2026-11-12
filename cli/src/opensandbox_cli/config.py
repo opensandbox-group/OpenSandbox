@@ -143,10 +143,11 @@ def resolve_config(
         or os.getenv("OPEN_SANDBOX_PROTOCOL")
         or _str_or_none(conn.get("protocol"))
         or "http",
-        "request_timeout": cli_timeout
-        or _int_or_none(os.getenv("OPEN_SANDBOX_REQUEST_TIMEOUT"))
-        or _int_or_none(conn.get("request_timeout"))
-        or 30,
+        "request_timeout": _request_timeout_seconds(
+            cli_timeout,
+            _int_or_none(os.getenv("OPEN_SANDBOX_REQUEST_TIMEOUT")),
+            _int_or_none(conn.get("request_timeout")),
+        ),
         "use_server_proxy": _coalesce(
             cli_use_server_proxy,
             _bool_or_none(os.getenv("OPEN_SANDBOX_USE_SERVER_PROXY")),
@@ -169,6 +170,26 @@ def init_config_file(config_path: Path | None = None, *, force: bool = False) ->
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(DEFAULT_CONFIG_TEMPLATE)
     return path
+
+
+def _request_timeout_seconds(*candidates: int | None) -> int:
+    """Return the first explicit request timeout, in seconds.
+
+    ``None`` means that source did not set a timeout. Zero and negative values
+    are explicit and invalid: they must not fall through to a later source or
+    the 30 second default. ``--request-timeout 0`` used to be ignored because
+    ``0`` is falsy.
+    """
+    for value in candidates:
+        if value is None:
+            continue
+        if value <= 0:
+            raise click.ClickException(
+                "Request timeout must be a positive number of seconds, "
+                f"got {value}."
+            )
+        return value
+    return 30
 
 
 def _int_or_none(value: Any) -> int | None:

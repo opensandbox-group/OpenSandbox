@@ -36,7 +36,7 @@ from opensandbox_cli.commands.skills import skills_group
 from opensandbox_cli.commands.snapshot import snapshot_group
 from opensandbox_cli.commands.template import template_group
 from opensandbox_cli.commands.terminal import terminal
-from opensandbox_cli.config import resolve_config
+from opensandbox_cli.config import _request_timeout_seconds, resolve_config
 
 BANNER = r"""[bold cyan]
    ____                   _____                 _ _
@@ -144,7 +144,7 @@ def cli(
             "api_key": api_key,
             "domain": domain,
             "protocol": protocol or "http",
-            "request_timeout": request_timeout or 30,
+            "request_timeout": _request_timeout_seconds(request_timeout),
             "use_server_proxy": use_server_proxy if use_server_proxy is not None else False,
             "color": True,
             "default_image": None,
