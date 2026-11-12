@@ -448,6 +448,44 @@ func TestProxyShouldSkipOutboundLog_ClearedByEmptyList(t *testing.T) {
 		"clearing the list must re-enable logging for all hosts")
 }
 
+// forward advertises a 4096-byte EDNS0 buffer upstream; a UDP client that sent
+// no OPT must still get a reply that fits in 512 bytes, with TC set, and no OPT.
+func TestServeDNSFitsReplyForNonEDNSUDPClient(t *testing.T) {
+	t.Cleanup(func() { resetNameserverExemptCache(t) })
+	const records = 15 // about 900 bytes: under the upstream's 4096, over 512
+	upstream := startLargeAnswerUpstream(t, records)
+	allow, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"big.example.com"}]}`)
+	require.NoError(t, err)
+	proxy := &Proxy{
+		upstreams:               []string{upstream},
+		activeUpstreams:         []string{upstream},
+		upstreamExchangeTimeout: time.Second,
+		effectivePolicy:         allow,
+		userPolicy:              allow,
+	}
+	query := new(dns.Msg)
+	query.SetQuestion("big.example.com.", dns.TypeTXT)
+	require.Nil(t, query.IsEdns0())
+
+	udpClient := &fakeRespWriter{remote: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 5353}}
+	proxy.serveDNS(udpClient, query)
+	require.Len(t, udpClient.msgs, 1)
+	reply := udpClient.msgs[0]
+	packed, err := reply.Pack()
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(packed), dns.MinMsgSize, "a non-EDNS UDP client only accepts 512 bytes")
+	require.True(t, reply.Truncated, "dropped records must set TC so the client retries over TCP")
+	require.Nil(t, reply.IsEdns0(), "no OPT record in a reply to a query that had none")
+
+	edns := query.Copy()
+	edns.SetEdns0(4096, false)
+	ednsClient := &fakeRespWriter{remote: &net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 5353}}
+	proxy.serveDNS(ednsClient, edns)
+	require.Len(t, ednsClient.msgs, 1)
+	require.False(t, ednsClient.msgs[0].Truncated, "an EDNS0 client keeps the full answer")
+	require.Len(t, ednsClient.msgs[0].Answer, records)
+}
+
 // startLargeAnswerUpstream serves the same answer set over UDP and TCP on one
 // port. Over UDP it truncates to the client's EDNS0 size, as resolvers do.
 func startLargeAnswerUpstream(t *testing.T, records int) string {
