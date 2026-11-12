@@ -137,8 +137,15 @@ def _k8s_list_error(exc: Exception) -> dict[str, Any]:
     }
 
 
+def _event_last_time(ev: Any) -> Any:
+    # events.k8s.io/v1 reporters (e.g. kube-scheduler) leave the legacy
+    # timestamps empty and record eventTime / series.lastObservedTime instead.
+    series_last = ev.series.last_observed_time if ev.series else None
+    return ev.last_timestamp or series_last or ev.event_time
+
+
 def _event_sort_key(ev: Any) -> Any:
-    return ev.last_timestamp or ev.event_time or ev.metadata.creation_timestamp
+    return _event_last_time(ev) or ev.metadata.creation_timestamp
 
 
 def _list_namespace_events(v1: Any, namespace: str, *, page_size: int, max_pages: int) -> list[Any]:
@@ -184,6 +191,8 @@ def _event_matches_sandbox(ev: Any, pod_names: set[str]) -> bool:
 
 def _event_row(ev: Any, tenant: str, namespace: str) -> dict[str, Any]:
     obj = ev.involved_object
+    first = ev.first_timestamp or ev.event_time
+    last = _event_last_time(ev)
     return {
         "tenant": tenant,
         "namespace": namespace,
@@ -191,8 +200,8 @@ def _event_row(ev: Any, tenant: str, namespace: str) -> dict[str, Any]:
         "reason": ev.reason,
         "message": ev.message,
         "count": ev.count,
-        "firstTimestamp": ev.first_timestamp.isoformat() if ev.first_timestamp else None,
-        "lastTimestamp": ev.last_timestamp.isoformat() if ev.last_timestamp else None,
+        "firstTimestamp": first.isoformat() if first else None,
+        "lastTimestamp": last.isoformat() if last else None,
         "involvedObject": {
             "kind": obj.kind if obj else None,
             "name": obj.name if obj else None,
