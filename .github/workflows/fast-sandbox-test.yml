@@ -24,9 +24,12 @@ permissions:
   actions: write
 
 # Unique group per dispatch run (GitHub concurrency would otherwise fold
-# queued runs away); PR pushes keep superseding each other.
+# queued runs away); PR pushes keep superseding each other. Unrelated
+# `labeled` events get their own group: the job gate skips them anyway, and
+# a shared group would let workflow-level cancel-in-progress kill an
+# in-flight KVM run before the gate gets a chance to skip.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test') && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
