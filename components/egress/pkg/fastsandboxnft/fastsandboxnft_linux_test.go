@@ -49,13 +49,16 @@ func TestResolvedIPRenewalExtendsKernelExpiry(t *testing.T) {
 	a := NewApplier(nil)
 	s := subject.FromSandboxUID("renewal")
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("renewal", "10.0.0.5")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
 	addresses := []netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("2001:db8::1")}
 	resolve := func(ttl time.Duration) {
 		ips := make([]nftables.ResolvedIP, 0, len(addresses))
 		for _, address := range addresses {
 			ips = append(ips, nftables.ResolvedIP{Addr: address, TTL: ttl})
 		}
-		require.NoError(t, a.AddResolvedIPs(ctx, s, ips))
+		require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", ips))
 	}
 	resolve(0)                 // clamped to the 60s minimum
 	resolve(300 * time.Second) // clamped to 360s
