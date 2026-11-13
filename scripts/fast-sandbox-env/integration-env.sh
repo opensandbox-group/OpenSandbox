@@ -37,7 +37,12 @@
 # injection against a CA-signed TLS echo endpoint, the execd-as-init
 # in-guest process verify (OSEP-0018: `execd --init` as a subreaper under
 # the guest init — topology, reaping, and the hardening report pinned
-# in-guest), and the idle-pause / wake-on-access verify (OSEP-0024). The
+# in-guest), the OSEP-0018 hardening floor verify on a dedicated hardened
+# overlaybd template (EXECD_ISOLATION_CONFIG template env -> execd TOML:
+# launcher-presence, reduced /command + detached-workload self-dump,
+# credential env strip, Landlock active|unsupported, capabilities report,
+# sustained fork-heavy churn), and the idle-pause / wake-on-access verify
+# (OSEP-0024). The
 # scenario stages are storage-independent, so they run once per run — on
 # the OCI template, the production-default path — not on both rootfs lanes.
 #
@@ -1649,16 +1654,17 @@ template_up() {
 # the in-cluster registry. status.manifestRef is the runnable artifact.
 OCI_TEMPLATE_ID=""
 
-_overlaybd_template_phase() {
-	osb_api template get "$OCI_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'
+_overlaybd_template_phase() { # [template-id] (default: the plain overlaybd template)
+	local id="${1:-$OCI_TEMPLATE_ID}"
+	osb_api template get "$id" -o json 2>/dev/null | jq -r '.status.phase // empty'
 }
 
-_overlaybd_template_failed() {
+_overlaybd_template_failed() { # [template-id] [label]
 	local phase message
-	phase="$(_overlaybd_template_phase)"
+	phase="$(_overlaybd_template_phase "${1:-$OCI_TEMPLATE_ID}")"
 	[[ "$phase" == "Failed" ]] || return 1
-	message="$(osb_api template get "$OCI_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.message // empty')"
-	log "overlaybd template Failed: ${message:-<no message>}"
+	message="$(osb_api template get "${1:-$OCI_TEMPLATE_ID}" -o json 2>/dev/null | jq -r '.status.message // empty')"
+	log "${2:-overlaybd} template Failed: ${message:-<no message>}"
 	return 0
 }
 
@@ -1699,6 +1705,71 @@ template_up_overlaybd() {
 
 _overlaybd_template_phase_is_succeeded() {
 	[[ "$(_overlaybd_template_phase)" == "Succeeded" ]]
+}
+
+# A hardened overlaybd template beside the plain one (OSEP-0018): same
+# inputs plus EXECD_ISOLATION_CONFIG pointing at the isolation TOML baked
+# into SBX_IMAGE (/opt/opensandbox/isolation.toml, [hardening] + [landlock]
+# enabled), so execd arms the pre-exec hardening floor for sandboxes the
+# hardening verify stage creates from it. Kept beside — never merged into —
+# the plain overlaybd template so the rest of the matrix keeps proving the
+# default unhardened tier (the init-mode stage pins its floor-off report).
+# The Succeeded id persists at $WORK/hardening-template-id and is reused
+# across actions; the stage script (verify/hardening.sh) resolves the same
+# file standalone.
+OCI_HARDENING_TEMPLATE_ID=""
+
+_hardening_template_phase() {
+	_overlaybd_template_phase "$OCI_HARDENING_TEMPLATE_ID"
+}
+
+_hardening_template_phase_is_succeeded() {
+	[[ "$(_hardening_template_phase)" == "Succeeded" ]]
+}
+
+_hardening_template_failed() {
+	_overlaybd_template_failed "$OCI_HARDENING_TEMPLATE_ID" "hardening"
+}
+
+template_up_overlaybd_hardening() {
+	OCI_HARDENING_TEMPLATE_ID="$(cat "$WORK/hardening-template-id" 2>/dev/null || true)"
+	if [[ -n "$OCI_HARDENING_TEMPLATE_ID" ]] && _hardening_template_phase_is_succeeded; then
+		log "hardening template reused: $OCI_HARDENING_TEMPLATE_ID"
+		return 0
+	fi
+	log "verify: creating the hardened overlaybd template via the opensandbox CLI (EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml)"
+	local created create_err="$WORK/hardening-create.err"
+	local -a hrd_args=(
+		template create
+		--image "$SBX_IMAGE"
+		--publish "oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO"
+		--format overlaybd
+		--env "EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml"
+		--resource cpu=1 --resource memory=512Mi --resource disk=2Gi
+		--warmup-seconds 15
+		--metadata origin=fast-sandbox-env-hardening
+	)
+	created="$(osb_api "${hrd_args[@]}" -o json 2>"$create_err")" \
+		|| fail "hardening template create failed against $SERVER_URL: $(head -c 400 "$create_err")"
+	OCI_HARDENING_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$OCI_HARDENING_TEMPLATE_ID" != "null" ]] || fail "hardening template create carried no templateId"
+	printf '%s' "$OCI_HARDENING_TEMPLATE_ID" > "$WORK/hardening-template-id"
+	local attempts=0
+	while ! _hardening_template_phase_is_succeeded; do
+		if _hardening_template_failed; then
+			failure_dump "hardening-template-failed"
+			fail "hardening template entered Failed"
+		fi
+		attempts=$((attempts + 1))
+		# OCI builds run the convertor + a Firecracker cold boot.
+		[[ "$attempts" -ge 450 ]] && { failure_dump "hardening-template-timeout"; fail "hardening template not Succeeded after 450 attempts"; }
+		sleep 2
+	done
+	local manifest_ref
+	manifest_ref="$(osb_api template get "$OCI_HARDENING_TEMPLATE_ID" -o json | jq -r '.status.manifest_ref // empty')"
+	[[ "$manifest_ref" == oci://* ]] || fail "hardening template manifestRef is not an oci:// reference: $manifest_ref"
+	log "hardening template manifestRef: $manifest_ref"
+	pass "hardened overlaybd SandboxTemplate Succeeded (floor TOML via template env)"
 }
 
 # --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry)
@@ -4311,6 +4382,10 @@ verify_overlaybd() {
 		|| fail "six overlaybd template creates must hit the warm pool without misses, daemon restarts or pod replacement"
 	pass "ublk warm pool: at least six hits, zero new misses/restarts, idle devices replenished"
 	run_stage "execd-as-init verify (overlaybd template)" init_mode_verify "$OCI_TEMPLATE_ID"
+	run_stage "SandboxTemplate build (hardened floor, overlaybd, OSEP-0018)" template_up_overlaybd_hardening
+	# Lives in verify/hardening.sh (the split layout this stage executes; the
+	# template id comes from $WORK/hardening-template-id).
+	run_stage "execd hardening floor verify (hardened overlaybd template, OSEP-0018)" "$SCRIPT_DIR/verify/hardening.sh"
 	run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
 	run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
 	run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
@@ -4796,7 +4871,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
                    (create -> gateway route -> execd /ping, pause/resume,
                    vault, idle-pause, snapshot); requires `up`
   verify-overlaybd build the overlaybd SandboxTemplate (oci:// publication)
-                   and run the same verify matrix against it; requires `up`
+                   and run the same verify matrix against it, plus the
+                   OSEP-0018 hardening floor verify on a dedicated hardened
+                   overlaybd template; requires `up`
                    (no-op when OCI_STACK=0)
   verify-resourceaware
                    OSEP-0026 matrix on the ResourceAware pool: shaped-template
