@@ -170,7 +170,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                         && metrics.getMemoryUsedInMiB() <= metrics.getMemoryTotalInMiB());
         assertRecentTimestampMs(metrics.getTimestamp(), 120_000);
 
-        // Renew: validate remaining TTL is close to requested duration.
         SandboxRenewResponse renewResp = sandbox.renew(Duration.ofMinutes(5));
         assertNotNull(renewResp, "renew() should return a response");
         assertNotNull(renewResp.getExpiresAt(), "renew().expiresAt should not be null");
@@ -201,7 +200,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertNotNull(sandbox.metrics());
         assertNotNull(sandbox.httpClientProvider());
 
-        // Connect to existing sandbox by ID and run a basic command.
         Sandbox sandbox2 =
                 Sandbox.connector()
                         .connectionConfig(sharedConnectionConfig)
@@ -348,7 +346,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                                     .target("pypi.org")
                                     .build()));
 
-            // Poll until the patched rule takes effect (pypi now blocked).
             waitUntilEgressBlocks(policySandbox, "https://pypi.org", Duration.ofSeconds(30));
 
             NetworkPolicy patchedPolicy = policySandbox.getEgressPolicy();
@@ -472,7 +469,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                                     .target("pypi.org")
                                     .build()));
 
-            // Poll until patched rule applied (pypi now blocked).
             waitUntilEgressBlocks(policySandbox, "https://pypi.org", Duration.ofSeconds(30));
 
             NetworkPolicy patchedPolicy = policySandbox.getEgressPolicy();
@@ -528,7 +524,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         try {
             assertTrue(volumeSandbox.isHealthy(), "Volume sandbox should be healthy");
 
-            // Step 1: Verify the host marker file is visible inside the sandbox
             // Retry: bind mount propagation can sometimes lag on first access
             Execution readMarker =
                     runWithRetry(volumeSandbox, "cat " + containerMountPath + "/marker.txt");
@@ -537,7 +532,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             assertEquals(
                     "opensandbox-e2e-marker\n", readMarker.getLogs().getStdout().get(0).getText());
 
-            // Step 2: Write a file from inside the sandbox to the mounted path
             Execution writeResult =
                     volumeSandbox
                             .commands()
@@ -550,7 +544,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                                             .build());
             assertNull(writeResult.getError(), "Failed to write file");
 
-            // Step 3: Verify the written file is readable
             // Retry: bind mount propagation can sometimes lag on first access
             Execution readBack =
                     runWithRetry(
@@ -559,7 +552,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             assertEquals(1, readBack.getLogs().getStdout().size());
             assertEquals("written-from-sandbox\n", readBack.getLogs().getStdout().get(0).getText());
 
-            // Step 4: Verify the mount path is a proper directory
             Execution dirCheck =
                     volumeSandbox
                             .commands()
@@ -605,7 +597,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         try {
             assertTrue(roSandbox.isHealthy(), "Read-only volume sandbox should be healthy");
 
-            // Step 1: Verify the host marker file is readable
             // Retry: bind mount propagation can sometimes lag on first access
             Execution readMarker =
                     runWithRetry(roSandbox, "cat " + containerMountPath + "/marker.txt");
@@ -614,7 +605,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             assertEquals(
                     "opensandbox-e2e-marker\n", readMarker.getLogs().getStdout().get(0).getText());
 
-            // Step 2: Verify writing is denied on read-only mount
             Execution writeResult =
                     roSandbox
                             .commands()
@@ -663,7 +653,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         try {
             assertTrue(pvcSandbox.isHealthy(), "PVC volume sandbox should be healthy");
 
-            // Step 1: Verify the marker file seeded into the named volume is readable
             // Retry: bind mount propagation can sometimes lag on first access
             Execution readMarker =
                     runWithRetry(pvcSandbox, "cat " + containerMountPath + "/marker.txt");
@@ -671,7 +660,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             assertEquals(1, readMarker.getLogs().getStdout().size());
             assertEquals("pvc-marker-data\n", readMarker.getLogs().getStdout().get(0).getText());
 
-            // Step 2: Write a file from inside the sandbox to the named volume
             Execution writeResult =
                     pvcSandbox
                             .commands()
@@ -684,7 +672,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                                             .build());
             assertNull(writeResult.getError(), "Failed to write file to PVC volume");
 
-            // Step 3: Verify the written file is readable
             // Retry: bind mount propagation can sometimes lag on first access
             Execution readBack =
                     runWithRetry(pvcSandbox, "cat " + containerMountPath + "/pvc-output.txt");
@@ -692,7 +679,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             assertEquals(1, readBack.getLogs().getStdout().size());
             assertEquals("written-to-pvc\n", readBack.getLogs().getStdout().get(0).getText());
 
-            // Step 4: Verify the mount path is a proper directory
             Execution dirCheck =
                     pvcSandbox
                             .commands()
@@ -738,7 +724,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         try {
             assertTrue(roSandbox.isHealthy(), "Read-only PVC volume sandbox should be healthy");
 
-            // Step 1: Verify the marker file is readable
             // Retry: bind mount propagation can sometimes lag on first access
             Execution readMarker =
                     runWithRetry(roSandbox, "cat " + containerMountPath + "/marker.txt");
@@ -746,7 +731,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             assertEquals(1, readMarker.getLogs().getStdout().size());
             assertEquals("pvc-marker-data\n", readMarker.getLogs().getStdout().get(0).getText());
 
-            // Step 2: Verify writing is denied on read-only mount
             Execution writeResult =
                     roSandbox
                             .commands()
@@ -796,7 +780,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         try {
             assertTrue(subpathSandbox.isHealthy(), "PVC subPath sandbox should be healthy");
 
-            // Step 1: Verify the subpath marker file is readable
             // Retry: bind mount propagation can sometimes lag on first access
             Execution readMarker =
                     runWithRetry(subpathSandbox, "cat " + containerMountPath + "/marker.txt");
@@ -804,7 +787,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             assertEquals(1, readMarker.getLogs().getStdout().size());
             assertEquals("pvc-subpath-marker\n", readMarker.getLogs().getStdout().get(0).getText());
 
-            // Step 2: Verify only subPath contents are visible (not the full volume)
             Execution lsResult =
                     subpathSandbox
                             .commands()
@@ -820,7 +802,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             assertTrue(lsOutput.contains("marker.txt"), "Should contain marker.txt");
             assertFalse(lsOutput.contains("datasets"), "Should not contain datasets dir");
 
-            // Step 3: Write a file and verify
             Execution writeResult =
                     subpathSandbox
                             .commands()
@@ -847,10 +828,6 @@ public class SandboxE2ETest extends BaseE2ETest {
             subpathSandbox.close();
         }
     }
-
-    // ==========================================
-    // Command Execution Tests
-    // ==========================================
 
     @Test
     @Order(3)
@@ -1008,7 +985,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                         + envKey
                         + "}\"; fi'";
 
-        // Baseline: variable should be empty when not injected.
         Execution baseline =
                 sandbox.commands().run(RunCommandRequest.builder().command(probeCommand).build());
         assertNotNull(baseline);
@@ -1020,7 +996,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                         .trim();
         assertEquals("__EMPTY__", baselineOutput);
 
-        // Inject env vars for this command and verify visibility.
         Execution injected =
                 sandbox.commands()
                         .run(
@@ -1152,10 +1127,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         sandbox.commands().deleteSession(sid2);
     }
 
-    // ==========================================
-    // Filesystem Operations Tests
-    // ==========================================
-
     @Test
     @Order(4)
     @DisplayName("Command status + background logs")
@@ -1263,12 +1234,10 @@ public class SandboxE2ETest extends BaseE2ETest {
             byte[] streamBytes = inputStream.readAllBytes();
             String readContent3 = new String(streamBytes, StandardCharsets.UTF_8);
 
-            // Verify content matches original for all files
             assertEquals(testContent, readContent1, "Content of testFile1 should match");
             assertEquals(testContent, readContent2, "Content of testFile2 should match");
             assertEquals(testContent, readContent3, "Content of testFile3 should match");
 
-            // Verify partial read works correctly
             assertEquals(
                     testContent.substring(0, 10),
                     readContent1Partial,
@@ -1331,7 +1300,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                         .build();
         sandbox.files().setPermissions(List.of(permEntry1, permEntry2));
 
-        // Verify permission changes for both files in single call
         Map<String, EntryInfo> updatedInfoMap =
                 sandbox.files().readFileInfo(List.of(testFile1, testFile2));
         EntryInfo updatedInfo1 = updatedInfoMap.get(testFile1);
@@ -1374,7 +1342,6 @@ public class SandboxE2ETest extends BaseE2ETest {
                 updatedContent1.getBytes(StandardCharsets.UTF_8).length, afterUpdate.getSize());
         assertModifiedUpdated(beforeUpdate.getModifiedAt(), afterUpdate.getModifiedAt(), 1, 1000);
 
-        // Replace contents
         EntryInfo beforeReplace = afterUpdate;
         try {
             Thread.sleep(50);
@@ -1398,7 +1365,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         EntryInfo afterReplace = sandbox.files().readFileInfo(List.of(testFile1)).get(testFile1);
         assertModifiedUpdated(beforeReplace.getModifiedAt(), afterReplace.getModifiedAt(), 1, 1000);
 
-        // No match → replacedCount=0
         var noMatchResults =
                 sandbox.files()
                         .replaceContentsDetailed(
@@ -1411,7 +1377,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertEquals(1, noMatchResults.size());
         assertEquals(0, noMatchResults.get(0).getReplacedCount());
 
-        // Multiple matches
         sandbox.files()
                 .write(
                         List.of(
@@ -1431,7 +1396,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertEquals(1, multiResults.size());
         assertEquals(3, multiResults.get(0).getReplacedCount());
 
-        // Batch replace across multiple files
         String batchFileA = testDir1 + "/batch_a.txt";
         String batchFileB = testDir1 + "/batch_b.txt";
         sandbox.files()
@@ -1465,7 +1429,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertEquals("hi world", sandbox.files().readFile(batchFileA, "UTF-8", null));
         assertEquals("hi hi", sandbox.files().readFile(batchFileB, "UTF-8", null));
 
-        // Verify original replaceContents (verbose=false, void return) still works
         sandbox.files()
                 .replaceContents(
                         List.of(
@@ -1480,7 +1443,6 @@ public class SandboxE2ETest extends BaseE2ETest {
 
         sandbox.files().deleteFiles(List.of(testDir1 + "/multi.txt", batchFileA, batchFileB));
 
-        // Move file3
         String movedPath = testDir2 + "/moved_file3.txt";
         sandbox.files()
                 .moveFiles(List.of(MoveEntry.builder().src(testFile3).dest(movedPath).build()));
@@ -1489,7 +1451,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertEquals(testContent, moved);
         assertThrows(Exception.class, () -> sandbox.files().readByteArray(testFile3, null));
 
-        // Delete file2
         sandbox.files().deleteFiles(List.of(testFile2));
         assertThrows(Exception.class, () -> sandbox.files().readFile(testFile2, "UTF-8", null));
         Set<String> after = new HashSet<>();
@@ -1499,7 +1460,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         }
         assertEquals(Set.of(testFile1), after);
 
-        // Delete directories
         sandbox.files().deleteDirectories(List.of(testDir1, testDir2));
         Execution verify =
                 sandbox.commands()
@@ -1551,15 +1511,12 @@ public class SandboxE2ETest extends BaseE2ETest {
         String content = "line1\nline2\nline3\nline4\nline5";
         sandbox.files().write(List.of(WriteEntry.builder().path(testPath).data(content).build()));
 
-        // offset=2, limit=2 → lines 2-3
         String result1 = sandbox.files().readFile(testPath, "UTF-8", null, 2, 2);
         assertEquals("line2\nline3", result1);
 
-        // offset=4, no limit → lines 4-5
         String result2 = sandbox.files().readFile(testPath, "UTF-8", null, 4, null);
         assertEquals("line4\nline5", result2);
 
-        // limit=2, no offset → lines 1-2
         String result3 = sandbox.files().readFile(testPath, "UTF-8", null, null, 2);
         assertEquals("line1\nline2", result3);
 
@@ -1647,7 +1604,6 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertNotNull(finalStatus, "Failed to get final status after resume operation");
         assertEquals("Paused", finalStatus.getState(), "Sandbox should be in Paused state");
 
-        // pause => unhealthy
         boolean healthy = true;
         for (int i = 0; i < 10; i++) {
             healthy = sandbox.isHealthy();

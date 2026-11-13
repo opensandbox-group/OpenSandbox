@@ -86,8 +86,6 @@ class TestIsolatedSessionE2E:
         await sandbox.kill()
         await sandbox.close()
 
-    # ── Helpers ────────────────────────────────────────────────────────
-
     async def _create_session(self, mode: str = "rw", path: str = "/tmp"):
         return await self.sandbox.isolation.create(
             CreateIsolatedSessionRequest(
@@ -98,8 +96,6 @@ class TestIsolatedSessionE2E:
     def _require_overlay(self):
         if not self.overlay_supported:
             pytest.skip("overlay mode not available in this environment")
-
-    # ── Core session tests ────────────────────────────────────────────
 
     async def test_capabilities(self):
         caps = await self.sandbox.isolation.capabilities()
@@ -128,7 +124,6 @@ class TestIsolatedSessionE2E:
             assert by_id[session_a.session_id].status == "active"
             assert by_id[session_a.session_id].created_at is not None
 
-            # After deleting a session it should no longer be listed.
             await session_b.delete()
             session_b_deleted = True
             remaining = await self.sandbox.isolation.list()
@@ -211,9 +206,7 @@ class TestIsolatedSessionE2E:
         with pytest.raises(SandboxApiException):
             fake_session = await self._create_session()
             await fake_session.delete()
-            await fake_session.delete()  # second delete should fail
-
-    # ── Attach (stateless recovery) ───────────────────────────────────
+            await fake_session.delete()
 
     async def test_attach_roundtrip(self):
         """Stateless-recovery flow: create → drop handle → attach by
@@ -222,19 +215,14 @@ class TestIsolatedSessionE2E:
         created = await self._create_session(mode="rw")
         session_id = created.session_id
         try:
-            # Prove the original handle can write state we want to
-            # observe after we re-attach.
             await created.run("echo attached-state > /tmp/attach-marker.txt")
 
-            # Simulate a stateless client that only kept the sessionId.
             attached = await self.sandbox.isolation.attach(session_id)
             assert attached.session_id == session_id
-            # Creation-param echo fields should now be populated.
             assert attached.info.workspace is not None
             assert attached.info.workspace.path == "/tmp"
             assert attached.info.workspace.mode == "rw"
 
-            # Handle must work end-to-end via sessionId alone.
             state = await attached.get()
             assert state.status == "active"
 
@@ -243,9 +231,6 @@ class TestIsolatedSessionE2E:
 
             await attached.delete()
         except Exception:
-            # If attach failed before delete, clean up via the original handle.
-            # Best-effort: swallow cleanup errors so the original exception
-            # surfaces, but log them for debuggability.
             try:
                 await created.delete()
             except Exception as cleanup_exc:
@@ -260,8 +245,6 @@ class TestIsolatedSessionE2E:
             await self.sandbox.isolation.attach(
                 "00000000-0000-0000-0000-000000000000",
             )
-
-    # ── RW mode: run-based file tests ─────────────────────────────────
 
     async def test_rw_files_write_via_run(self):
         session = await self._create_session(mode="rw")
@@ -294,8 +277,6 @@ class TestIsolatedSessionE2E:
         finally:
             await session.run(f"rm -f /tmp/{marker}")
             await session.delete()
-
-    # ── RW mode: filesystem API tests ─────────────────────────────────
 
     async def test_rw_files_upload_download(self):
         session = await self._create_session(mode="rw")
@@ -418,8 +399,6 @@ class TestIsolatedSessionE2E:
         finally:
             await session.delete()
 
-    # ── RO mode tests ─────────────────────────────────────────────────
-
     async def test_ro_can_read_existing_files(self):
         """RO mode: session can read files that exist on host."""
         marker = f"ro_read_{int(time.time() * 1000)}.txt"
@@ -479,8 +458,6 @@ class TestIsolatedSessionE2E:
             await session.delete()
             await self.sandbox.commands.run(f"rm -rf {prefix}")
 
-    # ── Overlay mode tests ────────────────────────────────────────────
-
     async def test_overlay_writes_not_visible_on_host(self):
         """Overlay mode: writes inside session are NOT visible on host."""
         self._require_overlay()
@@ -533,7 +510,6 @@ class TestIsolatedSessionE2E:
             await session.files.write_files([WriteEntry(path=path, data="overlay file", mode=644)])
             content = await session.files.read_file(path, encoding="utf-8")
             assert content == "overlay file"
-            # Host should NOT see it
             host_check = await self.sandbox.commands.run(f"cat {path} 2>&1 || echo NOT_FOUND")
             assert "NOT_FOUND" in host_check.text or "No such file" in host_check.text
         finally:
@@ -567,7 +543,6 @@ class TestIsolatedSessionE2E:
             await session.files.delete_files([f"{prefix}/target.txt"])
             with pytest.raises(SandboxApiException):
                 await session.files.get_file_info([f"{prefix}/target.txt"])
-            # Host file should be untouched
             host_check = await self.sandbox.commands.run(f"cat {prefix}/target.txt")
             assert "x" in host_check.text
         finally:
@@ -599,7 +574,6 @@ class TestIsolatedSessionE2E:
             ])
             info_map = await session.files.get_file_info([f"/tmp/{marker}"])
             assert info_map[f"/tmp/{marker}"].mode == 755
-            # Host should still be 644
             host_check = await self.sandbox.commands.run(f"stat -c %a /tmp/{marker}")
             assert "644" in host_check.text
         finally:
@@ -618,7 +592,6 @@ class TestIsolatedSessionE2E:
             ])
             content = await session.files.read_file(f"/tmp/{marker}", encoding="utf-8")
             assert "new" in content and "old" not in content
-            # Host unchanged
             host_check = await self.sandbox.commands.run(f"cat /tmp/{marker}")
             assert "old" in host_check.text
         finally:
@@ -642,8 +615,6 @@ class TestIsolatedSessionE2E:
         finally:
             await session.delete()
             await self.sandbox.commands.run(f"rm -rf {prefix}")
-
-    # ── run_once / session convenience method tests ──────────────────
 
     async def test_run_once(self):
         result = await self.sandbox.isolation.run_once(
@@ -688,19 +659,14 @@ class TestIsolatedSessionE2E:
             result = await session.run("cat /tmp/ctx_test.txt")
             assert "step1" in result.text
 
-    # ── Bind mount tests (explicit source->dest binds) ─────────────────
-
     async def test_bind_read_write_host_visible(self):
         """Legal RW bind: sandbox writes at dest are visible on host at source."""
         ts = int(time.time() * 1000)
-        # Source must be within the execd writable allowlist (e.g. /data).
         src_dir = f"/data/bind_rw_{ts}"
         dest = "/mnt/bind_rw"
         file_name = "from_sandbox.txt"
         content = "bind-rw-visible-on-host"
 
-        # Create the source dir and the destination mount point (bwrap binds
-        # onto an existing dir; it cannot create one under the read-only root).
         await self.sandbox.commands.run(f"mkdir -p {src_dir} {dest}")
 
         session = await self.sandbox.isolation.create(
@@ -727,7 +693,6 @@ class TestIsolatedSessionE2E:
             await self.sandbox.isolation.create(
                 CreateIsolatedSessionRequest(
                     workspace=IsolatedWorkspaceSpec(path="/tmp", mode="rw"),
-                    # /etc is not in the writable allowlist.
                     binds=[BindMount(source="/etc", dest="/mnt/etc")],
                 )
             )
@@ -767,8 +732,6 @@ class TestIsolatedSessionE2E:
             await session.delete()
             await self.sandbox.commands.run(f"rm -rf {src_dir}")
 
-    # ── Bind mount + files API tests (session.files on bind dests) ──────
-
     async def test_bind_files_api_read_write_roundtrip(self):
         """session.files reads/writes bind dests and stays consistent with
         session.run in both directions: the files API serves the same mounts
@@ -786,7 +749,6 @@ class TestIsolatedSessionE2E:
             )
         )
         try:
-            # files-API write → visible to run and on the host source.
             api_path = f"{dest}/from_files_api.txt"
             await session.files.write_files([
                 WriteEntry(path=api_path, data="via-files-api", mode=644)
@@ -798,14 +760,12 @@ class TestIsolatedSessionE2E:
             )
             assert "via-files-api" in host_check.text
 
-            # run write → visible to the files API at the bind dest.
             await session.run(f"echo -n via-run > {dest}/from_run.txt")
             content = await session.files.read_file(
                 f"{dest}/from_run.txt", encoding="utf-8"
             )
             assert content == "via-run"
 
-            # host-side seed → readable through both views.
             await self.sandbox.commands.run(f"echo -n seeded > {src_dir}/seeded.txt")
             assert (
                 await session.files.read_file(f"{dest}/seeded.txt", encoding="utf-8")
@@ -848,7 +808,6 @@ class TestIsolatedSessionE2E:
                     WriteEntry(path=f"{dest}/denied.txt", data="x", mode=644)
                 ])
 
-            # The namespace view must not have gained the file either.
             check = await self.sandbox.commands.run(
                 f"test -e {src_dir}/denied.txt && echo EXISTS || echo ABSENT"
             )
@@ -856,8 +815,6 @@ class TestIsolatedSessionE2E:
         finally:
             await session.delete()
             await self.sandbox.commands.run(f"rm -rf {src_dir}")
-
-    # ── Background run tests ─────────────────────────────────────────
 
     async def _wait_for_background_run(
         self, session, run_id: str, timeout: float = 30.0
@@ -886,7 +843,6 @@ class TestIsolatedSessionE2E:
             assert "hello-background" in logs.text
             assert logs.cursor > 0
 
-            # Incremental read from the returned cursor returns the remainder.
             tail = await session.run_logs(run.run_id, cursor=logs.cursor)
             assert tail.text == ""
         finally:

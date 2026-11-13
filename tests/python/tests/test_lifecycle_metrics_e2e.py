@@ -172,7 +172,6 @@ async def test_sandbox_create_skips_metrics_when_env_disabled(monkeypatch):
 
 
 def test_sandbox_sync_create_reports_lifecycle_metrics():
-    """Sync create also posts sandbox.create metrics."""
     captured: list[dict] = []
     original = lifecycle_metrics._post_sync
 
