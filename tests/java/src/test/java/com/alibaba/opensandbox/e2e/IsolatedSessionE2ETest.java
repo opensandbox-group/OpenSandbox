@@ -286,8 +286,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         }
     }
 
-    // ── RW mode: filesystem API tests ───────────────────────────────
-
     private IsolationSession createSession(String mode, String path) {
         return sandbox.isolation()
                 .create(
@@ -526,8 +524,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         }
     }
 
-    // ── RO mode tests ───────────────────────────────────────────────
-
     @Test
     @Order(18)
     void testRoCanReadExistingFiles() {
@@ -612,8 +608,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         }
     }
 
-    // ── Overlay mode tests ──────────────────────────────────────────
-
     private void requireOverlay() {
         IsolatedCapabilities caps = sandbox.isolation().capabilities();
         Assumptions.assumeTrue(
@@ -693,7 +687,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                                             .build()));
             String content = session.getFiles().readFile(path);
             assertEquals("overlay file", content);
-            // Host should NOT see it
             Execution hostCheck = sandbox.commands().run("cat " + path + " 2>&1 || echo NOT_FOUND");
             String hostText = stdoutText(hostCheck);
             assertTrue(
@@ -745,7 +738,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
             assertThrows(
                     SandboxException.class,
                     () -> session.getFiles().readFileInfo(List.of(prefix + "/target.txt")));
-            // Host file should be untouched
             Execution hostCheck = sandbox.commands().run("cat " + prefix + "/target.txt");
             assertTrue(stdoutText(hostCheck).contains("x"));
         } finally {
@@ -795,7 +787,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
             Map<String, EntryInfo> infoMap =
                     session.getFiles().readFileInfo(List.of("/tmp/" + marker));
             assertEquals(755, infoMap.get("/tmp/" + marker).getMode());
-            // Host should still be 644
             Execution hostCheck = sandbox.commands().run("stat -c %a /tmp/" + marker);
             assertTrue(stdoutText(hostCheck).contains("644"));
         } finally {
@@ -823,7 +814,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
             String content = session.getFiles().readFile("/tmp/" + marker);
             assertTrue(content.contains("new"));
             assertFalse(content.contains("old"));
-            // Host unchanged
             Execution hostCheck = sandbox.commands().run("cat /tmp/" + marker);
             assertTrue(stdoutText(hostCheck).contains("old"));
         } finally {
@@ -858,8 +848,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
             sandbox.commands().run("rm -rf " + prefix);
         }
     }
-
-    // ── run_once / withSession convenience API tests ─────────────────
 
     @Test
     @Order(33)
@@ -951,20 +939,15 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         assertTrue(output.contains("step1"));
     }
 
-    // ── Bind mount tests (explicit source->dest binds) ─────────────────
-
     @Test
     @Order(37)
     void testBindReadWriteHostVisible() {
         long ts = System.currentTimeMillis();
-        // Source must be within the execd writable allowlist (e.g. /data).
         String srcDir = "/data/bind_rw_" + ts;
         String dest = "/mnt/bind_rw";
         String fileName = "from_sandbox.txt";
         String content = "bind-rw-visible-on-host";
 
-        // Create the source dir and the destination mount point (bwrap binds
-        // onto an existing dir; it cannot create one under the read-only root).
         sandbox.commands().run("mkdir -p " + srcDir + " " + dest);
 
         IsolationSession session =
@@ -1021,7 +1004,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                                                 null,
                                                 "balanced",
                                                 null,
-                                                // /etc is not in the writable allowlist.
                                                 List.of(new BindMount("/etc", "/mnt/etc", null)),
                                                 null,
                                                 null,
@@ -1092,8 +1074,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
         }
     }
 
-    // ── Multiple overlay mounts (overlays request field) ────────────────
-
     private IsolationSession createOverlaysSession(List<IsolatedOverlaySpec> overlays) {
         return sandbox.isolation()
                 .create(
@@ -1134,7 +1114,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                                 new IsolatedOverlaySpec(dirA, "overlay", null),
                                 new IsolatedOverlaySpec(dirB, "overlay", null)));
         try {
-            // Writes land in each mount's own copy-on-write layer.
             session.run(
                     new IsolatedRunRequest(
                             "echo a-upper > " + dirA + "/upper.txt"
@@ -1152,12 +1131,9 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                     text.contains("a-upper") && text.contains("b-upper"),
                     "expected both overlay writes visible in-session, got: " + text);
 
-            // The files API routes each path to its own overlay view.
             assertEquals("a-upper", session.getFiles().readFile(dirA + "/upper.txt").trim());
             assertEquals("b-upper", session.getFiles().readFile(dirB + "/upper.txt").trim());
 
-            // Copy-on-write: host lower files are untouched and upper files
-            // never surface on the host.
             Execution hostCheck =
                     sandbox.commands()
                             .run(
@@ -1176,7 +1152,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                     hostText.contains("NOT_FOUND") || hostText.contains("No such file"),
                     "overlay upper files must not be visible on host, got: " + hostText);
 
-            // The session state echoes the effective overlay list.
             var state = session.get();
             assertNotNull(state.getOverlays());
             assertEquals(2, state.getOverlays().size());
@@ -1202,8 +1177,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                                 new IsolatedOverlaySpec("/", "overlay", null),
                                 new IsolatedOverlaySpec("/workspace", "overlay", null)));
         try {
-            // The nested /workspace overlay shadows the root overlay inside
-            // its own subtree; writes to /etc go through the root overlay.
             session.run(
                     new IsolatedRunRequest(
                             "echo in-session > " + wsMarker
@@ -1215,8 +1188,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                     stdoutText(exec).contains("in-session"),
                     "nested workspace overlay must shadow the root overlay");
 
-            // Host /workspace is untouched (COW) and the /etc write never
-            // reaches the host.
             Execution hostCheck =
                     sandbox.commands()
                             .run(
@@ -1233,8 +1204,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                     hostText.contains("NOT_FOUND") || hostText.contains("No such file"),
                     "root-overlay write must not be visible on host, got: " + hostText);
 
-            // The files API routes by longest prefix: /workspace to its own
-            // overlay, /etc to the root overlay.
             assertTrue(session.getFiles().readFile(wsMarker).contains("in-session"));
             assertTrue(session.getFiles().readFile(rootMarker).contains("in-session-root"));
         } finally {
@@ -1273,8 +1242,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                             null,
                             null));
 
-            // The rw (legacy workspace) mount writes straight through to the
-            // host; the overlay mount's writes stay in its upper.
             Execution hostCheck =
                     sandbox.commands()
                             .run(
@@ -1294,7 +1261,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
             assertEquals("rw-write", session.getFiles().readFile(dirA + "/f.txt").trim());
             assertEquals("ov-write", session.getFiles().readFile(dirB + "/f.txt").trim());
 
-            // workspace is echoed as the first of the two effective overlays.
             var state = session.get();
             assertEquals(2, state.getOverlays().size());
             assertEquals(dirA, state.getOverlays().get(0).getPath());
@@ -1319,21 +1285,14 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                                 new IsolatedOverlaySpec(dirA, "overlay", true),
                                 new IsolatedOverlaySpec(dirB, "overlay", false)));
         try {
-            // Both mounts accept in-session writes regardless of persist.
             session.run(
                     new IsolatedRunRequest(
                             "echo p > " + dirA + "/f.txt && echo e > " + dirB + "/f.txt",
                             null,
                             null));
 
-            // The persistent overlay's upper is host-visible, so the files
-            // API observes in-session writes on it.
             assertEquals("p", session.getFiles().readFile(dirA + "/f.txt").trim());
 
-            // An ephemeral (persist=false) overlay's tmpfs upper is internal
-            // to the namespace: the files API serves the host-side view only,
-            // so an in-session-only file is not observable and files-API
-            // writes into the ephemeral overlay are rejected.
             assertThrows(
                     SandboxApiException.class,
                     () -> session.getFiles().readFile(dirB + "/f.txt"));
@@ -1362,7 +1321,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
     @Test
     @Order(44)
     void testOverlayPersistOnRwRejected() {
-        // persist applies only to overlay mode; the API must reject it 400.
         assertThrows(
                 SandboxException.class,
                 () ->
@@ -1380,8 +1338,6 @@ public class IsolatedSessionE2ETest extends BaseE2ETest {
                 createOverlaysSession(
                         List.of(new IsolatedOverlaySpec(dir, "overlay", false)));
         try {
-            // An ephemeral primary overlay has no host-visible writable
-            // location for background-run logs.
             assertThrows(
                     SandboxException.class, () -> session.runBackground("echo bg", null));
         } finally {

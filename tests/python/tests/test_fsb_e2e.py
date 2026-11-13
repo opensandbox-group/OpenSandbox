@@ -656,7 +656,6 @@ class TestFsbE2E:
             metadata={"origin": "fast-sandbox-env-pause"},
         )
         try:
-            # State markers written before the checkpoint.
             await sandbox.files.write_file("/tmp/fsb-state.txt", "pause-state-check")
             await sandbox.commands.run("echo ram-state-check > /dev/shm/fsb-mem.txt")
             uptime_before = float(
@@ -682,7 +681,6 @@ class TestFsbE2E:
             assert resumed.origin == SandboxOrigin.TEMPLATE
             assert await resumed.is_healthy()
 
-            # Checkpoint fidelity.
             assert (
                 await resumed.files.read_file("/tmp/fsb-state.txt")
                 == "pause-state-check"
@@ -802,12 +800,10 @@ class TestFsbE2E:
             assert attached.origin == SandboxOrigin.TEMPLATE
             assert await attached.is_healthy()
 
-            # execd serves through the re-attached instance.
             result = await attached.commands.run("echo connect-ok")
             assert result.error is None
             assert "connect-ok" in result.logs.stdout[0].text
 
-            # The policy persisted across attach.
             policy = await attached.get_egress_policy()
             assert any(r.target == "example.com" for r in policy.egress or [])
         finally:

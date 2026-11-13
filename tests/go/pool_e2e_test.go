@@ -30,10 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ==========================================================================
-// Single-node InMemory pool E2E tests
-// ==========================================================================
-
 func TestPool_WarmupAcquireFailFastAndCommand(t *testing.T) {
 	tag := poolTag("go-pool")
 	store := opensandbox.NewInMemoryPoolStateStore()
@@ -106,7 +102,6 @@ func TestPool_StaleIdleFallbackShutdownRestartSnapshot(t *testing.T) {
 	require.NoError(t, pool.Start(context.Background()))
 	t.Cleanup(func() { cleanupPool(pool); cleanupTaggedSandboxes(t, tag) })
 
-	// Inject a stale (nonexistent) sandbox ID.
 	require.NoError(t, store.PutIdle(context.Background(), poolName, fmt.Sprintf("missing-%d", time.Now().UnixNano())))
 
 	ctx := context.Background()
@@ -118,7 +113,6 @@ func TestPool_StaleIdleFallbackShutdownRestartSnapshot(t *testing.T) {
 	t.Cleanup(func() { _ = fallback.Kill(context.Background()); _ = fallback.Close() })
 	require.True(t, fallback.IsHealthy(ctx))
 
-	// Shutdown then verify PoolNotRunningError.
 	require.NoError(t, pool.Shutdown(ctx, true))
 	_, err = pool.Acquire(ctx, opensandbox.AcquireOptions{
 		SandboxTimeout: 5 * time.Minute,
@@ -131,7 +125,6 @@ func TestPool_StaleIdleFallbackShutdownRestartSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "STOPPED", snap.LifecycleState.String())
 
-	// Restart and verify snapshot_idle_entries have ExpiresAt.
 	require.NoError(t, pool.Start(ctx))
 	eventually(t, "pool restarts and warms idle",
 		func() bool { return snapshotState(pool) == "HEALTHY" && snapshotIdle(pool) >= 1 }, 0, 0)
@@ -207,7 +200,6 @@ func TestPool_RetryNextIdleSkipsStaleAndReturnsHealthyWarm(t *testing.T) {
 	require.Equal(t, 0, *exec.ExitCode)
 	require.Contains(t, exec.Text(), "go-retry-next-idle-ok")
 
-	// Stale id must not silently reappear in the idle queue.
 	entries, err := store.SnapshotIdleEntries(context.Background(), poolName)
 	require.NoError(t, err)
 	for _, entry := range entries {
@@ -343,7 +335,6 @@ func TestPool_LifecycleIdempotencyResizeRewarm(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Idempotent shutdown.
 	require.NoError(t, pool.Shutdown(ctx, false))
 	require.NoError(t, pool.Shutdown(ctx, false))
 	assert.Equal(t, "STOPPED", snapshotLifecycle(pool))
@@ -355,12 +346,10 @@ func TestPool_LifecycleIdempotencyResizeRewarm(t *testing.T) {
 	var notRunErr *opensandbox.PoolNotRunningError
 	require.True(t, errors.As(err, &notRunErr))
 
-	// Release after stop.
 	_, err = pool.ReleaseAllIdle(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 0, snapshotIdle(pool))
 
-	// Inject fake IDs and release.
 	require.NoError(t, store.PutIdle(ctx, poolName, "injected-a"))
 	require.NoError(t, store.PutIdle(ctx, poolName, "injected-b"))
 	released, err := pool.ReleaseAllIdle(ctx)
@@ -368,7 +357,6 @@ func TestPool_LifecycleIdempotencyResizeRewarm(t *testing.T) {
 	assert.Equal(t, 2, released)
 	assert.Equal(t, 0, snapshotIdle(pool))
 
-	// Restart, resize to 0 then back.
 	require.NoError(t, pool.Start(ctx))
 	eventually(t, "pool rewarms after restart", func() bool { return snapshotIdle(pool) >= 1 }, 0, 0)
 
@@ -430,7 +418,6 @@ func TestPool_ConcurrentAcquireAndShutdown(t *testing.T) {
 	require.Empty(t, errs, "unexpected errors during concurrent acquire: %v", errs)
 	assert.Len(t, acquiredIDs, 4)
 
-	// Race acquire vs shutdown.
 	require.NoError(t, pool.Resize(context.Background(), 1))
 	require.NoError(t, pool.Start(context.Background()))
 	eventually(t, "pool rewarmed before shutdown race", func() bool { return snapshotIdle(pool) >= 1 }, 0, 0)
@@ -554,7 +541,6 @@ func TestPool_WarmupPreparerAndIsolation(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, exec.Text(), "prepared")
 
-	// Isolation: second pool with different tag.
 	otherTag := poolTag("go-pool-other")
 	otherPool := createTestPool(t, "pool-"+otherTag, "owner-"+otherTag,
 		opensandbox.NewInMemoryPoolStateStore(), otherTag, 1, nil)
@@ -563,7 +549,6 @@ func TestPool_WarmupPreparerAndIsolation(t *testing.T) {
 
 	eventually(t, "other pool warms", func() bool { return snapshotIdle(otherPool) >= 1 }, 0, 0)
 
-	// Draining one pool should not affect the other.
 	require.NoError(t, preparedPool.Resize(ctx, 0))
 	_, _ = preparedPool.ReleaseAllIdle(ctx)
 	eventually(t, "prepared pool drains", func() bool { return snapshotIdle(preparedPool) == 0 }, 0, 0)
@@ -626,7 +611,6 @@ func TestPool_BrokenConnectionDegrades(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	// Healthy pool works independently.
 	healthyTag := poolTag("go-pool-good")
 	healthyPool := createTestPool(t, "healthy-pool-"+tag, "healthy-owner-"+tag,
 		opensandbox.NewInMemoryPoolStateStore(), healthyTag, 1, nil)
@@ -644,10 +628,6 @@ func TestPool_BrokenConnectionDegrades(t *testing.T) {
 	t.Cleanup(func() { _ = sb.Kill(context.Background()); _ = sb.Close() })
 	require.True(t, sb.IsHealthy(ctx))
 }
-
-// ==========================================================================
-// Redis distributed pool E2E tests
-// ==========================================================================
 
 func skipWithoutRedis(t *testing.T) *redis.Client {
 	t.Helper()
@@ -728,7 +708,6 @@ func TestRedisPool_CrossNodeAcquireResizeDirectCreate(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, exec.Text(), "go-redis-dist-ok")
 
-	// Shared resize to 0.
 	require.NoError(t, poolB.Resize(ctx, 0))
 	eventually(t, "Redis idle drains after shared resize", func() bool { return snapshotIdle(poolA) == 0 }, 0, 0)
 	time.Sleep(poolReconcileInterval * 2)
@@ -741,7 +720,6 @@ func TestRedisPool_CrossNodeAcquireResizeDirectCreate(t *testing.T) {
 	var emptyErr *opensandbox.PoolEmptyError
 	require.True(t, errors.As(err, &emptyErr))
 
-	// Direct create fallback.
 	direct, err := poolA.Acquire(ctx, opensandbox.AcquireOptions{
 		SandboxTimeout: 5 * time.Minute,
 		Policy:         policyPtr(opensandbox.AcquirePolicyDirectCreate),
@@ -790,7 +768,6 @@ func TestRedisPool_PrimaryFailoverRestart(t *testing.T) {
 			return v == ownerB && snapshotIdle(poolB) >= 1
 		}, 60*time.Second, 0)
 
-	// Restart node A and apply resize jitter.
 	require.NoError(t, poolA.Start(ctx))
 	for i := 0; i < 6; i++ {
 		p := poolA
@@ -935,7 +912,6 @@ func TestRedisPool_ConcurrentCrossNodeAcquireAtomicTake(t *testing.T) {
 	wg.Wait()
 	assert.Len(t, ids, 2)
 
-	// Pure-store contention test: 50 IDs, 16 goroutines.
 	contentionStore := newRedisE2EStore(t, rdb, prefix)
 	contentionPool := "redis-store-contention-" + tag
 	for i := 0; i < 50; i++ {
@@ -985,12 +961,10 @@ func TestRedisPool_ExpiredIdleReapedByTakeNotSnapshot(t *testing.T) {
 	require.NoError(t, store.PutIdle(ctx, poolName, fmt.Sprintf("expired-%d", time.Now().UnixNano())))
 	time.Sleep(100 * time.Millisecond)
 
-	// SnapshotCounters filters expired entries, so it should already report 0.
 	counters, err := store.SnapshotCounters(ctx, poolName)
 	require.NoError(t, err)
 	assert.Equal(t, 0, counters.IdleCount)
 
-	// TryTakeIdle also returns empty for expired entries.
 	id, err := store.TryTakeIdle(ctx, poolName)
 	require.NoError(t, err)
 	assert.Empty(t, id)
@@ -1094,7 +1068,6 @@ func TestRedisPool_StaleIdleRemovedAndDirectCreateFallback(t *testing.T) {
 	require.NoError(t, poolA.Start(ctx))
 	require.NoError(t, poolB.Start(ctx))
 
-	// Inject a nonexistent sandbox ID.
 	require.NoError(t, storeA.PutIdle(ctx, poolName, fmt.Sprintf("missing-%d", time.Now().UnixNano())))
 
 	_, err := poolB.Acquire(ctx, opensandbox.AcquireOptions{
@@ -1116,8 +1089,6 @@ func TestRedisPool_StaleIdleRemovedAndDirectCreateFallback(t *testing.T) {
 	t.Cleanup(func() { _ = sb.Kill(context.Background()); _ = sb.Close() })
 	require.True(t, sb.IsHealthy(ctx))
 }
-
-// ---------- Helpers ----------
 
 func policyPtr(p opensandbox.AcquirePolicy) *opensandbox.AcquirePolicy {
 	return &p

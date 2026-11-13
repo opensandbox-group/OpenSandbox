@@ -46,12 +46,10 @@ func TestE2E_FullLifecycle(t *testing.T) {
 
 	client := opensandbox.NewLifecycleClient(getServerURL()+"/v1", "")
 
-	// 1. List sandboxes
 	list, err := client.ListSandboxes(ctx, opensandbox.ListOptions{Page: 1, PageSize: 10})
 	require.NoError(t, err)
 	t.Logf("Initial sandbox count: %d", list.Pagination.TotalItems)
 
-	// 2. Create a sandbox
 	sb, err := client.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
 		Image: &opensandbox.ImageSpec{
 			URI: getDefaultImage(),
@@ -76,7 +74,6 @@ func TestE2E_FullLifecycle(t *testing.T) {
 		_ = client.DeleteSandbox(context.Background(), sb.ID)
 	}()
 
-	// 3. Wait for Running state
 	var running *opensandbox.SandboxInfo
 	for i := 0; i < 30; i++ {
 		running, err = client.GetSandbox(ctx, sb.ID)
@@ -96,14 +93,12 @@ func TestE2E_FullLifecycle(t *testing.T) {
 	require.Equal(t, opensandbox.StateRunning, running.Status.State, "sandbox did not reach Running state within timeout")
 	t.Logf("Sandbox is Running: %s", running.ID)
 
-	// 4. Get execd endpoint (default execd port: 44772)
 	endpoint, err := client.GetEndpoint(ctx, sb.ID, 44772, nil)
 	require.NoError(t, err)
 	t.Logf("Execd endpoint: %s", endpoint.Endpoint)
 
 	require.NotEmpty(t, endpoint.Endpoint)
 
-	// 5. Test Execd — ping
 	execdURL := endpoint.Endpoint
 	if !strings.HasPrefix(execdURL, "http") {
 		execdURL = "http://" + execdURL
@@ -129,7 +124,6 @@ func TestE2E_FullLifecycle(t *testing.T) {
 	}, 30*time.Second, 500*time.Millisecond, "execd ping never succeeded")
 	t.Log("Execd ping: OK")
 
-	// 6. Test Execd — run a command with SSE streaming
 	var output strings.Builder
 	err = execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
 		Command: "echo hello-from-go-e2e && python3 --version",
@@ -140,19 +134,16 @@ func TestE2E_FullLifecycle(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 7. Test Execd — file operations
 	fileInfoMap, err := execClient.GetFileInfo(ctx, "/etc/os-release")
 	require.NoError(t, err)
 	for path, fi := range fileInfoMap {
 		t.Logf("File info: path=%s size=%d", path, fi.Size)
 	}
 
-	// 8. Test Execd — metrics
 	metrics, err := execClient.GetMetrics(ctx)
 	require.NoError(t, err)
 	t.Logf("Metrics: cpu_count=%.0f mem_total=%.0fMiB", metrics.CPUCount, metrics.MemTotalMB)
 
-	// 9. Test Egress — get policy (if available, default egress port: 18080)
 	egressEndpoint, err := client.GetEndpoint(ctx, sb.ID, 18080, nil)
 	if err != nil {
 		t.Logf("GetEndpoint(egress): %v (skipping egress tests)", err)
@@ -178,12 +169,10 @@ func TestE2E_FullLifecycle(t *testing.T) {
 		}
 	}
 
-	// 10. Delete sandbox
 	err = client.DeleteSandbox(ctx, sb.ID)
 	require.NoError(t, err)
 	t.Log("Sandbox deleted successfully")
 
-	// 11. Verify deletion
 	deleted, err := client.GetSandbox(ctx, sb.ID)
 	if err != nil {
 		t.Logf("GetSandbox after delete: %v (expected)", err)
@@ -205,7 +194,6 @@ func TestE2E_PauseResume(t *testing.T) {
 		APIKey:   os.Getenv("OPENSANDBOX_API_KEY"),
 	}
 
-	// 1. Create sandbox via high-level API
 	sb, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
 		Image:    getDefaultImage(),
 		Env:      map[string]string{"EXECD_API_GRACE_SHUTDOWN": "3s", "EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms"},
@@ -215,38 +203,31 @@ func TestE2E_PauseResume(t *testing.T) {
 	t.Logf("Created sandbox: %s", sb.ID())
 	defer func() { _ = sb.Kill(context.Background()) }()
 
-	// 2. Verify sandbox is healthy
 	require.True(t, sb.IsHealthy(ctx), "sandbox not healthy after creation")
 	t.Log("Sandbox is healthy")
 
-	// 3. Run a command before pause
 	exec, err := sb.RunCommand(ctx, "echo before-pause", nil)
 	require.NoError(t, err)
 	t.Logf("Pre-pause output: %s", exec.Text())
 
-	// 4. Pause
 	require.NoError(t, sb.Pause(ctx))
 	t.Log("Sandbox paused")
 
-	// 5. Verify paused state
 	info, err := sb.GetInfo(ctx)
 	require.NoError(t, err)
 	require.Equal(t, opensandbox.StatePaused, info.Status.State)
 	t.Logf("Confirmed state: %s", info.Status.State)
 
-	// 6. Resume via package-level function
 	resumed, err := opensandbox.ResumeSandbox(ctx, config, sb.ID())
 	require.NoError(t, err)
 	t.Log("Sandbox resumed")
 
-	// 7. Verify resumed sandbox is healthy and functional
 	require.True(t, resumed.IsHealthy(ctx), "sandbox not healthy after resume")
 
 	exec2, err := resumed.RunCommand(ctx, "echo after-resume", nil)
 	require.NoError(t, err)
 	t.Logf("Post-resume output: %s", exec2.Text())
 
-	// 8. Also test instance method Resume: pause again and resume via method
 	require.NoError(t, resumed.Pause(ctx))
 	t.Log("Sandbox paused again")
 
@@ -257,7 +238,6 @@ func TestE2E_PauseResume(t *testing.T) {
 	require.NoError(t, err)
 	t.Logf("Instance resume output: %s", exec3.Text())
 
-	// Cleanup
 	require.NoError(t, resumed2.Kill(ctx))
 	t.Log("Sandbox killed — pause/resume e2e passed")
 }
@@ -272,7 +252,6 @@ func TestE2E_ManualCleanup(t *testing.T) {
 		APIKey:   os.Getenv("OPENSANDBOX_API_KEY"),
 	}
 
-	// 1. Create sandbox with ManualCleanup (no auto-expiration)
 	sb, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
 		Image:         getDefaultImage(),
 		Env:           map[string]string{"EXECD_API_GRACE_SHUTDOWN": "3s", "EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms"},
@@ -283,7 +262,6 @@ func TestE2E_ManualCleanup(t *testing.T) {
 	t.Logf("Created sandbox: %s", sb.ID())
 	defer func() { _ = sb.Kill(context.Background()) }()
 
-	// 2. Verify sandbox has no expiration set
 	info, err := sb.GetInfo(ctx)
 	require.NoError(t, err)
 
@@ -292,12 +270,10 @@ func TestE2E_ManualCleanup(t *testing.T) {
 		t.Log("Confirmed: ExpiresAt is nil (no auto-expiration)")
 	}
 
-	// 3. Verify sandbox is functional
 	exec, err := sb.RunCommand(ctx, "echo manual-cleanup-works", nil)
 	require.NoError(t, err)
 	t.Logf("Output: %s", exec.Text())
 
-	// 4. Compare with a normal sandbox that should have an expiration
 	sbWithTimeout, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
 		Image:    getDefaultImage(),
 		Env:      map[string]string{"EXECD_API_GRACE_SHUTDOWN": "3s", "EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms"},
