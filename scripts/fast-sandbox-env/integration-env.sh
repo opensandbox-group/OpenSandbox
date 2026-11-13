@@ -1770,12 +1770,11 @@ _hardening_template_failed() {
 	_overlaybd_template_failed "$OCI_HARDENING_TEMPLATE_ID" "hardening"
 }
 
-hardened_sbx_push_cleanup() { # <unused> <pf-pid>
-	sudo_ sed -i "\#127.0.0.1 $OCI_REGISTRY_HOST#d" /etc/hosts 2>/dev/null || true
-	sudo_ rm -rf "/etc/docker/certs.d/$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT" 2>/dev/null || true
-	docker logout "$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT" >/dev/null 2>&1 || true
-	if [[ -n "${2:-}" ]]; then
-		kill "$2" >/dev/null 2>&1 || true
+hardened_sbx_push_cleanup() { # <pf-pid>
+	sudo_ rm -rf "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT" 2>/dev/null || true
+	docker logout "127.0.0.1:$HARDENED_SBX_PUSH_PORT" >/dev/null 2>&1 || true
+	if [[ -n "${1:-}" ]]; then
+		kill "$1" >/dev/null 2>&1 || true
 	fi
 }
 
@@ -1795,33 +1794,35 @@ template_up_overlaybd_hardening() {
 	local source_image="$SBX_IMAGE"
 	if [[ "$HARDENED_SBX_PUSH" == 1 ]]; then
 		# Two tags on one image: the checkout-local pull name (what the
-		# template references — no port) and the runner-side push name (the
-		# port-forward endpoint; docker treats host:port/repo as a distinct
-		# image name, so the push needs its own tag).
-		local push_ref="$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT/${HARDENED_SBX_REF#*/}"
+		# template references — the in-cluster DNS host) and the runner-side
+		# push name (the port-forward endpoint; docker treats host:port/repo
+		# as a distinct image name, so the push needs its own tag).
+		local push_ref="127.0.0.1:$HARDENED_SBX_PUSH_PORT/${HARDENED_SBX_REF#*/}"
 		log "building the hardened golden image from this checkout ($HARDENED_SBX_REF)"
 		docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
 			-f "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
 			-t "$HARDENED_SBX_REF" -t "$push_ref" "$OSB_ROOT" >/dev/null \
 			|| die "hardened golden image build failed"
 		log "pushing through the in-cluster registry (port-forward 127.0.0.1:$HARDENED_SBX_PUSH_PORT)"
-		sudo_ grep -qx "127.0.0.1 $OCI_REGISTRY_HOST" /etc/hosts \
-			|| echo "127.0.0.1 $OCI_REGISTRY_HOST" | sudo_ tee -a /etc/hosts >/dev/null
-		sudo_ mkdir -p "/etc/docker/certs.d/$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT"
-		sudo_ cp "$CA_DIR/ca.crt" "/etc/docker/certs.d/$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT/ca.crt"
+		# The serving cert carries IP:127.0.0.1 (registry_ca_up), so the
+		# runner-side docker trusts the env CA for this endpoint — dockerd
+		# does not consult the host /etc/hosts, which is why the push goes
+		# over the loopback IP instead of the registry's DNS name.
+		sudo_ mkdir -p "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT"
+		sudo_ cp "$CA_DIR/ca.crt" "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT/ca.crt"
 		kubectl -n "$RESOURCE_NS" port-forward svc/registry "$HARDENED_SBX_PUSH_PORT:443" >/dev/null 2>&1 &
 		pf_pid=$!
 		local pf_wait=0
 		until host_port_busy "$HARDENED_SBX_PUSH_PORT"; do
 			pf_wait=$((pf_wait + 1))
-			[[ "$pf_wait" -ge 20 ]] && { hardened_sbx_push_cleanup 0 "$pf_pid"; die "registry port-forward never became ready"; }
+			[[ "$pf_wait" -ge 20 ]] && { hardened_sbx_push_cleanup "$pf_pid"; die "registry port-forward never became ready"; }
 			sleep 1
 		done
-		echo "$OCI_REGISTRY_PASSWORD" | docker login "$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT" \
+		echo "$OCI_REGISTRY_PASSWORD" | docker login "127.0.0.1:$HARDENED_SBX_PUSH_PORT" \
 			-u "$OCI_REGISTRY_USER" --password-stdin >/dev/null \
-			|| { hardened_sbx_push_cleanup 0 "$pf_pid"; die "docker login to the in-cluster registry failed"; }
+			|| { hardened_sbx_push_cleanup "$pf_pid"; die "docker login to the in-cluster registry failed"; }
 		if ! docker push "$push_ref" >/dev/null; then
-			hardened_sbx_push_cleanup 0 "$pf_pid"
+			hardened_sbx_push_cleanup "$pf_pid"
 			die "hardened golden image push failed"
 		fi
 		source_image="$HARDENED_SBX_REF"
@@ -1848,7 +1849,7 @@ template_up_overlaybd_hardening() {
 	while ! _hardening_template_phase_is_succeeded; do
 		if _hardening_template_failed; then
 			failure_dump "hardening-template-failed"
-			hardened_sbx_push_cleanup 0 "$pf_pid"
+			hardened_sbx_push_cleanup "$pf_pid"
 			fail "hardening template entered Failed"
 		fi
 		attempts=$((attempts + 1))
@@ -1861,7 +1862,7 @@ template_up_overlaybd_hardening() {
 	[[ "$manifest_ref" == oci://* ]] || fail "hardening template manifestRef is not an oci:// reference: $manifest_ref"
 	log "hardening template manifestRef: $manifest_ref"
 	if [[ -n "$pf_pid" ]]; then
-		hardened_sbx_push_cleanup 0 "$pf_pid"
+		hardened_sbx_push_cleanup "$pf_pid"
 		pass "hardened golden image built + pushed + overlaybd SandboxTemplate Succeeded (floor TOML via template env)"
 	else
 		pass "hardened overlaybd SandboxTemplate Succeeded (floor TOML via template env, source image $SBX_IMAGE)"
@@ -1929,13 +1930,17 @@ CA_CNF
 		-keyout "$CA_DIR/server.key" -out "$CA_DIR/server.csr" \
 		-subj "/CN=$OCI_REGISTRY_HOST" >/dev/null 2>&1 \
 		|| die "registry server key generation failed"
+	# IP:127.0.0.1 lets the runner-side push reach the ClusterIP-only
+	# registry through a kubectl port-forward with valid TLS (dockerd does
+	# not consult the host /etc/hosts, so a DNS-name push alias is not
+	# reachable from it).
 	cat > "$CA_DIR/server.ext" <<EXT
 basicConstraints=CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid,issuer
-subjectAltName=DNS:registry,DNS:registry.$RESOURCE_NS,DNS:registry.$RESOURCE_NS.svc,DNS:$OCI_REGISTRY_HOST
+subjectAltName=DNS:registry,DNS:registry.$RESOURCE_NS,DNS:registry.$RESOURCE_NS.svc,DNS:$OCI_REGISTRY_HOST,IP:127.0.0.1
 EXT
 	openssl x509 -req -sha256 -days 365 \
 		-in "$CA_DIR/server.csr" -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
