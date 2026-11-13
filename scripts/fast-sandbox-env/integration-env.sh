@@ -94,14 +94,14 @@
 #                    registry (CA baked into the fsb images), the chart's
 #                    runtime.oci node stack, and a full overlaybd verify
 #                    pass beside native. Nodes need ublk support. 0 = native-only.
-#   ROOTFS_ONLY      1 = force-run the FSEP-0001 rootfs-only snapshot verify
-#                    (overlaybd lane). Off by default: the fastlet-side
+#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify
+#                    (overlaybd lane). On by default: the fastlet-side
 #                    prerequisites are provisioned automatically whenever
-#                    OCI_STACK=1, but the deployed Firecracker v1.16.1 fails
-#                    the capture's final recovery step (thaw after plain
-#                    Pause -> Resume times out over guest-control vsock;
-#                    fast-sandbox#187). FIXME: flip the default once #187
-#                    ships.
+#                    OCI_STACK=1, the capture qualification is
+#                    deployment-derived upstream (fast-sandbox#185), and
+#                    capture runs on the managed Firecracker 1.17.0 the
+#                    pinned stack installs (the v1.16.1 thaw failure,
+#                    fast-sandbox#187, is a legacy capture version).
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -1441,15 +1441,6 @@ control_plane_up() {
 	apply_ns "$NS"
 	helm_render fsb-base "$OSB_ROOT/manifests/charts/base" "$NS" "$GEN_DIR/fsb-base.yaml"
 	kubectl apply -f "$GEN_DIR/fsb-base.yaml" >/dev/null
-	# The ublkd qualification record digest comes from the qualification
-	# stage (digest of the deployed overlaybd-ublkd binary); without it the
-	# record is not published and rootfs-only captures are rejected.
-	local -a rootfs_qualification_set=()
-	if [[ "$OCI_STACK" == 1 && -f "$WORK/rootfs-qualification.env" ]]; then
-		# shellcheck disable=SC1090
-		source "$WORK/rootfs-qualification.env"
-		rootfs_qualification_set=(--set "runtime.oci.rootfsQualifiedSHA256=$OVERLAYBD_QUALIFIED_SHA256")
-	fi
 	# Keep poolSizeGB=2 in sync with the disk=2Gi template builds below.
 	helm_render fast-sandbox "$OSB_ROOT/manifests/charts/fast-sandbox" "$NS" \
 		"$GEN_DIR/fast-sandbox.yaml" \
@@ -1466,8 +1457,7 @@ control_plane_up() {
 		--set runtime.oci.enabled="$([[ "$OCI_STACK" == 1 ]] && echo true || echo false)" \
 		--set runtime.oci.poolLow=4 \
 		--set runtime.oci.poolHigh=8 \
-		--set runtime.oci.poolSizeGB=2 \
-		"${rootfs_qualification_set[@]}"
+		--set runtime.oci.poolSizeGB=2
 	kubectl apply -f "$GEN_DIR/fast-sandbox.yaml" >/dev/null
 	local image
 	for image in "$IMG_CONTROLLER" "$IMG_FASTLET" "$IMG_FASTLET_PROXY" \
@@ -2297,48 +2287,34 @@ VOLUMES
 			{ print }
 		' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
 	else
-		grep -v '^# @OCI_FASTLET_\|^# @ROOTFS_QUALIFICATION_' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+		grep -v '^# @OCI_FASTLET_\|^# @GUEST_KERNEL_' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
 	fi
-	# Rootfs-capture qualification fragment (FSEP-0001): the fastlet-side
-	# profile (ConfigMap) + the node guest kernel, both staged by the
-	# qualification stage. Inert for Full snapshots — the capture path is
-	# the only consumer. Requires the OCI lane: the storage stack being
-	# qualified IS the OverlayBD one.
-	if [[ "$OCI_STACK" == 1 && -f "$WORK/rootfs-qualification.env" ]]; then
-		# shellcheck disable=SC1090
-		source "$WORK/rootfs-qualification.env"
-		local rq_env rq_mounts rq_volumes
-		rq_env="$(cat <<'ENVS'
-        - name: FAST_SANDBOX_ROOTFS_QUALIFICATION
-          value: /etc/fast-sandbox/rootfs-qualification/profile.json
-ENVS
-)"
-		rq_mounts="$(cat <<'MOUNTS'
-        - name: rootfs-qualification
-          mountPath: /etc/fast-sandbox/rootfs-qualification
-          readOnly: true
+	# Guest-kernel fragment (FSEP-0001): cold-boot restore resolves the
+	# kernel on the node under /usr/local/share/firecracker, so the fastlet
+	# mounts the staged node copy (rootfs_only_kernel_up). Inert for Full
+	# snapshots — the restore path is the only consumer. Requires the OCI
+	# lane: rootfs-only capture is OverlayBD-only.
+	if [[ "$OCI_STACK" == 1 ]]; then
+		local gk_mounts gk_volumes
+		gk_mounts="$(cat <<'MOUNTS'
         - name: guest-kernel
           mountPath: /usr/local/share/firecracker/vmlinux.bin
 MOUNTS
 )"
-		rq_volumes="$(cat <<'VOLUMES'
-      - name: rootfs-qualification
-        configMap:
-          name: fast-sandbox-rootfs-qualification
+		gk_volumes="$(cat <<'VOLUMES'
       - name: guest-kernel
         hostPath:
           path: /var/lib/fast-sandbox-env/vmlinux.bin
           type: File
 VOLUMES
 )"
-		rq_env="$rq_env" rq_mounts="$rq_mounts" rq_volumes="$rq_volumes" awk '
-			/^# @ROOTFS_QUALIFICATION_ENV@$/ { printf "%s\n", ENVIRON["rq_env"]; next }
-			/^# @ROOTFS_QUALIFICATION_MOUNTS@$/ { printf "%s\n", ENVIRON["rq_mounts"]; next }
-			/^# @ROOTFS_QUALIFICATION_VOLUMES@$/ { printf "%s\n", ENVIRON["rq_volumes"]; next }
+		gk_mounts="$gk_mounts" gk_volumes="$gk_volumes" awk '
+			/^# @GUEST_KERNEL_MOUNTS@$/ { printf "%s\n", ENVIRON["gk_mounts"]; next }
+			/^# @GUEST_KERNEL_VOLUMES@$/ { printf "%s\n", ENVIRON["gk_volumes"]; next }
 			{ print }
 		' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
 	else
-		grep -v '^# @ROOTFS_QUALIFICATION_' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+		grep -v '^# @GUEST_KERNEL_' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
 	fi
 	# Leftover-token guard: match only value positions (key: ...@T@...),
 	# never the header comments that document the tokens themselves.
@@ -2363,10 +2339,6 @@ pool_up() {
 			kubectl delete sandboxpool "$POOL_NAME" --wait --timeout=300s >/dev/null
 		fi
 	fi
-	# The rootfs-capture qualification profile must exist before fastlet
-	# pods mount it (inert for Full snapshots; the capture path is the only
-	# consumer).
-	rootfs_only_qualification_configmap_apply
 	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
 	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null
 	wait_for "fastlet pods Ready (poolMin=$POOL_MIN)" 300 fastlet_pods_ready
@@ -4226,96 +4198,37 @@ idle_e2e() {
 	uv run pytest tests/test_fsb_idle_pause_e2e.py
 }
 
-# --- FSEP-0001 rootfs-only qualification provisioning (OCI lane) --------------
+# --- FSEP-0001 guest-kernel staging (OCI lane) --------------------------------
 #
-# The capture is operator-qualified by design; this environment ACTS as that
-# operator so CI can exercise the feature. Three prerequisites, all inert for
-# Full snapshots:
-#   1. qualification profile (ConfigMap -> fastlet env FAST_SANDBOX_ROOTFS_
-#      QUALIFICATION via the pool fastletTemplate render tokens) — digests
-#      computed from the exact images this env deploys;
-#   2. ublkd qualification record — the chart's runtime.oci.rootfsQualified
-#      SHA256 value (digest of the deployed overlaybd-ublkd binary) drives
-#      the node daemon's startup record;
-#   3. guest kernel asset — extracted from the sandboxtemplate-builder image
-#      (the same kernel templates boot) onto every kind node, hostPath-
-#      mounted into fastlets at /usr/local/share/firecracker/vmlinux.bin.
-# The fourth prerequisite (guest control in the TEMPLATE BUILD) is upstream
-# (fast-sandbox#182); until it lands, the verify stage stays gated behind
-# ROOTFS_ONLY=1.
+# The only env-side prerequisite left: cold-boot restore resolves the guest
+# kernel on the node under /usr/local/share/firecracker (the manifest's
+# kernel.version is the builder's default vmlinux.bin filename), so the
+# builder image's kernel is extracted onto every kind node and hostPath-
+# mounted into fastlets. Everything else is deployment-derived upstream
+# (fast-sandbox#185): the capture qualification reads the kernel digest from
+# the template's boot provenance, the overlaybd digest + storage revision
+# from the deployed oci-tools bundle, and the VMM digest from the managed
+# selection; the node daemon self-attests the running ublkd process without
+# a configured digest. All of this is inert for Full snapshots.
 
-ROOTFS_QUALIFICATION_DIR="/var/lib/fast-sandbox-env"
+ROOTFS_KERNEL_HOST_DIR="/var/lib/fast-sandbox-env"
 
-rootfs_only_sha256() { # <file> -> sha256 hex (coreutils name first, Perl shasum fallback)
-	if command -v sha256sum >/dev/null 2>&1; then
-		sha256sum "$1" | awk '{print $1}'
-	else
-		shasum -a 256 "$1" | awk '{print $1}'
-	fi
-}
-
-rootfs_only_image_digest() { # <image> <path> -> sha256
-	local image="$1" path="$2" cid sum
-	cid="$(docker create --entrypoint /bin/true "$image" 2>/dev/null)" \
-		|| die "rootfs qualification: cannot create a container from $image"
-	docker cp "$cid:$path" "$WORK/.rootfs-digest.tmp" >/dev/null 2>&1 \
-		|| { docker rm "$cid" >/dev/null 2>&1 || true; die "rootfs qualification: $path not found in $image"; }
-	docker rm "$cid" >/dev/null 2>&1 || true
-	sum="$(rootfs_only_sha256 "$WORK/.rootfs-digest.tmp")"
-	rm -f "$WORK/.rootfs-digest.tmp"
-	[[ "$sum" =~ ^[0-9a-f]{64}$ ]] || die "rootfs qualification: digest of $path in $image is not a sha256"
-	printf '%s' "$sum"
-}
-
-rootfs_only_qualification_up() {
+rootfs_only_kernel_up() {
 	[[ "$OCI_STACK" == 1 ]] || return 0
-	log "rootfs-only qualification: computing digests from the deployed images"
-	local kernel_sum fc_sum ovl_sum
-	kernel_sum="$(rootfs_only_image_digest "$IMG_BUILDER" /usr/local/share/firecracker/vmlinux.bin)"
-	fc_sum="$(rootfs_only_image_digest "$IMG_RUNTIME" /usr/local/share/fast-sandbox/fc-assets/firecracker)"
-	ovl_sum="$(rootfs_only_image_digest "$IMG_RUNTIME" /usr/local/share/fast-sandbox/oci-tools/libexec/overlaybd-ublkd)"
-	# The profile's kernelSHA256 must identify the SAME kernel file mounted
-	# into fastlets (and the one templates boot); extract and stage it.
+	log "rootfs-only: staging the guest kernel from $IMG_BUILDER onto every node"
 	local cid
 	cid="$(docker create --entrypoint /bin/true "$IMG_BUILDER" 2>/dev/null)" \
-		|| die "rootfs qualification: cannot create a container from $IMG_BUILDER"
+		|| die "rootfs kernel staging: cannot create a container from $IMG_BUILDER"
 	docker cp "$cid:/usr/local/share/firecracker/vmlinux.bin" "$WORK/vmlinux.bin" >/dev/null \
-		|| { docker rm "$cid" >/dev/null 2>&1 || true; die "rootfs qualification: kernel extraction from $IMG_BUILDER failed"; }
+		|| { docker rm "$cid" >/dev/null 2>&1 || true; die "rootfs kernel staging: extraction from $IMG_BUILDER failed"; }
 	docker rm "$cid" >/dev/null 2>&1 || true
 	local node
 	for node in $(kind get nodes --name "$KIND_CLUSTER" 2>/dev/null); do
-		docker exec "$node" mkdir -p "$ROOTFS_QUALIFICATION_DIR"
-		docker cp "$WORK/vmlinux.bin" "$node:$ROOTFS_QUALIFICATION_DIR/vmlinux.bin" >/dev/null \
-			|| die "rootfs qualification: kernel placement on node $node failed"
+		docker exec "$node" mkdir -p "$ROOTFS_KERNEL_HOST_DIR"
+		docker cp "$WORK/vmlinux.bin" "$node:$ROOTFS_KERNEL_HOST_DIR/vmlinux.bin" >/dev/null \
+			|| die "rootfs kernel staging: kernel placement on node $node failed"
 	done
-	# Fastlet-side profile (the pool render mounts it + sets the env):
-	# storageRevision is an operator-attested opaque string for this stack.
-	cat > "$GEN_DIR/rootfs-qualification-profile.json" <<EOF_JSON
-{"firecrackerSHA256": "$fc_sum", "kernelSHA256": "$kernel_sum", "overlaybdSHA256": "$ovl_sum", "storageRevision": "fast-sandbox-env-$FSB_COMMIT", "exclusiveExt4": true}
-EOF_JSON
-	cat > "$GEN_DIR/rootfs-qualification-profile-cm.yaml" <<EOF_YAML
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: fast-sandbox-rootfs-qualification
-  namespace: $RESOURCE_NS
-data:
-  profile.json: |
-    {"firecrackerSHA256": "$fc_sum", "kernelSHA256": "$kernel_sum", "overlaybdSHA256": "$ovl_sum", "storageRevision": "fast-sandbox-env-$FSB_COMMIT", "exclusiveExt4": true}
-EOF_YAML
-	# Handoff to control_plane_up (chart --set) and pool_up (ConfigMap apply
-	# + render fragments); pool_up guards on this file's existence.
-	cat > "$WORK/rootfs-qualification.env" <<EOF_ENV
-OVERLAYBD_QUALIFIED_SHA256=$ovl_sum
-KERNEL_SHA256=$kernel_sum
-FIRECRACKER_SHA256=$fc_sum
-EOF_ENV
-	pass "rootfs-only qualification: digests computed (fc $fc_sum / kernel $kernel_sum / overlaybd $ovl_sum), kernel staged on $(kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | wc -l | tr -d ' ') node(s)"
-}
-
-rootfs_only_qualification_configmap_apply() {
-	[[ "$OCI_STACK" == 1 && -f "$GEN_DIR/rootfs-qualification-profile-cm.yaml" ]] || return 0
-	kubectl apply -f "$GEN_DIR/rootfs-qualification-profile-cm.yaml" >/dev/null
+	pass "rootfs-only: guest kernel staged on $(kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | wc -l | tr -d ' ') node(s)"
 }
 
 # --- verify actions (native / overlaybd) --------------------------------------
@@ -4404,24 +4317,19 @@ verify_overlaybd() {
 	run_stage "exchange resolver verify (overlaybd template, OSEP-0025)" exchange_resolver_verify "$OCI_TEMPLATE_ID"
 	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
 	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
-	# Rootfs-only capture is operator-qualified by design (FSEP-0001): this
-	# environment provisions the fastlet-side prerequisites itself
-	# (rootfs_only_qualification_up: qualification profile, ublkd record,
-	# guest kernel), and template-build guest control is unconditional
-	# upstream (fast-sandbox#183).
-	#
-	# FIXME(rootfs-only): the first real execution (CI run 42843978757)
-	# reached the final recovery step and failed there — after plain
-	# Pause -> Resume the guest-control vsock is dead and ThawAndWait times
-	# out ("read unix @->guest-control.sock: i/o timeout"), exactly the
-	# VMM-qualification failure FSEP-0001 documents for Firecracker v1.16.1.
-	# Freeze/pause/cut/resume all behave; only thaw fails. Tracked upstream
-	# at fast-sandbox#187. Gated off until that lands: flip to
-	# "${ROOTFS_ONLY:-1}" (or set ROOTFS_ONLY=1) once the fix ships.
-	if [[ "${ROOTFS_ONLY:-0}" == "1" ]]; then
+	# Rootfs-only verify (FSEP-0001), default-on: the fastlet-side kernel is
+	# staged by the up chain (rootfs_only_kernel_up), the capture
+	# qualification is deployment-derived upstream (fast-sandbox#185), and
+	# capture runs on the managed Firecracker 1.17.0 the pinned stack
+	# installs. The historically failing final recovery step (thaw after
+	# plain Pause -> Resume timed out over guest-control vsock on the
+	# legacy v1.16.1 capture version, fast-sandbox#187) is no longer
+	# reachable: fresh overlaybd template builds select the managed 1.17.0.
+	# ROOTFS_ONLY=0 skips the stage.
+	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
 		run_stage "rootfs-only snapshot verify (overlaybd template, FSEP-0001)" rootfs_only_verify "$OCI_TEMPLATE_ID"
 	else
-		log "ROOTFS_ONLY!=1: skipping the rootfs-only snapshot verify (blocked upstream: fast-sandbox#187 — guest-control vsock dies after plain Pause -> Resume, thaw i/o timeout; capture/publish/resume all verified working up to that point)"
+		log "ROOTFS_ONLY=0: skipping the rootfs-only snapshot verify"
 	fi
 	# Same placement rationale as verify_native: the family recorded by this
 	# matrix's opensandbox_verify pass was killed stages ago.
@@ -4980,7 +4888,7 @@ case "$ACTION" in
 		run_stage "RustFS + bucket" rustfs_up
 		run_stage "RustFS endpoint (kind network)" resolve_rustfs_endpoint
 		run_stage "OCI registry (in-cluster, TLS)" registry_up
-		run_stage "rootfs-only qualification (digests + kernel staging)" rootfs_only_qualification_up
+		run_stage "rootfs-only guest kernel staging (FSEP-0001 restore prerequisite)" rootfs_only_kernel_up
 		run_stage "CRDs + control plane" control_plane_up
 		run_stage "credentials (publish/pull)" credentials_up
 		run_stage "MITM CA material (OSEP-0022 trust anchor)" mitm_ca_up
