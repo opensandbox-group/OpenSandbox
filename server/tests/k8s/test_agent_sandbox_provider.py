@@ -994,6 +994,20 @@ spec:
         assert endpoint.endpoint == "10.0.0.9:8080"
         assert endpoint.headers is None
 
+    def test_get_endpoint_info_brackets_ipv6_running_pod_ip(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.list_pods.return_value = [
+            SimpleNamespace(status=SimpleNamespace(phase="Running", pod_ip="fd00::9"))
+        ]
+        workload = {
+            "status": {"selector": "app=sandbox"},
+            "metadata": {"namespace": "test-ns"},
+        }
+
+        endpoint = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "[fd00::9]:8080"
+
     def test_get_endpoint_info_falls_back_to_service_fqdn(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.side_effect = Exception("boom")
