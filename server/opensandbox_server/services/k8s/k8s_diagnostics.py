@@ -13,16 +13,15 @@
 # limitations under the License.
 
 """
-Kubernetes diagnostics mixins for the DevOps API.
+Kubernetes diagnostics mixins for the Diagnostics API.
 
-K8sDiagnosticsMixin serves sandbox logs, inspect output, and events from
-K8s Pod state; K8sStartupDiagnosticsMixin explains Pods that never became
-ready. Both are mixed into KubernetesSandboxService.
+K8sDiagnosticsMixin serves sandbox logs and events from K8s Pod state;
+K8sStartupDiagnosticsMixin explains Pods that never became ready. Both
+are mixed into KubernetesSandboxService.
 """
 
 from __future__ import annotations
 
-import re
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -61,16 +60,6 @@ _STABLE_EVENT_LINE_LIMIT = 50
 #: (e.g. "execd-installer"). Without this default, Kubernetes returns HTTP 400
 #: on any pod with more than one container.
 DEFAULT_LOG_CONTAINER = "sandbox"
-
-
-def _parse_since(since: str) -> int:
-    """Parse a human-readable duration string (e.g. '10m', '1h') into seconds."""
-    m = re.fullmatch(r"(\d+)\s*([smhd])", since.strip().lower())
-    if not m:
-        return 600
-    value, unit = int(m.group(1)), m.group(2)
-    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    return value * multipliers[unit]
 
 
 class K8sDiagnosticsMixin:
@@ -117,8 +106,6 @@ class K8sDiagnosticsMixin:
         content = self.get_sandbox_logs(
             sandbox_id,
             tail=_STABLE_LOG_LINE_LIMIT + 1,
-            since=None,
-            container=None,
         )
         content, truncated = limit_diagnostic_lines(
             content,
@@ -216,14 +203,12 @@ class K8sDiagnosticsMixin:
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: str | None = None,
-        container: str | None = None,
     ) -> str:
         pod = self._find_pod_for_sandbox(sandbox_id)
         pod_name = pod.metadata.name
         core_v1 = self.k8s_client.get_core_v1_api()
 
-        target_container = self._resolve_log_container(pod, container)
+        target_container = self._resolve_log_container(pod)
 
         kwargs: dict = {
             "name": pod_name,
@@ -232,8 +217,6 @@ class K8sDiagnosticsMixin:
             "tail_lines": tail,
             "timestamps": True,
         }
-        if since:
-            kwargs["since_seconds"] = _parse_since(since)
 
         try:
             log_text = core_v1.read_namespaced_pod_log(**kwargs)
@@ -243,33 +226,18 @@ class K8sDiagnosticsMixin:
         return log_text or "(no logs)"
 
     @staticmethod
-    def _resolve_log_container(pod, requested: str | None) -> str:
+    def _resolve_log_container(pod) -> str:
         """Pick the container to read logs from.
 
         Order of preference:
-        1. The caller-supplied name, if it matches a container or init container
-           on the pod.
-        2. ``DEFAULT_LOG_CONTAINER`` ("sandbox") when present.
-        3. The first regular container declared in the pod spec.
+        1. ``DEFAULT_LOG_CONTAINER`` ("sandbox") when present.
+        2. The first regular container declared in the pod spec.
+        3. The first init container.
         """
         spec = getattr(pod, "spec", None)
         regular = list(getattr(spec, "containers", None) or []) if spec else []
         init = list(getattr(spec, "init_containers", None) or []) if spec else []
         all_names = [c.name for c in regular] + [c.name for c in init]
-
-        if requested:
-            if requested in all_names:
-                return requested
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "code": SandboxErrorCodes.K8S_SANDBOX_NOT_FOUND,
-                    "message": (
-                        f"Container '{requested}' not found on pod "
-                        f"'{pod.metadata.name}'. Available: {all_names or '(none)'}"
-                    ),
-                },
-            )
 
         if DEFAULT_LOG_CONTAINER in all_names:
             return DEFAULT_LOG_CONTAINER
@@ -280,88 +248,6 @@ class K8sDiagnosticsMixin:
         # Fall back to the canonical name so the upstream Kubernetes error is
         # explicit instead of silently None-ing the container kwarg.
         return DEFAULT_LOG_CONTAINER
-
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        pod = self._find_pod_for_sandbox(sandbox_id)
-        meta = pod.metadata
-        spec = pod.spec
-        pod_status = pod.status
-
-        lines: list[str] = []
-        lines.append(f"Pod Name:       {meta.name}")
-        lines.append(f"Namespace:      {meta.namespace}")
-        lines.append(f"Node:           {spec.node_name or 'N/A'}")
-        lines.append(f"Phase:          {pod_status.phase if pod_status else 'Unknown'}")
-        lines.append(f"Pod IP:         {pod_status.pod_ip if pod_status else 'N/A'}")
-        lines.append(f"Host IP:        {pod_status.host_ip if pod_status else 'N/A'}")
-        lines.append(f"Start Time:     {pod_status.start_time if pod_status else 'N/A'}")
-
-        if spec.runtime_class_name:
-            lines.append(f"Runtime Class:  {spec.runtime_class_name}")
-
-        if pod_status and pod_status.container_statuses:
-            lines.append("")
-            lines.append("Containers:")
-            for cs in pod_status.container_statuses:
-                lines.append(f"  {cs.name}:")
-                lines.append(f"    Ready:          {cs.ready}")
-                lines.append(f"    Restart Count:  {cs.restart_count}")
-                lines.append(f"    Image:          {cs.image}")
-                if cs.state:
-                    if cs.state.running:
-                        lines.append(f"    State:          Running (since {cs.state.running.started_at})")
-                    elif cs.state.waiting:
-                        lines.append(f"    State:          Waiting ({cs.state.waiting.reason})")
-                        if cs.state.waiting.message:
-                            lines.append(f"    Message:        {cs.state.waiting.message}")
-                    elif cs.state.terminated:
-                        t = cs.state.terminated
-                        lines.append(f"    State:          Terminated (exit={t.exit_code}, reason={t.reason})")
-                        if t.message:
-                            lines.append(f"    Message:        {t.message}")
-                if cs.last_state and cs.last_state.terminated:
-                    t = cs.last_state.terminated
-                    lines.append(f"    Last State:     Terminated (exit={t.exit_code}, reason={t.reason})")
-
-        if pod_status and pod_status.init_container_statuses:
-            lines.append("")
-            lines.append("Init Containers:")
-            for cs in pod_status.init_container_statuses:
-                lines.append(f"  {cs.name}:")
-                lines.append(f"    Ready:          {cs.ready}")
-                if cs.state:
-                    if cs.state.terminated:
-                        t = cs.state.terminated
-                        lines.append(f"    State:          Terminated (exit={t.exit_code}, reason={t.reason})")
-                    elif cs.state.waiting:
-                        lines.append(f"    State:          Waiting ({cs.state.waiting.reason})")
-
-        if pod_status and pod_status.conditions:
-            lines.append("")
-            lines.append("Conditions:")
-            for cond in pod_status.conditions:
-                lines.append(f"  {cond.type}: {cond.status} (reason={cond.reason or 'N/A'})")
-                if cond.message:
-                    lines.append(f"    Message: {cond.message}")
-
-        if meta.labels:
-            lines.append("")
-            lines.append("Labels:")
-            for k, v in sorted(meta.labels.items()):
-                lines.append(f"  {k}={v}")
-
-        if spec.containers:
-            lines.append("")
-            lines.append("Resources:")
-            for container in spec.containers:
-                if container.resources:
-                    lines.append(f"  {container.name}:")
-                    if container.resources.requests:
-                        lines.append(f"    Requests: {dict(container.resources.requests)}")
-                    if container.resources.limits:
-                        lines.append(f"    Limits:   {dict(container.resources.limits)}")
-
-        return "\n".join(lines)
 
     def get_sandbox_events(self, sandbox_id: str, limit: int = 50) -> str:
         pod = self._find_pod_for_sandbox(sandbox_id)
