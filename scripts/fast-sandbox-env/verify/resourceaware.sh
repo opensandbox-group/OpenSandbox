@@ -15,9 +15,10 @@
 
 # verify/resourceaware.sh — OSEP-0026 ResourceAware resource accounting
 # (POOL_MODE=resource-aware stack only). Split-layout copy of the block in
-# integration-env.sh; keep the two in sync until the env.sh split completes.
+# integration-env.sh; keep the two in sync until the split layout becomes
+# the single home.
 
-# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware) ---------------
+# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware)
 #
 # Coverage:
 #   1. distinctly-shaped template (2 vCPU / 1Gi) -> create forwards the recorded
@@ -295,7 +296,7 @@ verify_resourceaware() {
 	run_stage "capacity saturation -> 429" ra_capacity_verify
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib.sh"

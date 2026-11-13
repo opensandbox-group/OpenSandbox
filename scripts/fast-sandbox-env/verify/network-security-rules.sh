@@ -32,8 +32,8 @@
 # while the Kubernetes API ClusterIP and a non-whitelisted node port stay
 # dropped (deny.always and the port cap beat the user policy).
 #
-# Runs as part of `integration.sh up` (the entry chains every verify script)
-# or standalone against a live stack from `env.sh up`.
+# Runs as part of `integration-env.sh verify-native` (run_stage executes
+# this script) or standalone against a live stack from `integration-env.sh up`.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -188,7 +188,7 @@ EOF
 	trap - EXIT
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	resolve_osb

@@ -18,9 +18,9 @@
 The deep stack behavior — the create wire-up, policy enforcement and update
 convergence, checkpoint durability and route release, recorded-policy carry
 across pause/resume and snapshots, vault transfer, idle-pause/wake, and
-artifact-store hygiene — is covered by the shell verify suites under
-``scripts/fast-sandbox-env/verify/``, which ``integration.sh up`` chains on
-every run. This module stays deliberately thin: it exercises only the Python
+artifact-store hygiene — is covered by the shell verify stages driven by
+``integration-env.sh`` (inline copies mirrored under
+``scripts/fast-sandbox-env/verify/``). This module stays deliberately thin: it exercises only the Python
 SDK client contract against the live stack — template CRUD, create with a
 network policy, the execd surface (commands/files/metrics), diagnostics, the
 egress patch/delete methods, pause/resume state fidelity, snapshot

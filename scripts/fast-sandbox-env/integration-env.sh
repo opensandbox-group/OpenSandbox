@@ -226,7 +226,7 @@ MITM_ECHO_NET=""
 image_repo() { printf '%s' "${1%:*}"; }
 image_tag() { printf '%s' "${1##*:}"; }
 
-# --- OpenSandbox server + ingress gateway (source-built; always deployed) ------
+# --- OpenSandbox server + ingress gateway (source-built; always deployed)
 
 OSB_NS="opensandbox-system"
 IMG_SERVER="${SERVER_IMAGE:-docker.io/opensandbox/server:env}"
@@ -282,7 +282,7 @@ export GOPROXY="$FSB_GOPROXY"
 AUTO_CLEAN=0
 ACTION=""
 
-# --- logging / stage machinery --------------------------------------------------
+# --- logging / stage machinery
 
 log() { printf '\033[1;34m[fast-sandbox-env]\033[0m %s\n' "$*" | tee -a "$WORK/run.log" >&2; }
 die() { printf '\033[1;31m[fast-sandbox-env] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -355,7 +355,7 @@ kubectl_get() { kubectl -n "$RESOURCE_NS" get "$1" -o jsonpath="$2"; }
 
 sudo_() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 
-# --- helpers ---------------------------------------------------------------------
+# --- helpers
 
 kind_node() { kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | head -1; }
 
@@ -372,7 +372,7 @@ rc() {
 		-v "$RC_CONFIG_DIR:/config" "$RC_IMAGE" "$@"
 }
 
-# --- failure dump ------------------------------------------------------------------
+# --- failure dump
 
 on_error() {
 	local rc=$? task="$1"
@@ -574,7 +574,7 @@ failure_dump() {
 	log "failure dump: $dump"
 }
 
-# --- stage: preflight + tooling ------------------------------------------------------
+# --- stage: preflight + tooling
 
 install_release_binary() { # name version url
 	local name="$1" version="$2" url="$3" tmp
@@ -731,7 +731,7 @@ sysctl_restore() {
 	rm -f "$SYSCTL_BACKUP"
 }
 
-# --- stage: fast-sandbox checkout @ master ---------------------------------------------
+# --- stage: fast-sandbox checkout @ master
 
 # Scratch Go tool run inside the fast-sandbox module (imports
 # internal/registryconfig); removed before dirty checks and on down.
@@ -763,7 +763,7 @@ ensure_fsb() {
 	pass "fast-sandbox checkout ready"
 }
 
-# --- stage: images ---------------------------------------------------------------------
+# --- stage: images
 
 build_images() {
 	log "building fast-sandbox images (pinned commit, firecracker scope) via manifests/release/build-fast-sandbox.sh"
@@ -801,7 +801,7 @@ build_images() {
 	pass "images built (fast-sandbox + OpenSandbox)"
 }
 
-# --- stage: XFS StateRoot (reflink CoW per-sandbox rootfs) ------------------------------
+# --- stage: XFS StateRoot (reflink CoW per-sandbox rootfs)
 
 XFS_STATEROOT="${XFS_STATEROOT:-1}"
 XFS_LOOP_FILE="${XFS_LOOP_FILE:-$WORK/fast-sandbox.img}"
@@ -891,7 +891,7 @@ stateroot_xfs_down() {
 	rm -f "$XFS_LOOP_FILE"
 }
 
-# --- stage: kind cluster -----------------------------------------------------------------
+# --- stage: kind cluster
 
 render_kind_config() { # > $GEN_DIR/kind-cluster.yaml
 	local src="$MANIFESTS_DIR/cluster/kind-cluster.yaml" out="$GEN_DIR/kind-cluster.yaml"
@@ -1005,7 +1005,7 @@ kind_up() {
 	pass "kind cluster ready (KVM passthrough + labels on every node)"
 }
 
-# --- stage: RustFS + credentials ------------------------------------------------------------
+# --- stage: RustFS + credentials
 
 rustfs_up() {
 	docker rm -f "$RUSTFS_CONTAINER" >/dev/null 2>&1 || true
@@ -1168,7 +1168,7 @@ credentials_up() {
 	pass "credentials written (publish/pull)"
 }
 
-# --- stage: MITM CA material (OSEP-0022 trust anchor) -------------------------
+# --- stage: MITM CA material (OSEP-0022 trust anchor)
 
 # mitm_ca_fingerprint <cert.pem> -> lowercase hex SHA-256 over the DER — the
 # exact fingerprint form the egress /healthz and the template manifest
@@ -1304,7 +1304,7 @@ CNF
 	pass "pinned MITM CA provisioned ($MITM_CA_SECRET, fingerprint ${MITM_CA_FINGERPRINT:0:16}…)"
 }
 
-# --- stage: TLS echo endpoint (certificate signed by the pinned CA) -----------
+# --- stage: TLS echo endpoint (certificate signed by the pinned CA)
 
 # The echo reflects the request headers it observed as the response body —
 # the injected credential header must appear there, which is the per-subject
@@ -1404,7 +1404,7 @@ mitm_echo_headers() {
 	mitm_echo_curl "${1:-}"
 }
 
-# --- stage: control plane -------------------------------------------------------------------
+# --- stage: control plane
 
 # helm is only a renderer; the cluster keeps no helm release state, so
 # re-runs stay plain idempotent `kubectl apply`.
@@ -1460,7 +1460,7 @@ control_plane_up() {
 	pass "CRDs + control plane ready (charts @ pinned $(git -C "$FSB_DIR" rev-parse --short HEAD))"
 }
 
-# --- stage: firecracker runtime (node readiness + DART P2P) -----------------------------------
+# --- stage: firecracker runtime (node readiness + DART P2P)
 
 runtime_node_labeled() { # node -> 0 when the agent applied both labels + condition
 	local node="$1"
@@ -1525,7 +1525,7 @@ runtime_up() {
 	pass "firecracker-runtime healthy + DART roster=$expected_members + nodes FirecrackerReady"
 }
 
-# --- stage (opensandbox CLI): SandboxTemplate golden image ---------------------
+# --- stage (opensandbox CLI): SandboxTemplate golden image
 
 wait_succeeded() { # description attempts probe probe_failed
 	local description="$1" attempts="$2" probe="$3" probe_failed="$4" attempt=0
@@ -1686,7 +1686,7 @@ _overlaybd_template_phase_is_succeeded() {
 	[[ "$(_overlaybd_template_phase)" == "Succeeded" ]]
 }
 
-# --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry) ---
+# --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry)
 
 # bake_registry_ca retags a built image with the registry CA trusted; the
 # upstream Dockerfiles take no CA input. Consumers: fastlet (fsb-vm), the
@@ -1938,7 +1938,7 @@ template_mitm_lineage_fingerprint() {
 	printf '%s' "$manifest_json" | jq -r '.platform.egressMitmCA.certificates[0].certSha256 // empty' 2>/dev/null
 }
 
-# --- stage: SandboxPool (egress attached, P2P spread) --------------------------------------------
+# --- stage: SandboxPool (egress attached, P2P spread)
 
 pool_pods() {
 	kubectl -n "$RESOURCE_NS" get pods \
@@ -1998,7 +1998,7 @@ warm_images_ready() {
 	kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" -o jsonpath='{.status.warmImages[*].cachedFastlets}' 2>/dev/null | grep -qv '^0*$'
 }
 
-# --- stage: ublk on the host and inside the kind nodes (OCI_STACK=1) ------------
+# --- stage: ublk on the host and inside the kind nodes (OCI_STACK=1)
 
 # OverlayBD talks to the HOST kernel's ublk module through /dev/ublkc* (the
 # control char device) and surfaces devices as /dev/ublkb<N>. The kernel is
@@ -2007,7 +2007,7 @@ warm_images_ready() {
 # appears on the host only at modprobe time — usually after the cluster
 # exists. Every ublkd/fsb-vm consumer (the builder Pod, the node ublkd
 # sidecar, fastlets) mounts the kind node's /dev, so the nodes need the nodes.
-# --- stage: ublk registration check (OCI_STACK=1) -------------------------------
+# --- stage: ublk registration check (OCI_STACK=1)
 
 # Informational registration check only. Naming varies by kernel: the char
 # (queue) device class is "ublk-char" (Al8 6.6 backport, /dev/ublkc<N>) or
@@ -2034,7 +2034,7 @@ ublk_module_up() {
 	pass "ublk module registered"
 }
 
-# --- stage: real ublk add/del probe + wedge self-heal (OCI_STACK=1) --------------
+# --- stage: real ublk add/del probe + wedge self-heal (OCI_STACK=1)
 
 # Registration in /proc/devices is necessary but not sufficient: a run
 # killed mid-add leaks kernel ublk devices that outlive the kind cluster
@@ -2386,7 +2386,7 @@ dart_source_counters() { # pod -> "<source> <value>" lines
 		}'
 }
 
-# --- stage: idle-pause Redis (OSEP-0024 profile) --------------------------------
+# --- stage: idle-pause Redis (OSEP-0024 profile)
 
 redis_up() {
 	# The sweeper connects at startup, so Redis must precede the server.
@@ -2401,7 +2401,7 @@ redis_up() {
 	pass "idle-pause Redis up ($REDIS_DSN)"
 }
 
-# --- stage: OpenSandbox server + ingress gateway --------------------------------
+# --- stage: OpenSandbox server + ingress gateway
 
 # Per-workdir key (not per-run): re-applies must keep old routes verifiable.
 osb_signing_key() {
@@ -2550,7 +2550,7 @@ opensandbox_up() {
 	pass "server + ingress gateway up (fsb runtime, gateway routes signed with key 'a')"
 }
 
-# --- stage: node-agent (vm-console collection) ------------------------------------------------
+# --- stage: node-agent (vm-console collection)
 
 # Source-built DaemonSet on both kind nodes (the control-plane taint is
 # removed in kind_up). The chart's vmConsole root equals the fast-sandbox
@@ -2809,7 +2809,7 @@ dump_latency_evidence() {
 	cat "$out"
 }
 
-# --- vm-console collection assertions (ride the e2e matrix's own sandboxes) ----
+# --- vm-console collection assertions (ride the e2e matrix's own sandboxes)
 #
 # The node-agent DaemonSet (deployed by up) collects each sandbox's
 # Firecracker guest serial through the driver-owned firecracker.log,
@@ -2944,7 +2944,7 @@ opensandbox_verify() {
 	pass "verify sandboxes cleaned up"
 }
 
-# --- stage: pause / resume (opensandbox CLI -> FastPath checkpoint) -------------
+# --- stage: pause / resume (opensandbox CLI -> FastPath checkpoint)
 
 # Fresh signed route + one GET: doubles as the "runtime actually serving" probe.
 execd_ping_ok() {
@@ -3014,7 +3014,7 @@ pause_resume_verify() {
 	wait_for "pause/resume sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: execd-as-init in-guest process verify (OSEP-0018) -------------------
+# --- stage: execd-as-init in-guest process verify (OSEP-0018)
 # NOTE: verify/init-mode.sh carries the split-layout copy of this stage; keep
 # the two in sync until the env.sh split is completed.
 
@@ -3155,7 +3155,7 @@ init_mode_verify() { # [template-id]
 	wait_for "init-mode sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay) --------
+# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay)
 
 # Status-code-returning variant of server_api for negative-path assertions
 # (curl -f hides the status).
@@ -3272,7 +3272,7 @@ vault_lifecycle_verify() {
 	wait_for "vault sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning) ----
+# --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning)
 # NOTE: verify/vault.sh carries the split-layout copy of this stage (plus its
 # helpers); keep the two in sync until the env.sh split is completed and the
 # verify scripts become the single home.
@@ -3421,7 +3421,7 @@ mitm_ca_chain_verify() {
 	wait_for "mitm-ca sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: exchange resolver verify (OSEP-0025) --------------------------------
+# --- stage: exchange resolver verify (OSEP-0025)
 # Mirrors verify/vault.sh (the split home); only the repo-root variable and
 # the lib.sh-only prune call differ.
 
@@ -3598,7 +3598,7 @@ exchange_resolver_verify() {
 	exchange_resolver_stop_all
 }
 
-# --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile) --------------
+# --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile)
 
 # Poll the gateway until /ping returns 200 (marked 503s tolerated; the
 # resume is never canceled). Fails on budget exhaustion.
@@ -3751,7 +3751,7 @@ idle_pause_verify() {
 	wait_for "idle-pause sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: snapshot (opensandbox CLI -> SandboxSnapshot CR -> restore) ----------
+# --- stage: snapshot (opensandbox CLI -> SandboxSnapshot CR -> restore)
 
 # Ready once the server watcher converges the row from the SandboxSnapshot
 # CR (Succeeded + template index published).
@@ -3902,7 +3902,7 @@ snapshot_verify() {
 	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
 }
 
-# --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py) -----------------
+# --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py)
 
 sdk_e2e() {
 	kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
@@ -3982,7 +3982,7 @@ idle_e2e() {
 	uv run pytest tests/test_fsb_idle_pause_e2e.py
 }
 
-# --- verify actions (native / overlaybd) --------------------------------------
+# --- verify actions (native / overlaybd)
 
 require_live_stack() {
 	kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
@@ -3998,7 +3998,7 @@ verify_native() {
 	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
 	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
-	# Lives in verify/network-security-rules.sh, shared with integration.sh.
+	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
 	run_stage "execd-as-init verify (in-guest process topology)" init_mode_verify
 	run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
@@ -4073,7 +4073,7 @@ verify_overlaybd() {
 	run_stage "vm-console finalize verify (overlaybd, node-agent completeness marker)" vm_console_finalize_verify
 }
 
-# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware) ---------------
+# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware)
 #
 # Coverage:
 #   1. distinctly-shaped template (2 vCPU / 1Gi) -> create forwards the recorded
@@ -4351,7 +4351,7 @@ verify_resourceaware() {
 	run_stage "capacity saturation -> 429" ra_capacity_verify
 }
 
-# --- status / summary ---------------------------------------------------------------------
+# --- status / summary
 
 dart_metrics_summary() {
 	local pods pod node metrics
@@ -4449,7 +4449,7 @@ env_summary() {
 	printf '  %-22s %s\n' "logs" "$LOGS_DIR"
 }
 
-# --- down ------------------------------------------------------------------------------------
+# --- down
 
 down() {
 	log "down: teardown"
@@ -4514,7 +4514,7 @@ down() {
 	pass "host cleanup complete"
 }
 
-# --- main --------------------------------------------------------------------------------------
+# --- main
 
 usage() {
 	cat <<'EOF'

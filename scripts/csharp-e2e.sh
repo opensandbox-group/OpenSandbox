@@ -39,18 +39,15 @@ trap cleanup EXIT
 # build execd image locally (context must include internal/)
 docker build -f components/execd/Dockerfile -t opensandbox/execd:local "${REPO_ROOT}"
 
-# prepare required images from registry
 docker pull opensandbox/code-interpreter:${TAG}
 echo "-------- Eval test images --------"
 docker images
 
-# prepare hostpath volume for e2e test
 mkdir -p /tmp/opensandbox-e2e/host-volume-test
 mkdir -p /tmp/opensandbox-e2e/logs
 echo "opensandbox-e2e-marker" > /tmp/opensandbox-e2e/host-volume-test/marker.txt
 chmod -R 755 /tmp/opensandbox-e2e
 
-# prepare Docker named volume for pvc e2e test
 docker volume rm opensandbox-e2e-pvc-test 2>/dev/null || true
 docker volume create opensandbox-e2e-pvc-test
 docker run --rm -v opensandbox-e2e-pvc-test:/data alpine sh -c "\
@@ -62,7 +59,6 @@ echo "-------- CSHARP E2E test logs for execd --------" > /tmp/opensandbox-e2e/l
 export OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE="${OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE:-opensandbox/code-interpreter:${TAG}}"
 setup_credential_vault_e2e_target
 
-# setup server
 cd server
 : > server.log
 export OPENSANDBOX_INSECURE_SERVER=YES
@@ -74,7 +70,6 @@ cd ..
 # wait for server
 sleep 10
 
-# test env for C# fixture
 export OPENSANDBOX_TEST_DOMAIN="localhost:8080"
 export OPENSANDBOX_TEST_PROTOCOL="http"
 export OPENSANDBOX_TEST_API_KEY=""

@@ -34,7 +34,7 @@ Credential Vault E2E tests require a reachable target service and `OPENSANDBOX_C
 
 ### Fast-sandbox (fsb) integration env
 
-`tests/test_fsb_e2e.py` exercises the Python SDK client contract against the live fsb stack, and stays deliberately thin: the deep stack behavior (create wire-up, policy enforcement and update convergence, checkpoint durability and route release, recorded-policy carry across pause/resume and snapshots, vault transfer, idle-pause/wake, artifact pruning) is covered by the shell verify suites under `scripts/fast-sandbox-env/verify/`, which `integration.sh up` chains on every run. The SDK suite is skipped unless the fsb stack is up and `OPENSANDBOX_TEST_FSB_TEMPLATE_ID` points at the golden-image template the env script builds, and it is excluded from the default `make test` run:
+`tests/test_fsb_e2e.py` exercises the Python SDK client contract against the live fsb stack, and stays deliberately thin: the deep stack behavior (create wire-up, policy enforcement and update convergence, checkpoint durability and route release, recorded-policy carry across pause/resume and snapshots, vault transfer, idle-pause/wake, artifact pruning) is covered by the shell verify stages driven by `integration-env.sh` (inline copies mirrored under `scripts/fast-sandbox-env/verify/`). The SDK suite is skipped unless the fsb stack is up and `OPENSANDBOX_TEST_FSB_TEMPLATE_ID` points at the golden-image template the env script builds, and it is excluded from the default `make test` run:
 
 ```bash
 ./scripts/fast-sandbox-env/integration-env.sh up     # brings up the stack, prints/keeps the template id
