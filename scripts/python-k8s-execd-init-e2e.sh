@@ -13,17 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Runs the execd-as-init E2E (OSEP-0018) on a Kind cluster with the
-# Kubernetes runtime. Two topologies, selected by E2E_EXECD_RUN_AS_INIT:
-#
-# - true (default): execd_run_as_init = true. Runs the init contract
-#   (test_execd_init_e2e), the init-on hardening classes (floor, custom
-#   policy, isolated sessions), and — with OPENSANDBOX_HARDENING_DEGRADATION
-#   =true — a second server rollout using the caps-drop template
-#   (SETPCAP/NET_RAW dropped) for the degradation and keep-caps-conflict
-#   classes.
-# - false: execd_run_as_init = false. Runs the init-off hardening classes
-#   only (drift + default-off), so the same classes run on docker and k8s.
+# Runs the execd-as-init E2E (OSEP-0018) on a Kind cluster. Two topologies,
+# selected by E2E_EXECD_RUN_AS_INIT:
+# - true (default): init contract + init-on hardening classes; with
+#   OPENSANDBOX_HARDENING_DEGRADATION=true, a second rollout on the
+#   caps-drop template adds degradation + keep-caps-conflict.
+# - false: init-off hardening classes only (drift + default-off).
 
 set -euxo pipefail
 
@@ -111,8 +106,7 @@ cd "${REPO_ROOT}/tests/python"
 uv sync --all-extras --refresh
 
 if [ "${RUN_AS_INIT}" != "true" ]; then
-  # Init-off topology: run only the hardening classes that need it (the
-  # init contract and the recycle e2e require an init-on server).
+  # Init-off topology: the init contract and recycle e2e need init on.
   export OPENSANDBOX_HARDENING_DRIFT=true
   export OPENSANDBOX_HARDENING_DEFAULT_OFF=true
   uv run pytest tests/test_execd_hardening_e2e.py -v \
@@ -126,16 +120,14 @@ uv run pytest tests/test_execd_hardening_e2e.py -v \
 uv run pytest tests/test_execd_k8s_restart_recycle_e2e.py -v
 
 if [ "${OPENSANDBOX_HARDENING_DEGRADATION:-false}" = "true" ]; then
-  # Second rollout: same server, but the BatchSandbox template drops
-  # SETPCAP and NET_RAW from the pod ceiling, exercising the fail-open
-  # cap_drop degradation and the keep_capabilities x ceiling conflict.
+  # Second rollout: the BatchSandbox template drops SETPCAP + NET_RAW from
+  # the pod ceiling for degradation + keep-caps-conflict. The rollout
+  # replaces the server pod and port-forward resolves a pod at start, so
+  # the tunnel must be re-established before probing health.
   export E2E_BATCHSANDBOX_TEMPLATE_FILE=/etc/opensandbox/e2e.batchsandbox-template-caps-drop.yaml
   export OPENSANDBOX_HARDENING_KEEP_CAPS_CONFLICT=true
   k8s_e2e_write_server_helm_values
   k8s_e2e_helm_install_server
-  # The rollout replaced the server pod, and kubectl port-forward resolves a
-  # specific pod at start — the old tunnel is dead. Re-establish it before
-  # probing health.
   kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   sleep 2
   kubectl port-forward -n "${SERVER_NAMESPACE}" svc/opensandbox-server "${LIFECYCLE_LOCAL_PORT}:80" >>"${PORT_FORWARD_LOG}" 2>&1 &

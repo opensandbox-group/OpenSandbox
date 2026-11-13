@@ -34,67 +34,27 @@ request (``EXECD_ISOLATION_CONFIG`` env + the workspace PVC mounted at
 k8s).
 
 Verifies through the SDK, with the whole server -> sandbox -> execd path
-running with ``[hardening]``/``[landlock]`` enabled:
+running with ``[hardening]``/``[landlock]`` enabled. Classes (gating env
+where a leg supplies it):
 
-- every execd-spawned path (entrypoint + /command + bash sessions) runs
-  reduced: no effective caps, bounding set trimmed, seccomp filter mode,
-  no_new_privs, and an unchanged UID (the floor never relocates identity)
-- execd's config env is stripped from the workload: the full blacklist is
-  absent from /command; the entrypoint keeps the Jupyter/envs
-  configuration its scripts need and loses credentials + lifecycle
-  transport. The /command-injected names ride request env
-  (COMMAND_ENV_INJECTED) so those assertions are non-vacuous on both
-  runtimes
-- Landlock confinement: /tmp writable, /etc/passwd not writable, the
-  bind-mounted workspace writable AND executable (exercises the launcher's
-  mount expansion); the /proc/1/environ denial is pinned by
-  test_execd_init_e2e.py::test_workload_cannot_read_execd_environ
-  (PR_SET_DUMPABLE is independent of the hardening TOML)
-- GET /v1/isolated/capabilities reports init_mode=pid1 with
-  cap_drop/seccomp active and landlock active|unsupported
-
-A second class covers the fail-open degradation with CAP_SETPCAP dropped
-from the container ceiling (run by the script's phase 2 on docker and the
-caps-drop k8s leg, gated on OPENSANDBOX_HARDENING_DEGRADATION=true):
-
-- cap_drop reports degraded with a concrete reason; seccomp/landlock stay
-  active
-- the floor still applies (CapEff=0, seccomp, NNP) but the bounding set is
-  NOT trimmed (fail-open: workloads keep the container ceiling's bounding
-  set)
-
-A third class covers bwrap isolated sessions under init mode + the floor:
-sessions run with the bwrap namespace + seccomp/NNP floor and the
-credential env strip, and the hardening report stays intact around
-session create/run/delete.
-
-A fourth class runs a custom-policy TOML variant
-(configs/isolation.custom.toml): a `[seccomp] deny` override (chmod family,
-which REPLACES the built-in denylist) + `keep_capabilities=["CAP_NET_RAW"]`.
-It asserts the denied syscall fails with EACCES in /command while the kept
-capability is raised in the ambient set and survives execve (CapEff=0x2000).
-
-A fifth class pins the EXECD_INIT <-> TOML drift state: the hardened
-TOML with `runtime.execd_run_as_init = false` must report init_mode=none and
-degrade the enabled layers (with EXECD_INIT guidance), while execd-spawned
-/command still runs through the floor.
-
-A sixth class pins the default-off state: with no isolation TOML and no
-EXECD_INIT, every layer reports disabled and the workload is unaffected.
-
-A seventh class pins the keep_capabilities x ceiling conflict: the custom
-keep list names a capability the ceiling already dropped, and the workload
-must come up with zero caps (the launcher logs and continues) with the
-rest of the floor intact (gated on OPENSANDBOX_HARDENING_KEEP_CAPS_CONFLICT
-=true; the docker phase-1 ceiling drops NET_RAW, the k8s caps-drop leg
-drops it from the pod template).
-
-An eighth class runs the hardened TOML against the production-default
-container ceiling (Docker's default seccomp profile + no_new_privileges
-left at the server default) to prove the launcher's own syscalls —
-notably the Landlock ones — pass an unmodified container profile, so
-landlock reports active rather than unsupported (gated on
-OPENSANDBOX_HARDENING_DEFAULT_CEILING=true).
+- TestHardeningE2E — the floor end to end: reduced entrypoint, /command
+  and bash sessions (caps, bounding set, seccomp, NNP, unchanged UID),
+  env strip, Landlock, capabilities endpoint
+- TestHardeningDegradationE2E (OPENSANDBOX_HARDENING_DEGRADATION) —
+  ceiling without CAP_SETPCAP: cap_drop degraded, bounding set untrimmed,
+  the rest of the floor active
+- TestIsolatedSessionHardeningE2E — bwrap sessions compose with the floor
+- TestHardeningCustomPolicyE2E — [seccomp] deny override + ambient
+  keep_capabilities (CapEff=0x2000)
+- TestHardeningDriftE2E (OPENSANDBOX_HARDENING_DRIFT) — floor enabled with
+  execd_run_as_init=false: layers degraded with EXECD_INIT guidance
+- TestHardeningDefaultOffE2E (OPENSANDBOX_HARDENING_DEFAULT_OFF) — no
+  TOML, no EXECD_INIT: every layer disabled, workload unaffected
+- TestHardeningKeepCapsConflictE2E
+  (OPENSANDBOX_HARDENING_KEEP_CAPS_CONFLICT) — kept cap outside the
+  ceiling: the launch succeeds fully reduced
+- TestHardeningDefaultCeilingE2E (OPENSANDBOX_HARDENING_DEFAULT_CEILING) —
+  Docker's default seccomp profile: Landlock active, not unsupported
 """
 
 import logging
@@ -126,10 +86,9 @@ WORKSPACE_HOST = os.environ.get(
     "OPENSANDBOX_HARDENING_WORKSPACE_HOST", "/tmp/opensandbox-e2e/workspace"
 )
 
-# The entrypoint is launched with bootstrapEnv: credentials and lifecycle
-# transport are stripped, the Jupyter/envs configuration image entrypoint
-# scripts need (e.g. the code-interpreter entrypoint) is kept. /command uses
-# the full config blacklist.
+# The entrypoint strip list: credentials + lifecycle transport are stripped,
+# the Jupyter/envs configuration image entrypoint scripts need is kept.
+# /command uses the full COMMAND_ENV_STRIPPED blacklist.
 ENTRYPOINT_BOOTSTRAP_ENV_STRIPPED = [
     "EXECD_ACCESS_TOKEN",
     "OPENSANDBOX_LIFECYCLE",
@@ -148,15 +107,11 @@ COMMAND_ENV_STRIPPED = [
     "EXECD_RUNTIME_INIT",
 ]
 
-# Request-env values that make the strip assertions non-vacuous on both
-# runtimes: the names land in the container env, and the launcher must
-# remove them again before execve. Values are behaviorally inert — this
-# suite overrides the image entrypoint (so JUPYTER_* have no consumer) and
-# bootstrap.sh merely touches the EXECD_ENVS path. OPENSANDBOX_LIFECYCLE /
-# EXECD_LIFECYCLE_CONFIG / EXECD_RUNTIME_INIT are NOT injected: execd parses
-# them at startup and invalid or behavior-changing values would break the
-# sandbox; their strip is pinned non-vacuously by the Go unit
-# TestHardeningEnvStrip instead.
+# Injected via request env so the strip assertions see real names (non-vacuous
+# on both runtimes). Values are inert: this suite overrides the image
+# entrypoint and bootstrap.sh only touches the EXECD_ENVS path. The lifecycle
+# names are not injected — execd parses them at startup — their strip is
+# pinned by the Go unit TestHardeningEnvStrip.
 COMMAND_ENV_INJECTED = {
     "JUPYTER_HOST": "http://127.0.0.1:9",
     "JUPYTER_TOKEN": "dummy-jupyter-token",
@@ -182,18 +137,10 @@ K8S_WORKSPACE_EXEC = "/mnt/workspace-exec"
 
 
 def _hardened_sandbox_options() -> dict:
-    """Sandbox create kwargs that point execd at the hardened TOML.
-
-    Both runtimes inject COMMAND_ENV_INJECTED via request env so the env-strip
-    assertions observe real names. Docker: the server additionally injects
-    EXECD_ISOLATION_CONFIG via [docker] sandbox_env (config-level bind mount of
-    isolation.hardened.toml at /etc/opensandbox/isolation.toml) — no request
-    args needed. Kubernetes: the TOML arrives via the template-mounted
-    ConfigMap, so the request env points execd at it; the workspace PVC is
-    mounted at /mnt/workspace-exec so the Landlock bind-mount expansion is
-    exercised like the docker bind mount (/workspace itself is a
-    runtime-provided noexec tmpfs on k8s).
-    """
+    """Point execd at the hardened TOML (docker: server-injected; k8s:
+    per-request env into the template-mounted ConfigMap) and carry the
+    COMMAND_ENV_INJECTED names; k8s also mounts the workspace PVC at
+    K8S_WORKSPACE_EXEC to exercise Landlock's mount expansion."""
     env = dict(COMMAND_ENV_INJECTED)
     if not is_kubernetes_runtime():
         return {"env": env}
@@ -362,10 +309,8 @@ class TestHardeningE2E:
         )
 
     def test_command_path_is_reduced(self, sandbox) -> None:
-        # /command children go through the same launcher prelude as the
-        # entrypoint: zero effective caps, bounding set trimmed, seccomp
-        # filter mode, no_new_privs — and an unchanged UID: the floor
-        # subtracts privilege, it never relocates identity.
+        # Same launcher prelude as the entrypoint; Uid asserts the floor
+        # never relocates identity.
         status = _status_fields(
             sandbox, ["CapEff", "CapBnd", "Seccomp", "NoNewPrivs", "Uid"]
         )
@@ -390,16 +335,12 @@ class TestHardeningE2E:
         assert status["Uid"].split()[0] == "0", status
         for name in ENTRYPOINT_BOOTSTRAP_ENV_STRIPPED:
             assert name not in env, f"entrypoint env leaked {name}"
-        # The reduced entrypoint strip list must keep the Jupyter/envs
-        # configuration image entrypoint scripts consume: inject via request
-        # env (COMMAND_ENV_INJECTED), so presence here is a non-vacuous pin
-        # of the bootstrapEnv asymmetry against /command.
+        # Injected names must survive here: pins the bootstrapEnv asymmetry.
         for name in ENTRYPOINT_BOOTSTRAP_ENV_KEPT:
             assert name in env, f"entrypoint env lost {name}"
 
     def test_bash_session_runs_through_floor(self, sandbox) -> None:
-        # /session (persistent shell sessions) shares the /command launch
-        # primitive; pin that the session shell carries the same floor.
+        # /session shares the /command launch primitive.
         sid = sandbox.commands.create_session()
         try:
             code = (
@@ -671,14 +612,9 @@ class TestHardeningDefaultOffE2E:
             assert layer.message is not None, f"{name} message missing"
 
     def test_workload_unaffected_without_hardening(self, sandbox) -> None:
-        # No floor: the workload keeps the container ceiling (cap_drop list
-        # still removes the dangerous caps from the ceiling, but nothing the
-        # launcher would subtract on top of that) and no launcher seccomp
-        # filter. Whether the ceiling itself carries a profile is a node
-        # concern: docker's default is none (Seccomp=0) while a k8s node may
-        # or may not apply RuntimeDefault depending on its containerd config
-        # (kind shows Seccomp=0). The invariant under test: no
-        # launcher-installed filter, which is exactly Seccomp != 2.
+        # No launcher floor. Whether the ceiling carries a seccomp profile is
+        # a node concern (docker: none; k8s: containerd-dependent); the
+        # invariant is "no launcher-installed filter": Seccomp != 2.
         status = _status_fields(sandbox, ["CapEff", "Seccomp", "NoNewPrivs"])
         assert status["CapEff"] != "0000000000000000", status
         assert status["Seccomp"] != "2", status
@@ -692,14 +628,9 @@ class TestHardeningDefaultOffE2E:
     "caps-drop leg (pod template capabilities.drop)",
 )
 class TestHardeningKeepCapsConflictE2E:
-    """keep_capabilities x ceiling conflict pin.
-
-    configs/isolation.custom.toml keeps CAP_NET_RAW, but this leg's ceiling
-    has already dropped NET_RAW, so the launcher's ambient raise cannot
-    grant it. The launch must still succeed with the full reduction — zero
-    effective caps (nothing silently granted), seccomp and no_new_privs
-    intact, the custom deny list enforced — and the endpoint must keep
-    reporting cap_drop active rather than degrading.
+    """The custom TOML keeps CAP_NET_RAW, but this leg's ceiling dropped it:
+    the launch must still succeed fully reduced (zero caps, seccomp, NNP,
+    deny list enforced) instead of failing or granting partially.
     """
 
     @pytest.fixture(scope="module", autouse=True)
@@ -716,10 +647,8 @@ class TestHardeningKeepCapsConflictE2E:
     def test_endpoint_reports_floor_active(self, sandbox) -> None:
         report = _hardening_report(sandbox)
         assert report.init_mode == "pid1", f"init_mode = {report.init_mode}"
-        # cap_drop is active where the leg's ceiling still holds CAP_SETPCAP
-        # (docker phase 3b) and degraded where it does not (the k8s caps-drop
-        # leg drops SETPCAP alongside NET_RAW). Either way the layer reports
-        # honestly, and the rest of the floor must stay active.
+        # cap_drop is active where the ceiling holds CAP_SETPCAP (docker
+        # phase 3b) and degraded where it does not (k8s caps-drop leg).
         assert report.cap_drop is not None and report.cap_drop.state in (
             "active",
             "degraded",
@@ -732,8 +661,8 @@ class TestHardeningKeepCapsConflictE2E:
         )
 
     def test_kept_cap_not_granted_and_floor_intact(self, sandbox) -> None:
-        # The kept cap is outside the ceiling: the ambient raise fails and is
-        # logged; the workload must run with zero caps, not a partial grant.
+        # Keep is per-cap best-effort: the unusable cap is dropped, not the
+        # whole reduction.
         status = _status_fields(sandbox, ["CapEff", "Seccomp", "NoNewPrivs"])
         assert status["CapEff"] == "0000000000000000", status
         assert status["Seccomp"] == "2", status
@@ -755,14 +684,9 @@ class TestHardeningKeepCapsConflictE2E:
     "profile override, so the sandbox runs Docker's default profile)",
 )
 class TestHardeningDefaultCeilingE2E:
-    """Launcher syscalls under an unmodified container profile.
-
-    The other legs unset the container's no_new_privileges/seccomp profile
-    so the observed floor provably comes from the launcher alone. This leg
-    keeps Docker's defaults instead: the launcher's own privileged setup —
-    bounding-set trim, capset, PR_SET_SECCOMP, and the Landlock syscalls —
-    must all pass the container's default profile, so Landlock reports
-    active (not unsupported) and the floor applies normally.
+    """The hardened TOML against Docker's default seccomp profile (the other
+    legs unset the container baseline): the launcher's own syscalls —
+    including Landlock — must pass, so landlock reports active.
     """
 
     @pytest.fixture(scope="module", autouse=True)
@@ -785,8 +709,8 @@ class TestHardeningDefaultCeilingE2E:
         assert report.seccomp is not None and report.seccomp.state == "active", (
             report.seccomp
         )
-        # The point of this leg: landlock_create_ruleset/restrict_self pass
-        # the container's default seccomp profile.
+        # The point of this leg: Landlock syscalls pass the container's
+        # default seccomp profile.
         assert report.landlock is not None and report.landlock.state == "active", (
             f"landlock must be active under the container default profile, "
             f"got: {report.landlock}"
@@ -819,12 +743,9 @@ class TestIsolatedSessionHardeningE2E:
 
     @pytest.fixture(scope="module", autouse=True)
     def sandbox(self):
-        # The isolation extension grants the container ceiling CAP_SYS_ADMIN
-        # (bwrap needs it to build namespaces); the floor still applies to
-        # every user-code child, and bwrap remains launcher-exempt. The
-        # hardened options carry the TOML pointer: on kubernetes the config
-        # travels per-request (the docker server injects it config-wide), so
-        # without this the floor would silently be off on the k8s leg.
+        # The hardened options carry the TOML pointer: kubernetes delivers it
+        # per-request, so omitting them would silently disable the floor on
+        # the k8s leg.
         sbx = _create_sandbox(
             extensions={"bootstrap.execd.isolation": "enable"},
             tag="execd-hardening-isolated-e2e",

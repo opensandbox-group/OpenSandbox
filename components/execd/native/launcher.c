@@ -492,12 +492,11 @@ int main(int argc, char **argv)
     }
 
     if (hdr.flags & FLAG_CAP_DROP) {
-        /* 6. Final cap sets + ambient raise so kept caps survive execve.
-         * Keep is per-cap best-effort: a kept cap outside the current
-         * permitted set (the ceiling dropped it, or CAP_SETPCAP is gone and
-         * the raise cannot happen) is dropped from the capset request
-         * instead of failing it wholesale — otherwise one unusable cap
-         * would leave the workload with the ceiling's full effective set. */
+        /* 6. Final cap sets + ambient raise. Keep is per-cap best-effort:
+         * a kept cap outside the current permitted set (ceiling dropped it,
+         * or CAP_SETPCAP is gone) is dropped from the capset request instead
+         * of failing it wholesale — one unusable cap must not leave the
+         * workload with the ceiling's full effective set. */
         uint64_t kept = 0;
         uint64_t permitted = 0;
         uint64_t keepable;

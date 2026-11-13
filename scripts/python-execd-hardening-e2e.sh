@@ -27,19 +27,14 @@
 # Phase 3: custom-policy overrides (R-q) — a [seccomp] deny override +
 #          keep_capabilities=["CAP_NET_RAW"]; the ceiling keeps NET_RAW so
 #          the ambient raise can succeed.
-# Phase 3b: keep_capabilities x ceiling conflict — same custom TOML against
-#           the phase-1 ceiling (NET_RAW dropped); the workload must come up
-#           fully reduced with the floor intact.
+# Phase 3b: keep_capabilities x ceiling conflict — the custom TOML keeps
+#           CAP_NET_RAW against the phase-1 ceiling (NET_RAW dropped).
 # Phase 4: EXECD_INIT <-> TOML drift pin (R-s) — the hardened TOML with
 #          execd_run_as_init = false; the endpoint must report init_mode=none
 #          and degrade the enabled layers.
-# Phase 5: default-off pin (R-m) — plain server, no isolation TOML, init off;
-#          the endpoint must report init_mode=none with every layer disabled
-#          and the workload must be unaffected (no floor applied).
-# Phase 6: production-default container ceiling — hardened TOML with the
-#          server's no_new_privileges/seccomp overrides removed (Docker
-#          default profile); Landlock must report active, proving the
-#          launcher's syscalls pass an unmodified container profile.
+# Phase 5: default-off pin (R-m) — plain server, no isolation TOML, init off.
+# Phase 6: production-default container ceiling — Docker's default seccomp
+#          profile; Landlock must report active under it.
 #
 # Usage: bash scripts/python-execd-hardening-e2e.sh
 
@@ -111,12 +106,8 @@ write_server_config() {
     toml_bind_line="  \"/tmp/opensandbox-e2e/${toml_file}:/etc/opensandbox/isolation.toml\","
   fi
   if [ "${default_ceiling}" != "true" ]; then
-    # The container baseline must not mask the launcher's own floor: with
-    # no_new_privileges=true (the server default) or Docker's default seccomp
-    # profile, a launcher regression would still show NoNewPrivs=1/Seccomp=2
-    # in the workload. Unset both so the observed values can only come from
-    # the opensandbox-launcher. Phase 6 keeps the defaults instead (the
-    # production scenario) and asserts Landlock active under them.
+    # Unset the container NNP/seccomp baseline so observed floor values can
+    # only come from the launcher (phase 6 keeps the defaults instead).
     ceiling_lines="no_new_privileges = false
 seccomp_profile = \"unconfined\""
   fi

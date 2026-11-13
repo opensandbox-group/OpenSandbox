@@ -184,7 +184,7 @@ func TestHardeningEnvStrip(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "env")
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	// Plant one marker value per blacklist entry so every name is asserted
+	// One planted marker per blacklist entry, so every name is asserted
 	// non-vacuously (the launcher unsets by name before execve).
 	cmd.Env = append(os.Environ(),
 		"EXECD_ACCESS_TOKEN=marker-access-token",
@@ -213,8 +213,7 @@ func TestHardeningEnvStrip(t *testing.T) {
 }
 
 // TestHardeningEntrypointEnvStrip pins the reduced entrypoint strip list:
-// credentials and lifecycle transport are stripped, while the Jupyter/envs
-// configuration image entrypoint scripts need (e.g. code-interpreter) is kept.
+// credentials + lifecycle transport stripped, Jupyter/envs config kept.
 func TestHardeningEntrypointEnvStrip(t *testing.T) {
 	buildLauncher(t)
 	launcherSearchPaths = append(launcherSearchPaths, launcherBuilt)
@@ -256,12 +255,10 @@ func TestHardeningEntrypointEnvStrip(t *testing.T) {
 	}
 }
 
-// TestHardeningEmptyDenyListDegrades pins the empty [seccomp] deny override:
-// an explicitly empty list produces no filter, and the seccomp layer must
-// report degraded ("deny list is empty") rather than claim enforcement. The
-// raw layer state is read from InitHardening's store because in a unit-test
-// process (no init mode) ReportHardening legitimately rewrites degraded
-// messages with the EXECD_INIT drift guidance.
+// TestHardeningEmptyDenyListDegrades pins an explicitly empty [seccomp] deny
+// as degraded ("deny list is empty"). The raw layer state is read from
+// InitHardening's store: without init mode, ReportHardening rewrites
+// degraded messages with the EXECD_INIT drift guidance.
 func TestHardeningEmptyDenyListDegrades(t *testing.T) {
 	buildLauncher(t)
 	launcherSearchPaths = append(launcherSearchPaths, launcherBuilt)
