@@ -121,13 +121,17 @@ uv run pytest tests/test_execd_k8s_restart_recycle_e2e.py -v
 
 if [ "${OPENSANDBOX_HARDENING_DEGRADATION:-false}" = "true" ]; then
   # Second rollout: the BatchSandbox template drops SETPCAP + NET_RAW from
-  # the pod ceiling for degradation + keep-caps-conflict. The rollout
-  # replaces the server pod and port-forward resolves a pod at start, so
-  # the tunnel must be re-established before probing health.
+  # the pod ceiling for degradation + keep-caps-conflict.
   export E2E_BATCHSANDBOX_TEMPLATE_FILE=/etc/opensandbox/e2e.batchsandbox-template-caps-drop.yaml
   export OPENSANDBOX_HARDENING_KEEP_CAPS_CONFLICT=true
   k8s_e2e_write_server_helm_values
   k8s_e2e_helm_install_server
+  # On an upgrade, `kubectl wait available` can pass on the old pod's
+  # status; watch the new rollout to completion first. The rollout replaces
+  # the server pod and port-forward resolves a pod at start, so the tunnel
+  # must then be re-established before probing health.
+  kubectl rollout status deployment/opensandbox-server \
+    -n "${SERVER_NAMESPACE}" --timeout=180s
   kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
   sleep 2
   kubectl port-forward -n "${SERVER_NAMESPACE}" svc/opensandbox-server "${LIFECYCLE_LOCAL_PORT}:80" >>"${PORT_FORWARD_LOG}" 2>&1 &
