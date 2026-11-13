@@ -674,13 +674,14 @@ class TestHardeningDefaultOffE2E:
         # No floor: the workload keeps the container ceiling (cap_drop list
         # still removes the dangerous caps from the ceiling, but nothing the
         # launcher would subtract on top of that) and no launcher seccomp
-        # filter. Docker applies no container seccomp profile by default
-        # (Seccomp=0); Kubernetes pods run the containerd RuntimeDefault
-        # profile (Seccomp=1) — either way the value must not be 2, which
-        # would mean a launcher-installed filter.
+        # filter. Whether the ceiling itself carries a profile is a node
+        # concern: docker's default is none (Seccomp=0) while a k8s node may
+        # or may not apply RuntimeDefault depending on its containerd config
+        # (kind shows Seccomp=0). The invariant under test: no
+        # launcher-installed filter, which is exactly Seccomp != 2.
         status = _status_fields(sandbox, ["CapEff", "Seccomp", "NoNewPrivs"])
         assert status["CapEff"] != "0000000000000000", status
-        assert status["Seccomp"] == ("1" if is_kubernetes_runtime() else "0"), status
+        assert status["Seccomp"] != "2", status
         assert status["NoNewPrivs"] == "0", status
 
 
@@ -815,10 +816,14 @@ class TestIsolatedSessionHardeningE2E:
     def sandbox(self):
         # The isolation extension grants the container ceiling CAP_SYS_ADMIN
         # (bwrap needs it to build namespaces); the floor still applies to
-        # every user-code child, and bwrap remains launcher-exempt.
+        # every user-code child, and bwrap remains launcher-exempt. The
+        # hardened options carry the TOML pointer: on kubernetes the config
+        # travels per-request (the docker server injects it config-wide), so
+        # without this the floor would silently be off on the k8s leg.
         sbx = _create_sandbox(
             extensions={"bootstrap.execd.isolation": "enable"},
             tag="execd-hardening-isolated-e2e",
+            **_hardened_sandbox_options(),
         )
         logger.info("✓ hardening+isolated sandbox created: %s", sbx.id)
         yield sbx
