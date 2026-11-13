@@ -15,6 +15,7 @@
 package opensandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -418,15 +419,23 @@ func TestSnapshotLifecycle(t *testing.T) {
 	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/sandboxes/sbx-1/snapshots":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				assert.Fail(t, fmt.Sprintf("read body: %v", err))
+			}
 			var req CreateSnapshotRequest
-			json.NewDecoder(r.Body).Decode(&req)
+			json.NewDecoder(bytes.NewReader(body)).Decode(&req)
 			if req.Name != "before-upgrade" {
 				assert.Fail(t, fmt.Sprintf("Name = %q, want %q", req.Name, "before-upgrade"))
+			}
+			if req.Mode != SnapshotModeRootfsOnly {
+				assert.Fail(t, fmt.Sprintf("Mode = %q, want %q", req.Mode, SnapshotModeRootfsOnly))
 			}
 			jsonResponse(w, http.StatusAccepted, SnapshotInfo{
 				ID:        "snap-1",
 				SandboxID: "sbx-1",
 				Name:      "before-upgrade",
+				Mode:      SnapshotModeRootfsOnly,
 				Status:    SnapshotStatus{State: SnapshotStateCreating},
 				CreatedAt: now,
 			})
@@ -460,13 +469,16 @@ func TestSnapshotLifecycle(t *testing.T) {
 		}
 	})
 
-	created, err := client.CreateSnapshot(context.Background(), "sbx-1", CreateSnapshotRequest{Name: "before-upgrade"})
+	created, err := client.CreateSnapshot(context.Background(), "sbx-1", CreateSnapshotRequest{Name: "before-upgrade", Mode: SnapshotModeRootfsOnly})
 	require.NoErrorf(t, err, "CreateSnapshot")
 	require.Equal(t, "snap-1", created.ID)
+	require.Equal(t, SnapshotModeRootfsOnly, created.Mode)
 
 	got, err := client.GetSnapshot(context.Background(), "snap-1")
 	require.NoErrorf(t, err, "GetSnapshot")
 	require.Equal(t, SnapshotStateReady, got.Status.State)
+	// The GET response predates the mode field: it must read back as full.
+	require.Equal(t, SnapshotModeFull, got.Mode)
 
 	listed, err := client.ListSnapshots(context.Background(), ListSnapshotsOptions{
 		SandboxID: "sbx-1",
@@ -477,9 +489,38 @@ func TestSnapshotLifecycle(t *testing.T) {
 	})
 	require.NoErrorf(t, err, "ListSnapshots")
 	require.Len(t, listed.Items, 1)
+	require.Equal(t, SnapshotModeFull, listed.Items[0].Mode)
 
 	err = client.DeleteSnapshot(context.Background(), "snap-1")
 	require.NoErrorf(t, err, "DeleteSnapshot")
+}
+
+// TestCreateSnapshotKeepsUnsetModeOffTheWire verifies that an empty
+// CreateSnapshotRequest sends no mode field (legacy-server compatibility) and
+// that a response predating the mode field reads back as full.
+func TestCreateSnapshotKeepsUnsetModeOffTheWire(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			assert.Fail(t, fmt.Sprintf("read body: %v", err))
+		}
+		if strings.Contains(string(body), "\"mode\"") {
+			assert.Fail(t, fmt.Sprintf("unset mode must stay off the wire, got %s", body))
+		}
+		jsonResponse(w, http.StatusAccepted, SnapshotInfo{
+			ID:        "snap-legacy",
+			SandboxID: "sbx-1",
+			Status:    SnapshotStatus{State: SnapshotStateCreating},
+			CreatedAt: now,
+		})
+	})
+
+	created, err := client.CreateSnapshot(context.Background(), "sbx-1", CreateSnapshotRequest{})
+	require.NoErrorf(t, err, "CreateSnapshot")
+	require.Equal(t, "snap-legacy", created.ID)
+	require.Equal(t, SnapshotModeFull, created.Mode)
 }
 
 func TestResumeSandbox(t *testing.T) {

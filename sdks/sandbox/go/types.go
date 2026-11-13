@@ -418,6 +418,24 @@ const (
 	SnapshotStateFailed   SnapshotState = "Failed"
 )
 
+// SnapshotMode identifies what a snapshot persists.
+type SnapshotMode string
+
+const (
+	// SnapshotModeFull is the most complete capture the runtime supports:
+	// memory and process state on the fast-sandbox backend (restoring resumes
+	// in place); filesystem-only on Docker and Kubernetes, where running
+	// processes are not restored. It is the server default, and snapshots
+	// created before the mode field existed report it.
+	SnapshotModeFull SnapshotMode = "full"
+
+	// SnapshotModeRootfsOnly preserves only the writable filesystem:
+	// restoring boots a fresh sandbox from the disk, the entrypoint re-runs,
+	// and resume moves from milliseconds to seconds. Requires the fast-sandbox
+	// backend with OCI-backed sandboxes; other backends reject the mode.
+	SnapshotModeRootfsOnly SnapshotMode = "rootfsOnly"
+)
+
 type SnapshotStatus struct {
 	State            SnapshotState `json:"state"`
 	Reason           string        `json:"reason,omitempty"`
@@ -426,15 +444,22 @@ type SnapshotStatus struct {
 }
 
 type SnapshotInfo struct {
-	ID        string         `json:"id"`
-	SandboxID string         `json:"sandboxId"`
-	Name      string         `json:"name,omitempty"`
+	ID        string `json:"id"`
+	SandboxID string `json:"sandboxId"`
+	Name      string `json:"name,omitempty"`
+	// Mode reports the artifact class of the snapshot. Snapshots created before
+	// this field existed report SnapshotModeFull: the client normalizes an
+	// absent field to SnapshotModeFull.
+	Mode      SnapshotMode   `json:"mode,omitempty"`
 	Status    SnapshotStatus `json:"status"`
 	CreatedAt time.Time      `json:"createdAt"`
 }
 
 type CreateSnapshotRequest struct {
 	Name string `json:"name,omitempty"`
+	// Mode selects what the snapshot persists (see SnapshotMode). Leave empty to
+	// keep the field off the wire and let the server apply its default.
+	Mode SnapshotMode `json:"mode,omitempty"`
 }
 
 // PaginationInfo contains pagination metadata for list responses.
