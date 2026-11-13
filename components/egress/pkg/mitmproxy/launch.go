@@ -377,6 +377,10 @@ func buildMitmdumpArgs(cfg Config) []string {
 		args = append(args, "--set", "ssl_insecure=true")
 	}
 
+	if cfg.SubjectRevisionIPC != nil && cfg.SubjectRevisionIPC.TLSAdmission {
+		args = append(args, "--set", "http2=false")
+	}
+
 	args = append(args, "-s", systemScriptPath)
 	if strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
 		args = append(args, "-s", upstreamProxyScriptPath)

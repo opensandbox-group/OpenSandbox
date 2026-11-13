@@ -104,6 +104,7 @@ FLOW_BINDING_KEY = "opensandbox_credential_binding"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
 FLOW_VAULT_SUPPRESS_KEY = "opensandbox_credential_vault_suppress"
 FLOW_REJECTION_KEY = "opensandbox_credential_rejected"
+FLOW_SUBJECT_REQUEST_KEY = "opensandbox_subject_request"
 FLOW_REQUEST_HANDLE_KEY = "opensandbox_credential_request_handle"
 FLOW_H2_AUTHORITY_KEY = "opensandbox_credential_h2_authority"
 HEADER_SUBSTITUTION_DENYLIST = {
@@ -1404,6 +1405,12 @@ def _flow_rejected(flow: http.HTTPFlow) -> bool:
     return bool(flow.metadata.get(FLOW_REJECTION_KEY))
 
 
+def _binding_log(flow: http.HTTPFlow, level: str, event: str, detail: str) -> None:
+    if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
+        detail = "credential proxy: subject request reason=" + event
+    getattr(ctx.log, level)(detail)
+
+
 def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] | None:
     matches: list[tuple[int, dict[str, Any]]] = []
     for binding in vault.bindings:
@@ -1417,9 +1424,10 @@ def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] |
     selected = [binding for precedence, binding in matches if precedence == highest]
     if len(selected) != 1:
         _reject_request(flow, b"credential binding ambiguous\n")
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "ambiguous_binding",
             "credential proxy: ambiguous binding match for "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
         )
         return None
     return selected[0]
@@ -1549,9 +1557,10 @@ def _apply_path_query_substitutions(
             _reject_request(
                 flow, b"request path contains ambiguous substituted segments\n"
             )
-            ctx.log.warn(
+            _binding_log(
+                flow, "warn", "invalid_substitution",
                 "credential proxy: rejected request after path substitution: "
-                f"{flow.request.method} {_request_host(flow)} path=[REDACTED]"
+                f"{flow.request.method} {_request_host(flow)} path=[REDACTED]",
             )
             return applied
 
@@ -1855,7 +1864,10 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> None:
 def _finish_live_request(flow: http.HTTPFlow) -> None:
     """H1 hooks finish immediately; H2 retains transport output obligations."""
     handle = flow.metadata.get(FLOW_REQUEST_HANDLE_KEY)
-    live = _live_runtime
+    live = (
+        _subject_admission_runtime()
+        if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY) else _live_runtime
+    )
     if handle is not None and live is not None:
         if getattr(handle, "client_stream_id", None) is not None:
             adapter = live.h2_for(getattr(flow, "client_conn", None))
@@ -1926,20 +1938,27 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
     continues: exchange bindings defer resolve I/O to the single await
     below; static and live paths stay inline and never suspend.
     """
-    if _subject_admission_runtime() is not None:
-        # B3b-1/I6: deliberately incomplete experiment. Never fall back to
-        # clientIp credentials, including on old transports after IP reuse.
-        # B3b-2 adds token-bound HTTP/H2 admission and tracked teardown.
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        flow.metadata[FLOW_SUBJECT_REQUEST_KEY] = True
         client = getattr(flow, "client_conn", None)
-        if (getattr(client, "tls", False) or flow.request.scheme == "https"
-                or getattr(client, "alpn", None) == b"h2"):
+        version = (flow.request.http_version or "").upper()
+        if (getattr(client, "alpn", None) == b"h2"
+                or version in ("HTTP/2", "HTTP/2.0")
+                or ((flow.request.scheme or "").lower() == "https" and version != "HTTP/1.1")):
             flow.metadata[FLOW_REJECTION_KEY] = True
-            # killable is always true here: HttpStream sets flow.live = True
-            # before yielding HttpRequestHeadersHook, and an already-killed
-            # flow is not forwarded either. The guard stays defensive.
             if flow.killable:
                 flow.kill()
-            ctx.log.warn("credential proxy: request denied reason=subject_requests_disabled")
+            ctx.log.warn("credential proxy: request denied reason=subject_protocol_unsupported")
+            return
+        _requestheaders_live(subject, flow)
+        if _flow_rejected(flow):
+            # Subject denials terminate transport, including streamed requests:
+            # discard the shared path's 403/503 response (used by sidecar mode).
+            _finish_live_request(flow)
+            flow.response = None
+            if flow.killable:
+                flow.kill()
         return
     live = _live_runtime
     if live is not None:
@@ -2091,17 +2110,19 @@ def _reject_ambiguous_binding_path(
     raw_path = flow.request.path or "/"
     if _path_is_ambiguous(raw_path, allow_encoded_slash=True):
         _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "ambiguous_path",
             "credential proxy: rejected request with ambiguous path: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
         )
         return True
     if _path_decoding_changes_binding(flow, vault):
         _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "ambiguous_path",
             "credential proxy: rejected request whose percent-decoding crosses "
             "the credential binding boundary: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
         )
         return True
     return False
@@ -2153,18 +2174,20 @@ def _apply_vault_binding(
 
     if injected_names or substituted_surfaces:
         flow.metadata[FLOW_REDACTIONS_KEY] = list(flow.metadata[FLOW_VAULT_REDACTIONS_KEY])
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "binding_processed",
             "credential proxy: applied binding="
             f"{binding.get('name')} revision={vault.revision} "
             f"host={_request_host(flow)} method={flow.request.method} "
             f"headers={','.join(injected_names)} "
-            f"substitutions={','.join(sorted(set(substituted_surfaces)))}"
+            f"substitutions={','.join(sorted(set(substituted_surfaces)))}",
         )
     elif _has_substitutions_on(binding, {"path", "query", "header"}):
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "binding_processed",
             "credential proxy: substitution miss binding="
             f"{binding.get('name')} revision={vault.revision} "
-            f"host={_request_host(flow)} method={flow.request.method}"
+            f"host={_request_host(flow)} method={flow.request.method}",
         )
     return None
 
@@ -2181,9 +2204,10 @@ def _apply_exchange_binding(
     them); the defensive branch stays fail closed."""
     if live is not None:
         _reject_request(flow, b"credential exchange unavailable\n", status_code=503)
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "exchange_denied",
             "credential proxy: exchange binding unsupported binding="
-            f"{binding.get('name')}"
+            f"{binding.get('name')}",
         )
         return None
     if _reject_ambiguous_binding_path(flow, vault):
@@ -2349,18 +2373,20 @@ def request(flow: http.HTTPFlow) -> None:
             flow.metadata[FLOW_REDACTIONS_KEY] = list(
                 flow.metadata.get(FLOW_VAULT_REDACTIONS_KEY, [])
             )
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "body_processed",
             "credential proxy: applied body substitutions binding="
             f"{binding.get('name')} host={_request_host(flow)} "
-            f"method={flow.request.method}"
+            f"method={flow.request.method}",
         )
     elif FLOW_REDACTIONS_KEY not in flow.metadata and _has_substitutions_on(
         binding, {"body"}
     ):
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "body_processed",
             "credential proxy: substitution miss binding="
             f"{binding.get('name')} host={_request_host(flow)} "
-            f"method={flow.request.method}"
+            f"method={flow.request.method}",
         )
 
 
