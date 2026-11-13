@@ -716,9 +716,14 @@ class TestHardeningKeepCapsConflictE2E:
     def test_endpoint_reports_floor_active(self, sandbox) -> None:
         report = _hardening_report(sandbox)
         assert report.init_mode == "pid1", f"init_mode = {report.init_mode}"
-        assert report.cap_drop is not None and report.cap_drop.state == "active", (
-            report.cap_drop
-        )
+        # cap_drop is active where the leg's ceiling still holds CAP_SETPCAP
+        # (docker phase 3b) and degraded where it does not (the k8s caps-drop
+        # leg drops SETPCAP alongside NET_RAW). Either way the layer reports
+        # honestly, and the rest of the floor must stay active.
+        assert report.cap_drop is not None and report.cap_drop.state in (
+            "active",
+            "degraded",
+        ), report.cap_drop
         assert report.seccomp is not None and report.seccomp.state == "active", (
             report.seccomp
         )

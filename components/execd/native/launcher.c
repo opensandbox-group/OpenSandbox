@@ -184,6 +184,23 @@ static int capset_all(uint64_t kept)
     return syscall(SYS_capset, &header, data);
 }
 
+/* Current permitted set via capget (same ABI v3 layout as capset_all). */
+static int capget_permitted(uint64_t *permitted)
+{
+    struct cap_header header;
+    struct cap_data data[2];
+
+    memset(&header, 0, sizeof(header));
+    memset(data, 0, sizeof(data));
+    header.version = _LINUX_CAPABILITY_VERSION_3;
+    header.pid = 0;
+    if (syscall(SYS_capget, &header, data) != 0)
+        return -1;
+    *permitted = (uint64_t)data[0].permitted |
+                 ((uint64_t)data[1].permitted << 32);
+    return 0;
+}
+
 static int raise_ambient(uint32_t cap)
 {
     return prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, (unsigned long)cap, 0, 0);
@@ -475,14 +492,30 @@ int main(int argc, char **argv)
     }
 
     if (hdr.flags & FLAG_CAP_DROP) {
-        /* 6. Final cap sets + ambient raise so kept caps survive execve. */
+        /* 6. Final cap sets + ambient raise so kept caps survive execve.
+         * Keep is per-cap best-effort: a kept cap outside the current
+         * permitted set (the ceiling dropped it, or CAP_SETPCAP is gone and
+         * the raise cannot happen) is dropped from the capset request
+         * instead of failing it wholesale — otherwise one unusable cap
+         * would leave the workload with the ceiling's full effective set. */
         uint64_t kept = 0;
+        uint64_t permitted = 0;
+        uint64_t keepable;
 
         for (uint32_t k = 0; k < hdr.n_keepcaps; k++)
             kept |= (UINT64_C(1) << keepcaps[k]);
-        if (capset_all(kept) != 0)
+        if (capget_permitted(&permitted) != 0) {
+            log_err("capget", errno);
+            permitted = 0;
+        }
+        keepable = kept & permitted;
+        if (keepable != kept)
+            log_err("keep caps outside the permitted set dropped", EINVAL);
+        if (capset_all(keepable) != 0)
             log_err("capset", errno);
         for (uint32_t k = 0; k < hdr.n_keepcaps; k++) {
+            if (((UINT64_C(1) << keepcaps[k]) & keepable) == 0)
+                continue;
             if (raise_ambient(keepcaps[k]) != 0)
                 log_err("PR_CAP_AMBIENT_RAISE", errno);
         }
