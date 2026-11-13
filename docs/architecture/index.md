@@ -110,7 +110,7 @@ Important request features:
 
 ### 2.2 Diagnostics API
 
-`specs/diagnostic-api.yml` defines best-effort diagnostic descriptors for sandbox logs and events. The server also exposes practical DevOps diagnostics routes that return plain text for operators and AI troubleshooting workflows.
+`specs/diagnostic-api.yml` defines best-effort diagnostic descriptors for sandbox logs and events, plus structured routing context for locating the runtime backend.
 
 ### 2.3 Execd API
 

@@ -732,15 +732,10 @@ class FastSandboxService(SandboxService, ExtensionService):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: Optional[str] = None,
-        container: Optional[str] = None,
     ) -> str:
         # FastPath diagnostics carry lifecycle events only; process output
         # flows through execd, which has no sandbox-log endpoint.
         raise self._unsupported("sandbox logs", status.HTTP_501_NOT_IMPLEMENTED)
-
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        return self._lifecycle_diagnostics(sandbox_id, "events", "inspect").content
 
     def get_sandbox_events(self, sandbox_id: str, limit: int = 50) -> str:
         return self._lifecycle_diagnostics(sandbox_id, "events", "events", limit).content
