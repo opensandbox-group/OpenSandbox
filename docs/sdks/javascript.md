@@ -434,7 +434,7 @@ Read current sandbox resource usage with `await sandbox.getMetrics()`. This is s
 
 | Operation | Public API |
 | --- | --- |
-| Snapshot a sandbox | `manager.createSnapshot(sandboxId, { name })` |
+| Snapshot a sandbox | `manager.createSnapshot(sandboxId, { name, mode })` |
 | Inspect/list/delete snapshots | `manager.getSnapshot`, `listSnapshots`, `deleteSnapshot` |
 | Restore a snapshot | `Sandbox.create({ snapshotId, connectionConfig })` |
 | Manage Fsb templates | `manager.createTemplate`, `getTemplate`, `listTemplates`, `deleteTemplate` |
@@ -442,6 +442,13 @@ Read current sandbox resource usage with `await sandbox.getMetrics()`. This is s
 | Patch metadata | `sandbox.patchMetadata` or `manager.patchSandboxMetadata` |
 
 Poll snapshot status before restoring. Template builds are asynchronous; wait for `status.phase === "Succeeded"` before use. Template-backed creation requires a TTL and inherits workload configuration from the published template. Metadata patch values add/replace keys; `null` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
+
+Snapshot `mode` selects what the snapshot persists:
+
+- `"full"` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `"rootfsOnly"`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+
+`SnapshotInfo.mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `"full"`.
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. Wait for `Ready` before restoring; the snapshot remains available after this example:
 
@@ -470,6 +477,19 @@ try {
 } finally {
   await manager.close();
 }
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```ts
+const rootfsSnapshot = await manager.createSnapshot(sandbox.id, {
+  name: "workspace-state",
+  mode: "rootfsOnly",
+});
+// ... poll manager.getSnapshot(rootfsSnapshot.id) until Ready, then:
+const rebooted = await Sandbox.create({ snapshotId: rootfsSnapshot.id, connectionConfig: config });
+// Files written before the snapshot are present; processes were not preserved
+// and the entrypoint re-ran on boot.
 ```
 
 Use an existing template after its build reaches `Succeeded`:

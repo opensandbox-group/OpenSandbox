@@ -69,7 +69,25 @@ export interface paths {
          */
         delete: {
             parameters: {
-                query?: never;
+                query?: {
+                    /**
+                     * @description When true, destinations removed by this policy change lose their
+                     *     established/related conntrack bypass on the dns+nft sidecar: matching
+                     *     keep-alive flows are dropped. Opt-in because tearing down long-lived
+                     *     connections can surprise callers that only meant to block new dials.
+                     *     The teardown rules stay installed across later policy applies until
+                     *     the destination is allowed again or the kernel's established-flow
+                     *     conntrack timeout (`nf_conntrack_tcp_timeout_established`, 5 days by
+                     *     default) has passed since the change. `POST /policy` ignores this
+                     *     parameter.
+                     *
+                     *     Unsupported configurations return `501 Not Implemented` without
+                     *     changing the policy: `dns`-only enforcement (no nftables chain), the
+                     *     experimental revision runtime, and an upstream proxy
+                     *     (`OPENSANDBOX_EGRESS_UPSTREAM_PROXY`) combined with transparent MITM.
+                     */
+                    dropEstablished?: boolean;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -99,6 +117,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 500: components["responses"]["InternalServerError"];
+                501: components["responses"]["DropEstablishedNotImplemented"];
                 /**
                  * @description The internal experimental revision runtime is unavailable, the
                  *     mutation outcome could not be confirmed, or sticky recovery is
@@ -131,7 +150,25 @@ export interface paths {
          */
         patch: {
             parameters: {
-                query?: never;
+                query?: {
+                    /**
+                     * @description When true, destinations removed by this policy change lose their
+                     *     established/related conntrack bypass on the dns+nft sidecar: matching
+                     *     keep-alive flows are dropped. Opt-in because tearing down long-lived
+                     *     connections can surprise callers that only meant to block new dials.
+                     *     The teardown rules stay installed across later policy applies until
+                     *     the destination is allowed again or the kernel's established-flow
+                     *     conntrack timeout (`nf_conntrack_tcp_timeout_established`, 5 days by
+                     *     default) has passed since the change. `POST /policy` ignores this
+                     *     parameter.
+                     *
+                     *     Unsupported configurations return `501 Not Implemented` without
+                     *     changing the policy: `dns`-only enforcement (no nftables chain), the
+                     *     experimental revision runtime, and an upstream proxy
+                     *     (`OPENSANDBOX_EGRESS_UPSTREAM_PROXY`) combined with transparent MITM.
+                     */
+                    dropEstablished?: boolean;
+                };
                 header?: never;
                 path?: never;
                 cookie?: never;
@@ -160,6 +197,7 @@ export interface paths {
                 400: components["responses"]["BadRequest"];
                 401: components["responses"]["Unauthorized"];
                 500: components["responses"]["InternalServerError"];
+                501: components["responses"]["DropEstablishedNotImplemented"];
                 /**
                  * @description The internal experimental revision runtime is unavailable, the
                  *     mutation outcome could not be confirmed, or sticky recovery is
@@ -480,6 +518,13 @@ export interface components {
             /** @description Optional human-readable reason when the sidecar returns extra context. */
             reason?: string;
             policy?: components["schemas"]["NetworkPolicy"];
+            /**
+             * @description Present when the request set `dropEstablished=true`. Best-effort count of
+             *     TCP conntrack flows whose original destination matched destinations the
+             *     new policy no longer allows. The sidecar also installs nft drop rules
+             *     ahead of `ct state established,related accept` for those destinations.
+             */
+            droppedEstablished?: number;
         };
         /**
          * @description Egress network policy matching the sidecar `/policy` request body.
@@ -731,6 +776,19 @@ export interface components {
         };
         /** @description The request conflicts with the current Credential Vault revision. */
         Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "text/plain": string;
+            };
+        };
+        /**
+         * @description `dropEstablished=true` was requested but this sidecar cannot honor it
+         *     (`dns`-only enforcement, the experimental revision runtime, or an
+         *     upstream proxy with transparent MITM). The policy was not changed.
+         */
+        DropEstablishedNotImplemented: {
             headers: {
                 [name: string]: unknown;
             };
