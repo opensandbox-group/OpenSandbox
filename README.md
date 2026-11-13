@@ -51,12 +51,12 @@ Requirements:
 ### Install and Configure the Sandbox Server
 
 ```bash
-uvx opensandbox-server@1.2.0 init-config ~/.sandbox.toml --example docker
+uvx opensandbox-server@1.2.1 init-config ~/.sandbox.toml --example docker
 
-uvx opensandbox-server@1.2.0
+uvx opensandbox-server@1.2.1
 
 # Show help
-# uvx opensandbox-server@1.2.0 -h
+# uvx opensandbox-server@1.2.1 -h
 ```
 
 ### Create a Sandbox and Execute Commands/Scripts
@@ -219,7 +219,7 @@ The OpenSandbox MCP server exposes sandbox creation, command execution, and text
 Install and run:
 
 ```bash
-pip install opensandbox-mcp==1.2.0
+pip install opensandbox-mcp==1.2.1
 opensandbox-mcp --domain localhost:8080 --protocol http
 ```
 
