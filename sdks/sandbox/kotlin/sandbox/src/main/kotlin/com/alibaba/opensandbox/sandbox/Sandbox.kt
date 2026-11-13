@@ -753,15 +753,22 @@ class Sandbox internal constructor(
      * Creates a snapshot from this sandbox.
      *
      * @param name Optional human-readable snapshot name
+     */
+    @JvmOverloads
+    fun createSnapshot(name: String? = null): SnapshotInfo = sandboxService.createSnapshot(id, name)
+
+    /**
+     * Creates a snapshot with an explicit mode.
+     *
+     * @param name Optional human-readable snapshot name
      * @param mode What the snapshot persists: [SnapshotMode.FULL] (the server
-     * default when omitted) or [SnapshotMode.ROOTFS_ONLY] (writable filesystem
+     * default when null) or [SnapshotMode.ROOTFS_ONLY] (writable filesystem
      * only, fast-sandbox backend with OCI-backed sandboxes). Restoring a
      * rootfs-only snapshot cold-boots a fresh sandbox and re-runs the entrypoint.
      */
-    @JvmOverloads
     fun createSnapshot(
-        name: String? = null,
-        mode: String? = null,
+        name: String?,
+        mode: String?,
     ): SnapshotInfo = sandboxService.createSnapshot(id, name, mode)
 
     /**

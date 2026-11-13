@@ -498,12 +498,16 @@ class SandboxesAdapterTest {
         val request = mockWebServer.takeRequest()
         val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
         assertEquals("baseline", payload["name"]!!.jsonPrimitive.content)
-        // The generated request model defaults mode to `full`; an unset mode must
-        // never serialize that default (absent or explicit null are both fine).
+        // The generated serializer (encodeDefaults = true, explicitNulls = true)
+        // cannot omit the field entirely, so an unset mode serializes as an
+        // explicit null. Every server tolerates that: Optional[Literal] on the
+        // current server, pydantic's default extra=ignore on servers predating
+        // the field. What must never reach the wire is the generated `full`
+        // default, which would mislabel servers that forbid unknown fields.
         val mode = payload["mode"]
         assertTrue(
-            mode == null || mode is JsonNull,
-            "unset mode must not reach the wire as a value: $payload",
+            mode is JsonNull,
+            "unset mode must serialize as an explicit null, got: $payload",
         )
     }
 

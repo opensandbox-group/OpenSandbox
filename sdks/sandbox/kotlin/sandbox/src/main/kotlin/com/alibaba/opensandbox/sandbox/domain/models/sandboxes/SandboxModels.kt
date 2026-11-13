@@ -944,7 +944,20 @@ class SnapshotInfo(
     val status: SnapshotStatus,
     val createdAt: OffsetDateTime,
     val mode: String = SnapshotMode.FULL,
-)
+) {
+    /**
+     * Retained for source and binary compatibility with callers compiled
+     * against SDKs that predate the mode field: snapshots constructed through
+     * it report [SnapshotMode.FULL].
+     */
+    constructor(
+        id: String,
+        sandboxId: String,
+        name: String?,
+        status: SnapshotStatus,
+        createdAt: OffsetDateTime,
+    ) : this(id, sandboxId, name, status, createdAt, SnapshotMode.FULL)
+}
 
 class SnapshotFilter private constructor(
     val sandboxId: String?,
