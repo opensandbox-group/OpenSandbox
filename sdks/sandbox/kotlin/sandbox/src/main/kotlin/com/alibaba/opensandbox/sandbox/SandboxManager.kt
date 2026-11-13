@@ -279,6 +279,7 @@ class SandboxManager internal constructor(
         sandboxService.deleteTemplate(templateId)
     }
 
+    @JvmOverloads
     fun createSnapshot(
         sandboxId: String,
         name: String? = null,

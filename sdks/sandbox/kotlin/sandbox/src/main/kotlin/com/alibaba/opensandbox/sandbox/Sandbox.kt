@@ -758,6 +758,7 @@ class Sandbox internal constructor(
      * only, fast-sandbox backend with OCI-backed sandboxes). Restoring a
      * rootfs-only snapshot cold-boots a fresh sandbox and re-runs the entrypoint.
      */
+    @JvmOverloads
     fun createSnapshot(
         name: String? = null,
         mode: String? = null,

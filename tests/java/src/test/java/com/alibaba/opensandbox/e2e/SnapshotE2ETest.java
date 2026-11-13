@@ -249,6 +249,9 @@ public class SnapshotE2ETest extends BaseE2ETest {
         assertEquals(expectedId, snapshot.getId());
         assertEquals(expectedSandboxId, snapshot.getSandboxId());
         assertEquals(expectedName, snapshot.getName());
+        // Every snapshot in this suite uses the default mode; the SDK must
+        // report it (responses predating the field read back as "full").
+        assertEquals("full", snapshot.getMode());
         assertNotNull(snapshot.getStatus());
         assertEquals(expectedState, snapshot.getStatus().getState());
         assertNotNull(snapshot.getCreatedAt(), "snapshot.createdAt should be present");
