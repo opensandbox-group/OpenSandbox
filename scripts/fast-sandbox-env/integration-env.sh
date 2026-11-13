@@ -1741,21 +1741,21 @@ HARDENED_SBX_PUSH_PORT="${HARDENED_SBX_PUSH_PORT:-18443}"
 OCI_HARDENING_TEMPLATE_ID=""
 
 hardened_sbx_inputs_fingerprint() {
-	local hash
-	hash="$(cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
-		"$OSB_ROOT/components/execd/native/launcher.c" \
-		"$OSB_ROOT/components/execd/configs/isolation.hardened.toml" \
-		"$OSB_ROOT"/scripts/fast-sandbox-env/sandbox-test-image/* 2>/dev/null \
-		| sha256sum 2>/dev/null || cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
+	# openssl is a hard dependency of this script (registry_ca_up dies
+	# without it), so pin the digest tool instead of falling back between
+	# sha256sum/shasum: a flipped algorithm rehashes identical inputs
+	# differently and would force a needless hardened template rebuild.
+	if [[ "$HARDENED_SBX_PUSH" != 1 ]]; then
+		# The published image is an opaque input; hash its reference.
+		openssl dgst -sha256 <(printf '%s' "$SBX_IMAGE") | awk '{print $NF}'
+		return 0
+	fi
+	openssl dgst -sha256 \
+		< <(cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
 			"$OSB_ROOT/components/execd/native/launcher.c" \
 			"$OSB_ROOT/components/execd/configs/isolation.hardened.toml" \
-			"$OSB_ROOT"/scripts/fast-sandbox-env/sandbox-test-image/* 2>/dev/null | shasum -a 256)"
-	hash="${hash%% *}"
-	if [[ "$HARDENED_SBX_PUSH" != 1 ]]; then
-		hash="$(printf '%s' "$SBX_IMAGE" | sha256sum 2>/dev/null | cut -d' ' -f1)"
-		[[ -n "$hash" ]] || hash="$(printf '%s' "$SBX_IMAGE" | shasum -a 256 | cut -d' ' -f1)"
-	fi
-	printf '%s\n' "$hash"
+			"$OSB_ROOT"/scripts/fast-sandbox-env/sandbox-test-image/* 2>/dev/null) \
+		| awk '{print $NF}'
 }
 
 _hardening_template_phase() {
