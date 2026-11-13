@@ -3644,7 +3644,10 @@ idle_ping_code() { # [sandbox_id] (default $VERIFY_ID)
 idle_pause_verify() {
 	# Raw curl create: the CLI has no lifecycle.idlePolicy parameter yet.
 	# Optional template override (the overlaybd second pass); default native.
-	[[ "$IDLE_PAUSE" == "1" ]] || { log "idle-pause profile off (IDLE_PAUSE=0); skipping verify"; return 0; }
+	# Marker-aware (matches verify/idle-pause.sh): the profile is provisioned
+	# by a prior `IDLE_PAUSE=1 up`, which leaves $WORK/idle-pause behind.
+	[[ "$IDLE_PAUSE" == "1" || -f "$WORK/idle-pause" ]] \
+		|| { log "idle-pause profile off (IDLE_PAUSE=0); skipping verify"; return 0; }
 	local template_id="${1:-$TEMPLATE_ID}"
 	log "verify (idle-pause): template=$template_id"
 	local created t0 t1 code i
