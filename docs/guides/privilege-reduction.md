@@ -1,15 +1,15 @@
 ---
-title: Process Hardening
-description: Reduce every process a sandbox runs below the container ceiling — execd as sandbox init plus a capability, seccomp, and Landlock floor configured through one TOML file baked into your image.
+title: In-Sandbox Privilege Reduction
+description: Run every process inside a sandbox below the container ceiling — execd as sandbox init plus a capability, seccomp, and Landlock floor configured through one TOML file baked into your image.
 ---
 
-# Process Hardening
+# In-Sandbox Privilege Reduction
 
-Sandboxes run untrusted and AI-generated code. The container boundary ([secure container runtime](/guides/secure-container), capability drops, seccomp profiles) is set by the operator at create time — everything inside the container starts with those same privileges. Process hardening adds a second layer *inside* the sandbox: execd launches every user-code process with a strict subset of the container's privileges — no effective capabilities, `no_new_privs`, a syscall denylist, and optional Landlock filesystem confinement.
+Sandboxes run untrusted and AI-generated code. The container boundary ([secure container runtime](/guides/secure-container), capability drops, seccomp profiles) is set by the operator at create time — everything inside the container starts with those same privileges. Privilege reduction adds a second layer *inside* the sandbox: execd launches every user-code process with a strict subset of the container's privileges — no effective capabilities, `no_new_privs`, a syscall denylist, and optional Landlock filesystem confinement.
 
-The feature is configured by a single TOML file that travels with your image. You decide *whether* to harden; the built-in defaults decide *how*. Everything is fail-open: a missing kernel feature is reported and skipped, never fatal, and the capabilities endpoint publishes what is actually enforced instead of what was requested.
+The feature is configured by a single TOML file that travels with your image. You decide *whether* to reduce; the built-in defaults decide *how*. Everything is fail-open: a missing kernel feature is reported and skipped, never fatal, and the capabilities endpoint publishes what is actually enforced instead of what was requested.
 
-Hardening is an operator/image-level policy, not a per-request option — it cannot be toggled from `CreateSandboxRequest`.
+Privilege reduction is an operator/image-level policy, not a per-request option — it cannot be toggled from `CreateSandboxRequest`.
 
 ## How it is structured
 
@@ -247,7 +247,7 @@ The floor subtracts from what the container grants; it cannot grant anything bac
 ## Compatibility notes
 
 - **Non-Linux platforms** — the floor is Linux-only; configured layers report `unsupported` on Windows.
-- **`execve` is reserved** in a custom `[seccomp] deny` when hardening is on (config error); `execveat` remains allowed.
+- **`execve` is reserved** in a custom `[seccomp] deny` when `[hardening] enabled` is on (config error); `execveat` remains allowed.
 - **Override keys replace, never merge** — `[seccomp] deny` and `allowed_writable` both fully replace their defaults.
 - **Landlock + forked descendants** — see the `/proc/self` warning above; test `ps`-style tooling before enabling Landlock on images whose users rely on it.
 - **Rollback** — set `runtime.execd_run_as_init = false` and remove the TOML (or its `EXECD_ISOLATION_CONFIG` pointer) to return to the classic background-and-wait topology with no floor; no other migration is needed.
