@@ -50,7 +50,15 @@ from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as p
 def _config(namespace: str = "ns-1", runtime: str = "kubernetes") -> AppConfig:
     config = AppConfig(
         server=ServerConfig(host="0.0.0.0", port=8080, api_key="x"),
-        runtime=RuntimeConfig(type=runtime, execd_image="opensandbox/execd:1.1.0"),
+        # Pinned to the classic topology: most tests here assert env projection
+        # without EXECD_INIT. Init-mode projection is covered by the
+        # execd_init_service fixture (the config default is execd_run_as_init
+        # = true; see test_config.py).
+        runtime=RuntimeConfig(
+            type=runtime,
+            execd_image="opensandbox/execd:1.1.0",
+            execd_run_as_init=False,
+        ),
     )
     if runtime != "docker":
         config.kubernetes = KubernetesRuntimeConfig(
@@ -532,7 +540,7 @@ def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
     assert crs.created[-1]["spec"]["envs"] == [{"name": "EXECD_INIT", "value": "1"}]
 
 
-def test_create_does_not_inject_execd_init_by_default(service, crs):
+def test_create_does_not_inject_execd_init_when_disabled(service, crs):
     service.create_template(_create_request(env={"LOG_LEVEL": "info"}))
     envs = {e["name"]: e["value"] for e in crs.created[-1]["spec"]["envs"]}
     assert envs == {"LOG_LEVEL": "info"}
