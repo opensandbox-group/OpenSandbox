@@ -87,10 +87,10 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.h = SubjectHarness(Path(directory.name), origin_port=h.free_port())
         self.addCleanup(self.h.stop)
-        # Exercise the defensive H2 hook with launcher protection deliberately
-        # bypassed; production and all H1 cases disable H2 at launch.
-        self.h.http2 = self._testMethodName == "test_h2_ip_reuse_never_reaches_origin_or_injects_credentials"
-        self.h.untracked = self._testMethodName == "test_decrypted_without_membership_is_denied"
+
+    def start_harness(self, *, http2=False, untracked=False):
+        self.h.http2 = http2
+        self.h.untracked = untracked
         self.h.start()
         self.requests = []
         requests = self.requests
@@ -111,6 +111,7 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
             connection.close()
 
     def test_unknown_uninstalled_suspend_and_same_sni_subject_isolation(self):
+        self.start_harness()
         self.assert_denied()
         self.h.lifecycle("register")
         self.assert_denied()
@@ -131,6 +132,7 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         self.assertIsNone(self.h.process.poll())
 
     def test_budget_exhaustion_closes_new_bound_but_opaque_still_connects(self):
+        self.start_harness()
         self.h.lifecycle("register")
         self.h.install_subject()
         connections = [self.h.connect(sni=h.BOUND, trust="mitm") for _ in range(2)]
@@ -145,6 +147,7 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
                 connection.close()
 
     def test_unload_ip_reuse_old_decrypted_request_is_killed(self):
+        self.start_harness()
         self.h.lifecycle("register")
         self.h.install_subject()
         connection = self.h.connect(sni=h.BOUND, trust="mitm")
@@ -159,6 +162,7 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
     def test_suspend_reinstall_old_connection_never_reaches_origin(self):
+        self.start_harness()
         self.h.lifecycle("register")
         self.h.install_subject()
         connection = self.h.connect(sni=h.BOUND, trust="mitm")
@@ -172,6 +176,7 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
     def test_same_sni_subject_a_injects_b_passes_through_and_rotation(self):
+        self.start_harness()
         self.h.lifecycle("register")
         self.h.install_subject()
         connection = self.h.connect(sni=h.BOUND, trust="mitm")
@@ -193,6 +198,7 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
             self.assertNotIn(forbidden, log)
 
     def test_wrong_host_is_denied_before_origin(self):
+        self.start_harness()
         self.h.lifecycle("register")
         self.h.install_subject()
         connection = self.h.connect(sni=h.BOUND, trust="mitm")
@@ -202,6 +208,7 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
     def test_decrypted_without_membership_is_denied(self):
+        self.start_harness(untracked=True)
         self.h.lifecycle("register")
         self.h.install_subject()
         connection = self.h.connect(sni=h.BOUND, trust="mitm")
@@ -211,6 +218,7 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         self.assertEqual(self.requests, [])
 
     def test_h2_offer_negotiates_http11_and_injects(self):
+        self.start_harness()
         self.h.lifecycle("register")
         self.h.install_subject()
         raw = socket.create_connection(("127.0.0.1", self.h.proxy_port), timeout=5)
@@ -236,6 +244,8 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         import h2.connection
         import h2.events
 
+        # Deliberately bypass launcher H2 protection to exercise the deny hook.
+        self.start_harness(http2=True)
         self.h.lifecycle("register")
         self.h.install_subject()
         raw = socket.create_connection(("127.0.0.1", self.h.proxy_port), timeout=5)

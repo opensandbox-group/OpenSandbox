@@ -49,6 +49,9 @@ class SubjectRegistry(BoundConnectionRegistry):
                 # Suspension revokes every existing membership permanently.
                 # Activation preserves this fence; only disconnect frees slots.
                 self._request_fenced = self._request_fenced.union(self._entries)
+                # Clearing the view removes the registry's epoch comparison
+                # on reinstall; receiver prepare/commit validation remains
+                # authoritative. The membership fence survives any new view.
                 self._view = None
             else:
                 self._publish_activation(self._plan_activation(view))

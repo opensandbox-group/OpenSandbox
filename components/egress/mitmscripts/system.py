@@ -1953,7 +1953,8 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
             return
         _requestheaders_live(subject, flow)
         if _flow_rejected(flow):
-            # Preserve terminal subject denials, including streamed requests.
+            # Subject denials terminate transport, including streamed requests:
+            # discard the shared path's 403/503 response (used by sidecar mode).
             _finish_live_request(flow)
             flow.response = None
             if flow.killable:
