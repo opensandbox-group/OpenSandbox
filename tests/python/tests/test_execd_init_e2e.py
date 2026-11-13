@@ -17,7 +17,7 @@
 E2E tests for execd-as-init mode (OSEP-0018).
 
 Requires a server running with ``runtime.execd_run_as_init = true`` (the
-dedicated real-e2e and kubernetes-nightly jobs set it). Verifies the
+real-e2e python job and the kubernetes e2e jobs run with it). Verifies the
 container-level init contract through the SDK:
 
 - execd is PID 1 and the workload's parent
