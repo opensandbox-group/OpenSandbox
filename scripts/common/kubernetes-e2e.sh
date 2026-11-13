@@ -196,7 +196,7 @@ configToml: |
   workload_provider = "batchsandbox"
   sandbox_create_timeout_seconds = 180
   sandbox_create_poll_interval_seconds = 1.0
-  batchsandbox_template_file = "/etc/opensandbox/e2e.batchsandbox-template.yaml"
+  batchsandbox_template_file = "${E2E_BATCHSANDBOX_TEMPLATE_FILE:-/etc/opensandbox/e2e.batchsandbox-template.yaml}"
 
   [storage]
   allowed_host_paths = []
