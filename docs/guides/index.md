@@ -12,6 +12,7 @@ Use these guides to add capabilities to a working [sandbox application](/getting
 - [Pause and resume](/guides/pause-resume)
 - [Lifecycle hooks](/guides/lifecycle-hooks)
 - [Isolation sessions](/guides/isolation-sessions)
+- [Process hardening](/guides/process-hardening)
 - [Credential Vault](/guides/credential-vault)
 - [Chained upstream proxy](/guides/egress-upstream-proxy)
 - [Secure access](/guides/secure-access)

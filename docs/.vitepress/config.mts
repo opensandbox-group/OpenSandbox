@@ -226,6 +226,7 @@ export default withMermaid(defineConfig({
             },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
+            { text: "Process Hardening", link: "/guides/process-hardening" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "OCI Templates", link: "/guides/oci-templates" },
             {
