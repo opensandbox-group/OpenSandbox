@@ -93,8 +93,10 @@ jobs:
       - name: Run integration tests (environment init)
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
+      # Thin lane: native boot path + egress rules only (~4 min observed);
+      # the full scenario matrix runs on the overlaybd template below.
       - name: Run native template verify
-        timeout-minutes: 75
+        timeout-minutes: 30
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
 
       - name: Run overlaybd template verify

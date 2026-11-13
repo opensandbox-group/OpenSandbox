@@ -21,18 +21,25 @@
 # kind cluster with KVM passthrough, the OpenSandbox Helm charts (base CRDs,
 # fast-sandbox control plane, server, ingress-gateway), a RustFS artifact
 # store, and the firecracker-egress-pool SandboxPool with the OpenSandbox
-# egress sidecar — and the verify-native matrix then proves the stack end to
-# end: sandbox create via the opensandbox CLI, execd /ping through the signed
-# gateway route, delete, a pause/resume round trip, a snapshot ->
-# restore-from-snapshotId boot, the egress-held credential vault lifecycle
-# (OSEP-0022 FastPath relay), the full MITM CA chain (OSEP-0022 trust
-# anchor): a self-signed CA is provisioned as the versioned Secret, the
-# server bakes it into the golden image, the pool pins the keypair into
-# mitmdump, and a guest HTTPS request proves the template↔pool fingerprint
-# pinning plus per-subject credential injection against a CA-signed TLS echo
-# endpoint, and the execd-as-init in-guest process verify (OSEP-0018:
-# `execd --init` as a subreaper under the guest init — topology, reaping,
-# and the hardening report pinned in-guest).
+# egress sidecar — and the verify actions then prove the stack end to end.
+# The two template lanes are split by cost: verify-native keeps the
+# native-rootfs boot path (sandbox create via the opensandbox CLI, execd
+# /ping through the signed gateway route, delete, the DART peer pull, warm
+# creates) plus the egress network-security-rules baseline, while
+# verify-overlaybd builds the OCI-published template and runs the full
+# scenario matrix on it: the same boot path over ublk on-demand devices, a
+# pause/resume round trip, a snapshot -> restore-from-snapshotId boot, the
+# egress-held credential vault lifecycle (OSEP-0022 FastPath relay), the
+# full MITM CA chain (OSEP-0022 trust anchor): a self-signed CA is
+# provisioned as the versioned Secret, the server bakes it into the golden
+# image, the pool pins the keypair into mitmdump, and a guest HTTPS request
+# proves the template↔pool fingerprint pinning plus per-subject credential
+# injection against a CA-signed TLS echo endpoint, the execd-as-init
+# in-guest process verify (OSEP-0018: `execd --init` as a subreaper under
+# the guest init — topology, reaping, and the hardening report pinned
+# in-guest), and the idle-pause / wake-on-access verify (OSEP-0024). The
+# scenario stages are storage-independent, so they run once per run — on
+# the OCI template, the production-default path — not on both rootfs lanes.
 #
 # All Kubernetes resources come from the charts via `helm template` + plain
 # `kubectl apply` (no helm release state); the only env-owned manifests are
@@ -44,8 +51,8 @@
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up             # environment: stack + pool + server/ingress + native template
-#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # verify matrix on the native template (needs up)
-#   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + verify matrix (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules verify (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + full scenario matrix (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh pool           # re-apply the pool only
 #   ./scripts/fast-sandbox-env/integration-env.sh status         # component/pool/DART/OpenSandbox health
 #   ./scripts/fast-sandbox-env/integration-env.sh down           # teardown, host left clean
@@ -2906,24 +2913,29 @@ vm_console_finalize_verify() {
 }
 
 opensandbox_verify() {
-	# Optional template override: the overlaybd second pass calls this with
-	# the OCI template id; the default stays the native template. Cold create
-	# pulls the golden image through DART (native) or the registry over ublk
+	# Optional template override: the overlaybd lane calls this with the OCI
+	# template id; the default stays the native template. Cold create pulls
+	# the golden image through DART (native) or the registry over ublk
 	# (overlaybd); warm creates: the second may still pull on the other node
 	# via its DART peer; after both nodes cache the set, creates are
-	# sub-second (native) / attach cached devices (overlaybd).
+	# sub-second (native) / attach cached devices (overlaybd). The optional
+	# second argument sets the total create/delete cycle count: the native
+	# lane keeps three (cold pull, cross-node peer pull, steady state) —
+	# warm #4-#6 repeated an identical probe — while the overlaybd lane
+	# keeps the six its ublk warm-pool assertion counts hits against.
 	local template_id="${1:-$TEMPLATE_ID}"
-	log "verify (end-to-end): template=$template_id"
+	local total_creates="${2:-6}"
+	log "verify (end-to-end): template=$template_id creates=$total_creates"
 	local ids=() id label index
 	verify_one_sandbox "cold #1" 600000 "$template_id"
 	ids+=("$VERIFY_ID")
 	verify_one_sandbox "warm #2" 600000 "$template_id"
 	ids+=("$VERIFY_ID")
-	for index in 3 4 5 6; do
+	for index in $(seq 3 "$total_creates"); do
 		verify_one_sandbox "warm #$index" 120000 "$template_id"
 		ids+=("$VERIFY_ID")
 	done
-	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
+	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK ($total_creates sandboxes)"
 	dump_latency_evidence
 	verify_lifecycle_ops "${ids[0]}"
 	# vm-console collection rides this stage's own sandbox (ids[0], still
@@ -3996,22 +4008,22 @@ require_live_stack() {
 	[[ -x "$OSB_BIN" ]] || die "osb not found at $OSB_BIN (run up first, or set OSB_BIN)"
 }
 
+# The native lane is deliberately thin: the native-rootfs boot path plus the
+# egress network-security-rules baseline (the only native-exclusive stage).
+# The scenario matrix — execd-as-init, pause/resume, vault, MITM CA, exchange
+# resolver, idle-pause, snapshot — is storage-independent and lives in
+# verify_overlaybd (the OCI template is the production-default path), so it
+# is proven once per run instead of twice.
 verify_native() {
 	require_live_stack
 	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
-	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
+	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify "$TEMPLATE_ID" 3
 	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
-	run_stage "execd-as-init verify (in-guest process topology)" init_mode_verify
-	run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
-	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
-	run_stage "MITM CA chain verify (baked CA -> injection -> pinning)" mitm_ca_chain_verify
-	run_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" exchange_resolver_verify
-	run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
-	run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
 	# Last on purpose: the e2e kill loop started the source's 30s disappearance
-	# grace; every stage above consumed it, so this is a near-free confirmation.
+	# grace; the network-security-rules stage consumed it, so this is a
+	# near-free confirmation.
 	run_stage "vm-console finalize verify (node-agent completeness marker)" vm_console_finalize_verify
 }
 
