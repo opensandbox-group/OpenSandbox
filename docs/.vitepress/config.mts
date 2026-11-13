@@ -221,11 +221,12 @@ export default withMermaid(defineConfig({
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
             {
-              text: "Network Isolation on Kubernetes",
-              link: "/guides/network-isolation",
+              text: "Sandbox Network Security",
+              link: "/guides/network-security",
             },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
+            { text: "In-Sandbox Privilege Reduction", link: "/guides/privilege-reduction" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "OCI Templates", link: "/guides/oci-templates" },
             {

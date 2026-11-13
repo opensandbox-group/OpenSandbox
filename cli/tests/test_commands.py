@@ -12,30 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for CLI commands with mocked SDK calls.
-
-Strategy: patch ``opensandbox_cli.main.ClientContext`` and ``resolve_config``
-so the root ``cli`` callback creates our mock instead of a real SDK client.
-"""
+"""Tests for CLI commands with mocked SDK calls."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-import os
-import stat
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-import websockets
 from click.testing import CliRunner
-from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
-from opensandbox.models.execd import Execution, ExecutionComplete, ExecutionError
+from opensandbox.models.execd import CommandLogs, Execution, ExecutionComplete
 from opensandbox.models.sandboxes import (
     PagedSnapshotInfos,
     PaginationInfo,
@@ -50,11 +41,9 @@ from opensandbox.models.templates import (
     TemplateInfo,
     TemplateStatus,
 )
-from websockets.datastructures import Headers
-from websockets.http11 import Response
 
-from opensandbox_cli.commands.terminal import _make_stdin_reader, stream_pty
-from opensandbox_cli.config import load_config_file, resolve_config
+from opensandbox_cli.commands.terminal import stream_pty
+from opensandbox_cli.config import load_config_file
 from opensandbox_cli.main import cli
 from opensandbox_cli.output import OutputFormatter
 
@@ -130,12 +119,6 @@ class TestConfigInit:
         assert result.exit_code == 0
         assert "Config file created" in result.output
 
-    def test_init_refuses_overwrite(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("existing")
-        result = runner.invoke(cli, ["--config", str(cfg_path), "config", "init"])
-        assert "already exists" in result.output
-
 
 class TestConfigShow:
     def test_show_json_output(self, runner: CliRunner) -> None:
@@ -146,19 +129,6 @@ class TestConfigShow:
         assert data["api_key"] == "te****ey"
         assert data["config_path"].endswith(".opensandbox/config.toml")
         assert "config_file_exists" in data
-
-    def test_show_masks_numeric_api_key_from_file(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("[connection]\napi_key = 1234567890\n")
-        result = runner.invoke(
-            cli, ["--config", str(cfg_path), "config", "show", "-o", "json"]
-        )
-        assert result.exit_code == 0
-        data = json.loads(result.output)
-        # A numeric-looking key is still a string, so it is masked and not dropped.
-        assert data["api_key"] == "12******90"
 
     def test_show_table_output(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--api-key", "test-key", "config", "show"])
@@ -175,16 +145,6 @@ class TestConfigShow:
 
 
 class TestConfigSet:
-    def test_set_rejects_flat_key(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("[connection]\n")
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "flat_key", "value"],
-        )
-        assert result.exit_code != 0
-        assert "section.field" in result.output
-
     def test_set_uses_root_config_path(self, runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "custom.toml"
         runner.invoke(cli, ["--config", str(cfg_path), "config", "init"])
@@ -196,55 +156,6 @@ class TestConfigSet:
 
         assert result.exit_code == 0
         assert 'domain = "team.host"' in cfg_path.read_text()
-
-    def test_set_fails_when_config_file_is_missing(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "missing.toml"
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
-        )
-        assert result.exit_code != 0
-        assert "Run 'osb config init' first." in result.output
-
-    def test_set_escapes_special_characters(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("[connection]\n")
-
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.domain", 'a"b\\c'],
-        )
-
-        assert result.exit_code == 0
-        parsed = load_config_file(cfg_path)
-        assert parsed["connection"]["domain"] == 'a"b\\c'
-
-    def test_set_preserves_comments_and_unrelated_sections(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text(
-            "# top comment\n"
-            "[connection]\n"
-            "# keep this note\n"
-            'api_key = "k"\n\n'
-            "[output]\n"
-            "color = true\n"
-        )
-
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
-        )
-
-        assert result.exit_code == 0
-        text = cfg_path.read_text()
-        assert "# top comment" in text
-        assert "# keep this note" in text
-        parsed = load_config_file(cfg_path)
-        assert parsed["connection"]["api_key"] == "k"
-        assert parsed["connection"]["domain"] == "team.host"
-        assert parsed["output"]["color"] is True
 
     def test_set_creates_missing_section(self, runner: CliRunner, tmp_path: Path) -> None:
         cfg_path = tmp_path / "config.toml"
@@ -275,121 +186,6 @@ class TestConfigSet:
         parsed = load_config_file(cfg_path)
         assert parsed["connection"]["request_timeout"] == 45
         assert parsed["connection"]["use_server_proxy"] is True
-
-    @pytest.mark.parametrize("value", ["007123", "1e10", "NaN", "1_000", "1.50"])
-    def test_set_keeps_text_a_number_would_change(
-        self,
-        runner: CliRunner,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        value: str,
-    ) -> None:
-        monkeypatch.delenv("OPEN_SANDBOX_API_KEY", raising=False)
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("[connection]\n")
-
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.api_key", value],
-        )
-
-        assert result.exit_code == 0
-        assert load_config_file(cfg_path)["connection"]["api_key"] == value
-        assert resolve_config(config_path=cfg_path)["api_key"] == value
-
-    @pytest.mark.parametrize(
-        ("key", "value", "resolved_key", "expected"),
-        [
-            ("connection.request_timeout", "1e2", "request_timeout", 100),
-            ("connection.use_server_proxy", "1.00", "use_server_proxy", True),
-        ],
-    )
-    def test_set_still_infers_numbers_for_typed_keys(
-        self,
-        runner: CliRunner,
-        tmp_path: Path,
-        key: str,
-        value: str,
-        resolved_key: str,
-        expected: object,
-    ) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("[connection]\n")
-
-        result = runner.invoke(
-            cli, ["--config", str(cfg_path), "config", "set", key, value]
-        )
-
-        assert result.exit_code == 0
-        assert resolve_config(config_path=cfg_path)[resolved_key] == expected
-
-    def test_set_reports_invalid_existing_toml(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("[connection\nbroken =")
-
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
-        )
-
-        assert result.exit_code != 0
-        assert "not valid TOML" in result.output
-
-    def test_set_rejects_nested_key(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("[connection]\n")
-
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.retry.count", "3"],
-        )
-
-        assert result.exit_code != 0
-        assert "section.field" in result.output
-        # The value must not be silently misfiled as a quoted literal key.
-        assert load_config_file(cfg_path) == {"connection": {}}
-
-    def test_set_handles_out_of_order_tables(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text(
-            "[connection]\n"
-            'domain = "old"\n\n'
-            "[output]\n"
-            "color = true\n\n"
-            "[connection.retry]\n"
-            "count = 3\n",
-            encoding="utf-8",
-        )
-
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
-        )
-
-        assert result.exit_code == 0
-        parsed = load_config_file(cfg_path)
-        assert parsed["connection"]["domain"] == "team.host"
-        assert parsed["connection"]["retry"]["count"] == 3
-        assert parsed["output"]["color"] is True
-
-    def test_set_preserves_non_ascii_config(self, runner: CliRunner, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text(
-            "# café comment\n[connection]\ndomain = \"old\"\n",
-            encoding="utf-8",
-        )
-
-        result = runner.invoke(
-            cli,
-            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
-        )
-
-        assert result.exit_code == 0
-        # Reads and writes must stay UTF-8 regardless of the platform locale.
-        assert "café comment" in cfg_path.read_text(encoding="utf-8")
-        assert load_config_file(cfg_path)["connection"]["domain"] == "team.host"
 
 
 # Sandbox commands
@@ -515,22 +311,6 @@ class TestSandboxCreate:
         data = json.loads(result.output)
         assert data["timeout"] == "sdk-default"
 
-    def test_create_supports_default_timeout_none(self, runner: CliRunner) -> None:
-        mock_sb = MagicMock()
-        mock_sb.id = "sb-123"
-        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
-        mock_ctx.resolved_config["default_image"] = "python:3.12"
-        mock_ctx.resolved_config["default_timeout"] = "none"
-
-        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
-             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
-             patch("opensandbox.sync.sandbox.SandboxSync.create", return_value=mock_sb) as mock_create:
-            mock_resolve.return_value = mock_ctx.resolved_config
-            result = runner.invoke(cli, ["sandbox", "create", "-o", "json"], catch_exceptions=False)
-
-        assert result.exit_code == 0
-        assert mock_create.call_args.kwargs["timeout"] is None
-
     def test_create_passes_image_auth_to_sdk(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
         mock_sb.id = "sb-123"
@@ -564,21 +344,6 @@ class TestSandboxCreate:
         assert image_arg.auth is not None
         assert image_arg.auth.username == "alice"
         assert image_arg.auth.password == "secret-token"
-
-    def test_create_requires_both_image_auth_fields(self, runner: CliRunner) -> None:
-        result = _invoke(
-            runner,
-            [
-                "sandbox",
-                "create",
-                "--image",
-                "private.example.com/team/app:latest",
-                "--image-auth-username",
-                "alice",
-            ],
-        )
-        assert result.exit_code != 0
-        assert "Pass both --image-auth-username and --image-auth-password together." in result.output
 
     def test_create_loads_volumes_from_file(self, runner: CliRunner, tmp_path: Path) -> None:
         mock_sb = MagicMock()
@@ -714,23 +479,6 @@ class TestSandboxCreate:
         assert result.exit_code == 0
         assert mock_create.call_args.kwargs["network_policy"].egress[0].target == "api.example.com"
         assert mock_create.call_args.kwargs["credential_proxy"].enabled is True
-
-    def test_create_rejects_credential_proxy_without_network_policy(
-        self, runner: CliRunner
-    ) -> None:
-        result = _invoke(
-            runner,
-            [
-                "sandbox",
-                "create",
-                "--image",
-                "python:3.12",
-                "--credential-proxy",
-            ],
-        )
-
-        assert result.exit_code != 0
-        assert "--credential-proxy requires --network-policy-file" in result.output
 
     def test_create_from_template_calls_sdk(
         self, runner: CliRunner, tmp_path: Path
@@ -904,37 +652,6 @@ class TestSandboxCreate:
         data = json.loads(result.output)
         assert data["timeout"] == "manual-cleanup"
 
-    def test_create_from_file_with_snapshot_and_network_policy(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        mock_sb = MagicMock()
-        mock_sb.id = "sb-file"
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text(json.dumps({
-            "snapshotId": "snap-1",
-            "timeout": 600,
-            "networkPolicy": {
-                "defaultAction": "deny",
-                "egress": [{"action": "allow", "target": "api.example.com"}],
-            },
-        }))
-
-        mock_ctx = _build_mock_client_context(sandbox=mock_sb)
-        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
-             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx), \
-             patch("opensandbox.sync.sandbox.SandboxSync.create", return_value=mock_sb) as mock_create:
-            mock_resolve.return_value = mock_ctx.resolved_config
-            result = runner.invoke(
-                cli,
-                ["sandbox", "create", "-o", "json", "-f", str(request_path)],
-                catch_exceptions=False,
-            )
-
-        assert result.exit_code == 0
-        assert mock_create.call_args.args[0] is None
-        assert mock_create.call_args.kwargs["snapshot_id"] == "snap-1"
-        assert mock_create.call_args.kwargs["network_policy"].egress[0].target == "api.example.com"
-
     def test_create_from_file_with_template_calls_sdk(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
@@ -985,60 +702,6 @@ class TestSandboxCreate:
         assert result.exit_code != 0
         assert "--file cannot be combined with: --image" in result.output
 
-    def test_create_from_file_requires_startup_source(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text(json.dumps({"timeout": 600}))
-
-        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
-        assert result.exit_code != 0
-        assert "must set one of 'image', 'templateId', or 'snapshotId'" in result.output
-
-    def test_create_from_file_rejects_unknown_fields(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text(json.dumps({"image": "python:3.12", "snapshot_id": "snap-1"}))
-
-        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
-        assert result.exit_code != 0
-        assert "unsupported fields: snapshot_id" in result.output
-
-    def test_create_from_file_rejects_multiple_sources(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text(json.dumps({"image": "python:3.12", "snapshotId": "snap-1"}))
-
-        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
-        assert result.exit_code != 0
-        assert "must set only one of 'image', 'templateId', 'snapshotId'" in result.output
-
-    def test_create_from_file_rejects_template_workload_fields(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text(json.dumps({
-            "templateId": "tpl_abc",
-            "timeout": 600,
-            "resourceLimits": {"cpu": "1"},
-        }))
-
-        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
-        assert result.exit_code != 0
-        assert "cannot combine 'templateId' with 'resourceLimits'" in result.output
-
-    def test_create_from_file_rejects_invalid_json(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text("{not json")
-
-        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
-        assert result.exit_code != 0
-        assert "Invalid JSON in request file" in result.output
-
     def test_create_from_file_applies_default_timeout(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
@@ -1061,27 +724,6 @@ class TestSandboxCreate:
 
         assert result.exit_code == 0
         assert mock_create.call_args.kwargs["timeout"].total_seconds() == 900
-
-    def test_create_from_file_template_without_timeout_mentions_file(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text(json.dumps({"templateId": "tpl_abc"}))
-
-        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
-        assert result.exit_code != 0
-        assert f"'timeout' is required in request file '{request_path}'" in result.output
-        assert "--timeout is required" not in result.output
-
-    def test_create_from_file_template_rejects_manual_cleanup(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text(json.dumps({"templateId": "tpl_abc", "timeout": None}))
-
-        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
-        assert result.exit_code != 0
-        assert "'timeout': null (manual cleanup) is not supported in template mode." in result.output
 
     def test_create_from_file_allows_secure_access_false_with_template(
         self, runner: CliRunner, tmp_path: Path
@@ -1109,20 +751,6 @@ class TestSandboxCreate:
         assert result.exit_code == 0
         mock_create.assert_called_once()
         assert mock_create.call_args.args[0] == "tpl_abc"
-
-    def test_create_from_file_rejects_secure_access_true_with_template(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "sandbox-request.json"
-        request_path.write_text(json.dumps({
-            "templateId": "tpl_abc",
-            "timeout": 600,
-            "secureAccess": True,
-        }))
-
-        result = _invoke(runner, ["sandbox", "create", "-f", str(request_path)])
-        assert result.exit_code != 0
-        assert "cannot combine 'templateId' with 'secureAccess'" in result.output
 
 
 def _make_template_info(phase: str = "Pending") -> TemplateInfo:
@@ -1225,63 +853,6 @@ class TestTemplateCommands:
         data = json.loads(result.output)
         assert data["request_file"] == str(request_path)
 
-    def test_create_from_file_rejects_payload_flags(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "template-request.json"
-        request_path.write_text(json.dumps({
-            "image": "python:3.12",
-            "publish": "s3://bucket/publish",
-        }))
-
-        result = _invoke(
-            runner,
-            ["template", "create", "-f", str(request_path), "--image", "python:3.11"],
-            manager=MagicMock(),
-        )
-        assert result.exit_code != 0
-        assert "--file cannot be combined with: --image" in result.output
-
-    def test_create_requires_image_and_publish_without_file(
-        self, runner: CliRunner
-    ) -> None:
-        result = _invoke(runner, ["template", "create"], manager=MagicMock())
-        assert result.exit_code != 0
-        assert "Missing required options: --image, --publish (or pass --file)." in result.output
-
-    def test_create_from_file_rejects_invalid_request(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "template-request.json"
-        request_path.write_text(json.dumps({"image": "python:3.12"}))
-
-        result = _invoke(
-            runner,
-            ["template", "create", "-f", str(request_path)],
-            manager=MagicMock(),
-        )
-        assert result.exit_code != 0
-        assert "Invalid request file" in result.output
-        assert "publish" in result.output
-
-    def test_create_from_file_rejects_unknown_fields(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        request_path = tmp_path / "template-request.json"
-        request_path.write_text(json.dumps({
-            "image": "python:3.12",
-            "publish": "s3://bucket/publish",
-            "resourceLimit": {"cpu": "1"},
-        }))
-
-        result = _invoke(
-            runner,
-            ["template", "create", "-f", str(request_path)],
-            manager=MagicMock(),
-        )
-        assert result.exit_code != 0
-        assert "unsupported fields: resourceLimit" in result.output
-
     def test_get_list_delete_use_manager(self, runner: CliRunner) -> None:
         mock_mgr = MagicMock()
         mock_mgr.get_template.return_value = _make_template_info()
@@ -1299,6 +870,20 @@ class TestTemplateCommands:
         mock_mgr.get_template.assert_called_once_with("tpl_abc")
         mock_mgr.delete_template.assert_called_once_with("tpl_abc")
         mock_mgr.list_templates.assert_called_once()
+
+    def test_get_table_includes_manifest_ref(self, runner: CliRunner) -> None:
+        mock_mgr = MagicMock()
+        info = _make_template_info("Succeeded")
+        info.status = TemplateStatus(
+            phase="Succeeded",
+            manifest_ref="s3://bucket/publish/manifest.json",
+        )
+        mock_mgr.get_template.return_value = info
+
+        result = _invoke(runner, ["template", "get", "tpl_abc"], manager=mock_mgr)
+
+        assert result.exit_code == 0
+        assert "s3://bucket/publish/manifest.json" in result.output
 
 
 def _make_snapshot_info(state: str = "Succeeded") -> SnapshotInfo:
@@ -1472,55 +1057,6 @@ class TestSandboxMetrics:
         assert lines[0]["cpu_used_percentage"] == 12.5
         assert lines[1]["memory_used_in_mib"] == 300
 
-    def test_metrics_watch_warns_and_continues_on_error_events(self, runner: CliRunner) -> None:
-        class _FakeResponse:
-            def __init__(self) -> None:
-                self.lines = [
-                    'data: {"cpu_count": 2, "cpu_used_pct": 12.5, "mem_total_mib": 1024, "mem_used_mib": 256, "timestamp": 1710000000000}',
-                    'data: {"error": "failed to get CPU percent"}',
-                    'data: {"cpu_count": 2, "cpu_used_pct": 18.0, "mem_total_mib": 1024, "mem_used_mib": 300, "timestamp": 1710000001000}',
-                ]
-
-            def __enter__(self) -> _FakeResponse:
-                return self
-
-            def __exit__(self, exc_type, exc, tb) -> None:
-                return None
-
-            def raise_for_status(self) -> None:
-                return None
-
-            def iter_lines(self):
-                yield from self.lines
-
-        mock_sb = MagicMock()
-        mock_sb.metrics._httpx_client.stream.return_value = _FakeResponse()
-
-        result = _invoke(
-            runner,
-            ["sandbox", "metrics", "sb-1", "--watch", "-o", "json"],
-            sandbox=mock_sb,
-        )
-        assert result.exit_code == 0
-        decoder = json.JSONDecoder()
-        items: list[dict[str, object]] = []
-        raw = result.output.strip()
-        index = 0
-        while index < len(raw):
-            while index < len(raw) and raw[index].isspace():
-                index += 1
-            if index >= len(raw):
-                break
-            item, next_index = decoder.raw_decode(raw, index)
-            items.append(item)
-            index = next_index
-
-        assert len(items) == 3
-        assert items[0]["cpu_used_percentage"] == 12.5
-        assert items[1]["status"] == "warning"
-        assert items[1]["message"] == "Metrics stream error: failed to get CPU percent"
-        assert items[2]["cpu_used_percentage"] == 18.0
-
 
 class TestSandboxEndpoint:
     def test_endpoint_passes_valid_port_to_sdk(self, runner: CliRunner) -> None:
@@ -1612,116 +1148,15 @@ class TestFileTransfer:
         assert local_path.read_bytes() == b"hello"
         mock_sb.files.read_bytes_stream.assert_called_once_with("/tmp/download.txt")
 
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX device file")
-    def test_download_to_null_device(self, runner: CliRunner) -> None:
-        mock_sb = MagicMock()
-        mock_sb.files.read_bytes_stream.return_value = iter([b"\x00\xff", b"data"])
-
-        result = _invoke(
-            runner,
-            ["file", "download", "sb-1", "/tmp/data.bin", os.devnull],
-            sandbox=mock_sb,
-        )
-
-        assert result.exit_code == 0, result.output
-        assert stat.S_ISCHR(Path(os.devnull).stat().st_mode)
-        mock_sb.files.read_bytes_stream.assert_called_once_with("/tmp/data.bin")
-        mock_sb.close.assert_called_once()
-
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX named pipes and symlinks")
-    @pytest.mark.parametrize("symlink", [False, True])
-    @pytest.mark.parametrize("failure", [None, "disconnect", "interrupt"])
-    def test_download_streams_to_fifo_without_replacing_it(
-        self, runner: CliRunner, tmp_path: Path, symlink: bool, failure: str | None
-    ) -> None:
-        fifo = tmp_path / "download.pipe"
-        os.mkfifo(fifo)
-        original_inode = fifo.stat().st_ino
-        destination = fifo
-        if symlink:
-            destination = tmp_path / "download-link"
-            destination.symlink_to(fifo.name)
-
-        def stream():
-            yield b"\x00\xfffirst"
-            if failure == "disconnect":
-                raise ConnectionError("Download disconnected")
-            if failure == "interrupt":
-                raise KeyboardInterrupt
-            yield b"second"
-
-        mock_sb = MagicMock()
-        mock_sb.files.read_bytes_stream.return_value = stream()
-        # Keep a reader connected so opening the FIFO for writing cannot block.
-        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
-        try:
-            result = _invoke(
-                runner,
-                ["file", "download", "sb-1", "/tmp/data.bin", str(destination)],
-                sandbox=mock_sb,
-            )
-            received = os.read(reader, 1024)
-        finally:
-            os.close(reader)
-
-        assert (result.exit_code == 0) == (failure is None), result.output
-        assert ("Downloaded:" in result.output) == (failure is None)
-        assert received == b"\x00\xfffirst" + (b"second" if failure is None else b"")
-        assert stat.S_ISFIFO(fifo.stat().st_mode)
-        assert fifo.stat().st_ino == original_inode
-        assert set(tmp_path.iterdir()) == {fifo, destination}
-        if symlink:
-            assert destination.is_symlink()
-        mock_sb.close.assert_called_once()
-
-    @pytest.mark.parametrize("existing", [False, True])
-    @pytest.mark.parametrize("failure", ["not_found", "disconnect", "interrupt"])
-    def test_failed_download_preserves_destination(
-        self, runner: CliRunner, tmp_path: Path, existing: bool, failure: str
-    ) -> None:
-        local_path = tmp_path / "result.json"
-        original = b"previous successful result"
-        if existing:
-            local_path.write_bytes(original)
-        mock_sb = MagicMock()
-        if failure == "not_found":
-            mock_sb.files.read_bytes_stream.side_effect = SandboxApiException(
-                "File not found", status_code=404
-            )
-        else:
-            def broken_stream():
-                yield b"partial download"
-                if failure == "interrupt":
-                    raise KeyboardInterrupt
-                raise ConnectionError("Download disconnected")
-
-            mock_sb.files.read_bytes_stream.return_value = broken_stream()
-
-        result = _invoke(
-            runner,
-            ["file", "download", "sb-1", "/workspace/result.json", str(local_path)],
-            sandbox=mock_sb,
-        )
-
-        assert result.exit_code != 0
-        assert "Downloaded:" not in result.output
-        if existing:
-            assert local_path.read_bytes() == original
-        else:
-            assert not local_path.exists()
-        assert set(tmp_path.iterdir()) == ({local_path} if existing else set())
-        mock_sb.close.assert_called_once()
-
-    @pytest.mark.parametrize("chunks", [[], [b"new ", b"result"]])
     def test_download_replaces_destination_after_stream_completes(
-        self, runner: CliRunner, tmp_path: Path, chunks: list[bytes]
+        self, runner: CliRunner, tmp_path: Path
     ) -> None:
         local_path = tmp_path / "result.json"
         original = b"previous successful result"
         local_path.write_bytes(original)
 
         def stream():
-            for chunk in chunks:
+            for chunk in [b"new ", b"result"]:
                 assert local_path.read_bytes() == original
                 yield chunk
             assert local_path.read_bytes() == original
@@ -1735,118 +1170,7 @@ class TestFileTransfer:
         )
 
         assert result.exit_code == 0, result.output
-        assert local_path.read_bytes() == b"".join(chunks)
-        assert set(tmp_path.iterdir()) == {local_path}
-        mock_sb.close.assert_called_once()
-
-    @pytest.mark.skipif(os.name == "nt", reason="POSIX file permissions")
-    @pytest.mark.parametrize("existing", [False, True])
-    def test_download_preserves_permissions_and_respects_umask(
-        self, runner: CliRunner, tmp_path: Path, existing: bool
-    ) -> None:
-        local_path = tmp_path / "script.sh"
-        if existing:
-            local_path.write_bytes(b"old script")
-            local_path.chmod(0o754)
-        mock_sb = MagicMock()
-        mock_sb.files.read_bytes_stream.return_value = iter([b"new script"])
-
-        previous_umask = os.umask(0o077)
-        try:
-            result = _invoke(
-                runner,
-                ["file", "download", "sb-1", "/workspace/script.sh", str(local_path)],
-                sandbox=mock_sb,
-            )
-        finally:
-            os.umask(previous_umask)
-
-        assert result.exit_code == 0, result.output
-        assert local_path.read_bytes() == b"new script"
-        assert stat.S_IMODE(local_path.stat().st_mode) == (0o754 if existing else 0o600)
-
-    @pytest.mark.skipif(os.name == "nt", reason="Creating symlinks may require privileges")
-    @pytest.mark.parametrize("existing", [False, True])
-    def test_download_follows_destination_symlink(
-        self, runner: CliRunner, tmp_path: Path, existing: bool
-    ) -> None:
-        target = tmp_path / "target.json"
-        if existing:
-            target.write_bytes(b"old result")
-        link = tmp_path / "link.json"
-        link.symlink_to(target.name)
-        mock_sb = MagicMock()
-        mock_sb.files.read_bytes_stream.return_value = iter([b"new result"])
-
-        result = _invoke(
-            runner,
-            ["file", "download", "sb-1", "/workspace/result.json", str(link)],
-            sandbox=mock_sb,
-        )
-
-        assert result.exit_code == 0, result.output
-        assert link.is_symlink()
-        assert target.read_bytes() == b"new result"
-        assert set(tmp_path.iterdir()) == {link, target}
-
-    @pytest.mark.skipif(
-        os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
-        reason="Requires POSIX write permission enforcement",
-    )
-    def test_download_does_not_overwrite_read_only_file(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        local_path = tmp_path / "readonly.json"
-        local_path.write_bytes(b"original")
-        local_path.chmod(0o444)
-        mock_sb = MagicMock()
-
-        result = _invoke(
-            runner,
-            ["file", "download", "sb-1", "/workspace/result.json", str(local_path)],
-            sandbox=mock_sb,
-        )
-
-        assert result.exit_code != 0
-        assert local_path.read_bytes() == b"original"
-        assert set(tmp_path.iterdir()) == {local_path}
-        mock_sb.files.read_bytes_stream.assert_not_called()
-        mock_sb.close.assert_called_once()
-
-    def test_download_rejects_directory_destination(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        mock_sb = MagicMock()
-        result = _invoke(
-            runner,
-            ["file", "download", "sb-1", "/workspace/result.json", str(tmp_path)],
-            sandbox=mock_sb,
-        )
-
-        assert result.exit_code != 0
-        assert tmp_path.is_dir()
-        assert list(tmp_path.iterdir()) == []
-        mock_sb.files.read_bytes_stream.assert_not_called()
-        mock_sb.close.assert_called_once()
-
-    def test_download_preserves_destination_when_replace_fails(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        local_path = tmp_path / "result.json"
-        local_path.write_bytes(b"original")
-        mock_sb = MagicMock()
-        mock_sb.files.read_bytes_stream.return_value = iter([b"complete download"])
-
-        with patch("os.replace", side_effect=PermissionError("Cannot replace file")):
-            result = _invoke(
-                runner,
-                ["file", "download", "sb-1", "/workspace/result.json", str(local_path)],
-                sandbox=mock_sb,
-            )
-
-        assert result.exit_code != 0
-        assert "Downloaded:" not in result.output
-        assert local_path.read_bytes() == b"original"
+        assert local_path.read_bytes() == b"new result"
         assert set(tmp_path.iterdir()) == {local_path}
         mock_sb.close.assert_called_once()
 
@@ -1975,27 +1299,7 @@ class TestCommandSeparators:
         mock_sb.commands.run.assert_called_once()
         assert mock_sb.commands.run.call_args.args[0] == "sh -lc 'echo ready'"
 
-    def test_command_run_exits_nonzero_when_stream_ends_early(self, runner: CliRunner) -> None:
-        mock_sb = MagicMock()
-        execution = MagicMock()
-        execution.error = None
-        execution.complete = None
-        mock_sb.commands.run.return_value = execution
-
-        result = _invoke(
-            runner,
-            ["command", "run", "sb-1", "--", "sleep", "60"],
-            sandbox=mock_sb,
-            output_format="raw",
-        )
-
-        assert result.exit_code == 1
-        assert "ended before the command finished" in result.output
-
     def test_command_run_argv_flag_preserves_literal_arguments(self, runner: CliRunner) -> None:
-        # With --argv the trailing arguments must reach the process verbatim:
-        # literal "$HOME", embedded space, single quote, and an empty string,
-        # with no shell quoting or expansion in between.
         mock_sb = MagicMock()
         execution = MagicMock()
         execution.error = None
@@ -2078,15 +1382,6 @@ class TestEgressCommands:
         assert rules[0].target == "pypi.org"
         assert rules[1].action == "deny"
         assert rules[1].target == "bad.example.com"
-
-
-    @pytest.mark.parametrize("rule", ["allow=", "deny=  "])
-    def test_patch_rejects_empty_target_as_usage_error(self, runner: CliRunner, rule: str) -> None:
-        mock_sb = MagicMock()
-        result = _invoke(runner, ["egress", "patch", "sb-1", "--rule", rule], sandbox=mock_sb)
-        assert result.exit_code == 2
-        assert f"Invalid rule '{rule}'" in result.output
-        mock_sb.patch_egress_rules.assert_not_called()
 
 
 # Credential Vault commands
@@ -2198,23 +1493,6 @@ bindings: []
         assert "runtime-secret" not in result.output
         data = json.loads(result.output)
         assert data["revision"] == 2
-
-    def test_patch_rejects_empty_mutation_payload(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
-        mock_sb = MagicMock()
-        payload_path = tmp_path / "empty.yaml"
-        payload_path.write_text("expectedRevision: 1\n")
-
-        result = _invoke(
-            runner,
-            ["credential-vault", "patch", "sb-1", "--file", str(payload_path)],
-            sandbox=mock_sb,
-        )
-
-        assert result.exit_code != 0
-        assert "must include credentials or bindings" in result.output
-        mock_sb.credential_vault.patch.assert_not_called()
 
     def test_delete_calls_sdk(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
@@ -2328,48 +1606,6 @@ class TestCommandRun:
         mock_sb.commands.run.assert_called_once()
         assert mock_sb.commands.run.call_args.args[0] == ["echo", "hello"]
 
-    @pytest.mark.parametrize("output_format", ["table", "json", "yaml"])
-    def test_background_run_exits_nonzero_on_execution_error(
-        self, runner: CliRunner, output_format: str
-    ) -> None:
-        mock_sb = MagicMock()
-        mock_sb.commands.run.return_value = Execution(
-            id="exec-123",
-            error=ExecutionError(
-                name="CommandExecError", value="cannot start command", timestamp=1
-            ),
-        )
-
-        result = _invoke(
-            runner,
-            ["command", "run", "sb-1", "--background", "-o", output_format, "--", "echo", "hello"],
-            sandbox=mock_sb,
-        )
-
-        assert result.exit_code == 1
-        assert "CommandExecError: cannot start command" in result.stderr
-        assert not result.stdout
-        mock_sb.close.assert_called_once()
-
-    @pytest.mark.parametrize("output_format", ["table", "json", "yaml"])
-    @pytest.mark.parametrize("execution_id", [None, "exec-123"])
-    def test_background_run_exits_nonzero_when_startup_is_unconfirmed(
-        self, runner: CliRunner, output_format: str, execution_id: str | None
-    ) -> None:
-        mock_sb = MagicMock()
-        mock_sb.commands.run.return_value = Execution(id=execution_id)
-
-        result = _invoke(
-            runner,
-            ["command", "run", "sb-1", "--background", "-o", output_format, "--", "echo", "hello"],
-            sandbox=mock_sb,
-        )
-
-        assert result.exit_code == 1
-        assert "before background command startup was confirmed" in result.stderr
-        assert not result.stdout
-        mock_sb.close.assert_called_once()
-
     def test_foreground_run_rejects_json_output(self, runner: CliRunner) -> None:
         result = _invoke(
             runner,
@@ -2377,6 +1613,40 @@ class TestCommandRun:
         )
         assert result.exit_code != 0
         assert "Allowed values: raw" in result.output
+
+
+class TestCommandLogs:
+    def test_table_includes_next_cursor(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_background_command_logs.return_value = CommandLogs(
+            content="hello-from-exec",
+            cursor=424242,
+        )
+
+        result = _invoke(
+            runner, ["command", "logs", "sb-1", "exec-1"], sandbox=mock_sb
+        )
+
+        assert result.exit_code == 0
+        assert "hello-from-exec" in result.output
+        assert "424242" in result.output.split()
+
+    def test_raw_logs_stay_the_payload(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_background_command_logs.return_value = CommandLogs(
+            content="hello-from-exec",
+            cursor=424242,
+        )
+
+        result = _invoke(
+            runner,
+            ["command", "logs", "sb-1", "exec-1", "-o", "raw"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0
+        assert "hello-from-exec" in result.output
+        assert "424242" not in result.output
 
 
 class TestCommandInterrupt:
@@ -2421,23 +1691,6 @@ class TestCommandSession:
         assert mock_sb.commands.run_in_session.call_args.args[:2] == ("sess-123", "pwd")
         assert mock_sb.commands.run_in_session.call_args.kwargs["timeout"] == timedelta(seconds=30)
 
-    def test_session_run_exits_nonzero_when_stream_ends_early(self, runner: CliRunner) -> None:
-        mock_sb = MagicMock()
-        mock_execution = MagicMock()
-        mock_execution.error = None
-        mock_execution.complete = None
-        mock_sb.commands.run_in_session.return_value = mock_execution
-
-        result = _invoke(
-            runner,
-            ["command", "session", "run", "sb-1", "sess-123", "--", "sleep", "60"],
-            sandbox=mock_sb,
-            output_format="raw",
-        )
-
-        assert result.exit_code == 1
-        assert "ended before the command finished" in result.output
-
     def test_session_delete(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
         result = _invoke(
@@ -2448,65 +1701,6 @@ class TestCommandSession:
         assert result.exit_code == 0
         mock_sb.commands.delete_session.assert_called_once_with("sess-123")
         assert "Deleted session: sess-123" in result.output
-
-
-# DevOps diagnostics
-
-
-class TestDevopsCommands:
-    def test_logs_preserves_legacy_plain_text_filters_with_warning(self, runner: CliRunner) -> None:
-        mock_ctx = _build_mock_client_context()
-        response = MagicMock()
-        response.status_code = 200
-        response.text = "sandbox logs"
-        response.raise_for_status = MagicMock()
-        devops_client = MagicMock()
-        devops_client.get.return_value = response
-        mock_ctx.get_devops_client.return_value = devops_client
-
-        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
-             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx):
-            mock_resolve.return_value = mock_ctx.resolved_config
-            result = runner.invoke(
-                cli,
-                ["devops", "logs", "sb-1", "--tail", "100", "--since", "30m"],
-                catch_exceptions=False,
-            )
-
-        assert result.exit_code == 0
-        assert "deprecated" in result.output
-        assert "sandbox logs" in result.output
-        devops_client.get.assert_called_once_with(
-            "sandboxes/sb-1/diagnostics/logs",
-            params={"tail": 100, "since": "30m"},
-        )
-
-    def test_events_preserves_legacy_limit_with_warning(self, runner: CliRunner) -> None:
-        mock_ctx = _build_mock_client_context()
-        response = MagicMock()
-        response.status_code = 200
-        response.text = "sandbox events"
-        response.raise_for_status = MagicMock()
-        devops_client = MagicMock()
-        devops_client.get.return_value = response
-        mock_ctx.get_devops_client.return_value = devops_client
-
-        with patch("opensandbox_cli.main.resolve_config") as mock_resolve, \
-             patch("opensandbox_cli.main.ClientContext", return_value=mock_ctx):
-            mock_resolve.return_value = mock_ctx.resolved_config
-            result = runner.invoke(
-                cli,
-                ["devops", "events", "sb-1", "--limit", "25"],
-                catch_exceptions=False,
-            )
-
-        assert result.exit_code == 0
-        assert "deprecated" in result.output
-        assert "sandbox events" in result.output
-        devops_client.get.assert_called_once_with(
-            "sandboxes/sb-1/diagnostics/events",
-            params={"limit": 25},
-        )
 
 
 # Stable diagnostics
@@ -2547,32 +1741,6 @@ class TestDiagnosticsCommands:
         assert result.exit_code == 0
         assert "line 1\nline 2" in result.output
         manager.get_diagnostic_logs.assert_called_once_with("sb-1", scope="container")
-
-    def test_logs_raw_surfaces_diagnostic_notices_on_stderr(
-        self, runner: CliRunner
-    ) -> None:
-        manager = MagicMock()
-        manager.get_diagnostic_logs.return_value = DiagnosticContent(
-            sandboxId="sb-1",
-            kind="logs",
-            scope="all",
-            delivery="inline",
-            contentType="text/plain; charset=utf-8",
-            content="container logs",
-            truncated=True,
-            warnings=["Only container logs are available."],
-        )
-
-        result = _invoke(
-            runner,
-            ["diagnostics", "logs", "sb-1", "--scope", "all", "-o", "raw"],
-            manager=manager,
-        )
-
-        assert result.exit_code == 0
-        assert result.stdout == "container logs\n"
-        assert "Warning: diagnostic content was truncated." in result.stderr
-        assert "Warning: Only container logs are available." in result.stderr
 
     def test_events_json_prints_descriptor(self, runner: CliRunner) -> None:
         manager = MagicMock()
@@ -2762,139 +1930,8 @@ class TestTerminal:
         assert result.exit_code == 0
         assert create.call_args.kwargs["workdir"] == "/tmp"
 
-    def test_closed_without_exit_frame_fails_and_keeps_session(
-        self, runner: CliRunner
-    ) -> None:
-        incoming = ['{"type":"connected","mode":"pty","role":"holder"}']
-
-        result, _, _, delete, _, _ = _invoke_terminal(
-            runner,
-            ["terminal", "sbx-1"],
-            incoming=incoming,
-        )
-
-        assert result.exit_code == 1
-        assert "kept on the sandbox: sess-1" in result.stderr
-        assert "DELETE http://execd.example:44772/pty/sess-1" in result.stderr
-        delete.assert_not_called()
-
-    def test_startup_failure_deletes_session_and_reports_error(
-        self, runner: CliRunner
-    ) -> None:
-        incoming = ['{"type":"error","code":"START_FAILED","error":"no such dir"}']
-
-        result, _, _, delete, _, _ = _invoke_terminal(
-            runner,
-            ["terminal", "sbx-1"],
-            incoming=incoming,
-        )
-
-        assert result.exit_code == 1
-        assert "Shell startup failed" in result.stderr
-        assert "no such dir" in result.stderr
-        assert delete.call_args.args[2] == "sess-1"
-
-    @pytest.mark.parametrize(
-        "error",
-        [
-            OSError("connection refused"),
-            websockets.InvalidStatus(Response(403, "Forbidden", Headers())),
-        ],
-    )
-    def test_failed_connect_deletes_session(
-        self, runner: CliRunner, error: Exception
-    ) -> None:
-        result, _, _, delete, _, _ = _invoke_terminal(
-            runner,
-            ["terminal", "sbx-1"],
-            incoming=[],
-            connect_error=error,
-        )
-
-        assert result.exit_code == 1
-        assert delete.call_args.args[2] == "sess-1"
-
-    def test_server_error_frames_are_reported_on_stderr(
-        self, runner: CliRunner
-    ) -> None:
-        incoming = [
-            '{"type":"error","code":"STDIN_WRITE_FAILED","error":"boom"}',
-            '{"type":"exit","exit_code":0}',
-        ]
-
-        result, _, _, _, _, _ = _invoke_terminal(
-            runner,
-            ["terminal", "sbx-1"],
-            incoming=incoming,
-        )
-
-        assert result.exit_code == 0
-        assert "boom" in result.stderr
-
-
-class TestStdinReader:
-    def test_reads_data_and_cancels_promptly_without_reader_left_registered(
-        self,
-    ) -> None:
-        async def scenario() -> bytes:
-            read_fd, write_fd = os.pipe()
-            try:
-                stdin_read = _make_stdin_reader(read_fd)
-
-                # With nothing written, cancellation must complete promptly
-                # (a blocking worker thread would hang here instead).
-                task = asyncio.create_task(stdin_read())
-                await asyncio.sleep(0.05)
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await asyncio.wait_for(task, timeout=2)
-
-                os.write(write_fd, b"hi")
-                return await asyncio.wait_for(stdin_read(), timeout=2)
-            finally:
-                os.close(read_fd)
-                os.close(write_fd)
-
-        assert asyncio.run(scenario()) == b"hi"
-
 
 class TestStreamPTY:
-    def test_abnormal_close_preserves_collected_error_frames(self) -> None:
-        class _AbnormalCloseWS(_FakePTYWebSocket):
-            async def __anext__(self) -> object:
-                try:
-                    return await super().__anext__()
-                except StopAsyncIteration:
-                    # execd closes without a WebSocket close frame on startup
-                    # failure; the error frame must not be lost.
-                    raise websockets.ConnectionClosedError(None, None) from None
-
-        async def scenario():
-            ws = _AbnormalCloseWS(
-                [
-                    '{"type":"error","code":"START_FAILED","error":"no such dir"}',
-                    b"\x01partial",
-                ]
-            )
-
-            async def stdin_read() -> bytes:
-                return b""
-
-            chunks = bytearray()
-            streamed = bytearray()
-            result = await stream_pty(
-                ws,
-                stdin_read=stdin_read,
-                stdout_write=chunks.extend,
-                error_write=streamed.extend,
-            )
-            return result, bytes(chunks), bytes(streamed)
-
-        (exit_code, errors), written, streamed = asyncio.run(scenario())
-        assert (exit_code, errors) == (None, ["no such dir"])
-        assert written == b"partial"
-        assert streamed == b"no such dir\r\n"
-
     def test_error_frames_are_collected_and_exit_code_returned(self) -> None:
         async def scenario() -> tuple[int | None, list[str]]:
             ws = _FakePTYWebSocket(

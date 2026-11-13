@@ -40,17 +40,17 @@ gh workflow run release-umbrella.yml \
   -f version=1.1.0-rc.1 -f dry_run=false
 ```
 
-Repeat with `-rc.2`, `-rc.3`, … as fixes land — every rc is a full rebuild and previous rc artifacts stay frozen in the registries. The stable release of the line (`1.1.0`, no suffix) then publishes packages for real. Prereleases are never resolved by default (PyPI / NuGet / Maven / Go hide them; npm publishes under the `rc` dist-tag).
+Repeat with `-rc.2`, `-rc.3`, … as fixes land — every rc is a full rebuild and previous rc artifacts stay frozen in the registries. The stable release of the line (`1.1.0`, no suffix) then publishes packages for real.
 
 ## Release Execution (workflow)
 
-Dispatch `.github/workflows/release-umbrella.yml` (`dry_run=false`, `version`, `channel`, `release_branch`). Stable releases require a release approver other than the triggerer to approve the `release` environment; rc releases and dry runs run approval-free. The workflow then runs:
+Dispatch `.github/workflows/release-umbrella.yml` on the target branch (`--ref <release-branch>`, inputs `version` and `dry_run=false`; `channel` is derived from the version suffix). Stable releases require a release approver other than the triggerer to approve the `release` environment; rc releases and dry runs run approval-free. The workflow then runs:
 
 | Stage | What happens |
 |---|---|
 | preflight | commit reachability + notes presence (`docs/releases/<version>.md`) |
 | scan | version-consistency scan (release-blocking) |
-| build | 13 images built and pushed directly to `release-X.Y.Z` (run-scoped staging tags while the `UMBRELLA_PUBLISH_ENABLED` gate is closed); all packages built and held |
+| build | 14 images built and pushed directly to `release-X.Y.Z` (run-scoped staging tags while the `UMBRELLA_PUBLISH_ENABLED` gate is closed); all packages built and held |
 | BOM | digests pinned into `docs/releases/<version>.yaml`, pushed to a `release/<version>` branch; the workflow opens a PR to the release branch and merges it (`C_bom`) — stable waits for a code-owner approval (required by the branch ruleset), rc merges immediately |
 | publish | once the BOM PR merges (all images green + code-owner approval), packages publish in parallel per registry (PyPI, npm, NuGet, Maven Central); images are already public at `release-X.Y.Z` from the build stage |
 | tag | `release-X.Y.Z` + `sdks/sandbox/go/vX.Y.Z` minted on `C_bom`, GitHub Release created with the notes and BOM |
@@ -89,7 +89,7 @@ Always file a P0 release incident with the run link before remediating. Global m
 
 1. Land the fix on `main` (standard PR review).
 2. `git checkout release-X.(Y-1) && git cherry-pick <sha> && git push`.
-3. Dispatch `release-umbrella.yml` with `version=X.(Y-1).Z`, `release_branch=release-X.(Y-1)`, `dry_run=false`. The full fan-out reruns; the release notes must link the CVE and name the equivalent current-line snapshot.
+3. Dispatch `release-umbrella.yml` on `--ref release-X.(Y-1)` with `version=X.(Y-1).Z` and `dry_run=false`. The full fan-out reruns; the release notes must link the CVE and name the equivalent current-line snapshot.
 
 Anything that is not a qualifying CVE waits for the next line birth.
 

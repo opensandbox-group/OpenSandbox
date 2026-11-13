@@ -24,8 +24,8 @@ auto-pausing after the idle window, and the SDK's wake retry path —
 ``Sandbox.connect`` against a paused sandbox retrying until the restore
 serves traffic, with no resume API call.
 
-Requires ``IDLE_PAUSE=1 integration.sh up`` plus
-``OPENSANDBOX_TEST_FSB_TEMPLATE_ID``; ``integration.sh idle-e2e`` exports
+Requires ``IDLE_PAUSE=1 integration-env.sh up`` plus
+``OPENSANDBOX_TEST_FSB_TEMPLATE_ID``; ``integration-env.sh idle-e2e`` exports
 both. Skipped otherwise and excluded from ``make test``.
 """
 

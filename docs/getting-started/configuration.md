@@ -109,5 +109,5 @@ Once the server is running, interactive API docs are available at:
 
 - [Secure Container Runtime](/guides/secure-container) — gVisor, Kata, and Firecracker configuration
 - [Credential Vault](/guides/credential-vault) — Secure credential injection
-- [Network Isolation on Kubernetes](/guides/network-isolation) — Egress policy design
+- [Sandbox Network Security](/guides/network-security) — Cluster-wide egress isolation baseline (CIDRs, domains, ports)
 - [Kubernetes Deployment](/deployment/) — Kubernetes-specific setup

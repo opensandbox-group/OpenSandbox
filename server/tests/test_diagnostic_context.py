@@ -18,7 +18,7 @@ from unittest.mock import Mock, PropertyMock
 import pytest
 from fastapi import HTTPException
 
-from opensandbox_server.api import devops
+from opensandbox_server.api import diagnostics
 from opensandbox_server.services.diagnostics import DiagnosticContext
 from opensandbox_server.services.docker.docker_diagnostics import DockerDiagnosticsMixin
 from opensandbox_server.services.k8s.k8s_diagnostics import K8sDiagnosticsMixin
@@ -36,7 +36,7 @@ def test_context_route(client, auth_headers, monkeypatch, backend):
         backend_type=backend,
         backend_identifiers={"resource": "runtime-1"},
     )
-    monkeypatch.setattr(devops, "sandbox_service", service)
+    monkeypatch.setattr(diagnostics, "sandbox_service", service)
     response = client.get("/v1/sandboxes/sbx-1/diagnostics/context", headers=auth_headers)
     assert response.status_code == 200
     assert response.json() == {
@@ -57,7 +57,7 @@ def test_context_route_omits_unavailable_state(client, auth_headers, monkeypatch
         backend_identifiers={"resource": "runtime-1"},
         **state_fields,
     )
-    monkeypatch.setattr(devops, "sandbox_service", service)
+    monkeypatch.setattr(diagnostics, "sandbox_service", service)
 
     response = client.get("/v1/sandboxes/sbx-1/diagnostics/context", headers=auth_headers)
 
@@ -79,7 +79,7 @@ def test_context_route_preserves_backend_errors(client, auth_headers, monkeypatc
         status,
         detail={"code": code, "message": "Unavailable"},
     )
-    monkeypatch.setattr(devops, "sandbox_service", service)
+    monkeypatch.setattr(diagnostics, "sandbox_service", service)
     response = client.get("/v1/sandboxes/sbx-1/diagnostics/context", headers=auth_headers)
     assert response.status_code == status
 
@@ -164,7 +164,7 @@ def test_kubernetes_context_normalizes_errors(client, auth_headers, monkeypatch,
     )
     stages = {"namespace": service._resolve_namespace_for_lookup, "workload": owned, "mapping": mapper}
     stages[failure_stage].side_effect = RuntimeError("API server unavailable")
-    monkeypatch.setattr(devops, "sandbox_service", service)
+    monkeypatch.setattr(diagnostics, "sandbox_service", service)
 
     response = client.get("/v1/sandboxes/sbx-1/diagnostics/context", headers=auth_headers)
 

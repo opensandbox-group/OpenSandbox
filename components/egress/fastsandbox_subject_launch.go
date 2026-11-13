@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 )
@@ -34,8 +35,9 @@ const fastSandboxRevisionMaxSubjects = 4096
 const fastSandboxRevisionRetainedBudget int64 = 2 * fastSandboxRevisionMaxSubjects * defaultRevisionMaxSnapshotSize
 
 type fastSandboxSubjectSessionConfig struct {
-	parent   string
-	uid, gid int
+	parent       string
+	uid, gid     int
+	tlsAdmission bool
 }
 
 // This is a shared-subject process session, not a sidecar ProcessSession. Its
@@ -110,6 +112,11 @@ func newFastSandboxSubjectSession(cfg fastSandboxSubjectSessionConfig) (*fastSan
 		SessionToken: token, ControlGeneration: control,
 		MaxSubjects: fastSandboxRevisionMaxSubjects, MaxSnapshotBytes: defaultRevisionMaxSnapshotSize,
 		RetainedPayloadBudget: fastSandboxRevisionRetainedBudget,
+	}
+	if cfg.tlsAdmission {
+		s.handoff.TLSAdmission = true
+		s.handoff.TLSCapacity = constants.EnvIntRange(constants.EnvFSBTLSCapacity, 32, 1, 1<<20)
+		s.handoff.ProcessTLSCapacity = constants.EnvIntRange(constants.EnvFSBProcessTLSCapacity, 131072, 1, 1<<20)
 	}
 	if _, err := mitmproxy.WithSubjectRevision(mitmproxy.Config{}, s.handoff); err != nil {
 		return nil, revision.ErrInvalid
@@ -196,6 +203,13 @@ type fastSandboxSubjectLaunchOwner struct {
 }
 
 func newFastSandboxSubjectLaunchOwner(enabled bool, uid, gid int) (*fastSandboxSubjectLaunchOwner, error) {
+	// The existing caller supplies its installation gate. Once startup has
+	// resolved the profile, use only that immutable result, including for restarts.
+	mode := fastSandboxInterceptionMode{installReceiver: enabled}
+	if startupFSBInterceptionMode != nil {
+		mode = *startupFSBInterceptionMode
+	}
+	enabled = mode.installReceiver
 	if !enabled {
 		return nil, nil
 	}
@@ -207,7 +221,7 @@ func newFastSandboxSubjectLaunchOwner(enabled bool, uid, gid int) (*fastSandboxS
 		return nil, revision.ErrTransportUnavailable
 	}
 	return &fastSandboxSubjectLaunchOwner{
-		cfg:      fastSandboxSubjectSessionConfig{parent: defaultRevisionSessionParent, uid: uid, gid: gid},
+		cfg:      fastSandboxSubjectSessionConfig{parent: defaultRevisionSessionParent, uid: uid, gid: gid, tlsAdmission: mode.credentialBound},
 		sessions: make(map[*mitmproxy.Running]*fastSandboxSubjectSession),
 		// Subject and sidecar revision session owners use the same fixed 1s
 		// grace period, even when the outer shutdown caller allows longer.

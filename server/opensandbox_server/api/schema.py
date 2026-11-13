@@ -1452,6 +1452,20 @@ class CreateSnapshotRequest(BaseModel):
         min_length=1,
         description="Optional human-readable snapshot name",
     )
+    mode: Optional[Literal["full", "rootfsOnly"]] = Field(
+        None,
+        description=(
+            "What the snapshot persists. 'full' (default) is the most "
+            "complete capture the runtime supports: on the fast-sandbox "
+            "backend that includes memory and process state (restoring "
+            "resumes in place); Docker and Kubernetes snapshots capture the "
+            "filesystem only and do not restore running processes. "
+            "'rootfsOnly' captures only the writable filesystem; restoring "
+            "boots a fresh sandbox from the disk, so the entrypoint re-runs "
+            "and resume takes seconds instead of milliseconds. 'rootfsOnly' "
+            "requires the fast-sandbox backend with OCI-backed sandboxes."
+        ),
+    )
 
     model_config = ConfigDict(
         extra="forbid",
@@ -1470,6 +1484,16 @@ class Snapshot(BaseModel):
     name: Optional[str] = Field(
         None,
         description="Optional human-readable snapshot name",
+    )
+    mode: Literal["full", "rootfsOnly"] = Field(
+        "full",
+        description=(
+            "Artifact class of the snapshot: 'full' is the runtime's most "
+            "complete capture (memory and process state on fast-sandbox; "
+            "filesystem-only on Docker and Kubernetes), 'rootfsOnly' is the "
+            "writable filesystem only. Snapshots created before this field "
+            "existed report 'full'."
+        ),
     )
     status: SnapshotStatus = Field(
         ...,

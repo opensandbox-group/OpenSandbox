@@ -64,12 +64,12 @@
 # template sets are removed, the baseline golden template set and the
 # indexes pointing into it are preserved.
 #
-# Runs as part of `integration.sh up` (the entry chains every verify
-# script) or standalone against a live stack from `env.sh up`.
+# Standalone against a live stack from `integration-env.sh up` (the
+# monolith carries its own inline copy of this stage).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
-# --- recorded-policy probes -----------------------------------------------------
+# --- recorded-policy probes
 # The checkpoint bundle is located through the Sandbox CR (status.runtime.
 # checkpoint.manifestRef) and read from the artifact store via the rc CLI;
 # policy.json is the egress policy-file envelope: a plain-JSON document
@@ -109,7 +109,7 @@ pause_egress_log_contains() { # <extended-regex> — marker in the pool egress l
 	kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null | grep -qE "$1"
 }
 
-# --- the verify -------------------------------------------------------------------
+# --- the verify
 
 pause_resume_verify() {
 	# Test shape: create WITH an egress policy -> pause -> the checkpoint
@@ -218,7 +218,7 @@ pause_resume_verify() {
 	wait_for "pause/resume sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	resolve_osb

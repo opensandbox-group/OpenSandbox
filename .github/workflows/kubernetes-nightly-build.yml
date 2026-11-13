@@ -72,6 +72,15 @@ jobs:
             script: scripts/python-k8s-e2e-ingress.sh
             e2e_gateway_route_mode: uri
             execd_run_as_init: "true"
+          - variant: execd-init-off-hardening
+            script: scripts/python-k8s-execd-init-e2e.sh
+            e2e_gateway_route_mode: ""
+            execd_run_as_init: "false"
+          - variant: execd-hardening-caps-drop
+            script: scripts/python-k8s-execd-init-e2e.sh
+            e2e_gateway_route_mode: ""
+            execd_run_as_init: "true"
+            hardening_degradation: "true"
     env:
       KIND_CLUSTER: opensandbox-e2e
       KIND_K8S_VERSION: v1.30.4
@@ -112,6 +121,7 @@ jobs:
         env:
           E2E_GATEWAY_ROUTE_MODE: ${{ matrix.e2e_gateway_route_mode }}
           E2E_EXECD_RUN_AS_INIT: ${{ matrix.execd_run_as_init }}
+          OPENSANDBOX_HARDENING_DEGRADATION: ${{ matrix.hardening_degradation }}
         run: bash "./${{ matrix.script }}"
 
       - name: Dump kind diagnostics

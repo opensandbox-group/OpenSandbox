@@ -88,7 +88,6 @@ def test_port_floor_with_vault_keeps_https_working(
     try:
         _write_reachable_ports_cap(sandbox.id, ["80", "443"])
 
-        # Precondition: probe target reachable before the floor lands.
         assert _wait_until_tcp(
             sandbox, mitm_target_ip, PROBE_PORT, expect_connected=True, timeout_s=60
         ), f"probe target {mitm_target_ip}:{PROBE_PORT} unreachable even before the floor"

@@ -58,7 +58,8 @@ def config_init(obj: ClientContext, force: bool, output_format: str | None) -> N
         path = init_config_file(obj.config_path, force=force)
         output.success(f"Config file created: {path}")
     except FileExistsError as exc:
-        output.warning(str(exc))
+        output.error(str(exc))
+        raise click.exceptions.Exit(1) from None
 
 
 _SENSITIVE_CONFIG_KEYS = {

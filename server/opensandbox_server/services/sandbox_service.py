@@ -245,7 +245,7 @@ class SandboxService(ABC):
             new_labels[k] = str(v)
         return new_labels
 
-    # Diagnostics (DevOps)
+    # Diagnostics
     # ------------------------------------------------------------------
 
     def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
@@ -281,8 +281,6 @@ class SandboxService(ABC):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: str | None = None,
-        container: str | None = None,
     ) -> str:
         """
         Retrieve container logs for a sandbox.
@@ -290,25 +288,9 @@ class SandboxService(ABC):
         Args:
             sandbox_id: Unique sandbox identifier
             tail: Number of trailing log lines to return
-            since: Only return logs newer than this duration (e.g. "10m", "1h")
-            container: Optional container name. When omitted, backends select a
-                sensible default (typically the user "sandbox" container).
 
         Returns:
             str: Plain-text log output
-        """
-        pass
-
-    @abstractmethod
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        """
-        Retrieve detailed inspection info for a sandbox container.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Returns:
-            str: Plain-text inspection output
         """
         pass
 

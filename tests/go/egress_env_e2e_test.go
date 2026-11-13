@@ -34,10 +34,10 @@ func TestEgressEnv_InjectedIntoSidecar(t *testing.T) {
 	sb, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
 		Image: getSandboxImage(),
 		Env: map[string]string{
-			"EXECD_API_GRACE_SHUTDOWN":        "3s",
+			"EXECD_API_GRACE_SHUTDOWN":         "3s",
 			"EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms",
-			"OPENSANDBOX_EGRESS_LOG_LEVEL":    "debug",
-			"MY_APP_VAR":                      "hello",
+			"OPENSANDBOX_EGRESS_LOG_LEVEL":     "debug",
+			"MY_APP_VAR":                       "hello",
 		},
 		NetworkPolicy: &opensandbox.NetworkPolicy{
 			DefaultAction: "allow",
@@ -48,13 +48,11 @@ func TestEgressEnv_InjectedIntoSidecar(t *testing.T) {
 
 	require.True(t, sb.IsHealthy(ctx), "sandbox should be healthy")
 
-	// OPENSANDBOX_EGRESS_LOG_LEVEL should NOT be in sandbox container env
 	exec, err := sb.RunCommand(ctx, "printenv OPENSANDBOX_EGRESS_LOG_LEVEL || echo __unset__", nil)
 	require.NoError(t, err)
 	output := strings.TrimSpace(exec.Text())
 	require.Equal(t, "__unset__", output, "OPENSANDBOX_EGRESS_ var should not leak into sandbox container")
 
-	// MY_APP_VAR should be in sandbox container env
 	exec, err = sb.RunCommand(ctx, "printenv MY_APP_VAR", nil)
 	require.NoError(t, err)
 	require.Contains(t, strings.TrimSpace(exec.Text()), "hello")
@@ -130,14 +128,12 @@ func TestEgressEnv_NoNetworkPolicyDoesNotBlock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Egress env vars without networkPolicy should not block sandbox creation
-	// (server logs a warning, vars are silently dropped)
 	sb, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
 		Image: getSandboxImage(),
 		Env: map[string]string{
-			"EXECD_API_GRACE_SHUTDOWN":        "3s",
+			"EXECD_API_GRACE_SHUTDOWN":         "3s",
 			"EXECD_JUPYTER_IDLE_POLL_INTERVAL": "200ms",
-			"OPENSANDBOX_EGRESS_LOG_LEVEL":    "debug",
+			"OPENSANDBOX_EGRESS_LOG_LEVEL":     "debug",
 		},
 	})
 	require.NoError(t, err)
@@ -145,7 +141,6 @@ func TestEgressEnv_NoNetworkPolicyDoesNotBlock(t *testing.T) {
 
 	require.True(t, sb.IsHealthy(ctx), "sandbox should be healthy even with egress env and no networkPolicy")
 
-	// The egress var should not be in the sandbox env
 	exec, err := sb.RunCommand(ctx, "printenv OPENSANDBOX_EGRESS_LOG_LEVEL || echo __unset__", nil)
 	require.NoError(t, err)
 	output := strings.TrimSpace(exec.Text())

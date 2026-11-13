@@ -204,7 +204,8 @@ func formatContentDisposition(filename string) string {
 	needsEncoding := false
 	for _, r := range filename {
 		// A quote closes, and a backslash escapes inside, the quoted-string below.
-		if r > 127 || r == '"' || r == '\\' {
+		// CR, LF, and other controls would split the header or inject another one.
+		if r < 0x20 || r == 0x7f || r > 127 || r == '"' || r == '\\' {
 			needsEncoding = true
 			break
 		}

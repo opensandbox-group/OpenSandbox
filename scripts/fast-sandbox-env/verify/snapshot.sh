@@ -64,8 +64,8 @@
 # The created snapshot id is shared through SNAPSHOT_ID; a re-entry
 # snapshot accepted during fence cache lag is tracked through SNAPSHOT_EXTRA.
 #
-# Runs as part of `integration.sh up` (the entry chains every verify
-# script) or standalone against a live stack from `env.sh up`.
+# Standalone against a live stack from `integration-env.sh up` (the
+# monolith carries its own inline copy of this stage).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -75,7 +75,7 @@ SNAPSHOT_ID=""
 # so its terminal outcome is asserted and it is cleaned up.
 SNAPSHOT_EXTRA=""
 
-# --- stage: snapshot (opensandbox CLI -> SandboxSnapshot CR -> restore) ----------
+# --- stage: snapshot (opensandbox CLI -> SandboxSnapshot CR -> restore)
 
 # Ready once the server watcher converges the row from the SandboxSnapshot
 # CR (Succeeded + template index published).
@@ -91,7 +91,7 @@ snapshot_terminal() { # <snapshot-id>
 	[[ "$state" == "Ready" || "$state" == "Failed" ]]
 }
 
-# --- policy view + in-guest traffic probes -----------------------------------------
+# --- policy view + in-guest traffic probes
 
 snapshot_policy_mode_is() { # <mode> — GET /networkpolicy reports <mode>
 	[[ "$(server_api GET "/sandboxes/$VERIFY_ID/networkpolicy" 2>/dev/null | jq -r '.mode // empty')" == "$1" ]]
@@ -133,7 +133,7 @@ snapshot_traffic_blocked() { # <target> — the guest cannot complete https://<t
 	[[ "$out" == *"PROBE_BLOCKED"* ]]
 }
 
-# --- artifact probes ---------------------------------------------------------------
+# --- artifact probes
 
 # The SandboxSnapshot CR name is deterministic: osb-snap-<uuid hex without
 # dashes> (server/sandbox_snapshot naming), with the raw id in a label.
@@ -169,7 +169,7 @@ snapshot_api_status() { # method path [json-body] -> http status
 	printf '%s' "${out##*$'\n'}"
 }
 
-# --- the verify ---------------------------------------------------------------------
+# --- the verify
 
 snapshot_verify() {
 	# Test shape: a policy-less sandbox gains deny rules over a default-allow
@@ -183,7 +183,7 @@ snapshot_verify() {
 	local t0 t1 t2 t3 t4
 	t0="$(now_ms)"
 
-	# --- Stage A: policy-less source -> deny rule #1 -> snapshot -----------------
+	# --- Stage A: policy-less source -> deny rule #1 -> snapshot
 	log "verify (snapshot): creating a sandbox WITHOUT a network policy via the opensandbox CLI (templateId=$TEMPLATE_ID)"
 	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
 		--metadata origin=fast-sandbox-env-snapshot --skip-health-check -o json 2>/dev/null)" \
@@ -292,7 +292,7 @@ wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 		|| log "verify cleanup: kill $source_id failed"
 	wait_for "snapshot source sandbox deleted" 120 verify_sandbox_gone
 
-	# --- Stage B: restore from the snapshot --------------------------------------
+	# --- Stage B: restore from the snapshot
 	local restored
 	log "verify (snapshot): osb sandbox create --snapshot-id $SNAPSHOT_ID (pool profile restated)"
 	restored="$(osb_api sandbox create --snapshot-id "$SNAPSHOT_ID" --timeout 1h \
@@ -343,7 +343,7 @@ wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 	pass "snapshot: cleanup (source + restored sandboxes deleted, snapshot rows removed)"
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	resolve_osb

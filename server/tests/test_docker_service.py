@@ -110,6 +110,13 @@ def test_parse_memory_limit_handles_units():
     assert parse_memory_limit("2gi") == 2 * 1024**3
     assert parse_memory_limit("invalid") is None
 
+
+def test_parse_memory_limit_rejects_values_above_int64():
+    assert parse_memory_limit("9223372036854775807") == (1 << 63) - 1
+    assert parse_memory_limit("8192Gi") == 8192 * 1024**3
+    assert parse_memory_limit("9223372036854775808") is None
+    assert parse_memory_limit("999999999999999999999Gi") is None
+
 def test_parse_nano_cpus():
     assert parse_nano_cpus("500m") == 500_000_000
     assert parse_nano_cpus("2") == 2_000_000_000
@@ -2814,7 +2821,8 @@ def test_metadata_excludes_labels_inherited_from_the_image(tmp_path):
     assert store.get("sandbox-meta", container_labels) == {"team": "infra"}
 
 
-def test_build_env_omits_execd_run_as_init_by_default():
+def test_build_env_injects_execd_run_as_init_by_default():
+    """execd_run_as_init defaults to true: EXECD_INIT rides along with user env."""
     service = DockerSandboxService(config=_app_config())
     request = CreateSandboxRequest(
         image=ImageSpec(uri="python:3.11"),
@@ -2826,12 +2834,12 @@ def test_build_env_omits_execd_run_as_init_by_default():
     _, environment = service._build_labels_and_env("sandbox-manual", request, None)
 
     assert "FOO=bar" in environment
-    assert not any(e.startswith("EXECD_INIT=") for e in environment)
+    assert "EXECD_INIT=1" in environment
 
 
-def test_build_env_injects_execd_run_as_init_when_enabled():
+def test_build_env_omits_execd_run_as_init_when_disabled():
     config = _app_config()
-    config.runtime.execd_run_as_init = True
+    config.runtime.execd_run_as_init = False
     service = DockerSandboxService(config=config)
     request = CreateSandboxRequest(
         image=ImageSpec(uri="python:3.11"),
@@ -2842,7 +2850,7 @@ def test_build_env_injects_execd_run_as_init_when_enabled():
 
     _, environment = service._build_labels_and_env("sandbox-manual", request, None)
 
-    assert "EXECD_INIT=1" in environment
+    assert not any(e.startswith("EXECD_INIT=") for e in environment)
 
 def test_build_labels_stores_renewal_policy_from_lifecycle():
     service = DockerSandboxService(config=_app_config())

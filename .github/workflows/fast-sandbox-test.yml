@@ -16,6 +16,7 @@ on:
     types: [fast-sandbox-pr]
   pull_request:
     branches: [ main ]
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
@@ -23,9 +24,12 @@ permissions:
   actions: write
 
 # Unique group per dispatch run (GitHub concurrency would otherwise fold
-# queued runs away); PR pushes keep superseding each other.
+# queued runs away); PR pushes keep superseding each other. Unrelated
+# `labeled` events get their own group: the job gate skips them anyway, and
+# a shared group would let workflow-level cancel-in-progress kill an
+# in-flight KVM run before the gate gets a chance to skip.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test') && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -37,7 +41,12 @@ jobs:
   integration:
     name: Integration Env (self-hosted kvm)
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: >-
+      github.event_name != 'pull_request' ||
+      ( needs.changes.outputs.relevant == 'true' &&
+      contains(github.event.pull_request.labels.*.name, 'ok-to-test') &&
+      ( github.event.action != 'labeled' ||
+      github.event.label.name == 'ok-to-test' ) )
     runs-on: kvm
     timeout-minutes: 240
     env:
@@ -63,7 +72,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: '1.26.11'
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -84,8 +93,10 @@ jobs:
       - name: Run integration tests (environment init)
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
+      # Thin lane: native boot path + egress rules only (~4 min observed);
+      # the full scenario matrix runs on the overlaybd template below.
       - name: Run native template verify
-        timeout-minutes: 75
+        timeout-minutes: 30
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
 
       - name: Run overlaybd template verify

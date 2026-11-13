@@ -17,7 +17,7 @@
 E2E tests for execd-as-init mode (OSEP-0018).
 
 Requires a server running with ``runtime.execd_run_as_init = true`` (the
-dedicated real-e2e and kubernetes-nightly jobs set it). Verifies the
+real-e2e python job and the kubernetes e2e jobs run with it). Verifies the
 container-level init contract through the SDK:
 
 - execd is PID 1 and the workload's parent
@@ -63,7 +63,6 @@ EXECD_CAPABILITIES_URL = "http://127.0.0.1:44772/v1/isolated/capabilities"
 
 
 def _run_command(sandbox, command: str) -> str:
-    """Run a command and return its combined stdout."""
     result = sandbox.commands.run(command, opts=RunCommandOpts())
     assert result.error is None, f"command failed: {result.error}"
     return "".join(msg.text for msg in result.logs.stdout)
@@ -282,7 +281,6 @@ class TestExecdInitE2E:
         round_n = 0
         while time.monotonic() < deadline:
             round_n += 1
-            # /command churn: short-lived orphans in a tight loop.
             _run_command(sandbox, "for i in $(seq 1 8); do ( sleep 0.05 ) & done")
             # Every few rounds spawn a long background sleeper that stays
             # alive across rounds (reparented to PID 1, must not zombie).
@@ -341,7 +339,6 @@ class TestExecdInitE2E:
             tag="execd-init-e2e-runtime-stop",
         )
         try:
-            # Locate the sandbox container by its opensandbox label.
             out = subprocess.run(
                 [
                     "docker", "ps", "-aq",
@@ -364,7 +361,6 @@ class TestExecdInitE2E:
                 check=True, capture_output=True, text=True,
             )
 
-            # Sandbox must end in the failed/terminated state with code 7.
             deadline = time.monotonic() + 45
             state = None
             while time.monotonic() < deadline:
@@ -380,9 +376,6 @@ class TestExecdInitE2E:
                 info.status.message
             )
 
-            # The entrypoint must have actually received SIGTERM (marker).
-            # The container is stopped, so `docker cp` the marker out of its
-            # filesystem (docker exec cannot run in a stopped container).
             with tempfile.TemporaryDirectory() as tmpdir:
                 marker_path = os.path.join(tmpdir, "runtime-stop-marker")
                 subprocess.run(

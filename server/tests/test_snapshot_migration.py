@@ -356,3 +356,62 @@ def test_migrate_snapshots_cli_cold_start(tmp_path, postgresql_dsn: str) -> None
     assert result.returncode == 0, result.stderr
     assert "Snapshots migrated: total=0, migrated=0, skipped=0" in result.stdout
     assert "partially initialized module" not in result.stdout + result.stderr
+
+
+def test_migrate_upgrades_pre_mode_postgresql_target(tmp_path, postgresql_dsn: str) -> None:
+    # A target table initialized by a pre-mode server lacks the mode column:
+    # CREATE TABLE IF NOT EXISTS does not add it, and the CLI migration never
+    # constructs the repository (so the repository's own ALTER does not run).
+    # The migration must add the column in its schema transaction.
+    now = datetime(2026, 1, 2, 3, 4, 5)
+    with psycopg.connect(postgresql_dsn) as conn:
+        conn.execute("DROP TABLE IF EXISTS snapshots")
+        conn.execute(
+            """
+            CREATE TABLE snapshots (
+                id TEXT PRIMARY KEY,
+                source_sandbox_id TEXT NOT NULL,
+                namespace TEXT DEFAULT NULL,
+                name TEXT,
+                description TEXT,
+                restore_config JSONB NOT NULL,
+                state TEXT NOT NULL,
+                reason TEXT,
+                message TEXT,
+                last_transition_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO snapshots (
+                id, source_sandbox_id, namespace, name, description,
+                restore_config, state, reason, message, last_transition_at,
+                created_at, updated_at
+            ) VALUES (
+                'snap-legacy', 'sbx-000', NULL, NULL, NULL,
+                '{"image": null}'::jsonb, 'Ready', NULL, NULL, NULL, %s, %s
+            )
+            """,
+            (now, now),
+        )
+
+    sqlite_repo = _create_sqlite_repository(
+        tmp_path,
+        [snapshot_record("snap-rootfs", "sbx-001", now, SnapshotState.READY, mode="rootfsOnly")],
+    )
+    sqlite_repo.close()
+
+    result = migrate_sqlite_snapshots_to_postgresql(
+        tmp_path / "opensandbox.db", postgresql_dsn
+    )
+
+    assert result.total == 1
+    assert result.migrated == 1
+    assert result.skipped == 0
+
+    stored = {record.id: record for record in _records_from_postgresql(postgresql_dsn)}
+    assert stored["snap-legacy"].mode is None  # pre-mode row keeps reading as full
+    assert stored["snap-rootfs"].mode == "rootfsOnly"

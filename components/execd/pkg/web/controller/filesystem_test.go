@@ -556,6 +556,11 @@ func TestFormatContentDisposition(t *testing.T) {
 			filename: `a\b.txt`,
 			want:     "attachment; filename=\"a%5Cb.txt\"; filename*=UTF-8''a%5Cb.txt",
 		},
+		{
+			name:     "CRLF in filename",
+			filename: "ok\r\nSet-Cookie: x",
+			want:     "attachment; filename=\"ok%0D%0ASet-Cookie%3A%20x\"; filename*=UTF-8''ok%0D%0ASet-Cookie%3A%20x",
+		},
 	}
 
 	for _, tt := range tests {

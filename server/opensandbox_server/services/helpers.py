@@ -84,7 +84,13 @@ def parse_memory_limit(value: Optional[str]) -> Optional[int]:
     if not multiplier:
         logger.warning(f"Unsupported memory unit '{unit}'; ignoring.")
         return None
-    return amount * multiplier
+    # Docker HostConfig.Memory and DiskQuota are signed int64. An unbounded
+    # Python int is accepted here and then fails inside the daemon as a 500.
+    result = amount * multiplier
+    if result > (1 << 63) - 1:
+        logger.warning(f"Memory limit is too large. Got '{value}'. Ignoring.")
+        return None
+    return result
 
 
 def parse_nano_cpus(value: Optional[str]) -> Optional[int]:

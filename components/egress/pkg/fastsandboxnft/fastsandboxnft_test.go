@@ -167,7 +167,7 @@ func TestUnknownSubjectRejected(t *testing.T) {
 	pol, err := policy.ParsePolicy(`{"defaultAction":"deny"}`)
 	require.NoError(t, err)
 	require.ErrorIs(t, a.ApplyPolicy(ctx, subject.FromSandboxUID("ghost"), pol), ErrUnknownSubject)
-	require.ErrorIs(t, a.AddResolvedIPs(ctx, subject.FromSandboxUID("ghost"), []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.2.3.4"), TTL: time.Minute}}), ErrUnknownSubject)
+	require.ErrorIs(t, a.AddResolvedIPs(ctx, subject.FromSandboxUID("ghost"), "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.2.3.4"), TTL: time.Minute}}), ErrUnknownSubject)
 }
 
 func TestAddResolvedIPsClampsTTL(t *testing.T) {
@@ -176,7 +176,10 @@ func TestAddResolvedIPsClampsTTL(t *testing.T) {
 	s := subject.FromSandboxUID("u-1")
 	ctx := context.Background()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{
 		{Addr: netip.MustParseAddr("1.2.3.4"), TTL: 30 * time.Second},   // clamps up to 90s (min 60 + slack)
 		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: 24 * time.Hour}, // clamps down to 360s
 	}))
@@ -191,7 +194,10 @@ func TestAddResolvedIPsRecreatesElementsToRenewExpiry(t *testing.T) {
 	s := subject.FromSandboxUID("u-1")
 	ctx := context.Background()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{
 		{Addr: netip.MustParseAddr("1.2.3.4"), TTL: 300 * time.Second},
 		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: 300 * time.Second},
 	}))
@@ -204,6 +210,60 @@ func TestAddResolvedIPsRecreatesElementsToRenewExpiry(t *testing.T) {
 			"add element inet %[1]s %[2]s { %[3]s }\ndelete element inet %[1]s %[2]s { %[3]s }\nadd element inet %[1]s %[2]s { %[3]s timeout 360s }\n",
 			TableName, tc.set, tc.addr), "a plain add does not renew an existing element's kernel expiry")
 	}
+}
+
+// TestAddResolvedIPsRejectsDomainRevokedByReload: a DNS answer that was in
+// flight while an always-rule reload tightened the overlay must not
+// re-authorize the revoked domain's cached IP.
+func TestAddResolvedIPsRejectsDomainRevokedByReload(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"api.example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	ips := []nftables.ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0}}
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", ips))
+
+	// the overlay tightens: example.com moves to always-deny
+	denyRule, err := policy.ParseValidatedEgressRule("deny", "example.com")
+	require.NoError(t, err)
+	merged := policy.MergeAlwaysOverlay(pol, []policy.EgressRule{denyRule}, nil)
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, nil, map[subject.Subject]*policy.NetworkPolicy{s: merged}))
+
+	// the stale in-flight answer arrives after the reload: refused
+	count := runner.count()
+	require.ErrorIs(t, a.AddResolvedIPs(ctx, s, "example.com", ips), ErrLeaseRejected)
+	require.Equal(t, count, runner.count(), "a refused lease must not emit an nft transaction")
+	require.NotContains(t, runner.last(), "192.0.2.1")
+	a.mu.Lock()
+	_, tracked := a.states[s]
+	a.mu.Unlock()
+	require.False(t, tracked, "a refused lease must not enter the refresh mirror")
+
+	// a domain the reload still allows keeps working
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "api.example.com", ips))
+	require.Contains(t, runner.last(), "192.0.2.1")
+}
+
+// TestAddResolvedIPsRejectsDenyFirstSubject: a subject that reverted to
+// deny-first while its DNS answer was in flight must not re-acquire a lease.
+func TestAddResolvedIPsRejectsDenyFirstSubject(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	count := runner.count()
+	require.ErrorIs(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0}}), ErrLeaseRejected)
+	require.Equal(t, count, runner.count(), "a refused lease must not emit an nft transaction")
+	a.mu.Lock()
+	_, tracked := a.states[s]
+	a.mu.Unlock()
+	require.False(t, tracked)
 }
 
 func TestRemoveRebuildsTable(t *testing.T) {
@@ -257,7 +317,7 @@ func TestRemoveKeepsRemainingSubjectsLeases(t *testing.T) {
 	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"api.example.com"}]}`)
 	require.NoError(t, err)
 	require.NoError(t, a.ApplyPolicy(ctx, kept, pol))
-	require.NoError(t, a.AddResolvedIPs(ctx, kept, []nftables.ResolvedIP{
+	require.NoError(t, a.AddResolvedIPs(ctx, kept, "api.example.com", []nftables.ResolvedIP{
 		{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0},                   // 60s lease
 		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: 300 * time.Second}, // 360s lease
 		{Addr: netip.MustParseAddr("192.0.2.9"), TTL: 0},                   // expires before the rebuild
@@ -314,6 +374,134 @@ func TestRemoveFailureStaysRetryable(t *testing.T) {
 	assert.Equal(t, before, runner.count())
 }
 
+// TestApplyAlwaysRulesReloadRebuildsTable: one transaction swaps the port
+// floor and re-emits every subject (merged policies, deny-first preserved,
+// DNS leases dropped); the applier adopts the reloaded state only after
+// the transaction commits.
+func TestApplyAlwaysRulesReloadRebuildsTable(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	denyFirst := subject.FromSandboxUID("u-1")
+	active := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, denyFirst, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.ApplyDenyFirst(ctx, active, testSlot("u-2", "10.0.0.6")))
+	oldPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"},{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, active, oldPol))
+	require.NoError(t, a.AddResolvedIPs(ctx, active, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0}}))
+
+	newDeny, err := policy.ParseValidatedEgressRule("deny", "203.0.113.0/24")
+	require.NoError(t, err)
+	newPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	merged := policy.MergeAlwaysOverlay(newPol, []policy.EgressRule{newDeny}, nil)
+	floor := []policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 65535}}
+
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, floor, map[subject.Subject]*policy.NetworkPolicy{active: merged}))
+	script := runner.last()
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox", "the reload rebuilds the whole table")
+	require.Contains(t, script, "tcp dport { 1-79, 81-65535 } drop", "the port floor is swapped into the master chains")
+	require.Contains(t, script, "203.0.113.0/24", "the new always-deny CIDR reaches the subject's deny set")
+	assert.NotContains(t, script, "8.8.8.8", "the replaced merged policy must not survive")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop", "deny-first subject keeps its bare drop")
+	assert.NotContains(t, script, "192.0.2.1", "DNS-learned leases must be dropped with the table (sidecar parity: a tightened overlay must not keep revoked domains authorized)")
+
+	// the applier adopted the reloaded policy: a later Remove rebuild (which
+	// re-emits subjects from in-memory state) carries it too
+	a.mu.Lock()
+	adopted := a.subjects[active].pol
+	a.mu.Unlock()
+	require.Same(t, merged, adopted)
+	runner.mu.Lock()
+	runner.scripts = nil
+	runner.mu.Unlock()
+	require.NoError(t, a.Remove(ctx, denyFirst))
+	require.Contains(t, runner.last(), "203.0.113.0/24", "rebuilds reuse the reloaded policy")
+}
+
+// TestApplyAlwaysRulesReloadFailureStaysRetryable: a failed reload leaves
+// the in-memory policies and floor untouched, so the retry re-runs the
+// full rebuild.
+func TestApplyAlwaysRulesReloadFailureStaysRetryable(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	s := subject.FromSandboxUID("u-1")
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	oldPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, oldPol))
+	originalFloor := []policy.PortRange{{Lo: 1, Hi: 79}}
+	a.mu.Lock()
+	a.opts.PortFloorDenyRanges = originalFloor
+	a.mu.Unlock()
+
+	newPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"9.9.9.9"}]}`)
+	require.NoError(t, err)
+	newFloor := []policy.PortRange{{Lo: 81, Hi: 65535}}
+	runner.mu.Lock()
+	runner.fail = func(string) error { return errors.New("nft busy") }
+	runner.mu.Unlock()
+	require.Error(t, a.ApplyAlwaysRulesReload(ctx, newFloor, map[subject.Subject]*policy.NetworkPolicy{s: newPol}))
+	a.mu.Lock()
+	keptPol := a.subjects[s].pol
+	keptFloor := a.opts.PortFloorDenyRanges
+	a.mu.Unlock()
+	require.Same(t, oldPol, keptPol, "a failed reload must keep the installed policy")
+	require.Equal(t, originalFloor, keptFloor, "a failed reload must keep the installed floor")
+
+	// the retry re-runs the rebuild and adopts both
+	runner.mu.Lock()
+	runner.fail = nil
+	runner.mu.Unlock()
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, newFloor, map[subject.Subject]*policy.NetworkPolicy{s: newPol}))
+	script := runner.last()
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
+	require.Contains(t, script, "tcp dport { 81-65535 } drop")
+	require.Contains(t, script, "9.9.9.9")
+	a.mu.Lock()
+	require.Same(t, newPol, a.subjects[s].pol)
+	require.Equal(t, newFloor, a.opts.PortFloorDenyRanges)
+	a.mu.Unlock()
+}
+
+// TestApplyAlwaysRulesReloadNeverUpgradesDenyFirst: a deny-first transition
+// that raced the reload's snapshot (inst.pol == nil in the applier) must
+// never be resurrected by the rebuild even when the caller's map still
+// carries a policy for the subject — the kernel stays deny-first.
+func TestApplyAlwaysRulesReloadNeverUpgradesDenyFirst(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	reverted := subject.FromSandboxUID("u-1")
+	require.NoError(t, a.ApplyDenyFirst(ctx, reverted, testSlot("u-1", "10.0.0.5")))
+	stillActive := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, stillActive, testSlot("u-2", "10.0.0.6")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, stillActive, pol))
+	// the race: u-1 reverts to deny-first (ApplyDenyFirst) AFTER the caller
+	// snapshotted its (allow) policy into the reload map
+	require.NoError(t, a.ApplyDenyFirst(ctx, reverted, testSlot("u-1", "10.0.0.5")))
+	staleAllow, err := policy.ParsePolicy(`{"defaultAction":"allow"}`)
+	require.NoError(t, err)
+
+	floor := []policy.PortRange{{Lo: 1, Hi: 79}}
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, floor, map[subject.Subject]*policy.NetworkPolicy{
+		reverted:    staleAllow,
+		stillActive: pol,
+	}))
+	script := runner.last()
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop",
+		"the reverted subject must re-emit deny-first despite the stale map entry")
+	assert.NotContains(t, script, "tcp dport { 1-65535 } drop", "no default-allow mark rules for the reverted subject")
+	a.mu.Lock()
+	require.Nil(t, a.subjects[reverted].pol, "the applier must not adopt a policy for a deny-first subject")
+	require.Same(t, pol, a.subjects[stillActive].pol)
+	a.mu.Unlock()
+}
+
 func TestDenyFirstResetsOnReRegistration(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -321,10 +509,10 @@ func TestDenyFirstResetsOnReRegistration(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"},{"action":"allow","target":"example.com"}]}`)
 	require.NoError(t, err)
 	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
 
 	runner.mu.Lock()
 	runner.scripts = nil
@@ -1097,10 +1285,10 @@ func TestPortScopedPolicyLifecycle(t *testing.T) {
 			ctx := context.Background()
 			require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 			require.NoError(t, a.ApplyDenyFirst(ctx, other, testSlot("u-2", "10.0.0.6")))
-			old, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"10.0.0.9","ports":[8443]},{"action":"deny","ports":[25]}]}`)
+			old, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"10.0.0.9","ports":[8443]},{"action":"deny","ports":[25]},{"action":"allow","target":"example.com"}]}`)
 			require.NoError(t, err)
 			require.NoError(t, a.ApplyPolicy(ctx, s, old))
-			require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.0.0.20"), TTL: time.Minute}}))
+			require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.0.0.20"), TTL: time.Minute}}))
 
 			next, err := policy.ParsePolicy(`{"defaultAction":"allow","egress":[{"action":"deny","target":"10.0.0.9","ports":[443]}]}`)
 			require.NoError(t, err)

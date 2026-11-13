@@ -24,6 +24,7 @@ import type {
   ListSandboxesResponse,
   ListSnapshotsParams,
   ListSnapshotsResponse,
+  RenewSandboxExpirationResponse,
   SandboxId,
   SandboxInfo,
   SandboxMetadataPatch,
@@ -167,9 +168,12 @@ export class SandboxManager {
   /**
    * Renew expiration by setting expiresAt to now + timeoutSeconds.
    */
-  async renewSandbox(sandboxId: SandboxId, timeoutSeconds: number): Promise<void> {
+  async renewSandbox(
+    sandboxId: SandboxId,
+    timeoutSeconds: number,
+  ): Promise<RenewSandboxExpirationResponse> {
     const expiresAt = new Date(Date.now() + timeoutSeconds * 1000).toISOString();
-    await this.sandboxes.renewSandboxExpiration(sandboxId, { expiresAt });
+    return await this.sandboxes.renewSandboxExpiration(sandboxId, { expiresAt });
   }
 
   createSnapshot(sandboxId: SandboxId, req?: CreateSnapshotRequest): Promise<SnapshotInfo> {

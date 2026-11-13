@@ -49,6 +49,13 @@ type fakeNft struct {
 	denyFirstErr  error
 	policyErr     error
 	removeErr     error
+
+	// always-reload recording: the port floor and per-subject merged
+	// policies the reload transaction carried.
+	reloadErr   error
+	reloadCalls int
+	reloadFloor []policy.PortRange
+	reloadPols  map[subject.Subject]*policy.NetworkPolicy
 }
 
 // fakeGatewayDNSRedirectApplier models the entire owned nft table, not only
@@ -116,6 +123,18 @@ func (f *fakeNft) ApplyPolicy(_ context.Context, s subject.Subject, pol *policy.
 	}
 	f.policyApplied = append(f.policyApplied, s)
 	f.lastPolicy = pol
+	return nil
+}
+
+func (f *fakeNft) ApplyAlwaysRulesReload(_ context.Context, floor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reloadErr != nil {
+		return f.reloadErr
+	}
+	f.reloadCalls++
+	f.reloadFloor = floor
+	f.reloadPols = pols
 	return nil
 }
 
@@ -1169,6 +1188,164 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	allowV4, _, denyV4, _ := applied.StaticIPSets()
 	require.Contains(t, denyV4, "203.0.113.0/24", "always-deny CIDR must reach the nft deny set")
 	require.Contains(t, allowV4, "198.51.100.7", "always-allow IP must reach the nft allow set")
+}
+
+// ---------------------------------------------------------------------------
+// Always-rule hot reload (deny.always / allow.always / reachable.ports.cap)
+// ---------------------------------------------------------------------------
+
+// stubAlwaysLoader mirrors policy.AlwaysRuleLoader's contract: the candidate
+// applies once, and an apply error vetoes the publish (stays staged for
+// retry).
+type stubAlwaysLoader struct {
+	mu             sync.Mutex
+	deny, allow    []policy.EgressRule
+	candidateDeny  []policy.EgressRule
+	candidateAllow []policy.EgressRule
+}
+
+func (l *stubAlwaysLoader) CurrentRules() (deny, allow []policy.EgressRule) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.deny, l.allow
+}
+
+func (l *stubAlwaysLoader) SetCurrentRules(deny, allow []policy.EgressRule) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.deny, l.allow = deny, allow
+}
+
+func (l *stubAlwaysLoader) RefreshIfDueWithApply(
+	_ time.Time,
+	apply func(deny, allow []policy.EgressRule) error,
+) (deny, allow []policy.EgressRule, changed bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.candidateDeny) == 0 && len(l.candidateAllow) == 0 {
+		return l.deny, l.allow, false, nil
+	}
+	deny, allow = l.candidateDeny, l.candidateAllow
+	if err := apply(deny, allow); err != nil {
+		return nil, nil, false, err
+	}
+	l.deny, l.allow = deny, allow
+	l.candidateDeny, l.candidateAllow = nil, nil
+	return deny, allow, true, nil
+}
+
+// TestFastSandboxAlwaysRuleReloadMovesKernelAndRegistry: a changed overlay
+// must reach both layers in order — one atomic kernel rebuild (merged
+// policies + port floor), then the registry (DNS dispatch). Deny-first
+// subjects carry no merged policy; a follow-up refresh is a no-op.
+func TestFastSandboxAlwaysRuleReloadMovesKernelAndRegistry(t *testing.T) {
+	oldDeny, err := policy.ParseValidatedEgressRule("deny", "old-blocked.example.com")
+	require.NoError(t, err)
+	newDeny, err := policy.ParseValidatedEgressRule("deny", "new-blocked.example.com")
+	require.NoError(t, err)
+	newAllow, err := policy.ParseValidatedEgressRule("allow", "always-allowed.example.com")
+	require.NoError(t, err)
+	floor := policy.NewPortFloorDenyRule([]policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 65535}})
+
+	loader := &stubAlwaysLoader{deny: []policy.EgressRule{oldDeny}}
+	reg := subject.NewRegistry([]policy.EgressRule{oldDeny}, nil)
+	nft := &fakeNft{}
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
+	srv.SetAlwaysRuleLoader(loader)
+
+	// one active subject + one deny-first subject (binding, no ready hook)
+	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
+	active := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(active)))
+	denying := subject.FromSandboxUID("u-2")
+	rec := doAction(t, srv, bindBody(t, "u-2", "10.0.0.6", testFenceR, testFenceA, 1, strPtr(`{"defaultAction":"deny"}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, subject.StateDenying, mustState(reg.Get(denying)))
+
+	loader.mu.Lock()
+	loader.candidateDeny = []policy.EgressRule{newDeny, floor}
+	loader.candidateAllow = []policy.EgressRule{newAllow}
+	loader.mu.Unlock()
+
+	changed, err := srv.reloadAlwaysRules()
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	// kernel: one rebuild, only the active subject merged, new overlay + floor
+	nft.mu.Lock()
+	require.Equal(t, 1, nft.reloadCalls)
+	merged := nft.reloadPols[active]
+	require.NotNil(t, merged, "active subject must receive its re-merged policy")
+	require.Equal(t, "new-blocked.example.com", merged.Egress[0].Target, "always-deny rides first")
+	for _, r := range merged.Egress {
+		assert.NotEqual(t, "old-blocked.example.com", r.Target, "the replaced overlay must not survive")
+	}
+	_, denyingMerged := nft.reloadPols[denying]
+	assert.False(t, denyingMerged, "deny-first subjects carry no merged policy")
+	require.Equal(t, floor.PortRanges, nft.reloadFloor, "the port floor reaches the master chains")
+	nft.mu.Unlock()
+
+	// registry (DNS dispatch): new overlay live, first-match deny wins
+	eff := reg.EffectivePolicy(active)
+	require.NotNil(t, eff)
+	require.Equal(t, "deny", eff.Evaluate("new-blocked.example.com"))
+	require.Equal(t, "allow", eff.Evaluate("always-allowed.example.com"))
+	require.Equal(t, "allow", eff.Evaluate("example.com"))
+	require.Nil(t, reg.EffectivePolicy(denying), "deny-first subject keeps failing closed in DNS")
+
+	// the follow-up refresh sees no change
+	changed, err = srv.reloadAlwaysRules()
+	require.NoError(t, err)
+	require.False(t, changed)
+}
+
+// TestFastSandboxAlwaysRuleReloadNftFailureKeepsOverlay: a failed kernel
+// rebuild vetoes the whole reload — the registry keeps the previous overlay
+// and the retry converges.
+func TestFastSandboxAlwaysRuleReloadNftFailureKeepsOverlay(t *testing.T) {
+	oldDeny, err := policy.ParseValidatedEgressRule("deny", "old-blocked.example.com")
+	require.NoError(t, err)
+	newDeny, err := policy.ParseValidatedEgressRule("deny", "new-blocked.example.com")
+	require.NoError(t, err)
+
+	loader := &stubAlwaysLoader{deny: []policy.EgressRule{oldDeny}}
+	reg := subject.NewRegistry([]policy.EgressRule{oldDeny}, nil)
+	nft := &fakeNft{reloadErr: errors.New("nft busy")}
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
+	srv.SetAlwaysRuleLoader(loader)
+
+	input := `{"defaultAction":"deny"}`
+	active := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
+
+	loader.mu.Lock()
+	loader.candidateDeny = []policy.EgressRule{newDeny}
+	loader.mu.Unlock()
+
+	_, err = srv.reloadAlwaysRules()
+	require.Error(t, err, "the kernel failure must surface as a reload failure")
+
+	// registry untouched: DNS dispatch still evaluates the old overlay
+	eff := reg.EffectivePolicy(active)
+	require.NotNil(t, eff)
+	require.Equal(t, "old-blocked.example.com", eff.Egress[0].Target)
+
+	// loader veto: current rules unchanged, the candidate stays staged
+	deny, _ := loader.CurrentRules()
+	require.Len(t, deny, 1)
+	require.Equal(t, "old-blocked.example.com", deny[0].Target)
+
+	// the retry converges
+	nft.mu.Lock()
+	nft.reloadErr = nil
+	nft.mu.Unlock()
+	changed, err := srv.reloadAlwaysRules()
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, "deny", reg.EffectivePolicy(active).Evaluate("new-blocked.example.com"))
 }
 
 // TestFastSandboxServerNftFailureKeepsRegistryState: a failed nft apply must leave

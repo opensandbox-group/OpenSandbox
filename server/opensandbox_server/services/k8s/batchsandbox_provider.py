@@ -1046,7 +1046,8 @@ class BatchSandboxProvider(WorkloadProvider):
         pod_ip = self._parse_pod_ip(workload)
         if not pod_ip:
             return None
-        return Endpoint(endpoint=f"{pod_ip}:{port}")
+        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+        return Endpoint(endpoint=f"{host}:{port}")
 
     def get_endpoint_info(self, workload: Dict[str, Any], port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Resolve endpoint using gateway ingress or parsed pod IP."""

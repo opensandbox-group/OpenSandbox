@@ -45,21 +45,17 @@ trap cleanup EXIT
 # build execd image locally (context must include internal/)
 docker build -f components/execd/Dockerfile -t opensandbox/execd:local "${REPO_ROOT}"
 
-# prepare required images from registry
 docker pull opensandbox/code-interpreter:${TAG}
 echo "-------- Eval test images --------"
 docker images
 
-# prepare hostpath volume for e2e test
 mkdir -p /tmp/opensandbox-e2e/host-volume-test
 mkdir -p /tmp/opensandbox-e2e/logs
 echo "opensandbox-e2e-marker" > /tmp/opensandbox-e2e/host-volume-test/marker.txt
 chmod -R 755 /tmp/opensandbox-e2e
 
-# prepare Docker named volume for pvc e2e test
 docker volume rm opensandbox-e2e-pvc-test 2>/dev/null || true
 docker volume create opensandbox-e2e-pvc-test
-# seed the named volume with a marker file and subpath test data via a temporary container
 docker run --rm -v opensandbox-e2e-pvc-test:/data alpine sh -c "\
   echo 'pvc-marker-data' > /data/marker.txt && \
   mkdir -p /data/datasets/train && \
@@ -70,7 +66,6 @@ export OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE="${OPENSANDBOX_CREDENTIAL_
 setup_credential_vault_e2e_target
 setup_egress_mitm_e2e_target
 
-# setup server
 cd server
 export OPENSANDBOX_INSECURE_SERVER=YES
 uv sync
@@ -81,11 +76,9 @@ cd ..
 # wait for server
 sleep 10
 
-# build local api
 cd sdks/sandbox/python && make generate-api
 cd ../../..
 
-# run real python e2e
 cd tests/python
 uv sync --all-extras --refresh
 if [ "${RUN_CODE_INTERPRETER_E2E}" = "true" ]; then
@@ -94,6 +87,5 @@ else
   uv run pytest \
     --ignore=tests/test_code_interpreter_e2e.py \
     --ignore=tests/test_code_interpreter_e2e_sync.py \
-    --ignore=tests/test_execd_init_e2e.py \
     --ignore=tests/test_execd_hardening_e2e.py
 fi

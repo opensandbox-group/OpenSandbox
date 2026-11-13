@@ -152,6 +152,15 @@ const (
 	// EnvExperimentalRevisionRuntime enables the internal OSEP-0023
 	// per-mitmdump revision bootstrap path. It is not a public interception mode.
 	EnvExperimentalRevisionRuntime = "OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME"
+	// Fast Sandbox operator-owned interception mode: all (default) or credential-bound.
+	EnvFSBInterceptionMode = "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE"
+	// B3b-1 is deliberately incomplete: handshake admission and dual budgets
+	// only; all decrypted HTTP/H2 requests are denied until B3b-2. Do not enable
+	// in production before B4 opaque transport teardown. Defaults are experimental,
+	// unmeasured memory assumptions; B6 determines release budgets.
+	EnvExperimentalFSBTLSAdmission = "OPENSANDBOX_EGRESS_EXPERIMENTAL_FSB_TLS_ADMISSION"
+	EnvFSBTLSCapacity              = "OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY"
+	EnvFSBProcessTLSCapacity       = "OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY"
 	// OSEP-0023 live admission budgets, handed to the mitmdump child with the
 	// revision session bundle. Decrypted-connection and admitted-request caps,
 	// plus the credential transition drain timeout in seconds (1..300).
