@@ -707,10 +707,11 @@ export interface SnapshotInfo extends Record<string, unknown> {
   sandboxId: SandboxId;
   name?: string;
   /**
-   * Artifact class of the snapshot. Snapshots created before this field
-   * existed report `full`.
+   * Artifact class of the snapshot. Built-in HTTP responses always populate
+   * it (absent fields are normalized to `full`), but it stays optional so
+   * custom `Sandboxes` adapters and existing fixtures keep type-checking.
    */
-  mode: SnapshotMode;
+  mode?: SnapshotMode;
   status: SnapshotStatus;
   createdAt: Date;
 }

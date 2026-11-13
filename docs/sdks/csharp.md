@@ -474,11 +474,7 @@ finally { await restored.KillAsync(); }
 Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
 
 ```csharp
-var rootfsSnapshot = await sandbox.CreateSnapshotAsync(new CreateSnapshotRequest
-{
-    Name = "workspace-state",
-    Mode = SnapshotModes.RootfsOnly,
-});
+var rootfsSnapshot = await sandbox.CreateSnapshotWithModeAsync("workspace-state", SnapshotModes.RootfsOnly);
 // ... poll manager.GetSnapshotAsync(rootfsSnapshot.Id) until Ready, then:
 await using var rebooted = await Sandbox.CreateAsync(new SandboxCreateOptions
 {

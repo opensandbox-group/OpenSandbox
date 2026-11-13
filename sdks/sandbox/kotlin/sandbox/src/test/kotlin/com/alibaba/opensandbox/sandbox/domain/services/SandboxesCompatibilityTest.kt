@@ -16,6 +16,7 @@
 
 package com.alibaba.opensandbox.sandbox.domain.services
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.LifecycleHook
@@ -34,6 +35,9 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotMode
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotState
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotStatus
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -175,6 +179,38 @@ class SandboxesCompatibilityTest {
         assertEquals(NetworkPolicy.DefaultAction.DENY, egress.getPolicy().defaultAction)
     }
 
+    @Test
+    fun `pre-mode implementations keep working for two-argument snapshot calls`() {
+        val sandboxes: Sandboxes = LegacySandboxes()
+
+        val snapshot = sandboxes.createSnapshot("sbx-1", "legacy-name")
+
+        assertEquals("legacy-snapshot", snapshot.id)
+        assertEquals(SnapshotMode.FULL, snapshot.mode)
+    }
+
+    @Test
+    fun `unset mode on the mode-aware signature delegates to pre-mode implementations`() {
+        val sandboxes: Sandboxes = LegacySandboxes()
+
+        val snapshot = sandboxes.createSnapshot("sbx-1", "legacy-name", null)
+
+        assertEquals("legacy-snapshot", snapshot.id)
+        assertEquals(SnapshotMode.FULL, snapshot.mode)
+    }
+
+    @Test
+    fun `mode requests on pre-mode implementations fail instead of silently producing a full snapshot`() {
+        val sandboxes: Sandboxes = LegacySandboxes()
+
+        val error =
+            assertThrows(InvalidArgumentException::class.java) {
+                sandboxes.createSnapshot("sbx-1", "legacy-name", SnapshotMode.ROOTFS_ONLY)
+            }
+
+        assertTrue(error.message!!.contains("not supported"))
+    }
+
     private class LegacySandboxes : Sandboxes {
         override fun createSandbox(
             spec: SandboxImageSpec?,
@@ -206,16 +242,28 @@ class SandboxesCompatibilityTest {
             newExpirationTime: OffsetDateTime,
         ): SandboxRenewResponse = unsupported()
 
+        /**
+         * Shapes a pre-mode SDK implementation: it only knows the two-argument
+         * snapshot signature and relies on the interface default method for the
+         * mode-aware one.
+         */
         override fun createSnapshot(
             sandboxId: String,
             name: String?,
-        ): SnapshotInfo = unsupported()
-
-        override fun createSnapshot(
-            sandboxId: String,
-            name: String?,
-            mode: String?,
-        ): SnapshotInfo = unsupported()
+        ): SnapshotInfo =
+            SnapshotInfo(
+                id = "legacy-snapshot",
+                sandboxId = sandboxId,
+                name = name,
+                status =
+                    SnapshotStatus(
+                        state = SnapshotState.CREATING,
+                        reason = null,
+                        message = null,
+                        lastTransitionAt = null,
+                    ),
+                createdAt = OffsetDateTime.now(),
+            )
 
         override fun getSnapshot(snapshotId: String): SnapshotInfo = unsupported()
 
