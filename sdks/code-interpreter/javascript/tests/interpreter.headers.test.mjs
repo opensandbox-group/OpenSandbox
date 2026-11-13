@@ -27,7 +27,7 @@ test("CodeInterpreter.create forwards endpoint headers to adapter factory", asyn
     },
     commands: {
       async run() {
-        return { error: null };
+        return { error: null, exitCode: 0 };
       },
     },
     async getEndpoint(port) {

@@ -60,7 +60,7 @@ class CodeInterpreterTest {
     fun setUp() {
         every { sandbox.id } returns sandboxId
         every { sandbox.commands() } returns commands
-        every { commands.run(any<String>()) } returns Execution()
+        every { commands.run(any<String>()) } returns Execution(exitCode = 0)
         codeInterpreter = CodeInterpreter(sandbox, codeService)
     }
 
@@ -162,6 +162,16 @@ class CodeInterpreterTest {
             }
 
         assertTrue(exception.message!!.contains("Jupyter"))
+    }
+
+    @Test
+    fun `isHealthy should not treat an unconfirmed runtime check as healthy`() {
+        // A stream that ends without an error or completion event leaves the
+        // exit code unknown; that does not prove the runtime port is open.
+        every { codeService.ping() } returns true
+        every { commands.run(any<String>()) } returns Execution()
+
+        assertEquals(false, codeInterpreter.isHealthy())
     }
 
     @Test
