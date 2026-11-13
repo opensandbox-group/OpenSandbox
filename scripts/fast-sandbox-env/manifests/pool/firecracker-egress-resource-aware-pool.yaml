@@ -33,11 +33,10 @@
 #   # @OCI_FASTLET_ENV@ / # @OCI_FASTLET_MOUNTS@ / # @OCI_FASTLET_VOLUMES@
 #   -> the fastlet OCI env item + shared mounts/volumes when OCI_STACK=1
 #   (registry config is compiled into Fastlets by the pool controller)
-#   # @ROOTFS_QUALIFICATION_ENV@ / # @ROOTFS_QUALIFICATION_MOUNTS@ /
-#   # @ROOTFS_QUALIFICATION_VOLUMES@
-#   -> the fastlet rootfs-capture qualification profile (ConfigMap) env +
-#   mounts + the node guest-kernel hostPath volume when OCI_STACK=1
-#   (FSEP-0001 rootfs-only capture prerequisites)
+#   # @GUEST_KERNEL_MOUNTS@ / # @GUEST_KERNEL_VOLUMES@
+#   -> the fastlet guest-kernel hostPath mount when OCI_STACK=1 (the node
+#   copy cold-boot restore resolves; FSEP-0001 restore prerequisite; the
+#   capture qualification itself is deployment-derived upstream)
 # (quoted in the template so the file stays valid YAML; the render step
 # substitutes the token including its quotes)
 #
@@ -59,12 +58,11 @@ spec:
         - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
           value: /run/fast-sandbox/firecracker/runtime.sock
 # @OCI_FASTLET_ENV@
-# @ROOTFS_QUALIFICATION_ENV@
         volumeMounts:
         - name: agent-socket
           mountPath: /run/fast-sandbox/firecracker
 # @OCI_FASTLET_MOUNTS@
-# @ROOTFS_QUALIFICATION_MOUNTS@
+# @GUEST_KERNEL_MOUNTS@
       - name: egress
         image: "@EGRESS_IMAGE@"
         # IfNotPresent: the environment kind-loads the image into the
@@ -166,7 +164,7 @@ spec:
           name: egress-network-security-rules
           optional: true
 # @OCI_FASTLET_VOLUMES@
-# @ROOTFS_QUALIFICATION_VOLUMES@
+# @GUEST_KERNEL_VOLUMES@
       # Pool-pinned MITM CA keypair (OSEP-0022, ops-runbook shape): the
       # versioned Secret copy lives in the pool namespace with the keypair
       # entries the seed mount expects (tls.crt + tls.key). In this env the
