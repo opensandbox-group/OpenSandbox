@@ -296,6 +296,56 @@ public class SandboxesAdapterTests
     }
 
     [Fact]
+    public async Task CreateSnapshotAsync_ShouldSendRequestedModeAndMapItBack()
+    {
+        var handler = new CaptureCreateSnapshotHandler(withMode: true);
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        var snapshot = await adapter.CreateSnapshotAsync(
+            "sbx-7",
+            new CreateSnapshotRequest { Name = "workspace-state", Mode = SnapshotModes.RootfsOnly });
+
+        handler.PathAndQuery.Should().Be("/v1/sandboxes/sbx-7/snapshots");
+        using var request = JsonDocument.Parse(handler.RequestBody!);
+        request.RootElement.GetProperty("name").GetString().Should().Be("workspace-state");
+        request.RootElement.GetProperty("mode").GetString().Should().Be(SnapshotModes.RootfsOnly);
+        snapshot.Mode.Should().Be(SnapshotModes.RootfsOnly);
+    }
+
+    [Fact]
+    public async Task CreateSnapshotAsync_ShouldKeepModeOffTheWireWhenUnsetAndReadLegacyResponsesAsFull()
+    {
+        var handler = new CaptureCreateSnapshotHandler(withMode: false);
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        var snapshot = await adapter.CreateSnapshotAsync(
+            "sbx-7",
+            new CreateSnapshotRequest { Name = "baseline" });
+
+        using var request = JsonDocument.Parse(handler.RequestBody!);
+        request.RootElement.GetProperty("name").GetString().Should().Be("baseline");
+        request.RootElement.TryGetProperty("mode", out _).Should().BeFalse();
+        snapshot.Mode.Should().Be(SnapshotModes.Full);
+    }
+
+    [Fact]
+    public async Task GetSnapshotAsync_ShouldReportFullWhenResponsePredatesMode()
+    {
+        var handler = new CaptureCreateSnapshotHandler(withMode: false);
+        var client = new HttpClient(handler);
+        var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
+        var adapter = new SandboxesAdapter(wrapper);
+
+        var snapshot = await adapter.GetSnapshotAsync("snap-1");
+
+        snapshot.Mode.Should().Be(SnapshotModes.Full);
+    }
+
+    [Fact]
     public async Task GetSandboxEndpointAsync_ShouldCaptureOriginResponseHeader()
     {
         var handler = new CaptureEndpointHandler(origin: SandboxOrigin.Template);
@@ -636,6 +686,63 @@ public class SandboxesAdapterTests
                 Content = new StringContent(payload, Encoding.UTF8, "application/json")
             };
             return Task.FromResult(response);
+        }
+    }
+
+    /// <summary>
+    /// Captures the create-snapshot request body and replies with a snapshot whose
+    /// mode field is present or absent depending on <paramref name="withMode"/>.
+    /// </summary>
+    private sealed class CaptureCreateSnapshotHandler(bool withMode) : HttpMessageHandler
+    {
+        public string? PathAndQuery { get; private set; }
+        public string? RequestBody { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            PathAndQuery = request.RequestUri?.PathAndQuery;
+            RequestBody = request.Content is null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken);
+            var statusPayload = """
+            {
+              "id": "snap-1",
+              "sandboxId": "sbx-7",
+              "name": "baseline",
+              "status": {
+                "state": "Creating",
+                "reason": "snapshot_accepted",
+                "message": null,
+                "lastTransitionAt": "2026-03-14T12:00:00Z"
+              },
+              "createdAt": "2026-03-14T12:00:00Z"
+            }
+            """;
+            var modePayload = """
+            {
+              "id": "snap-1",
+              "sandboxId": "sbx-7",
+              "name": "baseline",
+              "mode": "rootfsOnly",
+              "status": {
+                "state": "Creating",
+                "reason": "snapshot_accepted",
+                "message": null,
+                "lastTransitionAt": "2026-03-14T12:00:00Z"
+              },
+              "createdAt": "2026-03-14T12:00:00Z"
+            }
+            """;
+            var response = new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent(
+                    withMode ? modePayload : statusPayload,
+                    Encoding.UTF8,
+                    "application/json")
+            };
+            return response;
         }
     }
 
