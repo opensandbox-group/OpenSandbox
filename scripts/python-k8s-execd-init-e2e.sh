@@ -133,6 +133,13 @@ if [ "${OPENSANDBOX_HARDENING_DEGRADATION:-false}" = "true" ]; then
   export OPENSANDBOX_HARDENING_KEEP_CAPS_CONFLICT=true
   k8s_e2e_write_server_helm_values
   k8s_e2e_helm_install_server
+  # The rollout replaced the server pod, and kubectl port-forward resolves a
+  # specific pod at start — the old tunnel is dead. Re-establish it before
+  # probing health.
+  kill "${PORT_FORWARD_PID}" >/dev/null 2>&1 || true
+  sleep 2
+  kubectl port-forward -n "${SERVER_NAMESPACE}" svc/opensandbox-server "${LIFECYCLE_LOCAL_PORT}:80" >>"${PORT_FORWARD_LOG}" 2>&1 &
+  PORT_FORWARD_PID=$!
   k8s_e2e_wait_http_ok "http://127.0.0.1:${LIFECYCLE_LOCAL_PORT}/health"
   uv run pytest tests/test_execd_hardening_e2e.py -v \
     -k "TestHardeningDegradationE2E or TestHardeningKeepCapsConflictE2E"
