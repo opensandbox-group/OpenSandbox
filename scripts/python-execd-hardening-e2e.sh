@@ -76,9 +76,7 @@ run_pytest() {
   cd "${REPO_ROOT}"
 }
 
-# ---------------------------------------------------------------------------
 # Images + host workspace + hardened TOML.
-# ---------------------------------------------------------------------------
 docker build -f components/execd/Dockerfile -t opensandbox/execd:local "${REPO_ROOT}"
 docker pull opensandbox/code-interpreter:${TAG:-latest}
 
@@ -137,45 +135,35 @@ allowed_host_paths = ["/tmp/opensandbox-e2e"]
 EOF
 }
 
-# ---------------------------------------------------------------------------
 # Phase 1: the floor applies end to end (default ceiling keeps CAP_SETPCAP).
-# ---------------------------------------------------------------------------
 write_server_config '["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]'
 run_server
 run_pytest "TestHardeningE2E or TestIsolatedSessionHardeningE2E"
 stop_server
 
-# ---------------------------------------------------------------------------
 # Phase 2: degradation — CAP_SETPCAP missing from the ceiling.
-# ---------------------------------------------------------------------------
 write_server_config '["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG", "SETPCAP"]'
 run_server
 OPENSANDBOX_HARDENING_DEGRADATION=true run_pytest "TestHardeningDegradationE2E"
 stop_server
 
-# ---------------------------------------------------------------------------
 # Phase 3: custom-policy overrides (R-q) — [seccomp] deny + keep_capabilities.
 # The ceiling must KEEP CAP_NET_RAW (not in the drop list) so the launcher's
 # ambient raise can succeed; the custom TOML replaces the hardened one.
-# ---------------------------------------------------------------------------
 write_server_config '["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]' isolation.custom.toml
 run_server
 run_pytest "TestHardeningCustomPolicyE2E"
 stop_server
 
-# ---------------------------------------------------------------------------
 # Phase 4: EXECD_INIT <-> TOML drift (R-s) — hardened TOML with init off.
-# ---------------------------------------------------------------------------
 write_server_config '["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]' isolation.hardened.toml false
 run_server
 OPENSANDBOX_HARDENING_DRIFT=true run_pytest "TestHardeningDriftE2E"
 stop_server
 
-# ---------------------------------------------------------------------------
 # Phase 5: default-off pin (R-m) — plain server, no TOML, init off. The
 # endpoint must report init_mode=none with every layer disabled, and the
 # workload must be unaffected (no floor applied).
-# ---------------------------------------------------------------------------
 write_server_config '["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]' isolation.hardened.toml false false
 run_server
 OPENSANDBOX_HARDENING_DEFAULT_OFF=true run_pytest "TestHardeningDefaultOffE2E"

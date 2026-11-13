@@ -49,11 +49,11 @@
 # template sets are removed, the baseline golden template set and the
 # indexes pointing into it are preserved.
 #
-# Runs as part of `integration.sh up` (the entry chains every verify
-# script) or standalone against a live stack from `env.sh up`.
+# Standalone against a live stack from `integration-env.sh up` (the
+# monolith carries its own inline copy of this stage).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
-# --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile) --------------
+# --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile)
 
 # Poll the gateway until /ping returns 200 (marked 503s tolerated; the
 # resume is never canceled). Fails on budget exhaustion.
@@ -209,7 +209,7 @@ idle_pause_verify() {
 	wait_for "idle-pause sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	# Same profile check as the entry script's idle-e2e action: the marker is

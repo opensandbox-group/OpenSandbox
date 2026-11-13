@@ -43,8 +43,8 @@
 #      (compared as epoch seconds, with string equality as fallback).
 #   5. Cleanup: kill all six sandboxes and wait until each GET 404s.
 #
-# Runs as part of `integration.sh up` (the entry chains every verify
-# script) or standalone against a live stack from `env.sh up`.
+# Standalone against a live stack from `integration-env.sh up` (the
+# monolith carries its own inline copy of this stage).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -273,7 +273,7 @@ opensandbox_verify() {
 	pass "verify sandboxes cleaned up"
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	resolve_osb
