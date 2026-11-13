@@ -43,6 +43,7 @@ function createSandboxesStub() {
     },
     async renewSandboxExpiration(sandboxId, body) {
       calls.push({ method: "renewSandboxExpiration", args: [sandboxId, body] });
+      return { expiresAt: new Date(body.expiresAt) };
     },
     async createSnapshot(sandboxId, body) {
       calls.push({ method: "createSnapshot", args: [sandboxId, body] });
@@ -100,7 +101,8 @@ test("SandboxManager delegates lifecycle operations and closes its transport", a
   await manager.pauseSandbox("sbx-42");
   await manager.resumeSandbox("sbx-42");
   await manager.killSandbox("sbx-42");
-  await manager.renewSandbox("sbx-42", 30);
+  const renewed = await manager.renewSandbox("sbx-42", 30);
+  assert.ok(renewed.expiresAt instanceof Date);
   const snapshot = await manager.createSnapshot("sbx-42", { name: "before-upgrade" });
   assert.equal(snapshot.id, "snap-1");
   const snapshots = await manager.listSnapshots({
