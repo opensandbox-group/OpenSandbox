@@ -438,7 +438,14 @@ Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/obser
 
 ## Snapshots and metadata
 
-Create a snapshot with `sandbox.createSnapshot` or `manager.createSnapshot`. `SandboxManager` exposes `getSnapshot`, `listSnapshots`, `deleteSnapshot`, and `waitForSnapshotReady` to wait for asynchronous snapshot completion. Restore with `Sandbox.builder().snapshotId(snapshotId).connectionConfig(config).build()`.
+Create a snapshot with `sandbox.createSnapshot(name, mode)` or `manager.createSnapshot(sandboxId, name, mode)`. `SandboxManager` exposes `getSnapshot`, `listSnapshots`, `deleteSnapshot`, and `waitForSnapshotReady` to wait for asynchronous snapshot completion. Restore with `Sandbox.builder().snapshotId(snapshotId).connectionConfig(config).build()`.
+
+Snapshot `mode` selects what the snapshot persists:
+
+- `SnapshotMode.FULL` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `SnapshotMode.ROOTFS_ONLY`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+
+`SnapshotInfo.getMode()` reports the artifact class of an existing snapshot; snapshots created before the field existed report `SnapshotMode.FULL`.
 
 Use `sandbox.patchMetadata` or `manager.patchSandboxMetadata` to add/replace metadata keys; a `null` value removes a key. Runtime support is described by the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml).
 
@@ -459,6 +466,17 @@ try (SandboxManager manager = SandboxManager.builder().connectionConfig(config).
     }
     // The snapshot is retained. When no longer needed: manager.deleteSnapshot(snapshot.getId());
 }
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```java
+SnapshotInfo rootfsSnapshot = sandbox.createSnapshot("workspace-state", SnapshotMode.ROOTFS_ONLY);
+manager.waitForSnapshotReady(rootfsSnapshot.getId(), Duration.ofMinutes(15));
+Sandbox rebooted = Sandbox.builder()
+        .snapshotId(rootfsSnapshot.getId()).connectionConfig(config).build();
+// Files written before the snapshot are present; processes were not preserved
+// and the entrypoint re-ran on boot.
 ```
 
 Metadata updates can include both replacement values and removals. Use a map that accepts null values (`Map.of` does not):

@@ -18,6 +18,7 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.ActivityProbe
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
@@ -34,6 +35,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotMode
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -435,6 +437,82 @@ class SandboxesAdapterTest {
         assertEquals("/v1/sandboxes/$sandboxId/snapshots", request.path)
         val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
         assertEquals("baseline", payload["name"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `createSnapshot should send the requested rootfsOnly mode and map it back`() {
+        val sandboxId = "sandbox-123"
+        val responseBody =
+            """
+            {
+                "id": "snap-123",
+                "sandboxId": "$sandboxId",
+                "name": "workspace-state",
+                "mode": "rootfsOnly",
+                "status": {
+                    "state": "Ready",
+                    "reason": "snapshot_ready",
+                    "message": null,
+                    "lastTransitionAt": "2023-01-01T10:00:00Z"
+                },
+                "createdAt": "2023-01-01T10:00:00Z"
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        val result = sandboxesAdapter.createSnapshot(sandboxId, "workspace-state", SnapshotMode.ROOTFS_ONLY)
+
+        assertEquals(SnapshotMode.ROOTFS_ONLY, result.mode)
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("workspace-state", payload["name"]!!.jsonPrimitive.content)
+        assertEquals("rootfsOnly", payload["mode"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `createSnapshot should keep an unset mode off the generated default and read legacy responses as full`() {
+        val sandboxId = "sandbox-123"
+        // The response body predates the mode field: it must read back as full.
+        val responseBody =
+            """
+            {
+                "id": "snap-123",
+                "sandboxId": "$sandboxId",
+                "name": "baseline",
+                "status": {
+                    "state": "Ready",
+                    "reason": "snapshot_ready",
+                    "message": null,
+                    "lastTransitionAt": "2023-01-01T10:00:00Z"
+                },
+                "createdAt": "2023-01-01T10:00:00Z"
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        val result = sandboxesAdapter.createSnapshot(sandboxId, "baseline")
+
+        assertEquals(SnapshotMode.FULL, result.mode)
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("baseline", payload["name"]!!.jsonPrimitive.content)
+        // The generated request model defaults mode to `full`; an unset mode must
+        // never serialize that default (absent or explicit null are both fine).
+        val mode = payload["mode"]
+        assertTrue(
+            mode == null || mode is JsonNull,
+            "unset mode must not reach the wire as a value: $payload",
+        )
+    }
+
+    @Test
+    fun `createSnapshot should reject an unknown mode before any request is sent`() {
+        assertThrows(InvalidArgumentException::class.java) {
+            sandboxesAdapter.createSnapshot("sandbox-123", "baseline", "diskOnly")
+        }
+        assertEquals(0, mockWebServer.requestCount)
     }
 
     @Test

@@ -282,7 +282,8 @@ class SandboxManager internal constructor(
     fun createSnapshot(
         sandboxId: String,
         name: String? = null,
-    ): SnapshotInfo = sandboxService.createSnapshot(sandboxId, name)
+        mode: String? = null,
+    ): SnapshotInfo = sandboxService.createSnapshot(sandboxId, name, mode)
 
     fun getSnapshot(snapshotId: String): SnapshotInfo = sandboxService.getSnapshot(snapshotId)
 

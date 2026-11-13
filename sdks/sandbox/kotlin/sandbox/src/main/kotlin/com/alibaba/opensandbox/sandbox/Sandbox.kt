@@ -38,6 +38,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxOrigin
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotMode
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import com.alibaba.opensandbox.sandbox.domain.services.Commands
 import com.alibaba.opensandbox.sandbox.domain.services.CredentialVault
@@ -748,7 +749,19 @@ class Sandbox internal constructor(
         return sandboxService.patchSandboxMetadata(id, patch)
     }
 
-    fun createSnapshot(name: String? = null): SnapshotInfo = sandboxService.createSnapshot(id, name)
+    /**
+     * Creates a snapshot from this sandbox.
+     *
+     * @param name Optional human-readable snapshot name
+     * @param mode What the snapshot persists: [SnapshotMode.FULL] (the server
+     * default when omitted) or [SnapshotMode.ROOTFS_ONLY] (writable filesystem
+     * only, fast-sandbox backend with OCI-backed sandboxes). Restoring a
+     * rootfs-only snapshot cold-boots a fresh sandbox and re-runs the entrypoint.
+     */
+    fun createSnapshot(
+        name: String? = null,
+        mode: String? = null,
+    ): SnapshotInfo = sandboxService.createSnapshot(id, name, mode)
 
     /**
      * Gets current egress policy for this sandbox.

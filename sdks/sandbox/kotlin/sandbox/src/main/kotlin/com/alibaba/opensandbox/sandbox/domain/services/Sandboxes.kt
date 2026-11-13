@@ -325,6 +325,7 @@ interface Sandboxes {
     fun createSnapshot(
         sandboxId: String,
         name: String? = null,
+        mode: String? = null,
     ): SnapshotInfo
 
     fun getSnapshot(snapshotId: String): SnapshotInfo

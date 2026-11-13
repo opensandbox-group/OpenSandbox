@@ -913,6 +913,23 @@ object SnapshotState {
     const val UNKNOWN = "Unknown"
 }
 
+/**
+ * Artifact class of a snapshot.
+ *
+ * [FULL] is the runtime's most complete capture: memory and process state on
+ * the fast-sandbox backend (restoring resumes in place); Docker and Kubernetes
+ * snapshots capture the filesystem only and do not restore running processes.
+ * [ROOTFS_ONLY] preserves only the writable filesystem, so restoring boots a
+ * fresh sandbox and re-runs the entrypoint. It requires the fast-sandbox
+ * backend with OCI-backed sandboxes and is rejected by other backends.
+ *
+ * Note: snapshots created before the mode field existed report [FULL].
+ */
+object SnapshotMode {
+    const val FULL = "full"
+    const val ROOTFS_ONLY = "rootfsOnly"
+}
+
 class SnapshotStatus(
     val state: String,
     val reason: String?,
@@ -926,6 +943,7 @@ class SnapshotInfo(
     val name: String? = null,
     val status: SnapshotStatus,
     val createdAt: OffsetDateTime,
+    val mode: String = SnapshotMode.FULL,
 )
 
 class SnapshotFilter private constructor(
