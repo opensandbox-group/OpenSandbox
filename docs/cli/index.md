@@ -375,6 +375,10 @@ uses camelCase). See [Diagnostics](/api/#diagnostics) for runtime differences.
 Older server builds may still return
 `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
+::: info
+The legacy `osb devops` command group was removed. Use `osb diagnostics logs/events` with `--scope` for log and event collection and `osb sandbox get` for sandbox state. The plain-text filters (`--tail`, `--since`, `--limit`) have no stable equivalents; read the scoped output and filter as needed.
+:::
+
 ## Output Formats
 
 Output selection is command-scoped, not global.
