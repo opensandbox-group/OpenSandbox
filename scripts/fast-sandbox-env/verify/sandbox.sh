@@ -249,16 +249,21 @@ opensandbox_verify() {
 	# Cold create pulls the golden image through DART (slowest; generous
 	# budget). Warm creates: the second may still pull on the other node via
 	# its DART peer; after both nodes cache the set, creates are sub-second.
+	# Optional first argument: total create/delete cycles (default 6, so the
+	# standalone entry matches the overlaybd lane's six-create warm proof;
+	# the monolith's native lane passes 3).
+	local total_creates="${1:-6}"
+	log "verify (end-to-end): creates=$total_creates"
 	local ids=() id label index
 	verify_one_sandbox "cold #1" 600000
 	ids+=("$VERIFY_ID")
 	verify_one_sandbox "warm #2" 600000
 	ids+=("$VERIFY_ID")
-	for index in 3 4 5 6; do
+	for index in $(seq 3 "$total_creates"); do
 		verify_one_sandbox "warm #$index" 120000
 		ids+=("$VERIFY_ID")
 	done
-	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
+	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK ($total_creates sandboxes)"
 	dump_latency_evidence
 	verify_lifecycle_ops "${ids[0]}"
 	for id in "${ids[@]}"; do
