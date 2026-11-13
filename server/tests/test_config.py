@@ -81,7 +81,7 @@ def test_load_config_from_file(tmp_path, monkeypatch):
     assert loaded.server.max_sandbox_timeout_seconds == 172800
     assert loaded.runtime.type == "kubernetes"
     assert loaded.runtime.execd_image == "opensandbox/execd:test"
-    assert loaded.runtime.execd_run_as_init is False
+    assert loaded.runtime.execd_run_as_init is True
     assert loaded.ingress is not None
     assert loaded.ingress.mode == "gateway"
     assert loaded.ingress.gateway is not None
@@ -169,6 +169,18 @@ def test_runtime_execd_run_as_init_parses_from_toml(tmp_path):
 
     loaded = config_module.load_config(config_path)
     assert loaded.runtime.execd_run_as_init is True
+
+    toml_disabled = """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+        execd_run_as_init = false
+        """
+    disabled_path = tmp_path / "config-disabled.toml"
+    disabled_path.write_text(toml_disabled)
+
+    loaded_disabled = config_module.load_config(disabled_path)
+    assert loaded_disabled.runtime.execd_run_as_init is False
 
 
 def test_docker_runtime_disallows_kubernetes_block():
