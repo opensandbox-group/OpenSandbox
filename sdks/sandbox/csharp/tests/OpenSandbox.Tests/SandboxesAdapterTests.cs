@@ -16,6 +16,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
+using OpenSandbox;
 using OpenSandbox.Adapters;
 using OpenSandbox.Core;
 using OpenSandbox.Internal;
@@ -343,6 +344,26 @@ public class SandboxesAdapterTests
         var snapshot = await adapter.GetSnapshotAsync("snap-1");
 
         snapshot.Mode.Should().Be(SnapshotModes.Full);
+    }
+
+    [Fact]
+    public void CreateSnapshotAsync_ShouldPreserveLegacyAndModeOverloads()
+    {
+        // Published overloads must keep their exact signatures: existing binaries bind
+        // to them, and recompiled positional calls would otherwise bind the token to
+        // the mode parameter.
+        typeof(Sandbox)
+            .GetMethod(nameof(Sandbox.CreateSnapshotAsync), new[] { typeof(string), typeof(CancellationToken) })
+            .Should().NotBeNull("the pre-mode (name, cancellationToken) overload must survive");
+        typeof(Sandbox)
+            .GetMethod(nameof(Sandbox.CreateSnapshotAsync), new[] { typeof(string), typeof(string), typeof(CancellationToken) })
+            .Should().NotBeNull("the mode-aware (name, mode, cancellationToken) overload must exist");
+        typeof(SandboxManager)
+            .GetMethod(nameof(SandboxManager.CreateSnapshotAsync), new[] { typeof(string), typeof(string), typeof(CancellationToken) })
+            .Should().NotBeNull("the pre-mode (sandboxId, name, cancellationToken) overload must survive");
+        typeof(SandboxManager)
+            .GetMethod(nameof(SandboxManager.CreateSnapshotAsync), new[] { typeof(string), typeof(string), typeof(string), typeof(CancellationToken) })
+            .Should().NotBeNull("the mode-aware (sandboxId, name, mode, cancellationToken) overload must exist");
     }
 
     [Fact]

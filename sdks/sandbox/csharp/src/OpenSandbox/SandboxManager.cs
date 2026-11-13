@@ -221,7 +221,18 @@ public sealed class SandboxManager : IAsyncDisposable
     public Task<SnapshotInfo> CreateSnapshotAsync(
         string sandboxId,
         string? name = null,
-        string? mode = null,
+        CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.CreateSnapshotAsync(
+            sandboxId,
+            new CreateSnapshotRequest { Name = name },
+            cancellationToken);
+    }
+
+    public Task<SnapshotInfo> CreateSnapshotAsync(
+        string sandboxId,
+        string? name,
+        string? mode,
         CancellationToken cancellationToken = default)
     {
         return _sandboxes.CreateSnapshotAsync(

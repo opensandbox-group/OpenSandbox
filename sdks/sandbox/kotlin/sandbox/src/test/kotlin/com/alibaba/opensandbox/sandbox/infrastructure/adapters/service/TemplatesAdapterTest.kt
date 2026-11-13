@@ -469,6 +469,11 @@ class TemplatesAdapterTest {
         override fun createSnapshot(
             sandboxId: String,
             name: String?,
+        ): SnapshotInfo = throw UnsupportedOperationException()
+
+        override fun createSnapshot(
+            sandboxId: String,
+            name: String?,
             mode: String?,
         ): SnapshotInfo = throw UnsupportedOperationException()
 

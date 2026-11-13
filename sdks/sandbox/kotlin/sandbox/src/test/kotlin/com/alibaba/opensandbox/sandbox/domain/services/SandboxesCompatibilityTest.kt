@@ -209,6 +209,11 @@ class SandboxesCompatibilityTest {
         override fun createSnapshot(
             sandboxId: String,
             name: String?,
+        ): SnapshotInfo = unsupported()
+
+        override fun createSnapshot(
+            sandboxId: String,
+            name: String?,
             mode: String?,
         ): SnapshotInfo = unsupported()
 
@@ -283,6 +288,11 @@ class SandboxesCompatibilityTest {
             sandboxId: String,
             newExpirationTime: OffsetDateTime,
         ): SandboxRenewResponse = unsupported()
+
+        override fun createSnapshot(
+            sandboxId: String,
+            name: String?,
+        ): SnapshotInfo = unsupported()
 
         override fun createSnapshot(
             sandboxId: String,

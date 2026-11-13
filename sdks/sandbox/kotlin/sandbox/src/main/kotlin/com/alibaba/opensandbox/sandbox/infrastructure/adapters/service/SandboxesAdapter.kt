@@ -292,6 +292,11 @@ internal class SandboxesAdapter(
     override fun createSnapshot(
         sandboxId: String,
         name: String?,
+    ): SnapshotInfo = createSnapshot(sandboxId, name, null)
+
+    override fun createSnapshot(
+        sandboxId: String,
+        name: String?,
         mode: String?,
     ): SnapshotInfo {
         val body = createSnapshotRequestBody(name, mode)
