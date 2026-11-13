@@ -30,7 +30,7 @@ strip execd credential env → trim the capability bounding set
   → Landlock ruleset → seccomp filter (last) → execve(user command)
 ```
 
-The floor covers **every** user-code path: the image entrypoint, `/command` (commands and shell sessions), `/code` (Jupyter kernels), and PTY terminals. Isolated sessions ([isolation sessions](/guides/isolation-sessions)) already run inside a bwrap namespace with their own seccomp/`no_new_privs` floor and compose with this one unchanged.
+The floor covers the image entrypoint, `/command` (commands and shell sessions), and PTY terminals. Isolated sessions ([isolation sessions](/guides/isolation-sessions)) already run inside a bwrap namespace with their own seccomp/`no_new_privs` floor and compose with this one unchanged.
 
 On Fast Sandbox templates the server bakes `EXECD_INIT=1` into the golden image instead: execd runs as a subreaper under the guest init, so reaping, signal forwarding, and the floor all apply, but the PID 1 signal shield stays with the guest init.
 
@@ -176,7 +176,7 @@ These are deliberately **not** configuration keys — they are applied whenever 
 | `no_new_privs` | always set on user-code processes |
 | Dropped capabilities | all (empty effective set; raise `keep_capabilities` selectively) |
 | Identity | the image's own runtime user — the floor never invents a UID. A root image keeps UID 0 but without capabilities; for UID separation use a non-root image or [isolated sessions](/guides/isolation-sessions) |
-| Env strip for `/command`, `/code`, PTY | `EXECD_ACCESS_TOKEN`, `JUPYTER_HOST`, `JUPYTER_TOKEN`, `EXECD_ISOLATION_CONFIG`, `EXECD_ENVS`, `OPENSANDBOX_LIFECYCLE`, `EXECD_LIFECYCLE_CONFIG`, `EXECD_RUNTIME_INIT` |
+| Env strip for `/command`, shell sessions, PTY | `EXECD_ACCESS_TOKEN`, `JUPYTER_HOST`, `JUPYTER_TOKEN`, `EXECD_ISOLATION_CONFIG`, `EXECD_ENVS`, `OPENSANDBOX_LIFECYCLE`, `EXECD_LIFECYCLE_CONFIG`, `EXECD_RUNTIME_INIT` |
 | Env strip for the entrypoint | `EXECD_ACCESS_TOKEN`, `OPENSANDBOX_LIFECYCLE`, `EXECD_LIFECYCLE_CONFIG`, `EXECD_RUNTIME_INIT` — entrypoint scripts keep `JUPYTER_TOKEN`/`EXECD_ENVS` because images like the code-interpreter entrypoint configure themselves from them |
 | Signal forwarding (init mode) | `HUP`, `USR1`, `USR2`, `WINCH` to the entrypoint; external `SIGTERM` (container stop) is forwarded for graceful shutdown; the entrypoint's exit code becomes the container's |
 

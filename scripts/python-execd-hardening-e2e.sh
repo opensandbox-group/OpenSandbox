@@ -27,12 +27,19 @@
 # Phase 3: custom-policy overrides (R-q) — a [seccomp] deny override +
 #          keep_capabilities=["CAP_NET_RAW"]; the ceiling keeps NET_RAW so
 #          the ambient raise can succeed.
+# Phase 3b: keep_capabilities x ceiling conflict — same custom TOML against
+#           the phase-1 ceiling (NET_RAW dropped); the workload must come up
+#           fully reduced with the floor intact.
 # Phase 4: EXECD_INIT <-> TOML drift pin (R-s) — the hardened TOML with
 #          execd_run_as_init = false; the endpoint must report init_mode=none
 #          and degrade the enabled layers.
 # Phase 5: default-off pin (R-m) — plain server, no isolation TOML, init off;
 #          the endpoint must report init_mode=none with every layer disabled
 #          and the workload must be unaffected (no floor applied).
+# Phase 6: production-default container ceiling — hardened TOML with the
+#          server's no_new_privileges/seccomp overrides removed (Docker
+#          default profile); Landlock must report active, proving the
+#          launcher's syscalls pass an unmodified container profile.
 #
 # Usage: bash scripts/python-execd-hardening-e2e.sh
 
@@ -95,11 +102,23 @@ write_server_config() {
   local toml_file="${2:-isolation.hardened.toml}"
   local run_as_init="${3:-true}"
   local inject_toml="${4:-true}"
+  local default_ceiling="${5:-false}"
   local sandbox_env_line=""
   local toml_bind_line=""
+  local ceiling_lines=""
   if [ "${inject_toml}" = "true" ]; then
     sandbox_env_line='sandbox_env = { EXECD_ISOLATION_CONFIG = "/etc/opensandbox/isolation.toml" }'
     toml_bind_line="  \"/tmp/opensandbox-e2e/${toml_file}:/etc/opensandbox/isolation.toml\","
+  fi
+  if [ "${default_ceiling}" != "true" ]; then
+    # The container baseline must not mask the launcher's own floor: with
+    # no_new_privileges=true (the server default) or Docker's default seccomp
+    # profile, a launcher regression would still show NoNewPrivs=1/Seccomp=2
+    # in the workload. Unset both so the observed values can only come from
+    # the opensandbox-launcher. Phase 6 keeps the defaults instead (the
+    # production scenario) and asserts Landlock active under them.
+    ceiling_lines="no_new_privileges = false
+seccomp_profile = \"unconfined\""
   fi
   cat <<EOF > ~/.sandbox.toml
 [server]
@@ -117,13 +136,7 @@ image = "opensandbox/egress:local"
 mode = "dns+nft"
 [docker]
 network_mode = "bridge"
-# The container baseline must not mask the launcher's own floor: with
-# no_new_privileges=true (the server default) or Docker's default seccomp
-# profile, a launcher regression would still show NoNewPrivs=1/Seccomp=2
-# in the workload. Unset both so the observed values can only come from
-# the opensandbox-launcher.
-no_new_privileges = false
-seccomp_profile = "unconfined"
+${ceiling_lines}
 ${sandbox_env_line}
 sandbox_binds = [
   "/tmp/opensandbox-e2e/workspace:/workspace",
@@ -155,6 +168,14 @@ run_server
 run_pytest "TestHardeningCustomPolicyE2E"
 stop_server
 
+# Phase 3b: keep_capabilities x ceiling conflict (R-gap) — the custom TOML
+# keeps CAP_NET_RAW, but this ceiling drops it, so the ambient raise fails
+# and the workload must come up fully reduced instead.
+write_server_config '["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]' isolation.custom.toml
+run_server
+OPENSANDBOX_HARDENING_KEEP_CAPS_CONFLICT=true run_pytest "TestHardeningKeepCapsConflictE2E"
+stop_server
+
 # Phase 4: EXECD_INIT <-> TOML drift (R-s) — hardened TOML with init off.
 write_server_config '["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]' isolation.hardened.toml false
 run_server
@@ -169,4 +190,13 @@ run_server
 OPENSANDBOX_HARDENING_DEFAULT_OFF=true run_pytest "TestHardeningDefaultOffE2E"
 stop_server
 
-echo "Execd hardening E2E PASSED (phase 1: floor, phase 2: degradation, phase 3: custom policy, phase 4: drift, phase 5: default-off)"
+# Phase 6: production-default container ceiling — hardened TOML with the
+# server's no_new_privileges/seccomp_profile overrides removed, so the
+# sandbox runs Docker's default seccomp profile. Proves the launcher's own
+# syscalls (notably Landlock) pass an unmodified container profile.
+write_server_config '["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]' isolation.hardened.toml true true true
+run_server
+OPENSANDBOX_HARDENING_DEFAULT_CEILING=true run_pytest "TestHardeningDefaultCeilingE2E"
+stop_server
+
+echo "Execd hardening E2E PASSED (phase 1: floor, phase 2: degradation, phase 3: custom policy, phase 3b: keep-caps conflict, phase 4: drift, phase 5: default-off, phase 6: default ceiling)"

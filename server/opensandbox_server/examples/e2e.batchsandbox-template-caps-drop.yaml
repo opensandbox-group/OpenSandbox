@@ -1,0 +1,43 @@
+# E2E-only BatchSandbox template variant with a reduced capability ceiling
+# (not used in production defaults). Identical to e2e.batchsandbox-template.yaml
+# except the sandbox container drops SETPCAP and NET_RAW, so the OSEP-0018
+# hardening e2e can exercise the fail-open degradation (cap_drop without
+# CAP_SETPCAP) and the keep_capabilities x ceiling conflict (the TOML keeps
+# CAP_NET_RAW) on the Kubernetes path. Selected per leg via
+# E2E_BATCHSANDBOX_TEMPLATE_FILE in scripts/python-k8s-execd-init-e2e.sh.
+#
+# Faster Pod teardown in Kind/CI: skip the default 30s graceful termination window.
+# Do not use for real workloads where graceful shutdown matters.
+#
+# The execd-isolation ConfigMap carries the hardened isolation TOML for the
+# OSEP-0018 hardening e2e (created by scripts/python-k8s-execd-init-e2e.sh).
+# It is optional: e2e runs that do not create the ConfigMap get an empty
+# mount, and execd only reads it when EXECD_ISOLATION_CONFIG points at it.
+
+# Metadata template (will be merged with runtime-generated metadata)
+metadata:
+# Spec template
+spec:
+  replicas: 1
+  template:
+    spec:
+      terminationGracePeriodSeconds: 0
+      restartPolicy: Never
+      tolerations:
+        - operator: "Exists"
+      volumes:
+        - name: execd-isolation
+          configMap:
+            name: opensandbox-e2e-execd-isolation
+            optional: true
+      containers:
+        - name: sandbox
+          securityContext:
+            capabilities:
+              drop:
+                - SETPCAP
+                - NET_RAW
+          volumeMounts:
+            - name: execd-isolation
+              mountPath: /etc/opensandbox/execd-isolation
+              readOnly: true

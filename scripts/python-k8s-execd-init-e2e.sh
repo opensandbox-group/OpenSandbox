@@ -14,7 +14,16 @@
 # limitations under the License.
 
 # Runs the execd-as-init E2E (OSEP-0018) on a Kind cluster with the
-# Kubernetes runtime and runtime.execd_run_as_init = true.
+# Kubernetes runtime. Two topologies, selected by E2E_EXECD_RUN_AS_INIT:
+#
+# - true (default): execd_run_as_init = true. Runs the init contract
+#   (test_execd_init_e2e), the init-on hardening classes (floor, custom
+#   policy, isolated sessions), and — with OPENSANDBOX_HARDENING_DEGRADATION
+#   =true — a second server rollout using the caps-drop template
+#   (SETPCAP/NET_RAW dropped) for the degradation and keep-caps-conflict
+#   classes.
+# - false: execd_run_as_init = false. Runs the init-off hardening classes
+#   only (drift + default-off), so the same classes run on docker and k8s.
 
 set -euxo pipefail
 
@@ -44,7 +53,8 @@ LIFECYCLE_LOCAL_PORT="${LIFECYCLE_LOCAL_PORT:-8080}"
 SERVER_IMG_REPOSITORY="${SERVER_IMG%:*}"
 SERVER_IMG_TAG="${SERVER_IMG##*:}"
 
-export E2E_EXECD_RUN_AS_INIT=true
+RUN_AS_INIT="${E2E_EXECD_RUN_AS_INIT:-true}"
+export E2E_EXECD_RUN_AS_INIT="${RUN_AS_INIT}"
 
 k8s_e2e_export_kubeconfig
 k8s_e2e_setup_kind_and_controller
@@ -99,6 +109,31 @@ cd "${REPO_ROOT}/sdks/sandbox/python"
 make generate-api
 cd "${REPO_ROOT}/tests/python"
 uv sync --all-extras --refresh
+
+if [ "${RUN_AS_INIT}" != "true" ]; then
+  # Init-off topology: run only the hardening classes that need it (the
+  # init contract and the recycle e2e require an init-on server).
+  export OPENSANDBOX_HARDENING_DRIFT=true
+  export OPENSANDBOX_HARDENING_DEFAULT_OFF=true
+  uv run pytest tests/test_execd_hardening_e2e.py -v \
+    -k "TestHardeningDriftE2E or TestHardeningDefaultOffE2E"
+  exit 0
+fi
+
 uv run pytest tests/test_execd_init_e2e.py -v
-uv run pytest tests/test_execd_hardening_e2e.py -v -k "TestHardeningE2E or TestHardeningCustomPolicyE2E"
+uv run pytest tests/test_execd_hardening_e2e.py -v \
+  -k "TestHardeningE2E or TestHardeningCustomPolicyE2E or TestIsolatedSessionHardeningE2E"
 uv run pytest tests/test_execd_k8s_restart_recycle_e2e.py -v
+
+if [ "${OPENSANDBOX_HARDENING_DEGRADATION:-false}" = "true" ]; then
+  # Second rollout: same server, but the BatchSandbox template drops
+  # SETPCAP and NET_RAW from the pod ceiling, exercising the fail-open
+  # cap_drop degradation and the keep_capabilities x ceiling conflict.
+  export E2E_BATCHSANDBOX_TEMPLATE_FILE=/etc/opensandbox/e2e.batchsandbox-template-caps-drop.yaml
+  export OPENSANDBOX_HARDENING_KEEP_CAPS_CONFLICT=true
+  k8s_e2e_write_server_helm_values
+  k8s_e2e_helm_install_server
+  k8s_e2e_wait_http_ok "http://127.0.0.1:${LIFECYCLE_LOCAL_PORT}/health"
+  uv run pytest tests/test_execd_hardening_e2e.py -v \
+    -k "TestHardeningDegradationE2E or TestHardeningKeepCapsConflictE2E"
+fi

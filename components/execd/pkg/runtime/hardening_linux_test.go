@@ -184,19 +184,97 @@ func TestHardeningEnvStrip(t *testing.T) {
 	cmd := exec.Command("sh", "-c", "env")
 	cmd.Stdout = &out
 	cmd.Stderr = &out
+	// Plant one marker value per blacklist entry so every name is asserted
+	// non-vacuously (the launcher unsets by name before execve).
 	cmd.Env = append(os.Environ(),
-		"EXECD_ACCESS_TOKEN=supersecret",
-		"JUPYTER_TOKEN=anothersecret",
+		"EXECD_ACCESS_TOKEN=marker-access-token",
+		"JUPYTER_HOST=marker-jupyter-host",
+		"JUPYTER_TOKEN=marker-jupyter-token",
+		"EXECD_ISOLATION_CONFIG=marker-isolation-config",
+		"EXECD_ENVS=marker-envs",
+		"OPENSANDBOX_LIFECYCLE=marker-lifecycle",
+		"EXECD_LIFECYCLE_CONFIG=marker-lifecycle-config",
+		"EXECD_RUNTIME_INIT=marker-runtime-init",
 	)
 	mp, err := launchManaged(cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = mp.Wait()
-	for _, secret := range []string{"supersecret", "anothersecret"} {
-		if strings.Contains(out.String(), secret) {
-			t.Fatalf("execd credential env leaked into the workload: %q", out.String())
+	for _, marker := range []string{
+		"marker-access-token", "marker-jupyter-host", "marker-jupyter-token",
+		"marker-isolation-config", "marker-envs", "marker-lifecycle",
+		"marker-lifecycle-config", "marker-runtime-init",
+	} {
+		if strings.Contains(out.String(), marker) {
+			t.Fatalf("execd config env leaked into the workload: %q in %q", marker, out.String())
 		}
+	}
+}
+
+// TestHardeningEntrypointEnvStrip pins the reduced entrypoint strip list:
+// credentials and lifecycle transport are stripped, while the Jupyter/envs
+// configuration image entrypoint scripts need (e.g. code-interpreter) is kept.
+func TestHardeningEntrypointEnvStrip(t *testing.T) {
+	buildLauncher(t)
+	launcherSearchPaths = append(launcherSearchPaths, launcherBuilt)
+	initHardeningForTest(t, hardenedCfg())
+
+	var out bytes.Buffer
+	cmd := exec.Command("sh", "-c", "env")
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	cmd.Env = append(os.Environ(),
+		"EXECD_ACCESS_TOKEN=marker-access-token",
+		"OPENSANDBOX_LIFECYCLE=marker-lifecycle",
+		"EXECD_LIFECYCLE_CONFIG=marker-lifecycle-config",
+		"EXECD_RUNTIME_INIT=marker-runtime-init",
+		"JUPYTER_HOST=kept-jupyter-host",
+		"JUPYTER_TOKEN=kept-jupyter-token",
+		"EXECD_ENVS=kept-envs-path",
+	)
+	mp, err := launchManaged(cmd, bootstrapEnv())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = mp.Wait()
+	output := out.String()
+	for _, marker := range []string{
+		"marker-access-token", "marker-lifecycle", "marker-lifecycle-config",
+		"marker-runtime-init",
+	} {
+		if strings.Contains(output, marker) {
+			t.Fatalf("entrypoint env leaked a stripped name: %q in %q", marker, output)
+		}
+	}
+	for _, kept := range []string{
+		"kept-jupyter-host", "kept-jupyter-token", "kept-envs-path",
+	} {
+		if !strings.Contains(output, kept) {
+			t.Fatalf("entrypoint env lost a kept name: %q missing from %q", kept, output)
+		}
+	}
+}
+
+// TestHardeningEmptyDenyListDegrades pins the empty [seccomp] deny override:
+// an explicitly empty list produces no filter, and the seccomp layer must
+// report degraded ("deny list is empty") rather than claim enforcement. The
+// raw layer state is read from InitHardening's store because in a unit-test
+// process (no init mode) ReportHardening legitimately rewrites degraded
+// messages with the EXECD_INIT drift guidance.
+func TestHardeningEmptyDenyListDegrades(t *testing.T) {
+	buildLauncher(t)
+	launcherSearchPaths = append(launcherSearchPaths, launcherBuilt)
+	cfg := hardenedCfg()
+	cfg.Seccomp = &isolation.SeccompOverride{Deny: []string{}}
+	initHardeningForTest(t, cfg)
+	stored := hardening.seccomp.Load()
+	if stored == nil || stored.State != "degraded" ||
+		!strings.Contains(stored.Message, "empty") {
+		t.Fatalf("stored seccomp layer = %+v, want degraded with an empty-deny message", stored)
+	}
+	if report := ReportHardening(); report.Seccomp.State != "degraded" {
+		t.Fatalf("reported seccomp state = %q, want degraded", report.Seccomp.State)
 	}
 }
 
