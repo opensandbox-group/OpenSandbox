@@ -39,10 +39,12 @@
 # the guest init — topology, reaping, and the hardening report pinned
 # in-guest), the OSEP-0018 hardening floor verify on a dedicated hardened
 # overlaybd template (EXECD_ISOLATION_CONFIG template env -> execd TOML:
-# launcher-presence, reduced /command + detached-workload self-dump,
-# credential env strip, Landlock active|unsupported, capabilities report,
-# sustained fork-heavy churn), and the idle-pause / wake-on-access verify
-# (OSEP-0024). The
+# the hardened source image is built from this checkout, pushed to the
+# in-cluster registry, and bakes the launcher prelude + TOML at execd's
+# trusted runtime paths; the stage pins launcher-presence, reduced
+# /command, credential env strip, Landlock active|unsupported, the
+# capabilities report, and sustained fork-heavy churn), and the idle-pause
+# / wake-on-access verify (OSEP-0024). The
 # scenario stages are storage-independent, so they run once per run — on
 # the OCI template, the production-default path — not on both rootfs lanes.
 #
@@ -1709,15 +1711,52 @@ _overlaybd_template_phase_is_succeeded() {
 
 # A hardened overlaybd template beside the plain one (OSEP-0018): same
 # inputs plus EXECD_ISOLATION_CONFIG pointing at the isolation TOML baked
-# into SBX_IMAGE (/opt/opensandbox/isolation.toml, [hardening] + [landlock]
-# enabled), so execd arms the pre-exec hardening floor for sandboxes the
-# hardening verify stage creates from it. Kept beside — never merged into —
-# the plain overlaybd template so the rest of the matrix keeps proving the
-# default unhardened tier (the init-mode stage pins its floor-off report).
-# The Succeeded id persists at $WORK/hardening-template-id and is reused
-# across actions; the stage script (verify/hardening.sh) resolves the same
-# file standalone.
+# into the hardened source image (/opt/opensandbox/isolation.toml,
+# [hardening] + [landlock] enabled), so execd arms the pre-exec hardening
+# floor for sandboxes the hardening verify stage creates from it. Kept
+# beside — never merged into — the plain overlaybd template so the rest of
+# the matrix keeps proving the default unhardened tier (the init-mode
+# stage's floor-off report stays true).
+#
+# The hardened source image is built from THIS checkout's Dockerfile and
+# pushed to the in-cluster OCI registry: the launcher prelude + TOML must
+# come from the tree under test, not from the operator-published SBX_IMAGE,
+# which may predate the bake — and the template builder pulls source images
+# through the registry API, so a runner-side build alone is not reachable.
+# The registry is ClusterIP-only and its serving cert's SANs cover the
+# service DNS name (not 127.0.0.1), so the push borrows the name in
+# /etc/hosts, trusts the env CA via /etc/docker/certs.d, and rides a
+# port-forward for the whole build (the builder pulls while the template
+# converts). HARDENED_SBX_PUSH=0 escapes to $SBX_IMAGE for an operator
+# whose published image already carries the bake. The Succeeded template id
+# persists at $WORK/hardening-template-id and is reused across actions; the
+# stage script (verify/hardening.sh) resolves the same file standalone.
+HARDENED_SBX_PUSH="${HARDENED_SBX_PUSH:-1}"
+HARDENED_SBX_REF="${HARDENED_SBX_REF:-$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO/sandbox-golden-hardened:dev}"
+HARDENED_SBX_PUSH_PORT="${HARDENED_SBX_PUSH_PORT:-18443}"
+# Reuse freshness: a hash of everything that feeds the bake. The hardened
+# template id persists across runs, but a Succeeded id built from older
+# inputs must not be reused (the tag is mutable) — a changed hash rebuilds
+# the image + template once, then holds again.
 OCI_HARDENING_TEMPLATE_ID=""
+
+hardened_sbx_inputs_fingerprint() {
+	local hash
+	hash="$(cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
+		"$OSB_ROOT/components/execd/native/launcher.c" \
+		"$OSB_ROOT/components/execd/configs/isolation.hardened.toml" \
+		"$OSB_ROOT"/scripts/fast-sandbox-env/sandbox-test-image/* 2>/dev/null \
+		| sha256sum 2>/dev/null || cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
+			"$OSB_ROOT/components/execd/native/launcher.c" \
+			"$OSB_ROOT/components/execd/configs/isolation.hardened.toml" \
+			"$OSB_ROOT"/scripts/fast-sandbox-env/sandbox-test-image/* 2>/dev/null | shasum -a 256)"
+	hash="${hash%% *}"
+	if [[ "$HARDENED_SBX_PUSH" != 1 ]]; then
+		hash="$(printf '%s' "$SBX_IMAGE" | sha256sum 2>/dev/null | cut -d' ' -f1)"
+		[[ -n "$hash" ]] || hash="$(printf '%s' "$SBX_IMAGE" | shasum -a 256 | cut -d' ' -f1)"
+	fi
+	printf '%s\n' "$hash"
+}
 
 _hardening_template_phase() {
 	_overlaybd_template_phase "$OCI_HARDENING_TEMPLATE_ID"
@@ -1731,17 +1770,62 @@ _hardening_template_failed() {
 	_overlaybd_template_failed "$OCI_HARDENING_TEMPLATE_ID" "hardening"
 }
 
+hardened_sbx_push_cleanup() { # <unused> <pf-pid>
+	sudo_ sed -i "\#127.0.0.1 $OCI_REGISTRY_HOST#d" /etc/hosts 2>/dev/null || true
+	sudo_ rm -rf "/etc/docker/certs.d/$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT" 2>/dev/null || true
+	docker logout "$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT" >/dev/null 2>&1 || true
+	if [[ -n "${2:-}" ]]; then
+		kill "$2" >/dev/null 2>&1 || true
+	fi
+}
+
 template_up_overlaybd_hardening() {
+	local pf_pid=""
 	OCI_HARDENING_TEMPLATE_ID="$(cat "$WORK/hardening-template-id" 2>/dev/null || true)"
-	if [[ -n "$OCI_HARDENING_TEMPLATE_ID" ]] && _hardening_template_phase_is_succeeded; then
+	local inputs_fp
+	inputs_fp="$(hardened_sbx_inputs_fingerprint)"
+	if [[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$(cat "$WORK/hardening-template-fp" 2>/dev/null || true)" == "$inputs_fp" ]] \
+		&& _hardening_template_phase_is_succeeded; then
 		log "hardening template reused: $OCI_HARDENING_TEMPLATE_ID"
 		return 0
 	fi
-	log "verify: creating the hardened overlaybd template via the opensandbox CLI (EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml)"
+	if [[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$(cat "$WORK/hardening-template-fp" 2>/dev/null || true)" != "$inputs_fp" ]]; then
+		log "hardening template inputs changed (fp ${inputs_fp:0:12}…); rebuilding the hardened image + template"
+	fi
+	local source_image="$SBX_IMAGE"
+	if [[ "$HARDENED_SBX_PUSH" == 1 ]]; then
+		log "building the hardened golden image from this checkout ($HARDENED_SBX_REF)"
+		docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+			-f "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
+			-t "$HARDENED_SBX_REF" "$OSB_ROOT" >/dev/null \
+			|| die "hardened golden image build failed"
+		log "pushing through the in-cluster registry (port-forward 127.0.0.1:$HARDENED_SBX_PUSH_PORT)"
+		sudo_ grep -qx "127.0.0.1 $OCI_REGISTRY_HOST" /etc/hosts \
+			|| echo "127.0.0.1 $OCI_REGISTRY_HOST" | sudo_ tee -a /etc/hosts >/dev/null
+		sudo_ mkdir -p "/etc/docker/certs.d/$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT"
+		sudo_ cp "$CA_DIR/ca.crt" "/etc/docker/certs.d/$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT/ca.crt"
+		kubectl -n "$RESOURCE_NS" port-forward svc/registry "$HARDENED_SBX_PUSH_PORT:443" >/dev/null 2>&1 &
+		pf_pid=$!
+		local pf_wait=0
+		until host_port_busy "$HARDENED_SBX_PUSH_PORT"; do
+			pf_wait=$((pf_wait + 1))
+			[[ "$pf_wait" -ge 20 ]] && { hardened_sbx_push_cleanup 0 "$pf_pid"; die "registry port-forward never became ready"; }
+			sleep 1
+		done
+		echo "$OCI_REGISTRY_PASSWORD" | docker login "$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT" \
+			-u "$OCI_REGISTRY_USER" --password-stdin >/dev/null \
+			|| { hardened_sbx_push_cleanup 0 "$pf_pid"; die "docker login to the in-cluster registry failed"; }
+		if ! docker push "$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT/${HARDENED_SBX_REF#*/}" >/dev/null; then
+			hardened_sbx_push_cleanup 0 "$pf_pid"
+			die "hardened golden image push failed"
+		fi
+		source_image="$HARDENED_SBX_REF"
+	fi
+	log "verify: creating the hardened overlaybd template via the opensandbox CLI (image=$source_image, EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml)"
 	local created create_err="$WORK/hardening-create.err"
 	local -a hrd_args=(
 		template create
-		--image "$SBX_IMAGE"
+		--image "$source_image"
 		--publish "oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO"
 		--format overlaybd
 		--env "EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml"
@@ -1754,10 +1838,12 @@ template_up_overlaybd_hardening() {
 	OCI_HARDENING_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
 	[[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$OCI_HARDENING_TEMPLATE_ID" != "null" ]] || fail "hardening template create carried no templateId"
 	printf '%s' "$OCI_HARDENING_TEMPLATE_ID" > "$WORK/hardening-template-id"
+	printf '%s' "$inputs_fp" > "$WORK/hardening-template-fp"
 	local attempts=0
 	while ! _hardening_template_phase_is_succeeded; do
 		if _hardening_template_failed; then
 			failure_dump "hardening-template-failed"
+			hardened_sbx_push_cleanup 0 "$pf_pid"
 			fail "hardening template entered Failed"
 		fi
 		attempts=$((attempts + 1))
@@ -1769,7 +1855,12 @@ template_up_overlaybd_hardening() {
 	manifest_ref="$(osb_api template get "$OCI_HARDENING_TEMPLATE_ID" -o json | jq -r '.status.manifest_ref // empty')"
 	[[ "$manifest_ref" == oci://* ]] || fail "hardening template manifestRef is not an oci:// reference: $manifest_ref"
 	log "hardening template manifestRef: $manifest_ref"
-	pass "hardened overlaybd SandboxTemplate Succeeded (floor TOML via template env)"
+	if [[ -n "$pf_pid" ]]; then
+		hardened_sbx_push_cleanup 0 "$pf_pid"
+		pass "hardened golden image built + pushed + overlaybd SandboxTemplate Succeeded (floor TOML via template env)"
+	else
+		pass "hardened overlaybd SandboxTemplate Succeeded (floor TOML via template env, source image $SBX_IMAGE)"
+	fi
 }
 
 # --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry)

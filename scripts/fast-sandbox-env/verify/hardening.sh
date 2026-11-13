@@ -19,10 +19,11 @@
 # guest init) on the plain template, where the floor layers stay disabled.
 # This stage owns the hardened tier: a dedicated overlaybd template carries
 # EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml (built by
-# template_up_overlaybd_hardening in integration-env.sh; the TOML and the
-# opensandbox-launcher prelude are baked into SBX_IMAGE at execd's trusted
-# runtime paths), so execd loads the isolation TOML, finds the launcher, and
-# arms the pre-exec privilege floor for every user-code launch.
+# template_up_overlaybd_hardening in integration-env.sh, whose hardened
+# source image is built from THIS checkout and pushed to the in-cluster
+# registry with the launcher prelude + TOML baked at execd's trusted
+# runtime paths), so execd loads the isolation TOML, finds the launcher,
+# and arms the pre-exec privilege floor for every user-code launch.
 #
 # Pinned (mirroring the docker/k8s legs in
 # tests/python/tests/test_execd_hardening_e2e.py):
@@ -180,7 +181,7 @@ hardening_floor_verify() { # [template-id]
 	probe="$(guest_value LAUNCHER sh -c '[ -x /opt/opensandbox/opensandbox-launcher ] && echo LAUNCHER=1 || echo LAUNCHER=0')" \
 		|| fail "hardening: launcher probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "1" ]] \
-		|| fail "opensandbox-launcher is not present/executable at $LAUNCHER_GUEST_PATH — the SBX_IMAGE bake is missing; rebuild + publish the golden image first: docker build -f scripts/fast-sandbox-env/Dockerfile.sandbox-test-image -t <SBX_IMAGE> ."
+		|| fail "opensandbox-launcher is not present/executable at $LAUNCHER_GUEST_PATH — the hardened source image lacks the bake. The lane builds + pushes it from this checkout (template_up_overlaybd_hardening); for standalone templates, build + publish the golden image per scripts/fast-sandbox-env/Dockerfile.sandbox-test-image first."
 	pass "launcher present at $LAUNCHER_GUEST_PATH"
 
 	# 2. The isolation TOML is staged and hardening-gated.
