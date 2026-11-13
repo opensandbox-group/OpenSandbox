@@ -439,11 +439,12 @@ class FakeLoop:
         self.failing = set()
         self.scheduled = []
 
-    def call_soon_threadsafe(self, callback, proxyserver, client):
+    def call_soon_threadsafe(self, callback, *args):
+        client = args[-1]
         if id(client) in self.failing:
             raise RuntimeError("loop unavailable")
         self.scheduled.append(client)
-        callback(proxyserver, client)
+        callback(*args)
 
 
 class SubjectDrainTest(unittest.TestCase):
@@ -614,6 +615,78 @@ class SubjectDrainTest(unittest.TestCase):
         self.runtime.finish_request(held.handle)
         self.runtime.finish_request(newer.handle)
 
+    def test_queued_close_rechecks_after_retired_request_finishes(self):
+        self._check_queued_close_after_request_finishes(remove_host=False)
+
+    def test_queued_close_preserves_removed_host_deadline(self):
+        self._check_queued_close_after_request_finishes(remove_host=True)
+
+    def _check_queued_close_after_request_finishes(self, *, remove_host):
+        self.now = 100.0
+        self.publish(policy=1)
+        client, token = self.connect()
+        old = self.runtime.acquire_request(token)
+        self.publish(host=None if remove_host else "api.example.com", policy=2)
+        self.now = 130.0
+        queued = []
+        with patch.object(self.loop, "call_soon_threadsafe",
+                          side_effect=lambda *args: queued.append(args)):
+            self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(len(queued), 1)
+        self.runtime.finish_request(old.handle)
+        if not remove_host:
+            newer = self.runtime.acquire_request(token)
+            self.assertEqual(newer.action, "allow")
+            self.assertIsNone(self.registry().drain_state(token).deadline)
+        callback, *args = queued.pop()
+        callback(*args)
+        self.assertEqual(self.handler.closed, [client] if remove_host else [])
+        self.assertEqual(self.registry().count, 1)
+        self.runtime.client_disconnected(client)
+
+    def test_queued_close_waits_for_remaining_future_deadline(self):
+        self.publish(policy=1)
+        client, token = self.connect()
+        old = self.runtime.acquire_request(token)
+        self.publish(policy=2)
+        newer = self.runtime.acquire_request(token)
+        self.now = 120.0
+        self.publish(policy=3)
+        self.now = 130.0
+        queued = []
+        with patch.object(self.loop, "call_soon_threadsafe",
+                          side_effect=lambda *args: queued.append(args)):
+            self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(len(queued), 1)
+        self.runtime.finish_request(old.handle)
+        self.assertEqual(self.registry().drain_state(token).deadline, 150.0)
+        callback, *args = queued.pop()
+        callback(*args)
+        self.assertEqual(self.handler.closed, [])
+        self.now = 150.0
+        self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(self.handler.closed, [client])
+        self.runtime.finish_request(newer.handle)
+
+    def test_queued_close_preserves_other_expired_request(self):
+        self.publish(policy=1)
+        client, token = self.connect()
+        first = self.runtime.acquire_request(token)
+        second = self.runtime.acquire_request(token)
+        self.publish(policy=2)
+        self.now = 130.0
+        queued = []
+        with patch.object(self.loop, "call_soon_threadsafe",
+                          side_effect=lambda *args: queued.append(args)):
+            self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(len(queued), 1)
+        self.runtime.finish_request(first.handle)
+        callback, *args = queued.pop()
+        callback(*args)
+        self.assertEqual(self.handler.closed, [client])
+        self.assertEqual(self.registry().count, 1)
+        self.runtime.finish_request(second.handle)
+
     def test_republish_rotation_readd_never_extends_or_resurrects(self):
         self.publish()
         client, token = self.connect()
@@ -716,6 +789,7 @@ class SubjectDrainTest(unittest.TestCase):
                 resume.set()
                 sweeper.join(5)
         self.assertEqual(results, [1])
+        self.assertEqual(self.handler.closed, [])
         self.assertEqual(registry.budget_observations()[0], ("process", 0, 400))
         self.assertEqual(self.runtime.drain_sweep_once(), 0)
 

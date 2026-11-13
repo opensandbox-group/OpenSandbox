@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from contextlib import suppress
 
 from static_passthrough import StaticPassthrough
@@ -259,7 +260,7 @@ class SubjectAdmissionRuntime:
                 for token in tokens:
                     cursor = token.serial
                     client = self._member_client(registry, token)
-                    if client is not None and self._request_close(client):
+                    if client is not None and self._request_close(registry, token, client):
                         attempts += 1
                 if len(tokens) < _DRAIN_PAGE_LIMIT:
                     break
@@ -273,24 +274,30 @@ class SubjectAdmissionRuntime:
                 return None
             return item[2]
 
-    def _request_close(self, client):
+    def _request_close(self, registry, token, client):
         """Schedule closure on the proxy loop; never holds a runtime lock."""
         loop, proxyserver = self._transport
         if loop is None:
             return False
         try:
-            loop.call_soon_threadsafe(_close_in_loop, proxyserver, client)
+            loop.call_soon_threadsafe(self._close_in_loop, proxyserver, registry, token, client)
         except Exception:  # noqa: BLE001 - a closed loop is retried next sweep
             return False
         return True
 
-
-def _close_in_loop(proxyserver, client):
-    """Close one client transport inside the proxy loop; never raise into it."""
-    with suppress(Exception):
-        handler = proxyserver.connections.get(client.id)
-        if handler is not None:
-            handler.close_connection(client)
+    def _close_in_loop(self, proxyserver, registry, token, client):
+        """Recheck the exact retirement inside the proxy loop before closing."""
+        with suppress(Exception):
+            if self._member_client(registry, token) is not client:
+                return
+            # Request completion while this callback was queued can remove the
+            # last expired retirement or leave only a later deadline.
+            state = registry.drain_state(token)
+            if state is None or state.deadline is None or state.deadline > time.monotonic():
+                return
+            handler = proxyserver.connections.get(client.id)
+            if handler is not None:
+                handler.close_connection(client)
 
 
 _runtime = None
