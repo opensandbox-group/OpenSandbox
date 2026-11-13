@@ -43,7 +43,12 @@
 #      under the fsb subreaper: 20 tracked sleepers stay `kill -0`-alive
 #      under /command churn, then fully disappear (a zombie would still
 #      answer kill -0 — disappearance is the reap proof; kill(2) is outside
-#      Landlock's handled accesses and the seccomp deny list)
+#      Landlock's handled accesses and the seccomp deny list). While the
+#      guest kernel leaves Landlock unsupported the confined shell can
+#      still enumerate /proc, so the whole-table bound + zombie count are
+#      pinned directly; an active-Landlock kernel degrades that vantage
+#      (fsb has no unconfined in-guest entry) and the bound moves to the
+#      docker/k8s legs, which count from the host-side namespace entry
 #
 # Landlock observation limit (documented, matching the docker/k8s hardening
 # e2e): the launcher's ruleset grants read only beneath the launcher-wrapped
@@ -250,6 +255,7 @@ hardening_floor_verify() { # [template-id]
 	# The launcher drops to execd's own uid; the fsb guest execd is root by
 	# construction (the kernel boots the guest init as root), so root it is.
 	cmd_uid="$(hardening_field Uid "$cmd_fields" | awk '{print $1}')"
+	log "verify (hardening): /command status fields: $cmd_fields"
 	[[ -n "$cmd_uid" && "$cmd_uid" == "0" ]] \
 		|| fail "/command uid ($cmd_uid) is not execd's identity (root on fsb): the floor must not relocate identity"
 	pass "/command floor: CapEff=0 CapBnd=0 Seccomp=2 NoNewPrivs=1 uid=$cmd_uid (execd's uid)"
@@ -281,13 +287,23 @@ hardening_floor_verify() { # [template-id]
 		pass "Landlock: /tmp writable, /etc/passwd read-only, /tmp script executes"
 	fi
 
-	# 7. Sustained fork-heavy mix under the fsb subreaper, confined-safe: 20
-	#    tracked sleepers orphan into execd while /command churns (execd
-	#    stays responsive = the table is not wedged), then FULLY disappear —
-	#    a zombie still answers kill -0, so disappearance is the reap proof.
-	#    kill(2) is outside Landlock's handled accesses and the seccomp deny
-	#    list, and the pids travel through /tmp files (no cross-pid /proc
-	#    enumeration, which Landlock denies).
+	# 7. Sustained fork-heavy mix under the fsb subreaper, confined-safe:
+	#    20 tracked sleepers orphan into execd while /command churns, then
+	#    FULLY disappear — a zombie still answers kill -0, so disappearance
+	#    is the reap proof. kill(2) is outside Landlock's handled accesses
+	#    and the seccomp deny list; the pids travel through /tmp files (no
+	#    cross-pid /proc enumeration, which Landlock denies). While the
+	#    Landlock layer is unsupported (the fsb kernel today) the confined
+	#    shell can still enumerate /proc, so the whole-table bound and the
+	#    zombie count are pinned directly; under an active-Landlock kernel
+	#    that vantage degrades (fsb has no unconfined in-guest entry) and
+	#    the whole-table bound stays on the docker/k8s legs, which count
+	#    from the host-side namespace entry.
+	local baseline
+	if [[ "$landlock_state" != "active" ]]; then
+		baseline="$(guest_value BASELINE sh -c 'echo "BASELINE=$(ps -e --no-headers 2>/dev/null | wc -l || ps -e | tail -n +2 | wc -l)"')" \
+			|| fail "hardening: process-count baseline probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
+	fi
 	guest_out sh -c "rm -rf $HARDENING_SLEEPER_DIR; mkdir -p $HARDENING_SLEEPER_DIR; i=0; while [ \$i -lt 20 ]; do sleep 25 & echo \$! > $HARDENING_SLEEPER_DIR/\$i; i=\$((i+1)); done; echo SLEEPERS=20" >/dev/null \
 		|| fail "hardening: sleeper spawn failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
 	[[ "$(guest_value ALIVE sh -c "n=0; for f in $HARDENING_SLEEPER_DIR/*; do kill -0 \$(cat \$f) 2>/dev/null && n=\$((n+1)); done; echo ALIVE=\$n")" == "20" ]] \
@@ -297,8 +313,33 @@ hardening_floor_verify() { # [template-id]
 		guest_out sh -c 'echo churn' >/dev/null \
 			|| fail "hardening: /command churn round $i failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
 	done
-	pass "fork-heavy mix: 20 sleepers alive, /command churns served (bounded, responsive)"
+	local mix_zombies mix_total
+	if [[ "$landlock_state" != "active" ]]; then
+		probe="$(guest_value MIX sh -c 'z=$(ps -eo stat | grep -c "^Z" || true); n=$(ps -e --no-headers 2>/dev/null | wc -l || ps -e | tail -n +2 | wc -l); echo "MIX=z=$z,n=$n"')" \
+			|| fail "hardening: fork-heavy mix probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
+		mix_zombies="$(printf '%s' "$probe" | sed -n 's/^z=\([0-9]*\),n=[0-9]*$/\1/p')"
+		mix_total="$(printf '%s' "$probe" | sed -n 's/^z=[0-9]*,n=\([0-9]*\)$/\1/p')"
+		[[ -n "$mix_zombies" && -n "$mix_total" ]] || fail "fork-heavy mix probe returned unparseable output: $probe"
+		[[ "$mix_zombies" == "0" ]] \
+			|| fail "the guest process table carries zombies under the fork-heavy mix: $mix_zombies in Z state"
+		[[ "$mix_total" -le $(( baseline + 40 )) ]] \
+			|| fail "the guest process table is unbounded under the fork-heavy mix: baseline=$baseline, during=$mix_total"
+		pass "fork-heavy mix: bounded table ($mix_total processes, baseline $baseline), zombie-free under churn"
+	else
+		pass "fork-heavy mix: 20 sleepers alive, /command churns served (kill -0 tracking; the whole-table bound degrades under Landlock confinement)"
+	fi
 	wait_for "fork-heavy sleepers fully reaped by the subreaper" 25 hardening_sleepers_reaped
+	if [[ "$landlock_state" != "active" ]]; then
+		probe="$(guest_value FINAL sh -c 'z=$(ps -eo stat | grep -c "^Z" || true); n=$(ps -e --no-headers 2>/dev/null | wc -l || ps -e | tail -n +2 | wc -l); echo "FINAL=z=$z,n=$n"')" \
+			|| fail "hardening: post-reap table probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
+		mix_zombies="$(printf '%s' "$probe" | sed -n 's/^z=\([0-9]*\),n=[0-9]*$/\1/p')"
+		mix_total="$(printf '%s' "$probe" | sed -n 's/^z=[0-9]*,n=\([0-9]*\)$/\1/p')"
+		[[ -n "$mix_zombies" && "$mix_zombies" == "0" ]] \
+			|| fail "the guest process table carries zombies after the sleepers exited: $probe"
+		[[ "$mix_total" -le $(( baseline + 8 )) ]] \
+			|| fail "the guest process table did not return to baseline after the sleepers exited: baseline=$baseline, after=$mix_total"
+		pass "fork-heavy mix: table back to baseline ($mix_total vs $baseline), zombie-free"
+	fi
 	pass "fork-heavy mix: sleepers fully disappeared (zombies would still answer kill -0)"
 
 	log "verify (hardening): skipping by design on fsb — custom [seccomp]/keep_capabilities override (second OCI template build), EXECD_INIT drift (the fsb server always bakes EXECD_INIT=1), missing-CAP_SETPCAP degradation (no VM cap ceiling); the docker/k8s hardening legs pin these"
