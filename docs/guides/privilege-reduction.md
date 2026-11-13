@@ -9,7 +9,7 @@ Sandboxes run untrusted and AI-generated code. The container boundary ([secure c
 
 The feature is configured by a single TOML file that travels with your image. You decide *whether* to reduce; the built-in defaults decide *how*. Everything is fail-open: a missing kernel feature is reported and skipped, never fatal, and the capabilities endpoint publishes what is actually enforced instead of what was requested.
 
-Privilege reduction is an operator/image-level policy, not a per-request option — it cannot be toggled from `CreateSandboxRequest`. One boundary note: on current runtimes the config is *delivered* through sandbox env, and a caller who can create sandboxes can override `EXECD_ISOLATION_CONFIG` per request (including to an empty value, which disables the floor). Treat hardening as hardening-in-depth, not an enforcement boundary against untrusted sandbox-creators, until the runtimes reserve that variable.
+Privilege reduction is opt-in and self-applied: you — whoever builds the image and creates the sandbox — decide whether to harden, and on what scope. Bake the config into your image to cover every sandbox from it, or point at it per request where your delivery route supports that (Kubernetes request env). There is no platform switch that hardens anyone else's sandboxes; the container boundary above stays the platform's layer, this one is yours.
 
 ## How it is structured
 
@@ -153,7 +153,7 @@ All keys are optional. A missing file or a missing key falls back to the default
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | bool | `false` | Master switch for the privilege floor. When on, every user-code process (entrypoint, `/command`, `/code`, PTY) is launched through the launcher with dropped capabilities, `no_new_privs`, and the seccomp floor. Paired with `EXECD_INIT` injected by the server. |
-| `keep_capabilities` | []string | `[]` (drop all) | Capabilities the workload retains. Each named cap (`CAP_NET_RAW`, `CAP_SYS_TIME`, …) is raised in the ambient set so it survives `execve`. A name must be a valid `CAP_*` identifier or execd exits at startup. A kept cap must also exist in the container ceiling — if the operator's `drop_capabilities` removed it, the ambient raise fails and the workload simply runs without it. |
+| `keep_capabilities` | []string | `[]` (drop all) | Capabilities the workload retains. Each named cap (`CAP_NET_RAW`, `CAP_SYS_TIME`, …) is raised in the ambient set so it survives `execve`. A name must be a valid `CAP_*` identifier or execd exits at startup. A kept cap must also exist in the container ceiling — if the ceiling's `drop_capabilities` removed it, the ambient raise fails and the workload simply runs without it. |
 
 `no_new_privs` is always set when the floor is on and is not configurable; it costs nothing and is what makes the reduction irrevocable across `execve`.
 
@@ -195,7 +195,7 @@ Landlock is an allowlist: access under unlisted paths is denied, and rules can o
 | `extra_writable` | read/write/create/remove/rename/truncate |
 | `extra_readable` | read + execute |
 
-All built-in grants are best-effort — a path that does not exist in your image (alpine has no `/lib64`, minimal images lack `/workspace`) is skipped. Only operator-declared `extra_*` paths are required, and a missing one disables the layer (fail closed for your explicit grants, fail open overall).
+All built-in grants are best-effort — a path that does not exist in your image (alpine has no `/lib64`, minimal images lack `/workspace`) is skipped. Only your declared `extra_*` paths are required, and a missing one disables the layer (fail closed for your explicit grants, fail open overall).
 
 ::: warning Known Landlock limitation with `/proc/self`
 The `/proc/self` rule is inode-based: it grants the launcher's own `/proc/<pid>`, which the initial workload keeps across `execve`. A *forked descendant* resolves `/proc/self` to a different directory the inherited ruleset does not cover, so tools that inspect per-process procfs (for example `ps`, or a child reading its own `/proc/self/status`) fail with `EACCES` under Landlock. Granting all of `/proc` is not an option — it would re-expose `/proc/1` and execd's credentials.
@@ -246,7 +246,7 @@ The floor subtracts from what the container grants; it cannot grant anything bac
 
 ## Compatibility notes
 
-- **Trust boundary** — the config is delivered via sandbox env, so a caller who can create sandboxes can override `EXECD_ISOLATION_CONFIG` per request (empty value = floor off). Reserving that variable against request-env overrides is a tracked follow-up; until then, do not treat the floor as an enforcement boundary against untrusted sandbox-creators.
+- **Who controls it** — the sandbox creator, not the platform: the floor runs because your image (or your request env) points at a hardened TOML, and the same channels can point away from it — overriding it per request is your knob, not a bypass. If a platform deployment later wants to *enforce* hardening against its callers, reserving `EXECD_ISOLATION_CONFIG` against request-env overrides is the tracked follow-up (issue #2834).
 - **Non-Linux platforms** — the floor is Linux-only; configured layers report `unsupported` on Windows.
 - **`execve` is reserved** in a custom `[seccomp] deny` when `[hardening] enabled` is on (config error); `execveat` remains allowed.
 - **Override keys replace, never merge** — `[seccomp] deny` and `allowed_writable` both fully replace their defaults.
