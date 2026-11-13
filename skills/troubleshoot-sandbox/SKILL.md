@@ -1,6 +1,6 @@
 ---
 name: troubleshoot-sandbox
-description: Troubleshoot OpenSandbox issues by running diagnostics (logs, inspect, events, summary) via CLI or HTTP API to diagnose sandbox failures like OOM, crash, image pull errors, network problems, etc.
+description: Troubleshoot OpenSandbox issues by running diagnostics (context, logs, events) via CLI or HTTP API to diagnose sandbox failures like OOM, crash, image pull errors, network problems, etc.
 user-invocable: true
 argument-hint: "[sandbox-id]"
 ---
@@ -29,11 +29,13 @@ If the server requires authentication, add `-H "OPEN-SANDBOX-API-KEY: <your-key>
 
 Check the sandbox status (Running, Pending, Paused, Failed, etc.). If the sandbox is not found, it may have been deleted or expired.
 
-### Step 2: Get diagnostics summary (recommended first action)
+### Step 2: Collect diagnostics (recommended first action)
 
 **CLI:**
 ```bash
-opensandbox devops summary <sandbox-id>
+opensandbox diagnostics context <sandbox-id> -o json
+opensandbox diagnostics events <sandbox-id> --scope runtime -o raw
+opensandbox diagnostics logs <sandbox-id> --scope container -o raw
 ```
 
 **HTTP:**
@@ -41,8 +43,8 @@ opensandbox devops summary <sandbox-id>
 curl http://<server-domain>/v1/sandboxes/<sandbox-id>/diagnostics/summary
 ```
 
-This returns a combined plain-text view of:
-- **Inspect**: container/pod details (status, resources, network, labels)
+The CLI commands return:
+- **Context**: backend type, diagnostic identifiers, and current state
 - **Events**: state transitions, OOM kills, errors
 - **Logs**: recent container output
 
@@ -50,14 +52,12 @@ Read the output carefully and look for common failure patterns listed below.
 
 ### Step 3: Drill down if needed
 
-If the summary is not enough, use individual endpoints for more detail:
+If the scoped output is not enough, use `--scope all` to collect every built-in stream:
 
 **CLI:**
 ```bash
-opensandbox devops logs <sandbox-id> --tail 500
-opensandbox devops logs <sandbox-id> --since 30m
-opensandbox devops inspect <sandbox-id>
-opensandbox devops events <sandbox-id> --limit 100
+opensandbox diagnostics logs <sandbox-id> --scope all -o raw
+opensandbox diagnostics events <sandbox-id> --scope all -o raw
 ```
 
 **HTTP:**
@@ -79,13 +79,13 @@ curl "http://<server-domain>/v1/sandboxes/<sandbox-id>/diagnostics/events?limit=
 
 | Symptom | What to check | Likely cause |
 |---------|---------------|--------------|
-| Status=Pending, no IP | inspect - look for Waiting containers | Image pull failure, insufficient resources, node scheduling |
-| OOMKilled=true | inspect - check memory limits | Container exceeded memory limit, increase memory resource |
+| Status=Pending, no IP | events - look for scheduling/image failures | Image pull failure, insufficient resources, node scheduling |
+| OOMKilled=true | events - check OOM kill records | Container exceeded memory limit, increase memory resource |
 | Exit Code 137 | events + logs | OOM kill or external SIGKILL |
 | Exit Code 1 | logs - check application output | Application error, check entrypoint and env vars |
 | Exit Code 126/127 | logs | Entrypoint command not found or not executable |
-| Connection refused to sandbox | inspect - check ports and network | Service not started inside sandbox, wrong port, network policy blocking |
-| Sandbox stuck in Running but unresponsive | logs (tail=200) | Application hung, check for deadlocks or resource exhaustion |
+| Connection refused to sandbox | context + events - check ports and network policy | Service not started inside sandbox, wrong port, network policy blocking |
+| Sandbox stuck in Running but unresponsive | logs --scope container | Application hung, check for deadlocks or resource exhaustion |
 | execd health check failing | logs - look for execd errors | execd daemon crashed or port conflict |
 | ImagePullBackOff (K8s) | events | Wrong image name, missing registry credentials |
 | CrashLoopBackOff (K8s) | events + logs | Application keeps crashing, check exit code and logs |

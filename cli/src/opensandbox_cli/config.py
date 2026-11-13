@@ -64,16 +64,11 @@ DEFAULT_CONFIG_TEMPLATE = """\
 
 
 def load_config_file(config_path: Path | None = None) -> dict[str, Any]:
-    """Load and parse the TOML config file.
-
-    Returns an empty dict if the file doesn't exist or tomllib is unavailable.
-    Raises ``click.ClickException`` if the file cannot be read or parsed.
-    """
+    """Load the TOML config file; return {} when it does not exist."""
     path = config_path or DEFAULT_CONFIG_PATH
     if tomllib is None:
         return {}
-    # Open directly instead of checking path.exists() first: exists() raises
-    # PermissionError for a path under a directory that cannot be searched.
+    # Open directly: exists() raises on an unsearchable parent directory.
     try:
         with open(path, "rb") as f:
             return tomllib.load(f)
@@ -87,9 +82,8 @@ def load_config_file(config_path: Path | None = None) -> dict[str, Any]:
         ) from exc
 
 
-# Config-file keys resolve_config reads as text. `config set` stores their
-# values verbatim: inferring a TOML number would rewrite an API key such as
-# "007123" as 7123.
+# Read as text and stored verbatim so an API key like "007123" is not
+# rewritten as the number 7123.
 STRING_KEYS = frozenset(
     {
         "connection.api_key",
@@ -110,17 +104,11 @@ def resolve_config(
     cli_use_server_proxy: bool | None = None,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Merge config from all sources and return a flat dict.
+    """Merge config from all sources into a flat dict.
 
-    Values that come from the config file are coerced to the type declared for
-    each key. A file may legitimately encode a value with a different TOML type
-    than the CLI expects (for example an all-digit ``connection.api_key`` or a
-    ``defaults.timeout`` given in seconds), and callers downstream rely on the
-    declared type.
-
-    Keys returned:
-      - api_key, domain, protocol, request_timeout (int seconds), use_server_proxy (bool; deprecated)
-      - default_image, default_timeout (str like "10m")
+    Config-file values are coerced to each key's declared type. Keys returned:
+    api_key, domain, protocol, request_timeout (int seconds),
+    use_server_proxy (bool; deprecated), color, default_image, default_timeout.
     """
     file_cfg = load_config_file(config_path)
     for section in ("connection", "output", "defaults"):
@@ -173,13 +161,7 @@ def init_config_file(config_path: Path | None = None, *, force: bool = False) ->
 
 
 def _request_timeout_seconds(*candidates: int | None) -> int:
-    """Return the first explicit request timeout, in seconds.
-
-    ``None`` means that source did not set a timeout. Zero and negative values
-    are explicit and invalid: they must not fall through to a later source or
-    the 30 second default. ``--request-timeout 0`` used to be ignored because
-    ``0`` is falsy.
-    """
+    """Return the first explicit timeout in seconds; zero/negative values are rejected rather than ignored."""
     for value in candidates:
         if value is None:
             continue
@@ -207,11 +189,7 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def _bool_or_none(value: Any) -> bool | None:
-    """Coerce a configured value to ``bool``, or ``None`` when it is not boolean.
-
-    ``0``/``1`` are accepted so hand-edited files that write a TOML integer for a
-    boolean key keep resolving instead of silently falling back to the default.
-    """
+    """Coerce to ``bool``, accepting 0/1 so hand-edited files keep resolving."""
     if value is None:
         return None
     if isinstance(value, bool):

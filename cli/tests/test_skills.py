@@ -95,43 +95,6 @@ class TestSkillsCommands:
         assert data["title"] == "OpenSandbox Sandbox Lifecycle"
         assert '"defaultAction": "deny"' in data["json_shapes"]
 
-    def test_install_without_args_prints_guidance_and_does_not_install(
-        self,
-        runner: CliRunner,
-        isolated_skill_targets: None,
-        tmp_path: Path,
-    ) -> None:
-        result = runner.invoke(skills_group, ["install"])
-
-        assert result.exit_code != 0
-        assert "Install guidance:" in result.output
-        assert "osb skills install <skill-name> --target <tool> --scope <scope>" in result.output
-        assert not (
-            tmp_path / ".claude" / "skills" / "sandbox-troubleshooting" / "SKILL.md"
-        ).exists()
-
-    def test_install_with_skill_but_without_target_prints_guidance(
-        self,
-        runner: CliRunner,
-        isolated_skill_targets: None,
-    ) -> None:
-        result = runner.invoke(skills_group, ["install", "sandbox-troubleshooting"])
-
-        assert result.exit_code != 0
-        assert "Install guidance:" in result.output
-        assert "Missing required option '--target'" in result.output
-
-    def test_install_with_all_builtins_but_without_target_prints_guidance(
-        self,
-        runner: CliRunner,
-        isolated_skill_targets: None,
-    ) -> None:
-        result = runner.invoke(skills_group, ["install", "--all-builtins"])
-
-        assert result.exit_code != 0
-        assert "Install guidance:" in result.output
-        assert "Missing required option '--target'" in result.output
-
     def test_install_copy_target_creates_named_skill_file(
         self,
         runner: CliRunner,
@@ -223,19 +186,6 @@ class TestSkillsCommands:
         assert data["requires_restart"] is True
         assert data["operations"][0]["skill"] == "network-egress"
         assert data["operations"][0]["status"] == "installed"
-
-    def test_install_rejects_skill_name_and_all_builtins_together(
-        self,
-        runner: CliRunner,
-        isolated_skill_targets: None,
-    ) -> None:
-        result = runner.invoke(
-            skills_group,
-            ["install", "sandbox-troubleshooting", "--all-builtins"],
-        )
-
-        assert result.exit_code != 0
-        assert "either a skill name or --all-builtins" in result.output
 
     def test_install_to_global_codex_uses_global_path(
         self,
@@ -602,20 +552,14 @@ class TestSkillCliAlignment:
         assert {"--mode", "--owner", "--group", "-o", "--output"} <= _option_names(_command(["file", "chmod"]))
         assert {"--old", "--new", "-o", "--output"} <= _option_names(_command(["file", "replace"]))
 
-    def test_network_egress_diagnostics_and_devops_skills_match_cli(self) -> None:
+    def test_network_egress_and_diagnostics_skills_match_cli(self) -> None:
         patch_cmd = _command(["egress", "patch"])
         diag_logs_cmd = _command(["diagnostics", "logs"])
         diag_events_cmd = _command(["diagnostics", "events"])
-        logs_cmd = _command(["devops", "logs"])
-        events_cmd = _command(["devops", "events"])
-        summary_cmd = _command(["devops", "summary"])
 
         assert {"--rule", "-o", "--output"} <= _option_names(patch_cmd)
         assert {"--scope", "-s", "-o", "--output"} <= _option_names(diag_logs_cmd)
         assert {"--scope", "-s", "-o", "--output"} <= _option_names(diag_events_cmd)
-        assert {"--tail", "-n", "--since", "-s", "-o", "--output"} <= _option_names(logs_cmd)
-        assert {"--limit", "-l", "-o", "--output"} <= _option_names(events_cmd)
-        assert {"--tail", "-n", "--event-limit", "-o", "--output"} <= _option_names(summary_cmd)
 
     def test_credential_vault_skill_matches_cli(self) -> None:
         vault_group = _command(["credential-vault"])

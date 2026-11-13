@@ -376,13 +376,8 @@ Older server builds may still return
 `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
 ::: info
-Legacy DevOps diagnostics remain experimental. Prefer `osb diagnostics logs/events` for stable API-backed log and event collection.
+The legacy `osb devops` command group was removed. Use `osb diagnostics logs/events` with `--scope` for log and event collection and `osb sandbox get` for sandbox state. The plain-text filters (`--tail`, `--since`, `--limit`) have no stable equivalents; read the scoped output and filter as needed.
 :::
-
-```bash
-osb devops inspect <sandbox-id> -o raw
-osb devops summary <sandbox-id> -o raw
-```
 
 ## Output Formats
 
@@ -416,7 +411,6 @@ The main command groups are:
 - `osb egress`: runtime egress policy
 - `osb credential-vault`: sandbox-local credentials and bindings
 - `osb diagnostics`: stable diagnostics logs and events
-- `osb devops`: experimental legacy diagnostics
 - `osb config`: local CLI configuration
 - `osb skills`: bundled skills for AI tools
 

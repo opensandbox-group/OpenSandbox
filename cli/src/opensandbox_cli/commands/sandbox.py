@@ -448,8 +448,8 @@ _SANDBOX_REQUEST_FILE_FIELDS = (
     "extensions",
 )
 
-# Fields rejected alongside templateId: template mode fixes the workload shape
-# on the server (metadata, extensions, networkPolicy and timeout stay allowed).
+# Rejected alongside templateId: template mode fixes the workload shape on
+# the server (metadata, extensions, networkPolicy and timeout stay allowed).
 _TEMPLATE_MODE_FORBIDDEN_FILE_FIELDS = (
     "resourceLimits",
     "resourceRequests",
@@ -614,8 +614,8 @@ def _parse_sandbox_request_file(path: str) -> dict[str, Any]:
 
     if req["template"] is not None:
         def _is_set(name: str) -> bool:
-            # Mirror the server: explicit `secureAccess: false` is the documented
-            # default and stays allowed alongside templateId.
+            # Explicit `secureAccess: false` is the documented default and
+            # stays allowed alongside templateId.
             if name == "secureAccess":
                 return data.get(name) is True
             return data.get(name) is not None
