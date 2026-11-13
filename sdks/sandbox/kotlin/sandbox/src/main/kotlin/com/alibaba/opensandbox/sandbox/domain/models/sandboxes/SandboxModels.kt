@@ -943,12 +943,18 @@ class SnapshotInfo(
     val name: String? = null,
     val status: SnapshotStatus,
     val createdAt: OffsetDateTime,
-    val mode: String = SnapshotMode.FULL,
 ) {
     /**
-     * Retained for source and binary compatibility with callers compiled
-     * against SDKs that predate the mode field: snapshots constructed through
-     * it report [SnapshotMode.FULL].
+     * Artifact class of the snapshot. Snapshots created before the mode field
+     * existed report [SnapshotMode.FULL].
+     */
+    var mode: String = SnapshotMode.FULL
+        private set
+
+    /**
+     * Mode-aware constructor. The five-parameter primary constructor keeps the
+     * published ABI — including the compiler-generated default-argument bridge
+     * for callers that omit [name] — intact for pre-upgrade binaries.
      */
     constructor(
         id: String,
@@ -956,7 +962,10 @@ class SnapshotInfo(
         name: String?,
         status: SnapshotStatus,
         createdAt: OffsetDateTime,
-    ) : this(id, sandboxId, name, status, createdAt, SnapshotMode.FULL)
+        mode: String,
+    ) : this(id, sandboxId, name, status, createdAt) {
+        this.mode = mode
+    }
 }
 
 class SnapshotFilter private constructor(

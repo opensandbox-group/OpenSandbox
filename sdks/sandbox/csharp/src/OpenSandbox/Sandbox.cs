@@ -876,24 +876,20 @@ public sealed class Sandbox : IAsyncDisposable
     }
 
     /// <summary>
-    /// Creates a persistent snapshot with an explicit mode.
+    /// Creates a snapshot described by <paramref name="request"/>.
     /// </summary>
-    /// <param name="name">Optional snapshot name.</param>
-    /// <param name="mode">
-    /// What the snapshot persists: see <see cref="SnapshotModes"/>. Null lets the server apply its
-    /// default ("full"). <see cref="SnapshotModes.RootfsOnly"/> requires the fast-sandbox backend
-    /// with OCI-backed sandboxes; restoring it cold-boots a fresh sandbox.
+    /// <param name="request">
+    /// The snapshot request: <see cref="CreateSnapshotRequest.Name"/> and
+    /// <see cref="CreateSnapshotRequest.Mode"/> (see <see cref="SnapshotModes"/>). A null mode
+    /// lets the server apply its default ("full"). <see cref="SnapshotModes.RootfsOnly"/> requires
+    /// the fast-sandbox backend with OCI-backed sandboxes; restoring it cold-boots a fresh sandbox.
     /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     public Task<SnapshotInfo> CreateSnapshotAsync(
-        string? name,
-        string? mode,
+        CreateSnapshotRequest request,
         CancellationToken cancellationToken = default)
     {
-        return _sandboxes.CreateSnapshotAsync(
-            Id,
-            new CreateSnapshotRequest { Name = name, Mode = mode },
-            cancellationToken);
+        return _sandboxes.CreateSnapshotAsync(Id, request, cancellationToken);
     }
 
     /// <summary>

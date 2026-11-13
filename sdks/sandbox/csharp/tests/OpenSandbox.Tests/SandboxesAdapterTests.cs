@@ -350,20 +350,21 @@ public class SandboxesAdapterTests
     public void CreateSnapshotAsync_ShouldPreserveLegacyAndModeOverloads()
     {
         // Published overloads must keep their exact signatures: existing binaries bind
-        // to them, and recompiled positional calls would otherwise bind the token to
-        // the mode parameter.
+        // to them, and recompiled positional calls like ("name", default) must keep
+        // binding to the legacy overload instead of an ambiguous mode-aware one — the
+        // request-based overload never overlaps with the string-based legacy shapes.
         typeof(Sandbox)
             .GetMethod(nameof(Sandbox.CreateSnapshotAsync), new[] { typeof(string), typeof(CancellationToken) })
             .Should().NotBeNull("the pre-mode (name, cancellationToken) overload must survive");
         typeof(Sandbox)
-            .GetMethod(nameof(Sandbox.CreateSnapshotAsync), new[] { typeof(string), typeof(string), typeof(CancellationToken) })
-            .Should().NotBeNull("the mode-aware (name, mode, cancellationToken) overload must exist");
+            .GetMethod(nameof(Sandbox.CreateSnapshotAsync), new[] { typeof(CreateSnapshotRequest), typeof(CancellationToken) })
+            .Should().NotBeNull("the request-based overload must exist");
         typeof(SandboxManager)
             .GetMethod(nameof(SandboxManager.CreateSnapshotAsync), new[] { typeof(string), typeof(string), typeof(CancellationToken) })
             .Should().NotBeNull("the pre-mode (sandboxId, name, cancellationToken) overload must survive");
         typeof(SandboxManager)
-            .GetMethod(nameof(SandboxManager.CreateSnapshotAsync), new[] { typeof(string), typeof(string), typeof(string), typeof(CancellationToken) })
-            .Should().NotBeNull("the mode-aware (sandboxId, name, mode, cancellationToken) overload must exist");
+            .GetMethod(nameof(SandboxManager.CreateSnapshotAsync), new[] { typeof(string), typeof(CreateSnapshotRequest), typeof(CancellationToken) })
+            .Should().NotBeNull("the request-based overload must exist");
     }
 
     [Fact]

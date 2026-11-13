@@ -229,16 +229,22 @@ public sealed class SandboxManager : IAsyncDisposable
             cancellationToken);
     }
 
+    /// <summary>
+    /// Creates a snapshot described by <paramref name="request"/>.
+    /// </summary>
+    /// <param name="sandboxId">The sandbox ID to snapshot.</param>
+    /// <param name="request">
+    /// The snapshot request: <see cref="CreateSnapshotRequest.Name"/> and
+    /// <see cref="CreateSnapshotRequest.Mode"/> (see <see cref="SnapshotModes"/>). A null mode
+    /// lets the server apply its default ("full").
+    /// </param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     public Task<SnapshotInfo> CreateSnapshotAsync(
         string sandboxId,
-        string? name,
-        string? mode,
+        CreateSnapshotRequest request,
         CancellationToken cancellationToken = default)
     {
-        return _sandboxes.CreateSnapshotAsync(
-            sandboxId,
-            new CreateSnapshotRequest { Name = name, Mode = mode },
-            cancellationToken);
+        return _sandboxes.CreateSnapshotAsync(sandboxId, request, cancellationToken);
     }
 
     public Task<SnapshotInfo> GetSnapshotAsync(
