@@ -32,26 +32,29 @@
 #   3. capabilities endpoint: init_mode=subreaper, signal_shield=false,
 #      cap_drop + seccomp active (the TOML-load + launcher-found proof),
 #      landlock active|unsupported (honest), ebpf disabled
-#   4. /command runs through the launcher: CapEff=0, CapBnd=0, Seccomp=2,
-#      NoNewPrivs=1, uid root (fsb execd is root by construction; the
-#      launcher drops to execd's own uid, never a foreign identity)
-#   5. execd-spawned workload floor: a detached workload self-dumps its
-#      /proc/self/status + environ to /tmp (Landlock only grants /proc/self,
-#      so no confined probe may read another process's /proc) — CapEff=0,
-#      CapBnd=0, Seccomp=2, NoNewPrivs=1, execd config env absent. This is
-#      the fsb analog of the docker/k8s entrypoint dump (the baked `tail -f
-#      /dev/null` entrypoint is uninstrumentable; the entrypoint rides the
-#      same execd -> launcher path pinned here and by the capabilities
-#      report, and init-mode.sh pins it as execd's supervised child)
-#   6. env strip: execd's config/credential env absent from /command and
-#      from the detached workload
-#   7. Landlock (when active): /tmp writable, /etc/passwd read-only, a
+#   4. the /command workload runs through the launcher: CapEff=0, CapBnd=0,
+#      Seccomp=2, NoNewPrivs=1, uid root (fsb execd is root by construction;
+#      the launcher drops to execd's own uid, never a foreign identity),
+#      execd's config/credential env stripped from its environ
+#   5. Landlock (when active): /tmp writable, /etc/passwd read-only, a
 #      script written to /tmp still executes
-#   8. sustained fork-heavy mix keeps a bounded, zombie-free process table
+#   6. sustained fork-heavy mix keeps a bounded, zombie-free process table
 #      under the fsb subreaper: 20 tracked sleepers stay `kill -0`-alive
 #      under /command churn, then fully disappear (a zombie would still
 #      answer kill -0 — disappearance is the reap proof; kill(2) is outside
 #      Landlock's handled accesses and the seccomp deny list)
+#
+# Landlock observation limit (documented, matching the docker/k8s hardening
+# e2e): the launcher's ruleset grants read only beneath the launcher-wrapped
+# process's own /proc/<pid> directory — anchored at its execve'd PID — so a
+# forked helper cannot even read its own /proc/self, and no confined probe
+# can read another process's /proc entries. The /command shell IS the
+# launcher-wrapped process (same PID across the launcher's execve), so the
+# floor is pinned from inside that anchored process; the baked `tail -f
+# /dev/null` entrypoint is uninstrumentable on fsb (it rides the same
+# execd -> launcher path the capabilities report arms, and init-mode.sh pins
+# it as execd's supervised child) — its direct per-process pin stays on the
+# docker/k8s legs, where the test entrypoint self-dumps.
 #
 # Known fsb gaps, deliberately not pinned here (the docker/k8s legs own
 # them): the custom [seccomp] deny + keep_capabilities override (a second
@@ -77,29 +80,9 @@ CAPABILITIES_URL="http://127.0.0.1:44772/v1/isolated/capabilities"
 # launcher unsets this exact set before execve. JUPYTER_HOST/JUPYTER_TOKEN
 # are not set on the fsb golden image but the strip must hold regardless.
 HARDENING_ENV_BLACKLIST="EXECD_ACCESS_TOKEN EXECD_ISOLATION_CONFIG EXECD_ENVS EXECD_LIFECYCLE_CONFIG EXECD_RUNTIME_INIT OPENSANDBOX_LIFECYCLE JUPYTER_HOST JUPYTER_TOKEN"
-
-# The launcher's Landlock ruleset handles read_file and grants read only
-# beneath /proc/self + /proc/sys (+ the read/exec dirs), so a confined probe
-# must never read another process's /proc entries. The workload-floor probes
-# therefore run a detached, launcher-wrapped process that SELF-dumps its own
-# /proc/self/status and environ into /tmp (always writable under the floor),
-# and the stage reads the dump files back.
-HARDENING_RELAY_DIR="/tmp/hardening-relay"
-# hardening_relay_probe: one detached workload writing both dumps; the
-# foreground shell then cats them (stdout -> the CLI output the stage parses).
-hardening_relay_probe="
-rm -rf $HARDENING_RELAY_DIR; mkdir -p $HARDENING_RELAY_DIR
-{
-	grep -E '^(CapEff|CapBnd|Seccomp|NoNewPrivs|Uid):' /proc/self/status > $HARDENING_RELAY_DIR/status
-	tr '\\0' '\\n' < /proc/self/environ | grep '^EXECD_' > $HARDENING_RELAY_DIR/environ
-} &
-wait
-echo '--- status ---'
-cat $HARDENING_RELAY_DIR/status
-echo '--- env ---'
-cat $HARDENING_RELAY_DIR/environ
-echo '--- end ---'
-"
+# Pid files for the fork-heavy mix: the /command shell records the sleeper
+# pids it spawned (kill(2) needs no /proc enumeration, which Landlock denies).
+HARDENING_SLEEPER_DIR="/tmp/hardening-sleepers"
 
 # guest_out <words...>: run a command in the sandbox via the CLI.
 guest_out() {
@@ -197,7 +180,7 @@ hardening_floor_verify() { # [template-id]
 	probe="$(guest_value LAUNCHER sh -c '[ -x /opt/opensandbox/opensandbox-launcher ] && echo LAUNCHER=1 || echo LAUNCHER=0')" \
 		|| fail "hardening: launcher probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "1" ]] \
-		|| fail "opensandbox-launcher is not present/executable at /opt/opensandbox/opensandbox-launcher (SBX_IMAGE bake missing?)"
+		|| fail "opensandbox-launcher is not present/executable at $LAUNCHER_GUEST_PATH — the SBX_IMAGE bake is missing; rebuild + publish the golden image first: docker build -f scripts/fast-sandbox-env/Dockerfile.sandbox-test-image -t <SBX_IMAGE> ."
 	pass "launcher present at $LAUNCHER_GUEST_PATH"
 
 	# 2. The isolation TOML is staged and hardening-gated.
@@ -246,9 +229,12 @@ hardening_floor_verify() { # [template-id]
 	[[ "$(printf '%s' "$hardening_line" | jq -r '.ebpf.state')" == "disabled" ]] \
 		|| fail "hardening.ebpf is not disabled (eBPF observation is not part of the floor): $hardening_line"
 
-	# 4. /command runs through the launcher: reduced caps, trimmed bounding
-	#    set, seccomp filter mode, no_new_privs, identity not relocated.
-	#    /proc/$$/status is the launcher-exec'd command shell itself.
+	# 4. The /command workload runs through the launcher (it IS the
+	#    launcher-exec'd process — same PID across the launcher's execve, so
+	#    its /proc/<pid> dir is the anchored Landlock grant). CapEff/CapBnd
+	#    zero, seccomp filter mode, no_new_privs, identity not relocated.
+	#    The forked grep reads the anchored pid dir via /proc/$$ — allowed
+	#    by the grant (its own /proc/self would not be).
 	local cmd_fields cmd_uid
 	cmd_fields="$(hardening_status_fields sh -c 'grep -E "^(CapEff|CapBnd|Seccomp|NoNewPrivs|Uid):" /proc/$$/status')" \
 		|| fail "hardening: /command status probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
@@ -267,40 +253,19 @@ hardening_floor_verify() { # [template-id]
 		|| fail "/command uid ($cmd_uid) is not execd's identity (root on fsb): the floor must not relocate identity"
 	pass "/command floor: CapEff=0 CapBnd=0 Seccomp=2 NoNewPrivs=1 uid=$cmd_uid (execd's uid)"
 
-	# 5. Execd-spawned workload floor via the self-dump relay (Landlock only
-	#    grants /proc/self, so the floor is observed from inside the workload
-	#    it applies to — the fsb analog of the docker/k8s entrypoint dump; the
-	#    baked `tail -f /dev/null` entrypoint is uninstrumentable, rides the
-	#    same execd -> launcher path, and is pinned as execd's supervised
-	#    child by the init-mode stage).
-	local relay_fields relay_env
-	relay_fields="$(hardening_status_fields sh -c "$hardening_relay_probe")" \
-		|| fail "hardening: workload relay probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
-	for probe in CapEff CapBnd; do
-		[[ "$(hardening_field "$probe" "$relay_fields")" == "0000000000000000" ]] \
-			|| fail "workload $probe is not zero: $relay_fields"
-	done
-	[[ "$(hardening_field Seccomp "$relay_fields")" == "2" && "$(hardening_field NoNewPrivs "$relay_fields")" == "1" ]] \
-		|| fail "workload floor incomplete (want Seccomp=2 NoNewPrivs=1): $relay_fields"
-	pass "workload floor (detached relay): CapEff=0 CapBnd=0 Seccomp=2 NoNewPrivs=1"
-
-	# 6. Env strip: the launcher unsets execd's config/credential env before
-	#    execve — absent from /command and from the detached workload's
-	#    self-dumped environ. /proc/*/environ is NUL-separated, so the probe
-	#    reads it through `tr '\0' '\n'` before matching.
+	# 5. Env strip: the launcher unsets execd's config/credential env before
+	#    execve — absent from the launcher-wrapped shell's environ.
+	#    /proc/*/environ is NUL-separated, so the probe reads it through
+	#    `tr '\0' '\n'` before matching.
 	local strip_probe
 	strip_probe='f=""; for v in '"$HARDENING_ENV_BLACKLIST"'; do tr "\0" "\n" < /proc/$$/environ | grep -q "^$v=" && { f="$v"; break; }; done; echo "STRIP_FAIL=$f"'
 	probe="$(guest_value STRIP_FAIL sh -c "$strip_probe")" \
-		|| fail "hardening: /command env strip probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
+		|| fail "hardening: env strip probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
 	[[ -z "$probe" ]] \
 		|| fail "/command env carries execd config env: STRIP_FAIL=$probe"
-	relay_env="$(guest_value LEAK sh -c 'if [ -s '"$HARDENING_RELAY_DIR"'/environ ]; then echo "LEAK=$(head -1 '"$HARDENING_RELAY_DIR"'/environ)"; else echo "LEAK="; fi')" \
-		|| fail "hardening: workload env strip probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
-	[[ -z "$relay_env" ]] \
-		|| fail "detached workload env carries execd config env: $relay_env"
-	pass "env strip: execd config env absent from /command and the detached workload"
+	pass "env strip: execd config env absent from the launcher-wrapped workload"
 
-	# 7. Landlock behavior — only meaningful when the layer reports active;
+	# 6. Landlock behavior — only meaningful when the layer reports active;
 	#    an unsupported guest kernel fail-opens honestly (handled above).
 	if [[ "$landlock_state" == "active" ]]; then
 		probe="$(guest_value TMP_WRITABLE sh -c 'if echo ok > /tmp/landlock-probe 2>/dev/null; then echo TMP_WRITABLE=1; else echo TMP_WRITABLE=0; fi')" \
@@ -315,16 +280,16 @@ hardening_floor_verify() { # [template-id]
 		pass "Landlock: /tmp writable, /etc/passwd read-only, /tmp script executes"
 	fi
 
-	# 8. Sustained fork-heavy mix under the fsb subreaper, confined-safe: 20
+	# 7. Sustained fork-heavy mix under the fsb subreaper, confined-safe: 20
 	#    tracked sleepers orphan into execd while /command churns (execd
 	#    stays responsive = the table is not wedged), then FULLY disappear —
 	#    a zombie still answers kill -0, so disappearance is the reap proof.
 	#    kill(2) is outside Landlock's handled accesses and the seccomp deny
 	#    list, and the pids travel through /tmp files (no cross-pid /proc
 	#    enumeration, which Landlock denies).
-	guest_out sh -c "rm -rf $HARDENING_RELAY_DIR/sleepers; mkdir -p $HARDENING_RELAY_DIR/sleepers; i=0; while [ \$i -lt 20 ]; do sleep 25 & echo \$! > $HARDENING_RELAY_DIR/sleepers/\$i; i=\$((i+1)); done; echo SLEEPERS=20" >/dev/null \
+	guest_out sh -c "rm -rf $HARDENING_SLEEPER_DIR; mkdir -p $HARDENING_SLEEPER_DIR; i=0; while [ \$i -lt 20 ]; do sleep 25 & echo \$! > $HARDENING_SLEEPER_DIR/\$i; i=\$((i+1)); done; echo SLEEPERS=20" >/dev/null \
 		|| fail "hardening: sleeper spawn failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
-	[[ "$(guest_value ALIVE sh -c "n=0; for f in $HARDENING_RELAY_DIR/sleepers/*; do kill -0 \$(cat \$f) 2>/dev/null && n=\$((n+1)); done; echo ALIVE=\$n")" == "20" ]] \
+	[[ "$(guest_value ALIVE sh -c "n=0; for f in $HARDENING_SLEEPER_DIR/*; do kill -0 \$(cat \$f) 2>/dev/null && n=\$((n+1)); done; echo ALIVE=\$n")" == "20" ]] \
 		|| fail "fork-heavy mix: the 20 tracked sleepers are not all alive under the subreaper"
 	local i
 	for i in 1 2 3 4 5; do
@@ -343,7 +308,7 @@ hardening_floor_verify() { # [template-id]
 }
 
 hardening_sleepers_reaped() {
-	[[ "$(guest_value REAPED sh -c "r=20; for f in $HARDENING_RELAY_DIR/sleepers/*; do kill -0 \$(cat \$f) 2>/dev/null && r=\$((r-1)); done; echo REAPED=\$r")" == "20" ]]
+	[[ "$(guest_value REAPED sh -c "r=20; for f in $HARDENING_SLEEPER_DIR/*; do kill -0 \$(cat \$f) 2>/dev/null && r=\$((r-1)); done; echo REAPED=\$r")" == "20" ]]
 }
 
 # --- standalone entry
