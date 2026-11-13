@@ -107,6 +107,48 @@ func TestFilesystemControllerRenameFilesReturnsNotFoundForMissingSource(t *testi
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
+func TestFilesystemControllerRenameFilesRejectsEmptyPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	validSrc := filepath.Join(tmpDir, "valid.txt")
+	validDst := filepath.Join(tmpDir, "valid-moved.txt")
+	require.NoError(t, os.WriteFile(validSrc, []byte("keep"), 0o644))
+
+	// An empty src or dest (missing field or explicit "") would otherwise be
+	// expanded to the daemon's working directory, so the batch must be
+	// rejected before the leading valid entry is renamed.
+	cases := []struct {
+		name    string
+		invalid string
+	}{
+		{"missing src", fmt.Sprintf(`{"dest": %q}`, filepath.Join(tmpDir, "any"))},
+		{"explicit empty src", fmt.Sprintf(`{"src": "", "dest": %q}`, filepath.Join(tmpDir, "any"))},
+		{"missing dest", fmt.Sprintf(`{"src": %q}`, validSrc)},
+		{"explicit empty dest", `{"src": "/tmp/nonexistent-src", "dest": ""}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A valid entry ahead of the invalid one: the response must be a
+			// client error with no partial side effects.
+			payload := fmt.Sprintf(
+				`[{"src": %q, "dest": %q}, %s]`,
+				validSrc, validDst, tc.invalid,
+			)
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", []byte(payload))
+
+			ctrl.RenameFiles()
+
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+
+			require.FileExists(t, validSrc, "valid entry must not be renamed")
+			require.NoFileExists(t, validDst, "no destination may be created")
+		})
+	}
+}
+
 func TestFilesystemControllerSearchFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	a := filepath.Join(tmpDir, "alpha.txt")

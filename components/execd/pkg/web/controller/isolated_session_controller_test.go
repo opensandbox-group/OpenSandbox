@@ -34,6 +34,32 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
+func TestIsolatedSessionRenameFilesRejectsEmptySrcBeforeSessionLookup(t *testing.T) {
+	// The body is decoded and validated before the session is resolved, so an
+	// entry without src or dest is rejected as a client error even when the
+	// isolation runtime is unavailable.
+	ctx, rec := newTestContext(
+		http.MethodPost,
+		"/isolated/session/session-1/files/mv",
+		[]byte(`[{"dest": "/tmp/moved"}]`),
+	)
+	ctx.Params = gin.Params{{Key: "sessionId", Value: "session-1"}}
+	ctrl := NewIsolatedSessionController(ctx)
+
+	ctrl.RenameFiles()
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	var resp model.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Code != model.ErrorCodeInvalidRequest {
+		t.Errorf("code = %q, want %q", resp.Code, model.ErrorCodeInvalidRequest)
+	}
+}
+
 func TestClassifyIsolatedCreateError_UidModeUnavailable(t *testing.T) {
 	status, code := classifyIsolatedCreateError(
 		fmt.Errorf("create session: %w: userns", runtime.ErrUidModeUnavailable),

@@ -327,18 +327,26 @@ func (c *IsolatedSessionController) RemoveFiles() {
 }
 
 func (c *IsolatedSessionController) RenameFiles() {
-	mv, release, _ := c.getMergedView()
-	if mv == nil {
-		return
-	}
-	defer release()
-
+	// Decode and validate the body before touching the session, so a request
+	// without src or dest is rejected as a client error and an entry cannot
+	// resolve to the session view root instead of the intended file. Entries
+	// that pass validation are not renamed until every entry has been checked.
 	var request []model.RenameFileItem
 	if err := c.bindJSON(&request); err != nil {
 		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest,
 			fmt.Sprintf("error parsing request, MAYBE invalid body format. %v", err))
 		return
 	}
+	if err := validateRenameItems(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
+		return
+	}
+
+	mv, release, _ := c.getMergedView()
+	if mv == nil {
+		return
+	}
+	defer release()
 
 	for _, item := range request {
 		if err := mv.Rename(item.Src, item.Dest); err != nil {

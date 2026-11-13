@@ -2878,10 +2878,12 @@ components:
           type: string
           description: Source file path
           example: /workspace/old.txt
+          minLength: 1
         dest:
           type: string
           description: Destination file path
           example: /workspace/new.txt
+          minLength: 1
       required: [src, dest]
 
     ReplaceFileContentItem:

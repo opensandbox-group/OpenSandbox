@@ -147,6 +147,18 @@ func (c *FilesystemController) RenameFiles() {
 		return
 	}
 
+	// Reject the whole batch up front so an entry without src or dest cannot
+	// resolve to the daemon's working directory and rename it; entries that
+	// pass validation are not renamed until every entry has been checked.
+	if err := validateRenameItems(request); err != nil {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			err.Error(),
+		)
+		return
+	}
+
 	for _, renameItem := range request {
 		if err := RenameFile(renameItem); err != nil {
 			c.handleFileError(err)
