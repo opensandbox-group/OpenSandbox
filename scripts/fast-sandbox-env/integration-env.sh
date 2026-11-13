@@ -1794,10 +1794,15 @@ template_up_overlaybd_hardening() {
 	fi
 	local source_image="$SBX_IMAGE"
 	if [[ "$HARDENED_SBX_PUSH" == 1 ]]; then
+		# Two tags on one image: the checkout-local pull name (what the
+		# template references — no port) and the runner-side push name (the
+		# port-forward endpoint; docker treats host:port/repo as a distinct
+		# image name, so the push needs its own tag).
+		local push_ref="$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT/${HARDENED_SBX_REF#*/}"
 		log "building the hardened golden image from this checkout ($HARDENED_SBX_REF)"
 		docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
 			-f "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
-			-t "$HARDENED_SBX_REF" "$OSB_ROOT" >/dev/null \
+			-t "$HARDENED_SBX_REF" -t "$push_ref" "$OSB_ROOT" >/dev/null \
 			|| die "hardened golden image build failed"
 		log "pushing through the in-cluster registry (port-forward 127.0.0.1:$HARDENED_SBX_PUSH_PORT)"
 		sudo_ grep -qx "127.0.0.1 $OCI_REGISTRY_HOST" /etc/hosts \
@@ -1815,7 +1820,7 @@ template_up_overlaybd_hardening() {
 		echo "$OCI_REGISTRY_PASSWORD" | docker login "$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT" \
 			-u "$OCI_REGISTRY_USER" --password-stdin >/dev/null \
 			|| { hardened_sbx_push_cleanup 0 "$pf_pid"; die "docker login to the in-cluster registry failed"; }
-		if ! docker push "$OCI_REGISTRY_HOST:$HARDENED_SBX_PUSH_PORT/${HARDENED_SBX_REF#*/}" >/dev/null; then
+		if ! docker push "$push_ref" >/dev/null; then
 			hardened_sbx_push_cleanup 0 "$pf_pid"
 			die "hardened golden image push failed"
 		fi
