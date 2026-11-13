@@ -37,7 +37,14 @@
 # injection against a CA-signed TLS echo endpoint, the execd-as-init
 # in-guest process verify (OSEP-0018: `execd --init` as a subreaper under
 # the guest init — topology, reaping, and the hardening report pinned
-# in-guest), and the idle-pause / wake-on-access verify (OSEP-0024). The
+# in-guest), the OSEP-0018 hardening floor verify on a dedicated hardened
+# overlaybd template (EXECD_ISOLATION_CONFIG template env -> execd TOML:
+# the hardened source image is built from this checkout, pushed to the
+# in-cluster registry, and bakes the launcher prelude + TOML at execd's
+# trusted runtime paths; the stage pins launcher-presence, reduced
+# /command, credential env strip, Landlock active|unsupported, the
+# capabilities report, and sustained fork-heavy churn), and the idle-pause
+# / wake-on-access verify (OSEP-0024). The
 # scenario stages are storage-independent, so they run once per run — on
 # the OCI template, the production-default path — not on both rootfs lanes.
 #
@@ -1649,16 +1656,17 @@ template_up() {
 # the in-cluster registry. status.manifestRef is the runnable artifact.
 OCI_TEMPLATE_ID=""
 
-_overlaybd_template_phase() {
-	osb_api template get "$OCI_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'
+_overlaybd_template_phase() { # [template-id] (default: the plain overlaybd template)
+	local id="${1:-$OCI_TEMPLATE_ID}"
+	osb_api template get "$id" -o json 2>/dev/null | jq -r '.status.phase // empty'
 }
 
-_overlaybd_template_failed() {
+_overlaybd_template_failed() { # [template-id] [label]
 	local phase message
-	phase="$(_overlaybd_template_phase)"
+	phase="$(_overlaybd_template_phase "${1:-$OCI_TEMPLATE_ID}")"
 	[[ "$phase" == "Failed" ]] || return 1
-	message="$(osb_api template get "$OCI_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.message // empty')"
-	log "overlaybd template Failed: ${message:-<no message>}"
+	message="$(osb_api template get "${1:-$OCI_TEMPLATE_ID}" -o json 2>/dev/null | jq -r '.status.message // empty')"
+	log "${2:-overlaybd} template Failed: ${message:-<no message>}"
 	return 0
 }
 
@@ -1699,6 +1707,166 @@ template_up_overlaybd() {
 
 _overlaybd_template_phase_is_succeeded() {
 	[[ "$(_overlaybd_template_phase)" == "Succeeded" ]]
+}
+
+# A hardened overlaybd template beside the plain one (OSEP-0018): same
+# inputs plus EXECD_ISOLATION_CONFIG pointing at the isolation TOML baked
+# into the hardened source image (/opt/opensandbox/isolation.toml,
+# [hardening] + [landlock] enabled), so execd arms the pre-exec hardening
+# floor for sandboxes the hardening verify stage creates from it. Kept
+# beside — never merged into — the plain overlaybd template so the rest of
+# the matrix keeps proving the default unhardened tier (the init-mode
+# stage's floor-off report stays true).
+#
+# The hardened source image is built from THIS checkout's Dockerfile and
+# pushed to the in-cluster OCI registry: the launcher prelude + TOML must
+# come from the tree under test, not from the operator-published SBX_IMAGE,
+# which may predate the bake — and the template builder pulls source images
+# through the registry API, so a runner-side build alone is not reachable.
+# The registry is ClusterIP-only and its serving cert's SANs cover the
+# service DNS name (not 127.0.0.1), so the push borrows the name in
+# /etc/hosts, trusts the env CA via /etc/docker/certs.d, and rides a
+# port-forward for the whole build (the builder pulls while the template
+# converts). HARDENED_SBX_PUSH=0 escapes to $SBX_IMAGE for an operator
+# whose published image already carries the bake. The Succeeded template id
+# persists at $WORK/hardening-template-id and is reused across actions; the
+# stage script (verify/hardening.sh) resolves the same file standalone.
+HARDENED_SBX_PUSH="${HARDENED_SBX_PUSH:-1}"
+HARDENED_SBX_REF="${HARDENED_SBX_REF:-$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO/sandbox-golden-hardened:dev}"
+HARDENED_SBX_PUSH_PORT="${HARDENED_SBX_PUSH_PORT:-18443}"
+# Reuse freshness: a hash of everything that feeds the bake. The hardened
+# template id persists across runs, but a Succeeded id built from older
+# inputs must not be reused (the tag is mutable) — a changed hash rebuilds
+# the image + template once, then holds again.
+OCI_HARDENING_TEMPLATE_ID=""
+
+hardened_sbx_inputs_fingerprint() {
+	# openssl is a hard dependency of this script (registry_ca_up dies
+	# without it), so pin the digest tool instead of falling back between
+	# sha256sum/shasum: a flipped algorithm rehashes identical inputs
+	# differently and would force a needless hardened template rebuild.
+	if [[ "$HARDENED_SBX_PUSH" != 1 ]]; then
+		# The published image is an opaque input; hash its reference.
+		openssl dgst -sha256 <(printf '%s' "$SBX_IMAGE") | awk '{print $NF}'
+		return 0
+	fi
+	openssl dgst -sha256 \
+		< <(cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
+			"$OSB_ROOT/components/execd/native/launcher.c" \
+			"$OSB_ROOT/components/execd/configs/isolation.hardened.toml" \
+			"$OSB_ROOT"/scripts/fast-sandbox-env/sandbox-test-image/* 2>/dev/null) \
+		| awk '{print $NF}'
+}
+
+_hardening_template_phase() {
+	_overlaybd_template_phase "$OCI_HARDENING_TEMPLATE_ID"
+}
+
+_hardening_template_phase_is_succeeded() {
+	[[ "$(_hardening_template_phase)" == "Succeeded" ]]
+}
+
+_hardening_template_failed() {
+	_overlaybd_template_failed "$OCI_HARDENING_TEMPLATE_ID" "hardening"
+}
+
+hardened_sbx_push_cleanup() { # <pf-pid>
+	sudo_ rm -rf "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT" 2>/dev/null || true
+	docker logout "127.0.0.1:$HARDENED_SBX_PUSH_PORT" >/dev/null 2>&1 || true
+	if [[ -n "${1:-}" ]]; then
+		kill "$1" >/dev/null 2>&1 || true
+	fi
+}
+
+template_up_overlaybd_hardening() {
+	local pf_pid=""
+	OCI_HARDENING_TEMPLATE_ID="$(cat "$WORK/hardening-template-id" 2>/dev/null || true)"
+	local inputs_fp
+	inputs_fp="$(hardened_sbx_inputs_fingerprint)"
+	if [[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$(cat "$WORK/hardening-template-fp" 2>/dev/null || true)" == "$inputs_fp" ]] \
+		&& _hardening_template_phase_is_succeeded; then
+		log "hardening template reused: $OCI_HARDENING_TEMPLATE_ID"
+		return 0
+	fi
+	if [[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$(cat "$WORK/hardening-template-fp" 2>/dev/null || true)" != "$inputs_fp" ]]; then
+		log "hardening template inputs changed (fp ${inputs_fp:0:12}…); rebuilding the hardened image + template"
+	fi
+	local source_image="$SBX_IMAGE"
+	if [[ "$HARDENED_SBX_PUSH" == 1 ]]; then
+		# Two tags on one image: the checkout-local pull name (what the
+		# template references — the in-cluster DNS host) and the runner-side
+		# push name (the port-forward endpoint; docker treats host:port/repo
+		# as a distinct image name, so the push needs its own tag).
+		local push_ref="127.0.0.1:$HARDENED_SBX_PUSH_PORT/${HARDENED_SBX_REF#*/}"
+		log "building the hardened golden image from this checkout ($HARDENED_SBX_REF)"
+		docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+			-f "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
+			-t "$HARDENED_SBX_REF" -t "$push_ref" "$OSB_ROOT" >/dev/null \
+			|| die "hardened golden image build failed"
+		log "pushing through the in-cluster registry (port-forward 127.0.0.1:$HARDENED_SBX_PUSH_PORT)"
+		# The serving cert carries IP:127.0.0.1 (registry_ca_up), so the
+		# runner-side docker trusts the env CA for this endpoint — dockerd
+		# does not consult the host /etc/hosts, which is why the push goes
+		# over the loopback IP instead of the registry's DNS name.
+		sudo_ mkdir -p "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT"
+		sudo_ cp "$CA_DIR/ca.crt" "/etc/docker/certs.d/127.0.0.1:$HARDENED_SBX_PUSH_PORT/ca.crt"
+		kubectl -n "$RESOURCE_NS" port-forward svc/registry "$HARDENED_SBX_PUSH_PORT:443" >/dev/null 2>&1 &
+		pf_pid=$!
+		local pf_wait=0
+		until host_port_busy "$HARDENED_SBX_PUSH_PORT"; do
+			pf_wait=$((pf_wait + 1))
+			[[ "$pf_wait" -ge 20 ]] && { hardened_sbx_push_cleanup "$pf_pid"; die "registry port-forward never became ready"; }
+			sleep 1
+		done
+		echo "$OCI_REGISTRY_PASSWORD" | docker login "127.0.0.1:$HARDENED_SBX_PUSH_PORT" \
+			-u "$OCI_REGISTRY_USER" --password-stdin >/dev/null \
+			|| { hardened_sbx_push_cleanup "$pf_pid"; die "docker login to the in-cluster registry failed"; }
+		if ! docker push "$push_ref" >/dev/null; then
+			hardened_sbx_push_cleanup "$pf_pid"
+			die "hardened golden image push failed"
+		fi
+		source_image="$HARDENED_SBX_REF"
+	fi
+	log "verify: creating the hardened overlaybd template via the opensandbox CLI (image=$source_image, EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml)"
+	local created create_err="$WORK/hardening-create.err"
+	local -a hrd_args=(
+		template create
+		--image "$source_image"
+		--publish "oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO"
+		--format overlaybd
+		--env "EXECD_ISOLATION_CONFIG=/opt/opensandbox/isolation.toml"
+		--resource cpu=1 --resource memory=512Mi --resource disk=2Gi
+		--warmup-seconds 15
+		--metadata origin=fast-sandbox-env-hardening
+	)
+	created="$(osb_api "${hrd_args[@]}" -o json 2>"$create_err")" \
+		|| fail "hardening template create failed against $SERVER_URL: $(head -c 400 "$create_err")"
+	OCI_HARDENING_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$OCI_HARDENING_TEMPLATE_ID" && "$OCI_HARDENING_TEMPLATE_ID" != "null" ]] || fail "hardening template create carried no templateId"
+	printf '%s' "$OCI_HARDENING_TEMPLATE_ID" > "$WORK/hardening-template-id"
+	printf '%s' "$inputs_fp" > "$WORK/hardening-template-fp"
+	local attempts=0
+	while ! _hardening_template_phase_is_succeeded; do
+		if _hardening_template_failed; then
+			failure_dump "hardening-template-failed"
+			hardened_sbx_push_cleanup "$pf_pid"
+			fail "hardening template entered Failed"
+		fi
+		attempts=$((attempts + 1))
+		# OCI builds run the convertor + a Firecracker cold boot.
+		[[ "$attempts" -ge 450 ]] && { failure_dump "hardening-template-timeout"; fail "hardening template not Succeeded after 450 attempts"; }
+		sleep 2
+	done
+	local manifest_ref
+	manifest_ref="$(osb_api template get "$OCI_HARDENING_TEMPLATE_ID" -o json | jq -r '.status.manifest_ref // empty')"
+	[[ "$manifest_ref" == oci://* ]] || fail "hardening template manifestRef is not an oci:// reference: $manifest_ref"
+	log "hardening template manifestRef: $manifest_ref"
+	if [[ -n "$pf_pid" ]]; then
+		hardened_sbx_push_cleanup "$pf_pid"
+		pass "hardened golden image built + pushed + overlaybd SandboxTemplate Succeeded (floor TOML via template env)"
+	else
+		pass "hardened overlaybd SandboxTemplate Succeeded (floor TOML via template env, source image $SBX_IMAGE)"
+	fi
 }
 
 # --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry)
@@ -1762,13 +1930,17 @@ CA_CNF
 		-keyout "$CA_DIR/server.key" -out "$CA_DIR/server.csr" \
 		-subj "/CN=$OCI_REGISTRY_HOST" >/dev/null 2>&1 \
 		|| die "registry server key generation failed"
+	# IP:127.0.0.1 lets the runner-side push reach the ClusterIP-only
+	# registry through a kubectl port-forward with valid TLS (dockerd does
+	# not consult the host /etc/hosts, so a DNS-name push alias is not
+	# reachable from it).
 	cat > "$CA_DIR/server.ext" <<EXT
 basicConstraints=CA:FALSE
 keyUsage=digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 subjectKeyIdentifier=hash
 authorityKeyIdentifier=keyid,issuer
-subjectAltName=DNS:registry,DNS:registry.$RESOURCE_NS,DNS:registry.$RESOURCE_NS.svc,DNS:$OCI_REGISTRY_HOST
+subjectAltName=DNS:registry,DNS:registry.$RESOURCE_NS,DNS:registry.$RESOURCE_NS.svc,DNS:$OCI_REGISTRY_HOST,IP:127.0.0.1
 EXT
 	openssl x509 -req -sha256 -days 365 \
 		-in "$CA_DIR/server.csr" -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
@@ -4311,6 +4483,10 @@ verify_overlaybd() {
 		|| fail "six overlaybd template creates must hit the warm pool without misses, daemon restarts or pod replacement"
 	pass "ublk warm pool: at least six hits, zero new misses/restarts, idle devices replenished"
 	run_stage "execd-as-init verify (overlaybd template)" init_mode_verify "$OCI_TEMPLATE_ID"
+	run_stage "SandboxTemplate build (hardened floor, overlaybd, OSEP-0018)" template_up_overlaybd_hardening
+	# Lives in verify/hardening.sh (the split layout this stage executes; the
+	# template id comes from $WORK/hardening-template-id).
+	run_stage "execd hardening floor verify (hardened overlaybd template, OSEP-0018)" "$SCRIPT_DIR/verify/hardening.sh"
 	run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
 	run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
 	run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
@@ -4796,7 +4972,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
                    (create -> gateway route -> execd /ping, pause/resume,
                    vault, idle-pause, snapshot); requires `up`
   verify-overlaybd build the overlaybd SandboxTemplate (oci:// publication)
-                   and run the same verify matrix against it; requires `up`
+                   and run the same verify matrix against it, plus the
+                   OSEP-0018 hardening floor verify on a dedicated hardened
+                   overlaybd template; requires `up`
                    (no-op when OCI_STACK=0)
   verify-resourceaware
                    OSEP-0026 matrix on the ResourceAware pool: shaped-template
