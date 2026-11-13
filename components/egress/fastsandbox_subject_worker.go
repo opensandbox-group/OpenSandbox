@@ -29,6 +29,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 )
 
 const subjectLifecycleDeadline = 2 * time.Second
@@ -80,6 +81,9 @@ type fastSandboxSubjectIntent struct {
 	snapshot            *fastSandboxSubjectSnapshot
 	registration        uint64
 	authorityGeneration uint64
+	// Observation only: set when child publication rebuilt this intent. It is
+	// never consulted for validity, queue order, coalescing, ACK or retry.
+	replay bool
 }
 
 type fastSandboxSubjectSnapshot struct {
@@ -184,9 +188,13 @@ func (s *fastSandboxPolicyServer) publishSubjectClient(client *revision.SubjectL
 	}
 	sort.Slice(subjects, func(i, j int) bool { return subjects[i] < subjects[j] })
 	for _, subj := range subjects {
+		queued := len(d.queue)
 		s.recordSubjectIntentLocked(subj, d.fences[subj], false)
+		for i := queued; i < len(d.queue); i++ {
+			d.queue[i].replay = true
+		}
 		if snapshot := d.snapshots[subj]; snapshot != nil && s.subjectVaultAuthoritativeLocked(subj) {
-			d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: d.fences[subj], target: mustSubjectTarget(subj, d.fences[subj]), epoch: d.current, snapshot: snapshot, registration: d.registrations[subj]})
+			d.enqueueInstallLocked(fastSandboxSubjectIntent{subj: subj, fence: d.fences[subj], target: mustSubjectTarget(subj, d.fences[subj]), epoch: d.current, snapshot: snapshot, registration: d.registrations[subj], replay: true})
 		}
 	}
 	d.signal()
@@ -436,9 +444,78 @@ func subjectLifecycleReason(receipt revision.LifecycleReceipt) string {
 	}
 }
 
-func (d *fastSandboxSubjectDrain) recordResult(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error) {
+// recordResult applies the lifecycle result under s.mu, then records one
+// transition observation after unlocking: telemetry and the client mutex taken
+// by Pending are never reached while a business lock is held.
+func (d *fastSandboxSubjectDrain) recordResult(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error, elapsed time.Duration) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	observe := d.observeTransitionLocked(ctx, epoch)
+	d.recordResultLocked(ctx, s, epoch, intent, receipt, err)
+	s.mu.Unlock()
+	if observe {
+		telemetry.RecordCredentialVaultTransition(subjectTransition(intent), subjectLifecycleResult(intent, receipt, err, epoch.client.Pending), elapsed)
+	}
+}
+
+// Call under s.mu. Only the current epoch of a credential-bound child is
+// observed; a result late from a cancelled or replaced child, or from drain
+// shutdown, is not a receiver outcome. Revision-only children record nothing.
+func (d *fastSandboxSubjectDrain) observeTransitionLocked(ctx context.Context, epoch *fastSandboxSubjectEpoch) bool {
+	return d.current == epoch && epoch.handoff.TLSAdmission && ctx.Err() == nil && epoch.ctx.Err() == nil
+}
+
+// Observation only; the label never feeds back into control decisions.
+func subjectTransition(intent fastSandboxSubjectIntent) string {
+	switch {
+	case intent.replay:
+		return telemetry.CredentialTransitionReplay
+	case intent.snapshot != nil:
+		return telemetry.CredentialTransitionInstall
+	case intent.unload:
+		return telemetry.CredentialTransitionUnload
+	case intent.suspend:
+		return telemetry.CredentialTransitionSuspend
+	default:
+		return telemetry.CredentialTransitionRegister
+	}
+}
+
+// Classifies one lifecycle call from protocol state, never from error text. A
+// receipt with a sequence is a confirmed receiver answer. Without one, the
+// client either still owns the command (Pending) or never allocated it.
+func subjectLifecycleResult(intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error, pending func() bool) string {
+	switch {
+	case err == nil:
+		return telemetry.CredentialTransitionOK
+	case receipt.LifecycleSequence != 0:
+		if intent.suspend && (receipt.Result.Outcome == "subject_unknown" || receipt.Result.Outcome == "subject_generation_mismatch") {
+			return telemetry.CredentialTransitionOK // same confirmed no-op as recordResultLocked
+		}
+		return telemetry.CredentialTransitionRejected
+	case pending():
+		return telemetry.CredentialTransitionIndeterminate
+	default:
+		return telemetry.CredentialTransitionFailed
+	}
+}
+
+// Classifies one Apply or Reconcile. The sticky structured rejection wins over
+// the generic error; a confirmed Abort or a Reconcile that confirms anything
+// other than the candidate is a non-install; the rest awaits reconciliation.
+func subjectInstallResult(installer *fastSandboxSubjectInstaller, err error, installed bool) string {
+	switch {
+	case installer.transport.rejection != nil:
+		return telemetry.CredentialTransitionRejected
+	case installed:
+		return telemetry.CredentialTransitionOK
+	case err == nil, errors.Is(err, revision.ErrInvalid), errors.Is(err, revision.ErrPrepareRejected):
+		return telemetry.CredentialTransitionFailed
+	default:
+		return telemetry.CredentialTransitionIndeterminate
+	}
+}
+
+func (d *fastSandboxSubjectDrain) recordResultLocked(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, receipt revision.LifecycleReceipt, err error) {
 	// Drain shutdown, like epoch replacement, cancels in-flight I/O; that is
 	// not a receiver outage.
 	if d.current != epoch || ctx.Err() != nil {
@@ -548,6 +625,7 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 		stop := context.AfterFunc(ctx, cancel)
 		var receipt revision.LifecycleReceipt
 		var err error
+		started := time.Now() // monotonic; excludes FIFO wait and retry delay
 		if intent.unload {
 			receipt, err = epoch.client.Unload(commandCtx, intent.target)
 		} else if intent.suspend {
@@ -555,9 +633,10 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 		} else {
 			receipt, err = epoch.client.Register(commandCtx, intent.target, intent.sourceAddresses...)
 		}
+		elapsed := time.Since(started)
 		stop()
 		cancel()
-		d.recordResult(ctx, s, epoch, intent, receipt, err)
+		d.recordResult(ctx, s, epoch, intent, receipt, err, elapsed)
 		for epoch.client.Pending() && ctx.Err() == nil && epoch.ctx.Err() == nil {
 			// Keep the exact frozen command, even if its fence became stale
 			// after send: allocating a successor sequence would be unsafe.
@@ -575,7 +654,9 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 			}
 			reconcileCtx, cancel := context.WithTimeout(epoch.ctx, d.deadline)
 			stop := context.AfterFunc(ctx, cancel)
+			started := time.Now()
 			confirmed, reconcileErr := epoch.client.Reconcile(reconcileCtx)
+			elapsed := time.Since(started)
 			stop()
 			cancel()
 			receipt = revision.LifecycleReceipt{}
@@ -583,7 +664,7 @@ func (d *fastSandboxSubjectDrain) run(ctx context.Context, s *fastSandboxPolicyS
 				receipt = *confirmed
 			}
 			err = reconcileErr
-			d.recordResult(ctx, s, epoch, intent, receipt, err)
+			d.recordResult(ctx, s, epoch, intent, receipt, err, elapsed)
 		}
 		if intent.unload && err == nil {
 			s.mu.Lock()
@@ -748,7 +829,9 @@ func subjectInstallReason(installer *fastSandboxSubjectInstaller, err error) str
 func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPolicyServer, epoch *fastSandboxSubjectEpoch, intent fastSandboxSubjectIntent, installer *fastSandboxSubjectInstaller) bool {
 	commandCtx, cancel := context.WithTimeout(epoch.ctx, d.deadline)
 	stop := context.AfterFunc(ctx, cancel)
+	started := time.Now() // monotonic; one observation per Apply or Reconcile
 	candidate, err := installer.coordinator.Apply(commandCtx, intent.snapshot.vaultRevision, intent.snapshot.policyEpoch, intent.snapshot.payload)
+	elapsed := time.Since(started)
 	stop()
 	cancel()
 	installed := err == nil
@@ -763,6 +846,7 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 		// not a receiver rejection, and permits the same retry as Reconcile.
 		aborted := errors.Is(err, revision.ErrPrepareRejected)
 		s.mu.Lock()
+		observe := d.observeTransitionLocked(ctx, epoch)
 		if d.current == epoch {
 			if installed && s.subjectIntentCurrentLocked(intent) && intent.authorityGeneration == d.authorityGenerations[intent.subj] {
 				// A newer mirror may already exist. Stamp only the acknowledged
@@ -787,6 +871,9 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 		}
 		retry := (err == nil || aborted) && !installed && d.retryInstallLocked(s, epoch, intent)
 		s.mu.Unlock()
+		if observe {
+			telemetry.RecordCredentialVaultTransition(subjectTransition(intent), subjectInstallResult(installer, err, installed), elapsed)
+		}
 		if terminal {
 			return false
 		}
@@ -815,11 +902,15 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 				cancel()
 				return true
 			}
+			started = time.Now()
 			candidate, err = installer.coordinator.Apply(reconcileCtx, intent.snapshot.vaultRevision, intent.snapshot.policyEpoch, intent.snapshot.payload)
+			elapsed = time.Since(started)
 			installed = err == nil
 		} else {
 			var active *revision.Identity
+			started = time.Now()
 			active, err = installer.coordinator.Reconcile(reconcileCtx)
+			elapsed = time.Since(started)
 			installed = err == nil && active != nil && *active == candidate
 		}
 		stop()

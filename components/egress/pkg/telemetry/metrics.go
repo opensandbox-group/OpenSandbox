@@ -45,6 +45,9 @@ var (
 	credentialResolutions   metric.Int64Counter
 	credentialResolutionDur metric.Float64Histogram
 
+	credentialVaultTransitions   metric.Int64Counter
+	credentialVaultTransitionDur metric.Float64Histogram
+
 	lastNftRuleCount atomic.Int64
 )
 
@@ -227,6 +230,28 @@ func registerEgressMetrics() error {
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(
 			0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120,
+		),
+	)
+	if err != nil {
+		return err
+	}
+
+	credentialVaultTransitions, err = meter.Int64Counter(
+		"egress.credential_vault.transitions_total",
+		metric.WithDescription("Fast Sandbox credential-bound worker IPC calls by closed transition and result; "+
+			"retries and reconciles count separately. Best-effort observation, not a security signal."),
+	)
+	if err != nil {
+		return err
+	}
+	credentialVaultTransitionDur, err = meter.Float64Histogram(
+		"egress.credential_vault.transition.duration",
+		metric.WithDescription("Duration of one Fast Sandbox credential-bound worker IPC call; excludes queueing and retry delay."),
+		metric.WithUnit("s"),
+		// Seconds, not the SDK's millisecond ladder: a local IPC call is
+		// sub-millisecond to a few milliseconds, and the per-call deadline is 2s.
+		metric.WithExplicitBucketBoundaries(
+			0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10,
 		),
 	)
 	if err != nil {
