@@ -108,13 +108,7 @@ def config_show(obj: ClientContext, output_format: str | None) -> None:
 
 
 def _parse_toml_value(raw: str) -> Any:
-    """Infer a TOML scalar type from a raw CLI string.
-
-    Booleans, integers, and floats are recognized so values like ``false`` or
-    ``30`` keep their native TOML type; anything else is stored as a string.
-    The value is always serialized by tomlkit, so quotes, escapes, and
-    whitespace in string values are encoded correctly.
-    """
+    """Infer a TOML scalar type (bool/int/float) from a raw CLI string; else keep text."""
     normalized = raw.lower()
     if normalized in ("true", "false"):
         return normalized == "true"

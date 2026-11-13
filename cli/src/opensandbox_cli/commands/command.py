@@ -79,9 +79,8 @@ def _run_command(
     """Shared implementation for ``command run``.
 
     Foreground mode streams output and allows only ``-o raw``; background mode
-    returns a tracked execution object and allows structured output. The payload
-    is joined into one shell command string unless ``argv`` sends it as a
-    literal argv list (needs an argv-capable execd).
+    returns a tracked execution object and allows structured output. ``--argv``
+    sends the payload as a literal argv list instead of a joined shell command.
     """
     allowed = ("table", "json", "yaml") if background else ("raw",)
     fallback = "table" if background else "raw"

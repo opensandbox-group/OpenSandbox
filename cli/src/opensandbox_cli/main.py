@@ -27,7 +27,6 @@ from opensandbox_cli.client import ClientContext
 from opensandbox_cli.commands.command import command_group
 from opensandbox_cli.commands.config_cmd import config_group
 from opensandbox_cli.commands.credential_vault import credential_vault_group
-from opensandbox_cli.commands.devops import devops_group
 from opensandbox_cli.commands.diagnostics import diagnostics_group
 from opensandbox_cli.commands.egress import egress_group
 from opensandbox_cli.commands.file import file_group
@@ -50,23 +49,17 @@ BANNER = r"""[bold cyan]
 """
 
 
-# A representative icon: any encoding that cannot render it would raise on output.
+# A representative icon: encodings that cannot render it raise on output.
 _OUTPUT_PROBE = "\u2705"
 
 
 def _configure_output_streams() -> None:
-    """Keep CLI output writable when the active encoding cannot represent it.
+    """Escape unencodable output instead of raising UnicodeEncodeError.
 
-    Click and Rich print emoji and box-drawing characters. On a legacy Windows
-    code page (cp936, cp1252, ...) or a POSIX ``C`` locale writing them raises
-    ``UnicodeEncodeError``, which aborts the command - even after the work is
-    done - so streams whose encoding cannot represent that output escape the
-    characters instead of raising.
-
-    Escaping (``backslashreplace``) keeps payload writes - raw command and
-    file data, machine-readable output - recoverable; ``errors="replace"``
-    would silently corrupt them into ``?``. CPython uses the same handler for
-    Windows stderr.
+    Click and Rich print emoji and box-drawing characters that legacy code
+    pages (cp936, cp1252, ...) and POSIX ``C`` locales cannot represent.
+    ``backslashreplace`` keeps payload and machine-readable output recoverable;
+    ``errors="replace"`` would silently corrupt them into ``?``.
     """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -188,5 +181,4 @@ cli.add_command(egress_group)
 cli.add_command(credential_vault_group)
 cli.add_command(config_group)
 cli.add_command(diagnostics_group)
-cli.add_command(devops_group)
 cli.add_command(skills_group)

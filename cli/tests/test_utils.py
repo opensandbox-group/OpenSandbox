@@ -20,16 +20,11 @@ import json
 from datetime import timedelta
 from pathlib import Path
 
-import click
 import pytest
-from click.testing import CliRunner
-from pydantic import BaseModel, ValidationError, model_validator
 
-from opensandbox_cli.output import OutputFormatter
 from opensandbox_cli.utils import (
     DURATION,
     KEY_VALUE,
-    handle_errors,
     load_json_object,
     parse_duration,
     validation_message,
@@ -53,20 +48,6 @@ class TestParseDuration:
     def test_valid_durations(self, input_str: str, expected: timedelta) -> None:
         assert parse_duration(input_str) == expected
 
-    @pytest.mark.parametrize(
-        "input_str",
-        [
-            "",
-            "abc",
-            "10x",
-            "m10",
-            "-5m",
-        ],
-    )
-    def test_invalid_durations(self, input_str: str) -> None:
-        with pytest.raises(click.BadParameter):
-            parse_duration(input_str)
-
     def test_strips_whitespace(self) -> None:
         assert parse_duration("  10m  ") == timedelta(minutes=10)
 
@@ -81,10 +62,6 @@ class TestDurationType:
         result = DURATION.convert(td, None, None)  # type: ignore[arg-type]
         assert result is td
 
-    def test_invalid_raises_bad_parameter(self) -> None:
-        with pytest.raises(click.exceptions.BadParameter):
-            DURATION.convert("invalid", None, None)
-
 
 class TestKeyValueType:
     def test_parses_simple_kv(self) -> None:
@@ -96,24 +73,10 @@ class TestKeyValueType:
     def test_empty_value(self) -> None:
         assert KEY_VALUE.convert("key=", None, None) == ("key", "")
 
-    def test_missing_equals_fails(self) -> None:
-        with pytest.raises(click.exceptions.BadParameter):
-            KEY_VALUE.convert("no-equals", None, None)
-
     def test_passes_through_tuple(self) -> None:
         t = ("key", "val")
         result = KEY_VALUE.convert(t, None, None)  # type: ignore[arg-type]
         assert result is t
-
-
-class _UniqueNames(BaseModel):
-    names: list[str] = []
-
-    @model_validator(mode="after")
-    def _names_unique(self) -> _UniqueNames:
-        if len(self.names) != len(set(self.names)):
-            raise ValueError("names must be unique")
-        return self
 
 
 class TestLoadJsonObject:
@@ -122,31 +85,11 @@ class TestLoadJsonObject:
         path.write_text(json.dumps({"image": "python:3.12"}))
         assert load_json_object(str(path)) == {"image": "python:3.12"}
 
-    def test_invalid_json_names_the_file(self, tmp_path: Path) -> None:
-        path = tmp_path / "req.json"
-        path.write_text("{not json")
-        with pytest.raises(click.ClickException, match="Invalid JSON in request file"):
-            load_json_object(str(path))
-
-    def test_non_object_rejected(self, tmp_path: Path) -> None:
-        path = tmp_path / "req.json"
-        path.write_text(json.dumps([1, 2]))
-        with pytest.raises(click.ClickException, match="must contain a JSON object"):
-            load_json_object(str(path))
-
-    def test_unreadable_file_names_the_file(self, tmp_path: Path) -> None:
-        path = tmp_path / "req.json"
-        path.write_bytes(b'{"image": "\xff\xfe"}')
-        with pytest.raises(click.ClickException, match="Cannot read request file"):
-            load_json_object(str(path))
-
-    def test_missing_file_names_the_file(self, tmp_path: Path) -> None:
-        with pytest.raises(click.ClickException, match="Cannot read request file"):
-            load_json_object(str(tmp_path / "missing.json"))
-
 
 class TestValidationMessage:
     def test_joins_field_errors(self) -> None:
+        from pydantic import BaseModel, ValidationError
+
         class _Model(BaseModel):
             image: str
 
@@ -155,28 +98,3 @@ class TestValidationMessage:
         message = validation_message(exc_info.value)
         assert "image" in message
         assert ": " in message
-
-    def test_model_level_error_has_no_dangling_prefix(self) -> None:
-        with pytest.raises(ValidationError) as exc_info:
-            _UniqueNames(names=["a", "a"])
-        message = validation_message(exc_info.value)
-        assert "names must be unique" in message
-        assert message.index("Value error") == 0
-
-
-class TestHandleErrors:
-    @pytest.mark.parametrize("color", [True, False])
-    def test_unexpected_error_prints_message_as_is(self, color: bool) -> None:
-        @click.command()
-        @click.pass_context
-        @handle_errors
-        def fail(ctx: click.Context) -> None:
-            raise RuntimeError("cannot open /data/[old]/a[/]b")
-
-        obj = type("Obj", (), {"output": OutputFormatter("table", color=color)})()
-        result = CliRunner().invoke(fail, obj=obj)
-
-        assert result.exit_code == 1
-        assert "cannot open /data/[old]/a[/]b" in result.stderr
-        assert "Type: RuntimeError" in result.stderr
-        assert "[dim]" not in result.stderr

@@ -80,7 +80,6 @@ The `osb` CLI under `cli/` is a terminal interface for day-to-day sandbox operat
 - `osb command`: command execution, background logs, and shell sessions
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy inspection and mutation
-- `osb devops`: low-level diagnostics
 - `osb skills`: OpenSandbox-specific agent skill installation
 
 The MCP server under `sdks/mcp/sandbox/python` exposes focused sandbox lifecycle, command, and text-file tools to MCP-capable clients such as Claude Code and Cursor.

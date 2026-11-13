@@ -245,10 +245,6 @@ class OutputFormatter:
         else:
             self._print_kv_table(data, title=title)
 
-    def print_text(self, text: str) -> None:
-        """Print raw text (ignores format)."""
-        click.echo(text)
-
     def _print_json(self, data: Any) -> None:
         if self.color:
             self.console.print_json(json.dumps(data, default=str))
@@ -263,9 +259,8 @@ class OutputFormatter:
             sys.exit(1)
         text = yaml.dump(data, default_flow_style=False, allow_unicode=True).rstrip()
         if not _stdout_can_encode(text):
-            # Keep machine-readable output valid on limited code pages: escape
-            # non-ASCII into round-trippable sequences instead of letting the
-            # stream replace characters with "?".
+            # Escape non-ASCII to keep machine-readable output valid on
+            # limited code pages.
             text = yaml.dump(
                 data, default_flow_style=False, allow_unicode=False
             ).rstrip()

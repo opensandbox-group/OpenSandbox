@@ -383,13 +383,6 @@ temporary URL. Structured CLI output follows the SDK/Python field style, for
 example `content_url`, `content_length`, and `expires_at`. Older server builds
 may still return `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
-Legacy DevOps diagnostics remain experimental. Prefer `osb diagnostics logs/events` for stable API-backed log and event collection.
-
-```bash
-osb devops inspect <sandbox-id> -o raw
-osb devops summary <sandbox-id> -o raw
-```
-
 ## Output Formats
 
 Output selection is command-scoped, not global.
@@ -421,7 +414,6 @@ The main command groups are:
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
 - `osb diagnostics`: stable diagnostics logs and events
-- `osb devops`: experimental legacy diagnostics
 - `osb config`: local CLI configuration
 - `osb skills`: bundled skills for AI tools
 
