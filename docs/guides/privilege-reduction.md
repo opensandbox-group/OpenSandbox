@@ -9,7 +9,7 @@ Sandboxes run untrusted and AI-generated code. The container boundary ([secure c
 
 The feature is configured by a single TOML file that travels with your image. You decide *whether* to reduce; the built-in defaults decide *how*. Everything is fail-open: a missing kernel feature is reported and skipped, never fatal, and the capabilities endpoint publishes what is actually enforced instead of what was requested.
 
-Privilege reduction is an operator/image-level policy, not a per-request option — it cannot be toggled from `CreateSandboxRequest`.
+Privilege reduction is an operator/image-level policy, not a per-request option — it cannot be toggled from `CreateSandboxRequest`. One boundary note: on current runtimes the config is *delivered* through sandbox env, and a caller who can create sandboxes can override `EXECD_ISOLATION_CONFIG` per request (including to an empty value, which disables the floor). Treat hardening as hardening-in-depth, not an enforcement boundary against untrusted sandbox-creators, until the runtimes reserve that variable.
 
 ## How it is structured
 
@@ -89,15 +89,15 @@ For a policy that applies to every sandbox without rebuilding images, bind-mount
 [docker]
 sandbox_env = { EXECD_ISOLATION_CONFIG = "/etc/opensandbox/isolation.toml" }
 sandbox_binds = [
-  "/etc/opensandbox/isolation.toml:/etc/opensandbox/isolation.toml",
+  "/etc/opensandbox/isolation.toml:/etc/opensandbox/isolation.toml:ro",
 ]
 ```
 
-([storage] `allowed_host_paths` must include the host path of the bind.)
+([storage] `allowed_host_paths` must include the host path of the bind.) Mount the policy read-only: a root-image workload keeps UID 0 under the floor, and where Landlock is absent or unsupported nothing else prevents sandbox code from overwriting a writable bind and weakening the policy for subsequent sandboxes.
 
 ### Mount it from a ConfigMap (Kubernetes runtime)
 
-Add the TOML as a ConfigMap key, mount it in the BatchSandbox pod template, and set `EXECD_ISOLATION_CONFIG` to the mounted path — either in the template env or per create-request env. This is how the reference e2e delivers the policy (`opensandbox-e2e-execd-isolation` ConfigMap in `scripts/common/kubernetes-e2e.sh`).
+Add the TOML as a ConfigMap key, mount it in the BatchSandbox pod template, and set `EXECD_ISOLATION_CONFIG` to the mounted path via the per create-request env. This is how the reference e2e delivers the policy (`opensandbox-e2e-execd-isolation` ConfigMap in `scripts/common/kubernetes-e2e.sh`). Setting it in the *template* env does not work today: the BatchSandbox provider merges only volumes, mounts, and securityContext from the template, not container env — so the request env (or your own template rendering) is the delivery channel.
 
 ::: tip Config errors are fatal, missing features are not
 A file that does not parse, a misspelled capability name, or a `[seccomp] deny` that lists the reserved `execve` makes execd exit at startup and the sandbox fails to start — fix the file. A missing *runtime* capability (old kernel, missing `CAP_SETPCAP`, absent launcher binary) never blocks startup: the layer is reported as `degraded` or `unsupported` and the rest keeps working.
@@ -246,6 +246,7 @@ The floor subtracts from what the container grants; it cannot grant anything bac
 
 ## Compatibility notes
 
+- **Trust boundary** — the config is delivered via sandbox env, so a caller who can create sandboxes can override `EXECD_ISOLATION_CONFIG` per request (empty value = floor off). Reserving that variable against request-env overrides is a tracked follow-up; until then, do not treat the floor as an enforcement boundary against untrusted sandbox-creators.
 - **Non-Linux platforms** — the floor is Linux-only; configured layers report `unsupported` on Windows.
 - **`execve` is reserved** in a custom `[seccomp] deny` when `[hardening] enabled` is on (config error); `execveat` remains allowed.
 - **Override keys replace, never merge** — `[seccomp] deny` and `allowed_writable` both fully replace their defaults.
