@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -91,8 +91,10 @@ def load_config_file(config_path: Path | None = None) -> dict[str, Any]:
 # are rejected so a typo cannot quietly strand the real setting.
 #
 # "verbatim" keys are stored as raw CLI text: inferring a TOML number would
-# rewrite an API key such as "007123" as 7123.
-CONFIG_VALUE_KINDS: dict[str, str] = {
+# rewrite an API key such as "007123" as 7123. The kind set is closed: a new
+# kind must be handled in `_validated_config_value`, which fails loudly on
+# anything it does not recognize.
+CONFIG_VALUE_KINDS: dict[str, Literal["verbatim", "protocol", "int", "bool", "duration-or-none"]] = {
     "connection.api_key": "verbatim",
     "connection.domain": "verbatim",
     "connection.protocol": "protocol",

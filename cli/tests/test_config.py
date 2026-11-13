@@ -334,7 +334,42 @@ class TestConfigSet:
         init_config_file(cfg)
         result = self._invoke_set(cfg, "connection.request_timeout", "abc")
         assert result.exit_code == 1
-        assert "Must be a whole number" in result.stderr
+        assert "Must be a positive whole number" in result.stderr
+
+    def test_zero_request_timeout_is_rejected_cli(self, tmp_path: Path) -> None:
+        cfg = tmp_path / "config.toml"
+        init_config_file(cfg)
+        result = self._invoke_set(cfg, "connection.request_timeout", "0")
+        assert result.exit_code == 1
+        assert "Must be a positive whole number" in result.stderr
+        assert "request_timeout" not in load_config_file(cfg)["connection"]
+
+    @pytest.mark.parametrize("raw", ["-5", "0", "-1e2"])
+    def test_non_positive_request_timeout_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str
+    ) -> None:
+        from opensandbox_cli.commands import config_cmd
+
+        monkeypatch.setattr(
+            config_cmd,
+            "CONFIG_VALUE_KINDS",
+            {"connection.request_timeout": "int"},
+        )
+        with pytest.raises(click.ClickException, match="positive whole number"):
+            config_cmd._validated_config_value("connection.request_timeout", raw)
+
+    def test_unsupported_value_kind_fails_loudly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opensandbox_cli.commands import config_cmd
+
+        monkeypatch.setattr(
+            config_cmd,
+            "CONFIG_VALUE_KINDS",
+            {"connection.api_key": "bogus-kind"},
+        )
+        with pytest.raises(click.ClickException, match="Unsupported value kind"):
+            config_cmd._validated_config_value("connection.api_key", "secret")
 
     def test_scientific_notation_timeout_resolves_as_int(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.toml"

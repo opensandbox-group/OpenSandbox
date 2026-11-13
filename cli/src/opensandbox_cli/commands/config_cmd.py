@@ -129,35 +129,42 @@ def _validated_config_value(key: str, raw: str) -> Any:
             )
         return normalized
     if kind == "int":
+        # Positive-only: the keys using this kind feed the SDK's
+        # positive-timeout validation, and 0 would be silently dropped by
+        # resolve_config's falsy fallback chain.
+        parsed_int: int | None = None
         try:
-            return int(raw)
+            parsed_int = int(raw)
         except ValueError:
-            pass
-        try:
-            parsed = float(raw)
-        except ValueError:
-            parsed = None
-        if parsed is None or not parsed.is_integer():
+            try:
+                as_float = float(raw)
+            except ValueError:
+                as_float = None
+            if as_float is not None and as_float.is_integer():
+                parsed_int = int(as_float)
+        if parsed_int is None or parsed_int <= 0:
             raise click.ClickException(
-                f"Invalid value for {key}: '{raw}'. Must be a whole number."
+                f"Invalid value for {key}: '{raw}'. Must be a positive whole number."
             ) from None
-        return int(parsed)
+        return parsed_int
     if kind == "bool":
         normalized = raw.strip().lower()
         if normalized in ("1", "true", "yes", "on"):
             return True
         if normalized in ("0", "false", "no", "off"):
             return False
+        as_number: float | None = None
         try:
-            parsed = float(raw)
+            as_number = float(raw)
         except ValueError:
-            parsed = None
-        if parsed is not None and parsed in (0, 1):
-            return bool(parsed)
+            as_number = None
+        if as_number is not None and as_number in (0, 1):
+            return bool(as_number)
         raise click.ClickException(
             f"Invalid value for {key}: '{raw}'. Must be a boolean (true/false)."
         )
-    # kind == "duration-or-none"
+    if kind != "duration-or-none":
+        raise click.ClickException(f"Unsupported value kind '{kind}' for {key}.")
     try:
         parse_nullable_duration(raw)
     except click.BadParameter as exc:
