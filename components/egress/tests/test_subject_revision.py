@@ -282,7 +282,7 @@ class SubjectOwnerTest(unittest.TestCase):
         self.assertEqual(self.owner._entries, {})
         self.assertEqual(self.owner._last.sequence, 20000)
         self.assertLessEqual(len(self.owner._last.raw_body), 8192)
-        self.assertEqual(set(self.owner.__dict__), {"_control", "_max_subjects", "_max_snapshot_bytes", "_entries", "_last", "_operation_lock", "_terminal", "_closed", "_source_index", "_quarantined", "_tls_capacity", "_accounting", "_static_passthrough"})
+        self.assertEqual(set(self.owner.__dict__), {"_control", "_max_subjects", "_max_snapshot_bytes", "_entries", "_last", "_operation_lock", "_terminal", "_closed", "_source_index", "_quarantined", "_tls_capacity", "_accounting", "_static_passthrough", "_drain_timeout"})
         self.assertIsNone(self.owner._tls_capacity)
         self.assertIsNone(self.owner._accounting)
         self.assertEqual(self.owner._static_passthrough, ())
@@ -420,6 +420,21 @@ class SubjectBoundsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             subject.request_body_limit(sys.maxsize)
         make_owner().close()
+
+    def test_drain_timeout_is_admission_only_bounded_and_reaches_registry(self):
+        admission = dict(tls_capacity=1, process_tls_capacity=1, static_passthrough=())
+        for supplied, expected in ((None, 30), (1, 1), (300, 300)):
+            with self.subTest(supplied=supplied):
+                extra = {} if supplied is None else {"drain_timeout_seconds": supplied}
+                owner = make_owner(**admission, **extra)
+                owner.lifecycle("register", command(1))
+                self.assertEqual(owner._entries[A.subject_key].registry._drain_timeout, expected)
+                owner.close()
+        for invalid in (0, 301, -1, True, 30.0, "30"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                make_owner(**admission, drain_timeout_seconds=invalid)
+        with self.assertRaises(ValueError):
+            make_owner(drain_timeout_seconds=30)
 
     def test_maximum_unicode_and_control_escape_metadata_fit(self):
         for text in ("\U0001f680", "\x00"):

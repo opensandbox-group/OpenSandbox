@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 LIFECYCLE_BODY_LIMIT = 8192
 RESPONSE_LIMIT = 4096
 MAX_SEQUENCE = 2**63 - 1
+DEFAULT_DRAIN_TIMEOUT_SECONDS = 30
 _DIGEST_PREFIX = b"opensandbox.subject-lifecycle.v2\x00"
 
 
@@ -183,7 +184,8 @@ class SubjectRevisionOwner:
     def __init__(self, control_generation: str, *, max_subjects: int,
                  max_snapshot_bytes: int, retained_payload_budget: int,
                  tls_capacity: int | None = None, process_tls_capacity: int | None = None,
-                 static_passthrough: tuple | None = None) -> None:
+                 static_passthrough: tuple | None = None,
+                 drain_timeout_seconds: int | None = None) -> None:
         if (not valid_identity(control_generation, 128)
                 or not all(_positive_integer(value) for value in
                            (max_subjects, max_snapshot_bytes, retained_payload_budget))
@@ -194,6 +196,14 @@ class SubjectRevisionOwner:
                     static_passthrough is not None)
         if any(supplied) and not all(supplied):
             raise ValueError("incomplete subject TLS admission configuration")
+        if drain_timeout_seconds is None:
+            # Internal constructors keep the registry default; the addon
+            # always passes the launcher handoff value.
+            drain_timeout_seconds = DEFAULT_DRAIN_TIMEOUT_SECONDS
+        elif not supplied[0]:
+            raise ValueError("incomplete subject TLS admission configuration")
+        if type(drain_timeout_seconds) is not int or not 1 <= drain_timeout_seconds <= 300:
+            raise ValueError("invalid subject TLS drain timeout")
         request_body_limit(max_snapshot_bytes)
         self._control = control_generation
         self._max_subjects = max_subjects
@@ -208,6 +218,7 @@ class SubjectRevisionOwner:
         self._tls_capacity = tls_capacity
         self._accounting = None if tls_capacity is None else ConnectionAccounting(process_tls_capacity)
         self._static_passthrough = () if static_passthrough is None else static_passthrough
+        self._drain_timeout = drain_timeout_seconds
 
     @property
     def control_generation(self) -> str:
@@ -298,6 +309,8 @@ class SubjectRevisionOwner:
             elif operation == "commit" and entry.prepared == revision:
                 entry.snapshot = self._call(entry, "acquire")
                 entry.prepared = None
+                # Synchronous: the registry request fence and retirement
+                # deadlines are published before this commit receipt returns.
                 self._publish_index()
             elif operation == "abort" and entry.prepared == revision:
                 entry.prepared = None
@@ -364,6 +377,7 @@ class SubjectRevisionOwner:
             self._entries[target.subject_key].registry = SubjectRegistry(
                 capacity=self._tls_capacity, accounting=self._accounting,
                 static_passthrough=self._static_passthrough,
+                drain_timeout_seconds=self._drain_timeout,
             )
         self._publish_index()
         return _Result(200, "registered")

@@ -150,6 +150,9 @@ type SubjectRevisionIPCConfig struct {
 	TLSAdmission          bool
 	TLSCapacity           int
 	ProcessTLSCapacity    int
+	// DrainTimeoutSeconds bounds subject transport retirement after a binding
+	// transition. It is shipped and validated only when TLSAdmission is set.
+	DrainTimeoutSeconds int
 }
 
 func validateSubjectRevisionIPCConfig(cfg Config) error {
@@ -166,7 +169,8 @@ func validateSubjectRevisionIPCConfig(cfg Config) error {
 		return errInvalidRevisionIPCConfig
 	}
 	if subject.TLSAdmission && (subject.TLSCapacity < 1 || subject.TLSCapacity > 1<<20 ||
-		subject.ProcessTLSCapacity < 1 || subject.ProcessTLSCapacity > 1<<20) {
+		subject.ProcessTLSCapacity < 1 || subject.ProcessTLSCapacity > 1<<20 ||
+		subject.DrainTimeoutSeconds < 1 || subject.DrainTimeoutSeconds > 300) {
 		return errInvalidRevisionIPCConfig
 	}
 	count := 0
@@ -203,7 +207,7 @@ func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
 		// intentionally: the disabled path has no reader for this prefix.
 		return env
 	}
-	clean := make([]string, 0, len(env)+11)
+	clean := make([]string, 0, len(env)+12)
 	for _, value := range env {
 		name, _, _ := strings.Cut(value, "=")
 		if !strings.HasPrefix(name, subjectRevisionEnvPrefix) {
@@ -224,6 +228,7 @@ func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
 		clean = append(clean, subjectRevisionEnvPrefix+"TLS_ADMISSION=true",
 			subjectRevisionEnvPrefix+"TLS_CAPACITY="+strconv.Itoa(s.TLSCapacity),
 			subjectRevisionEnvPrefix+"PROCESS_TLS_CAPACITY="+strconv.Itoa(s.ProcessTLSCapacity),
+			subjectRevisionEnvPrefix+"DRAIN_TIMEOUT_SECONDS="+strconv.Itoa(s.DrainTimeoutSeconds),
 			// The child reads its static passthrough policy only from this
 			// handoff: inheritance is stripped above and main.go rejects an
 			// operator-set value for fast-sandbox, so the policy is empty.

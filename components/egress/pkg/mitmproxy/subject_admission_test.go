@@ -5,6 +5,7 @@ package mitmproxy
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ import (
 // so admission must ship the policy explicitly or the child fatals at load().
 func TestSubjectAdmissionStaticPassthroughHandoff(t *testing.T) {
 	cfg := subjectLaunchHandoff()
-	require.NoError(t, json.Unmarshal([]byte(`{"TLSAdmission":true,"TLSCapacity":32,"ProcessTLSCapacity":131072}`), &cfg))
+	require.NoError(t, json.Unmarshal([]byte(`{"TLSAdmission":true,"TLSCapacity":32,"ProcessTLSCapacity":131072,"DrainTimeoutSeconds":30}`), &cfg))
 	child, err := WithSubjectRevision(Config{}, cfg)
 	require.NoError(t, err)
 	env := buildMitmdumpChildEnv([]string{constants.EnvMitmproxyPassthroughHosts + `=["stale.example"]`}, "/home", child)
@@ -37,14 +38,22 @@ func TestSubjectAdmissionStaticPassthroughHandoff(t *testing.T) {
 func TestSubjectAdmissionHandoff(t *testing.T) {
 	cfg := subjectLaunchHandoff()
 	// JSON allows these behavior tests to run against the unmodified baseline.
-	require.NoError(t, json.Unmarshal([]byte(`{"TLSAdmission":true,"TLSCapacity":32,"ProcessTLSCapacity":131072}`), &cfg))
+	require.NoError(t, json.Unmarshal([]byte(`{"TLSAdmission":true,"TLSCapacity":32,"ProcessTLSCapacity":131072,"DrainTimeoutSeconds":30}`), &cfg))
 	child, err := WithSubjectRevision(Config{}, cfg)
 	require.NoError(t, err)
 	env := buildMitmdumpChildEnv(nil, "/home", child)
-	for _, field := range []string{"TLS_ADMISSION=true", "TLS_CAPACITY=32", "PROCESS_TLS_CAPACITY=131072"} {
+	for _, field := range []string{"TLS_ADMISSION=true", "TLS_CAPACITY=32", "PROCESS_TLS_CAPACITY=131072", "DRAIN_TIMEOUT_SECONDS=30"} {
 		require.Contains(t, env, subjectRevisionEnvPrefix+field)
 	}
-	for _, data := range []string{`{"TLSCapacity":0}`, `{"TLSCapacity":1048577}`, `{"ProcessTLSCapacity":0}`} {
+	for _, seconds := range []int{1, 300} {
+		bounded := cfg
+		bounded.DrainTimeoutSeconds = seconds
+		child, err := WithSubjectRevision(Config{}, bounded)
+		require.NoError(t, err)
+		require.Contains(t, buildMitmdumpChildEnv(nil, "/home", child), subjectRevisionEnvPrefix+"DRAIN_TIMEOUT_SECONDS="+strconv.Itoa(seconds))
+	}
+	for _, data := range []string{`{"TLSCapacity":0}`, `{"TLSCapacity":1048577}`, `{"ProcessTLSCapacity":0}`,
+		`{"DrainTimeoutSeconds":0}`, `{"DrainTimeoutSeconds":301}`, `{"DrainTimeoutSeconds":-1}`} {
 		bad := cfg
 		require.NoError(t, json.Unmarshal([]byte(data), &bad))
 		_, err = WithSubjectRevision(Config{}, bad)
@@ -75,8 +84,15 @@ func TestSubjectAdmissionHTTP1OnlyAndDisabledExactArgs(t *testing.T) {
 		subjectRevisionEnvPrefix + "MAX_SUBJECTS=4096", subjectRevisionEnvPrefix + "MAX_SNAPSHOT_BYTES=8388608",
 		subjectRevisionEnvPrefix + "RETAINED_PAYLOAD_BUDGET=68719476736"}
 	require.Equal(t, expectedEnv, buildMitmdumpChildEnv([]string{"PATH=/bin", "KEEP=value"}, "/home", off))
+	// An admission-only drain value never leaks into the installation-only child.
+	drainOnly := subjectLaunchHandoff()
+	drainOnly.DrainTimeoutSeconds = 7
+	offWithDrain, err := WithSubjectRevision(Config{ListenPort: 18080}, drainOnly)
+	require.NoError(t, err)
+	require.Equal(t, expected, buildMitmdumpArgs(offWithDrain))
+	require.Equal(t, expectedEnv, buildMitmdumpChildEnv([]string{"PATH=/bin", "KEEP=value", revisionIPCDrainTimeoutSecondsEnv + "=9"}, "/home", offWithDrain))
 	on := *off.SubjectRevisionIPC
-	on.TLSAdmission, on.TLSCapacity, on.ProcessTLSCapacity = true, 32, 131072
+	on.TLSAdmission, on.TLSCapacity, on.ProcessTLSCapacity, on.DrainTimeoutSeconds = true, 32, 131072, 30
 	enabled := off
 	enabled.SubjectRevisionIPC = &on
 	require.Contains(t, buildMitmdumpArgs(enabled), "http2=false")

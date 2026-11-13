@@ -117,6 +117,8 @@ func newFastSandboxSubjectSession(cfg fastSandboxSubjectSessionConfig) (*fastSan
 		s.handoff.TLSAdmission = true
 		s.handoff.TLSCapacity = constants.EnvIntRange(constants.EnvFSBTLSCapacity, 32, 1, 1<<20)
 		s.handoff.ProcessTLSCapacity = constants.EnvIntRange(constants.EnvFSBProcessTLSCapacity, 131072, 1, 1<<20)
+		// Same operator setting, default and range as the sidecar live bundle.
+		s.handoff.DrainTimeoutSeconds = constants.EnvIntRange(constants.EnvRevisionDrainTimeoutSeconds, constants.DefaultRevisionDrainTimeoutSeconds, 1, 300)
 	}
 	if _, err := mitmproxy.WithSubjectRevision(mitmproxy.Config{}, s.handoff); err != nil {
 		return nil, revision.ErrInvalid
