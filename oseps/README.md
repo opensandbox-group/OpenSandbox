@@ -32,3 +32,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0024](0024-auto-pause-and-wake-on-access-for-fast-sandbox.md) |      Auto-Pause and Wake-on-Access for Fast Sandbox                  |  implemented  |  2026-10-12  |
 | [OSEP-0025](0025-credential-vault-provider-spi.md)             |      Credential Vault Exchange and Delegated Header Resolution           |     draft     |  2026-10-28 |
 | [OSEP-0026](0026-resource-oversubscription-accounting-for-fast-sandbox.md) |      Resource Oversubscription Accounting for Fast Sandbox       |  implemented  |  2026-11-09 |
+| [OSEP-0028](0028-sandbox-termination-confirmation.md) |      Sandbox Termination Confirmation                                     |     draft     |  2026-11-11 |
