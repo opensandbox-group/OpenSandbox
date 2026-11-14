@@ -350,6 +350,9 @@ func clientWithoutRedirects(base *http.Client) *http.Client {
 func copyResponse(rw http.ResponseWriter, resp *http.Response) error {
 	// The marker is gateway-owned; upstream responses must not carry it.
 	resp.Header.Del(WakeMarkerHeader)
+	// coder/websocket replaces a failed handshake body with its first 1 KiB,
+	// so the backend's Content-Length no longer describes it.
+	resp.Header.Del("Content-Length")
 	copyHeader(rw.Header(), resp.Header)
 	rw.WriteHeader(resp.StatusCode)
 	defer func() {
