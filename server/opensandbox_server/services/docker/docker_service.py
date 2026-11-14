@@ -892,6 +892,15 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 cap_drop.add("NET_ADMIN")
                 if cap_drop:
                     host_config_kwargs["cap_drop"] = list(cap_drop)
+                cap_add = [
+                    cap
+                    for cap in host_config_kwargs.get("cap_add") or []
+                    if cap.upper().removeprefix("CAP_") != "NET_ADMIN"
+                ]
+                if cap_add:
+                    host_config_kwargs["cap_add"] = cap_add
+                else:
+                    host_config_kwargs.pop("cap_add", None)
             else:
                 host_config_kwargs = self._base_host_config_kwargs(
                     effective_mem_limit, effective_nano_cpus, self.network_mode,
