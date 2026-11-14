@@ -35,6 +35,14 @@ var (
 	// execute_reply after receiving the execution's matching idle status.
 	JupyterIdlePollInterval time.Duration
 
+	// JupyterReplyFinalizeTimeout bounds how long an execution waits for its
+	// matching idle status once execute_reply has arrived. The reply means the
+	// kernel finished the cell and only output delivery remains; if the idle
+	// never dispatches (lost, or relayed without the matching parent header),
+	// the execution would otherwise hold the session lock and keep the SSE
+	// stream open with pings forever.
+	JupyterReplyFinalizeTimeout time.Duration
+
 	// IsolationConfigPath points to the TOML isolation config file.
 	// Empty means use built-in defaults.
 	IsolationConfigPath string

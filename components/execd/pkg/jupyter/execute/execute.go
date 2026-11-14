@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/internal/safego"
@@ -126,6 +127,11 @@ type streamExecutionState struct {
 	// instead of racing a closed channel.
 	chanMutex sync.RWMutex
 	closed    bool
+
+	// outputActivity counts delivered output results (stream and execute_result).
+	// The reply deadline uses it to expire on output silence instead of on
+	// absolute wall-clock time, so a slow relay cannot be cut off mid-delivery.
+	outputActivity atomic.Int64
 }
 
 func newStreamExecutionState(startTime time.Time) *streamExecutionState {
@@ -238,7 +244,7 @@ func (c *Client) buildExecuteMessage(code string) (*Message, error) {
 
 func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, resultChan chan *ExecutionResult) {
 	c.registerHandler(MsgExecuteReply, func(msg *Message) {
-		c.handleExecuteReply(msg, state)
+		c.handleExecuteReply(msg, state, resultChan)
 	})
 	c.registerHandler(MsgExecuteResult, func(msg *Message) {
 		c.handleExecuteResult(msg, state, resultChan)
@@ -269,7 +275,7 @@ func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, 
 	c.mu.Unlock()
 }
 
-func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
+func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
 	if msg.ParentHeader.MessageID != state.requestID {
 		return
 	}
@@ -280,7 +286,6 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
 	}
 
 	state.resultMutex.Lock()
-	defer state.resultMutex.Unlock()
 	state.replyReceived = true
 	state.result.ExecutionCount = execReply.ExecutionCount
 	if execReply.Status != "ok" || execReply.EName != "" {
@@ -293,6 +298,62 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
 			state.result.Error = &errOutput
 		}
 	}
+	state.resultMutex.Unlock()
+
+	// The reply means the kernel has finished the cell; everything after it is
+	// output delivery. Finalization still waits for the matching idle, but that
+	// wait must not be unbounded: if the idle is lost or relayed without the
+	// matching parent header, nothing else would ever release this execution --
+	// the results channel never closes, the caller's SSE stream stays open with
+	// keepalive pings, and the session stays locked. Arm a bounded deadline that
+	// finalizes with whatever output has been collected. It coexists with the
+	// idle-triggered finalization in handleExecutionStatus; whoever flips
+	// executeDone first finalizes and the loser exits. The timeout is read here,
+	// on the dispatch path, so the deadline goroutine never touches the flag.
+	replyDeadline := execdflag.JupyterReplyFinalizeTimeout
+	safego.Go(func() { c.finalizeOnReplyDeadline(state, resultChan, replyDeadline) })
+}
+
+// finalizeOnReplyDeadline releases an execution whose matching idle status
+// never arrived although execute_reply did. The kernel sends the reply after it
+// finished the cell, so the outcome is already known and only the delivery of
+// remaining IOPub output is pending. Finalizing here closes the results channel
+// with the output collected so far; a late idle is a no-op because executeDone
+// is already set.
+//
+// The bound expires on output silence, not on absolute wall-clock time: while
+// output keeps arriving, each delivery restarts the grace period, so a slow
+// relay cannot be cut off mid-delivery; the execution is finalized only once
+// the output has gone quiet for a full grace period.
+func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan chan *ExecutionResult, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+
+	delivered := state.outputActivity.Load()
+	for {
+		timer := time.NewTimer(timeout)
+		select {
+		case <-state.cancelled:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		latest := state.outputActivity.Load()
+		if latest == delivered {
+			break
+		}
+		delivered = latest
+	}
+
+	state.executeMutex.Lock()
+	alreadyFinalizing := state.executeDone
+	state.executeDone = true
+	state.executeMutex.Unlock()
+	if alreadyFinalizing {
+		return
+	}
+	c.finalizeExecution(state, resultChan)
 }
 
 func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
@@ -314,6 +375,7 @@ func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, 
 		ExecutionData:  execResult.Data,
 	}
 	state.trySend(resultChan, notify)
+	state.outputActivity.Add(1)
 
 	state.resultMutex.Lock()
 	state.result.ExecutionCount = execResult.ExecutionCount
@@ -339,6 +401,7 @@ func (c *Client) handleStreamOutput(msg *Message, state *streamExecutionState, r
 		Stream: []*StreamOutput{&stream},
 	}
 	state.trySend(resultChan, notify)
+	state.outputActivity.Add(1)
 }
 
 func (c *Client) handleExecutionError(msg *Message, state *streamExecutionState) {
