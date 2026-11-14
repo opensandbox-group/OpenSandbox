@@ -316,8 +316,9 @@ class CodeInterpreterSync:
             try:
                 if not skip_health_check:
                     interpreter.check_ready(ready_timeout, health_check_polling_interval)
-            except Exception:
-                # Don't leak the service's clients on a failed creation.
+            except BaseException:
+                # Don't leak the service's clients on a failed or interrupted
+                # creation (e.g. KeyboardInterrupt during the health check).
                 with contextlib.suppress(Exception):
                     interpreter.close()
                 raise
