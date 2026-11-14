@@ -1119,7 +1119,7 @@ func (r *PoolReconciler) updatePool(ctx context.Context, pool *sandboxv1alpha1.P
 type scaleArgs struct {
 	updateRevision string
 	pods           []*corev1.Pod
-	totalPodCnt    int32 // all pods including evicting ones, for PoolMax enforcement
+	totalPodCnt    int32 // all pods including evicting ones; see scalePool for how PoolMax applies to it
 	allocatedCnt   int32
 	supplyCnt      int32 // to create
 	idlePods       []string
@@ -1160,11 +1160,29 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 			return true, nil
 		}
 	}
-	schedulableCnt := int32(len(args.pods))
+	// A pod that already finished - evicted, or run to completion - can never
+	// serve a sandbox again. Counting it as schedulable hides capacity the pool
+	// owes, and counting it as not ready spends the scale-up budget, so a pool
+	// whose buffer died never refills (#2650). Reap the finished idle pods and
+	// count only the rest. A finished pod that is still allocated keeps its
+	// allocation until the sandbox hands it back, and one the update already
+	// retired is replaced through its own supply, so both stay out of this loop.
+	idlePods := sets.New(args.idlePods...)
+	toDeletePods := args.toDeletePods
+	var finishedPods []*corev1.Pod
+	schedulablePods := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if isTerminalPod(pod) && idlePods.Has(pod.Name) {
+			finishedPods = append(finishedPods, pod)
+			continue
+		}
+		schedulablePods = append(schedulablePods, pod)
+	}
+
+	schedulableCnt := int32(len(schedulablePods))
 	totalPodCnt := args.totalPodCnt
 	allocatedCnt := args.allocatedCnt
 	supplyCnt := args.supplyCnt
-	toDeletePods := args.toDeletePods
 	bufferCnt := r.countReadyIdlePods(pods, args.idlePods)
 
 	// Calculate desired buffer cnt.
@@ -1173,20 +1191,25 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	// Calculate desired schedulable cnt.
 	desiredSchedulableCnt := max(allocatedCnt+supplyCnt+desiredBufferCnt, pool.Spec.CapacitySpec.PoolMin)
 	// Enforce PoolMax: limit new pods based on total running pods (including evicting).
-	maxNewPods := max(pool.Spec.CapacitySpec.PoolMax-totalPodCnt, 0)
+	// A finished pod holds no node resources and no slot, so PoolMax counts the
+	// pods that can still hold one - PoolMax bounds the non-terminal pods, and the
+	// scale-down below deletes every finished pod in this same pass.
+	podCntForMax := totalPodCnt - int32(len(finishedPods))
+	maxNewPods := max(pool.Spec.CapacitySpec.PoolMax-podCntForMax, 0)
 
 	log.Info("Scale pool decision", "pool", pool.Name,
 		"totalPodCnt", totalPodCnt, "schedulableCnt", schedulableCnt,
 		"allocatedCnt", allocatedCnt, "bufferCnt", bufferCnt,
 		"desiredBufferCnt", desiredBufferCnt, "supplyCnt", supplyCnt,
 		"desiredSchedulableCnt", desiredSchedulableCnt, "maxNewPods", maxNewPods,
-		"toDeletePods", len(toDeletePods), "idlePods", len(args.idlePods))
+		"toDeletePods", len(toDeletePods), "idlePods", len(args.idlePods),
+		"finishedPods", len(finishedPods))
 
 	// Scale-up: create new pods if needed and allowed by PoolMax
 	if desiredSchedulableCnt > schedulableCnt && maxNewPods > 0 {
 		createCnt := min(desiredSchedulableCnt-schedulableCnt, maxNewPods)
 		scaleMaxUnavailable := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
-		notReadyCnt := r.countNotReadyPods(pods)
+		notReadyCnt := r.countNotReadyPods(schedulablePods)
 		limitedCreateCnt := scaleMaxUnavailable - notReadyCnt
 		createCnt = max(0, min(createCnt, limitedCreateCnt))
 		if createCnt > 0 {
@@ -1211,12 +1234,12 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	// creating them. Pods already planned for deletion count toward it.
 	planned := int32(len(plannedDeletions(podsByName(pods), toDeletePods)))
 	scaleIn = max(scaleIn, schedulableCnt-planned-pool.Spec.CapacitySpec.PoolMax)
-	if scaleIn > 0 || len(toDeletePods) > 0 {
-		podsToDelete := r.pickPodsToDelete(pods, args.idlePods, args.toDeletePods, scaleIn)
+	if scaleIn > 0 || len(toDeletePods) > 0 || len(finishedPods) > 0 {
+		podsToDelete := r.pickPodsToDelete(pods, args.idlePods, toDeletePods, scaleIn)
+		// maxUnavailable throttles available capacity going away, and a finished pod
+		// is not available, so finished pods are deleted on top of that budget.
 		maxDeleteCnt := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
-		if int32(len(podsToDelete)) > maxDeleteCnt {
-			podsToDelete = podsToDelete[:maxDeleteCnt]
-		}
+		podsToDelete = withFinishedPods(limitDeleteBudget(podsToDelete, maxDeleteCnt), finishedPods)
 		log.Info("Scaling down pool", "pool", pool.Name, "scaleIn", scaleIn, "toDeletePods", len(toDeletePods), "podsToDelete", len(podsToDelete))
 		for _, pod := range podsToDelete {
 			log.Info("Deleting pool pod", "pool", pool.Name, "pod", pod.Name)
@@ -1383,6 +1406,50 @@ func (r *PoolReconciler) getScaleMaxUnavailable(pool *sandboxv1alpha1.Pool, desi
 		result = 1
 	}
 	return int32(result)
+}
+
+// isTerminalPod reports whether a pod finished and can never serve a sandbox.
+func isTerminalPod(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded
+}
+
+// limitDeleteBudget drops the delete candidates a throttled pass would skip,
+// counting only the pods that still serve traffic: maxUnavailable bounds the
+// available capacity going away, and a finished pod holds none.
+func limitDeleteBudget(pods []*corev1.Pod, maxCnt int32) []*corev1.Pod {
+	kept := make([]*corev1.Pod, 0, len(pods))
+	live := int32(0)
+	for _, pod := range pods {
+		if !isTerminalPod(pod) {
+			if live == maxCnt {
+				continue
+			}
+			live++
+		}
+		kept = append(kept, pod)
+	}
+	return kept
+}
+
+// withFinishedPods appends the finished pods a pass must still reap, skipping
+// the ones it already queued and the ones already terminating.
+func withFinishedPods(pods []*corev1.Pod, finished []*corev1.Pod) []*corev1.Pod {
+	queued := make(map[string]struct{}, len(pods))
+	for _, pod := range pods {
+		queued[pod.Name] = struct{}{}
+	}
+	merged := pods
+	for _, pod := range finished {
+		if !pod.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if _, ok := queued[pod.Name]; ok {
+			continue
+		}
+		queued[pod.Name] = struct{}{}
+		merged = append(merged, pod)
+	}
+	return merged
 }
 
 // countNotReadyPods returns the count of pods that are not ready.
