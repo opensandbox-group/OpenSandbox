@@ -2660,6 +2660,7 @@ func TestExecution_ErrorEventExitCode(t *testing.T) {
 		data          string
 		wantErrorCode *int
 		wantExitCode  *int
+		wantError     *ExecutionError
 	}{
 		{
 			name:          "exit_code is authoritative",
@@ -2672,6 +2673,22 @@ func TestExecution_ErrorEventExitCode(t *testing.T) {
 			data:          `{"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1}}`,
 			wantErrorCode: intPtr(-1),
 			wantExitCode:  intPtr(-1),
+		},
+		{
+			name:          "timeout preserves signal exit status",
+			data:          `{"type":"error","timestamp":2,"error":{"ename":"CommandTimeout","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1}}`,
+			wantErrorCode: intPtr(-1),
+			wantExitCode:  intPtr(-1),
+			wantError: &ExecutionError{Name: "CommandTimeout", Value: "-1", Timestamp: 2,
+				Traceback: []string{"signal: terminated"}, ExitCode: intPtr(-1)},
+		},
+		{
+			name:          "timeout preserves nonzero exit status",
+			data:          `{"type":"error","timestamp":2,"error":{"ename":"CommandTimeout","evalue":"137","traceback":["exit status 137"],"exit_code":137}}`,
+			wantErrorCode: intPtr(137),
+			wantExitCode:  intPtr(137),
+			wantError: &ExecutionError{Name: "CommandTimeout", Value: "137", Timestamp: 2,
+				Traceback: []string{"exit status 137"}, ExitCode: intPtr(137)},
 		},
 		{
 			name: "start failure has no exit code",
@@ -2695,6 +2712,10 @@ func TestExecution_ErrorEventExitCode(t *testing.T) {
 
 			require.NotNil(t, exec.Error)
 			require.NotNil(t, handled)
+			require.Equal(t, exec.Error, handled)
+			if tc.wantError != nil {
+				require.Equal(t, tc.wantError, exec.Error)
+			}
 			require.Equal(t, tc.wantErrorCode, exec.Error.ExitCode)
 			require.Equal(t, tc.wantErrorCode, handled.ExitCode)
 			require.Equal(t, tc.wantExitCode, exec.ExitCode)

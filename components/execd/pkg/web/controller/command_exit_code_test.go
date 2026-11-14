@@ -106,6 +106,7 @@ func TestRunCommandTimeoutDoesNotReportSuccess(t *testing.T) {
 			var payload map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(event["error"], &payload))
 			require.JSONEq(t, "-1", string(payload["exit_code"]))
+			require.JSONEq(t, `"CommandTimeout"`, string(payload["ename"]))
 		}
 	}
 	require.True(t, found, w.Body.String())

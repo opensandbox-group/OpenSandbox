@@ -247,6 +247,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		Credential: cred,
 	}
 
+	// The group watcher owns cancellation, including timeout classification.
+	// Disable the competing exec.Cmd watcher, which kills only the leader.
+	cmd.Cancel = nil
+
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -287,9 +291,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		isBackground: false,
 	}
 	c.storeCommandKernel(session, kernel)
-	request.Hooks.OnExecuteInit(session)
 
+	var timedOut bool
+	watcherDone := make(chan struct{})
 	safego.Go(func() {
+		defer close(watcherDone)
 		for {
 			select {
 			case <-done:
@@ -315,9 +321,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 				// Genuine cancellation (timeout, client disconnect,
 				// Interrupt). Kill the whole process group so children
 				// don't outlive the cancelled context.
-				if cmd.Process != nil {
-					_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				}
+				deadline := errors.Is(ctx.Err(), context.DeadlineExceeded)
+				killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				// Record delivered cancellation, not a deadline observed after Wait.
+				// An independent exit can still coincide with a successful signal.
+				timedOut = deadline && killErr == nil
 				return
 			case sig := <-signals:
 				if sig == nil {
@@ -331,43 +339,54 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		}
 	})
 
-	err = mp.Wait()
-	close(done)
+	var waitErr error
+	safego.Go(func() {
+		// Observe exit independently of blocked init or output callbacks.
+		waitErr = mp.Wait()
+		close(done)
+	})
+
+	request.Hooks.OnExecuteInit(session)
+	<-done
+	<-watcherDone
 	wg.Wait()
-	if err != nil {
-		var eName, eValue string
-		var eCode int
-		var exitCodePtr *int
-		var traceback []string
-
-		var exitCodeErr exitCoder
-		if errors.As(err, &exitCodeErr) {
-			exitCode := exitCodeErr.ExitCode()
-			eName = "CommandExecError"
-			eValue = strconv.Itoa(exitCode)
-			eCode = exitCode
-			exitCodePtr = &exitCode
-		} else {
-			eName = "CommandExecError"
-			eValue = err.Error()
-			eCode = 1
-		}
-		traceback = []string{err.Error()}
-
-		request.Hooks.OnExecuteError(&execute.ErrorOutput{
-			EName:     eName,
-			EValue:    eValue,
-			Traceback: traceback,
-			ExitCode:  exitCodePtr,
-		})
-
-		log.ErrorWithCommandID(session, "command: run failed: %v", err)
-		c.markCommandFinished(session, eCode, err.Error())
+	if waitErr == nil {
+		c.markCommandFinished(session, 0, "")
+		request.Hooks.OnExecuteComplete(time.Since(startAt))
 		return nil
 	}
 
-	c.markCommandFinished(session, 0, "")
-	request.Hooks.OnExecuteComplete(time.Since(startAt))
+	var eName, eValue string
+	var eCode int
+	var exitCodePtr *int
+
+	var exitCodeErr exitCoder
+	if errors.As(waitErr, &exitCodeErr) {
+		exitCode := exitCodeErr.ExitCode()
+		eName = "CommandExecError"
+		eValue = strconv.Itoa(exitCode)
+		eCode = exitCode
+		exitCodePtr = &exitCode
+	} else {
+		eName = "CommandExecError"
+		eValue = waitErr.Error()
+		eCode = 1
+	}
+	errorMessage := waitErr.Error()
+	if timedOut {
+		eName = "CommandTimeout"
+		errorMessage = fmt.Sprintf("command timed out after %s: %s", request.Timeout, errorMessage)
+	}
+
+	request.Hooks.OnExecuteError(&execute.ErrorOutput{
+		EName:     eName,
+		EValue:    eValue,
+		Traceback: []string{errorMessage},
+		ExitCode:  exitCodePtr,
+	})
+
+	log.ErrorWithCommandID(session, "command: run failed: %s", errorMessage)
+	c.markCommandFinished(session, eCode, errorMessage)
 	return nil
 }
 

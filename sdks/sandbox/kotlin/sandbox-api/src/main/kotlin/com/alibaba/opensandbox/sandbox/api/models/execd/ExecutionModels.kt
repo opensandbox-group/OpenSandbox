@@ -62,9 +62,10 @@ data class ErrorData
         val value: String? = null,
         @SerialName("traceback")
         val traceback: List<String> = emptyList(),
-        // Exit status for CommandExecError when the command ran and finished
-        // non-zero (-1 when terminated by a signal). Null when the process failed
-        // to start, for non-command errors, and on servers that predate error.exit_code.
+        // Exit status for CommandExecError or CommandTimeout after a command exits
+        // non-zero (-1 when terminated by a signal). Null when the process failed to
+        // start, no exit status was observed, or the error is not from a command.
+        // Also null on servers that predate error.exit_code.
         @SerialName("exit_code")
         val exitCode: Long? = null,
     )
