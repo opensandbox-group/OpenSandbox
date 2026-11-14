@@ -37,7 +37,7 @@ func compileDomainIndex(egress []EgressRule) *compiledDomainIndex {
 		if r.targetKind != targetDomain {
 			continue
 		}
-		pattern := strings.ToLower(strings.TrimSpace(r.Target))
+		pattern := normalizeDomainPattern(r.Target)
 		if pattern == "" {
 			continue
 		}
