@@ -66,5 +66,6 @@ class EventNode(BaseModel):
     execution_count: int | None = Field(default=None, alias="execution_count")
     execution_time_in_millis: int | None = Field(default=None, alias="execution_time")
     timestamp: int
+    exit_code: int | None = Field(default=None, alias="exit_code")
     results: EventNodeResults | None = None
     error: EventNodeError | None = None

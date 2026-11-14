@@ -189,13 +189,26 @@ class CommandsAdapter(Commands):
                 if event_node is None:
                     continue
                 await dispatcher.dispatch(event_node)
-                # Foreground responses drain to EOF (no break below): older
-                # servers may emit trailing output after the completion event.
+                # Background commands are done once execution_complete arrives;
+                # do not wait for the chunked terminator (#1528).
                 if is_background and event_node.type == "execution_complete":
-                    # Background commands are done once execution_complete
-                    # arrives; do not wait for the chunked terminator, which
-                    # older execd versions delay with a grace-period sleep and can
-                    # be lost if the connection is closed early (#1528).
+                    break
+
+                # Foreground commands on servers with authoritative exit_code ordering (#2654):
+                # modern execd guarantees all stdout/stderr is flushed before emitting
+                # execution_complete (with exit_code: 0) or error (with error.exit_code).
+                # Breaking immediately avoids the 200ms-1000ms ApiGracefulShutdownTimeout sleep.
+                # Older execd versions (e.g. v1.0.1) omit exit_code and may emit trailing output
+                # after the terminal event; those streams continue draining to EOF.
+                has_authoritative_exit_code = (
+                    (event_node.type == "execution_complete" and event_node.exit_code is not None)
+                    or (
+                        event_node.type == "error"
+                        and event_node.error is not None
+                        and event_node.error.exit_code is not None
+                    )
+                )
+                if has_authoritative_exit_code:
                     break
 
         if infer_exit_code:
