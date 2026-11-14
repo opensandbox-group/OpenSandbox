@@ -217,3 +217,15 @@ func TestParseKeys(t *testing.T) {
 	_, err = ParseKeys("K=" + base64.StdEncoding.EncodeToString(raw))
 	assert.Error(t, err)
 }
+
+func TestParsePortSegment_RejectsSign(t *testing.T) {
+	// OSEP-0011: port is decimal 1..65535 with no leading zeros. strconv.Atoi
+	// also takes a sign, which would let "+08080" slip past the zero check.
+	for _, s := range []string{"+8080", "+08080", "-1", "+0"} {
+		_, err := ParsePortSegment(s)
+		assert.Errorf(t, err, "port %q", s)
+	}
+	p, err := ParsePortSegment("8080")
+	assert.NoError(t, err)
+	assert.Equal(t, 8080, p)
+}
