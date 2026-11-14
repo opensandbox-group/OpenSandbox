@@ -205,6 +205,24 @@ class CommandsAdapterTest {
     }
 
     @Test
+    fun `run should keep the first event after a leading UTF-8 BOM`() {
+        val init = """data: {"type":"init","text":"cmd-1","timestamp":1}"""
+        val stdout = """data: {"type":"stdout","text":"hi","timestamp":2}"""
+        val complete = """data: {"type":"execution_complete","execution_time":3,"timestamp":3}"""
+        mockWebServer.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody("\uFEFF$init\n\n$stdout\n\n$complete\n\n"),
+        )
+
+        val execution = commandsAdapter.run(RunCommandRequest.builder().command("echo hi").build())
+
+        assertEquals("cmd-1", execution.id)
+        assertEquals("hi", execution.logs.stdout.single().text)
+        assertEquals(0, execution.exitCode)
+    }
+
+    @Test
     fun `endpoint headers should be sent to streaming and generated api requests`() {
         val host = mockWebServer.hostName
         val port = mockWebServer.port
