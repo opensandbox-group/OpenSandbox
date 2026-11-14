@@ -22,8 +22,8 @@ so multiple container runtimes (docker, kubernetes, etc.) can reuse them.
 from __future__ import annotations
 
 import logging
-import math
 import re
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
@@ -100,27 +100,24 @@ def parse_nano_cpus(value: Optional[str]) -> Optional[int]:
     cpu_str = value.strip().lower()
     try:
         if cpu_str.endswith("m"):
-            cpus = float(cpu_str[:-1]) / 1000
+            quantity = Decimal(cpu_str[:-1])
+            nano_cpus = quantity * Decimal(1_000_000)
         else:
-            cpus = float(cpu_str)
-    except ValueError:
+            quantity = Decimal(cpu_str)
+            nano_cpus = quantity * Decimal(1_000_000_000)
+        if not quantity.is_finite() or not nano_cpus.is_finite():
+            raise InvalidOperation
+        nano_cpus = nano_cpus.to_integral_value(rounding=ROUND_DOWN)
+    except (InvalidOperation, ValueError):
         logger.warning(f"Invalid CPU limit format '{value}'; ignoring.")
         return None
-    if not math.isfinite(cpus):
-        logger.warning(f"CPU limit must be finite. Got '{value}'. Ignoring.")
-        return None
-    if cpus <= 0:
+    if quantity <= 0:
         logger.warning(f"CPU limit must be positive. Got '{value}'. Ignoring.")
         return None
-    nano_cpus = cpus * 1_000_000_000
-    if not math.isfinite(nano_cpus):
-        logger.warning(f"CPU limit is too large. Got '{value}'. Ignoring.")
-        return None
-    nano_cpus = int(nano_cpus)
     if nano_cpus > (1 << 63) - 1:
         logger.warning(f"CPU limit is too large. Got '{value}'. Ignoring.")
         return None
-    return nano_cpus
+    return int(nano_cpus)
 
 
 def parse_gpu_request(value: Optional[str]) -> Optional[int]:
