@@ -32,6 +32,7 @@ def _get_kwargs(
     page: int | Unset = 1,
     page_size: int | Unset = 20,
 ) -> dict[str, Any]:
+
     params: dict[str, Any] = {}
 
     params["metadata"] = metadata

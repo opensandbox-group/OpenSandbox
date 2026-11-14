@@ -31,6 +31,7 @@ def _get_kwargs(
     sandbox_id: str,
     binding_name: str,
 ) -> dict[str, Any]:
+
     _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/sandboxes/{sandbox_id}/credential-vault/bindings/{binding_name}".format(
