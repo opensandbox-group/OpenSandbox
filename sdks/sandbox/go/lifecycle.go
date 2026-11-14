@@ -285,6 +285,13 @@ func (c *LifecycleClient) GetCredentialVaultBinding(ctx context.Context, sandbox
 	return &resp, nil
 }
 
+// normalizeSnapshotMode reports snapshots that predate the mode field as full.
+func normalizeSnapshotMode(info *SnapshotInfo) {
+	if info.Mode == "" {
+		info.Mode = SnapshotModeFull
+	}
+}
+
 // ListSnapshots returns a paginated list of snapshots with optional filtering.
 func (c *LifecycleClient) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (*ListSnapshotsResponse, error) {
 	params := url.Values{}
@@ -313,6 +320,9 @@ func (c *LifecycleClient) ListSnapshots(ctx context.Context, opts ListSnapshotsO
 	if err := c.doRequest(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, err
 	}
+	for i := range resp.Items {
+		normalizeSnapshotMode(&resp.Items[i])
+	}
 	return &resp, nil
 }
 
@@ -322,6 +332,7 @@ func (c *LifecycleClient) CreateSnapshot(ctx context.Context, sandboxID string, 
 	if err := c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(sandboxID)+"/snapshots", req, &resp); err != nil {
 		return nil, err
 	}
+	normalizeSnapshotMode(&resp)
 	return &resp, nil
 }
 
@@ -331,6 +342,7 @@ func (c *LifecycleClient) GetSnapshot(ctx context.Context, id string) (*Snapshot
 	if err := c.doRequest(ctx, "GET", "/snapshots/"+url.PathEscape(id), nil, &resp); err != nil {
 		return nil, err
 	}
+	normalizeSnapshotMode(&resp)
 	return &resp, nil
 }
 

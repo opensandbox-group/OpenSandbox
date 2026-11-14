@@ -1452,6 +1452,27 @@ public class SnapshotStatus
 }
 
 /// <summary>
+/// Known snapshot modes: what a snapshot persists.
+/// </summary>
+public static class SnapshotModes
+{
+    /// <summary>
+    /// The most complete capture the runtime supports: memory and process state on the fast-sandbox
+    /// backend (restoring resumes in place); filesystem-only on Docker and Kubernetes (processes are
+    /// not restored there). This is the server default and what snapshots created before the mode
+    /// field existed report.
+    /// </summary>
+    public const string Full = "full";
+
+    /// <summary>
+    /// Only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint
+    /// re-runs, and resume moves from milliseconds to seconds. Requires the fast-sandbox backend
+    /// with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+    /// </summary>
+    public const string RootfsOnly = "rootfsOnly";
+}
+
+/// <summary>
 /// Information about a snapshot.
 /// </summary>
 public class SnapshotInfo
@@ -1464,6 +1485,12 @@ public class SnapshotInfo
 
     [JsonPropertyName("name")]
     public string? Name { get; set; }
+
+    /// <summary>
+    /// Artifact class of the snapshot. Snapshots created before this field existed report "full".
+    /// </summary>
+    [JsonPropertyName("mode")]
+    public string Mode { get; set; } = SnapshotModes.Full;
 
     [JsonPropertyName("status")]
     public required SnapshotStatus Status { get; set; }
@@ -1479,6 +1506,13 @@ public class CreateSnapshotRequest
 {
     [JsonPropertyName("name")]
     public string? Name { get; set; }
+
+    /// <summary>
+    /// What the snapshot persists: see <see cref="SnapshotModes"/>. Leave null to let the server
+    /// apply its default ("full") — the field stays off the wire for servers that predate it.
+    /// </summary>
+    [JsonPropertyName("mode")]
+    public string? Mode { get; set; }
 }
 
 /// <summary>

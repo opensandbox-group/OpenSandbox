@@ -132,6 +132,8 @@ export class SandboxesAdapter implements Sandboxes {
   private mapSnapshotInfo(raw: ApiGetSnapshotOk | ApiCreateSnapshotOk): SnapshotInfo {
     return {
       ...(raw ?? {}),
+      // Responses that predate the mode field read back as "full".
+      mode: raw?.mode ?? "full",
       createdAt: this.parseIsoDate("createdAt", raw?.createdAt),
       status: {
         ...(raw?.status ?? {}),

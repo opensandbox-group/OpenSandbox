@@ -29,6 +29,7 @@ import com.alibaba.opensandbox.sandbox.api.infrastructure.ServerError
 import com.alibaba.opensandbox.sandbox.api.infrastructure.ServerException
 import com.alibaba.opensandbox.sandbox.api.infrastructure.Success
 import com.alibaba.opensandbox.sandbox.api.models.Endpoint
+import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
@@ -291,17 +292,47 @@ internal class SandboxesAdapter(
     override fun createSnapshot(
         sandboxId: String,
         name: String?,
+    ): SnapshotInfo = createSnapshot(sandboxId, name, null)
+
+    override fun createSnapshot(
+        sandboxId: String,
+        name: String?,
+        mode: String?,
     ): SnapshotInfo {
+        val body = createSnapshotRequestBody(name, mode)
         return try {
-            snapshotApi.sandboxesSandboxIdSnapshotsPost(
-                sandboxId,
-                name?.let { com.alibaba.opensandbox.sandbox.api.models.CreateSnapshotRequest(name = it) },
-            )
+            snapshotApi.sandboxesSandboxIdSnapshotsPost(sandboxId, body)
                 .toSnapshotInfo()
         } catch (e: Exception) {
             throw e.toSandboxException()
         }
     }
+
+    /**
+     * Builds the create-snapshot request body, or null when there is nothing to send.
+     *
+     * An unset mode passes an explicit null so the generated enum default (`full`)
+     * never reaches the wire: servers that predate the mode field must not see it.
+     */
+    private fun createSnapshotRequestBody(
+        name: String?,
+        mode: String?,
+    ): com.alibaba.opensandbox.sandbox.api.models.CreateSnapshotRequest? =
+        when {
+            name == null && mode == null -> null
+            mode == null -> com.alibaba.opensandbox.sandbox.api.models.CreateSnapshotRequest(name = name, mode = null)
+            else ->
+                com.alibaba.opensandbox.sandbox.api.models.CreateSnapshotRequest(
+                    name = name,
+                    mode =
+                        com.alibaba.opensandbox.sandbox.api.models.CreateSnapshotRequest.Mode.entries
+                            .firstOrNull { candidate -> candidate.value == mode }
+                            ?: throw InvalidArgumentException(
+                                "Unknown snapshot mode: $mode. " +
+                                    "Use SnapshotMode.FULL or SnapshotMode.ROOTFS_ONLY.",
+                            ),
+                )
+        }
 
     override fun getSnapshot(snapshotId: String): SnapshotInfo {
         return try {
