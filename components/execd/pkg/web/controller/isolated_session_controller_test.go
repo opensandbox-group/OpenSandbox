@@ -709,3 +709,47 @@ func TestIsolatedRun_UnknownSessionReturnsJSON(t *testing.T) {
 		t.Fatalf("body = %s, want session-not-found error", runRecorder.Body.String())
 	}
 }
+
+func TestIsolatedSearchRejectsBadGlob(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+	ctx, rec := newTestContext(
+		http.MethodGet,
+		"/v1/isolated/session/"+sessionID+"/files/search?path=.&pattern=%5B",
+		nil,
+	)
+	ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+	NewIsolatedSessionController(ctx).SearchFiles()
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid pattern") {
+		t.Fatalf("body = %s, want invalid pattern", rec.Body.String())
+	}
+}
