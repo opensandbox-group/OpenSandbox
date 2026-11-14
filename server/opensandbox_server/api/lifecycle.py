@@ -21,7 +21,7 @@ All business logic is delegated to the service layer that backs each operation.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response
 
 from opensandbox_server.extensions import validate_extensions, validate_renew_policy_conflict
@@ -52,6 +52,12 @@ from opensandbox_server.services.constants import (
     SandboxErrorCodes,
 )
 from opensandbox_server.services.factory import create_sandbox_service
+from opensandbox_server.services.lifecycle_audit import (
+    load_sandbox_for_audit_delete,
+    schedule_lifecycle_audit_create,
+    schedule_lifecycle_audit_delete,
+    schedule_lifecycle_audit_metadata,
+)
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 from opensandbox_server.services.snapshot_service import create_snapshot_service
 from opensandbox_server.services.validators import normalize_network_policy_actions
@@ -94,6 +100,7 @@ snapshot_service.start_background_sync()
 )
 async def create_sandbox(
     request: CreateSandboxRequest,
+    background_tasks: BackgroundTasks,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
 ) -> CreateSandboxResponse:
     """
@@ -110,7 +117,9 @@ async def create_sandbox(
     # on the snapshot row selects the fsb vs pod backend for restores.
     if not (request.template_id or "").strip():
         request = await resolve_sandbox_image_from_request(request)
-    return await sandbox_service.create_sandbox(request)
+    response = await sandbox_service.create_sandbox(request)
+    schedule_lifecycle_audit_create(background_tasks, request, response)
+    return response
 
 
 @router.get(
@@ -204,6 +213,7 @@ def get_sandbox(
 )
 def patch_sandbox_metadata(
     sandbox_id: str,
+    background_tasks: BackgroundTasks,
     patch: PatchSandboxMetadataRequest = Body(...),
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
 ) -> Sandbox:
@@ -215,7 +225,9 @@ def patch_sandbox_metadata(
     so a concurrent PATCH may revert a value another PATCH changed or resurrect a key it deleted;
     a PATCH on an fsb sandbox sends only its own keys, fenced by the sandbox UID and generation.
     """
-    return sandbox_service.patch_sandbox_metadata(sandbox_id, patch)
+    sandbox = sandbox_service.patch_sandbox_metadata(sandbox_id, patch)
+    schedule_lifecycle_audit_metadata(background_tasks, sandbox)
+    return sandbox
 
 
 @router.delete(
@@ -232,6 +244,7 @@ def patch_sandbox_metadata(
 )
 def delete_sandbox(
     sandbox_id: str,
+    background_tasks: BackgroundTasks,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
 ) -> Response:
     """
@@ -241,7 +254,11 @@ def delete_sandbox(
     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
     and return 404 once the resource is removed.
     """
+    final_sandbox = load_sandbox_for_audit_delete(
+        lambda: sandbox_service.get_sandbox(sandbox_id)
+    )
     sandbox_service.delete_sandbox(sandbox_id)
+    schedule_lifecycle_audit_delete(background_tasks, sandbox_id, final_sandbox)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
