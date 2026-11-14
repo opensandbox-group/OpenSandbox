@@ -14,6 +14,7 @@
 
 import { isOpaqueRedirect } from "../config/redirectFetch.js";
 import { SandboxApiException, SandboxError } from "../core/exceptions.js";
+import { throwOnFailedResponse } from "./openapiError.js";
 
 /**
  * Surface a failed (non-2xx) upload response as a `SandboxApiException`.
@@ -35,13 +36,5 @@ export async function throwOnUploadFailure(response: Response): Promise<void> {
     });
   }
 
-  const requestId = response.headers.get("x-request-id") ?? undefined;
-  const rawBody = await response.text().catch(() => undefined);
-  throw new SandboxApiException({
-    message: `Upload failed (status=${response.status})`,
-    statusCode: response.status,
-    requestId,
-    error: new SandboxError(SandboxError.UNEXPECTED_RESPONSE, "Upload failed"),
-    rawBody,
-  });
+  await throwOnFailedResponse(response, `Upload failed (status=${response.status})`);
 }
