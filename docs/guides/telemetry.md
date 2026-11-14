@@ -166,7 +166,7 @@ Meter: `opensandbox/execd` · Service name: `opensandbox-execd-<version>` (fixed
 |---|---|---|---|---|
 | `execd.http.request.duration` | Histogram | `ms` | `http_method`, `http_route`, `http_status_code` | HTTP request latency. |
 | `execd.execution.duration` | Histogram | `ms` | `operation`, `result` | Code/command execution duration. |
-| `execd.filesystem.operations.duration` | Histogram | `ms` | `operation`, `result` | Filesystem operation duration. |
+| `execd.filesystem.operations.duration` | Histogram | `ms` | `operation`, `result` | Filesystem operation duration; HTTP errors are recorded with `result="failure"`. |
 | `execd.system.process.count` | Observable Gauge | - | - | Current process count. |
 | `execd.system.cpu.usage` | Observable Gauge | `%` | - | Sandbox CPU usage percent: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
 | `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | Sandbox memory used bytes: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
