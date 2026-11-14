@@ -58,22 +58,13 @@ func DeleteFile(filePath string) error {
 }
 
 func ChmodFile(file string, perms model.Permission) error {
+	perms.ModeSet = perms.ModeSet || perms.Mode != 0
 	abs, err := pathutil.ExpandAbsPath(file)
 	if err != nil {
 		return err
 	}
 
-	if perms.Mode != 0 {
-		mode, err := strconv.ParseUint(strconv.Itoa(perms.Mode), 8, 32)
-		if err != nil {
-			return err
-		}
-		err = os.Chmod(abs, os.FileMode(mode))
-		if err != nil {
-			return err
-		}
-	}
-	return SetFileOwnership(abs, perms.Owner, perms.Group)
+	return applyFilePermission(abs, perms)
 }
 
 func SetFileOwnership(absPath string, owner string, group string) error {
@@ -204,6 +195,12 @@ func MkdirAllWithOwnership(targetDir string, dirPerm os.FileMode, owner, group s
 }
 
 func MakeDir(dir string, perm model.Permission) error {
+	perm.ModeSet = perm.ModeSet || perm.Mode != 0
+	if perm.ModeSet {
+		if _, err := permissionFileMode(perm.Mode); err != nil {
+			return err
+		}
+	}
 	abs, err := pathutil.ExpandAbsPath(dir)
 	if err != nil {
 		return err
@@ -219,12 +216,8 @@ func MakeDir(dir string, perm model.Permission) error {
 		return err
 	}
 
-	if !existed && perm.Mode != 0 {
-		mode, err := strconv.ParseUint(strconv.Itoa(perm.Mode), 8, 32)
-		if err != nil {
-			return err
-		}
-		return os.Chmod(abs, os.FileMode(mode))
+	if !existed {
+		return applyFilePermission(abs, perm)
 	}
 	return nil
 }

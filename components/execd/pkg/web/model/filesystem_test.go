@@ -17,6 +17,7 @@ package model
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestFileMetadata_UnmarshalJSON(t *testing.T) {
@@ -48,6 +49,63 @@ func TestFileMetadata_UnmarshalJSON(t *testing.T) {
 				t.Errorf("path/owner/group did not decode: %+v", meta)
 			}
 		})
+	}
+}
+
+func TestPermission_UnmarshalJSON(t *testing.T) {
+	for _, mode := range []string{"", `,"mode":null`, `,"mode":0`, `,"mode":644`, `,"mode":600,"mode":644`, `,"mode":null,"mode":600`, `,"mode":600,"mode":null`} {
+		t.Run(mode, func(t *testing.T) {
+			data := `{"owner":"alice","group":"staff"` + mode + `}`
+			var perm Permission
+			if err := json.Unmarshal([]byte(data), &perm); err != nil {
+				t.Fatal(err)
+			}
+			var meta FileMetadata
+			if err := json.Unmarshal([]byte(data), &meta); err != nil {
+				t.Fatal(err)
+			}
+			if perm != meta.Permission {
+				t.Errorf("permission = %+v, upload permission = %+v", perm, meta.Permission)
+			}
+			encoded, err := json.Marshal(perm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(encoded, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if len(fields) != 3 || perm.Owner != "alice" || perm.Group != "staff" {
+				t.Errorf("wire fields or ownership changed: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestPermission_UnmarshalJSONRejectsStringMode(t *testing.T) {
+	var perm Permission
+	if err := json.Unmarshal([]byte(`{"mode":"644"}`), &perm); err == nil {
+		t.Fatal("Unmarshal accepted a string mode")
+	}
+}
+
+func TestFileInfo_JSONRoundTrip(t *testing.T) {
+	want := FileInfo{
+		Path: "/tmp/file", Type: "file", Size: 42,
+		ModifiedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		CreatedAt:  time.Date(2026, 1, 1, 3, 4, 5, 0, time.UTC),
+		Permission: Permission{Owner: "alice", Group: "staff", Mode: 640},
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got FileInfo
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("round trip = %+v, want %+v", got, want)
 	}
 }
 

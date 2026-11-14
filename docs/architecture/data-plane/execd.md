@@ -126,6 +126,14 @@ After writing, the handler applies ownership before the explicit mode, so chown 
 
 Validation is per pair: earlier pairs are not rolled back, multipart parsing may already have created temporary files, and later filesystem or permission failures can leave target changes behind. Windows continues to ignore owner/group and use Windows chmod semantics. The isolated-session upload handler keeps its separate write path and permission policy; it ignores `ModeSet` and does not run this permission preflight.
 
+### Directory and permission modes
+
+`POST /directories` and `POST /files/permissions`, including their Linux identity-prefixed and isolated-session variants, use the same octal-digit conversion and 0 through 7777 bound. They validate all requested modes before changing any target; an invalid mode returns `400 INVALID_FILE_METADATA`. Explicit zero requests mode 0000. Regular directory creation applies ownership before the requested mode to newly created target directories and leaves existing directories unchanged; omitted or null mode retains the 0777 creation default subject to umask and filesystem rules. Permission updates apply ownership before any explicit mode; omitted or null mode skips chmod, so chown can still clear existing special bits.
+
+For directory and permission requests, a duplicate `mode` ending in null retains an earlier nonzero value, as before. Upload metadata instead uses the last mode field's presence and skips the requested chmod when that field is null.
+
+Isolated-session directory creation retains its 0755 default for omitted or null mode and its session UID/GID ownership policy. Explicit modes are applied to new targets after the view creates and assigns ownership to the directories. Isolated-session permission updates continue to ignore metadata owner/group. Windows uses the same parsing and bounds, keeps ownership as a no-op, and applies only the mode semantics supported by Windows. Filesystem failures after mode validation can still leave partial changes.
+
 ## Isolated sessions
 
 An isolated session runs a shell inside a per-execution [bubblewrap](https://github.com/containers/bubblewrap) namespace — a private view of mounts and identity, created fresh for each session:

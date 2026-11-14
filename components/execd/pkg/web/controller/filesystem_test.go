@@ -453,7 +453,7 @@ func TestFilesystemDirectoryRoutesRejectStagingNames(t *testing.T) {
 			t.Run("make", func(t *testing.T) {
 				target := filepath.Join(t.TempDir(), stagingName)
 				payload, err := json.Marshal(map[string]model.Permission{
-					target + string(os.PathSeparator) + ".": {Mode: 0o755},
+					target + string(os.PathSeparator) + ".": {Mode: 755},
 				})
 				require.NoError(t, err)
 

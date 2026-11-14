@@ -367,21 +367,32 @@ func (c *IsolatedSessionController) ChmodFiles() {
 		return
 	}
 
+	if err := validatePermissionModes(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidFileMetadata, err.Error())
+		return
+	}
+
 	for file, item := range request {
-		if item.Mode != 0 {
-			mode, err := strconv.ParseUint(strconv.Itoa(item.Mode), 8, 32)
-			if err != nil {
-				c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest,
-					fmt.Sprintf("invalid mode for %s: %v", file, err))
-				return
-			}
-			if err := mv.Chmod(file, os.FileMode(mode)); err != nil {
-				c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
-				return
-			}
+		if err := chmodIsolatedFile(mv, file, item); err != nil {
+			c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
+			return
 		}
 	}
 	c.RespondSuccess(nil)
+}
+
+// chmodIsolatedFile retains the view's ownership policy; metadata owner/group
+// are ignored, as they are for isolated-session directory creation.
+func chmodIsolatedFile(mv vfs.FS, file string, perm model.Permission) error {
+	perm.ModeSet = perm.ModeSet || perm.Mode != 0
+	if !perm.ModeSet {
+		return nil
+	}
+	mode, err := permissionFileMode(perm.Mode)
+	if err != nil {
+		return err
+	}
+	return mv.Chmod(file, mode)
 }
 
 func (c *IsolatedSessionController) ReplaceContent() {
@@ -461,15 +472,13 @@ func (c *IsolatedSessionController) MakeDirs() {
 		return
 	}
 
+	if err := validatePermissionModes(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidFileMetadata, err.Error())
+		return
+	}
+
 	for dir, perm := range request {
-		mode := os.FileMode(0o755)
-		if perm.Mode != 0 {
-			parsed, err := strconv.ParseUint(strconv.Itoa(perm.Mode), 8, 32)
-			if err == nil {
-				mode = os.FileMode(parsed)
-			}
-		}
-		if err := mv.MkdirAll(dir, mode); err != nil {
+		if err := makeIsolatedDir(mv, dir, perm); err != nil {
 			if os.IsNotExist(err) {
 				c.RespondError(http.StatusNotFound, model.ErrorCodeFileNotFound, err.Error())
 			} else {
@@ -479,6 +488,34 @@ func (c *IsolatedSessionController) MakeDirs() {
 		}
 	}
 	c.RespondSuccess(nil)
+}
+
+// makeIsolatedDir keeps the view's ownership policy and creation default, then
+// applies an explicit mode to a new target after MkdirAll has assigned ownership.
+func makeIsolatedDir(mv vfs.FS, dir string, perm model.Permission) error {
+	perm.ModeSet = perm.ModeSet || perm.Mode != 0
+	mode := os.FileMode(0o755)
+	if perm.ModeSet {
+		var err error
+		mode, err = permissionFileMode(perm.Mode)
+		if err != nil {
+			return err
+		}
+	}
+	_, statErr := mv.Stat(dir)
+	existed := statErr == nil
+	creationMode := mode
+	if perm.ModeSet && mode == 0 {
+		// Keep missing parents traversable until the final target is chmod'd.
+		creationMode = 0o755
+	}
+	if err := mv.MkdirAll(dir, creationMode); err != nil {
+		return err
+	}
+	if !existed && perm.ModeSet {
+		return mv.Chmod(dir, mode)
+	}
+	return nil
 }
 
 func (c *IsolatedSessionController) RemoveDirs() {

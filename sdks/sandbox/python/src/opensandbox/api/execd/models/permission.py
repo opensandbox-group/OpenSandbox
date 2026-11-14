@@ -32,7 +32,10 @@ class Permission:
     """File ownership and mode settings
 
     Attributes:
-        mode (int): Permission mode in octal format (e.g., 644, 755) Default: 755. Example: 755.
+        mode (int): Octal permission digits 0-7777 written as a decimal integer (e.g., 644 or 4755). The 4000/2000/1000
+            digits apply setuid/setgid/sticky bits. Explicit 0 requests mode 0000. Explicit directory modes apply only to
+            new target directories; isolated-session operations keep session ownership. Invalid digits or values outside
+            this range return 400 INVALID_FILE_METADATA before any target changes. Default: 755. Example: 755.
         owner (str | Unset): Owner username Example: root.
         group (str | Unset): Group name Example: root.
     """
