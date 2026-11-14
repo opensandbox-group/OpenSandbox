@@ -24,7 +24,8 @@ from app.k8s_client import load_core_v1
 
 
 async def _probe_pod_readyz(ip: str, port: int, timeout: float) -> dict[str, Any]:
-    url = f"http://{ip}:{port}/readyz"
+    host = f"[{ip}]" if ":" in ip else ip
+    url = f"http://{host}:{port}/readyz"
     try:
         async with httpx.AsyncClient(timeout=timeout) as http:
             resp = await http.get(url)
