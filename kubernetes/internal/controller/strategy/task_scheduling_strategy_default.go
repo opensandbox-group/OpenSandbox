@@ -63,16 +63,19 @@ func (s *defaultTaskSchedulingStrategy) getTaskSpec(idx int) (*api.Task, error) 
 	if len(s.Spec.ShardTaskPatches) > 0 && idx < len(s.Spec.ShardTaskPatches) {
 		taskTemplate := s.Spec.TaskTemplate.DeepCopy()
 		cloneBytes, _ := json.Marshal(taskTemplate)
-		patch := s.Spec.ShardTaskPatches[idx]
-		modified, err := strategicpatch.StrategicMergePatch(cloneBytes, patch.Raw, &sandboxv1alpha1.TaskTemplateSpec{})
+		patch, err := json.Marshal(s.Spec.ShardTaskPatches[idx])
 		if err != nil {
-			return nil, fmt.Errorf("batchsandbox: failed to merge patch raw %s, idx %d, err %w", patch.Raw, idx, err)
+			return nil, fmt.Errorf("batchsandbox: failed to marshal shard task patch idx %d, err %w", idx, err)
+		}
+		modified, err := strategicpatch.StrategicMergePatch(cloneBytes, patch, &sandboxv1alpha1.TaskTemplateSpec{})
+		if err != nil {
+			return nil, fmt.Errorf("batchsandbox: failed to merge shard task patch %s, idx %d, err %w", patch, idx, err)
 		}
 		newTaskTemplate := &sandboxv1alpha1.TaskTemplateSpec{}
 		if err = json.Unmarshal(modified, newTaskTemplate); err != nil {
 			return nil, fmt.Errorf("batchsandbox: failed to unmarshal %s to TaskTemplateSpec, idx %d, err %w", modified, idx, err)
 		}
-		task.Process = convertProcessSpec(newTaskTemplate.Spec.Process, s.Spec.TaskTemplate.Spec.TimeoutSeconds)
+		task.Process = convertProcessSpec(newTaskTemplate.Spec.Process, newTaskTemplate.Spec.TimeoutSeconds)
 	} else if s.Spec.TaskTemplate != nil && s.Spec.TaskTemplate.Spec.Process != nil {
 		task.Process = convertProcessSpec(s.Spec.TaskTemplate.Spec.Process, s.Spec.TaskTemplate.Spec.TimeoutSeconds)
 	}
