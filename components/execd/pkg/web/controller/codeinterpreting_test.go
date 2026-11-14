@@ -130,6 +130,24 @@ func TestCreateContextRejectsUnsupportedLanguage(t *testing.T) {
 	require.Contains(t, resp.Message, "unsupported language")
 }
 
+func TestCreateContextRejectsInvalidCwd(t *testing.T) {
+	previousRunner := codeRunner
+	codeRunner = &fakeCodeRunner{
+		createContext: func(_ context.Context, _ *runtime.CreateContextRequest) (string, error) {
+			return "", fmt.Errorf("%w %q: not a directory", runtime.ErrInvalidContextCwd, "/etc/hosts")
+		},
+	}
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	ctx, w := newTestContext(http.MethodPost, "/code/context", []byte(`{"language":"python","cwd":"/etc/hosts"}`))
+	NewCodeInterpretingController(ctx).CreateContext()
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+}
+
 func TestBuildExecuteCodeRequestDefaultsToCommand(t *testing.T) {
 	ctrl := &CodeInterpretingController{}
 	req := model.RunCodeRequest{

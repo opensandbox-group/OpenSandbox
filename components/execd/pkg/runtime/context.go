@@ -169,7 +169,8 @@ func (c *Controller) waitForJupyterContext(ctx context.Context, req CreateContex
 		session *jupytersession.Session
 	)
 	err := retry.OnError(kernelWaitingBackoff, func(err error) bool {
-		if ctx.Err() != nil || errors.Is(err, errJupyterNotConfigured) || errors.Is(err, ErrUnsupportedLanguage) {
+		if ctx.Err() != nil || errors.Is(err, errJupyterNotConfigured) || errors.Is(err, ErrUnsupportedLanguage) ||
+			errors.Is(err, ErrInvalidContextCwd) {
 			return false
 		}
 		log.Error("jupyter: create context failed, retrying: %v", err)
@@ -221,7 +222,7 @@ func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyte
 	sessionID := c.newContextID()
 	ipynb, err := c.newIpynbPath(sessionID, request.Cwd)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%w %q: %w", ErrInvalidContextCwd, request.Cwd, err)
 	}
 
 	jupyterSession, err := client.CreateSession(sessionID, ipynb, kernel)

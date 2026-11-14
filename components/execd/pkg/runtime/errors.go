@@ -64,3 +64,7 @@ var ErrSessionNotActive = errors.New("isolated session is not active")
 // ErrUnsupportedLanguage indicates that the language runtime is reachable but
 // offers no kernel for the requested language, so retrying cannot succeed.
 var ErrUnsupportedLanguage = errors.New("unsupported language")
+
+// ErrInvalidContextCwd indicates that a code context's working directory
+// cannot be resolved or created, so retrying the Jupyter request cannot help.
+var ErrInvalidContextCwd = errors.New("invalid code context cwd")
