@@ -15,9 +15,11 @@
 """Bounded subject installation owner with optional dispatch-only TLS registries.
 
 One operation lock owns routing, receiver calls, lifecycle publication and the
-terminal latch. No socket I/O happens here. InstallationReceiver never performs
-admission; the optional registries consume only the dispatch view. In B3b-1 an
-unload receipt still proves installation cleanup only, not transport teardown.
+terminal latch. No socket I/O happens under it. InstallationReceiver never
+performs admission; the optional registries consume only the dispatch view.
+With an attached admission runtime, lifecycle teardown is two-phase: fence
+under the lock, close and wait outside it, then publish the frozen receipt.
+Without one, an unload receipt proves installation cleanup only.
 """
 
 from __future__ import annotations
@@ -27,6 +29,8 @@ import ipaddress
 import json
 import sys
 import threading
+import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 from types import MappingProxyType
@@ -41,6 +45,8 @@ LIFECYCLE_BODY_LIMIT = 8192
 RESPONSE_LIMIT = 4096
 MAX_SEQUENCE = 2**63 - 1
 _DIGEST_PREFIX = b"opensandbox.subject-lifecycle.v2\x00"
+# Matches subject_admission.TEARDOWN_TIMEOUT_SECONDS without importing it.
+_TEARDOWN_WAIT = 1.0
 
 
 class SubjectError(Exception):
@@ -151,12 +157,30 @@ class _Result:
     http_status: int
     outcome: str
     completion: str | None = None
+    # Admission teardown only; None keeps the installation-only wire shape.
+    closed: int | None = None
+    remaining: int | None = None
 
     def wire(self) -> dict[str, Any]:
         unload = None if self.completion is None else {
-            "routingRevoked": True, "transportObligations": "none", "completion": self.completion,
+            "routingRevoked": True,
+            "transportObligations": "pending" if self.remaining else "none",
+            "completion": self.completion,
         }
+        if unload is not None and self.remaining is not None:
+            unload.update(closedConnections=self.closed, remainingConnections=self.remaining)
         return {"httpStatus": self.http_status, "outcome": self.outcome, "unload": unload}
+
+
+@dataclass(eq=False, slots=True)
+class _Pending:
+    """One lifecycle command between its fence and its frozen receipt."""
+
+    sequence: int
+    operation: str
+    raw_body: bytes = field(repr=False)
+    ticket: Any = field(repr=False)
+    finish: Callable[[int, int], _Result] = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +236,11 @@ class SubjectRevisionOwner:
         self._quarantined: list[InstallationReceiver] = []
         self._last: _Record | None = None
         self._operation_lock = threading.Lock()
+        # Lifecycle commands wait here, without the lock, for a pending teardown.
+        self._idle = threading.Condition(self._operation_lock)
+        self._pending: _Pending | None = None
+        self._teardown: Any = None
+        self._deferred: list[Any] = []
         self._terminal = False
         self._closed = False
         self._tls_capacity = tls_capacity
@@ -222,6 +251,23 @@ class SubjectRevisionOwner:
     @property
     def control_generation(self) -> str:
         return self._control
+
+    def attach_teardown(self, runtime: Any) -> None:
+        """Admission-only: wire the transport runtime before IPC is served."""
+        with self._operation_lock:
+            if self._accounting is None or self._teardown is not None or runtime is None:
+                raise ValueError("invalid subject teardown runtime")
+            self._teardown = runtime
+
+    def _fence_locked(self, **selection: Any) -> Any:
+        return None if self._teardown is None else self._teardown.fence(**selection)
+
+    def _settle(self, ticket: Any) -> tuple[int, int]:
+        """Outside the lock: bounded close/wait; failures stay unconfirmed."""
+        try:
+            return self._teardown.teardown(ticket)
+        except Exception:  # noqa: BLE001 - an unknown close is never complete
+            return 0, len(ticket.members)
 
     def admit_tls(self, address, sni, *, ech_hidden=False, destination_port=None):
         from subject_admission import admit_source
@@ -237,21 +283,56 @@ class SubjectRevisionOwner:
         if self._terminal or self._closed:
             raise SubjectError(500, "internal_error")
 
-    def _run(self, operation: Callable[[], Any]) -> Any:
-        with self._operation_lock:
-            self._check_owner()
-            try:
-                return operation()
-            except SubjectError:
-                raise
-            except Exception:  # noqa: BLE001 - uncertain owner publication is terminal
-                self._terminal = True
-                for entry in self._entries.values():
-                    if entry.registry is not None:
-                        entry.registry.deactivate()
-                self._source_index = MappingProxyType({})
+    def _await_idle_locked(self) -> None:
+        deadline = 2 * _TEARDOWN_WAIT
+        while self._pending is not None and deadline > 0:
+            started = time.monotonic()
+            self._idle.wait(deadline)
+            deadline -= time.monotonic() - started
+        if self._pending is not None:
+            raise SubjectError(503, "subject_failed")
+
+    def _run(self, operation: Callable[[], Any], *, lifecycle: bool = False) -> Any:
+        deferred: list[Any] = []
+        try:
+            with self._operation_lock:
+                try:
+                    if lifecycle:
+                        self._await_idle_locked()
+                    self._check_owner()
+                    return operation()
+                except SubjectError:
+                    raise
+                except Exception:  # noqa: BLE001 - uncertain owner publication is terminal
+                    self._terminal = True
+                    for entry in self._entries.values():
+                        if entry.registry is not None:
+                            entry.registry.deactivate()
+                    self._source_index = MappingProxyType({})
+                    self._abandon_pending_locked()
+                    with suppress(Exception):
+                        ticket = self._fence_locked(everything=True)
+                        if ticket is not None:
+                            self._deferred.append(ticket)
+                finally:
+                    deferred, self._deferred = self._deferred, []
+        finally:
+            # Receiver-failure and terminal teardown close after unlock; the
+            # entry or owner is already fenced, so no receipt waits on this.
+            for ticket in deferred:
+                self._settle(ticket)
+                if not ticket.everything:  # a terminal owner stays fenced
+                    with suppress(Exception):
+                        self._teardown.release(ticket)
         # Do not retain a potentially payload-bearing exception as context.
         raise SubjectError(500, "internal_error")
+
+    def _abandon_pending_locked(self) -> None:
+        if self._pending is not None:
+            with suppress(Exception):
+                self._teardown.release(self._pending.ticket)
+            self._pending = None
+        self._idle.notify_all()
 
     def _check_control(self, value: Any) -> None:
         if not valid_identity(value, 128):
@@ -285,6 +366,9 @@ class SubjectRevisionOwner:
             entry.failed = True
             entry.snapshot = None
             self._publish_index()
+            ticket = self._fence_locked(targets=(entry.target,), addresses=entry.source_addresses)
+            if ticket is not None:
+                self._deferred.append(ticket)
             raise SubjectError(503, "subject_failed")
 
     def _revision_call(self, operation: str, target: Target, revision: Revision,
@@ -353,7 +437,8 @@ class SubjectRevisionOwner:
             for entry in self._entries.values() for address in entry.source_addresses
         })
 
-    def _register(self, target: Target, addresses: tuple[str, ...]) -> _Result:
+    def _register(self, target: Target, addresses: tuple[str, ...],
+                  settled: bool = False) -> _Result | _Pending:
         entry = self._entries.get(target.subject_key)
         if entry is not None:
             if entry.target != target or entry.source_addresses != addresses:
@@ -363,6 +448,27 @@ class SubjectRevisionOwner:
             return _Result(409, "subject_conflict")
         if len(self._entries) + len(self._quarantined) >= self._max_subjects:
             return _Result(503, "subject_capacity_exhausted")
+        if self._teardown is not None and addresses:
+            if settled:
+                # The pending ticket still fences these sources.
+                if self._teardown.live_members(addresses):
+                    return _Result(503, "subject_failed")
+                return self._install(target, addresses)
+            # Fence and select atomically, even with no residual: an
+            # ownerless connect must not land before publication.
+            ticket = self._teardown.fence(addresses=addresses)
+            if ticket.members:
+                # A reused source must not publish while any earlier proxied
+                # client on it is live; the pending ticket owns the fence.
+                return _Pending(0, "register", b"", ticket,
+                                lambda _closed, _remaining: self._register(target, addresses, True))
+            try:
+                return self._install(target, addresses)
+            finally:
+                self._teardown.release(ticket)
+        return self._install(target, addresses)
+
+    def _install(self, target: Target, addresses: tuple[str, ...]) -> _Result:
         try:
             receiver = InstallationReceiver(self._control, target.subject_generation,
                                             max_snapshot_bytes=self._max_snapshot_bytes,
@@ -381,10 +487,11 @@ class SubjectRevisionOwner:
         self._publish_index()
         return _Result(200, "registered")
 
-    def _unload(self, target: Target) -> _Result:
+    def _unload(self, target: Target) -> _Result | _Pending:
         entry = self._entries.get(target.subject_key)
         if entry is None:
-            return _Result(200, "already_absent", "terminal")
+            result = _Result(200, "already_absent", "terminal")
+            return self._teardown_plan(result, targets=(target,))
         if entry.target != target:
             return _Result(409, "subject_generation_mismatch")
         entry.failed = True
@@ -396,8 +503,26 @@ class SubjectRevisionOwner:
             entry.receiver.close()
         except Exception:  # noqa: BLE001 - reserve capacity without retaining key/IP
             self._quarantined.append(entry.receiver)
-            return _Result(503, "subject_failed", "fenced")
-        return _Result(200, "unloaded", "terminal")
+            result = _Result(503, "subject_failed", "fenced")
+        else:
+            result = _Result(200, "unloaded", "terminal")
+        # Old clients by identity, plus anything else proxied on its sources.
+        return self._teardown_plan(result, targets=(target,), addresses=entry.source_addresses)
+
+    def _teardown_plan(self, result: _Result, **selection: Any) -> _Result | _Pending:
+        if self._teardown is None:
+            return result
+        ticket = self._teardown.fence(**selection)
+
+        def finish(closed: int, remaining: int) -> _Result:
+            if result.completion is None:
+                # Suspend: authority is revoked, but unconfirmed old
+                # transports are a confirmed failure, not a clean suspend.
+                return _Result(503, "subject_failed") if remaining else result
+            if remaining:
+                return _Result(503, "subject_failed", "fenced", closed, remaining)
+            return _Result(result.http_status, result.outcome, result.completion, closed, 0)
+        return _Pending(0, "", b"", ticket, finish)
 
     def _suspend(self, target: Target) -> _Result:
         try:
@@ -410,7 +535,9 @@ class SubjectRevisionOwner:
         # prepare and successful commit publish a dispatch snapshot again.
         entry.prepared = None
         self._publish_index()
-        return _Result(200, "suspended")
+        # The same registry serves later commits; only these members are doomed.
+        return self._teardown_plan(_Result(200, "suspended"), targets=(entry.target,),
+                                   addresses=entry.source_addresses)
 
     def lifecycle(self, operation: str, raw_body: bytes) -> dict[str, Any]:
         if operation not in ("register", "unload", "suspend") or type(raw_body) is not bytes:
@@ -461,12 +588,41 @@ class SubjectRevisionOwner:
                     result = self._suspend(target)
                 else:
                     result = self._unload(target)
+            if type(result) is _Pending:
+                # Routing/authority is already revoked; no successor command
+                # may run until this sequence publishes its frozen receipt.
+                result.sequence, result.operation, result.raw_body = sequence, operation, raw_body
+                self._pending = result
+                return result
+            return publish(result)
+
+        def publish(result: _Result) -> dict[str, Any]:
             record = _Record(sequence, operation, raw_body, command_digest(operation, raw_body), result)
             receipt = record.receipt()
             # Sequence and frozen result publish together under the operation lock.
             self._last = record
             return receipt
-        return self._run(perform)
+
+        outcome = self._run(perform, lifecycle=True)
+        if type(outcome) is not _Pending:
+            return outcome
+        closed, remaining = self._settle(outcome.ticket)
+
+        def finish() -> dict[str, Any]:
+            if self._pending is not outcome:
+                raise SubjectError(500, "internal_error")
+            try:
+                return publish(outcome.finish(closed, remaining))
+            finally:
+                self._abandon_pending_locked()
+        try:
+            return self._run(finish)
+        finally:
+            if self._pending is outcome:
+                # close()/terminal interrupted publication; never leave a waiter.
+                with self._operation_lock:
+                    if self._pending is outcome:
+                        self._abandon_pending_locked()
 
     def lifecycle_status(self, control_generation: str) -> dict[str, Any]:
         self._check_control(control_generation)
@@ -479,12 +635,16 @@ class SubjectRevisionOwner:
 
     def close(self) -> None:
         """Fence the process and try every receiver, retaining any failed closes."""
+        ticket = None
         with self._operation_lock:
             self._closed = True
             self._source_index = MappingProxyType({})
             for entry in self._entries.values():
                 if entry.registry is not None:
                     entry.registry.deactivate()
+            self._abandon_pending_locked()
+            with suppress(Exception):
+                ticket = self._fence_locked(everything=True)
             failed = False
             try:
                 for key, entry in tuple(self._entries.items()):
@@ -506,5 +666,8 @@ class SubjectRevisionOwner:
             except Exception:  # noqa: BLE001
                 self._terminal = True
                 failed = True
+        if ticket is not None:
+            # Process shutdown has no receipt; the fence is never released.
+            self._settle(ticket)
         if failed:
             raise SubjectError(500, "internal_error")

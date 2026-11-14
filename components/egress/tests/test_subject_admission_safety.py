@@ -56,6 +56,7 @@ class SubjectRequestSafetyTest(unittest.TestCase):
         runtime = SubjectAdmissionRuntime(owner)
         client = types.SimpleNamespace(peername=("192.0.2.1", 1234),
                                        sni="api.example.com", tls=True, alpn=None)
+        runtime.client_connected(client)
         runtime.admit_tls(client, client.sni, destination_port=443)
         self.addCleanup(runtime.client_disconnected, client)
         flow = f._Flow()

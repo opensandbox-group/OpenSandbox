@@ -64,7 +64,7 @@ const lifecycleInitialStatus = `{"lastSequence":0,"operation":null,"commandDiges
 func lifecycleRegistered() LifecycleResult { return LifecycleResult{200, "registered", nil} }
 
 func lifecycleUnloaded() LifecycleResult {
-	return LifecycleResult{200, "unloaded", &SubjectUnloadResult{true, "none", "terminal"}}
+	return LifecycleResult{200, "unloaded", &SubjectUnloadResult{true, "none", "terminal", nil, nil}}
 }
 
 func TestSubjectLifecycleConfirmedSequenceAndNoHistory(t *testing.T) {
@@ -344,7 +344,7 @@ func TestSubjectLifecycleFailedCloseConsumesThenNewSequenceRetries(t *testing.T)
 		commands++
 		result := lifecycleUnloaded()
 		if commands == 1 {
-			result = LifecycleResult{503, "subject_failed", &SubjectUnloadResult{true, "none", "fenced"}}
+			result = LifecycleResult{503, "subject_failed", &SubjectUnloadResult{true, "none", "fenced", nil, nil}}
 		}
 		stored, _ = lifecycleTestReceipt(t, r, result)
 		return lifecycleTestResponse(t, stored, false), nil
@@ -464,7 +464,7 @@ func TestSubjectLifecycleClosedReceiptSchema(t *testing.T) {
 	} {
 		result := LifecycleResult{pair.status, pair.outcome, nil}
 		if pair.completion != "" {
-			result.Unload = &SubjectUnloadResult{true, "none", pair.completion}
+			result.Unload = &SubjectUnloadResult{true, "none", pair.completion, nil, nil}
 		}
 		data, err := json.Marshal(LifecycleReceipt{math.MaxInt64, pair.operation, digest, result})
 		require.NoError(t, err)
@@ -489,4 +489,50 @@ func TestSubjectLifecycleClosedReceiptSchema(t *testing.T) {
 	initial, err := decodeLifecycleRecord([]byte(lifecycleInitialStatus), "lastSequence", true)
 	require.NoError(t, err)
 	require.Zero(t, initial.LifecycleSequence)
+}
+
+func TestSubjectLifecycleUnloadConnectionCounts(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	receipt := func(status int, outcome, unload string) string {
+		return fmt.Sprintf(`{"lifecycleSequence":3,"operation":"unload","commandDigest":"%s","result":{"httpStatus":%d,"outcome":"%s","unload":%s}}`, digest, status, outcome, unload)
+	}
+	counts := func(obligations, completion, closed, remaining string) string {
+		return fmt.Sprintf(`{"routingRevoked":true,"transportObligations":"%s","completion":"%s","closedConnections":%s,"remainingConnections":%s}`, obligations, completion, closed, remaining)
+	}
+	clean, err := decodeLifecycleRecord([]byte(receipt(200, "unloaded", counts("none", "terminal", "2", "0"))), "lifecycleSequence", false)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), *clean.Result.Unload.ClosedConnections)
+	require.False(t, clean.Result.Unload.UnconfirmedConnections())
+	unconfirmed, err := decodeLifecycleRecord([]byte(receipt(503, "subject_failed", counts("pending", "fenced", "1", "2"))), "lifecycleSequence", false)
+	require.NoError(t, err)
+	require.True(t, unconfirmed.Result.Unload.UnconfirmedConnections())
+	legacy, err := decodeLifecycleRecord([]byte(receipt(200, "unloaded", `{"routingRevoked":true,"transportObligations":"none","completion":"terminal"}`)), "lifecycleSequence", false)
+	require.NoError(t, err)
+	require.Nil(t, legacy.Result.Unload.ClosedConnections)
+	require.False(t, legacy.Result.Unload.UnconfirmedConnections())
+	encoded, err := json.Marshal(legacy.Result.Unload)
+	require.NoError(t, err)
+	require.Equal(t, `{"routingRevoked":true,"transportObligations":"none","completion":"terminal"}`, string(encoded))
+	for name, body := range map[string]string{
+		"remaining hides behind unloaded": receipt(200, "unloaded", counts("pending", "terminal", "0", "1")),
+		"remaining hides behind absent":   receipt(200, "already_absent", counts("pending", "terminal", "0", "1")),
+		"remaining with none obligations": receipt(503, "subject_failed", counts("none", "fenced", "0", "1")),
+		"pending without remaining":       receipt(503, "subject_failed", counts("pending", "fenced", "1", "0")),
+		"pending in legacy shape":         receipt(503, "subject_failed", `{"routingRevoked":true,"transportObligations":"pending","completion":"fenced"}`),
+		"only closed count":               receipt(200, "unloaded", `{"routingRevoked":true,"transportObligations":"none","completion":"terminal","closedConnections":1}`),
+		"only remaining count":            receipt(200, "unloaded", `{"routingRevoked":true,"transportObligations":"none","completion":"terminal","remainingConnections":0}`),
+		"duplicate count":                 receipt(200, "unloaded", `{"routingRevoked":true,"transportObligations":"none","completion":"terminal","closedConnections":1,"closedConnections":1,"remainingConnections":0}`),
+		"negative count":                  receipt(200, "unloaded", counts("none", "terminal", "-1", "0")),
+		"float count":                     receipt(200, "unloaded", counts("none", "terminal", "1.0", "0")),
+		"exponent count":                  receipt(200, "unloaded", counts("none", "terminal", "1e2", "0")),
+		"string count":                    receipt(200, "unloaded", counts("none", "terminal", `"1"`, "0")),
+		"null count":                      receipt(200, "unloaded", counts("none", "terminal", "null", "0")),
+		"overflow count":                  receipt(200, "unloaded", counts("none", "terminal", "18446744073709551616", "0")),
+		"counts on suspend":               strings.Replace(receipt(200, "suspended", counts("none", "terminal", "0", "0")), `"unload","commandDigest"`, `"suspend","commandDigest"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := decodeLifecycleRecord([]byte(body), "lifecycleSequence", false)
+			require.ErrorIs(t, err, ErrInvalidTransportResponse)
+		})
+	}
 }
