@@ -369,13 +369,13 @@ func (c *IsolatedSessionController) ChmodFiles() {
 
 	for file, item := range request {
 		if item.Mode != 0 {
-			mode, err := strconv.ParseUint(strconv.Itoa(item.Mode), 8, 32)
+			mode, err := fileModeFromAPI(item.Mode)
 			if err != nil {
 				c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest,
 					fmt.Sprintf("invalid mode for %s: %v", file, err))
 				return
 			}
-			if err := mv.Chmod(file, os.FileMode(mode)); err != nil {
+			if err := mv.Chmod(file, mode); err != nil {
 				c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
 				return
 			}
@@ -464,9 +464,9 @@ func (c *IsolatedSessionController) MakeDirs() {
 	for dir, perm := range request {
 		mode := os.FileMode(0o755)
 		if perm.Mode != 0 {
-			parsed, err := strconv.ParseUint(strconv.Itoa(perm.Mode), 8, 32)
+			parsed, err := fileModeFromAPI(perm.Mode)
 			if err == nil {
-				mode = os.FileMode(parsed)
+				mode = parsed
 			}
 		}
 		if err := mv.MkdirAll(dir, mode); err != nil {
@@ -577,16 +577,13 @@ func buildIsolatedFileInfo(path string, info os.FileInfo) model.FileInfo {
 		ft = "directory"
 	}
 
-	modeStr := strconv.FormatInt(int64(mode.Perm()), 8)
-	modeInt, _ := strconv.Atoi(modeStr)
-
 	return model.FileInfo{
 		Path:       path,
 		Type:       ft,
 		Size:       info.Size(),
 		ModifiedAt: info.ModTime(),
 		Permission: model.Permission{
-			Mode: modeInt,
+			Mode: apiModeFromFileMode(mode),
 		},
 	}
 }
