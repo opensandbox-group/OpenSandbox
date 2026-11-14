@@ -126,7 +126,9 @@ class SandboxesAdapter(Sandboxes):
             "User-Agent": self.connection_config.user_agent,
             **self.connection_config.headers,
         }
-        if api_key:
+        if api_key and not any(
+            name.lower() == "open-sandbox-api-key" for name in headers
+        ):
             headers["OPEN-SANDBOX-API-KEY"] = api_key
 
         # Create client with custom auth header for OpenSandbox API
