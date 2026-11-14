@@ -3,7 +3,7 @@ title: Egress Upstream Proxy Forward Mode
 authors:
   - "@hittyt"
 creation-date: 2026-11-13
-last-updated: 2026-11-13
+last-updated: 2026-11-14
 status: draft
 ---
 
@@ -82,7 +82,7 @@ Platforms that adopt a centralized agent egress gateway want the opposite divisi
 | R6 | Everything that is not relayed TCP or DNS to the egress DNS proxy is dropped, including UDP, ICMP and link-local destinations. |
 | R7 | The DNS proxy resolves every name for forward-mode sandboxes. |
 | R8 | The sandbox cannot reach the gateway endpoint directly, so it cannot forge tunnel metadata. |
-| R9 | On Fast Sandbox, a mismatch between the server mode and the egress mode makes the sandbox fail closed (no network) and surface as `Failed`; this also holds after egress restarts and binding replays. |
+| R9 | On Fast Sandbox, a mismatch between the server mode and the egress mode makes the sandbox fail closed (no network) and surface as `Failed`. This holds for every source of a subject's policy: the binding input, binding replays after egress restarts or rollbacks, the persisted policy record, and snapshot restore. |
 | R10 | `mode = "mitm"` and an unset `mode` behave exactly as today, including the binding input format sent to existing Fast Sandbox pools. |
 
 ## Proposal
@@ -138,11 +138,12 @@ Responsibilities in forward mode:
 
 | Risk | Mitigation |
 |---|---|
-| Bypass through non-TCP or uncaptured traffic | R6: forward mode drops everything that is not relayed TCP or DNS to the egress DNS proxy, ahead of any per-subject allow (Fast Sandbox default-allow subjects included). |
+| Bypass through non-TCP or uncaptured traffic | R6: forward mode drops everything that is not relayed TCP or DNS to the egress DNS proxy; Fast Sandbox `forward` subjects never receive a per-subject accept mark. |
 | Sandbox forges tunnel identity by dialing the gateway directly | R8: the gateway endpoint is reachable only by the egress forwarder identity (sidecar: existing UID-scoped proxy accept ([nft upstream][nft-upstream]); Fast Sandbox: existing profile-wide endpoint drop ([fsb upstream][fsb-nft-upstream])). |
 | SNI or Host spoofing (claim an allowed name, dial an arbitrary IP) | Gateway contract: when authorizing by hostname, the gateway must route to the authorized hostname rather than to the CONNECT IP (same rule as Substrate's trust boundary). |
 | Gateway outage silently opens egress | R5: no fallback; connections fail. Readiness reports tunnel health (see Observability). |
-| Fast Sandbox pool not configured while server is in forward mode, so sandboxes egress directly | R9: per-binding mode handshake; mismatch fails closed. |
+| Fast Sandbox pool not configured while server is in forward mode, so sandboxes egress directly | R9: the forward marker is part of the policy body, so every policy source (binding, persisted record, snapshot bundle) is checked; mismatch fails closed. |
+| Egress rollback or snapshot restore onto an older Fastlet activates a stored allow policy | Forward subjects never store an allow policy; older egress rejects the stored `forward` value and degrades the subject to default-deny. |
 | SSRF or metadata access through the gateway | Link-local is dropped before the gateway (R6); the gateway deployment must restrict private ranges on its own egress (documented gateway requirement). |
 | Per-connection tunnel setup latency | One extra RTT to a nearby gateway per TCP connection; HTTP/2 multiplexed `CONNECT` is a possible follow-up. |
 
@@ -172,7 +173,7 @@ When `mode = "forward"`, the server returns HTTP 400 for:
 
 Sidecar profile: today Docker and Kubernetes attach the egress sidecar only when `networkPolicy` is present. In forward mode the sidecar is attached unconditionally, configured with `OPENSANDBOX_EGRESS_UPSTREAM_PROXY`, `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH`, the server-injected `OPENSANDBOX_EGRESS_SANDBOX_ID`, and a new `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_MODE=forward`. The sandbox container receives no egress-related env and no CA.
 
-Fast Sandbox profile: no server-side attachment change is needed. Every fsb sandbox already registers an egress subject at create; a policy-less sandbox seeds `DEFAULT_ALLOW_POLICY` because "the registration is the point" ([create mapping][fsb-create-mapping]), and FastPath rejects the create if the pool does not declare the `egress` handler ([fast-sandbox validation][fsb-validate]).
+Fast Sandbox profile: no server-side attachment change is needed. Every fsb sandbox already registers an egress subject at create; a policy-less sandbox seeds `DEFAULT_ALLOW_POLICY` because "the registration is the point" ([create mapping][fsb-create-mapping]), and FastPath rejects the create if the pool does not declare the `egress` handler ([fast-sandbox validation][fsb-validate]). In forward mode the server seeds the internal forward policy instead (see [Mode consistency check](#mode-consistency-check-for-fast-sandbox)).
 
 ### Egress data plane in forward mode
 
@@ -200,26 +201,29 @@ DNS: the DNS proxy answers every query for forward-mode sandboxes (policy evalua
 The shared egress is configured per pool through the FastletTemplate env, as today for `OPENSANDBOX_EGRESS_UPSTREAM_PROXY`. In forward mode:
 
 - `OnRegistered` ([server][fsb-onregistered]) installs a per-subject TCP redirect to the shared forwarder, modeled on the existing `setMitmRedirect`, in addition to deny-first and the gateway DNS redirect. Registration fails closed if any step fails, as today.
-- The shared master chain gets a forward-mode rule set ahead of every per-subject jump: accept redirected TCP and DNS to the gateway resolver, drop everything else. This is required because the seeded `DEFAULT_ALLOW_POLICY` maps to an unconditional accept mark ([fsb nft][fsb-nft]) that would otherwise let UDP and ICMP egress directly.
+- A subject whose policy is `defaultAction = "forward"` never receives the per-subject accept mark that `allow` subjects get today ([fsb nft][fsb-nft]). The shared master chain gets a forward-mode rule set ahead of every per-subject jump: accept redirected TCP and DNS to the gateway resolver; everything else falls through to the existing master-chain tail drop, so UDP and ICMP cannot egress directly.
 - The forwarder resolves the subject by source IP (existing subject registry) to fill `OpenSandbox-Sandbox-Id`.
-- The DNS proxy's per-subject evaluation of the default-allow policy already resolves every name, which satisfies R7.
+- The DNS proxy resolves every name for `forward` subjects, which satisfies R7.
 
 ### Mode consistency check for Fast Sandbox
 
 The server cannot observe a pool's egress configuration: FastPath `PoolInfo` exposes resources, revisions and component ports only, and a pool-level check would miss Fastlets still on an older template during rollout. The check therefore runs in egress, per binding, at enforcement time.
 
-- With `mode = "forward"`, the server sends the `egress` binding input as a versioned envelope instead of a bare policy:
+The marker must survive every path by which a Fast Sandbox egress obtains a subject's policy, not only the binding input. Egress persists each subject's policy record, and on `SET_BINDING` replay a record whose fence matches supersedes the replayed input ([`rehydratePolicyReload`][fsb-policy-reload], [`applyBindingPolicyLocked`][fsb-policy-apply]); `POLICY_IMPORT` restores the same record from a snapshot bundle. A marker that lives outside the policy body (for example a versioned envelope around a default-allow policy) would be stripped on persistence, and an older egress replaying or importing the stored default-allow record would activate it without any forward-mode capture or drop rules.
 
-  ```json
-  {"version": 2, "upstreamMode": "forward", "policy": {"defaultAction": "allow", "egress": []}}
-  ```
+The marker is therefore part of the policy itself, as an internal `defaultAction` value:
 
-- With `mode = "mitm"` or no upstream proxy, the server keeps sending the bare policy JSON (R10), so existing pools and older egress builds are unaffected.
-- Egress in forward mode accepts only a version 2 envelope with `upstreamMode = "forward"`; a bare policy is rejected. Egress not in forward mode rejects any version 2 envelope.
-- An older egress parses the envelope as a `NetworkPolicy` with no rules and no `defaultAction`, which defaults to deny ([policy parsing][policy-parse]); this is also fail-closed and must be locked by a test.
-- The check runs in `applySetBinding` before any side effect. A rejected binding leaves the subject unregistered or deny-first; unmarked traffic is dropped by the master-chain tail, and the binding reports `FAILED`, which the server maps to `Failed` once the data plane settles ([status mapping][fsb-status]). Because the Fastlet replays `SET_BINDING` after every egress restart, a pool reconfigured after creation is detected on replay.
+```json
+{"defaultAction": "forward", "egress": []}
+```
 
-The sidecar profile needs no handshake: the server generates the sidecar env, so the modes agree by construction.
+- With `mode = "forward"`, the server sends exactly this policy as the `egress` binding input. With `mode = "mitm"` or no upstream proxy, the server keeps sending today's policy JSON (R10).
+- `forward` is internal to the server–egress binding and the egress-held policy record. It is not a public `networkPolicy` value: the lifecycle API schema stays `allow | deny`, and forward mode rejects `networkPolicy` anyway.
+- A forward-mode egress requires `defaultAction = "forward"` with an empty rule list on every policy source (binding input, persisted record, snapshot bundle, relay write) and rejects anything else. An egress not in forward mode rejects `forward` on every source.
+- An older egress rejects `forward` everywhere, because policy parsing accepts only `allow` and `deny` ([policy parsing][policy-parse]): the binding input fails validation before any side effect (HTTP 400); a persisted record with `forward` is quarantined and the subject degrades to default-deny; a snapshot bundle with `forward` is rejected on import. All three are fail-closed.
+- The check runs before any side effect. A rejected binding leaves the subject unregistered or deny-first; unmarked traffic is dropped by the master-chain tail, and the binding reports `FAILED`, which the server maps to `Failed` once the data plane settles ([status mapping][fsb-status]). Because the Fastlet replays `SET_BINDING` after every egress restart, a pool reconfigured or rolled back after creation is detected on replay.
+
+The sidecar profile needs no handshake: the server generates the sidecar env, so the modes agree by construction. The sidecar egress `/policy` API rejects `forward` from callers, and a forward-mode sidecar rejects policy updates.
 
 ### Gateway contract
 
@@ -242,7 +246,7 @@ With agentgateway, this corresponds to a bind with `tunnelProtocol: connect` re-
 
 - **OSEP-0001 (FQDN egress) and `networkPolicy`:** not applied in forward mode; the gateway owns destination policy.
 - **OSEP-0012 and OSEP-0023 (Credential Vault, credential-bound interception):** mutually exclusive with forward mode; `mode = "mitm"` remains the path for local credential injection.
-- **OSEP-0022 (multi-sandbox egress control plane):** forward mode reuses subject registration, deny-first, binding replay and the fail-closed lifecycle unchanged; it adds one redirect kind and one binding input version.
+- **OSEP-0022 (multi-sandbox egress control plane):** forward mode reuses subject registration, deny-first, binding replay and the fail-closed lifecycle unchanged; it adds one redirect kind and one internal policy value (`forward`).
 - **Proposed managed egress integration ([#2308][pr-2308]):** complementary. That proposal manages durable intent and rotating gateway credentials on top of the MITM chain and keeps local denies in front of every CONNECT. Forward mode instead hands destination policy to the gateway. A rotating credential source defined there could later feed the forwarder's `Proxy-Authorization`.
 
 ## Test Plan
@@ -252,8 +256,10 @@ Unit tests:
 - Server config: `mode` defaults to `mitm`; forward-mode validation (`dns+nft`, Docker host network, gVisor, pool mode).
 - Server request handling: 400 for `networkPolicy`, `credentialProxy`, MITM env, `PUT`/`PATCH` network policy in forward mode; unchanged behavior in `mitm` mode.
 - Sidecar attachment: Docker and Kubernetes attach egress without `networkPolicy` in forward mode, with the expected env and no sandbox-container env or CA.
-- Fast Sandbox mapping: version 2 envelope only in forward mode; bare policy otherwise.
-- Egress: envelope parsing and the four mismatch combinations; an older parser yields default deny for the envelope; forwarder builds the expected `CONNECT` request and closes the client on non-2xx, timeout or dial failure without any direct dial.
+- Fast Sandbox mapping: `{"defaultAction": "forward", "egress": []}` only in forward mode; today's policy otherwise.
+- Egress mode check on every policy source (binding input, persisted record, snapshot bundle, relay write) for both directions: forward egress rejects `allow`/`deny`, non-forward egress rejects `forward`.
+- Legacy fail-closed: the current release's policy parser rejects `forward` in the binding input, and the current reload path quarantines a persisted `forward` record and degrades the subject to default-deny.
+- Forwarder builds the expected `CONNECT` request and closes the client on non-2xx, timeout or dial failure without any direct dial.
 
 Integration tests (egress container with a test CONNECT proxy and origin):
 
@@ -266,6 +272,7 @@ E2E:
 
 - Docker bridge and Kubernetes non-pooled sandboxes without `networkPolicy` against agentgateway in passthrough and `dynamicCa` termination modes (sandbox trusting the gateway CA through its image).
 - Fast Sandbox pool in forward mode: sandbox egress relayed; server-forward with pool-not-forward and the reverse both yield `Failed` with no network; egress restart with a changed pool mode is detected on replay.
+- Rollback and restore: with a persisted forward record, roll the pool's egress back to the previous release and restart it, and restore a forward-mode snapshot onto a previous-release Fastlet; in both cases the sandbox has no network and never activates an allow policy.
 
 ## Drawbacks
 
@@ -278,7 +285,8 @@ E2E:
 ## Alternatives
 
 - **Keep the MITM chain and double-intercept at the gateway.** Functional with today's components, but decrypts every connection twice, keeps mitmproxy on the data path, and still requires `networkPolicy` per request.
-- **Add `defaultAction: forward` to `networkPolicy`.** Unifies semantics in the policy model, but the gateway endpoint and credentials are platform secrets that cannot be per-request, and a caller could opt out by submitting another policy; platform enforcement would still need server configuration, leaving the new action without independent value.
+- **Add `defaultAction: forward` to the public `networkPolicy`.** Unifies semantics in the policy model, but the gateway endpoint and credentials are platform secrets that cannot be per-request, and a caller could opt out by submitting another policy; platform enforcement would still need server configuration, leaving a public value without independent value. The same token is used only internally, as the mode marker between server and egress.
+- **Versioned binding envelope as the mode marker.** A wrapper such as `{"version": 2, "upstreamMode": "forward", "policy": {...}}` parses as default-deny on older egress, but the wrapped policy is what egress persists. On replay or snapshot restore the persisted record supersedes the binding input, so an older egress would activate a stored default-allow policy without forward-mode rules.
 - **Use mitmproxy pass-through (`ignore_hosts`) with chaining.** Not possible: pass-through connections cannot be chained through a CONNECT proxy and the addon refuses this combination.
 - **PROXY protocol or HBONE instead of CONNECT.** PROXY protocol cannot multiplex and the gateway-side TLV handling is limited; HBONE is tied to Istio ambient service discovery. HTTP `CONNECT` is standard, carries headers for identity, and is the transport Substrate uses.
 - **Filter DNS by the gateway's policy (Substrate-style).** Requires syncing gateway policy into OpenSandbox, recreating the coupling this proposal removes.
@@ -293,7 +301,7 @@ No new services. E2E coverage needs a CONNECT gateway container (agentgateway or
 - Opt-in: existing `[egress.upstream_proxy]` configurations without `mode` keep today's behavior, and the binding input sent to Fast Sandbox pools is unchanged unless `mode = "forward"`.
 - Enabling forward mode on Fast Sandbox: roll the pool's egress configuration and the server configuration together; during the window, new sandboxes on mismatched Fastlets fail closed and surface as `Failed`. This is a new feature with no existing users to migrate.
 - Switching a deployment between modes affects new sandboxes; sidecar sandboxes keep the mode they were created with, Fast Sandbox subjects are re-checked on binding replay.
-- Downgrade: removing `mode = "forward"` returns new sandboxes to today's behavior; an older egress receiving a version 2 envelope fails closed.
+- Downgrade: removing `mode = "forward"` returns new sandboxes to today's behavior. Existing forward-mode Fast Sandbox subjects keep their `forward` record; an egress not in forward mode, or an older egress, rejects it and the subject fails closed rather than falling back to direct egress.
 
 ## Questions for Review
 
@@ -317,7 +325,9 @@ No new services. E2E coverage needs a CONNECT gateway container (agentgateway or
 [fsb-nft]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/fastsandboxnft/fastsandboxnft.go#L27
 [fsb-nft-upstream]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/fastsandboxnft/upstream.go
 [nft-upstream]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/nftables/upstream.go#L67-L68
-[policy-parse]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/policy/policy.go
+[policy-parse]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/policy/policy.go#L154-L161
+[fsb-policy-reload]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/fastsandbox_policy_persist.go#L371-L468
+[fsb-policy-apply]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/fastsandbox_policy_persist.go#L470-L498
 [fsb-validate]: https://github.com/opensandbox-group/fast-sandbox/blob/3b8f5dd5e59c36673ea84ec019a1973f194f2463/api/v1alpha2/validation.go#L74-L89
 [substrate-egress]: https://github.com/agent-substrate/substrate/blob/94e0a26ac90151886a76410568aaac2664a54d90/docs/guides/network-egress.md
 [ag-egress-example]: https://github.com/agentgateway/agentgateway/tree/v1.7.0/examples/traffic-egress-proxy
