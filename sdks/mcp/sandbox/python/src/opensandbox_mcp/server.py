@@ -658,7 +658,7 @@ def register_tools(
         content: str,
         *,
         encoding: str = "utf-8",
-        mode: int = 755,
+        mode: int | None = None,
         owner: str | None = None,
         group: str | None = None,
         connect_if_missing: bool = False,
@@ -670,7 +670,9 @@ def register_tools(
             path: Destination file path.
             content: File content.
             encoding: Text encoding.
-            mode: Unix file permissions.
+            mode: Unix file permissions. Omit to let the sandbox choose.
+                A new file uses 0666 masked by umask, and an existing file
+                keeps its mode. Pass 755 for an executable file.
             owner: Owner username.
             group: Group name.
             connect_if_missing: Connect if sandbox not in local registry.

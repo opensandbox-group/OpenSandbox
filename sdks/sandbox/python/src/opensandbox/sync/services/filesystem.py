@@ -151,7 +151,7 @@ class FilesystemSync(Protocol):
         data: str | bytes | IOBase,
         *,
         encoding: str = "utf-8",
-        mode: int = 755,
+        mode: int | None = None,
         owner: str | None = None,
         group: str | None = None,
     ) -> None:
