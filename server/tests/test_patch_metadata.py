@@ -173,3 +173,35 @@ class TestPatchMetadataValidation:
             {"Invalid Key!": None},
         )
         assert labels == {"team": "platform"}
+
+
+class TestDockerPatchMetadataReservedKey:
+    """Docker rejects reserved keys with the canonical metadata error code."""
+
+    def test_reserved_key_rejected_with_canonical_code(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+
+        from opensandbox_server.config import AppConfig, RuntimeConfig
+        from opensandbox_server.services.docker import DockerSandboxService
+
+        monkeypatch.setattr(
+            "opensandbox_server.services.docker.metadata.DEFAULT_STORE_DIR",
+            tmp_path / "metadata",
+        )
+        config = AppConfig(
+            runtime=RuntimeConfig(type="docker", execd_image="opensandbox/execd:test"),
+        )
+        with patch("opensandbox_server.services.docker.docker_service.docker") as mock_docker:
+            mock_client = MagicMock()
+            mock_client.containers.list.return_value = []
+            mock_docker.from_env.return_value = mock_client
+            service = DockerSandboxService(config=config)
+
+        container = MagicMock()
+        container.attrs = {"Config": {"Labels": {"opensandbox.io/id": "sbx-001"}}}
+        monkeypatch.setattr(service, "_get_container_by_sandbox_id", lambda _id: container)
+
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"opensandbox.io/expires-at": "never"})
+        assert exc.value.status_code == 400
+        assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
