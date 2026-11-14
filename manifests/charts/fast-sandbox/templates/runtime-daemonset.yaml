@@ -1,6 +1,16 @@
 {{- if .Values.runtime.enabled }}
 {{- $ns := include "fast-sandbox.namespace" . }}
 {{- $dartDiscover := printf "dns:dart.%s.svc.cluster.local:%d" $ns (int .Values.runtime.dartPeerPort) }}
+{{- $transfer := .Values.runtime.transfer | default dict }}
+{{- $transferFormat := $transfer.format | default "legacy" }}
+{{- if not (has $transferFormat (list "legacy" "chunked")) }}
+{{- fail (printf "runtime.transfer.format must be legacy or chunked, got %q" $transferFormat) }}
+{{- end }}
+{{- $chunked := eq $transferFormat "chunked" }}
+{{- /* The agent reads transfer settings only at startup: the ConfigMap block and
+     the pod annotation hash below come from this one string, so any change
+     to the mode or its tuning rolls the DaemonSet. */}}
+{{- $transferBlock := printf "transfer:\n  format: chunked\n  compression: %v\n  concurrency: %v\n  chunkSizeMiB: %v" ($transfer.compression | default "none") ($transfer.concurrency | default 8) ($transfer.chunkSizeMiB | default 4) }}
 {{- $probeCmd := printf "curl -fsS -X POST --unix-socket %s/runtime.sock -H 'Content-Type: application/json' -d \"{\\\"podUid\\\":\\\"$POD_UID\\\",\\\"namespace\\\":\\\"%s\\\"}\" http://firecracker-agent/v1/health | grep -q '\"ok\":true'" .Values.runtime.socketDir $ns }}
 ---
 # Node-level firecracker runtime: serves the UDS management API (artifact
@@ -130,6 +140,9 @@ data:
         cacheSize: 8GiB
         discover: {{ $dartDiscover }}
     {{- end }}
+    {{- if $chunked }}
+    {{- $transferBlock | nindent 4 }}
+    {{- end }}
     nodeReadiness:
       enabled: true
       assetsDir: /opt/fast-sandbox/firecracker
@@ -167,6 +180,12 @@ spec:
         prometheus.io/port: "9092"
         prometheus.io/path: /metrics
         kubectl.kubernetes.io/default-container: firecracker-agent
+        {{- if $chunked }}
+        # Transfer settings are read at agent startup: these annotations roll
+        # the DaemonSet when the mode or any of its tuning values change.
+        fast-sandbox.io/transfer-format: chunked
+        fast-sandbox.io/transfer-config: {{ $transferBlock | sha256sum | trunc 16 | quote }}
+        {{- end }}
         {{- with .Values.runtime.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
