@@ -26,8 +26,13 @@ from tomlkit.exceptions import ParseError
 from tomlkit.items import InlineTable, Table
 
 from opensandbox_cli.client import ClientContext
-from opensandbox_cli.config import STRING_KEYS, init_config_file, resolve_config
-from opensandbox_cli.utils import handle_errors, output_option, prepare_output
+from opensandbox_cli.config import CONFIG_VALUE_KINDS, init_config_file, resolve_config
+from opensandbox_cli.utils import (
+    handle_errors,
+    output_option,
+    parse_nullable_duration,
+    prepare_output,
+)
 
 
 @click.group("config", invoke_without_command=True)
@@ -107,19 +112,66 @@ def config_show(obj: ClientContext, output_format: str | None) -> None:
     )
 
 
-def _parse_toml_value(raw: str) -> Any:
-    """Infer a TOML scalar type (bool/int/float) from a raw CLI string; else keep text."""
-    normalized = raw.lower()
-    if normalized in ("true", "false"):
-        return normalized == "true"
+def _validated_config_value(key: str, raw: str) -> Any:
+    """Validate a ``config set`` value against the key's declared shape.
+
+    Returns the TOML value to store. Raises ``click.ClickException`` for an
+    invalid value so the mistake is caught at ``config set`` time instead of
+    surfacing as a validation error on every later command.
+    """
+    kind = CONFIG_VALUE_KINDS[key]
+    if kind == "verbatim":
+        return raw
+    if kind == "protocol":
+        normalized = raw.strip().lower()
+        if normalized not in ("http", "https"):
+            raise click.ClickException(
+                f"Invalid value for {key}: '{raw}'. Protocol must be 'http' or 'https'."
+            )
+        return normalized
+    if kind == "int":
+        # Positive-only: the keys using this kind feed the SDK's
+        # positive-timeout validation, and 0 would be silently dropped by
+        # resolve_config's falsy fallback chain.
+        parsed_int: int | None = None
+        try:
+            parsed_int = int(raw)
+        except ValueError:
+            try:
+                as_float = float(raw)
+            except ValueError:
+                as_float = None
+            if as_float is not None and as_float.is_integer():
+                parsed_int = int(as_float)
+        if parsed_int is None or parsed_int <= 0:
+            raise click.ClickException(
+                f"Invalid value for {key}: '{raw}'. Must be a positive whole number."
+            ) from None
+        return parsed_int
+    if kind == "bool":
+        normalized = raw.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+        as_number: float | None = None
+        try:
+            as_number = float(raw)
+        except ValueError:
+            as_number = None
+        if as_number is not None and as_number in (0, 1):
+            return bool(as_number)
+        raise click.ClickException(
+            f"Invalid value for {key}: '{raw}'. Must be a boolean (true/false)."
+        )
+    if kind != "duration-or-none":
+        raise click.ClickException(f"Unsupported value kind '{kind}' for {key}.")
     try:
-        return int(raw)
-    except ValueError:
-        pass
-    try:
-        return float(raw)
-    except ValueError:
-        pass
+        parse_nullable_duration(raw)
+    except click.BadParameter as exc:
+        raise click.ClickException(
+            f"Invalid value for {key}: '{raw}'. Use format like 10m, 1h30m, 90s, or 'none'."
+        ) from exc
     return raw
 
 
@@ -146,6 +198,11 @@ def config_set(
         raise click.ClickException(
             "Key must be in 'section.field' format (e.g. connection.domain)."
         )
+    if key not in CONFIG_VALUE_KINDS:
+        known_keys = ", ".join(sorted(CONFIG_VALUE_KINDS))
+        raise click.ClickException(
+            f"Unknown config key '{key}'. Known keys: {known_keys}."
+        )
 
     try:
         document = tomlkit.parse(path.read_text(encoding="utf-8"))
@@ -161,7 +218,7 @@ def config_set(
     if not isinstance(table, (Table, InlineTable, OutOfOrderTableProxy)):
         raise click.ClickException(f"Cannot set {key}: '{section}' is not a TOML table.")
 
-    table[field] = value if key in STRING_KEYS else _parse_toml_value(value)
+    table[field] = _validated_config_value(key, value)
     path.write_text(tomlkit.dumps(document), encoding="utf-8")
 
     obj.output.success(f"Set {key} = {value}")

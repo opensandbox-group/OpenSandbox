@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import click
 
@@ -82,17 +82,23 @@ def load_config_file(config_path: Path | None = None) -> dict[str, Any]:
         ) from exc
 
 
-# Read as text and stored verbatim so an API key like "007123" is not
-# rewritten as the number 7123.
-STRING_KEYS = frozenset(
-    {
-        "connection.api_key",
-        "connection.domain",
-        "connection.protocol",
-        "defaults.image",
-        "defaults.timeout",
-    }
-)
+# Config keys `config set` accepts and the value shape for each. Unknown keys
+# are rejected so a typo cannot quietly strand the real setting.
+#
+# "verbatim" keys are stored as raw CLI text: inferring a TOML number would
+# rewrite an API key such as "007123" as 7123. The kind set is closed: a new
+# kind must be handled in `_validated_config_value`, which fails loudly on
+# anything it does not recognize.
+CONFIG_VALUE_KINDS: dict[str, Literal["verbatim", "protocol", "int", "bool", "duration-or-none"]] = {
+    "connection.api_key": "verbatim",
+    "connection.domain": "verbatim",
+    "connection.protocol": "protocol",
+    "connection.request_timeout": "int",
+    "connection.use_server_proxy": "bool",
+    "output.color": "bool",
+    "defaults.image": "verbatim",
+    "defaults.timeout": "duration-or-none",
+}
 
 
 def resolve_config(
