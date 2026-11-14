@@ -139,18 +139,34 @@ func (e *ExecdClient) DeleteSession(ctx context.Context, sessionID string) error
 
 // RunCommand executes a shell command and streams output events via SSE.
 func (e *ExecdClient) RunCommand(ctx context.Context, req RunCommandRequest, handler EventHandler) error {
-	if !req.Background {
-		return e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, handler)
-	}
 	// Returning a private sentinel closes the response without masking callback errors.
-	complete := fmt.Errorf("background command started")
+	complete := fmt.Errorf("command stream complete")
 	err := e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, func(event StreamEvent) error {
 		if err := handler(event); err != nil {
 			return err
 		}
-		var payload struct{ Type string }
-		if json.Unmarshal([]byte(event.Data), &payload) == nil && payload.Type == "execution_complete" {
-			return complete
+		var payload struct {
+			Type     string `json:"type"`
+			ExitCode *int   `json:"exit_code"`
+			Error    *struct {
+				ExitCode *int `json:"exit_code"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(event.Data), &payload) != nil {
+			return nil
+		}
+		// Modern foreground terminal events carry an exit code only after
+		// output has drained. Legacy events must still be read through EOF.
+		// Background completion acknowledges startup, not process exit.
+		switch payload.Type {
+		case "execution_complete":
+			if req.Background || payload.ExitCode != nil {
+				return complete
+			}
+		case "error":
+			if !req.Background && payload.Error != nil && payload.Error.ExitCode != nil {
+				return complete
+			}
 		}
 		return nil
 	})
