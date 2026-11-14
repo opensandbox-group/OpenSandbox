@@ -934,7 +934,7 @@ def sandbox_endpoint(
 def sandbox_health(
     obj: ClientContext, sandbox_id: str, output_format: str | None
 ) -> None:
-    """Check sandbox health."""
+    """Check sandbox health. Exits with status 1 when the sandbox is unhealthy."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
@@ -949,6 +949,8 @@ def sandbox_health(
                 {"sandbox_id": sandbox_id, "healthy": healthy},
                 title="Health Check",
             )
+        if not healthy:
+            raise click.exceptions.Exit(1)
     finally:
         sandbox.close()
 

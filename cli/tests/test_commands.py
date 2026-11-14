@@ -1004,6 +1004,34 @@ class TestSandboxResume:
         mock_sb.close.assert_called_once()
 
 
+class TestSandboxHealth:
+    @pytest.mark.parametrize("output_format", ["table", "json"])
+    def test_healthy_exits_zero(self, runner: CliRunner, output_format: str) -> None:
+        mock_sb = MagicMock()
+        mock_sb.is_healthy.return_value = True
+
+        result = _invoke(
+            runner, ["sandbox", "health", "sb-1", "-o", output_format], sandbox=mock_sb
+        )
+
+        assert result.exit_code == 0
+        mock_sb.close.assert_called_once()
+
+    @pytest.mark.parametrize("output_format", ["table", "json"])
+    def test_unhealthy_exits_one(self, runner: CliRunner, output_format: str) -> None:
+        mock_sb = MagicMock()
+        mock_sb.is_healthy.return_value = False
+
+        result = _invoke(
+            runner, ["sandbox", "health", "sb-1", "-o", output_format], sandbox=mock_sb
+        )
+
+        assert result.exit_code == 1
+        mock_sb.close.assert_called_once()
+        if output_format == "json":
+            assert json.loads(result.stdout) == {"sandbox_id": "sb-1", "healthy": False}
+
+
 class TestSandboxMetrics:
     def test_metrics_fetches_snapshot(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
