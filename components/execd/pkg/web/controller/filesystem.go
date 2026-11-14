@@ -162,6 +162,11 @@ func (c *FilesystemController) RenameFiles() {
 		return
 	}
 
+	if err := validateExpandedRenameFiles(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
+		return
+	}
+
 	for _, renameItem := range request {
 		if err := rejectStagingPath(renameItem.Src); err != nil {
 			c.handleFileError(err)

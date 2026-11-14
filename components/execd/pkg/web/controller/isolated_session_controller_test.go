@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
@@ -441,6 +442,87 @@ func TestBackgroundRun_Endpoints404(t *testing.T) {
 	NewIsolatedSessionController(logsCtx).GetRunLogs()
 	if logsRecorder.Code != http.StatusNotFound {
 		t.Errorf("logs unknown run: status = %d, want 404", logsRecorder.Code)
+	}
+}
+
+func TestIsolatedRenameFilesRejectsMissingPaths(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	require.NoError(t, err)
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	tests := []struct {
+		name  string
+		field string
+		omit  bool
+	}{
+		{name: "missing_src", field: "src", omit: true},
+		{name: "empty_src", field: "src"},
+		{name: "missing_dest", field: "dest", omit: true},
+		{name: "empty_dest", field: "dest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err)
+			firstSrc := filepath.Join(workspace, "first.txt")
+			badSrc := filepath.Join(workspace, "invalid.txt")
+			for _, src := range []string{firstSrc, badSrc} {
+				require.NoError(t, os.WriteFile(src, []byte(src), 0o644))
+			}
+			sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+				WorkspacePath: workspace,
+				WorkspaceMode: "rw",
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+			outputDir := filepath.Join(workspace, "renamed")
+			firstDest := filepath.Join(outputDir, "first.txt")
+			badDest := filepath.Join(workspace, "invalid-dest.txt")
+			invalid := map[string]string{"src": badSrc, "dest": badDest}
+			if tt.omit {
+				delete(invalid, tt.field)
+			} else {
+				invalid[tt.field] = ""
+			}
+			payload, err := json.Marshal([]map[string]string{
+				{"src": firstSrc, "dest": firstDest},
+				invalid,
+			})
+			require.NoError(t, err)
+			ctx, rec := newTestContext(http.MethodPost, "/v1/isolated/session/"+sessionID+"/files/mv", payload)
+			ctx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+
+			NewIsolatedSessionController(ctx).RenameFiles()
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+			}
+			for _, src := range []string{firstSrc, badSrc} {
+				content, err := os.ReadFile(src)
+				require.NoError(t, err, "source changed: %s", src)
+				require.Equal(t, src, string(content))
+			}
+			for _, dest := range []string{firstDest, badDest, outputDir} {
+				_, err := os.Stat(dest)
+				require.ErrorIs(t, err, os.ErrNotExist, "destination created: %s", dest)
+			}
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+		})
 	}
 }
 

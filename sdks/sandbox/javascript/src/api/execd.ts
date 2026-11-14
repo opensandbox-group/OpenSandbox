@@ -1569,7 +1569,7 @@ export interface components {
              */
             mode?: number;
         };
-        /** @description File rename/move operation */
+        /** @description File rename/move operation. Both src and dest must be non-empty. On ordinary filesystem routes, including execution-identity routes, paths must also remain non-empty after environment-variable and home-directory expansion; isolated-session paths are literal. Missing or empty paths, or empty expansions on ordinary routes, return 400 INVALID_REQUEST_BODY before any rename in the batch. Other path-expansion and filesystem errors retain their existing handling and can leave earlier renames applied. */
         RenameFileItem: {
             /**
              * @description Source file path
