@@ -243,7 +243,11 @@ def ensure_platform_valid(platform: Optional["PlatformSpec"]) -> None:
 
 
 VOLUME_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
-K8S_RESOURCE_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+# PVC claim names are DNS-1123 subdomains (dots allowed, 253 chars). A DNS-1123
+# label rejects names Kubernetes accepts, such as "my.models".
+K8S_RESOURCE_NAME_RE = re.compile(
+    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+)
 
 
 def ensure_valid_volume_name(name: str) -> None:

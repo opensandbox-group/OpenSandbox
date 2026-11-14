@@ -265,6 +265,10 @@ class TestPVC:
         backend = PVC(claim_name="my-pvc")
         assert backend.claim_name == "my-pvc"
 
+    def test_dotted_claim_name(self):
+        backend = PVC(claim_name="my.models")
+        assert backend.claim_name == "my.models"
+
     def test_claim_name_alias(self):
         data = {"claimName": "my-pvc"}
         backend = PVC.model_validate(data)
