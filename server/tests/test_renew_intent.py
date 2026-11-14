@@ -39,6 +39,11 @@ def test_parse_rejects_bad_json():
     assert parse_renew_intent_json("not json") is None
 
 
+@pytest.mark.parametrize("raw", ["[]", "null", '"sbx-1"', "1"])
+def test_parse_rejects_non_object_json(raw):
+    assert parse_renew_intent_json(raw) is None
+
+
 def test_parse_reads_ingress_namespace():
     raw = (
         '{"namespace":"tenant-a","sandbox_id":"abc",'
