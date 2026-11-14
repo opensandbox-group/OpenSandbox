@@ -43,6 +43,7 @@ Cache strategy:
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -223,7 +224,7 @@ class HTTPTenantProvider:
         namespace = (data.get("namespace") or "").strip()
         if not namespace:
             raise ValueError("HTTP tenant endpoint returned empty namespace for key")
-        ttl = float(data.get("ttl", 30))
+        ttl = _parse_ttl(data.get("ttl"))
 
         entry = TenantEntry(
             name=namespace,
@@ -235,6 +236,20 @@ class HTTPTenantProvider:
             self._cache[api_key] = _CacheEntry(tenant=entry, fetched_at=now, ttl=ttl)
 
         return entry
+
+
+_DEFAULT_TTL_SECONDS = 30.0
+
+
+def _parse_ttl(value: object) -> float:
+    """Suggested cache TTL; a missing or malformed value falls back to the default."""
+    try:
+        ttl = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return _DEFAULT_TTL_SECONDS
+    if not math.isfinite(ttl) or ttl < 0:
+        return _DEFAULT_TTL_SECONDS
+    return ttl
 
 
 class _Unauthorized(Exception):
