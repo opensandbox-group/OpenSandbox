@@ -58,22 +58,13 @@ func DeleteFile(filePath string) error {
 }
 
 func ChmodFile(file string, perms model.Permission) error {
+	perms.ModeSet = perms.ModeSet || perms.Mode != 0
 	abs, err := pathutil.ExpandAbsPath(file)
 	if err != nil {
 		return err
 	}
 
-	if perms.Mode != 0 {
-		mode, err := strconv.ParseUint(strconv.Itoa(perms.Mode), 8, 32)
-		if err != nil {
-			return err
-		}
-		err = os.Chmod(abs, os.FileMode(mode))
-		if err != nil {
-			return err
-		}
-	}
-	return SetFileOwnership(abs, perms.Owner, perms.Group)
+	return applyFilePermission(abs, perms)
 }
 
 func SetFileOwnership(absPath string, owner string, group string) error {
@@ -81,28 +72,9 @@ func SetFileOwnership(absPath string, owner string, group string) error {
 		return nil
 	}
 
-	uid := -1
-	if owner != "" {
-		userInfo, err := user.Lookup(owner)
-		if err != nil {
-			return fmt.Errorf("failed to lookup user %s: %w", owner, err)
-		}
-		uid, err = strconv.Atoi(userInfo.Uid)
-		if err != nil {
-			return fmt.Errorf("failed to convert uid for user %s: %w", owner, err)
-		}
-	}
-
-	gid := -1
-	if group != "" {
-		groupInfo, err := user.LookupGroup(group)
-		if err != nil {
-			return fmt.Errorf("failed to lookup group %s: %w", group, err)
-		}
-		gid, err = strconv.Atoi(groupInfo.Gid)
-		if err != nil {
-			return fmt.Errorf("failed to convert gid for group %s: %w", group, err)
-		}
+	uid, gid, err := lookupOwnership(owner, group)
+	if err != nil {
+		return err
 	}
 
 	if err := os.Chown(absPath, uid, gid); err != nil {
@@ -110,6 +82,36 @@ func SetFileOwnership(absPath string, owner string, group string) error {
 	}
 
 	return nil
+}
+
+// lookupOwnership resolves an owner and a group name to numeric IDs without
+// changing anything. An empty name resolves to -1, which os.Chown leaves as is.
+func lookupOwnership(owner string, group string) (int, int, error) {
+	uid := -1
+	if owner != "" {
+		userInfo, err := user.Lookup(owner)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to lookup user %s: %w", owner, err)
+		}
+		uid, err = strconv.Atoi(userInfo.Uid)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to convert uid for user %s: %w", owner, err)
+		}
+	}
+
+	gid := -1
+	if group != "" {
+		groupInfo, err := user.LookupGroup(group)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to lookup group %s: %w", group, err)
+		}
+		gid, err = strconv.Atoi(groupInfo.Gid)
+		if err != nil {
+			return 0, 0, fmt.Errorf("failed to convert gid for group %s: %w", group, err)
+		}
+	}
+
+	return uid, gid, nil
 }
 
 func RenameFile(item model.RenameFileItem) error {
@@ -193,6 +195,12 @@ func MkdirAllWithOwnership(targetDir string, dirPerm os.FileMode, owner, group s
 }
 
 func MakeDir(dir string, perm model.Permission) error {
+	perm.ModeSet = perm.ModeSet || perm.Mode != 0
+	if perm.ModeSet {
+		if _, err := permissionFileMode(perm.Mode); err != nil {
+			return err
+		}
+	}
 	abs, err := pathutil.ExpandAbsPath(dir)
 	if err != nil {
 		return err
@@ -208,12 +216,8 @@ func MakeDir(dir string, perm model.Permission) error {
 		return err
 	}
 
-	if !existed && perm.Mode != 0 {
-		mode, err := strconv.ParseUint(strconv.Itoa(perm.Mode), 8, 32)
-		if err != nil {
-			return err
-		}
-		return os.Chmod(abs, os.FileMode(mode))
+	if !existed {
+		return applyFilePermission(abs, perm)
 	}
 	return nil
 }

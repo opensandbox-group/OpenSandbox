@@ -35,7 +35,9 @@ class FileMetadata:
         path (str | Unset): Target file path Example: /workspace/upload.txt.
         owner (str | Unset): File owner Example: admin.
         group (str | Unset): File group Example: admin.
-        mode (int | Unset): File permissions in octal Example: 755.
+        mode (int | Unset): Octal permission digits 0-7777 written as a decimal integer (e.g., 644 or 4755). The
+            4000/2000/1000 digits apply setuid/setgid/sticky bits. Explicit 0 sets mode 0000; omitting the field or sending
+            null skips chmod, though chown can still clear existing special bits. Example: 755.
     """
 
     path: str | Unset = UNSET

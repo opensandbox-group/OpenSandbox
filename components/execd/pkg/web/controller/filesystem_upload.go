@@ -25,6 +25,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -103,6 +104,12 @@ func (c *FilesystemController) processUploadPair(metadataHeader, fileHeader *mul
 		return uerr
 	}
 
+	// Validate this pair's mode and account names before creating target
+	// directories or opening the destination.
+	if uerr := validateUploadPermission(meta); uerr != nil {
+		return uerr
+	}
+
 	resolvedPath, uerr := resolveUploadTarget(meta.Path, meta.Permission)
 	if uerr != nil {
 		return uerr
@@ -112,7 +119,40 @@ func (c *FilesystemController) processUploadPair(metadataHeader, fileHeader *mul
 		return uerr
 	}
 
-	return applyUploadPermission(resolvedPath, meta.Permission)
+	return applyUploadPermission(resolvedPath, meta)
+}
+
+// validateUploadPermission checks the mode, owner and group of an upload without
+// changing anything on disk. A mode that is not octal digits, or an owner or
+// group the system does not know, is a client error.
+func validateUploadPermission(meta *model.FileMetadata) *uploadError {
+	if meta.ModeSet {
+		if _, err := permissionFileMode(meta.Mode); err != nil {
+			return newUploadError(
+				http.StatusBadRequest,
+				model.ErrorCodeInvalidFileMetadata,
+				fmt.Sprintf("invalid metadata mode. %v", err),
+			)
+		}
+	}
+
+	if _, _, err := lookupOwnership(meta.Owner, meta.Group); err != nil {
+		var unknownUser user.UnknownUserError
+		var unknownGroup user.UnknownGroupError
+		if errors.As(err, &unknownUser) || errors.As(err, &unknownGroup) {
+			return newUploadError(
+				http.StatusBadRequest,
+				model.ErrorCodeInvalidFileMetadata,
+				fmt.Sprintf("invalid metadata owner or group. %v", err),
+			)
+		}
+		return newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error resolving owner or group. %v", err),
+		)
+	}
+	return nil
 }
 
 func parseUploadMetadata(header *multipart.FileHeader) (*model.FileMetadata, *uploadError) {
@@ -436,14 +476,14 @@ func resolveUploadTargetPath(path string) (string, *uploadError) {
 
 // applyUploadPermission applies the metadata permission with one retry to
 // absorb metadata-propagation delay on weakly-coherent filesystems
-// (virtio-fs, 9pfs). ChmodFile always invokes chown under the hood, so a
-// freshly-created dirent that has not yet propagated will surface as ENOENT
-// here even though the file is fully written and synced.
-func applyUploadPermission(resolvedPath string, permission model.Permission) *uploadError {
-	chmodErr := ChmodFile(resolvedPath, permission)
+// (virtio-fs, 9pfs). A freshly-created dirent that has not yet propagated will
+// surface as ENOENT from chown or chmod even though the file is fully written
+// and synced.
+func applyUploadPermission(resolvedPath string, meta *model.FileMetadata) *uploadError {
+	chmodErr := applyFilePermission(resolvedPath, meta.Permission)
 	if chmodErr != nil {
 		time.Sleep(20 * time.Millisecond)
-		chmodErr = ChmodFile(resolvedPath, permission)
+		chmodErr = applyFilePermission(resolvedPath, meta.Permission)
 	}
 	if chmodErr != nil {
 		return newUploadError(
