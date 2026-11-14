@@ -15,10 +15,12 @@
 package web
 
 import (
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -52,4 +54,42 @@ func TestProxyMiddlewareReturnsSidecarForbiddenForActiveVault(t *testing.T) {
 
 	require.Equal(t, http.StatusForbidden, resp.StatusCode)
 	require.Equal(t, "/credential-vault/_active", <-receivedPath)
+}
+
+func TestProxyMiddlewareReusesUpstreamConnections(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var newConns atomic.Int32
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	backend.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	backend.Start()
+	defer backend.Close()
+
+	backendURL, err := url.Parse(backend.URL)
+	require.NoError(t, err)
+	_, port, err := net.SplitHostPort(backendURL.Host)
+	require.NoError(t, err)
+
+	router := gin.New()
+	router.Use(ProxyMiddleware())
+	proxyServer := httptest.NewServer(router)
+	defer proxyServer.Close()
+
+	const requests = 5
+	for range requests {
+		resp, err := proxyServer.Client().Get(proxyServer.URL + "/proxy/" + port + "/")
+		require.NoError(t, err)
+		_, err = io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	require.Equal(t, int32(1), newConns.Load(),
+		"sequential proxied requests should reuse one keep-alive upstream connection")
 }
