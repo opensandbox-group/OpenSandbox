@@ -20,7 +20,9 @@ from contextlib import suppress
 
 from static_passthrough import StaticPassthrough
 from tls_decision import _classify, compile_view
-from tls_registry import AdmissionResult, BoundConnectionRegistry, RequestAdmission
+from tls_registry import (
+    DEFAULT_DRAIN_TIMEOUT_SECONDS, AdmissionResult, BoundConnectionRegistry, RequestAdmission,
+)
 
 # Same cadence as the sidecar drain thread; the page size is the registry maximum.
 _DRAIN_INTERVAL_SECONDS = 0.5
@@ -30,7 +32,8 @@ _DRAIN_PAGE_LIMIT = 128
 class SubjectRegistry(BoundConnectionRegistry):
     """One entry lifetime; invalidation never releases a live transport token."""
 
-    def __init__(self, *, capacity, accounting, static_passthrough, drain_timeout_seconds=30):
+    def __init__(self, *, capacity, accounting, static_passthrough,
+                 drain_timeout_seconds=DEFAULT_DRAIN_TIMEOUT_SECONDS):
         super().__init__(capacity=capacity, accounting=accounting,
                          drain_timeout_seconds=drain_timeout_seconds)
         self._static_config = StaticPassthrough(static_passthrough)

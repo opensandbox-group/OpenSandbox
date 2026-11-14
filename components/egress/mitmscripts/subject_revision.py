@@ -33,14 +33,13 @@ from types import MappingProxyType
 
 from revision_publication import InstallationReceiver
 from revision_receiver import Revision, RevisionError, Snapshot
-from tls_registry import ConnectionAccounting
+from tls_registry import DEFAULT_DRAIN_TIMEOUT_SECONDS, ConnectionAccounting
 if TYPE_CHECKING:
     from subject_admission import SubjectRegistry
 
 LIFECYCLE_BODY_LIMIT = 8192
 RESPONSE_LIMIT = 4096
 MAX_SEQUENCE = 2**63 - 1
-DEFAULT_DRAIN_TIMEOUT_SECONDS = 30
 _DIGEST_PREFIX = b"opensandbox.subject-lifecycle.v2\x00"
 
 
