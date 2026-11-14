@@ -40,6 +40,7 @@ import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationService
 import com.alibaba.opensandbox.sandbox.domain.services.IsolationSession
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.ExecutionEventDispatcher
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.decodeResponseBody
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.Serializable
@@ -272,9 +273,10 @@ internal class IsolatedSessionsAdapter(
             httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "create isolated session")
                 val resp =
-                    json.decodeFromString(
+                    json.decodeResponseBody(
                         IsolatedSessionInfoResponse.serializer(),
                         response.body!!.string(),
+                        "create isolated session",
                     )
                 val info =
                     IsolatedSessionInfo(
@@ -301,9 +303,10 @@ internal class IsolatedSessionsAdapter(
             httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "attach isolated session")
                 val resp =
-                    json.decodeFromString(
+                    json.decodeResponseBody(
                         IsolatedSessionStateResponse.serializer(),
                         response.body!!.string(),
+                        "attach isolated session",
                     )
                 val info =
                     IsolatedSessionInfo(
@@ -351,9 +354,10 @@ internal class IsolatedSessionsAdapter(
             httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "get isolated session")
                 val resp =
-                    json.decodeFromString(
+                    json.decodeResponseBody(
                         IsolatedSessionStateResponse.serializer(),
                         response.body!!.string(),
+                        "get isolated session",
                     )
                 return IsolatedSessionState(
                     status = resp.status,
@@ -471,9 +475,10 @@ internal class IsolatedSessionsAdapter(
                     }
                 }
                 val resp =
-                    json.decodeFromString(
+                    json.decodeResponseBody(
                         IsolatedBackgroundRunResponse.serializer(),
                         response.body!!.string(),
+                        "run background in isolated session",
                     )
                 return IsolatedBackgroundRun(
                     sessionId = resp.session_id,
@@ -503,9 +508,10 @@ internal class IsolatedSessionsAdapter(
             httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "get isolated run status")
                 val resp =
-                    json.decodeFromString(
+                    json.decodeResponseBody(
                         IsolatedRunStatusResponse.serializer(),
                         response.body!!.string(),
+                        "get isolated run status",
                     )
                 return IsolatedRunStatus(
                     sessionId = resp.session_id,
@@ -587,9 +593,10 @@ internal class IsolatedSessionsAdapter(
             httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "get isolated capabilities")
                 val resp =
-                    json.decodeFromString(
+                    json.decodeResponseBody(
                         IsolatedCapabilitiesResponse.serializer(),
                         response.body!!.string(),
+                        "get isolated capabilities",
                     )
                 return IsolatedCapabilities(
                     available = resp.available,
@@ -630,9 +637,10 @@ internal class IsolatedSessionsAdapter(
             httpClientProvider.httpClient.newCall(httpRequest).execute().use { response ->
                 ensureSuccess(response, "list isolated sessions")
                 val resp =
-                    json.decodeFromString(
+                    json.decodeResponseBody(
                         ListIsolatedSessionsResponse.serializer(),
                         response.body!!.string(),
+                        "list isolated sessions",
                     )
                 return resp.sessions.map { summary ->
                     IsolatedSessionSummary(

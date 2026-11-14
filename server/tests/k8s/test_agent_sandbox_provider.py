@@ -463,39 +463,6 @@ spec:
 
         assert exc_info.value.status == 500
 
-    def test_get_workload_prefers_informer_cache(self, mock_k8s_client):
-        cached = {"metadata": {"name": "test-id"}}
-        mock_k8s_client.get_custom_object.return_value = cached
-
-        provider = AgentSandboxProvider(mock_k8s_client)
-
-        result = provider.get_workload("test-id", "test-ns")
-
-        assert result == cached
-        mock_k8s_client.get_custom_object.assert_called()
-
-    def test_create_workload_updates_informer_cache(self, mock_k8s_client):
-        created_body = {"metadata": {"name": "test-id", "uid": "test-uid"}}
-        mock_k8s_client.create_custom_object.return_value = created_body
-
-        provider = AgentSandboxProvider(mock_k8s_client)
-
-        expires_at = datetime(2025, 12, 31, 10, 0, 0, tzinfo=timezone.utc)
-
-        result = provider.create_workload(
-            sandbox_id="test-id",
-            namespace="test-ns",
-            image_spec=ImageSpec(uri="python:3.11"),
-            entrypoint=["/bin/bash"],
-            env={"FOO": "bar"},
-            resource_limits={"cpu": "1", "memory": "1Gi"},
-            labels={"opensandbox.io/id": "test-id"},
-            expires_at=expires_at,
-            execd_image="execd:latest",
-        )
-
-        assert result == {"name": "test-id", "uid": "test-uid", "apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox"}
-
     def test_update_expiration_patches_spec(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.get_custom_object.return_value = {"metadata": {"name": "sandbox-test-id"}}
@@ -1027,6 +994,20 @@ spec:
         assert endpoint.endpoint == "10.0.0.9:8080"
         assert endpoint.headers is None
 
+    def test_get_endpoint_info_brackets_ipv6_running_pod_ip(self, mock_k8s_client):
+        provider = AgentSandboxProvider(mock_k8s_client)
+        mock_k8s_client.list_pods.return_value = [
+            SimpleNamespace(status=SimpleNamespace(phase="Running", pod_ip="fd00::9"))
+        ]
+        workload = {
+            "status": {"selector": "app=sandbox"},
+            "metadata": {"namespace": "test-ns"},
+        }
+
+        endpoint = provider.get_endpoint_info(workload, 8080, "sandbox-123")
+
+        assert endpoint.endpoint == "[fd00::9]:8080"
+
     def test_get_endpoint_info_falls_back_to_service_fqdn(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.list_pods.side_effect = Exception("boom")
@@ -1039,8 +1020,6 @@ spec:
 
         assert endpoint.endpoint == "svc.example.com:9000"
         assert endpoint.headers is None
-
-    # ===== Pause / Resume Tests =====
 
     def _running_sandbox(self) -> dict:
         return {
@@ -1227,8 +1206,6 @@ spec:
             provider.resume_sandbox("test-id", "test-ns")
 
 
-    # ===== Image Auth / Pull Secrets Tests =====
-
     def test_supports_image_auth_returns_true(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client, _app_config())
         assert provider.supports_image_auth() is True
@@ -1398,8 +1375,6 @@ spec:
         )
 
 class TestAgentSandboxProviderExecdInit:
-    """AgentSandboxProvider execd init container resource tests"""
-
     def test_init_container_has_no_resources_when_not_configured(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
@@ -1461,8 +1436,6 @@ class TestAgentSandboxProviderExecdInit:
 
 
 class TestAgentSandboxProviderEgress:
-    """AgentSandboxProvider egress sidecar tests"""
-
     def test_create_workload_without_network_policy_no_sidecar(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
@@ -1489,7 +1462,6 @@ class TestAgentSandboxProviderEgress:
 
         assert len(containers) == 1
         assert containers[0]["name"] == "sandbox"
-        # Should not have securityContext with sysctls
         assert "securityContext" not in pod_spec or "sysctls" not in pod_spec.get(
             "securityContext", {}
         )

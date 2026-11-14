@@ -65,7 +65,7 @@ export function createLifecycleApiClient<Paths extends object>(
     ...(opts.headers ?? {}),
   };
 
-  if (apiKey && !headers["OPEN-SANDBOX-API-KEY"]) {
+  if (apiKey && !Object.keys(headers).some((name) => name.toLowerCase() === "open-sandbox-api-key")) {
     headers["OPEN-SANDBOX-API-KEY"] = apiKey;
   }
 

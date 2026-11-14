@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -57,6 +58,14 @@ func main() {
 	// fast-sandbox, without dns+nft enforcement) fails startup instead of
 	// being silently ignored.
 	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
+	fsbMode, err := revisionRuntimeStartup(profile)
+	if err != nil {
+		log.Fatalf("invalid live revision runtime configuration: %v", err)
+	}
+	startupFSBInterceptionMode = &fsbMode
+	if fsbMode.deprecatedAlias {
+		log.Warnf("%s and %s are deprecated for Fast Sandbox TLS admission; use %s=credential-bound", constants.EnvExperimentalRevisionRuntime, constants.EnvExperimentalFSBTLSAdmission, constants.EnvFSBInterceptionMode)
+	}
 	if _, present := os.LookupEnv(constants.EnvMitmproxyPassthroughHosts); present &&
 		(profile == constants.ProfileFastSandbox || !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime))) {
 		log.Fatalf("invalid %s configuration: requires sidecar live revision runtime", constants.EnvMitmproxyPassthroughHosts)
@@ -220,6 +229,34 @@ func main() {
 	}
 
 	waitForShutdown(ctx, proxy, policySrv, exemptDst, nftMgr, mitm, blockedBroadcaster, policyHandler)
+}
+
+// validateRevisionRuntimeStartup runs before profile dispatch or network setup.
+// Kept for startup-focused callers; main retains the resolved mode for launch.
+func validateRevisionRuntimeStartup(profile string) error {
+	_, err := revisionRuntimeStartup(profile)
+	return err
+}
+
+func revisionRuntimeStartup(profile string) (fastSandboxInterceptionMode, error) {
+	mode, err := resolveFastSandboxInterceptionMode(profile)
+	if err != nil {
+		return mode, err
+	}
+	if profile == constants.ProfileFastSandbox {
+		return mode, validateFastSandboxInterception(mode)
+	}
+	if !constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)) {
+		return mode, nil
+	}
+	ports, err := constants.BuildMitmproxyPortList(os.Getenv(constants.EnvMitmproxyExtraPorts))
+	if err != nil {
+		return mode, fmt.Errorf("invalid %s for live revision runtime", constants.EnvMitmproxyExtraPorts)
+	}
+	if ports != constants.MitmproxyBasePorts {
+		return mode, fmt.Errorf("%s is not supported with %s", constants.EnvMitmproxyExtraPorts, constants.EnvExperimentalRevisionRuntime)
+	}
+	return mode, nil
 }
 
 func withLogger(ctx context.Context) context.Context {

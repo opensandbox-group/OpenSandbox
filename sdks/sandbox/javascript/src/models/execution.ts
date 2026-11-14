@@ -32,6 +32,12 @@ export interface ExecutionError {
   value: string;
   timestamp: number;
   traceback: string[];
+  /**
+   * Exit status reported by execd for a `CommandExecError` when the command ran and finished
+   * with a non-zero status (-1 when it was terminated by a signal). Absent when the process
+   * failed to start, for non-command errors, and on servers that predate `error.exit_code`.
+   */
+  exitCode?: number;
 }
 
 export interface ExecutionComplete {
@@ -55,6 +61,40 @@ export interface Execution {
   error?: ExecutionError;
   complete?: ExecutionComplete;
   exitCode?: number | null;
+}
+
+/**
+ * Normalizes a wire `error.exit_code` value. Only integers are accepted; anything else
+ * (missing, non-numeric, fractional) yields `undefined` so callers fall back to `evalue`.
+ *
+ * @internal
+ */
+export function normalizeExitCode(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+}
+
+/**
+ * Infers the final exit code of a foreground command execution.
+ *
+ * Prefers the authoritative `error.exitCode` (from `error.exit_code`) and falls back to
+ * parsing `error.value` (`evalue`) for servers that predate `exit_code`. A completed
+ * execution without an error is `0`; anything else is `null`.
+ *
+ * @internal
+ */
+export function inferExecutionExitCode(execution: Pick<Execution, "error" | "complete">): number | null {
+  const error = execution.error;
+  if (error != null) {
+    const exitCode = normalizeExitCode(error.exitCode);
+    if (exitCode !== undefined) {
+      return exitCode;
+    }
+    const errorValue = error.value?.trim();
+    const parsedExitCode =
+      errorValue && /^-?\d+$/.test(errorValue) ? Number(errorValue) : Number.NaN;
+    return Number.isFinite(parsedExitCode) ? parsedExitCode : null;
+  }
+  return execution.complete ? 0 : null;
 }
 
 export interface ExecutionHandlers {

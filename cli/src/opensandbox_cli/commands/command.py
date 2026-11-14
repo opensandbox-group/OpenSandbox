@@ -79,9 +79,8 @@ def _run_command(
     """Shared implementation for ``command run``.
 
     Foreground mode streams output and allows only ``-o raw``; background mode
-    returns a tracked execution object and allows structured output. The payload
-    is joined into one shell command string unless ``argv`` sends it as a
-    literal argv list (needs an argv-capable execd).
+    returns a tracked execution object and allows structured output. ``--argv``
+    sends the payload as a literal argv list instead of a joined shell command.
     """
     allowed = ("table", "json", "yaml") if background else ("raw",)
     fallback = "table" if background else "raw"
@@ -147,9 +146,12 @@ def _handle_execution_error(
     help="Run a command in a sandbox. Use `--` before the sandbox command payload.",
     epilog=(
         "Separator rule: use `--` before the sandbox command payload.\n\n"
-        "By default the payload is joined into one shell command string. Add "
-        "`--argv` to pass the arguments to the executable as-is (no shell), so "
-        "literal `$HOME`, quotes, and empty strings are preserved; this needs a "
+        "By default each payload word is quoted as a single shell token and "
+        "the tokens are joined into one shell command line, so shell syntax "
+        "such as redirects or pipes must ride inside an explicit word "
+        "(for example: -- sh -c 'echo hi > /tmp/x'). Add `--argv` to pass "
+        "the arguments to the executable as-is (no shell), so literal "
+        "`$HOME`, quotes, and empty strings are preserved; this needs a "
         "sandbox image whose execd accepts argv requests."
     ),
 )
@@ -243,7 +245,9 @@ def command_logs(
         elif obj.output.fmt == "raw":
             click.echo(logs.content)
         else:
-            obj.output.panel(logs.content, title="Command Logs")
+            # The next cursor is the only way to continue an incremental read.
+            obj.output.print_dict({"cursor": logs.cursor}, title="Command Logs")
+            obj.output.panel(logs.content, title="Content")
     finally:
         sandbox.close()
 

@@ -19,6 +19,16 @@ import {createWakeRetryFetch, type WakeRetryOptions} from "./wakeRetry.js";
 export type ConnectionProtocol = "http" | "https";
 
 /**
+ * Internal request-init marker set by the redirect-safe transport on
+ * cross-origin redirect hops. When present, `createTimedFetch` skips injecting
+ * the SDK host's client-IP header so that address is never delivered to a
+ * redirect target.
+ */
+export const SUPPRESS_CLIENT_IP: unique symbol = Symbol(
+  "opensandbox.suppressClientIp"
+);
+
+/**
  * Options for {@link ConnectionConfig}.
  *
  * Most users only need `domain`, `protocol`, and `apiKey`.
@@ -57,6 +67,10 @@ export interface ConnectionConfigOptions {
   /**
    * Use sandbox server as proxy for process execd requests.
    * Useful when the client SDK cannot access the created sandbox directly.
+   *
+   * @deprecated The server-proxied data path is in maintenance mode (security
+   * and bug fixes only). Route data-plane traffic through the ingress gateway
+   * instead.
    */
   useServerProxy?: boolean;
   /**
@@ -296,25 +310,34 @@ function createTimedFetch(opts: {
           )
         : undefined;
 
-    const onAbort = () =>
-      ac.abort((requestSignal as any)?.reason ?? new Error("Aborted"));
-    if (requestSignal) {
-      if (requestSignal.aborted) onAbort();
-      else
-        requestSignal.addEventListener("abort", onAbort, { once: true } as any);
-    }
+    // Caller cancellation covers the response body too; only the SDK's
+    // response-header deadline is cleared when fetch resolves.
+    const signal = requestSignal
+      ? AbortSignal.any([requestSignal, ac.signal])
+      : ac.signal;
 
     // Best-effort: attach the SDK host's own IP so the server can see the
     // client's self-reported address. Applied per request (never overriding a
     // caller-supplied value or dropping existing headers) and skipped silently
     // when the IP is unavailable. Await the one-time detection so even the very
     // first request carries the header (bounded by the probe timeout).
-    await ensureClientIpReady();
-    const withIp = withClientIp(input, init);
-    const reqInput = withIp.input;
+    //
+    // Cross-origin redirect hops set SUPPRESS_CLIENT_IP so the SDK host's
+    // intranet address is not delivered to a redirect target.
+    const suppressClientIp =
+      (init as Record<PropertyKey, unknown> | undefined)?.[SUPPRESS_CLIENT_IP] === true;
+
+    let reqInput: RequestInfo | URL = input;
+    let effectiveInit: RequestInit | undefined = init;
+    if (!suppressClientIp) {
+      await ensureClientIpReady();
+      const withIp = withClientIp(input, init);
+      reqInput = withIp.input;
+      effectiveInit = withIp.init;
+    }
     const mergedInit: RequestInit = {
-      ...(withIp.init ?? {}),
-      signal: ac.signal,
+      ...(effectiveInit ?? {}),
+      signal,
     };
 
     if (debug) {
@@ -322,7 +345,7 @@ function createTimedFetch(opts: {
       // by withClientIp (which include the client-IP header), falling back to
       // the request input's headers when it is a Request object.
       const outgoing = new Headers(
-        withIp.init?.headers ??
+        effectiveInit?.headers ??
           (typeof Request !== "undefined" && reqInput instanceof Request
             ? reqInput.headers
             : undefined)
@@ -349,8 +372,6 @@ function createTimedFetch(opts: {
       return res;
     } finally {
       if (t) clearTimeout(t);
-      if (requestSignal)
-        requestSignal.removeEventListener("abort", onAbort as any);
     }
   };
 }
@@ -368,6 +389,10 @@ export class ConnectionConfig {
   readonly userAgent: string = DEFAULT_USER_AGENT;
   /**
    * Use sandbox server as proxy for endpoint requests (default false).
+   *
+   * @deprecated The server-proxied data path is in maintenance mode (security
+   * and bug fixes only). Route data-plane traffic through the ingress gateway
+   * instead.
    */
   readonly useServerProxy: boolean;
   readonly endpointCacheTtlMs: number;
@@ -434,7 +459,7 @@ export class ConnectionConfig {
 
     const headers: Record<string, string> = { ...(opts.headers ?? {}) };
     // Attach API key via header unless the user already provided one.
-    if (this.apiKey && !headers["OPEN-SANDBOX-API-KEY"]) {
+    if (this.apiKey && !Object.keys(headers).some((name) => name.toLowerCase() === "open-sandbox-api-key")) {
       headers["OPEN-SANDBOX-API-KEY"] = this.apiKey;
     }
     // Best-effort user-agent (Node only).

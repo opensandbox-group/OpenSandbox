@@ -61,6 +61,7 @@ from opensandbox.pool_types import (
     PoolLifecycleState,
     PoolSnapshot,
     PoolState,
+    _extra_create_kwargs,
     effective_max_idle_attempts,
     policy_falls_through_to_direct_create,
 )
@@ -912,6 +913,7 @@ class SandboxPoolAsync:
             )
 
         spec = self._creation_spec
+        create_kwargs = _extra_create_kwargs(spec)
         return await self._sandbox_factory.create(
             spec.image,
             timeout=self._config.idle_timeout,
@@ -920,6 +922,7 @@ class SandboxPoolAsync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            **create_kwargs,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,
@@ -952,6 +955,7 @@ class SandboxPoolAsync:
             return sandbox
 
         spec = self._creation_spec
+        create_kwargs = _extra_create_kwargs(spec)
         sandbox = await self._sandbox_factory.create(
             spec.image,
             timeout=self._config.idle_timeout,
@@ -960,6 +964,7 @@ class SandboxPoolAsync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            **create_kwargs,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,
@@ -1279,17 +1284,28 @@ class SandboxPoolAsync:
                 self._in_flight_condition.notify_all()
 
     async def _await_in_flight_drain(self, timeout: timedelta) -> bool:
-        deadline = asyncio.get_running_loop().time() + timeout.total_seconds()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout.total_seconds()
         async with self._in_flight_condition:
             while self._in_flight > 0:
-                remaining = deadline - asyncio.get_running_loop().time()
+                remaining = deadline - loop.time()
                 if remaining <= 0:
                     return False
                 try:
                     await asyncio.wait_for(self._in_flight_condition.wait(), remaining)
                 except (asyncio.TimeoutError, TimeoutError):
-                    return self._in_flight == 0
+                    if self._in_flight > 0:
+                        return False
+        # Kills handed off by those operations target ids already dropped from
+        # the store, so they drain under the same budget.
+        cleanup_tasks = set(self._cleanup_tasks)
+        if not cleanup_tasks:
             return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        _, pending = await asyncio.wait(cleanup_tasks, timeout=remaining)
+        return not pending
 
     async def _stop_reconcile(
         self,

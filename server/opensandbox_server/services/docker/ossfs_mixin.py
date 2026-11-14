@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 class OSSFSMixin:
+
     @staticmethod
     def _validate_bucket_name(bucket: str) -> None:
         """Validate OSS bucket name to prevent command injection."""
@@ -45,7 +46,7 @@ class OSSFSMixin:
                     "message": "OSSFS bucket name cannot be empty.",
                 },
             )
-        if not re.match(r'^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$', bucket):
+        if not re.fullmatch(r'^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$', bucket):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
@@ -94,8 +95,7 @@ class OSSFSMixin:
                     "message": f"Mount path must be absolute: '{path}'",
                 },
             )
-        
-        # Check for dangerous characters that could be used for command injection
+
         dangerous_chars = [';', '&', '|', '`', '$', '(', ')', '<', '>', '\n', '\r']
         for char in dangerous_chars:
             if char in path:

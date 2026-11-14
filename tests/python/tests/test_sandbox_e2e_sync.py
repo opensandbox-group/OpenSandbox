@@ -170,7 +170,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     def test_01_sandbox_lifecycle_and_health(self) -> None:
-        """Test sandbox lifecycle and health monitoring."""
         TestSandboxE2ESync._ensure_sandbox_created()
         sandbox = TestSandboxE2ESync.sandbox
         assert sandbox is not None
@@ -236,7 +235,6 @@ class TestSandboxE2ESync:
         assert sandbox.metrics is not None
         assert sandbox.connection_config is not None
 
-        # Connect to existing sandbox by ID and run a basic command.
         sandbox2 = SandboxSync.connect(
             sandbox.id, connection_config=TestSandboxE2ESync.connection_config
         )
@@ -275,7 +273,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     def test_01_extensions_round_trip(self) -> None:
-        """Verify extensions are returned in create response and get_info."""
         cfg = create_connection_config_sync()
         ext_sandbox = SandboxSync.create(
             image=SandboxImageSpec(get_sandbox_image()),
@@ -508,7 +505,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     def test_01b_host_volume_mount(self) -> None:
-        """Test creating a sandbox with a host volume mount (sync)."""
         if is_kubernetes_runtime():
             pytest.skip("Host path volume E2E is only covered in the Docker runtime suite")
 
@@ -538,7 +534,6 @@ class TestSandboxE2ESync:
         try:
             logger.info("✓ Sandbox with volume created: %s", sandbox.id)
 
-            # Step 1: Verify the host marker file is visible inside the sandbox
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
                 result = sandbox.commands.run(f"cat {container_mount_path}/marker.txt")
@@ -550,13 +545,11 @@ class TestSandboxE2ESync:
             assert result.logs.stdout[0].text == "opensandbox-e2e-marker\n"
             logger.info("✓ Host marker file read successfully inside sandbox")
 
-            # Step 2: Write a file from inside the sandbox to the mounted path (read-write)
             result = sandbox.commands.run(
                 f"echo 'written-from-sandbox' > {container_mount_path}/sandbox-output.txt"
             )
             assert result.error is None, f"Failed to write file: {result.error}"
 
-            # Step 3: Verify the written file is readable
             # Retry: written data may not be immediately visible through bind mount
             for _attempt in range(5):
                 result = sandbox.commands.run(f"cat {container_mount_path}/sandbox-output.txt")
@@ -568,7 +561,6 @@ class TestSandboxE2ESync:
             assert result.logs.stdout[0].text == "written-from-sandbox\n"
             logger.info("✓ File written and verified inside sandbox")
 
-            # Step 4: Verify the mount path is a proper directory
             result = sandbox.commands.run(f"test -d {container_mount_path} && echo OK")
             assert result.error is None
             assert len(result.logs.stdout) == 1
@@ -591,7 +583,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     def test_01c_host_volume_mount_readonly(self) -> None:
-        """Test creating a sandbox with a read-only host volume mount (sync)."""
         if is_kubernetes_runtime():
             pytest.skip("Host path volume E2E is only covered in the Docker runtime suite")
 
@@ -621,7 +612,6 @@ class TestSandboxE2ESync:
         try:
             logger.info("✓ Sandbox with read-only volume created: %s", sandbox.id)
 
-            # Step 1: Verify the host marker file is readable
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
                 result = sandbox.commands.run(f"cat {container_mount_path}/marker.txt")
@@ -633,7 +623,6 @@ class TestSandboxE2ESync:
             assert result.logs.stdout[0].text == "opensandbox-e2e-marker\n"
             logger.info("✓ Host marker file read successfully in read-only mount")
 
-            # Step 2: Verify writing is denied on read-only mount
             result = sandbox.commands.run(
                 f"touch {container_mount_path}/should-fail.txt"
             )
@@ -656,7 +645,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     def test_01d_pvc_named_volume_mount(self) -> None:
-        """Test creating a sandbox with a PVC (Docker named volume) mount (sync)."""
         logger.info("=" * 80)
         logger.info("TEST 1d: Creating sandbox with PVC named volume mount (sync)")
         logger.info("=" * 80)
@@ -683,7 +671,6 @@ class TestSandboxE2ESync:
         try:
             logger.info("✓ Sandbox with PVC volume created: %s", sandbox.id)
 
-            # Step 1: Verify the marker file seeded into the named volume is readable
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
                 result = sandbox.commands.run(f"cat {container_mount_path}/marker.txt")
@@ -695,13 +682,11 @@ class TestSandboxE2ESync:
             assert result.logs.stdout[0].text == "pvc-marker-data\n"
             logger.info("✓ PVC marker file read successfully inside sandbox")
 
-            # Step 2: Write a file from inside the sandbox to the named volume
             result = sandbox.commands.run(
                 f"echo 'written-to-pvc' > {container_mount_path}/pvc-output.txt"
             )
             assert result.error is None, f"Failed to write file: {result.error}"
 
-            # Step 3: Verify the written file is readable
             # Retry: written data may not be immediately visible through bind mount
             for _attempt in range(5):
                 result = sandbox.commands.run(f"cat {container_mount_path}/pvc-output.txt")
@@ -713,7 +698,6 @@ class TestSandboxE2ESync:
             assert result.logs.stdout[0].text == "written-to-pvc\n"
             logger.info("✓ File written and verified inside sandbox via PVC mount")
 
-            # Step 4: Verify the mount path is a proper directory
             result = sandbox.commands.run(f"test -d {container_mount_path} && echo OK")
             assert result.error is None
             assert len(result.logs.stdout) == 1
@@ -736,7 +720,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     def test_01e_pvc_named_volume_mount_readonly(self) -> None:
-        """Test creating a sandbox with a read-only PVC (Docker named volume) mount (sync)."""
         logger.info("=" * 80)
         logger.info("TEST 1e: Creating sandbox with read-only PVC named volume mount (sync)")
         logger.info("=" * 80)
@@ -763,7 +746,6 @@ class TestSandboxE2ESync:
         try:
             logger.info("✓ Sandbox with read-only PVC volume created: %s", sandbox.id)
 
-            # Step 1: Verify the marker file is readable
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
                 result = sandbox.commands.run(f"cat {container_mount_path}/marker.txt")
@@ -775,7 +757,6 @@ class TestSandboxE2ESync:
             assert result.logs.stdout[0].text == "pvc-marker-data\n"
             logger.info("✓ PVC marker file read successfully in read-only mount")
 
-            # Step 2: Verify writing is denied on read-only mount
             result = sandbox.commands.run(
                 f"touch {container_mount_path}/should-fail.txt"
             )
@@ -798,7 +779,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     def test_01f_pvc_named_volume_subpath_mount(self) -> None:
-        """Test creating a sandbox with a PVC named volume mount using subPath (sync)."""
         logger.info("=" * 80)
         logger.info("TEST 1f: Creating sandbox with PVC named volume subPath mount (sync)")
         logger.info("=" * 80)
@@ -826,7 +806,6 @@ class TestSandboxE2ESync:
         try:
             logger.info("✓ Sandbox with PVC subPath volume created: %s", sandbox.id)
 
-            # Step 1: Verify the subpath marker file is readable
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
                 result = sandbox.commands.run(f"cat {container_mount_path}/marker.txt")
@@ -838,7 +817,6 @@ class TestSandboxE2ESync:
             assert result.logs.stdout[0].text == "pvc-subpath-marker\n"
             logger.info("✓ SubPath marker file read successfully")
 
-            # Step 2: Verify we only see the subpath contents (not the full volume)
             result = sandbox.commands.run(f"ls {container_mount_path}/")
             assert result.error is None
             stdout_text = "\n".join(msg.text for msg in result.logs.stdout)
@@ -846,7 +824,7 @@ class TestSandboxE2ESync:
             assert "datasets" not in stdout_text
             logger.info("✓ Only subPath contents are visible inside the sandbox")
 
-            # Step 3: Write a file and verify (retry read-back for transient SSE drops)
+            # Retry read-back for transient SSE drops.
             result = sandbox.commands.run(
                 f"echo 'subpath-write-test' > {container_mount_path}/output.txt"
             )
@@ -877,7 +855,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(2)
     def test_02_basic_command_execution(self) -> None:
-        """Test basic command execution."""
         TestSandboxE2ESync._ensure_sandbox_created()
         sandbox = TestSandboxE2ESync.sandbox
         assert sandbox is not None
@@ -1075,6 +1052,14 @@ class TestSandboxE2ESync:
         assert fail.complete is None
         logger.info("✓ run_in_session failure propagated exit_code=7")
 
+        logger.info("Step 3d: Session stdout events preserve line endings (incl. blank lines)")
+        out_lines = sandbox.commands.run_in_session(sid, "printf 'a\\n\\nb\\n'")
+        assert out_lines.error is None
+        assert out_lines.exit_code == 0
+        joined = "".join(m.text for m in out_lines.logs.stdout)
+        assert joined == "a\n\nb\n", f"session stdout should reconstruct exactly, got: {joined!r}"
+        logger.info("✓ session stdout line endings preserved: %r", joined)
+
         logger.info("Step 4: New session with working_directory=/var — verify create_session working directory again")
         sid2 = sandbox.commands.create_session(working_directory="/var")
         assert sid2 is not None
@@ -1095,7 +1080,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(3)
     def test_02a_command_status_and_logs(self) -> None:
-        """Test command status + background logs (sync)."""
         TestSandboxE2ESync._ensure_sandbox_created()
         sandbox = TestSandboxE2ESync.sandbox
         assert sandbox is not None
@@ -1127,7 +1111,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(3)
     def test_02b_run_command_with_envs(self) -> None:
-        """Test run_command env injection via RunCommandOpts.envs (sync)."""
         TestSandboxE2ESync._ensure_sandbox_created()
         sandbox = TestSandboxE2ESync.sandbox
         assert sandbox is not None
@@ -1139,13 +1122,11 @@ class TestSandboxE2ESync:
             f"else echo \"${{{env_key}}}\"; fi'"
         )
 
-        # Baseline: variable should be empty when not injected.
         baseline = sandbox.commands.run(probe_command)
         assert baseline.error is None
         baseline_output = "\n".join(msg.text for msg in baseline.logs.stdout).strip()
         assert baseline_output == "__EMPTY__"
 
-        # Inject environment variables for this command only.
         injected = sandbox.commands.run(
             probe_command,
             opts=RunCommandOpts(
@@ -1162,7 +1143,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(120)
     @pytest.mark.order(4)
     def test_03_basic_filesystem_operations(self) -> None:
-        """Test basic filesystem operations."""
         TestSandboxE2ESync._ensure_sandbox_created()
         sandbox = TestSandboxE2ESync.sandbox
         assert sandbox is not None
@@ -1301,7 +1281,6 @@ class TestSandboxE2ESync:
         assert after_update_info.size == len(updated_content1.encode("utf-8"))
         _assert_modified_updated(before_update_info.modified_at, after_update_info.modified_at, min_delta_ms=1)
 
-        # Replace file contents via API (replace_contents)
         before_replace_info = after_update_info
         time.sleep(0.05)
         replace_results = sandbox.files.replace_contents_detailed(
@@ -1322,7 +1301,6 @@ class TestSandboxE2ESync:
         after_replace_info = sandbox.files.get_file_info([test_file1])[test_file1]
         _assert_modified_updated(before_replace_info.modified_at, after_replace_info.modified_at, min_delta_ms=1)
 
-        # Replace with no match (replacedCount=0)
         no_match_results = sandbox.files.replace_contents_detailed([
             ContentReplaceEntry(
                 path=test_file1,
@@ -1335,7 +1313,6 @@ class TestSandboxE2ESync:
         assert no_match_results[0].replaced_count == 0
         assert sandbox.files.read_file(test_file1, encoding="utf-8") == replaced_content1
 
-        # Replace with multiple matches (replacedCount>1)
         multi_match_file = f"{test_dir1}/multi_match.txt"
         sandbox.files.write_files([WriteEntry(path=multi_match_file, data="foo bar foo baz foo")])
         multi_results = sandbox.files.replace_contents_detailed([
@@ -1345,7 +1322,6 @@ class TestSandboxE2ESync:
         assert multi_results[0].replaced_count == 3
         assert sandbox.files.read_file(multi_match_file, encoding="utf-8") == "qux bar qux baz qux"
 
-        # Batch replace across multiple files
         batch_file_a = f"{test_dir1}/batch_a.txt"
         batch_file_b = f"{test_dir1}/batch_b.txt"
         sandbox.files.write_files([
@@ -1365,13 +1341,11 @@ class TestSandboxE2ESync:
 
         sandbox.files.delete_files([multi_match_file, batch_file_a, batch_file_b])
 
-        # Verify original replace_contents (no return value) still works
         sandbox.files.replace_contents([
             ContentReplaceEntry(path=test_file1, old_content="Replaced line in file1", new_content="Final line in file1")
         ])
         assert "Final line in file1" in sandbox.files.read_file(test_file1, encoding="utf-8")
 
-        # Move/rename a file via API (move_files)
         moved_path = f"{test_dir2}/moved_file3.txt"
         sandbox.files.move_files([MoveEntry(src=test_file3, dest=moved_path)])
         moved_bytes = sandbox.files.read_bytes(moved_path)
@@ -1379,7 +1353,6 @@ class TestSandboxE2ESync:
         with pytest.raises(Exception):
             sandbox.files.read_bytes(test_file3)
 
-        # Delete file via API (delete_files)
         sandbox.files.delete_files([test_file2])
         with pytest.raises(Exception):
             sandbox.files.read_file(test_file2, encoding="utf-8")
@@ -1387,7 +1360,6 @@ class TestSandboxE2ESync:
         files_after = sandbox.files.search(SearchEntry(path=test_dir1, pattern="*"))
         assert {e.path for e in files_after} == {test_file1}
 
-        # Delete directories recursively (delete_directories)
         sandbox.files.delete_directories([test_dir1, test_dir2])
         verify_dirs_deleted = sandbox.commands.run(
             f"test ! -d {test_dir1} && test ! -d {test_dir2} && echo OK",
@@ -1413,7 +1385,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(60)
     @pytest.mark.order(4)
     def test_03a_line_based_file_reading(self) -> None:
-        """Test line-based file reading with offset and limit."""
         TestSandboxE2ESync._ensure_sandbox_created()
         sandbox = TestSandboxE2ESync.sandbox
         assert sandbox is not None
@@ -1422,15 +1393,12 @@ class TestSandboxE2ESync:
         content = "line1\nline2\nline3\nline4\nline5"
         sandbox.files.write_files([WriteEntry(path=test_path, data=content)])
 
-        # offset=2, limit=2 → lines 2-3
         result = sandbox.files.read_file(test_path, offset=2, limit=2)
         assert result == "line2\nline3"
 
-        # offset=4, no limit → lines 4-5
         result = sandbox.files.read_file(test_path, offset=4)
         assert result == "line4\nline5"
 
-        # limit=2, no offset → lines 1-2
         result = sandbox.files.read_file(test_path, limit=2)
         assert result == "line1\nline2"
 
@@ -1439,7 +1407,6 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(360)
     @pytest.mark.order(5)
     def test_04_interrupt_command(self) -> None:
-        """Test interrupting a long-running command."""
         TestSandboxE2ESync._ensure_sandbox_created()
         sandbox = TestSandboxE2ESync.sandbox
         assert sandbox is not None
@@ -1600,7 +1567,6 @@ class TestSandboxE2ESync:
             time.sleep(1)
         assert healthy is True, "Sandbox should be healthy after resume"
 
-        # Minimal smoke check: after resume, the existing SandboxSync instance should still be usable.
         echo = sandbox.commands.run("echo resume-ok")
         assert echo.error is None
         assert len(echo.logs.stdout) == 1

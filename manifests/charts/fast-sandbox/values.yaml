@@ -70,6 +70,14 @@ controller:
   # are created by the controller; build it with manifests/release/build-fast-sandbox.sh).
   # Empty uses the release-<appVersion> companion image tag.
   sandboxtemplateBuilderImage: ""
+  # -- Extra labels merged into the controller pod template labels.
+  podLabels: {}
+  # -- Extra annotations merged into the controller pod template annotations.
+  podAnnotations: {}
+  # -- Node selector for the controller pod.
+  nodeSelector: {}
+  # -- Affinity for the controller pod.
+  affinity: {}
   # -- Resource requests and limits for the controller
   resources:
     limits:
@@ -90,7 +98,26 @@ controller:
   # fastlet Pods. Defaults to the released companion image published by the
   # umbrella release (build-fast-sandbox.sh); override for clusters that
   # cannot pull from docker.io.
-  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.2.0-rc.1
+  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.2.1
+  # -- Namespaces the controller informer cache watches; empty watches the
+  # whole cluster (upstream "--namespaces" flag, introduced at the f44561a
+  # pin). When set, the list must cover every namespace holding
+  # SandboxPool/Sandbox/SandboxTemplate objects plus systemNamespace (the
+  # runtime environment ConfigMap); the controller refuses to start
+  # otherwise. Keep empty for multi-tenant deployments where sandboxes span
+  # many namespaces (the OpenSandbox default); scope it only when this
+  # control plane shares a large cluster with unrelated workloads and the
+  # cluster-wide initial cache sync is too heavy.
+  namespaces: []
+  # -- API-server client rate limit in queries per second for the shared
+  # controller client (upstream "--kube-client-qps" flag; speeds up the
+  # initial cache-sync LISTs on large clusters; watches are exempt). Must
+  # be set together with kubeClientBurst; 0 keeps the client-go default.
+  kubeClientQPS: 0
+  # -- API-server client burst budget for the rate limiter (upstream
+  # "--kube-client-burst" flag). Must be set together with kubeClientQPS;
+  # 0 keeps the client-go default.
+  kubeClientBurst: 0
 
 # Artifact store shared by the controller, the runtime-agent and golden-image
 # builds. Rendered into the fast-sandbox-artifact-store ConfigMap.
@@ -150,6 +177,7 @@ runtimeEnvironments: |-
         firecracker:
           firecracker:
             binaryPath: /opt/fast-sandbox/firecracker/firecracker
+            vmmDir: /opt/fast-sandbox/firecracker
             jailerPath: /opt/fast-sandbox/firecracker/jailer
             # No kernelPath: restore never boots a kernel (the bundled
             # vmlinux.bin was dropped upstream); direct-boot operators
@@ -199,6 +227,23 @@ runtime:
   # it with your own coarse selector only if the cluster hosts unrelated
   # node pools.
   nodeSelector: {}
+  # -- Extra labels merged into the firecracker-runtime pod template labels.
+  podLabels: {}
+  # -- Extra annotations merged into the firecracker-runtime pod template
+  # annotations (on top of the built-in prometheus.io/* ones).
+  podAnnotations: {}
+  # -- Affinity for the firecracker-runtime DaemonSet pod.
+  affinity: {}
+  # -- DART P2P artifact delivery: when true (default) the chart renders
+  # the dart headless Service, the DaemonSet peer port, and the default
+  # agent.yaml p2p block (each node runs a node-local DART child and peers
+  # fetch blocks from each other). When false the agent pulls artifacts
+  # directly from the origin store (upstream semantics: an empty p2p
+  # config section means direct header-signed pulls) and none of the DART
+  # resources are rendered. Ignored when runtime.config overrides the
+  # whole agent.yaml.
+  p2p:
+    enabled: true
   # -- Container resources for the DaemonSet. Setting requests matters more
   # than limits here: without them the pod is BestEffort and is evicted
   # first under node pressure, taking down the management API for every
@@ -209,6 +254,9 @@ runtime:
     agent: {}
     # -- Resources for the janitor sidecar container.
     janitor: {}
+    # -- Resources for the overlaybd-ublkd sidecar container
+    # (runtime.oci.enabled only).
+    ublkd: {}
   # -- Secret carrying the compiled agent registry configuration
   # (registry.json key with artifact-store pull credentials); must be
   # provisioned by the operator.
@@ -223,7 +271,8 @@ runtime:
   stateRoot: /var/lib/fast-sandbox/firecracker
   # -- Node hostPath sharing the agent UDS socket with fastlet Pods
   socketDir: /run/fast-sandbox/firecracker
-  # -- DART P2P peer listen port (also the headless dart Service port)
+  # -- DART P2P peer listen port (also the headless dart Service port;
+  # rendered only when runtime.p2p.enabled=true)
   dartPeerPort: 9000
   # -- Agent config (agent.yaml). Empty = the chart default (upstream
   # config/dev/agent-config.yaml with the dart discover URL pointing at
@@ -231,3 +280,27 @@ runtime:
   # startup-only; the nodeReadiness section (fcVersion, interval,
   # minFree, minMemory) hot-reloads on every readiness pass.
   config: ""
+  # -- OverlayBD OCI on-demand loading: installs the fsb-vm + OverlayBD
+  # tools bundle (init container), sets FAST_SANDBOX_OCI_ENABLED on the
+  # agent, and runs one overlaybd-ublkd sidecar per node. Nodes need KVM
+  # plus kernel ublk support. Pool fastlets set the flag separately
+  # (pools are not managed by this chart).
+  oci:
+    # -- Whether the node OCI stack (tools init + overlaybd-ublkd sidecar
+    # + agent flag + janitor oci-state-root) is installed
+    enabled: false
+    # -- Shared overlaybd block cache capacity (OVERLAYBD_CACHE_SIZE_GB).
+    cacheSizeGB: 16
+    # -- Target idle ublk device count when OCI is enabled. Set to 0 to disable pooling.
+    poolLow: 4
+    # -- Maximum idle ublk devices retained on release; not a Sandbox count limit. Must be >= poolLow.
+    poolHigh: 8
+    # -- Pool device capacity in GiB (OVERLAYBD_POOL_SIZE_GB). Default 2 matches the OpenSandbox template API's default resourceLimits.disk=2Gi. Must exactly match the built template rootfs capacity; a mismatch falls back to cold device creation.
+    # For 60Gi/200Gi templates set 60/200, respectively; a 200Gi pool cannot
+    # serve a 60Gi template. One daemon supports one capacity. The standalone
+    # fast-sandbox CRD default (30Gi) and fsb-vm build default (20Gi) differ.
+    # Check machine.rootfsSizeMiB in the snapfiles artifact's manifest.json:
+    # for whole-GiB templates,
+    # poolSizeGB = rootfsSizeMiB / 1024. This is unrelated to image layer size,
+    # disk usage or runtime.oci.cacheSizeGB, and is not inferred by Helm.
+    poolSizeGB: 2

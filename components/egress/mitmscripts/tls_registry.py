@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -49,6 +50,17 @@ RequestReason = Literal[
 
 class RegistryError(Exception):
     """A fixed registry error that never contains snapshot data."""
+
+
+class ConnectionAccounting:
+    """Shared process budget. Always take the owning registry lock first."""
+
+    def __init__(self, capacity: int) -> None:
+        if type(capacity) is not int or capacity <= 0:
+            raise ValueError("positive process TLS capacity required")
+        self.capacity = capacity
+        self.occupied = 0
+        self._lock = threading.Lock()
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +146,7 @@ class BoundConnectionRegistry:
         self, *, capacity: int, receiver: Receiver | None = None,
         request_capacity: int | None = None,
         drain_timeout_seconds: int = 30,
+        accounting: ConnectionAccounting | None = None,
     ) -> None:
         if type(capacity) is not int or capacity <= 0:
             raise ValueError("positive TLS registry capacity required")
@@ -146,6 +159,7 @@ class BoundConnectionRegistry:
         if type(drain_timeout_seconds) is not int or not 1 <= drain_timeout_seconds <= 300:
             raise ValueError("TLS drain timeout must be an integer from 1 to 300")
         self._capacity = capacity
+        self._accounting = accounting
         # This compatibility default is not a production HTTP/2 sizing policy.
         self._request_capacity = request_capacity
         self._drain_timeout = drain_timeout_seconds
@@ -302,20 +316,21 @@ class BoundConnectionRegistry:
             )
             if result.action != "needs_registry":
                 return AdmissionResult(result.action, result.reason)
-            if len(self._entries) >= self._capacity:
-                return AdmissionResult("deny", "registry_exhausted")
-            self._next_serial += 1
-            # classify only returns needs_registry for a valid, nonempty SNI
-            # and a matching installed view.
-            assert self._view is not None and sni is not None
-            token = AdmissionToken(
-                self._next_serial,
-                self._view.revision,
-                sni.lower().removesuffix("."),
-                self._owner,
-            )
-            self._entries[token.serial] = token
-            return AdmissionResult("decrypt", "binding_host", token)
+            accounting = self._accounting
+            with accounting._lock if accounting is not None else nullcontext():
+                if (len(self._entries) >= self._capacity or accounting is not None
+                        and accounting.occupied >= accounting.capacity):
+                    return AdmissionResult("deny", "registry_exhausted")
+                self._next_serial += 1
+                assert self._view is not None and sni is not None
+                token = AdmissionToken(
+                    self._next_serial, self._view.revision,
+                    sni.lower().removesuffix("."), self._owner,
+                )
+                self._entries[token.serial] = token
+                if accounting is not None:
+                    accounting.occupied += 1
+                return AdmissionResult("decrypt", "binding_host", token)
 
     def acquire_request(
         self, token: AdmissionToken | None, *, client_stream_id: int | None = None,
@@ -356,7 +371,7 @@ class BoundConnectionRegistry:
                     for serial in self._requests_by_connection.get(token.serial, ())
                 ):
                     return RequestAdmission("deny", "duplicate_client_stream_id")
-            if self._view is None or self._receiver is None:
+            if self._view is None or self._request_snapshot_missing_locked():
                 return RequestAdmission("deny", "snapshot_missing")
             born = token.revision
             current = self._view.revision
@@ -367,7 +382,7 @@ class BoundConnectionRegistry:
             if len(self._requests) >= self._request_capacity:
                 return RequestAdmission("deny", "request_registry_exhausted")
             try:
-                snapshot = self._receiver.acquire()
+                snapshot = self._request_snapshot_locked()
             except Exception:  # noqa: BLE001 - never expose receiver error contents
                 return RequestAdmission("deny", "receiver_unavailable")
             if snapshot is None:
@@ -407,6 +422,13 @@ class BoundConnectionRegistry:
             self._max_admitted_stream_ids = high_water
             return result
 
+    def _request_snapshot_missing_locked(self) -> bool:
+        return self._receiver is None
+
+    def _request_snapshot_locked(self) -> Snapshot | None:
+        """Pin request data under the admission lock; subclasses own publication."""
+        return None if self._receiver is None else self._receiver.acquire()
+
     def finish_request(self, handle: RequestHandle | None) -> bool:
         """Idempotently remove an exact live request, leaving its connection open."""
         with self._lock:
@@ -440,6 +462,9 @@ class BoundConnectionRegistry:
                 del self._requests[serial]
                 self._request_deadlines.pop(serial, None)
             del self._entries[token.serial]
+            if self._accounting is not None:
+                with self._accounting._lock:
+                    self._accounting.occupied -= 1
             self._request_fenced.discard(token.serial)
             self._connection_deadlines.pop(token.serial, None)
             self._max_admitted_stream_ids.pop(token.serial, None)

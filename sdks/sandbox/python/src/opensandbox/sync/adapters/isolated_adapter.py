@@ -58,7 +58,7 @@ from opensandbox.sync.services.isolated import (
     IsolationServiceSyncMixin,
     IsolationSessionSync,
 )
-from opensandbox.transport import unwrap_retry_transport
+from opensandbox.transport import streaming_transport
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,10 @@ def _decode_sse_event_data(data: str) -> EventNode | None:
 
 def _infer_exit_code(execution: Execution) -> int | None:
     if execution.error is not None:
+        # Prefer the authoritative error.exit_code; fall back to parsing evalue
+        # for servers that predate it.
+        if execution.error.exit_code is not None:
+            return execution.error.exit_code
         try:
             return int(execution.error.value)
         except (TypeError, ValueError):
@@ -195,9 +199,8 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
-        # SSE bootstraps bypass the retry wrapper: request bodies are
-        # not replayable and a non-idempotent status opt-in would cause
-        # duplicate execution on a resent SSE POST.
+        # SSE bootstraps keep only the wake-timeout retry: a non-idempotent
+        # status opt-in would cause duplicate execution on a resent SSE POST.
         self._sse_client = httpx.Client(
             headers=sse_headers,
             timeout=httpx.Timeout(
@@ -206,7 +209,7 @@ class IsolatedSessionsAdapterSync(IsolationServiceSyncMixin, IsolationServiceSyn
                 write=timeout_seconds,
                 pool=None,
             ),
-            transport=unwrap_retry_transport(self.connection_config.transport),
+            transport=streaming_transport(self.connection_config.transport),
             **build_redirect_client_options(self.connection_config, base_url),
         )
 

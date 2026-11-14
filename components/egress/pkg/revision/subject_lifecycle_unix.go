@@ -23,6 +23,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 )
@@ -60,6 +61,7 @@ type subjectLifecycleCommand struct {
 	ControlGeneration string        `json:"controlGeneration"`
 	LifecycleSequence int64         `json:"lifecycleSequence"`
 	Target            SubjectTarget `json:"target"`
+	SourceAddresses   *[]string     `json:"sourceAddresses,omitempty"`
 }
 
 type pendingSubjectLifecycle struct {
@@ -106,16 +108,28 @@ func NewSubjectLifecycleClient(socketPath, sessionToken, controlGeneration strin
 // ErrTransportRejected accompanies a confirmed failure receipt. ErrIndeterminate
 // requires Reconcile before any later lifecycle command can be allocated.
 // The caller must supply a context with a deadline; see SubjectLifecycleClient.
-func (c *SubjectLifecycleClient) Register(ctx context.Context, target SubjectTarget) (LifecycleReceipt, error) {
-	return c.command(ctx, "register", target)
+func (c *SubjectLifecycleClient) Register(ctx context.Context, target SubjectTarget, addresses ...netip.Addr) (LifecycleReceipt, error) {
+	canonical := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if !address.IsValid() || address.Zone() != "" {
+			return LifecycleReceipt{}, ErrInvalidTransport
+		}
+		canonical = append(canonical, address.String())
+	}
+	return c.command(ctx, "register", target, &canonical)
 }
 
-// Unload closes exactly this installation owner. A confirmed subject_failed
-// receipt retires its sequence but leaves the remote owner fenced; another
-// explicit Unload may retry closure with a new sequence.
+// Suspend revokes snapshot authority without changing the target or routing.
+// A new prepare/commit is required before dispatch inspection exposes a snapshot.
+func (c *SubjectLifecycleClient) Suspend(ctx context.Context, target SubjectTarget) (LifecycleReceipt, error) {
+	return c.command(ctx, "suspend", target, nil)
+}
+
+// Unload releases the key and source routes even if closure fails. A failed
+// receiver retains its capacity in quarantine until the child process restarts.
 // The caller must supply a context with a deadline; see SubjectLifecycleClient.
 func (c *SubjectLifecycleClient) Unload(ctx context.Context, target SubjectTarget) (LifecycleReceipt, error) {
-	return c.command(ctx, "unload", target)
+	return c.command(ctx, "unload", target, nil)
 }
 
 // Pending reports whether an earlier command still needs exact reconciliation.
@@ -127,7 +141,7 @@ func (c *SubjectLifecycleClient) Pending() bool {
 	return c.pending != nil
 }
 
-func (c *SubjectLifecycleClient) command(ctx context.Context, operation string, target SubjectTarget) (LifecycleReceipt, error) {
+func (c *SubjectLifecycleClient) command(ctx context.Context, operation string, target SubjectTarget, addresses *[]string) (LifecycleReceipt, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pending != nil {
@@ -143,7 +157,7 @@ func (c *SubjectLifecycleClient) command(ctx context.Context, operation string, 
 		return LifecycleReceipt{}, ErrLifecycleSequenceExhausted
 	}
 	sequence := c.last + 1
-	raw, err := json.Marshal(subjectLifecycleCommand{c.control, sequence, target})
+	raw, err := json.Marshal(subjectLifecycleCommand{c.control, sequence, target, addresses})
 	if err != nil || len(raw) > maxSubjectMetadataBytes {
 		return LifecycleReceipt{}, ErrInvalidTransport
 	}
@@ -266,7 +280,7 @@ func decodeLifecycleRecord(data []byte, sequenceKey string, allowInitial bool) (
 	}
 	if record.LifecycleSequence < 1 || isNull(operation) || isNull(digest) || isNull(result) ||
 		json.Unmarshal(operation, &record.Operation) != nil || json.Unmarshal(digest, &record.CommandDigest) != nil ||
-		(record.Operation != "register" && record.Operation != "unload") || !validLifecycleDigest(record.CommandDigest) {
+		(record.Operation != "register" && record.Operation != "unload" && record.Operation != "suspend") || !validLifecycleDigest(record.CommandDigest) {
 		return nil, ErrInvalidTransportResponse
 	}
 	decoded, err := decodeLifecycleResult(result, record.Operation)
@@ -310,8 +324,16 @@ func decodeLifecycleResult(data []byte, operation string) (*LifecycleResult, err
 			expectedStatus = http.StatusServiceUnavailable
 		}
 	case "subject_generation_mismatch":
-		if operation == "unload" {
+		if operation == "unload" || operation == "suspend" {
 			expectedStatus = http.StatusConflict
+		}
+	case "subject_unknown":
+		if operation == "suspend" {
+			expectedStatus = http.StatusNotFound
+		}
+	case "suspended":
+		if operation == "suspend" {
+			expectedStatus = http.StatusOK
 		}
 	case "unloaded", "already_absent":
 		if operation == "unload" {

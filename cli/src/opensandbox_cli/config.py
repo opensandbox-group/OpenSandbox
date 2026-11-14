@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import click
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -49,6 +51,7 @@ DEFAULT_CONFIG_TEMPLATE = """\
 # domain = "localhost:8080"
 # protocol = "http"
 # request_timeout = 30
+# use_server_proxy is deprecated (maintenance mode); prefer the ingress gateway for data-plane traffic.
 # use_server_proxy = false
 
 [output]
@@ -61,17 +64,35 @@ DEFAULT_CONFIG_TEMPLATE = """\
 
 
 def load_config_file(config_path: Path | None = None) -> dict[str, Any]:
-    """Load and parse the TOML config file.
-
-    Returns an empty dict if the file doesn't exist or tomllib is unavailable.
-    """
+    """Load the TOML config file; return {} when it does not exist."""
     path = config_path or DEFAULT_CONFIG_PATH
-    if not path.exists():
-        return {}
     if tomllib is None:
         return {}
-    with open(path, "rb") as f:
-        return tomllib.load(f)
+    # Open directly: exists() raises on an unsearchable parent directory.
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+    except OSError as exc:
+        raise click.ClickException(f"Cannot read config file {path}: {exc}") from exc
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise click.ClickException(
+            f"Config file is not valid TOML ({path}): {exc}"
+        ) from exc
+
+
+# Read as text and stored verbatim so an API key like "007123" is not
+# rewritten as the number 7123.
+STRING_KEYS = frozenset(
+    {
+        "connection.api_key",
+        "connection.domain",
+        "connection.protocol",
+        "defaults.image",
+        "defaults.timeout",
+    }
+)
 
 
 def resolve_config(
@@ -83,19 +104,18 @@ def resolve_config(
     cli_use_server_proxy: bool | None = None,
     config_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Merge config from all sources and return a flat dict.
+    """Merge config from all sources into a flat dict.
 
-    Values that come from the config file are coerced to the type declared for
-    each key. A file may legitimately encode a value with a different TOML type
-    than the CLI expects (for example an all-digit ``connection.api_key`` or a
-    ``defaults.timeout`` given in seconds), and callers downstream rely on the
-    declared type.
-
-    Keys returned:
-      - api_key, domain, protocol, request_timeout (int seconds), use_server_proxy (bool)
-      - default_image, default_timeout (str like "10m")
+    Config-file values are coerced to each key's declared type. Keys returned:
+    api_key, domain, protocol, request_timeout (int seconds),
+    use_server_proxy (bool; deprecated), color, default_image, default_timeout.
     """
     file_cfg = load_config_file(config_path)
+    for section in ("connection", "output", "defaults"):
+        if section in file_cfg and not isinstance(file_cfg[section], dict):
+            raise click.ClickException(
+                f"Config section '{section}' must be a TOML table (use [{section}])."
+            )
     conn = file_cfg.get("connection", {})
     output_cfg = file_cfg.get("output", {})
     defaults = file_cfg.get("defaults", {})
@@ -111,10 +131,11 @@ def resolve_config(
         or os.getenv("OPEN_SANDBOX_PROTOCOL")
         or _str_or_none(conn.get("protocol"))
         or "http",
-        "request_timeout": cli_timeout
-        or _int_or_none(os.getenv("OPEN_SANDBOX_REQUEST_TIMEOUT"))
-        or _int_or_none(conn.get("request_timeout"))
-        or 30,
+        "request_timeout": _request_timeout_seconds(
+            cli_timeout,
+            _int_or_none(os.getenv("OPEN_SANDBOX_REQUEST_TIMEOUT")),
+            _int_or_none(conn.get("request_timeout")),
+        ),
         "use_server_proxy": _coalesce(
             cli_use_server_proxy,
             _bool_or_none(os.getenv("OPEN_SANDBOX_USE_SERVER_PROXY")),
@@ -139,6 +160,20 @@ def init_config_file(config_path: Path | None = None, *, force: bool = False) ->
     return path
 
 
+def _request_timeout_seconds(*candidates: int | None) -> int:
+    """Return the first explicit timeout in seconds; zero/negative values are rejected rather than ignored."""
+    for value in candidates:
+        if value is None:
+            continue
+        if value <= 0:
+            raise click.ClickException(
+                "Request timeout must be a positive number of seconds, "
+                f"got {value}."
+            )
+        return value
+    return 30
+
+
 def _int_or_none(value: Any) -> int | None:
     """Coerce a configured value to ``int``, or ``None`` when it is not numeric."""
     if value is None or isinstance(value, bool):
@@ -154,11 +189,7 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def _bool_or_none(value: Any) -> bool | None:
-    """Coerce a configured value to ``bool``, or ``None`` when it is not boolean.
-
-    ``0``/``1`` are accepted so hand-edited files that write a TOML integer for a
-    boolean key keep resolving instead of silently falling back to the default.
-    """
+    """Coerce to ``bool``, accepting 0/1 so hand-edited files keep resolving."""
     if value is None:
         return None
     if isinstance(value, bool):

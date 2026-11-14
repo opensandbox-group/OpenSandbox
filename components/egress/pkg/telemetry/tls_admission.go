@@ -36,7 +36,7 @@ func RecordTLSAdmission(decision, reason string) {
 	case "deny":
 		switch reason {
 		case "unknown_identity", "invalid_sni", "snapshot_missing", "generation_mismatch",
-			"invalid_input", "registry_exhausted", "admission_disabled", "ssl_insecure", "malformed_extensions":
+			"invalid_input", "non_canonical_port", "registry_exhausted", "admission_disabled", "ssl_insecure", "malformed_extensions":
 			valid = true
 		}
 	}
@@ -47,4 +47,18 @@ func RecordTLSAdmission(decision, reason string) {
 	attrs = append(attrs, attribute.String("mode", "credential-bound"),
 		attribute.String("decision", decision), attribute.String("reason", reason))
 	tlsAdmissionConnections.Add(context.Background(), 1, metric.WithAttributes(attrs...))
+}
+
+// RecordTLSBudget observes current slots without retaining subject identities.
+// Histograms are event observations, not time-weighted occupancy or RSS.
+func RecordTLSBudget(scope string, occupied, budget int64) {
+	if (scope != "process" && scope != "subject") || budget < 1 || budget > 1<<20 ||
+		occupied < 0 || occupied > budget || tlsRegistryOccupancy == nil || tlsRegistryBudget == nil {
+		return
+	}
+	attrs := append([]attribute.KeyValue(nil), egressSharedAttrs()...)
+	attrs = append(attrs, attribute.String("profile", "fast-sandbox"), attribute.String("scope", scope))
+	opts := metric.WithAttributes(attrs...)
+	tlsRegistryOccupancy.Record(context.Background(), occupied, opts)
+	tlsRegistryBudget.Record(context.Background(), budget, opts)
 }

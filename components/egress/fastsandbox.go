@@ -18,11 +18,15 @@
 //
 // Control flow:
 //
-//	fastlet action protocol --(SET_BINDING / LIFECYCLE_HOOK / REMOVE_BINDING)-->
+//	fastlet action protocol --(SET_BINDING / LIFECYCLE_HOOK / REMOVE_BINDING /
+//	                         VAULT_EXPORT / VAULT_IMPORT /
+//	                         POLICY_EXPORT / POLICY_IMPORT)-->
 //	  fastSandboxPolicyServer:18080 (loopback): subject lifecycle + deny-first nft,
-//	  policy activation on sandbox.data-plane-ready (the binding input is the
-//	  policy; the credential vault is egress-held behind the FastPath
-//	  handler-relay, OSEP-0022)
+//	  policy activation on sandbox.data-plane-ready. The binding input seeds the
+//	  policy at create; runtime mutations go through the handler-relay surfaces
+//	  (/policy/{uid} for the recorded policy, /vault/{uid} for the credential
+//	  vault, both egress-held per OSEP-0022) and the persisted files supersede
+//	  replayed binding inputs after a restart.
 //	DNS: one shared proxy, per-query policy via source IP dispatch
 //
 // Subject lifecycle is driven entirely by the Fastlet (Sandbox Actions
@@ -39,6 +43,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -62,6 +67,13 @@ import (
 // on the shared dnsproxy.
 func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.UpstreamProxySpec) {
 	log.Infof("egress profile: fast-sandbox (multi-sandbox control plane)")
+	actionsAPIVersion, err := constants.ParseFastSandboxActionsAPIVersion(os.Getenv(constants.EnvFastSandboxActionsAPIVersion))
+	if err != nil {
+		log.Fatalf("fast-sandbox Actions protocol: %v", err)
+	}
+	if err := validateOwnerDomain(os.Getenv(constants.EnvEgressPolicyDir), actionsAPIVersion); err != nil {
+		log.Fatalf("fast-sandbox Actions domain: %v", err)
+	}
 
 	otelShutdown, err := telemetry.Init(ctx)
 	if err != nil {
@@ -76,10 +88,17 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		}()
 	}
 
-	alwaysDeny, alwaysAllow, err := policy.LoadAlwaysRuleFiles()
+	// Startup load goes THROUGH the loader so its file-state snapshot matches
+	// disk from the first tick: a rule file deleted before the first poll is
+	// then recognized as a removal, and startup rules can never outlive their
+	// files. Loader gate (30s) sits under the one-minute reload ticker so
+	// every tick re-stats the files.
+	loader := policy.NewAlwaysRuleLoader(30 * time.Second)
+	alwaysDeny, alwaysAllow, _, err := loader.RefreshIfDue(time.Now())
 	if err != nil {
 		log.Fatalf("failed to load always allow/deny rule files: %v", err)
 	}
+	log.Infof("loaded %d always-deny rule(s), %d always-allow rule(s) from /var/egress/rules", len(alwaysDeny), len(alwaysAllow))
 
 	podNft := fastsandboxnft.NewApplier(nil, fastSandboxNftOptions(upstreamSpec))
 	// Construct the resolver without starting its listener. Seed hostname
@@ -110,13 +129,36 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
+	fastSandboxSrv.SetActionsAPIVersion(actionsAPIVersion)
+	// The startup snapshot above is re-staged by the reload job every minute,
+	// so configmap-mounted rule changes need no restart.
+	fastSandboxSrv.SetAlwaysRuleLoader(loader)
+
+	// Register the configured state-directory basenames BEFORE either
+	// constructor runs: the volume-root restriction must recognize the
+	// configured sibling as ours even on custom-named deployments.
+	vaultDir := strings.TrimSpace(os.Getenv(constants.EnvEgressVaultDir))
+	policyDir := strings.TrimSpace(os.Getenv(constants.EnvEgressPolicyDir))
+	if policyDir == "" {
+		log.Fatalf("fast-sandbox policy persistence: OPENSANDBOX_EGRESS_POLICY_DIR is required (the recorded policy is egress-held state)")
+	}
+	registerStateDirName(vaultDir)
+	registerStateDirName(policyDir)
+	// The two state directories are siblings holding same-named per-subject
+	// files (<uid>.json) and seal markers: aliasing them would make each
+	// persister clobber the other's state (a restart-time rehydrate of one
+	// kind quarantines the other kind's file). Reject before any state is
+	// written.
+	if vaultDir != "" && policyDir != "" && sameStateDir(vaultDir, policyDir) {
+		log.Fatalf("fast-sandbox policy persistence: OPENSANDBOX_EGRESS_POLICY_DIR must differ from OPENSANDBOX_EGRESS_VAULT_DIR (both resolve to %s)", policyDir)
+	}
 
 	// Vault persistence (OSEP-0022 stage 2): per-subject vault files under
 	// OPENSANDBOX_EGRESS_VAULT_DIR so an egress restart recovers locally at
 	// SET_BINDING replay. Empty/unset keeps the vault memory-only. Fail fast
 	// on an unusable directory: silently serving memory-only would break the
 	// acked ⇒ durable contract.
-	if vaultDir := strings.TrimSpace(os.Getenv(constants.EnvEgressVaultDir)); vaultDir != "" {
+	if vaultDir != "" {
 		vp, err := newVaultPersistence(vaultDir)
 		if err != nil {
 			log.Fatalf("fast-sandbox vault persistence: %v", err)
@@ -124,6 +166,13 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		fastSandboxSrv.SetVaultFiles(vp)
 		log.Infof("fast-sandbox vault persistence enabled at %s (one file per subject, atomic commit protocol)", vaultDir)
 	}
+
+	pp, err := newPolicyPersistence(policyDir)
+	if err != nil {
+		log.Fatalf("fast-sandbox policy persistence: %v", err)
+	}
+	fastSandboxSrv.SetPolicyFiles(pp)
+	log.Infof("fast-sandbox policy persistence enabled at %s (one file per subject, atomic commit protocol)", policyDir)
 
 	// Shared mitmproxy (OSEP-0022 A1): one mitmdump in the Pod netns serving
 	// every sandbox. Started BEFORE the HTTP listener so subjects can never
@@ -157,6 +206,9 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 			log.Fatalf("fast-sandbox mitmproxy ports: %v", err)
 		}
 		fastSandboxSrv.SetMitm(mitmGate, mitm.port, dports)
+		if mitm.subjectOwner != nil {
+			mitm.subjectOwner.attach(fastSandboxSrv, mitm.running)
+		}
 		mitm.watchMitmproxy(ctx, mitmGate)
 		mitmGate.SetReady(true)
 		log.Infof("fast-sandbox mitmproxy watch started (shared listener, healthz-gated)")
@@ -218,7 +270,13 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 			OnResolved: func(domain string, ips []nftables.ResolvedIP) {
 				addCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
-				if err := podNft.AddResolvedIPs(addCtx, s, ips); err != nil {
+				if err := podNft.AddResolvedIPs(addCtx, s, domain, ips); err != nil {
+					if errors.Is(err, fastsandboxnft.ErrLeaseRejected) || errors.Is(err, fastsandboxnft.ErrUnknownSubject) {
+						// Answer was in flight during a rule change: fail
+						// closed, quietly.
+						log.Infof("[dns] resolved IPs for subject %s domain %q not admitted (policy changed during resolution)", s, domain)
+						return
+					}
 					log.Warnf("[dns] add resolved IPs to fast-sandbox nft failed for subject %s domain %q: %v", s, domain, err)
 				}
 			},
@@ -248,6 +306,8 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	})
 	log.Infof("fast-sandbox policy server listening on %s (Sandbox Actions Handler)", httpAddr)
 
+	fastSandboxSrv.startAlwaysRuleReloadJob()
+
 	// Per-subject connection refresh: active TCP connections keep their
 	// dynamic leases alive (bucketed by source IP from the Pod netns
 	// conntrack table).
@@ -274,6 +334,18 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	// ApplyReset before serving.
 	log.Infof("fast-sandbox profile shutdown complete")
 	_ = os.Stderr.Sync()
+}
+
+// sameStateDir reports whether two state-directory paths resolve to the
+// same directory (lexical cleaning plus best-effort symlink resolution).
+func sameStateDir(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if a == b {
+		return true
+	}
+	ra, erra := filepath.EvalSymlinks(a)
+	rb, errb := filepath.EvalSymlinks(b)
+	return erra == nil && errb == nil && ra == rb
 }
 
 // fastSandboxNftOptions assembles the fast-sandbox nft options: the shared

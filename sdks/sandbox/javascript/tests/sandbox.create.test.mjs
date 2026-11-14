@@ -535,6 +535,35 @@ test("Sandbox.create reports create metrics after ready", async () => {
   assert.match(ua, /^OpenSandbox-JS-SDK\//);
 });
 
+for (const headerName of ["open-sandbox-api-key", "Open-Sandbox-Api-Key"]) {
+  test(`Sandbox.create metrics preserves explicit ${headerName}`, async (t) => {
+    const { adapterFactory } = createAdapterFactory();
+    const config = new ConnectionConfig({
+      domain: "http://127.0.0.1:8080",
+      apiKey: "fallback-key",
+      headers: { [headerName]: "explicit-key" },
+    }).withTransportIfMissing();
+    t.after(() => config.closeTransport());
+    const requests = [];
+    Object.defineProperty(config, "fetch", {
+      get: () => async (url, init) => {
+        requests.push(new Request(url, init));
+        return new Response(null);
+      },
+    });
+    const sandbox = await Sandbox.create({
+      adapterFactory,
+      connectionConfig: config,
+      image: "python:3.12",
+      skipHealthCheck: true,
+    });
+    t.after(() => sandbox.close());
+    assert.equal(requests.length, 1);
+    assert.match(requests[0].url, /\/metrics\/events$/);
+    assert.equal(requests[0].headers.get("open-sandbox-api-key"), "explicit-key");
+  });
+}
+
 test("Sandbox.create metrics failure does not change create error", async () => {
   const { adapterFactory } = createAdapterFactory();
   adapterFactory.createExecdStack = () => ({

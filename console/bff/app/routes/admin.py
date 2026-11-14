@@ -23,9 +23,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from app.config import get_settings
 from app.deps import get_session_payload, require_admin_session
 from app.lifecycle import LifecycleClient
+from app.k8s_platform import probe_platform_deployment
+from app.k8s_probe import probe_node_agent
+from app.k8s_resources import list_events, list_workloads
+from app.nodeagent_archive import fetch_archive_logs
+from app.query_params import parse_archive_max_bytes, parse_query_int
 from app.routes.proxy_utils import passthrough_json
 from app.routes.admin_proxy import admin_get_sandbox, admin_lifecycle_request
-from app.routes.session_keys import api_key_for_tenant_name
+from app.routes.session_keys import api_key_for_tenant_name, tenant_namespace_for_name
 from app.runtime import aggregate_runtime_stats, attach_runtime_summary
 from app.tenants import load_tenants
 
@@ -322,6 +327,42 @@ async def admin_delete_snapshot(
     return await admin_lifecycle_request(tenant, "DELETE", f"/snapshots/{snapshot_id}", request=request)
 
 
+@router.get("/k8s/workloads")
+async def admin_k8s_workloads(
+    request: Request,
+    payload: dict = Depends(get_session_payload),
+) -> dict[str, Any]:
+    require_admin_session(payload)
+    settings = get_settings()
+    qp = request.query_params
+    limit = parse_query_int(qp.get("limit"), field="limit", default=200, maximum=500)
+    return await list_workloads(
+        settings,
+        tenant=qp.get("tenant"),
+        namespace=qp.get("namespace"),
+        sandbox_id=qp.get("sandboxId"),
+        limit=limit,
+    )
+
+
+@router.get("/k8s/events")
+async def admin_k8s_events(
+    request: Request,
+    payload: dict = Depends(get_session_payload),
+) -> dict[str, Any]:
+    require_admin_session(payload)
+    settings = get_settings()
+    qp = request.query_params
+    limit = parse_query_int(qp.get("limit"), field="limit", default=100, maximum=300)
+    return await list_events(
+        settings,
+        tenant=qp.get("tenant"),
+        namespace=qp.get("namespace"),
+        sandbox_id=qp.get("sandboxId"),
+        limit=limit,
+    )
+
+
 @router.get("/stats/runtime")
 async def admin_runtime_stats(
     request: Request,
@@ -435,3 +476,69 @@ async def admin_sandbox_diagnostic_events(
         params=params,
     )
     return await passthrough_json(resp)
+
+
+@router.get("/platform/summary")
+async def admin_platform_summary(
+    payload: dict = Depends(get_session_payload),
+) -> dict[str, Any]:
+    require_admin_session(payload)
+    client = LifecycleClient(get_settings())
+    health: dict[str, Any] | None = None
+    version: dict[str, Any] | None = None
+    health_error: str | None = None
+    version_error: str | None = None
+    try:
+        health = await client.get_health()
+    except Exception as exc:
+        health_error = str(exc)
+    try:
+        version = await client.get_version()
+    except Exception as exc:
+        version_error = str(exc)
+
+    return {
+        "asOf": datetime.now(timezone.utc).isoformat(),
+        "server": {
+            "health": health,
+            "healthError": health_error,
+            "version": version,
+            "versionError": version_error,
+        },
+        "components": {
+            "ingress": await probe_platform_deployment(
+                get_settings(),
+                component="ingress",
+                deployment_name=get_settings().bff_k8s_ingress_deployment,
+            ),
+            "controller": await probe_platform_deployment(
+                get_settings(),
+                component="controller",
+                deployment_name=get_settings().bff_k8s_controller_deployment,
+            ),
+            "nodeAgent": await probe_node_agent(get_settings()),
+            "console": {"status": "ok", "note": "BFF session active"},
+        },
+    }
+
+
+@router.get("/sandboxes/{sandbox_id}/logs/archive")
+async def admin_sandbox_archive_logs(
+    sandbox_id: str,
+    request: Request,
+    payload: dict = Depends(get_session_payload),
+):
+    require_admin_session(payload)
+    tenant = _require_tenant_query(request)
+    namespace = tenant_namespace_for_name(tenant)
+    settings = get_settings()
+    max_bytes = parse_archive_max_bytes(
+        request.query_params.get("maxBytes"),
+        cap=settings.bff_nodeagent_archive_max_bytes,
+    )
+    return await fetch_archive_logs(
+        settings,
+        namespace,
+        sandbox_id,
+        max_bytes=max_bytes,
+    )

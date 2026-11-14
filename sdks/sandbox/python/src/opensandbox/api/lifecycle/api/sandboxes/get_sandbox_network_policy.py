@@ -49,27 +49,50 @@ def _parse_response(
         return response_200
 
     if response.status_code == 401:
-        response_401 = ErrorResponse.from_dict(response.json())
+        try:
+            response_401 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_401
 
     if response.status_code == 403:
-        response_403 = ErrorResponse.from_dict(response.json())
+        try:
+            response_403 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_403
 
     if response.status_code == 404:
-        response_404 = ErrorResponse.from_dict(response.json())
+        try:
+            response_404 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_404
 
+    if response.status_code == 409:
+        try:
+            response_409 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
+
+        return response_409
+
     if response.status_code == 500:
-        response_500 = ErrorResponse.from_dict(response.json())
+        try:
+            response_500 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_500
 
     if response.status_code == 503:
-        response_503 = ErrorResponse.from_dict(response.json())
+        try:
+            response_503 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_503
 
@@ -97,11 +120,10 @@ def sync_detailed(
 ) -> Response[ErrorResponse | PolicyStatusResponse]:
     """Read sandbox network policy
 
-     For Fsb, reads persisted egress Action Binding intent in the tenant's
-    Sandbox CR, not live enforcement state. An absent binding defaults to
-    deny-first when an egress handler is configured; this is not proof of
-    enforcement on a pool without that handler. Other backends proxy the
-    sandbox-side egress service. Requires lifecycle API authentication.
+     Fsb reads the egress-held policy record — the response reflects
+    exactly what the egress enforces, not the create-time binding input.
+    Other backends proxy the sandbox-side egress service. Requires
+    lifecycle API authentication.
 
     Args:
         sandbox_id (str):
@@ -132,11 +154,10 @@ def sync(
 ) -> ErrorResponse | PolicyStatusResponse | None:
     """Read sandbox network policy
 
-     For Fsb, reads persisted egress Action Binding intent in the tenant's
-    Sandbox CR, not live enforcement state. An absent binding defaults to
-    deny-first when an egress handler is configured; this is not proof of
-    enforcement on a pool without that handler. Other backends proxy the
-    sandbox-side egress service. Requires lifecycle API authentication.
+     Fsb reads the egress-held policy record — the response reflects
+    exactly what the egress enforces, not the create-time binding input.
+    Other backends proxy the sandbox-side egress service. Requires
+    lifecycle API authentication.
 
     Args:
         sandbox_id (str):
@@ -162,11 +183,10 @@ async def asyncio_detailed(
 ) -> Response[ErrorResponse | PolicyStatusResponse]:
     """Read sandbox network policy
 
-     For Fsb, reads persisted egress Action Binding intent in the tenant's
-    Sandbox CR, not live enforcement state. An absent binding defaults to
-    deny-first when an egress handler is configured; this is not proof of
-    enforcement on a pool without that handler. Other backends proxy the
-    sandbox-side egress service. Requires lifecycle API authentication.
+     Fsb reads the egress-held policy record — the response reflects
+    exactly what the egress enforces, not the create-time binding input.
+    Other backends proxy the sandbox-side egress service. Requires
+    lifecycle API authentication.
 
     Args:
         sandbox_id (str):
@@ -195,11 +215,10 @@ async def asyncio(
 ) -> ErrorResponse | PolicyStatusResponse | None:
     """Read sandbox network policy
 
-     For Fsb, reads persisted egress Action Binding intent in the tenant's
-    Sandbox CR, not live enforcement state. An absent binding defaults to
-    deny-first when an egress handler is configured; this is not proof of
-    enforcement on a pool without that handler. Other backends proxy the
-    sandbox-side egress service. Requires lifecycle API authentication.
+     Fsb reads the egress-held policy record — the response reflects
+    exactly what the egress enforces, not the create-time binding input.
+    Other backends proxy the sandbox-side egress service. Requires
+    lifecycle API authentication.
 
     Args:
         sandbox_id (str):

@@ -386,7 +386,7 @@ class Fixture:
         self.ctx.server.tls = upstream_tls
         self.handler = handler_type(self.ctx, None)
         self.handler.runtime = self.process
-        admitted = self.process.admit_tls("example.test")
+        admitted = self.process.admit_tls("example.test", destination_port=443)
         assert admitted.token is not None
         assert self.process.track(admitted.token, self.ctx.client)
         self.handler.connected_gate = self.sched.loop.create_future()
@@ -726,7 +726,7 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
                     elif changed == "current_io_missing":
                         removed = f.handler.transports.pop(f.item.connection)
                     elif changed == "runtime_token":
-                        new = f.process.admit_tls("example.test").token
+                        new = f.process.admit_tls("example.test", destination_port=443).token
                         self.assertTrue(f.process.track(new, f.ctx.client))
                     elif changed == "runtime_adapter":
                         f.process._h2[id(f.ctx.client)] = (
@@ -838,6 +838,57 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
         self.assertEqual((denied.action, denied.reason), ("deny", "connection_fenced"))
         self.assertEqual(f.process.registry.request_count, 1)
 
+    def test_live_registry_denies_late_lower_stream_below_frozen_high_water(self):
+        """Real LiveRuntime/Registry owner ordering; no wire or hook claim."""
+        f = self.fixture()
+        token = f.item.token
+        # Stream 3 is held at the pre-acquire point; no handle is fabricated.
+        paused_stream_id = 3
+
+        higher = f.process.acquire_request(token, client_stream_id=5)
+        self.assertEqual((higher.action, higher.reason), ("allow", "admitted"))
+        self.assertIsNotNone(higher.handle)
+        self.assertEqual(higher.handle.client_stream_id, 5)
+        self.assertEqual(
+            f.process.registry.drain_state(token).max_admitted_stream_id, 5
+        )
+
+        old_snapshot = f.process._receiver.acquire()
+        self.assertIsNotNone(old_snapshot)
+        payload = json.loads(old_snapshot.payload)
+        payload.update(
+            state="active-empty",
+            vaultRevision=2,
+            tlsBindingHostSelectors=[],
+            fullRenderedBindings=[],
+            redactions=[],
+        )
+        encoded = json.dumps(payload, separators=(",", ":")).encode()
+        revision = Revision(
+            "control", "subject", 2, 2, 0, hashlib.sha256(encoded).hexdigest()
+        )
+        receiver = f.process._receiver
+        self.assertEqual(receiver.prepare(revision, encoded), revision)
+        self.assertEqual(receiver.commit(revision), revision)
+        self.assertEqual(receiver.readback(), revision)
+
+        state = f.process.registry.drain_state(token)
+        self.assertTrue(state.fenced)
+        self.assertEqual(state.frozen_last_stream_id, 5)
+        self.assertLessEqual(paused_stream_id, state.frozen_last_stream_id)
+        self.assertEqual(f.request_handle.snapshot.revision.decision_epoch, 1)
+        self.assertEqual(higher.handle.snapshot.revision.decision_epoch, 1)
+
+        late = f.process.acquire_request(token, client_stream_id=paused_stream_id)
+        self.assertEqual((late.action, late.reason), ("deny", "connection_fenced"))
+        self.assertIsNone(late.handle)
+        self.assertEqual(f.process.registry.request_count, 2)
+        self.assertEqual(f.process.registry.count, 1)
+
+        f.process.finish_request(higher.handle)
+        f.process.finish_request(f.request_handle)
+        self.assertEqual(f.process.registry.request_count, 0)
+
     def test_close_exception_is_not_consumption_or_completion(self):
         f = self.fixture(
             full_lifecycle=True, delay_cancel=True, handler_type=FailingCloseHandler
@@ -898,7 +949,7 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
         other = connection.Client(
             peername=("127.0.0.1", 1), sockname=("127.0.0.1", 443)
         )
-        other_token = f.process.admit_tls("example.test").token
+        other_token = f.process.admit_tls("example.test", destination_port=443).token
         self.assertTrue(f.process.track(other_token, other))
         with (
             mock.patch.object(
@@ -1013,7 +1064,7 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
         context.client.sni = "example.test"
         context.server.address = ("example.test", 443)
         context.server.tls = True
-        admission = runtime.admit_tls("example.test")
+        admission = runtime.admit_tls("example.test", destination_port=443)
         self.assertTrue(runtime.track(admission.token, context.client))
         addons = {"nextlayer": NextLayerSelector(), "proxyserver": proxyserver}
         master = SimpleNamespace(addons=SimpleNamespace(get=addons.get))
@@ -1088,7 +1139,16 @@ class H2RuntimeLifecycleTest(unittest.TestCase):
                         layers.HttpErrorHook,
                     ),
                 ):
-                    getattr(system, hook.name)(hook.flow)
+                    # requestheaders became a coroutine with OSEP-0025 (the
+                    # exchange resolve defers I/O to an await): drive async
+                    # hooks to completion like mitmproxy does, or the hook
+                    # body never runs and the handle metadata below is
+                    # missing. The live path never suspends here (no
+                    # exchange vaults in this module), so awaiting matches
+                    # the pre-async synchronous behavior exactly.
+                    hook_result = getattr(system, hook.name)(hook.flow)
+                    if asyncio.iscoroutine(hook_result):
+                        await hook_result
                     if isinstance(hook, layers.HttpRequestHeadersHook):
                         admitted_handles.append(
                             hook.flow.metadata[system.FLOW_REQUEST_HANDLE_KEY]

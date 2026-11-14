@@ -223,7 +223,8 @@ class CodeInterpreterSync:
         """
         try:
             execution = self._sandbox.commands.run(RUNTIME_PROCESS_CHECK_COMMAND)
-            return execution.error is None
+            # Only a confirmed exit code 0 counts; a dropped stream is unknown.
+            return execution.error is None and execution.exit_code == 0
         except Exception:
             return False
 

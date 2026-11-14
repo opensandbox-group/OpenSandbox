@@ -66,17 +66,26 @@ def _parse_response(
         return response_202
 
     if response.status_code == 400:
-        response_400 = ErrorResponse.from_dict(response.json())
+        try:
+            response_400 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_400
 
     if response.status_code == 404:
-        response_404 = ErrorResponse.from_dict(response.json())
+        try:
+            response_404 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_404
 
     if response.status_code == 503:
-        response_503 = ErrorResponse.from_dict(response.json())
+        try:
+            response_503 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
 
         return response_503
 
@@ -110,7 +119,9 @@ def sync_detailed(
     handle with 202 Accepted for polling status and logs via
     `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds`
     applies to foreground runs only; background runs are not time-limited (idle GC is suspended while
-    one is active) and are bounded by the session lifetime.
+    one is active) and are bounded by the session lifetime. Foreground streams emit periodic `ping`
+    keepalive events so idle gateway timeouts do not reap the connection while the command produces no
+    output; clients must ignore unrecognized event types.
 
     Args:
         session_id (UUID):
@@ -149,7 +160,9 @@ def sync(
     handle with 202 Accepted for polling status and logs via
     `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds`
     applies to foreground runs only; background runs are not time-limited (idle GC is suspended while
-    one is active) and are bounded by the session lifetime.
+    one is active) and are bounded by the session lifetime. Foreground streams emit periodic `ping`
+    keepalive events so idle gateway timeouts do not reap the connection while the command produces no
+    output; clients must ignore unrecognized event types.
 
     Args:
         session_id (UUID):
@@ -183,7 +196,9 @@ async def asyncio_detailed(
     handle with 202 Accepted for polling status and logs via
     `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds`
     applies to foreground runs only; background runs are not time-limited (idle GC is suspended while
-    one is active) and are bounded by the session lifetime.
+    one is active) and are bounded by the session lifetime. Foreground streams emit periodic `ping`
+    keepalive events so idle gateway timeouts do not reap the connection while the command produces no
+    output; clients must ignore unrecognized event types.
 
     Args:
         session_id (UUID):
@@ -220,7 +235,9 @@ async def asyncio(
     handle with 202 Accepted for polling status and logs via
     `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds`
     applies to foreground runs only; background runs are not time-limited (idle GC is suspended while
-    one is active) and are bounded by the session lifetime.
+    one is active) and are bounded by the session lifetime. Foreground streams emit periodic `ping`
+    keepalive events so idle gateway timeouts do not reap the connection while the command produces no
+    output; clients must ignore unrecognized event types.
 
     Args:
         session_id (UUID):

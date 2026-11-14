@@ -34,7 +34,10 @@ import (
 func newRouterFixture(t *testing.T) (*MultiMergedView, string) {
 	t.Helper()
 
-	base := t.TempDir()
+	// Resolve symlinks: MergedView rejects symlinked path components, and
+	// t.TempDir() sits under the /var symlink on macOS.
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	wsLower := filepath.Join(base, "ws")
 	wsUpper := filepath.Join(base, "upper-ws")
 	subLower := filepath.Join(wsLower, "sub")
@@ -132,7 +135,8 @@ func TestMultiMergedView_LongestPrefixRouting(t *testing.T) {
 }
 
 func TestMultiMergedView_ModeSemanticsPreserved(t *testing.T) {
-	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
 	roLower := filepath.Join(base, "ro")
 	roUpper := filepath.Join(base, "upper-ro")
 	require.NoError(t, os.MkdirAll(roLower, 0o755))

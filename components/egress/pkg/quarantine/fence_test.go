@@ -16,12 +16,12 @@ package quarantine
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 	"github.com/stretchr/testify/require"
 )
 
@@ -85,80 +85,12 @@ func TestFenceEnsureRequiresReadback(t *testing.T) {
 				require.NoError(t, err)
 			}
 			wantCalls := 2
-			if present, err := inspectFence(tc.readback); tc.readErr == nil && err == nil && present {
+			if present, err := nftables.InspectTableJSON(tc.readback, fenceTableReadback); tc.readErr == nil && err == nil && present {
 				wantCalls = 3
 			}
 			require.Equal(t, wantCalls, calls, "both complete snapshots are required after a command, including a lost result")
 		})
 	}
-}
-
-func TestFenceReadbackStrict(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		index     int
-		kind, key string
-		value     any
-	}{
-		{"null-owner", 1, "table", "comment", nil},
-		{"wrong-owner", 1, "table", "comment", "foreign"},
-		{"dormant-table", 1, "table", "flags", []string{"dormant"}},
-		{"process-owned-table", 1, "table", "flags", []string{"owner", "persist"}},
-		{"string-flags", 1, "table", "flags", "dormant"},
-		{"unknown-table-property", 1, "table", "disabled", true},
-		{"wrong-hook", 2, "chain", "hook", "output"},
-		{"late-priority", 2, "chain", "prio", 0},
-		{"symbolic-priority", 2, "chain", "prio", "raw"},
-		{"accept-policy", 2, "chain", "policy", "accept"},
-		{"nat-chain", 2, "chain", "type", "nat"},
-		{"device-bound-chain", 2, "chain", "dev", "eth0"},
-		{"conditional-drop", 5, "rule", "expr", []any{map[string]any{"match": map[string]any{"left": "meta mark", "right": 0}}, map[string]any{"drop": nil}}},
-		{"accept-rule", 5, "rule", "expr", []any{map[string]any{"accept": nil}}},
-		{"invalid-drop-value", 5, "rule", "expr", []any{map[string]any{"drop": true}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var doc struct {
-				Nftables []map[string]any `json:"nftables"`
-			}
-			require.NoError(t, json.Unmarshal(fenceJSON(), &doc))
-			doc.Nftables[tc.index][tc.kind].(map[string]any)[tc.key] = tc.value
-			data, err := json.Marshal(doc)
-			require.NoError(t, err)
-			present, err := inspectFence(data)
-			require.Error(t, err)
-			require.False(t, present)
-		})
-	}
-	for _, index := range []int{1, 2, 3, 4, 5, 6, 7} {
-		for _, duplicate := range []bool{false, true} {
-			var doc struct {
-				Nftables []map[string]any `json:"nftables"`
-			}
-			require.NoError(t, json.Unmarshal(fenceJSON(), &doc))
-			if duplicate {
-				doc.Nftables = append(doc.Nftables, doc.Nftables[index])
-			} else {
-				doc.Nftables = append(doc.Nftables[:index], doc.Nftables[index+1:]...)
-			}
-			data, err := json.Marshal(doc)
-			require.NoError(t, err)
-			_, err = inspectFence(data)
-			require.Error(t, err, "index=%d duplicate=%v", index, duplicate)
-		}
-	}
-	for _, data := range [][]byte{nil, []byte(`{}`), []byte(`null`), []byte(`{"nftables":null}`), []byte(`{"nftables":[]} {}`), []byte(`{"nftables":[],"extra":true}`), []byte(`{"nftables":[null]}`), []byte(`{"nftables":[{"table":null}]}`), []byte(`{"nftables":[{"set":{"family":"inet","table":"opensandbox_quarantine","name":"unexpected"}}]}`)} {
-		_, err := inspectFence(data)
-		require.Error(t, err, "%s", data)
-	}
-	present, err := inspectFence(fenceJSON())
-	require.NoError(t, err)
-	require.True(t, present)
-	present, err = inspectFence(absentFenceJSON)
-	require.NoError(t, err)
-	require.False(t, present)
-	present, err = inspectFence([]byte(strings.Replace(string(fenceJSON()), `"handle":1`, `"handle":1,"flags":[]`, 1)))
-	require.NoError(t, err)
-	require.True(t, present)
 }
 
 func TestFenceCancellationAndSerialization(t *testing.T) {

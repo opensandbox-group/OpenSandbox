@@ -26,10 +26,12 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter"
 )
 
+// kernelWaitingBackoff retries about once a second for five minutes while
+// Jupyter starts. The delay is fixed because wait.Backoff stops retrying as
+// soon as a growing delay reaches its Cap.
 var kernelWaitingBackoff = wait.Backoff{
-	Steps:    60,
-	Duration: 500 * time.Millisecond,
-	Factor:   1.5,
+	Steps:    300,
+	Duration: time.Second,
 	Jitter:   0.1,
 }
 
@@ -37,6 +39,8 @@ var kernelWaitingBackoff = wait.Backoff{
 type Controller struct {
 	baseURL                 string
 	token                   string
+	jupyterRuntimeRoot      string
+	jupyterRuntimeUID       *int
 	mu                      sync.RWMutex
 	jupyterClientMap        sync.Map // map[sessionID]*jupyterKernel
 	defaultLanguageSessions sync.Map // map[Language]string
@@ -45,7 +49,7 @@ type Controller struct {
 	ptySessionMap           sync.Map // map[sessionID]*ptySession
 	isolatedSessionMap      sync.Map // map[sessionID]*isolatedSession
 	db                      *sql.DB
-	dbOnce                  sync.Once
+	dbMu                    sync.Mutex
 }
 
 type jupyterKernel struct {

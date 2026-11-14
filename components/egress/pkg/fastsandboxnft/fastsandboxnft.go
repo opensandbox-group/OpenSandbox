@@ -30,7 +30,7 @@
 //	    tcp/udp dport 853 drop                        <- DoT bypass blocked
 //	    ip saddr <ip> jump subj_<id>                  <- one rule per subject
 //	    meta mark & 0x2 != 0x2 drop                   <- fail-closed tail
-//	  chain subj_<id> (regular chain)                 <- deny sets only
+//	  chain subj_<id> (regular chain)                 <- deny sets and port rules
 //	    ip daddr @subj_<id>_deny_v4/v6 drop
 //
 // Dispatch matches the sandbox source IP only — never iifname: with
@@ -126,8 +126,14 @@ func DefaultRunner(ctx context.Context, script string) ([]byte, error) {
 // deny-first rules have not been installed yet.
 var ErrUnknownSubject = fmt.Errorf("fastsandboxnft: subject rules not installed")
 
-// Options carries fast-sandbox-profile-wide enforcement toggles, loaded once at
-// startup and applied to every table (re)build.
+// ErrLeaseRejected is returned when a DNS answer that was in flight during a
+// rule change (overlay tightened, or the subject reverted to deny-first)
+// carries a domain the installed policy no longer authorizes.
+var ErrLeaseRejected = fmt.Errorf("fastsandboxnft: DNS lease rejected by the installed policy")
+
+// Options carries fast-sandbox-profile-wide enforcement toggles, applied to
+// every table (re)build; ApplyAlwaysRulesReload also re-swaps
+// PortFloorDenyRanges at runtime.
 type Options struct {
 	// BlockDoH443 drops TCP 443 to the DoH blocklist (or all TCP 443 when
 	// no blocklist is provided — strict mode). Same semantics as the sidecar
@@ -154,8 +160,7 @@ type Options struct {
 	// profile's uid-scoped upstream rules.
 	UpstreamProxy *UpstreamProxyEndpoint
 	// PortFloorDenyRanges carries the platform port cap (reachable.ports.cap
-	// complement), enforced profile-wide in the master chains. User
-	// port-scoped rules never reach this profile (#2213).
+	// complement), enforced profile-wide in the master chains.
 	PortFloorDenyRanges []policy.PortRange
 }
 
@@ -338,19 +343,6 @@ func (a *Applier) ApplyPolicy(ctx context.Context, s subject.Subject, pol *polic
 	if pol == nil {
 		pol = policy.DefaultDenyPolicy()
 	}
-	// User port-scoped rules (Ports) would be silently dropped by the fast
-	// path — a deny rule that stops denying is fail-open — so refuse the
-	// apply. PortRanges-only rules are the platform floor, enforced in the
-	// master chains, and are exempt.
-	blocked := 0
-	for _, r := range pol.Egress {
-		if len(r.Ports) > 0 {
-			blocked++
-		}
-	}
-	if blocked > 0 {
-		return fmt.Errorf("fastsandboxnft: subject policy carries %d port-scoped rule(s), which the fast path cannot enforce", blocked)
-	}
 	var b strings.Builder
 	if err := writeSubjectPolicySwapFragment(&b, s, pol, a.opts.MitmRedirectPort); err != nil {
 		return err
@@ -367,15 +359,27 @@ func (a *Applier) ApplyPolicy(ctx context.Context, s subject.Subject, pol *polic
 }
 
 // AddResolvedIPs adds DNS-learned IPs to a subject's dynamic allow sets with
-// a bounded timeout (mirrors the sidecar profile's lease behavior).
-func (a *Applier) AddResolvedIPs(ctx context.Context, s subject.Subject, ips []nftables.ResolvedIP) error {
+// a bounded timeout (mirrors the sidecar profile's lease behavior). The
+// domain is re-authorized against the installed policy under the same lock
+// the always-rule reload rebuilds under, so an answer that was in flight
+// while the overlay tightened cannot re-authorize a revoked domain's IP.
+// Returns ErrLeaseRejected (expected race outcome, not an nft failure — the
+// answer still reaches the client) or ErrUnknownSubject.
+func (a *Applier) AddResolvedIPs(ctx context.Context, s subject.Subject, domain string, ips []nftables.ResolvedIP) error {
 	if len(ips) == 0 {
 		return nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if _, ok := a.subjects[s]; !ok {
+	inst, ok := a.subjects[s]
+	if !ok {
 		return ErrUnknownSubject
+	}
+	// Serialized with ApplyAlwaysRulesReload; inst.pol carries the always
+	// overlay and Evaluate is what the DNS selector used at query time.
+	// Deny-first subjects admit no leases.
+	if inst.pol == nil || inst.pol.Evaluate(domain) == policy.ActionDeny {
+		return ErrLeaseRejected
 	}
 	var b strings.Builder
 	writeResolvedIPsFragment(&b, s, ips)
@@ -436,6 +440,7 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 	if err := a.writeTableHeader(&b); err != nil {
 		return err
 	}
+	now := a.now()
 	for subj, inst := range a.subjects {
 		if subj == s {
 			continue
@@ -449,6 +454,7 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 		if err != nil {
 			return err
 		}
+		writeRemainingLeasesFragment(&b, subj, a.states[subj], now)
 	}
 	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpRemove)
@@ -456,6 +462,69 @@ func (a *Applier) Remove(ctx context.Context, s subject.Subject) error {
 	}
 	delete(a.subjects, s)
 	delete(a.states, s)
+	a.tableReady = true
+	a.recordRuleCountLocked()
+	telemetry.RecordNftablesUpdate()
+	return nil
+}
+
+// ApplyAlwaysRulesReload rebuilds the whole table (as Remove does) after an
+// always-rule reload: the port floor is swapped into the master chains and
+// every installed subject re-emitted with the NEW merged policy from pols.
+// Subjects the applier holds deny-first (inst.pol == nil) stay deny-first
+// even when pols carries a policy for them — a deny-first transition that
+// raced the caller's snapshot must never be resurrected by the rebuild.
+// Every DNS-learned lease is dropped (sidecar parity): a tightened overlay
+// must not keep a revoked domain's IP authorized, and a late DNS answer
+// cannot re-admit one — AddResolvedIPs re-authorizes under this same lock.
+// Active flows keep passing via the established-state accept; a still-
+// allowed domain recovers with the next DNS lookup (the refresh loop renews
+// only mirrored leases, never re-learns). In-memory state mutates only after
+// the transaction commits, so a failed reload stays retryable.
+func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Stage the floor into opts so the script builders emit it; revert on
+	// failure so the applier state matches what the kernel still enforces.
+	previousFloor := a.opts.PortFloorDenyRanges
+	a.opts.PortFloorDenyRanges = portFloor
+	var b strings.Builder
+	if err := a.writeTableHeader(&b); err != nil {
+		a.opts.PortFloorDenyRanges = previousFloor
+		return err
+	}
+	for subj, inst := range a.subjects {
+		// Kernel truth wins over the caller's snapshot: deny-first stays
+		// deny-first (see the doc comment).
+		pol := pols[subj]
+		if inst.pol == nil {
+			pol = nil
+		}
+		var err error
+		if pol == nil {
+			err = writeSubjectDenyFirstFragment(&b, subj, inst.att, a.opts.MitmRedirectPort)
+		} else {
+			err = writeSubjectInitialPolicyFragment(&b, subj, inst.att, pol, a.opts.MitmRedirectPort)
+		}
+		if err != nil {
+			a.opts.PortFloorDenyRanges = previousFloor
+			return err
+		}
+	}
+	if err := a.applyWithMissingTableFallback(ctx, b.String()); err != nil {
+		a.opts.PortFloorDenyRanges = previousFloor
+		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
+		return err
+	}
+	for subj, inst := range a.subjects {
+		pol := pols[subj]
+		if inst.pol == nil {
+			pol = nil
+		}
+		inst.pol = pol
+		a.subjects[subj] = inst
+	}
+	a.states = make(map[subject.Subject]*refreshState) // leases cleared with the table; the refresh mirror renews, never re-learns
 	a.tableReady = true
 	a.recordRuleCountLocked()
 	telemetry.RecordNftablesUpdate()
@@ -619,8 +688,8 @@ func writeSubjectDenyFirstFragment(b *strings.Builder, s subject.Subject, att ac
 	}
 	writeSubjectChain(b, s, mitmPort)
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, true)
-	writeSubjectInputVerdictRules(b, s, policy.ActionDeny, mitmPort)
+	writeSubjectForwardDenyRules(b, s, nil, true)
+	writeSubjectInputVerdictRules(b, s, nil, mitmPort)
 	return nil
 }
 
@@ -632,9 +701,9 @@ func writeSubjectInitialPolicyFragment(b *strings.Builder, s subject.Subject, at
 	}
 	writeSubjectChain(b, s, mitmPort)
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, false)
-	writeSubjectMarkRules(b, s, pol.DefaultAction)
-	writeSubjectInputVerdictRules(b, s, pol.DefaultAction, mitmPort)
+	writeSubjectForwardDenyRules(b, s, pol, false)
+	writeSubjectMarkRules(b, s, pol)
+	writeSubjectInputVerdictRules(b, s, pol, mitmPort)
 	return nil
 }
 
@@ -657,8 +726,8 @@ func writeSubjectResetFragment(b *strings.Builder, s subject.Subject, att action
 		fmt.Fprintf(b, "flush set inet %s %s\n", TableName, name)
 	}
 	writeDispatchRule(b, s, att, mitmPort)
-	writeSubjectForwardDenyRules(b, s, true)
-	writeSubjectInputVerdictRules(b, s, policy.ActionDeny, mitmPort)
+	writeSubjectForwardDenyRules(b, s, nil, true)
+	writeSubjectInputVerdictRules(b, s, nil, mitmPort)
 	return nil
 }
 
@@ -692,9 +761,9 @@ func writeSubjectPolicySwapFragment(b *strings.Builder, s subject.Subject, pol *
 	if err := writeSetElements(b, denySetName(s, "v6"), denyV6); err != nil {
 		return err
 	}
-	writeSubjectForwardDenyRules(b, s, false)
-	writeSubjectMarkRules(b, s, pol.DefaultAction)
-	writeSubjectInputVerdictRules(b, s, pol.DefaultAction, mitmPort)
+	writeSubjectForwardDenyRules(b, s, pol, false)
+	writeSubjectMarkRules(b, s, pol)
+	writeSubjectInputVerdictRules(b, s, pol, mitmPort)
 	return nil
 }
 
@@ -759,14 +828,16 @@ func writeSubjectChain(b *strings.Builder, s subject.Subject, mitmPort int) {
 }
 
 // writeSubjectForwardDenyRules emits the forward-path subject chain content:
-// the deny-set drops ONLY. No accept verdicts exist in the forward path
+// the deny-set and port-scoped drops ONLY. No accept verdicts exist in the forward path
 // (bridge-netfilter semantics — an explicit accept would return the frame to
 // the bridge L2 path and drop it); allowed traffic is marked in prerouting
 // and simply not dropped by the master-chain tail. denyFirst additionally
 // appends a bare drop so a deny-first subject is blocked even before any
 // marks could exist.
-func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, denyFirst bool) {
+func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy, denyFirst bool) {
 	chain := subjectChain(s)
+	deny, _ := pol.PortScopedRules()
+	writeSubjectPortRules(b, chain, deny, false, "drop")
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s drop\n", TableName, chain, denySetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s drop\n", TableName, chain, denySetName(s, "v6"))
 	if denyFirst {
@@ -779,12 +850,14 @@ func writeSubjectForwardDenyRules(b *strings.Builder, s subject.Subject, denyFir
 // unmarked and is dropped by the master-chain tail); default-allow policies
 // mark EVERY outbound packet (the deny sets still drop). Deny-first subjects
 // carry no mark rules at all.
-func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, defaultAction string) {
+func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy) {
 	chain := markChainName(s)
-	if defaultAction == policy.ActionAllow {
+	if pol.DefaultAction == policy.ActionAllow {
 		fmt.Fprintf(b, "add rule inet %s %s meta mark set 0x%x\n", TableName, chain, allowMark)
 		return
 	}
+	_, allow := pol.PortScopedRules()
+	writeSubjectPortRules(b, chain, allow, false, fmt.Sprintf("meta mark set 0x%x", allowMark))
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s meta mark set 0x%x\n", TableName, chain, allowSetName(s, "v4"), allowMark)
 	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s meta mark set 0x%x\n", TableName, chain, allowSetName(s, "v6"), allowMark)
 	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s meta mark set 0x%x\n", TableName, chain, dynSetName(s, "v4"), allowMark)
@@ -797,21 +870,53 @@ func writeSubjectMarkRules(b *strings.Builder, s subject.Subject, defaultAction 
 // accept semantics are normal for local delivery, and the conntrack ORIGINAL
 // destination is matched. The trailing rule carries the default action: drop
 // for default-deny (deny-first and enforcing), accept for default-allow.
-func writeSubjectInputVerdictRules(b *strings.Builder, s subject.Subject, defaultAction string, mitmPort int) {
+func writeSubjectInputVerdictRules(b *strings.Builder, s subject.Subject, pol *policy.NetworkPolicy, mitmPort int) {
 	if mitmPort <= 0 {
 		return
 	}
 	in := subjectChainIn(s)
+	deny, allow := pol.PortScopedRules()
+	writeSubjectPortRules(b, in, deny, true, "drop")
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s drop\n", TableName, in, denySetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s drop\n", TableName, in, denySetName(s, "v6"))
+	writeSubjectPortRules(b, in, allow, true, "accept")
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s accept\n", TableName, in, dynSetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s accept\n", TableName, in, dynSetName(s, "v6"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip daddr @%s accept\n", TableName, in, allowSetName(s, "v4"))
 	fmt.Fprintf(b, "add rule inet %s %s ct original ip6 daddr @%s accept\n", TableName, in, allowSetName(s, "v6"))
-	if defaultAction == policy.ActionDeny {
+	if pol == nil || pol.DefaultAction == policy.ActionDeny {
 		fmt.Fprintf(b, "add rule inet %s %s drop\n", TableName, in)
 	} else {
 		fmt.Fprintf(b, "add rule inet %s %s accept\n", TableName, in)
+	}
+}
+
+func writeSubjectPortRules(b *strings.Builder, chain string, rules []policy.PortScopedRule, original bool, verdict string) {
+	for _, r := range rules {
+		// PortRanges-only rules are the platform cap, already enforced in the master chains.
+		if len(r.Ports) == 0 {
+			continue
+		}
+		members := make([]string, 0, len(r.Ports))
+		for _, port := range r.Ports {
+			members = append(members, fmt.Sprintf("%d", port))
+		}
+		target := ""
+		if r.Target != "" {
+			daddr := "ip daddr"
+			if r.IsV6 {
+				daddr = "ip6 daddr"
+			}
+			if original {
+				daddr = "ct original " + daddr
+			}
+			target = daddr + " " + r.Target + " "
+		}
+		dport := "tcp dport"
+		if original {
+			dport = "meta l4proto tcp ct original proto-dst"
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s%s { %s } %s\n", TableName, chain, target, dport, strings.Join(members, ", "), verdict)
 	}
 }
 
@@ -862,25 +967,45 @@ func writeDispatchRule(b *strings.Builder, s subject.Subject, att actionhandler.
 	}
 }
 
-// writeResolvedIPsFragment adds DNS-learned IPs to a subject's dynamic sets
-// with clamped TTLs (mirrors pkg/nftables lease behavior).
+// writeResolvedIPsFragment adds or renews DNS-learned IPs in a subject's
+// dynamic sets with clamped TTLs (mirrors pkg/nftables lease behavior).
 func writeResolvedIPsFragment(b *strings.Builder, s subject.Subject, ips []nftables.ResolvedIP) {
-	var v4, v6 []string
 	for _, r := range ips {
 		addr := r.Addr.Unmap()
-		ttl := clampTTL(r.TTL)
-		value := fmt.Sprintf("%s timeout %ds", addr, int(ttl/time.Second))
+		var set string
 		if addr.Is4() {
-			v4 = append(v4, value)
+			set = dynSetName(s, "v4")
 		} else if addr.Is6() {
-			v6 = append(v6, value)
+			set = dynSetName(s, "v6")
+		} else {
+			continue
 		}
+		nftables.WriteTimedElement(b, TableName, set, addr, clampTTL(r.TTL))
 	}
-	if len(v4) > 0 {
-		fmt.Fprintf(b, "add element inet %s %s { %s }\n", TableName, dynSetName(s, "v4"), strings.Join(v4, ", "))
+}
+
+// writeRemainingLeasesFragment re-adds a subject's unexpired DNS-learned IPs
+// to its freshly rebuilt dynamic sets with the time each lease has left, so
+// rebuilding the table to remove another subject keeps them allowed.
+func writeRemainingLeasesFragment(b *strings.Builder, s subject.Subject, st *refreshState, now time.Time) {
+	if st == nil {
+		return
 	}
-	if len(v6) > 0 {
-		fmt.Fprintf(b, "add element inet %s %s { %s }\n", TableName, dynSetName(s, "v6"), strings.Join(v6, ", "))
+	for addr, expiresAt := range st.dyn {
+		left := expiresAt.Sub(now)
+		if left <= 0 {
+			continue
+		}
+		var set string
+		if addr.Is4() {
+			set = dynSetName(s, "v4")
+		} else if addr.Is6() {
+			set = dynSetName(s, "v6")
+		} else {
+			continue
+		}
+		seconds := int((left + time.Second - 1) / time.Second)
+		fmt.Fprintf(b, "add element inet %s %s { %s timeout %ds }\n", TableName, set, addr, seconds)
 	}
 }
 

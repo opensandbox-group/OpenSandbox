@@ -190,7 +190,7 @@ async def test_validate_startup_warns_gvisor_with_egress() -> None:
         await validate_secure_runtime_on_startup(config, k8s_client=k8s_client)
 
     mock_logger.warning.assert_called_once()
-    assert "iptables nat" in mock_logger.warning.call_args[0][0]
+    assert "nftables" in mock_logger.warning.call_args[0][0]
 
 
 @pytest.mark.asyncio

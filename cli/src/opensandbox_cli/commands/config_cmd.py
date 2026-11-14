@@ -26,7 +26,7 @@ from tomlkit.exceptions import ParseError
 from tomlkit.items import InlineTable, Table
 
 from opensandbox_cli.client import ClientContext
-from opensandbox_cli.config import init_config_file, resolve_config
+from opensandbox_cli.config import STRING_KEYS, init_config_file, resolve_config
 from opensandbox_cli.utils import handle_errors, output_option, prepare_output
 
 
@@ -53,7 +53,8 @@ def config_init(obj: ClientContext, force: bool, output_format: str | None) -> N
         path = init_config_file(obj.config_path, force=force)
         output.success(f"Config file created: {path}")
     except FileExistsError as exc:
-        output.warning(str(exc))
+        output.error(str(exc))
+        raise click.exceptions.Exit(1) from None
 
 
 _SENSITIVE_CONFIG_KEYS = {
@@ -107,13 +108,7 @@ def config_show(obj: ClientContext, output_format: str | None) -> None:
 
 
 def _parse_toml_value(raw: str) -> Any:
-    """Infer a TOML scalar type from a raw CLI string.
-
-    Booleans, integers, and floats are recognized so values like ``false`` or
-    ``30`` keep their native TOML type; anything else is stored as a string.
-    The value is always serialized by tomlkit, so quotes, escapes, and
-    whitespace in string values are encoded correctly.
-    """
+    """Infer a TOML scalar type (bool/int/float) from a raw CLI string; else keep text."""
     normalized = raw.lower()
     if normalized in ("true", "false"):
         return normalized == "true"
@@ -166,7 +161,7 @@ def config_set(
     if not isinstance(table, (Table, InlineTable, OutOfOrderTableProxy)):
         raise click.ClickException(f"Cannot set {key}: '{section}' is not a TOML table.")
 
-    table[field] = _parse_toml_value(value)
+    table[field] = value if key in STRING_KEYS else _parse_toml_value(value)
     path.write_text(tomlkit.dumps(document), encoding="utf-8")
 
     obj.output.success(f"Set {key} = {value}")

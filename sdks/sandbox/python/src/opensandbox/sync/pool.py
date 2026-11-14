@@ -60,6 +60,7 @@ from opensandbox.pool_types import (
     PoolLifecycleState,
     PoolSnapshot,
     PoolState,
+    _extra_create_kwargs,
     effective_max_idle_attempts,
     policy_falls_through_to_direct_create,
 )
@@ -1133,6 +1134,7 @@ class SandboxPoolSync:
             )
 
         spec = self._creation_spec
+        create_kwargs = _extra_create_kwargs(spec)
         return self._sandbox_factory.create(
             spec.image,
             timeout=self._config.idle_timeout,
@@ -1141,6 +1143,7 @@ class SandboxPoolSync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            **create_kwargs,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,
@@ -1184,6 +1187,7 @@ class SandboxPoolSync:
             return sandbox
 
         spec = self._creation_spec
+        create_kwargs = _extra_create_kwargs(spec)
         sandbox = self._sandbox_factory.create(
             spec.image,
             timeout=self._config.idle_timeout,
@@ -1192,6 +1196,7 @@ class SandboxPoolSync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            **create_kwargs,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,

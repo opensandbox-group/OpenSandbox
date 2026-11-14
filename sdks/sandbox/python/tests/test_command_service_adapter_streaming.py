@@ -48,7 +48,8 @@ LITERAL_ARGV = [
 
 
 class _SseTransport(httpx.AsyncBaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, explicit_exit_code: bool = False) -> None:
+        self.explicit_exit_code = explicit_exit_code
         self.last_request: httpx.Request | None = None
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -65,6 +66,8 @@ class _SseTransport(httpx.AsyncBaseTransport):
                 b'data: {"type":"result","results":{"text":"ok"},"timestamp":3}\n\n'
                 b'data: {"type":"execution_complete","timestamp":4,"execution_time":5}\n\n'
             )
+            if self.explicit_exit_code:
+                sse = sse.replace(b'"execution_time":5}', b'"execution_time":5,"exit_code":0}')
             return httpx.Response(
                 200,
                 headers={"Content-Type": "text/event-stream"},
@@ -164,8 +167,9 @@ class _SseTransport(httpx.AsyncBaseTransport):
 
 
 @pytest.mark.asyncio
-async def test_run_command_streaming_happy_path_updates_execution() -> None:
-    transport = _SseTransport()
+@pytest.mark.parametrize("explicit_exit_code", [False, True])
+async def test_run_command_streaming_happy_path_updates_execution(explicit_exit_code: bool) -> None:
+    transport = _SseTransport(explicit_exit_code)
     cfg = ConnectionConfig(protocol="http", transport=transport)
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CommandsAdapter(cfg, endpoint)
@@ -486,3 +490,70 @@ async def test_foreground_drains_terminal_response_and_closes_stream(
     assert (execution.complete is None) == failure
     assert stream.exhausted
     assert stream.closed
+
+
+class _ErrorEventTransport(httpx.AsyncBaseTransport):
+    """Replies to any request with a single CommandExecError event."""
+
+    def __init__(self, error: dict) -> None:
+        self._error = error
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        sse = (
+            b'data: {"type":"init","text":"exec-err","timestamp":1}\n\n'
+            + b"data: "
+            + json.dumps({"type": "error", "error": self._error, "timestamp": 2}).encode()
+            + b"\n\n"
+        )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=sse,
+            request=request,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_session", [False, True])
+@pytest.mark.parametrize(
+    ("error", "expected_error_exit_code", "expected_exit_code"),
+    [
+        # exit_code is authoritative and wins over evalue.
+        ({"ename": "CommandExecError", "evalue": "3", "exit_code": 3}, 3, 3),
+        # A shell killed by a signal is a failure with exit_code -1.
+        ({"ename": "CommandExecError", "evalue": "-1", "exit_code": -1}, -1, -1),
+        # Start failure: no exit_code and a free-form evalue.
+        ({"ename": "CommandExecError", "evalue": "fork/exec /bin/sh: argument list too long"}, None, None),
+        # Older servers without exit_code: fall back to parsing evalue.
+        ({"ename": "CommandExecError", "evalue": "7"}, None, 7),
+    ],
+)
+async def test_error_exit_code_propagates_to_execution(
+    error: dict,
+    expected_error_exit_code: int | None,
+    expected_exit_code: int | None,
+    in_session: bool,
+) -> None:
+    cfg = ConnectionConfig(protocol="http", transport=_ErrorEventTransport(error))
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapter(cfg, endpoint)
+
+    if in_session:
+        execution = await adapter.run_in_session("sess-err", "cmd")
+    else:
+        execution = await adapter.run("cmd")
+
+    assert execution.error is not None
+    assert execution.error.exit_code == expected_error_exit_code
+    assert execution.exit_code == expected_exit_code
+    assert execution.complete is None
+
+
+def test_server_stream_event_preserves_optional_zero_exit_code() -> None:
+    from opensandbox.api.execd.models.server_stream_event import ServerStreamEvent
+
+    explicit = ServerStreamEvent.from_dict({"type": "execution_complete", "exit_code": 0})
+    assert explicit.exit_code == 0
+    assert explicit.to_dict()["exit_code"] == 0
+    legacy = ServerStreamEvent.from_dict({"type": "execution_complete"})
+    assert "exit_code" not in legacy.to_dict()

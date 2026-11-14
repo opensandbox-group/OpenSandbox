@@ -80,18 +80,6 @@ public class EgressAdapterNetworkPolicyTests
         }
         """;
 
-    private const string OkPolicyWithMalformedPort = """
-        {
-          "status": "ok",
-          "policy": {
-            "defaultAction": "deny",
-            "egress": [
-              { "action": "allow", "ports": ["https"] }
-            ]
-          }
-        }
-        """;
-
     private const string OkPolicyWithEmptyPorts = """
         {
           "status": "ok",

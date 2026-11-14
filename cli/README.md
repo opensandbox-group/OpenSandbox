@@ -202,7 +202,8 @@ osb sandbox create -f sandbox-request.json -o json
 Templates are golden-image builds; the build runs asynchronously, so poll `template get` until the status phase is `Succeeded`. Template management requires a Kubernetes-backed runtime.
 
 ```bash
-osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template create --image python:3.12 --publish s3://bucket/publish --format native -o json
+osb template create --image python:3.12 --publish oci://registry.example.com/sandbox/templates --format overlaybd -o json
 osb template get <template-id> -o json
 osb template list -o json
 osb template delete <template-id> -o json
@@ -218,10 +219,13 @@ osb template create -f template-request.json -o json
 {
   "image": "python:3.12",
   "publish": "s3://bucket/publish",
+  "format": "native",
   "resourceLimits": { "cpu": "1", "memory": "512Mi" },
   "readiness": { "probe": "tcp://127.0.0.1:44772", "warmupSeconds": 60 }
 }
 ```
+
+OCI targets must name a repository without a tag or digest. Use `overlaybd` (the default) for OCI and explicitly select `native` for S3. The builder returns an immutable OCI reference in `status.manifestRef`; `sandbox create --template` uses that reference automatically. See [OCI template setup](../docs/guides/oci-templates.md) for Registry Secrets and runtime prerequisites.
 
 ### Manage snapshots
 
@@ -278,7 +282,7 @@ osb command logs <sandbox-id> <execution-id> -o json
 
 Background start errors or a stream ending before startup confirmation make the CLI exit non-zero without success metadata. After a successful start, use `command status` and `command logs` to check the process's eventual result.
 
-By default the payload after `--` is joined into one shell command string, so pipelines, redirection, and `$VAR` expansion work as in a terminal. Add `--argv` to pass the arguments to the executable as a literal argv list (no shell) when values such as `$HOME`, quotes, embedded spaces, or empty strings must reach the process unchanged. `--argv` needs a sandbox image whose execd accepts argv requests:
+By default each payload word after `--` is quoted as a single shell token and the tokens are joined into one shell command line that the sandbox's shell runs. Shell syntax such as pipelines or redirection must therefore ride inside an explicit word (`-- sh -c 'echo hi > /tmp/x'`); an unquoted `$VAR` is expanded by your own terminal before the CLI sees it, while a quoted one reaches the sandbox shell literally. Add `--argv` to pass the arguments to the executable as a literal argv list (no shell) when values such as `$HOME`, quotes, embedded spaces, or empty strings must reach the process unchanged. `--argv` needs a sandbox image whose execd accepts argv requests:
 
 ```bash
 osb command run <sandbox-id> -o raw --argv -- python3 -c "import sys; print(sys.argv[1:])" "a b" '$HOME' "x'y" ""
@@ -293,6 +297,17 @@ osb command session run <sandbox-id> <session-id> -o raw -- export FOO=bar
 osb command session run <sandbox-id> <session-id> -o raw -- sh -c 'echo $FOO'
 osb command session delete <sandbox-id> <session-id> -o json
 ```
+
+### Open an interactive terminal
+
+`osb terminal` attaches your current terminal to a real PTY inside the sandbox (colors, `stty`, and resize all behave like a local shell). Exit the remote shell (or press Ctrl-D) to leave; the remote exit code becomes the command's exit code.
+
+```bash
+osb terminal <sandbox-id>
+osb terminal <sandbox-id> -w /workspace
+```
+
+Requires an interactive TTY, and is supported on Unix, macOS, and Linux. If the connection drops while the shell is still running, the session is kept server-side and its id is printed so it can be inspected or removed via the execd API; a clean exit tears the session down.
 
 ### Work with files
 
@@ -368,12 +383,7 @@ temporary URL. Structured CLI output follows the SDK/Python field style, for
 example `content_url`, `content_length`, and `expires_at`. Older server builds
 may still return `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
-Legacy DevOps diagnostics remain experimental. Prefer `osb diagnostics logs/events` for stable API-backed log and event collection.
-
-```bash
-osb devops inspect <sandbox-id> -o raw
-osb devops summary <sandbox-id> -o raw
-```
+The legacy `osb devops` command group was removed. Use `osb diagnostics logs/events` with `--scope` for log and event collection and `osb sandbox get` for sandbox state. The plain-text filters (`--tail`, `--since`, `--limit`) have no stable equivalents.
 
 ## Output Formats
 
@@ -402,10 +412,10 @@ The main command groups are:
 - `osb template`: golden-image template builds
 - `osb snapshot`: snapshot management
 - `osb command`: command execution and persistent sessions
+- `osb terminal`: interactive PTY terminal into a sandbox
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
 - `osb diagnostics`: stable diagnostics logs and events
-- `osb devops`: experimental legacy diagnostics
 - `osb config`: local CLI configuration
 - `osb skills`: bundled skills for AI tools
 
@@ -488,7 +498,8 @@ api_key = "your-api-key"
 domain = "localhost:8080"
 protocol = "http"
 request_timeout = 30
-use_server_proxy = false
+# use_server_proxy is deprecated (maintenance mode); prefer the ingress gateway for data-plane traffic.
+# use_server_proxy = false
 
 [output]
 color = true

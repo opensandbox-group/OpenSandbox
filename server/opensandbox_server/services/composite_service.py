@@ -73,7 +73,8 @@ class CompositeSandboxService(SandboxService, ExtensionService):
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
-            objects = self._kubernetes.list_sandbox_objects() + self._fsb.list_sandbox_objects()
+            metadata = request.filter.metadata if request.filter else None
+            objects = self._kubernetes.list_sandbox_objects(metadata=metadata) + self._fsb.list_sandbox_objects()
             objects.sort(key=lambda sandbox: sandbox.id)
             return _build_list_sandboxes_response(objects, request)
         except HTTPException:
@@ -176,13 +177,8 @@ class CompositeSandboxService(SandboxService, ExtensionService):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: str | None = None,
-        container: str | None = None,
     ) -> str:
-        return self._backend(sandbox_id).get_sandbox_logs(sandbox_id, tail, since, container)
-
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        return self._backend(sandbox_id).get_sandbox_inspect(sandbox_id)
+        return self._backend(sandbox_id).get_sandbox_logs(sandbox_id, tail)
 
     def get_sandbox_events(self, sandbox_id: str, limit: int = 50) -> str:
         return self._backend(sandbox_id).get_sandbox_events(sandbox_id, limit)

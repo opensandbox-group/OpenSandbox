@@ -14,6 +14,7 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
@@ -39,6 +40,94 @@ public class FilesystemTransferTimeoutTests
 {
     private const int RequestTimeoutSeconds = 1;
     private static readonly TimeSpan ResponseBound = TimeSpan.FromSeconds(5);
+
+    [Theory]
+    [InlineData("gzip", false)]
+    [InlineData("gzip", true)]
+    [InlineData("deflate", false)]
+    [InlineData("deflate", true)]
+    public async Task ContentEncodedRangeDownloadHasUnknownTotalSize(string encoding, bool streaming)
+    {
+        var data = Encoding.UTF8.GetBytes(new string('a', 6000));
+        using var compressed = new MemoryStream();
+        using (Stream compressor = encoding == "gzip"
+                   ? new GZipStream(compressed, CompressionLevel.Optimal, leaveOpen: true)
+                   : new ZLibStream(compressed, CompressionLevel.Optimal, leaveOpen: true))
+        {
+            await compressor.WriteAsync(data);
+        }
+        var encoded = compressed.ToArray();
+        var range = FormattableString.Invariant($"bytes 0-{encoded.Length - 1}/{encoded.Length}");
+
+        await using var server = new LoopbackHttpServer();
+        server.OnRequest(async (stream, _, _) =>
+        {
+            var headers = Encoding.ASCII.GetBytes(
+                $"HTTP/1.1 206 Partial Content\r\nContent-Encoding: {encoding}\r\n" +
+                $"Content-Length: {encoded.Length}\r\nContent-Range: {range}\r\nConnection: close\r\n\r\n");
+            await stream.WriteAsync(headers);
+            await stream.WriteAsync(encoded);
+        });
+        var serving = server.ServeAsync();
+        var (files, provider) = CreateFiles(server.Port);
+        using var _ = provider;
+        var options = new ReadBytesOptions { Range = $"bytes=0-{encoded.Length - 1}" };
+
+        if (streaming)
+        {
+            var response = await files.ReadBytesStreamDetailedAsync("/data.bin", options);
+            await using var body = response.Body;
+            using var output = new MemoryStream();
+            await foreach (var chunk in body)
+            {
+                await output.WriteAsync(chunk);
+            }
+            output.ToArray().Should().Equal(data);
+            response.ContentRange.Should().Be(new ByteRange(0, encoded.Length - 1, encoded.Length, range));
+            response.TotalSize.Should().Be(-1);
+        }
+        else
+        {
+            var response = await files.ReadBytesDetailedAsync("/data.bin", options);
+            response.Body.Should().Equal(data);
+            response.ContentRange.Should().Be(new ByteRange(0, encoded.Length - 1, encoded.Length, range));
+            response.TotalSize.Should().Be(-1);
+        }
+        await serving;
+    }
+
+    [Theory]
+    [InlineData(null, -1)]
+    [InlineData("identity", 10)]
+    public async Task ChunkedRangeDownloadNeedsVisibleIdentityEncoding(string? encoding, long expectedTotal)
+    {
+        await using var server = new LoopbackHttpServer();
+        server.OnRequest(async (stream, _, _) =>
+        {
+            var encodingHeader = encoding == null ? "" : $"Content-Encoding: {encoding}\r\n";
+            var response = Encoding.ASCII.GetBytes(
+                "HTTP/1.1 206 Partial Content\r\nTransfer-Encoding: chunked\r\n" +
+                $"Content-Range: bytes 0-4/10\r\n{encodingHeader}Connection: close\r\n\r\n" +
+                "5\r\nhello\r\n0\r\n\r\n");
+            await stream.WriteAsync(response);
+        });
+        var serving = server.ServeAsync();
+        var (files, provider) = CreateFiles(server.Port);
+        using var _ = provider;
+
+        var download = await files.ReadBytesStreamDetailedAsync("/data.bin", new ReadBytesOptions { Range = "bytes=0-4" });
+        await using var body = download.Body;
+        using var output = new MemoryStream();
+        await foreach (var chunk in body)
+        {
+            await output.WriteAsync(chunk);
+        }
+        output.ToArray().Should().Equal(Encoding.UTF8.GetBytes("hello"));
+        download.ContentLength.Should().Be(-1);
+        download.ContentRange.Should().Be(new ByteRange(0, 4, 10, "bytes 0-4/10"));
+        download.TotalSize.Should().Be(expectedTotal);
+        await serving;
+    }
 
     [Fact]
     public async Task UploadOutlivingRequestTimeoutCompletes()
@@ -211,7 +300,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation during the header wait must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -261,7 +350,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation during the header wait must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -305,7 +394,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(ResponseBound, "a caller token must still cancel a transfer in flight");
         await serving;
@@ -335,7 +424,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -514,7 +603,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -545,7 +634,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -572,7 +661,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,

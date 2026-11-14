@@ -30,7 +30,11 @@ from opensandbox.exceptions import (
     PoolEmptyException,
     PoolNotRunningException,
 )
-from opensandbox.models.sandboxes import PlatformSpec
+from opensandbox.models.sandboxes import (
+    CredentialProxyConfig,
+    NetworkPolicy,
+    PlatformSpec,
+)
 from opensandbox.pool import (
     AcquirePolicy,
     AsyncPoolConfig,
@@ -777,6 +781,100 @@ async def test_async_acquire_direct_create_forwards_pool_creation_platform() -> 
         await pool.acquire()
 
         assert captured_kwargs["platform"] == PlatformSpec(os="linux", arch="arm64")
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warmup", [False, True], ids=["direct", "warmup"])
+@pytest.mark.parametrize(
+    "credential_proxy",
+    [None, CredentialProxyConfig(enabled=False), CredentialProxyConfig(enabled=True)],
+    ids=["omitted", "disabled", "enabled"],
+)
+async def test_async_pool_creation_forwards_credential_proxy(
+    warmup: bool, credential_proxy: CredentialProxyConfig | None
+) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    class CapturingAsyncSandbox(FakeAsyncSandbox):
+        @classmethod
+        async def create(cls, *args: Any, **kwargs: Any) -> CapturingAsyncSandbox:
+            captured_kwargs.update(kwargs)
+            return cls("created-with-credential-proxy")
+
+    network_policy = NetworkPolicy(defaultAction="deny")
+    spec_kwargs = {"credential_proxy": credential_proxy} if credential_proxy else {}
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        max_idle=1 if warmup else 0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(
+            image="ubuntu:22.04", network_policy=network_policy, **spec_kwargs
+        ),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),  # type: ignore[arg-type]
+        sandbox_factory=CapturingAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        if warmup:
+            await _eventually(lambda: _idle_count_equals(pool, 1))
+        else:
+            await pool.acquire()
+
+        if credential_proxy is None:
+            assert "credential_proxy" not in captured_kwargs
+        else:
+            assert captured_kwargs["credential_proxy"] is credential_proxy
+        assert captured_kwargs["network_policy"] is network_policy
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("warmup", [False, True], ids=["direct", "warmup"])
+async def test_async_pool_creation_supports_legacy_factory(warmup: bool) -> None:
+    class LegacySandbox(FakeAsyncSandbox):
+        @classmethod
+        async def create(
+            cls,
+            image: Any,
+            *,
+            timeout: Any,
+            ready_timeout: Any,
+            env: Any,
+            metadata: Any,
+            resource: Any,
+            network_policy: Any,
+            platform: Any,
+            extensions: Any,
+            secure_access: Any,
+            entrypoint: Any,
+            volumes: Any,
+            connection_config: Any,
+            health_check: Any,
+            health_check_polling_interval: Any,
+            skip_health_check: Any,
+        ) -> LegacySandbox:
+            return cls("legacy-factory-sandbox")
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        max_idle=1 if warmup else 0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: _manager_factory(FakeAsyncManager()),  # type: ignore[arg-type]
+        sandbox_factory=LegacySandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        if warmup:
+            await _eventually(lambda: _idle_count_equals(pool, 1))
+        else:
+            sandbox = await pool.acquire()
+            assert sandbox.id == "legacy-factory-sandbox"
     finally:
         await pool.shutdown(False)
 

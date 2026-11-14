@@ -153,6 +153,36 @@ func TestServerStreamEventToJSON(t *testing.T) {
 	require.Equal(t, event.ExecutionCount, decoded.ExecutionCount)
 }
 
+func TestServerStreamEventErrorExitCodeJSON(t *testing.T) {
+	exitCode := 3
+	exited := ServerStreamEvent{
+		Type: StreamEventTypeError,
+		Error: &execute.ErrorOutput{
+			EName:     "CommandExecError",
+			EValue:    "3",
+			Traceback: []string{"exit status 3"},
+			ExitCode:  &exitCode,
+		},
+	}
+	require.Contains(t, string(exited.ToJSON()), `"exit_code":3`)
+
+	var decoded ServerStreamEvent
+	require.NoError(t, json.Unmarshal(exited.ToJSON(), &decoded))
+	require.NotNil(t, decoded.Error)
+	require.NotNil(t, decoded.Error.ExitCode)
+	require.Equal(t, 3, *decoded.Error.ExitCode)
+
+	startFailure := ServerStreamEvent{
+		Type: StreamEventTypeError,
+		Error: &execute.ErrorOutput{
+			EName:     "CommandExecError",
+			EValue:    "fork/exec /usr/bin/bash: argument list too long",
+			Traceback: []string{"fork/exec /usr/bin/bash: argument list too long"},
+		},
+	}
+	require.NotContains(t, string(startFailure.ToJSON()), "exit_code")
+}
+
 func TestServerStreamEventSummary(t *testing.T) {
 	longText := strings.Repeat("a", 120)
 	tests := []struct {

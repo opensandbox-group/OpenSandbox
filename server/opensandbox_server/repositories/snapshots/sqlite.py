@@ -60,6 +60,7 @@ class SQLiteSnapshotRepository:
                     namespace,
                     name,
                     description,
+                    mode,
                     restore_config,
                     state,
                     reason,
@@ -67,7 +68,7 @@ class SQLiteSnapshotRepository:
                     last_transition_at,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 self._to_db_tuple(record),
             )
@@ -83,6 +84,7 @@ class SQLiteSnapshotRepository:
                     namespace,
                     name,
                     description,
+                    mode,
                     restore_config,
                     state,
                     reason,
@@ -135,6 +137,7 @@ class SQLiteSnapshotRepository:
                     namespace,
                     name,
                     description,
+                    mode,
                     restore_config,
                     state,
                     reason,
@@ -165,6 +168,7 @@ class SQLiteSnapshotRepository:
                     namespace = ?,
                     name = ?,
                     description = ?,
+                    mode = ?,
                     restore_config = ?,
                     state = ?,
                     reason = ?,
@@ -174,20 +178,7 @@ class SQLiteSnapshotRepository:
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (
-                    record.source_sandbox_id,
-                    record.namespace,
-                    record.name,
-                    record.description,
-                    json.dumps(record.restore_config.to_dict(), sort_keys=True),
-                    record.status.state.value,
-                    record.status.reason,
-                    record.status.message,
-                    self._datetime_to_str(record.status.last_transition_at),
-                    self._datetime_to_str(record.created_at),
-                    self._datetime_to_str(record.updated_at),
-                    record.id,
-                ),
+                self._to_update_tuple(record) + (record.id,),
             )
         return record
 
@@ -205,6 +196,7 @@ class SQLiteSnapshotRepository:
                     namespace = ?,
                     name = ?,
                     description = ?,
+                    mode = ?,
                     restore_config = ?,
                     state = ?,
                     reason = ?,
@@ -214,21 +206,7 @@ class SQLiteSnapshotRepository:
                     updated_at = ?
                 WHERE id = ? AND state = ?
                 """,
-                (
-                    record.source_sandbox_id,
-                    record.namespace,
-                    record.name,
-                    record.description,
-                    json.dumps(record.restore_config.to_dict(), sort_keys=True),
-                    record.status.state.value,
-                    record.status.reason,
-                    record.status.message,
-                    self._datetime_to_str(record.status.last_transition_at),
-                    self._datetime_to_str(record.created_at),
-                    self._datetime_to_str(record.updated_at),
-                    record.id,
-                    expected_state.value,
-                ),
+                self._to_update_tuple(record) + (record.id, expected_state.value),
             )
             return cursor.rowcount == 1
 
@@ -249,6 +227,7 @@ class SQLiteSnapshotRepository:
                     namespace TEXT DEFAULT NULL,
                     name TEXT,
                     description TEXT,
+                    mode TEXT,
                     restore_config TEXT NOT NULL,
                     state TEXT NOT NULL,
                     reason TEXT,
@@ -270,6 +249,7 @@ class SQLiteSnapshotRepository:
             )
             self._migrate_add_namespace(conn)
             self._migrate_namespace_nullable(conn)
+            self._migrate_add_mode(conn)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_snapshots_name_namespace
@@ -284,6 +264,14 @@ class SQLiteSnapshotRepository:
         columns = {row["name"] for row in rows}
         if "namespace" not in columns:
             conn.execute("ALTER TABLE snapshots ADD COLUMN namespace TEXT DEFAULT NULL")
+
+    @staticmethod
+    def _migrate_add_mode(conn: sqlite3.Connection) -> None:
+        """Add mode column if missing (snapshot artifact class, rootfs-only support)."""
+        rows = conn.execute("PRAGMA table_info(snapshots)").fetchall()
+        columns = {row["name"] for row in rows}
+        if "mode" not in columns:
+            conn.execute("ALTER TABLE snapshots ADD COLUMN mode TEXT")
 
     @staticmethod
     def _migrate_namespace_nullable(conn: sqlite3.Connection) -> None:
@@ -342,6 +330,7 @@ class SQLiteSnapshotRepository:
             record.namespace,
             record.name,
             record.description,
+            record.mode,
             json.dumps(record.restore_config.to_dict(), sort_keys=True),
             record.status.state.value,
             record.status.reason,
@@ -350,6 +339,10 @@ class SQLiteSnapshotRepository:
             self._datetime_to_str(record.created_at),
             self._datetime_to_str(record.updated_at),
         )
+
+    def _to_update_tuple(self, record: SnapshotRecord) -> tuple[object, ...]:
+        """Column values in UPDATE SET order (no leading id)."""
+        return self._to_db_tuple(record)[1:]
 
     @staticmethod
     def _datetime_to_str(value) -> str | None:
@@ -364,6 +357,7 @@ class SQLiteSnapshotRepository:
             namespace=row["namespace"],
             name=row["name"],
             description=row["description"],
+            mode=row["mode"],
             restore_config=SnapshotRestoreConfig.from_dict(restore_config),
             status=SnapshotStatusRecord(
                 state=SnapshotState(row["state"]),

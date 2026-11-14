@@ -35,7 +35,7 @@ func TestBuildRulesetWithUpstreamProxyScopesAccept(t *testing.T) {
 			UID:  10042,
 			IPs:  []netip.Addr{netip.MustParseAddr("10.20.30.40")},
 		},
-	})
+	}, EstablishedDrops{})
 	require.NoError(t, err)
 
 	expectContains(t, rendered, "add set inet opensandbox upstream_proxy_v4 { type ipv4_addr; flags timeout; }")
@@ -48,9 +48,14 @@ func TestBuildRulesetWithUpstreamProxyScopesAccept(t *testing.T) {
 }
 
 func TestBuildRulesetWithoutUpstreamProxyOmitsScopedSets(t *testing.T) {
-	rendered, err := buildRuleset(policy.DefaultDenyPolicy(), Options{BlockDoT: true})
+	rendered, err := buildRuleset(policy.DefaultDenyPolicy(), Options{BlockDoT: true}, EstablishedDrops{})
 	require.NoError(t, err)
 	require.NotContains(t, rendered, "upstream_proxy")
+	// OSEP-0025 D16: no automatic OUTPUT exception for the egress's own dials
+	// (e.g. the credential resolver) — no UID-scoped accept rule exists unless
+	// an operator endpoint is configured. Resolver reachability stays an
+	// operator-provisioned exclusion.
+	require.NotContains(t, rendered, "meta skuid")
 }
 
 // DNS-learned proxy addresses land in the scoped sets with their (clamped)

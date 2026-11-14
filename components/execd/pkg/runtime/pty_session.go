@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -246,6 +247,27 @@ func buildPTYCommand(command string) *exec.Cmd {
 	return exec.Command(shell, args...)
 }
 
+// defaultPTYTerm backs the TERM default in ptySessionEnv: execd runs as a
+// daemon whose environment normally carries no TERM, which makes interactive
+// programs disable colors and terminfo features.
+const defaultPTYTerm = "xterm-256color"
+
+// ptySessionEnv returns the user process environment with TERM defaulted for
+// the interactive PTY side; pipe mode is not a terminal and gets no default.
+func ptySessionEnv() []string {
+	env := UserProcessEnvironment()
+	for i, kv := range env {
+		if name, value, ok := strings.Cut(kv, "="); ok && name == "TERM" {
+			if value != "" {
+				return env
+			}
+			env[i] = "TERM=" + defaultPTYTerm
+			return env
+		}
+	}
+	return append(env, "TERM="+defaultPTYTerm)
+}
+
 // StartPTY launches the preferred shell via pty.StartWithSize.
 // Must be called with the WS lock held.
 func (s *ptySession) StartPTY() error {
@@ -262,7 +284,7 @@ func (s *ptySession) StartPTY() error {
 	cmd := buildPTYCommand(s.command)
 	// Resolve through the shared user-env layering (sandbox binding envs from
 	// /init < EXECD_ENVS file) instead of inheriting execd's raw environment.
-	cmd.Env = UserProcessEnvironment()
+	cmd.Env = ptySessionEnv()
 	if s.cwd != "" {
 		cmd.Dir = s.cwd
 	}
@@ -292,7 +314,7 @@ func (s *ptySession) StartPTY() error {
 		defer close(outputDoneCh)
 		s.broadcastPTY(ptmx)
 	})
-	safego.Go(func() { s.waitAndExit(mp, ptmx) })
+	safego.Go(func() { s.waitAndExit(mp, ptmx, outputDoneCh) })
 
 	return nil
 }
@@ -437,19 +459,33 @@ func (s *ptySession) writeAndFanout(chunk []byte, isStdout bool) {
 	}
 }
 
+// ptyDrainTimeout bounds how long the session waits for buffered PTY output
+// after the shell exits, in case an attached client stopped reading.
+const ptyDrainTimeout = 2 * time.Second
+
 // waitAndExit waits for the PTY-mode process and updates session state on exit.
-func (s *ptySession) waitAndExit(mp *managedProcess, ptmx *os.File) {
+func (s *ptySession) waitAndExit(mp *managedProcess, ptmx *os.File, outputDone <-chan struct{}) {
 	_ = mp.Wait()
 
-	// Close the PTY master to unblock the broadcast goroutine.
-	_ = ptmx.Close()
-
+	// The shell is reaped and its PID may be reused, so stop signalling it
+	// before waiting for its output below.
 	s.mu.Lock()
 	exitCode := mp.ExitCode()
 	s.lastExitCode = exitCode
 	s.pid = 0
 	doneCh := s.doneCh
 	s.mu.Unlock()
+
+	// Output the shell wrote before exiting can still be buffered in the
+	// master, and closing it discards that output. The broadcast goroutine
+	// stops once it has read everything (the master then returns EIO), so
+	// wait for it, but not past ptyDrainTimeout: it blocks while an attached
+	// client is not reading.
+	select {
+	case <-outputDone:
+	case <-time.After(ptyDrainTimeout):
+	}
+	_ = ptmx.Close()
 
 	close(doneCh)
 }
@@ -472,12 +508,19 @@ func (s *ptySession) waitAndExitPipe(mp *managedProcess, stdinW, stdoutR, stderr
 }
 
 // WriteStdin writes p to shell stdin (PTY master or pipe write-end).
+// Input that arrives once the shell is reaped is dropped, as a terminal would:
+// while the output drains the master is still open, and a write to it would
+// block once the tty input queue is full and then fail.
 func (s *ptySession) WriteStdin(p []byte) (int, error) {
 	s.mu.Lock()
 	w := s.stdin
+	exited := s.pid == 0
 	s.mu.Unlock()
 	if w == nil {
 		return 0, errors.New("session not started")
+	}
+	if exited {
+		return len(p), nil
 	}
 	return w.Write(p)
 }
@@ -621,6 +664,30 @@ func (s *ptySession) ResizePTY(cols, rows uint16) error {
 	return pty.Setsize(ptmx, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
+// ptyHangUpGrace bounds how long close waits for the shell to exit after
+// SIGHUP before killing its process group.
+const ptyHangUpGrace = 500 * time.Millisecond
+
+// hangUp sends SIGHUP to the PTY shell, as closing a terminal does, and waits
+// up to ptyHangUpGrace for it to exit. Interactive bash passes SIGHUP on to its
+// jobs, which job control puts in their own process groups; killing the
+// shell's group alone leaves them running and holding the terminal open.
+func (s *ptySession) hangUp(pid int) {
+	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+		return
+	}
+	deadline := time.Now().Add(ptyHangUpGrace)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		exited := s.pid != pid
+		s.mu.Unlock()
+		if exited {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // close terminates the session and releases all resources.
 // Safe to call multiple times.
 func (s *ptySession) close() {
@@ -633,9 +700,15 @@ func (s *ptySession) close() {
 	pid := s.pid
 	ptmx := s.ptmx
 	stdin := s.stdin
+	isPTY := s.isPTY
 	s.mu.Unlock()
 
 	if pid != 0 {
+		if isPTY {
+			s.hangUp(pid)
+		}
+		// Kill whatever is left in the shell's group even if the shell has
+		// exited: a group id is not reused while any member is alive.
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
 	if ptmx != nil {

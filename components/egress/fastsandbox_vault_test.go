@@ -316,16 +316,17 @@ func TestVaultRelayRebindDiscardsPreviousVault(t *testing.T) {
 	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 }
 
-// TestVaultForResetsOrphanMaterializedWhileUnregistered covers the TOCTOU
-// window with terminal cleanup: a store materialized while the subject was
-// unregistered carries the zero fence and is never inherited by the next
-// registration of the same UID.
+// An absent subject never materializes a store. Explicitly seed legacy
+// zero-fence state as well to retain defensive orphan cleanup coverage.
 func TestVaultForResetsOrphanMaterializedWhileUnregistered(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID(vaultTestUID)
 
-	// Orphan: credentials only — bindings would require an effective policy.
-	orphan := srv.vaultFor(s)
+	require.Nil(t, srv.vaultFor(s))
+	require.Empty(t, srv.vaults)
+	// Legacy orphan: bindings would require an effective policy.
+	orphan := credentialvault.NewStore(nil, func() bool { return true })
+	srv.vaults[s] = vaultEntry{store: orphan}
 	_, err := orphan.Create(credentialvault.CreateRequest{
 		Credentials: []credentialvault.Credential{
 			{Name: "tok", Source: json.RawMessage(`{"type":"inline","value":"orphan-secret"}`)},

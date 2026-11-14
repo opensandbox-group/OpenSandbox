@@ -72,8 +72,19 @@ class RetrySyncTransport(httpx.BaseTransport):
 
     @property
     def inner(self) -> httpx.BaseTransport:
-        """The wrapped raw transport, safe to hand to SSE clients."""
+        """The wrapped raw transport."""
         return self._inner
+
+    def for_streaming(self) -> httpx.BaseTransport:
+        """Transport for streaming (SSE) clients; see :meth:`RetryPolicy.wake_only`."""
+        if not self._policy.wake_retry_enabled:
+            return self._inner
+        return RetrySyncTransport(
+            self._inner,
+            self._policy.wake_only(),
+            owns_inner=self._owns_inner,
+            rng=self._rng,
+        )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         policy = self._policy

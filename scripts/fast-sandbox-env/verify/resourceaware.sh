@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# verify/resourceaware.sh — OSEP-0026 ResourceAware resource accounting
+# (POOL_MODE=resource-aware stack only). Split-layout copy of the block in
+# integration-env.sh; keep the two in sync until the split layout becomes
+# the single home.
+
+# --- OSEP-0026: ResourceAware resource accounting (POOL_MODE=resource-aware)
+#
+# Coverage:
+#   1. distinctly-shaped template (2 vCPU / 1Gi) -> create forwards the recorded
+#      machine as per-sandbox limits: Sandbox CR spec.resources.limits, cgroup
+#      leaf cpu.max (from the limit) and cpu.weight (from the pool-derived
+#      request ceil(2000m/2)=1000m), aggregate memory budget (derived from
+#      the rendered maxSandboxesPerPod).
+#   2. oversized template (8 vCPU limit > 4 CPU per-fastlet budget) -> permanent 400.
+#   3. capacity saturation (9 concurrent 2vCPU sandboxes vs 2x4 slots) -> 429.
+#   4. template -> snapshot -> restore round-trip: recorded limits replayed
+#      through the composite production path; restore CR carries the same
+#      limits; guest answers /ping.
+#   LegacySlot regression is covered by the default stages on the legacy stack
+#   (byte-identical requests, no CR resources) — this stage requires the
+#   resource-aware pool profile.
+
+ra_expected_cpu_weight() { # <milli> — mirrors fastlet cpuWeight (shares [2,262144] -> weight [1,10000])
+	local milli="$1" shares
+	shares=$(( milli * 1024 / 1000 ))
+	(( shares < 2 )) && shares=2
+	(( shares > 262144 )) && shares=262144
+	echo $(( 1 + (shares - 2) * 9999 / 262142 ))
+}
+
+# Fixture pool defaults: limits 1 CPU / 512Mi, overcommit ratios cpu 2 / memory 2
+# (keep in sync with manifests/pool/firecracker-egress-resource-aware-pool.yaml):
+# aggregate fastlet budget = 500m x 8 slots = 4000m CPU, 256Mi x 8 = 2Gi memory.
+RA_DEFAULT_REQ_CPU_MILLI=$(( 1000 / 2 ))
+RA_DEFAULT_REQ_MEM_BYTES=$(( 512 * 1024 * 1024 / 2 ))
+
+ra_aggregate_memory_budget() { # max(defaultRequest * maxSandboxesPerPod, defaultLimit)
+	local req=$(( RA_DEFAULT_REQ_MEM_BYTES * MAX_SANDBOXES_PER_POD ))
+	local limit=$(( 512 * 1024 * 1024 ))
+	(( req >= limit )) && { echo "$req"; return 0; }
+	echo "$limit"
+}
+
+ra_pod_cgroup_dir() { # <fastlet-pod> -> "<node>\n<pod-cgroup-dir>" (absolute, inside the node)
+	local pod="$1" node uid cand
+	node="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)" || return 1
+	uid="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || return 1
+	# Node-side discovery is the primary: the kubelet slice prefix varies by
+	# distribution (kubelet-kubepods-* on newer kubeadm, kubepods-* classic)
+	# and the Pod UID suffix is systemd-escaped; the fast-sandbox aggregate
+	# under the pod dir is the stable marker.
+	dir="$(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 5 -type d -name 'fast-sandbox' \( -path '*${uid//-/_}*' -o -path '*${uid}*' \) 2>/dev/null | head -1")"
+	if [[ -n "$dir" ]]; then
+		printf '%s\n%s\n' "$node" "${dir%/fast-sandbox}"
+		return 0
+	fi
+	# Classic-layout fallbacks (Guaranteed/Burstable x systemd/cgroupfs).
+	for cand in \
+		"kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod${uid//-/_}.slice" \
+		"kubepods.slice/kubepods-pod${uid//-/_}.slice" \
+		"kubepods/burstable/pod${uid}" \
+		"kubepods/pod${uid}"; do
+		if docker exec "$node" test -d "/sys/fs/cgroup/$cand/fast-sandbox" 2>/dev/null; then
+			printf '%s\n%s\n' "$node" "/sys/fs/cgroup/$cand"
+			return 0
+		fi
+	done
+	return 1
+}
+
+ra_leaf_read() { # <sandbox-id> <cgroup-file> -> value, from the fastlet hosting the sandbox
+	# The leaf name hashes the SANDBOX OBJECT UID (Identity.SandboxUID),
+	# not the sandbox name.
+	local sid="$1" file="$2" pod node dir out suid
+	suid="$(kubectl -n "$RESOURCE_NS" get sandbox "$sid" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$suid" ]] || return 1
+	local leaf="fsb-$(printf '%s' "$suid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
+	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+		dir="$(ra_pod_cgroup_dir "$pod")" || continue
+		node="${dir%%$'\n'*}"; dir="${dir#*$'\n'}"
+		out="$(docker exec "$node" cat "$dir/fast-sandbox/$leaf/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
+	done
+	return 1
+}
+
+ra_aggregate_read() { # <cgroup-file> -> value, from the first fastlet's VM pool aggregate
+	local file="$1" pod node dir out
+	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+		dir="$(ra_pod_cgroup_dir "$pod")" || continue
+		node="${dir%%$'\n'*}"; dir="${dir#*$'\n'}"
+		out="$(docker exec "$node" cat "$dir/$file" 2>/dev/null)" && { printf '%s' "$out"; return 0; }
+	done
+	return 1
+}
+
+ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read failure
+	local sid="$1" pod node uid leaf
+	leaf="fsb-$(printf '%s' "$sid" | openssl dgst -sha256 -hex | awk '{print substr($2,1,16)}')"
+	log "ra debug: sandbox=$sid leaf=$leaf pool=$POOL_NAME ns=$RESOURCE_NS"
+	log "ra debug: fastlet pods: $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo '<selector matched none>')"
+	for pod in $(kubectl -n "$RESOURCE_NS" get pods -l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+		node="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.spec.nodeName}' 2>/dev/null)"
+		uid="$(kubectl -n "$RESOURCE_NS" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+		log "ra debug: pod=$pod node=$node uid=$uid"
+		log "ra debug: node cgroup roots: $(docker exec "$node" ls /sys/fs/cgroup 2>&1 | head -c 200 | tr '\n' ' ')"
+		log "ra debug: node pod dirs: $(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 3 -type d -name '*${uid}*' 2>/dev/null" | tr '\n' ' ')"
+		log "ra debug: node fast-sandbox dirs: $(docker exec "$node" sh -c "find /sys/fs/cgroup -maxdepth 5 -type d -name 'fast-sandbox' 2>/dev/null" | tr '\n' ' ')"
+	done
+}
+
+_ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
+
+ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
+	local cpu="$1" memory="$2" created phase attempts=0
+	local cache="$WORK/ra-template-$cpu-$memory.id"
+	if [[ -s "$cache" ]]; then
+		RA_TEMPLATE_ID="$(<"$cache")"
+		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
+			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+			return 0
+		fi
+	fi
+	created="$(osb_api template create \
+		--image "$SBX_IMAGE" \
+		--publish "s3://$RUSTFS_BUCKET/publish" \
+		--format native \
+		--resource "cpu=$cpu" --resource "memory=$memory" --resource "disk=2Gi" \
+		--warmup-seconds 15 \
+		--metadata "origin=osep-0026-resourceaware" \
+		-o json 2>/dev/null)" \
+		|| fail "template create ($cpu/$memory) failed: $(osb_api template get 2>&1 | head -c 200)"
+	RA_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$RA_TEMPLATE_ID" && "$RA_TEMPLATE_ID" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
+	printf '%s' "$RA_TEMPLATE_ID" > "$cache"
+	while (( attempts++ < 300 )); do
+		phase="$(_ra_template_phase)"
+		[[ "$phase" == "Succeeded" ]] && { pass "SandboxTemplate build ($cpu/$memory): $RA_TEMPLATE_ID"; return 0; }
+		[[ "$phase" == "Failed" ]] && fail "template $RA_TEMPLATE_ID build failed"
+		sleep 2
+	done
+	fail "template $RA_TEMPLATE_ID did not reach Succeeded in 600s (last phase: ${phase:-unknown})"
+}
+
+ra_sandbox_create() { # -> id (from RA_TEMPLATE_ID)
+	osb_api sandbox create --template "$RA_TEMPLATE_ID" --timeout 30m \
+		--metadata origin=osep-0026 --skip-health-check -o json 2>/dev/null | jq -r '.id'
+}
+
+ra_kill_all() { # kill every osep-0026 sandbox still around
+	local id
+	for id in "${RA_VERIFY_IDS[@]:-}"; do
+		[[ -n "$id" ]] && osb_api sandbox kill "$id" >/dev/null 2>&1
+	done
+	RA_VERIFY_IDS=()
+}
+
+ra_forward_verify() {
+	local id cpu memory weight
+	id="$(ra_sandbox_create)"
+	[[ -n "$id" && "$id" != "null" ]] || fail "template-mode create (2 vCPU / 1Gi) failed"
+	RA_VERIFY_IDS+=("$id")
+	VERIFY_ID="$id"
+	wait_for "resource-aware sandbox Running" 90 sandbox_running
+
+	cpu="$(kubectl -n "$RESOURCE_NS" get sandbox "$id" -o jsonpath='{.spec.resources.limits.cpu}')"
+	memory="$(kubectl -n "$RESOURCE_NS" get sandbox "$id" -o jsonpath='{.spec.resources.limits.memory}')"
+	[[ "$cpu" == "2" && "$memory" == "1Gi" ]] \
+		|| fail "Sandbox CR spec.resources.limits mismatch: cpu=$cpu memory=$memory (want 2 / 1Gi)"
+	pass "Sandbox CR carries the forwarded limits (cpu=2, memory=1Gi)"
+
+	local cpu_max cpu_weight pids_max want_mem_budget got_mem_budget
+	weight="$(ra_expected_cpu_weight 1000)" # request = ceil(2000m / ratio 2) = 1000m
+	# Reads may legitimately fail (|| true): the debug dump below must run
+	# before the failure is finalized.
+	cpu_max="$(ra_leaf_read "$id" cpu.max || true)"
+	cpu_weight="$(ra_leaf_read "$id" cpu.weight || true)"
+	pids_max="$(ra_leaf_read "$id" pids.max || true)"
+	got_mem_budget="$(ra_aggregate_read memory.max || true)"
+	want_mem_budget="$(ra_aggregate_memory_budget)"
+	[[ -z "$cpu_max$cpu_weight$pids_max$got_mem_budget" ]] && ra_debug_cgroup "$id"
+	if [[ "$cpu_max" == "200000 100000" && "$cpu_weight" == "$weight" \
+		&& "$pids_max" == "128" && "$got_mem_budget" -ge "$want_mem_budget" ]]; then
+		pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
+	else
+		ra_debug_cgroup "$id"
+		fail "cgroup enforcement mismatch: cpu.max='$cpu_max' cpu.weight='$cpu_weight' (want $weight) pids.max='$pids_max' memory.max='$got_mem_budget' (want $want_mem_budget)"
+	fi
+	pass "cgroup enforcement matches: leaf cpu.max/weight/pids from limit+derived request, aggregate memory budget"
+
+	wait_for "resource-aware sandbox execd /ping" 60 execd_ping_ok
+	ra_kill_all
+	wait_for "resource-aware sandbox gone" 60 verify_sandbox_gone
+}
+
+ra_oversized_verify() {
+	local code
+	ra_template_up 8 1Gi # 8 vCPU limit > 4 CPU per-fastlet sandbox budget
+	code="$(server_api_status POST "/sandboxes" "{\"templateId\": \"$RA_TEMPLATE_ID\", \"timeout\": 600}")"
+	[[ "$code" == "400" ]] \
+		|| fail "oversized template (8 vCPU) create returned HTTP $code (want permanent 400)"
+	pass "oversized template create -> permanent 400"
+}
+
+ra_capacity_verify() {
+	local -a ids=()
+	local i id code total
+	# Committed per sandbox: cpu ceil(2000m/2)=1000m, memory ceil(1Gi/2)=512Mi.
+	# Per-fastlet slots derive from the RENDERED density (budget =
+	# max(defaultReq * maxSandboxesPerPod, defaultLimit)), not the manifest
+	# literal; total = slots * POOL_MIN fastlets, then one more must 429.
+	local budget_cpu=$(( RA_DEFAULT_REQ_CPU_MILLI * MAX_SANDBOXES_PER_POD ))
+	(( budget_cpu < 1000 )) && budget_cpu=1000
+	local budget_mem
+	budget_mem="$(ra_aggregate_memory_budget)"
+	local per=$(( budget_cpu / 1000 )) # committed CPU per 2vCPU saturation sandbox
+	local per_mem=$(( budget_mem / (512 * 1024 * 1024) ))
+	(( per_mem < per )) && per=$per_mem
+	(( per > MAX_SANDBOXES_PER_POD )) && per=$MAX_SANDBOXES_PER_POD
+	total=$(( per * POOL_MIN ))
+	log "capacity: $per slots/fastlet (budget ${budget_cpu}m/$(printf '%d' "$budget_mem")B) x $POOL_MIN fastlets -> saturating at $total"
+	ra_template_up 2 1Gi
+	for i in $(seq 1 "$total"); do
+		id="$(ra_sandbox_create)"
+		[[ -n "$id" && "$id" != "null" ]] || fail "capacity pre-fill create #$i failed"
+		RA_VERIFY_IDS+=("$id"); ids+=("$id")
+		VERIFY_ID="$id"
+		wait_for "capacity pre-fill sandbox #$i Running" 90 sandbox_running
+	done
+	code="$(server_api_status POST "/sandboxes" "{\"templateId\": \"$RA_TEMPLATE_ID\", \"timeout\": 600}")"
+	ra_kill_all
+	for id in "${ids[@]}"; do VERIFY_ID="$id"; wait_for "saturated sandbox $id gone" 60 verify_sandbox_gone; done
+	[[ "$code" == "429" ]] \
+		|| fail "capacity-exhausted create returned HTTP $code (want retryable 429)"
+	pass "capacity-exhausted create -> retryable 429"
+}
+
+ra_snapshot_verify() {
+	local source_id restore_id snap_id state attempts=0
+	ra_template_up 2 1Gi
+	source_id="$(ra_sandbox_create)"
+	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "snapshot source create failed"
+	RA_VERIFY_IDS+=("$source_id")
+	VERIFY_ID="$source_id"
+	wait_for "snapshot source Running" 90 sandbox_running
+
+	snap_id="$(osb_api snapshot create "$source_id" --name osep-0026-ra -o json 2>/dev/null | jq -r '.snapshot_id // .id')"
+	[[ -n "$snap_id" && "$snap_id" != "null" ]] || fail "snapshot create failed"
+	while (( attempts++ < 150 )); do
+		state="$(osb_api snapshot get "$snap_id" -o json 2>/dev/null | jq -r '.status.state // empty')"
+		[[ "$state" == "Ready" ]] && break
+		[[ "$state" == "Failed" ]] && fail "snapshot $snap_id failed"
+		sleep 2
+	done
+	[[ "$state" == "Ready" ]] || fail "snapshot $snap_id did not reach Ready in 300s (last: ${state:-unknown})"
+
+	restore_id="$(osb_api sandbox create --snapshot-id "$snap_id" --timeout 30m \
+		--resource cpu=2 --resource memory=1Gi \
+		--skip-health-check -o json 2>/dev/null | jq -r '.id')"
+	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "snapshot restore create failed"
+	RA_VERIFY_IDS+=("$restore_id")
+	VERIFY_ID="$restore_id"
+	wait_for "restored sandbox Running" 120 sandbox_running
+	[[ "$(kubectl -n "$RESOURCE_NS" get sandbox "$restore_id" -o jsonpath='{.spec.resources.limits.cpu}')" == "2" \
+		&& "$(kubectl -n "$RESOURCE_NS" get sandbox "$restore_id" -o jsonpath='{.spec.resources.limits.memory}')" == "1Gi" ]] \
+		|| fail "restore did not replay the recorded limits (want cpu=2 memory=1Gi)"
+	wait_for "restored sandbox execd /ping" 60 execd_ping_ok
+	osb_api snapshot delete "$snap_id" >/dev/null 2>&1 || true
+	ra_kill_all
+	for id in "$source_id" "$restore_id"; do VERIFY_ID="$id"; wait_for "snapshot chain sandbox $id gone" 60 verify_sandbox_gone; done
+	pass "snapshot round-trip replays recorded limits through the composite path"
+}
+
+verify_resourceaware() {
+	require_live_stack
+	[[ "$POOL_MODE" == "resource-aware" ]] \
+		|| die "verify-resourceaware requires POOL_MODE=resource-aware (stack was brought up with: $POOL_MODE)"
+	run_stage "SandboxTemplate build (2 vCPU / 1Gi, distinctly shaped)" ra_template_up 2 1Gi
+	run_stage "per-sandbox limit forwarding + cgroup enforcement" ra_forward_verify
+	run_stage "oversized template -> 400" ra_oversized_verify
+	run_stage "template -> snapshot -> restore round-trip" ra_snapshot_verify
+	run_stage "capacity saturation -> 429" ra_capacity_verify
+}
+
+# --- standalone entry
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib.sh"
+	resolve_osb
+	require_live_stack
+	[[ "$POOL_MODE" == "resource-aware" ]] \
+		|| die "verify/resourceaware.sh requires POOL_MODE=resource-aware"
+	trap 'on_error verify-resourceaware' ERR
+	run_stage "OSEP-0026 ResourceAware verify" verify_resourceaware
+fi

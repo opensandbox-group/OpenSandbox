@@ -438,6 +438,37 @@ func TestDeleteSessionRemovesRWRunArtifacts(t *testing.T) {
 	}
 }
 
+// TestDeleteSessionRemovesRunningRunScript verifies that a run cut short by
+// DeleteIsolatedSession does not leave its script file in an rw workspace.
+func TestDeleteSessionRemovesRunningRunScript(t *testing.T) {
+	runner := newTestRunner(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: ws,
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatalf("CreateIsolatedSession: %v", err)
+	}
+
+	runID, _, err := runner.RunInIsolatedSessionBackground(id, "sleep 30", nil)
+	if err != nil {
+		t.Fatalf("RunInIsolatedSessionBackground: %v", err)
+	}
+	scriptPath := filepath.Join(ws, isolatedBackgroundRunDir, runID+".sh")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(scriptPath)
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond, "script file should exist while the run is in flight")
+
+	if err := runner.DeleteIsolatedSession(id); err != nil {
+		t.Fatalf("DeleteIsolatedSession: %v", err)
+	}
+	if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
+		t.Errorf("script file should be removed after delete, stat err = %v", err)
+	}
+}
+
 // TestRunInIsolatedSessionBackground_RejectsUnwritableWorkspace verifies that
 // a session whose workspace root is not writable by its own uid gets a clean
 // rejection instead of an accepted run that can never write its exit code
@@ -762,6 +793,108 @@ func TestBackgroundRunCompletesDespiteShellSyntaxError(t *testing.T) {
 	if !strings.Contains(string(output), "unexpected EOF") &&
 		!strings.Contains(string(output), "syntax error") {
 		t.Errorf("log output = %q, want a shell syntax diagnostic", output)
+	}
+}
+
+// TestRunInIsolatedSessionBackground_LargeCode verifies that code larger than
+// the 128 KiB limit on a single exec argument runs like any other code, and
+// leaves no script file behind.
+func TestRunInIsolatedSessionBackground_LargeCode(t *testing.T) {
+	runner := newTestRunner(t)
+	ws := filepath.Join(t.TempDir(), "ws")
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: ws,
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatalf("CreateIsolatedSession: %v", err)
+	}
+	defer runner.DeleteIsolatedSession(id)
+
+	code := "#" + strings.Repeat("x", 150*1024) + "\necho large-code-done"
+	runID, _, err := runner.RunInIsolatedSessionBackground(id, code, nil)
+	if err != nil {
+		t.Fatalf("RunInIsolatedSessionBackground: %v", err)
+	}
+
+	snapshot := waitForBackgroundRun(t, runner, id, runID)
+	output, _, err := runner.SeekIsolatedBackgroundOutput(id, runID, 0)
+	if err != nil {
+		t.Fatalf("SeekIsolatedBackgroundOutput: %v", err)
+	}
+	if snapshot.ExitCode == nil || *snapshot.ExitCode != 0 {
+		t.Fatalf("ExitCode = %v, want 0; output = %q", snapshot.ExitCode, output)
+	}
+	if !strings.Contains(string(output), "large-code-done") {
+		t.Errorf("output = %q, want to contain large-code-done", output)
+	}
+	if _, err := os.Stat(filepath.Join(ws, isolatedBackgroundRunDir, runID+".sh")); !os.IsNotExist(err) {
+		t.Errorf("script file should be removed after the run, stat err = %v", err)
+	}
+}
+
+// TestRunInIsolatedSessionBackground_RunsCodeVerbatim verifies that the code
+// reaches the shell byte for byte and that the wrapper does not change the
+// caller's environment.
+func TestRunInIsolatedSessionBackground_RunsCodeVerbatim(t *testing.T) {
+	runner := newTestRunner(t)
+	id := newBackgroundTestSession(t, runner, "rw")
+	defer runner.DeleteIsolatedSession(id)
+
+	for _, tc := range []struct {
+		code string
+		envs map[string]string
+		want string
+	}{
+		{code: `printf 'a\\b\n'`, want: "a\\b\n"},
+		{code: `printf %s "$F"`, envs: map[string]string{"F": "from-caller"}, want: "from-caller"},
+	} {
+		runID, _, err := runner.RunInIsolatedSessionBackground(id, tc.code, tc.envs)
+		if err != nil {
+			t.Fatalf("RunInIsolatedSessionBackground(%q): %v", tc.code, err)
+		}
+		waitForBackgroundRun(t, runner, id, runID)
+		output, _, err := runner.SeekIsolatedBackgroundOutput(id, runID, 0)
+		if err != nil {
+			t.Fatalf("SeekIsolatedBackgroundOutput: %v", err)
+		}
+		if string(output) != tc.want {
+			t.Errorf("code %q: output = %q, want %q", tc.code, output, tc.want)
+		}
+	}
+}
+
+// TestRunInIsolatedSessionBackground_ScriptWriteFailure verifies that a
+// script file that cannot be written completely is not run: the run fails
+// with exit code 126 instead of running a truncated prefix of the code.
+func TestRunInIsolatedSessionBackground_ScriptWriteFailure(t *testing.T) {
+	runner := newTestRunner(t)
+	id := newBackgroundTestSession(t, runner, "rw")
+	defer runner.DeleteIsolatedSession(id)
+
+	// Limit file sizes in the session shell, and ignore SIGXFSZ so that an
+	// oversized write fails instead of killing the shell.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := runner.RunInIsolatedSession(ctx, id, "ulimit -f 8; trap '' XFSZ", nil, nil); err != nil {
+		t.Fatalf("limit file size: %v", err)
+	}
+
+	code := "echo truncated-prefix-ran\n#" + strings.Repeat("x", 150*1024) + "\necho done"
+	runID, _, err := runner.RunInIsolatedSessionBackground(id, code, nil)
+	if err != nil {
+		t.Fatalf("RunInIsolatedSessionBackground: %v", err)
+	}
+	snapshot := waitForBackgroundRun(t, runner, id, runID)
+	output, _, err := runner.SeekIsolatedBackgroundOutput(id, runID, 0)
+	if err != nil {
+		t.Fatalf("SeekIsolatedBackgroundOutput: %v", err)
+	}
+	if snapshot.ExitCode == nil || *snapshot.ExitCode != 126 {
+		t.Errorf("ExitCode = %v, want 126; output = %q", snapshot.ExitCode, output)
+	}
+	if strings.Contains(string(output), "truncated-prefix-ran") {
+		t.Errorf("a truncated script ran: output = %q", output)
 	}
 }
 

@@ -1,7 +1,12 @@
 # Copyright 2026 The OpenSandbox Authors
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pure pinned-library layer tests. No sockets, TLS handshake, IPC, or Go claims."""
+"""Socket-free H2/manual-peer stress tests; no TLS, real IPC or client interoperability claim.
+
+The companion opt-in runner's ManualH2Peer records and withholds GOAWAY from
+hyper-h2 state processing. Its frame timing is useful for late-frame stress,
+not proof that a normal client received GOAWAY or migrated correctly.
+"""
 
 import sys
 import unittest
@@ -14,8 +19,13 @@ from unittest.mock import patch
 try:
     import h2.config
     import h2.connection
+    import h2.errors
     import h2.events
     import h2.settings
+    from hyperframe.frame import (
+        ContinuationFrame, DataFrame, Frame, GoAwayFrame, HeadersFrame,
+        RstStreamFrame, SettingsFrame, WindowUpdateFrame,
+    )
     from mitmproxy import connection, http
     from mitmproxy.proxy import commands, events
     from mitmproxy.proxy.context import Context
@@ -164,6 +174,8 @@ class Harness:
         self.identities = []
         self.output = []
         self.peer_events = []
+        self.client_wire = bytearray()
+        self.parse_client_wire = True
         self.origin_events = []
         self.origin_bytes = bytearray()
         self.opens = []
@@ -181,6 +193,7 @@ class Harness:
         self.identities.append(identity)
         if (
             self.deny
+            or self.runtime.state.fenced
             or len(self.adapter._active) >= self.runtime.registry.request_capacity
         ):
             self.adapter.refuse(identity, flow)
@@ -215,7 +228,9 @@ class Harness:
                     self.opens.append(command)
                 elif isinstance(command, commands.SendData):
                     if command.connection is self.client:
-                        self.peer_events.extend(self.peer.receive_data(command.data))
+                        self.client_wire.extend(command.data)
+                        if self.parse_client_wire:
+                            self.peer_events.extend(self.peer.receive_data(command.data))
                     else:
                         self.upstream_conn = command.connection
                         self.origin_bytes.extend(command.data)
@@ -248,6 +263,25 @@ class Harness:
         data = self.peer.data_to_send()
         if data:
             self.run(events.DataReceived(self.client, data))
+
+    @staticmethod
+    def decode_frames(data):
+        """Decode synthetic wire bytes with pinned hyperframe."""
+        frames = []
+        offset = 0
+        while offset < len(data):
+            header = memoryview(data[offset : offset + 9])
+            frame, body_length = Frame.parse_frame_header(header)
+            end = offset + 9 + body_length
+            if end > len(data):
+                raise AssertionError("truncated synthetic server frame")
+            frame.parse_body(memoryview(data[offset + 9 : end]))
+            frames.append(frame)
+            offset = end
+        return frames
+
+    def client_frames(self):
+        return self.decode_frames(self.client_wire)
 
     def tick(self):
         wake = self.adapter._wakeup
@@ -334,7 +368,7 @@ class Harness:
     dependency_versions_supported(),
     "requires mitmproxy 11.0.2 / h2 4.1.0 / hyperframe 6.0.1",
 )
-class BoundH2Tests(unittest.TestCase):
+class SocketFreeManualPeerStressTests(unittest.TestCase):
     def test_instance_identity_is_raw_exact_and_one_shot(self):
         h = Harness(deny=True)
         h.headers(
@@ -414,6 +448,41 @@ class BoundH2Tests(unittest.TestCase):
         )
         h.assert_identity_empty(self)
         h.assert_no_origin(self)
+
+    def test_socket_free_stub_paused_stream_is_refused_after_fence_not_ac07_acceptance(self):
+        h = Harness(hold={("requestheaders", 1)})
+        h.headers(1)
+        h.headers(3, end=True)
+        self.assertEqual(list(h.adapter._active), [3])
+        self.assertEqual(list(h.adapter._pending.values())[0].stream_id, 1)
+
+        h.fence(last=3)
+        h.tick()
+        self.assertEqual(
+            [event.last_stream_id for event in h.peer_events
+             if isinstance(event, h2.events.ConnectionTerminated)],
+            [3],
+        )
+        h.parse_client_wire = False
+        h.release(("requestheaders", 1))
+
+        self.assertEqual(list(h.adapter._active), [3])
+        self.assertNotIn(1, h.adapter._claimed)
+        self.assertNotIn(1, h.adapter._pending)
+        self.assertNotIn(1, h.adapter._refused)
+        self.assertFalse(h.adapter.failed)
+        origin_requests = [
+            event for event in h.origin_events
+            if isinstance(event, h2.events.RequestReceived)
+        ]
+        self.assertEqual(len(origin_requests), 1)
+        self.assertEqual(dict(origin_requests[0].headers)[b":path"], b"/3")
+        resets = [
+            frame for frame in h.client_frames()
+            if isinstance(frame, RstStreamFrame) and frame.stream_id == 1
+        ]
+        self.assertEqual(len(resets), 1)
+        self.assertEqual(resets[0].error_code, h2.errors.ErrorCodes.REFUSED_STREAM)
 
     def test_active_capacity_exhaustion_refuses_new_stream_preserving_old(self):
         h = Harness(capacity=1)
@@ -544,33 +613,220 @@ class BoundH2Tests(unittest.TestCase):
             h.adapter.owned_upstreams(), ((association[0], association[1]),)
         )
 
-    def test_h2_backpressure_retains_handle_and_delays_goaway(self):
+    def test_manual_peer_late_goaway_stress_retains_handle_and_delays_close(self):
         h = Harness(downstream_window=0)
         h.headers(end=True)
         h.from_origin()
         h.response(body=b"payload")
+        state = h.adapter.h2_conn.state_machine.state
         h.fence()
         h.tick()
         self.assertFalse(h.runtime.finished)
         self.assertTrue(h.adapter.h2_conn.stream_buffers[1])
         self.assertFalse(h.adapter.goaway_sent)
+        early = [
+            event for event in h.peer_events
+            if isinstance(event, h2.events.ConnectionTerminated)
+        ]
+        self.assertEqual([(event.last_stream_id, event.error_code) for event in early], [(1, 0)])
+        self.assertNotIn(
+            1,
+            [event.stream_id for event in h.peer_events
+             if isinstance(event, h2.events.StreamEnded)],
+        )
+        self.assertIs(h.adapter.h2_conn.state_machine.state, state)
         handle = h.flows[1].metadata["opensandbox_credential_request_handle"]
-        h.peer.increment_flow_control_window(100, stream_id=1)
-        h.flush()
+        h.parse_client_wire = False
+        window_update = WindowUpdateFrame(stream_id=1)
+        window_update.window_increment = 100
+        h.run(events.DataReceived(h.client, window_update.serialize()))
         h.tick()
         self.assertEqual(h.runtime.finished, [handle])
         self.assertNotIn("opensandbox_credential_request_handle", h.flows[1].metadata)
         self.assertTrue(h.adapter.goaway_sent)
-        terms = [
-            x for x in h.peer_events if isinstance(x, h2.events.ConnectionTerminated)
+        frames = h.client_frames()
+        goaways = [
+            (index, frame) for index, frame in enumerate(frames)
+            if isinstance(frame, GoAwayFrame)
         ]
-        self.assertEqual([(x.last_stream_id, x.error_code) for x in terms], [(1, 0)])
-        types = [type(x) for x in h.peer_events]
-        self.assertLess(
-            types.index(h2.events.StreamEnded),
-            types.index(h2.events.ConnectionTerminated),
+        self.assertEqual(
+            [(frame.last_stream_id, frame.error_code) for _, frame in goaways],
+            [(1, 0), (1, 0)],
         )
+        early_index, final_index = goaways[0][0], goaways[1][0]
+        body_frames = [
+            (index, frame) for index, frame in enumerate(frames)
+            if isinstance(frame, DataFrame) and frame.stream_id == 1
+        ]
+        self.assertEqual(
+            b"".join(frame.data for _, frame in body_frames), b"payload"
+        )
+        self.assertIn("END_STREAM", body_frames[-1][1].flags)
+        self.assertLess(early_index, body_frames[0][0])
+        self.assertLess(body_frames[-1][0], final_index)
         self.assertFalse(h.adapter.failed)
+
+    def test_goaway_serialization_clamps_all_paths_and_preserves_instance_scope(self):
+        for path in ("close", "terminate", "protocol_error"):
+            with self.subTest(path=path):
+                h = Harness()
+                h.headers(end=True)
+                h.runtime.state.fenced = True
+                h.runtime.state.frozen_last_stream_id = 0
+                connection_class_method = type(h.adapter.h2_conn)._prepare_for_sending
+
+                if path == "close":
+                    h.adapter.h2_conn.close_connection(
+                        error_code=h2.errors.ErrorCodes.NO_ERROR,
+                        last_stream_id=9,
+                    )
+                    data = h.adapter.h2_conn.data_to_send()
+                    expected_error = h2.errors.ErrorCodes.NO_ERROR
+                elif path == "terminate":
+                    h.adapter.h2_conn._terminate_connection(
+                        h2.errors.ErrorCodes.PROTOCOL_ERROR
+                    )
+                    data = h.adapter.h2_conn.data_to_send()
+                    expected_error = h2.errors.ErrorCodes.PROTOCOL_ERROR
+                else:
+                    commands_out = list(h.adapter.protocol_error(
+                        "synthetic protocol error",
+                        h2.errors.ErrorCodes.PROTOCOL_ERROR,
+                    ))
+                    data = next(
+                        command.data for command in commands_out
+                        if isinstance(command, commands.SendData)
+                    )
+                    expected_error = h2.errors.ErrorCodes.PROTOCOL_ERROR
+
+                events = h.peer.receive_data(data)
+                goaway = next(
+                    event for event in events
+                    if isinstance(event, h2.events.ConnectionTerminated)
+                )
+                self.assertEqual(goaway.last_stream_id, 0)
+                self.assertEqual(goaway.error_code, expected_error)
+                self.assertEqual(h.adapter.h2_conn.highest_inbound_stream_id, 1)
+                self.assertIs(type(h.adapter.h2_conn)._prepare_for_sending, connection_class_method)
+                self.assertNotIn("_prepare_for_sending", type(h.adapter.h2_conn).__dict__)
+
+    def test_serialized_goaway_bound_never_increases(self):
+        h = Harness()
+        h.runtime.state.fenced = True
+        h.runtime.state.frozen_last_stream_id = 5
+        h.adapter.h2_conn._prepare_for_sending([
+            GoAwayFrame(0, last_stream_id=2, error_code=h2.errors.ErrorCodes.NO_ERROR)
+        ])
+        h.adapter.h2_conn._prepare_for_sending([
+            GoAwayFrame(0, last_stream_id=9, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR)
+        ])
+        events = h.peer.receive_data(h.adapter.h2_conn.data_to_send())
+        goaways = [event for event in events if isinstance(event, h2.events.ConnectionTerminated)]
+        self.assertEqual([event.last_stream_id for event in goaways], [2, 2])
+        self.assertEqual(
+            [event.error_code for event in goaways],
+            [h2.errors.ErrorCodes.NO_ERROR, h2.errors.ErrorCodes.PROTOCOL_ERROR],
+        )
+
+    def _install_serializer_spy(self, adapter):
+        conn = adapter.h2_conn
+        del conn._prepare_for_sending
+        class_prepare = type(conn)._prepare_for_sending
+        original_calls = []
+
+        def prepare_spy(instance, frames):
+            original_calls.append(tuple(frames))
+            return class_prepare(instance, frames)
+
+        with patch.object(type(conn), "_prepare_for_sending", prepare_spy):
+            adapter._install_retirement_serializer()
+        return conn, original_calls
+
+    def test_retirement_serializer_skips_registry_on_empty_and_ordinary_batches(self):
+        h = Harness()
+        h.runtime.state.fenced = True
+        h.runtime.state.frozen_last_stream_id = 0
+        # Count the original serializer and restore the class method afterward.
+        conn, original_calls = self._install_serializer_spy(h.adapter)
+
+        registry_reads = []
+        h.runtime.registry.drain_state = lambda token: (
+            registry_reads.append(token) or h.runtime.state
+        )
+        conn._prepare_for_sending([])
+        conn._prepare_for_sending([SettingsFrame(0)])
+
+        self.assertEqual(registry_reads, [])
+        self.assertEqual(len(original_calls), 2)
+        self.assertEqual(original_calls[0], ())
+        self.assertEqual(len(original_calls[1]), 1)
+        self.assertIsInstance(original_calls[1][0], SettingsFrame)
+
+    def test_retirement_serializer_clamps_direct_mixed_goaways_and_is_instance_scoped(
+        self,
+    ):
+        h = Harness()
+        h.runtime.state.fenced = True
+        h.runtime.state.frozen_last_stream_id = 5
+        conn, original_calls = self._install_serializer_spy(h.adapter)
+
+        registry_reads = []
+        h.runtime.registry.drain_state = lambda token: (
+            registry_reads.append(token) or h.runtime.state
+        )
+        # First GOAWAY is a direct error path. Multiple controls in one batch
+        # and later batches retain the frozen and serialized minimum bounds.
+        batch = [
+            SettingsFrame(0),
+            GoAwayFrame(
+                0,
+                last_stream_id=9,
+                error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+            ),
+            GoAwayFrame(
+                0,
+                last_stream_id=3,
+                error_code=h2.errors.ErrorCodes.NO_ERROR,
+            ),
+            GoAwayFrame(
+                0,
+                last_stream_id=8,
+                error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+            ),
+        ]
+        conn._prepare_for_sending(batch)
+        self.assertEqual(
+            [frame.last_stream_id for frame in batch[1:]], [5, 3, 3]
+        )
+        self.assertEqual(len(registry_reads), 1)
+        self.assertEqual(len(original_calls), 1)
+
+        # A missing registry state after first serialization cannot loosen the
+        # already serialized bound while this concrete transport still lives.
+        h.runtime.state = None
+        next_batch = [
+            GoAwayFrame(
+                0,
+                last_stream_id=12,
+                error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+            )
+        ]
+        conn._prepare_for_sending(next_batch)
+        self.assertEqual(next_batch[0].last_stream_id, 3)
+        self.assertEqual(len(registry_reads), 2)
+        self.assertEqual(len(original_calls), 2)
+
+        # The instance-installed wrapper does not affect a sibling connection.
+        sibling = type(conn)(h2.config.H2Configuration(client_side=False))
+        sibling_goaway = GoAwayFrame(
+            0,
+            last_stream_id=12,
+            error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        )
+        sibling._prepare_for_sending([sibling_goaway])
+        self.assertEqual(sibling_goaway.last_stream_id, 12)
+        self.assertEqual(len(registry_reads), 2)
+        self.assertEqual(len(original_calls), 2)
 
     def test_h1_normal_response_releases_only_after_upload_finishes(self):
         h = Harness(upstream="h1")
@@ -770,10 +1026,47 @@ class BoundH2Tests(unittest.TestCase):
         h = Harness(max_streams=1)
         h.headers(1, end=True)
         h.from_origin()
-        h.headers(3, end=True)
+        h.headers(3, end=True, extra=[("x-dynamic", "cached-value")])
+        self.assertIn(
+            (b"x-dynamic", b"cached-value"),
+            h.peer.encoder.header_table.dynamic_entries,
+        )
+        h.peer.max_outbound_frame_size = 16384
+        long_value = "".join(chr(33 + (index * 17) % 90) for index in range(45000))
+        h.peer.send_headers(
+            5,
+            [
+                (":method", "POST"),
+                (":scheme", "https"),
+                (":authority", "example.test"),
+                (":path", "/5"),
+                ("x-dynamic", "cached-value"),
+                ("x-long", long_value),
+            ],
+            end_stream=False,
+        )
+        h.peer.send_data(5, b"post-bound", end_stream=True)
+        post_bound_bytes = h.peer.data_to_send()
+        post_bound_frames = h.decode_frames(post_bound_bytes)
+        self.assertTrue(any(isinstance(frame, ContinuationFrame)
+                            for frame in post_bound_frames))
         h.fence()
+        h.tick()
         h.deny = True
-        h.headers(5, end=True)
+        h.parse_client_wire = False
+        data_window = h.adapter.h2_conn._inbound_flow_control_window_manager
+        bytes_processed = data_window._bytes_processed
+        h.run(events.DataReceived(h.client, post_bound_bytes))
+        self.assertEqual(data_window._bytes_processed - bytes_processed, len(b"post-bound"))
+        self.assertNotIn(5, h.adapter._active)
+        self.assertNotIn(5, h.root.streams)
+        h.assert_identity_empty(self)
+        self.assertTrue(any(
+            (b"x-dynamic", b"cached-value") in identity.headers
+            for identity in h.identities if identity.stream_id == 5
+        ))
+        self.assertNotIn(5, h.adapter.h2_conn.stream_buffers)
+        self.assertNotIn(5, h.adapter.h2_conn.stream_trailers)
         self.assertEqual(h.adapter._association(h.adapter._active[3])[3], "queued")
         h.response(1, body=b"first")
         h.tick()
@@ -783,10 +1076,26 @@ class BoundH2Tests(unittest.TestCase):
         h.tick()
         self.assertEqual(len(h.runtime.finished), 2)
         self.assertFalse(h.adapter.failed)
+        frames = h.client_frames()
         terms = [
-            x for x in h.peer_events if isinstance(x, h2.events.ConnectionTerminated)
+            frame for frame in frames if isinstance(frame, GoAwayFrame)
         ]
-        self.assertEqual([(x.last_stream_id, x.error_code) for x in terms], [(3, 0)])
+        self.assertEqual(
+            [(frame.last_stream_id, frame.error_code) for frame in terms],
+            [(3, 0), (3, 0)],
+        )
+        refused = [
+            frame for frame in frames
+            if isinstance(frame, RstStreamFrame) and frame.stream_id == 5
+        ]
+        self.assertEqual(len(refused), 1)
+        self.assertEqual(refused[0].error_code, h2.errors.ErrorCodes.REFUSED_STREAM)
+        self.assertFalse(
+            any(
+                isinstance(frame, (HeadersFrame, DataFrame)) and frame.stream_id == 5
+                for frame in frames
+            )
+        )
         self.assertEqual(
             [
                 x.stream_id

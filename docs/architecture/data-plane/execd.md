@@ -28,7 +28,7 @@ Execd also fronts a small reverse proxy (`/proxy/{port}`), so one exposed host p
 
 ## API surface
 
-Everything execd exposes lives under one API. When the platform configures an access token, every endpoint below requires it in the `X-EXECD-ACCESS-TOKEN` header — only liveness and readiness are always open. The contract lives in [specs/execd-api.yaml](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml).
+Everything execd exposes lives under one API. When the platform configures an access token, every endpoint below requires it in the `X-EXECD-ACCESS-TOKEN` header — only liveness and readiness are always open. PTY WebSocket handshakes also accept the browser-compatible credential described below. The contract lives in [specs/execd-api.yaml](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml).
 
 ![execd request pipeline](../../public/images/execd-request-pipeline.svg)
 
@@ -58,6 +58,14 @@ Execution modes:
 
 Foreground `stdout` and `stderr` event text preserves the command's line endings (`\n`, `\r`, or `\r\n`). Concatenate event text for each stream to reconstruct its output; the last event may be an unterminated fragment.
 
+A successful foreground `POST /command` ends with `execution_complete` carrying `exit_code: 0`. This optional field is omitted from background startup acknowledgements and code execution events; absence is not an exit status. Non-zero command exits retain `error.exit_code` on the `error` event. Older execd versions omit the successful exit code, so clients may retain their existing foreground-only completion inference. A stream that ends before a terminal event does not establish success.
+
+::: warning Legacy SDK compatibility
+SDKs built before `sandbox-api 1.0.18` do not know the `exit_code` key, and when a consumer classpath resolves an incompatible kotlinx-serialization runtime, decoding the unknown key crashes with `AbstractMethodError` — the command finishes inside the sandbox but the client call never returns and logs nothing. Setting `EXECD_SSE_LEGACY_COMPAT=true` makes execd omit the field from both events for such fleets; successful commands lose nothing because the value is a constant 0 and newer SDKs infer it. The long-term fix is upgrading the sandbox SDK to a build that shades its serialization runtime (`sandbox-api` 1.0.18 or newer), which removes the dependency-conflict hazard for every field added in the future.
+:::
+
+Bash-session runs stream one merged `stdout` event stream (session stderr is merged into it) with the same line-ending contract: event text preserves `\n`, `\r`, or `\r\n`, and concatenating event text reconstructs the run's output. Blank lines are preserved as events containing only the line ending, and the final event may be an unterminated fragment. A line longer than 16 MiB is split across several events, and only the last of them ends with the line ending.
+
 Sessions use Bash when the image provides it and fall back to POSIX `sh` on minimal images — commands sent to a fallback session must be `sh`-compatible. Windows sandboxes are supported (environment names are case-insensitive; batch files require shell syntax).
 
 ## Code execution
@@ -74,9 +82,29 @@ Each terminal session is a real PTY served over WebSocket — not a wrapped comm
 
 The sharing model is deliberate: exactly one **holder** owns the keyboard, and any number of **viewers** can watch. Viewers first replay what has already been printed, then follow live output — useful for supervision, debugging assistants, or letting a second person watch an agent work without giving it input.
 
+### Browser WebSocket authentication
+
+Browsers cannot attach an arbitrary `X-EXECD-ACCESS-TOKEN` header to a WebSocket handshake. For `GET /pty/{sessionId}/ws` only, a browser can instead offer the `opensandbox-pty` application subprotocol and one credential subprotocol whose suffix is the existing execd token encoded as unpadded base64url:
+
+```javascript
+const bytes = new TextEncoder().encode(execdToken);
+const encoded = btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(""))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const socket = new WebSocket(websocketUrl, [
+  "opensandbox-pty",
+  `base64url.bearer.execd.opensandbox.${encoded}`,
+]);
+```
+
+Execd verifies the same token before upgrading the connection, removes the credential entry, and negotiates only `opensandbox-pty`. This works for both interactive attachments and `?mode=viewer`. An explicit `X-EXECD-ACCESS-TOKEN` header takes precedence, including when it is empty or invalid; it never falls back to a subprotocol token. Duplicate credentials, malformed encoding, and a credential without the application subprotocol are rejected with `401`. Existing header-authenticated clients do not need to offer a subprotocol. Other HTTP APIs, including PTY creation and deletion, still require the header when token protection is enabled.
+
+This is a sandbox-wide credential, not a restricted terminal ticket. Obtain it through an authorized endpoint-resolution flow; do not place it in the URL or persistent browser storage. Use WSS in production: base64url is not encryption. Configure proxies and observability systems to redact the credential-bearing `Sec-WebSocket-Protocol` request header. An ingress signed URL satisfies ingress authentication only and does not replace execd authentication. The existing Origin policy and PTY disconnect/reconnect behavior are unchanged; deployments must enforce their browser-origin policy at the trusted gateway.
+
 ## Files and directories
 
 One API covers the whole filesystem tree: stream files in and out, list and search directories, inspect and change permissions, replace file contents, move and remove paths. The file APIs in every sandbox SDK are a thin wrapper over these endpoints.
+
+Uploads through the filesystem route are staged next to their destination and renamed into place, so a copy that fails partway leaves the file it was replacing untouched instead of truncating it. This requires write permission on the containing directory. When only the destination file is writable (for example a `0666` file in a `0555` directory), execd falls back to an in-place write: the upload still succeeds, but a partial failure can truncate the old content. The replacement keeps the destination's mode, including setuid/setgid/sticky bits, and, where the platform allows it, its owner and group. Staging replaces the inode, so extended attributes such as POSIX ACLs and file capabilities are not preserved on the staged path; the in-place fallback keeps them. Staging files are created privately when a destination already exists, and execd hides their names from directory listings and search results. The isolated-session file routes (`/v1/isolated/session/:sessionId/files/upload` and `files/replace`) stage and rename the same way, with the same in-place fallback, across every session view: the overlay upper directory, `binds` destinations, and the strict profile's private `/tmp`. Those routes also reassign the written file to the session's UID/GID rather than preserving an existing owner, matching the behavior they have always had.
 
 ### Filesystem execution identity
 
@@ -126,3 +154,9 @@ Sandboxes can be pre-warmed in pools and reused across allocations. Execd makes 
 ## Observability
 
 Execd exposes local CPU and memory metrics as a snapshot and as a live stream, and exports OpenTelemetry metrics when the platform configures an endpoint — attributed to your sandbox ID and allocation. See [telemetry](/guides/telemetry#execd) for the metric list and how export is configured.
+
+Command-related operational records add only the top-level JSON field `command_id`, equal to the runtime-generated ID in the SSE `init` event and command status, output, and interrupt endpoints. Query this field to correlate existing records. No public wire field or header is added. Noncommand records are unchanged.
+
+Existing formatted messages, levels, event counts, ordering, and sampling remain unchanged, including the ID already present in the init message. Received commands remain INFO; start and wait failures remain ERROR. Successful verbose SSE writes, including completion, remain INFO; successful stdout/stderr and keepalive writes remain quiet. Correlation is assigned before output workers start, including Unix output before init, without emitting init or committing headers earlier.
+
+A background `execution_complete` acknowledges startup, not process termination. Successful background termination produces no additional log record; foreground completion follows a successful wait. These sampled operational logs are **not an audit trail**. The existing sampler groups by level and fully formatted message, retaining the first 100 per one-second tick and then every 100th matching event. The added field neither changes this key nor bypasses sampling; even ERROR records may be dropped. Use the command status and output APIs for lifecycle state and output.

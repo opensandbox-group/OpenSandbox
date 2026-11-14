@@ -20,6 +20,7 @@ import {
   FileSearchOutlined,
   LogoutOutlined,
   PlusOutlined,
+  SettingOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
 import { Layout, Menu, Typography } from 'antd';
@@ -44,16 +45,31 @@ export function AppLayout() {
   const isAdmin = user?.role === 'admin';
 
   const items = [
-    { key: '/', icon: <DashboardOutlined />, label: '概览' },
+    { key: '/', icon: <DashboardOutlined />, label: 'Overview' },
     isAdmin
-      ? { key: '/admin/sandboxes', icon: <UnorderedListOutlined />, label: '沙箱（全局）' }
-      : { key: '/sandboxes', icon: <UnorderedListOutlined />, label: '沙箱' },
+      ? { key: '/admin/sandboxes', icon: <UnorderedListOutlined />, label: 'Sandboxes (All Tenants)' }
+      : { key: '/sandboxes', icon: <UnorderedListOutlined />, label: 'Sandboxes' },
     ...(isAdmin
       ? []
-      : [{ key: '/sandboxes/new', icon: <PlusOutlined />, label: '创建沙箱' }]),
-    { key: '/snapshots', icon: <CameraOutlined />, label: '快照' },
+      : [{ key: '/sandboxes/new', icon: <PlusOutlined />, label: 'Create Sandbox' }]),
+    { key: '/snapshots', icon: <CameraOutlined />, label: 'Snapshots' },
     ...(isAdmin ? [{ key: '/pools', icon: <DatabaseOutlined />, label: 'Pool' }] : []),
-    { key: '/diagnostics', icon: <FileSearchOutlined />, label: '诊断' },
+    { key: '/diagnostics', icon: <FileSearchOutlined />, label: 'Diagnostics' },
+    {
+      key: 'platform',
+      icon: <SettingOutlined />,
+      label: 'Platform',
+      children: [
+        { key: '/platform/health', label: 'Component Health' },
+        { key: '/platform/version', label: 'Version' },
+        ...(isAdmin
+          ? [
+              { key: '/platform/k8s/workloads', label: 'K8s Workloads' },
+              { key: '/platform/k8s/events', label: 'K8s Events' },
+            ]
+          : []),
+      ],
+    },
   ];
 
   const selectedKey = menuKey(location.pathname, Boolean(isAdmin));
@@ -73,8 +89,11 @@ export function AppLayout() {
           theme="dark"
           mode="inline"
           selectedKeys={[selectedKey]}
+          defaultOpenKeys={['platform']}
           items={items}
-          onClick={({ key }) => navigate(key)}
+          onClick={({ key }) => {
+            if (key !== 'platform') navigate(key);
+          }}
         />
       </Sider>
       <Layout>
@@ -92,7 +111,7 @@ export function AppLayout() {
             <AppstoreOutlined /> {user?.namespace ?? 'platform'}
           </Typography.Text>
           <Typography.Link onClick={() => void logout()}>
-            <LogoutOutlined /> 退出
+            <LogoutOutlined /> Sign Out
           </Typography.Link>
         </Header>
         <Content style={{ margin: 24 }}>

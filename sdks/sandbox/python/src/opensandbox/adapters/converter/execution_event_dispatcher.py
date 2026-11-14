@@ -117,6 +117,7 @@ class ExecutionEventDispatcher:
             value=error_data.value or "",
             timestamp=timestamp,
             traceback=error_data.traceback,
+            exit_code=error_data.exit_code,
         )
         self.execution.error = error
         if self.handlers and self.handlers.on_error:

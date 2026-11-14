@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -109,6 +110,8 @@ type Config struct {
 	// private socket parent and must not reuse this configuration after the
 	// child exits. Nil keeps the receiver disabled and removes inherited values.
 	RevisionIPC *RevisionIPCConfig
+	// SubjectRevisionIPC selects the independent shared-process installation receiver.
+	SubjectRevisionIPC *SubjectRevisionIPCConfig
 }
 
 // RevisionIPCConfig is handed only to the mitmdump child. The bearer token is
@@ -128,6 +131,107 @@ type RevisionIPCConfig struct {
 	TLSCapacity         int
 	RequestCapacity     int
 	DrainTimeoutSeconds int
+}
+
+// SubjectRevisionScriptPath is the bundled installation-only shared receiver addon.
+const SubjectRevisionScriptPath = "/var/egress/mitmscripts/subject_runtime.py"
+
+const subjectRevisionEnvPrefix = "OPENSANDBOX_EGRESS_SUBJECT_REVISION_"
+
+// SubjectRevisionIPCConfig is an internal handoff, never an operator setting.
+// It deliberately has no single SubjectGeneration.
+type SubjectRevisionIPCConfig struct {
+	SocketPath            string
+	SessionToken          string
+	ControlGeneration     string
+	MaxSubjects           int
+	MaxSnapshotBytes      int
+	RetainedPayloadBudget int64
+	TLSAdmission          bool
+	TLSCapacity           int
+	ProcessTLSCapacity    int
+}
+
+func validateSubjectRevisionIPCConfig(cfg Config) error {
+	subject := cfg.SubjectRevisionIPC
+	if subject == nil {
+		return nil
+	}
+	if cfg.RevisionIPC != nil || !filepath.IsAbs(subject.SocketPath) ||
+		strings.IndexByte(subject.SocketPath, 0) >= 0 || len(subject.SocketPath) > 103 ||
+		!validRevisionIPCToken(subject.SessionToken) || !validRevisionIPCGeneration(subject.ControlGeneration) ||
+		subject.MaxSubjects <= 0 || subject.MaxSnapshotBytes <= 0 ||
+		int64(subject.MaxSubjects) > math.MaxInt64/2/int64(subject.MaxSnapshotBytes) ||
+		subject.RetainedPayloadBudget < 2*int64(subject.MaxSubjects)*int64(subject.MaxSnapshotBytes) {
+		return errInvalidRevisionIPCConfig
+	}
+	if subject.TLSAdmission && (subject.TLSCapacity < 1 || subject.TLSCapacity > 1<<20 ||
+		subject.ProcessTLSCapacity < 1 || subject.ProcessTLSCapacity > 1<<20) {
+		return errInvalidRevisionIPCConfig
+	}
+	count := 0
+	for _, path := range cfg.ScriptPaths {
+		if path == SubjectRevisionScriptPath {
+			count++
+		}
+	}
+	if count != 1 {
+		return errInvalidRevisionIPCConfig
+	}
+	return nil
+}
+
+// WithSubjectRevision returns an owned launch config; the template is reusable
+// only without its per-child session. The system addon receives no v1 bundle.
+func WithSubjectRevision(cfg Config, handoff SubjectRevisionIPCConfig) (Config, error) {
+	if cfg.RevisionIPC != nil || cfg.SubjectRevisionIPC != nil {
+		return Config{}, errInvalidRevisionIPCConfig
+	}
+	cfg.ScriptPaths = append(append([]string(nil), cfg.ScriptPaths...), SubjectRevisionScriptPath)
+	cfg.SubjectRevisionIPC = &handoff
+	if err := validateSubjectRevisionIPCConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+// Nil subject configuration delegates verbatim to the existing sidecar builder.
+func buildMitmdumpChildEnv(base []string, home string, cfg Config) []string {
+	env := buildMitmdumpEnv(base, home, cfg.RevisionIPC)
+	if cfg.SubjectRevisionIPC == nil {
+		// Preserve inherited OPENSANDBOX_EGRESS_SUBJECT_REVISION_* values
+		// intentionally: the disabled path has no reader for this prefix.
+		return env
+	}
+	clean := make([]string, 0, len(env)+11)
+	for _, value := range env {
+		name, _, _ := strings.Cut(value, "=")
+		if !strings.HasPrefix(name, subjectRevisionEnvPrefix) {
+			clean = append(clean, value)
+		}
+	}
+	s := cfg.SubjectRevisionIPC
+	clean = append(clean,
+		subjectRevisionEnvPrefix+"MODE=subject-v2",
+		subjectRevisionEnvPrefix+"SOCKET="+s.SocketPath,
+		subjectRevisionEnvPrefix+"TOKEN="+s.SessionToken,
+		subjectRevisionEnvPrefix+"CONTROL_GENERATION="+s.ControlGeneration,
+		subjectRevisionEnvPrefix+"MAX_SUBJECTS="+strconv.Itoa(s.MaxSubjects),
+		subjectRevisionEnvPrefix+"MAX_SNAPSHOT_BYTES="+strconv.Itoa(s.MaxSnapshotBytes),
+		subjectRevisionEnvPrefix+"RETAINED_PAYLOAD_BUDGET="+strconv.FormatInt(s.RetainedPayloadBudget, 10),
+	)
+	if s.TLSAdmission {
+		clean = append(clean, subjectRevisionEnvPrefix+"TLS_ADMISSION=true",
+			subjectRevisionEnvPrefix+"TLS_CAPACITY="+strconv.Itoa(s.TLSCapacity),
+			subjectRevisionEnvPrefix+"PROCESS_TLS_CAPACITY="+strconv.Itoa(s.ProcessTLSCapacity),
+			// The child reads its static passthrough policy only from this
+			// handoff: inheritance is stripped above and main.go rejects an
+			// operator-set value for fast-sandbox, so the policy is empty.
+			// parse_handoff treats a missing value as an error, including for
+			// an empty policy, so admission must ship it explicitly.
+			constants.EnvMitmproxyPassthroughHosts+"=[]")
+	}
+	return clean
 }
 
 // Running: child mitmdump; use GracefulShutdown to SIGTERM+reap before process exit.
@@ -170,6 +274,9 @@ func Launch(cfg Config) (*Running, error) {
 	if err := validateRevisionIPCConfig(cfg.RevisionIPC); err != nil {
 		return nil, err
 	}
+	if err := validateSubjectRevisionIPCConfig(cfg); err != nil {
+		return nil, err
+	}
 	uname := cfg.UserName
 	if strings.TrimSpace(uname) == "" {
 		uname = RunAsUser
@@ -194,7 +301,7 @@ func Launch(cfg Config) (*Running, error) {
 	}
 	// HOME determines mitm's confdir (~/.mitmproxy) which holds both the CA
 	// and the baked-in config.yaml.
-	cmd.Env = buildMitmdumpEnv(os.Environ(), home, cfg.RevisionIPC)
+	cmd.Env = buildMitmdumpChildEnv(os.Environ(), home, cfg)
 
 	if err := cmd.Start(); err != nil {
 		_ = mitmIn.Close()
@@ -268,6 +375,10 @@ func buildMitmdumpArgs(cfg Config) []string {
 
 	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxySslInsecure)) {
 		args = append(args, "--set", "ssl_insecure=true")
+	}
+
+	if cfg.SubjectRevisionIPC != nil && cfg.SubjectRevisionIPC.TLSAdmission {
+		args = append(args, "--set", "http2=false")
 	}
 
 	args = append(args, "-s", systemScriptPath)
@@ -374,6 +485,13 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 		if !ok {
 			continue
 		}
+		if strings.HasPrefix(msg, "credential proxy: tls-budget-v1 ") {
+			scope, occupied, budget, ok := tlsBudgetEvent(msg)
+			if ok {
+				telemetry.RecordTLSBudget(scope, occupied, budget)
+			}
+			continue
+		}
 		if strings.HasPrefix(msg, "credential proxy: tls-admission-") {
 			if decision, reason, ok := tlsAdmissionEvent(msg); ok {
 				telemetry.RecordTLSAdmission(decision, reason)
@@ -394,6 +512,18 @@ func forwardMitmdumpOutput(r io.ReadCloser) {
 }
 
 const tlsAdmissionPrefix = "credential proxy: tls-admission-v1"
+
+func tlsBudgetEvent(msg string) (scope string, occupied, budget int64, ok bool) {
+	payload, found := strings.CutPrefix(msg, "credential proxy: tls-budget-v1 ")
+	parts := strings.Split(payload, " ")
+	if !found || len(parts) != 3 || (parts[0] != "process" && parts[0] != "subject") {
+		return "", 0, 0, false
+	}
+	occupied, first := strconv.ParseInt(parts[1], 10, 64)
+	budget, second := strconv.ParseInt(parts[2], 10, 64)
+	return parts[0], occupied, budget, first == nil && second == nil &&
+		occupied >= 0 && budget >= 1 && budget <= 1<<20 && occupied <= budget
+}
 
 // tlsAdmissionEvent validates framing only. The recorder validates the closed
 // decision/reason pairs before creating attributes.
@@ -425,6 +555,11 @@ func credentialProxyMessage(line string) (string, bool) {
 	}
 	if !strings.HasPrefix(line, "credential proxy:") {
 		return "", false
+	}
+	if strings.HasPrefix(line, "credential proxy: tls-budget-") {
+		if _, _, _, ok := tlsBudgetEvent(line); !ok {
+			return "", false
+		}
 	}
 	return line, true
 }

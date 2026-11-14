@@ -47,5 +47,5 @@ export function SandboxStateTag({ state }: SandboxStateTagProps) {
   );
 }
 
-/** 表格内 Tag 列：防止窄列溢出到相邻单元格。 */
+/** Tag column for tables; prevents narrow columns from overflowing into adjacent cells. */
 export const consoleTagTableCellProps = { className: 'console-tag-table-cell' as const };

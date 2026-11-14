@@ -28,6 +28,7 @@ class EventNodeError(BaseModel):
     name: str | None = Field(default=None, alias="ename")
     value: str | None = Field(default=None, alias="evalue")
     traceback: list[str] = Field(default_factory=list)
+    exit_code: int | None = Field(default=None, alias="exit_code")
 
     @field_validator("traceback", mode="before")
     @classmethod

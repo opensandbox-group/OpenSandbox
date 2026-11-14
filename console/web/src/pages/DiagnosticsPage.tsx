@@ -18,6 +18,7 @@ import { useSearchParams } from 'react-router-dom';
 
 import { ApiError, adminApi, sandboxApi } from '../api/client';
 import type { DiagnosticContentResponse } from '../api/types';
+import { SandboxArchiveLogPanel } from '../components/SandboxArchiveLogPanel';
 import { SandboxLogPanel } from '../components/SandboxLogPanel';
 import { useAuth } from '../auth/AuthContext';
 import { DIAGNOSTIC_SCOPES } from '../utils/format';
@@ -53,11 +54,11 @@ export function DiagnosticsPage() {
   };
 
   const renderPayload = (data: DiagnosticContentResponse | null) => {
-    if (!data) return <Typography.Text type="secondary">暂无数据</Typography.Text>;
+    if (!data) return <Typography.Text type="secondary">No data available</Typography.Text>;
     if (data.contentUrl) {
       return (
         <Typography.Link href={data.contentUrl} target="_blank" rel="noreferrer">
-          下载诊断内容 ({data.contentLength ?? 'unknown'} bytes)
+          Download diagnostic data ({data.contentLength ?? 'unknown'} bytes)
         </Typography.Link>
       );
     }
@@ -70,11 +71,11 @@ export function DiagnosticsPage() {
 
   const fetchEvents = async () => {
     if (!sandboxId.trim()) {
-      message.warning('请输入 Sandbox ID');
+      message.warning('Enter a Sandbox ID');
       return;
     }
     if (user?.role === 'admin' && !tenant.trim()) {
-      message.warning('Admin 查看事件需指定 tenant');
+      message.warning('Admins must specify a tenant to view events');
       setEvents(null);
       return;
     }
@@ -90,9 +91,9 @@ export function DiagnosticsPage() {
     } catch (e) {
       if (seq !== requestSeq.current) return;
       if (e instanceof ApiError && e.status === 404) {
-        message.info('诊断 API 未返回数据');
+        message.info('The diagnostics API returned no data');
       } else {
-        message.error(e instanceof Error ? e.message : '请求失败');
+        message.error(e instanceof Error ? e.message : 'Request failed');
       }
       setEvents(null);
     } finally {
@@ -102,13 +103,13 @@ export function DiagnosticsPage() {
 
   return (
     <div>
-      <Typography.Title level={4}>诊断</Typography.Title>
+      <Typography.Title level={4}>Diagnostics</Typography.Title>
       {user?.role === 'admin' && (
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="Admin 查看日志/事件时需填写 tenant（与全局列表一致），BFF 将用该租户 Key 代发。"
+          message="Admins must enter a tenant to view logs or events, as in the global sandbox list. The BFF will make the request using that tenant’s key."
         />
       )}
       <Space wrap style={{ marginBottom: 16 }}>
@@ -121,7 +122,7 @@ export function DiagnosticsPage() {
         />
         {user?.role === 'admin' && (
           <Input
-            placeholder="tenant 名称"
+            placeholder="Tenant name"
             value={tenant}
             onChange={(e) => setTenant(e.target.value)}
             onBlur={() => syncUrl(sandboxId, tenant)}
@@ -133,15 +134,36 @@ export function DiagnosticsPage() {
         items={[
           {
             key: 'logs',
-            label: '运行日志',
+            label: 'Runtime Logs',
             children: sandboxId.trim() ? (
-              <SandboxLogPanel
-                sandboxId={sandboxId.trim()}
-                tenant={user?.role === 'admin' ? tenant.trim() : undefined}
-                autoLoad={user?.role === 'tenant' || Boolean(tenant.trim())}
+              <Tabs
+                items={[
+                  {
+                    key: 'live',
+                    label: 'Live',
+                    children: (
+                      <SandboxLogPanel
+                        sandboxId={sandboxId.trim()}
+                        tenant={user?.role === 'admin' ? tenant.trim() : undefined}
+                        autoLoad={user?.role === 'tenant' || Boolean(tenant.trim())}
+                      />
+                    ),
+                  },
+                  {
+                    key: 'archive',
+                    label: 'Archived',
+                    children: (
+                      <SandboxArchiveLogPanel
+                        sandboxId={sandboxId.trim()}
+                        tenant={user?.role === 'admin' ? tenant.trim() : undefined}
+                        autoLoad={user?.role === 'tenant' || Boolean(tenant.trim())}
+                      />
+                    ),
+                  },
+                ]}
               />
             ) : (
-              <Typography.Text type="secondary">请先填写 Sandbox ID</Typography.Text>
+              <Typography.Text type="secondary">Enter a Sandbox ID first</Typography.Text>
             ),
           },
           {
@@ -156,8 +178,8 @@ export function DiagnosticsPage() {
                     style={{ width: 160 }}
                     options={DIAGNOSTIC_SCOPES.map((s) => ({ label: s, value: s }))}
                   />
-                  <Typography.Link onClick={() => void fetchEvents()}>加载</Typography.Link>
-                  {loadingEvents && <Typography.Text type="secondary">加载中…</Typography.Text>}
+                  <Typography.Link onClick={() => void fetchEvents()}>Load</Typography.Link>
+                  {loadingEvents && <Typography.Text type="secondary">Loading…</Typography.Text>}
                 </Space>
                 {renderPayload(events)}
               </>

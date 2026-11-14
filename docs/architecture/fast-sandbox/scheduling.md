@@ -5,7 +5,7 @@ description: Pools and Fastlets — the create hot path, capacity and placement,
 
 # Scheduling
 
-Fast Sandbox schedules sandboxes into **pools** of pre-warmed **Fastlet** pods. A pool fixes the runtime profile and resource shape; a Fastlet hosts many sandboxes; a sandbox claims a slice of one Fastlet. The result: creating a sandbox is a constant-time admission into capacity that already exists, instead of a fresh scheduling round.
+Fast Sandbox schedules sandboxes into **pools** of pre-warmed **Fastlet** pods. A pool fixes the runtime profile and the resource policy; a Fastlet hosts many sandboxes; a sandbox claims a slice of one Fastlet. The result: creating a sandbox is a constant-time admission into capacity that already exists, instead of a fresh scheduling round. The two resource policies (`LegacySlot` and `ResourceAware`) are compared and configured in [Resource-Aware Scheduling for Fast Sandbox](/guides/resource-aware-scheduling).
 
 ![The create hot path](../../public/images/fast-sandbox-create-path.svg)
 
@@ -15,7 +15,7 @@ A `SandboxPool` is the unit of capacity and policy:
 
 - **`capacity`** sizes the Fastlet fleet — how many warm pods to hold, and the ceiling.
 - **`runtime`** selects one immutable, platform-owned runtime profile (the Firecracker profile). All sandboxes in a pool share it.
-- **`sandboxResources`** is the immutable resource shape of every sandbox the pool produces.
+- **`sandboxResources`** is the immutable resource policy for every sandbox the pool produces. A `LegacySlot` pool fixes one shape for all sandboxes; a `ResourceAware` pool declares default limits plus overcommit ratios, derives each sandbox's committed request as `ceil(limit / ratio)`, and lets template-based creates carry the template's recorded machine shape as their limits (see [Templates](/architecture/fast-sandbox/templates)).
 - **`fastletTemplate`** is an ordinary Kubernetes pod template for the Fastlet pods themselves — node selectors, affinity, and spreads stay Kubernetes-native.
 - **`infraComponents`** declares the pod-local infrastructure (such as the egress action handler). It is compiled into an immutable revision: updating it rolls new Fastlets while existing sandboxes stay on the revision they were admitted with.
 - **`maxSandboxesPerPod`** bounds density; **`warmImages`** lists artifacts to pre-pull, protected from ordinary cache eviction, so readiness never waits on a pull.

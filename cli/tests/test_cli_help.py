@@ -39,12 +39,12 @@ class TestRootCLI:
             "template",
             "snapshot",
             "command",
+            "terminal",
             "file",
             "egress",
             "credential-vault",
             "config",
             "diagnostics",
-            "devops",
             "skills",
         ):
             assert cmd in result.output
@@ -64,6 +64,12 @@ class TestSandboxHelp:
 
 
 class TestTemplateAndSnapshotHelp:
+    def test_template_create_help_describes_oci_destination(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["template", "create", "--help"])
+        assert result.exit_code == 0
+        assert "oci://registry/repository" in result.output
+        assert "no tag or digest" in " ".join(result.output.split())
+
     @pytest.mark.parametrize("group", ["template", "snapshot"])
     def test_group_help_lists_subcommands(self, runner: CliRunner, group: str) -> None:
         result = runner.invoke(cli, [group, "--help"])
@@ -94,6 +100,14 @@ class TestFileHelp:
             assert subcmd in result.output
 
 
+class TestTerminalHelp:
+    def test_terminal_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["terminal", "--help"])
+        assert result.exit_code == 0
+        assert "SANDBOX_ID" in result.output
+        assert "--workdir" in result.output
+
+
 class TestEgressHelp:
     def test_egress_help(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["egress", "--help"])
@@ -122,14 +136,6 @@ class TestConfigHelp:
         result = runner.invoke(cli, ["config", "--help"])
         assert result.exit_code == 0
         for subcmd in ("init", "show", "set"):
-            assert subcmd in result.output
-
-
-class TestDevopsHelp:
-    def test_devops_help(self, runner: CliRunner) -> None:
-        result = runner.invoke(cli, ["devops", "--help"])
-        assert result.exit_code == 0
-        for subcmd in ("logs", "inspect", "events", "summary"):
             assert subcmd in result.output
 
 

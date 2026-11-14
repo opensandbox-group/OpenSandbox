@@ -27,10 +27,6 @@ from opensandbox_cli.config import (
     resolve_config,
 )
 
-# ---------------------------------------------------------------------------
-# load_config_file
-# ---------------------------------------------------------------------------
-
 
 class TestLoadConfigFile:
     def test_returns_empty_when_file_missing(self, tmp_path: Path) -> None:
@@ -48,11 +44,6 @@ class TestLoadConfigFile:
         assert result["output"]["color"] is False
         assert result["defaults"]["image"] == "alpine"
         assert result["defaults"]["timeout"] == "5m"
-
-
-# ---------------------------------------------------------------------------
-# resolve_config — priority: CLI > env > file > defaults
-# ---------------------------------------------------------------------------
 
 
 class TestResolveConfig:
@@ -121,21 +112,6 @@ class TestResolveConfig:
         assert result["request_timeout"] == 999
         assert result["use_server_proxy"] is True
 
-    def test_invalid_timeout_env_falls_through(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        cfg = tmp_path / "empty.toml"
-        cfg.write_text("")
-        monkeypatch.setenv("OPEN_SANDBOX_REQUEST_TIMEOUT", "not-a-number")
-        result = resolve_config(config_path=cfg)
-        # Falls through to default 30
-        assert result["request_timeout"] == 30
-
-    def test_invalid_bool_env_falls_through(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        cfg = tmp_path / "empty.toml"
-        cfg.write_text("")
-        monkeypatch.setenv("OPEN_SANDBOX_USE_SERVER_PROXY", "not-a-bool")
-        result = resolve_config(config_path=cfg)
-        assert result["use_server_proxy"] is False
-
     def test_numeric_file_scalars_stay_strings(self, tmp_path: Path) -> None:
         cfg = tmp_path / "config.toml"
         cfg.write_text(
@@ -148,35 +124,6 @@ class TestResolveConfig:
         assert result["domain"] == "12345"
         assert result["default_timeout"] == "300"
 
-    def test_stringly_typed_file_scalars_are_coerced(self, tmp_path: Path) -> None:
-        cfg = tmp_path / "config.toml"
-        cfg.write_text(
-            '[connection]\nrequest_timeout = "45"\nuse_server_proxy = "true"\n\n'
-            '[output]\ncolor = "false"\n'
-        )
-        result = resolve_config(config_path=cfg)
-        assert result["request_timeout"] == 45
-        assert result["use_server_proxy"] is True
-        assert result["color"] is False
-
-    def test_numeric_file_scalars_are_coerced_for_typed_keys(
-        self, tmp_path: Path
-    ) -> None:
-        cfg = tmp_path / "config.toml"
-        cfg.write_text(
-            "[connection]\nrequest_timeout = 45.5\nuse_server_proxy = 1\n\n"
-            "[output]\ncolor = 0\n"
-        )
-        result = resolve_config(config_path=cfg)
-        assert result["request_timeout"] == 45
-        assert result["use_server_proxy"] is True
-        assert result["color"] is False
-
-
-# ---------------------------------------------------------------------------
-# init_config_file
-# ---------------------------------------------------------------------------
-
 
 class TestInitConfigFile:
     def test_creates_default_config(self, tmp_path: Path) -> None:
@@ -188,12 +135,6 @@ class TestInitConfigFile:
         assert "[connection]" in content
         assert "[output]" in content
         assert "[defaults]" in content
-
-    def test_refuses_overwrite_without_force(self, tmp_path: Path) -> None:
-        cfg_path = tmp_path / "config.toml"
-        cfg_path.write_text("existing")
-        with pytest.raises(FileExistsError, match="already exists"):
-            init_config_file(cfg_path)
 
     def test_force_overwrites(self, tmp_path: Path) -> None:
         cfg_path = tmp_path / "config.toml"

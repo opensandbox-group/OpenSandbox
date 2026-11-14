@@ -172,9 +172,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         closeCurrentSandboxQuietly();
     }
 
-    // ==========================================
-    // Basic Code Execution Tests
-    // ==========================================
     @Test
     @Order(1)
     @DisplayName("CodeInterpreter Creation and Basic Functionality")
@@ -185,7 +182,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(codeInterpreter);
         assertNotNull(codeInterpreter.getId());
 
-        // 2. Verify service access
         assertNotNull(codeInterpreter.codes());
         assertNotNull(codeInterpreter.files());
         assertNotNull(codeInterpreter.commands());
@@ -205,7 +201,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(javaContext.getId());
         assertEquals("java", javaContext.getLanguage());
 
-        // Event tracking for comprehensive validation
         List<OutputMessage> stdoutMessages = Collections.synchronizedList(new ArrayList<>());
         List<OutputMessage> stderrMessages = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionResult> results = Collections.synchronizedList(new ArrayList<>());
@@ -301,9 +296,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNull(varResult.getExitCode());
         assertNotNull(varResult.getComplete());
 
-        // 3. Java error handling test.
-        // Jupyter may emit execution_complete and error for the same run, so
-        // complete is not mutually exclusive with error here.
         stdoutMessages.clear();
         stderrMessages.clear();
         results.clear();
@@ -334,14 +326,12 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
     void testPythonCodeExecution() {
         logger.info("Testing Python code execution");
 
-        // Use class-scoped interpreter (created in @BeforeAll)
         assertNotNull(codeInterpreter);
         CodeContext pythonContext = codeInterpreter.codes().createContext(SupportedLanguage.PYTHON);
         assertNotNull(pythonContext);
         assertEquals("python", pythonContext.getLanguage());
         Duration perExecTimeout = Duration.ofMinutes(2);
 
-        // Event tracking
         List<OutputMessage> stdoutMessages = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionComplete> completedEvents = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionError> errors = Collections.synchronizedList(new ArrayList<>());
@@ -370,7 +360,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                                 })
                         .build();
 
-        // 1. Simple Python execution
         RunCodeRequest simpleRequest =
                 RunCodeRequest.builder()
                         .code(
@@ -392,7 +381,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertFalse(completedEvents.isEmpty());
         assertTrue(errors.isEmpty());
 
-        // 2. Python with variables and state persistence
         RunCodeRequest varRequest =
                 RunCodeRequest.builder()
                         .code(
@@ -412,7 +400,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNull(varResult.getExitCode());
         assertNotNull(varResult.getComplete());
 
-        // 3. Test variable persistence across executions
         RunCodeRequest persistRequest =
                 RunCodeRequest.builder()
                         .code(
@@ -430,7 +417,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNull(persistResult.getExitCode());
         assertNotNull(persistResult.getComplete());
 
-        // 4. Python error handling
         RunCodeRequest errorRequest =
                 RunCodeRequest.builder()
                         .code("print(undefined_variable)  # This will cause NameError")
@@ -464,7 +450,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(goContext);
         assertEquals("go", goContext.getLanguage());
 
-        // Event tracking
         List<OutputMessage> stdoutMessages = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionComplete> completedEvents = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionError> errors = Collections.synchronizedList(new ArrayList<>());
@@ -491,7 +476,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                                 })
                         .build();
 
-        // 1. Simple Go execution
         RunCodeRequest simpleRequest =
                 RunCodeRequest.builder()
                         .code(
@@ -511,7 +495,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(simpleResult.getId());
         assertFalse(completedEvents.isEmpty());
 
-        // 2. Go with data structures and functions
         RunCodeRequest dataRequest =
                 RunCodeRequest.builder()
                         .code(
@@ -537,7 +520,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(dataResult);
         assertNotNull(dataResult.getId());
 
-        // 3. Go compilation error test
         RunCodeRequest errorRequest =
                 RunCodeRequest.builder()
                         .code(
@@ -570,13 +552,11 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
 
         assertNotNull(codeInterpreter);
 
-        // Create TypeScript execution context
         CodeContext tsContext = codeInterpreter.codes().createContext(SupportedLanguage.TYPESCRIPT);
 
         assertNotNull(tsContext);
         assertEquals("typescript", tsContext.getLanguage());
 
-        // Event tracking
         List<OutputMessage> stdoutMessages = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionComplete> completedEvents = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionError> errors = Collections.synchronizedList(new ArrayList<>());
@@ -605,7 +585,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                                 })
                         .build();
 
-        // 1. Simple TypeScript execution
         RunCodeRequest simpleRequest =
                 RunCodeRequest.builder()
                         .code(
@@ -622,7 +601,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(simpleResult.getId());
         assertFalse(completedEvents.isEmpty());
 
-        // 2. TypeScript with types and interfaces
         RunCodeRequest typesRequest =
                 RunCodeRequest.builder()
                         .code(
@@ -725,11 +703,9 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         // issue), fail fast instead of blocking the entire 10-minute JUnit timeout.
         Duration perExecTimeout = Duration.ofMinutes(2);
 
-        // Create separate contexts for different languages
         CodeContext python1 = codeInterpreter.codes().createContext(SupportedLanguage.PYTHON);
         CodeContext python2 = codeInterpreter.codes().createContext(SupportedLanguage.PYTHON);
 
-        // 1. Set different variables in each Python context to test isolation
         RunCodeRequest python1Setup =
                 RunCodeRequest.builder()
                         .code(
@@ -754,7 +730,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(result2);
         assertNotNull(result2.getId());
 
-        // 2. Verify isolation - each context should only see its own variables
         RunCodeRequest python1Check =
                 RunCodeRequest.builder()
                         .code("print(f'Python1 still has: {secret_value1}')")
@@ -789,7 +764,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         ExecutorService executor = Executors.newFixedThreadPool(4);
         long timestamp = System.currentTimeMillis();
 
-        // Create multiple contexts for concurrent execution
         CodeContext pythonConcurrent1 =
                 codeInterpreter.codes().createContext(SupportedLanguage.PYTHON);
         CodeContext pythonConcurrent2 =
@@ -797,12 +771,10 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         CodeContext javaConcurrent = codeInterpreter.codes().createContext(SupportedLanguage.JAVA);
         CodeContext goConcurrent = codeInterpreter.codes().createContext(SupportedLanguage.GO);
 
-        // Track futures with labels for diagnostics
         List<String> taskLabels = List.of("Python1", "Python2", "Java", "Go");
         List<Future<Execution>> futures = new ArrayList<>();
 
         try {
-            // Submit concurrent executions
             futures.add(
                     executor.submit(
                             () -> {
@@ -874,7 +846,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                                 return codeInterpreter.codes().run(request);
                             }));
 
-            // Collect results with per-task diagnostics
             int succeeded = 0;
             List<String> failures = new ArrayList<>();
             for (int i = 0; i < futures.size(); i++) {
@@ -886,7 +857,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                         logger.error(msg);
                         failures.add(msg);
                     } else if (result.getId() == null) {
-                        // Log available fields to aid debugging
                         String detail =
                                 label
                                         + ": Execution has null id (error="
@@ -915,10 +885,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                 }
             }
 
-            // At least 2 of 4 concurrent executions must succeed.
-            // Java/Go compilation overhead in CI can occasionally cause
-            // timeouts or incomplete responses, so we tolerate partial
-            // failure while still asserting that concurrency works.
             assertTrue(
                     succeeded >= 2,
                     "Expected at least 2 of 4 concurrent executions to succeed, but only "
@@ -951,7 +917,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         CodeContext pythonContext = codeInterpreter.codes().createContext(SupportedLanguage.PYTHON);
         CodeContext javaContext = codeInterpreter.codes().createContext(SupportedLanguage.JAVA);
 
-        // Event tracking for interrupt testing
         List<ExecutionComplete> completedEvents = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionError> errors = Collections.synchronizedList(new ArrayList<>());
         List<ExecutionInit> initEvents = Collections.synchronizedList(new ArrayList<>());
@@ -980,7 +945,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                                 })
                         .build();
 
-        // Test 1: Python long-running execution with interrupt
         logger.info("Testing Python interrupt functionality");
 
         RunCodeRequest pythonLongRunningRequest =
@@ -998,13 +962,11 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                         .handlers(handlers)
                         .build();
 
-        // Start Python execution in background
         ExecutorService executor = Executors.newSingleThreadExecutor();
         long start = System.currentTimeMillis();
         Future<Execution> pythonFuture =
                 executor.submit(() -> codeInterpreter.codes().run(pythonLongRunningRequest));
 
-        // Wait for init
         long deadline = System.currentTimeMillis() + 15_000;
         while (initEvents.isEmpty() && System.currentTimeMillis() < deadline) {
             Thread.sleep(100);
@@ -1013,13 +975,9 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         String pythonExecutionId = initEvents.get(initEvents.size() - 1).getId();
         assertNotNull(pythonExecutionId, "Execution ID should not be null");
 
-        // Interrupt the execution after letting it run briefly
         logger.info("Interrupting Python execution with ID: {}", pythonExecutionId);
         assertDoesNotThrow(() -> codeInterpreter.codes().interrupt(pythonExecutionId));
 
-        // Wait for execution to complete (should be interrupted).
-        // The SSE stream may close abruptly after interrupt, so handle both
-        // a clean result and an exception from a broken connection.
         Execution pythonResult = null;
         try {
             pythonResult = pythonFuture.get(60, TimeUnit.SECONDS);
@@ -1039,19 +997,14 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
             assertEquals(pythonExecutionId, pythonResult.getId());
         }
 
-        // Verify the interrupt was effective: execution finished much faster
-        // than the full 20 s run.  Terminal events (complete/error) may or may
-        // not arrive depending on how quickly the server closed the stream.
         assertTrue(
                 elapsed < 90_000,
                 "Execution should have finished promptly after interrupt (elapsed="
                         + elapsed
                         + "ms)");
 
-        // Test 2: Java long-running execution with interrupt
         logger.info("Testing Java interrupt functionality");
 
-        // Clear event lists for Java test
         completedEvents.clear();
         errors.clear();
         initEvents.clear();
@@ -1076,20 +1029,16 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                         .handlers(handlers)
                         .build();
 
-        // Start Java execution in background
         ExecutorService javaExecutor = Executors.newSingleThreadExecutor();
         Future<Execution> javaFuture =
                 javaExecutor.submit(() -> codeInterpreter.codes().run(javaLongRunningRequest));
 
-        // Wait for execution to start
         Thread.sleep(1000);
 
-        // Verify Java execution was initialized
         assertFalse(initEvents.isEmpty(), "Java execution should have been initialized");
         String javaExecutionId = initEvents.get(initEvents.size() - 1).getId();
         assertNotNull(javaExecutionId, "Java execution ID should not be null");
 
-        // Interrupt the Java execution
         logger.info("Interrupting Java execution with ID: {}", javaExecutionId);
         assertDoesNotThrow(() -> codeInterpreter.codes().interrupt(javaExecutionId));
 
@@ -1114,7 +1063,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                     javaResult.getError() != null ? javaResult.getError().getName() : "none");
         }
 
-        // Test 4: Quick execution that completes before interrupt
         logger.info("Testing interrupt of already completed execution");
 
         RunCodeRequest quickRequest =
@@ -1131,7 +1079,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(quickResult);
         assertNotNull(quickResult.getId());
 
-        // Try to interrupt already completed execution
         try {
             codeInterpreter.codes().interrupt(quickResult.getId());
         } catch (Exception ignored) {

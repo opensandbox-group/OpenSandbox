@@ -69,6 +69,10 @@ public class ConnectionConfigOptions
     /// <summary>
     /// Gets or sets whether to use server-proxied endpoint URLs.
     /// </summary>
+    [Obsolete(
+        "The server-proxied data path is in maintenance mode (security and bug fixes only). "
+            + "Route data-plane traffic through the ingress gateway instead."
+    )]
     public bool? UseServerProxy { get; set; }
 
     /// <summary>
@@ -194,6 +198,8 @@ public sealed class ConnectionConfig
 
     /// <summary>
     /// Gets whether server-proxied endpoint URLs should be requested.
+    /// Deprecated: the server-proxied data path is in maintenance mode (security
+    /// and bug fixes only); route data-plane traffic through the ingress gateway instead.
     /// </summary>
     public bool UseServerProxy { get; }
 
@@ -250,7 +256,9 @@ public sealed class ConnectionConfig
         Domain = domainBase;
         ApiKey = options.ApiKey ?? envApiKey;
         RequestTimeoutSeconds = options.RequestTimeoutSeconds ?? Constants.DefaultRequestTimeoutSeconds;
+#pragma warning disable CS0618 // Reading the deprecated option here is intentional.
         UseServerProxy = options.UseServerProxy ?? false;
+#pragma warning restore CS0618
         EndpointCacheTtlSeconds = options.EndpointCacheTtlSeconds ?? 600;
         EndpointCacheSize = options.EndpointCacheSize ?? 1024;
         EndpointCacheDisabled = options.EndpointCacheDisabled ?? false;
@@ -272,8 +280,11 @@ public sealed class ConnectionConfig
 
         var headers = new Dictionary<string, string>(options.Headers ?? new Dictionary<string, string>());
 
-        // Add API key header if not already present
-        if (!string.IsNullOrEmpty(ApiKey) && !headers.ContainsKey(Constants.ApiKeyHeader))
+        // Add API key header if not already present. HTTP header names are
+        // case-insensitive, so any casing of the header set by the caller
+        // suppresses the default; an explicit empty value is preserved.
+        if (!string.IsNullOrEmpty(ApiKey) &&
+            !headers.Keys.Any(k => string.Equals(k, Constants.ApiKeyHeader, StringComparison.OrdinalIgnoreCase)))
         {
             headers[Constants.ApiKeyHeader] = ApiKey;
         }
@@ -328,10 +339,11 @@ public sealed class ConnectionConfig
     {
         var handler = new HttpClientHandler
         {
+            AllowAutoRedirect = false,
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
         };
 
-        var client = new HttpClient(handler)
+        var client = new HttpClient(new ProtectedRedirectHandler(handler))
         {
             Timeout = TimeSpan.FromSeconds(RequestTimeoutSeconds)
         };
@@ -384,10 +396,11 @@ public sealed class ConnectionConfig
     {
         var handler = new HttpClientHandler
         {
+            AllowAutoRedirect = false,
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
         };
 
-        var client = new HttpClient(handler)
+        var client = new HttpClient(new ProtectedRedirectHandler(handler))
         {
             Timeout = Timeout.InfiniteTimeSpan
         };

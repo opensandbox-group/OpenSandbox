@@ -82,6 +82,12 @@ func TestNormalizeEnvUpstreamAddr(t *testing.T) {
 
 	_, err = normalizeEnvUpstreamAddr("dns.google:53")
 	require.Error(t, err)
+
+	// A bad port must fail at startup, not as SERVFAIL on every query.
+	for _, bad := range []string{"8.8.8.8:0", "8.8.8.8:70000", "8.8.8.8:dns", "[2001:db8::1]:-53", "8.8.8.8:+53"} {
+		_, err = normalizeEnvUpstreamAddr(bad)
+		require.Errorf(t, err, "upstream %q", bad)
+	}
 }
 
 func TestParseEnvDNSUpstreams(t *testing.T) {

@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Kubernetes-based implementation of SandboxService.
-
-This module provides a Kubernetes implementation of the sandbox service interface,
-using Kubernetes resources for sandbox lifecycle management.
-"""
+"""Kubernetes-based implementation of SandboxService."""
 
 import asyncio
 import logging
@@ -64,9 +59,15 @@ from opensandbox_server.services.k8s.error_helpers import (
     _is_not_found_error,
     _quota_rejection_message,
 )
-from opensandbox_server.services.k8s.k8s_diagnostics import K8sDiagnosticsMixin
+from opensandbox_server.services.k8s.k8s_diagnostics import (
+    K8sDiagnosticsMixin,
+    K8sStartupDiagnosticsMixin,
+)
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
-from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
+from opensandbox_server.services.k8s.list_helpers import (
+    _build_list_sandboxes_response,
+    build_sandbox_label_selector,
+)
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
     _is_quota_exhausted_status,
@@ -125,11 +126,13 @@ logger = logging.getLogger(__name__)
 _CLUSTER_LOOKUP_FORBIDDEN_BACKOFF_SECONDS = 600.0
 
 
+#: Upper bound on the extra time a create timeout spends reading Pod details.
+_STARTUP_DETAILS_TIMEOUT_SECONDS = 5.0
+
+
 def _is_namespace_not_found(exc: Exception) -> bool:
     """True when a K8s ApiException indicates the target namespace does not exist."""
     try:
-        from kubernetes.client import ApiException
-
         if not isinstance(exc, ApiException):
             return False
         return exc.status == 404 and "namespace" in str(exc).lower()
@@ -137,7 +140,9 @@ def _is_namespace_not_found(exc: Exception) -> bool:
         return False
 
 
-class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionService):
+class KubernetesSandboxService(
+    K8sDiagnosticsMixin, K8sStartupDiagnosticsMixin, SandboxService, ExtensionService
+):
     def __init__(self, config: Optional[AppConfig] = None):
         self.app_config = config or get_config()
         runtime_config = self.app_config.runtime
@@ -341,7 +346,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         pool_acquisition_timeout_seconds: float | None = None,
     ) -> Dict[str, Any]:
         """
-        Wait for Pod to be Running and have an IP address.
+        Wait until the workload reports Running (or pool-Allocated), raising
+        early on terminal failure states.
 
         Args:
             pool_acquisition_timeout_seconds: Maximum cumulative time to wait
@@ -371,6 +377,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         active = True
 
         pending_workload: Dict[str, Any] | None = None
+        last_workload: Any = None
         reading_workload = True
         workload_identity: tuple[str, str] | None = None
 
@@ -458,6 +465,7 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                         logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
                         await wait_for_change()
                         continue
+                    last_workload = workload
 
                     status_info = _normalize_create_status(
                         self.workload_provider.get_status(workload)
@@ -565,14 +573,23 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
                 raise self._pool_capacity_exhausted_error(
                     pool_acquisition_timeout_seconds
                 )
+            message = (
+                f"Timeout waiting for sandbox {sandbox_id} to be Running with IP. "
+                f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
+            )
+            # The caller deletes the workload after this error, which removes
+            # the Pod and with it the only place users could see why it never
+            # started. Capture that reason now so it reaches the caller.
+            startup_details = await self._startup_failure_details(
+                sandbox_id, last_workload
+            )
+            if startup_details:
+                message += f". Pod startup details: {startup_details}"
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail={
                     "code": SandboxErrorCodes.K8S_POD_READY_TIMEOUT,
-                    "message": (
-                        f"Timeout waiting for sandbox {sandbox_id} to be Running with IP. "
-                        f"Elapsed: {elapsed:.1f}s, Last state: {last_state}"
-                    ),
+                    "message": message,
                 },
             )
 
@@ -580,6 +597,31 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             active = False
             if unsubscribe is not None:
                 unsubscribe()
+
+    async def _startup_failure_details(
+        self, sandbox_id: str, workload: Any
+    ) -> Optional[str]:
+        """Best-effort Pod failure reason for a create timeout.
+
+        Never raises, and is bounded by ``_STARTUP_DETAILS_TIMEOUT_SECONDS``:
+        a failed or slow lookup must not change the timeout error or hold up
+        the rollback that follows it.
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.collect_startup_failure_details,
+                    sandbox_id,
+                    self._resolve_namespace(),
+                    workload,
+                ),
+                timeout=_STARTUP_DETAILS_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"Could not collect startup details for sandbox {sandbox_id}: {exc}"
+            )
+            return None
 
     @staticmethod
     def _pool_capacity_exhausted_error(
@@ -751,7 +793,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         scheduling if the PVC truly doesn't exist).
         """
         from kubernetes.client import V1PersistentVolumeClaim, V1ObjectMeta
-        from kubernetes.client import ApiException
 
         default_size = self.app_config.storage.volume_default_size
 
@@ -1035,9 +1076,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
-        Create a new sandbox using Kubernetes Pod.
-
-        Wait for the Pod to be Running and have an IP address before returning.
+        Create a new sandbox workload via the workload provider and wait for
+        it to report Running (or pool-Allocated) before returning.
         """
         pool_ref = (request.extensions or {}).get("poolRef", "").strip()
         has_pool_ref = bool(pool_ref)
@@ -1350,10 +1390,16 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             logger.error(f"Error getting sandbox {sandbox_id}: {e}")
             raise _build_k8s_api_error("get sandbox", e) from e
 
-    def list_sandbox_objects(self) -> list[Sandbox]:
+    def list_sandbox_objects(
+        self,
+        metadata: Optional[Dict[str, str]] = None,
+        label_selector: Optional[str] = None,
+    ) -> list[Sandbox]:
+        if label_selector is None:
+            label_selector = build_sandbox_label_selector(metadata)
         workloads = self.workload_provider.list_workloads(
             namespace=self._resolve_namespace(),
-            label_selector=SANDBOX_ID_LABEL,
+            label_selector=label_selector,
         )
         tenant = get_current_tenant()
         sandboxes = []
@@ -1367,7 +1413,11 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
-            return _build_list_sandboxes_response(self.list_sandbox_objects(), request)
+            metadata = request.filter.metadata if request.filter else None
+            return _build_list_sandboxes_response(
+                self.list_sandbox_objects(metadata=metadata),
+                request,
+            )
             
         except Exception as e:
             logger.error(f"Error listing sandboxes: {e}")
@@ -1418,8 +1468,6 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         claims in ``Terminating`` through the ``kubernetes.io/pvc-protection``
         finalizer until pod teardown completes.
         """
-        from kubernetes.client import ApiException
-
         selector = (
             f"{SANDBOX_MANAGED_VOLUMES_LABEL}=server,"
             f"{SANDBOX_ID_LABEL}={sandbox_id}"
@@ -1583,7 +1631,8 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
         """
         Renew sandbox expiration time.
 
-        Updates both the BatchSandbox spec.expireTime and label for consistency.
+        Persists the new expiration via the workload provider
+        (BatchSandbox spec.expireTime or Sandbox spec.shutdownTime).
         """
         new_expiration = ensure_future_expiration(request.expires_at)
 

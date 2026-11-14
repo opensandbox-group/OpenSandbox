@@ -13,17 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""OSEP-0024 idle-pause / wake-on-access E2E (fsb integration env).
+"""OSEP-0024 idle-pause/wake SDK contract (fsb integration env).
+
+The full profile behavior — multi-round auto-pause/wake, the
+wakeOnAccess=false invariant, and pause suppression while Redis is down or
+flushed — is covered by the shell verify suite
+(``scripts/fast-sandbox-env/verify/idle-pause.sh``). This module keeps only
+the SDK client contract: create with an ``IdlePolicy``, the sandbox
+auto-pausing after the idle window, and the SDK's wake retry path —
+``Sandbox.connect`` against a paused sandbox retrying until the restore
+serves traffic, with no resume API call.
 
 Requires ``IDLE_PAUSE=1 integration-env.sh up`` plus
-``OPENSANDBOX_TEST_FSB_TEMPLATE_ID``; ``integration-env.sh idle-e2e``
-exports both. Skipped otherwise and excluded from ``make test``.
+``OPENSANDBOX_TEST_FSB_TEMPLATE_ID``; ``integration-env.sh idle-e2e`` exports
+both. Skipped otherwise and excluded from ``make test``.
 """
 
 import asyncio
 import logging
 import os
-import statistics
 import time
 from datetime import timedelta
 
@@ -43,7 +51,6 @@ FSB_PROTOCOL = os.getenv("OPENSANDBOX_TEST_PROTOCOL", "http")
 FSB_API_KEY = os.getenv("OPENSANDBOX_TEST_API_KEY", "fast-sandbox-env")
 # The server rejects X < 30, so 30 is the fastest workable value.
 IDLE_TIMEOUT = int(os.getenv("OPENSANDBOX_TEST_IDLE_TIMEOUT", "30"))
-IDLE_ROUNDS = int(os.getenv("OPENSANDBOX_TEST_IDLE_ROUNDS", "3"))
 
 pytestmark = pytest.mark.skipif(
     not FSB_TEMPLATE_ID or not IDLE_PAUSE_ENABLED,
@@ -115,15 +122,6 @@ async def _kill_and_wait_gone(
         await _wait_until(_gone, timedelta(minutes=2), f"sandbox {sandbox_id} deleted")
 
 
-def _summarize(label: str, values: list[float]) -> str:
-    return (
-        f"{label}: n={len(values)} "
-        f"min={min(values):.1f}s max={max(values):.1f}s "
-        f"mean={statistics.mean(values):.1f}s "
-        f"samples={[round(v, 1) for v in values]}"
-    )
-
-
 async def _wake_and_run(
     sandbox_id: str,
     connection_config: ConnectionConfig,
@@ -157,7 +155,7 @@ async def _wake_and_run(
 
 
 class TestFsbIdlePauseE2E:
-    """OSEP-0024 auto-pause / wake-on-access against the live fsb stack."""
+    """OSEP-0024 idle-pause/wake SDK contract against the live fsb stack."""
 
     @pytest.fixture(scope="class")
     def connection_config(self):
@@ -167,10 +165,13 @@ class TestFsbIdlePauseE2E:
     async def manager(self, connection_config) -> SandboxManager:
         return await SandboxManager.create(connection_config)
 
-    @pytest.mark.timeout(3600)
+    @pytest.mark.timeout(1800)
     async def test_01_auto_pause_then_wake_on_access(
         self, manager: SandboxManager, connection_config
     ) -> None:
+        """An opted-in sandbox (IdlePolicy via the SDK) auto-pauses with zero
+        traffic, and the SDK's wake retry path (connect + run, no resume API
+        call) serves the next request after the restore."""
         sandbox = await Sandbox.create_from_template(
             FSB_TEMPLATE_ID,
             timeout=timedelta(hours=2),
@@ -180,39 +181,19 @@ class TestFsbIdlePauseE2E:
             ),
             metadata={"origin": "fsb-idle-pause-e2e"},
         )
-        logger.info("opted-in sandbox ready: %s (rounds=%d)", sandbox.id, IDLE_ROUNDS)
+        logger.info("opted-in sandbox ready: %s", sandbox.id)
         try:
             assert sandbox.origin == SandboxOrigin.TEMPLATE
 
             result = await sandbox.commands.run("echo pre-idle")
             assert result.error is None
 
-            pause_times: list[float] = []
-            wake_times: list[float] = []
-            for rnd in range(1, IDLE_ROUNDS + 1):
-                t0 = time.monotonic()
-                await _wait_until(
-                    lambda: _state_is(manager, sandbox.id, "Paused"),
-                    PAUSE_BUDGET,
-                    f"round {rnd}/{IDLE_ROUNDS}: auto-paused",
-                )
-                pause_times.append(time.monotonic() - t0)
+            await _wait_until(
+                lambda: _state_is(manager, sandbox.id, "Paused"),
+                PAUSE_BUDGET,
+                "auto-paused",
+            )
 
-                t1 = time.monotonic()
-                await _wake_and_run(
-                    sandbox.id, connection_config, f"wake-r{rnd}-ok"
-                )
-                wake_times.append(time.monotonic() - t1)
-                logger.info(
-                    "round %d/%d: pause=%.1fs wake=%.1fs",
-                    rnd, IDLE_ROUNDS, pause_times[-1], wake_times[-1],
-                )
-
-            logger.info(_summarize("auto-pause", pause_times))
-            logger.info(_summarize("wake", wake_times))
-            for rnd, wake in enumerate(wake_times, start=1):
-                assert wake < WAKE_BUDGET.total_seconds(), (
-                    f"round {rnd} wake {wake:.1f}s exceeded budget"
-                )
+            await _wake_and_run(sandbox.id, connection_config, "wake-ok")
         finally:
             await _kill_and_wait_gone(manager, sandbox.id)

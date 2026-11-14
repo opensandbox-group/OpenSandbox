@@ -14,6 +14,11 @@
 
 package model
 
+const (
+	PTYWebSocketProtocol    = "opensandbox-pty"
+	PTYWebSocketTokenPrefix = "base64url.bearer.execd.opensandbox."
+)
+
 type ClientFrame struct {
 	Type   string `json:"type"`
 	Data   string `json:"data,omitempty"`

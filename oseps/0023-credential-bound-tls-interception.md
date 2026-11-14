@@ -3,7 +3,7 @@ title: Credential-Bound TLS Interception
 authors:
   - "@hpliStartAgain"
 creation-date: 2026-09-04
-last-updated: 2026-10-09
+last-updated: 2026-11-12
 status: implementing
 ---
 
@@ -34,6 +34,7 @@ Tracking issue: [#1713](https://github.com/opensandbox-group/OpenSandbox/issues/
   - [Concurrency](#concurrency)
   - [Failure Semantics](#failure-semantics)
   - [Sidecar and Fast Sandbox Profiles](#sidecar-and-fast-sandbox-profiles)
+    - [Fast Sandbox integration contract](#fast-sandbox-integration-contract)
   - [SNI, ECH, and Destination Identity](#sni-ech-and-destination-identity)
   - [Security and Privacy Model](#security-and-privacy-model)
   - [Observability](#observability)
@@ -43,13 +44,14 @@ Tracking issue: [#1713](https://github.com/opensandbox-group/OpenSandbox/issues/
 - [Alternatives](#alternatives)
 - [Infrastructure Needed](#infrastructure-needed)
 - [Upgrade & Migration Strategy](#upgrade--migration-strategy)
+- [Appendix: Implementation Log](#appendix-implementation-log)
 <!-- /toc -->
 
 ## Summary
 
-This proposal adds an opt-in Credential Proxy interception mode that decrypts TLS only when the connection's SNI hostname matches at least one binding in the active, acknowledged Credential Vault revision. TLS for other hosts remains inside the transparent proxy path for network routing, but is forwarded as opaque bytes without presenting an OpenSandbox-generated certificate.
+This proposal stages a Credential Proxy interception mode that decrypts TLS only when the connection's SNI hostname matches at least one binding in the active, acknowledged Credential Vault revision. TLS for other hosts remains inside the transparent proxy path for network routing, but is forwarded as opaque bytes without presenting an OpenSandbox-generated certificate.
 
-The existing intercept-all behavior remains the default. The new mode reduces the privacy, compatibility, and certificate-trust impact of Credential Vault for unrelated HTTPS destinations while preserving full binding validation and credential injection for credential-bound requests.
+The sidecar profile keeps intercept-all as its default. The fast-sandbox profile targets an experimental credential-bound opt-in in 1.2.2, then targets credential-bound by default in 1.2.3 with a per-Pool opt-out. The new mode reduces the privacy, compatibility, and certificate-trust impact of Credential Vault for unrelated HTTPS destinations while preserving full binding validation and credential injection for credential-bound requests.
 
 ## Motivation
 
@@ -67,7 +69,7 @@ The repository already supports static pass-through with mitmproxy `ignore_hosts
 4. Fail closed when the authoritative binding decision is unavailable or a revision transition cannot be completed safely.
 5. Keep decisions sandbox-local in the sidecar profile and subject-local in the fast-sandbox profile.
 6. Provide bounded-cardinality telemetry for decrypt, pass-through, deny, and revision-transition decisions without recording credential values.
-7. Stage implementation behind an opt-in so current users and operator addons keep existing behavior.
+7. Stage Fast Sandbox behind an experimental opt-in before changing its profile default with a per-Pool opt-out; preserve existing sidecar behavior.
 
 ### Non-Goals
 
@@ -84,29 +86,29 @@ The repository already supports static pass-through with mitmproxy `ignore_hosts
 
 | ID | Requirement | Priority |
 |---|---|---|
-| R1 | Omitting the new option preserves the current intercept-all behavior | Must Have |
+| R1 | In the sidecar profile, omitting the option preserves intercept-all; in the fast-sandbox profile, mode is an operator-owned profile-level setting, initially experimental opt-in and later credential-bound by default with an opt-out | Must Have |
 | R2 | In credential-bound mode, TLS is decrypted only for SNI hosts covered by the active acknowledged binding host set | Must Have |
 | R3 | A binding host match at TLS time never bypasses the existing full HTTP request binding match | Must Have |
 | R4 | In credential-bound mode, an unknown fast-sandbox identity always denies; for a known identity, ECH/no-SNI/static-ignore traffic passes early, while other SNI-bearing traffic requires an installed acknowledged snapshot and denies only while authoritative state is unknown; first creation installs an empty snapshot before readiness | Must Have |
 | R5 | Vault and effective-policy mutations are serialized per sandbox/subject and acknowledged only after the proxy installs the new decision revision | Must Have |
 | R6 | Host-add acknowledgement makes the new revision effective for subsequent TLS decisions; existing opaque connections remain uncredentialed until clients reconnect | Must Have |
 | R7 | Removing the final binding for a host fences new requests from the retired revision before acknowledgement; previously admitted requests may drain for a bounded interval while new connections use pass-through | Must Have |
-| R8 | The request-admission linearization point and prior-revision completion semantics are explicit for HTTP/1.1 and HTTP/2 | Must Have |
-| R9 | Sidecar and fast-sandbox profiles expose the same user-visible behavior | Must Have |
+| R8 | The request-admission linearization point and prior-revision completion semantics are explicit for HTTP/1.1 and HTTP/2; the first Fast Sandbox stage supports HTTP/1.1 only and does not negotiate h2 on decrypted connections, with HTTP/2 following later | Must Have |
+| R9 | Sidecar and fast-sandbox profiles converge on the same user-visible behavior in stages; the first Fast Sandbox stage supports HTTP/1.1 only and does not negotiate h2 on decrypted connections, with HTTP/2 parity following later | Must Have |
 | R10 | Static pass-through keeps precedence, and overlap with binding selectors is rejected using a sound shared host-selector algebra | Must Have |
 | R11 | Metrics and logs contain no credentials and avoid unbounded hostname labels | Must Have |
 | R12 | Phase 1 covers canonical HTTPS port 443; other TLS ports require explicit follow-up support | Must Have |
 | R13 | HTTP port 80 behavior remains unchanged in the first implementation | Must Have |
 | R14 | Operators can observe what the new mode would decide before enabling it | Should Have |
-| R15 | Interception mode is immutable for a sandbox/subject lifetime | Must Have |
+| R15 | Interception mode is immutable within a sandbox/subject runtime generation; Fast Sandbox cross-Pod resume may select the destination Pod's profile mode for the new generation | Must Have |
 | R16 | TLS host selectors include only bindings eligible for HTTPS on canonical port 443 | Must Have |
 | R17 | Every Credential Vault PATCH in credential-bound mode requires `expectedRevision` | Must Have |
-| R18 | Clients verify the runtime-confirmed effective mode after create and fail explicitly on missing or mismatched values | Must Have |
+| R18 | Only when a public mode field exists, clients verify the runtime-confirmed effective mode after create and fail explicitly on missing or mismatched values | Must Have |
 | R19 | Credential-bound mode rejects legacy arbitrary-regex `ignore_hosts`; operators must use analyzable exact/wildcard pass-through selectors | Must Have |
 
 ## Proposal
 
-Extend `credentialProxy` with an interception mode:
+The future public configuration design sketches an interception mode on `credentialProxy`; this field is deferred and is not part of the staged Fast Sandbox rollout:
 
 ```json
 {
@@ -117,16 +119,16 @@ Extend `credentialProxy` with an interception mode:
 }
 ```
 
-The public modes are:
+The mode semantics are:
 
 | Mode | Behavior |
 |---|---|
 | `all` | Current behavior. Decrypt TLS on configured transparent interception ports unless static `ignore_hosts` or existing no-SNI handling selects pass-through. |
 | `credential-bound` | On canonical HTTPS port 443, decrypt only when normalized SNI matches an active binding host in the acknowledged decision snapshot. Pass other TLS through without decryption. |
 
-`interceptionMode` defaults to `all`. Setting it requires `credentialProxy.enabled: true`; otherwise the lifecycle API rejects the request. The initial implementation rejects `credential-bound` when non-canonical extra interception ports are enabled, rather than silently applying mixed semantics.
+In the future public configuration design, `interceptionMode` defaults to `all` for the sidecar profile and requires `credentialProxy.enabled: true`; otherwise the lifecycle API would reject the request. Fast Sandbox uses an operator-owned profile-level mode instead of this field, with the staged defaults described in R1. Fast Sandbox credential-bound startup must reject extra interception ports, non-empty `ignore_hosts` or `allow_hosts`, and `ssl_insecure=true`, rather than silently applying mixed semantics.
 
-The mode is selected at sandbox creation and is immutable for that runtime generation. Changing modes requires replacing the sandbox/subject, so runtime mode transitions never have ambiguous connection semantics.
+The effective mode is fixed for a runtime generation. For Fast Sandbox, the Pool/profile configuration selects it when that generation is initialized; resume on another Pod may select a different mode for the new generation, as described in the migration strategy.
 
 At the TLS ClientHello boundary, the proxy evaluates only information available before decryption: sandbox or subject identity, active decision revision, normalized SNI, static ignore rules, and the configured mode. If any binding's HTTPS/443-eligible host selector matches SNI, the connection is decrypted. An HTTP-only or non-canonical-port binding never expands the TLS decryption set. The existing HTTP request matcher then evaluates scheme, canonical port, host, method, path, and any future binding selectors before injecting a credential.
 
@@ -149,7 +151,7 @@ At the TLS ClientHello boundary, the proxy evaluates only information available 
 | Concurrent policy and vault mutations validate against different states | A binding becomes active against stale policy or vice versa | Use one per-sandbox/subject mutation barrier and validate the complete post-mutation policy/vault pair |
 | SNI and HTTP authority disagree | Wrong host is decrypted or a credential is injected to the wrong destination | Require the existing destination-identity hardening before enabling the new mode; SNI selection never substitutes for HTTP binding validation |
 | Fast Sandbox subject cache leaks decisions between sandboxes | One subject's host set changes another subject's decryption | Key snapshots and connections by fenced subject identity, not hostname alone |
-| Operators lose L7 addon visibility | Monitoring or custom addons no longer see unbound HTTPS | Keep `all` as the default and document the visibility change on opt-in |
+| Operators lose L7 addon visibility | Monitoring or custom addons no longer see unbound HTTPS | Document the Fast Sandbox default change and retain per-Pool opt-out to `all`; sidecar keeps its current default |
 | Per-ClientHello decision adds latency | Higher TLS connection setup cost | Match against the installed immutable snapshot in-process; do not perform a control-socket fetch per connection |
 | Hostname metric labels expose destinations or create high cardinality | Privacy and telemetry cost | Use bounded `mode`, `decision`, `reason`, and `transition` attributes; keep hostname out of metrics |
 | HTTP/2 origin coalescing carries a bound authority over an unbound SNI connection | The request remains opaque and receives no credential | Define the feature as SNI-connection scoped, reject cross-authority requests on decrypted connections, and document that credentialed clients must connect with the bound host as SNI |
@@ -182,7 +184,9 @@ None of these changes derives a TLS decrypt/pass-through decision from the activ
 
 ### Public Configuration
 
-The lifecycle OpenAPI schema adds:
+**Current status:** the public `interceptionMode` field is deferred. This rollout does not change specs, SDKs, or CLI, and 1.2.2 does not change the server. Mode will not be exposed through SDKs; any future public configuration is limited at most to server-level configuration and requires a separate design. Fast Sandbox mode is an operator-owned Pool/profile setting. Sidecar behavior remains unchanged and its internal revision experiment continues to use only `OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME`.
+
+**Future design (not implemented or accepted for this rollout):** the original lifecycle schema sketch is retained below for reference:
 
 ```yaml
 CredentialProxyConfig:
@@ -198,15 +202,17 @@ CredentialProxyConfig:
   additionalProperties: false
 ```
 
-Handwritten SDK models and generated clients expose the same enum using their language naming conventions. SDKs omit `interceptionMode` when the caller does not explicitly select it, including when the effective value is `all`. Existing servers may ignore unknown nested fields. Clients use the existing `POST /v1/sandboxes` route and verify the returned effective mode as described below. Old clients continue sending only `enabled`.
+The schema sketch does not authorize generated-client or handwritten SDK changes. Existing clients continue sending only `enabled`; no new mode field is exposed through SDKs in this rollout. Existing servers may ignore unknown nested fields, so the sketch must not be treated as an available API.
 
-The server delivers the chosen create-time mode to the egress runtime as operator-owned configuration. Sandbox request `env` cannot override it. Fast Sandbox runtimes carry the mode in the fenced subject binding input rather than a process-global environment variable. A runtime that cannot provide the full sidecar/fast-sandbox, HTTP/1.1, and HTTP/2 contract rejects `credential-bound` at admission instead of advertising partial support.
+Fast Sandbox takes the effective mode from operator-owned Pool/profile configuration, not a sandbox request or a new subject binding field. Sandbox request `env` cannot override it. The first Fast Sandbox release explicitly supports only HTTP/1.1 in the Actions v1 domain; it does not wait for HTTP/2 or sidecar public enablement. Unsupported configuration must fail startup instead of silently degrading.
 
 ### Effective Mode Verification
 
+**Current status:** R18 and the response-verification design below apply only if a public mode field is introduced by a later design. They are not prerequisites for the operator-owned Fast Sandbox rollout and do not add SDK behavior or server changes to 1.2.2. The following paragraphs retain the future public-field design for reference.
+
 Keep the existing create route. Add `credentialProxy.interceptionMode` to create and sandbox-get responses as a runtime-confirmed effective value, not a copy of the request. The server obtains it from the egress runtime after mode initialization and readiness; unsupported or unconfirmed runtime configuration must fail creation rather than echo the requested value.
 
-When requesting `credential-bound`, SDKs must verify the create response contains exactly that effective value before returning a usable sandbox handle. Missing, unknown, or mismatched values raise `INTERCEPTION_MODE_MISMATCH`. Never default a missing response field to the requested mode or silently retry with `all`. Apply the same verification when connecting to an existing sandbox with an explicit expected mode. Raw API callers have the same responsibility.
+If a later public-field design is adopted, callers requesting `credential-bound` would need to verify the create response contains exactly that effective value before returning a usable sandbox handle; the SDK mechanism described here is deferred and is not an approved SDK surface. Missing, unknown, or mismatched values raise `INTERCEPTION_MODE_MISMATCH`. Never default a missing response field to the requested mode or silently retry with `all`. Apply the same verification when connecting to an existing sandbox with an explicit expected mode. Raw API callers have the same responsibility.
 
 The mismatch error includes the sandbox ID when available so callers can clean up the already-created resource. Cleanup is an explicit caller/SDK option; failure to delete must retain the ID and report the cleanup failure.
 
@@ -342,7 +348,7 @@ Let `covers_old(sni)` and `covers_new(sni)` be semantic HTTPS/443 coverage predi
 - Atomically activate the new snapshot so no new request can receive a credential from the retired revision.
 - Stop accepting new HTTP/1.1 requests or HTTP/2 streams on decrypted connections for removed hosts. In the approved experimental H2 integration, valid post-fence requests receive REFUSED_STREAM without origin processing; ordinary GOAWAY is delayed until admitted streams and local downstream and upstream output obligations finish. Then send one NO_ERROR GOAWAY and close. Deadline or invariant failure instead takes the abnormal-close path. See the [H2 integration contract](../docs/architecture/network/osep-0023-h2-integration.md) for scope, the narrow exceptional child-exit fallback and acceptance status.
 - A request is admitted when the system addon's `requestheaders` hook binds it to an immutable revision. For HTTP/2 this is per stream; for pipelined HTTP/1.1 it is per parsed request. Requests admitted before the cutover may finish under the old snapshot. New HTTP/2 streams and parsed HTTP/1.1 requests are rejected after the fence.
-- Drain uses the operator-owned `OPENSANDBOX_EGRESS_CREDENTIAL_TRANSITION_DRAIN_TIMEOUT_SECONDS` setting (default `30`, valid range `1..300`). At expiry the proxy force-closes the connection. HTTP/2 GOAWAY uses the greatest stream ID admitted before the cutover as `last_stream_id`.
+- Drain uses the operator-owned `OPENSANDBOX_EGRESS_REVISION_DRAIN_TIMEOUT_SECONDS` setting (default `30`, valid range `1..300`). At expiry the proxy force-closes the connection. HTTP/2 GOAWAY uses the greatest stream ID admitted before the cutover as `last_stream_id`.
 - Acknowledge once the new-request fence is active. Subsequent connections use pass-through.
 
 **Unchanged host set**
@@ -359,6 +365,8 @@ Vault create/patch/delete, runtime policy mutation, always-rule changes that aff
 The internal monotonic `decisionEpoch` serializes this composite state. Vault callers still use public `expectedRevision` only for vault content; policy callers use their existing policy API. Any accepted policy or always-rule change that affects the complete snapshot advances `decisionEpoch` inside the same barrier. Conflict responses return the current public vault revision when the request was a vault mutation; `decisionEpoch` remains internal.
 
 `expectedRevision` retains its OSEP-0012 optimistic concurrency semantics. In credential-bound mode every `PATCH /credential-vault` request requires it, including credential-only changes; omission or mismatch returns a conflict before preparing the candidate. This makes retry after a lost response safe: either the original revision is still current and the patch can commit once, or the revision advanced and the retry conflicts. Create and delete retain their naturally checkable exists/not-found results. All writes remain serialized.
+
+**Fast Sandbox Actions v1 enforcement boundary (first stage).** R17 is enforced at the proxy boundary. On the Actions v1 Fast Sandbox path the lifecycle server composes a public `PATCH` as `GET` → merge → `PUT` and fills an omitted caller `expectedRevision` from its own read before relaying (`server/opensandbox_server/services/fast_sandbox/vault.py`, `merge_mutation` and `relay_patch`), so egress cannot distinguish a caller-fenced `PATCH` from an unguarded one on that path. A retry after a lost response re-merges onto the current revision instead of conflicting. The per-sandbox relay lock and the read revision carried by the composed `PUT` still make concurrent writers conflict, but they do not provide caller-supplied fencing. End-to-end R17 enforcement on that path requires relay work outside the 1.2.2 unchanged-server boundary; until that work lands, the limitation must be documented rather than assumed away.
 
 The fast-sandbox profile additionally fences every snapshot with the subject runtime generation. A delayed push, acknowledgement, or connection-close event from an old generation cannot affect the replacement subject.
 
@@ -394,6 +402,68 @@ Replace the fixed 65,536/1,024 ceilings with operator-configured finite process 
 
 On exhaustion, immediately close a new bound connection before TLS termination; the client observes connection termination, not an indefinite timeout. Existing tracked connections and new opaque connections continue. Emit `registry_exhausted`, occupancy, and configured-budget metrics using bounded labels. Sustained exhaustion is a paging-worthy bound-HTTPS availability signal; operators increase provisioned budget or reduce workload concurrency. Limits and defaults are deployment controls, not a new sandbox-user API.
 
+#### Fast Sandbox integration contract
+
+Subject identity, lifecycle, and Vault persistence are owned by OSEP-0022, with separate [legacy Actions v1 lifecycle](0022-multi-sandbox-egress-control-plane.md#lifecycle-and-fail-closed-guarantee) and [strict ownership domain (Actions v2)](0022-multi-sandbox-egress-control-plane.md#strict-ownership-domain-actions-v2) contracts. The first credential-bound Fast Sandbox stage guarantees only the Actions v1 domain. It adds no Actions v2 guarantees and must preserve existing v2 tests. This OSEP consumes the applicable subject fence for decision installation and TLS admission; neither source IP nor the revision receiver becomes an owner authority.
+
+**Implementation boundary:** B0–B2 and B3a have merged through [#2586](https://github.com/opensandbox-group/OpenSandbox/pull/2586), [#2589](https://github.com/opensandbox-group/OpenSandbox/pull/2589), [#2609](https://github.com/opensandbox-group/OpenSandbox/pull/2609), [#2634](https://github.com/opensandbox-group/OpenSandbox/pull/2634), [#2649](https://github.com/opensandbox-group/OpenSandbox/pull/2649), [#2666](https://github.com/opensandbox-group/OpenSandbox/pull/2666), and [#2708](https://github.com/opensandbox-group/OpenSandbox/pull/2708): subject sessions, lifecycle wiring, decision snapshot production, exact acknowledgement/readiness, and TLS identity dispatch are present. B3b-1, handshake admission and dual budgets, is under review in [#2737](https://github.com/opensandbox-group/OpenSandbox/pull/2737). These foundations do not establish live HTTP/1.1 credential injection, transport teardown, recovery, or complete R4/R9 acceptance. The B1 descriptions below retain their increment-specific boundaries; B2 supersedes installation-only readiness limitations, while Register alone still does not install a snapshot.
+
+**Subject identity.** B1 must derive the target in Go from the existing registered fence, using this exact encoding:
+
+```text
+SubjectKey = string(subject.FromSandboxUID(uid)) = "s-" + uid
+fenceJSON = encoding/json.Marshal([2]string{runtimeInstanceId, attachmentId})
+SubjectGeneration = lowercase_hex(SHA-256(UTF8("fsb-subject-generation/v1:") || fenceJSON))
+```
+
+`fenceJSON` is the byte output of Go `encoding/json` for the two-element string array in that order, with no extra whitespace or trailing newline; Go `encoding/json.Marshal`'s default escaping applies, including escaping `<`, `>`, `&`, U+2028, and U+2029. Concatenate the prefix bytes and JSON bytes before hashing. The result is exactly 64 lowercase hexadecimal characters. `SubjectKey` must be nonempty valid UTF-8 and at most 256 Unicode code points (including `s-`); the generation fits the IPC limit of 128 code points. Go computes the generation; Python validates the transported identity format without independently deriving it from a fence. Neither the source IP nor `specGeneration` participates. A change in either fence field changes the encoded identity; strict-domain same-UID rebind remains forbidden by 0022. Legacy rebind uses a new generation and never transfers the old installation. This mapping relies on the platform's fence uniqueness; it does not authorize fence reuse or replace exact-owner validation.
+
+**Child session and replay.** Each mitmdump child launch must receive a fresh random `controlGeneration` and a fresh authenticated process session. A child restart invalidates all old process-generation installations even when subject fences are unchanged. After the existing restart publication seam, the single lifecycle worker switches to a new client/control generation, enumerates the currently registered subjects and records Register replay under `s.mu`. Later SET intents follow replay in the same FIFO. Before sending, the worker rechecks the target against the current fence and drops stale intents; old-generation Unload targets must remain distinguishable from successor Register targets. This is process-local reconstruction for B1, not durable replay of decision snapshots. Subject-mode session/launch variants must preserve the existing sidecar `ProcessSession` and `revisionLaunchOwner` semantics.
+
+**Lifecycle intent and lock boundaries.** B1b must record intents under `s.mu` at existing state transitions, rather than call the lifecycle client from apply functions:
+
+| Transition | Intent registration point |
+|------------|---------------------------|
+| `applySetBinding` | Register only after `RegisterAndEnforce` succeeds with deny-first enforcement and the fence is published |
+| `applyRemoveBinding` | Unload only on the branch that actually completed `unloadEnforcement` and `reg.Unregister`; the three early-success branches (pending-rebind fence mismatch, registered-fence mismatch, already unregistered) record no intent |
+| `subjectRebind` | Record Unload for the old fence encoded as the old target before Register for the successor; do not derive the Unload target from the new fence |
+| `takeoverStaleSubject` | Capture evicted victims through the existing `victims` collection and defer intent registration until outside the registry callback; unload the victim generation before registering the successor |
+| Child restart | After publication, record Register replay of the current registered set as described above |
+
+One drain worker is the sole goroutine that owns `SubjectLifecycleClient`. It consumes the FIFO with an independent deadline for each command. It sends without holding `s.mu`, `policyCommitMu`, an owner stripe, or `actionGate`; handlers and the action gate never wait for `client.mu`, including through `Pending()`. Result recording takes `s.mu` and revalidates the fence, with only the `client.mu` → `s.mu` lock direction permitted. Slow IPC must not block any subject's SET/REMOVE/hooks or Vault/Policy relay. Registry callbacks must not acquire `s.mu` or send IPC.
+
+**B1 failure and readiness contract.** An indeterminate result retains the exact frozen command; the worker must Reconcile that command before allocating another lifecycle sequence, leaving later intents queued. Confirmed failures such as `subject_conflict`, `subject_failed`, and `subject_capacity_exhausted` consume their sequence, record a bounded degraded status/log outcome, and are not automatically retried in B1. Receiver/egress divergence is tolerated only for this installation-only observation stage: subject admission stays disabled, traffic remains in `all` mode, and IPC degradation alone must not block the runtime-ready or data-plane-ready hooks, and must not set the actions status `Ready` field to false. Existing readiness failures retain their effects. A new child rebuilds receiver registration from the current set. B2 must introduce repair and the acknowledged-empty readiness gate before credential-bound admission can satisfy R4; B1 readiness is not that guarantee.
+
+**Internal handoff.** The B1 foundation uses the `fast-sandbox` profile with the existing `OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME=true` gate; false or unset preserves legacy traffic behavior in that foundation. The staged rollout will separate operator-owned Fast Sandbox profile enablement from the unchanged sidecar gate, first opt-in and then default-on with per-Pool opt-out; the exact Fast Sandbox switch name remains to be confirmed. Go passes a subject-mode discriminator and the following internal resource envelope to the child:
+
+| Internal field | Value source |
+|----------------|--------------|
+| `max_subjects` | Reuse an existing Fast Sandbox subject-capacity constant if present; otherwise define an internal constant of 4096 |
+| `max_snapshot_bytes` | Reuse the sidecar's internal `defaultRevisionMaxSnapshotSize` (currently `8 << 20` bytes) |
+| `retained_payload_budget` | `2 × max_subjects × max_snapshot_bytes`, with overflow checks and the Python constructor's envelope constraints satisfied |
+
+These are process handoff fields derived from Go constants, not environment knobs or sandbox-user settings. B1a loads the authenticated subject IPC server and `SubjectRevisionOwner` through a subject-mode addon/session variant, without live TLS admission. The single-subject sidecar handoff remains separate. Installation resource bounds do not establish live connection-budget defaults or override the transport-budget requirements above.
+
+**Integration increments and acceptance.** These Fast Sandbox increments refine the existing phased plan; they do not replace it or expose the public lifecycle option early:
+
+| Increment | Deliverable and acceptance boundary | R4 / R9 relationship | Target release |
+|-----------|-------------------------------------|-----------------------|----------------|
+| B0 | Ownership and integration contract; merged | Defines boundaries; no runtime acceptance | Foundation merged; 1.2.2 rollout |
+| B1a | Subject-mode child session, internal handoff, installation receiver, `controlGeneration`, and restart generation change; merged | Installation foundation only; no admission or R4/R9 parity | Foundation merged; 1.2.2 rollout |
+| B1b | Single drain worker and transition/replay wiring with exact targets, rebind/takeover isolation, Reconcile ordering, degraded status and slow-IPC lock boundaries; merged | Known/uninstalled lifecycle only; Register is not an empty-snapshot acknowledgement | Foundation merged; 1.2.2 rollout |
+| B2 | First-create and per-subject Vault/Policy decision snapshots, repair, and exact acknowledgement-based readiness; merged | Establishes the empty-before-ready prerequisite in R4, not live TLS acceptance | Foundation merged; 1.2.2 rollout |
+| B3a | Fenced TLS identity dispatch and suspension of non-authoritative subjects; merged | Dispatch foundation for R4; no handshake admission or complete R9 parity | Foundation merged; 1.2.2 rollout |
+| B3b-1 | Handshake admission and process/per-subject dual budgets; under review in #2737 | Bounds known-identity decrypt admission and unknown-identity deny; not request injection or full transport ownership | 1.2.2 target |
+| B3b follow-up | Live HTTP/1.1 request admission, injection, and revision transitions; decrypted connections do not negotiate h2 | Completes the first-stage protocol scope; HTTP/2 parity remains deferred | 1.2.2 target |
+| B4 | Transport ownership and teardown, including tracked and opaque transports before identity reuse | Required cross-generation connection isolation for the Actions v1 HTTP/1.1 stage | 1.2.2 target |
+| B5 | Recovery and replay of authoritative decision state across restart | Required replay safety for R4/R9 within the Actions v1 first-stage scope | 1.2.2 target |
+| B6 | Real shared-launcher, multi-subject HTTP/1.1 TLS/rebind/recovery E2E and rollout acceptance | Required runtime evidence; installation tests alone cannot close first-stage R4/R9 acceptance | 1.2.2 target; default-on acceptance in 1.2.3 |
+| Follow-up parity | Fast Sandbox HTTP/2, public Pod sandbox (sidecar) enablement, and Actions v2 integration | Separate later acceptance; no new v2 guarantee in the first stage | After 1.2.3; exact releases to be confirmed |
+
+**Resolved integration questions.** Effective mode is an operator-owned Pool/profile-level setting, not a per-sandbox API field. The first stage supports only Actions v1; Actions v2 integration is later work and its existing tests must continue to pass. New and old Pods may coexist during rolling upgrades, and cross-Pod resume may select the destination Pod's mode for a new runtime generation. This is expected rollout behavior, not a promise of mode persistence in snapshots.
+
+**Open integration questions.** The exact Fast Sandbox enablement/opt-out configuration and remaining trusted loss/unknown recovery inputs require confirmation; a missing Vault file or successful Register is insufficient proof of authoritative empty state. Shared-live E2E, including subjects A/B using the same SNI, revocation/rotation, opaque teardown, and restart/replay, remains unverified. OSEP-0025 exchange credential support is maintainer-owned and outside this series; unsupported exchange credentials must fail explicitly rather than silently passing without injection. Existing exchange and v2 writer work does not itself establish those decision-snapshot interactions or R9 parity. Whether the Actions v1 Fast Sandbox public `PATCH` path gains caller-supplied `expectedRevision` fencing within 1.2.2, which requires server relay work, or ships with the documented enforcement boundary above, remains a maintainer decision.
+
 ### SNI, ECH, and Destination Identity
 
 Credential-bound selection requires visible SNI. No-SNI connections keep the existing pass-through behavior and cannot receive Credential Vault injection. If the ClientHello advertises ECH and the actual service name is unavailable, the outer SNI is not used as a binding host. The connection is treated as opaque and cannot receive credentials in the initial design. Operators that require Credential Vault for a destination must ensure its client exposes usable SNI.
@@ -412,7 +482,7 @@ This mode reduces the plaintext visible to the trusted egress proxy and its oper
 
 For unbound HTTPS, HTTP inspection addons cannot read headers, URL paths, or bodies, perform content-based data loss prevention (DLP), or generate request/response-level application audit records. DNS and network-policy enforcement remain in place, but network metadata and TLS-decision telemetry do not replace application-level inspection or auditing. Documentation must distinguish this intentional loss of visibility from an addon malfunction.
 
-Deployments that require such inspection should select `interceptionMode: all` and configure the trusted platform admission layer to reject incompatible mode requests where inspection is mandatory. The caller-selected enum alone is not an enforcement mechanism for an operator's mandatory inspection policy. The implementation documentation must identify how each supported deployment enforces that restriction before recommending it for this purpose.
+After Fast Sandbox becomes default-on, unbound HTTPS is no longer visible to operator addons or application auditing; Pools requiring full inspection within the existing interception scope must use the per-Pool opt-out to retain `all`. Deployments that require such inspection must enforce the operator-owned Pool/profile setting; any future public-field design would also need a trusted platform admission restriction. The caller-selected enum alone is not an enforcement mechanism for an operator's mandatory inspection policy. The implementation documentation must identify how each supported deployment enforces that restriction before recommending it for this purpose.
 
 `all` remains subject to its interception scope and protocol support; it does not guarantee universal coverage of no-SNI, ECH, QUIC, or explicitly bypassed traffic. Operators must evaluate these exceptions against their inspection requirements. This OSEP does not add a DLP engine or fill those coverage gaps.
 
@@ -444,6 +514,149 @@ Allowed attribute values are closed sets. Hostnames, paths, credential names, cr
 Structured logs may include revision, bounded decision/reason, and the existing sandbox attribution. Host logging follows the existing egress privacy policy and must never include credentials or rendered headers. A dry-run mode may compare `all` with the would-be credential-bound decision using counters only; it does not change traffic.
 
 ### Phased Implementation
+
+1. **Decision telemetry and red tests**: add fail-closed tests distinguishing authoritative empty from lookup failure, dry-run counters while traffic uses `all`, shared host matching, and destination-identity prerequisites.
+2. **Immutable revision acknowledgement**: replace time-only cache correctness with explicit snapshot installation/invalidation, serialize policy/Vault changes, and fence runtime generations.
+3. **Opt-in sidecar mode for HTTPS/443**: keep the internal experimental gate, implement ClientHello selection and HTTP/1.1 transitions, and do not accept a public lifecycle field.
+4. **Staged profile rollout**:
+   1. **Phase 4a — sidecar HTTP/2 (completed within the internal experiment)**: preserve the existing experimental admission and bounded-drain boundary; this is not public enablement or a claim of unrestricted client/Linux acceptance.
+   2. **Phase 4b — Fast Sandbox HTTP/1.1 experimental opt-in (1.2.2 target)**: decrypt only binding-covered hosts and pass other HTTPS through; support Actions v1 only and do not negotiate h2 on decrypted connections. Reject unsupported extra ports, `ignore_hosts`, `allow_hosts`, and `ssl_insecure` at startup. Target the Alibaba-side upgrade trial around the earliest anticipated 2026-11-26 cut; timing and release acceptance remain conditional on implementation and validation. Keep specs, SDKs, CLI, and server unchanged in 1.2.2; do not expose `interceptionMode` through SDKs. Maintainer-owned OSEP-0025 exchange support is outside this series and must not fail silently.
+   3. **Phase 4c — Fast Sandbox default-on (1.2.3 target)**: make credential-bound the fast-sandbox profile default with a per-Pool opt-out to `all`, after first-stage acceptance and operator communication about audit visibility and rolling-upgrade behavior.
+   4. **Phase 4d — Fast Sandbox HTTP/2 (later release)**: add and accept the per-stream admission, GOAWAY/drain, and multi-subject protocol-parity contract; exact release remains to be confirmed.
+   5. **Phase 4e — public Pod sandbox (sidecar) enablement (separate design)**: retain the current sidecar gate and behavior until that design is accepted. Actions v2 integration is also later work, with no new v2 guarantees in the first Fast Sandbox stage.
+5. **Broader port support and graduation**: evaluate extra TLS ports only after binding matching supports them; graduation beyond the staged Fast Sandbox defaults requires its own compatibility and acceptance evidence.
+6. **Post-feature configuration consolidation**: after core behavior and profile parity, consolidate complex static operator configuration into egress-owned files or custom images. Do not automatically expose it through the lifecycle server or SDKs. Define compatibility, conflicts, deprecation, and fail-closed migration before replacing environment variables; file formats, locations, and handoff mechanisms remain follow-up decisions.
+
+## Test Plan
+
+The public-field/server/SDK cases below remain future-design tests and do not gate the operator-owned Fast Sandbox first stage. HTTP/2 cases apply to the existing sidecar experiment and later Fast Sandbox HTTP/2 acceptance; first-stage Fast Sandbox acceptance covers Actions v1 and HTTP/1.1 only. This rollout adds no Actions v2 guarantees and must preserve existing v2 tests.
+
+### Unit Tests
+
+- Exact, wildcard, trailing-dot, case, and IDNA SNI matching share Credential Vault normalization.
+- `all` mode preserves current decisions.
+- A legacy create response with no effective mode causes an explicit SDK error containing the created sandbox ID; mismatched/unknown modes also fail.
+- The server echoes only the mode confirmed by the runtime, never the request.
+- Cleanup success and failure preserve the mismatch result and resource identity.
+- Unknown request fields are rejected by capable servers; omitted mode retains `all`. Test the previously tolerated-extra-field compatibility change.
+- Credential-bound active-empty and unbound SNI select pass-through.
+- First-create auto-empty leaves the public vault absent and first POST creates revision 1. Serialize startup/POST races so startup cannot overwrite a vault.
+- ECH is detected before outer-SNI matching and selects opaque pass-through.
+- Bound SNI selects decryption, then still requires a full HTTP binding match.
+- HTTP-only bindings do not add hosts to `tlsBindingHostSelectors`.
+- Exact/exact, exact/wildcard, wildcard/exact, and wildcard/wildcard overlap checks reject every intersecting binding revision.
+- Static exact `api.example.com` rejects binding wildcard `*.example.com`; the inverse combination and nested wildcard suffixes are covered as regressions.
+- Credential-bound startup and option updates reject non-empty `ignore_hosts` and `allow_hosts`; startup accepts the canonical typed pass-through list. Static bypass requires actual destination port 443, preserves HTTP/80, and never grants an exception to network policy.
+- Missing/bootstrapping state is distinct from an acknowledged empty revision, timeout, 5xx, malformed JSON, dispatch miss, and generation mismatch. Dynamic pass-through requires an installed snapshot with no matching TLS selector.
+- Cache invalidation makes an acknowledged revision visible immediately.
+- Prepare, commit, abort, and readback are idempotent; lost acknowledgement is resolved by active-revision readback.
+- Indeterminate reconciliation blocks vault, policy, always-rule, and replay mutations while still permitting forced subject/sandbox teardown.
+- Concurrent policy and vault mutations cannot commit an inconsistent pair.
+- `expectedRevision` is required for every credential-bound PATCH and rejects stale mutations.
+- Old fast-sandbox generations cannot install snapshots or close new-generation connections.
+- Registry exhaustion immediately terminates new bound connections without evicting live entries or denying new unbound TLS.
+- Telemetry uses only the documented bounded attributes.
+
+### Integration Tests
+
+- A newly ready sandbox that never creates a vault can immediately use HTTPS pass-through. A failed auto-empty install prevents readiness.
+- First Vault POST succeeds after startup; recovery without confirmed intent remains not-ready and cannot replace a lost bound revision with empty state.
+
+- An unbound HTTPS server with a certificate trusted by the sandbox succeeds without trusting the OpenSandbox CA and observes end-to-end TLS.
+- A bound HTTPS server requires the OpenSandbox CA and receives the expected injected credential only on matching requests.
+- Adding the first binding leaves an existing opaque connection uncredentialed; after ACK a fresh TLS decision decrypts and injects on matching requests. Test handshake-admission races across the cutover.
+- Reuse an opaque HTTP/2 connection after host-add ACK: new streams remain uncredentialed, while reconnecting with bound SNI enables injection. Exercise the connection-pool recycling procedure documented in the SDK examples.
+- With an inspection test addon, verify unbound HTTPS exposes no HTTP headers, paths, bodies, or request/response audit events in credential-bound mode. Compare with `all` for supported, non-bypassed TLS and verify network-policy denial still applies in both modes. Test the documented platform restriction against incompatible caller-selected modes where inspection is mandatory.
+- Removing the final binding prevents new injection, drains HTTP/1.1 and HTTP/2 connections, and makes the next connection pass through.
+- Credential-only replacement keeps the TLS connection but switches new requests to the acknowledged revision.
+- Long-running requests admitted before cutover either finish within the drain window or are force-closed at the documented deadline.
+- A pre-commit transition failure returns an error and leaves the prior revision active; a lost post-commit readback blocks vault APIs until reconciliation resolves the active tuple.
+- Restart preserves early ECH/no-SNI/static-ignore pass-through but denies other SNI-bearing TLS until an active or explicit empty revision is replayed.
+- No-SNI and ECH-hidden connections receive no credential injection.
+- A bound HTTP/2 authority coalesced over an opaque connection receives no credential; a cross-authority request on a decrypted connection is rejected.
+
+### E2E Tests
+
+- Docker and Kubernetes sandboxes call one credential-bound model API and one unrelated pinned-CA public HTTPS endpoint in the same sandbox.
+- Exercise new and legacy server responses through the existing create route. Verify mismatch detection and cleanup, and demonstrate that entrypoint traffic may precede detection so no pre-creation safety guarantee is claimed.
+- The model API is decrypted and credentialed; the unrelated endpoint is pass-through and does not require the OpenSandbox CA.
+- In fast-sandbox mode, the same destination decrypts for a subject with a binding and passes through for another subject without one.
+- Runtime add, replace, delete, restart, subject unload/rebind, and replay preserve the revision and failure contracts.
+- Egress network deny rules still block pass-through destinations.
+- Logs, metrics, diagnostics, and API responses contain no credential value.
+
+### Performance Tests
+
+- Compare TLS handshake latency and throughput for `all`, credential-bound decrypt, and credential-bound pass-through paths.
+- Exercise at least 4,096 fast-sandbox subjects without unbounded per-host or per-source cache growth.
+- Measure binding-revision transition latency with active HTTP/1.1 and HTTP/2 connections.
+- Run sustained connect/close churn and burst storms for mostly unbound, mostly bound, and mixed traffic, including concurrent host-add/remove. Measure CPU, RSS, allocations, p95/p99 admission latency, registry cleanup, and rejection rates against `all`; verify unbound traffic creates no extra decision-registry entries and returns to baseline after churn.
+- Publish per-entry memory measurements and validate global/per-subject budget arithmetic at the advertised fast-sandbox scale; test raised budgets and exhaustion.
+
+## Drawbacks
+
+- The proxy must maintain connection state and revision fences, which is more complex than time-based snapshot polling.
+- A runtime binding addition does not upgrade existing opaque connections; pooled clients must reconnect to receive credentials.
+- Host-level decryption remains broader than path- or method-level credential scope.
+- Visible SNI is required; ECH and no-SNI traffic cannot use Credential Vault.
+- Operators using custom addons lose L7 visibility for unbound hosts when they opt in.
+- Bound hosts still require dynamic CA trust, so this reduces rather than eliminates CA integration work.
+
+## Alternatives
+
+### Keep Intercept-All
+
+This is the simplest implementation and remains the sidecar default and Fast Sandbox opt-out, but it preserves the broad TLS decryption and CA compatibility cost that motivates this proposal.
+
+### Generate Static `ignore_hosts`
+
+Operators can already rebuild or mount a static mitmproxy configuration. It does not follow sandbox-local runtime mutations, cannot vary per fast-sandbox subject, and risks drift between the static list and the active vault. Arbitrary regex also has no sound intersection check against the binding wildcard language, so credential-bound mode requires migration to the analyzable selector list.
+
+### Bypass mitmproxy in iptables or nftables
+
+Routing only bound host IPs into mitmproxy would avoid even the pass-through proxy hop, but binding policy is FQDN-based and destination IPs are dynamic, shared, and learned through DNS. Kernel rules cannot reliably distinguish two TLS hostnames sharing an IP. ClientHello selection keeps the decision at the first layer that can observe SNI.
+
+### Decide From HTTP Host After Decryption
+
+That is the current behavior. It can choose whether to inject a credential but cannot undo TLS decryption that already occurred.
+
+### Make Credential-Bound the New Default Immediately
+
+Changing every profile immediately would remove L7 visibility from operator addons and change certificate behavior without a staged migration. This proposal instead targets an experimental Fast Sandbox opt-in in 1.2.2, followed by a communicated profile default change with per-Pool opt-out in 1.2.3; sidecar keeps its existing behavior.
+
+The staged Fast Sandbox default change requires implementation and performance results, addon compatibility evidence, explicit operator communication, and a migration plan that prevents silent loss of required inspection coverage. Preserve an explicit per-Pool opt-out to `all`. Default changes outside this Fast Sandbox rollout require a separate design.
+
+### Track Every Opaque Connection and Close on Host Add
+
+This provides stronger host-add injection availability but requires registry churn for all visible-SNI TLS and turns a global cap into a broad HTTPS outage. The selected bound-only design accepts existing opaque sessions just as it accepts coalescing: no credential is injected until the client reconnects. Revision acknowledgement remains immediate for new decisions and for request evaluation on decrypted connections.
+
+### Bound Opaque Connection Age
+
+A 60–120 second maximum age could bound stale opaque sessions, but still needs timers and per-connection lifecycle work, interrupts legitimate long-lived traffic, and cannot make an opaque connection credentialed in place. Defer this option until a concrete workload needs bounded reconnection latency.
+
+### Time-Based Vault Polling Alone
+
+Retaining the 0.5-second snapshot cache would also delay new TLS decisions and request-level revocation on decrypted connections. That is distinct from accepting existing opaque sessions. Keep explicit revision acknowledgement and the decrypted-request fence.
+
+## Infrastructure Needed
+
+No new external service is required. The implementation needs an internal revision-install/acknowledgement path between the Go egress control plane and the mitmproxy system addon, plus a bounded connection registry. The exact local IPC mechanism is an implementation detail as long as it is private to the sidecar, fenced by subject generation, and meets the acknowledgement contract.
+
+CI needs Linux integration coverage with mitmproxy 11.0.2, local TLS servers, HTTP/2, network namespaces, and the existing Docker/Kubernetes/fast-sandbox egress test paths.
+
+## Upgrade & Migration Strategy
+
+1. Implement and validate the internal decision/transition protocol without a public lifecycle field.
+2. Ship dry-run telemetry and acknowledgement prerequisites without changing traffic.
+3. Roll out the fast-sandbox profile before public sidecar or HTTP/2 parity: target 1.2.2 for experimental HTTP/1.1 opt-in in the Actions v1 domain. Keep specs, SDKs, and CLI unchanged; 1.2.2 also leaves the server unchanged. Defer the public `interceptionMode` field; any later public configuration is at most server-level and requires separate design and verification.
+4. Enable Fast Sandbox credential-bound through an operator-owned Pool/profile experimental opt-in in 1.2.2, then target default-on in 1.2.3 with a per-Pool opt-out to `all`. The first stage supports HTTP/1.1 only, does not negotiate h2 on decrypted connections, and rejects extra interception ports, non-empty `ignore_hosts` or `allow_hosts`, and `ssl_insecure=true` at startup. Sidecar behavior and its existing experimental gate remain unchanged; unsupported combinations must fail explicitly.
+5. The runtime automatically installs an internal empty decision snapshot before first-create readiness. The caller's first public Vault POST remains valid. Recovery requires replay or explicit trusted confirmation of empty intent.
+6. Document that every `PATCH /credential-vault` request in this mode must include the existing `expectedRevision`; callers can obtain it from `GET /credential-vault`. SDK documentation must explicitly distinguish this requirement from optional preconditions in `all` mode.
+7. Keep current regex `ignore_hosts`, CA setup, and `all` behavior unchanged for existing deployments. Before enabling `credential-bound`, migrate intended static bypass entries to the exact/wildcard `OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS` list; the new mode rejects a non-empty `ignore_hosts` or `allow_hosts` list. The static selector list is immutable; changing it requires a new sidecar process and revalidation. The later configuration-consolidation work must explicitly define migration from this environment-variable interface before replacing it.
+8. If a later public-field design introduces strict unknown-field rejection, its release notes must call out that runtime compatibility tightening, even though the OpenAPI schema was already closed; it is not a server change in 1.2.2.
+9. Communicate the Fast Sandbox default change and audit-visibility impact before the 1.2.3 rollout, retaining per-Pool opt-out for required inspection. New and old Pods coexist during rolling upgrades; effective mode may differ by Pod, and a sandbox resumed on another Pod may adopt that Pod's mode for its new runtime generation. These are expected behaviors, so this rollout does not promise a mode pinned across resume. Publish implementation/performance and addon-compatibility evidence for the default-on decision; other profile default changes remain separate work.
+
+## Appendix: Implementation Log
 
 This section records the sequence of implementation increments. Statements about unwired handlers, disabled admissions or epoch-zero-only bootstrap in the earlier foundation descriptions are historical, not the current sidecar boundary. The live-Vault and Policy revision integrations below supersede those limitations; HTTP/2, Fast Sandbox and the public mode remain outside the current experiment. Acceptance evidence is tracked separately in [live-vault-acceptance.md](../docs/guides/live-vault-acceptance.md).
 
@@ -563,154 +776,3 @@ The exact commit order is optional user-policy file persistence, nft application
 This sequence does not make disk, kernel and receiver instantly atomic. New nft rules can affect traffic before receiver acknowledgement. Once nft succeeded, receiver rejection or an unresolved result requires sticky recovery, quarantine and exact-child cleanup. Restoring the file or replaying old nft rules cannot prove that established connections, dynamic sets or already-sent requests were undone. Quarantine is confirmed only by its existing target/readback checks; 503, quiescence or child exit alone is not packet-isolation evidence. There is no new journal, rollback protocol or safe whole-sidecar restart mechanism.
 
 Policy-only publication registers retirement deadlines for old request handles, including HTTP 101 upgrades, without changing binding hosts or credentials. The default drain is 30 seconds and does not delay API success until expiry. Repeated updates do not extend the earliest old-request deadline. Still-covered connections can admit new-revision requests; expiry of an old request closes the whole connection and can interrupt those newer requests. Once old requests finish, a still-covered idle connection is not retired solely by a Policy epoch change. Actual close follows the periodic sweep and event loop, with failed closes retried; this does not establish a deadline for opaque/direct-IP traffic outside the registry. These paths remain default-off and add no supported public configuration, SDK method, HTTP/2 or Fast Sandbox capability. Their acceptance status is separate from the historical live-Vault results.
-
-1. **Decision telemetry and red tests**
-   - Add fail-closed tests that distinguish authoritative empty from lookup failure.
-   - Add dry-run decision counters while traffic still uses `all`.
-   - Land shared normalized host matching and destination-identity prerequisites.
-2. **Immutable revision acknowledgement**
-   - Replace time-only cache correctness with explicit snapshot install and invalidation.
-   - Serialize policy/vault changes and fence sidecar/fast-sandbox generations.
-3. **Opt-in sidecar mode for HTTPS/443**
-   - Keep the mode behind an internal experimental gate; do not yet accept the public lifecycle field.
-   - Implement ClientHello selection and HTTP/1.1 connection transitions.
-4. **HTTP/2 and fast-sandbox parity**
-   - Add GOAWAY/drain semantics and per-subject connection registries.
-   - Run subject-isolation and replay/restart E2E coverage.
-   - Only after these checks pass, add the lifecycle spec, server, SDK, and egress public configuration.
-5. **Broader port support and graduation**
-   - Evaluate extra TLS ports only after binding matching supports them.
-   - Consider changing the default only in a future OSEP with compatibility evidence; this proposal keeps `all` as the default.
-
-6. **Post-feature configuration consolidation**
-   - After the core credential-bound behavior and profile parity are complete, consolidate complex, static operator configuration into egress-owned configuration files or custom egress images.
-   - Do not automatically expose these operational settings through the lifecycle Server API or SDKs. Any public surface requires a separate, justified design.
-   - Define the migration policy for existing environment variables, including compatibility, conflicts, deprecation, and fail-closed validation, before changing configuration behavior.
-   - This is follow-up cleanup, not a merge gate for the current feature increments. File formats, locations, and internal process handoff mechanisms remain implementation decisions for that work.
-
-## Test Plan
-
-### Unit Tests
-
-- Exact, wildcard, trailing-dot, case, and IDNA SNI matching share Credential Vault normalization.
-- `all` mode preserves current decisions.
-- A legacy create response with no effective mode causes an explicit SDK error containing the created sandbox ID; mismatched/unknown modes also fail.
-- The server echoes only the mode confirmed by the runtime, never the request.
-- Cleanup success and failure preserve the mismatch result and resource identity.
-- Unknown request fields are rejected by capable servers; omitted mode retains `all`. Test the previously tolerated-extra-field compatibility change.
-- Credential-bound active-empty and unbound SNI select pass-through.
-- First-create auto-empty leaves the public vault absent and first POST creates revision 1. Serialize startup/POST races so startup cannot overwrite a vault.
-- ECH is detected before outer-SNI matching and selects opaque pass-through.
-- Bound SNI selects decryption, then still requires a full HTTP binding match.
-- HTTP-only bindings do not add hosts to `tlsBindingHostSelectors`.
-- Exact/exact, exact/wildcard, wildcard/exact, and wildcard/wildcard overlap checks reject every intersecting binding revision.
-- Static exact `api.example.com` rejects binding wildcard `*.example.com`; the inverse combination and nested wildcard suffixes are covered as regressions.
-- Credential-bound startup and option updates reject non-empty `ignore_hosts` and `allow_hosts`; startup accepts the canonical typed pass-through list. Static bypass requires actual destination port 443, preserves HTTP/80, and never grants an exception to network policy.
-- Missing/bootstrapping state is distinct from an acknowledged empty revision, timeout, 5xx, malformed JSON, dispatch miss, and generation mismatch. Dynamic pass-through requires an installed snapshot with no matching TLS selector.
-- Cache invalidation makes an acknowledged revision visible immediately.
-- Prepare, commit, abort, and readback are idempotent; lost acknowledgement is resolved by active-revision readback.
-- Indeterminate reconciliation blocks vault, policy, always-rule, and replay mutations while still permitting forced subject/sandbox teardown.
-- Concurrent policy and vault mutations cannot commit an inconsistent pair.
-- `expectedRevision` is required for every credential-bound PATCH and rejects stale mutations.
-- Old fast-sandbox generations cannot install snapshots or close new-generation connections.
-- Registry exhaustion immediately terminates new bound connections without evicting live entries or denying new unbound TLS.
-- Telemetry uses only the documented bounded attributes.
-
-### Integration Tests
-
-- A newly ready sandbox that never creates a vault can immediately use HTTPS pass-through. A failed auto-empty install prevents readiness.
-- First Vault POST succeeds after startup; recovery without confirmed intent remains not-ready and cannot replace a lost bound revision with empty state.
-
-- An unbound HTTPS server with a certificate trusted by the sandbox succeeds without trusting the OpenSandbox CA and observes end-to-end TLS.
-- A bound HTTPS server requires the OpenSandbox CA and receives the expected injected credential only on matching requests.
-- Adding the first binding leaves an existing opaque connection uncredentialed; after ACK a fresh TLS decision decrypts and injects on matching requests. Test handshake-admission races across the cutover.
-- Reuse an opaque HTTP/2 connection after host-add ACK: new streams remain uncredentialed, while reconnecting with bound SNI enables injection. Exercise the connection-pool recycling procedure documented in the SDK examples.
-- With an inspection test addon, verify unbound HTTPS exposes no HTTP headers, paths, bodies, or request/response audit events in credential-bound mode. Compare with `all` for supported, non-bypassed TLS and verify network-policy denial still applies in both modes. Test the documented platform restriction against incompatible caller-selected modes where inspection is mandatory.
-- Removing the final binding prevents new injection, drains HTTP/1.1 and HTTP/2 connections, and makes the next connection pass through.
-- Credential-only replacement keeps the TLS connection but switches new requests to the acknowledged revision.
-- Long-running requests admitted before cutover either finish within the drain window or are force-closed at the documented deadline.
-- A pre-commit transition failure returns an error and leaves the prior revision active; a lost post-commit readback blocks vault APIs until reconciliation resolves the active tuple.
-- Restart preserves early ECH/no-SNI/static-ignore pass-through but denies other SNI-bearing TLS until an active or explicit empty revision is replayed.
-- No-SNI and ECH-hidden connections receive no credential injection.
-- A bound HTTP/2 authority coalesced over an opaque connection receives no credential; a cross-authority request on a decrypted connection is rejected.
-
-### E2E Tests
-
-- Docker and Kubernetes sandboxes call one credential-bound model API and one unrelated pinned-CA public HTTPS endpoint in the same sandbox.
-- Exercise new and legacy server responses through the existing create route. Verify mismatch detection and cleanup, and demonstrate that entrypoint traffic may precede detection so no pre-creation safety guarantee is claimed.
-- The model API is decrypted and credentialed; the unrelated endpoint is pass-through and does not require the OpenSandbox CA.
-- In fast-sandbox mode, the same destination decrypts for a subject with a binding and passes through for another subject without one.
-- Runtime add, replace, delete, restart, subject unload/rebind, and replay preserve the revision and failure contracts.
-- Egress network deny rules still block pass-through destinations.
-- Logs, metrics, diagnostics, and API responses contain no credential value.
-
-### Performance Tests
-
-- Compare TLS handshake latency and throughput for `all`, credential-bound decrypt, and credential-bound pass-through paths.
-- Exercise at least 4,096 fast-sandbox subjects without unbounded per-host or per-source cache growth.
-- Measure binding-revision transition latency with active HTTP/1.1 and HTTP/2 connections.
-- Run sustained connect/close churn and burst storms for mostly unbound, mostly bound, and mixed traffic, including concurrent host-add/remove. Measure CPU, RSS, allocations, p95/p99 admission latency, registry cleanup, and rejection rates against `all`; verify unbound traffic creates no extra decision-registry entries and returns to baseline after churn.
-- Publish per-entry memory measurements and validate global/per-subject budget arithmetic at the advertised fast-sandbox scale; test raised budgets and exhaustion.
-
-## Drawbacks
-
-- The proxy must maintain connection state and revision fences, which is more complex than time-based snapshot polling.
-- A runtime binding addition does not upgrade existing opaque connections; pooled clients must reconnect to receive credentials.
-- Host-level decryption remains broader than path- or method-level credential scope.
-- Visible SNI is required; ECH and no-SNI traffic cannot use Credential Vault.
-- Operators using custom addons lose L7 visibility for unbound hosts when they opt in.
-- Bound hosts still require dynamic CA trust, so this reduces rather than eliminates CA integration work.
-
-## Alternatives
-
-### Keep Intercept-All
-
-This is the simplest implementation and remains the default, but it preserves the broad TLS decryption and CA compatibility cost that motivates this proposal.
-
-### Generate Static `ignore_hosts`
-
-Operators can already rebuild or mount a static mitmproxy configuration. It does not follow sandbox-local runtime mutations, cannot vary per fast-sandbox subject, and risks drift between the static list and the active vault. Arbitrary regex also has no sound intersection check against the binding wildcard language, so credential-bound mode requires migration to the analyzable selector list.
-
-### Bypass mitmproxy in iptables or nftables
-
-Routing only bound host IPs into mitmproxy would avoid even the pass-through proxy hop, but binding policy is FQDN-based and destination IPs are dynamic, shared, and learned through DNS. Kernel rules cannot reliably distinguish two TLS hostnames sharing an IP. ClientHello selection keeps the decision at the first layer that can observe SNI.
-
-### Decide From HTTP Host After Decryption
-
-That is the current behavior. It can choose whether to inject a credential but cannot undo TLS decryption that already occurred.
-
-### Make Credential-Bound the New Default Immediately
-
-This would silently remove L7 visibility from operator addons and change certificate behavior for existing sandboxes. The proposal uses an opt-in and requires separate evidence before any future default change.
-
-Credential-bound interception may be a suitable future default for deployments whose primary purpose is credential injection. Any default change requires implementation and performance results, addon compatibility evidence, explicit operator communication, and a migration plan that prevents silent loss of required inspection coverage. Preserve an explicit `all` option even if the default changes. This OSEP keeps the current default and leaves that decision to a future proposal.
-
-### Track Every Opaque Connection and Close on Host Add
-
-This provides stronger host-add injection availability but requires registry churn for all visible-SNI TLS and turns a global cap into a broad HTTPS outage. The selected bound-only design accepts existing opaque sessions just as it accepts coalescing: no credential is injected until the client reconnects. Revision acknowledgement remains immediate for new decisions and for request evaluation on decrypted connections.
-
-### Bound Opaque Connection Age
-
-A 60–120 second maximum age could bound stale opaque sessions, but still needs timers and per-connection lifecycle work, interrupts legitimate long-lived traffic, and cannot make an opaque connection credentialed in place. Defer this option until a concrete workload needs bounded reconnection latency.
-
-### Time-Based Vault Polling Alone
-
-Retaining the 0.5-second snapshot cache would also delay new TLS decisions and request-level revocation on decrypted connections. That is distinct from accepting existing opaque sessions. Keep explicit revision acknowledgement and the decrypted-request fence.
-
-## Infrastructure Needed
-
-No new external service is required. The implementation needs an internal revision-install/acknowledgement path between the Go egress control plane and the mitmproxy system addon, plus a bounded connection registry. The exact local IPC mechanism is an implementation detail as long as it is private to the sidecar, fenced by subject generation, and meets the acknowledgement contract.
-
-CI needs Linux integration coverage with mitmproxy 11.0.2, local TLS servers, HTTP/2, network namespaces, and the existing Docker/Kubernetes/fast-sandbox egress test paths.
-
-## Upgrade & Migration Strategy
-
-1. Implement and validate the internal decision/transition protocol without a public lifecycle field.
-2. Ship dry-run telemetry and acknowledgement prerequisites without changing traffic.
-3. After sidecar, fast-sandbox, HTTP/1.1, and HTTP/2 parity passes, align the lifecycle request/response schema, server runtime confirmation, and all SDKs on the existing create route. Document minimum versions, coordinated upgrades, effective-mode verification, and its post-creation detection limitation.
-4. Enable `credential-bound` only when explicitly requested and only on runtimes that implement the complete contract; reject unsupported extra-port or pool/fast-sandbox combinations instead of degrading silently.
-5. The runtime automatically installs an internal empty decision snapshot before first-create readiness. The caller's first public Vault POST remains valid. Recovery requires replay or explicit trusted confirmation of empty intent.
-6. Document that every `PATCH /credential-vault` request in this mode must include the existing `expectedRevision`; callers can obtain it from `GET /credential-vault`. SDK documentation must explicitly distinguish this requirement from optional preconditions in `all` mode.
-7. Keep current regex `ignore_hosts`, CA setup, and `all` behavior unchanged for existing deployments. Before enabling `credential-bound`, migrate intended static bypass entries to the exact/wildcard `OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS` list; the new mode rejects a non-empty `ignore_hosts` or `allow_hosts` list. The static selector list is immutable; changing it requires a new sidecar process and revalidation. The later configuration-consolidation work must explicitly define migration from this environment-variable interface before replacing it.
-8. Release notes must call out strict unknown-field rejection as a runtime compatibility tightening, even though the OpenAPI schema was already closed.
-9. Do not change the default in this OSEP. A future default change requires usage data, addon compatibility evidence, and a separate migration plan.

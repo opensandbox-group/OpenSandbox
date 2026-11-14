@@ -21,6 +21,25 @@ namespace OpenSandbox.Tests;
 
 public class ModelsTests
 {
+    [Theory]
+    [InlineData("{\"type\":\"execution_complete\",\"exit_code\":0}", 0)]
+    [InlineData("{\"type\":\"execution_complete\"}", null)]
+    public void ServerStreamEvent_ShouldPreserveOptionalZeroExitCode(string json, int? expected)
+    {
+        var streamEvent = JsonSerializer.Deserialize<ServerStreamEvent>(json)!;
+        streamEvent.ExitCode.Should().Be(expected);
+
+        using var serialized = JsonDocument.Parse(JsonSerializer.Serialize(streamEvent));
+        if (expected.HasValue)
+        {
+            serialized.RootElement.GetProperty("exit_code").GetInt32().Should().Be(0);
+        }
+        else
+        {
+            serialized.RootElement.TryGetProperty("exit_code", out _).Should().BeFalse();
+        }
+    }
+
     [Fact]
     public void RenewalPolicy_ShouldAcceptBoundaries()
     {

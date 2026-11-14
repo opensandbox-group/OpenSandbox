@@ -15,7 +15,7 @@
 """Regression tests for the MCP 2.x migration (follow-up to the 1.x pin in #1725).
 
 The server now targets the mcp 2.x API (`MCPServer` / 2-param `Context`) and the
-dependency constraint is `mcp[cli]>=2,<3`. These tests pin both halves:
+dependency constraint is `mcp[cli]>=2.3.0,<3`. These tests pin both halves:
 the distribution metadata keeps the constraint, and the public entry points
 only exist on the 2.x API surface.
 """
@@ -58,7 +58,7 @@ class TestMcp2Constraint:
         mcp_entries = [r for r in requires if r.startswith("mcp[")]
         assert mcp_entries, f"no mcp requirement found in: {requires}"
         entry = mcp_entries[0]
-        assert ">=2" in entry, entry
+        assert ">=2.3.0" in entry, entry
         assert "<3" in entry, entry
 
     def test_pyproject_declares_mcp_2(self) -> None:
@@ -68,7 +68,7 @@ class TestMcp2Constraint:
         data = tomllib.loads(pyproject.read_text())
         deps = data["project"]["dependencies"]
         mcp_deps = [d for d in deps if d.startswith("mcp[")]
-        assert mcp_deps == ["mcp[cli]>=2,<3"]
+        assert mcp_deps == ["mcp[cli]>=2.3.0,<3"]
 
 
 class TestMcp2Imports:

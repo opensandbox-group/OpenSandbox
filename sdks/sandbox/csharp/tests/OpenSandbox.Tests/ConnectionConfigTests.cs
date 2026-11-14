@@ -209,4 +209,73 @@ public class ConnectionConfigTests
         client.Should().NotBeNull();
         client.Timeout.Should().Be(Timeout.InfiniteTimeSpan);
     }
+
+    [Fact]
+    public void Constructor_WithExplicitApiKeyHeaderInAnyCase_ShouldSuppressDefaultKey()
+    {
+        // Arrange
+        var options = new ConnectionConfigOptions
+        {
+            ApiKey = "configured-key",
+            Headers = new Dictionary<string, string>
+            {
+                ["open-sandbox-api-key"] = "explicit-key"
+            }
+        };
+
+        // Act
+        var config = new ConnectionConfig(options);
+
+        // Assert
+        var apiKeyEntries = config.Headers
+            .Where(h => string.Equals(h.Key, Constants.ApiKeyHeader, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        apiKeyEntries.Should().HaveCount(1, "an explicit API key header suppresses the default regardless of casing");
+        apiKeyEntries[0].Should().Be(new KeyValuePair<string, string>("open-sandbox-api-key", "explicit-key"));
+    }
+
+    [Fact]
+    public void Constructor_WithEmptyExplicitApiKeyHeader_ShouldPreserveIt()
+    {
+        // Arrange
+        var options = new ConnectionConfigOptions
+        {
+            ApiKey = "configured-key",
+            Headers = new Dictionary<string, string>
+            {
+                ["Open-Sandbox-Api-Key"] = ""
+            }
+        };
+
+        // Act
+        var config = new ConnectionConfig(options);
+
+        // Assert
+        var apiKeyEntries = config.Headers
+            .Where(h => string.Equals(h.Key, Constants.ApiKeyHeader, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        apiKeyEntries.Should().HaveCount(1);
+        apiKeyEntries[0].Value.Should().BeEmpty("a present-but-empty explicit header is not replaced by the default");
+    }
+
+    [Fact]
+    public void Constructor_WithCanonicalExplicitApiKeyHeader_ShouldKeepExplicitValue()
+    {
+        // Arrange
+        var options = new ConnectionConfigOptions
+        {
+            ApiKey = "configured-key",
+            Headers = new Dictionary<string, string>
+            {
+                [Constants.ApiKeyHeader] = "explicit-key"
+            }
+        };
+
+        // Act
+        var config = new ConnectionConfig(options);
+
+        // Assert
+        config.Headers.Should().HaveCount(1);
+        config.Headers[Constants.ApiKeyHeader].Should().Be("explicit-key");
+    }
 }

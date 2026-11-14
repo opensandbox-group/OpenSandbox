@@ -109,6 +109,38 @@ Sandbox manual = Sandbox.builder()
     .build();
 ```
 
+Renew on access instead of on a timer (OSEP-0009): `renewalPolicy` moves the expiration to `max(now + extendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0.
+
+```java
+Sandbox sandbox = Sandbox.builder()
+    .connectionConfig(config)
+    .image("ubuntu")
+    .lifecycle(
+        SandboxLifecycle.builder()
+            .renewalPolicy(RenewalPolicy.builder().extendSeconds(3600).build())
+            .build()
+    )
+    .build();
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `idlePolicy` pauses the sandbox after `idleTimeoutSeconds` continuously idle seconds (30–86400, `onIdle` only takes `OnIdleAction.PAUSE` today). Incoming traffic then wakes it:
+
+```java
+Sandbox sandbox = Sandbox.builder()
+    .connectionConfig(config)
+    .image("ubuntu")
+    .lifecycle(
+        SandboxLifecycle.builder()
+            .idlePolicy(
+                IdlePolicy.builder().idleTimeoutSeconds(600).onIdle(OnIdleAction.PAUSE).build()
+            )
+            .build()
+    )
+    .build();
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`wakeRetryEnabled` / `wakeMaxAttempts` / `wakeOverallDeadline` on `RetryPolicy`; defaults 5 attempts / 60 seconds; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. Note: the request that starts a stream does not wake-retry in Kotlin today — a marked `503` on a stream start fails fast instead.
+
 ### 2. Custom Health Check
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check.
@@ -376,6 +408,56 @@ Pool lifecycle semantics:
 
 > For distributed deployment, use the optional `com.alibaba.opensandbox:sandbox-pool-redis` module or provide a custom `PoolStateStore` implementation. The Redis module accepts a caller-managed Jedis client, so your application keeps ownership of Redis connection configuration and lifecycle. Nodes sharing the same pool namespace must use the same sandbox creation and warmup definition; use a new `poolName` or namespace when changing that definition. The pool renews an owned primary lock independently from warmup execution at an internal interval no greater than `primaryLockTtl / 3`, so one slow warmup does not block leader heartbeats. In distributed mode, `resize(maxIdle)` can be called from any node. The call returns after the target is stored in the shared state store; the current primary applies replenish or shrink work during periodic reconcile. Use `resize(0)` and wait for `snapshot().idleCount == 0` when you need to drain the distributed idle buffer; `releaseAllIdle()` is only a best-effort cleanup pass. `releaseAllIdle()` preserves the original serial cleanup behavior. Use `releaseAllIdle(concurrency)` for bounded parallel cleanup. `concurrency` must be positive; the overload returns only after every ID drained from the store has received a best-effort kill attempt. `SandboxPoolManager.destroy(poolName)` is a stronger administrative operation: it writes a `DESTROYING` fence, drains visible idle IDs, best-effort kills idle sandboxes, clears persistent pool state, and then writes a `DESTROYED` tombstone for the configured TTL to prevent old nodes from recreating the same pool namespace. If drain or persistent-state cleanup cannot complete, `destroy()` throws `PoolDestroyIncompleteException` and leaves the namespace fenced as `DESTROYING`; retry `destroy()` to finish cleanup.
 
+### 9. fsb Templates
+
+Manage fast-sandbox (fsb) golden-image templates. The build is asynchronous: poll `getTemplate` until the phase is `Succeeded`, and treat `Failed` as terminal by surfacing `status.message`. Template management requires a Kubernetes-backed runtime.
+
+```java
+import com.alibaba.opensandbox.sandbox.SandboxManager;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFormat;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateInfo;
+
+SandboxManager manager = SandboxManager.builder()
+    .connectionConfig(config)
+    .build();
+
+TemplateInfo template = manager.createTemplate(
+    CreateTemplateRequest.builder()
+        .image("python:3.11")
+        .publish("s3://bucket/templates/py311")
+        .format(TemplateFormat.NATIVE)
+        .build()
+);
+
+// Poll getTemplate until the build finishes (or fails).
+// In Kotlin: template.status.phase  (dot-access shorthand)
+// In Java:   template.getStatus().getPhase()  (JavaBean getter)
+while (!"Succeeded".equals(template.getStatus().getPhase())
+       && !"Failed".equals(template.getStatus().getPhase())) {
+    Thread.sleep(5000);
+    template = manager.getTemplate(template.getTemplateId());
+}
+if ("Failed".equals(template.getStatus().getPhase())) {
+    throw new IllegalStateException(
+        "template build failed: " + template.getStatus().getMessage());
+}
+```
+
+`format` selects the snapshot storage encoding: `TemplateFormat.NATIVE` publishes raw snapshots to the `s3://` target, while `TemplateFormat.OVERLAYBD` (the default) publishes an overlaybd snapshot set to the `oci://registry/repository` target (repository only, no tag or digest; the immutable published reference is reported in `status.manifestRef`). Boot a sandbox from a built template using the fluent launcher:
+
+```java
+import com.alibaba.opensandbox.sandbox.Sandbox;
+import java.time.Duration;
+
+Sandbox sandbox = Sandbox.fromTemplate()
+    .templateId(template.getTemplateId())
+    .timeout(Duration.ofMinutes(30))
+    .create();
+```
+
+> **Note for Java callers:** Kotlin `val` properties expose JavaBean-style getters (`getStatus()`, `getPhase()`, etc.) rather than direct field access. The examples above use getter syntax for Java compatibility; in pure Kotlin code you can use the dot-access shorthand.
+
 ## Configuration
 
 ### 1. Connection Configuration
@@ -466,6 +548,26 @@ Sandbox sandbox = Sandbox.builder()
     .build();
 ```
 
+A rule can scope by TCP destination ports instead of a target — `ports` (each 1–65535, at most 256 per rule, no duplicates) may replace `target` entirely, and combining a domain `target` with `ports` is rejected. Docker, Kubernetes, and Fast Sandbox backends all enforce `ports` rules; a targetless `ports` rule matches direct IP connections only, so under a deny-default policy hostname traffic still needs a domain rule alongside it.
+
+```java
+Sandbox sandbox = Sandbox.builder()
+    .connectionConfig(config)
+    .image("python:3.11")
+    .networkPolicy(
+        NetworkPolicy.builder()
+            .defaultAction(NetworkPolicy.DefaultAction.DENY)
+            .addEgress(
+                NetworkRule.builder()
+                    .action(NetworkRule.Action.ALLOW)
+                    .ports(List.of(443, 8443))
+                    .build()
+            )
+            .build()
+    )
+    .build();
+```
+
 ### 3. Runtime Egress Policy Updates
 
 Runtime egress reads and patches go directly to the sandbox egress sidecar. The SDK first resolves the sandbox endpoint on port `18080`, then calls the sidecar `/policy` API.
@@ -540,6 +642,34 @@ sandbox.credentialVault().create(
                             .build()
                     )
                     .auth(CredentialAuth.apiKey("x-api-key", "api-token"))
+                    .build()
+            )
+        )
+        .build()
+);
+```
+
+Exchange-sourced credentials (OSEP-0025) carry no local material: the egress resolves header sets per request from a header-resolver endpoint, and bindings reference them through the typeless exchange auth form.
+
+```java
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.ExchangeCredentialSource;
+
+sandbox.credentialVault().create(
+    CredentialVaultCreateRequest.builder()
+        .credentials(
+            List.of(
+                Credential.builder()
+                    .name("spi-signer")
+                    .exchangeSource("unix:///run/spi/spi.sock")
+                    .build()
+            )
+        )
+        .bindings(
+            List.of(
+                CredentialBinding.builder()
+                    .name("internal-api")
+                    .match(CredentialMatch.builder().hosts("*.internal.example.com").build())
+                    .auth(CredentialAuth.exchange("spi-signer"))
                     .build()
             )
         )

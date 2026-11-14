@@ -167,7 +167,7 @@ func TestUnknownSubjectRejected(t *testing.T) {
 	pol, err := policy.ParsePolicy(`{"defaultAction":"deny"}`)
 	require.NoError(t, err)
 	require.ErrorIs(t, a.ApplyPolicy(ctx, subject.FromSandboxUID("ghost"), pol), ErrUnknownSubject)
-	require.ErrorIs(t, a.AddResolvedIPs(ctx, subject.FromSandboxUID("ghost"), []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.2.3.4"), TTL: time.Minute}}), ErrUnknownSubject)
+	require.ErrorIs(t, a.AddResolvedIPs(ctx, subject.FromSandboxUID("ghost"), "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.2.3.4"), TTL: time.Minute}}), ErrUnknownSubject)
 }
 
 func TestAddResolvedIPsClampsTTL(t *testing.T) {
@@ -176,13 +176,94 @@ func TestAddResolvedIPsClampsTTL(t *testing.T) {
 	s := subject.FromSandboxUID("u-1")
 	ctx := context.Background()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{
 		{Addr: netip.MustParseAddr("1.2.3.4"), TTL: 30 * time.Second},   // clamps up to 90s (min 60 + slack)
 		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: 24 * time.Hour}, // clamps down to 360s
 	}))
 	script := runner.last()
 	require.Contains(t, script, "1.2.3.4 timeout 90s")
 	require.Contains(t, script, "2001:db8::1 timeout 360s")
+}
+
+func TestAddResolvedIPsRecreatesElementsToRenewExpiry(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{
+		{Addr: netip.MustParseAddr("1.2.3.4"), TTL: 300 * time.Second},
+		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: 300 * time.Second},
+	}))
+	script := runner.last()
+	for _, tc := range []struct{ set, addr string }{
+		{dynSetName(s, "v4"), "1.2.3.4"},
+		{dynSetName(s, "v6"), "2001:db8::1"},
+	} {
+		require.Contains(t, script, fmt.Sprintf(
+			"add element inet %[1]s %[2]s { %[3]s }\ndelete element inet %[1]s %[2]s { %[3]s }\nadd element inet %[1]s %[2]s { %[3]s timeout 360s }\n",
+			TableName, tc.set, tc.addr), "a plain add does not renew an existing element's kernel expiry")
+	}
+}
+
+// TestAddResolvedIPsRejectsDomainRevokedByReload: a DNS answer that was in
+// flight while an always-rule reload tightened the overlay must not
+// re-authorize the revoked domain's cached IP.
+func TestAddResolvedIPsRejectsDomainRevokedByReload(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"},{"action":"allow","target":"api.example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	ips := []nftables.ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0}}
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", ips))
+
+	// the overlay tightens: example.com moves to always-deny
+	denyRule, err := policy.ParseValidatedEgressRule("deny", "example.com")
+	require.NoError(t, err)
+	merged := policy.MergeAlwaysOverlay(pol, []policy.EgressRule{denyRule}, nil)
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, nil, map[subject.Subject]*policy.NetworkPolicy{s: merged}))
+
+	// the stale in-flight answer arrives after the reload: refused
+	count := runner.count()
+	require.ErrorIs(t, a.AddResolvedIPs(ctx, s, "example.com", ips), ErrLeaseRejected)
+	require.Equal(t, count, runner.count(), "a refused lease must not emit an nft transaction")
+	require.NotContains(t, runner.last(), "192.0.2.1")
+	a.mu.Lock()
+	_, tracked := a.states[s]
+	a.mu.Unlock()
+	require.False(t, tracked, "a refused lease must not enter the refresh mirror")
+
+	// a domain the reload still allows keeps working
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "api.example.com", ips))
+	require.Contains(t, runner.last(), "192.0.2.1")
+}
+
+// TestAddResolvedIPsRejectsDenyFirstSubject: a subject that reverted to
+// deny-first while its DNS answer was in flight must not re-acquire a lease.
+func TestAddResolvedIPsRejectsDenyFirstSubject(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	s := subject.FromSandboxUID("u-1")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+
+	count := runner.count()
+	require.ErrorIs(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0}}), ErrLeaseRejected)
+	require.Equal(t, count, runner.count(), "a refused lease must not emit an nft transaction")
+	a.mu.Lock()
+	_, tracked := a.states[s]
+	a.mu.Unlock()
+	require.False(t, tracked)
 }
 
 func TestRemoveRebuildsTable(t *testing.T) {
@@ -221,6 +302,34 @@ func TestRemoveRebuildsTable(t *testing.T) {
 	require.NoError(t, a.Remove(ctx, s2))
 	script = runner.last()
 	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
+}
+
+func TestRemoveKeepsRemainingSubjectsLeases(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	now := time.Unix(1_700_000_000, 0)
+	a.now = func() time.Time { return now }
+	ctx := context.Background()
+	removed := subject.FromSandboxUID("u-1")
+	kept := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, removed, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.ApplyDenyFirst(ctx, kept, testSlot("u-2", "10.0.0.6")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"api.example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, kept, pol))
+	require.NoError(t, a.AddResolvedIPs(ctx, kept, "api.example.com", []nftables.ResolvedIP{
+		{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0},                   // 60s lease
+		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: 300 * time.Second}, // 360s lease
+		{Addr: netip.MustParseAddr("192.0.2.9"), TTL: 0},                   // expires before the rebuild
+	}))
+	a.states[kept].dyn[netip.MustParseAddr("192.0.2.9")] = now.Add(-time.Second)
+
+	now = now.Add(20*time.Second + 500*time.Millisecond)
+	require.NoError(t, a.Remove(ctx, removed))
+	script := runner.last()
+	require.Contains(t, script, fmt.Sprintf("add element inet %s %s { 192.0.2.1 timeout 40s }", TableName, dynSetName(kept, "v4")))
+	require.Contains(t, script, fmt.Sprintf("add element inet %s %s { 2001:db8::1 timeout 340s }", TableName, dynSetName(kept, "v6")))
+	assert.NotContains(t, script, "192.0.2.9", "an expired lease must not be re-added")
 }
 
 // TestRemoveFailureStaysRetryable: a failed nft transaction must not forget
@@ -265,6 +374,134 @@ func TestRemoveFailureStaysRetryable(t *testing.T) {
 	assert.Equal(t, before, runner.count())
 }
 
+// TestApplyAlwaysRulesReloadRebuildsTable: one transaction swaps the port
+// floor and re-emits every subject (merged policies, deny-first preserved,
+// DNS leases dropped); the applier adopts the reloaded state only after
+// the transaction commits.
+func TestApplyAlwaysRulesReloadRebuildsTable(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	denyFirst := subject.FromSandboxUID("u-1")
+	active := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, denyFirst, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.ApplyDenyFirst(ctx, active, testSlot("u-2", "10.0.0.6")))
+	oldPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"},{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, active, oldPol))
+	require.NoError(t, a.AddResolvedIPs(ctx, active, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: 0}}))
+
+	newDeny, err := policy.ParseValidatedEgressRule("deny", "203.0.113.0/24")
+	require.NoError(t, err)
+	newPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	merged := policy.MergeAlwaysOverlay(newPol, []policy.EgressRule{newDeny}, nil)
+	floor := []policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 65535}}
+
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, floor, map[subject.Subject]*policy.NetworkPolicy{active: merged}))
+	script := runner.last()
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox", "the reload rebuilds the whole table")
+	require.Contains(t, script, "tcp dport { 1-79, 81-65535 } drop", "the port floor is swapped into the master chains")
+	require.Contains(t, script, "203.0.113.0/24", "the new always-deny CIDR reaches the subject's deny set")
+	assert.NotContains(t, script, "8.8.8.8", "the replaced merged policy must not survive")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop", "deny-first subject keeps its bare drop")
+	assert.NotContains(t, script, "192.0.2.1", "DNS-learned leases must be dropped with the table (sidecar parity: a tightened overlay must not keep revoked domains authorized)")
+
+	// the applier adopted the reloaded policy: a later Remove rebuild (which
+	// re-emits subjects from in-memory state) carries it too
+	a.mu.Lock()
+	adopted := a.subjects[active].pol
+	a.mu.Unlock()
+	require.Same(t, merged, adopted)
+	runner.mu.Lock()
+	runner.scripts = nil
+	runner.mu.Unlock()
+	require.NoError(t, a.Remove(ctx, denyFirst))
+	require.Contains(t, runner.last(), "203.0.113.0/24", "rebuilds reuse the reloaded policy")
+}
+
+// TestApplyAlwaysRulesReloadFailureStaysRetryable: a failed reload leaves
+// the in-memory policies and floor untouched, so the retry re-runs the
+// full rebuild.
+func TestApplyAlwaysRulesReloadFailureStaysRetryable(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	s := subject.FromSandboxUID("u-1")
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	oldPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, s, oldPol))
+	originalFloor := []policy.PortRange{{Lo: 1, Hi: 79}}
+	a.mu.Lock()
+	a.opts.PortFloorDenyRanges = originalFloor
+	a.mu.Unlock()
+
+	newPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"9.9.9.9"}]}`)
+	require.NoError(t, err)
+	newFloor := []policy.PortRange{{Lo: 81, Hi: 65535}}
+	runner.mu.Lock()
+	runner.fail = func(string) error { return errors.New("nft busy") }
+	runner.mu.Unlock()
+	require.Error(t, a.ApplyAlwaysRulesReload(ctx, newFloor, map[subject.Subject]*policy.NetworkPolicy{s: newPol}))
+	a.mu.Lock()
+	keptPol := a.subjects[s].pol
+	keptFloor := a.opts.PortFloorDenyRanges
+	a.mu.Unlock()
+	require.Same(t, oldPol, keptPol, "a failed reload must keep the installed policy")
+	require.Equal(t, originalFloor, keptFloor, "a failed reload must keep the installed floor")
+
+	// the retry re-runs the rebuild and adopts both
+	runner.mu.Lock()
+	runner.fail = nil
+	runner.mu.Unlock()
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, newFloor, map[subject.Subject]*policy.NetworkPolicy{s: newPol}))
+	script := runner.last()
+	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
+	require.Contains(t, script, "tcp dport { 81-65535 } drop")
+	require.Contains(t, script, "9.9.9.9")
+	a.mu.Lock()
+	require.Same(t, newPol, a.subjects[s].pol)
+	require.Equal(t, newFloor, a.opts.PortFloorDenyRanges)
+	a.mu.Unlock()
+}
+
+// TestApplyAlwaysRulesReloadNeverUpgradesDenyFirst: a deny-first transition
+// that raced the reload's snapshot (inst.pol == nil in the applier) must
+// never be resurrected by the rebuild even when the caller's map still
+// carries a policy for the subject — the kernel stays deny-first.
+func TestApplyAlwaysRulesReloadNeverUpgradesDenyFirst(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run)
+	ctx := context.Background()
+	reverted := subject.FromSandboxUID("u-1")
+	require.NoError(t, a.ApplyDenyFirst(ctx, reverted, testSlot("u-1", "10.0.0.5")))
+	stillActive := subject.FromSandboxUID("u-2")
+	require.NoError(t, a.ApplyDenyFirst(ctx, stillActive, testSlot("u-2", "10.0.0.6")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, a.ApplyPolicy(ctx, stillActive, pol))
+	// the race: u-1 reverts to deny-first (ApplyDenyFirst) AFTER the caller
+	// snapshotted its (allow) policy into the reload map
+	require.NoError(t, a.ApplyDenyFirst(ctx, reverted, testSlot("u-1", "10.0.0.5")))
+	staleAllow, err := policy.ParsePolicy(`{"defaultAction":"allow"}`)
+	require.NoError(t, err)
+
+	floor := []policy.PortRange{{Lo: 1, Hi: 79}}
+	require.NoError(t, a.ApplyAlwaysRulesReload(ctx, floor, map[subject.Subject]*policy.NetworkPolicy{
+		reverted:    staleAllow,
+		stillActive: pol,
+	}))
+	script := runner.last()
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop",
+		"the reverted subject must re-emit deny-first despite the stale map entry")
+	assert.NotContains(t, script, "tcp dport { 1-65535 } drop", "no default-allow mark rules for the reverted subject")
+	a.mu.Lock()
+	require.Nil(t, a.subjects[reverted].pol, "the applier must not adopt a policy for a deny-first subject")
+	require.Same(t, pol, a.subjects[stillActive].pol)
+	a.mu.Unlock()
+}
+
 func TestDenyFirstResetsOnReRegistration(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -272,10 +509,10 @@ func TestDenyFirstResetsOnReRegistration(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"}]}`)
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"8.8.8.8"},{"action":"allow","target":"example.com"}]}`)
 	require.NoError(t, err)
 	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
-	require.NoError(t, a.AddResolvedIPs(ctx, s, []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
+	require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}}))
 
 	runner.mu.Lock()
 	runner.scripts = nil
@@ -870,56 +1107,294 @@ func TestPortFloorDropsInDispatchAndInputChains(t *testing.T) {
 	assert.NotContains(t, plain.last(), "tcp dport { 1-79")
 }
 
-func TestApplyPolicy_PortScopedRuleFailsClosed(t *testing.T) {
-	// Older servers and direct Fastlet callers can deliver port-scoped rules
-	// the fast path cannot enforce; the applier must refuse the apply (the
-	// subject stays deny-first) instead of silently dropping the rule.
-	runner := &fakeRunner{}
-	a := NewApplier(runner.Run, Options{})
-	s := subject.FromSandboxUID("u-1")
-	ctx := context.Background()
-	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
-
-	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[
-		{"action":"deny","target":"10.0.0.0/8","ports":[22]}
-	]}`)
-	require.NoError(t, err)
-	err = a.ApplyPolicy(ctx, s, p)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "port-scoped")
-
-	// The deny-first subject was untouched: the failed apply must not have
-	// installed the rule's static set (10.0.0.0/8 appears in no script).
-	for _, script := range runner.scripts {
-		require.NotContains(t, script, "10.0.0.0/8")
+func TestPortScopedPolicyRules(t *testing.T) {
+	targets := []struct {
+		name   string
+		target string
+		daddr  string
+	}{
+		{name: "port_only"},
+		{name: "ipv4", target: "10.0.0.9", daddr: "ip daddr 10.0.0.9 "},
+		{name: "cidr4", target: "10.0.0.0/24", daddr: "ip daddr 10.0.0.0/24 "},
+		{name: "ipv6", target: "2001:db8::9", daddr: "ip6 daddr 2001:db8::9 "},
+		{name: "cidr6", target: "2001:db8::/64", daddr: "ip6 daddr 2001:db8::/64 "},
+	}
+	for _, target := range targets {
+		for _, action := range []string{policy.ActionAllow, policy.ActionDeny} {
+			for _, defaultAction := range []string{policy.ActionAllow, policy.ActionDeny} {
+				for _, mitmPort := range []int{0, 18081} {
+					t.Run(fmt.Sprintf("%s/%s/default_%s/mitm_%d", target.name, action, defaultAction, mitmPort), func(t *testing.T) {
+						runner := &fakeRunner{}
+						a := NewApplier(runner.Run, Options{MitmRedirectPort: mitmPort})
+						s := subject.FromSandboxUID("u-1")
+						ctx := context.Background()
+						require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+						pol, err := policy.ParsePolicy(fmt.Sprintf(`{"defaultAction":%q,"egress":[{"action":%q,"target":%q,"ports":[1,443,65535]}]}`, defaultAction, action, target.target))
+						require.NoError(t, err)
+						require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+						script := runner.last()
+						predicate := target.daddr + "tcp dport { 1, 443, 65535 }"
+						forwardRule := "add rule inet opensandbox-fast-sandbox subj_s_u_1 " + predicate + " drop"
+						markRule := "add rule inet opensandbox-fast-sandbox mark_s_u_1 " + predicate + " meta mark set 0x2"
+						if action == policy.ActionDeny {
+							require.Contains(t, script, forwardRule)
+							assert.NotContains(t, script, markRule)
+						} else {
+							assert.NotContains(t, script, forwardRule)
+							if defaultAction == policy.ActionDeny {
+								require.Contains(t, script, markRule)
+							} else {
+								require.Contains(t, script, "add rule inet opensandbox-fast-sandbox mark_s_u_1 meta mark set 0x2")
+								assert.NotContains(t, script, markRule)
+							}
+						}
+						assert.NotContains(t, script, "add element", "port-scoped targets must not enter portless sets")
+						assert.NotContains(t, script, "udp dport")
+						if mitmPort == 0 {
+							assert.NotContains(t, script, "ct original")
+							assert.NotContains(t, script, "subj_s_u_1_in")
+							return
+						}
+						originalTarget := ""
+						if target.daddr != "" {
+							originalTarget = "ct original " + target.daddr
+						}
+						verdict := "accept"
+						if action == policy.ActionDeny {
+							verdict = "drop"
+						}
+						inputRule := "add rule inet opensandbox-fast-sandbox subj_s_u_1_in " + originalTarget + "meta l4proto tcp ct original proto-dst { 1, 443, 65535 } " + verdict
+						require.Contains(t, script, inputRule)
+						defaultVerdict := "accept"
+						if defaultAction == policy.ActionDeny {
+							defaultVerdict = "drop"
+						}
+						defaultRule := "add rule inet opensandbox-fast-sandbox subj_s_u_1_in " + defaultVerdict + "\n"
+						require.Less(t, strings.Index(script, inputRule), strings.Index(script, defaultRule))
+						assert.NotContains(t, script, "ct original proto-dst { 18081 }")
+					})
+				}
+			}
+		}
 	}
 }
 
-func TestApplyPolicy_PlatformFloorExemptFromPortScopedGuard(t *testing.T) {
-	// The floor rides the always overlay into every subject policy via the
-	// registry; ApplyPolicy must still succeed (the floor is enforced
-	// profile-wide in the master chains), while a user Ports rule in the
-	// same policy keeps the fail-closed guard.
+func TestPortScopedPolicyMaxPorts(t *testing.T) {
+	members := make([]string, 256)
+	for i := range members {
+		members[i] = fmt.Sprintf("%d", i+1)
+	}
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","ports":[` + strings.Join(members, ",") + `]}]}`)
+	require.NoError(t, err)
 	runner := &fakeRunner{}
-	a := NewApplier(runner.Run, Options{
-		PortFloorDenyRanges: []policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}},
-	})
+	a := NewApplier(runner.Run, Options{MitmRedirectPort: 18081})
 	s := subject.FromSandboxUID("u-1")
 	ctx := context.Background()
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	ports := "{ " + strings.Join(members, ", ") + " }"
+	require.Contains(t, runner.last(), "mark_s_u_1 tcp dport "+ports+" meta mark set 0x2")
+	require.Contains(t, runner.last(), "subj_s_u_1_in meta l4proto tcp ct original proto-dst "+ports+" accept")
+}
 
-	user, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[
-		{"action":"allow","target":"pypi.org"}
-	]}`)
+func TestPortScopedApplyFailureKeepsDenyFirst(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{MitmRedirectPort: 18081})
+	s := subject.FromSandboxUID("u-1")
+	other := subject.FromSandboxUID("u-2")
+	ctx := context.Background()
+	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+	require.NoError(t, a.ApplyDenyFirst(ctx, other, testSlot("u-2", "10.0.0.6")))
+	pol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","ports":[443]}]}`)
 	require.NoError(t, err)
-	effective := policy.MergeAlwaysOverlay(user,
-		[]policy.EgressRule{policy.NewPortFloorDenyRule([]policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}})},
-		nil)
-	require.NoError(t, a.ApplyPolicy(ctx, s, effective), "the floor alone must not trip the port-scoped guard")
+	runner.fail = func(string) error { return errors.New("nft rejected transaction") }
+	require.Error(t, a.ApplyPolicy(ctx, s, pol))
+	assert.Nil(t, a.subjects[s].pol)
+	runner.fail = nil
+	require.NoError(t, a.Remove(ctx, other))
+	script := runner.last()
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1_in drop")
+	assert.NotContains(t, script, "meta mark set")
+	assert.NotContains(t, script, "{ 443 }")
+	require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+	require.Contains(t, runner.last(), "mark_s_u_1 tcp dport { 443 } meta mark set 0x2")
+}
 
-	// Adding a user Ports rule on top trips it again.
-	effective.Egress = append(effective.Egress, policy.EgressRule{Action: policy.ActionAllow, Ports: []int{22}})
-	err = a.ApplyPolicy(ctx, s, effective)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "port-scoped")
+func TestPortScopedDenyPrecedesEveryAllow(t *testing.T) {
+	for _, defaultAction := range []string{policy.ActionAllow, policy.ActionDeny} {
+		t.Run(defaultAction, func(t *testing.T) {
+			runner := &fakeRunner{}
+			a := NewApplier(runner.Run, Options{MitmRedirectPort: 18081})
+			s := subject.FromSandboxUID("u-1")
+			ctx := context.Background()
+			require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+			pol, err := policy.ParsePolicy(fmt.Sprintf(`{"defaultAction":%q,"egress":[
+				{"action":"allow","ports":[443]},
+				{"action":"allow","target":"10.0.0.0/24"},
+				{"action":"allow","target":"2001:db8::/64"},
+				{"action":"allow","target":"example.com"},
+				{"action":"deny","target":"10.0.0.9","ports":[443]},
+				{"action":"deny","target":"2001:db8::9","ports":[443]},
+				{"action":"deny","ports":[25]},
+				{"action":"deny","target":"10.0.0.10"},
+				{"action":"deny","target":"2001:db8::10"}
+			]}`, defaultAction))
+			require.NoError(t, err)
+			require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+			script := runner.last()
+			inputPrefix := "add rule inet opensandbox-fast-sandbox subj_s_u_1_in "
+			firstAllow := strings.Index(script, inputPrefix+"meta l4proto tcp ct original proto-dst { 443 } accept")
+			require.NotEqual(t, -1, firstAllow)
+			for _, predicate := range []string{
+				"ct original ip daddr 10.0.0.9 meta l4proto tcp ct original proto-dst { 443 }",
+				"ct original ip6 daddr 2001:db8::9 meta l4proto tcp ct original proto-dst { 443 }",
+				"meta l4proto tcp ct original proto-dst { 25 }",
+				"ct original ip daddr @subj_s_u_1_deny_v4",
+				"ct original ip6 daddr @subj_s_u_1_deny_v6",
+			} {
+				drop := inputPrefix + predicate + " drop"
+				require.Contains(t, script, drop)
+				require.Less(t, strings.Index(script, drop), firstAllow)
+			}
+			for _, set := range []string{"dyn_v4", "dyn_v6", "allow_v4", "allow_v6"} {
+				family := "ip"
+				if strings.HasSuffix(set, "v6") {
+					family = "ip6"
+				}
+				allow := inputPrefix + "ct original " + family + " daddr @subj_s_u_1_" + set + " accept"
+				require.Contains(t, script, allow)
+				require.Less(t, firstAllow, strings.Index(script, allow))
+			}
+			for _, line := range strings.Split(script, "\n") {
+				if strings.HasPrefix(line, "add rule inet opensandbox-fast-sandbox subj_s_u_1 ") || strings.HasPrefix(line, "add rule inet opensandbox-fast-sandbox mark_s_u_1 ") {
+					assert.NotContains(t, line, " accept")
+				}
+			}
+		})
+	}
+}
+
+func TestPortScopedPolicyLifecycle(t *testing.T) {
+	for _, mitmPort := range []int{0, 18081} {
+		t.Run(fmt.Sprintf("mitm_%d", mitmPort), func(t *testing.T) {
+			runner := &fakeRunner{}
+			a := NewApplier(runner.Run, Options{MitmRedirectPort: mitmPort})
+			s := subject.FromSandboxUID("u-1")
+			other := subject.FromSandboxUID("u-2")
+			ctx := context.Background()
+			require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+			require.NoError(t, a.ApplyDenyFirst(ctx, other, testSlot("u-2", "10.0.0.6")))
+			old, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"10.0.0.9","ports":[8443]},{"action":"deny","ports":[25]},{"action":"allow","target":"example.com"}]}`)
+			require.NoError(t, err)
+			require.NoError(t, a.ApplyPolicy(ctx, s, old))
+			require.NoError(t, a.AddResolvedIPs(ctx, s, "example.com", []nftables.ResolvedIP{{Addr: netip.MustParseAddr("10.0.0.20"), TTL: time.Minute}}))
+
+			next, err := policy.ParsePolicy(`{"defaultAction":"allow","egress":[{"action":"deny","target":"10.0.0.9","ports":[443]}]}`)
+			require.NoError(t, err)
+			before := runner.count()
+			runner.fail = func(string) error { return errors.New("nft rejected transaction") }
+			require.Error(t, a.ApplyPolicy(ctx, s, next))
+			require.Equal(t, before+1, runner.count())
+			assert.Same(t, old, a.subjects[s].pol)
+			runner.fail = nil
+
+			require.NoError(t, a.Remove(ctx, other))
+			script := runner.last()
+			require.Contains(t, script, "ip daddr 10.0.0.9 tcp dport { 8443 } meta mark set 0x2")
+			require.Contains(t, script, "tcp dport { 25 } drop")
+			assert.NotContains(t, script, "tcp dport { 443 }")
+			assert.NotContains(t, script, "subj_s_u_2")
+			if mitmPort > 0 {
+				require.Contains(t, script, "ct original ip daddr 10.0.0.9 meta l4proto tcp ct original proto-dst { 8443 } accept")
+				require.Contains(t, script, "meta l4proto tcp ct original proto-dst { 25 } drop")
+			}
+
+			before = runner.count()
+			require.NoError(t, a.ApplyPolicy(ctx, s, next))
+			require.Equal(t, before+1, runner.count(), "the policy update must be one transaction")
+			script = runner.last()
+			require.Contains(t, script, "flush chain inet opensandbox-fast-sandbox mark_s_u_1")
+			require.Contains(t, script, "flush chain inet opensandbox-fast-sandbox subj_s_u_1")
+			require.Contains(t, script, "ip daddr 10.0.0.9 tcp dport { 443 } drop")
+			require.Contains(t, script, "mark_s_u_1 meta mark set 0x2")
+			assert.NotContains(t, script, "8443")
+			assert.NotContains(t, script, "{ 25 }")
+			assert.NotContains(t, script, "flush set inet opensandbox-fast-sandbox subj_s_u_1_dyn")
+			assert.Contains(t, a.states[s].dyn, netip.MustParseAddr("10.0.0.20"))
+			if mitmPort > 0 {
+				require.Contains(t, script, "flush chain inet opensandbox-fast-sandbox subj_s_u_1_in")
+				require.Contains(t, script, "ct original ip daddr 10.0.0.9 meta l4proto tcp ct original proto-dst { 443 } drop")
+			}
+
+			require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.7")))
+			script = runner.last()
+			assert.NotContains(t, script, "meta mark set")
+			assert.NotContains(t, script, "tcp dport { 443 }")
+			require.Contains(t, script, "flush set inet opensandbox-fast-sandbox subj_s_u_1_dyn_v4")
+			assert.Nil(t, a.subjects[s].pol)
+			assert.NotContains(t, a.states, s)
+			require.NoError(t, a.ApplyPolicy(ctx, s, nil))
+			assert.NotContains(t, runner.last(), "mark_s_u_1 meta mark set")
+			assert.NotContains(t, runner.last(), "tcp dport {")
+			assert.Equal(t, policy.ActionDeny, a.subjects[s].pol.DefaultAction)
+			assert.Empty(t, a.subjects[s].pol.Egress)
+			require.NoError(t, a.Remove(ctx, s))
+			assert.NotContains(t, runner.last(), "subj_s_u_1")
+			require.Contains(t, runner.last(), "dispatch meta mark & 0x2 != 0x2 drop")
+		})
+	}
+}
+
+func TestPortScopedSubjectIsolation(t *testing.T) {
+	runner := &fakeRunner{}
+	a := NewApplier(runner.Run, Options{MitmRedirectPort: 18081})
+	ctx := context.Background()
+	for i, port := range []int{443, 8443} {
+		uid := fmt.Sprintf("u-%d", i+1)
+		s := subject.FromSandboxUID(uid)
+		require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot(uid, fmt.Sprintf("10.0.0.%d", i+5))))
+		pol, err := policy.ParsePolicy(fmt.Sprintf(`{"defaultAction":"deny","egress":[{"action":"allow","ports":[%d]}]}`, port))
+		require.NoError(t, err)
+		require.NoError(t, a.ApplyPolicy(ctx, s, pol))
+		assert.NotContains(t, runner.last(), fmt.Sprintf("subj_s_u_%d", 2-i))
+	}
+	require.NoError(t, a.Remove(ctx, subject.FromSandboxUID("u-1")))
+	script := runner.last()
+	require.Contains(t, script, "ip saddr 10.0.0.6 jump mark_s_u_2")
+	require.Contains(t, script, "mark_s_u_2 tcp dport { 8443 } meta mark set 0x2")
+	require.Contains(t, script, "subj_s_u_2_in meta l4proto tcp ct original proto-dst { 8443 } accept")
+	assert.NotContains(t, script, "{ 443 }")
+	assert.NotContains(t, script, "subj_s_u_1")
+}
+
+func TestPortScopedPolicyComposesWithPlatformFloor(t *testing.T) {
+	for _, defaultAction := range []string{policy.ActionAllow, policy.ActionDeny} {
+		t.Run(defaultAction, func(t *testing.T) {
+			ranges := []policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 442}, {Lo: 444, Hi: 65535}}
+			runner := &fakeRunner{}
+			a := NewApplier(runner.Run, Options{MitmRedirectPort: 18081, PortFloorDenyRanges: ranges})
+			s := subject.FromSandboxUID("u-1")
+			other := subject.FromSandboxUID("u-2")
+			ctx := context.Background()
+			require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
+			require.NoError(t, a.ApplyDenyFirst(ctx, other, testSlot("u-2", "10.0.0.6")))
+			user, err := policy.ParsePolicy(fmt.Sprintf(`{"defaultAction":%q,"egress":[{"action":"allow","ports":[22,443]},{"action":"deny","ports":[80]}]}`, defaultAction))
+			require.NoError(t, err)
+			effective := policy.MergeAlwaysOverlay(user, []policy.EgressRule{policy.NewPortFloorDenyRule(ranges)}, nil)
+			require.NoError(t, a.ApplyPolicy(ctx, s, effective))
+			assert.NotContains(t, runner.last(), "1-79", "the platform cap must not be duplicated per subject")
+			require.NoError(t, a.Remove(ctx, other))
+			script := runner.last()
+			floorForward := "add rule inet opensandbox-fast-sandbox dispatch tcp dport { 1-79, 81-442, 444-65535 } drop"
+			floorInput := "add rule inet opensandbox-fast-sandbox input ct status dnat tcp dport 18081 ct original proto-dst { 1-79, 81-442, 444-65535 } drop"
+			require.Contains(t, script, floorForward)
+			require.Contains(t, script, floorInput)
+			require.Equal(t, 2, strings.Count(script, "1-79"))
+			require.Less(t, strings.Index(script, floorForward), strings.Index(script, "dispatch ip saddr 10.0.0.5 jump"))
+			require.Less(t, strings.Index(script, floorInput), strings.Index(script, "input ip saddr 10.0.0.5 tcp dport 18081 ct status dnat jump"))
+			require.Contains(t, script, "subj_s_u_1 tcp dport { 80 } drop")
+			require.Contains(t, script, "subj_s_u_1_in meta l4proto tcp ct original proto-dst { 22, 443 } accept")
+		})
+	}
 }

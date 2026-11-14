@@ -18,9 +18,20 @@ import "errors"
 
 var ErrContextNotFound = errors.New("context not found")
 
+// ErrCommandNotFound indicates that no command is tracked under the given ID.
+var ErrCommandNotFound = errors.New("command not found")
+
 // ErrUidModeUnavailable indicates that the requested isolation uid mode did
 // not pass the startup capability probe in the current environment.
 var ErrUidModeUnavailable = errors.New("requested uid mode is unavailable")
+
+// ErrSessionPrivateNetUnavailable indicates that a share_net=false request
+// could not be served because the requested uid mode cannot create the
+// private network namespace (bwrap --unshare-net, whose loopback setup needs
+// CAP_NET_ADMIN in the execd container). Create rejects such requests before
+// starting bwrap so callers get a named error instead of an opaque workload
+// gate failure.
+var ErrSessionPrivateNetUnavailable = errors.New("requested private network namespace is unavailable")
 
 // ErrSessionTeardownTimeout indicates that a session workload could not be
 // reaped within the bounded teardown window. The caller must retain ownership
@@ -49,3 +60,7 @@ var ErrIsolatedRunnerClosed = errors.New("isolated session runner is closed")
 // accepts run or filesystem operations. Cleanup may still be retried through
 // Delete while the controller retains ownership of the session resources.
 var ErrSessionNotActive = errors.New("isolated session is not active")
+
+// ErrUnsupportedLanguage indicates that the language runtime is reachable but
+// offers no kernel for the requested language, so retrying cannot succeed.
+var ErrUnsupportedLanguage = errors.New("unsupported language")

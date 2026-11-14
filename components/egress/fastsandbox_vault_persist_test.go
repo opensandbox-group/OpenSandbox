@@ -104,6 +104,12 @@ func (f *fakeVaultFile) SaveRaw(data []byte) (policy.FileMutationState, error) {
 	return f.saveState, nil
 }
 
+func (f *fakeVaultFile) SaveRawNonDurable(data []byte) (policy.FileMutationState, error) {
+	// Same observable effect as SaveRaw in the fake: the durability
+	// difference lives in the real atomic store's fsync behavior.
+	return f.SaveRaw(data)
+}
+
 func (f *fakeVaultFile) Restore(s *policy.PolicyFileSnapshot) (policy.FileMutationState, error) {
 	f.restoreCalls++
 	f.restored = append(f.restored, s)
@@ -136,13 +142,14 @@ func (f *fakeVaultFile) Delete() (policy.FileMutationState, error) {
 // vaultPersistHarness wires a fast-sandbox test server to a fake-backed
 // vaultPersistence over a real (swept) temp directory.
 type vaultPersistHarness struct {
-	srv   *fastSandboxPolicyServer
-	reg   *subject.MemoryRegistry
-	nft   *fakeNft
-	vp    *vaultPersistence
-	dir   string
-	files map[string]*fakeVaultFile
-	mapMu sync.Mutex
+	srv        *fastSandboxPolicyServer
+	reg        *subject.MemoryRegistry
+	nft        *fakeNft
+	vp         *vaultPersistence
+	dir        string
+	files      map[string]*fakeVaultFile
+	mapMu      sync.Mutex
+	newFileErr error
 }
 
 func newVaultPersistHarness(t *testing.T) *vaultPersistHarness {
@@ -163,6 +170,11 @@ func newTestVaultPersistence(t *testing.T, h *vaultPersistHarness) *vaultPersist
 	vp, err := newVaultPersistence(h.dir)
 	require.NoError(t, err)
 	vp.newFile = func(path string) (vaultFileStore, error) {
+		if h.newFileErr != nil {
+			err := h.newFileErr
+			h.newFileErr = nil
+			return nil, err
+		}
 		h.mapMu.Lock()
 		defer h.mapMu.Unlock()
 		f, ok := h.files[path]
@@ -547,9 +559,12 @@ func TestVaultPersistUnknownVersionDegradesButPreservesFile(t *testing.T) {
 func TestVaultPersistReloadValidationFailureDegrades(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	// The file's binding host is not covered by the replayed binding policy:
-	// the content cannot be revalidated, so the slice degrades (fail closed)
-	// instead of injecting uncovered credentials — and the file is
-	// quarantined, since it can never validate under this binding.
+	// the content cannot be revalidated, so the slice DEGRADES (fail closed)
+	// instead of injecting uncovered credentials — and the file is KEPT: the
+	// policy/vault divergence is a normal state (runtime relay commits never
+	// re-validate the vault), so quarantining would silently destroy
+	// persisted credentials. A policy heal + restart, or a vault relay
+	// write, revives the slice.
 	uncovered := `{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],` +
 		`"bindings":[{"name":"api","match":{"hosts":["other.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}`
 	h.seedVaultFile(vaultTestUID, testFenceR, testFenceA, 5, uncovered)
@@ -563,7 +578,34 @@ func TestVaultPersistReloadValidationFailureDegrades(t *testing.T) {
 	// The vault slice stays empty — interception fails closed.
 	rec := doVault(t, h.srv, http.MethodGet, vaultTestUID, "", "")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.False(t, h.fileFor(vaultTestUID).exists, "content rejected by the binding policy is quarantined")
+	assert.True(t, h.fileFor(vaultTestUID).exists, "the uncovered-but-healthy vault file is kept (no quarantine)")
+
+	// Revival: a policy heal (the record now covers the vault's binding
+	// host) plus a restart reloads the kept vault at its preserved revision.
+	healed := `{"defaultAction":"deny","egress":[{"action":"allow","target":"other.example.com"}]}`
+	rec = doPolicy(t, h.srv, http.MethodPut, vaultTestUID, policyPutDoc(healed, 0, false, false), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	srv2, _, _ := fastSandboxTestServer(t)
+	vp2, err := newVaultPersistence(h.dir)
+	require.NoError(t, err)
+	vp2.newFile = h.vp.newFile
+	srv2.SetVaultFiles(vp2)
+
+	// The replayed binding covers the vault's binding host (other.example.com).
+	rec = doAction(t, srv2, bindBody(t, vaultTestUID, vaultTestIP, testFenceR, testFenceA, 2,
+		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"other.example.com"}]}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv2, hookBody(t, vaultTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv2, hookBody(t, vaultTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = doVault(t, srv2, http.MethodGet, vaultTestUID, "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"revision":5`)
+	status = mustStatus(t, srv2)
+	assert.Empty(t, status.DegradedVaults)
 }
 
 func TestVaultPersistDuplicateSetBindingKeepsLiveSlice(t *testing.T) {
@@ -630,15 +672,17 @@ func TestVaultPersistRemoveBindingPurgesFile(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code)
 	require.True(t, h.fileFor(vaultTestUID).exists)
 
-	// The final purge runs AFTER Unregister: a relay write parked on the
-	// server lock during the first purge can recreate the file for the dead
-	// subject — simulate that survivor with an uncertain first purge.
+	// A failed best-effort cleanup is still acknowledged; an explicit later
+	// REMOVE can retry it, but no automatic retry is promised.
 	h.fileFor(vaultTestUID).failFirstDelete = errors.New("unlink EIO")
 
 	rec = doAction(t, h.srv, removeBody(t, vaultTestUID, testFenceR, testFenceA))
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.False(t, h.fileFor(vaultTestUID).exists, "REMOVE_BINDING purges memory + file (terminal)")
-	assert.Equal(t, 2, h.fileFor(vaultTestUID).deleteCalls, "the post-unregister purge retries a failed first purge")
+	assert.True(t, h.fileFor(vaultTestUID).exists, "failed cleanup leaves the old fenced file")
+	assert.Equal(t, 1, h.fileFor(vaultTestUID).deleteCalls)
+	rec = doAction(t, h.srv, removeBody(t, vaultTestUID, testFenceR, testFenceA))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.False(t, h.fileFor(vaultTestUID).exists)
 
 	// REMOVE_BINDING for unknown Handler state also drops any cached file.
 	h.seedVaultFile(vaultTestUID, "runtime-x", "attachment-x", 1, reloadVaultBody)

@@ -449,7 +449,10 @@ type statusCapturingResponseWriter struct {
 }
 
 func (w *statusCapturingResponseWriter) WriteHeader(code int) {
-	if !w.written {
+	// A 1xx other than 101, such as 103 Early Hints forwarded by
+	// ReverseProxy, is informational: the final status is still to come.
+	informational := code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
+	if !w.written && !informational {
 		w.statusCode = code
 		w.written = true
 	}
@@ -485,10 +488,10 @@ func (w *statusCapturingResponseWriter) Flush() {
 // finally falls back to the remote address.
 func (p *Proxy) getClientIP(r *http.Request) string {
 	if xff := r.Header.Get(XForwardedFor); xff != "" {
-		if idx := strings.Index(xff, ", "); idx != -1 {
-			return xff[:idx]
+		first, _, _ := strings.Cut(xff, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
 		}
-		return xff
 	}
 	if realIP := r.Header.Get(XRealIP); realIP != "" {
 		return realIP

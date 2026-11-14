@@ -190,7 +190,7 @@ sandbox = await Sandbox.create(
 
 ### Wake retry
 
-A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the SDK recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the SDK raises `SandboxWakeTimeoutException` (carrying `attempts` and `waited`) while the server-side restore continues in the background. Bare `503` responses follow the existing retry rules untouched. Streaming (SSE) calls bypass wake retry.
+A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the SDK recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the SDK raises `SandboxWakeTimeoutException` (carrying `attempts` and `waited`) while the server-side restore continues in the background. Bare `503` responses follow the existing retry rules untouched. Streaming (SSE) calls such as `commands.run` and `codes.run` get the wake retry too, for the request that starts the stream; an established stream is never resent.
 
 ## Usage Examples
 
@@ -249,6 +249,8 @@ manual = await Sandbox.create(
 
 Resolving an endpoint confirms that a route exists; it does not confirm that the application on that port is healthy. For service readiness, make a bounded request to the application's health endpoint and include the returned endpoint headers.
 
+Endpoint-cache invalidation is scoped to the affected sandbox. An in-flight lookup for a different sandbox can still populate the cache; a lookup invalidated for its own sandbox cannot repopulate it with an older endpoint. This applies to both the synchronous and asynchronous Python clients.
+
 With the built-in health probe, readiness checks during creation, connection, and resume fail immediately when the health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException` with the original status, error details, and request ID instead of waiting for `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions before retrying. Transient health failures retain their existing polling behavior; `is_healthy()` still returns `False` for a failed built-in health probe.
 
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
@@ -275,6 +277,10 @@ sandbox = await Sandbox.create(
 ```
 
 ### 3. Command Execution & Streaming
+
+Both synchronous and asynchronous streaming APIs accept an optional leading
+UTF-8 byte order mark (BOM), including when it spans network chunks. Only the
+stream's initial BOM is removed; U+FEFF characters in event data are preserved.
 
 Execute commands and handle output streams in real-time.
 
@@ -312,6 +318,8 @@ result = await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"])
 ```
 
 Native argv execution requires an updated execd. See [command execution modes](/architecture/data-plane/execd#command-execution) for executable lookup and platform behavior.
+
+`RunCommandOpts.timeout` and the `timeout` of `commands.run_in_session` take a `timedelta` and are sent in whole milliseconds, rounded up: 500 microseconds is sent as 1 ms and 1.5 ms as 2 ms. An omitted timeout is left out of the request and `timedelta(0)` is sent as 0; ordinary commands then run without a deadline, and bash-session commands use their 24-hour default.
 
 #### Background commands
 
@@ -411,6 +419,32 @@ await sandbox.files.delete_files(["/tmp/hello.txt"])
 
 For binary data, pass `bytes` to `WriteEntry.data` and use `read_bytes()`; use `read_bytes_stream()` for large downloads. `read_file()` and `read_bytes()` also accept `offset` and `limit` for partial reads.
 
+Async download iterators release their HTTP response when iteration finishes, fails, or is cancelled. A connection failure while reading a download body raises the same SDK exception as a failed request (for example `SandboxConnectionException`), with the underlying `httpx` error as its `__cause__`; this applies to the sync streams too. If you stop consuming a download early, close the started iterator with `aclose()` (for example, using `contextlib.aclosing`) to release the connection promptly. This applies to both `sandbox.files` and isolated-session files.
+
+```python
+from contextlib import aclosing
+
+async with aclosing(await sandbox.files.read_bytes_stream("/tmp/large.bin")) as chunks:
+    async for chunk in chunks:
+        if enough_data(chunk):
+            break
+```
+
+Use `read_bytes_detailed` or `read_bytes_stream_detailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check the optional `DownloadFilesystem` capability before calling them:
+
+For content-encoded responses, `content_length` and `content_range` describe the encoded HTTP representation. The SDK decodes the body, so `total_size` is `-1` when its decoded size cannot be determined from those headers.
+
+```python
+from opensandbox.services import DownloadFilesystem
+
+files = sandbox.files
+if isinstance(files, DownloadFilesystem):
+    download = await files.read_bytes_detailed("/tmp/data.bin", range_header="bytes=5-")
+    print(download.is_partial, download.total_size, download.content_range)
+```
+
+Check `is_partial` before appending a resumed download. Use `async with download.body` for a detailed stream so it closes even on early exit. The synchronous equivalent uses `DownloadFilesystemSync` from `opensandbox.sync.services` and `with download.body`.
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:
@@ -456,14 +490,21 @@ Read current sandbox resource usage with `await sandbox.get_metrics()`. This is 
 
 | Operation | Public API |
 | --- | --- |
-| Snapshot a sandbox | `sandbox.create_snapshot(name=...)` or `manager.create_snapshot(sandbox_id, name=...)` |
+| Snapshot a sandbox | `sandbox.create_snapshot(name=..., mode=...)` or `manager.create_snapshot(sandbox_id, name=..., mode=...)` |
 | Inspect/list/delete snapshots | `manager.get_snapshot`, `list_snapshots`, `delete_snapshot` |
 | Restore a snapshot | `Sandbox.create(snapshot_id=..., connection_config=config)` |
 | Manage Fsb templates | `manager.create_template`, `get_template`, `list_templates`, `delete_template` |
 | Create from a published template | `Sandbox.create_from_template(template_id, timeout=..., connection_config=config)` |
 | Patch metadata | `sandbox.patch_metadata` or `manager.patch_sandbox_metadata` |
 
-These APIs also exist on the synchronous SDK. Snapshot creation and template builds are asynchronous: inspect status before restoring or using a template. Templates must reach `Succeeded`; template-backed creation requires a TTL and inherits environment, resources, volumes, and lifecycle hooks from the template. Metadata patch values add/replace keys; `None` deletes a key. See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+These APIs also exist on the synchronous SDK. Snapshot creation and template builds are asynchronous: inspect status before restoring or using a template. Templates must reach `Succeeded`; template-backed creation requires a TTL and inherits environment, resources, volumes, and lifecycle hooks from the template. Metadata patch values add/replace keys; `None` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
+
+Snapshot `mode` selects what the snapshot persists:
+
+- `"full"` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `"rootfsOnly"`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+
+`SnapshotInfo.mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `"full"`.
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. This example waits up to 15 minutes, restores a new sandbox, and retains the snapshot for reuse:
 
@@ -492,6 +533,16 @@ async with await SandboxManager.create(connection_config=config) as manager:
     # When no longer needed: await manager.delete_snapshot(snapshot.id)
 ```
 
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```python
+snapshot = await sandbox.create_snapshot(name="workspace-state", mode="rootfsOnly")
+# ... poll manager.get_snapshot(snapshot.id) until Ready, then:
+restored = await Sandbox.create(snapshot_id=snapshot.id, connection_config=config)
+# Files written before the snapshot are present; processes were not preserved
+# and the entrypoint re-ran on boot.
+```
+
 Create from an existing template after its build reaches `Succeeded`:
 
 ```python
@@ -516,27 +567,28 @@ await sandbox.patch_metadata({"project": "demo", "obsolete-key": None})
 
 The `ConnectionConfig` class manages API server connection settings.
 
+Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sandboxes. SDK-owned transports share that configuration's lazily loaded SSL context, avoiding repeated CA certificate loading, while each Sandbox/Manager keeps its own connection pool and closes it independently. TLS verification remains enabled. Create a new configuration to reload the system or environment-configured trust store. For connection pooling across sandboxes, supply a shared `transport` and close it after all users finish.
+
 | Parameter         | Description                                | Default                      | Environment Variable   |
 | ----------------- | ------------------------------------------ | ---------------------------- | ---------------------- |
 | `api_key`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
-| `domain`          | The endpoint domain of the sandbox service | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
+| `domain`          | The endpoint domain of the sandbox service (`host[:port]` or a full URL); a trailing `/` or `/v1` is ignored | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`        | HTTP protocol (http/https)                 | `http`                       | -                      |
-| `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
+| `request_timeout` | Timeout for API requests; command streams (SSE) wait at most `max(request_timeout, 30s)` for the response and between stream bytes | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |
 | `headers`         | Custom HTTP headers                        | Empty                        | -                      |
 | `follow_redirects` | Follow HTTP redirects for SDK requests    | `False`                      | -                      |
 | `event_hooks`     | Additional httpx hooks for adapter clients | Empty                        | -                      |
 | `transport`       | Shared httpx transport (pool/proxy/retry); custom transports must honor request timeouts  | SDK-created per instance     | -                      |
-| `retry_policy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
-| `use_server_proxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `False` | -                      |
+| `retry_policy`    | Automatic retry policy; streaming requests only get its wake retry (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
 | `disable_metrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `False` | `OPENSANDBOX_DISABLE_METRICS` |
 | `enable_tracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `False` | - |
 
-The Python Code Interpreter inherits the sandbox's connection configuration. With `use_server_proxy=True`, context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
+The Python Code Interpreter inherits the sandbox's connection configuration. With the deprecated `use_server_proxy=True` (maintenance mode), context requests and streamed code execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server authentication. In direct mode, the SDK does not automatically attach this key to code execution requests. This applies to both the asynchronous and synchronous APIs.
 
 When `follow_redirects` is enabled, same-origin redirects preserve request headers. An origin is the combination of scheme, host, and port, so changing any of those values is cross-origin. Before following a cross-origin redirect, the SDK removes every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-` (case-insensitive). Other custom headers are not stripped automatically.
 
-File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. This applies to both direct chunked uploads and uploads through the server proxy. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
+File uploads never follow redirects, even when `follow_redirects` is enabled, because streamed or file-backed multipart request bodies cannot always be safely replayed. A redirect response from an upload is surfaced as a `SandboxApiException` with the original 3xx status.
 
 `ConnectionConfig.event_hooks` accepts async httpx hooks, while `ConnectionConfigSync.event_hooks` accepts synchronous hooks. Configured request hooks run before the SDK safety hook, so they cannot re-add protected OpenSandbox headers to a cross-origin request. Lifecycle telemetry honors `follow_redirects` and the SDK safety hook, but does not invoke configured user hooks.
 
@@ -584,7 +636,7 @@ Default behavior:
 - **Enabled by default.** Idempotent methods (`GET/HEAD/PUT/DELETE/OPTIONS`) are retried on `429`, `502`, `503`, and on pre-send transport failures (DNS, TCP connect, TLS handshake, fresh-connection reset).
 - **`POST`/`PATCH` are never retried on a status code by default**, since the request may already have been applied server-side. Pre-send transport failures (before any byte is written) are still retried for these methods.
 - Up to `3` retries with decorrelated-jitter exponential backoff, honoring a server `Retry-After` header (capped at 60s).
-- **SSE / streaming requests bypass retry** entirely (bodies are not replayable).
+- **SSE / streaming requests are not retried** on status codes or transport errors, since they may already have started a command. Only the [wake retry](#wake-retry) applies to the request that starts the stream.
 
 ::: warning Behavior change
 Retries are on by default. This can increase the number of HTTP attempts and tail latency compared to earlier SDK versions. If you rely on fast-fail semantics, opt out explicitly with `RetryPolicy.disabled()`.

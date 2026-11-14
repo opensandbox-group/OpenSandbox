@@ -117,11 +117,11 @@ def test_tty_confirmation_timeout(monkeypatch):
     monkeypatch.delenv(INSECURE_SERVER_ENV_VAR, raising=False)
     monkeypatch.setattr(
         "opensandbox_server.startup_guard.API_KEY_CONFIRM_TIMEOUT_SECONDS",
-        1,
+        0.05,
     )
 
     def _slow_input(_: str) -> str:
-        time.sleep(2)
+        time.sleep(0.2)
         return ALLOW_NO_API_KEY_CONFIRMATION
 
     with pytest.raises(RuntimeError) as exc_info:

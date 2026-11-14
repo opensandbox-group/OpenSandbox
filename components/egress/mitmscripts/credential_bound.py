@@ -945,11 +945,5 @@ def configure(
     return runtime, server
 
 
-def reset_for_tests() -> None:
-    """Test-only: detach the module-level runtime without IPC cleanup."""
-    global _runtime
-    _runtime = None
-
-
 def runtime() -> LiveRuntime | None:
     return _runtime

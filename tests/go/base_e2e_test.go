@@ -111,8 +111,6 @@ func newExecdClientForSandbox(t *testing.T, ctx context.Context, sb *opensandbox
 	return opensandbox.NewExecdClient(execdURL, token)
 }
 
-// ---------- Pool E2E helpers ----------
-
 // Pool test constants aligned with Python E2E tests.
 const (
 	poolMaxIdle           = 2
@@ -321,13 +319,6 @@ func brokenConnectionConfig() opensandbox.ConnectionConfig {
 		APIKey:         "broken-e2e-test",
 		RequestTimeout: 1 * time.Second,
 	}
-}
-
-func newPoolManager(t *testing.T) *opensandbox.SandboxManager {
-	t.Helper()
-	mgr := opensandbox.NewSandboxManager(getConnectionConfig(t))
-	t.Cleanup(func() { mgr.Close() })
-	return mgr
 }
 
 func snapshotIdle(pool *opensandbox.DefaultSandboxPool) int {

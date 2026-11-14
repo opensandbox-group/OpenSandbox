@@ -214,7 +214,7 @@ test("stale in-flight completion does not delete a newer fetch entry", async () 
   }
 
   const first = cache.getOrFetch("sbx", 44772, false, fetcher);
-  // invalidate() drops the first in-flight entry and bumps the generation.
+  // invalidate() drops the first in-flight entry.
   cache.invalidate("sbx");
   const second = cache.getOrFetch("sbx", 44772, false, fetcher);
 

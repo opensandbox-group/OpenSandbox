@@ -18,8 +18,8 @@
 //
 // They do not change any SDK behavior. They:
 //  1. Prove the SDK's default transport reuses idle pooled connections.
-//  2. Reproduce the exact "Client.Timeout ... while awaiting headers" error on a
-//     connection that goes black-hole (dead but no FIN) after being idle.
+//  2. Reproduce a client deadline timeout on a connection that goes black-hole
+//     (dead but no FIN) after being idle.
 //  3. Show that forcing a fresh connection (DisableKeepAlives, or an
 //     IdleConnTimeout shorter than the idle gap) avoids the hang.
 //  4. Provide an env-gated probe to run against the REAL lifecycle server.
@@ -31,6 +31,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -205,8 +206,8 @@ func blackHoleAfterReuseServer(t *testing.T) (addr string, cleanup func()) {
 // transport-level root cause behind the screenshot error: issuing requests
 // directly on the SDK's default (keep-alive) transport, the second request
 // reuses the idle connection that the "LB" has black-holed, hangs until
-// http.Client.Timeout, and fails with the exact
-// "Client.Timeout exceeded while awaiting headers" text.
+// http.Client.Timeout, and fails with a deadline-exceeded timeout. The exact
+// error text can differ depending on which cancellation path wins.
 //
 // This uses the raw *http.Client (NOT Client.doRequest) so it keeps documenting
 // the underlying transport behavior even after the SDK's doRequest recovery is
@@ -232,8 +233,18 @@ func TestDiag_ReusedConnBlackHoleReproducesClientTimeout(t *testing.T) {
 	_, err = httpClient.Get(baseURL + "/")
 	require.Error(t, err)
 	t.Logf("req2 error: %v", err)
-	assert.Contains(t, err.Error(), "Client.Timeout exceeded while awaiting headers")
-	t.Log("=> Raw transport: reused idle connection + black-hole => Client.Timeout while awaiting headers.")
+	// net/http may surface either the request context deadline or a timeout
+	// decorated with "Client.Timeout exceeded while awaiting headers". Both
+	// represent the same timeout; the wording depends on cancellation timing.
+	var timeoutErr net.Error
+	if !errors.As(err, &timeoutErr) || !timeoutErr.Timeout() {
+		t.Fatalf("request 2 should report a network timeout, got: %v", err)
+	}
+	tt.mu.Lock()
+	reused := tt.lastReused
+	tt.mu.Unlock()
+	require.True(t, reused, "request 2 should reuse the black-holed idle connection")
+	t.Log("=> Raw transport: reused idle connection + black-hole => deadline timeout.")
 }
 
 // TestDiag_FixDisableKeepAlives shows that using a fresh connection per request

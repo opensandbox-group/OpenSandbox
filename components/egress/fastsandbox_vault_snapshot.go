@@ -50,18 +50,28 @@ var errVaultSnapshotTooLarge = fmt.Errorf("vault bundle file exceeds %d bytes", 
 // inside the vault persistence directory — reserved for per-subject vault
 // files (an export target there could clobber another subject's vault).
 func (p *vaultPersistence) reservesPath(path string) bool {
-	rel, err := filepath.Rel(filepath.Clean(p.dir), filepath.Clean(path))
+	return reservesPathUnder(p.dir, path)
+}
+
+// reservesPathUnder is the shared path-reservation check for the per-subject
+// state directories: only the parent chain may be outside; children whose
+// names begin with dots (e.g. "..victim.json") are inside the reserved
+// subtree. Uncomparable paths fail closed.
+func reservesPathUnder(dir, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
 	if err != nil {
 		// Uncomparable — fail closed.
 		return true
 	}
-	// Only the parent chain is outside; children whose names begin with
-	// dots (e.g. "..victim.json") are inside the reserved subtree.
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // applyVaultExport copies the subject's vault file into the bundle target and
-// marks the subject sealed. A subject without a vault file just seals. Any
+// marks the subject sealed (SnapshotTransfer.Seal absent/true — the
+// checkpoint flow); Seal=false is the seal-free template carry: the record
+// is copied verbatim and the source keeps full relay CRUD. A subject
+// without a vault file just seals (checkpoint) / exports nothing
+// (template). Any
 // failure leaves the subject unsealed and active; what the pause flow does
 // with that is the caller's call — the fast-sandbox driver fails the pause
 // checkpoint, so the teardown never runs without a bundle. A retried export
@@ -81,21 +91,24 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	target := strings.TrimSpace(env.Snapshot.Path)
-	if s.vaultFiles.reservesPath(target) {
-		return http.StatusBadRequest, fmt.Errorf("vault bundle target %q must not live under the vault persistence directory", target)
+	if s.reservesStatePath(target) {
+		return http.StatusBadRequest, fmt.Errorf("vault bundle target %q must not live under a per-subject state directory", target)
 	}
 	// A subject that never registered (a sandbox created without an egress
 	// binding, or after terminal cleanup) has no vault to carry: 200 so the
 	// checkpoint proceeds — a 404 would fail every pause of a binding-less
 	// sandbox. A registered subject under a stale fence still fails below.
-	if _, ok := s.reg.Fence(subj); !ok {
+	// Registry reads before the lock acquisitions (lock order: registry →
+	// s.mu, see handleVaultRelayWrite).
+	regFence, registered := s.reg.Fence(subj)
+	if !registered {
 		log.Infof("vault export: subject %s not registered; no vault to carry, checkpoint proceeds without it", subj)
 		return http.StatusOK, nil
 	}
 
 	// Phase 1: guards + consistent source image.
 	s.mu.Lock()
-	snap, status, err := s.exportSourceImageLocked(subj, fence)
+	snap, status, err := s.exportSourceImageLocked(subj, fence, regFence, registered)
 	if err != nil {
 		s.mu.Unlock()
 		return status, err
@@ -114,10 +127,12 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 		}
 	}
 
-	// Phase 3: seal only against the exact copied image.
+	// Phase 3: re-check + seal; the fence is re-read fresh so a rebind
+	// during the copy fails the export.
+	regFence, registered = s.reg.Fence(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live, status, err := s.exportSourceImageLocked(subj, fence)
+	live, status, err := s.exportSourceImageLocked(subj, fence, regFence, registered)
 	if err != nil {
 		return status, err
 	}
@@ -137,6 +152,19 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 			return http.StatusInternalServerError, fmt.Errorf("vault bundle removal failed (state %v): %v", state, err)
 		}
 	}
+	// Seal-free template carry: the record was copied verbatim and the
+	// source keeps full relay CRUD — no latch, bookkeeping untouched. (The
+	// vault blob is carried as-is; encryption at rest is a deferred TODO in
+	// the vault persist layer, and clone isolation is key scoping, not the
+	// blob.)
+	if !env.Snapshot.Sealed() {
+		if snap.Exists() {
+			log.Infof("subject %s: vault exported to snapshot bundle, seal-free (template carry)", subj)
+		} else {
+			log.Infof("subject %s: no vault file to export, seal-free (template carry)", subj)
+		}
+		return http.StatusOK, nil
+	}
 	// Durable seal first: a restart before REMOVE_BINDING must reload the
 	// entry sealed, or relay writes would stale the taken bundle.
 	if err := s.vaultFiles.seal(subj); err != nil {
@@ -145,7 +173,7 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 	s.vaultForLocked(subj, fence)
 	e := s.vaults[subj]
 	e.sealed = true
-	s.vaults[subj] = e
+	s.setSubjectVaultEntryLocked(subj, e)
 	if snap.Exists() {
 		log.Infof("subject %s: vault exported to snapshot bundle, subject sealed", subj)
 	} else {
@@ -155,17 +183,35 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 }
 
 // exportSourceImageLocked runs the export guards and returns a consistent
-// image of the subject's vault file. Callers hold s.mu.
-func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, fence subject.Fencing) (*policy.PolicyFileSnapshot, int, error) {
-	regFence, ok := s.reg.Fence(subj)
-	if !ok {
+// image of the subject's vault file. regFence/registered are the caller's
+// pre-read of the registration (lock order: registry → s.mu, see
+// applyVaultExport). Callers hold s.mu.
+func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, fence subject.Fencing, regFence subject.Fencing, registered bool) (*policy.PolicyFileSnapshot, int, error) {
+	if s.subjectRebindingLocked(subj) {
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("subject rebind in progress")
+	}
+	if !registered {
 		return nil, http.StatusNotFound, fmt.Errorf("vault export for unknown subject %s", subj)
 	}
 	if !regFence.Matches(fence) {
 		return nil, http.StatusConflict, fmt.Errorf("stale vault export (fence mismatch) for subject %s", subj)
 	}
+	if !s.fenceMatchesLocked(subj, fence) {
+		// Purged between the pre-read and the lock — the stale envelope
+		// lost the race with a rebind. The registered-fence mismatch above
+		// already covers the plain stale case.
+		return nil, http.StatusNotFound, fmt.Errorf("vault export for unknown subject %s", subj)
+	}
 	if recovery := s.vaultRecovery.Load(); recovery != nil {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("vault persistence recovery required: %s", recovery.reason)
+	}
+	if entry, ok := s.vaults[subj]; ok {
+		if entry.vaultStateUnknown {
+			return nil, http.StatusServiceUnavailable, errors.New("vault state is unknown; refusing snapshot export")
+		}
+		if entry.fileMeta.version >= credentialvault.VaultFileVersion2 {
+			return nil, http.StatusConflict, errors.New("v2 vault state is read-only until lineage-aware restore is supported")
+		}
 	}
 	fs, err := s.vaultFiles.storeFor(subj)
 	if err != nil {
@@ -176,16 +222,20 @@ func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, 
 		return nil, http.StatusInternalServerError, fmt.Errorf("vault file snapshot: %w", err)
 	}
 	if snap.Exists() {
-		// Carry only bytes attributable to the registered fence: a leftover
-		// from a previous incarnation (purge failed), a corrupt file, or a
-		// newer schema is treated as absent — never exported, or import
-		// would re-stamp foreign credentials as current.
+		// The current reader can expose v2 state read-only but cannot restore
+		// its ordering lineage. Refuse before copying, sealing, or deleting a
+		// stale bundle; treating it as absent would make a successful snapshot
+		// impossible to restore.
 		vf, _, decErr := credentialvault.DecodeVaultFile(snap.Data())
+		if errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion) || (decErr == nil && vf.Version >= credentialvault.VaultFileVersion2) {
+			return nil, http.StatusConflict, fmt.Errorf("v2 or unknown vault state cannot be exported before lineage-aware restore is supported")
+		}
+		// Carry only bytes attributable to the registered fence: a leftover
+		// from a previous incarnation (purge failed) or a corrupt v1 file is
+		// treated as absent, preserving the legacy behavior.
 		if decErr != nil || vf.Incarnation != regFence.RuntimeInstanceID || vf.AttachmentID != regFence.AttachmentID {
 			what := "unattributable fence"
-			if errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion) {
-				what = "newer schema (preserved for the newer writer)"
-			} else if decErr != nil {
+			if decErr != nil {
 				what = "unreadable"
 			}
 			log.Infof("subject %s: vault file not carried (%s)", subj, what)
@@ -215,8 +265,8 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	source := strings.TrimSpace(env.Snapshot.Path)
-	if s.vaultFiles.reservesPath(source) {
-		return http.StatusBadRequest, fmt.Errorf("vault bundle source %q must not live under the vault persistence directory", source)
+	if s.reservesStatePath(source) {
+		return http.StatusBadRequest, fmt.Errorf("vault bundle source %q must not live under a per-subject state directory", source)
 	}
 
 	// Read before locking; a missing/oversized/unreadable source is
@@ -235,41 +285,79 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 	if err != nil {
 		return http.StatusBadRequest, fmt.Errorf("invalid vault bundle file: %v", err)
 	}
+	if vf.Version != credentialvault.VaultFileVersion {
+		return http.StatusConflict, fmt.Errorf("v%d vault bundles are read-only until lineage-aware import is supported", vf.Version)
+	}
 	// The authorized incarnation transfer.
 	payload, err := credentialvault.EncodeVaultFile(fence.RuntimeInstanceID, fence.AttachmentID, vf.Revision, body)
 	if err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("vault bundle re-stamp failed: %w", err)
 	}
 
+	// The whole import holds policyCommitMu (vault-write parity with
+	// handleVaultRelayWrite): the validation policy and the registration
+	// fence cannot change between the pre-reads and the commit. Lock
+	// order: policyCommitMu → registry → s.mu.
+	if s.subjectRebinding(subj) {
+		return http.StatusServiceUnavailable, fmt.Errorf("subject rebind in progress")
+	}
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
+	validation := s.vaultValidationPolicy(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.subjectRebindingLocked(subj) {
+		return http.StatusServiceUnavailable, fmt.Errorf("subject rebind in progress")
+	}
 	// The latch freezes every vault file mutation; only a restart
 	// reconciles (relay-write parity).
 	if recovery := s.vaultRecovery.Load(); recovery != nil {
 		return http.StatusServiceUnavailable, fmt.Errorf("vault persistence recovery required: %s", recovery.reason)
 	}
+	if entry, ok := s.vaults[subj]; ok {
+		if entry.vaultStateUnknown {
+			return http.StatusServiceUnavailable, errors.New("vault state is unknown; refusing snapshot import")
+		}
+		if entry.fileMeta.version >= credentialvault.VaultFileVersion2 {
+			return http.StatusConflict, errors.New("v2 vault state is read-only until lineage-aware writes are supported")
+		}
+	}
 	// At-least-once delivery: never roll a newer local revision back. The
 	// guard requires the stored fence to match the envelope — a newer file
 	// under an old incarnation is stale local state the import must
 	// supersede, not ack.
-	if fs, fsErr := s.vaultFiles.storeFor(subj); fsErr == nil {
-		if cur, snapErr := fs.Snapshot(); snapErr == nil && cur.Exists() {
-			if curVF, _, decErr := credentialvault.DecodeVaultFile(cur.Data()); decErr == nil &&
-				curVF.Incarnation == fence.RuntimeInstanceID && curVF.AttachmentID == fence.AttachmentID &&
-				curVF.Revision > vf.Revision {
-				log.Infof("subject %s: vault import superseded (local revision %d > bundle revision %d), idempotent ack", subj, curVF.Revision, vf.Revision)
-				return http.StatusOK, nil
-			}
+	fileStore, fsErr := s.vaultFiles.storeFor(subj)
+	if fsErr != nil {
+		return http.StatusInternalServerError, fmt.Errorf("vault file store unavailable: %w", fsErr)
+	}
+	current, snapErr := fileStore.Snapshot()
+	if snapErr != nil {
+		return http.StatusInternalServerError, fmt.Errorf("vault file snapshot: %w", snapErr)
+	}
+	if current.Exists() {
+		curVF, _, decErr := credentialvault.DecodeVaultFile(current.Data())
+		if decErr != nil && errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion) {
+			return http.StatusConflict, errors.New("local vault file uses an unsupported schema; refusing to overwrite it")
+		}
+		if decErr == nil && curVF.Version != credentialvault.VaultFileVersion {
+			return http.StatusConflict, errors.New("local v2 vault state is read-only until lineage-aware writes are supported")
+		}
+		if decErr == nil && curVF.Incarnation == fence.RuntimeInstanceID && curVF.AttachmentID == fence.AttachmentID && curVF.Revision > vf.Revision {
+			log.Infof("subject %s: vault import superseded (local revision %d > bundle revision %d), idempotent ack", subj, curVF.Revision, vf.Revision)
+			return http.StatusOK, nil
 		}
 	}
-	regFence, registered := s.reg.Fence(subj)
+	// Commit-time fence re-validation against our own record (subjFence —
+	// see fenceMatchesLocked): an unknown fence means unregistered (the
+	// bundle lands for the next registration), a mismatched one is stale.
+	registered := s.fenceMatchesLocked(subj, fence)
+	if _, known := s.subjFence[subj]; known && !registered {
+		return http.StatusConflict, fmt.Errorf("stale vault import (fence mismatch) for subject %s", subj)
+	}
 	if registered {
-		if !regFence.Matches(fence) {
-			return http.StatusConflict, fmt.Errorf("stale vault import (fence mismatch) for subject %s", subj)
-		}
 		// Validate before any durable effect — a permanently broken bundle
 		// is a 400 with last-good kept, never half-open.
-		if err := validateImportedVault(vf, body, s.vaultValidationPolicyLocked(subj)); err != nil {
+		if err := validateImportedVault(vf, body, validation); err != nil {
 			return http.StatusBadRequest, fmt.Errorf("vault bundle rejected: %v", err)
 		}
 	}
@@ -283,7 +371,7 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 				// Before SET_BINDING: registration reloads and validates.
 				return s.vaultFiles.unseal(subj)
 			}
-			return s.installImportedVaultLocked(subj, fence, vf, body)
+			return s.installImportedVaultLocked(subj, fence, vf, body, validation)
 		},
 	)
 	if err != nil {
@@ -295,6 +383,7 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 		return status, errors.New("vault import persistence failure")
 	}
 	if registered {
+		s.recordSubjectSnapshotLocked(subj, fence)
 		log.Infof("subject %s: vault imported from snapshot bundle (revision %d, re-stamped to %s/%s)",
 			subj, vf.Revision, fence.RuntimeInstanceID, fence.AttachmentID)
 	} else {
@@ -308,11 +397,13 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 // per-subject slice under the restored fence, replacing any stale entry.
 // The slice is only replaced once Reload accepts — a failure leaves the live
 // entry untouched while the commit protocol rolls the file back.
-func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subject, fence subject.Fencing, vf credentialvault.VaultFile, body credentialvault.VaultFileBody) error {
-	pol := s.vaultValidationPolicyLocked(subj)
+// validation is the caller's pre-computed vault validation policy
+// (lock order: registry → s.mu, see vaultValidationPolicy).
+func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subject, fence subject.Fencing, vf credentialvault.VaultFile, body credentialvault.VaultFileBody, validation *policy.NetworkPolicy) error {
+	pol := validation
 	entry, ok := s.vaults[subj]
 	if !ok || entry.fence != fence {
-		entry = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence}
+		entry = vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence}
 	}
 	if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 		return err
@@ -323,14 +414,14 @@ func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subjec
 		return err
 	}
 	entry.sealed = false
-	s.vaults[subj] = entry
+	s.setSubjectVaultEntryLocked(subj, entry)
 	return nil
 }
 
 // validateImportedVault runs the imported revision through the exact Reload
 // the live install will use, on a scratch store.
 func validateImportedVault(vf credentialvault.VaultFile, body credentialvault.VaultFileBody, pol *policy.NetworkPolicy) error {
-	scratch := credentialvault.NewStore(nil, func() bool { return true })
+	scratch := credentialvault.NewSubjectStore()
 	return scratch.Reload(vf.Revision, credentialvault.CreateRequest(body), pol)
 }
 

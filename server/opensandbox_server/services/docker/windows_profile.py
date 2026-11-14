@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 WINDOWS_REQUIRED_DEVICES = ("/dev/kvm", "/dev/net/tun")
 WINDOWS_REQUIRED_CAP_ADD = ("NET_ADMIN", "NET_RAW")
 WINDOWS_OEM_VOLUME_PREFIX = "opensandbox-win-oem"
+WINDOWS_OEM_MOUNT_PATH = "/oem"
 
 
 def resolve_docker_platform(platform: Optional["PlatformSpec"]) -> Optional[str]:
@@ -94,7 +95,7 @@ def apply_windows_runtime_host_config_defaults(
     """Apply runtime defaults required by Windows profile."""
     updated = dict(host_config_kwargs)
 
-    default_binds = [f"{WINDOWS_OEM_VOLUME_PREFIX}-{sandbox_id}:/oem:rw"]
+    default_binds = [f"{WINDOWS_OEM_VOLUME_PREFIX}-{sandbox_id}:{WINDOWS_OEM_MOUNT_PATH}:rw"]
     existing_binds = list(updated.get("binds") or [])
     updated["binds"] = existing_binds + default_binds
 
@@ -285,8 +286,10 @@ def install_windows_oem_scripts(
     ensure_directory: Callable[[object, str, Optional[str]], None],
     docker_operation: Callable[[str, Optional[str]], object],
 ) -> None:
-    """Install OEM script for dockur/windows:
-    - C:\\OEM\\install.bat from execd image
+    """Install OEM scripts for dockur/windows from the execd image:
+
+    - C:\\OEM\\install.bat (execd bootstrap)
+    - C:\\OEM\\execd.exe (Windows execd binary)
     """
     ensure_directory(container, "/oem", sandbox_id)
 

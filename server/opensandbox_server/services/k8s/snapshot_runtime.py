@@ -32,6 +32,7 @@ from opensandbox_server.services.snapshot_runtime import (
     SnapshotRuntimePreflightError,
     SnapshotRuntimeStatus,
     SnapshotRuntimeUnsupportedError,
+    reject_rootfs_only_mode,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,11 @@ class KubernetesSnapshotRuntime:
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> None:
+        reject_rootfs_only_mode(
+            "Kubernetes rootfs snapshot commits are full-only", mode
+        )
         ns = namespace if namespace is not None else self._namespace
         try:
             workload = self._k8s_client.get_custom_object(
@@ -164,7 +169,9 @@ class KubernetesSnapshotRuntime:
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
+        del mode  # rootfsOnly is rejected in preflight; rootfs commits are full.
         snapshot_name = build_public_snapshot_name(snapshot_id)
         ns = namespace if namespace is not None else self._namespace
         self._snapshot_namespaces[snapshot_id] = ns

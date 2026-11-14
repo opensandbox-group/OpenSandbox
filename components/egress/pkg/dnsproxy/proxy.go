@@ -284,7 +284,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 // reply is written, so nft programming lands before the client can dial.
 func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, notify func(string, []nftables.ResolvedIP)) {
 	start := time.Now()
-	resp, failure, err := p.forward(r)
+	resp, failure, err := p.forward(r, upstreamNetwork(w))
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
 		telemetry.RecordDNSForward(elapsed)
@@ -300,7 +300,26 @@ func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host s
 		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
 	}
 	p.maybeNotifyResolvedWith(domain, resp, notify)
+	if upstreamNetwork(w) == "udp" && r.IsEdns0() == nil {
+		fitClassicUDPReply(resp)
+	}
 	p.writeReply(w, r, resp, telemetry.DNSReplyStageAnswer)
+}
+
+// fitClassicUDPReply shapes an answer for a UDP client that sent no EDNS0 OPT.
+// forward advertises a 4096-byte buffer upstream, but such a client only
+// accepts 512 bytes (RFC 1035 4.2.1) and must not be sent an OPT record
+// (RFC 6891 7), so drop the OPT and truncate with TC set; the client then
+// retries over TCP.
+func fitClassicUDPReply(resp *dns.Msg) {
+	extra := resp.Extra[:0]
+	for _, rr := range resp.Extra {
+		if _, ok := rr.(*dns.OPT); !ok {
+			extra = append(extra, rr)
+		}
+	}
+	resp.Extra = extra
+	resp.Truncate(dns.MinMsgSize)
 }
 
 // writeReply sends a DNS response and surfaces write failures. A reply can be
@@ -393,8 +412,18 @@ func (p *Proxy) maybeNotifyResolved(domain string, resp *dns.Msg) {
 // forward returns the response, or the bounded failure reason (a telemetry.DNSFailure*
 // constant) alongside the error. The reason is what the last attempted upstream failed
 // with: the loop keeps trying, so only the final outcome is reported.
-func (p *Proxy) forward(r *dns.Msg) (*dns.Msg, string, error) {
-	return p.forwardContext(context.Background(), r)
+func (p *Proxy) forward(r *dns.Msg, network string) (*dns.Msg, string, error) {
+	return p.forwardContext(context.Background(), r, network)
+}
+
+// upstreamNetwork returns the transport the client used, to forward its query
+// over the same one. A client retries over TCP after a truncated UDP answer,
+// and only a TCP exchange with the upstream returns that answer in full.
+func upstreamNetwork(w dns.ResponseWriter) string {
+	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
+		return "tcp"
+	}
+	return "udp"
 }
 
 func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.ResolvedIP, error) {
@@ -403,7 +432,7 @@ func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.Re
 	for _, queryType := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		query := new(dns.Msg)
 		query.SetQuestion(dns.Fqdn(domain), queryType)
-		response, _, err := p.forwardContext(ctx, query)
+		response, _, err := p.forwardContext(ctx, query, "udp")
 		if err != nil {
 			return nil, err
 		}
@@ -425,7 +454,7 @@ func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.Re
 	return ips, nil
 }
 
-func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg) (*dns.Msg, string, error) {
+func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg, network string) (*dns.Msg, string, error) {
 	list := p.forwardUpstreams()
 	var lastErr error
 	lastFailure := telemetry.DNSFailureNoUpstreams
@@ -439,6 +468,7 @@ func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg) (*dns.Msg, strin
 			query.SetEdns0(upstreamUDPSize, false)
 		}
 		c := &dns.Client{
+			Net:     network,
 			Timeout: p.upstreamExchangeTimeout,
 			Dialer:  p.dialerForUpstream(upstream),
 			UDPSize: upstreamUDPSize,
@@ -639,7 +669,7 @@ func normalizeEnvUpstreamAddr(s string) (string, error) {
 		return "", fmt.Errorf("empty upstream address")
 	}
 	if host, port, err := net.SplitHostPort(s); err == nil {
-		if port == "" {
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return "", fmt.Errorf("invalid port in %q", s)
 		}
 		if _, err := netip.ParseAddr(host); err != nil {

@@ -67,7 +67,6 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!sandbox) return;
   try {
-    // keep teardown best-effort
     await sandbox.kill();
   } catch {
     // ignore

@@ -37,6 +37,38 @@ class SnapshotRuntimeStatus:
     # Backend marker persisted into restore_config on READY (e.g. "fsb") so
     # create-time routing can send restores to the owning backend.
     backend: Optional[str] = None
+    # Source sandbox's per-sandbox limits, persisted and replayed on restore.
+    resource_limits: Optional[dict] = None
+    # Artifact class the runtime confirmed for the produced snapshot
+    # ("full" | "rootfsOnly"); None when the runtime cannot report one and
+    # the persisted request mode stays authoritative.
+    mode: Optional[str] = None
+
+
+# Public snapshot mode values (wire names; see CreateSnapshotRequest).
+SNAPSHOT_MODE_FULL = "full"
+SNAPSHOT_MODE_ROOTFS_ONLY = "rootfsOnly"
+
+
+def normalize_snapshot_mode(mode: Optional[str]) -> Optional[str]:
+    """Collapse the public mode to its persisted form (None = full)."""
+    if mode == SNAPSHOT_MODE_ROOTFS_ONLY:
+        return SNAPSHOT_MODE_ROOTFS_ONLY
+    return None
+
+
+def reject_rootfs_only_mode(backend_description: str, mode: Optional[str]) -> None:
+    """Fail closed when a runtime without rootfs-only support is asked for it.
+
+    Runtimes other than fast-sandbox cannot produce a rootfs-only artifact;
+    rejecting in preflight keeps the failure a client-side 409 before any
+    side effect instead of a failed row after one.
+    """
+    if mode == SNAPSHOT_MODE_ROOTFS_ONLY:
+        raise SnapshotRuntimeUnsupportedError(
+            "Snapshot mode 'rootfsOnly' is only supported on the fast-sandbox "
+            f"backend; {backend_description}."
+        )
 
 
 # Reason on a FAILED SnapshotRuntimeStatus when the runtime refused the create
@@ -75,6 +107,7 @@ class SnapshotRuntime(Protocol):
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> None:
         """Validate source-specific compatibility before persisting a snapshot."""
 
@@ -84,6 +117,7 @@ class SnapshotRuntime(Protocol):
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         """
         Create a snapshot for a sandbox and return the final runtime status.
@@ -122,6 +156,25 @@ class SnapshotRuntime(Protocol):
         """
 
 
+def is_snapshot_source_state_supported(
+    runtime: SnapshotRuntime,
+    sandbox_id: str,
+    state: str,
+    *,
+    namespace: str | None = None,
+) -> bool:
+    """Return whether a runtime accepts snapshot creation from the source state.
+
+    Existing runtime adapters that do not expose a source-state capability
+    retain the historical behavior and only accept Running. Backends may opt
+    into additional safe states by implementing supports_snapshot_source_state.
+    """
+    checker = getattr(runtime, "supports_snapshot_source_state", None)
+    if checker is None:
+        return state == "Running"
+    return checker(sandbox_id, state, namespace=namespace)
+
+
 class NoopSnapshotRuntime:
     """
     Placeholder runtime used when snapshot execution is not yet wired.
@@ -141,6 +194,7 @@ class NoopSnapshotRuntime:
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> None:
         raise SnapshotRuntimeUnsupportedError(
             self.create_snapshot_unsupported_message()
@@ -152,6 +206,7 @@ class NoopSnapshotRuntime:
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
         raise NotImplementedError(self.create_snapshot_unsupported_message())
 
@@ -190,4 +245,5 @@ __all__ = [
     "SnapshotRuntimeStatus",
     "SnapshotRuntimeUnsupportedError",
     "NoopSnapshotRuntime",
+    "is_snapshot_source_state_supported",
 ]

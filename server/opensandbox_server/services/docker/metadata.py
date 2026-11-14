@@ -14,8 +14,8 @@
 
 """Per-sandbox file-backed metadata store for Docker.
 
-Docker cannot update labels on running containers, so user metadata patches
-and expiration overrides are persisted to individual JSON files under
+Docker cannot update labels on running containers, so user metadata patches,
+expiration overrides, and lifecycle transitions are persisted to JSON files under
 ``~/.opensandbox/metadata/``. Atomic writes (tmp + rename) guard against
 truncation during crash, and one lock serializes every read-modify-write so
 concurrent patches of one sandbox neither fail nor drop each other's keys.
@@ -30,6 +30,8 @@ from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
+
+from opensandbox_server.services.constants import SANDBOX_METADATA_KEYS_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +50,23 @@ def _is_user_label(key: str) -> bool:
 
 
 def _extract_user_labels(labels: dict) -> dict:
+    """User metadata stored in container labels.
+
+    Image labels are merged into container labels, so only the keys recorded
+    at create are metadata. Containers created before that label existed fall
+    back to every label without a system prefix.
+    """
+    try:
+        keys = json.loads(labels[SANDBOX_METADATA_KEYS_LABEL])
+    except (KeyError, TypeError, ValueError):
+        keys = None
+    if isinstance(keys, list):
+        return {k: labels[k] for k in keys if isinstance(k, str) and k in labels}
     return {k: v for k, v in labels.items() if _is_user_label(k)}
 
 
 class DockerMetadataStore:
-    """Per-sandbox file-backed store for user metadata and expiration overrides."""
+    """Per-sandbox file-backed store for metadata, expiration, and transitions."""
 
     def __init__(self, root: Path | None = None) -> None:
         self._root = root or DEFAULT_STORE_DIR
@@ -118,9 +132,29 @@ class DockerMetadataStore:
                 {"expires_at": expires_at.isoformat()},
             )
 
+    def get_transition_time(self, sandbox_id: str, state: str) -> str | None:
+        payload = self._read_file(self._transition_path(sandbox_id))
+        if not isinstance(payload, dict) or payload.get("state") != state:
+            return None
+        transitioned_at = payload.get("last_transition_at")
+        if isinstance(transitioned_at, str) and transitioned_at.strip():
+            return transitioned_at
+        return None
+
+    def set_transition(self, sandbox_id: str, state: str, transitioned_at: datetime) -> None:
+        with self._lock:
+            self._write_file(
+                self._transition_path(sandbox_id),
+                {"state": state, "last_transition_at": transitioned_at.isoformat()},
+            )
+
     def delete(self, sandbox_id: str) -> None:
         with self._lock:
-            for path in (self._sandbox_path(sandbox_id), self._expiration_path(sandbox_id)):
+            for path in (
+                self._sandbox_path(sandbox_id),
+                self._expiration_path(sandbox_id),
+                self._transition_path(sandbox_id),
+            ):
                 try:
                     path.unlink(missing_ok=True)
                 except OSError as exc:
@@ -131,6 +165,9 @@ class DockerMetadataStore:
 
     def _expiration_path(self, sandbox_id: str) -> Path:
         return self._root / "_expiration" / f"{sandbox_id}.json"
+
+    def _transition_path(self, sandbox_id: str) -> Path:
+        return self._root / "_transition" / f"{sandbox_id}.json"
 
     @staticmethod
     def _read_file(path: Path) -> dict | None:

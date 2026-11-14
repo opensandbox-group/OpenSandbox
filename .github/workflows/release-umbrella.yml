@@ -185,6 +185,7 @@ jobs:
         if: steps.already_released.outputs.released != 'true'
         env:
           COMPONENT: ${{ matrix.component }}
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.resolve.outputs.version }}
           # release tags once the publish gate opens, run-scoped staging
           # tags before that; dry runs push nothing (PUSH=false)
           IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
@@ -248,6 +249,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to ACR
+        if: inputs.dry_run == false
         uses: docker/login-action@v3
         with:
           registry: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com
@@ -255,6 +257,7 @@ jobs:
           password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Login to GHCR
+        if: inputs.dry_run == false
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -262,6 +265,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login to DockerHub
+        if: inputs.dry_run == false
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -303,22 +307,36 @@ jobs:
       - name: Build and push images
         if: steps.already_released.outputs.released != 'true'
         env:
-          # same publish gate as build-images
+          # same publish gate as build-images; dry runs push nothing (PUSH=false)
           IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
+          PUSH: ${{ inputs.dry_run == false }}
         run: |
           GHCR_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/opensandbox"
           export GHCR_REPO
           # fsb- prefix disambiguates fsb-controller from the k8s controller image
-          TAG="$IMAGE_TAG" ./manifests/release/build-fast-sandbox.sh --push
+          if [ "$PUSH" = "true" ]; then
+            TAG="$IMAGE_TAG" ./manifests/release/build-fast-sandbox.sh --push
+          else
+            TAG="$IMAGE_TAG" ./manifests/release/build-fast-sandbox.sh
+          fi
 
       - name: Record digests in manifest
         if: steps.already_released.outputs.released != 'true'
         env:
           IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
+          PUSH: ${{ inputs.dry_run == false }}
         run: |
           jq -n '{}' > digest-fast-sandbox.json
           for img in fsb-controller fsb-fastlet fsb-fastlet-proxy fsb-janitor fsb-firecracker-runtime fsb-sandboxtemplate-builder; do
-            d="$(docker buildx imagetools inspect "docker.io/opensandbox/${img}:${IMAGE_TAG}" --format '{{.Manifest.Digest}}')"
+            if [ "$PUSH" = "true" ]; then
+              d="$(docker buildx imagetools inspect "docker.io/opensandbox/${img}:${IMAGE_TAG}" --format '{{.Manifest.Digest}}')"
+            else
+              d="$(docker image inspect --format '{{.Id}}' "opensandbox/${img}:${IMAGE_TAG}")"
+            fi
+            if [[ -z "$d" ]]; then
+              echo "Unable to resolve image digest for ${img}" >&2
+              exit 1
+            fi
             jq --arg k "${img}" --arg v "${d}" '. + {($k): $v}' digest-fast-sandbox.json > tmp.json && mv tmp.json digest-fast-sandbox.json
           done
           cat digest-fast-sandbox.json

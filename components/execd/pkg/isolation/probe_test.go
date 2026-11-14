@@ -46,23 +46,61 @@ func TestSetBwrapModeAvailability(t *testing.T) {
 		name          string
 		setprivErr    error
 		identityErr   error
+		setprivNetErr error
 		usernsErr     error
+		usernsNetErr  error
 		wantAvailable bool
 		wantSetpriv   bool
 		wantIdentity  bool
+		wantSetprivN  bool
 		wantUserns    bool
+		wantUsernsN   bool
 	}{
-		{name: "both available", wantAvailable: true, wantSetpriv: true, wantIdentity: true, wantUserns: true},
-		{name: "setpriv only", usernsErr: probeErr, wantAvailable: true, wantSetpriv: true, wantIdentity: true},
-		{name: "setpriv default only", identityErr: probeErr, usernsErr: probeErr, wantAvailable: true, wantSetpriv: true},
-		{name: "userns only", setprivErr: probeErr, wantAvailable: true, wantUserns: true},
-		{name: "neither available", setprivErr: probeErr, usernsErr: probeErr},
+		{
+			name:          "all available",
+			wantAvailable: true, wantSetpriv: true, wantIdentity: true,
+			wantSetprivN: true, wantUserns: true, wantUsernsN: true,
+		},
+		{
+			name:      "setpriv only",
+			usernsErr: probeErr, usernsNetErr: probeErr,
+			wantAvailable: true, wantSetpriv: true, wantIdentity: true, wantSetprivN: true,
+		},
+		{
+			name:        "setpriv default only",
+			identityErr: probeErr, usernsErr: probeErr, usernsNetErr: probeErr,
+			// The identity-switch failure does not gate the independent
+			// private-net smoke for the base setpriv path.
+			wantAvailable: true, wantSetpriv: true, wantSetprivN: true,
+		},
+		{
+			name:       "userns only",
+			setprivErr: probeErr, setprivNetErr: probeErr,
+			wantAvailable: true, wantUserns: true, wantUsernsN: true,
+		},
+		{
+			name:       "neither available",
+			setprivErr: probeErr, setprivNetErr: probeErr,
+			usernsErr: probeErr, usernsNetErr: probeErr,
+		},
+		{
+			name:          "modes available without private net",
+			setprivNetErr: probeErr, usernsNetErr: probeErr,
+			wantAvailable: true, wantSetpriv: true, wantIdentity: true, wantUserns: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ProbeResult{}
-			setBwrapModeAvailability(&result, tt.setprivErr, tt.identityErr, tt.usernsErr)
+			setBwrapModeAvailability(
+				&result,
+				tt.setprivErr,
+				tt.identityErr,
+				tt.setprivNetErr,
+				tt.usernsErr,
+				tt.usernsNetErr,
+			)
 			if result.Available != tt.wantAvailable {
 				t.Errorf("Available = %v, want %v", result.Available, tt.wantAvailable)
 			}
@@ -72,10 +110,34 @@ func TestSetBwrapModeAvailability(t *testing.T) {
 			if result.SetprivSwitchAvailable != tt.wantIdentity {
 				t.Errorf("SetprivSwitchAvailable = %v, want %v", result.SetprivSwitchAvailable, tt.wantIdentity)
 			}
+			if result.SetprivNetAvailable != tt.wantSetprivN {
+				t.Errorf("SetprivNetAvailable = %v, want %v", result.SetprivNetAvailable, tt.wantSetprivN)
+			}
 			if result.UsernsAvailable != tt.wantUserns {
 				t.Errorf("UsernsAvailable = %v, want %v", result.UsernsAvailable, tt.wantUserns)
 			}
+			if result.UsernsNetAvailable != tt.wantUsernsN {
+				t.Errorf("UsernsNetAvailable = %v, want %v", result.UsernsNetAvailable, tt.wantUsernsN)
+			}
 		})
+	}
+}
+
+func TestSmokeLabel(t *testing.T) {
+	tests := []struct {
+		mode       UidMode
+		privateNet bool
+		want       string
+	}{
+		{UidModeSetpriv, false, "setpriv"},
+		{UidModeSetpriv, true, "setpriv+private-net"},
+		{UidModeUserns, false, "userns"},
+		{UidModeUserns, true, "userns+private-net"},
+	}
+	for _, tt := range tests {
+		if got := smokeLabel(tt.mode, tt.privateNet); got != tt.want {
+			t.Errorf("smokeLabel(%q, %v) = %q, want %q", tt.mode, tt.privateNet, got, tt.want)
+		}
 	}
 }
 
@@ -87,12 +149,12 @@ func TestSetprivSmokeTargetIDs(t *testing.T) {
 }
 
 func TestBwrapSmokeArgs(t *testing.T) {
-	rootSetprivArgs := bwrapSmokeArgs(UidModeSetpriv, false, 0, 0)
+	rootSetprivArgs := bwrapSmokeArgs(UidModeSetpriv, false, false, 0, 0)
 	if slices.Contains(rootSetprivArgs, "setpriv") {
 		t.Errorf("root setpriv smoke args unexpectedly contain setpriv: %v", rootSetprivArgs)
 	}
 
-	setprivArgs := bwrapSmokeArgs(UidModeSetpriv, false, 65534, 65533)
+	setprivArgs := bwrapSmokeArgs(UidModeSetpriv, false, false, 65534, 65533)
 	if slices.Contains(setprivArgs, "--unshare-user") {
 		t.Errorf("setpriv smoke args unexpectedly contain --unshare-user: %v", setprivArgs)
 	}
@@ -102,7 +164,12 @@ func TestBwrapSmokeArgs(t *testing.T) {
 		}
 	}
 
-	usernsArgs := bwrapSmokeArgs(UidModeUserns, false, 1000, 1001)
+	setprivNetArgs := bwrapSmokeArgs(UidModeSetpriv, false, true, 0, 0)
+	if !slices.Contains(setprivNetArgs, "--unshare-net") {
+		t.Errorf("setpriv private-net smoke args do not contain --unshare-net: %v", setprivNetArgs)
+	}
+
+	usernsArgs := bwrapSmokeArgs(UidModeUserns, false, false, 1000, 1001)
 	for _, want := range []string{"--unshare-user", "--disable-userns", "--uid", "1000", "--gid", "1001"} {
 		if !slices.Contains(usernsArgs, want) {
 			t.Errorf("userns smoke args do not contain %q: %v", want, usernsArgs)
@@ -112,7 +179,12 @@ func TestBwrapSmokeArgs(t *testing.T) {
 		t.Errorf("userns smoke args unexpectedly contain setpriv: %v", usernsArgs)
 	}
 
-	setuidUsernsArgs := bwrapSmokeArgs(UidModeUserns, true, 1000, 1001)
+	usernsNetArgs := bwrapSmokeArgs(UidModeUserns, false, true, 1000, 1001)
+	if !slices.Contains(usernsNetArgs, "--unshare-net") {
+		t.Errorf("userns private-net smoke args do not contain --unshare-net: %v", usernsNetArgs)
+	}
+
+	setuidUsernsArgs := bwrapSmokeArgs(UidModeUserns, true, false, 1000, 1001)
 	if slices.Contains(setuidUsernsArgs, "--disable-userns") {
 		t.Errorf("setuid bwrap smoke args unexpectedly contain --disable-userns: %v", setuidUsernsArgs)
 	}

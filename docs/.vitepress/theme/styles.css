@@ -91,3 +91,19 @@ limitations under the License.
 .VPFooter {
   border-top: 1px solid var(--vp-c-divider);
 }
+
+.Layout .VPFooter.has-sidebar {
+  display: block;
+}
+
+@media (min-width: 960px) {
+  .VPFooter.has-sidebar {
+    margin-left: var(--vp-sidebar-width);
+  }
+}
+
+@media (min-width: 1440px) {
+  .VPFooter.has-sidebar {
+    margin-left: calc((100vw - var(--vp-layout-max-width)) / 2 + var(--vp-sidebar-width));
+  }
+}

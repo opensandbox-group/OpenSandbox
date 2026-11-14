@@ -22,7 +22,6 @@ import (
 	"net"
 	"reflect"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
@@ -624,10 +623,9 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 		}
 	)
 	type fields struct {
-		Client         client.Client
-		Scheme         *runtime.Scheme
-		Recorder       record.EventRecorder
-		taskSchedulers sync.Map
+		Client   client.Client
+		Scheme   *runtime.Scheme
+		Recorder record.EventRecorder
 	}
 	type args struct {
 		ctx      context.Context

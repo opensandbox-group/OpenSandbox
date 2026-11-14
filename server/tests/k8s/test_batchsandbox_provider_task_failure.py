@@ -135,7 +135,6 @@ def test_get_status_stays_running_when_expire_time_is_still_in_the_future():
 
 
 def test_get_status_stays_running_without_task_failure():
-    # Regression guard: the common path must be untouched.
     provider = BatchSandboxProvider(MagicMock())
     workload = {
         "status": {"replicas": 1, "ready": 1, "allocated": 1, "taskFailed": 0, "taskSucceed": 1},

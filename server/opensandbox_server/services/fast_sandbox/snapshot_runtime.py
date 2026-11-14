@@ -26,6 +26,7 @@ from __future__ import annotations
 # protobuf-generated modules expose dynamic attributes.
 
 import logging
+from dataclasses import replace
 from threading import Lock
 from typing import Callable, Iterable, Optional
 from uuid import UUID
@@ -44,13 +45,23 @@ from opensandbox_server.services.k8s.snapshot_runtime import (
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
     SNAPSHOT_CREATE_CONFLICT_REASON,
+    SNAPSHOT_MODE_FULL,
+    SNAPSHOT_MODE_ROOTFS_ONLY,
     SnapshotRuntimePreflightError,
     SnapshotRuntimeStatus,
+    SnapshotRuntimeUnsupportedError,
+    normalize_snapshot_mode,
 )
 
 GROUP = "sandbox.fast.io"
 VERSION = "v1alpha2"
 PLURAL = "sandboxsnapshots"
+SANDBOX_PLURAL = "sandboxes"
+
+# fast-sandbox OCI artifacts (templates, snapshots, checkpoints) carry this
+# prefix; restore/create image references that start with it take the OCI
+# publication path upstream.
+OCI_IMAGE_PREFIX = "oci://"
 
 # FastPath validates snapshot metadata keys as DNS-1123 labels and projects
 # them onto CR labels as "metadata.sandbox.fast.io/<key>" (same convention as
@@ -122,6 +133,7 @@ class FastSandboxSnapshotRuntime:
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> None:
         ns = namespace if namespace is not None else self._namespace
         try:
@@ -134,6 +146,16 @@ class FastSandboxSnapshotRuntime:
             raise SnapshotRuntimePreflightError(
                 f"Cannot verify snapshot runtime for sandbox {sandbox_id}."
             ) from exc
+        if mode == SNAPSHOT_MODE_ROOTFS_ONLY:
+            # Mirror FastPath's own gate so the mismatch fails as a
+            # client-side 409 before any intent is persisted upstream; the
+            # Fastlet re-checks the effective source authoritatively.
+            source_image = self._source_sandbox_image(ns, sandbox_id)
+            if source_image is None or not source_image.startswith(OCI_IMAGE_PREFIX):
+                raise SnapshotRuntimeUnsupportedError(
+                    "Snapshot mode 'rootfsOnly' requires a sandbox on the OCI "
+                    f"artifact path; sandbox {sandbox_id} is not OCI-backed."
+                )
 
     def create_snapshot(
         self,
@@ -141,16 +163,36 @@ class FastSandboxSnapshotRuntime:
         sandbox_id: str,
         *,
         namespace: str | None = None,
+        mode: str | None = None,
     ) -> SnapshotRuntimeStatus:
         snapshot_name = build_public_snapshot_name(snapshot_id)
         ns = namespace if namespace is not None else self._namespace
         self._ensure_namespace_watch(ns)
 
+        source_image = self._source_sandbox_image(ns, sandbox_id)
+        if source_image is None:
+            # The encoding decides template_name semantics; guessing wrong is
+            # a guaranteed upstream rejection.
+            return SnapshotRuntimeStatus(
+                state=SnapshotState.FAILED,
+                reason="snapshot_runtime_create_failed",
+                message=(
+                    f"Cannot snapshot sandbox {sandbox_id}: its Sandbox CR "
+                    "image could not be read to determine the artifact "
+                    "encoding (native vs OCI)."
+                ),
+            )
+
         request = pb2.CreateSandboxSnapshotRequest(
             request_id=snapshot_name,
             sandbox=namespaced_reference(ns, sandbox_id),
-            template_name=snapshot_name,
         )
+        if mode == SNAPSHOT_MODE_ROOTFS_ONLY:
+            request.mode = pb2.SNAPSHOT_MODE_ROOTFS_ONLY
+        if not source_image.startswith(OCI_IMAGE_PREFIX):
+            # native publishes under a template-name index key; OCI snapshots
+            # omit it and restore from the returned manifest_ref.
+            request.template_name = snapshot_name
         request.metadata[SNAPSHOT_ID_METADATA_KEY] = snapshot_id
         try:
             self._fastpath.create_sandbox_snapshot(request)
@@ -169,11 +211,25 @@ class FastSandboxSnapshotRuntime:
                     reason=SNAPSHOT_CREATE_CONFLICT_REASON,
                     message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
                 )
-            return SnapshotRuntimeStatus(
-                state=SnapshotState.FAILED,
-                reason="snapshot_runtime_create_failed",
-                message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
-            )
+            # The request is durable and idempotent by request_id, so it may
+            # have been persisted before the error (e.g. a lost reply). Unless
+            # FastPath confirms it is absent, report it as submitted whatever
+            # its phase: a failed status would leave it without a record, and
+            # convergence records its terminal state, or its absence, once the
+            # row exists.
+            try:
+                self._fastpath.get_sandbox_snapshot(ns, snapshot_name)
+            except FastPathNotFound:
+                return SnapshotRuntimeStatus(
+                    state=SnapshotState.FAILED,
+                    reason="snapshot_runtime_create_failed",
+                    message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
+                )
+            except FastPathError as probe_exc:
+                logger.warning(
+                    f"Could not check fsb snapshot {snapshot_name} after a failed create "
+                    f"({exc}): {probe_exc}"
+                )
         return SnapshotRuntimeStatus(
             state=SnapshotState.CREATING,
             reason="snapshot_runtime_submitted",
@@ -182,7 +238,46 @@ class FastSandboxSnapshotRuntime:
                 "completion is observed via watch."
             ),
             backend=_BACKEND_FSB,
+            resource_limits=self._source_sandbox_limits(ns, sandbox_id),
+            mode=normalize_snapshot_mode(mode),
         )
+
+    def _source_sandbox_limits(self, namespace: str, sandbox_id: str) -> Optional[dict]:
+        """The source's per-sandbox limits (SandboxInfo field 10), or None
+        when unset (pool-default shaped) or the read fails."""
+        try:
+            info = self._fastpath.get_sandbox(namespace, sandbox_id).sandbox
+            requirements = getattr(info, "resources", None)
+            limits = getattr(requirements, "limits", None) if requirements is not None else None
+            if limits is None or not (limits.cpu and limits.memory):
+                return None
+            return {"cpu": limits.cpu, "memory": limits.memory}
+        except FastPathError as exc:
+            logger.warning(
+                f"Could not read resource limits of sandbox {namespace}/{sandbox_id} "
+                f"for snapshot replay: {exc}"
+            )
+            return None
+
+    def _source_sandbox_image(self, namespace: str, sandbox_id: str) -> Optional[str]:
+        """The source Sandbox CR's image, or None when unreadable."""
+        try:
+            cr = self._k8s_client.get_custom_object(
+                group=GROUP,
+                version=VERSION,
+                namespace=namespace,
+                plural=SANDBOX_PLURAL,
+                name=sandbox_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - unreadable means unclassifiable
+            logger.warning(
+                f"Failed to read Sandbox CR {namespace}/{sandbox_id} before "
+                f"snapshot: {exc}"
+            )
+            return None
+        spec = cr.get("spec") if isinstance(cr, dict) else None
+        image = spec.get("image") if isinstance(spec, dict) else None
+        return str(image) if image else None
 
     def get_snapshot_status(self, snapshot_id: str) -> SnapshotRuntimeStatus:
         return self.inspect_snapshot(snapshot_id)
@@ -231,7 +326,15 @@ class FastSandboxSnapshotRuntime:
                 message=f"Failed to inspect fsb snapshot {snapshot_name}: {exc}",
             )
 
-        return self._status_from_info(response.snapshot)
+        status = self._status_from_info(response.snapshot)
+        if status.state == SnapshotState.READY and source_sandbox_id:
+            # Retry point for a transient read failure at creation: the
+            # source still exists at its terminal transition.
+            status = replace(
+                status,
+                resource_limits=self._source_sandbox_limits(ns, source_sandbox_id),
+            )
+        return status
 
     # -- status watch ------------------------------------------------------
 
@@ -306,26 +409,40 @@ class FastSandboxSnapshotRuntime:
         phase_name = pb2_phase_name(phase)
         message = (getattr(info, "message", "") or "").strip() or None
         template_name = (getattr(info, "template_name", "") or "").strip() or None
+        mode = fsb_snapshot_mode(info)
 
         if phase_name in _TERMINAL_READY_PHASES:
-            # The restore image is the snapshot's template name: the artifact
-            # set is published under index/<sha256(templateName)>.json, the
-            # same content-addressed layout as template golden images. The
-            # manifest_ref points at the raw manifest object and is not
-            # resolvable as a CreateSandbox image.
-            if not template_name:
+            # native restores via the template-name index key, OCI via the
+            # returned immutable manifest_ref; a success with neither is
+            # unpublishable.
+            if template_name:
                 return SnapshotRuntimeStatus(
-                    state=SnapshotState.FAILED,
-                    reason="snapshot_runtime_missing_image",
-                    message="fsb snapshot succeeded without a template name.",
+                    state=SnapshotState.READY,
+                    image=template_name,
+                    reason="snapshot_runtime_ready",
+                    message="fsb snapshot artifacts published successfully.",
                     backend=_BACKEND_FSB,
+                    mode=mode,
+                )
+            manifest_ref = (getattr(info, "manifest_ref", "") or "").strip()
+            if manifest_ref.startswith(OCI_IMAGE_PREFIX):
+                return SnapshotRuntimeStatus(
+                    state=SnapshotState.READY,
+                    image=manifest_ref,
+                    reason="snapshot_runtime_ready",
+                    message="fsb snapshot OCI artifacts published successfully.",
+                    backend=_BACKEND_FSB,
+                    mode=mode,
                 )
             return SnapshotRuntimeStatus(
-                state=SnapshotState.READY,
-                image=template_name,
-                reason="snapshot_runtime_ready",
-                message="fsb snapshot artifacts published successfully.",
+                state=SnapshotState.FAILED,
+                reason="snapshot_runtime_missing_image",
+                message=(
+                    "fsb snapshot succeeded without a template name or an "
+                    "OCI manifest_ref; no runnable restore image."
+                ),
                 backend=_BACKEND_FSB,
+                mode=mode,
             )
 
         if phase_name in _TERMINAL_FAILED_PHASES:
@@ -334,6 +451,7 @@ class FastSandboxSnapshotRuntime:
                 reason="snapshot_runtime_failed",
                 message=message or "fsb snapshot creation failed.",
                 backend=_BACKEND_FSB,
+                mode=mode,
             )
 
         return SnapshotRuntimeStatus(
@@ -341,7 +459,29 @@ class FastSandboxSnapshotRuntime:
             reason="snapshot_runtime_in_progress",
             message=message or f"fsb snapshot phase is {phase_name or 'Pending'}.",
             backend=_BACKEND_FSB,
+            mode=mode,
         )
+
+
+def fsb_snapshot_mode(info) -> Optional[str]:
+    """Map SandboxSnapshotInfo.mode onto the public mode value.
+
+    UNSPECIFIED covers legacy Full snapshots and a not-yet-admitted task;
+    both fall back to the persisted request mode (None = full).
+    """
+    mode = getattr(info, "mode", None)
+    try:
+        name = mode.name  # proto enum instance
+    except AttributeError:
+        try:
+            name = pb2.SnapshotMode.Name(int(mode))
+        except (TypeError, ValueError):
+            return None
+    if name == "SNAPSHOT_MODE_ROOTFS_ONLY":
+        return SNAPSHOT_MODE_ROOTFS_ONLY
+    if name == "SNAPSHOT_MODE_FULL":
+        return SNAPSHOT_MODE_FULL
+    return None
 
 
 def pb2_phase_name(phase) -> str:
@@ -358,5 +498,6 @@ def pb2_phase_name(phase) -> str:
 
 __all__ = [
     "FastSandboxSnapshotRuntime",
+    "fsb_snapshot_mode",
     "snapshot_id_from_crd",
 ]

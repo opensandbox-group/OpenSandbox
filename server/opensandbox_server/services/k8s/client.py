@@ -23,7 +23,7 @@ from functools import partial
 from typing import Callable, Any, Dict, List, Optional, Tuple
 
 from kubernetes import client, config
-from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api, V1APIResourceList
+from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api
 
 from opensandbox_server.config import KubernetesRuntimeConfig
 from opensandbox_server.services.k8s.informer import WorkloadInformer
@@ -45,8 +45,8 @@ class K8sClient:
     """
     Unified Kubernetes API client.
 
-    Encapsulates all cluster resource operations (CustomObject, Secret, Pod,
-    RuntimeClass). Callers never hold raw API handles directly.
+    Encapsulates all cluster resource operations (CustomObject, Secret, PVC,
+    Pod, RuntimeClass). Callers never hold raw API handles directly.
     """
 
     def __init__(self, k8s_config: KubernetesRuntimeConfig):
@@ -203,7 +203,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_write(obj)
         return obj
 
     def get_custom_object(
@@ -288,22 +288,6 @@ class K8sClient:
                 return []
             raise
 
-    def custom_resource_exists(self, group: str, version: str, plural: str) -> bool:
-        """Distinguish an uninstalled API from a failed namespaced list."""
-        if self._read_limiter:
-            self._read_limiter.acquire()
-        try:
-            resources = self.get_custom_objects_api().get_api_resources(
-                group, version, _request_timeout=(10, 30)
-            )
-        except ApiException as exc:
-            if exc.status == 404:
-                return False
-            raise
-        if not isinstance(resources, V1APIResourceList) or resources.resources is None:
-            raise TypeError("API discovery returned an invalid APIResourceList response")
-        return any(resource.name == plural for resource in resources.resources)
-
     def invalidate_custom_objects(
         self, group: str, version: str, plural: str, namespace: str
     ) -> None:
@@ -359,7 +343,7 @@ class K8sClient:
         """Delete a namespaced custom resource."""
         if self._write_limiter:
             self._write_limiter.acquire()
-        self.get_custom_objects_api().delete_namespaced_custom_object(
+        response = self.get_custom_objects_api().delete_namespaced_custom_object(
             group=group,
             version=version,
             namespace=namespace,
@@ -370,7 +354,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_delete(name, response)
 
     def patch_custom_object(
         self,
@@ -394,7 +378,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_write(obj)
         return obj
 
     # ------------------------------------------------------------------

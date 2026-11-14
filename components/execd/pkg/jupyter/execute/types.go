@@ -72,6 +72,12 @@ const (
 	StateBusy ExecutionState = "busy"
 
 	StateStarting ExecutionState = "starting"
+
+	// StateRestarting and StateDead are sent by the Jupyter server, not the
+	// kernel, when the kernel died and is being restarted or could not be.
+	StateRestarting ExecutionState = "restarting"
+
+	StateDead ExecutionState = "dead"
 )
 
 type Header struct {
@@ -152,6 +158,13 @@ type ErrorOutput struct {
 	EValue string `json:"evalue"`
 
 	Traceback []string `json:"traceback"`
+
+	// ExitCode is the process exit status. It is set only when a command
+	// actually ran and finished with a non-zero status (-1 when it was
+	// terminated by a signal), so clients can tell an exit status apart from
+	// a failure to start the process, which shares the same ename. It is
+	// omitted for start failures and for non-command errors.
+	ExitCode *int `json:"exit_code,omitempty"`
 }
 
 func (e *ErrorOutput) String() string {

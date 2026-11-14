@@ -22,10 +22,6 @@ from opensandbox_server.services.k8s.provider_common import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Helpers for _workload_platform_constraint_scope tests
-# ---------------------------------------------------------------------------
-
 def _analyzer(pod_spec):
     """Return whether pod_spec has nodeSelector / nodeName (platform constraints)."""
     has_platform = bool(pod_spec.get("nodeSelector") or pod_spec.get("nodeName"))
@@ -63,6 +59,37 @@ def test_translate_resource_limits_no_gpu_key_unchanged():
     assert result is not inputs
 
 
+@pytest.mark.parametrize(
+    "aliases",
+    [{"disk": "10G"}, {"storage": "10G"}, {"ephemeral-storage": "10G"}],
+    ids=["disk", "storage", "ephemeral-storage"],
+)
+def test_translate_resource_limits_normalizes_disk_aliases(aliases):
+    # The portable disk-quota key must land on the canonical Kubernetes
+    # container storage resource instead of an unknown resource key the
+    # API server would reject.
+    result = _translate_resource_limits_for_k8s({**aliases, "cpu": "500m"})
+    assert result == {"cpu": "500m", "ephemeral-storage": "10G"}
+    for alias in ("disk", "storage"):
+        assert alias not in result
+
+
+def test_translate_resource_limits_disk_alias_precedence():
+    # Same precedence as the Docker runtime and the Windows profile:
+    # disk > storage > ephemeral-storage.
+    result = _translate_resource_limits_for_k8s(
+        {"disk": "10G", "storage": "20G", "ephemeral-storage": "30G"}
+    )
+    assert result == {"ephemeral-storage": "10G"}
+
+
+def test_translate_resource_limits_canonical_disk_key_wins_over_alias():
+    result = _translate_resource_limits_for_k8s(
+        {"disk": "10G", "ephemeral-storage": "30G"}
+    )
+    assert result == {"ephemeral-storage": "10G"}
+
+
 def test_translate_resource_limits_rejects_all():
     with pytest.raises(HTTPException) as excinfo:
         _translate_resource_limits_for_k8s({"gpu": "all"})
@@ -85,10 +112,6 @@ def test_translate_resource_limits_drops_invalid_gpu(bad_value):
 def test_translate_resource_limits_empty_dict():
     assert _translate_resource_limits_for_k8s({}) == {}
 
-
-# ---------------------------------------------------------------------------
-# _workload_platform_constraint_scope
-# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("workload", [
     {"spec": {"template": None, "poolRef": "pool-runc"}},  # key exists, value None (pool mode)

@@ -21,6 +21,10 @@ import pytest
 from httpx import HTTPStatusError, Request, Response
 from pydantic import ValidationError
 
+from opensandbox.adapters.converter.command_execution import (
+    build_run_in_session_request_body,
+    resolve_run_in_session_timeout,
+)
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
     parse_sandbox_error,
@@ -529,6 +533,82 @@ def test_execution_converter_to_api_run_command_request() -> None:
     assert literal_request == {"argv": literal_argv}
 
 
+@pytest.mark.parametrize(
+    ("microseconds", "expected"),
+    [
+        (None, None),
+        (0, 0),
+        (1, 1),
+        (500, 1),
+        (900, 1),
+        (999, 1),
+        (1000, 1),
+        (1001, 2),
+        (1200, 2),
+        (1_001_000, 1001),
+        (2_007_000, 2007),
+        (60_000_000, 60_000),
+    ],
+)
+def test_execution_converter_rounds_timeout_up_to_milliseconds(
+    microseconds: int | None, expected: int | None
+) -> None:
+    timeout = timedelta(microseconds=microseconds) if microseconds is not None else None
+    request = ExecutionConverter.to_api_run_command_request(
+        "sleep 10", RunCommandOpts(timeout=timeout)
+    ).to_dict()
+
+    if expected is None:
+        assert "timeout" not in request
+    else:
+        assert request["timeout"] == expected
+
+
+@pytest.mark.parametrize(
+    ("microseconds", "expected"),
+    [
+        (None, None),
+        (0, 0),
+        (1, 1),
+        (500, 1),
+        (900, 1),
+        (999, 1),
+        (1000, 1),
+        (1001, 2),
+        (1200, 2),
+        (1_001_000, 1001),
+        (2_007_000, 2007),
+        (60_000_000, 60_000),
+    ],
+)
+def test_run_in_session_converter_rounds_timeout_up_to_milliseconds(
+    microseconds: int | None, expected: int | None
+) -> None:
+    timeout = timedelta(microseconds=microseconds) if microseconds is not None else None
+    timeout_ms = resolve_run_in_session_timeout(timeout)
+    assert timeout_ms == expected
+    request = build_run_in_session_request_body("sleep 10", None, timeout_ms).to_dict()
+
+    if expected is None:
+        assert "timeout" not in request
+    else:
+        assert request["timeout"] == expected
+
+
+@pytest.mark.parametrize("microseconds", [-1, -999, -1000])
+def test_execution_converter_rejects_negative_timeout(microseconds: int) -> None:
+    with pytest.raises(InvalidArgumentException, match="^timeout must be positive"):
+        ExecutionConverter.to_api_run_command_request(
+            "sleep 10", RunCommandOpts(timeout=timedelta(microseconds=microseconds))
+        )
+
+
+@pytest.mark.parametrize("microseconds", [-1, -999, -1000])
+def test_run_in_session_converter_rejects_negative_timeout(microseconds: int) -> None:
+    with pytest.raises(InvalidArgumentException, match="^timeout must not be negative"):
+        resolve_run_in_session_timeout(timedelta(microseconds=microseconds))
+
+
 def test_run_command_opts_validates_gid_requires_uid() -> None:
     with pytest.raises(ValueError, match="uid is required when gid is provided"):
         RunCommandOpts(gid=1000)
@@ -781,6 +861,48 @@ def test_sandbox_model_converter_snapshot_restore_request() -> None:
     assert dumped["snapshotId"] == "snap-123"
     assert "image" not in dumped
     assert "entrypoint" not in dumped
+
+
+def test_create_snapshot_request_mode_mapping() -> None:
+    from opensandbox.models.sandboxes import CreateSnapshotRequest
+
+    full = SandboxModelConverter.to_api_create_snapshot_request(
+        CreateSnapshotRequest(name="full-snap")
+    )
+    rootfs_only = SandboxModelConverter.to_api_create_snapshot_request(
+        CreateSnapshotRequest(name="workspace-state", mode="rootfsOnly")
+    )
+
+    assert "mode" not in full.to_dict()
+    assert rootfs_only.to_dict()["mode"] == "rootfsOnly"
+
+
+def test_snapshot_info_mode_reads_unset_as_full() -> None:
+    from datetime import datetime, timezone
+
+    from opensandbox.api.lifecycle.models.snapshot import Snapshot
+    from opensandbox.api.lifecycle.models.snapshot_status import SnapshotStatus
+    from opensandbox.api.lifecycle.types import UNSET
+
+    def _api_snapshot(mode):
+        return Snapshot(
+            id="snap-1",
+            sandbox_id="sbx-1",
+            name="workspace-state",
+            status=SnapshotStatus(state="Ready"),
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            mode=mode,
+        )
+
+    legacy = SandboxModelConverter.to_snapshot_info(_api_snapshot(UNSET))
+    rootfs_only = SandboxModelConverter.to_snapshot_info(
+        _api_snapshot("rootfsOnly")
+    )
+
+    assert legacy.mode == "full"
+    assert rootfs_only.mode == "rootfsOnly"
+    assert isinstance(rootfs_only.mode, str)
+
 
 def test_sandbox_model_converter_to_api_volume_skips_unset_fields() -> None:
     from opensandbox.api.lifecycle.types import UNSET

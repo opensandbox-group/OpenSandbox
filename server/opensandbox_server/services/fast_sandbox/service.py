@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Optional
@@ -91,11 +92,9 @@ from opensandbox_server.services.fast_sandbox.cr_reader import (
 )
 from opensandbox_server.services.fast_sandbox.cr_mapping import sandbox_from_cr
 from opensandbox_server.services.fast_sandbox.network_policy import (
-    delete_policy_rules,
-    merge_policy_rules,
     normalized_policy,
-    policy_status,
 )
+from opensandbox_server.services.fast_sandbox import policy_relay
 from opensandbox_server.services.fast_sandbox import vault as vault_relay
 from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
@@ -114,7 +113,16 @@ _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
 # see FastSandboxService.__init__).
 _VAULT_LOCK_SHARDS = 64
 
+# Same-shard-count locks for the policy PATCH/rule-delete composition
+# (relay GET -> merge -> relay PUT); the revision precondition inside the
+# merged PUT is the cross-replica backstop.
+_POLICY_LOCK_SHARDS = 64
+
 logger = logging.getLogger(__name__)
+
+#: Pool mode is immutable for a pool's lifetime (spec.sandboxResources), so
+#: only a same-name delete-and-recreate can invalidate a cached entry.
+_POOL_MODE_CACHE_TTL_SECONDS = 15 * 60
 
 
 class FastSandboxService(SandboxService, ExtensionService):
@@ -138,6 +146,8 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._tenant_provider = None  # type: ignore[assignment]
         self._k8s_client = k8s_client
         self._k8s_client_lock = Lock()
+        self._pool_mode_cache: dict[tuple[str, str], tuple[bool, float]] = {}
+        self._pool_mode_cache_lock = Lock()
         self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
         self._template_service = template_service
         self._activity_recorder: Optional[ActivityRecorder] = None
@@ -149,10 +159,15 @@ class FastSandboxService(SandboxService, ExtensionService):
         # the serialization scope; the revision precondition inside the
         # merged PUT stays the cross-replica backstop either way.
         self._vault_locks = [Lock() for _ in range(_VAULT_LOCK_SHARDS)]
+        self._policy_locks = [Lock() for _ in range(_POLICY_LOCK_SHARDS)]
 
     def vault_lock(self, sandbox_id: str) -> Lock:
         """Return the process-local PATCH shard lock for one sandbox."""
         return self._vault_locks[hash(sandbox_id) % _VAULT_LOCK_SHARDS]
+
+    def policy_lock(self, sandbox_id: str) -> Lock:
+        """Return the process-local policy PATCH shard lock for one sandbox."""
+        return self._policy_locks[hash(sandbox_id) % _POLICY_LOCK_SHARDS]
 
     @property
     def cr_reader(self) -> SandboxCRReader:
@@ -260,7 +275,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         if self._template_service is None:
             self._template_service = FastSandboxTemplateService(self._app_config)
             # Keep template rows converged even without /templates traffic
-            # (template-mode create resolves against the synced row).
+            # (template-mode create resolves against the watch-converged row).
             self._template_service.start_background_sync()
         return self._template_service
 
@@ -315,10 +330,10 @@ class FastSandboxService(SandboxService, ExtensionService):
 
         return self._k8s.namespace or "default"
 
-    def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
-        """Return the resource profile declared by the selected SandboxPool."""
+    def _pool_info(self, namespace: str, pool_ref: str) -> pb2.PoolInfo:
+        """Fetch the selected SandboxPool via FastPath GetPool."""
         try:
-            pool = self._fastpath.get_pool(namespace, pool_ref)
+            return self._fastpath.get_pool(namespace, pool_ref)
         except FastPathNotFound:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -329,6 +344,34 @@ class FastSandboxService(SandboxService, ExtensionService):
             )
         except FastPathError as exc:
             raise self._fastpath_http_error(exc) from exc
+
+    @staticmethod
+    def _pool_is_resource_aware(pool: pb2.PoolInfo) -> bool:
+        """Only an explicitly reported ResourceAware profile passes; legacy,
+        unspecified, and unreported (older FastPath) fail safe to False."""
+        profile = pool.sandbox_resource_profile
+        return (
+            profile is not None
+            and profile.mode == pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+        )
+
+    def _pool_is_resource_aware_cached(self, namespace: str, pool_ref: str) -> bool:
+        """Pool-mode gate read, TTL-cached per pool. Only successful lookups
+        are cached; stale entries fail safe (FastPath rejects stale-aware,
+        stale-legacy forwards no resources)."""
+        key = (namespace, pool_ref)
+        now = time.monotonic()
+        with self._pool_mode_cache_lock:
+            cached = self._pool_mode_cache.get(key)
+        if cached is not None and now - cached[1] < _POOL_MODE_CACHE_TTL_SECONDS:
+            return cached[0]
+        aware = self._pool_is_resource_aware(self._pool_info(namespace, pool_ref))
+        with self._pool_mode_cache_lock:
+            self._pool_mode_cache[key] = (aware, time.monotonic())
+        return aware
+
+    @staticmethod
+    def _pool_resources_from_info(pool: pb2.PoolInfo) -> dict:
         resources: dict = {}
         if pool.sandbox_cpu:
             resources["cpu"] = pool.sandbox_cpu
@@ -363,7 +406,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         # the FastPath image; workload shape comes from the golden image.
         template_entrypoint: Optional[list[str]] = None
         if (request.template_id or "").strip():
-            image_ref, template_entrypoint = (
+            image_ref, template_entrypoint, template_machine = (
                 self.resolve_template_service().resolve_template_artifact(
                     request.template_id.strip()
                 )
@@ -385,6 +428,30 @@ class FastSandboxService(SandboxService, ExtensionService):
                         "message": str(exc),
                     },
                 ) from exc
+            # OSEP-0026: pool mode is the forwarding gate; the second map
+            # reuses request_id and the first absolute expiry (idempotency).
+            try:
+                create_request = map_template_create_request(
+                    request,
+                    sandbox_id=create_request.request_id,
+                    namespace=create_request.namespace,
+                    image_ref=image_ref,
+                    entrypoint=template_entrypoint,
+                    fastpath_resource_pool=self._k8s.fastpath_resource_pool,
+                    expires_at_unix_seconds=create_request.expires_at_unix_seconds,
+                    template_machine=template_machine,
+                    pool_is_resource_aware=self._pool_is_resource_aware_cached(
+                        create_request.namespace, create_request.pool_ref
+                    ),
+                )
+            except UnsupportedFieldError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": str(exc),
+                    },
+                ) from exc
         else:
             try:
                 create_request = map_create_request(
@@ -401,9 +468,8 @@ class FastSandboxService(SandboxService, ExtensionService):
                         "message": str(exc),
                     },
                 ) from exc
-            pool_resources = self._pool_resources(
-                create_request.namespace, create_request.pool_ref
-            )
+            pool = self._pool_info(create_request.namespace, create_request.pool_ref)
+            snapshot_limits = request.resolved_snapshot_limits
             try:
                 create_request = map_create_request(
                     request,
@@ -411,7 +477,12 @@ class FastSandboxService(SandboxService, ExtensionService):
                     namespace=create_request.namespace,
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
                     expires_at_unix_seconds=create_request.expires_at_unix_seconds,
-                    pool_resources=pool_resources,
+                    # A snapshot restore fixes cpu/memory to the recorded
+                    # source limits; pids stays pool-owned (validated against
+                    # the same profile as a plain create).
+                    pool_resources=self._pool_resources_from_info(pool),
+                    snapshot_limits=snapshot_limits,
+                    pool_is_resource_aware=self._pool_is_resource_aware(pool),
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(
@@ -424,12 +495,16 @@ class FastSandboxService(SandboxService, ExtensionService):
 
         namespace = create_request.namespace
         sandbox_id = create_request.request_id
+        sync_started = time.perf_counter()
+        rpc_ms = -1
 
         try:
+            rpc_started = time.perf_counter()
             response = self._fastpath.create_sandbox(
                 create_request,
                 wait_timeout_millis=int(self._k8s.fastpath_wait_ready_seconds * 1000),
             )
+            rpc_ms = int((time.perf_counter() - rpc_started) * 1000)
         except (FastPathInvalidArgument, FastPathConflict, FastPathNotFound) as exc:
             raise self._fastpath_http_error(exc) from exc
         except FastPathError as exc:
@@ -445,6 +520,12 @@ class FastSandboxService(SandboxService, ExtensionService):
             info = response.sandbox
         finally:
             self._cr_reader.invalidate(namespace)
+            logger.info(
+                "fsb create served: sandbox=%s total=%dms fastpath_rpc=%dms",
+                sandbox_id,
+                int((time.perf_counter() - sync_started) * 1000),
+                rpc_ms,
+            )
 
         # Durable intent exists (accepted or recovery-confirmed): restart the
         # idle clock from this transition (OSEP-0024).
@@ -651,15 +732,10 @@ class FastSandboxService(SandboxService, ExtensionService):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: Optional[str] = None,
-        container: Optional[str] = None,
     ) -> str:
         # FastPath diagnostics carry lifecycle events only; process output
         # flows through execd, which has no sandbox-log endpoint.
         raise self._unsupported("sandbox logs", status.HTTP_501_NOT_IMPLEMENTED)
-
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        return self._lifecycle_diagnostics(sandbox_id, "events", "inspect").content
 
     def get_sandbox_events(self, sandbox_id: str, limit: int = 50) -> str:
         return self._lifecycle_diagnostics(sandbox_id, "events", "events", limit).content
@@ -728,68 +804,21 @@ class FastSandboxService(SandboxService, ExtensionService):
     # -- endpoints ---------------------------------------------------------
 
     def get_network_policy(self, sandbox_id: str) -> dict:
-        current = self._cr_reader.get(self._resolve_namespace(), sandbox_id)
-        binding = next(
-            (b for b in current["spec"].get("actionBindings", []) if b["handler"] == "egress"), None
-        )
-        try:
-            raw = binding.get("input") if binding else None
-            if isinstance(raw, str) and not raw.strip():
-                raw = None
-            policy = json.loads(raw) if raw is not None else None
-            if policy is not None:
-                policy = normalized_policy(NetworkPolicy.model_validate(policy))
-        except (ValueError, TypeError, HTTPException) as exc:
-            raise HTTPException(503, detail="Invalid persisted egress binding.") from exc
-        return policy_status(policy)
+        """The recorded policy reflects exactly what the egress enforces."""
+        return policy_relay.relay_get(self, sandbox_id)
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
-        return self._commit_network_policy(sandbox_id, normalized_policy(policy))
+        self._reject_network_policy_with_upstream_proxy()
+        return policy_relay.relay_put(self, sandbox_id, normalized_policy(policy))
 
     def patch_network_policy(self, sandbox_id: str, rules: list[NetworkRule]) -> dict:
-        """Merge rules into the persisted egress binding (sidecar PATCH semantics)."""
-        current = self.get_network_policy(sandbox_id)
-        merged = merge_policy_rules(current["policy"], rules)
-        return self._commit_network_policy(sandbox_id, normalized_policy(NetworkPolicy.model_validate(merged)))
+        """Merge rules into the recorded policy (sidecar PATCH semantics)."""
+        self._reject_network_policy_with_upstream_proxy()
+        return policy_relay.relay_patch(self, sandbox_id, rules)
 
     def delete_network_policy_rules(self, sandbox_id: str, targets: list[str]) -> dict:
-        """Remove rules by target from the persisted egress binding (idempotent)."""
-        current = self.get_network_policy(sandbox_id)
-        kept = delete_policy_rules(current["policy"], targets)
-        return self._commit_network_policy(
-            sandbox_id,
-            normalized_policy(NetworkPolicy.model_validate(kept)),
-            guard_upstream_proxy=False,
-        )
-
-    def _commit_network_policy(
-        self, sandbox_id: str, normalized: dict, *, guard_upstream_proxy: bool = True
-    ) -> dict:
-        if guard_upstream_proxy:
-            self._reject_network_policy_with_upstream_proxy()
-        current = self._cr_reader.get(self._resolve_namespace(), sandbox_id)
-        metadata = current["metadata"]
-        bindings = [dict(b) for b in current["spec"].get("actionBindings", [])]
-        replacement = {"handler": "egress", "input": json.dumps(normalized)}
-        for index, binding in enumerate(bindings):
-            if binding["handler"] == "egress":
-                bindings[index] = replacement
-                break
-        else:
-            bindings.append(replacement)
-        try:
-            self._fastpath.replace_action_bindings(
-                metadata["namespace"],
-                sandbox_id,
-                bindings,
-                expected_uid=metadata["uid"],
-                expected_generation=metadata["generation"],
-            )
-        except FastPathError as exc:
-            raise self._fastpath_http_error(exc) from exc
-        finally:
-            self._cr_reader.invalidate(metadata["namespace"])
-        return policy_status(normalized)
+        """Remove rules by target from the recorded policy (idempotent)."""
+        return policy_relay.relay_delete_rules(self, sandbox_id, targets)
 
     def get_endpoint(
         self,

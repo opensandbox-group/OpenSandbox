@@ -18,10 +18,10 @@
 package runtime
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -196,16 +196,27 @@ func (s *bashSession) start() error {
 	return nil
 }
 
-func (s *bashSession) trackCurrentProcess(pid int) {
+func (s *bashSession) trackRunProcess(pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.currentProcessPid = pid
+	if !s.started {
+		// close() ran after this run passed its started check, so nothing
+		// else will stop this process group.
+		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+			log.Warn("bash session: kill process group %d started after close: %v", pid, err)
+		}
+		return
+	}
+	if s.runPids == nil {
+		s.runPids = make(map[int]struct{})
+	}
+	s.runPids[pid] = struct{}{}
 }
 
-func (s *bashSession) untrackCurrentProcess() {
+func (s *bashSession) untrackRunProcess(pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.currentProcessPid = 0
+	delete(s.runPids, pid)
 }
 
 //nolint:gocognit
@@ -284,14 +295,12 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	// inherited stdout) exit.
 	_ = stdoutW.Close()
 	defer stdoutR.Close()
-	defer s.untrackCurrentProcess()
-	s.trackCurrentProcess(cmd.Process.Pid)
+	runPid := cmd.Process.Pid
+	s.trackRunProcess(runPid)
+	defer s.untrackRunProcess(runPid)
 
 	stopGroupKill := killProcessGroupOnDone(ctx, cmd.Process.Pid)
 	defer stopGroupKill()
-
-	scanner := bufio.NewScanner(stdoutR)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 
 	var (
 		envLines []string
@@ -299,32 +308,80 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		exitCode *int
 		inEnv    bool
 	)
+	// Env-dump records are reassembled from raw fragment bytes and only
+	// finalized on LF: values may contain literal CR bytes (dash quotes them
+	// verbatim), so CR-split fragments must be joined before parseExportLine
+	// sees a record.
+	var envRecord strings.Builder
+	flushEnvRecord := func() {
+		if envRecord.Len() == 0 {
+			return
+		}
+		envLines = append(envLines, strings.TrimSuffix(envRecord.String(), "\n"))
+		envRecord.Reset()
+	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		switch {
-		case line == envDumpStartMarker:
-			inEnv = true
-		case line == envDumpEndMarker:
-			inEnv = false
-		case strings.HasPrefix(line, exitMarkerPrefix):
-			if code, err := strconv.Atoi(strings.TrimPrefix(line, exitMarkerPrefix)); err == nil {
-				exitCode = &code //nolint:ineffassign
-			}
-		case strings.HasPrefix(line, pwdMarkerPrefix):
-			pwdLine = strings.TrimPrefix(line, pwdMarkerPrefix)
-		default:
-			if inEnv {
-				envLines = append(envLines, line)
-				continue
-			}
-			if request.Hooks.OnExecuteStdout != nil {
-				request.Hooks.OnExecuteStdout(line)
-			}
+	emit := func(fragment string) {
+		if request.Hooks.OnExecuteStdout != nil {
+			request.Hooks.OnExecuteStdout(fragment)
 		}
 	}
 
-	scanErr := scanner.Err()
+	// handleFragment forwards user output while intercepting the wrapper's
+	// protocol lines. The wrapper prints the env-dump marker on its own line,
+	// so user output that lacks a trailing newline merges with the marker
+	// line; stripping the marker suffix keeps that output byte-exact.
+	handleFragment := func(fragment string) {
+		content := lineContent(fragment)
+		switch {
+		case content == envDumpStartMarker:
+			inEnv = true
+			return
+		case strings.HasSuffix(content, envDumpStartMarker):
+			inEnv = true
+			if prefix := strings.TrimSuffix(content, envDumpStartMarker); prefix != "" {
+				emit(prefix)
+			}
+			return
+		case content == envDumpEndMarker:
+			inEnv = false
+			return
+		case strings.HasPrefix(content, exitMarkerPrefix):
+			if code, err := strconv.Atoi(strings.TrimPrefix(content, exitMarkerPrefix)); err == nil {
+				exitCode = &code //nolint:ineffassign
+			}
+			return
+		case strings.HasPrefix(content, pwdMarkerPrefix):
+			pwdLine = strings.TrimPrefix(content, pwdMarkerPrefix)
+			return
+		}
+		if inEnv {
+			envRecord.WriteString(fragment)
+			if strings.HasSuffix(fragment, "\n") {
+				flushEnvRecord()
+			}
+			return
+		}
+		emit(fragment)
+	}
+
+	// carry holds the tail of an unfinished piece of a long line: the wrapper's
+	// env-dump marker follows output that lacks a trailing newline on the same
+	// line, so it can be split across two pieces. The scanner always passes
+	// another fragment after an unfinished piece, so carry is never left over.
+	var carry string
+	scanErr := scanLineFragments(stdoutR, func(fragment string, complete bool) {
+		fragment = carry + fragment
+		carry = ""
+		if !complete {
+			fragment, carry = holdBackMarkerPrefix(fragment, envDumpStartMarker)
+		}
+		handleFragment(fragment)
+	})
+	if inEnv {
+		flushEnvRecord()
+	}
+
 	waitErr := mp.Wait()
 
 	if scanErr != nil {
@@ -352,10 +409,74 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	}
 	s.mu.Unlock()
 
+	return reportRunResult(request, waitErr, exitCode, startAt)
+}
+
+// scanLineFragments reads r and calls onFragment for each fragment terminated
+// by \n or \r, passing the terminator through; a final unterminated fragment
+// is flushed at EOF. A line longer than maxScanLineBytes is passed in pieces
+// with complete=false for all but the last piece; pieces never split a UTF-8
+// sequence. Concatenating the fragments reproduces the exact byte stream,
+// including blank lines and \r-only progress output.
+func scanLineFragments(r io.Reader, onFragment func(fragment string, complete bool)) error {
+	buf := make([]byte, 64*1024)
+	var pending []byte
+	for {
+		n, readErr := r.Read(buf)
+		for i := range n {
+			b := buf[i]
+			pending = append(pending, b)
+			if b == '\n' || b == '\r' {
+				onFragment(string(pending), true)
+				pending = pending[:0]
+			} else if len(pending) > maxScanLineBytes {
+				// The byte just read stays pending, so the last piece is never
+				// empty.
+				cut := lastRuneBoundary(pending[:maxScanLineBytes])
+				onFragment(string(pending[:cut]), false)
+				pending = pending[:copy(pending, pending[cut:])]
+			}
+		}
+		if readErr != nil {
+			if len(pending) > 0 {
+				onFragment(string(pending), true)
+			}
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			return readErr
+		}
+	}
+}
+
+// lineContent strips the single line-ending byte from a fragment produced by
+// scanLineFragments; unterminated fragments are returned unchanged.
+func lineContent(fragment string) string {
+	if fragment == "" {
+		return ""
+	}
+	if c := fragment[len(fragment)-1]; c == '\n' || c == '\r' {
+		return fragment[:len(fragment)-1]
+	}
+	return fragment
+}
+
+// reportRunResult maps the shell's wait result and parsed exit code onto the
+// request hooks: a non-exit wait error is returned, a non-zero exit code is
+// reported via OnExecuteError, and a clean run via OnExecuteComplete.
+func reportRunResult(request *ExecuteCodeRequest, waitErr error, exitCode *int, startAt time.Time) error {
 	var exitCodeErr exitCoder
 	if waitErr != nil && !errors.As(waitErr, &exitCodeErr) {
 		log.Error("bash session: wait: %v (command: %q)", waitErr, log.SanitizeCommand(request.Code))
 		return waitErr
+	}
+	// A shell terminated by a signal (e.g. `kill -TERM $$`) never prints the
+	// exit marker and reports ExitCode() == -1, which the >= 0 check above
+	// skips. Take the code from the wait error so the run is reported as a
+	// failure (exit_code -1) rather than as a successful completion.
+	if exitCode == nil && exitCodeErr != nil {
+		code := exitCodeErr.ExitCode()
+		exitCode = &code
 	}
 
 	userExitCode := 0
@@ -373,6 +494,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 				EName:     "CommandExecError",
 				EValue:    strconv.Itoa(userExitCode),
 				Traceback: []string{errMsg},
+				ExitCode:  &userExitCode,
 			})
 		}
 		log.Error("bash session: command error: %s (command: %q)", errMsg, log.SanitizeCommand(request.Code))
@@ -439,7 +561,7 @@ func buildWrappedScript(command string, env map[string]string, cwd string) strin
 	}
 
 	b.WriteString("__USER_EXIT_CODE__=$?\n")
-	b.WriteString("printf \"\\n%s\\n\" \"" + envDumpStartMarker + "\"\n")
+	b.WriteString("printf \"%s\\n\" \"" + envDumpStartMarker + "\"\n")
 	b.WriteString("export -p\n")
 	b.WriteString("printf \"%s\\n\" \"" + envDumpEndMarker + "\"\n")
 	b.WriteString("printf \"" + pwdMarkerPrefix + "%s\\n\" \"$(pwd)\"\n")
@@ -491,7 +613,10 @@ func parseExportLine(line string) (string, string, bool) {
 	if eq := strings.Index(rest, "="); eq >= 0 {
 		name = rest[:eq]
 		raw := rest[eq+1:]
-		if unquoted, err := strconv.Unquote(raw); err == nil {
+		// Only a double-quoted value is a Go-compatible literal. A single-quoted
+		// one is verbatim shell text: strconv.Unquote would read '\t' or '\\'
+		// as a Go rune literal and turn it into a tab or a single backslash.
+		if unquoted, err := strconv.Unquote(raw); err == nil && strings.HasPrefix(raw, `"`) {
 			value = unquoted
 		} else if unquoted, ok := unquoteShellWord(raw); ok {
 			// POSIX shell word: a concatenation of '...' and "..." segments
@@ -621,13 +746,13 @@ func (s *bashSession) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	pid := s.currentProcessPid
-	s.currentProcessPid = 0
+	pids := s.runPids
+	s.runPids = nil
 	s.started = false
 	s.env = nil
 	s.cwd = ""
 
-	if pid != 0 {
+	for pid := range pids {
 		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
 			log.Warn("bash session: kill process group %d: %v (process may have already exited)", pid, err)
 		}

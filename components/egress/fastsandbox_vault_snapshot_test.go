@@ -44,7 +44,7 @@ const (
 )
 
 // snapshotBody builds a VAULT_EXPORT / VAULT_IMPORT envelope.
-func snapshotBody(t *testing.T, uid, runtimeID, attID, op, path string) string {
+func snapshotBody(t *testing.T, uid, runtimeID, attID, op, path string, seal ...*bool) string {
 	t.Helper()
 	env := actionhandler.Envelope{
 		APIVersion:   constants.ActionsAPIVersion,
@@ -58,6 +58,9 @@ func snapshotBody(t *testing.T, uid, runtimeID, attID, op, path string) string {
 			RouteGeneration:   1,
 		},
 		Snapshot: &actionhandler.SnapshotTransfer{Path: path},
+	}
+	if len(seal) > 0 {
+		env.Snapshot.Seal = seal[0]
 	}
 	raw, err := json.Marshal(env)
 	require.NoError(t, err)
@@ -265,6 +268,32 @@ func TestVaultSnapshotExportGuards(t *testing.T) {
 		assert.False(t, h.srv.vaultSealedLocked(subject.FromSandboxUID(snapshotTestUID)))
 		assert.Equal(t, copied, bundle.data, "the stale copy exists but is not sealed — the driver retries against the newer state")
 	})
+}
+
+// TestVaultSnapshotExportSealFree (issue #2312, Seal=false): the template
+// carry copies the vault file verbatim and the source keeps full relay CRUD.
+func TestVaultSnapshotExportSealFree(t *testing.T) {
+	h := newVaultPersistHarness(t)
+	h.snapshotSubject(t)
+	bundlePath := filepath.Join(t.TempDir(), "bundle", snapshotTestUID+".json")
+	sealFree := false
+
+	before := h.fileFor(snapshotTestUID).data
+	rec := doAction(t, h.srv, snapshotBody(t, snapshotTestUID, testFenceR, testFenceA, "VAULT_EXPORT", bundlePath, &sealFree))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	bundle := h.fakeForPath(bundlePath)
+	require.True(t, bundle.exists)
+	assert.Equal(t, before, bundle.data, "byte-identical copy")
+
+	// The source keeps full relay CRUD (no seal): GET works, a relay write
+	// lands, and the write does not leak into the taken bundle.
+	rec = doVault(t, h.srv, http.MethodGet, snapshotTestUID, "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doVault(t, h.srv, http.MethodPut, snapshotTestUID, vaultPut("1"), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotEqual(t, before, h.fileFor(snapshotTestUID).data, "the source moved on")
+	assert.Equal(t, before, bundle.data, "the taken bundle is unchanged")
 }
 
 // ---------------------------------------------------------------------------

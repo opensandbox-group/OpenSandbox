@@ -845,10 +845,8 @@ class TestCreateSandboxRequestWithVolumes:
 
 
 class TestCreateSandboxRequestPoolMode:
-    """Tests for pool mode (extensions.poolRef) validation."""
 
     def test_pool_mode_accepts_only_pool_ref(self):
-        """Happy path: poolRef only, no image/entrypoint/resourceLimits required."""
         request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
         )
@@ -858,7 +856,6 @@ class TestCreateSandboxRequestPoolMode:
         assert request.extensions["poolRef"] == "my-pool"
 
     def test_pool_mode_accepts_pool_ref_with_optional_fields(self):
-        """poolRef with optional env/metadata/timeout should be valid."""
         request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
             env={"KEY": "value"},
@@ -895,7 +892,6 @@ class TestCreateSandboxRequestPoolMode:
         assert request.network_policy is not None
 
     def test_resource_limits_required_without_pool_ref(self):
-        """Without poolRef, resourceLimits is still required (image mode)."""
         with pytest.raises(ValidationError):
             CreateSandboxRequest(
                 image=ImageSpec(uri="python:3.11"),
@@ -914,6 +910,44 @@ class TestCreateSandboxRequestPoolMode:
             CreateSandboxRequest(
                 extensions={"poolRef": "   "},
             )
+
+
+class TestNetworkPolicy:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"egress": [{"action": "allow", "target": "10.0.0.0/8", "port": [443]}]},
+            {"egres": []},
+        ],
+    )
+    def test_rejects_unknown_fields(self, payload):
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            NetworkPolicy.model_validate(payload)
+
+    @pytest.mark.parametrize("action", ["allow", "deny"])
+    def test_round_trips_valid_policy(self, action):
+        payload = {
+            "defaultAction": action,
+            "egress": [
+                {"action": action, "target": "*.example.com"},
+                {"action": action, "target": "10.0.0.0/8", "ports": [22, 443]},
+                {"action": action, "ports": [25]},
+            ],
+        }
+        policy = NetworkPolicy.model_validate(payload)
+        assert policy.model_dump(by_alias=True, exclude_none=True) == payload
+
+    def test_preserves_omitted_defaults(self):
+        policy = NetworkPolicy()
+        assert policy.default_action is None
+        assert policy.egress == []
+        assert policy.model_dump(by_alias=True, exclude_none=True) == {"egress": []}
+
+    def test_preserves_default_action_field_name(self):
+        policy = NetworkPolicy.model_validate({"default_action": "deny"})
+        assert policy.model_dump(by_alias=True, exclude_none=True) == {
+            "defaultAction": "deny", "egress": [],
+        }
 
 
 class TestNetworkRule:

@@ -19,7 +19,11 @@ package runtime
 
 import (
 	"bufio"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +32,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/internal/safego"
+
+	"github.com/alibaba/opensandbox/execd/pkg/binding"
 )
 
 func replayContains(t *testing.T, s *ptySession, substr string, timeout time.Duration) bool {
@@ -298,6 +304,58 @@ func TestPTYSession_CloseTerminatesProcess(t *testing.T) {
 	}
 }
 
+func TestPTYSession_CloseStopsBackgroundJobs(t *testing.T) {
+	requireBash(t)
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("process liveness check needs /proc")
+	}
+
+	s := newPTYSession(uuidString(), "", "")
+	require.NoError(t, s.StartPTY())
+	t.Cleanup(func() { s.close() })
+	stdoutR, _, detach := s.AttachOutput()
+	defer detach()
+	safego.Go(func() { _, _ = io.Copy(io.Discard, stdoutR) }) //nolint:errcheck
+
+	// Job control puts the background job in its own process group.
+	pidFile := filepath.Join(t.TempDir(), "job.pid")
+	_, err := s.WriteStdin([]byte("sleep 300 & echo $! > " + pidFile + "\n"))
+	require.NoError(t, err)
+	var jobPid int
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		jobPid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+		return err == nil && jobPid > 0
+	}, 5*time.Second, 25*time.Millisecond, "background job did not start")
+
+	started := time.Now()
+	s.close()
+
+	select {
+	case <-s.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("session did not end within 3s after close()")
+	}
+	// The job no longer holds the terminal open until ptyDrainTimeout.
+	assert.Less(t, time.Since(started), ptyDrainTimeout, "session end waited for the output drain timeout")
+	assert.Eventually(t, func() bool { return processGone(jobPid) }, 3*time.Second, 25*time.Millisecond,
+		"background job %d survived close()", jobPid)
+}
+
+// processGone reports whether pid no longer exists or is a zombie.
+func processGone(pid int) bool {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	// The state follows the parenthesised command name.
+	fields := strings.Fields(string(data[strings.LastIndexByte(string(data), ')')+1:]))
+	return len(fields) > 0 && fields[0] == "Z"
+}
+
 func TestPTYSession_ExitCode(t *testing.T) {
 	requireBash(t)
 
@@ -390,5 +448,142 @@ func waitForLine(ch <-chan string, target string, timeout time.Duration) bool {
 		case <-deadline:
 			return false
 		}
+	}
+}
+
+func TestPTYSessionEnvDefaultsTerm(t *testing.T) {
+	t.Setenv("EXECD_ENVS", "")
+	applyTestBinding(t, &binding.RuntimeBinding{SandboxID: "sandbox-1"})
+
+	t.Setenv("TERM", "")
+	require.Equal(
+		t,
+		[]string{"TERM=" + defaultPTYTerm},
+		terminalEntries(ptySessionEnv()),
+	)
+}
+
+func TestPTYSessionEnvKeepsExistingTerm(t *testing.T) {
+	t.Setenv("EXECD_ENVS", "")
+	applyTestBinding(t, &binding.RuntimeBinding{SandboxID: "sandbox-1"})
+
+	t.Setenv("TERM", "xterm")
+	require.Equal(t, []string{"TERM=xterm"}, terminalEntries(ptySessionEnv()))
+}
+
+func terminalEntries(env []string) []string {
+	var found []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "TERM=") {
+			found = append(found, kv)
+		}
+	}
+	return found
+}
+
+// When the shell exits, the PTY master still holds output the reader has not
+// consumed yet, e.g. because the attached client reads slowly. That output
+// must still reach the replay buffer.
+func TestPTYSession_KeepsOutputBufferedWhenShellExits(t *testing.T) {
+	requireBash(t)
+
+	const outputBytes = 600000
+	s := newPTYSession(uuidString(), "", "head -c 600000 /dev/zero | tr '\\0' a; printf END")
+	require.NoError(t, s.StartPTY())
+	t.Cleanup(func() { s.close() })
+
+	stdoutR, _, detach := s.AttachOutput()
+	defer detach()
+	safego.Go(func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := stdoutR.Read(buf); err != nil {
+				return
+			}
+			time.Sleep(200 * time.Microsecond)
+		}
+	})
+
+	select {
+	case <-s.OutputDone():
+	case <-time.After(30 * time.Second):
+		t.Fatal("PTY output was not drained")
+	}
+	data, _ := s.replay.ReadFrom(0)
+	require.Equal(t, outputBytes+len("END"), len(data))
+	require.True(t, strings.HasSuffix(string(data), "END"))
+}
+
+// A client that is attached but stopped reading blocks the broadcast
+// goroutine; the session must still end once the shell exits.
+func TestPTYSession_EndsWhileClientStopsReading(t *testing.T) {
+	requireBash(t)
+
+	s := newPTYSession(uuidString(), "", "echo started")
+	require.NoError(t, s.StartPTY())
+	t.Cleanup(func() { s.close() })
+	_, _, detach := s.AttachOutput()
+	defer detach()
+
+	select {
+	case <-s.Done():
+	case <-time.After(ptyDrainTimeout + 5*time.Second):
+		t.Fatal("session did not end after the shell exited")
+	}
+}
+
+// The shell is reaped before its output is drained, so its PID may be reused
+// meanwhile: the session must stop signalling it right away.
+func TestPTYSession_StopsSignallingOnceShellIsReaped(t *testing.T) {
+	requireBash(t)
+
+	s := newPTYSession(uuidString(), "", "echo started")
+	require.NoError(t, s.StartPTY())
+	t.Cleanup(func() { s.close() })
+	_, _, detach := s.AttachOutput()
+	defer detach()
+
+	require.Eventually(t, func() bool { return !s.IsRunning() },
+		ptyDrainTimeout/2, 10*time.Millisecond,
+		"session still signalable while its output drains")
+}
+
+// Input that arrives after the shell is reaped, while its output drains, is
+// dropped as a terminal would, rather than failing the client's stdin write.
+func TestPTYSession_DropsStdinOnceShellIsReaped(t *testing.T) {
+	requireBash(t)
+
+	s := newPTYSession(uuidString(), "", "echo started")
+	require.NoError(t, s.StartPTY())
+	t.Cleanup(func() { s.close() })
+	_, _, detach := s.AttachOutput()
+	defer detach()
+
+	require.Eventually(t, func() bool { return !s.IsRunning() },
+		ptyDrainTimeout/2, 10*time.Millisecond)
+	select {
+	case <-s.Done():
+		t.Fatal("session ended before its output drained")
+	default:
+	}
+
+	// More than the tty input queue holds, so a write that reached the master
+	// would block until the drain ends and then fail.
+	line := []byte(strings.Repeat("a", 1023) + "\n")
+	written := make(chan error, 1)
+	safego.Go(func() {
+		for range 64 {
+			if _, err := s.WriteStdin(line); err != nil {
+				written <- err
+				return
+			}
+		}
+		written <- nil
+	})
+	select {
+	case err := <-written:
+		require.NoError(t, err)
+	case <-time.After(ptyDrainTimeout / 2):
+		t.Fatal("stdin write blocked while the output drained")
 	}
 }

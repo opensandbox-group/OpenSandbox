@@ -12,8 +12,11 @@ Thank you for your interest in contributing to OpenSandbox! This guide will help
 - [Coding Standards](#coding-standards)
 - [Testing Guidelines](#testing-guidelines)
 - [Submitting Contributions](#submitting-contributions)
+- [Project Roles and Technical Steering Committee](#project-roles-and-technical-steering-committee)
 - [Contributor Advancement](#contributor-advancement)
 - [Communication Channels](#communication-channels)
+- [License](#license)
+- [Developer Certificate of Origin](#developer-certificate-of-origin)
 
 ## Code of Conduct
 
@@ -139,7 +142,7 @@ OpenSandbox/
 ├── examples/                 # Example integrations
 ├── docs/                     # Documentation
 ├── tests/                    # Cross-component tests
-│   └── e2e/                  # End-to-end tests
+│   └── python/               # Python end-to-end tests
 └── scripts/                  # Build and utility scripts
 ```
 
@@ -478,12 +481,12 @@ go test -v -cover ./pkg/...
 Integration tests require Docker:
 
 ```bash
-# Server integration tests
+# Server tests (from the repository root)
 cd server
-uv run pytest tests/integration/
+uv run pytest tests/
 
-# E2E tests
-cd tests/e2e/python
+# Python E2E tests
+cd ../tests/python
 uv run pytest
 ```
 
@@ -505,7 +508,7 @@ uv run pytest
 4. **Update Documentation**: Update relevant docs
 5. **Test Locally**: Ensure all tests pass
 6. **Run Linters**: Fix any style issues
-7. **Commit Changes**: Use conventional commit messages
+7. **Commit Changes**: Use conventional commit messages and [sign off code contributions](#developer-certificate-of-origin)
 8. **Push to Fork**: Push your branch to your fork
 9. **Create Pull Request**: Submit PR with detailed description
 
@@ -541,9 +544,11 @@ When creating a PR, fill out the template:
 
 ### Pull Request Guidelines
 
+Source code changes exceeding **2000 lines cannot be reviewed**. PRs above this limit will not be reviewed; please split them before submitting. Plan your development pace accordingly: break large features into a series of small, focused PRs (for example, by module, layer, or feature increment) and land them incrementally instead of accumulating a long-running branch. Refactors should be separated from behavior changes whenever possible.
+
 **Do:**
 
-- Keep PRs focused and reasonably sized (< 500 lines if possible)
+- Keep PRs focused and reasonably sized (< 500 lines if possible; hard limit 2000 lines, see above)
 - Write clear PR descriptions with motivation and context
 - Link related issues
 - Respond to review comments promptly
@@ -565,6 +570,14 @@ When creating a PR, fill out the template:
 3. **Feedback Loop**: Address review comments
 4. **Approval**: Once approved, a maintainer will merge your PR
 5. **Cleanup**: Delete your feature branch after merge
+
+## Project Roles and Technical Steering Committee
+
+OpenSandbox's governance is established by the [Technical Charter](CHARTER.md). The project uses the following roles under Sections 2.b., 2.c., and 2.e. of the Charter:
+
+- **Contributors** participate through code, documentation, issues, reviews, testing, or community support.
+- **Maintainers (component scope)** guide development, review contributions, and help contributors in the areas assigned to them in [CODEOWNERS](.github/CODEOWNERS). They preserve quality, compatibility, and security, coordinate cross-component review, and keep affected implementations and documentation aligned. Component maintainership alone does not confer TSC membership or voting rights.
+- **Project Maintainers** provide repository-wide stewardship and serve as the voting members of the Technical Steering Committee (TSC), with responsibilities set out in [Section 2 of the Charter](CHARTER.md#2-technical-steering-committee). They coordinate cross-cutting decisions, governance updates, maintainer onboarding and offboarding, and resolution of review deadlocks. The Project Maintainers listed in [MAINTAINERS.md](MAINTAINERS.md#project-maintainers-and-technical-steering-committee) constitute the TSC membership under Section 2.b.; keep that roster synchronized with the fallback `*` owners in [CODEOWNERS](.github/CODEOWNERS).
 
 ## Contributor Advancement
 
@@ -662,4 +675,14 @@ If you have suggestions for improving this contributing guide, please open an is
 
 ## License
 
-By contributing to OpenSandbox, you agree that your contributions will be licensed under the [Apache 2.0 License](LICENSE).
+Code contributions are licensed under the [Apache 2.0 License](LICENSE). Documentation contributions are received and made available under the [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/), as specified in [Section 7 of the Technical Charter](CHARTER.md#7-intellectual-property-policy). License exceptions follow Section 7.c. of the Charter.
+
+### Developer Certificate of Origin
+
+All new inbound code contributions must include a [Developer Certificate of Origin](https://developercertificate.org/) (DCO) sign-off, as required by Section 7.b.ii. of the Technical Charter. Read the DCO before signing off. If you can make its certification, add the sign-off to each code contribution commit with:
+
+```bash
+git commit -s
+```
+
+This adds a `Signed-off-by: Your Name <your-email@example.com>` trailer to the commit message. Maintainers should verify the sign-offs on code contribution commits before merging; license-header checks do not verify DCO sign-offs.

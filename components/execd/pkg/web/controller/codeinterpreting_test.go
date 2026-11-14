@@ -18,7 +18,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,12 +34,16 @@ import (
 )
 
 type fakeCodeRunner struct {
+	createContext          func(_ context.Context, _ *runtime.CreateContextRequest) (string, error)
 	execute                func(request *runtime.ExecuteCodeRequest) error
 	runInBashSession       func(_ context.Context, _ *runtime.ExecuteCodeRequest) error
 	validateBashSessionCwd func(_, _ string) error
 }
 
-func (f *fakeCodeRunner) CreateContext(_ *runtime.CreateContextRequest) (string, error) {
+func (f *fakeCodeRunner) CreateContext(ctx context.Context, req *runtime.CreateContextRequest) (string, error) {
+	if f.createContext != nil {
+		return f.createContext(ctx, req)
+	}
 	return "", nil
 }
 
@@ -104,6 +110,25 @@ func (f *fakeCodeRunner) CreatePTYSession(_ string, _ string, _ string) (runtime
 func (f *fakeCodeRunner) GetPTYSession(_ string) runtime.PTYSession         { return nil }
 func (f *fakeCodeRunner) DeletePTYSession(_ string) error                   { return nil }
 func (f *fakeCodeRunner) GetPTYSessionStatus(_ string) (bool, int64, error) { return false, 0, nil }
+
+func TestCreateContextRejectsUnsupportedLanguage(t *testing.T) {
+	previousRunner := codeRunner
+	codeRunner = &fakeCodeRunner{
+		createContext: func(_ context.Context, _ *runtime.CreateContextRequest) (string, error) {
+			return "", fmt.Errorf("%w: no kernel spec for %q", runtime.ErrUnsupportedLanguage, "ruby")
+		},
+	}
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	ctx, w := newTestContext(http.MethodPost, "/code/context", []byte(`{"language":"ruby"}`))
+	NewCodeInterpretingController(ctx).CreateContext()
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+	require.Contains(t, resp.Message, "unsupported language")
+}
 
 func TestBuildExecuteCodeRequestDefaultsToCommand(t *testing.T) {
 	ctrl := &CodeInterpretingController{}
@@ -428,6 +453,118 @@ func TestRunCodeSuccessStillEmitsSSE(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
 	require.NotEmpty(t, w.Body.Bytes(), "successful run should write SSE events")
+}
+
+// An error returned after the init event cannot change the response status
+// any more, so it must reach the client as an SSE error event instead of a
+// JSON error body appended to the stream.
+func TestRunErrorAfterInitEmitsErrorEvent(t *testing.T) {
+	failAfterInit := func(request *runtime.ExecuteCodeRequest) error {
+		request.Hooks.OnExecuteInit("session-1")
+		return errors.New("failure after init")
+	}
+	previousRunner := codeRunner
+	previousTimeout := flag.ApiGracefulShutdownTimeout
+	codeRunner = &fakeCodeRunner{
+		execute: failAfterInit,
+		runInBashSession: func(_ context.Context, request *runtime.ExecuteCodeRequest) error {
+			return failAfterInit(request)
+		},
+	}
+	flag.ApiGracefulShutdownTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		codeRunner = previousRunner
+		flag.ApiGracefulShutdownTimeout = previousTimeout
+	})
+
+	cases := []struct {
+		name   string
+		path   string
+		body   string
+		params gin.Params
+		run    func(*CodeInterpretingController)
+	}{
+		{
+			name: "RunCode",
+			path: "/code/run",
+			body: `{"code":"print(1)","context":{"id":"ctx-1","language":"python"}}`,
+			run:  (*CodeInterpretingController).RunCode,
+		},
+		{
+			name: "RunCommand",
+			path: "/command",
+			body: `{"command":"echo hi","background":true}`,
+			run:  (*CodeInterpretingController).RunCommand,
+		},
+		{
+			name:   "RunInSession",
+			path:   "/sessions/session-1/run",
+			body:   `{"command":"echo hi","timeout":0}`,
+			params: gin.Params{{Key: "sessionId", Value: "session-1"}},
+			run:    (*CodeInterpretingController).RunInSession,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, w := newTestContext(http.MethodPost, tc.path, []byte(tc.body))
+			ctx.Params = append(ctx.Params, tc.params...)
+
+			tc.run(NewCodeInterpretingController(ctx))
+
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Contains(t, w.Header().Get("Content-Type"), "text/event-stream")
+			body := w.Body.String()
+			require.True(t, strings.HasSuffix(body, "\n\n"), "every event must be terminated, got %q", body)
+			var errorEvent *model.ServerStreamEvent
+			for _, frame := range strings.Split(strings.TrimSuffix(body, "\n\n"), "\n\n") {
+				var event model.ServerStreamEvent
+				require.NoError(t, json.Unmarshal([]byte(frame), &event))
+				require.NotEmpty(t, event.Type, "frame without an event type: %s", frame)
+				if event.Type == model.StreamEventTypeError {
+					errorEvent = &event
+				}
+			}
+			require.NotNil(t, errorEvent, "no error event in %q", body)
+			require.NotNil(t, errorEvent.Error)
+			require.Contains(t, errorEvent.Error.EValue, "failure after init")
+		})
+	}
+}
+
+// Some runtime paths report a specific error event and then also return an
+// error. The run has already ended, so no second, generic error may follow:
+// clients keep the last error event they see.
+func TestRunErrorAfterReportedErrorIsNotRepeated(t *testing.T) {
+	previousRunner := codeRunner
+	previousTimeout := flag.ApiGracefulShutdownTimeout
+	codeRunner = &fakeCodeRunner{
+		execute: func(request *runtime.ExecuteCodeRequest) error {
+			request.Hooks.OnExecuteInit("session-1")
+			request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "DBInitError", EValue: "no database"})
+			return errors.New("no database")
+		},
+	}
+	flag.ApiGracefulShutdownTimeout = 50 * time.Millisecond
+	t.Cleanup(func() {
+		codeRunner = previousRunner
+		flag.ApiGracefulShutdownTimeout = previousTimeout
+	})
+
+	body := []byte(`{"code":"select 1","context":{"id":"ctx-1","language":"sql"}}`)
+	ctx, w := newTestContext(http.MethodPost, "/code/run", body)
+
+	NewCodeInterpretingController(ctx).RunCode()
+
+	var errorEvents []model.ServerStreamEvent
+	for _, frame := range strings.Split(strings.TrimSuffix(w.Body.String(), "\n\n"), "\n\n") {
+		var event model.ServerStreamEvent
+		require.NoError(t, json.Unmarshal([]byte(frame), &event))
+		if event.Type == model.StreamEventTypeError {
+			errorEvents = append(errorEvents, event)
+		}
+	}
+	require.Len(t, errorEvents, 1)
+	require.Equal(t, "DBInitError", errorEvents[0].Error.EName)
 }
 
 func TestRunInSession_InvalidCwdReturns400(t *testing.T) {

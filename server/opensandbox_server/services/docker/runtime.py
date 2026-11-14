@@ -26,7 +26,7 @@ import logging
 import posixpath
 import tarfile
 import time
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from docker.errors import DockerException, NotFound as DockerNotFound
@@ -46,11 +46,11 @@ SESSION_GATE_SOURCE_PATH = "/usr/local/libexec/opensandbox-session-gate"
 SESSION_GATE_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-session-gate")
 LAUNCHER_SOURCE_PATH = "/usr/local/libexec/opensandbox-launcher"
 LAUNCHER_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-launcher")
-DEFAULT_EXECD_ENVS_PATH = posixpath.join(OPENSANDBOX_DIR, ".env")
 
 
 class DockerRuntimeMixin:
     """Mixin providing execd distribution and bootstrap launcher installation."""
+
 
     def _fetch_execd_archive(self, platform: Optional[PlatformSpec] = None) -> bytes:
         """Fetch (and memoize) the execd archive by effective target platform."""
@@ -76,7 +76,7 @@ class DockerRuntimeMixin:
                 )
 
                 with self._docker_operation("execd cache create container", "execd-cache"):
-                    create_kwargs: dict[str, any] = {
+                    create_kwargs: dict[str, Any] = {
                         "image": self.execd_image,
                         "command": ["tail", "-f", "/dev/null"],
                         "name": f"sandbox-execd-{uuid4()}",

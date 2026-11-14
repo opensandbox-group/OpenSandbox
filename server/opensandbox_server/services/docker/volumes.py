@@ -24,53 +24,131 @@ from __future__ import annotations
 import logging
 import os
 import posixpath
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from docker.errors import DockerException, NotFound as DockerNotFound
 from fastapi import HTTPException, status
 
+from opensandbox_server.extensions.keys import (
+    BOOTSTRAP_EXECD_ISOLATION_KEY,
+    ISOLATION_UPPER_MOUNT_PATH,
+)
 from opensandbox_server.services.constants import (
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_PLATFORM_OS_LABEL,
     SandboxErrorCodes,
 )
-from opensandbox_server.services.docker.windows_profile import WINDOWS_OEM_VOLUME_PREFIX
+from opensandbox_server.services.docker.windows_profile import (
+    WINDOWS_OEM_MOUNT_PATH,
+    WINDOWS_OEM_VOLUME_PREFIX,
+)
 from opensandbox_server.services.validators import (
     ensure_valid_host_path,
     ensure_volumes_valid,
 )
+from opensandbox_server.services.windows_common import is_windows_platform
+
+if TYPE_CHECKING:
+    from opensandbox_server.api.schema import CreateSandboxRequest
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_mount_path(path: str) -> str:
+    # Docker cleans container paths, including repeated leading slashes.
+    return posixpath.normpath("/" + path.lstrip("/"))
 
 
 class DockerVolumesMixin:
     """Mixin providing volume validation, bind mount building, and cleanup."""
 
+
+    def _validate_volume_definitions(self, request: CreateSandboxRequest) -> None:
+        """Validate request volumes before filesystem changes or Docker API calls."""
+        if not request.volumes:
+            return
+
+        allowed_prefixes = self.app_config.storage.allowed_host_paths
+        ensure_volumes_valid(request.volumes, allowed_host_prefixes=allowed_prefixes)
+
+        seen_mount_paths = self._server_mount_paths(request)
+        for volume in request.volumes:
+            if ":" in volume.mount_path:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
+                        "message": (
+                            f"Volume '{volume.name}': mount path '{volume.mount_path}' "
+                            "contains ':', which is not supported by the Docker runtime."
+                        ),
+                    },
+                )
+            mount_path = _clean_mount_path(volume.mount_path)
+            # Docker's root check also reads a backslash as "/"; its duplicate check does not.
+            root_path = posixpath.normpath("/" + volume.mount_path.replace("\\", "/").lstrip("/"))
+            if root_path == "/":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
+                        "message": (
+                            f"Volume '{volume.name}': mount path '{volume.mount_path}' "
+                            "resolves to '/', which is not supported by the Docker runtime."
+                        ),
+                    },
+                )
+            if mount_path in seen_mount_paths:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_MOUNT_PATH,
+                        "message": (
+                            f"Duplicate mount path '{mount_path}'. Each volume must have "
+                            "a unique mount destination in the Docker runtime, including "
+                            "paths the server mounts itself."
+                        ),
+                    },
+                )
+            seen_mount_paths.add(mount_path)
+
+    def _server_mount_paths(self, request: CreateSandboxRequest) -> set[str]:
+        """Container paths the server mounts itself for this request."""
+        paths: set[str] = set()
+        for bind in self.app_config.docker.sandbox_binds or []:
+            # host_path:container_path[:mode]
+            parts = bind.split(":")
+            if len(parts) > 1:
+                paths.add(_clean_mount_path(parts[1]))
+        if (request.extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
+            paths.add(ISOLATION_UPPER_MOUNT_PATH)
+        if is_windows_platform(request.platform):
+            paths.add(WINDOWS_OEM_MOUNT_PATH)
+        return paths
+
+    @staticmethod
+    def _has_volume_at(request: CreateSandboxRequest, path: str) -> bool:
+        """Whether a request volume mounts at ``path`` once Docker cleans it."""
+        return any(
+            _clean_mount_path(volume.mount_path) == path
+            for volume in request.volumes or []
+        )
+
     def _validate_volumes(
         self, request
     ) -> tuple[dict[str, dict], list[str]]:
         """
-        Validate volume definitions for Docker runtime.
+        Validate volume backends for Docker runtime. Request definitions must
+        already have passed ``_validate_volume_definitions``.
 
-        Returns:
-            A tuple of:
-            - A dict mapping PVC volume names (``pvc.claimName``) to their
-              ``docker volume inspect`` results.  Empty when there are no PVC
-              volumes.  This data is passed to ``_build_volume_binds`` so that
-              bind generation does not need a second API call.
-            - A list of Docker named volume names that were auto-created during
-              validation (empty when ``createIfNotExists`` is false or all
-              volumes already existed).
-
-        Raises:
-            HTTPException: When any validation fails.
+        Returns the PVC claimName → ``docker volume inspect`` cache (reused by
+        ``_build_volume_binds`` to avoid a second API call) and the names of
+        Docker named volumes auto-created during validation.
         """
         if not request.volumes:
             return {}, []
 
         allowed_prefixes = self.app_config.storage.allowed_host_paths
-        ensure_volumes_valid(request.volumes, allowed_host_prefixes=allowed_prefixes)
-
         pvc_inspect_cache: dict[str, dict] = {}
         auto_created_volumes: list[str] = []
         try:
@@ -151,11 +229,11 @@ class DockerVolumesMixin:
 
     def _validate_pvc_volume(self, volume) -> tuple[dict, bool]:
         """
-        Docker-specific validation for PVC (named volume) backend.
+        Docker-specific validation for the PVC (named volume) backend.
 
-        In Docker runtime, the ``pvc`` backend maps to a Docker named volume.
+        In Docker runtime, the ``pvc`` backend maps to a Docker named volume;
         ``pvc.claimName`` is used as the Docker volume name.  The volume must
-        already exist (created via ``docker volume create``).
+        already exist unless ``createIfNotExists`` auto-creates it.
 
         When ``subPath`` is specified, the volume must use the ``local`` driver
         so that the host-side ``Mountpoint`` is a real filesystem path.  The
@@ -163,14 +241,10 @@ class DockerVolumesMixin:
         safety but *not* for existence, because the Mountpoint directory is
         typically owned by root and may not be stat-able by the server process.
 
-        Returns:
-            A tuple of:
-            - The ``docker volume inspect`` result dict for the named volume.
-            - Whether the volume was auto-created by this call.
-
-        Raises:
-            HTTPException: When the named volume does not exist, inspection
-                fails, or subPath constraints are violated.
+        Returns the ``docker volume inspect`` result dict and whether the
+        volume was auto-created by this call.  Raises ``HTTPException`` when
+        the named volume does not exist, inspection fails, or subPath
+        constraints are violated.
         """
         volume_name = volume.pvc.claim_name
         auto_created = False
@@ -337,30 +411,15 @@ class DockerVolumesMixin:
         """
         Convert Volume definitions into Docker bind/volume mount specs.
 
-        Supported backends:
-        - ``host``: host path bind mount.
-          Format: ``/host/path:/container/path:ro|rw``
-        - ``pvc``: Docker named volume mount.
-          Format (no subPath): ``volume-name:/container/path:ro|rw``
-          Docker recognises non-absolute-path sources as named volume references.
-          Format (with subPath): ``/var/lib/docker/volumes/…/subdir:/container/path:ro|rw``
-          When subPath is specified, the volume's host Mountpoint (obtained from
-          ``pvc_inspect_cache``) is used to produce a standard bind mount.
-        - ``ossfs``: host bind mount to runtime-mounted OSSFS path.
-          Format: ``/mnt/ossfs/<bucket>/<subPath?>:/container/path:ro|rw``
-
-        Each mount string uses ``:ro`` for read-only and ``:rw`` for read-write
-        (default).
-
-        Args:
-            pvc_inspect_cache: Dict mapping PVC claimNames to their
-                ``docker volume inspect`` results, populated by
-                ``_validate_volumes``.  Avoids a redundant API call and
-                eliminates the race window between validation and bind
-                generation.
-
-        Returns:
-            List of Docker bind/volume mount strings.
+        Formats:
+        - ``host``: ``/host/path[/subPath]:/container/path:ro|rw`` bind mount.
+        - ``pvc`` (no subPath): ``claimName:/container/path:ro|rw`` — Docker
+          treats a non-absolute source as a named volume reference.
+        - ``pvc`` (with subPath): bind of the volume's host Mountpoint plus
+          subPath, resolved from ``pvc_inspect_cache`` (populated by
+          ``_validate_volumes``, avoiding a redundant API call and the
+          validation-to-bind race window).
+        - ``ossfs``: bind of the runtime-mounted OSSFS host path.
         """
         if not volumes:
             return []
@@ -381,11 +440,8 @@ class DockerVolumesMixin:
 
             elif volume.pvc is not None:
                 if volume.sub_path:
-                    # Resolve the named volume's host-side Mountpoint and append
-                    # the subPath to produce a regular bind mount.  Validation
-                    # has already ensured the driver is "local" and the resolved
-                    # path is safe.  Reuse cached inspect data to avoid a
-                    # redundant Docker API call and potential race condition.
+                    # Validation already ensured the driver is "local" and the
+                    # resolved path is safe.
                     vol_info = cache.get(volume.pvc.claim_name, {})
                     mountpoint = vol_info.get("Mountpoint", "")
                     resolved = posixpath.normpath(
@@ -393,7 +449,6 @@ class DockerVolumesMixin:
                     )
                     binds.append(f"{resolved}:{container_path}:{mode}")
                 else:
-                    # No subPath: use claimName directly as Docker volume ref.
                     binds.append(
                         f"{volume.pvc.claim_name}:{container_path}:{mode}"
                     )

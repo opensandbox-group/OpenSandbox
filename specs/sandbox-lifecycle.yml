@@ -59,11 +59,10 @@ paths:
       operationId: getSandboxNetworkPolicy
       summary: Read sandbox network policy
       description: |
-        For Fsb, reads persisted egress Action Binding intent in the tenant's
-        Sandbox CR, not live enforcement state. An absent binding defaults to
-        deny-first when an egress handler is configured; this is not proof of
-        enforcement on a pool without that handler. Other backends proxy the
-        sandbox-side egress service. Requires lifecycle API authentication.
+        Fsb reads the egress-held policy record — the response reflects
+        exactly what the egress enforces, not the create-time binding input.
+        Other backends proxy the sandbox-side egress service. Requires
+        lifecycle API authentication.
       responses:
         '200':
           description: Policy intent (Fsb) or sidecar policy (other backends).
@@ -80,6 +79,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -94,9 +95,12 @@ paths:
       summary: Replace the complete sandbox network policy
       description: |
         Replaces defaultAction and all rules, rather than merging them. Fsb
-        commits the egress binding through FastPath, preserving unrelated bindings
-        with UID/generation conflict protection. Success does not imply handler
-        convergence. Other backends proxy the sandbox-side egress service.
+        relays the replacement to the egress-held policy record through the
+        FastPath handler relay — the ack means the egress applied it (and, with
+        policy persistence, that it is durable). The create-time binding input
+        is the bootstrap only; runtime changes never rewrite it, and a paused
+        (sealed) sandbox rejects mutations until resume. Other backends proxy
+        the sandbox-side egress service.
       requestBody:
         required: true
         content:
@@ -141,9 +145,10 @@ paths:
         take priority over existing rules with the same target and replace
         them in place; within one patch payload, the first rule for a target
         wins; existing rules for other targets and the current defaultAction
-        are preserved. Fsb commits the merged binding through FastPath with
-        UID/generation conflict protection. Other backends proxy the
-        sandbox-side egress service.
+        are preserved. Fsb composes the merge server-side (relay GET → merge
+        → relay PUT carrying the read revision) — a concurrent writer wins
+        and the stale merge is a 409. Other backends proxy the sandbox-side
+        egress service.
       requestBody:
         required: true
         content:
@@ -1107,6 +1112,11 @@ paths:
                 summary: Create a named snapshot
                 value:
                   name: checkpoint-before-import
+              rootfsOnly:
+                summary: Create a rootfs-only snapshot
+                value:
+                  name: workspace-state
+                  mode: rootfsOnly
       responses:
         '202':
           description: |
@@ -1252,7 +1262,12 @@ paths:
             maximum: 65535
         - name: use_server_proxy
           in: query
-          description: Whether to return a server-proxied URL. Cannot be combined with `expires`.
+          deprecated: true
+          description: |
+            Deprecated: the server-proxied data path is in maintenance mode and only
+            receives security fixes and bug fixes; data-plane traffic should be served by
+            the ingress gateway. When true, returns a server-proxied URL. Cannot be
+            combined with `expires`.
           schema:
             type: boolean
             default: false
@@ -1690,6 +1705,23 @@ components:
           type: string
           description: Optional human-readable snapshot name.
           minLength: 1
+        mode:
+          type: string
+          description: |
+            What the snapshot persists.
+
+            - `full` (default): the most complete capture the runtime
+              supports. On the fast-sandbox backend that includes memory and
+              process state, and restoring resumes the sandbox in place;
+              Docker and Kubernetes snapshots capture the filesystem only and
+              do not restore running processes.
+            - `rootfsOnly`: only the writable filesystem; restoring boots a
+              fresh sandbox from the disk. Running processes and in-memory
+              state are discarded, and the entrypoint re-runs on restore.
+              Supported only on the fast-sandbox backend with OCI-backed
+              sandboxes; rejected otherwise.
+          enum: [full, rootfsOnly]
+          default: full
       additionalProperties: false
 
     Snapshot:
@@ -1707,6 +1739,16 @@ components:
         name:
           type: string
           description: Optional human-readable snapshot name
+
+        mode:
+          type: string
+          description: |
+            Artifact class of the snapshot: `full` is the runtime's most
+            complete capture (memory and process state on the fast-sandbox
+            backend; filesystem-only on Docker and Kubernetes),
+            `rootfsOnly` preserves only the writable filesystem. Snapshots
+            created before this field existed report `full`.
+          enum: [full, rootfsOnly]
 
         status:
           $ref: '#/components/schemas/SnapshotStatus'
@@ -2266,7 +2308,7 @@ components:
             SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
 
         resourceRequests:
-          $ref: '#/components/schemas/ResourceLimits'
+          $ref: '#/components/schemas/ResourceRequests'
           description: |
             Resource reservations (guaranteed minimums) for the sandbox instance.
             When provided, these values are used as Kubernetes resource `requests`,
@@ -2356,6 +2398,11 @@ components:
             Optional outbound network policy for the sandbox.
             Shape matches the sidecar `/policy` endpoint. If omitted or empty,
             the sidecar starts in allow-all mode until updated.
+            For Fsb, an omitted policy still registers an egress binding,
+            seeded with a no-op default-allow record (the sandbox behaves
+            like a policy-less one until changed): runtime changes go
+            through the networkpolicy endpoints (handler relay), which
+            require that registration.
             Not supported together with `extensions.poolRef`; pooled pods are
             pre-created, so the server rejects this combination instead of
             silently ignoring the requested policy.
@@ -2426,6 +2473,14 @@ components:
         - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
         - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
         - `gpu`: Number of GPU devices (e.g., "1")
+        - `disk`: Writable-layer disk quota (e.g., "10G", "512M"); `storage` and
+          `ephemeral-storage` are accepted as aliases. On the Docker runtime this
+          bounds only the container's writable layer via HostConfig.StorageOpt —
+          bind mounts, named volumes, and read-only image layers are not covered —
+          and requires a quota-capable storage driver (for example overlay2 on XFS
+          with pquota); the create request fails with INVALID_PARAMETER if the
+          daemon cannot enforce it. On the Windows profile this maps to the
+          sandbox disk size.
 
         New resource types can be added without API changes.
       additionalProperties:
@@ -2434,6 +2489,43 @@ components:
         cpu: "500m"
         memory: "512Mi"
         gpu: "1"
+    ResourceRequests:
+      type: object
+      description: |
+        Resource reservations for the sandbox, as key-value pairs in Kubernetes
+        resource specification syntax (same key space as `resourceLimits`):
+        - `cpu`: CPU reservation (e.g., "250m" for 0.25 CPU cores)
+        - `memory`: Memory reservation (e.g., "512Mi", "1Gi")
+
+        On Kubernetes-based runtimes these become the sandbox container's
+        `requests` — scheduling guarantees, not hard caps. This field is
+        ignored by the Docker runtime, which reads only `resourceLimits`, so
+        a `disk` reservation here does not create a writable-layer quota.
+      additionalProperties:
+        type: string
+      example:
+        cpu: "500m"
+        memory: "512Mi"
+    FsbTemplateResourceLimits:
+      type: object
+      description: |
+        Guest machine sizing for a Fast Sandbox template, as key-value pairs:
+        - `cpu`: guest vCPUs (e.g., "1")
+        - `memory`: guest memory (e.g., "512Mi")
+        - `disk`: logical size of the guest rootfs (e.g., "2Gi"); the artifact
+          set is stored and P2P-pulled at this size, so keep it just above the
+          expanded source image.
+
+        Defaults when omitted: cpu `1`, memory `512Mi`, disk `2Gi`.
+        Only these three keys are accepted: `storage` and `ephemeral-storage`
+        are sandbox writable-layer quota aliases and are not template keys —
+        the request fails with HTTP 400 if they are set here.
+      additionalProperties:
+        type: string
+      example:
+        cpu: "1"
+        memory: "512Mi"
+        disk: "2Gi"
     RenewSandboxExpirationRequest:
       type: object
       required: [expiresAt]
@@ -2713,6 +2805,7 @@ components:
           type: string
         sourceType:
           type: string
+          description: Credential source kind (`inline` or `exchange`).
         revision:
           type: integer
           description: |
@@ -2737,13 +2830,14 @@ components:
       additionalProperties: false
     CredentialAuthMetadata:
       type: object
-      description: Sanitized auth shape — type always, name for apiKey only.
+      description: Sanitized auth shape — `type` (plus `name` for `apiKey`) for static kinds; `credential` only for the typeless exchange form.
       properties:
         type:
           type: string
         name:
           type: string
-      required: [type]
+        credential:
+          type: string
       additionalProperties: false
     Credential:
       type: object
@@ -2752,19 +2846,41 @@ components:
           type: string
           minLength: 1
         source:
-          $ref: '#/components/schemas/InlineCredentialSource'
+          $ref: '#/components/schemas/CredentialSource'
       required: [name, source]
       additionalProperties: false
-    InlineCredentialSource:
+    CredentialSource:
       type: object
+      required: [type]
+      description: |
+        Where the credential material comes from. Exactly one kind, selected
+        by `type`:
+
+        - `inline`: the secret value travels in this request via `value`.
+          Inline values are write-only and never appear in reads.
+        - `exchange`: no local material. Egress resolves header sets per
+          request from a header-resolver service addressed by `endpoint`.
+          Supported endpoint forms are `unix:///absolute/path` (HTTP over a
+          Unix domain socket) and `https://host[:port]` (TLS); anything else
+          is rejected with 400.
+
+        Fields of the other kind must be absent; for example `value` together
+        with `type: exchange` is rejected with 400.
       properties:
         type:
           type: string
-          enum: [inline]
+          enum: [inline, exchange]
         value:
           type: string
           writeOnly: true
-      required: [type, value]
+          description: |
+            Inline secret value. Required when `type` is `inline`; must be
+            absent otherwise.
+        endpoint:
+          type: string
+          description: |
+            Header-resolver endpoint. Required when `type` is `exchange`; must
+            be absent otherwise.
       additionalProperties: false
     CredentialBinding:
       type: object
@@ -2811,99 +2927,54 @@ components:
       required: [hosts]
       additionalProperties: false
     CredentialAuth:
-      oneOf:
-        - $ref: '#/components/schemas/BearerCredentialAuth'
-        - $ref: '#/components/schemas/BasicCredentialAuth'
-        - $ref: '#/components/schemas/ApiKeyCredentialAuth'
-        - $ref: '#/components/schemas/CustomHeadersCredentialAuth'
-        - $ref: '#/components/schemas/PassthroughCredentialAuth'
-      discriminator:
-        propertyName: type
-        mapping:
-          bearer: '#/components/schemas/BearerCredentialAuth'
-          basic: '#/components/schemas/BasicCredentialAuth'
-          apiKey: '#/components/schemas/ApiKeyCredentialAuth'
-          customHeaders: '#/components/schemas/CustomHeadersCredentialAuth'
-          passthrough: '#/components/schemas/PassthroughCredentialAuth'
-    BearerCredentialAuth:
       type: object
+      description: |
+        How a binding injects credential material. Exactly one auth kind:
+
+        - `bearer`: `type: bearer` plus `credential`.
+        - `basic`: `type: basic` plus `credential`.
+        - `apiKey`: `type: apiKey` plus `name` and `credential`.
+        - `customHeaders`: `type: customHeaders` plus `headers`.
+        - `passthrough`: `type: passthrough`, no credential reference.
+        - typeless exchange: `type` omitted with only `credential` set. The
+          referenced credential must be exchange-sourced; egress resolves the
+          header set per request from the credential's endpoint.
+
+        Static kinds must reference inline-sourced credentials, and the
+        typeless form must reference an exchange-sourced credential and must
+        not set `name`, `headers`, or `substitutions`. The five static kinds
+        accept optional `substitutions`. Violations are rejected with 400.
       properties:
         type:
           type: string
-          enum: [bearer]
+          enum: [bearer, basic, apiKey, customHeaders, passthrough]
+          description: Static auth kind. Omit entirely for the typeless exchange form.
         credential:
           type: string
           minLength: 1
-          description: Credential name whose value becomes the bearer token.
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type, credential]
-      additionalProperties: false
-    BasicCredentialAuth:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [basic]
-        credential:
-          type: string
-          minLength: 1
-          description: Credential containing pre-encoded base64(username:password).
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type, credential]
-      additionalProperties: false
-    ApiKeyCredentialAuth:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [apiKey]
+          description: |
+            Name of the sandbox-local credential whose value is injected. For
+            `bearer` the value becomes the bearer token; for `basic` it
+            contains pre-encoded base64(username:password). Required for
+            `bearer`, `basic`, `apiKey`, and the typeless exchange form; must
+            be absent otherwise.
         name:
           type: string
           pattern: '^[A-Za-z0-9!#$%&''*+\-.^_`|~]+$'
-        credential:
-          type: string
-          minLength: 1
-          description: Credential name whose value is the API key.
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type, name, credential]
-      additionalProperties: false
-    CustomHeadersCredentialAuth:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [customHeaders]
+          description: Request header name. Required for `apiKey`; must be absent otherwise.
         headers:
           type: array
           minItems: 1
           items:
             $ref: '#/components/schemas/CustomHeaderEntry'
+          description: Static header set. Required for `customHeaders`; must be absent otherwise.
         substitutions:
           type: array
           items:
             $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type, headers]
-      additionalProperties: false
-    PassthroughCredentialAuth:
-      type: object
-      properties:
-        type:
-          type: string
-          enum: [passthrough]
-        substitutions:
-          type: array
-          items:
-            $ref: '#/components/schemas/CredentialSubstitution'
-      required: [type]
+          description: |
+            Optional placeholder replacement set. Accepted for the five static
+            kinds; must be absent for the typeless exchange form.
       additionalProperties: false
     CustomHeaderEntry:
       type: object
@@ -3135,7 +3206,7 @@ components:
           minLength: 1
           description: Source OCI image reference the golden image is built from.
         resourceLimits:
-          $ref: '#/components/schemas/ResourceLimits'
+          $ref: '#/components/schemas/FsbTemplateResourceLimits'
           description: |
             Guest machine sizing: `cpu` -> guest vCPUs, `memory` -> guest memory,
             `disk` -> logical size of the guest rootfs (parallel resource keys).
@@ -3174,8 +3245,10 @@ components:
           type: string
           minLength: 1
           description: |
-            S3-compatible publish target for the built artifacts,
-            e.g. `s3://bucket/publish`.
+            Publish destination: `s3://bucket/publish` for native artifacts or
+            `oci://registry/repository` for overlaybd artifacts. OCI targets
+            must not contain a tag or digest; the builder generates unique
+            tags per build. Registry credentials are configured on the server.
         format:
           type: string
           enum: [native, overlaybd]
@@ -3195,8 +3268,8 @@ components:
         manifestRef:
           type: string
           description: |
-            S3 manifest reference of the published artifacts; present when
-            Succeeded.
+            Published S3 manifest reference or immutable OCI reference
+            (`oci://registry/repository@sha256:...`); present when Succeeded.
         message:
           type: string
           description: Failure reason when phase is Failed.
@@ -3216,7 +3289,7 @@ components:
           type: string
           description: Source OCI image reference.
         resourceLimits:
-          $ref: '#/components/schemas/ResourceLimits'
+          $ref: '#/components/schemas/FsbTemplateResourceLimits'
         entrypoint:
           type: array
           items:
@@ -3236,7 +3309,7 @@ components:
           $ref: '#/components/schemas/FsbTemplateReadiness'
         publish:
           type: string
-          description: S3-compatible publish target.
+          description: S3-compatible or repository-only OCI publish target.
         format:
           type: string
           enum: [native, overlaybd]

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 
 const sdkSidebar = [
   {
@@ -45,7 +46,7 @@ const sdkSidebar = [
   },
 ];
 
-export default defineConfig({
+export default withMermaid(defineConfig({
   title: "OpenSandbox",
   description: "Universal Sandbox Infrastructure for AI Applications",
   cleanUrls: true,
@@ -211,6 +212,7 @@ export default defineConfig({
           text: "Guides",
           items: [
             { text: "Overview", link: "/guides/" },
+            { text: "Developer Console", link: "/guides/developer-console" },
             { text: "Credential Vault", link: "/guides/credential-vault" },
             {
               text: "Chained Upstream Proxy",
@@ -219,12 +221,14 @@ export default defineConfig({
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
             {
-              text: "Network Isolation on Kubernetes",
-              link: "/guides/network-isolation",
+              text: "Sandbox Network Security",
+              link: "/guides/network-security",
             },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
+            { text: "In-Sandbox Privilege Reduction", link: "/guides/privilege-reduction" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
+            { text: "OCI Templates", link: "/guides/oci-templates" },
             {
               text: "Auto-Pause & Wake-on-Access",
               link: "/guides/auto-pause-wake",
@@ -247,6 +251,10 @@ export default defineConfig({
               link: "/guides/egress-sse-truncation",
             },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
+            {
+              text: "Resource-Aware Scheduling for Fast Sandbox",
+              link: "/guides/resource-aware-scheduling",
+            },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
             {
               text: "Node Agent Configuration",
@@ -316,6 +324,7 @@ export default defineConfig({
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
             { text: "Windows", link: "/examples/windows" },
             { text: "AKS Kata", link: "/examples/aks-kata" },
+            { text: "ACK PeerPods", link: "/examples/ack-peerpods" },
             { text: "Harbor Evaluation", link: "/examples/harbor-evaluation" },
           ],
         },
@@ -353,10 +362,6 @@ export default defineConfig({
           items: [
             { text: "Contributing", link: "/community/contributing" },
             { text: "Code of Conduct", link: "/community/code-of-conduct" },
-            {
-              text: "Enhancement Proposals",
-              link: "/community/oseps",
-            },
           ],
         },
         {
@@ -413,8 +418,10 @@ export default defineConfig({
     ],
 
     footer: {
-      message: "Released under the Apache 2.0 License.",
-      copyright: "Copyright © 2024-present OpenSandbox Contributors",
+      // VitePress renders message first, followed by copyright.
+      message: "Copyright © OpenSandbox a Series of LF Projects, LLC",
+      copyright:
+        'For web site terms of use, trademark policy and other project policies please see <a href="https://lfprojects.org/" target="_blank" rel="noopener noreferrer">https://lfprojects.org/</a>.',
     },
 
     search: {
@@ -425,4 +432,4 @@ export default defineConfig({
       level: [2, 3],
     },
   },
-});
+}));

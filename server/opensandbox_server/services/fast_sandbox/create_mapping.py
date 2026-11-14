@@ -36,6 +36,11 @@ from opensandbox_server.services.fast_sandbox.generated import (
     fastpath_pb2 as pb2,
 )
 
+# The egress binding input seeded for a sandbox created without a
+# networkPolicy: default-allow (behavior identical to a policy-less
+# sandbox) — the binding's point is subject registration, not enforcement.
+DEFAULT_ALLOW_POLICY = {"defaultAction": "allow", "egress": []}
+
 SUPPORTED_EXTENSION_KEYS = frozenset({"poolRef"})
 
 #: FastPath CreateSandboxRequest has no nullable timeout; fsb requires an explicit one.
@@ -63,6 +68,8 @@ def map_create_request(
     now: Optional[datetime] = None,
     expires_at_unix_seconds: Optional[int] = None,
     pool_resources: Optional[dict] = None,
+    snapshot_limits: Optional[dict] = None,
+    pool_is_resource_aware: bool = False,
 ) -> pb2.CreateSandboxRequest:
     """Map the accepted request subset to a FastPath v2 CreateSandboxRequest.
 
@@ -78,13 +85,17 @@ def map_create_request(
     Pool compatibility: ``pool_resources`` is the selected SandboxPool profile
     (e.g. {"cpu": "500m", "memory": "512Mi", "pids": "256"}). When provided,
     request ``resource_limits`` must match the pool for every key the pool
-    defines and must not declare keys the pool does not define; FastPath has
-    no per-sandbox resource field, so incompatible limits are rejected rather
-    than silently ignored.
+    defines and must not declare keys the pool does not define.
+
+    Snapshot restores: ``snapshot_limits`` carries the recorded source
+    limits; caller ``resource_limits`` must match them (not the pool), and a
+    ResourceAware pool replays them as per-sandbox ``resources.limits``.
     """
     _reject_unsupported_fields(request)
 
-    if pool_resources is not None:
+    if snapshot_limits is not None:
+        _validate_restore_limits(request, snapshot_limits, pool_resources)
+    elif pool_resources is not None:
         _validate_resource_limits(request, pool_resources)
 
     image = request.image
@@ -133,9 +144,21 @@ def map_create_request(
     if request.metadata:
         create.metadata.update(request.metadata)
 
+    # Every fsb sandbox registers an egress subject at create: the binding
+    # is what makes the Fastlet run SET_BINDING (deny-first install, network
+    # attachment) — the handler-relay surfaces (/policy/{uid},
+    # /vault/{uid}) and the pause/resume state transfer attach to it. A
+    # sandbox created without a networkPolicy seeds a no-op default-allow
+    # record (the registration is the point — the sandbox behaves exactly
+    # like today's policy-less one), and runtime changes ride the relay.
     if request.network_policy is not None:
         create.action_bindings.add(
             handler="egress", input=json.dumps(normalized_policy(request.network_policy))
+        )
+    else:
+        create.action_bindings.add(
+            handler="egress",
+            input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
     extensions = request.extensions or {}
@@ -148,6 +171,9 @@ def map_create_request(
     # and validates every entry; reject incompatible keys/values here so users
     # get a clear error instead of a confusing gRPC rejection.
     _validate_metadata(create.metadata)
+
+    if snapshot_limits is not None and pool_is_resource_aware:
+        _set_resource_limits(create, snapshot_limits, "snapshotLimits")
 
     return create
 
@@ -162,6 +188,8 @@ def map_template_create_request(
     fastpath_resource_pool: str = "default-pool",
     now: Optional[datetime] = None,
     expires_at_unix_seconds: Optional[int] = None,
+    template_machine: Optional[dict] = None,
+    pool_is_resource_aware: bool = False,
 ) -> pb2.CreateSandboxRequest:
     """Map a template-mode CreateSandboxRequest to FastPath v2.
 
@@ -170,6 +198,10 @@ def map_template_create_request(
     becomes the FastPath ``image`` and the template's recorded entrypoint
     becomes the guest command. Idempotency and metadata rules match
     :func:`map_create_request`.
+
+    OSEP-0026: on a ResourceAware pool the recorded effective machine shape
+    (``template_machine``) is forwarded verbatim as per-sandbox
+    ``resources.limits``; any other pool mode leaves the field unset.
     """
     _reject_unsupported_fields(request)
     if request.timeout is None:
@@ -193,9 +225,15 @@ def map_template_create_request(
     if request.metadata:
         create.metadata.update(request.metadata)
 
+    # Same registration rule as map_create_request: every fsb sandbox gets
+    # an egress subject at create.
     if request.network_policy is not None:
         create.action_bindings.add(
             handler="egress", input=json.dumps(normalized_policy(request.network_policy))
+        )
+    else:
+        create.action_bindings.add(
+            handler="egress", input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
     extensions = request.extensions or {}
@@ -204,7 +242,67 @@ def map_template_create_request(
 
     _validate_metadata(create.metadata)
 
+    if pool_is_resource_aware:
+        _set_resource_limits(create, template_machine, "templateMachine")
+
     return create
+
+
+def _set_resource_limits(
+    create: pb2.CreateSandboxRequest, machine: Optional[dict], field: str
+) -> None:
+    """Fail-fast validation + verbatim forwarding; FastPath stays
+    authoritative for budget checks."""
+    cpu = str((machine or {}).get("cpu") or "")
+    memory = str((machine or {}).get("memory") or "")
+    try:
+        cpu_quantity = _canonical_quantity(cpu)
+        memory_quantity = _canonical_quantity(memory)
+    except Exception:
+        raise UnsupportedFieldError(
+            field,
+            f"recorded shape is not a valid quantity pair: cpu={cpu!r}, memory={memory!r}",
+        ) from None
+    if cpu_quantity <= 0 or memory_quantity <= 0:
+        raise UnsupportedFieldError(
+            field,
+            f"recorded shape must be positive: cpu={cpu!r}, memory={memory!r}",
+        )
+    if cpu_quantity < decimal.Decimal("0.01"):
+        raise UnsupportedFieldError(
+            field,
+            f"recorded cpu {cpu!r} is below the FastPath minimum of 10m",
+        )
+    create.resources.limits.cpu = cpu
+    create.resources.limits.memory = memory
+
+
+def _validate_restore_limits(
+    request: CreateSandboxRequest, recorded: dict, pool_resources: Optional[dict]
+) -> None:
+    """Snapshot restores fix cpu/memory to the recorded source shape; any
+    other key (pids) stays pool-owned and is validated against the pool
+    profile exactly as a plain create would be."""
+    if request.resource_limits is None:
+        return
+    limits = request.resource_limits.root
+    for key, value in limits.items():
+        if key in recorded:
+            baseline, source = recorded[key], "the snapshot's recorded"
+        elif pool_resources is not None and key in pool_resources:
+            baseline, source = pool_resources[key], "the SandboxPool profile"
+        else:
+            raise UnsupportedFieldError(
+                "resourceLimits",
+                f"{key!r} is not part of the snapshot's recorded shape; "
+                "resources are fixed by the source sandbox",
+            )
+        if not _quantities_equal(baseline, value):
+            raise UnsupportedFieldError(
+                "resourceLimits",
+                f"{key!r}={value!r} does not match {source} {key!r}={baseline!r}; "
+                "resources are fixed per restore source",
+            )
 
 
 def _validate_resource_limits(request: CreateSandboxRequest, pool_resources: dict) -> None:
@@ -263,7 +361,13 @@ def _quantities_equal(a: str, b: str) -> bool:
 
 
 def _canonical_quantity(value: str) -> decimal.Decimal:
+    # Covers the Kubernetes quantity grammar (see config's
+    # _KUBERNETES_QUANTITY_RE), including the sub-integer n/u suffixes.
     value = value.strip()
+    if value.endswith("n"):
+        return decimal.Decimal(value[:-1]) / 10**9
+    if value.endswith("u"):
+        return decimal.Decimal(value[:-1]) / 10**6
     if value.endswith("m"):
         return decimal.Decimal(value[:-1]) / 1000
     for suffix, exponent in _BINARY_QUANTITY_SUFFIXES.items():

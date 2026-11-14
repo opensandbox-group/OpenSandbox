@@ -21,11 +21,12 @@ Mixed into DockerSandboxService.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from docker.errors import DockerException, ImageNotFound
+from docker.errors import APIError, DockerException, ImageNotFound
 from docker.types import DeviceRequest
 from fastapi import HTTPException, status
 
@@ -39,8 +40,10 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
 )
 from opensandbox_server.services.constants import (
+    RESERVED_LABEL_PREFIX,
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_ID_LABEL,
+    SANDBOX_METADATA_KEYS_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SANDBOX_PLATFORM_ARCH_LABEL,
     SANDBOX_PLATFORM_OS_LABEL,
@@ -75,6 +78,7 @@ logger = logging.getLogger(__name__)
 
 class DockerContainerOpsMixin:
     """Mixin providing image management, platform resolution, and container creation."""
+
 
     def _normalize_platform_key(self, platform: Optional[PlatformSpec]) -> str:
         if platform is None:
@@ -288,6 +292,7 @@ class DockerContainerOpsMixin:
     ) -> tuple[dict[str, str], list[str]]:
         metadata = request.metadata or {}
         labels = {key: str(value) for key, value in metadata.items()}
+        labels[SANDBOX_METADATA_KEYS_LABEL] = json.dumps(sorted(metadata))
         labels[SANDBOX_ID_LABEL] = sandbox_id
         if expires_at is None:
             labels[SANDBOX_MANUAL_CLEANUP_LABEL] = "true"
@@ -315,6 +320,29 @@ class DockerContainerOpsMixin:
         environment.append(f"OPENSANDBOX_ID={sandbox_id}")
         return labels, environment
 
+    def _mask_inherited_system_labels(
+        self,
+        image_uri: str,
+        labels: dict[str, str],
+        sandbox_id: str,
+    ) -> dict[str, str]:
+        """Blank reserved labels the image would pass on to the container.
+
+        Docker merges image labels into container labels, and a snapshot image
+        keeps every label of the sandbox it was committed from (expiration,
+        host ports, managed volumes, egress token, ...). Labels can be
+        overridden but not removed, so set the ones this sandbox does not
+        define itself to an empty value.
+        """
+        with self._docker_operation(f"inspect image {image_uri} labels", sandbox_id):
+            image = self.docker_client.images.get(image_uri)
+        image_labels = ((image.attrs or {}).get("Config") or {}).get("Labels") or {}
+        masked = dict(labels)
+        for key in image_labels:
+            if key.startswith(RESERVED_LABEL_PREFIX) and key not in masked:
+                masked[key] = ""
+        return masked
+
     def _resolve_image_auth(
         self, request: CreateSandboxRequest, sandbox_id: str
     ) -> tuple[str, Optional[dict]]:
@@ -330,13 +358,21 @@ class DockerContainerOpsMixin:
 
     def _resolve_resource_limits(
         self, request: CreateSandboxRequest
-    ) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    ) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
         resource_limits = (request.resource_limits.root if request.resource_limits else None) or {}
+        # `disk` is the canonical writable-layer quota key; `storage` and
+        # `ephemeral-storage` are accepted as aliases with the same precedence the
+        # Windows profile resolves them, so callers can move between runtimes
+        # without changing keys.
+        for alias in ("storage", "ephemeral-storage"):
+            if "disk" not in resource_limits and alias in resource_limits:
+                resource_limits = {**resource_limits, "disk": resource_limits[alias]}
         resolved: dict[str, Optional[int]] = {}
         for key, parser in (
             ("memory", parse_memory_limit),
             ("cpu", parse_nano_cpus),
             ("gpu", parse_gpu_request),
+            ("disk", parse_memory_limit),
         ):
             if key not in resource_limits:
                 resolved[key] = None
@@ -359,7 +395,7 @@ class DockerContainerOpsMixin:
                     },
                 )
             resolved[key] = parsed
-        return resolved["memory"], resolved["cpu"], resolved["gpu"]
+        return resolved["memory"], resolved["cpu"], resolved["gpu"], resolved["disk"]
 
     def _profile_security_opts(self) -> list[str]:
         """Return the ``security_opt`` entries for the configured AppArmor/seccomp profiles.
@@ -382,6 +418,7 @@ class DockerContainerOpsMixin:
         nano_cpus: Optional[int],
         network_mode: str,
         gpu_count: Optional[int] = None,
+        disk_quota: Optional[int] = None,
     ) -> Dict[str, Any]:
         host_config_kwargs: Dict[str, Any] = {"network_mode": network_mode}
         security_opts: list[str] = []
@@ -406,6 +443,15 @@ class DockerContainerOpsMixin:
             host_config_kwargs["device_requests"] = [
                 DeviceRequest(count=gpu_count, capabilities=[["gpu"]])
             ]
+        if disk_quota is not None:
+            # Bounds the container's writable layer (upper dir) via HostConfig
+            # StorageOpt; bind mounts, named volumes, and read-only image layers
+            # are not covered. The quota is sent in bytes so the value is
+            # storage-driver independent. If the node's storage driver cannot
+            # enforce it (for example overlay2 without pquota), the Engine fails
+            # the create call and _create_and_start_container maps that to a 400
+            # instead of silently ignoring the request.
+            host_config_kwargs["storage_opt"] = {"size": str(disk_quota)}
         if self.docker_runtime:
             logger.info(
                 f"Using Docker runtime '{self.docker_runtime}' for container creation"
@@ -439,6 +485,7 @@ class DockerContainerOpsMixin:
         container = None
         container_id: Optional[str] = None
         try:
+            labels = self._mask_inherited_system_labels(image_uri, labels, sandbox_id)
             with self._docker_operation("create sandbox container", sandbox_id):
                 container_kwargs = {
                     "image": image_uri,
@@ -536,6 +583,24 @@ class DockerContainerOpsMixin:
                         "message": (
                             "The configured Docker client/daemon does not support "
                             f"platform-aware container create for '{docker_platform}'."
+                        ),
+                    },
+                ) from exc
+
+            if isinstance(exc, APIError) and "storage-opt" in str(exc):
+                # The Engine rejects HostConfig.StorageOpt when the node's storage
+                # driver cannot enforce a writable-layer quota (for example
+                # overlay2 over ext4, or XFS without pquota). Fail fast with a
+                # clear 400 instead of silently dropping resourceLimits.disk.
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": (
+                            "The Docker daemon rejected resourceLimits.disk: "
+                            f"{str(exc)}. The node's Docker storage driver must "
+                            "support writable-layer quotas (for example overlay2 "
+                            "on XFS with pquota, devicemapper, or zfs)."
                         ),
                     },
                 ) from exc

@@ -185,13 +185,16 @@ osb sandbox create --snapshot-id <snapshot-id> --timeout 30m -o json
 Templates are golden-image builds; the build runs asynchronously, so poll `template get` until the status phase is `Succeeded`. Template management requires a Kubernetes-backed runtime.
 
 ```bash
-osb template create --image python:3.12 --publish s3://bucket/publish -o json
+osb template create --image python:3.12 --publish s3://bucket/publish --format native -o json
+osb template create --image python:3.12 --publish oci://registry.example.com/sandbox/templates --format overlaybd -o json
 osb template get <template-id> -o json
 osb template list -o json
 osb template delete <template-id> -o json
 ```
 
 `template create` also accepts `--resource cpu=1 memory=512Mi disk=2Gi`, `--entrypoint` (repeat per argv item), `--env KEY=VALUE`, `--metadata KEY=VALUE`, `--format native|overlaybd`, `--readiness-probe`, and `--warmup-seconds`.
+
+OCI publishing requires a repository-only target without a tag or digest. The builder generates unique tags and returns an immutable `oci://...@sha256:...` in `status.manifestRef`. Use `overlaybd` (the default) for OCI and explicitly select `native` for S3. Configure the builder's Registry Secret and an OCI-enabled Fast Sandbox pool before building; see [OCI template setup](/guides/oci-templates).
 
 ### Manage snapshots
 
@@ -279,6 +282,17 @@ osb command session run <sandbox-id> <session-id> -o raw -- sh -c 'echo $FOO'
 osb command session delete <sandbox-id> <session-id> -o json
 ```
 
+### Open an interactive terminal
+
+`osb terminal` attaches your current terminal to a real PTY inside the sandbox (colors, `stty`, and resize all behave like a local shell). Exit the remote shell (or press Ctrl-D) to leave; the remote exit code becomes the command's exit code.
+
+```bash
+osb terminal <sandbox-id>
+osb terminal <sandbox-id> -w /workspace
+```
+
+Requires an interactive TTY, and is supported on Unix, macOS, and Linux. If the connection drops while the shell is still running, the session is kept server-side and its id is printed so it can be inspected or removed via the execd API; a clean exit tears the session down.
+
 ### Work with files
 
 ```bash
@@ -362,13 +376,8 @@ Older server builds may still return
 `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
 ::: info
-Legacy DevOps diagnostics remain experimental. Prefer `osb diagnostics logs/events` for stable API-backed log and event collection.
+The legacy `osb devops` command group was removed. Use `osb diagnostics logs/events` with `--scope` for log and event collection and `osb sandbox get` for sandbox state. The plain-text filters (`--tail`, `--since`, `--limit`) have no stable equivalents; read the scoped output and filter as needed.
 :::
-
-```bash
-osb devops inspect <sandbox-id> -o raw
-osb devops summary <sandbox-id> -o raw
-```
 
 ## Output Formats
 
@@ -397,11 +406,11 @@ The main command groups are:
 - `osb template`: golden-image template builds
 - `osb snapshot`: snapshot management
 - `osb command`: command execution and persistent sessions
+- `osb terminal`: interactive PTY terminal into a sandbox
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
 - `osb credential-vault`: sandbox-local credentials and bindings
 - `osb diagnostics`: stable diagnostics logs and events
-- `osb devops`: experimental legacy diagnostics
 - `osb config`: local CLI configuration
 - `osb skills`: bundled skills for AI tools
 
@@ -478,6 +487,8 @@ osb config set defaults.image python:3.12
 osb config set defaults.timeout 30m
 ```
 
+The optional `connection`, `output`, and `defaults` sections must be TOML tables (for example, `[connection]`), not scalar values or arrays. Invalid section types produce a configuration error naming the section. Omitted sections use defaults.
+
 Example config file:
 
 ```toml
@@ -486,7 +497,6 @@ api_key = "your-api-key"
 domain = "localhost:8080"
 protocol = "http"
 request_timeout = 30
-use_server_proxy = false
 
 [output]
 color = true

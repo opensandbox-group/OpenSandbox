@@ -114,6 +114,6 @@ The workflow writes and executes a small Python job in the sandbox, then passes 
 ## References
 
 - [Microsoft Agent Framework Python samples](https://github.com/microsoft/agent-framework/tree/main/python/samples)
-- [Functional workflow with agents](https://github.com/microsoft/agent-framework/blob/main/python/samples/01-get-started/05_functional_workflow_with_agents.py)
+- [Functional workflow with agents](https://github.com/microsoft/agent-framework/blob/main/python/samples/01-get-started/05b_functional_workflow_with_agents.py)
 - [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox)
 - [Source code on GitHub](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/microsoft-agent-framework)

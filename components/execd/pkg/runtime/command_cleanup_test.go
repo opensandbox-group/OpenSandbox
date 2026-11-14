@@ -50,6 +50,32 @@ func TestRunCommandRemovesForegroundOutputFiles(t *testing.T) {
 	require.False(t, status.Running)
 }
 
+func TestRunBackgroundCommandClosesOutputFileWhenStartFails(t *testing.T) {
+	const fdDir = "/proc/self/fd"
+	if _, err := os.Stat(fdDir); err != nil {
+		t.Skip("needs /proc/self/fd")
+	}
+	openFDs := func() int {
+		entries, err := os.ReadDir(fdDir)
+		require.NoError(t, err)
+		return len(entries)
+	}
+
+	t.Setenv("TMPDIR", t.TempDir())
+	c := NewController("", "")
+	missingCwd := filepath.Join(t.TempDir(), "missing")
+
+	before := openFDs()
+	for range 20 {
+		ctx, cancel := context.WithCancel(context.Background())
+		req := &ExecuteCodeRequest{Code: "true", Cwd: missingCwd}
+		req.SetDefaultHooks()
+		require.Error(t, c.runBackgroundCommand(ctx, cancel, req))
+		cancel()
+	}
+	require.LessOrEqual(t, openFDs(), before)
+}
+
 func TestCommandOutputDirRejectsSymlink(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("symlink creation requires additional privileges on Windows")

@@ -18,6 +18,8 @@ package isolation
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 // Profile presets default isolation settings.
@@ -121,11 +123,19 @@ type Capabilities struct {
 	Available        bool
 	Isolator         string
 	Version          string
+	Message          string
 	SetprivAvailable bool
 	// SetprivSwitchAvailable is used internally to reject a setpriv
 	// request that selects IDs different from execd's own before side effects.
 	SetprivSwitchAvailable bool
 	UsernsAvailable        bool
+	// SetprivNetAvailable / UsernsNetAvailable report whether the uid mode
+	// can also create the private network namespace required by share_net=
+	// false (bwrap --unshare-net; its loopback setup needs CAP_NET_ADMIN in
+	// the setpriv mode). Runtime rejects such requests with a named error
+	// before starting bwrap when the mode's flag is false.
+	SetprivNetAvailable    bool
+	UsernsNetAvailable     bool
 	Profiles               []Profile
 	AllowedWorkspaces      []string
 	AllowedExtraWritable   []string
@@ -141,14 +151,32 @@ type Capabilities struct {
 
 // WrapOptions configures a single isolated execution.
 type WrapOptions struct {
-	Profile        Profile
-	Overlays       []OverlaySpec
-	ExtraWritable  []string
-	Binds          []BindMount
+	Profile       Profile
+	Overlays      []OverlaySpec
+	ExtraWritable []string
+	Binds         []BindMount
+	// TmpDir is the session-private /tmp backing dir (absolute host path),
+	// bound to the namespace /tmp in place of the profile's segment. Empty
+	// keeps the profile default.
+	TmpDir         string
 	ShareNet       bool
 	EnvPassthrough EnvSpec
 	Uid, Gid       *uint32
 	UidMode        UidMode // "" or "setpriv" → setpriv; "userns" → user namespace
+}
+
+// OverlaysCoverPath reports whether any overlay mounts over path, either
+// at path itself or at one of its ancestors: bubblewrap applies mounts in
+// argv order and a later shallower mount shadows the subtree of any earlier
+// segment, so an ancestor overlay already provides path.
+func OverlaysCoverPath(overlays []OverlaySpec, path string) bool {
+	for _, ov := range overlays {
+		p := filepath.Clean(ov.Path)
+		if p == path || p == "/" || strings.HasPrefix(path, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Isolator wraps an *exec.Cmd in a namespace-isolated execution environment.

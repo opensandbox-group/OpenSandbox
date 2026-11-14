@@ -35,6 +35,9 @@ func (*AtomicPolicyFile) Save(*NetworkPolicy) (FileMutationState, error) {
 func (*AtomicPolicyFile) SaveRaw([]byte) (FileMutationState, error) {
 	return FileUnchanged, atomicPolicyPlatformError()
 }
+func (*AtomicPolicyFile) SaveRawNonDurable([]byte) (FileMutationState, error) {
+	return FileUnchanged, atomicPolicyPlatformError()
+}
 func (*AtomicPolicyFile) Restore(*PolicyFileSnapshot) (FileMutationState, error) {
 	return FileUnchanged, atomicPolicyPlatformError()
 }

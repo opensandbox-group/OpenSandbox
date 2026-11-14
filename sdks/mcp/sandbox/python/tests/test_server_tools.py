@@ -235,3 +235,130 @@ async def test_failed_connect_is_not_sticky(server, monkeypatch) -> None:
     assert metrics == "metrics"
     assert attempts == ["sbx-flaky", "sbx-flaky"]
     assert state.connecting == {}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_does_not_cancel_coalesced_connect(
+    server, monkeypatch
+) -> None:
+    """Cancelling one tool call must not fail others waiting on the same connect.
+
+    MCP cancels a tool call's handler when the client cancels the request.
+    """
+    fake, state = server
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    connect_calls: list[str] = []
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            connect_calls.append(sandbox_id)
+            entered.set()
+            await release.wait()
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    cancelled = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-shared", connect_if_missing=True)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    waiting = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-shared", connect_if_missing=True)
+    )
+    await asyncio.sleep(0)
+
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+
+    assert await asyncio.wait_for(waiting, timeout=1) == "metrics"
+    assert connect_calls == ["sbx-shared"]
+    assert state.sandboxes["sbx-shared"].id == "sbx-shared"
+
+
+@pytest.mark.asyncio
+async def test_connect_finished_after_its_caller_cancelled_is_registered(
+    server, monkeypatch
+) -> None:
+    """A connect whose only caller was cancelled still registers the sandbox,
+    so the next call reuses it instead of connecting again."""
+    fake, state = server
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    connect_calls: list[str] = []
+
+    class _MetricsSandbox(_FakeSandbox):
+        async def get_metrics(self):
+            return "metrics"
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            connect_calls.append(sandbox_id)
+            entered.set()
+            await release.wait()
+            return _MetricsSandbox(sandbox_id)
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+
+    cancelled = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-orphan", connect_if_missing=True)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    connect_task = state.connecting["sbx-orphan"]
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+    await asyncio.wait_for(connect_task, timeout=1)
+
+    metrics = await fake.tools["sandbox_get_metrics"](
+        "sbx-orphan", connect_if_missing=True
+    )
+    assert metrics == "metrics"
+    assert connect_calls == ["sbx-orphan"]
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_after_its_caller_cancelled_is_not_logged(
+    server, monkeypatch
+) -> None:
+    """A connect that fails after its only caller was cancelled is not
+    reported to the loop exception handler: no request is waiting for it, and
+    the next call simply connects again."""
+    fake, state = server
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class _FakeServerSandboxModule:
+        @staticmethod
+        async def connect(sandbox_id, connection_config=None, **kwargs):
+            entered.set()
+            await release.wait()
+            raise RuntimeError("transient connect failure")
+
+    monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeServerSandboxModule)
+    loop = asyncio.get_running_loop()
+    reported: list[dict] = []
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+
+    cancelled = asyncio.create_task(
+        fake.tools["sandbox_get_metrics"]("sbx-orphan", connect_if_missing=True)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    connect_task = state.connecting["sbx-orphan"]
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+    await asyncio.wait_for(connect_task, timeout=1)
+    await asyncio.sleep(0)
+
+    assert reported == []

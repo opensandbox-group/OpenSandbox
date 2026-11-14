@@ -391,6 +391,8 @@ files.forEach(f -> System.out.println("Found: " + f.getPath()));
 sandbox.files().deleteFiles(List.of("/tmp/hello.txt"));
 ```
 
+Use `readByteArrayDetailed` or `readStreamDetailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check `isPartial` before appending a resumed download, and close a detailed stream body with try-with-resources or Kotlin's `use`. Custom adapters that do not override these methods throw `UnsupportedOperationException`.
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:
@@ -438,7 +440,7 @@ Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/obser
 
 Create a snapshot with `sandbox.createSnapshot` or `manager.createSnapshot`. `SandboxManager` exposes `getSnapshot`, `listSnapshots`, `deleteSnapshot`, and `waitForSnapshotReady` to wait for asynchronous snapshot completion. Restore with `Sandbox.builder().snapshotId(snapshotId).connectionConfig(config).build()`.
 
-Use `sandbox.patchMetadata` or `manager.patchSandboxMetadata` to add/replace metadata keys; a `null` value removes a key. Runtime support is described by the [lifecycle contract](/api/#1-sandbox-lifecycle-yml).
+Use `sandbox.patchMetadata` or `manager.patchSandboxMetadata` to add/replace metadata keys; a `null` value removes a key. Runtime support is described by the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml).
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. The JVM helper waits for `Ready` and raises an exception on failure or timeout:
 
@@ -474,6 +476,8 @@ sandbox.patchMetadata(patch);
 
 The `ConnectionConfig` class manages API server connection settings.
 
+An explicit `OPEN-SANDBOX-API-KEY` entry in `headers` takes precedence over `apiKey` and its environment fallback, regardless of header-name casing. The header is attached only when a key is configured. This also applies to SDK telemetry requests.
+
 ::: info Transfer timeouts
 `requestTimeout` bounds each transport phase - connecting, waiting for response headers, and waiting for more of a response body - but it never caps a healthy file upload or download that keeps making progress. A transfer that stalls for longer than the timeout, or an upload that gets no response headers within it after the body has been sent, fails instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract). An explicit `RetryPolicy.overallDeadline` still caps the whole transfer.
 :::
@@ -488,7 +492,6 @@ The `ConnectionConfig` class manages API server connection settings.
 | `headers`        | Custom HTTP headers                        | Empty                        | -                      |
 | `connectionPool` | Shared OKHttp ConnectionPool               | SDK-created per instance     | -                      |
 | `retryPolicy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
-| `useServerProxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false` | -                      |
 | `disableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
 | `enableTracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `false` | - |
 
@@ -719,6 +722,7 @@ fsb (fast-sandbox microVM) golden-image templates are managed through `SandboxMa
 ```java
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFilter;
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFormat;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateInfo;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplatePhase;
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateReadiness;
@@ -726,6 +730,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateReadiness
 CreateTemplateRequest request = CreateTemplateRequest.builder()
     .image("alpine:3.19")
     .publish("s3://bucket/publish")
+    .format(TemplateFormat.NATIVE)
     .resourceLimits(Map.of("cpu", "1", "memory", "512Mi", "disk", "2Gi"))
     .readiness(TemplateReadiness.builder().probe("tcp://127.0.0.1:44772").build())
     .metadata(Map.of("team", "backend"))

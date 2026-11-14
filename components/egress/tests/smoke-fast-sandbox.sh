@@ -56,6 +56,8 @@ SEED_FP=""
 UPSTREAM_PID=""
 EXT_PID=""
 PROXY_PID=""
+RESOLVER_PID=""
+RESOLVER_HTTPS_PID=""
 EGRESS_PID=""
 HOSTS_BACKUP=""
 
@@ -65,6 +67,12 @@ HOSTS_BACKUP=""
 # same directory must survive the in-run restarts (Test 14 durability).
 VAULT_DIR=""
 VAULT_BODY=""
+
+# Per-subject policy files (egress-held policy): REQUIRED by the fast-sandbox
+# profile — the recorded policy is egress-held state, so a fresh directory
+# per run keeps the seeding assertions meaningful while surviving the in-run
+# restarts (Test 9/14 durability).
+POLICY_DIR=""
 
 info() { echo "[$(date +%H:%M:%S)] $*"; }
 pass() { info "PASS: $*"; }
@@ -102,9 +110,13 @@ cleanup() {
     [ "${SAVED_FORWARD_POLICY}" = "-P FORWARD ACCEPT" ] || iptables -t filter -P FORWARD DROP >/dev/null 2>&1 || true
   fi
   [ -n "${SSL_DIR:-}" ] && rm -rf "${SSL_DIR}" 2>/dev/null
-  [ -n "${CA_SEED_DIR}" ] && rm -rf "${CA_SEED_DIR}" 2>/dev/null
+  [ -n "${CA_SEED_DIR:-}" ] && rm -rf "${CA_SEED_DIR}" 2>/dev/null
   [ -n "${VAULT_DIR}" ] && rm -rf "${VAULT_DIR}" 2>/dev/null
+  [ -n "${POLICY_DIR}" ] && rm -rf "${POLICY_DIR}" 2>/dev/null
   [ -n "${VAULT_BODY}" ] && rm -f "${VAULT_BODY}" 2>/dev/null
+  [ -n "${RESOLVER_PID}" ] && kill "${RESOLVER_PID}" 2>/dev/null
+  [ -n "${RESOLVER_HTTPS_PID}" ] && kill "${RESOLVER_HTTPS_PID}" 2>/dev/null
+  rm -f /tmp/osb-t7-resolver.sock /tmp/osb-t7-resolver.log /tmp/osb-t7-resolver-https.log 2>/dev/null
   nft delete table inet opensandbox-fast-sandbox 2>/dev/null
 }
 trap cleanup EXIT
@@ -151,6 +163,19 @@ EOF
   action "${body}"
 }
 
+# set_binding_named <uid> <name> <ip> <spec_gen> <runtime> <att> <input>
+#   set_binding variant carrying SandboxRef.Name — the CR name that becomes
+#   the wire sandboxId on the credential-resolver subject (OSEP-0025 D11).
+set_binding_named() {
+  local uid="$1" name="$2" ip="$3" spec_gen="$4" runtime="$5" att="$6" input="$7"
+  local body
+  body="$(cat <<EOF
+{"apiVersion":"sandbox.fast.io/actions/v1","operation":"SET_BINDING","invocationId":"smoke-${uid}-${spec_gen}","sandbox":{"uid":"${uid}","name":"${name}"},"revision":{"specGeneration":${spec_gen},"runtimeInstanceId":"${runtime}","attachmentId":"${att}","routeGeneration":1},"attachment":{"network":{"ip":"${ip}","gateway":"10.10.0.1","privateCidr":"10.10.0.0/24","hostVeth":"veth-${uid}-p"}},"binding":{"input":$(json_input "${input}")}}
+EOF
+)"
+  action "${body}"
+}
+
 # lifecycle_hook <uid> <runtime> <att> <hook_name>
 lifecycle_hook() {
   local uid="$1" runtime="$2" att="$3" hook="$4"
@@ -183,6 +208,34 @@ bind_and_ready() {
   lifecycle_hook "${uid}" "${runtime}" "${att}" sandbox.data-plane-ready
 }
 
+# relay_put_policy <uid> <input>: a runtime policy change through the
+# handler-relay surface (/policy/{uid}). The binding input only ever seeds a
+# fresh subject's policy — every later change rides this surface, which
+# applies in place on an active subject and holds pending on a denying one.
+relay_put_policy() {
+  local uid="$1" input="$2" code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -XPUT \
+    "http://127.0.0.1:${POLICY_PORT}/policy/${uid}" -d "{\"policy\":${input}}")"
+  case "${code}" in
+    200|201) ;;
+    *) fail "relay PUT /policy/${uid} failed: ${code}" ;;
+  esac
+}
+
+# relay_get_policy <uid> <name>: echoes the recorded policy document.
+relay_get_policy() {
+  curl -s "http://127.0.0.1:${POLICY_PORT}/policy/${1}"
+}
+
+# relay_delete_policy <uid>: DELETE lands an authoritative default-deny
+# tombstone at the successor revision (204).
+relay_delete_policy() {
+  local uid="$1" code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -XDELETE \
+    "http://127.0.0.1:${POLICY_PORT}/policy/${uid}")"
+  [ "${code}" = "204" ] || fail "relay DELETE /policy/${uid} failed: ${code}"
+}
+
 dns_query() {
   # dns_query <netns-or-host> <name>
   local where="$1" name="$2"
@@ -207,7 +260,31 @@ expect_answers() {
   echo "${out}" | grep -q "answers=$3" || fail "dns ${2}: expected answer $3, got '${out}'"
 }
 
-nft_has() { nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q "$1"; }
+# nft_table_flat: the fast-sandbox nft table flattened to single-spaced tokens,
+# so line wrapping or spacing changes in nft's rendering cannot false-fail a
+# grep. An nft error is printed and returned, never silently empty: a broken
+# nft or runner reads as an error, not as "rule missing" (#2541).
+nft_table_flat() {
+  local out
+  if ! out="$(nft list table inet opensandbox-fast-sandbox 2>&1)"; then
+    echo "nft list table inet opensandbox-fast-sandbox failed:" >&2
+    printf '%s\n' "${out}" >&2
+    return 1
+  fi
+  printf '%s\n' "${out}" | tr '\n' '\t' | tr -s ' \t' ' '
+}
+
+nft_has() { nft_table_flat | grep -q "$1"; }
+
+nft_has_set() {
+  local out
+  if ! out="$(nft list set inet opensandbox-fast-sandbox "$1" 2>&1)"; then
+    echo "nft list set inet opensandbox-fast-sandbox $1 failed:" >&2
+    printf '%s\n' "${out}" >&2
+    return 1
+  fi
+  printf '%s\n' "${out}" | tr '\n' '\t' | tr -s ' \t' ' ' | grep -q "$2"
+}
 
 # dns_rcode_is <netns-or-host> <name> <rcode>: probe variant of expect_rcode
 # that returns non-zero instead of failing (usable inside wait_for).
@@ -248,6 +325,14 @@ start_egress() {
   if [ -n "${upstream}" ]; then
     upstream_env=(OPENSANDBOX_EGRESS_UPSTREAM_PROXY="${upstream}")
   fi
+  # Optional resolver CA honored by the Go TLS stack via SSL_CERT_FILE.
+  # CAVEAT: SSL_CERT_FILE replaces the process's whole trust pool — fine in
+  # this harness, NOT production guidance (T8 operator docs). Caller auth
+  # (D5) is deferred: no auth env exists.
+  local resolver_env=()
+  if [ -n "${EGRESS_RESOLVER_CA_FILE-}" ]; then
+    resolver_env+=(SSL_CERT_FILE="${EGRESS_RESOLVER_CA_FILE}")
+  fi
   # env(1) is required: words produced by "${mitm_env[@]}" expansion are NOT
   # treated as environment assignments by bash (they'd be executed as commands).
   env \
@@ -258,8 +343,10 @@ start_egress() {
   OPENSANDBOX_EGRESS_BLOCK_DOH_443="${block_doh}" \
   OPENSANDBOX_EGRESS_DOH_BLOCKLIST="${doh_blocklist}" \
   OPENSANDBOX_EGRESS_VAULT_DIR="${VAULT_DIR}" \
+  OPENSANDBOX_EGRESS_POLICY_DIR="${POLICY_DIR}" \
   "${mitm_env[@]}" \
   "${upstream_env[@]}" \
+  "${resolver_env[@]}" \
   "${EGRESS_BIN}" >"${EGRESS_LOG}" 2>&1 &
   EGRESS_PID=$!
   if [ "${expect_down}" = "1" ]; then
@@ -324,6 +411,7 @@ printf '%s\n' '10.99.0.9' > "${ALWAYS_RULES_DIR}/deny.always"
 # writes run the commit protocol and the ack means durable (exercised by the
 # Test 14 restart reload).
 VAULT_DIR="$(mktemp -d -t fast-sandbox-vault.XXXXXX)"
+POLICY_DIR="$(mktemp -d -t fast-sandbox-policy.XXXXXX)"
 VAULT_BODY="$(mktemp -t fast-sandbox-vault-body.XXXXXX)"
 
 info "Building egress binary"
@@ -368,22 +456,25 @@ pass "DoH-443 blocking installed (doh_block_v4 set + element + drop rule)"
 info "Test 1: SET_BINDING registers deny-first (fail closed before any policy)"
 set_binding a 10.10.0.5 1 runtime-a att-a '{"defaultAction":"deny"}'
 wait_for 15 "subject a deny-first installed" nft_has 'subj_s_a'
-nft_has 'ip saddr 10.10.0.5 jump subj_s_a' || fail "dispatch rule missing"
-nft_has 'subj_s_a_allow_v4 {' || fail "subject a static sets missing"
+wait_for 10 "subject a dispatch rule" nft_has 'ip saddr 10.10.0.5 jump subj_s_a'
+wait_for 10 "subject a static sets" nft_has 'subj_s_a_allow_v4 {'
 expect_rcode osb-sandbox-a allow.test 3
 pass "deny-first registered (nft + NXDOMAIN, policy pending)"
 
 ###############################################################################
-info "Test 2: data-plane-ready activates the subject (dns+nft)"
-set_binding a 10.10.0.5 2 runtime-a att-a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"10.99.0.2"}]}'
+info "Test 2: data-plane-ready activates the subject; the relay owns runtime changes"
 lifecycle_hook a runtime-a att-a sandbox.runtime-ready
 lifecycle_hook a runtime-a att-a sandbox.data-plane-ready
+# The binding input seeded deny at spec 1; the allow policy is a RUNTIME
+# change through the handler-relay surface, applied in place on the active
+# subject. A same-fence SET_BINDING with a new input would be superseded.
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"10.99.0.2"}]}'
 expect_answers osb-sandbox-a allow.test 1.1.1.1
 expect_answers osb-sandbox-a other.test 1.1.1.2
 expect_rcode osb-sandbox-a nope.test 3
 pass "DNS per-subject policy (allow *.test, deny others)"
 
-nft_has '10.99.0.2' || fail "static allow element missing from nft"
+wait_for 10 "static allow element" nft_has '10.99.0.2'
 wait_for 10 "dns-learned dynamic allow" nft_has '1.1.1.1'
 pass "nft static allow + DNS-learned dynamic lease"
 
@@ -410,8 +501,8 @@ fi
 pass "forward drop (default deny)"
 
 ###############################################################################
-info "Test 4: deny CIDR overrides allow (nft layer, in-place update)"
-set_binding a 10.10.0.5 3 runtime-a att-a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"deny","target":"10.99.0.0/24"}]}'
+info "Test 4: deny CIDR overrides allow (nft layer, relay update)"
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"deny","target":"10.99.0.0/24"}]}'
 if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null http://10.99.0.2:8080/ 2>/dev/null; then
   fail "deny CIDR must block 10.99.0.2"
 fi
@@ -430,8 +521,13 @@ http_code="$(curl -s -o /dev/null -w '%{http_code}' -XPOST \
   "http://127.0.0.1:${POLICY_PORT}/credential-vault" -d '{}')"
 [ "${http_code}" = "404" ] || fail "superseded /credential-vault must be gone (404), got ${http_code}"
 http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${POLICY_PORT}/policy")"
-[ "${http_code}" = "404" ] || fail "superseded /policy must be gone (404), got ${http_code}"
-pass "superseded proxy-route surfaces removed (policy rides the binding only)"
+case "${http_code}" in
+  301|307|308) ;; # redirects into the /policy/{uid} relay subtree
+  *) fail "bare /policy must redirect into the relay subtree, got ${http_code}" ;;
+esac
+location="$(curl -s -D - -o /dev/null "http://127.0.0.1:${POLICY_PORT}/policy" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+[ "${location}" = "/policy/" ] || fail "bare /policy redirect target must be /policy/, got ${location:-none}"
+pass "superseded proxy-route surfaces removed (relay surfaces only)"
 
 set_up_netns b 10.10.0.6
 bind_and_ready b 10.10.0.6 1 runtime-b att-b '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
@@ -459,6 +555,11 @@ info "Test 9: restart recovery (reset -> action replay -> active)"
 # Refresh the DNS-learned dyn lease (1.1.1.1) right before the restart, so
 # the post-restart "stale wiped" assertions are meaningful.
 expect_answers osb-sandbox-a allow.test 1.1.1.1
+# Durability probe: relay a policy DISTINCT from the replayed binding input;
+# after the restart + SET_BINDING replay the recorded file must supersede
+# the input — asserted by the marker target surviving the GET below
+# (vault parity, Test 14e).
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"durability.test"},{"action":"allow","target":"10.99.0.0/24"}]}'
 wait_for 10 "dyn lease present before restart" nft_has '1.1.1.1'
 kill "${EGRESS_PID}" 2>/dev/null
 wait "${EGRESS_PID}" 2>/dev/null || true
@@ -469,7 +570,35 @@ expect_rcode osb-sandbox-a allow.test 3
 # The Fastlet's instanceId replay: SET_BINDING + reached Hooks.
 bind_and_ready a 10.10.0.5 5 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
 expect_answers osb-sandbox-a allow.test 1.1.1.1
-pass "restart recovery (stale wiped, action replay reactivates)"
+# The durability probe's relay write survived the restart: the recorded
+# file superseded the replayed binding input.
+recorded="$(curl -s "http://127.0.0.1:${POLICY_PORT}/policy/a")"
+echo "${recorded}" | grep -q 'durability.test' || fail "the relayed policy must survive the restart (file supersedes the replayed binding input), got: ${recorded}"
+# Enforcement, not just the record: the probe's static allow must be live
+# in nft (the replayed input does not contain it — a regression where the
+# replay overrode the reload would lose this element).
+nft_has '10.99.0.0/24' || fail "the reloaded policy must be ENFORCED (10.99.0.0/24 missing from nft)"
+pass "restart durability (recorded policy supersedes the replayed binding input, enforced)"
+# Restore the lineage: under file-supersedes-input, every later section
+# starts from the recorded policy — put back what the binding inputs intend.
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
+# DELETE tombstone: an authoritative default-deny at the successor
+# revision (204); the stale expectedRevision precondition is a 412 on the
+# handler contract (the server remaps it to 409 on the public API).
+http_code="$(curl -s -o /dev/null -w '%{http_code}' -XPUT "http://127.0.0.1:${POLICY_PORT}/policy/a" -d '{"policy":{"defaultAction":"deny","egress":[]},"expectedRevision":99}')"
+[ "${http_code}" = "412" ] || fail "stale expectedRevision must be 412, got ${http_code}"
+relay_delete_policy a
+recorded="$(relay_get_policy a)"
+echo "${recorded}" | grep -q '"defaultAction":"deny"' \
+  || fail "the DELETE tombstone must be an authoritative default-deny record, got: ${recorded}"
+pass "DELETE tombstone (default-deny record persisted, stale revision 412)"
+
+# The tombstone survives the Test 10 restart + binding replay: the
+# replayed bootstrap binding (deny) is superseded by the identical tombstone
+# at the SAME revision — no resurrection of the pre-delete allow, no
+# revision reset.
+relay_get_policy a | grep -q '"defaultAction":"deny"' \
+  || fail "the tombstone must survive the restart, got: $(relay_get_policy a)"
 
 ###############################################################################
 info "Test 10: strict DoH mode (no blocklist) drops all tcp 443 globally"
@@ -481,7 +610,11 @@ set_binding a 10.10.0.5 6 runtime-a-2 att-a-2 '{"defaultAction":"deny"}'
 wait_for 15 "subject a re-registered after strict-mode restart" dns_rcode_is osb-sandbox-a allow.test 3
 nft_has 'tcp dport 443 drop' || fail "strict mode must install a bare tcp 443 drop"
 nft_has 'doh_block_v4' && fail "strict mode must not create blocklist sets"
-pass "strict DoH mode enforced (bare 443 drop, no blocklist sets)"
+# The tombstone revision is preserved across the restart + replay — the
+# binding input was superseded, not re-seeded.
+relay_get_policy a | grep -q '"defaultAction":"deny"' \
+  || fail "the tombstone must survive the strict-mode restart + replay"
+pass "strict DoH mode enforced (bare 443 drop, no blocklist sets); tombstone survives replay"
 
 ###############################################################################
 info "Test 11: MITM data plane — shared mitmdump + per-subject DNAT + subject-aware active vault"
@@ -592,8 +725,10 @@ else
   # rejected), so the sandbox curls the ext netns with an explicit Host
   # header; the policy keeps allowing the real daddr 10.99.0.2 so the nft
   # layers pass the packet.
-  set_binding a 10.10.0.5 8 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   lifecycle_hook a runtime-a-2 att-a-2 sandbox.runtime-ready
+  # A relay write while denying is held to the data-plane-ready barrier
+  # (pending-policy validation semantics, same as the vault).
+  relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   lifecycle_hook a runtime-a-2 att-a-2 sandbox.data-plane-ready
   code="$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "${ACTIVE_SOCK}" 'http://localhost/credential-vault/_active?clientIp=10.10.0.5')"
   [ "${code}" = "404" ] || fail "active API: subject a has no vault yet (relay not wired), got ${code}"
@@ -650,7 +785,7 @@ else
   # DoH-443 blocking under MITM: the Pod-netns INPUT enforcement chain
   # applies the blocklist to the DNATed 443 (the forward hook only sees the
   # real destination for non-MITM traffic).
-  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'doh_block_v4 tcp dport 443 drop' \
+  nft_has 'doh_block_v4 tcp dport 443 drop' \
     || fail "Pod-layer DoH-443 drop missing under MITM"
   if ip netns exec osb-sandbox-a curl -sk -m 2 -o /dev/null https://203.0.113.1/ 2>/dev/null; then
     fail "blocklisted DoH endpoint 203.0.113.1 must be unreachable under MITM"
@@ -769,9 +904,9 @@ else
   # authority NXDOMAINs the name): drop element + forward/input drop rules.
   wait_for 15 "upstream drop set seeded via the Pod resolver" bash -c \
     "nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2'"
-  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'upstream_proxy_v4 tcp dport 3128 drop' \
+  nft_has 'upstream_proxy_v4 tcp dport 3128 drop' \
     || fail "profile-wide forward drop rule missing"
-  nft list table inet opensandbox-fast-sandbox 2>/dev/null | grep -q 'ct original ip daddr @upstream_proxy_v4' \
+  nft_has 'ct original ip daddr @upstream_proxy_v4' \
     || fail "input-path containment rule missing (intercepted CONNECTs)"
   pass "drop set seeded from the Pod-resolver authority (split-authority union)"
 
@@ -803,10 +938,9 @@ else
   # Default-allow subject: still dropped — the containment is profile-wide,
   # above every per-subject rule. Control first: non-proxy traffic flows, so
   # only the proxy endpoint is unreachable. Subject a is still active, so
-  # this in-place binding update applies immediately — no data-plane-ready
-  # replay (the protocol sends no Hook for updates; a redundant one 409s on
-  # the fail-closed "no pending policy" guard).
-  set_binding a 10.10.0.5 11 runtime-a-2 att-a-2 '{"defaultAction":"allow"}'
+  # this relay update applies immediately (no data-plane-ready replay —
+  # relay writes apply in place on an active subject).
+  relay_put_policy a '{"defaultAction":"allow"}'
   out="$(ip netns exec osb-sandbox-a curl -s -m 5 -H 'Host: ext.test' http://10.99.0.2:8080/)"
   echo "${out}" | grep -qi "client=10.10.0.5" || fail "default-allow control request failed (subject inactive?); got: ${out}"
   if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null --proxytunnel -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then
@@ -821,12 +955,16 @@ else
   kill "${EGRESS_PID}" 2>/dev/null
   wait "${EGRESS_PID}" 2>/dev/null || true
   EGRESS_PID=""
-  nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2' \
+  nft_has_set upstream_proxy_v4 '10.99.0.2' \
     || fail "drop element must persist in the kernel while the egress daemon is down"
   EGRESS_MITM=1 EGRESS_UPSTREAM_PROXY="http://proxy.test:3128" start_egress
   wait_for 15 "drop set re-seeded after restart" bash -c \
     "nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2'"
   bind_and_ready a 10.10.0.5 12 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
+  # The default-allow control write (spec 11) survived this restart — the
+  # file supersedes the replayed input — so re-assert the allow-list
+  # through the relay before the containment assertions.
+  relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null --proxytunnel -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then
     fail "containment must survive egress restart"
   fi
@@ -869,6 +1007,7 @@ else
   EGRESS_PID=""
   EGRESS_MITM=1 start_egress
   bind_and_ready a 10.10.0.5 13 runtime-a-2 att-a-2 "${VAULT_POLICY_A}"
+  relay_put_policy a "${VAULT_POLICY_A}"
   wait_for 15 "per-subject DNAT (vault preamble)" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '"
 
   # vault_relay <subject> <method> [body] [incarnation]: one relay op;
@@ -993,6 +1132,9 @@ else
   # credential while a keeps a separate one.
   VB_BODY='{"credentials":[{"name":"smoke-b-token","source":{"type":"inline","value":"smoke-b-secret"}}],"bindings":[{"name":"ext-bearer","match":{"hosts":["ext.test"],"schemes":["http"],"paths":["/private*"]},"auth":{"type":"bearer","credential":"smoke-b-token"}}]}'
   set_binding b 10.10.0.6 3 runtime-b att-b "${VAULT_POLICY_B}"
+  # b's record survived the restarts (MITM section) and supersedes the
+  # binding input — the vault validation policy rides the relay.
+  relay_put_policy b "${VAULT_POLICY_B}"
   code="$(vault_relay b POST "${VB_BODY}")"
   [ "${code}" = "201" ] || fail "relay POST must accept a denying subject (pending-policy validation), got ${code}: $(cat "${VAULT_BODY}")"
   lifecycle_hook b runtime-b att-b sandbox.runtime-ready
@@ -1046,6 +1188,176 @@ else
   out="$(vault_probe a ext.test /private)"
   assert_no_credential "${out}" 'smoke-vault-secret-3'
   pass "relay DELETE stops injection (no-vault plain flow)"
+
+  ###############################################################################
+  info "Test 15: OSEP-0025 exchange credentials — resolver e2e (Codex P1 #2 final acceptance)"
+  # The T5 control-plane payload shape reaches the live data plane for the
+  # first time: a relay PUT carrying an exchange credential + TYPELESS
+  # binding (exactly what the server's PATCH /credential-vault relays since
+  # T5), the shared-mitm addon resolving per request on the egress _resolve
+  # endpoint, and the T6 test resolver proving the wire contract — subject ==
+  # the SET_BINDING sandboxId (the fsb- CR name, never the internal UID, never
+  # the client IP), destination-bound signature
+  # sha256(subject|credential|binding|authority|path), fresh headers at the
+  # upstream, response-header by-name suppression + by-value redaction, and
+  # fail-closed 407 with the static (inline) binding unaffected.
+  FSB_NAME="fsb-smoke-a"
+  RESOLVER_SOCK="/tmp/osb-t7-resolver.sock"
+  RESOLVER_LOG="/tmp/osb-t7-resolver.log"
+  RESOLVER_HTTPS_LOG="/tmp/osb-t7-resolver-https.log"
+
+  python3 "${SCRIPT_DIR}/resolver/resolver.py" --uds "${RESOLVER_SOCK}" >"${RESOLVER_LOG}" 2>&1 &
+  RESOLVER_PID=$!
+  wait_for 10 "T6 resolver stub (uds)" grep -q "test resolver ready" "${RESOLVER_LOG}"
+
+  # The binding replay carries the CR name: the resolve path's wire subject.
+  set_binding_named a "${FSB_NAME}" 10.10.0.5 16 runtime-a-2 att-a "${VAULT_POLICY_A}"
+  lifecycle_hook a runtime-a-2 att-a sandbox.runtime-ready
+  lifecycle_hook a runtime-a-2 att-a sandbox.data-plane-ready
+
+  # Mixed vault: the exchange binding under test (https — the resolve path
+  # binds the resolver proof to the connection SNI, so the probes ride TLS)
+  # plus a static (inline) binding that must keep flowing while the resolver
+  # is down.
+  EX_VAULT='{"credentials":[{"name":"spi-signer","source":{"type":"exchange","endpoint":"unix:///tmp/osb-t7-resolver.sock"}},{"name":"smoke-token","source":{"type":"inline","value":"smoke-ex-static-1"}}],"bindings":[{"name":"internal-api","match":{"hosts":["api.test"],"methods":["GET"],"paths":["/v1/*"]},"auth":{"credential":"spi-signer"}},{"name":"ext-bearer","match":{"hosts":["ext.test"],"schemes":["http"],"paths":["/private*"]},"auth":{"type":"bearer","credential":"smoke-token"}}]}'
+  code="$(vault_relay a PUT "${EX_VAULT}" runtime-a-2)"
+  [ "${code}" = "201" ] || fail "exchange relay PUT must create (T5 payload shape), got ${code}: $(cat "${VAULT_BODY}")"
+
+  # Addon snapshot: the exchange marker with EXPLICIT empty arrays — the
+  # canonical form the addon parser fails closed on when degraded to null.
+  snapshot="$(curl -s --unix-socket "${ACTIVE_SOCK}" "http://localhost/credential-vault/_active?clientIp=10.10.0.5")"
+  echo "${snapshot}" | grep -qF '"exchange":{"credential":"spi-signer"}' \
+    || fail "active snapshot must carry the exchange marker, got: ${snapshot}"
+  echo "${snapshot}" | grep -qF '"headers":[]' \
+    || fail "exchange binding snapshot must carry an explicit empty headers array, got: ${snapshot}"
+  if echo "${snapshot}" | grep -qF '"headers":null'; then
+    fail "exchange binding snapshot must never render null headers: ${snapshot}"
+  fi
+  pass "exchange vault live (addon snapshot marker, headers:[] explicit)"
+
+  # Deterministic oracle: sha256(subject|credential|binding|authority|path).
+  # request.path is the full request-target including query (plan §3.2); the
+  # authority carries the derived scheme default port. The probes ride TLS
+  # with SNI api.test (--resolve pins the daddr; the connection SNI is what
+  # the resolver proof binds to).
+  EX_SIG="$(printf '%s' "${FSB_NAME}|spi-signer|internal-api|api.test:443|/v1/foo?x=1" \
+    | openssl dgst -sha256 | awk '{print $NF}')"
+  ex_probe() { # ex_probe <path> [extra curl args...]
+    local path="$1"; shift
+    ip netns exec osb-sandbox-a curl -sk -m 10 --resolve "api.test:443:10.99.0.2" "$@" "https://api.test${path}"
+  }
+
+  out="$(ex_probe "/v1/foo?x=1")"
+  echo "${out}" | grep -qi 'client=10.99.0.1' || fail "resolve probe did not traverse the shared mitm; got: ${out}"
+  echo "${out}" | grep -qi "x-test-subject: ${FSB_NAME}" \
+    || fail "the resolver subject must be the sandboxId (fsb- CR name), got: ${out}"
+  echo "${out}" | grep -qi "x-test-signature: ${EX_SIG}" \
+    || fail "destination-bound signature mismatch (want ${EX_SIG}); got: ${out}"
+  echo "${out}" | grep -qi 'authorization: bearer test-spi-signer' \
+    || fail "fresh resolver headers must reach the upstream; got: ${out}"
+  if echo "${out}" | grep -q '10.10.0.5'; then
+    fail "the client IP must never surface in resolver-derived headers; got: ${out}"
+  fi
+  pass "exchange happy path uds (subject == sandboxId, bound signature, fresh headers)"
+
+  # Only bound requests resolve: an off-scope path on the same host flows
+  # plain (no resolver round-trip, no injected headers).
+  out="$(ex_probe "/other")"
+  echo "${out}" | grep -qi 'client=10.99.0.1' || fail "off-scope probe did not traverse the shared mitm; got: ${out}"
+  if echo "${out}" | grep -qEi '^(authorization|x-test-subject|x-test-signature):'; then
+    fail "off-scope request must carry no resolved headers; got: ${out}"
+  fi
+  pass "off-scope path stays plain (resolver engaged only on binding match)"
+
+  # Response-header hygiene (R9): with the opt-in upstream reflection, the
+  # injected name is suppressed by name and the signature value redacted.
+  hdrs="$(ip netns exec osb-sandbox-a curl -sk -m 10 -o /dev/null -D - \
+    --resolve "api.test:443:10.99.0.2" -H 'X-Osb-Echo-Response-Headers: 1' "https://api.test/v1/foo?x=1")"
+  if echo "${hdrs}" | grep -qEi '^authorization:'; then
+    fail "response header with an injected NAME must be suppressed; got: ${hdrs}"
+  fi
+  if echo "${hdrs}" | grep -q "${EX_SIG}"; then
+    fail "the signature VALUE must be redacted from response headers; got: ${hdrs}"
+  fi
+  echo "${hdrs}" | grep -qEi '^x-echo-sig: sig=\[REDACTED\]' \
+    || fail "by-value redaction expected ([REDACTED]); got: ${hdrs}"
+  pass "response suppression by name + by-value redaction"
+
+  # Fail-closed: resolver down -> 407 for the exchange binding, while the
+  # static binding on the same vault and non-bound traffic keep flowing.
+  kill "${RESOLVER_PID}" 2>/dev/null || true
+  wait "${RESOLVER_PID}" 2>/dev/null || true
+  RESOLVER_PID=""
+  # || true + --http1.1: the buffered 407 must arrive as a readable response
+  # (an H2-killed stream would only prove the connection died); a transport
+  # failure still yields a code (000) for the assertion instead of tripping
+  # set -e on the substitution.
+  code="$(ip netns exec osb-sandbox-a curl -sk --http1.1 -m 10 -o /dev/null -w '%{http_code}' \
+    --resolve "api.test:443:10.99.0.2" "https://api.test/v1/foo?x=1" || true)"
+  [ "${code}" = "407" ] || fail "resolver down must fail closed with 407, got ${code}"
+  out="$(ip netns exec osb-sandbox-a curl -s -m 5 -H 'Host: ext.test' "http://10.99.0.2/private")"
+  assert_credential "${out}" 'authorization: bearer smoke-ex-static-1'
+  out="$(ex_probe "/other")"
+  echo "${out}" | grep -qi 'client=10.99.0.1' || fail "non-bound traffic must not notice the resolver outage; got: ${out}"
+  pass "fail-closed 407 (resolver down); static binding + non-bound traffic unaffected"
+
+  # A failed resolve never poisons the next request: the stub returns and the
+  # very next probe resolves fresh again.
+  resolver_up() {
+    [ "$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "${ACTIVE_SOCK}" \
+      -X POST -H 'Content-Type: application/json' \
+      --data '{"binding":"internal-api","sni":"api.test","request":{"scheme":"http","host":"api.test","method":"GET","path":"/v1/probe"}}' \
+      "http://localhost/credential-vault/_resolve?clientIp=10.10.0.5")" = "200" ]
+  }
+  python3 "${SCRIPT_DIR}/resolver/resolver.py" --uds "${RESOLVER_SOCK}" >>"${RESOLVER_LOG}" 2>&1 &
+  RESOLVER_PID=$!
+  wait_for 10 "resolver stub restarted" resolver_up
+  out="$(ex_probe "/v1/foo?x=1")"
+  echo "${out}" | grep -qi "x-test-signature: ${EX_SIG}" \
+    || fail "post-outage resolve must carry the correct signature again; got: ${out}"
+  pass "no pollution after resolver recovery (fresh signature)"
+
+  ###############################################################################
+  info "Test 15b: exchange over the HTTPS resolver transport (TLS)"
+  # Same chain over https:// with no caller authentication (D5 deferred —
+  # resolver dials carry no Authorization header): TLS verifies against the
+  # fixture CA via SSL_CERT_FILE, and the wire subject stays the sandboxId.
+  python3 "${SCRIPT_DIR}/resolver/resolver.py" --https 127.0.0.1:18443 \
+    --tls-cert "${SCRIPT_DIR}/resolver/fixtures/test-localhost-cert.pem" \
+    --tls-key "${SCRIPT_DIR}/resolver/fixtures/test-localhost-key.pem" \
+    >"${RESOLVER_HTTPS_LOG}" 2>&1 &
+  RESOLVER_HTTPS_PID=$!
+  wait_for 10 "T6 resolver stub (https)" grep -q "test resolver ready" "${RESOLVER_HTTPS_LOG}"
+
+  kill "${EGRESS_PID}" 2>/dev/null
+  wait "${EGRESS_PID}" 2>/dev/null || true
+  EGRESS_PID=""
+  EGRESS_RESOLVER_CA_FILE="${SCRIPT_DIR}/resolver/fixtures/test-localhost-cert.pem" \
+  EGRESS_MITM=1 start_egress
+
+  set_binding_named a "${FSB_NAME}" 10.10.0.5 17 runtime-a-2 att-a "${VAULT_POLICY_A}"
+  lifecycle_hook a runtime-a-2 att-a sandbox.runtime-ready
+  lifecycle_hook a runtime-a-2 att-a sandbox.data-plane-ready
+  EX_VAULT_HTTPS='{"credentials":[{"name":"spi-signer","source":{"type":"exchange","endpoint":"https://127.0.0.1:18443"}}],"bindings":[{"name":"internal-api","match":{"hosts":["api.test"],"methods":["GET"],"paths":["/v1/*"]},"auth":{"credential":"spi-signer"}}]}'
+  code="$(vault_relay a PUT "${EX_VAULT_HTTPS}" runtime-a-2)"
+  [ "${code}" = "200" ] || fail "https exchange relay PUT must replace (200), got ${code}: $(cat "${VAULT_BODY}")"
+
+  out="$(ex_probe "/v1/foo?x=1")"
+  echo "${out}" | grep -qi "x-test-subject: ${FSB_NAME}" \
+    || fail "https resolver subject must stay the sandboxId, got: ${out}"
+  echo "${out}" | grep -qi "x-test-signature: ${EX_SIG}" \
+    || fail "https resolver signature mismatch (want ${EX_SIG}); got: ${out}"
+  echo "${out}" | grep -qi 'authorization: bearer test-spi-signer' \
+    || fail "https resolver headers must reach the upstream (TLS ok); got: ${out}"
+  pass "exchange happy path https (TLS transport, same wire subject)"
+
+  kill "${RESOLVER_HTTPS_PID}" 2>/dev/null || true
+  wait "${RESOLVER_HTTPS_PID}" 2>/dev/null || true
+  RESOLVER_HTTPS_PID=""
+  code="$(ip netns exec osb-sandbox-a curl -sk --http1.1 -m 10 -o /dev/null -w '%{http_code}' \
+    --resolve "api.test:443:10.99.0.2" "https://api.test/v1/foo?x=1" || true)"
+  [ "${code}" = "407" ] || fail "https resolver down must fail closed with 407, got ${code}"
+  pass "https transport fail-closed (407)"
 fi
 
 ###############################################################################

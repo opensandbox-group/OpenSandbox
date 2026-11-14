@@ -5,7 +5,7 @@ description: Authenticate inbound HTTP and WebSocket traffic to sandbox endpoint
 
 # Secure Access
 
-Secure Access is OpenSandbox's inbound access control for sandbox endpoints. When enabled on a sandbox, the ingress gateway (and the server proxy path) require every caller to prove they are authorized before HTTP or WebSocket traffic reaches the sandbox.
+Secure Access is OpenSandbox's inbound access control for sandbox endpoints. When enabled on a sandbox, the ingress gateway requires every caller to prove they are authorized before HTTP or WebSocket traffic reaches the sandbox.
 
 Its counterparts:
 
@@ -142,7 +142,7 @@ Omitting `expires` on `GetEndpoint` is not a `400` — it returns the unsigned r
 
 ## Notes
 
-- Enforcement covers both ingress gateway and the server proxy path (`/v1/sandboxes/{id}/proxy/...`), HTTP and WebSocket.
+- Enforcement covers the ingress gateway, for both HTTP and WebSocket.
 - The gateway strips `OpenSandbox-Secure-Access` and any signed URI prefix before forwarding.
 - In URI mode, path segments that resemble `expires_b36/signature` are only interpreted as a signed prefix when the sandbox actually has secure access enabled; otherwise the full path is forwarded unchanged.
 - Secure Access is independent of the execd access token (`X-EXECD-ACCESS-TOKEN`) and Credential Vault; all can be used together.

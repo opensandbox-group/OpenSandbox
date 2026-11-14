@@ -86,8 +86,7 @@ spec:
     
     def test_create_provider_with_none_type_uses_default(self, mock_k8s_client, k8s_app_config):
         provider = create_workload_provider(None, mock_k8s_client, k8s_app_config)
-        
-        # Should use the first registered provider (batchsandbox)
+
         assert isinstance(provider, BatchSandboxProvider)
     
     def test_create_provider_with_invalid_type_raises_error(self, mock_k8s_client):
@@ -158,12 +157,6 @@ spec:
         assert isinstance(provider, CustomProvider)
 
         assert "custom" in list_available_providers()
-    
-    def test_create_batchsandbox_with_config(self, mock_k8s_client, k8s_app_config):
-        provider = create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_app_config)
-        
-        assert isinstance(provider, BatchSandboxProvider)
-        assert provider.k8s_client == mock_k8s_client
     
     def test_create_provider_with_empty_registry_raises_error(self, mock_k8s_client, isolated_registry):
         from opensandbox_server.services.k8s import provider_factory

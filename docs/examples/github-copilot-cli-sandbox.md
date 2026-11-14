@@ -69,4 +69,4 @@ Never commit a GitHub token. If a token is exposed in terminal output, documenta
 
 - [GitHub Copilot CLI](https://github.com/github/copilot-cli)
 - [GitHub Copilot CLI quickstart](https://docs.github.com/en/copilot/get-started/cli-quickstart)
-- [Source code](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/github-copilot)
+- [Source code](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/github-copilot-cli-sandbox)

@@ -443,8 +443,9 @@ Create the gVisor configuration file:
 
 ```bash
 sudo tee /etc/containerd/runsc.toml > /dev/null <<'EOF'
-[runsc]
-  platform = "ptrace"
+[runsc_config]
+  # Example configuration flag to enable GPU support:
+  nvproxy = "true"
 EOF
 ```
 

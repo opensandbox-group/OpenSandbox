@@ -408,6 +408,7 @@ EGRESS_CT_ID="$(docker run -d --name "${EGRESS_CT}" \
   -v "${MITM_HOME}:/var/lib/mitmproxy" \
   -v "${SEED_DIR}:/var/egress/mitm-ca-seed:ro" \
   -e OPENSANDBOX_EGRESS_PROFILE=fast-sandbox \
+  -e OPENSANDBOX_EGRESS_POLICY_DIR=/var/lib/opensandbox-egress/policy \
   -e OPENSANDBOX_EGRESS_DNS_UPSTREAM="${BRIDGE_GW}:${DNS_UPSTREAM_PORT}" \
   -e OPENSANDBOX_EGRESS_DNS_UPSTREAM_PROBE=allow.test \
   -e OPENSANDBOX_EGRESS_HTTP_ADDR="127.0.0.1:${POLICY_PORT}" \

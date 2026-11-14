@@ -14,7 +14,12 @@
 
 // Egress-held vault persistence (OSEP-0022 stage 2): one file per subject
 // under <egress-volume>/vault/, so an egress restart recovers locally — no
-// server re-push exists or is needed. Ordering is persist → apply → ack
+// server re-push exists or is needed.
+//
+// TODO(encryption-at-rest): template-borne vault blobs are stored as-is.
+// When encryption lands it protects the store-side reader only — CLONE
+// ISOLATION is determined by KEY SCOPING (per-tenant/pool keys), so design
+// the key hierarchy with the template-distribution flow in mind. Ordering is persist → apply → ack
 // (acked ⇒ durable and applied), reusing the policy-persistence machinery's
 // three-state classification, snapshot restore, and recovery latch.
 package main
@@ -23,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,6 +54,11 @@ type vaultRecoveryState struct {
 type vaultFileStore interface {
 	Snapshot() (*policy.PolicyFileSnapshot, error)
 	SaveRaw(data []byte) (policy.FileMutationState, error)
+	// SaveRawNonDurable publishes by rename without durability barriers —
+	// only valid for content the caller can reconstruct by replay (the
+	// atomic store documents the contract). Everything that outruns its
+	// replay source must use SaveRaw.
+	SaveRawNonDurable(data []byte) (policy.FileMutationState, error)
 	Restore(*policy.PolicyFileSnapshot) (policy.FileMutationState, error)
 	Delete() (policy.FileMutationState, error)
 }
@@ -67,42 +78,8 @@ type vaultPersistence struct {
 // the volume joins the credential trust surface) and sweeps staged leftovers:
 // startup loads the committed files only.
 func newVaultPersistence(dir string) (*vaultPersistence, error) {
-	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return nil, errors.New("vault persistence directory is empty")
-	}
-	if !filepath.IsAbs(dir) {
-		return nil, fmt.Errorf("vault persistence directory %q must be absolute", dir)
-	}
-	for _, part := range strings.Split(dir, string(os.PathSeparator)) {
-		if part == ".." {
-			return nil, fmt.Errorf("vault persistence directory %q must not traverse parents", dir)
-		}
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("prepare vault directory %s: %w", dir, err)
-	}
-	// Reject a symlinked vault directory BEFORE chmod/sweep act through it
-	// (the per-file atomic machinery re-validates no-follow on every real
-	// vault op; this keeps startup from mutating a link target first).
-	if info, err := os.Lstat(dir); err != nil {
-		return nil, fmt.Errorf("inspect vault directory %s: %w", dir, err)
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("vault persistence directory %q must not be a symlink", dir)
-	} else if !info.IsDir() {
-		return nil, fmt.Errorf("vault persistence directory %q is not a directory", dir)
-	}
-	// An existing directory may carry wider bits from a previous generation.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("restrict vault directory %s: %w", dir, err)
-	}
-	// The volume root must pass the atomic machinery's trusted-ancestor
-	// check; kubelet creates emptyDir roots 0777, which fails it.
-	if err := restrictVolumeRoot(dir); err != nil {
+	if err := prepareStateDir(dir, "vault"); err != nil {
 		return nil, err
-	}
-	if err := sweepVaultTempFiles(dir); err != nil {
-		return nil, fmt.Errorf("sweep staged vault leftovers in %s: %w", dir, err)
 	}
 	return &vaultPersistence{
 		dir:     dir,
@@ -111,44 +88,55 @@ func newVaultPersistence(dir string) (*vaultPersistence, error) {
 	}, nil
 }
 
-// restrictVolumeRoot clears group/world-write bits from the vault volume
-// root (the vault directory's parent): kubelet creates emptyDir roots 0777,
-// which the atomic machinery rejects as an untrusted ancestor. A parent
-// holding foreign entries is left untouched — that is the manifest's job —
-// and already-restrictive roots are a no-op.
-func restrictVolumeRoot(dir string) error {
-	parent := filepath.Dir(dir)
-	info, err := os.Stat(parent)
-	if err != nil {
-		return fmt.Errorf("inspect vault volume root %s: %w", parent, err)
+// prepareStateDir validates and prepares one per-subject state directory
+// (0700, no symlink, no traversal) for the atomic file machinery: it sweeps
+// staging leftovers a crashed writer left behind, so startup loads the
+// committed files only. noun names the state kind in errors and logs
+// ("vault", "policy").
+func prepareStateDir(dir, noun string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return fmt.Errorf("%s persistence directory is empty", noun)
 	}
-	if !info.IsDir() || info.Mode().Perm()&0o022 == 0 {
-		return nil
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("%s persistence directory %q must be absolute", noun, dir)
 	}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && st.Uid != uint32(os.Geteuid()) {
-		return nil // not ours to restrict
-	}
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		return fmt.Errorf("list vault volume root %s: %w", parent, err)
-	}
-	base := filepath.Base(dir)
-	for _, entry := range entries {
-		if entry.Name() != base {
-			log.Infof("vault persistence: volume root %s holds foreign entry %q; not restricting (fix permissions in the manifest)", parent, entry.Name())
-			return nil
+	for _, part := range strings.Split(dir, string(os.PathSeparator)) {
+		if part == ".." {
+			return fmt.Errorf("%s persistence directory %q must not traverse parents", noun, dir)
 		}
 	}
-	if err := os.Chmod(parent, info.Mode().Perm()&^0o022); err != nil {
-		return fmt.Errorf("restrict vault volume root %s: %w", parent, err)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("prepare %s directory %s: %w", noun, dir, err)
 	}
-	log.Infof("vault persistence: restricted group/world-writable volume root %s (kubelet emptyDir default)", parent)
+	// Reject a symlinked state directory BEFORE chmod/sweep act through it
+	// (the per-file atomic machinery re-validates no-follow on every real
+	// op; this keeps startup from mutating a link target first).
+	if info, err := os.Lstat(dir); err != nil {
+		return fmt.Errorf("inspect %s directory %s: %w", noun, dir, err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s persistence directory %q must not be a symlink", noun, dir)
+	} else if !info.IsDir() {
+		return fmt.Errorf("%s persistence directory %q is not a directory", noun, dir)
+	}
+	// An existing directory may carry wider bits from a previous generation.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("restrict %s directory %s: %w", noun, dir, err)
+	}
+	// The volume root must pass the atomic machinery's trusted-ancestor
+	// check; kubelet creates emptyDir roots 0777, which fails it.
+	if err := restrictVolumeRoot(dir, noun); err != nil {
+		return err
+	}
+	if err := sweepStateTempFiles(dir, noun); err != nil {
+		return fmt.Errorf("sweep staged %s leftovers in %s: %w", noun, dir, err)
+	}
 	return nil
 }
 
-// sweepVaultTempFiles unlinks staging files a crashed writer left behind
+// sweepStateTempFiles unlinks staging files a crashed writer left behind
 // (rename never attempted — unconfirmed candidate state).
-func sweepVaultTempFiles(dir string) error {
+func sweepStateTempFiles(dir, noun string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -161,8 +149,59 @@ func sweepVaultTempFiles(dir string) error {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil {
 			return fmt.Errorf("discard staged leftover %s: %w", name, err)
 		}
-		log.Infof("vault persistence: discarded staged leftover %s", name)
+		log.Infof("%s persistence: discarded staged leftover %s", noun, name)
 	}
+	return nil
+}
+
+// stateDirNames are the basenames of the per-subject state directories
+// sharing one egress volume root, registered at assembly from the CONFIGURED
+// paths (the basename is deployment-owned). restrictVolumeRoot treats
+// registered siblings as ours — otherwise the second initializer skips the
+// volume-root restriction and the atomic machinery rejects every file op on
+// the untrusted ancestor.
+var stateDirNames = map[string]bool{
+	"vault":  true,
+	"policy": true,
+}
+
+// registerStateDirName records a configured state directory basename.
+func registerStateDirName(dir string) {
+	stateDirNames[filepath.Base(filepath.Clean(dir))] = true
+}
+
+// restrictVolumeRoot clears group/world-write bits from the state volume
+// root: kubelet creates emptyDir roots 0777, which the atomic machinery
+// rejects as an untrusted ancestor. Registered siblings belong to us; a
+// root holding any other entry is left untouched (the manifest's job).
+func restrictVolumeRoot(dir, noun string) error {
+	parent := filepath.Dir(dir)
+	info, err := os.Stat(parent)
+	if err != nil {
+		return fmt.Errorf("inspect %s volume root %s: %w", noun, parent, err)
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o022 == 0 {
+		return nil
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && st.Uid != uint32(os.Geteuid()) {
+		return nil // not ours to restrict
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return fmt.Errorf("list %s volume root %s: %w", noun, parent, err)
+	}
+	base := filepath.Base(dir)
+	for _, entry := range entries {
+		if entry.Name() == base || (entry.IsDir() && stateDirNames[entry.Name()]) {
+			continue
+		}
+		log.Infof("%s persistence: volume root %s holds foreign entry %q; not restricting (fix permissions in the manifest)", noun, parent, entry.Name())
+		return nil
+	}
+	if err := os.Chmod(parent, info.Mode().Perm()&^0o022); err != nil {
+		return fmt.Errorf("restrict %s volume root %s: %w", noun, parent, err)
+	}
+	log.Infof("%s persistence: restricted group/world-writable volume root %s (kubelet emptyDir default)", noun, parent)
 	return nil
 }
 
@@ -269,6 +308,44 @@ func (p *vaultPersistence) isSealed(subj subject.Subject) bool {
 	return err == nil
 }
 
+// inspectLazyVaultStateLocked discovers only whether a lazy vault must stay
+// unavailable to the v1 relay path. Removal bindings have no policy against
+// which to reload legacy contents, so this deliberately does not import or
+// quarantine v1 files. Callers hold s.mu.
+func (s *fastSandboxPolicyServer) inspectLazyVaultStateLocked(subj subject.Subject, entry *vaultEntry) {
+	if s.vaultFiles == nil || entry.vaultStateProtected {
+		return
+	}
+	fileStore, err := s.vaultFiles.storeFor(subj)
+	if err != nil {
+		entry.degraded = fmt.Sprintf("vault file store unavailable: %v", err)
+		entry.vaultStateUnknown = true
+		return
+	}
+	snapshot, err := fileStore.Snapshot()
+	if err != nil {
+		entry.degraded = fmt.Sprintf("vault file unreadable: %v", err)
+		entry.vaultStateUnknown = true
+		return
+	}
+	entry.degraded = ""
+	entry.vaultStateUnknown = false
+	if !snapshot.Exists() {
+		return
+	}
+	vf, _, decodeErr := credentialvault.DecodeVaultFile(snapshot.Data())
+	if decodeErr == nil && vf.Version == credentialvault.VaultFileVersion {
+		return
+	}
+	entry.vaultStateProtected = true
+	entry.vaultStateUnknown = true
+	entry.degraded = "unreadable or non-v1 vault state requires a lineage-aware reload"
+	entry.fileMeta = vaultFileMetadata{
+		version: vf.Version, revision: vf.Revision, state: vf.State, lineage: vf.StateLineage,
+		stateRevision: vf.StateRevision, initializationID: vf.InitializationID,
+	}
+}
+
 // SetVaultFiles wires persistence under the relay handlers; nil (the default)
 // keeps the vault memory-only.
 func (s *fastSandboxPolicyServer) SetVaultFiles(vp *vaultPersistence) {
@@ -280,13 +357,64 @@ func (s *fastSandboxPolicyServer) SetVaultFiles(vp *vaultPersistence) {
 // purgeVaultFile removes the subject's persisted slice (rebind or terminal
 // cleanup). Best effort: a failed purge leaves a file that its recorded fence
 // keeps out of every later registration.
-func (s *fastSandboxPolicyServer) purgeVaultFile(subj subject.Subject) {
+func (s *fastSandboxPolicyServer) purgeVaultFile(subj subject.Subject) error {
 	if s.vaultFiles == nil {
-		return
+		return nil
 	}
-	if err := s.vaultFiles.purge(subj); err != nil {
+	err := s.vaultFiles.purge(subj)
+	if err != nil {
 		log.Errorf("subject %s: vault file purge failed (leftover stays fenced out): %v", subj, err)
 	}
+	return err
+}
+
+// vaultPurgeStatusLocked protects the remaining lifecycle writer: unlike
+// relay/snapshot handlers, terminal REMOVE and rebind cleanup delete the file.
+// Callers hold s.mu and the action/commit gate before invoking it.
+func (s *fastSandboxPolicyServer) vaultPurgeStatusLocked(subj subject.Subject) (int, error) {
+	if entry, ok := s.vaults[subj]; ok {
+		if entry.vaultStateUnknown {
+			return http.StatusServiceUnavailable, errors.New("vault state is unknown; refusing lifecycle purge")
+		}
+		if entry.fileMeta.version >= credentialvault.VaultFileVersion2 {
+			return http.StatusConflict, errors.New("v2 vault state is read-only until lineage-aware lifecycle writes are supported")
+		}
+	}
+	if s.vaultFiles == nil {
+		return 0, nil
+	}
+	fileStore, err := s.vaultFiles.storeFor(subj)
+	if err != nil {
+		return http.StatusServiceUnavailable, fmt.Errorf("vault purge state unavailable: %w", err)
+	}
+	snapshot, err := fileStore.Snapshot()
+	if err != nil {
+		return http.StatusServiceUnavailable, fmt.Errorf("vault purge snapshot unavailable: %w", err)
+	}
+	if !snapshot.Exists() {
+		return 0, nil
+	}
+	vf, _, decodeErr := credentialvault.DecodeVaultFile(snapshot.Data())
+	if errors.Is(decodeErr, credentialvault.ErrUnsupportedFileVersion) {
+		return http.StatusServiceUnavailable, errors.New("vault file schema is unknown; refusing lifecycle purge")
+	}
+	if decodeErr == nil && vf.Version >= credentialvault.VaultFileVersion2 {
+		return http.StatusConflict, errors.New("v2 vault state is read-only until lineage-aware lifecycle writes are supported")
+	}
+	// Corrupt v1 files retain the pre-existing terminal cleanup behavior. A
+	// recognized v2/unknown schema is never deleted through this v1 path.
+	return 0, nil
+}
+
+// vaultPurgeFailureStatusLocked preserves a specific v2/unknown refusal. If a
+// transient preflight snapshot error clears during this recheck, status 0 must
+// still become a valid retryable HTTP error for the failed preflight.
+func (s *fastSandboxPolicyServer) vaultPurgeFailureStatusLocked(subj subject.Subject) int {
+	status, _ := s.vaultPurgeStatusLocked(subj)
+	if status < 100 || status > 599 {
+		return http.StatusInternalServerError
+	}
+	return status
 }
 
 // persistVaultCandidateLocked runs the commit protocol; callers hold s.mu for
@@ -378,7 +506,7 @@ func (s *fastSandboxPolicyServer) vaultRecoveryActive() bool {
 func (s *fastSandboxPolicyServer) clearVaultDegradedLocked(subj subject.Subject) {
 	if e, ok := s.vaults[subj]; ok {
 		e.degraded = ""
-		s.vaults[subj] = e
+		s.setSubjectVaultEntryLocked(subj, e)
 	}
 }
 
@@ -430,23 +558,61 @@ func (s *fastSandboxPolicyServer) degradedVaultUIDsLocked() []string {
 // An existing slice for this exact fence wins (duplicate SET_BINDING); one
 // left under a different fence goes through the same file rules as a fresh
 // registration.
-func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy) {
+// policyDegraded reports that the recorded policy itself degraded at this
+// restart: the vault then degrades WITHOUT validation and WITHOUT
+// quarantine (a deny-seeded validation would quarantine a HEALTHY vault
+// whose binding hosts the tightened/unknown policy no longer covers —
+// silently destroying persisted credentials on every restart until a
+// policy/vault relay write heals it).
+func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, policyDegraded bool) {
 	if s.vaultFiles == nil {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e, live := s.vaults[subj]; live {
-		if e.fence == fence {
+	// The strict writer never infers initialization/recovery from file absence.
+	// Its separate verify operation must re-establish the in-process ACK.
+	if s.actionsAPIVersion == "sandbox.fast.io/actions/v2" {
+		record, err := s.readOwnerRecord(subj)
+		if err != nil {
+			s.mu.Lock()
+			entry, live := s.vaults[subj]
+			if !live || entry.fence != fence {
+				s.setSubjectVaultEntryLocked(subj, vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence, vaultStateUnknown: true, degraded: "strict owner authority unavailable"})
+			}
+			s.mu.Unlock()
 			return
 		}
-		delete(s.vaults, subj)
+		if record != nil && record.VaultContract != nil {
+			s.mu.Lock()
+			entry, live := s.vaults[subj]
+			if !live || entry.fence != fence || !entry.v2Verified {
+				s.setSubjectVaultEntryLocked(subj, vaultEntry{store: credentialvault.NewSubjectStore(), fence: fence, vaultStateUnknown: true, vaultStateProtected: true, degraded: "Vault initialization verification required"})
+			}
+			s.mu.Unlock()
+			return
+		}
 	}
-	entry := vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	protectedBefore := false
+	previousMeta := vaultFileMetadata{}
+	if e, live := s.vaults[subj]; live {
+		if e.fence == fence && !e.vaultStateUnknown {
+			return
+		}
+		if e.fence == fence {
+			protectedBefore = e.vaultStateProtected
+			previousMeta = e.fileMeta
+		}
+	}
+	entry := vaultEntry{
+		store: credentialvault.NewSubjectStore(), fence: fence,
+		fileMeta: previousMeta, vaultStateProtected: protectedBefore,
+	}
 	fs, err := s.vaultFiles.storeFor(subj)
 	if err != nil {
 		entry.degraded = fmt.Sprintf("vault file store unavailable: %v", err)
-		s.vaults[subj] = entry
+		entry.vaultStateUnknown = true
+		s.setSubjectVaultEntryLocked(subj, entry)
 		log.Warnf("subject %s: %s", subj, entry.degraded)
 		return
 	}
@@ -454,15 +620,41 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 	switch {
 	case err != nil:
 		entry.degraded = fmt.Sprintf("vault file unreadable: %v", err)
+		entry.vaultStateUnknown = true
 		log.Warnf("subject %s: %s", subj, entry.degraded)
 	case !snap.Exists():
-		// Fresh subject: nothing persisted, nothing to recover.
+		if entry.vaultStateProtected {
+			// A previously observed v2/unsupported file disappearing is not
+			// evidence of a fresh v1 subject. Keep its provenance sticky for
+			// this fence so a relay write cannot replace it with v1.
+			entry.degraded = "previously protected vault state disappeared; refusing legacy fallback"
+			entry.vaultStateUnknown = true
+			log.Warnf("subject %s: %s", subj, entry.degraded)
+		}
+		// Otherwise a fresh subject has nothing persisted to recover.
 	default:
 		vf, body, decErr := credentialvault.DecodeVaultFile(snap.Data())
+		unsupported := errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion)
+		if vf.Version >= credentialvault.VaultFileVersion2 || unsupported {
+			entry.vaultStateProtected = true
+		}
+		legacyDowngrade := protectedBefore && vf.Version < credentialvault.VaultFileVersion2 && !unsupported
+		if !legacyDowngrade {
+			entry.fileMeta = vaultFileMetadata{
+				version: vf.Version, revision: vf.Revision, state: vf.State, lineage: vf.StateLineage,
+				stateRevision: vf.StateRevision, initializationID: vf.InitializationID,
+			}
+		}
 		switch {
+		case legacyDowngrade:
+			entry.degraded = "previously protected vault state was replaced by a legacy file; refusing downgrade"
+			entry.vaultStateUnknown = true
+			log.Warnf("subject %s: %s", subj, entry.degraded)
 		case decErr != nil && errors.Is(decErr, credentialvault.ErrUnsupportedFileVersion):
-			// Written by a newer consumer — reject without destroying.
+			// A newer or unreadable v2 state must remain available for a
+			// compatible reader; never quarantine or expose it as absent.
 			entry.degraded = fmt.Sprintf("vault file version not readable by this egress: %v", decErr)
+			entry.vaultStateUnknown = true
 			log.Warnf("subject %s: %s (file preserved for the newer writer)", subj, entry.degraded)
 		case decErr != nil:
 			// Structurally corrupt: quarantine so the degradation cannot
@@ -470,23 +662,58 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 			entry.degraded = fmt.Sprintf("corrupt vault file: %v", decErr)
 			s.quarantineVaultFile(subj, fs)
 			log.Warnf("subject %s: %s", subj, entry.degraded)
+		case policyDegraded:
+			// The recorded policy degraded at this restart: hold the vault
+			// degraded WITHOUT validating it against the deny fallback (a
+			// deny-seeded validation would quarantine a HEALTHY vault) and
+			// WITHOUT quarantining the file — a policy/vault relay write
+			// heals the slice.
+			entry.degraded = "held degraded: the recorded policy is degraded at this restart"
+			entry.vaultStateUnknown = vf.Version >= credentialvault.VaultFileVersion2
+			log.Warnf("subject %s: %s (file kept)", subj, entry.degraded)
+		case vf.Version == credentialvault.VaultFileVersion2 && vf.State == credentialvault.FileStateEmpty:
+			// Empty is an explicit initialization decision, not a legacy
+			// absence. This stage cannot verify its mode/owner contract.
+			entry.degraded = "explicit empty vault state requires the strict mode protocol"
+			entry.vaultStateUnknown = true
+			log.Warnf("subject %s: %s (file kept)", subj, entry.degraded)
 		case (subject.Fencing{RuntimeInstanceID: vf.Incarnation, AttachmentID: vf.AttachmentID}).Matches(fence):
 			// Same-instance recovery: revalidate against the replayed binding
-			// policy, install at the exact file revision.
-			if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
+			// policy, install at the exact file revision. A validation
+			// failure (e.g. the recorded policy was tightened and no longer
+			// covers a binding host) DEGRADES the slice but KEEPS the file —
+			// runtime relay commits never re-validate the vault, so
+			// policy/vault divergence at restart is a normal state, and
+			// quarantining here would silently destroy persisted
+			// credentials. A policy/vault relay write heals the slice; a
+			// policy heal + restart revives it from the kept file.
+			if vf.Version == credentialvault.VaultFileVersion2 && vf.State == credentialvault.FileStateDeleted {
+				// The persisted tombstone is known absence. Keep the store
+				// empty so the public GET remains 404, and keep the file as
+				// the source of truth until v2 writes are implemented.
+				log.Infof("subject %s: deleted v2 vault state reloaded (stateRevision %d)", subj, vf.StateRevision)
+			} else if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 				entry.degraded = fmt.Sprintf("vault file reload rejected: %v", err)
-				s.quarantineVaultFile(subj, fs) // can never validate under this binding
-				log.Warnf("subject %s: %s", subj, entry.degraded)
+				entry.vaultStateUnknown = vf.Version >= credentialvault.VaultFileVersion2
+				log.Warnf("subject %s: %s (file kept; a policy/vault relay write heals the slice)", subj, entry.degraded)
 			} else {
-				log.Infof("subject %s: vault reloaded from file (revision %d, incarnation %s)", subj, vf.Revision, vf.Incarnation)
+				log.Infof("subject %s: vault reloaded from file (version %d, revision %d, incarnation %s)", subj, vf.Version, vf.Revision, vf.Incarnation)
 			}
 		default:
-			// Stale: discard durably. A failed purge is harmless — the
-			// recorded fence mismatches every later registration regardless.
-			if _, delErr := fs.Delete(); delErr != nil {
-				log.Warnf("subject %s: stale vault file purge failed (stays fenced out): %v", subj, delErr)
+			if vf.Version >= credentialvault.VaultFileVersion2 {
+				// A v2 file belongs to an unknown lineage/owner here. Preserve
+				// it and block relay reads/writes; this stage cannot safely
+				// infer a transfer or purge authorization from the file alone.
+				entry.degraded = "v2 vault file owner does not match the current runtime fence"
+				entry.vaultStateUnknown = true
+				log.Warnf("subject %s: %s (file preserved)", subj, entry.degraded)
 			} else {
-				log.Infof("subject %s: stale vault file discarded (fence %s/%s ≠ %s/%s)", subj, vf.Incarnation, vf.AttachmentID, fence.RuntimeInstanceID, fence.AttachmentID)
+				// Legacy v1 stale cleanup retains its existing behavior.
+				if _, delErr := fs.Delete(); delErr != nil {
+					log.Warnf("subject %s: stale vault file purge failed (stays fenced out): %v", subj, delErr)
+				} else {
+					log.Infof("subject %s: stale vault file discarded (fence %s/%s ≠ %s/%s)", subj, vf.Incarnation, vf.AttachmentID, fence.RuntimeInstanceID, fence.AttachmentID)
+				}
 			}
 		}
 	}
@@ -497,7 +724,7 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 		entry.sealed = true
 		log.Infof("subject %s: seal restored from marker (exported bundle pending)", subj)
 	}
-	s.vaults[subj] = entry
+	s.setSubjectVaultEntryLocked(subj, entry)
 }
 
 // quarantineVaultFile unlinks a file that can never load again. Best effort:

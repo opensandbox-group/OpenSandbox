@@ -126,6 +126,7 @@ export interface K8sListResponse<T> {
   totalItems?: number;
   disabled?: boolean;
   message?: string;
+  errorCode?: string;
 }
 
 export interface PoolListResponse {
@@ -164,9 +165,4 @@ export interface PlatformSummary {
     totalPods?: number;
     sampleReasons?: string[];
   }>;
-}
-
-export interface ApiErrorBody {
-  code?: string;
-  message?: string;
 }

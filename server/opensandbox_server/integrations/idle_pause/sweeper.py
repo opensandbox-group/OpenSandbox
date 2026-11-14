@@ -81,9 +81,7 @@ from opensandbox_server.integrations.idle_pause.redis_client import (
     close_idle_pause_redis_client,
     connect_idle_pause_redis_from_config,
 )
-from opensandbox_server.services.composite_service import CompositeSandboxService
 from opensandbox_server.services.fast_sandbox.endpoint import build_endpoint
-from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
 logger = logging.getLogger(__name__)
 
@@ -386,36 +384,22 @@ class IdlePauseSweeper:
         threshold: int,
         stats: SweepStats,
     ) -> bool:
-        if last_active_ms is not None:
+        if last_active_ms is not None and tombstone_ms is not None:
             # The activity key reappeared: a leftover tombstone must not
             # outlive fresh traffic, or its age would later fake idleness
             # after the key is evicted (OSEP-0024 tombstone semantics).
-            if tombstone_ms is not None:
-                try:
-                    await self._activity.clear_tombstone(candidate.sandbox_id)
-                except (RedisError, OSError) as exc:
-                    line, ex = idlep_bundle(
-                        event=IDLEP_EVENT_SWEEP_SKIPPED,
-                        source=IDLEP_SOURCE_SWEEPER,
-                        sandbox_id=candidate.sandbox_id,
-                        namespace=candidate.namespace,
-                        skip_reason="tombstone_clear_failed",
-                        error_type=type(exc).__name__,
-                    )
-                    logger.warning(f"idle_pause {line} error={exc!s}", extra=ex)
-            decision = evaluate_idle(
-                last_active_ms=last_active_ms,
-                tombstone_ms=None,
-                now_ms=now_ms,
-                threshold_seconds=threshold,
-            )
-        else:
-            decision = evaluate_idle(
-                last_active_ms=None,
-                tombstone_ms=tombstone_ms,
-                now_ms=now_ms,
-                threshold_seconds=threshold,
-            )
+            try:
+                await self._activity.clear_tombstone(candidate.sandbox_id)
+            except (RedisError, OSError) as exc:
+                line, ex = idlep_bundle(
+                    event=IDLEP_EVENT_SWEEP_SKIPPED,
+                    source=IDLEP_SOURCE_SWEEPER,
+                    sandbox_id=candidate.sandbox_id,
+                    namespace=candidate.namespace,
+                    skip_reason="tombstone_clear_failed",
+                    error_type=type(exc).__name__,
+                )
+                logger.warning(f"idle_pause {line} error={exc!s}", extra=ex)
         decision = evaluate_idle(
             last_active_ms=last_active_ms,
             tombstone_ms=tombstone_ms,
@@ -541,6 +525,11 @@ async def start_idle_pause_sweeper(
     if app_config.runtime.type != "kubernetes":
         logger.info("idle_pause disabled for non-kubernetes runtime (fsb backend only)")
         return None
+
+    # Imported here: FastSandboxService imports this package for its idle
+    # policy helpers, so a module-level import would be circular.
+    from opensandbox_server.services.composite_service import CompositeSandboxService
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
     fsb = None
     if isinstance(sandbox_service, CompositeSandboxService):

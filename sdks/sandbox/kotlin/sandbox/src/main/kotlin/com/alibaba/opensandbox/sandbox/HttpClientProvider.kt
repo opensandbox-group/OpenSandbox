@@ -224,8 +224,14 @@ class HttpClientProvider(
 
     private class AuthenticationInterceptor(private val apiKey: String) : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            // An explicit header from ConnectionConfig.headers (matched
+            // case-insensitively by OkHttp) wins over the configured API key.
+            if (apiKey.isBlank() || request.header("OPEN-SANDBOX-API-KEY") != null) {
+                return chain.proceed(request)
+            }
             return chain.proceed(
-                chain.request().newBuilder()
+                request.newBuilder()
                     .header("OPEN-SANDBOX-API-KEY", apiKey)
                     .build(),
             )

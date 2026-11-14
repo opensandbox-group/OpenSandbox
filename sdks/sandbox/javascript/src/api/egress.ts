@@ -1,11 +1,11 @@
 // Copyright 2026 The OpenSandbox Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -563,6 +563,7 @@ export interface components {
         };
         CredentialMetadata: {
             name: string;
+            /** @description Credential source kind (`inline` or `exchange`). */
             sourceType: string;
             revision: number;
         };
@@ -574,12 +575,36 @@ export interface components {
         };
         Credential: {
             name: string;
-            source: components["schemas"]["InlineCredentialSource"];
+            source: components["schemas"]["CredentialSource"];
         };
-        InlineCredentialSource: {
+        /**
+         * @description Where the credential material comes from. Exactly one kind, selected
+         *     by `type`:
+         *
+         *     - `inline`: the secret value travels in this request via `value`.
+         *       Inline values are write-only and never appear in reads.
+         *     - `exchange`: no local material. Egress resolves header sets per
+         *       request from a header-resolver service addressed by `endpoint`.
+         *       Supported endpoint forms are `unix:///absolute/path` (HTTP over a
+         *       Unix domain socket) and `https://host[:port]` (TLS); anything else
+         *       is rejected with 400.
+         *
+         *     Fields of the other kind must be absent; for example `value` together
+         *     with `type: exchange` is rejected with 400.
+         */
+        CredentialSource: {
             /** @enum {string} */
-            type: "inline";
-            value: string;
+            type: "inline" | "exchange";
+            /**
+             * @description Inline secret value. Required when `type` is `inline`; must be
+             *     absent otherwise.
+             */
+            value?: string;
+            /**
+             * @description Header-resolver endpoint. Required when `type` is `exchange`; must
+             *     be absent otherwise.
+             */
+            endpoint?: string;
         };
         CredentialBinding: {
             name: string;
@@ -616,51 +641,44 @@ export interface components {
              */
             paths: string[];
         };
-        CredentialAuth: components["schemas"]["BearerCredentialAuth"] | components["schemas"]["BasicCredentialAuth"] | components["schemas"]["ApiKeyCredentialAuth"] | components["schemas"]["CustomHeadersCredentialAuth"] | components["schemas"]["PassthroughCredentialAuth"];
-        BearerCredentialAuth: {
+        /**
+         * @description How a binding injects credential material. Exactly one auth kind:
+         *
+         *     - `bearer`: `type: bearer` plus `credential`.
+         *     - `basic`: `type: basic` plus `credential`.
+         *     - `apiKey`: `type: apiKey` plus `name` and `credential`.
+         *     - `customHeaders`: `type: customHeaders` plus `headers`.
+         *     - `passthrough`: `type: passthrough`, no credential reference.
+         *     - typeless exchange: `type` omitted with only `credential` set. The
+         *       referenced credential must be exchange-sourced; egress resolves the
+         *       header set per request from the credential's endpoint.
+         *
+         *     Static kinds must reference inline-sourced credentials, and the
+         *     typeless form must reference an exchange-sourced credential and must
+         *     not set `name`, `headers`, or `substitutions`. The five static kinds
+         *     accept optional `substitutions`. Violations are rejected with 400.
+         */
+        CredentialAuth: {
             /**
-             * @description discriminator enum property added by openapi-typescript
+             * @description Static auth kind. Omit entirely for the typeless exchange form.
              * @enum {string}
              */
-            type: "bearer";
-            credential: string;
-            substitutions?: components["schemas"]["CredentialSubstitution"][];
-        };
-        BasicCredentialAuth: {
+            type?: "bearer" | "basic" | "apiKey" | "customHeaders" | "passthrough";
             /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
+             * @description Name of the sandbox-local credential whose value is injected. For
+             *     `basic` the referenced credential contains pre-encoded
+             *     base64(username:password). Required for `bearer`, `basic`,
+             *     `apiKey`, and the typeless exchange form; must be absent otherwise.
              */
-            type: "basic";
-            /** @description Credential containing pre-encoded base64(username:password). */
-            credential: string;
-            substitutions?: components["schemas"]["CredentialSubstitution"][];
-        };
-        ApiKeyCredentialAuth: {
+            credential?: string;
+            /** @description Request header name. Required for `apiKey`; must be absent otherwise. */
+            name?: string;
+            /** @description Static header set. Required for `customHeaders`; must be absent otherwise. */
+            headers?: components["schemas"]["CustomHeaderEntry"][];
             /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
+             * @description Optional placeholder replacement set. Accepted for the five static
+             *     kinds; must be absent for the typeless exchange form.
              */
-            type: "apiKey";
-            name: string;
-            credential: string;
-            substitutions?: components["schemas"]["CredentialSubstitution"][];
-        };
-        CustomHeadersCredentialAuth: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "customHeaders";
-            headers: components["schemas"]["CustomHeaderEntry"][];
-            substitutions?: components["schemas"]["CredentialSubstitution"][];
-        };
-        PassthroughCredentialAuth: {
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "passthrough";
             substitutions?: components["schemas"]["CredentialSubstitution"][];
         };
         CustomHeaderEntry: {
@@ -676,9 +694,11 @@ export interface components {
             /** @description Request surfaces where the placeholder may be replaced. Query and path replacements are URL-encoded, JSON string bodies are escaped, x-www-form-urlencoded bodies are form-encoded, compressed bodies are skipped, and multipart bodies are skipped. */
             in: ("path" | "query" | "header" | "body")[];
         };
+        /** @description Sanitized auth shape — `type` (plus `name` for `apiKey`) for static kinds; `credential` only for the typeless exchange form. */
         CredentialAuthMetadata: {
-            type: string;
+            type?: string;
             name?: string;
+            credential?: string;
         };
     };
     responses: {

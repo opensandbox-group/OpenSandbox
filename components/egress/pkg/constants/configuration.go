@@ -15,14 +15,37 @@
 package constants
 
 import (
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
 )
 
+func ParseFastSandboxActionsAPIVersion(raw string) (string, error) {
+	version := strings.TrimSpace(raw)
+	if version == "" {
+		return ActionsAPIVersion, nil
+	}
+	switch version {
+	case ActionsAPIVersion, ActionsAPIVersionV2:
+		return version, nil
+	default:
+		return "", fmt.Errorf("unsupported Fast Sandbox Actions apiVersion %q", version)
+	}
+}
+
 const (
 	EnvCredentialVaultTrustedProxyCIDRs  = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_TRUSTED_PROXY_CIDRS"
 	EnvCredentialVaultRequireScopedMatch = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_SCOPED_MATCH"
+)
+
+// Credential header resolver client (OSEP-0025); owned by
+// pkg/credentialvault/resolver_client.go — consumers use the client interface
+// only. Caller authentication (D5) is deferred: resolver dials carry no
+// Authorization header.
+const (
+	EnvCredentialResolverTimeout        = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"         // seconds, 1..120
+	EnvCredentialResolverMaxConcurrency = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY" // 1..1024
 )
 
 // Fast Sandbox profile: the egress control plane serves N sandboxes
@@ -43,9 +66,19 @@ const (
 // Lifecycle Hooks to the egress Handler over two Pod-loopback HTTP endpoints
 // on the action target port.
 const (
-	ActionsAPIVersion   = "sandbox.fast.io/actions/v1"
-	ActionsStatusPath   = "/_fastlet/v1/actions/status"
-	ActionsDispatchPath = "/_fastlet/v1/actions"
+	ActionsAPIVersion               = "sandbox.fast.io/actions/v1"
+	ActionsAPIVersionV2             = "sandbox.fast.io/actions/v2"
+	ActionsStatusPath               = "/_fastlet/v1/actions/status"
+	ActionsDispatchPath             = "/_fastlet/v1/actions"
+	ActionsV2StatusPath             = "/_fastlet/v2/actions/status"
+	ActionsV2DispatchPath           = "/_fastlet/v2/actions"
+	ActionsV2OwnerPathPrefix        = "/_fastlet/v2/owners/"
+	ActionsV2RelayPathPrefix        = "/_fastlet/v2/relay/"
+	ActionsV2VaultRelayPathPrefix   = ActionsV2RelayPathPrefix + "vault/"
+	ActionsV2PolicyRelayPathPrefix  = ActionsV2RelayPathPrefix + "policy/"
+	EnvFastSandboxActionsAPIVersion = "OPENSANDBOX_EGRESS_ACTIONS_API_VERSION"
+	EgressActionsOwnerHeader        = "X-Fast-Sandbox-Owner"
+	EgressActionsSandboxUIDHeader   = "X-Sandbox-Uid"
 
 	HookRuntimeReady   = "sandbox.runtime-ready"
 	HookDataPlaneReady = "sandbox.data-plane-ready"
@@ -60,17 +93,29 @@ const (
 // server↔egress contract terminated by the FastPath handler-relay. Every op
 // may carry the expectedIncarnation precondition (the owning runtime
 // instance recorded at SET_BINDING); a mismatch is a 412.
+//
+// Relay policy surface mirrors the vault relay: /policy/{sandboxUid}
+// terminates the same handler-relay channel for the subject's recorded
+// egress policy (full replace with an optional expectedRevision, deny-first
+// on DELETE).
 const (
 	EgressVaultIncarnationHeader = "X-Fast-Sandbox-Incarnation"
 
 	VaultRelayPathPrefix = "/vault/"
+
+	PolicyRelayPathPrefix = "/policy/"
 )
 
 // EnvEgressVaultDir (fast-sandbox profile): directory for the per-subject
 // vault files on the Pod-scoped emptyDir volume. Empty/unset keeps the vault
 // memory-only; the sidecar profile never persists.
+//
+// EnvEgressPolicyDir (fast-sandbox profile): REQUIRED — directory for the
+// per-subject policy files. The recorded policy is egress-held state; the
+// profile fails startup without it.
 const (
-	EnvEgressVaultDir = "OPENSANDBOX_EGRESS_VAULT_DIR"
+	EnvEgressVaultDir  = "OPENSANDBOX_EGRESS_VAULT_DIR"
+	EnvEgressPolicyDir = "OPENSANDBOX_EGRESS_POLICY_DIR"
 )
 
 const (
@@ -107,6 +152,15 @@ const (
 	// EnvExperimentalRevisionRuntime enables the internal OSEP-0023
 	// per-mitmdump revision bootstrap path. It is not a public interception mode.
 	EnvExperimentalRevisionRuntime = "OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME"
+	// Fast Sandbox operator-owned interception mode: all (default) or credential-bound.
+	EnvFSBInterceptionMode = "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE"
+	// B3b-1 is deliberately incomplete: handshake admission and dual budgets
+	// only; all decrypted HTTP/H2 requests are denied until B3b-2. Do not enable
+	// in production before B4 opaque transport teardown. Defaults are experimental,
+	// unmeasured memory assumptions; B6 determines release budgets.
+	EnvExperimentalFSBTLSAdmission = "OPENSANDBOX_EGRESS_EXPERIMENTAL_FSB_TLS_ADMISSION"
+	EnvFSBTLSCapacity              = "OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY"
+	EnvFSBProcessTLSCapacity       = "OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY"
 	// OSEP-0023 live admission budgets, handed to the mitmdump child with the
 	// revision session bundle. Decrypted-connection and admitted-request caps,
 	// plus the credential transition drain timeout in seconds (1..300).
@@ -161,6 +215,9 @@ const (
 	DefaultMaxEgressRules        = 4096
 	DefaultDNSUpstreamTimeoutSec = 2
 	OpenSandboxRootDir           = "/opt/opensandbox"
+	// Credential header resolver client defaults (OSEP-0025).
+	DefaultCredentialResolverTimeoutSeconds = 2
+	DefaultCredentialResolverMaxConcurrency = 32
 	// OSEP-0023 live admission defaults (experimental sidecar only).
 	DefaultRevisionTLSCapacity         = 1024
 	DefaultRevisionRequestCapacity     = 4096

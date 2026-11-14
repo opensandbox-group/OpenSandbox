@@ -242,6 +242,17 @@ class TestExtensionsFromAnnotations:
 
         assert extract_extensions_from_mapping(annotations) is None
 
+    def test_skips_empty_values(self):
+        annotations = {
+            "opensandbox.io/extensions.blanked": "",
+            "opensandbox.io/extensions.custom-key": "custom-value",
+        }
+
+        assert extract_extensions_from_mapping(annotations) == {
+            "opensandbox.extensions.custom-key": "custom-value",
+        }
+        assert extract_extensions_from_mapping({"opensandbox.io/extensions.blanked": ""}) is None
+
     def test_empty_annotations_return_none(self):
         assert extract_extensions_from_mapping({}) is None
         assert extract_extensions_from_mapping(None) is None

@@ -31,6 +31,9 @@ export type { ExecdClient } from "./openapi/execdClient.js";
 export { createEgressClient } from "./openapi/egressClient.js";
 export type { EgressClient } from "./openapi/egressClient.js";
 
+// Data-plane header policy, shared with companion SDKs such as the code interpreter.
+export { createDataPlaneHeaders } from "./factory/defaultAdapterFactory.js";
+
 // OpenAPI schema types (NOT stable public API; internal-only).
 export type { paths as LifecyclePaths } from "./api/lifecycle.js";
 export type { paths as ExecdPaths } from "./api/execd.js";
@@ -45,7 +48,20 @@ export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
 export { IsolatedSessionsAdapter } from "./adapters/isolatedSessionsAdapter.js";
+export { IsolatedFilesystemAdapter } from "./adapters/isolatedFilesystemAdapter.js";
 export { EndpointCache } from "./core/endpointCache.js";
+
+// Cross-origin redirect protection helpers (advanced/testing).
+export {
+  createRedirectSafeFetch,
+  hasProtectedHeaders,
+  stripProtectedHeaders,
+  stripCredentialHeaders,
+  isSameOrigin,
+  PROTECTED_HEADER_PREFIXES,
+  CROSS_ORIGIN_CREDENTIAL_HEADERS,
+} from "./config/redirectFetch.js";
+export type { RedirectSafeFetchOptions } from "./config/redirectFetch.js";
 
 // Client-IP detection helpers (advanced/testing).
 export {

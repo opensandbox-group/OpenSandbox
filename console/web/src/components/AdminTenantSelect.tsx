@@ -46,13 +46,13 @@ export function AdminTenantSelect({ value, onChange, width = 240, placeholder }:
         );
       } catch (error) {
         setTenantOptions([]);
-        message.error(error instanceof Error ? error.message : '加载租户列表失败');
+        message.error(error instanceof Error ? error.message : 'Failed to load tenants');
       }
     })();
   }, []);
 
   const options = useMemo(
-    () => [{ label: '全部租户', value: ALL_TENANTS }, ...tenantOptions],
+    () => [{ label: 'All tenants', value: ALL_TENANTS }, ...tenantOptions],
     [tenantOptions],
   );
 
@@ -64,7 +64,7 @@ export function AdminTenantSelect({ value, onChange, width = 240, placeholder }:
       onChange={onChange}
       options={options}
       optionFilterProp="label"
-      placeholder={placeholder ?? '全部租户'}
+      placeholder={placeholder ?? 'All tenants'}
     />
   );
 }

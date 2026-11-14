@@ -54,6 +54,7 @@ from opensandbox_server.services.constants import (
 from opensandbox_server.services.factory import create_sandbox_service
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 from opensandbox_server.services.snapshot_service import create_snapshot_service
+from opensandbox_server.services.validators import normalize_network_policy_actions
 
 router = APIRouter(tags=["Sandboxes"])
 
@@ -101,19 +102,10 @@ async def create_sandbox(
     Creates a new sandbox from a container image with optional resource limits,
     environment variables, and metadata. Sandboxes are provisioned directly from
     the specified image without requiring a pre-created template.
-
-    Args:
-        request: Sandbox creation request
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        CreateSandboxResponse: Accepted sandbox creation request
-
-    Raises:
-        HTTPException: If sandbox creation scheduling fails
     """
     validate_extensions(request.extensions)
     validate_renew_policy_conflict(request.lifecycle, request.extensions)
+    normalize_network_policy_actions(request.network_policy)
     # Resolve snapshotId before backend routing: the owning backend recorded
     # on the snapshot row selects the fsb vs pod backend for restores.
     if not (request.template_id or "").strip():
@@ -144,16 +136,6 @@ def list_sandboxes(
 
     List all sandboxes with optional filtering and pagination using query parameters.
     All filter conditions use AND logic. Multiple `state` parameters use OR logic within states.
-
-    Args:
-        state: Filter by lifecycle state.
-        metadata: Arbitrary metadata key-value pairs for filtering.
-        page: Page number for pagination.
-        page_size: Number of items per page.
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        ListSandboxesResponse: Paginated list of sandboxes
     """
     metadata_dict = {}
     if metadata:
@@ -202,16 +184,6 @@ def get_sandbox(
 
     Returns the complete sandbox information including image specification,
     status, metadata, and timestamps.
-
-    Args:
-        sandbox_id: Unique sandbox identifier
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        Sandbox: Complete sandbox information
-
-    Raises:
-        HTTPException: If sandbox not found or access denied
     """
     return sandbox_service.get_sandbox(sandbox_id)
 
@@ -268,16 +240,6 @@ def delete_sandbox(
     Request sandbox deletion. Runtime cleanup may continue after the response.
     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
     and return 404 once the resource is removed.
-
-    Args:
-        sandbox_id: Unique sandbox identifier
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        Response: 204 No Content
-
-    Raises:
-        HTTPException: If sandbox not found or deletion fails
     """
     sandbox_service.delete_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -308,16 +270,6 @@ def pause_sandbox(
 
     Pauses a running sandbox while preserving its state.
     Poll GET /sandboxes/{sandboxId} to track state transition through Pausing and eventually Paused.
-
-    Args:
-        sandbox_id: Unique sandbox identifier
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        Response: 202 Accepted
-
-    Raises:
-        HTTPException: If sandbox not found or cannot be paused
     """
     sandbox_service.pause_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_202_ACCEPTED)
@@ -344,16 +296,6 @@ def resume_sandbox(
 
     Resumes execution of a paused sandbox.
     Poll GET /sandboxes/{sandboxId} to track state transition through Resuming and eventually Running.
-
-    Args:
-        sandbox_id: Unique sandbox identifier
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        Response: 202 Accepted
-
-    Raises:
-        HTTPException: If sandbox not found or cannot be resumed
     """
     sandbox_service.resume_sandbox(sandbox_id)
     return Response(status_code=status.HTTP_202_ACCEPTED)
@@ -384,17 +326,6 @@ def renew_sandbox_expiration(
     Sets the absolute expiration time of a sandbox to the supplied future timestamp.
     This may shorten, preserve, or extend the current expiration.
     The creation-time limit server.max_sandbox_timeout_seconds does not apply.
-
-    Args:
-        sandbox_id: Unique sandbox identifier
-        request: Renewal request with new expiration time
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        RenewSandboxExpirationResponse: Updated expiration time
-
-    Raises:
-        HTTPException: If sandbox not found or renewal fails
     """
     return sandbox_service.renew_expiration(sandbox_id, request)
 
@@ -535,7 +466,15 @@ def get_sandbox_endpoint(
     request: Request,
     sandbox_id: str,
     port: int,
-    use_server_proxy: bool = Query(False, description="Whether to return a server-proxied URL"),
+    use_server_proxy: bool = Query(
+        False,
+        deprecated=True,
+        description=(
+            "Deprecated: the server-proxied data path is in maintenance mode "
+            "(security and bug fixes only); deploy the ingress gateway for "
+            "data-plane traffic. When true, returns a server-proxied URL."
+        ),
+    ),
     expires: Optional[int] = Query(None, description="Request a signed route token with this Unix epoch second expiration. Requires ingress gateway with secure_access configured."),
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
     response: Response = None,  # type: ignore[assignment]
@@ -550,23 +489,8 @@ def get_sandbox_endpoint(
     When the ``expires`` query parameter is provided, the endpoint is wrapped in a
     cryptographically signed route token (OSEP-0011) instead of returning a plain URL.
     This requires the ingress gateway to be configured with secure_access signing keys.
-
-    Args:
-        request: FastAPI request object
-        sandbox_id: Unique sandbox identifier
-        port: Port number where the service is listening inside the sandbox (1-65535)
-        use_server_proxy: Whether to return a server-proxied URL
-        expires: Unix epoch seconds for signed route token expiration. Must be a
-            non-negative uint64 value. When omitted or invalid, a plain (unsigned)
-            endpoint is returned.
-        x_request_id: Unique request identifier for tracing (optional; server generates if omitted).
-
-    Returns:
-        Endpoint: Public endpoint URL
-
-    Raises:
-        HTTPException: If sandbox not found, endpoint not available, or signed
-            routes are not supported by the runtime/configuration (400).
+    ``expires`` must be a non-negative Unix epoch second value; when omitted or
+    invalid, a plain (unsigned) endpoint is returned.
     """
     if use_server_proxy and expires is not None:
         raise HTTPException(

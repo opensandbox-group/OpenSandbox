@@ -43,7 +43,7 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `POST /sandboxes/{sandboxId}/resume` - Resume a paused sandbox
 - `POST /sandboxes/{sandboxId}/renew-expiration` - Set the absolute sandbox expiration time
 - `PATCH /sandboxes/{sandboxId}/metadata` - Patch sandbox metadata (JSON Merge Patch, RFC 7396)
-- `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint and required headers; supports `use_server_proxy` and signed-endpoint `expires` parameters
+- `GET /sandboxes/{sandboxId}/endpoints/{port}` - Get an access endpoint and required headers; supports the signed-endpoint `expires` parameter
 - `GET/PUT/PATCH/DELETE /sandboxes/{sandboxId}/networkpolicy` - Inspect and manage the sandbox egress network policy (Fsb persists intent on the Sandbox CR; other backends proxy the sandbox-side egress service)
 - `POST/GET/PATCH/DELETE /sandboxes/{sandboxId}/credential-vault` (+ sanitized `credentials` / `bindings` reads) - Manage the sandbox Credential Vault (fsb relays to the egress-held vault over FastPath; other backends proxy the sandbox-side egress service; values are write-only and never returned)
 - `POST /templates` - Create a fsb template (asynchronous golden-image build)
@@ -52,6 +52,14 @@ Defines the complete lifecycle interfaces for creating, managing, and destroying
 - `DELETE /templates/{templateId}` - Delete a template
 
 **Expiration updates:** `renew-expiration` sets `expiresAt` to the supplied future timestamp, which may be earlier than, equal to, or later than the current expiration. The configured `server.max_sandbox_timeout_seconds` applies only to `timeout` on creation; it does not cap expiration updates. See [Sandbox expiration](/getting-started/configuration#sandbox-expiration).
+
+**Unknown fields:** In sandbox creation requests, `image`, `image.auth`, `platform`, each `volumes[]` object and its `host`, `pvc` or `ossfs` backend, and `credentialProxy` reject unrecognized fields with HTTP 422 (`extra_forbidden`), matching their `additionalProperties: false` schemas. The `renew-expiration` and snapshot-creation bodies do the same. Correct misspellings such as `readonly` to `readOnly`.
+
+Supported aliases and snake_case field names remain accepted individually; sending both for one field in these objects now returns 422. Unknown top-level fields in `CreateSandboxRequest` are still ignored. The `metadata`, `env`, `extensions` and `resourceLimits` maps remain open, subject to existing key/value validation.
+
+For `image.auth`, send only `username` and `password`; `password` may contain a registry authentication token. Remove extra fields such as `token` or Docker-config metadata. The JavaScript/TypeScript SDK forwards this object as supplied, so its legacy `token` property also causes 422.
+
+**Concurrent Docker lifecycle requests:** Recognized conflicts on the main container return `409 Conflict` when removal is already in progress or the container is no longer in the state required by pause or resume. A missing main container returns `404 Not Found` when reported by the operation or confirmed by the follow-up lookup. For resume, these mappings apply only after any required sidecar rollback succeeds. Pause/resume sidecar failures, failed rollbacks, and unrelated main-container or lookup failures retain their existing `500` responses.
 
 **Optional `Sandbox.allocation` response field:**
 - Returned only when the runtime confirms the sandbox's current concrete Pool allocation.
@@ -146,6 +154,12 @@ Defines interfaces for executing code, commands, and file operations within sand
 - `POST /files/upload` - Upload files (multipart)
 - `GET /files/download` - Download files (supports range requests)
 
+On Linux, `GET /files/info`, `GET /files/search`, and `GET /directories/list` use the entry's birth time for `created_at` when `statx` reports `STATX_BTIME`; symbolic links report the link's own timestamp. If birth time is unavailable or the lookup fails, execd preserves its legacy fallback: inode change time when available, otherwise modification time. These fallback timestamps are not true creation times and can change after metadata or content updates.
+
+`GET /files/download`, its `/v1/filesystem/{uid}/{gid}/files/download` variant, and `/v1/isolated/session/{sessionId}/files/download` reject an opened directory with `400 INVALID_REQUEST_BODY` and `path is a directory: <path>` before serving whole-file, byte-range, or line-based content. This also covers a symlink to a directory wherever the route's existing path resolution follows it. Use the corresponding `directories/list` route to list entries.
+
+A `Range` header rejected by the download handler returns `416` with JSON code `UNKNOWN` and message `invalid Range header: <header>`. A well-formed range starting past the end of a file retains the existing plain-text `416` response.
+
 **Directory Operations:**
 - `GET /directories/list` - List directory contents with optional depth control
 - `POST /directories` - Create directories with permissions (mkdir -p semantics)
@@ -214,6 +228,8 @@ Code execution and command execution interfaces use SSE for real-time streaming 
 - `execution_complete` - Execution completed
 - `execution_count` - Execution count
 - `error` - Error information
+
+For Jupyter-backed `POST /code` executions, `execution_complete` is a success-only terminal event sent after the execution's output and result events. Failed executions report `error` without `execution_complete`. Read the stream through its terminal event; an earlier status update or the end of a connection alone does not establish success.
 
 ### Resource Limits
 

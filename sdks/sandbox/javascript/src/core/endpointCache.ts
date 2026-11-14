@@ -30,7 +30,6 @@ export class EndpointCache {
   private readonly inflight = new Map<string, Promise<Endpoint>>();
   private readonly maxSize: number;
   private readonly ttlMs: number;
-  private generation = 0;
 
   constructor(opts: { maxSize?: number; ttlMs?: number } = {}) {
     this.maxSize = opts.maxSize ?? 1024;
@@ -71,7 +70,6 @@ export class EndpointCache {
   }
 
   invalidate(sandboxId: string): void {
-    this.generation++;
     const prefix = `${sandboxId}:`;
     for (const key of [...this.cache.keys()]) {
       if (key.startsWith(prefix)) {
@@ -99,15 +97,12 @@ export class EndpointCache {
     const existing = this.inflight.get(key);
     if (existing) return existing.then((ep) => this.cloneEndpoint(ep));
 
-    const genBefore = this.generation;
     const promise = fetcher()
       .then((ep) => {
-        // Only cache if no invalidation occurred during fetch.
-        if (this.generation === genBefore) {
-          this.put(sandboxId, port, useServerProxy, ep);
-        }
-        // Only clear our own entry (an invalidate() may have replaced it).
+        // Only the current fetch may populate this key or clear its entry.
+        // Invalidating another sandbox must not discard this result.
         if (this.inflight.get(key) === promise) {
+          this.put(sandboxId, port, useServerProxy, ep);
           this.inflight.delete(key);
         }
         return this.cloneEndpoint(ep);

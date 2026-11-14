@@ -278,6 +278,24 @@ helm upgrade opensandbox-server manifests/charts/server \
 
 For the complete values reference and local development installation, see the [`opensandbox-server` chart README](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts/server).
 
+## Controller Cache Scoping (Large Clusters)
+
+The controller-manager watches Pods and Jobs through its informer cache. By default the cache is cluster-wide: on large shared clusters (hundreds of namespaces) the deserialized objects kept resident can exceed the controller's memory limit during startup cache sync, and the controller Pod gets OOM-killed before it reaches Ready.
+
+Scope the cache to the namespaces that hold your workloads with the `opensandbox-controller` chart value `controller.namespaces` (umbrella key: `opensandbox-controller.controller.namespaces`):
+
+```yaml
+controller:
+  namespaces:
+    - opensandbox
+```
+
+The equivalent controller flag is `--namespaces=ns-a,ns-b`; an empty value keeps the cluster-wide default.
+
+::: warning List every workload namespace
+The scope applies to all informers: Pools, BatchSandboxes, their Pods, and snapshot commit Jobs are only watched and reconciled inside the listed namespaces. Multi-tenant deployments whose BatchSandboxes spread across many namespaces should leave the value empty.
+:::
+
 ## Operator Metrics
 
 The operator (controller-manager) exposes standard [controller-runtime](https://book.kubebuilder.io/reference/metrics) Prometheus metrics — reconcile rate and latency (`controller_runtime_reconcile_*`), work-queue depth, client-go request counts, and Go runtime stats. The endpoint is **disabled by default** (`--metrics-bind-address=0`).
@@ -380,5 +398,5 @@ kubectl delete namespace opensandbox-dataplane
 - [Kubernetes Overview](/architecture/control-plane/operator) — Operator features and CRDs
 - [Pause & Resume](/guides/pause-resume) — Snapshot-based pause/resume on Kubernetes
 - [Secure Container](/guides/secure-container) — gVisor and Kata on Kubernetes
-- [Network Isolation on Kubernetes](/guides/network-isolation) — Egress policy design for Kubernetes
+- [Sandbox Network Security](/guides/network-security) — Cluster-wide egress isolation baseline (CIDRs, domains, ports)
 - [Helm charts source](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts) — Chart sources and values reference

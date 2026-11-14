@@ -24,6 +24,8 @@ boxlite, containerd-based runtimes and the upstream central sandbox-proxy are ou
   ```
 
 - Nodes that should serve Firecracker sandboxes need bare-metal KVM (`/dev/kvm`). There is NO manual labeling step: the firecracker-runtime readiness loop verifies each host, installs the Firecracker assets, and applies the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` labels plus the `FirecrackerReady` condition itself (rechecking every 5 minutes).
+- OverlayBD OCI on-demand loading (`runtime.oci.enabled=true`) additionally needs kernel ublk support on every runtime node (`CONFIG_BLK_DEV_UBLK`, `/dev/ublkc*`; `modprobe ublk_drv` when built as a module) and an OCI registry reachable from the cluster: SandboxTemplates publish `oci://` artifacts there and nodes read blocks on demand. The SandboxPool's fastlet containers must set `FAST_SANDBOX_OCI_ENABLED=true` separately — pools are not managed by this chart. See the fast-sandbox [OverlayBD OCI guide](https://github.com/opensandbox-group/fast-sandbox/blob/main/docs/guides/overlaybd-oci-sandboxes.md) for the credential (registry Secret + `fast-sandbox-registry` ConfigMap) and StateRoot-sharing requirements.
+- With `runtime.oci.enabled=true`, this chart enables the ublk warm pool at low/high watermarks of 4/8 with 2 GiB devices, matching the OpenSandbox template API's default disk capacity. Configure `runtime.oci.poolSizeGB` for templates built at another capacity; see the matching requirements below. Standalone fast-sandbox keeps pooling disabled by default.
 
 - The agent registry Secret with artifact-store pull credentials (compiled `registry.json`):
 
@@ -45,6 +47,31 @@ helm install opensandbox manifests/charts/opensandbox \
   --set fast-sandbox.enabled=true
 ```
 
+## OCI warm pool and template capacity
+
+The warm pool holds idle writable ublk devices on each node. `poolLow=4` is the target idle reserve; `poolHigh=8` is the maximum retained on release, not a limit on running Sandboxes. Setting `runtime.oci.poolLow=0` disables pooling. The pool is separate from SandboxPool fastlet capacity, template prewarming, and the OverlayBD block cache.
+
+**`runtime.oci.poolSizeGB` must exactly match the built template's rootfs virtual capacity.** Despite the parameter name, the unit is GiB (1 GiB = 2^30 bytes). It is not the compressed image size, used disk space, or `runtime.oci.cacheSizeGB`. A larger pool device cannot serve a smaller template; mismatches fall back to cold device creation. Writable mode and block size must also match.
+
+For OpenSandbox template builds, `resourceLimits.disk` is projected to `SandboxTemplate.spec.output.rootfsSize` and passed to `fsb-vm build --disk-size-gb`. When disk is omitted, the OpenSandbox API explicitly chooses `2Gi`, so this chart defaults to `poolSizeGB: 2`. This differs from the standalone fast-sandbox CRD's `30Gi` default and the standalone `fsb-vm build` default of 20 GiB. The integration CI explicitly builds `disk=2Gi` templates and sets the pool to 2 GiB as well.
+
+Check `machine.rootfsSizeMiB` in the built snapfiles artifact's `manifest.json`, since the pool matches the actual built rootfs. For whole-GiB capacities, `poolSizeGB = rootfsSizeMiB / 1024`; for example, 61440 MiB requires `60` and 204800 MiB requires `200`. Update the pool configuration whenever template capacity changes. Helm does not discover templates or derive this value automatically.
+
+For a template built with `resourceLimits.disk: 60Gi`, use:
+
+```yaml
+runtime:
+  oci:
+    enabled: true
+    poolLow: 4
+    poolHigh: 8
+    poolSizeGB: 60
+```
+
+For a `200Gi` template, set `poolSizeGB: 200`. These are values for the standalone fast-sandbox chart; under the OpenSandbox umbrella chart, nest them beneath `fast-sandbox` (for example, `fast-sandbox.runtime.oci.poolSizeGB`).
+
+Each upstream daemon supports only one pool capacity. A single daemon cannot accelerate both 60 GiB and 200 GiB templates with one setting. To accelerate both, use separate node groups with matching daemon configurations, or implement separate daemons and capacity-based routing for the same node; the current chart/runtime does not provide that routing. After deployment, inspect `/v1/pool` through the node daemon's Unix socket and check `enabled`, `size_gb`, `idle`, and the changes in `hits`/`misses` during creates.
+
 ## Parameters
 
 The following table lists the configurable parameters of the chart and their default values.
@@ -53,11 +80,18 @@ The following table lists the configurable parameters of the chart and their def
 |-----|------|---------|-------------|
 | artifactStore.endpoint | string | `""` | S3-compatible endpoint (empty = AWS default) |
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
+| controller.affinity | object | `{}` | Affinity for the controller pod. |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
-| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.0-rc.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
 | controller.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |
+| controller.kubeClientBurst | int | `0` | API-server client burst budget for the rate limiter (upstream "--kube-client-burst" flag). Must be set together with kubeClientQPS; 0 keeps the client-go default. |
+| controller.kubeClientQPS | int | `0` | API-server client rate limit in queries per second for the shared controller client (upstream "--kube-client-qps" flag; speeds up the initial cache-sync LISTs on large clusters; watches are exempt). Must be set together with kubeClientBurst; 0 keeps the client-go default. |
+| controller.namespaces | list | `[]` | Namespaces the controller informer cache watches; empty watches the whole cluster (upstream "--namespaces" flag, introduced at the f44561a pin). When set, the list must cover every namespace holding SandboxPool/Sandbox/SandboxTemplate objects plus systemNamespace (the runtime environment ConfigMap); the controller refuses to start otherwise. Keep empty for multi-tenant deployments where sandboxes span many namespaces (the OpenSandbox default); scope it only when this control plane shares a large cluster with unrelated workloads and the cluster-wide initial cache sync is too heavy. |
+| controller.nodeSelector | object | `{}` | Node selector for the controller pod. |
+| controller.podAnnotations | object | `{}` | Extra annotations merged into the controller pod template annotations. |
+| controller.podLabels | object | `{}` | Extra labels merged into the controller pod template labels. |
 | controller.replicaCount | int | `1` | Number of controller replicas (no leader election; keep 1) |
 | controller.resources | object | `{"limits":{"cpu":"1","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits for the controller |
 | controller.sandboxtemplateBuilderImage | string | `""` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh). Empty uses the release-<appVersion> companion image tag. |
@@ -77,21 +111,32 @@ The following table lists the configurable parameters of the chart and their def
 | routeKeys.existingSecret | string | `""` | Use an existing Secret instead of creating one (its keys must be private-key / public-key) |
 | routeKeys.privateKey | string | `"nWGxne/9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A="` | Ed25519 private key (base64) used by the controller's route signer |
 | routeKeys.publicKey | string | `"11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="` | Ed25519 public key (base64) used by the controller's route verifier |
+| runtime.affinity | object | `{}` | Affinity for the firecracker-runtime DaemonSet pod. |
 | runtime.config | string | `""` | Agent config (agent.yaml). Empty = the chart default (upstream config/dev/agent-config.yaml with the dart discover URL pointing at this chart's namespace). socket/stateRoot/registryConfig/p2p are startup-only; the nodeReadiness section (fcVersion, interval, minFree, minMemory) hot-reloads on every readiness pass. |
-| runtime.dartPeerPort | int | `9000` | DART P2P peer listen port (also the headless dart Service port) |
+| runtime.dartPeerPort | int | `9000` | DART P2P peer listen port (also the headless dart Service port; rendered only when runtime.p2p.enabled=true) |
 | runtime.enabled | bool | `true` | Whether the firecracker-runtime DaemonSet, its RBAC, the agent config ConfigMap and the dart headless Service are installed |
 | runtime.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | runtime.image.repository | string | `"opensandbox/fsb-firecracker-runtime"` | Runtime image repository (built by manifests/release/build-fast-sandbox.sh) |
 | runtime.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |
 | runtime.nodeSelector | object | `{}` | Node selector. Empty by default: the runtime applies the firecracker scheduling labels itself, so it must run on every candidate node. Pin it with your own coarse selector only if the cluster hosts unrelated node pools. |
+| runtime.oci | object | `{"cacheSizeGB":16,"enabled":false,"poolHigh":8,"poolLow":4,"poolSizeGB":2}` | OverlayBD OCI on-demand loading: installs the fsb-vm + OverlayBD tools bundle (init container), sets FAST_SANDBOX_OCI_ENABLED on the agent, and runs one overlaybd-ublkd sidecar per node. Nodes need KVM plus kernel ublk support. Pool fastlets set the flag separately (pools are not managed by this chart). |
+| runtime.oci.cacheSizeGB | int | `16` | Shared overlaybd block cache capacity (OVERLAYBD_CACHE_SIZE_GB). |
+| runtime.oci.enabled | bool | `false` | Whether the node OCI stack (tools init + overlaybd-ublkd sidecar + agent flag + janitor oci-state-root) is installed |
+| runtime.oci.poolHigh | int | `8` | Maximum idle ublk devices retained on release; not a Sandbox count limit. Must be >= poolLow. |
+| runtime.oci.poolLow | int | `4` | Target idle ublk device count when OCI is enabled. Set to 0 to disable pooling. |
+| runtime.oci.poolSizeGB | int | `2` | Pool device capacity in GiB (OVERLAYBD_POOL_SIZE_GB). Default 2 matches the OpenSandbox template API's default resourceLimits.disk=2Gi. Must exactly match the built template rootfs capacity; a mismatch falls back to cold device creation. For 60Gi/200Gi templates set 60/200, respectively; a 200Gi pool cannot serve a 60Gi template. One daemon supports one capacity. The standalone fast-sandbox CRD default (30Gi) and fsb-vm build default (20Gi) differ. Check machine.rootfsSizeMiB in the snapfiles artifact's manifest.json: for whole-GiB templates, poolSizeGB = rootfsSizeMiB / 1024. This is unrelated to image layer size, disk usage or runtime.oci.cacheSizeGB, and is not inferred by Helm. |
+| runtime.p2p | object | `{"enabled":true}` | DART P2P artifact delivery: when true (default) the chart renders the dart headless Service, the DaemonSet peer port, and the default agent.yaml p2p block (each node runs a node-local DART child and peers fetch blocks from each other). When false the agent pulls artifacts directly from the origin store (upstream semantics: an empty p2p config section means direct header-signed pulls) and none of the DART resources are rendered. Ignored when runtime.config overrides the whole agent.yaml. |
+| runtime.podAnnotations | object | `{}` | Extra annotations merged into the firecracker-runtime pod template annotations (on top of the built-in prometheus.io/* ones). |
+| runtime.podLabels | object | `{}` | Extra labels merged into the firecracker-runtime pod template labels. |
 | runtime.registrySecret | string | `"fast-sandbox-agent-registry"` | Secret carrying the compiled agent registry configuration (registry.json key with artifact-store pull credentials); must be provisioned by the operator. |
-| runtime.resources | object | `{"agent":{},"janitor":{}}` | Container resources for the DaemonSet. Setting requests matters more than limits here: without them the pod is BestEffort and is evicted first under node pressure, taking down the management API for every fastlet on the node. Limits stay off by default so artifact pulls and the readiness loop are not throttled or OOM-killed at their spikes. |
+| runtime.resources | object | `{"agent":{},"janitor":{},"ublkd":{}}` | Container resources for the DaemonSet. Setting requests matters more than limits here: without them the pod is BestEffort and is evicted first under node pressure, taking down the management API for every fastlet on the node. Limits stay off by default so artifact pulls and the readiness loop are not throttled or OOM-killed at their spikes. |
 | runtime.resources.agent | object | `{}` | Resources for the firecracker-runtime agent container. |
 | runtime.resources.janitor | object | `{}` | Resources for the janitor sidecar container. |
+| runtime.resources.ublkd | object | `{}` | Resources for the overlaybd-ublkd sidecar container (runtime.oci.enabled only). |
 | runtime.socketDir | string | `"/run/fast-sandbox/firecracker"` | Node hostPath sharing the agent UDS socket with fastlet Pods |
 | runtime.stateRoot | string | `"/var/lib/fast-sandbox/firecracker"` | Node hostPath holding per-node Firecracker state (rootfs, snapshots). Each node needs its own directory; do not share across nodes. |
 | runtime.tolerations | list | `[]` | Additional tolerations for the firecracker-runtime DaemonSet pod, appended to the built-in control-plane toleration. Needed when target nodes carry infra taints (e.g. sigma.ali resource-pool taints). |
-| runtimeEnvironments | string | `"version: v1alpha2\nenvironments:\n  default:\n    containerd:\n      socket: /run/containerd/containerd.sock\n      namespace: k8s.io\n      defaultSnapshotter: overlayfs\n      root: /var/lib/containerd\n    kubelet:\n      root: /var/lib/kubelet\n    runtimes:\n      container: {}\n      gvisor: {}\n      kata-qemu: {}\n      kata-clh: {}\n      kata-fc:\n        snapshotter: blockfile\n        configPath: /opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml\n      kata-dragonball:\n        configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml\n      boxlite: {}\n      firecracker:\n        firecracker:\n          binaryPath: /opt/fast-sandbox/firecracker/firecracker\n          jailerPath: /opt/fast-sandbox/firecracker/jailer\n          # No kernelPath: restore never boots a kernel (the bundled\n          # vmlinux.bin was dropped upstream); direct-boot operators\n          # pin one here explicitly.\n          rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs\n          stateRoot: /var/lib/fast-sandbox/firecracker"` |  |
+| runtimeEnvironments | string | `"version: v1alpha2\nenvironments:\n  default:\n    containerd:\n      socket: /run/containerd/containerd.sock\n      namespace: k8s.io\n      defaultSnapshotter: overlayfs\n      root: /var/lib/containerd\n    kubelet:\n      root: /var/lib/kubelet\n    runtimes:\n      container: {}\n      gvisor: {}\n      kata-qemu: {}\n      kata-clh: {}\n      kata-fc:\n        snapshotter: blockfile\n        configPath: /opt/kata/share/defaults/kata-containers/configuration-fc-fast-sandbox.toml\n      kata-dragonball:\n        configPath: /opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball-fast-sandbox.toml\n      boxlite: {}\n      firecracker:\n        firecracker:\n          binaryPath: /opt/fast-sandbox/firecracker/firecracker\n          vmmDir: /opt/fast-sandbox/firecracker\n          jailerPath: /opt/fast-sandbox/firecracker/jailer\n          # No kernelPath: restore never boots a kernel (the bundled\n          # vmlinux.bin was dropped upstream); direct-boot operators\n          # pin one here explicitly.\n          rootfsPath: /var/lib/fast-sandbox/firecracker/rootfs\n          stateRoot: /var/lib/fast-sandbox/firecracker"` |  |
 | systemNamespace | string | `"opensandbox-system"` | Namespace for the fast-sandbox control plane workloads (the shared OpenSandbox system namespace). Must match base.fastSandbox.namespaces.system (where the ServiceAccounts live). |
 
 ## Signing keys: two independent systems

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import type { Execution, ExecutionComplete, ExecutionError, ExecutionHandlers, ExecutionInit, ExecutionResult, OutputMessage } from "./execution.js";
+import { normalizeExitCode } from "./execution.js";
 import type { ServerStreamEvent } from "./execd.js";
 
 function extractText(results: ServerStreamEvent["results"] | undefined): string | undefined {
@@ -89,6 +90,10 @@ export class ExecutionEventDispatcher {
             timestamp: ts,
             traceback: Array.isArray(e.traceback) ? e.traceback.map(String) : [],
           };
+          const exitCode = normalizeExitCode(e.exit_code);
+          if (exitCode !== undefined) {
+            err.exitCode = exitCode;
+          }
           this.execution.error = err;
           await this.handlers?.onError?.(err);
         }

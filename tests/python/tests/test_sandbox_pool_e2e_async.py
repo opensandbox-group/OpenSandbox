@@ -578,7 +578,6 @@ class TestSandboxPoolSingleNodeE2EAsync:
             assert result.error is None
             assert result.logs.stdout[0].text == "py-async-retry-next-idle-ok\n"
 
-            # The stale id must not silently reappear in the idle queue.
             remaining = await mixed_store.snapshot_idle_entries(mixed_pool_name)
             assert all(entry.sandbox_id != stale_id for entry in remaining)
         finally:

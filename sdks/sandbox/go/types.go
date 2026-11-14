@@ -552,7 +552,7 @@ type TemplateReadiness struct {
 // TemplateStatus is the build status of a fsb template.
 type TemplateStatus struct {
 	Phase TemplatePhase `json:"phase"`
-	// ManifestRef is the S3 manifest reference of the published artifacts;
+	// ManifestRef is the published S3 manifest reference or immutable OCI reference;
 	// present when the phase is Succeeded.
 	ManifestRef string `json:"manifestRef,omitempty"`
 	// Message is the failure reason when the phase is Failed.
@@ -569,8 +569,8 @@ type TemplateStatus struct {
 type CreateTemplateRequest struct {
 	// Image is the source OCI image reference the golden image is built from.
 	Image string `json:"image"`
-	// Publish is the S3-compatible publish target for the built artifacts,
-	// e.g. "s3://bucket/publish".
+	// Publish is s3://bucket/publish (native) or oci://registry/repository
+	// (overlaybd, without a tag or digest).
 	Publish string `json:"publish"`
 	// ResourceLimits is the guest machine sizing, e.g.
 	// {"cpu": "1", "memory": "512Mi", "disk": "2Gi"}. Server defaults when
@@ -653,22 +653,32 @@ type CredentialSourceType string
 const (
 	// CredentialSourceInline carries write-only inline credential material.
 	CredentialSourceInline CredentialSourceType = "inline"
+	// CredentialSourceExchange resolves headers per request from a resolver endpoint; no local material.
+	CredentialSourceExchange CredentialSourceType = "exchange"
 )
 
-// InlineCredentialSource contains write-only credential material. Values sent
-// in this model are never returned by Credential Vault state endpoints.
-type InlineCredentialSource struct {
-	Type  CredentialSourceType `json:"type"`
-	Value string               `json:"value"`
+// CredentialSource is a Credential Vault credential source: inline material
+// (Value) or a resolver endpoint (Endpoint), never both.
+type CredentialSource struct {
+	Type     CredentialSourceType `json:"type,omitempty"`
+	Value    string               `json:"value,omitempty"`
+	Endpoint string               `json:"endpoint,omitempty"`
 }
 
-// MarshalJSON defaults the only supported source type so callers can use the
-// natural zero-value form InlineCredentialSource{Value: secret}.
-func (s InlineCredentialSource) MarshalJSON() ([]byte, error) {
-	type inlineCredentialSource InlineCredentialSource
-	source := inlineCredentialSource(s)
+// InlineCredentialSource is an alias of CredentialSource for inline-only callers.
+type InlineCredentialSource = CredentialSource
+
+// MarshalJSON defaults the type for the zero-value forms: Value only →
+// inline, Endpoint only → exchange.
+func (s CredentialSource) MarshalJSON() ([]byte, error) {
+	type credentialSource CredentialSource
+	source := credentialSource(s)
 	if source.Type == "" {
-		source.Type = CredentialSourceInline
+		if source.Endpoint != "" && source.Value == "" {
+			source.Type = CredentialSourceExchange
+		} else {
+			source.Type = CredentialSourceInline
+		}
 	}
 	return json.Marshal(source)
 }
@@ -676,8 +686,8 @@ func (s InlineCredentialSource) MarshalJSON() ([]byte, error) {
 // Credential is a sandbox-local Credential Vault credential create/update
 // model.
 type Credential struct {
-	Name   string                 `json:"name"`
-	Source InlineCredentialSource `json:"source"`
+	Name   string           `json:"name"`
+	Source CredentialSource `json:"source"`
 }
 
 // CredentialScheme is a request scheme matched by a Credential Vault binding.
@@ -734,10 +744,10 @@ const (
 	CredentialAuthPassthrough   CredentialAuthType = "passthrough"
 )
 
-// CredentialAuth configures how a binding injects credential material into
-// matching outbound requests.
+// CredentialAuth configures how a binding injects credential material.
+// Static kinds set Type; the typeless exchange form sets only Credential.
 type CredentialAuth struct {
-	Type          CredentialAuthType       `json:"type"`
+	Type          CredentialAuthType       `json:"type,omitempty"`
 	Credential    string                   `json:"credential,omitempty"`
 	Name          string                   `json:"name,omitempty"`
 	Headers       []CustomHeaderEntry      `json:"headers,omitempty"`
@@ -784,18 +794,33 @@ type CredentialVaultPatchRequest struct {
 }
 
 // CredentialMetadata is sanitized credential metadata returned by Credential
-// Vault. It intentionally does not include source values.
+// Vault. It intentionally does not include source values; SourceType is
+// `inline` or `exchange`.
 type CredentialMetadata struct {
 	Name       string `json:"name"`
 	SourceType string `json:"sourceType"`
 	Revision   int    `json:"revision"`
 }
 
-// CredentialAuthMetadata is sanitized auth metadata returned by Credential
-// Vault. It intentionally does not include credential references or values.
+// CredentialAuthMetadata is sanitized auth metadata. Static kinds carry
+// Type (Name for apiKey); the typeless form carries only Credential.
 type CredentialAuthMetadata struct {
-	Type string `json:"type"`
-	Name string `json:"name,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Credential string `json:"credential,omitempty"`
+}
+
+// MarshalJSON enforces the sanitized shape symmetrically: credential only
+// when typeless, name only when typed.
+func (m CredentialAuthMetadata) MarshalJSON() ([]byte, error) {
+	type credentialAuthMetadata CredentialAuthMetadata
+	out := credentialAuthMetadata(m)
+	if out.Type != "" {
+		out.Credential = ""
+	} else {
+		out.Name = ""
+	}
+	return json.Marshal(out)
 }
 
 // CredentialBindingMetadata is sanitized binding metadata returned by

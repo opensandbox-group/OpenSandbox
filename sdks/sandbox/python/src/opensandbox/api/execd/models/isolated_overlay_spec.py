@@ -34,7 +34,10 @@ class IsolatedOverlaySpec:
     (default) writes land in a host upper directory tracked and usage-accounted by execd (the substrate for the
     diff/commit endpoints); with `persist=false` the upper is an ephemeral tmpfs whose writes are discarded when the
     session ends. `rw` and `ro` bind the host path directly; `persist` applies to overlay mode only and must be omitted
-    for them (execd rejects the request otherwise).
+    for them (execd rejects the request otherwise). Overlay mode is one-directional for the session files API: while the
+    session runs, files-API writes land in the host upper directory and are not visible to runs inside the namespace
+    (the kernel caches overlayfs directory entries at mount time), while the run-to-files direction works; use `rw` or
+    `binds` for bidirectional file exchange.
 
         Attributes:
             path (str): Mount destination inside the namespace (absolute). Example: /workspace.

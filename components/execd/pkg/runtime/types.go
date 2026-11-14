@@ -24,13 +24,16 @@ import (
 
 // ExecuteResultHook groups execution callbacks.
 type ExecuteResultHook struct {
-	OnExecuteInit     func(context string)
-	OnExecuteResult   func(result map[string]any, count int)
-	OnExecuteStatus   func(status string)
-	OnExecuteStdout   func(stdout string) //nolint:predeclared
-	OnExecuteStderr   func(stderr string) //nolint:predeclared
-	OnExecuteError    func(err *execute.ErrorOutput)
-	OnExecuteComplete func(executionTime time.Duration)
+	// OnCommandAllocated runs once before every other command callback or goroutine.
+	// It binds internal correlation without emitting init or committing headers.
+	OnCommandAllocated func(commandID string)
+	OnExecuteInit      func(context string)
+	OnExecuteResult    func(result map[string]any, count int)
+	OnExecuteStatus    func(status string)
+	OnExecuteStdout    func(stdout string) //nolint:predeclared
+	OnExecuteStderr    func(stderr string) //nolint:predeclared
+	OnExecuteError     func(err *execute.ErrorOutput)
+	OnExecuteComplete  func(executionTime time.Duration)
 }
 
 // ExecuteCodeRequest represents a code execution request with context and hooks.
@@ -100,7 +103,8 @@ type bashSession struct {
 	env     map[string]string
 	cwd     string
 
-	// currentProcessPid is the pid of the active run's process group leader (bash).
-	// Set after cmd.Start(), cleared when run() returns. Used by close() to kill the process group.
-	currentProcessPid int
+	// runPids holds the process group leader (bash) of each active run. Runs may
+	// overlap, so each run adds its pid after cmd.Start() and removes it when
+	// run() returns. close() kills every group still listed.
+	runPids map[int]struct{}
 }

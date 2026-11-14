@@ -33,11 +33,7 @@ _DURATION_RE = re.compile(
 
 
 def parse_duration(value: str) -> timedelta:
-    """Parse a human-friendly duration string into a ``timedelta``.
-
-    Supported formats: ``10m``, ``1h30m``, ``90s``, ``2h``, ``1h30m45s``.
-    A plain integer is treated as seconds.
-    """
+    """Parse ``10m``, ``1h30m``, ``90s``, etc.; a plain integer is seconds."""
     value = value.strip()
     if not value:
         raise click.BadParameter("Duration cannot be empty")
@@ -64,10 +60,7 @@ def parse_duration(value: str) -> timedelta:
 
 
 def parse_nullable_duration(value: str) -> timedelta | None:
-    """Parse a duration string or the literal ``none``.
-
-    ``none`` means no automatic timeout / manual cleanup mode.
-    """
+    """Parse a duration string, or return None for ``none`` (manual cleanup)."""
     normalized = value.strip().lower()
     if normalized == "none":
         return None
@@ -86,12 +79,8 @@ class DurationType(click.ParamType):
             return value
         try:
             return parse_duration(value)
-        except click.BadParameter:
-            self.fail(
-                f"Invalid duration '{value}'. Use format like 10m, 1h30m, 90s.",
-                param,
-                ctx,
-            )
+        except click.BadParameter as exc:
+            self.fail(exc.format_message(), param, ctx)
 
 
 DURATION = DurationType()
@@ -193,7 +182,6 @@ def handle_errors(fn):  # type: ignore[no-untyped-def]
         except (click.exceptions.Exit, click.ClickException):
             raise
         except Exception as exc:
-            # Import here to avoid circular imports at module level
             from opensandbox.exceptions import SandboxException
 
             ctx = click.get_current_context(silent=True)
@@ -205,7 +193,7 @@ def handle_errors(fn):  # type: ignore[no-untyped-def]
                     output.error_panel(str(exc), title="Sandbox Error")
                 else:
                     output.error_panel(
-                        f"{str(exc)}\n\n[dim]Type: {type(exc).__qualname__}[/]",
+                        f"{exc}\n\nType: {type(exc).__qualname__}",
                         title=type(exc).__name__,
                     )
             else:

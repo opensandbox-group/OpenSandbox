@@ -28,6 +28,10 @@
 #      fail closed for all intercepted requests, including hosts outside any
 #      binding scope. Credential values are never logged; response header values
 #      containing them are redacted. Response bodies are not rewritten.
+#      Exchange bindings (OSEP-0025) carry only a marker in the snapshot:
+#      the async `requestheaders` hook resolves them per request on the
+#      active socket `_resolve` endpoint and fails closed (407/kill) on any
+#      failure; static bindings stay inline and never suspend the hook.
 #      Processing is split across hooks because stream_large_bodies=1m streams
 #      bodies above 1 MiB upstream before the `request` hook fires: binding
 #      match, path/query/header rewrites and header injection run in
@@ -60,14 +64,17 @@
 # OPENSANDBOX_EGRESS_MITMPROXY_SCRIPT (comma-separated for multiple scripts).
 from __future__ import annotations
 
+import asyncio
 import http.client as http_client
 import ipaddress
 import json
 import os
 import re
 import socket
+import sys
+import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
 from urllib.parse import quote, quote_plus, unquote
 
 from mitmproxy import ctx, http
@@ -79,10 +86,25 @@ if TYPE_CHECKING:
 CREDENTIAL_PROXY_SOCKET_ENV = "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET"
 DEFAULT_CREDENTIAL_PROXY_SOCKET = "/run/opensandbox/credential-proxy/active.sock"
 ACTIVE_VAULT_PATH = "/credential-vault/_active"
+CREDENTIAL_RESOLVE_PATH = "/credential-vault/_resolve"
+# Mirrors the Go resolver timeout env (seconds, 1..120, default 2); the fixed
+# margin lets the egress deliver its own timeout classification first.
+CREDENTIAL_RESOLVER_TIMEOUT_ENV = "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT"
+CREDENTIAL_RESOLVER_MAX_CONCURRENCY_ENV = (
+    "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY"
+)
+CREDENTIAL_RESOLVE_TIMEOUT_MARGIN_SECONDS = 0.25
+DEFAULT_CREDENTIAL_RESOLVER_TIMEOUT_SECONDS = 2
+CREDENTIAL_RESOLVER_TIMEOUT_BOUNDS = (1, 120)
+DEFAULT_CREDENTIAL_RESOLVER_CONCURRENCY = 32
+CREDENTIAL_RESOLVER_CONCURRENCY_BOUNDS = (1, 1024)
+MAX_RESOLVE_RESPONSE_BYTES = 256 * 1024
 FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
 FLOW_BINDING_KEY = "opensandbox_credential_binding"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
+FLOW_VAULT_SUPPRESS_KEY = "opensandbox_credential_vault_suppress"
 FLOW_REJECTION_KEY = "opensandbox_credential_rejected"
+FLOW_SUBJECT_REQUEST_KEY = "opensandbox_subject_request"
 FLOW_REQUEST_HANDLE_KEY = "opensandbox_credential_request_handle"
 FLOW_H2_AUTHORITY_KEY = "opensandbox_credential_h2_authority"
 HEADER_SUBSTITUTION_DENYLIST = {
@@ -119,6 +141,24 @@ ACTIVE_VAULT_HEADER_RESERVED_NAMES = {
 _ACTIVE_VAULT_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$")
 _ACTIVE_VAULT_HOST_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _PERCENT_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+# Strict snapshot key sets: unknown fields reject the whole snapshot
+# (OSEP-0025 version-skew gate) instead of silently degrading bindings.
+_ACTIVE_VAULT_TOP_LEVEL_FIELDS = {"revision", "bindings", "redactions"}
+_ACTIVE_VAULT_BINDING_FIELDS = {
+    "name",
+    "match",
+    "headers",
+    "substitutions",
+    "exchange",
+}
+# `ports` is deprecated upstream but still rendered by the Go snapshot for
+# legacy vaults; allowed and ignored here.
+_ACTIVE_VAULT_MATCH_FIELDS = {"schemes", "ports", "hosts", "methods", "paths"}
+_ACTIVE_VAULT_HEADER_FIELDS = {"name", "value"}
+_ACTIVE_VAULT_SUBSTITUTION_FIELDS = {"placeholder", "value", "in"}
+_RESOLVE_RESPONSE_FIELDS = {"revision", "binding", "headers", "redactions", "suppressHeaders"}
+_RESOLVE_HEADER_FIELDS = {"name", "value"}
+_ENV_INT_RE = re.compile(r"[+-]?[0-9]+")
 _REVISION_RUNTIME_ERROR = "credential proxy: invalid revision runtime configuration"
 _REVISION_ENV = {
     "socket": "OPENSANDBOX_EGRESS_REVISION_IPC_SOCKET",
@@ -294,7 +334,8 @@ def configure(updated: set) -> None:
     """Fence insecure TLS and native pre-TLS bypasses in the live runtime."""
     if not {"ssl_insecure", "ignore_hosts", "allow_hosts"}.intersection(updated):
         return
-    if _live_runtime is None and not _live_admission_requested():
+    if (_live_runtime is None and not _live_admission_requested()
+            and _subject_admission_runtime() is None):
         return
     _validate_live_options()
 
@@ -369,6 +410,16 @@ def tls_clienthello(data: ClientHelloData) -> None:
     MITM remains possible and the escape hatch keeps working. TCP-layer
     enforcement (deny/allow rules) still applies.
     """
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        try:
+            _tls_clienthello_live(subject, data, subject=True)
+        except Exception:  # noqa: BLE001 - hook exceptions must not decrypt by default
+            from credential_bound import terminate_handshake
+
+            _record_tls_admission("deny", "invalid_input")
+            terminate_handshake(data.context.client)
+        return
     live = _live_runtime
     if live is not None:
         _tls_clienthello_live(live, data)
@@ -497,7 +548,7 @@ _TLS_ADMISSION_REASONS = {
     "decrypt": ("binding_host",),
     "passthrough": ("ech", "no_sni", "static_ignore", "no_binding_host"),
     "deny": ("unknown_identity", "invalid_sni", "snapshot_missing",
-             "generation_mismatch", "invalid_input", "registry_exhausted",
+             "generation_mismatch", "invalid_input", "non_canonical_port", "registry_exhausted",
              "admission_disabled", "ssl_insecure", "malformed_extensions"),
 }
 
@@ -509,7 +560,15 @@ def _record_tls_admission(decision: str, reason: str) -> None:
             ctx.log.warn(f"credential proxy: tls-admission-v1 {decision} {reason}")
 
 
-def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
+def _subject_admission_runtime() -> Any:
+    # subject_runtime.load() guards its import with admission; subject_revision
+    # imports lazily on enabled paths. The gate is runtime() is not None, not
+    # module presence. Never import here: disabled deployments may omit it.
+    module = sys.modules.get("subject_admission")
+    return None if module is None else module.runtime()
+
+
+def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = False) -> None:
     # The live credential-bound mode must never run with insecure upstream
     # verification; deny the handshake outright instead of trusting an
     # unverified origin identity with a credential.
@@ -536,7 +595,10 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
     from static_passthrough import destination_port
 
     port = destination_port(getattr(getattr(data.context, "server", None), "address", None))
-    result = live.admit_tls(sni, ech_hidden=ech_hidden, destination_port=port)
+    if subject:
+        result = live.admit_tls(data.context.client, sni, ech_hidden=ech_hidden, destination_port=port)
+    else:
+        result = live.admit_tls(sni, ech_hidden=ech_hidden, destination_port=port)
     _record_tls_admission(result.action, result.reason)
     if result.action == "passthrough":
         data.ignore_connection = True
@@ -551,7 +613,8 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
 
         credential_bound.terminate_handshake(data.context.client)
         return
-    live.track(result.token, data.context.client)
+    if not subject:
+        live.track(result.token, data.context.client)
 
 
 def _load_active_vault(client_ip: str | None = None) -> ActiveVault | None:
@@ -649,6 +712,12 @@ def _fetch_active_vault(
 def _parse_active_vault(payload: Any) -> ActiveVault:
     if not isinstance(payload, dict):
         raise ActiveVaultLookupError("active vault payload must be an object")
+    unexpected_fields = set(payload) - _ACTIVE_VAULT_TOP_LEVEL_FIELDS
+    if unexpected_fields:
+        raise ActiveVaultLookupError(
+            "active vault payload contains unsupported fields: "
+            + ",".join(sorted(unexpected_fields))
+        )
     revision = payload.get("revision")
     if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
         raise ActiveVaultLookupError("active vault revision must be a positive integer")
@@ -664,16 +733,30 @@ def _parse_active_vault(payload: Any) -> ActiveVault:
     redaction_set = set(redactions)
     normalized_bindings: list[dict[str, Any]] = []
     for index, binding in enumerate(bindings):
+        unexpected_fields = set(binding) - _ACTIVE_VAULT_BINDING_FIELDS
+        if unexpected_fields:
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} contains unsupported fields: "
+                + ",".join(sorted(unexpected_fields))
+            )
         name = binding.get("name")
         if not isinstance(name, str) or not name.strip():
             raise ActiveVaultLookupError(
                 f"active vault binding {index} name must be a non-empty string"
             )
 
+        exchange = _parse_active_vault_exchange(binding, index)
+
         match = binding.get("match")
         if not isinstance(match, dict):
             raise ActiveVaultLookupError(
                 f"active vault binding {index} match must be an object"
+            )
+        unexpected_fields = set(match) - _ACTIVE_VAULT_MATCH_FIELDS
+        if unexpected_fields:
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} match contains unsupported fields: "
+                + ",".join(sorted(unexpected_fields))
             )
         host_field = f"binding {index} match.hosts"
         hosts = [
@@ -709,6 +792,13 @@ def _parse_active_vault(payload: Any) -> ActiveVault:
             )
         normalized_headers: list[dict[str, str]] = []
         for header_index, header in enumerate(raw_headers):
+            unexpected_fields = set(header) - _ACTIVE_VAULT_HEADER_FIELDS
+            if unexpected_fields:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} header {header_index} "
+                    "contains unsupported fields: "
+                    + ",".join(sorted(unexpected_fields))
+                )
             header_name = header.get("name")
             header_value = header.get("value")
             if not isinstance(header_name, str) or not header_name.strip():
@@ -750,6 +840,13 @@ def _parse_active_vault(payload: Any) -> ActiveVault:
             )
         normalized_substitutions: list[dict[str, Any]] = []
         for substitution_index, substitution in enumerate(raw_substitutions):
+            unexpected_fields = set(substitution) - _ACTIVE_VAULT_SUBSTITUTION_FIELDS
+            if unexpected_fields:
+                raise ActiveVaultLookupError(
+                    f"active vault binding {index} substitution {substitution_index} "
+                    "contains unsupported fields: "
+                    + ",".join(sorted(unexpected_fields))
+                )
             placeholder = substitution.get("placeholder")
             value = substitution.get("value")
             if not isinstance(placeholder, str) or not placeholder.strip():
@@ -792,24 +889,51 @@ def _parse_active_vault(payload: Any) -> ActiveVault:
                 {"placeholder": placeholder, "value": value, "in": surfaces}
             )
 
-        normalized_bindings.append(
-            {
-                "name": name.strip(),
-                "match": {
-                    "schemes": schemes,
-                    "hosts": hosts,
-                    "methods": methods,
-                    "paths": paths,
-                },
-                "headers": normalized_headers,
-                "substitutions": normalized_substitutions,
-            }
-        )
+        normalized_binding: dict[str, Any] = {
+            "name": name.strip(),
+            "match": {
+                "schemes": schemes,
+                "hosts": hosts,
+                "methods": methods,
+                "paths": paths,
+            },
+            "headers": normalized_headers,
+            "substitutions": normalized_substitutions,
+        }
+        if exchange is not None:
+            normalized_binding["exchange"] = exchange
+        normalized_bindings.append(normalized_binding)
     return ActiveVault(
         revision=revision,
         bindings=normalized_bindings,
         redactions=list(redactions),
     )
+
+
+def _parse_active_vault_exchange(binding: dict[str, Any], index: int) -> dict[str, str] | None:
+    """Validate the optional exchange marker: exactly ``{"credential": name}``
+    with explicitly empty ``headers``/``substitutions``; any present value
+    (including ``null``) other than that shape fails the snapshot closed.
+    """
+    if "exchange" not in binding:
+        return None
+    raw_exchange = binding["exchange"]
+    if not isinstance(raw_exchange, dict) or set(raw_exchange) != {"credential"}:
+        raise ActiveVaultLookupError(
+            f"active vault binding {index} exchange must contain only credential"
+        )
+    credential = raw_exchange["credential"]
+    if not isinstance(credential, str) or not credential.strip():
+        raise ActiveVaultLookupError(
+            f"active vault binding {index} exchange credential must be a non-empty string"
+        )
+    for field in ("headers", "substitutions"):
+        if binding.get(field) != []:
+            raise ActiveVaultLookupError(
+                f"active vault binding {index} with exchange must carry an "
+                f"empty {field} list"
+            )
+    return {"credential": credential}
 
 
 def _normalize_active_vault_strings(
@@ -906,6 +1030,143 @@ def _validate_active_vault_etag(value: str | None) -> str:
     if value is None or re.fullmatch(r'"[A-Za-z0-9._~-]{1,128}"', value) is None:
         raise ActiveVaultLookupError("active vault response has an invalid ETag")
     return value
+
+
+class CredentialResolveError(Exception):
+    """Resolve failure with a log-safe reason: transport | invalid_response
+    | deadline | http_<status>. Resolve content never reaches logs."""
+
+
+def _env_int_range(name: str, default: int, bounds: tuple[int, int]) -> int:
+    # Mirrors Go EnvIntRange: unparsable or out-of-bounds keeps the default.
+    raw = os.environ.get(name, "").strip()
+    if not raw or _ENV_INT_RE.fullmatch(raw) is None:
+        return default
+    value = int(raw)
+    if not bounds[0] <= value <= bounds[1]:
+        return default
+    return value
+
+
+def _resolve_budget_seconds() -> float:
+    return (
+        _env_int_range(
+            CREDENTIAL_RESOLVER_TIMEOUT_ENV,
+            DEFAULT_CREDENTIAL_RESOLVER_TIMEOUT_SECONDS,
+            CREDENTIAL_RESOLVER_TIMEOUT_BOUNDS,
+        )
+        + CREDENTIAL_RESOLVE_TIMEOUT_MARGIN_SECONDS
+    )
+
+
+# Concurrency aligned with the Go endpoint's semaphore; keyed by loop
+# because tests and script reloads swap event loops.
+_resolve_limiter_state: tuple[asyncio.AbstractEventLoop, asyncio.Semaphore] | None = None
+
+
+def _resolve_limiter() -> asyncio.Semaphore:
+    global _resolve_limiter_state
+    loop = asyncio.get_running_loop()
+    state = _resolve_limiter_state
+    if state is None or state[0] is not loop:
+        state = (
+            loop,
+            asyncio.Semaphore(
+                _env_int_range(
+                    CREDENTIAL_RESOLVER_MAX_CONCURRENCY_ENV,
+                    DEFAULT_CREDENTIAL_RESOLVER_CONCURRENCY,
+                    CREDENTIAL_RESOLVER_CONCURRENCY_BOUNDS,
+                )
+            ),
+        )
+        _resolve_limiter_state = state
+    return state[1]
+
+
+def _parse_resolve_response(raw: bytes, binding_name: str) -> dict[str, Any]:
+    """Strictly validate one 200 resolve body against the frozen contract."""
+    if len(raw) > MAX_RESOLVE_RESPONSE_BYTES:
+        raise CredentialResolveError("invalid_response")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise CredentialResolveError("invalid_response") from None
+    if not isinstance(document, dict) or set(document) != _RESOLVE_RESPONSE_FIELDS:
+        raise CredentialResolveError("invalid_response")
+    revision = document["revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
+        raise CredentialResolveError("invalid_response")
+    if document["binding"] != binding_name:
+        raise CredentialResolveError("invalid_response")
+    raw_headers = document["headers"]
+    if not isinstance(raw_headers, list):
+        raise CredentialResolveError("invalid_response")
+    headers: list[dict[str, str]] = []
+    for header in raw_headers:
+        if not isinstance(header, dict) or set(header) != _RESOLVE_HEADER_FIELDS:
+            raise CredentialResolveError("invalid_response")
+        name = header["name"]
+        value = header["value"]
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or _ACTIVE_VAULT_HEADER_NAME_RE.fullmatch(name) is None
+            or name.lower() in ACTIVE_VAULT_HEADER_RESERVED_NAMES
+            or not isinstance(value, str)
+            or not value
+        ):
+            raise CredentialResolveError("invalid_response")
+        headers.append({"name": name, "value": value})
+    redactions = document["redactions"]
+    if not isinstance(redactions, list) or any(
+        not isinstance(item, str) or not item for item in redactions
+    ):
+        raise CredentialResolveError("invalid_response")
+    raw_suppress = document["suppressHeaders"]
+    if not isinstance(raw_suppress, list):
+        raise CredentialResolveError("invalid_response")
+    suppress: set[str] = set()
+    for name in raw_suppress:
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or _ACTIVE_VAULT_HEADER_NAME_RE.fullmatch(name) is None
+            or name.lower() in ACTIVE_VAULT_HEADER_RESERVED_NAMES
+        ):
+            raise CredentialResolveError("invalid_response")
+        suppress.add(name.lower())
+    return {
+        "revision": revision,
+        "headers": headers,
+        "redactions": redactions,
+        "suppressHeaders": suppress,
+    }
+
+
+def _resolve_exchange_http(
+    socket_path: str, timeout: float, path: str, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """One resolve RPC; failures normalize to CredentialResolveError."""
+    connection = UnixSocketHTTPConnection(socket_path, timeout=timeout)
+    try:
+        body = json.dumps(payload).encode("utf-8")
+        connection.request(
+            "POST", path, body=body, headers={"Content-Type": "application/json"}
+        )
+        response = connection.getresponse()
+        # Bound the read itself; the size check must not follow an unbounded
+        # buffer, multiplied by concurrent per-request resolves.
+        raw = response.read(MAX_RESOLVE_RESPONSE_BYTES + 1)
+        if response.status != 200:
+            raise CredentialResolveError(f"http_{response.status}")
+        return _parse_resolve_response(raw, payload["binding"])
+    except CredentialResolveError:
+        raise
+    except Exception:
+        raise CredentialResolveError("transport") from None
+    finally:
+        with suppress(Exception):
+            connection.close()
 
 
 def _request_host(flow: http.HTTPFlow) -> str:
@@ -1144,6 +1405,12 @@ def _flow_rejected(flow: http.HTTPFlow) -> bool:
     return bool(flow.metadata.get(FLOW_REJECTION_KEY))
 
 
+def _binding_log(flow: http.HTTPFlow, level: str, event: str, detail: str) -> None:
+    if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
+        detail = "credential proxy: subject request reason=" + event
+    getattr(ctx.log, level)(detail)
+
+
 def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] | None:
     matches: list[tuple[int, dict[str, Any]]] = []
     for binding in vault.bindings:
@@ -1157,9 +1424,10 @@ def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] |
     selected = [binding for precedence, binding in matches if precedence == highest]
     if len(selected) != 1:
         _reject_request(flow, b"credential binding ambiguous\n")
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "ambiguous_binding",
             "credential proxy: ambiguous binding match for "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
         )
         return None
     return selected[0]
@@ -1289,9 +1557,10 @@ def _apply_path_query_substitutions(
             _reject_request(
                 flow, b"request path contains ambiguous substituted segments\n"
             )
-            ctx.log.warn(
+            _binding_log(
+                flow, "warn", "invalid_substitution",
                 "credential proxy: rejected request after path substitution: "
-                f"{flow.request.method} {_request_host(flow)} path=[REDACTED]"
+                f"{flow.request.method} {_request_host(flow)} path=[REDACTED]",
             )
             return applied
 
@@ -1595,7 +1864,10 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> None:
 def _finish_live_request(flow: http.HTTPFlow) -> None:
     """H1 hooks finish immediately; H2 retains transport output obligations."""
     handle = flow.metadata.get(FLOW_REQUEST_HANDLE_KEY)
-    live = _live_runtime
+    live = (
+        _subject_admission_runtime()
+        if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY) else _live_runtime
+    )
     if handle is not None and live is not None:
         if getattr(handle, "client_stream_id", None) is not None:
             adapter = live.h2_for(getattr(flow, "client_conn", None))
@@ -1632,20 +1904,9 @@ def _observe_tls_shadow(
             ctx.log.warn("credential proxy: tls-shadow observer_error")
 
 
-def requestheaders(flow: http.HTTPFlow) -> None:
-    """Credential proxy phase 1: binding match and request metadata rewrite.
-
-    Header injection must happen here, before the upstream connection is
-    made: with ``stream_large_bodies=1m`` the ``request`` hook fires only
-    after a body above 1 MiB has been streamed upstream.
-
-    In live credential-bound mode the vault comes from the admitted decision
-    snapshot (see :func:`_requestheaders_live`) instead of the pull cache.
-    """
-    live = _live_runtime
-    if live is not None:
-        _requestheaders_live(live, flow)
-        return
+def _requestheaders_pull(flow: http.HTTPFlow) -> Awaitable[None] | None:
+    """Pull-mode processing; returns an awaitable only when an exchange
+    binding defers its resolve I/O to the caller."""
     try:
         vault = _load_active_vault(_flow_client_ip(flow))
     except ActiveVaultLookupError as exc:
@@ -1656,11 +1917,56 @@ def requestheaders(flow: http.HTTPFlow) -> None:
             b"credential proxy unavailable\n",
             status_code=503,
         )
-        return
+        return None
     _observe_tls_shadow(flow, vault)
     if vault is None:
+        return None
+    return _apply_vault_binding(flow, vault)
+
+
+async def requestheaders(flow: http.HTTPFlow) -> None:
+    """Credential proxy phase 1: binding match and request metadata rewrite.
+
+    Header injection must happen here, before the upstream connection is
+    made: with ``stream_large_bodies=1m`` the ``request`` hook fires only
+    after a body above 1 MiB has been streamed upstream.
+
+    In live credential-bound mode the vault comes from the admitted decision
+    snapshot (see :func:`_requestheaders_live`) instead of the pull cache.
+
+    The hook is async because mitmproxy awaits it before the request
+    continues: exchange bindings defer resolve I/O to the single await
+    below; static and live paths stay inline and never suspend.
+    """
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        flow.metadata[FLOW_SUBJECT_REQUEST_KEY] = True
+        client = getattr(flow, "client_conn", None)
+        version = (flow.request.http_version or "").upper()
+        if (getattr(client, "alpn", None) == b"h2"
+                or version in ("HTTP/2", "HTTP/2.0")
+                or ((flow.request.scheme or "").lower() == "https" and version != "HTTP/1.1")):
+            flow.metadata[FLOW_REJECTION_KEY] = True
+            if flow.killable:
+                flow.kill()
+            ctx.log.warn("credential proxy: request denied reason=subject_protocol_unsupported")
+            return
+        _requestheaders_live(subject, flow)
+        if _flow_rejected(flow):
+            # Subject denials terminate transport, including streamed requests:
+            # discard the shared path's 403/503 response (used by sidecar mode).
+            _finish_live_request(flow)
+            flow.response = None
+            if flow.killable:
+                flow.kill()
         return
-    _apply_vault_binding(flow, vault)
+    live = _live_runtime
+    if live is not None:
+        _requestheaders_live(live, flow)
+        return
+    deferred = _requestheaders_pull(flow)
+    if deferred is not None:
+        await deferred
 
 
 def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
@@ -1795,42 +2101,52 @@ def _live_snapshot_vault(snapshot: Any) -> ActiveVault | None:
     return vault
 
 
+def _reject_ambiguous_binding_path(
+    flow: http.HTTPFlow, vault: ActiveVault
+) -> bool:
+    """Shared path gate for static and exchange injection: reject ambiguous
+    or boundary-crossing encodings so a secret never reaches a scope the
+    canonical path does not match. Returns True when rejected."""
+    raw_path = flow.request.path or "/"
+    if _path_is_ambiguous(raw_path, allow_encoded_slash=True):
+        _reject_request(flow, b"request path contains ambiguous segments\n")
+        _binding_log(
+            flow, "warn", "ambiguous_path",
+            "credential proxy: rejected request with ambiguous path: "
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
+        )
+        return True
+    if _path_decoding_changes_binding(flow, vault):
+        _reject_request(flow, b"request path contains ambiguous segments\n")
+        _binding_log(
+            flow, "warn", "ambiguous_path",
+            "credential proxy: rejected request whose percent-decoding crosses "
+            "the credential binding boundary: "
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
+        )
+        return True
+    return False
+
+
 def _apply_vault_binding(
     flow: http.HTTPFlow, vault: ActiveVault, live: Any | None = None
-) -> None:
-    """Shared binding selection, ambiguity checks and credential injection."""
+) -> Awaitable[None] | None:
+    """Shared binding selection, ambiguity checks and credential injection.
+
+    Returns an awaitable only for pull-mode exchange bindings (their resolve
+    I/O must complete before the request continues)."""
     # Requests outside credential binding scope are ordinary egress traffic.
     # Leave them untouched, including paths whose encoding would be ambiguous
     # for credential injection, because no secret is at risk.
     binding = _select_binding(flow, vault)
     if not binding:
-        return
+        return None
 
-    # Reject ambiguous paths only for requests that would receive credentials:
-    # dot-segments or backslashes could redirect credentials to a scope the
-    # canonical path does not match. Encoded slashes (``%2f`` at any decoding
-    # depth) are tolerated here; the next check rejects them when decoding
-    # would cross a binding boundary.
-    raw_path = flow.request.path or "/"
-    if _path_is_ambiguous(raw_path, allow_encoded_slash=True):
-        _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
-            "credential proxy: rejected request with ambiguous path: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
-        )
-        return
+    if "exchange" in binding:
+        return _apply_exchange_binding(flow, vault, binding, live)
 
-    # Encoded separators are safe only when every percent-decoding depth of
-    # the path matches the same credential binding, so the injection decision
-    # is independent of how any downstream processor decodes the path.
-    if _path_decoding_changes_binding(flow, vault):
-        _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
-            "credential proxy: rejected request whose percent-decoding crosses "
-            "the credential binding boundary: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
-        )
-        return
+    if _reject_ambiguous_binding_path(flow, vault):
+        return None
 
     flow.metadata[FLOW_BINDING_KEY] = binding
     # Persist the redactions of the matched revision: body substitutions run
@@ -1841,7 +2157,7 @@ def _apply_vault_binding(
 
     substituted_surfaces = _apply_requestheaders_substitutions(flow, binding)
     if _flow_rejected(flow):
-        return
+        return None
 
     injected_names: list[str] = []
     for header in binding.get("headers") or []:
@@ -1858,19 +2174,184 @@ def _apply_vault_binding(
 
     if injected_names or substituted_surfaces:
         flow.metadata[FLOW_REDACTIONS_KEY] = list(flow.metadata[FLOW_VAULT_REDACTIONS_KEY])
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "binding_processed",
             "credential proxy: applied binding="
             f"{binding.get('name')} revision={vault.revision} "
             f"host={_request_host(flow)} method={flow.request.method} "
             f"headers={','.join(injected_names)} "
-            f"substitutions={','.join(sorted(set(substituted_surfaces)))}"
+            f"substitutions={','.join(sorted(set(substituted_surfaces)))}",
         )
     elif _has_substitutions_on(binding, {"path", "query", "header"}):
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "binding_processed",
             "credential proxy: substitution miss binding="
             f"{binding.get('name')} revision={vault.revision} "
-            f"host={_request_host(flow)} method={flow.request.method}"
+            f"host={_request_host(flow)} method={flow.request.method}",
         )
+    return None
+
+
+def _apply_exchange_binding(
+    flow: http.HTTPFlow,
+    vault: ActiveVault,
+    binding: dict[str, Any],
+    live: Any | None,
+) -> Awaitable[None] | None:
+    """Gate one exchange binding, then defer its resolve I/O.
+
+    Live snapshots never carry exchange (the egress admission gate rejects
+    them); the defensive branch stays fail closed."""
+    if live is not None:
+        _reject_request(flow, b"credential exchange unavailable\n", status_code=503)
+        _binding_log(
+            flow, "warn", "exchange_denied",
+            "credential proxy: exchange binding unsupported binding="
+            f"{binding.get('name')}",
+        )
+        return None
+    if _reject_ambiguous_binding_path(flow, vault):
+        return None
+    sni = _connection_sni(flow)
+    if sni is None:
+        # Without a connection SNI the egress SNI gate can never pass.
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        ctx.log.warn(
+            "credential proxy: exchange binding without connection sni was denied"
+        )
+        return None
+    return _resolve_exchange_binding(flow, vault, binding, sni)
+
+
+async def _resolve_exchange_binding(
+    flow: http.HTTPFlow,
+    vault: ActiveVault,
+    binding: dict[str, Any],
+    sni: str,
+) -> None:
+    """Resolve on the active socket and inject headers.
+
+    I/O runs in a worker thread behind the semaphore so a slow resolver
+    never blocks the loop; any failure fails closed (407/kill). Results
+    live only in flow metadata."""
+    name = binding.get("name")
+    path = CREDENTIAL_RESOLVE_PATH
+    client_ip = _flow_client_ip(flow)
+    if _fast_sandbox_mode_enabled:
+        if not client_ip:
+            _reject_request(
+                flow, b"credential resolution unavailable\n", status_code=407
+            )
+            ctx.log.warn(
+                "credential proxy: exchange resolve denied reason=missing_client_ip"
+            )
+            return
+        path = f"{CREDENTIAL_RESOLVE_PATH}?clientIp={quote(client_ip)}"
+    socket_path = (
+        os.environ.get(CREDENTIAL_PROXY_SOCKET_ENV, "").strip()
+        or DEFAULT_CREDENTIAL_PROXY_SOCKET
+    )
+    payload = {
+        "binding": name,
+        "sni": sni,
+        "request": {
+            "scheme": (flow.request.scheme or "").lower(),
+            "host": _request_host(flow),
+            "port": _request_port(flow),
+            "method": (flow.request.method or "").upper(),
+            "path": flow.request.path or "/",
+        },
+    }
+    budget = _resolve_budget_seconds()
+    try:
+        deadline = time.monotonic() + budget
+        async with _resolve_limiter():
+            # The deadline covers semaphore and executor queueing too, not
+            # just the socket: a queued resolve fails within the budget
+            # instead of stacking timeout batches behind a slow resolver.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CredentialResolveError("deadline")
+            decision = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _resolve_exchange_http,
+                    socket_path,
+                    remaining,
+                    path,
+                    payload,
+                ),
+                timeout=remaining,
+            )
+        _install_exchange_headers(flow, vault, binding, decision)
+    except CredentialResolveError as error:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        ctx.log.warn(
+            f"credential proxy: exchange resolve failed binding={name} "
+            f"reason={error}"
+        )
+        return
+    except asyncio.TimeoutError:
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        ctx.log.warn(
+            f"credential proxy: exchange resolve failed binding={name} "
+            "reason=deadline"
+        )
+        return
+    except Exception:  # noqa: BLE001 - unexpected failures fail closed too
+        _reject_request(
+            flow, b"credential resolution unavailable\n", status_code=407
+        )
+        ctx.log.warn(
+            f"credential proxy: exchange resolve failed binding={name} "
+            "reason=unexpected"
+        )
+        return
+
+
+def _install_exchange_headers(
+    flow: http.HTTPFlow,
+    vault: ActiveVault,
+    binding: dict[str, Any],
+    decision: dict[str, Any],
+) -> None:
+    """Inject resolved headers and persist per-request redaction metadata.
+
+    Variants of every injected value are re-derived (R9) and injected names
+    always join the suppress set (D7), so redaction never depends on
+    resolver output completeness."""
+    injected_names: list[str] = []
+    for header in decision["headers"]:
+        name = header["name"]
+        # Delete-then-set, as static injection: the resolved value must be
+        # the only one.
+        if name in flow.request.headers:
+            del flow.request.headers[name]
+        flow.request.headers[name] = header["value"]
+        injected_names.append(name)
+    flow.metadata[FLOW_BINDING_KEY] = binding
+    redactions = list(vault.redactions)
+    redactions.extend(decision["redactions"])
+    for header in decision["headers"]:
+        redactions.extend(
+            _active_snapshot_substitution_redaction_variants(header["value"])
+        )
+    flow.metadata[FLOW_VAULT_REDACTIONS_KEY] = redactions
+    flow.metadata[FLOW_REDACTIONS_KEY] = list(redactions)
+    suppress = set(decision["suppressHeaders"])
+    suppress.update(name.lower() for name in injected_names)
+    flow.metadata[FLOW_VAULT_SUPPRESS_KEY] = sorted(suppress)
+    ctx.log.info(
+        "credential proxy: applied binding="
+        f"{binding.get('name')} revision={decision['revision']} "
+        f"host={_request_host(flow)} method={flow.request.method} "
+        f"headers={','.join(injected_names)} exchange=1"
+    )
 
 
 def request(flow: http.HTTPFlow) -> None:
@@ -1892,24 +2373,27 @@ def request(flow: http.HTTPFlow) -> None:
             flow.metadata[FLOW_REDACTIONS_KEY] = list(
                 flow.metadata.get(FLOW_VAULT_REDACTIONS_KEY, [])
             )
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "body_processed",
             "credential proxy: applied body substitutions binding="
             f"{binding.get('name')} host={_request_host(flow)} "
-            f"method={flow.request.method}"
+            f"method={flow.request.method}",
         )
     elif FLOW_REDACTIONS_KEY not in flow.metadata and _has_substitutions_on(
         binding, {"body"}
     ):
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "body_processed",
             "credential proxy: substitution miss binding="
             f"{binding.get('name')} host={_request_host(flow)} "
-            f"method={flow.request.method}"
+            f"method={flow.request.method}",
         )
 
 
 def responseheaders(flow: http.HTTPFlow) -> None:
     if flow.response is None:
         return
+    _suppress_response_headers(flow)
     _redact_response_headers(flow)
     content_type = flow.response.headers.get("content-type", "").lower()
     transfer_encoding = flow.response.headers.get("transfer-encoding", "").lower()
@@ -1938,9 +2422,24 @@ def error(flow: http.HTTPFlow) -> None:
 
 def client_disconnected(client_conn: Any) -> None:
     """Release the transport's live admission on confirmed disconnect."""
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        subject.client_disconnected(client_conn)
     live = _live_runtime
     if live is not None:
         live.client_disconnected(client_conn)
+
+
+def _suppress_response_headers(flow: http.HTTPFlow) -> None:
+    """Delete by-name suppressed response headers; the set was validated at
+    resolve time and every occurrence is removed."""
+    suppress = flow.metadata.get(FLOW_VAULT_SUPPRESS_KEY)
+    if not suppress or flow.response is None:
+        return
+    suppressed = {name.lower() for name in suppress}
+    for name in {name.lower() for name, _ in flow.response.headers.items()}:
+        if name in suppressed:
+            del flow.response.headers[name]
 
 
 def _redact_response_headers(flow: http.HTTPFlow) -> None:

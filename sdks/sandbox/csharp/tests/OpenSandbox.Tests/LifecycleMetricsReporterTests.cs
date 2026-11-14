@@ -135,6 +135,64 @@ public class LifecycleMetricsReporterTests
         received.Headers[Constants.ApiKeyHeader].Should().Be("test-key");
     }
 
+    [Fact]
+    public async Task ReportSandboxCreate_PreservesExplicitApiKeyHeaderOverConfiguredKey()
+    {
+        using var server = new StubHttpServer();
+        var config = new ConnectionConfig(new ConnectionConfigOptions
+        {
+            Domain = $"127.0.0.1:{server.Port}",
+            Protocol = ConnectionProtocol.Http,
+            RequestTimeoutSeconds = 5,
+            ApiKey = "configured-key",
+            Headers = new Dictionary<string, string>
+            {
+                [Constants.ApiKeyHeader] = "explicit-key"
+            }
+        });
+
+        LifecycleMetricsReporter.ReportSandboxCreate(
+            config,
+            sandboxId: "sbx",
+            image: "python:3.12",
+            createDurationMs: 42,
+            success: true);
+
+        var received = await server.WaitForRequestAsync(TimeSpan.FromSeconds(3));
+        received.Should().NotBeNull();
+        received!.Headers[Constants.ApiKeyHeader].Should().Be("explicit-key",
+            "an explicit API key header takes precedence over the configured ApiKey on metrics requests");
+    }
+
+    [Fact]
+    public async Task ReportSandboxCreate_DoesNotDuplicateLowercaseApiKeyHeader()
+    {
+        using var server = new StubHttpServer();
+        var config = new ConnectionConfig(new ConnectionConfigOptions
+        {
+            Domain = $"127.0.0.1:{server.Port}",
+            Protocol = ConnectionProtocol.Http,
+            RequestTimeoutSeconds = 5,
+            ApiKey = "configured-key",
+            Headers = new Dictionary<string, string>
+            {
+                ["open-sandbox-api-key"] = "explicit-key"
+            }
+        });
+
+        LifecycleMetricsReporter.ReportSandboxCreate(
+            config,
+            sandboxId: "sbx",
+            image: "python:3.12",
+            createDurationMs: 42,
+            success: true);
+
+        var received = await server.WaitForRequestAsync(TimeSpan.FromSeconds(3));
+        received.Should().NotBeNull();
+        received!.Headers[Constants.ApiKeyHeader].Should().Be("explicit-key",
+            "the caller's header is sent once, not duplicated with the configured key");
+    }
+
     /// <summary>
     /// Tiny single-shot HTTP stub that accepts one request and captures the request line, headers, and body.
     /// Only intended for these fire-and-forget metric tests.

@@ -25,6 +25,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,6 +49,60 @@ type fakeNft struct {
 	denyFirstErr  error
 	policyErr     error
 	removeErr     error
+
+	// always-reload recording: the port floor and per-subject merged
+	// policies the reload transaction carried.
+	reloadErr   error
+	reloadCalls int
+	reloadFloor []policy.PortRange
+	reloadPols  map[subject.Subject]*policy.NetworkPolicy
+}
+
+// fakeGatewayDNSRedirectApplier models the entire owned nft table, not only
+// callback counts. A failure can occur either before the replacement or
+// after it took effect (a lost/ambiguous result).
+type fakeGatewayDNSRedirectApplier struct {
+	gateways      map[netip.Addr]struct{}
+	calls         int
+	failAt        int
+	failErr       error
+	applyThenFail bool
+}
+
+func newFakeGatewayDNSRedirectApplier() *fakeGatewayDNSRedirectApplier {
+	return &fakeGatewayDNSRedirectApplier{gateways: make(map[netip.Addr]struct{})}
+}
+
+func (f *fakeGatewayDNSRedirectApplier) apply(_ context.Context, gateways []netip.Addr, _ int) error {
+	f.calls++
+	fail := f.calls == f.failAt
+	if fail && !f.applyThenFail {
+		return f.failErr
+	}
+	f.gateways = make(map[netip.Addr]struct{}, len(gateways))
+	for _, gateway := range gateways {
+		f.gateways[gateway.Unmap()] = struct{}{}
+	}
+	if fail {
+		return f.failErr
+	}
+	return nil
+}
+
+func (f *fakeGatewayDNSRedirectApplier) failOnCall(call int, err error, afterApply bool) {
+	f.failAt, f.failErr, f.applyThenFail = call, err, afterApply
+}
+
+func (f *fakeGatewayDNSRedirectApplier) clearFailures() {
+	f.failAt, f.failErr, f.applyThenFail = 0, nil, false
+}
+
+func (f *fakeGatewayDNSRedirectApplier) snapshot() map[netip.Addr]struct{} {
+	return f.gateways
+}
+
+func (f *fakeGatewayDNSRedirectApplier) callCount() int {
+	return f.calls
 }
 
 func (f *fakeNft) ApplyDenyFirst(_ context.Context, s subject.Subject, _ actionhandler.NetworkAttachment) error {
@@ -68,6 +123,18 @@ func (f *fakeNft) ApplyPolicy(_ context.Context, s subject.Subject, pol *policy.
 	}
 	f.policyApplied = append(f.policyApplied, s)
 	f.lastPolicy = pol
+	return nil
+}
+
+func (f *fakeNft) ApplyAlwaysRulesReload(_ context.Context, floor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.reloadErr != nil {
+		return f.reloadErr
+	}
+	f.reloadCalls++
+	f.reloadFloor = floor
+	f.reloadPols = pols
 	return nil
 }
 
@@ -93,9 +160,44 @@ func fastSandboxTestServer(t *testing.T) (*fastSandboxPolicyServer, *subject.Mem
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	// no-op the gateway DNS redirect (no iptables/nft in unit tests)
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
-	srv.dnsRedirectRemove = func() error { return nil }
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
+	// Policy persistence is REQUIRED in the fast-sandbox profile — every
+	// test server carries a store, mirroring the production posture (no
+	// memory-only mode). The file seam defaults to a cross-platform fake
+	// keyed by path (the atomic machinery itself is Linux-only); tests that
+	// need real files or outcome injection build their own harness.
+	pp, err := newPolicyPersistence(t.TempDir())
+	require.NoError(t, err)
+	files := make(map[string]*fakeVaultFile)
+	pp.newFile = func(path string) (vaultFileStore, error) {
+		f, ok := files[path]
+		if !ok {
+			f = newFakeVaultFile(path)
+			files[path] = f
+		}
+		return f, nil
+	}
+	srv.SetPolicyFiles(pp)
 	return srv, reg, nft
+}
+
+// wireTestPolicyPersistence attaches the required temp-dir-backed policy
+// persistence to a server constructed directly (bypassing
+// fastSandboxTestServer).
+func wireTestPolicyPersistence(t *testing.T, srv *fastSandboxPolicyServer) {
+	t.Helper()
+	pp, err := newPolicyPersistence(t.TempDir())
+	require.NoError(t, err)
+	files := make(map[string]*fakeVaultFile)
+	pp.newFile = func(path string) (vaultFileStore, error) {
+		f, ok := files[path]
+		if !ok {
+			f = newFakeVaultFile(path)
+			files[path] = f
+		}
+		return f, nil
+	}
+	srv.SetPolicyFiles(pp)
 }
 
 func doRequest(t *testing.T, srv *fastSandboxPolicyServer, method, path, body string) *httptest.ResponseRecorder {
@@ -298,20 +400,31 @@ func TestActionsSetBindingDenyFirstThenHookActivates(t *testing.T) {
 	assert.Equal(t, "allow", eff.Evaluate("example.com"))
 }
 
-func TestActionsSetBindingUpdateWhileActiveDoesNotReplay(t *testing.T) {
+// TestActionsSetBindingReplayNeverMutatesRecordedPolicy: the binding input
+// only seeds a fresh subject's policy. A same-fence SET_BINDING carrying a
+// different input (the superseded CRD-driven update path, or an at-least-once
+// replay) must never mutate the recorded policy — runtime changes go through
+// the relay surface.
+func TestActionsSetBindingReplayNeverMutatesRecordedPolicy(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
 	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
+	nft.mu.Lock()
 	denyFirstInstalls := len(nft.denyFirst)
+	appliedAfterSeed := len(nft.policyApplied)
+	nft.mu.Unlock()
 
-	// plain input update (new spec generation, same fence): applied in place
+	// same-fence binding with a different input: the recorded policy wins
 	newInput := `{"defaultAction":"deny","egress":[{"action":"allow","target":"updated.com"}]}`
 	rec := doAction(t, srv, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, &newInput))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
-	require.Equal(t, 2, nft.appliedCount())
-	require.Equal(t, denyFirstInstalls, len(nft.denyFirst), "an update must not re-install deny-first")
-	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("updated.com"))
+	nft.mu.Lock()
+	assert.Equal(t, appliedAfterSeed, len(nft.policyApplied), "a replayed binding must not re-apply a policy")
+	assert.Equal(t, denyFirstInstalls, len(nft.denyFirst), "a replayed binding must not re-install deny-first")
+	nft.mu.Unlock()
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"), "the seeded policy survives the replay")
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("updated.com"))
 }
 
 func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
@@ -335,6 +448,21 @@ func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
 	rec = doAction(t, srv, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+}
+
+// TestActionsDataPlaneReadyReplayIsIdempotent: hooks are delivered
+// at-least-once, so a data-plane-ready retried after a lost ack must succeed
+// and leave the subject active under the same policy.
+func TestActionsDataPlaneReadyReplayIsIdempotent(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
+	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
+
+	rec := doAction(t, srv, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("other.com"))
 }
 
 func TestActionsDataPlaneReadyWithoutPendingPolicyFailsClosed(t *testing.T) {
@@ -364,14 +492,20 @@ func TestActionsRebindDiscardsPolicy(t *testing.T) {
 	require.Equal(t, subject.StateDenying, mustState(reg.Get(s)))
 	assert.Nil(t, reg.EffectivePolicy(s), "old policy must not survive a rebind")
 
-	// the new instance's data-plane-ready activates with its own policy
-	newInput := `{"defaultAction":"deny","egress":[{"action":"allow","target":"new.com"}]}`
-	rec = doAction(t, srv, bindBody(t, testUID, testIP, "runtime-2", "attachment-2", 6, &newInput))
-	require.Equal(t, http.StatusOK, rec.Code)
+	// the new instance's data-plane-ready activates with its own (re-seeded)
+	// policy
 	rec = doAction(t, srv, hookBody(t, testUID, "runtime-2", "attachment-2", constants.HookDataPlaneReady))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("old.com"))
+
+	// a runtime policy change goes through the relay: the relayed policy is
+	// what the successor enforces
+	rec = doPolicy(t, srv, http.MethodPut, testUID, policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"new.com"}]}`, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("new.com"))
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("old.com"))
 	require.Greater(t, len(nft.denyFirst), 0)
 }
 
@@ -458,6 +592,38 @@ func TestActionsHookForUnregisteredSubjectConflict(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestHookRemoveConcurrentNoRace (review: subjFence map race): a
+// data-plane-ready hook (holding policyCommitMu, reading subjFence under
+// s.mu) racing terminal cleanup (which deletes subjFence under s.mu without
+// policyCommitMu) must be data-race-free and converge to a consistent
+// outcome. Run under -race in CI.
+func TestHookRemoveConcurrentNoRace(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	s := subject.FromSandboxUID(policyTestUID)
+
+	rec := doAction(t, srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(policyAllow())))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r := doAction(t, srv, removeBody(t, policyTestUID, testFenceR, testFenceA))
+		assert.Equal(t, http.StatusOK, r.Code)
+	}()
+	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	hookCode := rec.Code
+	<-done
+
+	// The removal always completes (we waited), so the converged terminal
+	// state is absent regardless of the hook's outcome (200 activation
+	// first → removal reverts; removal first → the hook is a 404/409).
+	assert.Contains(t, []int{http.StatusOK, http.StatusNotFound, http.StatusConflict}, hookCode)
+	_, present := reg.Get(s)
+	assert.False(t, present, "terminal cleanup wins: the subject is gone")
+}
+
 // Stale-subject takeover on slot reuse (OSEP-0022)
 // ---------------------------------------------------------------------------
 
@@ -610,9 +776,9 @@ func TestActionsSetBindingTakeoverGatewayRefcountConsistent(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
-	var installs, removes int
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
-	srv.dnsRedirectRemove = func() error { removes++; return nil }
+	wireTestPolicyPersistence(t, srv)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
 	inst := &fakeMitmInstaller{}
 	srv.mitmInstall = inst.install
 	srv.mitmRemove = inst.remove
@@ -621,13 +787,13 @@ func TestActionsSetBindingTakeoverGatewayRefcountConsistent(t *testing.T) {
 	input := `{"defaultAction":"deny"}`
 	rec := doAction(t, srv, bindBody(t, staleUID, testIP, testFenceR, testFenceA, 1, &input))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, 1, installs)
+	require.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr(testGW): {}}, dns.snapshot())
 
 	rec = doAction(t, srv, bindBody(t, takeUID, testIP, "runtime-2", "attachment-2", 1, &input))
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	assert.Equal(t, 2, installs, "the successor reinstalls the shared gateway redirect")
-	assert.Equal(t, 1, removes, "the stale subject releases its refcount exactly once")
+	assert.Equal(t, 3, dns.callCount(), "stale release and successor install each reconcile the full set")
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr(testGW): {}}, dns.snapshot())
 	srv.gwMu.Lock()
 	_, hasStale := srv.gatewayDNSRefs[subject.FromSandboxUID(staleUID)]
 	succ, hasSucc := srv.gatewayDNSRefs[subject.FromSandboxUID(takeUID)]
@@ -672,11 +838,16 @@ func TestActionsInvalidEnvelopesRejected(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestFastSandboxServerSupersededRoutesGone: the UID-header-routed /policy and
-// /credential-vault surfaces are removed — policy rides only the SET_BINDING
-// binding input and the vault moves to the relay-only /vault/{sandboxUid}
-// surface, so the mux must not serve the old routes.
+// /credential-vault surfaces are removed — policy rides the SET_BINDING
+// binding input at create and the relay surface /policy/{sandboxUid} at
+// runtime, and the vault moves to the relay-only /vault/{sandboxUid} surface.
+// The bare /policy path redirects into the relay subtree; /credential-vault
+// must stay gone.
 func TestFastSandboxServerSupersededRoutesGone(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
+	// The bare /policy path redirects into the relay subtree; the old
+	// UID-header surface stays gone. The exact 3xx code varies by method
+	// (and Go version) — assert the redirect class and the Location target.
 	for _, tc := range []struct {
 		method, path string
 	}{
@@ -684,6 +855,14 @@ func TestFastSandboxServerSupersededRoutesGone(t *testing.T) {
 		{http.MethodPut, "/policy"},
 		{http.MethodPost, "/policy"},
 		{http.MethodDelete, "/policy"},
+	} {
+		rec := doRequest(t, srv, tc.method, tc.path, `{}`)
+		require.True(t, rec.Code >= 300 && rec.Code < 400, "%s %s: want a redirect, got %d", tc.method, tc.path, rec.Code)
+		assert.Equal(t, "/policy/", rec.Header().Get("Location"), "%s %s", tc.method, tc.path)
+	}
+	for _, tc := range []struct {
+		method, path string
+	}{
 		{http.MethodGet, "/credential-vault"},
 		{http.MethodPost, "/credential-vault"},
 		{http.MethodPatch, "/credential-vault"},
@@ -992,8 +1171,8 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	reg := subject.NewRegistry([]policy.EgressRule{alwaysDeny}, []policy.EgressRule{alwaysAllow})
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
-	srv.dnsRedirectRemove = func() error { return nil }
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
 
 	// activation through the action protocol; the binding policy reaches nft
 	// merged with the always overlay
@@ -1011,39 +1190,214 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	require.Contains(t, allowV4, "198.51.100.7", "always-allow IP must reach the nft allow set")
 }
 
+// ---------------------------------------------------------------------------
+// Always-rule hot reload (deny.always / allow.always / reachable.ports.cap)
+// ---------------------------------------------------------------------------
+
+// stubAlwaysLoader mirrors policy.AlwaysRuleLoader's contract: the candidate
+// applies once, and an apply error vetoes the publish (stays staged for
+// retry).
+type stubAlwaysLoader struct {
+	mu             sync.Mutex
+	deny, allow    []policy.EgressRule
+	candidateDeny  []policy.EgressRule
+	candidateAllow []policy.EgressRule
+}
+
+func (l *stubAlwaysLoader) CurrentRules() (deny, allow []policy.EgressRule) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.deny, l.allow
+}
+
+func (l *stubAlwaysLoader) SetCurrentRules(deny, allow []policy.EgressRule) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.deny, l.allow = deny, allow
+}
+
+func (l *stubAlwaysLoader) RefreshIfDueWithApply(
+	_ time.Time,
+	apply func(deny, allow []policy.EgressRule) error,
+) (deny, allow []policy.EgressRule, changed bool, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.candidateDeny) == 0 && len(l.candidateAllow) == 0 {
+		return l.deny, l.allow, false, nil
+	}
+	deny, allow = l.candidateDeny, l.candidateAllow
+	if err := apply(deny, allow); err != nil {
+		return nil, nil, false, err
+	}
+	l.deny, l.allow = deny, allow
+	l.candidateDeny, l.candidateAllow = nil, nil
+	return deny, allow, true, nil
+}
+
+// TestFastSandboxAlwaysRuleReloadMovesKernelAndRegistry: a changed overlay
+// must reach both layers in order — one atomic kernel rebuild (merged
+// policies + port floor), then the registry (DNS dispatch). Deny-first
+// subjects carry no merged policy; a follow-up refresh is a no-op.
+func TestFastSandboxAlwaysRuleReloadMovesKernelAndRegistry(t *testing.T) {
+	oldDeny, err := policy.ParseValidatedEgressRule("deny", "old-blocked.example.com")
+	require.NoError(t, err)
+	newDeny, err := policy.ParseValidatedEgressRule("deny", "new-blocked.example.com")
+	require.NoError(t, err)
+	newAllow, err := policy.ParseValidatedEgressRule("allow", "always-allowed.example.com")
+	require.NoError(t, err)
+	floor := policy.NewPortFloorDenyRule([]policy.PortRange{{Lo: 1, Hi: 79}, {Lo: 81, Hi: 65535}})
+
+	loader := &stubAlwaysLoader{deny: []policy.EgressRule{oldDeny}}
+	reg := subject.NewRegistry([]policy.EgressRule{oldDeny}, nil)
+	nft := &fakeNft{}
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
+	srv.SetAlwaysRuleLoader(loader)
+
+	// one active subject + one deny-first subject (binding, no ready hook)
+	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
+	active := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(active)))
+	denying := subject.FromSandboxUID("u-2")
+	rec := doAction(t, srv, bindBody(t, "u-2", "10.0.0.6", testFenceR, testFenceA, 1, strPtr(`{"defaultAction":"deny"}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, subject.StateDenying, mustState(reg.Get(denying)))
+
+	loader.mu.Lock()
+	loader.candidateDeny = []policy.EgressRule{newDeny, floor}
+	loader.candidateAllow = []policy.EgressRule{newAllow}
+	loader.mu.Unlock()
+
+	changed, err := srv.reloadAlwaysRules()
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	// kernel: one rebuild, only the active subject merged, new overlay + floor
+	nft.mu.Lock()
+	require.Equal(t, 1, nft.reloadCalls)
+	merged := nft.reloadPols[active]
+	require.NotNil(t, merged, "active subject must receive its re-merged policy")
+	require.Equal(t, "new-blocked.example.com", merged.Egress[0].Target, "always-deny rides first")
+	for _, r := range merged.Egress {
+		assert.NotEqual(t, "old-blocked.example.com", r.Target, "the replaced overlay must not survive")
+	}
+	_, denyingMerged := nft.reloadPols[denying]
+	assert.False(t, denyingMerged, "deny-first subjects carry no merged policy")
+	require.Equal(t, floor.PortRanges, nft.reloadFloor, "the port floor reaches the master chains")
+	nft.mu.Unlock()
+
+	// registry (DNS dispatch): new overlay live, first-match deny wins
+	eff := reg.EffectivePolicy(active)
+	require.NotNil(t, eff)
+	require.Equal(t, "deny", eff.Evaluate("new-blocked.example.com"))
+	require.Equal(t, "allow", eff.Evaluate("always-allowed.example.com"))
+	require.Equal(t, "allow", eff.Evaluate("example.com"))
+	require.Nil(t, reg.EffectivePolicy(denying), "deny-first subject keeps failing closed in DNS")
+
+	// the follow-up refresh sees no change
+	changed, err = srv.reloadAlwaysRules()
+	require.NoError(t, err)
+	require.False(t, changed)
+}
+
+// TestFastSandboxAlwaysRuleReloadNftFailureKeepsOverlay: a failed kernel
+// rebuild vetoes the whole reload — the registry keeps the previous overlay
+// and the retry converges.
+func TestFastSandboxAlwaysRuleReloadNftFailureKeepsOverlay(t *testing.T) {
+	oldDeny, err := policy.ParseValidatedEgressRule("deny", "old-blocked.example.com")
+	require.NoError(t, err)
+	newDeny, err := policy.ParseValidatedEgressRule("deny", "new-blocked.example.com")
+	require.NoError(t, err)
+
+	loader := &stubAlwaysLoader{deny: []policy.EgressRule{oldDeny}}
+	reg := subject.NewRegistry([]policy.EgressRule{oldDeny}, nil)
+	nft := &fakeNft{reloadErr: errors.New("nft busy")}
+	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
+	srv.SetAlwaysRuleLoader(loader)
+
+	input := `{"defaultAction":"deny"}`
+	active := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
+
+	loader.mu.Lock()
+	loader.candidateDeny = []policy.EgressRule{newDeny}
+	loader.mu.Unlock()
+
+	_, err = srv.reloadAlwaysRules()
+	require.Error(t, err, "the kernel failure must surface as a reload failure")
+
+	// registry untouched: DNS dispatch still evaluates the old overlay
+	eff := reg.EffectivePolicy(active)
+	require.NotNil(t, eff)
+	require.Equal(t, "old-blocked.example.com", eff.Egress[0].Target)
+
+	// loader veto: current rules unchanged, the candidate stays staged
+	deny, _ := loader.CurrentRules()
+	require.Len(t, deny, 1)
+	require.Equal(t, "old-blocked.example.com", deny[0].Target)
+
+	// the retry converges
+	nft.mu.Lock()
+	nft.reloadErr = nil
+	nft.mu.Unlock()
+	changed, err := srv.reloadAlwaysRules()
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, "deny", reg.EffectivePolicy(active).Evaluate("new-blocked.example.com"))
+}
+
 // TestFastSandboxServerNftFailureKeepsRegistryState: a failed nft apply must leave
 // the registry (DNS dispatch) on the PREVIOUS policy — nft commits before registry
-// state.
+// state, and the relay write NACKs with last-good kept on both sides.
 func TestFastSandboxServerNftFailureKeepsRegistryState(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
 	s := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 
-	// in-place binding update fails at nft: registry must stay on the FIRST
-	// policy
+	// relay write fails at nft: 500, the registry must stay on the FIRST
+	// policy (the record was seeded at revision 1; the write targeted
+	// revision 2)
 	nft.mu.Lock()
 	nft.policyErr = errors.New("nft busy")
 	nft.mu.Unlock()
-	rec := doAction(t, srv, bindBody(t, "u-1", testIP, testFenceR, testFenceA, 2,
-		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)))
+	rec := doPolicy(t, srv, http.MethodPut, "u-1", policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`, 1, false, true), "")
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 
 	eff := reg.EffectivePolicy(s)
 	require.NotNil(t, eff)
 	assert.Equal(t, "deny", eff.Evaluate("example.com"), "failed nft apply must not publish the new policy")
+
+	// a same-fence binding replay never carries the new policy either
+	rec = doAction(t, srv, bindBody(t, "u-1", testIP, testFenceR, testFenceA, 2,
+		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	eff = reg.EffectivePolicy(s)
+	require.NotNil(t, eff)
+	assert.Equal(t, "deny", eff.Evaluate("example.com"), "the recorded policy is authoritative over binding replays")
+
+	// the retry with a working nft lands
+	nft.mu.Lock()
+	nft.policyErr = nil
+	nft.mu.Unlock()
+	rec = doPolicy(t, srv, http.MethodPut, "u-1", policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
 }
 
-// TestFastSandboxServerGatewayRedirectRefcounted: the shared prerouting REDIRECT
-// installs once per gateway and is removed when the last subject using it is
-// unloaded.
+// TestFastSandboxServerGatewayRedirectRefcounted: the shared prerouting table
+// keeps every active gateway and removes only gateways without owners.
 func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
-	var installs, removes int
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
-	srv.dnsRedirectRemove = func() error { removes++; return nil }
+	wireTestPolicyPersistence(t, srv)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
 
 	attA := mitmAtt(t, "10.0.0.5", "10.10.0.1")
 	attB := mitmAtt(t, "10.0.0.6", "10.10.0.1")
@@ -1052,14 +1406,169 @@ func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	require.NoError(t, srv.OnRegistered(subject.FromSandboxUID("a"), attA))
 	require.NoError(t, srv.OnRegistered(subject.FromSandboxUID("b"), attB))
 	require.NoError(t, srv.OnRegistered(subject.FromSandboxUID("c"), attC))
-	assert.Equal(t, 2, installs, "shared gateway installs once; distinct gateway installs again")
+	wantBoth := map[netip.Addr]struct{}{
+		netip.MustParseAddr("10.10.0.1"): {},
+		netip.MustParseAddr("10.20.0.1"): {},
+	}
+	assert.Equal(t, wantBoth, dns.snapshot())
 
 	require.NoError(t, srv.OnUnloaded(subject.FromSandboxUID("a"), attA))
+	assert.Equal(t, wantBoth, dns.snapshot(), "a non-final shared-gateway release preserves the whole table")
 	require.NoError(t, srv.OnUnloaded(subject.FromSandboxUID("b"), attB))
-	assert.Equal(t, 1, removes, "remove only when the LAST subject of the shared gateway unloads")
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.20.0.1"): {}}, dns.snapshot(), "removing gw1 must preserve gw2")
 
 	require.NoError(t, srv.OnUnloaded(subject.FromSandboxUID("c"), attC))
-	assert.Equal(t, 2, removes)
+	assert.Empty(t, dns.snapshot(), "the final release removes the DNS table contents")
+}
+
+func TestFastSandboxServerGatewayRedirectUsesLifecycleDeadline(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	var contexts []context.Context
+	srv.dnsRedirectApply = func(ctx context.Context, _ []netip.Addr, _ int) error {
+		contexts = append(contexts, ctx)
+		return nil
+	}
+	subj := subject.FromSandboxUID("dns-context")
+	att := mitmAtt(t, "10.0.0.5", "10.10.0.1")
+
+	require.NoError(t, srv.OnRegistered(subj, att))
+	require.NoError(t, srv.OnUnloaded(subj, att))
+	require.Len(t, contexts, 2)
+	for i, maxTimeout := range []time.Duration{policyApplyTimeout, 30 * time.Second} {
+		deadline, ok := contexts[i].Deadline()
+		require.True(t, ok, "lifecycle operation %d must have a deadline", i)
+		remaining := time.Until(deadline)
+		assert.Positive(t, remaining, "lifecycle context should still be within its deadline")
+		assert.LessOrEqual(t, remaining, maxTimeout, "lifecycle context must preserve its existing timeout")
+	}
+}
+
+func TestFastSandboxServerReleaseCleansUncommittedInstallAfterLostResult(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	subj, gw := subject.FromSandboxUID("uncommitted"), netip.MustParseAddr("10.10.0.1")
+	dns.failOnCall(1, errors.New("result lost"), true)
+	require.Error(t, srv.installGatewayDNSRedirect(context.Background(), subj, gw))
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs)
+	srv.gwMu.Unlock()
+	assert.Equal(t, map[netip.Addr]struct{}{gw: {}}, dns.snapshot())
+
+	require.NoError(t, srv.releaseGatewayDNSRedirect(context.Background(), subj))
+	assert.Empty(t, dns.snapshot(), "release reconciles even though install ownership was not committed")
+}
+
+func TestActionsSetAndRemoveRetryAfterGatewayDNSFailures(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	input := `{"defaultAction":"deny"}`
+	subj := subject.FromSandboxUID("dns-remove")
+	dns.failOnCall(1, errors.New("nft busy"), false)
+	rec := doAction(t, srv, bindBody(t, "dns-remove", testIP, testFenceR, testFenceA, 1, strPtr(input)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, subject.StateDenying, mustState(reg.Get(subj)))
+	assert.Empty(t, dns.snapshot())
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs, "failed install does not commit ownership")
+	srv.gwMu.Unlock()
+
+	dns.clearFailures()
+	rec = doAction(t, srv, bindBody(t, "dns-remove", testIP, testFenceR, testFenceA, 1, strPtr(input)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr(testGW): {}}, dns.snapshot())
+	dns.failOnCall(3, errors.New("nft result lost"), true)
+
+	rec = doAction(t, srv, removeBody(t, "dns-remove", testFenceR, testFenceA))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	state, ok := reg.Get(subj)
+	require.True(t, ok, "REMOVE_BINDING must not unregister after a failed DNS reconcile")
+	assert.Equal(t, subject.StateDenying, state)
+	srv.gwMu.Lock()
+	assert.Equal(t, netip.MustParseAddr(testGW), srv.gatewayDNSRefs[subj], "failed release retains retry ownership")
+	srv.gwMu.Unlock()
+	assert.Empty(t, dns.snapshot(), "the apply-then-error fake makes the kernel result ambiguous")
+
+	dns.clearFailures()
+	rec = doAction(t, srv, removeBody(t, "dns-remove", testFenceR, testFenceA))
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, ok = reg.Get(subj)
+	assert.False(t, ok)
+	assert.Empty(t, dns.snapshot())
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs)
+	srv.gwMu.Unlock()
+}
+
+func TestActionsSetBindingTakeoverRetriesAfterGatewayDNSFailure(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	staleUID, successorUID := "dns-stale", "dns-successor"
+	stale, successor := subject.FromSandboxUID(staleUID), subject.FromSandboxUID(successorUID)
+	input := `{"defaultAction":"deny"}`
+	setBindingAndReady(t, srv, reg, staleUID, testIP, &input)
+	dns.failOnCall(2, errors.New("nft result lost"), true)
+
+	rec := doAction(t, srv, bindBody(t, successorUID, testIP, "runtime-2", "attachment-2", 1, strPtr(input)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(stale)), "failed DNS release must not evict the old owner")
+	_, ok := reg.Get(successor)
+	assert.False(t, ok, "takeover must not publish its successor before DNS cleanup succeeds")
+	srv.gwMu.Lock()
+	assert.Equal(t, netip.MustParseAddr(testGW), srv.gatewayDNSRefs[stale])
+	srv.gwMu.Unlock()
+
+	dns.clearFailures()
+	rec = doAction(t, srv, bindBody(t, successorUID, testIP, "runtime-2", "attachment-2", 1, strPtr(input)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, ok = reg.Get(stale)
+	assert.False(t, ok)
+	require.Equal(t, subject.StateDenying, mustState(reg.Get(successor)))
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr(testGW): {}}, dns.snapshot())
+}
+
+func TestActionsMITMFailureRollbackAndTerminalCleanup(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
+	srv.mitmInstall = func([]iptables.MitmRedirectEntry) error { return errors.New("mitm failed") }
+	input := `{"defaultAction":"deny"}`
+
+	rec := doAction(t, srv, bindBody(t, "mitm-dns", testIP, testFenceR, testFenceA, 1, strPtr(input)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "mitm failed")
+	subj := subject.FromSandboxUID("mitm-dns")
+	state, ok := reg.Get(subj)
+	require.True(t, ok, "failed registration remains denying and retryable")
+	assert.Equal(t, subject.StateDenying, state)
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs, "successful rollback commits the empty ownership map")
+	srv.gwMu.Unlock()
+	assert.Empty(t, dns.snapshot(), "successful rollback removes the newly installed redirect")
+
+	// Retry the same deny-first registration; this time rollback applies but
+	// returns an error, so ownership remains available to terminal cleanup.
+	dns.failOnCall(4, errors.New("DNS rollback failed"), true)
+	rec = doAction(t, srv, bindBody(t, "mitm-dns", testIP, testFenceR, testFenceA, 1, strPtr(input)))
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "mitm failed")
+	assert.Contains(t, rec.Body.String(), "DNS rollback failed")
+	srv.gwMu.Lock()
+	assert.Equal(t, netip.MustParseAddr(testGW), srv.gatewayDNSRefs[subj], "failed rollback retains ownership")
+	srv.gwMu.Unlock()
+	assert.Empty(t, dns.snapshot(), "the rollback result is ambiguous")
+
+	dns.clearFailures()
+	rec = doAction(t, srv, removeBody(t, "mitm-dns", testFenceR, testFenceA))
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, ok = reg.Get(subj)
+	assert.False(t, ok)
+	assert.Empty(t, dns.snapshot())
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs)
+	srv.gwMu.Unlock()
 }
 
 func strPtr(s string) *string { return &s }
@@ -1170,18 +1679,26 @@ func TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent(t *testin
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
-	var installs, removes int
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
-	srv.dnsRedirectRemove = func() error { removes++; return nil }
+	wireTestPolicyPersistence(t, srv)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
 
 	att := mitmAtt(t, "10.0.0.5", "10.10.0.1")
 	s := subject.FromSandboxUID("a")
-	require.NoError(t, srv.OnRegistered(s, att))
+	dns.failOnCall(1, errors.New("result lost"), true)
+	require.Error(t, srv.OnRegistered(s, att))
+	srv.gwMu.Lock()
+	assert.Empty(t, srv.gatewayDNSRefs, "failed install does not commit the map")
+	srv.gwMu.Unlock()
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.10.0.1"): {}}, dns.snapshot())
+	dns.clearFailures()
+	require.NoError(t, srv.OnRegistered(s, att), "the same desired set must be reconciled after an ambiguous error")
 	require.NoError(t, srv.OnRegistered(s, att), "duplicate SET_BINDING delivery")
-	assert.Equal(t, 1, installs, "duplicate registration must not re-install the redirect")
+	assert.Equal(t, 3, dns.callCount(), "duplicate registration still reconciles the complete desired set")
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.10.0.1"): {}}, dns.snapshot())
 
 	require.NoError(t, srv.OnUnloaded(s, att))
-	assert.Equal(t, 1, removes, "one unload must fully release the gateway")
+	assert.Empty(t, dns.snapshot(), "one unload must fully release the gateway")
 }
 
 // TestFastSandboxServerGatewayRedirectRebindMovesGateway: a rebind that moved the
@@ -1190,17 +1707,25 @@ func TestFastSandboxServerGatewayRedirectRebindMovesGateway(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
-	var installs, removes int
-	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
-	srv.dnsRedirectRemove = func() error { removes++; return nil }
+	wireTestPolicyPersistence(t, srv)
+	dns := newFakeGatewayDNSRedirectApplier()
+	srv.dnsRedirectApply = dns.apply
 
 	s := subject.FromSandboxUID("a")
 	att1 := mitmAtt(t, "10.0.0.5", "10.10.0.1")
 	att2 := mitmAtt(t, "10.0.0.5", "10.20.0.1")
 	require.NoError(t, srv.OnRegistered(s, att1))
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.10.0.1"): {}}, dns.snapshot())
+	dns.failOnCall(2, errors.New("replacement rejected"), false)
+	require.Error(t, srv.OnRegistered(s, att2))
+	srv.gwMu.Lock()
+	assert.Equal(t, netip.MustParseAddr("10.10.0.1"), srv.gatewayDNSRefs[s], "failed replacement does not commit the new gateway")
+	srv.gwMu.Unlock()
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.10.0.1"): {}}, dns.snapshot(), "a rejected batch keeps the prior table")
+	dns.clearFailures()
 	require.NoError(t, srv.OnRegistered(s, att2), "rebind with a new gateway")
-	assert.Equal(t, 2, installs)
+	assert.Equal(t, map[netip.Addr]struct{}{netip.MustParseAddr("10.20.0.1"): {}}, dns.snapshot(), "one replacement drops the old gateway")
 
 	require.NoError(t, srv.OnUnloaded(s, att2))
-	assert.Equal(t, 2, removes, "both gateways must be released")
+	assert.Empty(t, dns.snapshot(), "the re-bound gateway must be released")
 }

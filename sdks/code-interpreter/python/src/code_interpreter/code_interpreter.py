@@ -249,15 +249,15 @@ class CodeInterpreter:
         """
         Check if the code interpreter runtime (Jupyter) is serving.
 
-        Probes the runtime listen port through the sandbox command service and
-        treats a failed command (non-zero exit surfaced as an execution error)
-        as an unhealthy runtime.
+        Probes the runtime listen port through the sandbox command service.
+        Only a confirmed exit code 0 counts as serving: a stream that ends
+        without an error or completion event does not prove the port is open.
         """
         try:
             execution = await self._sandbox.commands.run(
                 RUNTIME_PROCESS_CHECK_COMMAND
             )
-            return execution.error is None
+            return execution.error is None and execution.exit_code == 0
         except Exception:
             return False
 

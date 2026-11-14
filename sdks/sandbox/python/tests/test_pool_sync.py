@@ -32,7 +32,11 @@ from opensandbox.exceptions import (
     PoolEmptyException,
     PoolNotRunningException,
 )
-from opensandbox.models.sandboxes import PlatformSpec
+from opensandbox.models.sandboxes import (
+    CredentialProxyConfig,
+    NetworkPolicy,
+    PlatformSpec,
+)
 from opensandbox.pool import (
     AcquirePolicy,
     InMemoryPoolStateStore,
@@ -359,6 +363,98 @@ def test_acquire_direct_create_forwards_pool_creation_platform() -> None:
         pool.acquire()
 
         assert captured_kwargs["platform"] == PlatformSpec(os="linux", arch="arm64")
+    finally:
+        pool.shutdown(False)
+
+
+@pytest.mark.parametrize("warmup", [False, True], ids=["direct", "warmup"])
+@pytest.mark.parametrize(
+    "credential_proxy",
+    [None, CredentialProxyConfig(enabled=False), CredentialProxyConfig(enabled=True)],
+    ids=["omitted", "disabled", "enabled"],
+)
+def test_pool_creation_forwards_credential_proxy(
+    warmup: bool, credential_proxy: CredentialProxyConfig | None
+) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    class CapturingSandbox(FakeSandbox):
+        @classmethod
+        def create(cls, *args: Any, **kwargs: Any) -> CapturingSandbox:
+            captured_kwargs.update(kwargs)
+            return cls("created-with-credential-proxy")
+
+    network_policy = NetworkPolicy(defaultAction="deny")
+    spec_kwargs = {"credential_proxy": credential_proxy} if credential_proxy else {}
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        max_idle=1 if warmup else 0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(
+            image="ubuntu:22.04", network_policy=network_policy, **spec_kwargs
+        ),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=CapturingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        if warmup:
+            _eventually(lambda: pool.snapshot().idle_count == 1)
+        else:
+            pool.acquire()
+
+        if credential_proxy is None:
+            assert "credential_proxy" not in captured_kwargs
+        else:
+            assert captured_kwargs["credential_proxy"] is credential_proxy
+        assert captured_kwargs["network_policy"] is network_policy
+    finally:
+        pool.shutdown(False)
+
+
+@pytest.mark.parametrize("warmup", [False, True], ids=["direct", "warmup"])
+def test_pool_creation_supports_legacy_factory(warmup: bool) -> None:
+    class LegacySandbox(FakeSandbox):
+        @classmethod
+        def create(
+            cls,
+            image: Any,
+            *,
+            timeout: Any,
+            ready_timeout: Any,
+            env: Any,
+            metadata: Any,
+            resource: Any,
+            network_policy: Any,
+            platform: Any,
+            extensions: Any,
+            secure_access: Any,
+            entrypoint: Any,
+            volumes: Any,
+            connection_config: Any,
+            health_check: Any,
+            health_check_polling_interval: Any,
+            skip_health_check: Any,
+        ) -> LegacySandbox:
+            return cls("legacy-factory-sandbox")
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        max_idle=1 if warmup else 0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(image="ubuntu:22.04"),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=LegacySandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        if warmup:
+            _eventually(lambda: pool.snapshot().idle_count == 1)
+        else:
+            sandbox = pool.acquire()
+            assert sandbox.id == "legacy-factory-sandbox"
     finally:
         pool.shutdown(False)
 

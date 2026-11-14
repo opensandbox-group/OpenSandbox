@@ -24,9 +24,10 @@ import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 
 class ExecdEventSupportTest {
-    private val reported = mutableListOf<Pair<String, Exception>>()
+    private val reported = mutableListOf<Pair<String, Throwable>>()
 
     private fun decode(line: String): com.alibaba.opensandbox.sandbox.api.models.execd.EventNode? =
         ExecdEventSupport.decodeEventLine(line) { line, error -> reported.add(line to error) }
@@ -87,6 +88,26 @@ class ExecdEventSupportTest {
     }
 
     @Test
+    fun `reports linkage errors through onError and rethrows them`() {
+        val boom = AbstractMethodError("missing typeParametersSerializers()")
+        val linkageReported = mutableListOf<Pair<String, Throwable>>()
+        val rawLine = """data: {"type":"error","timestamp":1}"""
+
+        val thrown =
+            assertThrows<AbstractMethodError> {
+                ExecdEventSupport.decodeEventLine(
+                    rawLine,
+                    decodePayload = { throw boom },
+                ) { line, error -> linkageReported.add(line to error) }
+            }
+
+        assertEquals(boom, thrown)
+        assertEquals(1, linkageReported.size)
+        assertEquals(rawLine, linkageReported[0].first)
+        assertEquals(boom, linkageReported[0].second)
+    }
+
+    @Test
     fun `decodes payload lines the same way regardless of line endings`() {
         // Adapters feed reader.lineSequence() output: CRLF is already stripped.
         val node = decode("""{"type":"complete","timestamp":4}""")
@@ -114,5 +135,74 @@ class ExecdEventSupportTest {
                 error = ExecutionError(name = "ValueError", value = "division by zero", timestamp = 1)
             }
         assertNull(ExecdEventSupport.inferForegroundExitCode(nonNumeric))
+    }
+
+    @Test
+    fun `foreground exit code prefers authoritative error exitCode over evalue`() {
+        val mismatched =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "99",
+                        timestamp = 1,
+                        exitCode = 3,
+                    )
+            }
+        assertEquals(3, ExecdEventSupport.inferForegroundExitCode(mismatched))
+
+        val signalKill =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "-1",
+                        timestamp = 1,
+                        exitCode = -1,
+                    )
+            }
+        assertEquals(-1, ExecdEventSupport.inferForegroundExitCode(signalKill))
+
+        val startFailure =
+            Execution().apply {
+                error =
+                    ExecutionError(
+                        name = "CommandExecError",
+                        value = "fork/exec /bin/sh: argument list too long",
+                        timestamp = 1,
+                    )
+            }
+        assertNull(ExecdEventSupport.inferForegroundExitCode(startFailure))
+    }
+
+    @Test
+    fun `foreground exit code prefers wire complete exitCode when present`() {
+        val withWire =
+            Execution().apply {
+                complete = ExecutionComplete(timestamp = 1, executionTimeInMillis = 1, exitCode = 0)
+            }
+        assertEquals(0, ExecdEventSupport.inferForegroundExitCode(withWire))
+    }
+
+    @Test
+    fun `decodes execution_complete and error exit_code wire fields`() {
+        val complete =
+            decode(
+                """{"type":"execution_complete","timestamp":10,"execution_time":5,"exit_code":0}""",
+            )
+        assertNotNull(complete)
+        assertEquals("execution_complete", complete!!.type)
+        assertEquals(0L, complete.exitCode)
+
+        val error =
+            decode(
+                """{"type":"error","timestamp":11,"error":{"ename":"CommandExecError","evalue":"3",""" +
+                    """"traceback":["exit status 3"],"exit_code":3}}""",
+            )
+        assertNotNull(error)
+        assertEquals("error", error!!.type)
+        assertNotNull(error.error)
+        assertEquals(3L, error.error!!.exitCode)
+        assertTrue(reported.isEmpty())
     }
 }

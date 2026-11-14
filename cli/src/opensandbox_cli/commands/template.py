@@ -55,7 +55,7 @@ def template_group(ctx: click.Context) -> None:
     "--publish",
     "-p",
     default=None,
-    help="S3-compatible publish target for the built artifacts (e.g. s3://bucket/publish). Required unless --file is used.",
+    help="Publish target: s3://bucket/publish (native) or oci://registry/repository (overlaybd, no tag or digest). Required unless --file is used.",
 )
 @click.option(
     "--file",
@@ -233,6 +233,9 @@ def template_get(obj, template_id: str, output_format: str | None) -> None:
     status_val = d.get("status")
     if isinstance(status_val, dict):
         d["status"] = status_val.get("phase", str(status_val))
+        # model_dump uses the field name; accept the wire alias too.
+        manifest_ref = status_val.get("manifest_ref", status_val.get("manifestRef"))
+        d["manifest_ref"] = manifest_ref
         if status_val.get("message"):
             d["status_message"] = status_val["message"]
     readiness_val = d.get("readiness")

@@ -64,7 +64,7 @@ from opensandbox.sync.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcherSync,
 )
 from opensandbox.sync.services.command import CommandsSync
-from opensandbox.transport import unwrap_retry_transport
+from opensandbox.transport import sse_timeout, streaming_transport
 
 logger = logging.getLogger(__name__)
 
@@ -117,24 +117,19 @@ class CommandsAdapterSync(CommandsSync):
         )
         self._client.set_httpx_client(self._httpx_client)
 
-        # SSE client (read timeout disabled); endpoint headers already in headers
+        # SSE client: read timeout bounds the wait for response headers and the gap
+        # between stream bytes (see sse_timeout); endpoint headers already in headers
         sse_headers = {
             **headers,
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
         }
-        # SSE bootstraps bypass the retry wrapper: request bodies are
-        # not replayable and a non-idempotent status opt-in would cause
-        # duplicate execution on a resent SSE POST.
+        # SSE bootstraps keep only the wake-timeout retry: a non-idempotent
+        # status opt-in would cause duplicate execution on a resent SSE POST.
         self._sse_client = httpx.Client(
             headers=sse_headers,
-            timeout=httpx.Timeout(
-                connect=timeout_seconds,
-                read=None,
-                write=timeout_seconds,
-                pool=None,
-            ),
-            transport=unwrap_retry_transport(self.connection_config.transport),
+            timeout=sse_timeout(timeout_seconds),
+            transport=streaming_transport(self.connection_config.transport),
             **build_redirect_client_options(self.connection_config, base_url),
         )
 

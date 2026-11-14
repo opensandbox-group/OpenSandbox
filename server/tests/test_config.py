@@ -81,7 +81,7 @@ def test_load_config_from_file(tmp_path, monkeypatch):
     assert loaded.server.max_sandbox_timeout_seconds == 172800
     assert loaded.runtime.type == "kubernetes"
     assert loaded.runtime.execd_image == "opensandbox/execd:test"
-    assert loaded.runtime.execd_run_as_init is False
+    assert loaded.runtime.execd_run_as_init is True
     assert loaded.ingress is not None
     assert loaded.ingress.mode == "gateway"
     assert loaded.ingress.gateway is not None
@@ -170,18 +170,17 @@ def test_runtime_execd_run_as_init_parses_from_toml(tmp_path):
     loaded = config_module.load_config(config_path)
     assert loaded.runtime.execd_run_as_init is True
 
-
-def test_runtime_execd_run_as_init_defaults_false(tmp_path):
-    toml = """
+    toml_disabled = """
         [runtime]
         type = "docker"
         execd_image = "opensandbox/execd:test"
+        execd_run_as_init = false
         """
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(toml)
+    disabled_path = tmp_path / "config-disabled.toml"
+    disabled_path.write_text(toml_disabled)
 
-    loaded = config_module.load_config(config_path)
-    assert loaded.runtime.execd_run_as_init is False
+    loaded_disabled = config_module.load_config(disabled_path)
+    assert loaded_disabled.runtime.execd_run_as_init is False
 
 
 def test_docker_runtime_disallows_kubernetes_block():
@@ -205,8 +204,37 @@ def test_kubernetes_pool_acquisition_timeout_defaults_and_validates():
         config_module.KubernetesRuntimeConfig(pool_acquisition_timeout_seconds=0)
 
 
+def test_kubernetes_template_publish_secrets_defaults():
+    """native templates fall back to the S3 secret; the OCI publish secret
+    for overlaybd templates is opt-in and defaults to unset."""
+    kubernetes_cfg = config_module.KubernetesRuntimeConfig()
+    assert kubernetes_cfg.template_s3_publish_secret == "sandbox-oss-credentials"
+    assert kubernetes_cfg.template_oci_publish_secret is None
+
+    configured = config_module.KubernetesRuntimeConfig(
+        template_oci_publish_secret="registry-credentials"
+    )
+    assert configured.template_oci_publish_secret == "registry-credentials"
+
+    with pytest.raises(ValueError):
+        config_module.KubernetesRuntimeConfig(template_oci_publish_secret="")
+
+
+def test_kubernetes_template_oci_publish_secret_from_toml():
+    app_cfg = config_module.AppConfig.model_validate(
+        {
+            "server": {"host": "127.0.0.1", "port": 8000},
+            "runtime": {"type": "kubernetes", "execd_image": "opensandbox/execd:latest"},
+            "kubernetes": {
+                "template_oci_publish_secret": "registry-credentials",
+            },
+        }
+    )
+    assert app_cfg.kubernetes is not None
+    assert app_cfg.kubernetes.template_oci_publish_secret == "registry-credentials"
+
+
 def test_server_config_uvicorn_tuning_defaults():
-    """ServerConfig exposes uvicorn concurrency knobs with sensible defaults."""
     server_cfg = ServerConfig()
     assert server_cfg.limit_concurrency == 1024
     assert server_cfg.backlog == 2048
@@ -807,6 +835,50 @@ def test_gateway_address_validation_for_non_wildcard_mode():
     assert cfg_uri_port_like.gateway.address == "10.0.0.1:abc"
 
 
+@pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\r", "\t", " "])
+@pytest.mark.parametrize(
+    "address,route_mode",
+    [
+        ("gateway.opensandbox.io", "header"),
+        ("gateway.opensandbox.io:8080", "header"),
+        ("10.0.0.1", "header"),
+        ("10.0.0.1:8080", "header"),
+        ("*.opensandbox.io", "wildcard"),
+    ],
+    ids=["hostname", "hostname-port", "ip", "ip-port", "wildcard"],
+)
+def test_gateway_address_rejects_trailing_whitespace(address, route_mode, whitespace):
+    with pytest.raises(ValueError):
+        IngressConfig(
+            mode="gateway",
+            gateway=GatewayConfig(
+                address=address + whitespace,
+                route=GatewayRouteModeConfig(mode=route_mode),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "address,route_mode",
+    [
+        ("gateway .opensandbox.io", "header"),
+        ("gateway.opensandbox.io\nx", "header"),
+        ("10.0.0.1\n:8080", "header"),
+        ("*.opensandbox.io\nx", "wildcard"),
+    ],
+    ids=["hostname-space", "hostname-newline", "ip-newline-port", "wildcard-newline"],
+)
+def test_gateway_address_rejects_embedded_whitespace(address, route_mode):
+    with pytest.raises(ValueError):
+        IngressConfig(
+            mode="gateway",
+            gateway=GatewayConfig(
+                address=address,
+                route=GatewayRouteModeConfig(mode=route_mode),
+            ),
+        )
+
+
 def test_gateway_address_allows_scheme_less_defaults():
     cfg = IngressConfig(
         mode="gateway",
@@ -852,7 +924,6 @@ def test_docker_runtime_rejects_gateway_ingress():
                 ),
             ),
         )
-    # direct remains valid
     app_cfg = AppConfig(
         server=server_cfg,
         runtime=runtime_cfg,
@@ -862,19 +933,16 @@ def test_docker_runtime_rejects_gateway_ingress():
 
 
 def test_storage_config_defaults():
-    """StorageConfig should default to empty allowed_host_paths list."""
     cfg = StorageConfig()
     assert cfg.allowed_host_paths == []
 
 
 def test_storage_config_with_paths():
-    """StorageConfig should accept explicit allowed_host_paths."""
     cfg = StorageConfig(allowed_host_paths=["/data/opensandbox", "/tmp/sandbox"])
     assert cfg.allowed_host_paths == ["/data/opensandbox", "/tmp/sandbox"]
 
 
 def test_app_config_default_storage():
-    """AppConfig should include default StorageConfig when not specified."""
     server_cfg = ServerConfig()
     runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")
     app_cfg = AppConfig(server=server_cfg, runtime=runtime_cfg)
@@ -883,7 +951,6 @@ def test_app_config_default_storage():
 
 
 def test_load_config_with_storage_block(tmp_path, monkeypatch):
-    """StorageConfig should be loaded from [storage] TOML block."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -911,7 +978,6 @@ def test_load_config_with_storage_block(tmp_path, monkeypatch):
 
 
 def test_load_config_without_storage_block_uses_defaults(tmp_path, monkeypatch):
-    """AppConfig should use default StorageConfig when [storage] is not in TOML."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -955,7 +1021,6 @@ def test_secure_runtime_gvisor_with_docker_runtime_is_valid():
 
 
 def test_secure_runtime_gvisor_with_k8s_runtime_class_is_valid():
-    """gVisor with only k8s_runtime_class should be valid."""
     cfg = config_module.SecureRuntimeConfig(
         type="gvisor",
         docker_runtime=None,
@@ -1045,7 +1110,6 @@ def test_app_config_without_secure_runtime():
 
 
 def test_load_config_with_secure_runtime(tmp_path, monkeypatch):
-    """SecureRuntimeConfig should be loaded from [secure_runtime] TOML block."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1786,31 +1850,25 @@ def test_log_config_resolved_file_path():
     cfg = LogConfig(file_enabled=False)
     assert cfg.resolved_file_path() is None
 
-    # file_enabled=True without file_path uses default
     cfg = LogConfig(file_enabled=True)
     assert cfg.resolved_file_path() == LogConfig.DEFAULT_FILE_PATH
 
-    # file_enabled=True with file_path uses custom path
     cfg = LogConfig(file_enabled=True, file_path="/custom/path.log")
     assert cfg.resolved_file_path() == "/custom/path.log"
 
 
 def test_log_config_resolved_access_file_path():
-    # file_enabled=False always returns None
     cfg = LogConfig(file_enabled=False, access_file_path="/path/access.log")
     assert cfg.resolved_access_file_path() is None
 
-    # file_enabled=True without access_file_path returns default path
     cfg = LogConfig(file_enabled=True)
     assert cfg.resolved_access_file_path() == LogConfig.DEFAULT_ACCESS_FILE_PATH
 
-    # file_enabled=True with access_file_path returns the custom path
     cfg = LogConfig(file_enabled=True, access_file_path="/custom/access.log")
     assert cfg.resolved_access_file_path() == "/custom/access.log"
 
 
 def test_log_config_level_min_length():
-    """LogConfig level must be at least 3 characters."""
     with pytest.raises(ValidationError):
         LogConfig(level="AB")
     cfg = LogConfig(level="DEBUG")
@@ -1818,7 +1876,6 @@ def test_log_config_level_min_length():
 
 
 def test_log_config_file_max_bytes_validation():
-    """LogConfig file_max_bytes must be at least 1."""
     with pytest.raises(ValidationError):
         LogConfig(file_max_bytes=0)
     cfg = LogConfig(file_max_bytes=50 * 1024 * 1024)  # 50MB
@@ -1826,7 +1883,6 @@ def test_log_config_file_max_bytes_validation():
 
 
 def test_log_config_file_backup_count_validation():
-    """LogConfig file_backup_count must be >= 0."""
     with pytest.raises(ValidationError):
         LogConfig(file_backup_count=-1)
     cfg = LogConfig(file_backup_count=10)
@@ -1845,7 +1901,6 @@ def test_app_config_log_defaults():
 
 
 def test_load_config_with_log_subsection(tmp_path, monkeypatch):
-    """LogConfig should be loaded from [log] TOML section."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1875,7 +1930,6 @@ def test_load_config_with_log_subsection(tmp_path, monkeypatch):
 
 
 def test_load_config_without_log_subsection_uses_defaults(tmp_path, monkeypatch):
-    """AppConfig should use default LogConfig when [log] is not in TOML."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1899,7 +1953,6 @@ def test_load_config_without_log_subsection_uses_defaults(tmp_path, monkeypatch)
 
 
 def test_load_config_log_file_path_only(tmp_path, monkeypatch):
-    """LogConfig should accept only file_path with other defaults."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1919,15 +1972,14 @@ def test_load_config_log_file_path_only(tmp_path, monkeypatch):
     config_path.write_text(toml)
 
     loaded = config_module.load_config(config_path)
-    assert loaded.log.level == "INFO"  # default
+    assert loaded.log.level == "INFO"
     assert loaded.log.file_path == "/var/log/test.log"
-    assert loaded.log.access_file_path is None  # default
-    assert loaded.log.file_max_bytes == 100 * 1024 * 1024  # default
-    assert loaded.log.file_backup_count == 5  # default
+    assert loaded.log.access_file_path is None
+    assert loaded.log.file_max_bytes == 100 * 1024 * 1024
+    assert loaded.log.file_backup_count == 5
 
 
 def test_load_config_log_access_file_path(tmp_path, monkeypatch):
-    """LogConfig should accept access_file_path for separate access log file."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1953,7 +2005,6 @@ def test_load_config_log_access_file_path(tmp_path, monkeypatch):
 
 
 def test_load_config_log_file_enabled(tmp_path, monkeypatch):
-    """LogConfig file_enabled should enable file logging with default paths."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -1974,15 +2025,13 @@ def test_load_config_log_file_enabled(tmp_path, monkeypatch):
 
     loaded = config_module.load_config(config_path)
     assert loaded.log.file_enabled is True
-    assert loaded.log.file_path is None  # not set, uses default
+    assert loaded.log.file_path is None
     assert loaded.log.access_file_path is None
-    # resolved_* methods should return default paths
     assert loaded.log.resolved_file_path() == LogConfig.DEFAULT_FILE_PATH
     assert loaded.log.resolved_access_file_path() == LogConfig.DEFAULT_ACCESS_FILE_PATH
 
 
 def test_load_config_log_file_enabled_with_custom_paths(tmp_path, monkeypatch):
-    """LogConfig file_enabled with custom paths should use those paths."""
     _reset_config(monkeypatch)
     toml = textwrap.dedent(
         """
@@ -2007,11 +2056,6 @@ def test_load_config_log_file_enabled_with_custom_paths(tmp_path, monkeypatch):
     assert loaded.log.file_enabled is True
     assert loaded.log.resolved_file_path() == "/custom/server.log"
     assert loaded.log.resolved_access_file_path() == "/custom/access.log"
-
-
-# ============================================================
-# SecureAccessKey / SecureAccessConfig
-# ============================================================
 
 
 class TestSecureAccessKey:
@@ -2293,8 +2337,6 @@ class TestSecureAccessTomlLoading:
 
 
 class TestSecureAccessEnvOverride:
-    """OPENSANDBOX_SECURE_ACCESS_KEYS / OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY."""
-
     _GATEWAY_TOML = textwrap.dedent(
         """
         [server]
