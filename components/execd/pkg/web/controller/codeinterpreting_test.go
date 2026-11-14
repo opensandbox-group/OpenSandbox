@@ -589,3 +589,18 @@ func TestRunInSession_InvalidCwdReturns400(t *testing.T) {
 	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
 	require.Contains(t, resp.Message, "NOPE")
 }
+
+func TestListContextsRejectsNonKernelLanguage(t *testing.T) {
+	previousRunner := codeRunner
+	codeRunner = runtime.NewController("", "")
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	ctx, w := newTestContext(http.MethodGet, "/code/contexts?language=command", nil)
+	NewCodeInterpretingController(ctx).ListContexts()
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+	require.Contains(t, resp.Message, "command")
+}
