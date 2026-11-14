@@ -10,6 +10,8 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +23,7 @@ class SubjectHarness(h.LiveRuntimeHarness):
     sequence = 0
     http2 = False
     untracked = False
+    tls_capacity = 2
 
     def env(self, drain_seconds=1):
         # Mirror buildMitmdumpChildEnv instead of inheriting the sidecar bundle:
@@ -35,7 +38,9 @@ class SubjectHarness(h.LiveRuntimeHarness):
         values = dict(MODE="subject-v2", SOCKET=self.socket_path, TOKEN=h.TOKEN,
                       CONTROL_GENERATION=h.CONTROL, MAX_SUBJECTS="2",
                       MAX_SNAPSHOT_BYTES="1048576", RETAINED_PAYLOAD_BUDGET="4194304",
-                      TLS_ADMISSION="true", TLS_CAPACITY="2", PROCESS_TLS_CAPACITY="2")
+                      TLS_ADMISSION="true", TLS_CAPACITY=str(self.tls_capacity),
+                      PROCESS_TLS_CAPACITY=str(self.tls_capacity),
+                      DRAIN_TIMEOUT_SECONDS=str(drain_seconds))
         env.update({"OPENSANDBOX_EGRESS_SUBJECT_REVISION_" + k: v for k, v in values.items()})
         env["OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS"] = "[]"
         return env
@@ -64,11 +69,13 @@ class SubjectHarness(h.LiveRuntimeHarness):
         if status != 200:
             raise AssertionError((status, result))
 
-    def install_subject(self, subject="a", epoch=1, bound=True, secret=h.SECRET_ONE):
+    def install_subject(self, subject="a", epoch=1, bound=True, secret=h.SECRET_ONE,
+                        vault=None, policy=0):
+        vault = epoch if vault is None else vault
         payload = h.decision_payload([h.binding(secret)] if bound else [],
-                                     [secret] if bound else [], epoch)
+                                     [secret] if bound else [], vault, policy)
         revision = dict(controlGeneration=h.CONTROL, subjectGeneration=subject,
-                        decisionEpoch=epoch, vaultRevision=epoch, policyEpoch=0,
+                        decisionEpoch=epoch, vaultRevision=vault, policyEpoch=policy,
                         digest=hashlib.sha256(payload).hexdigest())
         target = dict(subjectKey="subject-" + subject, subjectGeneration=subject)
         for operation in ("prepare", "commit"):
@@ -278,6 +285,127 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
                 terminal |= isinstance(event, (h2.events.StreamReset, h2.events.ConnectionTerminated))
         self.assertEqual(self.requests, [])
 
+
+@unittest.skipUnless(h.MITMDUMP, "mitmdump is not installed")
+class SubjectTransitionRuntimeTest(unittest.TestCase):
+    """Binding transitions through the real subject IPC with a 2s drain handoff."""
+
+    drain_seconds = 2
+    slack = 2.0
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="r2-", dir=os.environ.get("TMPDIR"))
+        self.addCleanup(directory.cleanup)
+        self.h = SubjectHarness(Path(directory.name), origin_port=h.free_port())
+        self.h.tls_capacity = 8
+        self.addCleanup(self.h.stop)
+        self.h.start(drain_seconds=self.drain_seconds)
+        self.paths = paths = []
+
+        class RecordingOrigin(h.EchoHandler):
+            def do_GET(self):
+                paths.append(self.path)
+                self._serve()
+        self.h.origin.RequestHandlerClass = RecordingOrigin
+        self.h.lifecycle("register")
+        self.h.install_subject()
+
+    def connect(self, trust="mitm"):
+        connection = self.h.connect(sni=h.BOUND, trust=trust)
+        self.addCleanup(connection.close)
+        return connection
+
+    def hold(self, path):
+        entered, release = threading.Event(), threading.Event()
+        self.h.origin.held_requests[path] = (entered, release)
+        connection = self.connect()
+        connection.tls.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: {h.BOUND}\r\nConnection: keep-alive\r\n\r\n".encode())
+        self.assertTrue(entered.wait(5), "origin never received the held request")
+        return connection, release
+
+    def assert_open(self, connection, seconds):
+        connection.tls.settimeout(seconds)
+        try:
+            with self.assertRaises(socket.timeout):
+                connection.tls.recv(4096)
+        finally:
+            connection.tls.settimeout(10)
+
+    def closed_after(self, connection, start):
+        """Seconds from start until EOF/reset; a transport that stays open fails."""
+        remaining = start + self.drain_seconds + self.slack - time.monotonic()
+        connection.tls.settimeout(max(remaining, 0.5))
+        try:
+            data = connection.tls.recv(4096)
+        except socket.timeout:
+            self.fail("retired transport stayed open past its deadline")
+        except (ssl.SSLError, OSError):
+            data = b""
+        finally:
+            connection.tls.settimeout(10)
+        self.assertEqual(data, b"", "retired transport sent bytes")
+        return time.monotonic() - start
+
+    def test_host_removal_fences_drains_inflight_and_closes_at_deadline(self):
+        finishing, release = self.hold("/v1/held-finish")
+        overdue, _ = self.hold("/v1/held-overdue")
+        idle = self.connect()
+        self.assertEqual(idle.request("GET", "/v1/before", h.BOUND)[1]["private_token"], h.SECRET_ONE)
+        fenced = self.connect()
+        self.h.install_subject(epoch=2, bound=False)
+        receipt = time.monotonic()
+        with self.assertRaises((h.ClientError, OSError, ConnectionError)):
+            fenced.request("GET", "/v1/after-receipt", h.BOUND)
+        opaque = self.connect(trust="origin")
+        self.assertEqual(opaque.request("GET", "/v1/opaque", h.BOUND), (200, {
+            "host": h.BOUND, "path": "/v1/opaque", "private_token": ""}))
+        self.assert_open(idle, 0.25)
+        release.set()
+        status, payload = finishing.read_response()
+        self.assertEqual((status, payload["private_token"]), (200, h.SECRET_ONE))
+        for connection in (finishing, overdue, idle):
+            self.assertGreaterEqual(self.closed_after(connection, receipt), self.drain_seconds - 0.1)
+        self.assertNotIn("/v1/after-receipt", self.paths)
+        self.assertIsNone(self.h.process.poll())
+        log = self.h.read_log()
+        for forbidden in (h.SECRET_ONE, h.BOUND, "subject-a"):
+            self.assertNotIn(forbidden, log)
+
+    def test_credential_only_rotation_keeps_keepalive_past_deadline(self):
+        connection = self.connect()
+        self.assertEqual(connection.request("GET", "/v1/one", h.BOUND)[1]["private_token"], h.SECRET_ONE)
+        identity = connection.tls.getsockname()
+        self.h.install_subject(epoch=2, secret=h.SECRET_TWO)
+        self.assert_open(connection, self.drain_seconds + 0.75)
+        self.assertEqual(connection.request("GET", "/v1/two", h.BOUND)[1]["private_token"], h.SECRET_TWO)
+        self.assertEqual(identity, connection.tls.getsockname())
+
+    def test_policy_only_finished_request_keeps_covered_connection(self):
+        held, release = self.hold("/v1/held-policy")
+        idle = self.connect()
+        self.assertEqual(idle.request("GET", "/v1/idle", h.BOUND)[0], 200)
+        self.h.install_subject(epoch=2, vault=1, policy=1)
+        release.set()
+        self.assertEqual(held.read_response()[0], 200)
+        for connection in (held, idle):
+            self.assert_open(connection, self.drain_seconds + 0.75)
+            status, payload = connection.request("GET", "/v1/after-policy", h.BOUND)
+            self.assertEqual((status, payload["private_token"]), (200, h.SECRET_ONE))
+
+    def test_readd_before_deadline_neither_resurrects_nor_extends(self):
+        connection = self.connect()
+        self.assertEqual(connection.request("GET", "/v1/before", h.BOUND)[0], 200)
+        self.h.install_subject(epoch=2, bound=False)
+        receipt = time.monotonic()
+        self.h.install_subject(epoch=3)
+        self.h.install_subject(epoch=4, bound=False)
+        self.h.install_subject(epoch=5)
+        elapsed = self.closed_after(connection, receipt)
+        self.assertGreaterEqual(elapsed, self.drain_seconds - 0.1)
+        self.assertLess(elapsed, self.drain_seconds + self.slack)
+        fresh = self.connect()
+        self.assertEqual(fresh.request("GET", "/v1/fresh", h.BOUND)[1]["private_token"], h.SECRET_ONE)
 
 if __name__ == "__main__":
     unittest.main()

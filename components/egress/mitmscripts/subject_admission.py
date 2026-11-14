@@ -4,25 +4,38 @@
 """Experimental subject-bound TLS and HTTP/1.1 request admission.
 
 Only dispatch snapshots feed selector publication. No receiver readback/acquire,
-IPC, or owner operation lock is reachable from a ClientHello. B4 opaque teardown
-is still missing: this gate must not be enabled in production before B4.
+IPC, or owner operation lock is reachable from a ClientHello. A binding
+transition fences new requests at commit and the drain loop closes decrypted
+transports whose retirement deadline expired. B4 opaque teardown (Unload,
+suspend, rebind) is still missing: this gate must not be enabled in production
+before B4.
 """
 
 from __future__ import annotations
 
+import asyncio
 import threading
+import time
 from contextlib import suppress
 
 from static_passthrough import StaticPassthrough
 from tls_decision import _classify, compile_view
-from tls_registry import AdmissionResult, BoundConnectionRegistry, RequestAdmission
+from tls_registry import (
+    DEFAULT_DRAIN_TIMEOUT_SECONDS, AdmissionResult, BoundConnectionRegistry, RequestAdmission,
+)
+
+# Same cadence as the sidecar drain thread; the page size is the registry maximum.
+_DRAIN_INTERVAL_SECONDS = 0.5
+_DRAIN_PAGE_LIMIT = 128
 
 
 class SubjectRegistry(BoundConnectionRegistry):
     """One entry lifetime; invalidation never releases a live transport token."""
 
-    def __init__(self, *, capacity, accounting, static_passthrough):
-        super().__init__(capacity=capacity, accounting=accounting)
+    def __init__(self, *, capacity, accounting, static_passthrough,
+                 drain_timeout_seconds=DEFAULT_DRAIN_TIMEOUT_SECONDS):
+        super().__init__(capacity=capacity, accounting=accounting,
+                         drain_timeout_seconds=drain_timeout_seconds)
         self._static_config = StaticPassthrough(static_passthrough)
         self._dispatch_revision = None
         self._dispatch_snapshot = None
@@ -104,7 +117,9 @@ class SubjectAdmissionRuntime:
 
     Requests consume these exact (registry, token, client) memberships. No
     registry slot is released on Unload or suspend; client_disconnected is
-    the terminal signal. Verified transport teardown remains follow-up work.
+    the terminal signal. The drain loop only requests closure of transports
+    whose registry retirement deadline expired; Unload/suspend teardown
+    remains follow-up work.
     """
 
     def __init__(self, owner):
@@ -112,6 +127,11 @@ class SubjectAdmissionRuntime:
         self._lock = threading.Lock()
         self._connections = {}
         self._tokens = {}
+        # (event loop, proxyserver addon), captured inside a TLS hook; the
+        # drain thread only schedules closure onto that loop.
+        self._transport = (None, None)
+        self._drain_stop = threading.Event()
+        self._drain_thread = None
 
     def admit_tls(self, client, sni, *, ech_hidden=False, destination_port=None):
         try:
@@ -121,6 +141,7 @@ class SubjectAdmissionRuntime:
         result, registry = admit_source(self.owner, address, sni,
                                        ech_hidden=ech_hidden, destination_port=destination_port)
         if result.token is not None:
+            self._capture_transport()
             with self._lock:
                 previous = self._connections.get(id(client))
                 # No renegotiation may replace or prematurely release a live token.
@@ -176,6 +197,110 @@ class SubjectAdmissionRuntime:
         registry, token, _ = item
         registry.release(token)
         self._observe(registry)
+
+    # -- Drain ---------------------------------------------------------------
+
+    def _capture_transport(self):
+        """Record the proxy loop and connection registry; in-loop hooks only."""
+        if self._transport[0] is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        try:
+            from mitmproxy import ctx
+            proxyserver = ctx.master.addons.get("proxyserver")
+        except Exception:  # noqa: BLE001 - no master outside a proxy process
+            proxyserver = None
+        if proxyserver is not None:
+            self._transport = (loop, proxyserver)
+
+    def start(self):
+        """Start the single process-level drain loop of this runtime."""
+        with self._lock:
+            if self._drain_thread is not None or self._drain_stop.is_set():
+                raise RuntimeError("subject drain loop already started")
+            self._drain_thread = threading.Thread(
+                target=self._drain_loop, name="subject-admission-drain", daemon=True)
+            thread = self._drain_thread
+        thread.start()
+
+    def close(self):
+        """Stop the drain loop. Memberships stay until client_disconnected."""
+        self._drain_stop.set()
+        thread = self._drain_thread
+        if (thread is not None and thread.is_alive()
+                and thread is not threading.current_thread()):
+            thread.join(timeout=2)
+
+    def _drain_loop(self):
+        while not self._drain_stop.wait(_DRAIN_INTERVAL_SECONDS):
+            try:
+                self.drain_sweep_once()
+            except Exception:  # noqa: BLE001 - diagnostics must never kill the loop
+                with suppress(Exception):
+                    from mitmproxy import ctx
+                    ctx.log.warn("credential proxy: subject drain error")
+
+    def drain_sweep_once(self):
+        """Request closure of every held transport whose retirement expired.
+
+        Only registries that still hold a runtime membership are inspected,
+        including registries already removed from the owner index. Each sweep
+        restarts every registry at serial zero and pages to its end, so a
+        failed close neither stalls later pages nor is forgotten: the next
+        sweep retries it. Inspection never refreshes a deadline. A scheduled
+        close is not a release; only client_disconnected frees the budget.
+        """
+        with self._lock:
+            registries = {id(item[0]): item[0] for item in self._connections.values()}
+        attempts = 0
+        for registry in registries.values():
+            cursor = 0
+            while True:
+                tokens = registry.expired_connections(after_serial=cursor, limit=_DRAIN_PAGE_LIMIT)
+                for token in tokens:
+                    cursor = token.serial
+                    client = self._member_client(registry, token)
+                    if client is not None and self._request_close(registry, token, client):
+                        attempts += 1
+                if len(tokens) < _DRAIN_PAGE_LIMIT:
+                    break
+        return attempts
+
+    def _member_client(self, registry, token):
+        # Serials repeat across registries: match the exact token and registry.
+        with self._lock:
+            item = self._tokens.get(id(token))
+            if item is None or item[0] is not registry or item[1] is not token:
+                return None
+            return item[2]
+
+    def _request_close(self, registry, token, client):
+        """Schedule closure on the proxy loop; never holds a runtime lock."""
+        loop, proxyserver = self._transport
+        if loop is None:
+            return False
+        try:
+            loop.call_soon_threadsafe(self._close_in_loop, proxyserver, registry, token, client)
+        except Exception:  # noqa: BLE001 - a closed loop is retried next sweep
+            return False
+        return True
+
+    def _close_in_loop(self, proxyserver, registry, token, client):
+        """Recheck the exact retirement inside the proxy loop before closing."""
+        with suppress(Exception):
+            if self._member_client(registry, token) is not client:
+                return
+            # Request completion while this callback was queued can remove the
+            # last expired retirement or leave only a later deadline.
+            state = registry.drain_state(token)
+            if state is None or state.deadline is None or state.deadline > time.monotonic():
+                return
+            handler = proxyserver.connections.get(client.id)
+            if handler is not None:
+                handler.close_connection(client)
 
 
 _runtime = None

@@ -4,6 +4,7 @@
 """Fast Sandbox dispatch-only TLS admission and shared atomic accounting."""
 
 import threading
+import time
 import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -420,6 +421,398 @@ class SubjectAdmissionTest(unittest.TestCase):
         with patch.object(self.owner, "lookup_source", side_effect=AssertionError("no IP lookup")):
             self.assertEqual(runtime.acquire_request(token).action, "deny")
         self.assertEqual(old.count, 1)
+
+
+class FakeHandler:
+    def __init__(self):
+        self.closed = []
+
+    def close_connection(self, client):
+        self.closed.append(client)
+
+
+class FakeLoop:
+    """Runs scheduled callbacks inline; selected clients fail to schedule."""
+
+    def __init__(self, proxyserver):
+        self.proxyserver = proxyserver
+        self.failing = set()
+        self.scheduled = []
+
+    def call_soon_threadsafe(self, callback, *args):
+        client = args[-1]
+        if id(client) in self.failing:
+            raise RuntimeError("loop unavailable")
+        self.scheduled.append(client)
+        callback(*args)
+
+
+class SubjectDrainTest(unittest.TestCase):
+    """Binding transitions under a controlled registry clock."""
+
+    def setUp(self):
+        from subject_admission import SubjectAdmissionRuntime
+
+        self.owner = f.make_owner(tls_capacity=200, process_tls_capacity=400,
+                                  static_passthrough=(), drain_timeout_seconds=30)
+        self.addCleanup(self.owner.close)
+        self.sequence = 0
+        for target, address in ((f.A, "192.0.2.1"), (f.B, "192.0.2.2")):
+            self.sequence += 1
+            self.owner.lifecycle("register", f.command(self.sequence, target, sourceAddresses=[address]))
+        self.runtime = SubjectAdmissionRuntime(self.owner)
+        self.handler = FakeHandler()
+        self.proxyserver = types.SimpleNamespace(connections={})
+        self.loop = FakeLoop(self.proxyserver)
+        self.runtime._transport = (self.loop, self.proxyserver)
+        self.now = 100.0
+        clock = patch.object(tls.registry_module.time, "monotonic", side_effect=lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+        self.epoch = {f.A: 0, f.B: 0}
+
+    def publish(self, target=f.A, host="api.example.com", *, secret="one", vault=1, policy=1):
+        self.epoch[target] += 1
+        item = tls.TLSRegistryTest().snapshot(
+            epoch=self.epoch[target], host=host, identity=(f.CONTROL, target.subject_generation),
+            secret=secret if host else "", vault_revision=vault if host else 0, policy_epoch=policy)
+        self.owner.prepare(target, item.revision, item.payload)
+        self.owner.commit(target, item.revision)
+        return item
+
+    def connect(self, address="192.0.2.1"):
+        client = types.SimpleNamespace(peername=(address, 1234), id=object())
+        result = self.runtime.admit_tls(client, "api.example.com", destination_port=443)
+        self.assertEqual(result.action, "decrypt")
+        self.proxyserver.connections[client.id] = self.handler
+        self.addCleanup(self.runtime.client_disconnected, client)
+        return client, result.token
+
+    def registry(self, address="192.0.2.1"):
+        return self.owner.lookup_source(address).registry
+
+    def test_last_binding_removal_fences_before_commit_receipt(self):
+        self.publish()
+        client, token = self.connect()
+        registry = self.registry()
+        inflight = self.runtime.acquire_request(token)
+        self.assertEqual(inflight.action, "allow")
+        old_index = self.owner._source_index
+        order = []
+        publish = registry.publish_dispatch
+
+        def observed(snapshot):
+            publish(snapshot)
+            # Fence is published while the source index is still the old one.
+            order.append(("fence", self.owner._source_index is old_index,
+                          self.runtime.acquire_request(token).reason))
+
+        with patch.object(registry, "publish_dispatch", side_effect=observed):
+            self.publish(host=None)
+        order.append(("receipt", self.owner._source_index is old_index, None))
+        self.assertEqual(order, [("fence", True, "connection_fenced"), ("receipt", False, None)])
+        state = registry.drain_state(token)
+        self.assertTrue(state.fenced)
+        self.assertEqual(state.deadline, 130.0)
+        self.assertEqual(registry.pending_requests()[0].revision, inflight.snapshot.revision)
+        # A new handshake for the removed host is no longer decrypted.
+        self.assertEqual(self.owner.admit_tls("192.0.2.1", "api.example.com",
+                                              destination_port=443).action, "passthrough")
+
+    def test_commit_fence_races_concurrent_requests(self):
+        self.publish()
+        client, token = self.connect()
+        registry = self.registry()
+        committed, stop = threading.Event(), threading.Event()
+        barrier = threading.Barrier(9)
+        allowed, late = [], []
+
+        def request():
+            barrier.wait(5)
+            while not stop.is_set():
+                after_commit = committed.is_set()
+                result = self.runtime.acquire_request(token)
+                if result.action == "allow":
+                    allowed.append(result.handle)
+                elif after_commit:
+                    late.append(result.reason)
+        workers = [threading.Thread(target=request) for _ in range(8)]
+        for worker in workers:
+            worker.start()
+        barrier.wait(5)
+        self.publish(host=None)
+        committed.set()
+        deadline = time.perf_counter() + 5
+        while len(late) < 8 and time.perf_counter() < deadline:
+            time.sleep(0.001)
+        stop.set()
+        for worker in workers:
+            worker.join(5)
+        self.assertEqual(set(late), {"connection_fenced"})
+        # Every request admitted before the fence carries the first deadline.
+        for handle in allowed:
+            self.assertEqual(registry._request_deadlines[handle.serial], 130.0)
+        self.assertEqual(len(registry.pending_requests(limit=128)), min(len(allowed), 128))
+
+    def test_inflight_completes_then_expired_transports_close_and_new_connections_pass(self):
+        self.publish()
+        busy, busy_token = self.connect()
+        idle, idle_token = self.connect()
+        inflight = self.runtime.acquire_request(busy_token)
+        self.publish(host=None)
+        self.now = 129.9
+        self.assertEqual(self.runtime.drain_sweep_once(), 0)
+        self.runtime.finish_request(inflight.handle)  # completes before the deadline
+        self.now = 130.0
+        self.assertEqual(self.runtime.drain_sweep_once(), 2)
+        self.assertEqual(self.handler.closed, [busy, idle])
+        registry = self.registry()
+        # A scheduled close is not a release: budget stays until disconnect.
+        self.assertEqual(registry.count, 2)
+        self.assertEqual(self.runtime.acquire_request(idle_token).reason, "connection_fenced")
+        self.assertEqual(self.runtime.drain_sweep_once(), 2)
+        for client in (busy, idle):
+            self.runtime.client_disconnected(client)
+        self.assertEqual(registry.budget_observations()[0], ("process", 0, 400))
+        self.assertEqual(self.runtime.drain_sweep_once(), 0)
+        self.assertEqual(self.owner.admit_tls("192.0.2.1", "api.example.com",
+                                              destination_port=443).action, "passthrough")
+
+    def test_credential_only_rotation_keeps_connection_and_pins_handle(self):
+        first = self.publish(secret="one", vault=1)
+        client, token = self.connect()
+        old = self.runtime.acquire_request(token)
+        second = self.publish(secret="two", vault=2)
+        new = self.runtime.acquire_request(token)
+        self.assertEqual((old.handle.snapshot, new.snapshot), (first, second))
+        self.runtime.finish_request(old.handle)
+        self.now = 1000.0
+        self.assertEqual(self.runtime.drain_sweep_once(), 0)
+        self.assertFalse(self.registry().drain_state(token).fenced)
+        self.runtime.finish_request(new.handle)
+        self.assertEqual(self.runtime.acquire_request(token).snapshot, second)
+
+    def test_policy_only_drains_old_requests_but_keeps_idle_covered_connection(self):
+        self.publish(policy=1)
+        idle, idle_token = self.connect()
+        finished, finished_token = self.connect()
+        stuck, stuck_token = self.connect()
+        done = self.runtime.acquire_request(finished_token)
+        held = self.runtime.acquire_request(stuck_token)
+        self.publish(policy=2)
+        self.now = 110.0
+        newer = self.runtime.acquire_request(stuck_token)  # cannot extend the old deadline
+        self.assertEqual(newer.action, "allow")
+        self.runtime.finish_request(done.handle)
+        self.assertEqual(self.registry().drain_state(finished_token).deadline, None)
+        self.assertEqual(self.registry().drain_state(stuck_token).deadline, 130.0)
+        self.now = 130.0
+        self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(self.handler.closed, [stuck])
+        for token in (idle_token, finished_token):
+            self.assertFalse(self.registry().drain_state(token).fenced)
+            self.assertEqual(self.runtime.acquire_request(token).action, "allow")
+        self.runtime.finish_request(held.handle)
+        self.runtime.finish_request(newer.handle)
+
+    def test_queued_close_rechecks_after_retired_request_finishes(self):
+        self._check_queued_close_after_request_finishes(remove_host=False)
+
+    def test_queued_close_preserves_removed_host_deadline(self):
+        self._check_queued_close_after_request_finishes(remove_host=True)
+
+    def _check_queued_close_after_request_finishes(self, *, remove_host):
+        self.now = 100.0
+        self.publish(policy=1)
+        client, token = self.connect()
+        old = self.runtime.acquire_request(token)
+        self.publish(host=None if remove_host else "api.example.com", policy=2)
+        self.now = 130.0
+        queued = []
+        with patch.object(self.loop, "call_soon_threadsafe",
+                          side_effect=lambda *args: queued.append(args)):
+            self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(len(queued), 1)
+        self.runtime.finish_request(old.handle)
+        if not remove_host:
+            newer = self.runtime.acquire_request(token)
+            self.assertEqual(newer.action, "allow")
+            self.assertIsNone(self.registry().drain_state(token).deadline)
+        callback, *args = queued.pop()
+        callback(*args)
+        self.assertEqual(self.handler.closed, [client] if remove_host else [])
+        self.assertEqual(self.registry().count, 1)
+        self.runtime.client_disconnected(client)
+
+    def test_queued_close_waits_for_remaining_future_deadline(self):
+        self.publish(policy=1)
+        client, token = self.connect()
+        old = self.runtime.acquire_request(token)
+        self.publish(policy=2)
+        newer = self.runtime.acquire_request(token)
+        self.now = 120.0
+        self.publish(policy=3)
+        self.now = 130.0
+        queued = []
+        with patch.object(self.loop, "call_soon_threadsafe",
+                          side_effect=lambda *args: queued.append(args)):
+            self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(len(queued), 1)
+        self.runtime.finish_request(old.handle)
+        self.assertEqual(self.registry().drain_state(token).deadline, 150.0)
+        callback, *args = queued.pop()
+        callback(*args)
+        self.assertEqual(self.handler.closed, [])
+        self.now = 150.0
+        self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(self.handler.closed, [client])
+        self.runtime.finish_request(newer.handle)
+
+    def test_queued_close_preserves_other_expired_request(self):
+        self.publish(policy=1)
+        client, token = self.connect()
+        first = self.runtime.acquire_request(token)
+        second = self.runtime.acquire_request(token)
+        self.publish(policy=2)
+        self.now = 130.0
+        queued = []
+        with patch.object(self.loop, "call_soon_threadsafe",
+                          side_effect=lambda *args: queued.append(args)):
+            self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(len(queued), 1)
+        self.runtime.finish_request(first.handle)
+        callback, *args = queued.pop()
+        callback(*args)
+        self.assertEqual(self.handler.closed, [client])
+        self.assertEqual(self.registry().count, 1)
+        self.runtime.finish_request(second.handle)
+
+    def test_republish_rotation_readd_never_extends_or_resurrects(self):
+        self.publish()
+        client, token = self.connect()
+        registry = self.registry()
+        inflight = self.runtime.acquire_request(token)
+        self.publish(host=None)
+        registry.publish_dispatch(registry._dispatch_snapshot)  # exact duplicate
+        for now, host in ((110.0, None), (115.0, "api.example.com"), (120.0, None),
+                          (125.0, "api.example.com")):
+            self.now = now
+            self.publish(host=host)
+            state = registry.drain_state(token)
+            self.assertEqual((state.fenced, state.deadline), (True, 130.0))
+            self.assertEqual(registry._request_deadlines[inflight.handle.serial], 130.0)
+            self.assertEqual(self.runtime.acquire_request(token).reason, "connection_fenced")
+        self.now = 129.9
+        self.assertEqual(self.runtime.drain_sweep_once(), 0)
+        self.now = 130.0
+        self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        # Re-added host admits only new connections.
+        fresh, fresh_token = self.connect()
+        self.assertEqual(self.runtime.acquire_request(fresh_token).action, "allow")
+
+    def test_same_serial_in_other_registry_is_not_closed(self):
+        self.publish(f.A)
+        self.publish(f.B)
+        a_client, a_token = self.connect("192.0.2.1")
+        b_client, b_token = self.connect("192.0.2.2")
+        self.assertEqual(a_token.serial, b_token.serial)
+        self.publish(f.A, host=None)
+        self.now = 200.0
+        self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(self.handler.closed, [a_client])
+        self.assertFalse(self.registry("192.0.2.2").drain_state(b_token).fenced)
+        self.assertEqual(self.runtime.acquire_request(b_token).action, "allow")
+
+    def test_unindexed_registry_is_still_swept_while_members_remain(self):
+        self.publish()
+        client, token = self.connect()
+        registry = self.registry()
+        self.publish(host=None)
+        self.sequence += 1
+        self.owner.lifecycle("unload", f.command(self.sequence, f.A))
+        self.assertIsNone(self.owner.lookup_source("192.0.2.1"))
+        self.now = 130.0
+        self.assertEqual(self.runtime.drain_sweep_once(), 1)
+        self.assertEqual(self.handler.closed, [client])
+        self.runtime.client_disconnected(client)
+        self.assertEqual(registry.count, 0)
+
+    def test_pages_past_128_and_retries_failed_closes_without_stalling(self):
+        self.publish()
+        clients = [self.connect()[0] for _ in range(130)]
+        registry = self.registry()
+        self.publish(host=None)
+        self.now = 130.0
+        self.loop.failing = {id(clients[0]), id(clients[129])}
+        cursors = []
+        expired = registry.expired_connections
+
+        def page(**kwargs):
+            cursors.append(kwargs["after_serial"])
+            return expired(**kwargs)
+        with patch.object(registry, "expired_connections", side_effect=page):
+            self.assertEqual(self.runtime.drain_sweep_once(), 128)
+            self.assertEqual(cursors, [0, 128])
+            self.assertEqual(self.loop.scheduled, clients[1:129])
+            self.loop.failing = set()
+            cursors.clear()
+            self.assertEqual(self.runtime.drain_sweep_once(), 130)
+            self.assertEqual(cursors, [0, 128])
+        self.assertEqual(registry.drain_state(registry._entries[1]).deadline, 130.0)
+        self.assertEqual(registry.count, 130)
+
+    def test_disconnect_completes_while_close_is_pending(self):
+        self.publish()
+        client, token = self.connect()
+        registry = self.registry()
+        self.publish(host=None)
+        self.now = 130.0
+        entered, resume = threading.Event(), threading.Event()
+        schedule = self.loop.call_soon_threadsafe
+
+        def slow(*args):
+            entered.set()
+            self.assertTrue(resume.wait(5))
+            schedule(*args)
+        results = []
+        with patch.object(self.loop, "call_soon_threadsafe", side_effect=slow):
+            sweeper = threading.Thread(target=lambda: results.append(self.runtime.drain_sweep_once()))
+            sweeper.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                # Neither runtime nor registry lock is held while closing.
+                self.runtime.client_disconnected(client)
+                self.runtime.client_disconnected(client)
+                self.assertEqual(registry.count, 0)
+                self.assertEqual(registry.budget_observations()[0], ("process", 0, 400))
+            finally:
+                resume.set()
+                sweeper.join(5)
+        self.assertEqual(results, [1])
+        self.assertEqual(self.handler.closed, [])
+        self.assertEqual(registry.budget_observations()[0], ("process", 0, 400))
+        self.assertEqual(self.runtime.drain_sweep_once(), 0)
+
+    def test_drain_loop_start_close_and_no_loop_capture_outside_proxy(self):
+        from subject_admission import SubjectAdmissionRuntime
+
+        runtime = SubjectAdmissionRuntime(self.owner)
+        self.publish()
+        client = types.SimpleNamespace(peername=("192.0.2.1", 1), id=object())
+        self.addCleanup(runtime.client_disconnected, client)
+        runtime.admit_tls(client, "api.example.com", destination_port=443)
+        self.assertEqual(runtime._transport, (None, None))
+        self.publish(host=None)
+        self.now = 130.0
+        self.assertEqual(runtime.drain_sweep_once(), 0)  # nothing to schedule on
+        runtime.start()
+        thread = runtime._drain_thread
+        self.assertTrue(thread.is_alive())
+        runtime.close()
+        self.assertFalse(thread.is_alive())
+        runtime.close()
+        with self.assertRaises(RuntimeError):
+            runtime.start()
 
 
 if __name__ == "__main__":

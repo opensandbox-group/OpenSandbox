@@ -32,6 +32,8 @@ from static_passthrough import StaticPassthrough
 from revision_receiver import Receiver, Revision, Snapshot
 from tls_decision import Generation, Reason, TLSSelectorView, _classify, compile_view
 
+DEFAULT_DRAIN_TIMEOUT_SECONDS = 30
+
 RegistryAction = Literal["deny", "passthrough", "decrypt"]
 RegistryReason = Reason | Literal["registry_exhausted", "admission_disabled"]
 RequestReason = Literal[
@@ -145,7 +147,7 @@ class BoundConnectionRegistry:
     def __init__(
         self, *, capacity: int, receiver: Receiver | None = None,
         request_capacity: int | None = None,
-        drain_timeout_seconds: int = 30,
+        drain_timeout_seconds: int = DEFAULT_DRAIN_TIMEOUT_SECONDS,
         accounting: ConnectionAccounting | None = None,
     ) -> None:
         if type(capacity) is not int or capacity <= 0:
