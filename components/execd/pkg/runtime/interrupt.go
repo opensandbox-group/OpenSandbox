@@ -45,7 +45,12 @@ func (c *Controller) Interrupt(sessionID string) error {
 		}
 		return c.killPid(sessionID, snapshot.pid)
 	case c.getBashSession(sessionID) != nil:
-		return c.closeBashSession(sessionID)
+		session := c.getBashSession(sessionID)
+		if session == nil {
+			return ErrContextNotFound
+		}
+		// Interrupt ends the current run. Deleting the session is DeleteBashSession.
+		return session.interrupt()
 	default:
 		return errors.New("no such session")
 	}
