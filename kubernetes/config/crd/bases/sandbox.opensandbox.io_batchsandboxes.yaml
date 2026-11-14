@@ -210,6 +210,7 @@ spec:
                 - Paused
                 - Resuming
                 - Failed
+                - Completed
                 type: string
               ready:
                 description: "\tReady is the number of actual Ready Pod"
