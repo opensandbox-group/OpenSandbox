@@ -366,7 +366,7 @@ class SubjectRevisionOwner:
             entry.failed = True
             entry.snapshot = None
             self._publish_index()
-            ticket = self._fence_locked(targets=(entry.target,))
+            ticket = self._fence_locked(targets=(entry.target,), addresses=entry.source_addresses)
             if ticket is not None:
                 self._deferred.append(ticket)
             raise SubjectError(503, "subject_failed")
@@ -448,15 +448,27 @@ class SubjectRevisionOwner:
             return _Result(409, "subject_conflict")
         if len(self._entries) + len(self._quarantined) >= self._max_subjects:
             return _Result(503, "subject_capacity_exhausted")
-        if (self._teardown is not None and addresses
-                and self._teardown.live_members(addresses)):
-            # A reused source must not publish while any earlier proxied
-            # client on it is live, of any identity or none.
+        if self._teardown is not None and addresses:
             if settled:
-                return _Result(503, "subject_failed")
+                # The pending ticket still fences these sources.
+                if self._teardown.live_members(addresses):
+                    return _Result(503, "subject_failed")
+                return self._install(target, addresses)
+            # Fence and select atomically, even with no residual: an
+            # ownerless connect must not land before publication.
             ticket = self._teardown.fence(addresses=addresses)
-            return _Pending(0, "register", b"", ticket,
-                            lambda _closed, _remaining: self._register(target, addresses, True))
+            if ticket.members:
+                # A reused source must not publish while any earlier proxied
+                # client on it is live; the pending ticket owns the fence.
+                return _Pending(0, "register", b"", ticket,
+                                lambda _closed, _remaining: self._register(target, addresses, True))
+            try:
+                return self._install(target, addresses)
+            finally:
+                self._teardown.release(ticket)
+        return self._install(target, addresses)
+
+    def _install(self, target: Target, addresses: tuple[str, ...]) -> _Result:
         try:
             receiver = InstallationReceiver(self._control, target.subject_generation,
                                             max_snapshot_bytes=self._max_snapshot_bytes,
@@ -524,7 +536,8 @@ class SubjectRevisionOwner:
         entry.prepared = None
         self._publish_index()
         # The same registry serves later commits; only these members are doomed.
-        return self._teardown_plan(_Result(200, "suspended"), targets=(entry.target,))
+        return self._teardown_plan(_Result(200, "suspended"), targets=(entry.target,),
+                                   addresses=entry.source_addresses)
 
     def lifecycle(self, operation: str, raw_body: bytes) -> dict[str, Any]:
         if operation not in ("register", "unload", "suspend") or type(raw_body) is not bytes:

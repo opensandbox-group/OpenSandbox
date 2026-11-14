@@ -335,6 +335,112 @@ class TeardownTest(unittest.TestCase):
         self.assertEqual(rejected, ["connection fenced"])
         self.assertEqual(self.connect()[0].error, None)  # fence released with the receipt
 
+    def connect_from(self, address="192.0.2.1"):
+        """client_connected on another thread while the caller holds its locks."""
+        client = types.SimpleNamespace(peername=(address, 5000), id=object(), error=None)
+        self.proxyserver.connections[client.id] = self.handler
+        self.addCleanup(self.runtime.client_disconnected, client)
+        connector = threading.Thread(target=self.runtime.client_connected, args=(client,))
+        connector.start()
+        connector.join(5)
+        self.assertFalse(connector.is_alive())
+        return client
+
+    def test_connect_during_initially_empty_register_is_rejected(self):
+        # Codex 4573191823: no residual member, then a connect lands while the
+        # receiver is constructed, before the new owner is published.
+        raced = []
+        receiver = f.subject.InstallationReceiver
+
+        def constructing(*args, **kwargs):
+            self.assertTrue(self.owner._operation_lock.locked())
+            raced.append(self.connect_from())
+            return receiver(*args, **kwargs)
+        with patch.object(f.subject, "InstallationReceiver", side_effect=constructing):
+            self.assertEqual(self.register()["result"]["outcome"], "registered")
+        self.assertEqual(raced[0].error, "connection fenced")
+        self.assertFalse(self.live(raced[0]))
+        self.assertEqual(self.handler.closed, [])
+        self.assertEqual(self.runtime._fenced, {})  # released after publication
+        self.install()
+        fresh, result = self.connect()
+        self.assertEqual((fresh.error, result.action), (None, "decrypt"))
+        self.assertEqual(self.runtime.admit_tls(raced[0], None, destination_port=443).reason,
+                         "unknown_identity")
+
+    def test_empty_register_construction_failure_releases_its_fence(self):
+        raced = []
+
+        def failing(*_args, **_kwargs):
+            raced.append(self.connect_from())
+            raise RuntimeError("boom")
+        with patch.object(f.subject, "InstallationReceiver", side_effect=failing):
+            self.assertEqual(self.register()["result"]["outcome"], "subject_failed")
+        self.assertEqual(raced[0].error, "connection fenced")
+        self.assertEqual((self.runtime._fenced, self.owner._pending), ({}, None))
+        self.assertIsNone(self.owner.lookup_source("192.0.2.1"))
+        self.assertEqual(self.register()["result"]["outcome"], "registered")
+        self.assertEqual(self.runtime._fenced, {})
+
+    def test_conflict_and_capacity_rejections_take_no_fence(self):
+        self.register()
+        fence = self.runtime.fence
+        with patch.object(self.runtime, "fence", side_effect=fence) as observed:
+            self.assertEqual(self.register(f.B)["result"]["outcome"], "subject_conflict")
+            self.register(f.B, "192.0.2.2")
+            self.register(C, "192.0.2.3")
+            observed.reset_mock()
+            full = f.subject.Target("s-d", "generation-d")
+            self.assertEqual(self.register(full, "192.0.2.4")["result"]["outcome"],
+                             "subject_capacity_exhausted")
+        observed.assert_not_called()
+        self.assertEqual(self.runtime._fenced, {})
+
+    def reconnect_during_teardown(self):
+        """Close hook: a no-SNI reconnect from the source while teardown waits."""
+        attempts = []
+
+        def reconnect(_client):
+            new = self.connect_from()
+            attempts.append((new.error, self.live(new),
+                             self.runtime.admit_tls(new, None, destination_port=443).reason))
+        self.handler.hook = reconnect
+        return attempts
+
+    def test_reconnect_during_suspend_teardown_is_rejected(self):
+        # Codex 4573191825: Suspend must fence the source, not only the target.
+        self.register()
+        self.install()
+        old, admitted = self.connect()
+        attempts = self.reconnect_during_teardown()
+        self.assertEqual(self.command("suspend")["result"]["outcome"], "suspended")
+        self.assertEqual(attempts, [("connection fenced", False, "unknown_identity")])
+        self.assertEqual((self.runtime._fenced, self.handler.closed), ({}, [old]))
+        self.handler.hook = None
+        self.install(epoch=2)  # a later commit restores new connections
+        fresh, result = self.connect()
+        self.assertEqual((fresh.error, result.action), (None, "decrypt"))
+        self.assertEqual(self.runtime.acquire_request(admitted.token).reason, "invalid_token")
+        self.assertEqual(self.runtime.admit_tls(old, HOST, destination_port=443).reason,
+                         "unknown_identity")
+
+    def test_reconnect_during_receiver_failure_teardown_is_rejected(self):
+        self.register()
+        self.install()
+        old, _ = self.connect()
+        attempts = self.reconnect_during_teardown()
+        entry = self.owner._entries[f.A.subject_key]
+        item = f.snapshot(f.A, 2, HOST)
+        with patch.object(entry.receiver, "prepare", side_effect=RuntimeError("boom")):
+            with self.assertRaises(f.subject.SubjectError):
+                self.owner.prepare(f.A, item.revision, item.payload)
+        self.assertEqual(attempts, [("connection fenced", False, "unknown_identity")])
+        self.assertEqual((self.runtime._fenced, self.handler.closed), ({}, [old]))
+        self.handler.hook = None
+        later, _ = self.connect(handshake=False)
+        self.assertEqual(later.error, None)  # the fence is not permanent
+        self.assertFalse(self.live(old))
+
     # -- AC6: frozen receipts across exact replay, status and concurrency --
 
     def test_pending_teardown_freezes_receipt_without_holding_owner_lock(self):
