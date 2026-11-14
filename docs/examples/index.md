@@ -20,6 +20,7 @@ Run coding CLIs and AI agent frameworks inside isolated sandboxes.
 | [Claude Code](/examples/claude-code) | Run Claude Code CLI in a sandbox |
 | [Gemini CLI](/examples/gemini-cli) | Run Gemini CLI in a sandbox |
 | [Codex CLI](/examples/codex-cli) | Run OpenAI Codex CLI in a sandbox |
+| [DeepSeek Harness](/examples/deepseek-harness) | Remote-only headless Agent with explicit OpenSandbox binding |
 | [Apply Model Patches](/examples/apply-patch) | Apply Codex-style file patches with a custom sandbox image |
 | [OpenCode](/examples/opencode) | Run the OpenCode coding agent in a sandbox |
 | [Qwen Code](/examples/qwen-code) | Run Qwen Code CLI in a sandbox |
