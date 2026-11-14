@@ -2420,6 +2420,16 @@ def error(flow: http.HTTPFlow) -> None:
     _finish_live_request(flow)
 
 
+def client_connected(client_conn: Any) -> None:
+    """Index every proxied subject client, decrypted or opaque, at connect."""
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        try:
+            subject.client_connected(client_conn)
+        except Exception:  # noqa: BLE001 - an unindexed client must not proceed
+            client_conn.error = "connection fenced"
+
+
 def client_disconnected(client_conn: Any) -> None:
     """Release the transport's live admission on confirmed disconnect."""
     subject = _subject_admission_runtime()

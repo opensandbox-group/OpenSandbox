@@ -6,9 +6,10 @@
 Only dispatch snapshots feed selector publication. No receiver readback/acquire,
 IPC, or owner operation lock is reachable from a ClientHello. A binding
 transition fences new requests at commit and the drain loop closes decrypted
-transports whose retirement deadline expired. B4 opaque teardown (Unload,
-suspend, rebind) is still missing: this gate must not be enabled in production
-before B4.
+transports whose retirement deadline expired. Lifecycle teardown (Unload,
+suspend, receiver failure, owner terminal/close and source reuse before
+Register) closes every proxied client of the old identity, decrypted or
+opaque. Traffic that never reaches mitmproxy is outside this index.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import asyncio
 import threading
 import time
 from contextlib import suppress
+from dataclasses import dataclass, field
 
 from static_passthrough import StaticPassthrough
 from tls_decision import _classify, compile_view
@@ -27,6 +29,39 @@ from tls_registry import (
 # Same cadence as the sidecar drain thread; the page size is the registry maximum.
 _DRAIN_INTERVAL_SECONDS = 0.5
 _DRAIN_PAGE_LIMIT = 128
+# Lifecycle teardown waits at most this long for confirmed disconnects; the
+# Go lifecycle command deadline is 2s and includes the IPC round trip.
+TEARDOWN_TIMEOUT_SECONDS = 1.0
+_TEARDOWN_RETRY_SECONDS = 0.1
+
+
+def _source(client):
+    """Canonical peer address, or None when it cannot select any subject."""
+    from subject_revision import normalize_source
+    try:
+        return normalize_source(client.peername[0])
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+
+
+@dataclass(eq=False, slots=True)
+class _Member:
+    """One live proxied client and the identity fixed when it connected."""
+
+    client: object = field(repr=False)
+    address: str | None
+    target: object
+    registry: object = field(repr=False)
+    doomed: bool = False
+
+
+@dataclass(frozen=True, eq=False, slots=True)
+class Teardown:
+    """Exact doomed members plus the source fence held until release()."""
+
+    members: tuple
+    addresses: tuple
+    everything: bool
 
 
 class SubjectRegistry(BoundConnectionRegistry):
@@ -118,8 +153,10 @@ class SubjectAdmissionRuntime:
     Requests consume these exact (registry, token, client) memberships. No
     registry slot is released on Unload or suspend; client_disconnected is
     the terminal signal. The drain loop only requests closure of transports
-    whose registry retirement deadline expired; Unload/suspend teardown
-    remains follow-up work.
+    whose registry retirement deadline expired. Separately, every proxied
+    client is indexed from client_connected with the target and registry its
+    source owned at that moment; lifecycle teardown dooms and closes those
+    exact members and never lets a client inherit a later Register.
     """
 
     def __init__(self, owner):
@@ -127,33 +164,68 @@ class SubjectAdmissionRuntime:
         self._lock = threading.Lock()
         self._connections = {}
         self._tokens = {}
+        self._clients = {}
+        self._fenced = {}
+        self._fence_all = 0
+        self._changed = threading.Condition(self._lock)
         # (event loop, proxyserver addon), captured inside a TLS hook; the
         # drain thread only schedules closure onto that loop.
         self._transport = (None, None)
         self._drain_stop = threading.Event()
         self._drain_thread = None
 
+    def client_connected(self, client):
+        """Fix the connecting source identity; reject it while that source is fenced."""
+        self._capture_transport()
+        address = _source(client)
+        with self._lock:
+            if id(client) in self._clients:
+                return
+            if self._fence_all or self._fenced.get(address):
+                rejected = True
+            else:
+                rejected = False
+                # Lock-free index read under our lock: a lifecycle fence
+                # publishes the revoked index before it takes this lock.
+                dispatch = None if address is None else self.owner.lookup_source(address)
+                self._clients[id(client)] = _Member(
+                    client, address, None if dispatch is None else dispatch.target,
+                    None if dispatch is None else dispatch.registry)
+        if rejected:
+            # mitmproxy closes a client whose connect hook sets an error.
+            client.error = "connection fenced"
+
     def admit_tls(self, client, sni, *, ech_hidden=False, destination_port=None):
-        try:
-            address = client.peername[0]
-        except (AttributeError, IndexError, TypeError):
-            address = ""
-        result, registry = admit_source(self.owner, address, sni,
-                                       ech_hidden=ech_hidden, destination_port=destination_port)
+        with self._lock:
+            member = self._clients.get(id(client))
+            registry = None
+            if member is not None and member.client is client and not member.doomed:
+                dispatch = None if member.address is None else self.owner.lookup_source(member.address)
+                if (member.target is not None and dispatch is not None
+                        and dispatch.target == member.target and dispatch.registry is member.registry):
+                    registry = member.registry
+        if registry is None:
+            # Unindexed, doomed, ownerless or reassigned sources never adopt
+            # the current source owner.
+            return AdmissionResult("deny", "unknown_identity")
+        result = registry.admit(
+            identity=(self.owner.control_generation, member.target.subject_generation),
+            sni=sni, ech_hidden=ech_hidden, static_passthrough=registry.static_selectors,
+            destination_port=destination_port)
         if result.token is not None:
             self._capture_transport()
             with self._lock:
                 previous = self._connections.get(id(client))
                 # No renegotiation may replace or prematurely release a live token.
-                if previous is None:
+                rejected = previous is not None or member.doomed
+                if not rejected:
                     item = (registry, result.token, client)
                     self._connections[id(client)] = item
                     self._tokens[id(result.token)] = item
-            if previous is not None:
+            if rejected:
                 registry.release(result.token)
                 return AdmissionResult("deny", "invalid_input")
-        if registry is not None:
-            self._observe(registry)
+        self._observe(registry)
         return result
 
     def token_for(self, client):
@@ -169,6 +241,9 @@ class SubjectAdmissionRuntime:
             item = self._tokens.get(id(token))
             if item is None or item[1] is not token:
                 return RequestAdmission("deny", "invalid_token")
+            member = self._clients.get(id(item[2]))
+            if member is not None and member.doomed:
+                return RequestAdmission("deny", "connection_fenced")
             return item[0].acquire_request(token)
 
     def finish_request(self, handle):
@@ -189,6 +264,10 @@ class SubjectAdmissionRuntime:
 
     def client_disconnected(self, client):
         with self._lock:
+            member = self._clients.get(id(client))
+            if member is not None and member.client is client:
+                del self._clients[id(client)]
+                self._changed.notify_all()
             item = self._connections.get(id(client))
             if item is None or item[2] is not client:
                 return
@@ -197,6 +276,91 @@ class SubjectAdmissionRuntime:
         registry, token, _ = item
         registry.release(token)
         self._observe(registry)
+
+    # -- Lifecycle teardown --------------------------------------------------
+
+    def fence(self, *, targets=(), addresses=(), everything=False):
+        """Doom current members and fence new connects; never closes or waits.
+
+        Called by the owner under its operation lock after it revoked routing.
+        """
+        with self._lock:
+            members = tuple(member for member in self._clients.values()
+                            if everything or member.target in targets or member.address in addresses)
+            for member in members:
+                member.doomed = True
+            for address in addresses:
+                self._fenced[address] = self._fenced.get(address, 0) + 1
+            self._fence_all += bool(everything)
+        return Teardown(members, tuple(addresses), everything)
+
+    def release(self, ticket):
+        """Lift a ticket's source fence; doomed members stay doomed."""
+        with self._lock:
+            for address in ticket.addresses:
+                if self._fenced[address] == 1:
+                    del self._fenced[address]
+                else:
+                    self._fenced[address] -= 1
+            self._fence_all -= bool(ticket.everything)
+
+    def live_members(self, addresses):
+        """Live members on these sources, of any identity or none."""
+        with self._lock:
+            return sum(member.address in addresses for member in self._clients.values())
+
+    def teardown(self, ticket, timeout=None):
+        """Close exact members on the proxy loop; return (closed, remaining).
+
+        Only client_disconnected confirms closure. Scheduling a callback is not
+        completion; a missing loop/handler, an error or the deadline leaves the
+        member counted as remaining. On the proxy loop itself, close inline and
+        do not wait for disconnect hooks that need this same loop.
+        """
+        timeout = TEARDOWN_TIMEOUT_SECONDS if timeout is None else timeout
+        deadline = time.monotonic() + timeout
+        loop, proxyserver = self._transport
+        try:
+            inline = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            inline = False
+        # Bounded by attempts as well as the clock: no unbounded close loop.
+        for _ in range(int(timeout / _TEARDOWN_RETRY_SECONDS) + 1):
+            with self._lock:
+                pending = [member for member in ticket.members
+                           if self._clients.get(id(member.client)) is member]
+                if not pending or loop is None:
+                    break
+            for member in pending:
+                if inline:
+                    self._teardown_in_loop(proxyserver, member, member.client)
+                else:
+                    with suppress(Exception):
+                        loop.call_soon_threadsafe(
+                            self._teardown_in_loop, proxyserver, member, member.client)
+            left = deadline - time.monotonic()
+            if inline or left <= 0:
+                break
+            with self._changed:
+                # Releases our lock while waiting; reschedule once per interval.
+                self._changed.wait_for(
+                    lambda: all(self._clients.get(id(member.client)) is not member
+                                for member in pending),
+                    min(left, _TEARDOWN_RETRY_SECONDS))
+        with self._lock:
+            remaining = sum(self._clients.get(id(member.client)) is member
+                            for member in ticket.members)
+        return len(ticket.members) - remaining, remaining
+
+    def _teardown_in_loop(self, proxyserver, member, client):
+        """Close only if this exact doomed member is still live; idempotent."""
+        with suppress(Exception):
+            with self._lock:
+                if self._clients.get(id(client)) is not member or not member.doomed:
+                    return
+            handler = proxyserver.connections.get(client.id)
+            if handler is not None:
+                handler.close_connection(client)
 
     # -- Drain ---------------------------------------------------------------
 
