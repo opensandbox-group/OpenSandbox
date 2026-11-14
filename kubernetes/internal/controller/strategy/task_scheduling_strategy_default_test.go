@@ -175,6 +175,28 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "timeout-only patch preserves nil process",
+			args: args{
+				batchSbx: &sandboxv1alpha1.BatchSandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-bs",
+						Namespace: "default",
+					},
+					Spec: sandboxv1alpha1.BatchSandboxSpec{
+						TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{},
+						ShardTaskPatches: []sandboxv1alpha1.TaskTemplatePatch{
+							shardTaskPatch(`{"spec":{"timeoutSeconds":600}}`),
+						},
+					},
+				},
+				idx: 0,
+			},
+			want: &api.Task{
+				Name: "test-bs-0",
+			},
+			wantErr: false,
+		},
+		{
 			name: "task spec with invalid legacy patch",
 			args: args{
 				batchSbx: &sandboxv1alpha1.BatchSandbox{
@@ -193,7 +215,7 @@ func TestDefaultTaskSchedulingStrategy_getTaskSpec(t *testing.T) {
 						ShardTaskPatches: []sandboxv1alpha1.TaskTemplatePatch{
 							{
 								Spec: sandboxv1alpha1.TaskSpecPatch{
-									Process: sandboxv1alpha1.ProcessTaskPatch{
+									Process: &sandboxv1alpha1.ProcessTaskPatch{
 										Extra: map[string]json.RawMessage{"args": json.RawMessage("3600")},
 									},
 								},

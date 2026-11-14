@@ -242,9 +242,62 @@ type TaskTemplatePatch struct {
 // TaskSpecPatch is a partial TaskSpec.
 type TaskSpecPatch struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
-	Process ProcessTaskPatch `json:"process,omitempty"`
+	// +optional
+	Process *ProcessTaskPatch `json:"process,omitempty"`
 	// +optional
 	TimeoutSeconds *int64 `json:"timeoutSeconds,omitempty"`
+	// Extra preserves unknown fields and legacy values that no longer match the typed schema.
+	Extra map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON keeps legacy or unknown fields decodable instead of failing the whole BatchSandbox.
+// Typed values that are successfully decoded are removed from Extra and emitted by MarshalJSON.
+func (p *TaskSpecPatch) UnmarshalJSON(data []byte) error {
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	p.Process = nil
+	p.TimeoutSeconds = nil
+	if raw, ok := fields["process"]; ok {
+		var process *ProcessTaskPatch
+		if err := json.Unmarshal(raw, &process); err == nil && process != nil {
+			p.Process = process
+			delete(fields, "process")
+		}
+	}
+	if raw, ok := fields["timeoutSeconds"]; ok {
+		var timeoutSeconds *int64
+		if err := json.Unmarshal(raw, &timeoutSeconds); err == nil && timeoutSeconds != nil {
+			p.TimeoutSeconds = timeoutSeconds
+			delete(fields, "timeoutSeconds")
+		}
+	}
+	p.Extra = fields
+	return nil
+}
+
+// MarshalJSON restores preserved fields and overlays the typed fields.
+func (p TaskSpecPatch) MarshalJSON() ([]byte, error) {
+	fields := make(map[string]json.RawMessage, len(p.Extra)+2)
+	for key, raw := range p.Extra {
+		fields[key] = raw
+	}
+	if p.Process != nil {
+		raw, err := json.Marshal(p.Process)
+		if err != nil {
+			return nil, err
+		}
+		fields["process"] = raw
+	}
+	if p.TimeoutSeconds != nil {
+		raw, err := json.Marshal(p.TimeoutSeconds)
+		if err != nil {
+			return nil, err
+		}
+		fields["timeoutSeconds"] = raw
+	}
+	return json.Marshal(fields)
 }
 
 // ProcessTaskPatch is a partial ProcessTask.
@@ -253,28 +306,34 @@ type ProcessTaskPatch struct {
 	Command *[]string `json:"command,omitempty"`
 	// +optional
 	Args *[]string `json:"args,omitempty"`
-	// Extra preserves other ProcessTask fields for backward-compatible strategic merges.
+	// Extra preserves unknown fields and legacy values that no longer match the typed schema.
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
 // UnmarshalJSON decodes command and args while preserving other process fields.
+// Mistyped command/args values stay in Extra so legacy objects remain decodable and fail
+// later during the per-task strategic merge instead of wedging the informer cache.
 func (p *ProcessTaskPatch) UnmarshalJSON(data []byte) error {
 	fields := map[string]json.RawMessage{}
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	p.Extra = fields
 	p.Command, p.Args = nil, nil
 	if raw, ok := fields["command"]; ok {
-		if err := json.Unmarshal(raw, &p.Command); err != nil {
-			return err
+		var command *[]string
+		if err := json.Unmarshal(raw, &command); err == nil && command != nil {
+			p.Command = command
+			delete(fields, "command")
 		}
 	}
 	if raw, ok := fields["args"]; ok {
-		if err := json.Unmarshal(raw, &p.Args); err != nil {
-			return err
+		var args *[]string
+		if err := json.Unmarshal(raw, &args); err == nil && args != nil {
+			p.Args = args
+			delete(fields, "args")
 		}
 	}
+	p.Extra = fields
 	return nil
 }
 
