@@ -43,19 +43,36 @@ func NewFilesystemController(ctx *gin.Context) *FilesystemController {
 }
 
 func (c *FilesystemController) handleFileError(err error) {
-	if errors.Is(err, fs.ErrNotExist) {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		c.RespondError(
 			http.StatusNotFound,
 			model.ErrorCodeFileNotFound,
 			fmt.Sprintf("file not found. %v", err),
 		)
-	} else {
+	case errors.Is(err, pathutil.ErrUndefinedEnvVar):
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("invalid path: %v", err),
+		)
+	default:
 		c.RespondError(
 			http.StatusInternalServerError,
 			model.ErrorCodeRuntimeError,
 			fmt.Sprintf("error accessing file: %v", err),
 		)
 	}
+}
+
+// respondPathError reports a path expansion failure, treating references to
+// unset environment variables as caller errors.
+func (c *FilesystemController) respondPathError(err error, message string) {
+	if errors.Is(err, pathutil.ErrUndefinedEnvVar) {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, message)
+		return
+	}
+	c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, message)
 }
 
 func (c *FilesystemController) GetFilesInfo() {
@@ -191,11 +208,7 @@ func (c *FilesystemController) RemoveDirs() {
 	for _, dir := range paths {
 		resolvedDir, err := pathutil.ExpandPath(dir)
 		if err != nil {
-			c.RespondError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error resolving directory %s. %v", dir, err),
-			)
+			c.respondPathError(err, fmt.Sprintf("error resolving directory %s. %v", dir, err))
 			return
 		}
 		if err := rejectStagingPath(resolvedDir); err != nil {
@@ -246,11 +259,7 @@ func (c *FilesystemController) ListDirectory() {
 
 	path, err := pathutil.ExpandAbsPath(path)
 	if err != nil {
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error converting path %s to absolute. %v", path, err),
-		)
+		c.respondPathError(err, fmt.Sprintf("error converting path %s to absolute. %v", path, err))
 		return
 	}
 
@@ -351,11 +360,7 @@ func (c *FilesystemController) SearchFiles() {
 
 	path, err := pathutil.ExpandAbsPath(path)
 	if err != nil {
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error converting path %s to absolute. %v", path, err),
-		)
+		c.respondPathError(err, fmt.Sprintf("error converting path %s to absolute. %v", path, err))
 		return
 	}
 

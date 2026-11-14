@@ -908,3 +908,34 @@ func TestDownloadFileRegularFileControls(t *testing.T) {
 		})
 	}
 }
+
+func TestFilesystemControllerUndefinedEnvVarPathIsBadRequest(t *testing.T) {
+	const missing = "OSB_EXECD_TEST_UNDEFINED_PATH_VAR"
+	path := url.QueryEscape("$" + missing + "/x")
+
+	cases := []struct {
+		name    string
+		method  string
+		rawURL  string
+		handler func(*FilesystemController)
+	}{
+		{"info", http.MethodGet, "/files/info?path=" + path, (*FilesystemController).GetFilesInfo},
+		{"remove dirs", http.MethodDelete, "/directories?path=" + path, (*FilesystemController).RemoveDirs},
+		{"list", http.MethodGet, "/directories/list?path=" + path, (*FilesystemController).ListDirectory},
+		{"search", http.MethodGet, "/files/search?path=" + path, (*FilesystemController).SearchFiles},
+		{"download", http.MethodGet, "/files/download?path=" + path, (*FilesystemController).DownloadFile},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl, rec := newFilesystemController(t, tc.method, tc.rawURL, nil)
+
+			tc.handler(ctrl)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+			require.Contains(t, resp.Message, missing)
+		})
+	}
+}

@@ -96,3 +96,9 @@ func TestExpandPath_UndefinedEnvVarOnlyReturnsError(t *testing.T) {
 	require.Contains(t, err.Error(), "NOT_SET")
 	require.Equal(t, "", got)
 }
+
+func TestExpandPath_UndefinedEnvVarIsSentinel(t *testing.T) {
+	_, err := ExpandPath("$OSB_PATHUTIL_TEST_UNDEFINED/x")
+	require.ErrorIs(t, err, ErrUndefinedEnvVar)
+	require.Contains(t, err.Error(), "OSB_PATHUTIL_TEST_UNDEFINED")
+}
