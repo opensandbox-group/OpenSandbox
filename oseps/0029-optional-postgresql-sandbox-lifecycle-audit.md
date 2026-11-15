@@ -3,7 +3,7 @@ title: Optional PostgreSQL Sandbox Lifecycle Audit
 authors:
   - "@comqx"
 creation-date: 2026-11-13
-last-updated: 2026-11-13
+last-updated: 2026-11-15
 status: draft
 ---
 
@@ -21,6 +21,7 @@ status: draft
 - [Design Details](#design-details)
   - [Configuration](#configuration)
   - [Write path and API coupling](#write-path-and-api-coupling)
+  - [Phase 1 coverage and known gaps](#phase-1-coverage-and-known-gaps)
   - [Table schema](#table-schema)
   - [Observed runtime shape](#observed-runtime-shape)
   - [Delete and terminal state semantics](#delete-and-terminal-state-semantics)
@@ -60,6 +61,7 @@ Today operators and the optional Developer Console work primarily against **live
 4. Console BFF routes, UI, or migration tooling in the same merge as the server writer.
 5. Replacing OpenTelemetry metrics/logs or the Node Agent log collection roadmap ([OSEP-0019](0019-node-agent-sandbox-collection.md)).
 6. Guaranteed exactly-once delivery or transactional coupling with sandbox state transitions.
+7. **Phase 1 merge** — Hooks below the Lifecycle HTTP routes (renew-expiration, Docker timer eviction, Kubernetes controller TTL teardown) that bypass `DELETE /sandboxes/{id}`; see [Phase 1 coverage and known gaps](#phase-1-coverage-and-known-gaps).
 
 ## Requirements
 
@@ -68,11 +70,13 @@ Today operators and the optional Developer Console work primarily against **live
 | R1 | `lifecycle_audit.enabled` defaults to `false` | Must |
 | R2 | Writer is active only when `[store].type = "postgresql"` and audit is enabled | Must |
 | R3 | Create/delete/metadata patch hooks must not change HTTP status, response body, or error codes on DB failure | Must |
-| R4 | Rows are keyed by `sandbox_id`; upsert semantics tolerate duplicate or out-of-order events | Must |
+| R4 | Rows are keyed by `sandbox_id`; upsert semantics tolerate duplicate or out-of-order events; metadata JSONB **merges** on patch and a delayed create upsert must not discard a successful metadata patch | Must |
 | R5 | Terminal delete states (e.g. `Failed`) must not be overwritten with generic `Terminated` | Must |
 | R6 | Metadata label map stored as JSONB; operators must understand PII/policy implications | Should |
 | R7 | Schema created with `CREATE TABLE IF NOT EXISTS` under an advisory lock; safe for multi-process server | Must |
 | R8 | Server closes the audit pool on shutdown | Must |
+| R9 | Phase 1 documents known gaps for renew / runtime-only expiry; operators must not treat history as complete usage accounting until phase 1.5 | Must |
+| R10 | Phase 1.5 (follow-up): audit writes for `renew_expiration`, runtime-driven expiry, and controller teardown paths that do not hit the delete route | Should |
 
 ## Proposal
 
@@ -86,6 +90,7 @@ Consumers (console BFF, BI tools) treat the table as **read-only** relative to t
 - **Tenant isolation** is by `tenant_name` column content; authorization for reads is the consumer's responsibility (BFF session, SQL grants).
 - **Wall-clock duration** on delete uses observation time when create was never recorded.
 - Late create writes after a row is already ended or deleted must not clobber terminal metadata.
+- **Create vs metadata PATCH race**: create and patch may run in separate `BackgroundTasks`; patch must merge into an existing or future row so a slow create insert cannot overwrite patched labels (see R4).
 
 ### Risks and Mitigations
 
@@ -118,10 +123,24 @@ Environment: `OPENSANDBOX_STORE_POSTGRESQL_DSN` (existing).
 Hooks (no new public routes):
 
 - **After successful create** — upsert row with create response fields, request metadata labels, limits from request or observed shape.
-- **After metadata patch** — update `metadata` JSONB on open row when audit enabled.
+- **After metadata patch** — merge `metadata` JSONB on the open row (or enqueue merge if the create row is not visible yet); never replace the whole map with stale create-time labels when a newer patch was applied.
 - **After delete** — record `ended_at` / `deleted_at`, final state, `wall_clock_seconds` from observed sandbox before removal.
 
 Implementation uses `BackgroundTasks` and catches/logs repository errors.
+
+### Phase 1 coverage and known gaps
+
+**In scope for the initial server writer merge (phase 1):** lifecycle route hooks only — create, metadata patch, and explicit delete after the server observes the sandbox.
+
+**Known gaps (documented, not silent):**
+
+| Path | Why phase 1 may miss it | Phase 1.5 direction (R10) |
+| --- | --- | --- |
+| `renew_expiration` / renew-intent | Updates store/runtime without necessarily passing through the metadata or delete routes the hooks attach to | Publish audit update with new `expires_at` (and related fields) from `SandboxService.renew_expiration` or renew-intent integration |
+| Docker TTL timer | Container removed in `docker_service` without a lifecycle delete call | Hook runtime teardown or periodic reconcile |
+| Kubernetes controller TTL | Commented bypass of `delete_sandbox` on TTL expiry | Hook controller teardown or shared deletion helper used by both API and controller |
+
+Until R10 lands, usage-window reporting may show stale `expires_at` or missing terminal rows for sandboxes that expired without an API delete. Console BFF **reconcile** (follow-up) can partially mask gaps but does not replace server-side R10.
 
 ### Table schema
 
@@ -167,9 +186,10 @@ Out of scope for OSEP-0029 implementation phase 1. Expected pattern (documented 
 
 ## Test Plan
 
-- **Unit tests**: config gating (`enabled` + `postgresql`); metadata scheduling; shape parsing; delete conflict behavior; memory unit normalization.
-- **Repository tests**: upsert/create/delete/metadata against PostgreSQL when `OPENSANDBOX_TEST_POSTGRESQL_DSN` is set; skipped in default CI.
+- **Unit tests**: config gating (`enabled` + `postgresql`); metadata scheduling; shape parsing; delete conflict behavior; memory unit normalization; **metadata create/patch ordering** (patch after create response, slow create upsert must preserve merged labels).
+- **Repository tests**: upsert/create/delete/metadata against PostgreSQL when `OPENSANDBOX_TEST_POSTGRESQL_DSN` is set; the implementation PR must register these tests in the existing **server-test PostgreSQL job** (`.github/workflows/server-test.yml`) so they run in required CI when the DSN is provisioned — not optional-only locally.
 - **Manual**: enable audit on a dev cluster; create/delete sandbox; verify row contents via SQL.
+- **Phase 1.5 tests (R10)**: renew-expiration audit update; runtime expiry teardown (Docker/Kubernetes) once hooks exist.
 
 Reference draft implementation: [PR #2237](https://github.com/opensandbox-group/OpenSandbox/pull/2237) (to remain **draft** until this OSEP reaches **provisional** or **implementable**).
 
@@ -178,6 +198,7 @@ Reference draft implementation: [PR #2237](https://github.com/opensandbox-group/
 - Additional PostgreSQL load and storage growth without built-in retention.
 - Two components (server writer, console reader) must agree on column meaning.
 - Does not capture SDK-only traffic that never hits lifecycle routes (same as live list today).
+- Phase 1 does not guarantee complete renew/expiry history until R10 (see [Phase 1 coverage and known gaps](#phase-1-coverage-and-known-gaps)).
 
 ## Alternatives
 
@@ -189,7 +210,7 @@ Reference draft implementation: [PR #2237](https://github.com/opensandbox-group/
 ## Infrastructure Needed
 
 - Existing PostgreSQL used for `[store]` (no new mandatory service).
-- CI optional integration job with `OPENSANDBOX_TEST_POSTGRESQL_DSN` (nice-to-have).
+- Reuse the repository's existing PostgreSQL CI job; wire audit repository tests in the implementation PR (see Test Plan).
 
 ## Upgrade & Migration Strategy
 
