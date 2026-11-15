@@ -90,6 +90,9 @@ type BatchSandboxReconciler struct {
 	FeatureConfig *FeatureConfig
 	// podRecoveryNow overrides the clock used by pod recovery; tests only.
 	podRecoveryNow func() time.Time
+	// stateOwners maps namespace/name to the UID whose name-keyed in-memory
+	// state (scale expectations, pod recovery budget, task scheduler) is held.
+	stateOwners sync.Map
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -117,10 +120,10 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
 	batchSbx := &sandboxv1alpha1.BatchSandbox{}
-	// Status expectations are keyed by UID, and a deleted or replaced
-	// BatchSandbox is never reconciled again under its old UID, so drop them
-	// here. This runs after any earlier reconcile of this key that recorded
-	// one, since the workqueue never processes the same key concurrently.
+	// A deleted or replaced BatchSandbox is never reconciled again under its
+	// old UID, so drop its in-memory state here. This runs after any earlier
+	// reconcile of this key that recorded some, since the workqueue never
+	// processes the same key concurrently.
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: req.Namespace,
 		Name:      req.Name,
@@ -131,6 +134,12 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, err
 	}
+	// The informer may report a delete and a same-name recreation as one
+	// update, so a replacement can show up without a NotFound in between.
+	if owner, seen := r.stateOwners.Load(req.String()); seen && owner != batchSbx.UID {
+		r.forgetBatchSandbox(req.NamespacedName)
+	}
+	r.stateOwners.Store(req.String(), batchSbx.UID)
 	r.StatusRVExpectation.DeleteOthers(req.NamespacedName, batchSbx.UID)
 	if batchSbx.DeletionTimestamp != nil {
 		return r.reconcileDeletion(ctx, batchSbx)
@@ -548,6 +557,7 @@ func (r *BatchSandboxReconciler) getTaskScheduler(ctx context.Context, batchSbx 
 // so a later BatchSandbox with the same name would otherwise inherit it.
 func (r *BatchSandboxReconciler) forgetBatchSandbox(key types.NamespacedName) {
 	r.StatusRVExpectation.DeleteOthers(key, "")
+	r.stateOwners.Delete(key.String())
 	batchSandboxScaleExpectations.DeleteExpectations(key.String())
 	podRecoveryBudgets.delete(key.String())
 	r.taskSchedulers.Delete(key.String())

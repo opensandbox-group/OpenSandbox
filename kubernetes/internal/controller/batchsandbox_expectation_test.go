@@ -111,3 +111,34 @@ func TestDeletedBatchSandboxStateIsForgotten(t *testing.T) {
 	_, kept := r.taskSchedulers.Load(key)
 	require.False(t, kept, "task scheduler kept")
 }
+
+// The informer can deliver a delete and a same-name recreation as one update,
+// so the key is reconciled with the replacement present and never NotFound.
+// The predecessor's name-keyed state must still be dropped.
+func TestReplacedBatchSandboxStateIsForgotten(t *testing.T) {
+	previousExpectations := batchSandboxScaleExpectations
+	batchSandboxScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { batchSandboxScaleExpectations = previousExpectations })
+
+	old := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "reused", UID: "uid-old"}}
+	key := controllerutils.GetControllerKey(old)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(old)}
+	fakeClient := fake.NewClientBuilder().WithScheme(testscheme).
+		WithStatusSubresource(&sandboxv1alpha1.BatchSandbox{}).WithObjects(old.DeepCopy()).Build()
+	r := &BatchSandboxReconciler{Client: fakeClient, StatusRVExpectation: expectations.NewResourceVersionExpectation()}
+	ctx := context.Background()
+	_, _ = r.Reconcile(ctx, req)
+
+	batchSandboxScaleExpectations.ExpectScale(key, expectations.Create, "reused-stale")
+	r.taskSchedulers.Store(key, struct{}{})
+
+	require.NoError(t, fakeClient.Delete(ctx, old.DeepCopy()))
+	replacement := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "reused", UID: "uid-new"}}
+	require.NoError(t, fakeClient.Create(ctx, replacement))
+	_, _ = r.Reconcile(ctx, req)
+
+	require.NotContains(t, batchSandboxScaleExpectations.GetExpectations(key)[expectations.Create], "reused-stale",
+		"the predecessor's scale expectation was kept")
+	_, kept := r.taskSchedulers.Load(key)
+	require.False(t, kept, "the predecessor's task scheduler was kept")
+}
