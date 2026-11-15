@@ -32,7 +32,6 @@ from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
-from math import ceil
 from threading import Event, Lock, Thread
 import time
 from uuid import uuid4
@@ -43,13 +42,13 @@ from opensandbox_server.api.schema import (
     CreateSnapshotRequest,
     ListSnapshotsRequest,
     ListSnapshotsResponse,
-    PaginationInfo,
     Snapshot,
     SnapshotStatus,
 )
 from opensandbox_server.config import get_config
 from opensandbox_server.repositories.snapshots.factory import get_snapshot_repository
 from opensandbox_server.services.constants import SnapshotErrorCodes
+from opensandbox_server.services.helpers import build_pagination_info
 from opensandbox_server.services.snapshot_runtime import (
     SNAPSHOT_CREATE_CONFLICT_REASON,
     SNAPSHOT_MODE_FULL,
@@ -299,7 +298,6 @@ class PersistedSnapshotService(SnapshotService):
             )
         )
 
-        total_pages = ceil(result.total_items / pagination.page_size) if result.total_items > 0 else 0
         page_items = list(result.items)
         self._sync_creating_records(page_items)
         if request.filter.state:
@@ -313,12 +311,8 @@ class PersistedSnapshotService(SnapshotService):
             page_items = [item for item in page_items if item.status.state.value in wanted_states]
         return ListSnapshotsResponse(
             items=[self._to_snapshot_response(item) for item in page_items],
-            pagination=PaginationInfo(
-                page=pagination.page,
-                pageSize=pagination.page_size,
-                totalItems=result.total_items,
-                totalPages=total_pages,
-                hasNextPage=pagination.page < total_pages,
+            pagination=build_pagination_info(
+                pagination.page, pagination.page_size, result.total_items
             ),
         )
 
