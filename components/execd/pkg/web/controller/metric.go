@@ -52,11 +52,21 @@ func (c *MetricController) GetMetrics() {
 func (c *MetricController) WatchMetrics() {
 	c.setupSSEResponse()
 
+	// readMetrics samples CPU usage over a second, so an update is due one
+	// second after the previous one started, not one second after it ended;
+	// the wait only matters when reading failed before sampling.
+	next := time.Now()
 	for {
 		select {
 		case <-c.ctx.Request.Context().Done():
 			return
-		case <-time.After(time.Second * 1):
+		case <-time.After(time.Until(next)):
+			// The timer is usually due already, so it can win the select
+			// against a disconnect; check for one before sampling again.
+			if c.ctx.Request.Context().Err() != nil {
+				return
+			}
+			next = time.Now().Add(time.Second)
 			func() {
 				if flusher, ok := c.ctx.Writer.(http.Flusher); ok {
 					defer flusher.Flush()
