@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -99,4 +100,37 @@ func TestFilesystemControllerGetFilesInfoCreatedAtUsesSymlinkBirthTime(t *testin
 	require.Equal(t, "symlink", info.Type)
 	birthTime := time.Unix(beforeStat.Btime.Sec, int64(beforeStat.Btime.Nsec))
 	require.True(t, info.CreatedAt.Equal(birthTime), "created_at must use the dangling link's birth time")
+}
+
+func TestGetFileCreateTimeFallsBackForDifferentInode(t *testing.T) {
+	dir := t.TempDir()
+	lookupPath := filepath.Join(dir, "lookup.txt")
+	require.NoError(t, os.WriteFile(lookupPath, []byte("replacement"), 0o644))
+	lookupStat := statWithBirthTime(t, lookupPath)
+	lookupBirthTime := time.Unix(lookupStat.Btime.Sec, int64(lookupStat.Btime.Nsec))
+
+	infoPath := filepath.Join(dir, "original.txt")
+	require.NoError(t, os.WriteFile(infoPath, []byte("original"), 0o644))
+	var info os.FileInfo
+	var fallback time.Time
+	// Establish distinct timestamps even on a filesystem with coarse clock resolution.
+	// The mismatch itself is deterministic: the two real files remain in place.
+	require.Eventually(t, func() bool {
+		if err := os.Chmod(infoPath, 0o600); err != nil {
+			return false
+		}
+		var err error
+		info, err = os.Lstat(infoPath)
+		if err != nil {
+			return false
+		}
+		stat := info.Sys().(*syscall.Stat_t)
+		fallback = time.Unix(stat.Ctim.Sec, stat.Ctim.Nsec)
+		return !fallback.Equal(lookupBirthTime)
+	}, 3*time.Second, time.Millisecond)
+	require.NotEqual(t, lookupStat.Ino, info.Sys().(*syscall.Stat_t).Ino)
+
+	got := getFileCreateTime(lookupPath, info)
+	require.True(t, got.Equal(fallback), "created_at must fall back to the supplied inode's ctime")
+	require.False(t, got.Equal(lookupBirthTime), "created_at must not use another inode's birth time")
 }
