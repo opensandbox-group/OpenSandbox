@@ -240,7 +240,7 @@ class _DripStream(httpx.AsyncByteStream):
     async def __aiter__(self):
         while True:
             yield b" "
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.05)
 
 
 @pytest.mark.asyncio

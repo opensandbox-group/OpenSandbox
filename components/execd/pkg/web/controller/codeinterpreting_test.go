@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -33,12 +34,16 @@ import (
 )
 
 type fakeCodeRunner struct {
+	createContext          func(_ context.Context, _ *runtime.CreateContextRequest) (string, error)
 	execute                func(request *runtime.ExecuteCodeRequest) error
 	runInBashSession       func(_ context.Context, _ *runtime.ExecuteCodeRequest) error
 	validateBashSessionCwd func(_, _ string) error
 }
 
-func (f *fakeCodeRunner) CreateContext(_ context.Context, _ *runtime.CreateContextRequest) (string, error) {
+func (f *fakeCodeRunner) CreateContext(ctx context.Context, req *runtime.CreateContextRequest) (string, error) {
+	if f.createContext != nil {
+		return f.createContext(ctx, req)
+	}
 	return "", nil
 }
 
@@ -105,6 +110,43 @@ func (f *fakeCodeRunner) CreatePTYSession(_ string, _ string, _ string) (runtime
 func (f *fakeCodeRunner) GetPTYSession(_ string) runtime.PTYSession         { return nil }
 func (f *fakeCodeRunner) DeletePTYSession(_ string) error                   { return nil }
 func (f *fakeCodeRunner) GetPTYSessionStatus(_ string) (bool, int64, error) { return false, 0, nil }
+
+func TestCreateContextRejectsUnsupportedLanguage(t *testing.T) {
+	previousRunner := codeRunner
+	codeRunner = &fakeCodeRunner{
+		createContext: func(_ context.Context, _ *runtime.CreateContextRequest) (string, error) {
+			return "", fmt.Errorf("%w: no kernel spec for %q", runtime.ErrUnsupportedLanguage, "ruby")
+		},
+	}
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	ctx, w := newTestContext(http.MethodPost, "/code/context", []byte(`{"language":"ruby"}`))
+	NewCodeInterpretingController(ctx).CreateContext()
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+	require.Contains(t, resp.Message, "unsupported language")
+}
+
+func TestCreateContextRejectsInvalidCwd(t *testing.T) {
+	previousRunner := codeRunner
+	codeRunner = &fakeCodeRunner{
+		createContext: func(_ context.Context, _ *runtime.CreateContextRequest) (string, error) {
+			return "", fmt.Errorf("%w %q: not a directory", runtime.ErrInvalidContextCwd, "/etc/hosts")
+		},
+	}
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	ctx, w := newTestContext(http.MethodPost, "/code/context", []byte(`{"language":"python","cwd":"/etc/hosts"}`))
+	NewCodeInterpretingController(ctx).CreateContext()
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+}
 
 func TestBuildExecuteCodeRequestDefaultsToCommand(t *testing.T) {
 	ctrl := &CodeInterpretingController{}
@@ -564,4 +606,19 @@ func TestRunInSession_InvalidCwdReturns400(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
 	require.Contains(t, resp.Message, "NOPE")
+}
+
+func TestListContextsRejectsNonKernelLanguage(t *testing.T) {
+	previousRunner := codeRunner
+	codeRunner = runtime.NewController("", "")
+	t.Cleanup(func() { codeRunner = previousRunner })
+
+	ctx, w := newTestContext(http.MethodGet, "/code/contexts?language=command", nil)
+	NewCodeInterpretingController(ctx).ListContexts()
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+	require.Contains(t, resp.Message, "command")
 }

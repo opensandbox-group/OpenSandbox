@@ -26,7 +26,7 @@ function fakeSandbox(commandResult) {
       if (typeof commandResult === "function") {
         return commandResult(commands.calls.length);
       }
-      return commandResult ?? { error: null };
+      return commandResult ?? { error: null, exitCode: 0 };
     },
   };
   return {
@@ -54,7 +54,7 @@ test("CodeInterpreter.create passes the strict health check once the runtime por
   };
   const adapterFactory = { createCodes: () => codes };
   const { sandbox, commands } = fakeSandbox((attempt) =>
-    attempt >= 2 ? { error: null } : { error: { name: "CommandExecError" } },
+    attempt >= 2 ? { error: null, exitCode: 0 } : { error: { name: "CommandExecError" } },
   );
 
   const interpreter = await CodeInterpreter.create(sandbox, {
@@ -126,6 +126,27 @@ test("CodeInterpreter.create throws when the runtime port never listens", async 
   };
   const adapterFactory = { createCodes: () => codes };
   const { sandbox } = fakeSandbox({ error: { name: "CommandExecError" } });
+
+  await assert.rejects(
+    CodeInterpreter.create(sandbox, {
+      adapterFactory,
+      readyTimeoutSeconds: 0.05,
+      healthCheckPollingInterval: 10,
+    }),
+    SandboxReadyTimeoutException,
+  );
+});
+
+test("CodeInterpreter.create does not treat an unconfirmed runtime check as healthy", async () => {
+  // A stream that ends without an error or completion event leaves the exit
+  // code unknown; that does not prove the runtime port is open.
+  const codes = {
+    async ping() {
+      return true;
+    },
+  };
+  const adapterFactory = { createCodes: () => codes };
+  const { sandbox } = fakeSandbox({ error: null, exitCode: undefined });
 
   await assert.rejects(
     CodeInterpreter.create(sandbox, {

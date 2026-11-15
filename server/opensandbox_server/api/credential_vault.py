@@ -29,6 +29,7 @@ from opensandbox_server.api.schema import (
     CredentialVaultState,
 )
 from opensandbox_server.services.composite_service import CompositeSandboxService
+from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.fast_sandbox import FastSandboxService
 
 router = APIRouter(tags=["Sandboxes"])
@@ -39,7 +40,13 @@ def _fsb_service():
     if not isinstance(service, (FastSandboxService, CompositeSandboxService)):
         from fastapi import HTTPException
 
-        raise HTTPException(404, detail="Fsb sandbox not found.")
+        raise HTTPException(
+            404,
+            detail={
+                "code": SandboxErrorCodes.FSB_SANDBOX_NOT_FOUND,
+                "message": "Fsb sandbox not found.",
+            },
+        )
     return service
 
 

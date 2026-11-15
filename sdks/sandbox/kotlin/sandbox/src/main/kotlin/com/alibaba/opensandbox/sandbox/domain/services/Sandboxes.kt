@@ -16,6 +16,7 @@
 
 package com.alibaba.opensandbox.sandbox.domain.services
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
@@ -326,6 +327,27 @@ interface Sandboxes {
         sandboxId: String,
         name: String? = null,
     ): SnapshotInfo
+
+    /**
+     * Creates a snapshot with an explicit mode.
+     *
+     * The default implementation preserves compatibility with implementations
+     * that predate the mode field: it delegates when no mode is requested and
+     * rejects mode requests such an implementation cannot express, instead of
+     * silently producing a full snapshot.
+     */
+    fun createSnapshot(
+        sandboxId: String,
+        name: String?,
+        mode: String?,
+    ): SnapshotInfo =
+        if (mode == null) {
+            createSnapshot(sandboxId, name)
+        } else {
+            throw InvalidArgumentException(
+                "createSnapshot(mode) is not supported by this Sandboxes implementation",
+            )
+        }
 
     fun getSnapshot(snapshotId: String): SnapshotInfo
 

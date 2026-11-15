@@ -63,10 +63,6 @@ class ActivityRegistry:
         self._ttl = int(activity_ttl_seconds)
         self._max_script = self._client.register_script(_MONOTONIC_MAX_SCRIPT)
 
-    @property
-    def activity_ttl_seconds(self) -> int:
-        return self._ttl
-
     async def ping(self) -> None:
         """Raise when Redis is unreachable (the sweep skips entirely)."""
         await self._client.ping()

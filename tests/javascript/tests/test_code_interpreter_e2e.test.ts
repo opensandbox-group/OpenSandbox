@@ -31,10 +31,6 @@ import {
 let sandbox: Sandbox | null = null;
 let ci: CodeInterpreter | null = null;
 
-// ---------------------------------------------------------------------------
-// Helpers: sandbox lifecycle & retry
-// ---------------------------------------------------------------------------
-
 function sandboxCreateOptions() {
   return {
     connectionConfig: createConnectionConfig(),

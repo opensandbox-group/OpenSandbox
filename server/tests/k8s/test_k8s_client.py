@@ -46,7 +46,6 @@ class TestK8sClient:
             mock_load.assert_called_once()
 
     def test_insecure_skip_tls_verify_disables_certificate_validation(self):
-        """Verify optional TLS verification bypass is applied to the default config."""
         runtime_config = KubernetesRuntimeConfig(
             kubeconfig_path=None,
             insecure_skip_tls_verify=True,
@@ -106,7 +105,6 @@ class TestK8sClient:
             assert mock_api_class.call_count == 1
     
     def test_get_core_v1_api_creates_on_first_call(self, k8s_runtime_config):
-        """Verify API client is created on first call, not at init time."""
         with patch('kubernetes.config.load_kube_config'), \
              patch('kubernetes.client.CoreV1Api') as mock_api_class:
 
@@ -215,12 +213,10 @@ class TestK8sClient:
         fake_informer.invalidate.assert_not_called()
 
     def test_write_paths_skip_cache_when_no_informer(self, k8s_runtime_config):
-        """Write paths must not crash when no informer has been started yet."""
         c = self._make_client(k8s_runtime_config)
         c._custom_objects_api.create_namespaced_custom_object.return_value = {"metadata": {"name": "x"}}
         c._custom_objects_api.patch_namespaced_custom_object.return_value = {"metadata": {"name": "x"}}
         c.config = MagicMock(read_qps=0.0, write_qps=0.0)
-        # No informers registered → _lookup_informer returns None
         c.create_custom_object("g", "v1", "ns", "foos", {"metadata": {"name": "x"}})
         c.patch_custom_object("g", "v1", "ns", "foos", "x", {})
         c.delete_custom_object("g", "v1", "ns", "foos", "x")
@@ -228,7 +224,6 @@ class TestK8sClient:
 
     @pytest.mark.parametrize("operation", ["create", "patch", "delete"])
     def test_failed_write_does_not_touch_informer(self, k8s_runtime_config, operation):
-        """Only mutations confirmed successful are tracked by the informer."""
         c = self._make_client(k8s_runtime_config)
         fake_informer = self._attach_informer(c, MagicMock())
         api_method = getattr(
@@ -397,7 +392,6 @@ class TestK8sClient:
         assert informer._invalidation_generation == 0
 
     def test_stopped_informer_is_not_restarted_for_read(self, k8s_runtime_config):
-        """An existing stopped informer stays stopped and the read falls back live."""
         c = self._make_client(k8s_runtime_config)
         informer = WorkloadInformer(list_fn=MagicMock(), enable_watch=False)
         informer.stop()
@@ -428,7 +422,6 @@ class TestK8sClient:
     def test_get_custom_object_falls_back_to_api_without_synced_cache(
         self, k8s_runtime_config
     ):
-        """A lazily started (unsynced) informer never serves stale-free reads."""
         c = self._make_client(k8s_runtime_config)
         obj = {"metadata": {"name": "foo-1"}}
         c._custom_objects_api.get_namespaced_custom_object.return_value = obj
@@ -483,7 +476,6 @@ class TestK8sClient:
     def test_list_custom_objects_filters_cached_by_label_existence(
         self, k8s_runtime_config
     ):
-        """Bare-key selector filters cached items in memory without an API call."""
         c = self._make_client(k8s_runtime_config)
         items = [
             {"metadata": {"name": "with-id", "labels": {"opensandbox.io/id": "x"}}},
@@ -497,7 +489,6 @@ class TestK8sClient:
         c._custom_objects_api.list_namespaced_custom_object.assert_not_called()
 
     def test_list_custom_objects_filters_cached_by_equality(self, k8s_runtime_config):
-        """key=value selector filters cached items in memory without an API call."""
         c = self._make_client(k8s_runtime_config)
         items = [
             {"metadata": {"name": "alpha", "labels": {"team": "infra"}}},
@@ -612,7 +603,6 @@ class TestK8sClient:
         )
 
     def test_list_pods_reraises_exceptions(self, k8s_runtime_config):
-        """list_pods re-raises exceptions from the API."""
         c = self._make_client(k8s_runtime_config)
         c._core_v1_api.list_namespaced_pod.side_effect = Exception("network error")
         with pytest.raises(Exception, match="network error"):

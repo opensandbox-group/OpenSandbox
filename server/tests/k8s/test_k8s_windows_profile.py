@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for K8s windows_profile module."""
-
 import shutil
 import subprocess
 
@@ -28,8 +26,6 @@ from opensandbox_server.services.k8s.windows_profile import (
 
 
 class TestMemoryWithQemuOverhead:
-    """Tests for _memory_with_qemu_overhead helper."""
-
     @pytest.mark.parametrize(
         ("input_value", "expected"),
         [
@@ -77,8 +73,6 @@ class TestMemoryWithQemuOverhead:
 
 
 class TestBuildWindowsProfileEnv:
-    """Tests for build_windows_profile_env."""
-
     def test_does_not_inject_kvm_n_by_default(self):
         result = build_windows_profile_env(
             env={"VERSION": "11"},
@@ -109,8 +103,6 @@ class TestBuildWindowsProfileEnv:
 
 
 class TestApplyWindowsProfileOverrides:
-    """Tests for apply_windows_profile_overrides entrypoint and resource handling."""
-
     def _make_pod_spec(self):
         return {
             "initContainers": [

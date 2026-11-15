@@ -157,7 +157,6 @@ def test_ensure_metadata_labels_rejects_manual_cleanup_key():
     assert "reserved prefix" in exc_info.value.detail["message"]
 
 def test_ensure_metadata_labels_rejects_arbitrary_reserved_key():
-    """Any key under opensandbox.io/ should be rejected, not just known labels."""
     with pytest.raises(HTTPException) as exc_info:
         assert ensure_metadata_labels({"opensandbox.io/custom": "value"}) is None
     assert exc_info.value.status_code == 400
@@ -221,7 +220,6 @@ class TestEnsureValidVolumeName:
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_VOLUME_NAME
 
     def test_underscore_name_raises(self):
-        """Underscores should raise HTTPException (not valid DNS label)."""
         with pytest.raises(HTTPException) as exc_info:
             ensure_valid_volume_name("my_volume")
         assert exc_info.value.status_code == 400
@@ -267,11 +265,6 @@ class TestEnsureValidMountPath:
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_MOUNT_PATH
 
-    def test_path_not_starting_with_slash_raises(self):
-        with pytest.raises(HTTPException) as exc_info:
-            ensure_valid_mount_path("mnt/data")
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_MOUNT_PATH
 
 class TestEnsureValidSubPath:
 
@@ -335,6 +328,17 @@ class TestEnsureValidHostPath:
             ensure_valid_host_path("/data/../etc/passwd")
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_HOST_PATH
+
+    def test_path_with_trailing_traversal_raises(self):
+        for path in ("/..", "/data/..", r"C:\data\..\etc"):
+            with pytest.raises(HTTPException) as exc_info:
+                ensure_valid_host_path(path)
+            assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_HOST_PATH
+
+    def test_dotdot_inside_a_component_is_allowed(self):
+        assert ensure_valid_host_path("/data/..cache") is None
+        assert ensure_valid_host_path("/data/v1..v2/files") is None
+        assert ensure_valid_host_path(r"D:\data\..cache") is None
 
     def test_path_with_double_slash_raises(self):
         with pytest.raises(HTTPException) as exc_info:

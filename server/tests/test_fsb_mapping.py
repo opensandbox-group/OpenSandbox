@@ -518,7 +518,6 @@ def test_map_template_rejects_invalid_machine(machine):
 
 
 def test_map_template_remap_is_byte_identical_with_same_inputs():
-    """A retry with the same inputs serializes to the identical request."""
     request = _template_request()
     first = _map_template(
         request,

@@ -370,10 +370,6 @@ class FastSandboxService(SandboxService, ExtensionService):
             self._pool_mode_cache[key] = (aware, time.monotonic())
         return aware
 
-    def _pool_resources(self, namespace: str, pool_ref: str) -> dict:
-        """Return the resource profile declared by the selected SandboxPool."""
-        return self._pool_resources_from_info(self._pool_info(namespace, pool_ref))
-
     @staticmethod
     def _pool_resources_from_info(pool: pb2.PoolInfo) -> dict:
         resources: dict = {}
@@ -736,15 +732,10 @@ class FastSandboxService(SandboxService, ExtensionService):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: Optional[str] = None,
-        container: Optional[str] = None,
     ) -> str:
         # FastPath diagnostics carry lifecycle events only; process output
         # flows through execd, which has no sandbox-log endpoint.
         raise self._unsupported("sandbox logs", status.HTTP_501_NOT_IMPLEMENTED)
-
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        return self._lifecycle_diagnostics(sandbox_id, "events", "inspect").content
 
     def get_sandbox_events(self, sandbox_id: str, limit: int = 50) -> str:
         return self._lifecycle_diagnostics(sandbox_id, "events", "events", limit).content

@@ -611,6 +611,13 @@ fmt.Println(sandbox.Origin()) // "template"
 
 `Sandbox.CreateSnapshot` and `SandboxManager.CreateSnapshot` start snapshot creation. Use manager `GetSnapshot`, `ListSnapshots`, and `DeleteSnapshot` to manage snapshots, then pass `SnapshotID` to `SandboxCreateOptions` to restore. Poll snapshot status before restore. Use `Sandbox.PatchMetadata` or `SandboxManager.PatchSandboxMetadata` to add/replace keys; nil values remove keys.
 
+Snapshot `Mode` selects what the snapshot persists:
+
+- `opensandbox.SnapshotModeFull` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `opensandbox.SnapshotModeRootfsOnly`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+
+`SnapshotInfo.Mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `SnapshotModeFull`. Leave `CreateSnapshotRequest.Mode` empty to keep the field off the wire and let the server apply its default.
+
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. Wait for `Ready` before restoring. This example retains the snapshot for reuse:
 
 ```go
@@ -649,6 +656,21 @@ defer restored.Close()
 defer restored.Kill(context.Background())
 fmt.Println(restored.ID())
 // When no longer needed: manager.DeleteSnapshot(ctx, snapshot.ID)
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```go
+rootfsSnapshot, err := sandbox.CreateSnapshot(ctx, opensandbox.CreateSnapshotRequest{
+    Name: "workspace-state",
+    Mode: opensandbox.SnapshotModeRootfsOnly,
+})
+// ... poll manager.GetSnapshot(ctx, rootfsSnapshot.ID) until Ready, then:
+rebooted, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
+    SnapshotID: rootfsSnapshot.ID,
+})
+// Files written before the snapshot are present; processes were not preserved
+// and the entrypoint re-ran on boot.
 ```
 
 Add/replace a metadata key and remove another:

@@ -38,29 +38,22 @@ def _list_response(*names: str) -> dict:
 
 
 class TestWorkloadInformerInit:
-    """Construction and property defaults."""
-
     def test_cache_is_unavailable_before_start(self):
         """Cache reads fall back before the first list completes."""
         informer = _make_informer()
         assert informer.list_if_synced() is None
 
     def test_get_returns_none_before_sync(self):
-        """get() returns None before the cache is populated."""
         informer = _make_informer()
         assert informer.get_if_synced("anything") is None
 
     def test_resync_and_watch_params_stored(self):
-        """Constructor stores resync and watch timeout parameters."""
         informer = _make_informer(resync_period_seconds=120, watch_timeout_seconds=30)
         assert informer.resync_period_seconds == 120
         assert informer.watch_timeout_seconds == 30
 
 class TestWorkloadInformerFullResync:
-    """_full_resync populates the cache correctly."""
-
     def test_full_resync_populates_cache(self):
-        """After _full_resync, objects from list_fn are accessible via get()."""
         list_fn = MagicMock(return_value=_list_response("alpha", "beta"))
         informer = _make_informer(list_fn=list_fn)
         assert informer._full_resync() is True
@@ -70,7 +63,6 @@ class TestWorkloadInformerFullResync:
         assert informer.get_if_synced("gamma") is None
 
     def test_full_resync_publishes_cache(self):
-        """_full_resync marks the informer as synced."""
         list_fn = MagicMock(return_value=_list_response("x"))
         informer = _make_informer(list_fn=list_fn)
         informer._full_resync()
@@ -86,7 +78,6 @@ class TestWorkloadInformerFullResync:
         assert informer._resource_version == "rv:abc/7"
 
     def test_full_resync_replaces_stale_cache(self):
-        """A second _full_resync replaces the previous cache contents."""
         list_fn = MagicMock(return_value=_list_response("old"))
         informer = _make_informer(list_fn=list_fn)
         informer._full_resync()
@@ -156,8 +147,6 @@ class TestWorkloadInformerFullResync:
 
 
 class TestWorkloadInformerInvalidation:
-    """Direct mutations only invalidate the published LIST/WATCH state."""
-
     def test_invalidate_marks_cache_unsynced_without_changing_cache_or_cursor(self):
         informer = _make_informer(list_fn=MagicMock(return_value=_list_response("foo")))
         assert informer._full_resync() is True
@@ -177,8 +166,6 @@ def _obj(name: str, resource_version: str) -> dict:
 
 
 class TestWorkloadInformerPendingWrites:
-    """Writes hold back only the written object until LIST/WATCH reflects them."""
-
     def _synced_informer(self, *items: dict) -> WorkloadInformer:
         informer = _make_informer(
             list_fn=MagicMock(return_value={"metadata": {"resourceVersion": "42"}, "items": list(items)})
@@ -374,17 +361,13 @@ class TestWorkloadInformerPendingWrites:
 
 
 class TestWorkloadInformerHandleEvent:
-    """_handle_event applies watch events to the cache."""
-
     def test_handle_added_event_inserts_object(self):
-        """ADDED event inserts the object into the cache."""
         informer = _make_informer()
         obj = {"metadata": {"name": "bar", "resourceVersion": "10"}}
         informer._handle_event({"type": "ADDED", "object": obj})
         assert informer._cache["bar"] == obj
 
     def test_handle_modified_event_replaces_object(self):
-        """MODIFIED event replaces the cached object."""
         informer = _make_informer()
         informer._cache["bar"] = {"metadata": {"name": "bar", "resourceVersion": "1"}}
         updated = {"metadata": {"name": "bar", "resourceVersion": "2"}}
@@ -392,7 +375,6 @@ class TestWorkloadInformerHandleEvent:
         assert informer._cache["bar"] == updated
 
     def test_handle_deleted_event_removes_object(self):
-        """DELETED event removes the object from the cache."""
         informer = _make_informer()
         informer._cache["bar"] = {"metadata": {"name": "bar"}}
         informer._handle_event({"type": "DELETED", "object": {"metadata": {"name": "bar"}}})
@@ -400,7 +382,6 @@ class TestWorkloadInformerHandleEvent:
 
     @pytest.mark.parametrize("obj", [None, {"metadata": {}}])
     def test_handle_event_ignores_unusable_object(self, obj):
-        """Events without a usable named object are ignored."""
         informer = _make_informer()
         informer._handle_event({"type": "ADDED", "object": obj})
         assert informer._cache == {}
@@ -414,7 +395,6 @@ class TestWorkloadInformerHandleEvent:
         assert "sdk-obj" in informer._cache
 
     def test_handle_event_updates_resource_version(self):
-        """_handle_event advances _resource_version from the object metadata."""
         informer = _make_informer()
         informer._handle_event({
             "type": "ADDED",
@@ -447,8 +427,6 @@ class TestWorkloadInformerHandleEvent:
 
 
 class TestWorkloadInformerStaleness:
-    """Cache reads reflect whether the informer is still being maintained."""
-
     def _synced_informer(self) -> WorkloadInformer:
         informer = _make_informer(
             list_fn=MagicMock(return_value=_list_response("x")),
@@ -467,7 +445,6 @@ class TestWorkloadInformerStaleness:
         assert informer.list_if_synced() is None
 
     def test_cache_available_within_staleness_limit(self):
-        """Recent contact keeps the cache usable."""
         informer = self._synced_informer()
         informer._last_contact_at -= informer._staleness_limit_seconds - 1
         assert informer.list_if_synced() is not None
@@ -495,8 +472,6 @@ class TestWorkloadInformerStaleness:
 
 
 class TestWorkloadInformerWatchResilience:
-    """The watch stream cannot silently park the informer thread."""
-
     def test_watch_stream_sets_client_side_request_timeout(self):
         """A client read timeout is passed, above the server-side watch timeout."""
         informer = _make_informer()
@@ -542,10 +517,7 @@ class TestWorkloadInformerWatchResilience:
 
 
 class TestWorkloadInformerStartStop:
-    """start/stop thread lifecycle."""
-
     def test_start_launches_daemon_thread(self):
-        """start() spawns a daemon thread that is alive."""
         list_fn = MagicMock(return_value={"items": [], "metadata": {}})
         informer = WorkloadInformer(list_fn=list_fn, enable_watch=False,
                                     resync_period_seconds=9999,
@@ -557,7 +529,6 @@ class TestWorkloadInformerStartStop:
         informer.stop()
 
     def test_start_is_idempotent(self):
-        """Calling start() twice does not create a second thread."""
         list_fn = MagicMock(return_value={"items": [], "metadata": {}})
         informer = WorkloadInformer(list_fn=list_fn, enable_watch=False,
                                     resync_period_seconds=9999)
@@ -568,13 +539,11 @@ class TestWorkloadInformerStartStop:
         informer.stop()
 
     def test_stop_signals_stop_event(self):
-        """stop() sets the internal stop event."""
         informer = _make_informer()
         informer.stop()
         assert informer._stop_event.is_set()
 
     def test_stopped_informer_cannot_be_restarted(self):
-        """start() preserves the terminal stopped state."""
         informer = _make_informer()
         informer.stop()
 
@@ -601,7 +570,6 @@ class TestWorkloadInformerStartStop:
         informer._run_watch_loop.assert_called_once()
 
     def test_resync_build_error_backs_off_then_recovers(self):
-        """A failed candidate build retries and publishes the next valid LIST."""
         list_fn = MagicMock(
             side_effect=[
                 {"metadata": {"resourceVersion": "bad"}, "items": [None]},
@@ -663,7 +631,6 @@ class TestWorkloadInformerStartStop:
         assert call_count >= 2, "list_fn should be called more than once in poll mode"
 
     def test_watch_mode_full_resyncs_after_period(self):
-        """A normal watch timeout triggers a full list when the resync period elapses."""
         list_fn = MagicMock(
             side_effect=[
                 _list_response("stale"),
@@ -704,7 +671,6 @@ class TestWorkloadInformerStartStop:
         assert "fresh" in informer._cache
 
     def test_watch_mode_does_not_resync_before_period(self):
-        """Short watch timeouts resume until the full-resync deadline is reached."""
         list_fn = MagicMock(return_value=_list_response("sandbox"))
         informer = WorkloadInformer(
             list_fn=list_fn,
@@ -741,10 +707,7 @@ class TestWorkloadInformerStartStop:
 
 
 class TestWorkloadInformerEventHandlers:
-    """Late-attached reactor handlers (add_event_handler)."""
-
     def test_late_handler_receives_resync_events(self):
-        """A handler attached after construction gets SYNC events from a resync."""
         list_fn = MagicMock(return_value=_list_response("snap-1"))
         informer = _make_informer(list_fn=list_fn)
 
@@ -756,7 +719,6 @@ class TestWorkloadInformerEventHandlers:
         assert events[0][1]["metadata"]["name"] == "snap-1"
 
     def test_constructor_and_late_handlers_both_fire(self):
-        """Constructor-supplied and late-attached handlers both receive events."""
         primary = []
         late = []
         informer = WorkloadInformer(
@@ -772,13 +734,11 @@ class TestWorkloadInformerEventHandlers:
         assert late == ["MODIFIED"]
 
     def test_add_event_handler_ignores_none(self):
-        """Adding None is a no-op."""
         informer = _make_informer()
         informer.add_event_handler(None)
         assert informer._event_handlers == []
 
     def test_add_event_handler_is_idempotent(self):
-        """The same handler instance is registered only once."""
         informer = _make_informer()
         handler = lambda event_type, obj: None  # noqa: E731
         informer.add_event_handler(handler)
@@ -786,7 +746,6 @@ class TestWorkloadInformerEventHandlers:
         assert informer._event_handlers == [handler]
 
     def test_handler_failure_does_not_block_other_handlers(self):
-        """A raising handler never prevents later handlers from firing."""
         informer = _make_informer()
 
         seen = []

@@ -201,7 +201,6 @@ def run_with_retry_sync(
                 if flush_attempt_events is not None:
                     flush_attempt_events()
                 return result
-            # Empty result — retry
             if attempt < max_retries - 1:
                 logger.warning(
                     "Execution returned empty result (attempt %d/%d), retrying in %.1fs...",
@@ -543,8 +542,6 @@ class TestCodeInterpreterE2ESync:
     def test_03_python_code_execution(self, isolated_code_interpreter: CodeInterpreterSync):
         code_interpreter = isolated_code_interpreter
 
-        # New usage: directly pass a language string (ephemeral context).
-        # This validates the `codes.run(..., language=...)` convenience interface.
         direct_lang_result = run_with_retry_sync(
             code_interpreter,
             "result = 2 + 2\nresult",

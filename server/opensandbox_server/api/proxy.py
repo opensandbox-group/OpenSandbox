@@ -44,7 +44,11 @@ from opensandbox_server.api import lifecycle
 from opensandbox_server.config import get_config
 from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
-from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_SECURE_ACCESS_HEADER
+from opensandbox_server.services.constants import (
+    OPEN_SANDBOX_EGRESS_AUTH_HEADER,
+    OPEN_SANDBOX_SECURE_ACCESS_HEADER,
+    SandboxErrorCodes,
+)
 from opensandbox_server.tenants.context import set_current_tenant
 from opensandbox_server.tenants.provider import TenantProviderUnavailable
 
@@ -436,7 +440,10 @@ async def _proxy_http_request(
         if upgrade_header.lower() == "websocket":
             raise HTTPException(
                 status_code=400,
-                detail="Websocket upgrade is not supported yet",
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": "Websocket upgrade is not supported yet",
+                },
             )
 
         headers = _filter_proxy_headers(

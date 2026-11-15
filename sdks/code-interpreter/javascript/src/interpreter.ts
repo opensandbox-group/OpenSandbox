@@ -195,7 +195,8 @@ export class CodeInterpreter {
         undefined,
         signal,
       );
-      return execution.error == null;
+      // Only a confirmed exit code 0 counts; a dropped stream is unknown.
+      return execution.error == null && execution.exitCode === 0;
     } catch {
       return false;
     }

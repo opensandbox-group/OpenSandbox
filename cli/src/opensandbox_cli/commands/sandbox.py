@@ -448,8 +448,8 @@ _SANDBOX_REQUEST_FILE_FIELDS = (
     "extensions",
 )
 
-# Fields rejected alongside templateId: template mode fixes the workload shape
-# on the server (metadata, extensions, networkPolicy and timeout stay allowed).
+# Rejected alongside templateId: template mode fixes the workload shape on
+# the server (metadata, extensions, networkPolicy and timeout stay allowed).
 _TEMPLATE_MODE_FORBIDDEN_FILE_FIELDS = (
     "resourceLimits",
     "resourceRequests",
@@ -614,8 +614,8 @@ def _parse_sandbox_request_file(path: str) -> dict[str, Any]:
 
     if req["template"] is not None:
         def _is_set(name: str) -> bool:
-            # Mirror the server: explicit `secureAccess: false` is the documented
-            # default and stays allowed alongside templateId.
+            # Explicit `secureAccess: false` is the documented default and
+            # stays allowed alongside templateId.
             if name == "secureAccess":
                 return data.get(name) is True
             return data.get(name) is not None
@@ -1015,12 +1015,20 @@ def _parse_metric_stream_line(line: str) -> tuple[SandboxMetrics | None, str | N
     if not payload:
         return None, None
 
-    decoded: Any = json.loads(payload)
+    try:
+        decoded: Any = json.loads(payload)
+    except json.JSONDecodeError:
+        return None, "Metrics stream error: invalid JSON"
+
     if isinstance(decoded, dict) and decoded.get("error"):
         return None, f"Metrics stream error: {decoded['error']}"
-    if isinstance(decoded, dict) and "cpu_used_pct" in decoded:
-        return MetricsModelConverter.to_sandbox_metrics(Metrics.from_dict(decoded)), None
-    return SandboxMetrics.model_validate(decoded), None
+
+    try:
+        if isinstance(decoded, dict) and "cpu_used_pct" in decoded:
+            return MetricsModelConverter.to_sandbox_metrics(Metrics.from_dict(decoded)), None
+        return SandboxMetrics.model_validate(decoded), None
+    except (KeyError, TypeError, ValueError, ValidationError) as exc:
+        return None, f"Metrics stream error: {exc}"
 
 
 def _describe_create_timeout(

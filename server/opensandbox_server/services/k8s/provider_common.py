@@ -66,27 +66,11 @@ def _translate_resource_limits_for_k8s(
 ) -> Dict[str, str]:
     """Translate request-level resource limits into Kubernetes resource keys.
 
-    The lifecycle API exposes a portable ``gpu`` key on ``resourceLimits``.
-    Kubernetes requires the canonical extended-resource name
-    (``nvidia.com/gpu``) so the device plugin can schedule the request;
-    otherwise the value is silently treated as an unknown extended resource.
-
-    Args:
-        resource_limits: Raw resource limits from the create request.
-
-    Returns:
-        A new dict with the ``gpu`` key translated to ``nvidia.com/gpu``
-        and any unparseable GPU value dropped. The disk-quota keys
-        (``disk`` / ``storage`` / ``ephemeral-storage``) are translated to
-        the canonical ``ephemeral-storage`` container resource with the same
-        precedence the Docker runtime resolves. Other keys (cpu, memory, ...)
-        are passed through unchanged.
-
-    Raises:
-        HTTPException: If ``gpu`` is the ``"all"`` sentinel. Docker accepts
-            ``"all"`` (mapped to an unbounded DeviceRequest), but Kubernetes
-            extended resources require an integer count, so we surface a
-            400 rather than silently scheduling without a GPU.
+    The portable ``gpu`` key becomes the canonical ``nvidia.com/gpu`` extended
+    resource; the ``disk``/``storage``/``ephemeral-storage`` aliases become the
+    ``ephemeral-storage`` container resource with Docker-runtime precedence;
+    other keys pass through unchanged. Raises HTTPException (400) for the
+    ``gpu="all"`` sentinel, which Kubernetes extended resources cannot express.
     """
     if not resource_limits:
         return {}

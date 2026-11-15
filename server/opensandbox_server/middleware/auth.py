@@ -45,7 +45,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
     Returns 401 Unauthorized if authentication fails.
     """
 
-    # Paths that don't require authentication
     EXEMPT_PATHS = ["/health", "/version", "/docs", "/redoc", "/openapi.json"]
 
     # Strict pattern for proxy-to-sandbox: /sandboxes/{id}/proxy/{port}/... with numeric port only.

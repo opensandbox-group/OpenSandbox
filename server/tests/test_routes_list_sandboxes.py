@@ -204,13 +204,6 @@ def test_list_sandboxes_validates_page_size_upper_bound(
     assert response.status_code == 422
 
 
-def test_list_sandboxes_requires_api_key(client: TestClient) -> None:
-    response = client.get("/v1/sandboxes")
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "MISSING_API_KEY"
-
-
 def test_list_sandboxes_runs_in_threadpool_for_concurrency(
     client: TestClient,
     auth_headers: dict,

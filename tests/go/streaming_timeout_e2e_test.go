@@ -31,18 +31,14 @@ import (
 // Before the fix, the SSE read shared the request timeout and failed with
 // "sse read: context deadline exceeded (Client.Timeout ... while reading body)".
 func TestStreaming_NotKilledByRequestTimeout(t *testing.T) {
-	// Provision the sandbox with a generous streaming config (reliable startup).
 	ctx, sb := createTestSandbox(t)
 
-	// Reconnect with a SHORT RequestTimeout to prove streaming ignores it.
-	// Connection setup (GetEndpoint/ping) is fast and stays within this bound.
 	shortCfg := getConnectionConfig(t)
 	shortCfg.RequestTimeout = 5 * time.Second
 
 	sbShort, err := opensandbox.ConnectSandbox(ctx, shortCfg, sb.ID())
 	require.NoError(t, err, "reconnect with short RequestTimeout should succeed")
 
-	// Command runs ~8s > the 5s RequestTimeout.
 	start := time.Now()
 	exec, err := sbShort.RunCommand(ctx, "echo start-long; sleep 8; echo done-long", nil)
 	elapsed := time.Since(start)

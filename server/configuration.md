@@ -103,7 +103,7 @@ The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no 
 |-----|------|---------|-------------|
 | `type` | string | — | **`docker`** or **`kubernetes`**. |
 | `execd_image` | string | — | OCI image containing the **execd** binary (in-sandbox bootstrap). |
-| `execd_run_as_init` | boolean | `false` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 (child reaping, container lifecycle, hardening floor). fsb template builds bake `EXECD_INIT=1` into the golden image instead: execd runs as a subreaper under the fsb guest init, so reaping, signal forwarding, and the hardening floor still apply but the PID 1 signal shield does not. |
+| `execd_run_as_init` | boolean | `true` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 owning child reaping, signal forwarding, and the container lifecycle. This switch only injects `EXECD_INIT=1`; the hardening floor (cap-drop/seccomp/no-new-privileges) is **not** included by default — it stays off unless an execd isolation config enables it (`[hardening] enabled = true`, staged via `EXECD_ISOLATION_CONFIG`). Set `false` for the classic background-and-wait topology. fsb template builds bake `EXECD_INIT=1` into the golden image instead: execd runs as a subreaper under the fsb guest init, so reaping and signal forwarding still apply but the PID 1 signal shield does not. |
 
 ---
 

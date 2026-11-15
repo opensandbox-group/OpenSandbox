@@ -121,6 +121,63 @@ func Test_SandboxSnapshot_RBAC_Kustomization(t *testing.T) {
 	}
 }
 
+// Test_Helm_Controller_ClusterRole_Covers_Generated_Role verifies that the
+// manager ClusterRole shipped by the controller Helm chart grants every
+// permission controller-gen derives from the +kubebuilder:rbac markers, so a
+// Helm-installed controller is not denied an API call the kustomize install
+// allows.
+func Test_Helm_Controller_ClusterRole_Covers_Generated_Role(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config", "rbac", "role.yaml"))
+	require.NoError(t, err, "generated role.yaml must be readable")
+	var generated ClusterRole
+	require.NoError(t, yaml.Unmarshal(data, &generated), "generated role.yaml must be valid YAML")
+	require.NotEmpty(t, generated.Rules)
+
+	chartPath := filepath.Join("..", "..", "..", "manifests", "charts", "controller", "templates", "clusterrole.yaml")
+	data, err = os.ReadFile(chartPath)
+	require.NoError(t, err, "controller chart clusterrole.yaml must be readable")
+
+	// The manager ClusterRole document is plain YAML apart from template
+	// directives on metadata lines; drop those lines and parse the rest.
+	granted := map[string]bool{}
+	found := false
+	for _, doc := range strings.Split(string(data), "\n---\n") {
+		if !strings.Contains(doc, `include "opensandbox.managerRoleName"`) {
+			continue
+		}
+		var kept []string
+		for _, line := range strings.Split(doc, "\n") {
+			if !strings.Contains(line, "{{") {
+				kept = append(kept, line)
+			}
+		}
+		var role ClusterRole
+		require.NoError(t, yaml.Unmarshal([]byte(strings.Join(kept, "\n")), &role))
+		for _, rule := range role.Rules {
+			for _, g := range rule.APIGroups {
+				for _, r := range rule.Resources {
+					for _, v := range rule.Verbs {
+						granted[g+"|"+r+"|"+v] = true
+					}
+				}
+			}
+		}
+		found = true
+	}
+	require.True(t, found, "controller chart must define the manager ClusterRole")
+
+	for _, rule := range generated.Rules {
+		for _, g := range rule.APIGroups {
+			for _, r := range rule.Resources {
+				for _, v := range rule.Verbs {
+					require.True(t, granted[g+"|"+r+"|"+v],
+						"controller chart manager ClusterRole is missing apiGroup=%q resource=%q verb=%q from config/rbac/role.yaml", g, r, v)
+				}
+			}
+		}
+	}
+}
+
 // --- minimal YAML structs for test-only parsing ---
 
 type ProjectConfig struct {

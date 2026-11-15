@@ -64,7 +64,8 @@ SECURE_ACCESS_ACTIVE_KEY_ENV_VAR = "OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY"
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?:\.(?!-)[A-Za-z0-9-]{1,63})*$")
 _WILDCARD_DOMAIN_RE = re.compile(r"^\*\.(?!-)[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})+$")
 _IPV4_WITH_PORT_RE = re.compile(r"^(?P<ip>(?:\d{1,3}\.){3}\d{1,3})(?::(?P<port>\d{1,5}))?$")
-# ``parse_quantity`` is intentionally permissive (for example, it accepts NaN and the unsupported decimal suffix K), so guard it with Kubernetes' grammar.
+# ``parse_quantity`` is intentionally permissive (it accepts NaN and the unsupported decimal
+# suffix K), so guard it with Kubernetes' grammar.
 _KUBERNETES_QUANTITY_RE = re.compile(
     r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
     r"(?:(?:[eE][+-]?\d+)|(?:[numkMGTPE]|[KMGTPE]i)?)$"
@@ -469,8 +470,9 @@ class GatewayRouteModeConfig(BaseModel):
         description="Routing mode used by the gateway (wildcard, header, uri).",
     )
 
-    class Config:
-        populate_by_name = True
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
 
 
 class GatewayConfig(BaseModel):
@@ -1253,14 +1255,14 @@ class RuntimeConfig(BaseModel):
         min_length=1,
     )
     execd_run_as_init: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Run execd as the sandbox init (OSEP-0018): sets EXECD_INIT in the "
             "sandbox environment so bootstrap.sh execs into execd (--init) and "
             "execd becomes PID 1, reaping children and owning the container "
-            "lifecycle. Defaults to false (classic background-and-wait "
-            "topology); intended to be flipped on after a few releases once "
-            "the init mode is validated in production."
+            "lifecycle. Defaults to true (validated in production since the "
+            "OSEP-0018 opt-in releases); set to false for the classic "
+            "background-and-wait topology."
         ),
     )
 
@@ -1301,7 +1303,6 @@ class SecureRuntimeConfig(BaseModel):
             return self
 
         if self.type == "firecracker":
-            # Firecracker is Kubernetes-only
             if self.k8s_runtime_class is None:
                 raise ValueError(
                     "secure_runtime.k8s_runtime_class is required when secure_runtime.type is 'firecracker'."
@@ -1454,7 +1455,8 @@ class DockerConfig(BaseModel):
                 f"docker.port_range_min ({self.port_range_min}) must be less than "
                 f"docker.port_range_max ({self.port_range_max})."
             )
-        if self.port_range_max - self.port_range_min < 100:
+        # allocate_host_port uses random.randint, which includes both ends.
+        if self.port_range_max - self.port_range_min + 1 < 100:
             raise ValueError(
                 f"Port range ({self.port_range_min}-{self.port_range_max}) is too narrow. "
                 f"Need at least 100 ports for reliable allocation."

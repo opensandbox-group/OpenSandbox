@@ -88,14 +88,12 @@ def test_install_bootstrap_script_uses_full_bootstrap_sh(mock_docker):
     archive_bytes = mock_container.put_archive.call_args.kwargs["data"]
     script = _extract_bootstrap_script(archive_bytes)
 
-    # Full bootstrap.sh features (absent from the old inline shim).
     assert "trust_mitm_ca" in script
     assert "trust_mitm_ca_jdk" in script
     assert "_forward_signal" in script
     assert "OPENSANDBOX_MERGED_CA" in script
     assert "EXECD_BOOTSTRAP_PRE_SCRIPT" in script
 
-    # Core execd lifecycle shared by both old and new.
     assert 'EXECD="${EXECD:=/opt/opensandbox/execd}"' in script or "EXECD=" in script
     assert 'if [ -z "${EXECD_ENVS:-}" ]; then' in script
     assert 'export EXECD_ENVS' in script
