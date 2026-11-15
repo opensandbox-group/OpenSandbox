@@ -158,6 +158,33 @@ async def test_create_times_out_when_a_probe_hangs(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_times_out_when_a_probe_suppresses_cancellation(monkeypatch) -> None:
+    """A probe that swallows the cancellation and reports healthy late must not
+    hold create() past ready_timeout or turn the timeout into success."""
+
+    async def stubborn_ping(self) -> bool:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.5)
+        return True
+
+    monkeypatch.setattr(CodesAdapter, "ping", stubborn_ping)
+    sbx = _FakeSandbox()
+    started = time.monotonic()
+
+    with pytest.raises(SandboxReadyTimeoutException):
+        await CodeInterpreter.create(  # type: ignore[arg-type]
+            sandbox=sbx,
+            ready_timeout=timedelta(milliseconds=200),
+            health_check_polling_interval=timedelta(milliseconds=10),
+        )
+    assert time.monotonic() - started < 0.45
+    # Let the abandoned probe finish before the event loop closes.
+    await asyncio.sleep(0.6)
+
+
+@pytest.mark.asyncio
 async def test_create_skip_health_check_does_not_ping(monkeypatch) -> None:
     def boom(self) -> bool:
         raise AssertionError("ping must not be called when skip_health_check=True")
