@@ -62,6 +62,8 @@ def parse_renew_intent_json(raw: str) -> Optional[RenewIntent]:
         data: dict[str, Any] = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
+    if not isinstance(data, dict):
+        return None
     sid = data.get("sandbox_id")
     if not isinstance(sid, str) or not sid.strip():
         return None

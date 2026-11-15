@@ -189,10 +189,12 @@ class InstallationReceiver:
     def __init__(
         self, control_generation: str, subject_generation: str, *,
         max_snapshot_bytes: int,
+        static_passthrough: tuple[Selector, ...] = (),
     ) -> None:
         publisher = RevisionPublisher(
             control_generation, subject_generation,
             max_snapshot_bytes=max_snapshot_bytes, capacity=1, request_capacity=1,
+            static_passthrough=static_passthrough,
         )
         # These unused capacities are not a live-traffic sizing recommendation.
         # Guard before exposing the owner, including through this adapter.

@@ -35,6 +35,13 @@ func TestParseURIRoute_LegacyLeadingZeroPortRejected(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestParseURIRoute_LegacySignedPortRejected(t *testing.T) {
+	_, err := parseURIRoute("/sb/+08080")
+	assert.Error(t, err)
+	_, err = parseHostRoute("sb-+8080.example.com")
+	assert.Error(t, err)
+}
+
 func TestParseURIRoute_SignedFourSegmentsWithSig(t *testing.T) {
 	exp, sig := "1a2b3c", "01234567a"
 	pr, err := parseURIRoute("/sb/9090/" + exp + "/" + sig + "/extra/path")

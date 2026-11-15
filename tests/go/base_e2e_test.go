@@ -111,8 +111,6 @@ func newExecdClientForSandbox(t *testing.T, ctx context.Context, sb *opensandbox
 	return opensandbox.NewExecdClient(execdURL, token)
 }
 
-// ---------- Pool E2E helpers ----------
-
 // Pool test constants aligned with Python E2E tests.
 const (
 	poolMaxIdle           = 2

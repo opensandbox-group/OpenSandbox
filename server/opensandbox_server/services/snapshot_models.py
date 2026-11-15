@@ -85,6 +85,10 @@ class SnapshotRecord:
     namespace: str | None = None
     name: str | None = None
     description: str | None = None
+    # Artifact class: None means the default "full" (legacy rows and
+    # explicit full requests persist identically); "rootfsOnly" is the only
+    # persisted non-default value.
+    mode: str | None = None
     restore_config: SnapshotRestoreConfig = field(default_factory=SnapshotRestoreConfig)
     status: SnapshotStatusRecord = field(
         default_factory=lambda: SnapshotStatusRecord(state=SnapshotState.CREATING)

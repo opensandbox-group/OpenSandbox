@@ -42,6 +42,14 @@ def test_validate_bucket_name_rejects_invalid_characters(bucket) -> None:
     assert exc_info.value.status_code == 400
 
 
+@pytest.mark.parametrize("bucket", ["a", "ab", "a" * 64])
+def test_validate_bucket_name_rejects_names_outside_3_to_63_chars(bucket) -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        OSSFSMixin._validate_bucket_name(bucket)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+
+
 def test_write_ossfs_private_config_file_writes_content(tmp_path) -> None:
     config_path = tmp_path / "ossfs.conf"
 

@@ -303,7 +303,10 @@ def ensure_valid_sub_path(sub_path: Optional[str]) -> None:
         # Empty string is valid (no subpath)
         return
 
-    if sub_path.startswith("/"):
+    # Windows subPath uses '\\' as a separator. Treat it like the host-path
+    # check so 'foo\\..\\secret' cannot walk out of the volume root.
+    normalized = sub_path.replace("\\", "/")
+    if normalized.startswith("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -312,7 +315,7 @@ def ensure_valid_sub_path(sub_path: Optional[str]) -> None:
             },
         )
 
-    parts = sub_path.split("/")
+    parts = normalized.split("/")
     for part in parts:
         if part == "..":
             raise HTTPException(

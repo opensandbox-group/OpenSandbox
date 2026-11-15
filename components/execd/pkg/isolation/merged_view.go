@@ -720,6 +720,9 @@ func (m *MergedView) Chmod(path string, mode os.FileMode) error {
 // Search walks the merged view under root and returns matching file paths.
 // Directories are excluded from results. Whiteout entries are respected.
 func (m *MergedView) Search(root, pattern string) ([]string, error) { //nolint:gocognit
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return nil, err
+	}
 	rootRel, err := m.safePath(root)
 	if err != nil {
 		return nil, err

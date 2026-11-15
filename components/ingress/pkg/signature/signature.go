@@ -127,6 +127,10 @@ func ParsePortSegment(portStr string) (int, error) {
 	if len(portStr) > 1 && portStr[0] == '0' {
 		return 0, errors.New("port must not have leading zeros")
 	}
+	// strconv.Atoi accepts a leading sign; a port segment is digits only.
+	if portStr != "" && (portStr[0] < '0' || portStr[0] > '9') {
+		return 0, fmt.Errorf("invalid port %q", portStr)
+	}
 	p, err := strconv.Atoi(portStr)
 	if err != nil || p < 1 || p > 65535 {
 		return 0, fmt.Errorf("invalid port %q", portStr)

@@ -33,12 +33,23 @@ var (
 	ErrLifecycleSequenceConflict  = errors.New("subject lifecycle status conflicts with pending command")
 )
 
-// SubjectUnloadResult describes installation-owner closure only. There are no
-// admitted transports in this owner; terminal is not proof of live socket drain.
+// SubjectUnloadResult describes owner closure. Installation-only receipts omit
+// both connection counts and prove nothing about live sockets. Admission
+// receipts carry both: closed counts confirmed proxied disconnects, and any
+// remaining connection makes the result a fenced failure with pending
+// transport obligations. Neither count covers traffic that bypasses the proxy.
+// Older parsers reject the admission shape: upgrade Go and addon together.
 type SubjectUnloadResult struct {
-	RoutingRevoked       bool   `json:"routingRevoked"`
-	TransportObligations string `json:"transportObligations"`
-	Completion           string `json:"completion"`
+	RoutingRevoked       bool    `json:"routingRevoked"`
+	TransportObligations string  `json:"transportObligations"`
+	Completion           string  `json:"completion"`
+	ClosedConnections    *uint64 `json:"closedConnections,omitempty"`
+	RemainingConnections *uint64 `json:"remainingConnections,omitempty"`
+}
+
+// UnconfirmedConnections reports admission teardown that did not confirm closure.
+func (r *SubjectUnloadResult) UnconfirmedConnections() bool {
+	return r != nil && r.RemainingConnections != nil && *r.RemainingConnections > 0
 }
 
 // LifecycleResult is a closed, credential-free result for one consumed command.
@@ -354,14 +365,46 @@ func decodeLifecycleResult(data []byte, operation string) (*LifecycleResult, err
 		}
 		return result, nil
 	}
-	closed := &SubjectUnloadResult{}
-	if err := decodeStrictObject(unload, map[string]func(*json.Decoder) error{
-		"routingRevoked":       subjectField(&closed.RoutingRevoked),
-		"transportObligations": subjectField(&closed.TransportObligations),
-		"completion":           subjectField(&closed.Completion),
-	}); err != nil || !closed.RoutingRevoked || closed.TransportObligations != "none" || closed.Completion != completion {
+	closed, err := decodeUnloadResult(unload)
+	if err != nil || !closed.RoutingRevoked || closed.Completion != completion {
+		return nil, ErrInvalidTransportResponse
+	}
+	obligations := "none"
+	if closed.UnconfirmedConnections() {
+		// Unconfirmed teardown is never a clean unload.
+		if result.Outcome != "subject_failed" {
+			return nil, ErrInvalidTransportResponse
+		}
+		obligations = "pending"
+	}
+	if closed.TransportObligations != obligations {
 		return nil, ErrInvalidTransportResponse
 	}
 	result.Unload = closed
 	return result, nil
+}
+
+// decodeUnloadResult accepts the installation-only shape or the admission shape
+// with both counts; a lone count, duplicates and non-integers are rejected.
+func decodeUnloadResult(data []byte) (*SubjectUnloadResult, error) {
+	closed := &SubjectUnloadResult{}
+	fields := map[string]func(*json.Decoder) error{
+		"routingRevoked":       subjectField(&closed.RoutingRevoked),
+		"transportObligations": subjectField(&closed.TransportObligations),
+		"completion":           subjectField(&closed.Completion),
+	}
+	if decodeStrictObject(data, fields) == nil {
+		return closed, nil
+	}
+	closed = &SubjectUnloadResult{ClosedConnections: new(uint64), RemainingConnections: new(uint64)}
+	if err := decodeStrictObject(data, map[string]func(*json.Decoder) error{
+		"routingRevoked":       subjectField(&closed.RoutingRevoked),
+		"transportObligations": subjectField(&closed.TransportObligations),
+		"completion":           subjectField(&closed.Completion),
+		"closedConnections":    subjectField(closed.ClosedConnections),
+		"remainingConnections": subjectField(closed.RemainingConnections),
+	}); err != nil {
+		return nil, ErrInvalidTransportResponse
+	}
+	return closed, nil
 }

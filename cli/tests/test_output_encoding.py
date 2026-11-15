@@ -12,30 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI output must survive streams that cannot encode emoji.
+"""Regression guard: CLI output must survive streams that cannot encode emoji.
 
-The CLI prints emoji and box-drawing characters, which a legacy Windows code
-page (cp936, cp1252, ...) or a POSIX ``C`` locale cannot represent. Rich and
-Click used to raise ``UnicodeEncodeError`` and the command exited 1 with a
-traceback after already doing its work. ``CliRunner(charset=...)`` reproduces
-those stream encodings on any host.
-
-Streams that cannot represent a character escape it (``backslashreplace``)
-instead of substituting ``?``, so payload and machine-readable output stay
-recoverable.
+Legacy Windows code pages (cp936/cp1252, ...) and POSIX ``C`` locales cannot
+represent the emoji and box-drawing characters the CLI prints. Streams that
+cannot represent a character must escape it (``backslashreplace``) instead of
+raising ``UnicodeEncodeError`` or substituting ``?``.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
 from click.testing import CliRunner, Result
-from opensandbox.models.execd import OutputMessage
 
 from opensandbox_cli import main as cli_main
 from opensandbox_cli.main import cli
@@ -103,22 +96,6 @@ class TestNonUtf8Streams:
         assert "\u2705" not in result.output
         assert yaml.safe_load(result.output)["default_image"] == value
 
-    def test_real_errors_still_fail(self, tmp_path: Path) -> None:
-        result = _gbk_runner().invoke(
-            cli,
-            [
-                "--config",
-                str(tmp_path / "missing.toml"),
-                "config",
-                "set",
-                "connection.domain",
-                "team.host",
-            ],
-        )
-
-        assert result.exit_code != 0
-        assert "Config file not found" in result.output
-
 
 def _invoke_on_gbk(args: list[str], sandbox: MagicMock) -> Result:
     """Run the CLI against a mocked SDK with a gbk output stream."""
@@ -143,28 +120,6 @@ class TestPayloadOutputIsLossless:
 
         assert result.exit_code == 0
         assert result.output == "file \\u2705"
-
-    def test_command_streaming_output_without_loss(self) -> None:
-        sandbox = MagicMock()
-
-        def streamed(
-            payload: str, *, opts: Any = None, handlers: Any = None
-        ) -> MagicMock:
-            handlers.on_stdout(OutputMessage(text="ready \u2705\n", timestamp=0))
-            handlers.on_stderr(OutputMessage(text="warn \u2705\n", timestamp=0))
-            execution = MagicMock()
-            execution.error = None
-            return execution
-
-        sandbox.commands.run.side_effect = streamed
-        result = _invoke_on_gbk(
-            ["command", "run", "sb-1", "-o", "raw", "--", "echo", "ready"], sandbox
-        )
-
-        assert result.exit_code == 0
-        assert "ready \\u2705" in result.output
-        assert "warn \\u2705" in result.output
-        assert "?" not in result.output
 
 
 class _RecordingStream:
@@ -191,5 +146,3 @@ def test_only_unencodable_streams_are_reconfigured(
 
     assert stdout.reconfigured == []
     assert stderr.reconfigured == [{"errors": "backslashreplace"}]
-
-

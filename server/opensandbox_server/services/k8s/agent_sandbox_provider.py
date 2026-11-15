@@ -737,7 +737,9 @@ class AgentSandboxProvider(WorkloadProvider):
                 )
                 for pod in pods:
                     if pod.status and pod.status.pod_ip and pod.status.phase == "Running":
-                        return Endpoint(endpoint=f"{pod.status.pod_ip}:{port}")
+                        pod_ip = pod.status.pod_ip
+                        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                        return Endpoint(endpoint=f"{host}:{port}")
             except Exception as e:
                 logger.warning(f"Failed to resolve pod endpoint: {e}")
 

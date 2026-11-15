@@ -106,10 +106,6 @@ export interface paths {
                      * @description Required diagnostic scope selector. Known scopes may include `container`,
                      *     `lifecycle`, `runtime`, `network`, `process`, and `all`. Supported scopes
                      *     are implementation-defined; servers may add new scopes over time.
-                     *
-                     *     On deployments that still expose the legacy DevOps plain-text behavior on
-                     *     this path, requests without `scope` are treated as deprecated legacy
-                     *     requests and may return `text/plain` instead of this JSON descriptor.
                      */
                     scope: components["parameters"]["DiagnosticScope"];
                 };
@@ -179,10 +175,6 @@ export interface paths {
                      * @description Required diagnostic scope selector. Known scopes may include `container`,
                      *     `lifecycle`, `runtime`, `network`, `process`, and `all`. Supported scopes
                      *     are implementation-defined; servers may add new scopes over time.
-                     *
-                     *     On deployments that still expose the legacy DevOps plain-text behavior on
-                     *     this path, requests without `scope` are treated as deprecated legacy
-                     *     requests and may return `text/plain` instead of this JSON descriptor.
                      */
                     scope: components["parameters"]["DiagnosticScope"];
                 };
@@ -380,10 +372,6 @@ export interface components {
          * @description Required diagnostic scope selector. Known scopes may include `container`,
          *     `lifecycle`, `runtime`, `network`, `process`, and `all`. Supported scopes
          *     are implementation-defined; servers may add new scopes over time.
-         *
-         *     On deployments that still expose the legacy DevOps plain-text behavior on
-         *     this path, requests without `scope` are treated as deprecated legacy
-         *     requests and may return `text/plain` instead of this JSON descriptor.
          */
         DiagnosticScope: string;
     };

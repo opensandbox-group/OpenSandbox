@@ -101,7 +101,7 @@ def _idle_pause_namespaces() -> list[str]:
         )
     return namespaces
 
-from opensandbox_server.api.devops import router as devops_router  # noqa: E402
+from opensandbox_server.api.diagnostics import router as diagnostics_router  # noqa: E402
 from opensandbox_server.api.metrics import router as metrics_router  # noqa: E402
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
@@ -275,14 +275,14 @@ app.add_middleware(HttpMetricsMiddleware)
 # IMPORTANT: non-proxy routers MUST be registered before proxy_router
 # because proxy_router contains catch-all routes that would swallow diagnostics paths.
 app.include_router(router)
-app.include_router(devops_router)
+app.include_router(diagnostics_router)
 app.include_router(pool_router)
 app.include_router(templates_router)
 app.include_router(proxy_router)
 app.include_router(policy_router)
 app.include_router(credential_vault_router)
 app.include_router(router, prefix="/v1")
-app.include_router(devops_router, prefix="/v1")
+app.include_router(diagnostics_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
 app.include_router(templates_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")

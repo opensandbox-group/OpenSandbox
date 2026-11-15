@@ -1452,6 +1452,20 @@ class CreateSnapshotRequest(BaseModel):
         min_length=1,
         description="Optional human-readable snapshot name",
     )
+    mode: Optional[Literal["full", "rootfsOnly"]] = Field(
+        None,
+        description=(
+            "What the snapshot persists. 'full' (default) is the most "
+            "complete capture the runtime supports: on the fast-sandbox "
+            "backend that includes memory and process state (restoring "
+            "resumes in place); Docker and Kubernetes snapshots capture the "
+            "filesystem only and do not restore running processes. "
+            "'rootfsOnly' captures only the writable filesystem; restoring "
+            "boots a fresh sandbox from the disk, so the entrypoint re-runs "
+            "and resume takes seconds instead of milliseconds. 'rootfsOnly' "
+            "requires the fast-sandbox backend with OCI-backed sandboxes."
+        ),
+    )
 
     model_config = ConfigDict(
         extra="forbid",
@@ -1470,6 +1484,16 @@ class Snapshot(BaseModel):
     name: Optional[str] = Field(
         None,
         description="Optional human-readable snapshot name",
+    )
+    mode: Literal["full", "rootfsOnly"] = Field(
+        "full",
+        description=(
+            "Artifact class of the snapshot: 'full' is the runtime's most "
+            "complete capture (memory and process state on fast-sandbox; "
+            "filesystem-only on Docker and Kubernetes), 'rootfsOnly' is the "
+            "writable filesystem only. Snapshots created before this field "
+            "existed report 'full'."
+        ),
     )
     status: SnapshotStatus = Field(
         ...,
@@ -1717,6 +1741,14 @@ class PoolCapacitySpec(BaseModel):
     )
 
 
+def _check_buffer_bounds(capacity_spec: PoolCapacitySpec) -> None:
+    # Checked on requests only: PoolResponse also parses Pools applied with kubectl.
+    # The controller targets bufferMin below the range and bufferMax above it, so
+    # bufferMin > bufferMax makes it create and delete idle pods forever.
+    if capacity_spec.buffer_min > capacity_spec.buffer_max:
+        raise ValueError("capacitySpec.bufferMin must not exceed capacitySpec.bufferMax.")
+
+
 class CreatePoolRequest(BaseModel):
     """
     Request to create a new pre-warmed resource pool.
@@ -1742,6 +1774,11 @@ class CreatePoolRequest(BaseModel):
         description="Capacity configuration controlling pool size and buffer behavior.",
     )
 
+    @model_validator(mode="after")
+    def validate_capacity_spec(self) -> "CreatePoolRequest":
+        _check_buffer_bounds(self.capacity_spec)
+        return self
+
     model_config = ConfigDict(
         alias_generator=to_camel,
         populate_by_name=True,
@@ -1759,6 +1796,11 @@ class UpdatePoolRequest(BaseModel):
         ...,
         description="New capacity configuration for the pool.",
     )
+
+    @model_validator(mode="after")
+    def validate_capacity_spec(self) -> "UpdatePoolRequest":
+        _check_buffer_bounds(self.capacity_spec)
+        return self
 
     model_config = ConfigDict(
         alias_generator=to_camel,

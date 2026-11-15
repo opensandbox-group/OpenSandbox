@@ -20,7 +20,25 @@
 # sizes, tini + non-root user, HTTP :8080, multi-layer ENV with PATH override.
 #
 #   docker build -f scripts/fast-sandbox-env/Dockerfile.sandbox-test-image \
-#     -t opensandbox/fsb-sandbox-golden:latest scripts/fast-sandbox-env
+#     -t opensandbox/fsb-sandbox-golden:latest .
+#
+# OSEP-0018 hardening floor assets (inert until a template points execd at
+# the TOML via EXECD_ISOLATION_CONFIG): the static opensandbox-launcher
+# prelude (compiled from the OpenSandbox source, mirroring the execd image's
+# flags) and the hardened isolation TOML, both at execd's trusted runtime
+# paths under /opt/opensandbox. The fsb sandboxtemplate-builder stages only
+# execd/bootstrap.sh/prepare.sh/bwrap from the execd image, so the golden
+# image itself must carry these two for the hardening floor to arm. The
+# proper long-term home is builder-side staging in fast-sandbox; this bake
+# keeps the integration env self-contained until then.
+
+FROM alpine:latest AS launcher-builder
+# linux-headers: launcher.c includes linux/{capability,filter,seccomp}.h
+# (the execd image's builder gets them via libcap-dev's dependency).
+RUN apk add --no-cache gcc musl-dev linux-headers
+COPY components/execd/native/launcher.c /build/launcher.c
+RUN gcc -Os -static -s -Wall -Wextra -Werror \
+    -o /build/opensandbox-launcher /build/launcher.c
 
 FROM debian:bookworm-slim
 
@@ -76,8 +94,8 @@ RUN dd if=/dev/urandom of=/srv/data/random-1.bin bs=1M count=32 status=none \
     && dd if=/dev/zero of=/srv/data/zeros-64.bin bs=1M count=64 status=none
 
 # HTTP workload: /health + info endpoint on :8080
-COPY sandbox-test-image/server.py /srv/app/server.py
-COPY sandbox-test-image/entrypoint.sh /srv/app/entrypoint.sh
+COPY scripts/fast-sandbox-env/sandbox-test-image/server.py /srv/app/server.py
+COPY scripts/fast-sandbox-env/sandbox-test-image/entrypoint.sh /srv/app/entrypoint.sh
 RUN chmod 0755 /srv/app/entrypoint.sh /srv/app/server.py \
     && chown -R app:app /srv/app \
     && printf 'sandbox-test\n' > /etc/sandbox-test-release
@@ -99,4 +117,13 @@ USER root
 RUN find /srv /opt/sandbox-bin /etc/sandbox-test-release /etc/sandbox-test-python-version \
         -exec touch -h -d "@1767225600" {} + \
     && chmod 0755 /srv/app /srv/app/entrypoint.sh /srv/app/server.py
+# OSEP-0018 hardening floor assets at execd's trusted runtime paths; the
+# launcher must be root-owned 0755 (execd's findLauncher() stats exactly
+# /opt/opensandbox/opensandbox-launcher before any $PATH fallback).
+COPY --from=launcher-builder --chown=0:0 /build/opensandbox-launcher /opt/opensandbox/opensandbox-launcher
+COPY --chown=0:0 components/execd/configs/isolation.hardened.toml /opt/opensandbox/isolation.toml
+RUN chmod 0755 /opt/opensandbox/opensandbox-launcher \
+    && chmod 0644 /opt/opensandbox/isolation.toml \
+    && /opt/opensandbox/opensandbox-launcher 2>/dev/null; test $? -eq 125 \
+    || { echo "opensandbox-launcher smoke exec failed"; exit 1; }
 USER app

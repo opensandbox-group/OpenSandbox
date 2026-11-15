@@ -211,7 +211,7 @@ class ConnectionConfig private constructor(
         private const val ENV_DOMAIN = "OPEN_SANDBOX_DOMAIN"
         internal const val ENV_DISABLE_METRICS = "OPENSANDBOX_DISABLE_METRICS"
 
-        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.2.0"
+        private const val DEFAULT_USER_AGENT = "OpenSandbox-Kotlin-SDK/1.2.1"
         private const val API_VERSION = "v1"
 
         @JvmStatic

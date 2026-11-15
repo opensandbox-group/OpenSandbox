@@ -180,8 +180,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
         }
     }
 
-    // ── Background runs ─────────────────────────────────────────────
-
     [Fact]
     public async Task TestBackgroundRunEcho()
     {
@@ -201,8 +199,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             var logs = await session.GetRunLogsAsync(run.RunId);
             Assert.Contains("bg-echo-output", logs.Text);
 
-            // Incremental read: the next cursor fetch returns only the remainder
-            // (empty here) and the cursor stays at the tail.
             var remainder = await session.GetRunLogsAsync(run.RunId, logs.Cursor);
             Assert.DoesNotContain("bg-echo-output", remainder.Text);
             Assert.Equal(logs.Cursor, remainder.Cursor);
@@ -304,8 +300,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             await sessionB.DeleteAsync();
         }
     }
-
-    // ── RW mode: filesystem API tests ───────────────────────────────
 
     [Fact]
     public async Task TestRwFilesUploadDownload()
@@ -542,8 +536,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
         }
     }
 
-    // ── RO mode tests ───────────────────────────────────────────────
-
     [Fact]
     public async Task TestRoCanReadExistingFiles()
     {
@@ -641,8 +633,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
         }
     }
 
-    // ── Overlay mode tests ──────────────────────────────────────────
-
     private async Task<bool> OverlaySupported()
     {
         var caps = await _sandbox!.Isolation.CapabilitiesAsync();
@@ -734,7 +724,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             });
             var content = await session.Files.ReadFileAsync(path);
             Assert.Equal("overlay file", content);
-            // Host should NOT see it
             var hostCheck = await _sandbox.Commands.RunAsync(
                 $"cat {path} 2>&1 || echo NOT_FOUND");
             var hostText = StdoutText(hostCheck);
@@ -790,7 +779,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             await session.Files.DeleteFilesAsync(new[] { $"{prefix}/target.txt" });
             await Assert.ThrowsAsync<SandboxApiException>(
                 () => session.Files.GetFileInfoAsync(new[] { $"{prefix}/target.txt" }));
-            // Host file should be untouched
             var hostCheck = await _sandbox.Commands.RunAsync($"cat {prefix}/target.txt");
             Assert.Contains("x", StdoutText(hostCheck));
         }
@@ -846,7 +834,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             });
             var infoMap = await session.Files.GetFileInfoAsync(new[] { $"/tmp/{marker}" });
             Assert.Equal(755, infoMap[$"/tmp/{marker}"].Mode);
-            // Host should still be 644
             var hostCheck = await _sandbox.Commands.RunAsync($"stat -c %a /tmp/{marker}");
             Assert.Contains("644", StdoutText(hostCheck));
         }
@@ -880,7 +867,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             var content = await session.Files.ReadFileAsync($"/tmp/{marker}");
             Assert.Contains("new", content);
             Assert.DoesNotContain("old", content);
-            // Host unchanged
             var hostCheck = await _sandbox.Commands.RunAsync($"cat /tmp/{marker}");
             Assert.Contains("old", StdoutText(hostCheck));
         }
@@ -917,8 +903,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             await _sandbox.Commands.RunAsync($"rm -rf {prefix}");
         }
     }
-
-    // ── RunOnceAsync / WithSessionAsync convenience API tests ────────
 
     [Fact]
     public async Task TestRunOnce()
@@ -968,20 +952,15 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
         Assert.Contains("step1", output);
     }
 
-    // ── Bind mount tests (explicit source->dest binds) ─────────────────
-
     [Fact]
     public async Task TestBindReadWriteHostVisible()
     {
         var ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        // Source must be within the execd writable allowlist (e.g. /data).
         var srcDir = $"/data/bind_rw_{ts}";
         var dest = "/mnt/bind_rw";
         var fileName = "from_sandbox.txt";
         var content = "bind-rw-visible-on-host";
 
-        // Create the source dir and the destination mount point (bwrap binds
-        // onto an existing dir; it cannot create one under the read-only root).
         await _sandbox!.Commands.RunAsync($"mkdir -p {srcDir} {dest}");
 
         var session = await _sandbox.Isolation.CreateAsync(
@@ -1011,7 +990,6 @@ public sealed class IsolatedSessionE2ETests : IAsyncLifetime
             () => _sandbox!.Isolation.CreateAsync(
                 new CreateIsolatedSessionRequest(
                     new IsolatedWorkspaceSpec("/tmp", "rw"),
-                    // /etc is not in the writable allowlist.
                     Binds: new List<BindMount> { new BindMount("/etc", "/mnt/etc") })));
     }
 

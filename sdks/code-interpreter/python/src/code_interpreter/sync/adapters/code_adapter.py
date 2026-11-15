@@ -325,13 +325,13 @@ class CodesAdapterSync(CodesSync):
                     try:
                         event_dict = _normalize_sse_event(json.loads(data))
                         event_node = EventNode(**event_dict)
-                        dispatcher.dispatch(event_node)
                     except json.JSONDecodeError:
                         logger.debug(f"Failed to parse SSE line: {line}")
                         continue
                     except Exception as e:
-                        logger.error(f"Error processing event: {data}", exc_info=e)
+                        logger.error(f"Failed to decode SSE event: {data}", exc_info=e)
                         continue
+                    dispatcher.dispatch(event_node)
 
             return execution
         except Exception as e:

@@ -38,6 +38,21 @@ func TestDeleteFile(t *testing.T) {
 	require.NoError(t, DeleteFile(file), "expected no error deleting missing file")
 }
 
+func TestDeleteFileKeepsDollarDigitLiteral(t *testing.T) {
+	tmp := t.TempDir()
+	inner := filepath.Join(tmp, "Outer$1.class")
+	outer := filepath.Join(tmp, "Outer.class")
+	require.NoError(t, os.WriteFile(inner, []byte("inner"), 0o644))
+	require.NoError(t, os.WriteFile(outer, []byte("outer"), 0o644))
+
+	require.NoError(t, DeleteFile(inner))
+
+	_, err := os.Stat(inner)
+	require.True(t, os.IsNotExist(err), "expected %s removed, got err=%v", inner, err)
+	_, err = os.Stat(outer)
+	require.NoError(t, err, "deleting Outer$1.class must not touch Outer.class")
+}
+
 func TestRenameFile(t *testing.T) {
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.txt")

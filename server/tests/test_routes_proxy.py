@@ -1344,6 +1344,7 @@ def test_proxy_rejects_websocket_upgrade(
     )
 
     assert response.status_code == 400
+    assert response.json()["code"] == SandboxErrorCodes.INVALID_PARAMETER
     assert response.json()["message"] == "Websocket upgrade is not supported yet"
 
 
@@ -1367,6 +1368,7 @@ def test_proxy_rejects_websocket_upgrade_for_post_and_mixed_case_header(
     )
 
     assert response.status_code == 400
+    assert response.json()["code"] == SandboxErrorCodes.INVALID_PARAMETER
     assert response.json()["message"] == "Websocket upgrade is not supported yet"
 
 

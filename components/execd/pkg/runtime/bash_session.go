@@ -196,16 +196,27 @@ func (s *bashSession) start() error {
 	return nil
 }
 
-func (s *bashSession) trackCurrentProcess(pid int) {
+func (s *bashSession) trackRunProcess(pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.currentProcessPid = pid
+	if !s.started {
+		// close() ran after this run passed its started check, so nothing
+		// else will stop this process group.
+		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+			log.Warn("bash session: kill process group %d started after close: %v", pid, err)
+		}
+		return
+	}
+	if s.runPids == nil {
+		s.runPids = make(map[int]struct{})
+	}
+	s.runPids[pid] = struct{}{}
 }
 
-func (s *bashSession) untrackCurrentProcess() {
+func (s *bashSession) untrackRunProcess(pid int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.currentProcessPid = 0
+	delete(s.runPids, pid)
 }
 
 //nolint:gocognit
@@ -284,8 +295,9 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	// inherited stdout) exit.
 	_ = stdoutW.Close()
 	defer stdoutR.Close()
-	defer s.untrackCurrentProcess()
-	s.trackCurrentProcess(cmd.Process.Pid)
+	runPid := cmd.Process.Pid
+	s.trackRunProcess(runPid)
+	defer s.untrackRunProcess(runPid)
 
 	stopGroupKill := killProcessGroupOnDone(ctx, cmd.Process.Pid)
 	defer stopGroupKill()
@@ -601,7 +613,10 @@ func parseExportLine(line string) (string, string, bool) {
 	if eq := strings.Index(rest, "="); eq >= 0 {
 		name = rest[:eq]
 		raw := rest[eq+1:]
-		if unquoted, err := strconv.Unquote(raw); err == nil {
+		// Only a double-quoted value is a Go-compatible literal. A single-quoted
+		// one is verbatim shell text: strconv.Unquote would read '\t' or '\\'
+		// as a Go rune literal and turn it into a tab or a single backslash.
+		if unquoted, err := strconv.Unquote(raw); err == nil && strings.HasPrefix(raw, `"`) {
 			value = unquoted
 		} else if unquoted, ok := unquoteShellWord(raw); ok {
 			// POSIX shell word: a concatenation of '...' and "..." segments
@@ -731,13 +746,13 @@ func (s *bashSession) close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	pid := s.currentProcessPid
-	s.currentProcessPid = 0
+	pids := s.runPids
+	s.runPids = nil
 	s.started = false
 	s.env = nil
 	s.cwd = ""
 
-	if pid != 0 {
+	for pid := range pids {
 		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
 			log.Warn("bash session: kill process group %d: %v (process may have already exited)", pid, err)
 		}

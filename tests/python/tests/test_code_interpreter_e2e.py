@@ -214,14 +214,13 @@ async def run_with_retry(
                 if flush_attempt_events is not None:
                     await flush_attempt_events()
                 return result
-            # Empty result - retry
             if attempt < max_retries - 1:
                 logger.warning(
                     "Execution returned empty result (attempt %d/%d), retrying in %.1fs...",
                     attempt + 1, max_retries, retry_delay
                 )
                 await asyncio.sleep(retry_delay)
-                retry_delay *= 1.5  # exponential backoff
+                retry_delay *= 1.5
         except asyncio.TimeoutError:
             last_exception = TimeoutError(
                 f"codes.run() did not complete within {per_call_timeout}s"
@@ -241,7 +240,6 @@ async def run_with_retry(
         except Exception as e:
             last_exception = e
             error_name = type(e).__name__
-            # Check if it's a retryable network error
             error_str = str(e).lower()
             is_retryable = any(keyword in error_str for keyword in [
                 "disconnected", "connection", "reset", "closed", "timeout",
@@ -255,10 +253,8 @@ async def run_with_retry(
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 1.5
             else:
-                # Non-retryable error or last attempt
                 raise
 
-    # If we have a result (even empty), return it; otherwise raise last exception
     if last_result is not None:
         return last_result
     if last_exception is not None:
@@ -272,7 +268,6 @@ async def create_context_with_retry(
     max_retries: int = 3,
     retry_delay: float = 2.0,
 ):
-    """Create a code context with retry logic for network errors."""
     last_exception = None
     for attempt in range(max_retries):
         try:
@@ -512,7 +507,6 @@ class TestCodeInterpreterE2E:
             int(metrics.memory_total_in_mib),
         )
 
-        # Renewal through CodeInterpreter (extend expiration time)
         renew_response = await code_interpreter.sandbox.renew(timedelta(minutes=20))
         assert renew_response is not None
         logger.info("✓ CodeInterpreter expiration renewed to %s", renew_response.expires_at)
@@ -634,7 +628,6 @@ class TestCodeInterpreterE2E:
             assert var_result.complete is not None
             logger.info("✓ Java variables and state persistence work correctly")
 
-            # Error handling test
             stdout_messages.clear()
             stderr_messages.clear()
             errors.clear()
@@ -671,8 +664,6 @@ class TestCodeInterpreterE2E:
         logger.info("TEST 3: Python code execution")
         logger.info("=" * 80)
 
-        # New usage: directly pass a language string (ephemeral context).
-        # This validates the `codes.run(..., language=...)` convenience interface.
         # Use retry helper for the first call — kernel initialization can be flaky.
         direct_lang_result = await run_with_retry(
             code_interpreter,
@@ -800,7 +791,6 @@ class TestCodeInterpreterE2E:
             assert any("Sum of list: 15" in m.text for m in stdout_messages)
             logger.info("✓ Python variable persistence across executions works")
 
-            # Error handling
             stdout_messages.clear()
             stderr_messages.clear()
             errors.clear()
@@ -921,7 +911,6 @@ class TestCodeInterpreterE2E:
             assert data_result_go.id is not None
             logger.info("✓ Go data structures and functions work correctly")
 
-            # Compilation error
             stdout_messages.clear()
             errors.clear()
             completed_events.clear()
@@ -1029,7 +1018,6 @@ class TestCodeInterpreterE2E:
             assert types_result_ts.id is not None
             logger.info("✓ TypeScript types and interfaces work correctly")
 
-            # Type error
             stdout_messages.clear()
             errors.clear()
             completed_events.clear()

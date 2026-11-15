@@ -32,6 +32,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewRespo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxStatus
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotMode
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotStatus
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.TemplateFilter
@@ -316,6 +317,32 @@ class SandboxManagerTest {
         assertThrows(SandboxReadyTimeoutException::class.java) {
             sandboxManager.waitForSnapshotReady("snapshot-id", Duration.ofMillis(100), Duration.ofMillis(10))
         }
+    }
+
+    @Test
+    fun `createSnapshot should delegate name and mode to service`() {
+        val expected =
+            SnapshotInfo(
+                id = "snapshot-id",
+                sandboxId = "sandbox-id",
+                name = "workspace-state",
+                status =
+                    SnapshotStatus(
+                        state = SnapshotState.CREATING,
+                        reason = null,
+                        message = null,
+                        lastTransitionAt = null,
+                    ),
+                createdAt = OffsetDateTime.now(),
+                mode = SnapshotMode.ROOTFS_ONLY,
+            )
+
+        every { sandboxService.createSnapshot("sandbox-id", "workspace-state", SnapshotMode.ROOTFS_ONLY) } returns expected
+
+        val result = sandboxManager.createSnapshot("sandbox-id", "workspace-state", SnapshotMode.ROOTFS_ONLY)
+
+        assertEquals(expected, result)
+        verify { sandboxService.createSnapshot("sandbox-id", "workspace-state", SnapshotMode.ROOTFS_ONLY) }
     }
 
     @Test

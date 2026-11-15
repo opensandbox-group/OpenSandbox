@@ -40,8 +40,13 @@ var (
 	nftUpdateFailed         metric.Int64Counter
 	tlsShadowRequests       metric.Int64Counter
 	tlsAdmissionConnections metric.Int64Counter
+	tlsRegistryOccupancy    metric.Int64Histogram
+	tlsRegistryBudget       metric.Int64Histogram
 	credentialResolutions   metric.Int64Counter
 	credentialResolutionDur metric.Float64Histogram
+
+	credentialVaultTransitions   metric.Int64Counter
+	credentialVaultTransitionDur metric.Float64Histogram
 
 	lastNftRuleCount atomic.Int64
 )
@@ -169,6 +174,26 @@ func registerEgressMetrics() error {
 	if err != nil {
 		return err
 	}
+	// The SDK default buckets stop at 10000, below the default process budget
+	// (131072), collapsing process budgets and larger occupancies into +Inf.
+	// Cover the validated 0..1<<20 slot range, with finer steps around the
+	// default subject capacity of 32. Both instruments use the same ladder.
+	tlsSlotBuckets := metric.WithExplicitBucketBoundaries(
+		0, 1, 2, 4, 8, 16, 24, 32, 48, 64, 128, 256, 512, 1024,
+		2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576,
+	)
+	tlsRegistryOccupancy, err = meter.Int64Histogram("egress.mitm.tls.registry.occupancy",
+		metric.WithDescription("Fast Sandbox occupied connection slots observed at admission/release; subject observations are not an aggregate gauge."),
+		metric.WithUnit("{slot}"), tlsSlotBuckets)
+	if err != nil {
+		return err
+	}
+	tlsRegistryBudget, err = meter.Int64Histogram("egress.mitm.tls.registry.configured_budget",
+		metric.WithDescription("Configured connection budget at each Fast Sandbox admission/release observation; per-subject capacity is not reserved."),
+		metric.WithUnit("{slot}"), tlsSlotBuckets)
+	if err != nil {
+		return err
+	}
 	policyDenied, err = meter.Int64Counter(
 		"egress.policy.denied_total",
 		metric.WithDescription("DNS policy denials"),
@@ -205,6 +230,28 @@ func registerEgressMetrics() error {
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(
 			0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120,
+		),
+	)
+	if err != nil {
+		return err
+	}
+
+	credentialVaultTransitions, err = meter.Int64Counter(
+		"egress.credential_vault.transitions_total",
+		metric.WithDescription("Fast Sandbox credential-bound worker IPC calls by closed transition and result; "+
+			"retries and reconciles count separately. Best-effort observation, not a security signal."),
+	)
+	if err != nil {
+		return err
+	}
+	credentialVaultTransitionDur, err = meter.Float64Histogram(
+		"egress.credential_vault.transition.duration",
+		metric.WithDescription("Duration of one Fast Sandbox credential-bound worker IPC call; excludes queueing and retry delay."),
+		metric.WithUnit("s"),
+		// Seconds, not the SDK's millisecond ladder: a local IPC call is
+		// sub-millisecond to a few milliseconds, and the per-call deadline is 2s.
+		metric.WithExplicitBucketBoundaries(
+			0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10,
 		),
 	)
 	if err != nil {

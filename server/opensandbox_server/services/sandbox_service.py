@@ -213,6 +213,7 @@ class SandboxService(ABC):
     def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
         """Apply JSON Merge Patch to labels: separate user metadata, merge, validate, rebuild."""
         from fastapi import HTTPException
+        from opensandbox_server.services.constants import SandboxErrorCodes
         from opensandbox_server.services.validators import ensure_metadata_labels
 
         for key in patch:
@@ -220,7 +221,7 @@ class SandboxService(ABC):
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "code": "INVALID_METADATA_LABEL",
+                        "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
                         "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
                     },
                 )
@@ -245,7 +246,7 @@ class SandboxService(ABC):
             new_labels[k] = str(v)
         return new_labels
 
-    # Diagnostics (DevOps)
+    # Diagnostics
     # ------------------------------------------------------------------
 
     def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
@@ -281,8 +282,6 @@ class SandboxService(ABC):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: str | None = None,
-        container: str | None = None,
     ) -> str:
         """
         Retrieve container logs for a sandbox.
@@ -290,25 +289,9 @@ class SandboxService(ABC):
         Args:
             sandbox_id: Unique sandbox identifier
             tail: Number of trailing log lines to return
-            since: Only return logs newer than this duration (e.g. "10m", "1h")
-            container: Optional container name. When omitted, backends select a
-                sensible default (typically the user "sandbox" container).
 
         Returns:
             str: Plain-text log output
-        """
-        pass
-
-    @abstractmethod
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        """
-        Retrieve detailed inspection info for a sandbox container.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Returns:
-            str: Plain-text inspection output
         """
         pass
 

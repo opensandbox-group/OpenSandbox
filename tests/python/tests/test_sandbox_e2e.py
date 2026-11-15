@@ -13,9 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""
-Comprehensive E2E tests for Sandbox functionality.
-"""
 
 import asyncio
 import logging
@@ -133,7 +130,6 @@ class TestSandboxE2E:
 
     @classmethod
     async def _ensure_sandbox_created(cls):
-        """Ensure sandbox is created before running tests."""
         if cls._setup_done:
             return
 
@@ -171,7 +167,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     async def test_01_sandbox_lifecycle_and_health(self):
-        """Test sandbox lifecycle and health monitoring."""
         await self._ensure_sandbox_created()
         sandbox = TestSandboxE2E.sandbox
 
@@ -310,7 +305,6 @@ class TestSandboxE2E:
                 )
             logger.info("✓ Execd /ping succeeded through gateway with signed endpoint")
 
-            # Expired timestamp should be rejected by the server.
             expired_ts = int(time.time()) - 3600
             try:
                 await sandbox.get_signed_endpoint(44772, expired_ts)
@@ -360,7 +354,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     async def test_01_extensions_round_trip(self):
-        """Verify extensions are returned in create response, get_info, and list."""
         cfg = create_connection_config()
         ext_sandbox = await Sandbox.create(
             image=SandboxImageSpec(get_sandbox_image()),
@@ -448,19 +441,16 @@ class TestSandboxE2E:
         try:
             await asyncio.sleep(5)
 
-            # Verify get egress policy right after create.
             policy = await sandbox.get_egress_policy()
             assert policy.default_action == "deny"
             assert policy.egress is not None
             assert any(rule.target == "pypi.org" and rule.action == "allow" for rule in policy.egress)
 
-            # Baseline behavior: github blocked, pypi allowed.
             blocked = await sandbox.commands.run("curl -I https://www.github.com")
             assert blocked.error is not None
             allowed = await sandbox.commands.run("curl -I https://pypi.org")
             assert allowed.error is None
 
-            # Patch policy: allow github, deny pypi.
             await sandbox.patch_egress_rules(
                 [
                     NetworkRule(action="allow", target="www.github.com"),
@@ -480,7 +470,6 @@ class TestSandboxE2E:
                 for rule in patched_policy.egress
             )
 
-            # Behavior after patch should be flipped.
             github_allowed = await sandbox.commands.run("curl -I https://www.github.com")
             assert github_allowed.error is None
             pypi_denied = await sandbox.commands.run("curl -I https://pypi.org")
@@ -610,7 +599,6 @@ class TestSandboxE2E:
         try:
             await asyncio.sleep(5)
 
-            # Baseline: both targets reachable under deny-default policy.
             initial_policy = await sandbox.get_egress_policy()
             assert initial_policy.egress is not None
             assert any(r.target == "pypi.org" and r.action == "allow" for r in initial_policy.egress)
@@ -637,13 +625,11 @@ class TestSandboxE2E:
             ), "pypi.org rule should remain (other targets untouched)"
             assert deleted_policy.default_action == "deny", "defaultAction must be preserved"
 
-            # github now falls under default-deny; pypi still allowed.
             github_blocked = await sandbox.commands.run("curl -I https://www.github.com")
             assert github_blocked.error is not None
             pypi_still_ok = await sandbox.commands.run("curl -I https://pypi.org")
             assert pypi_still_ok.error is None
 
-            # Second delete of the same target is a no-op.
             await sandbox.delete_egress_rules(["www.github.com"])
             await asyncio.sleep(1)
             unchanged_policy = await sandbox.get_egress_policy()
@@ -756,7 +742,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     async def test_01b_host_volume_mount(self):
-        """Test creating a sandbox with a host volume mount."""
         if is_kubernetes_runtime():
             pytest.skip("Host path volume E2E is only covered in the Docker runtime suite")
 
@@ -786,7 +771,6 @@ class TestSandboxE2E:
         try:
             logger.info(f"✓ Sandbox with volume created: {sandbox.id}")
 
-            # Step 1: Verify the host marker file is visible inside the sandbox
             # Retry: bind mount propagation can sometimes lag on first access
             logger.info("Step 1: Verify host marker file is readable inside the sandbox")
             for _attempt in range(5):
@@ -799,14 +783,12 @@ class TestSandboxE2E:
             assert result.logs.stdout[0].text == "opensandbox-e2e-marker\n"
             logger.info("✓ Host marker file read successfully inside sandbox")
 
-            # Step 2: Write a file from inside the sandbox to the mounted path (read-write)
             logger.info("Step 2: Write a file from inside the sandbox to the mount path")
             result = await sandbox.commands.run(
                 f"echo 'written-from-sandbox' > {container_mount_path}/sandbox-output.txt"
             )
             assert result.error is None, f"Failed to write file: {result.error}"
 
-            # Step 3: Verify the written file is readable
             # Retry: written data may not be immediately visible through bind mount
             for _attempt in range(5):
                 result = await sandbox.commands.run(f"cat {container_mount_path}/sandbox-output.txt")
@@ -818,7 +800,6 @@ class TestSandboxE2E:
             assert result.logs.stdout[0].text == "written-from-sandbox\n"
             logger.info("✓ File written and verified inside sandbox")
 
-            # Step 4: Verify the mount path is a proper directory
             logger.info("Step 3: Verify mount path is a directory")
             result = await sandbox.commands.run(f"test -d {container_mount_path} && echo OK")
             assert result.error is None
@@ -838,7 +819,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     async def test_01c_host_volume_mount_readonly(self):
-        """Test creating a sandbox with a read-only host volume mount."""
         if is_kubernetes_runtime():
             pytest.skip("Host path volume E2E is only covered in the Docker runtime suite")
 
@@ -868,7 +848,6 @@ class TestSandboxE2E:
         try:
             logger.info(f"✓ Sandbox with read-only volume created: {sandbox.id}")
 
-            # Step 1: Verify the host marker file is readable
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
                 result = await sandbox.commands.run(f"cat {container_mount_path}/marker.txt")
@@ -880,7 +859,6 @@ class TestSandboxE2E:
             assert result.logs.stdout[0].text == "opensandbox-e2e-marker\n"
             logger.info("✓ Host marker file read successfully in read-only mount")
 
-            # Step 2: Verify writing is denied on read-only mount
             result = await sandbox.commands.run(
                 f"touch {container_mount_path}/should-fail.txt"
             )
@@ -899,7 +877,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     async def test_01d_pvc_named_volume_mount(self):
-        """Test creating a sandbox with a PVC (Docker named volume) mount."""
         logger.info("=" * 80)
         logger.info("TEST 1d: Creating sandbox with PVC named volume mount (async)")
         logger.info("=" * 80)
@@ -926,7 +903,6 @@ class TestSandboxE2E:
         try:
             logger.info(f"✓ Sandbox with PVC volume created: {sandbox.id}")
 
-            # Step 1: Verify the marker file seeded into the named volume is readable
             logger.info("Step 1: Verify PVC marker file is readable inside the sandbox")
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
@@ -939,14 +915,12 @@ class TestSandboxE2E:
             assert result.logs.stdout[0].text == "pvc-marker-data\n"
             logger.info("✓ PVC marker file read successfully inside sandbox")
 
-            # Step 2: Write a file from inside the sandbox to the named volume
             logger.info("Step 2: Write a file from inside the sandbox to the PVC mount")
             result = await sandbox.commands.run(
                 f"echo 'written-to-pvc' > {container_mount_path}/pvc-output.txt"
             )
             assert result.error is None, f"Failed to write file: {result.error}"
 
-            # Step 3: Verify the written file is readable
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
                 result = await sandbox.commands.run(f"cat {container_mount_path}/pvc-output.txt")
@@ -958,7 +932,6 @@ class TestSandboxE2E:
             assert result.logs.stdout[0].text == "written-to-pvc\n"
             logger.info("✓ File written and verified inside sandbox via PVC mount")
 
-            # Step 4: Verify the mount path is a proper directory
             result = await sandbox.commands.run(f"test -d {container_mount_path} && echo OK")
             assert result.error is None
             assert len(result.logs.stdout) == 1
@@ -977,7 +950,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     async def test_01e_pvc_named_volume_mount_readonly(self):
-        """Test creating a sandbox with a read-only PVC (Docker named volume) mount."""
         logger.info("=" * 80)
         logger.info("TEST 1e: Creating sandbox with read-only PVC named volume mount (async)")
         logger.info("=" * 80)
@@ -1004,7 +976,6 @@ class TestSandboxE2E:
         try:
             logger.info(f"✓ Sandbox with read-only PVC volume created: {sandbox.id}")
 
-            # Step 1: Verify the marker file is readable on read-only mount
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
                 result = await sandbox.commands.run(f"cat {container_mount_path}/marker.txt")
@@ -1016,7 +987,6 @@ class TestSandboxE2E:
             assert result.logs.stdout[0].text == "pvc-marker-data\n"
             logger.info("✓ PVC marker file read successfully in read-only mount")
 
-            # Step 2: Verify writing is denied on read-only mount
             result = await sandbox.commands.run(
                 f"touch {container_mount_path}/should-fail.txt"
             )
@@ -1035,7 +1005,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(1)
     async def test_01f_pvc_named_volume_subpath_mount(self):
-        """Test creating a sandbox with a PVC named volume mount using subPath."""
         logger.info("=" * 80)
         logger.info("TEST 1f: Creating sandbox with PVC named volume subPath mount (async)")
         logger.info("=" * 80)
@@ -1063,7 +1032,6 @@ class TestSandboxE2E:
         try:
             logger.info(f"✓ Sandbox with PVC subPath volume created: {sandbox.id}")
 
-            # Step 1: Verify the subpath marker file is readable
             logger.info("Step 1: Verify subPath marker file is readable")
             # Retry: bind mount propagation can sometimes lag on first access
             for _attempt in range(5):
@@ -1076,17 +1044,15 @@ class TestSandboxE2E:
             assert result.logs.stdout[0].text == "pvc-subpath-marker\n"
             logger.info("✓ SubPath marker file read successfully")
 
-            # Step 2: Verify we only see the subpath contents (not the full volume)
             logger.info("Step 2: Verify only subPath contents are visible")
             result = await sandbox.commands.run(f"ls {container_mount_path}/")
             assert result.error is None
-            # Should contain marker.txt but NOT 'datasets' directory (we are inside it)
             stdout_text = "\n".join(msg.text for msg in result.logs.stdout)
             assert "marker.txt" in stdout_text
             assert "datasets" not in stdout_text
             logger.info("✓ Only subPath contents are visible inside the sandbox")
 
-            # Step 3: Write a file and verify (retry read-back for transient SSE drops)
+            # Retry read-back for transient SSE drops.
             logger.info("Step 3: Write and verify a file inside subPath mount")
             result = await sandbox.commands.run(
                 f"echo 'subpath-write-test' > {container_mount_path}/output.txt"
@@ -1114,7 +1080,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(2)
     async def test_02_basic_command_execution(self):
-        """Test basic command execution."""
         await self._ensure_sandbox_created()
         sandbox = TestSandboxE2E.sandbox
 
@@ -1168,7 +1133,6 @@ class TestSandboxE2E:
             handlers=handlers,
         )
 
-        # Verify result
         assert echo_result is not None
         assert echo_result.id is not None and echo_result.id.strip()
         assert echo_result.error is None
@@ -1182,7 +1146,6 @@ class TestSandboxE2E:
         assert echo_result.complete.execution_time_in_millis >= 0
         _assert_recent_timestamp_ms(echo_result.complete.timestamp)
 
-        # Verify handlers captured events
         assert len(init_events) == 1, "Execution should have exactly one init event"
         assert len(completed_events) == 1, "Execution should have exactly one completion event"
         assert init_events[0].id == echo_result.id
@@ -1238,7 +1201,6 @@ class TestSandboxE2E:
         logger.info(f"✓ Background command returned in {execution_time:.2f} ms")
 
         logger.info("Step 4: Test failing command")
-        # Clear event lists for fail test
         stdout_messages.clear()
         stderr_messages.clear()
         errors.clear()
@@ -1250,7 +1212,6 @@ class TestSandboxE2E:
             handlers=handlers,
         )
 
-        # Verify error result
         assert fail_result is not None
         assert fail_result.id is not None and fail_result.id.strip()
         assert fail_result.error is not None
@@ -1264,7 +1225,6 @@ class TestSandboxE2E:
         assert fail_result.complete is None
         assert fail_result.exit_code == int(fail_result.error.value)
 
-        # Verify handlers captured error events
         assert len(init_events) == 1, "Execution should have exactly one init event"
         assert init_events[0].id == fail_result.id
         _assert_recent_timestamp_ms(init_events[0].timestamp)
@@ -1379,7 +1339,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(3)
     async def test_02a_command_status_and_logs(self):
-        """Test command status + background logs."""
         await self._ensure_sandbox_created()
         sandbox = TestSandboxE2E.sandbox
 
@@ -1410,7 +1369,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(3)
     async def test_02b_run_command_with_envs(self):
-        """Test run_command env injection via RunCommandOpts.envs."""
         await self._ensure_sandbox_created()
         sandbox = TestSandboxE2E.sandbox
 
@@ -1421,13 +1379,11 @@ class TestSandboxE2E:
             f"else echo \"${{{env_key}}}\"; fi'"
         )
 
-        # Baseline: variable should be empty when not injected.
         baseline = await sandbox.commands.run(probe_command)
         assert baseline.error is None
         baseline_output = "\n".join(msg.text for msg in baseline.logs.stdout).strip()
         assert baseline_output == "__EMPTY__"
 
-        # Inject environment variables for this command only.
         injected = await sandbox.commands.run(
             probe_command,
             opts=RunCommandOpts(
@@ -1444,7 +1400,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(4)
     async def test_03_basic_filesystem_operations(self):
-        """Test basic filesystem operations."""
         await self._ensure_sandbox_created()
         sandbox = TestSandboxE2E.sandbox
 
@@ -1696,7 +1651,6 @@ class TestSandboxE2E:
         with pytest.raises(Exception):
             await sandbox.files.read_file(test_file2, encoding="utf-8")
 
-        # After move+delete, search should reflect the updated view.
         files_after = await sandbox.files.search(SearchEntry(path=test_dir1, pattern="*"))
         assert {e.path for e in files_after} == {test_file1}
 
@@ -1728,7 +1682,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(60)
     @pytest.mark.order(4)
     async def test_03a_line_based_file_reading(self):
-        """Test line-based file reading with offset and limit."""
         await self._ensure_sandbox_created()
         sandbox = TestSandboxE2E.sandbox
 
@@ -1737,15 +1690,12 @@ class TestSandboxE2E:
         sandbox_files = sandbox.files
         await sandbox_files.write_files([WriteEntry(path=test_path, data=content)])
 
-        # offset=2, limit=2 → lines 2-3
         result = await sandbox_files.read_file(test_path, offset=2, limit=2)
         assert result == "line2\nline3"
 
-        # offset=4, no limit → lines 4-5
         result = await sandbox_files.read_file(test_path, offset=4)
         assert result == "line4\nline5"
 
-        # limit=2, no offset → lines 1-2
         result = await sandbox_files.read_file(test_path, limit=2)
         assert result == "line1\nline2"
 
@@ -1754,7 +1704,6 @@ class TestSandboxE2E:
     @pytest.mark.timeout(120)
     @pytest.mark.order(5)
     async def test_04_interrupt_command(self):
-        """Test interrupting a long-running command."""
         await self._ensure_sandbox_created()
         sandbox = TestSandboxE2E.sandbox
 
@@ -1931,8 +1880,6 @@ class TestSandboxE2E:
             await asyncio.sleep(1)
         assert healthy is True, "Sandbox should be healthy after resume"
 
-        # Minimal smoke check: after resume, the existing Sandbox instance should still be usable.
-        # This helps validate that SDK re-bound its execd adapters (endpoint may change across resume).
         echo = await sandbox.commands.run("echo resume-ok")
         assert echo.error is None
         assert len(echo.logs.stdout) == 1

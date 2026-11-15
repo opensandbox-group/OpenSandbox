@@ -913,6 +913,23 @@ object SnapshotState {
     const val UNKNOWN = "Unknown"
 }
 
+/**
+ * Artifact class of a snapshot.
+ *
+ * [FULL] is the runtime's most complete capture: memory and process state on
+ * the fast-sandbox backend (restoring resumes in place); Docker and Kubernetes
+ * snapshots capture the filesystem only and do not restore running processes.
+ * [ROOTFS_ONLY] preserves only the writable filesystem, so restoring boots a
+ * fresh sandbox and re-runs the entrypoint. It requires the fast-sandbox
+ * backend with OCI-backed sandboxes and is rejected by other backends.
+ *
+ * Note: snapshots created before the mode field existed report [FULL].
+ */
+object SnapshotMode {
+    const val FULL = "full"
+    const val ROOTFS_ONLY = "rootfsOnly"
+}
+
 class SnapshotStatus(
     val state: String,
     val reason: String?,
@@ -926,7 +943,30 @@ class SnapshotInfo(
     val name: String? = null,
     val status: SnapshotStatus,
     val createdAt: OffsetDateTime,
-)
+) {
+    /**
+     * Artifact class of the snapshot. Snapshots created before the mode field
+     * existed report [SnapshotMode.FULL].
+     */
+    var mode: String = SnapshotMode.FULL
+        private set
+
+    /**
+     * Mode-aware constructor. The five-parameter primary constructor keeps the
+     * published ABI — including the compiler-generated default-argument bridge
+     * for callers that omit [name] — intact for pre-upgrade binaries.
+     */
+    constructor(
+        id: String,
+        sandboxId: String,
+        name: String?,
+        status: SnapshotStatus,
+        createdAt: OffsetDateTime,
+        mode: String,
+    ) : this(id, sandboxId, name, status, createdAt) {
+        this.mode = mode
+    }
+}
 
 class SnapshotFilter private constructor(
     val sandboxId: String?,

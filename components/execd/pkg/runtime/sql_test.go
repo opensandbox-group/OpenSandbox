@@ -25,6 +25,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestInitDBRetriesAfterConnectionFailure(t *testing.T) {
+	orig := sandboxMySQLDSN
+	t.Cleanup(func() { sandboxMySQLDSN = orig })
+	sandboxMySQLDSN = "root:@tcp(127.0.0.1:1)/?timeout=200ms&readTimeout=200ms&writeTimeout=200ms"
+
+	c := NewController("", "")
+	err1 := c.initDB()
+	require.Error(t, err1)
+	require.NotContains(t, err1.Error(), "db is not initialized")
+
+	err2 := c.initDB()
+	require.Error(t, err2)
+	require.NotContains(t, err2.Error(), "db is not initialized")
+}
+
 func TestExecuteSelectSQLQuery_Success(t *testing.T) {
 	driver := &stubDriver{
 		columns: []string{"id", "name"},

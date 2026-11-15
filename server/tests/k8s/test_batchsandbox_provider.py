@@ -1583,6 +1583,15 @@ spec:
         assert result.endpoint == "10.0.0.1:8080"
         assert result.headers is None
 
+    def test_get_internal_endpoint_brackets_ipv6_pod_ip(self):
+        provider = BatchSandboxProvider(MagicMock())
+        workload = {
+            "metadata": {"annotations": {"sandbox.opensandbox.io/endpoints": '["fd00::9"]'}}
+        }
+
+        assert provider.get_internal_endpoint(workload, 8080, "sandbox-123").endpoint == "[fd00::9]:8080"
+        assert provider.get_endpoint_info(workload, 8080, "sandbox-123").endpoint == "[fd00::9]:8080"
+
     def test_get_internal_endpoint_returns_none_when_missing(self):
         provider = BatchSandboxProvider(MagicMock())
         workload = {"metadata": {"annotations": {}}}

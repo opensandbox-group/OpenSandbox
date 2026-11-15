@@ -120,7 +120,6 @@ class TestSandboxManagerE2ESync:
                     else:
                         raise
 
-            # OR states (broad: K8s lifecycle is not only Running/Paused)
             both = manager.list_sandbox_infos(
                 SandboxFilter(states=_STATES_OR_BROAD, metadata={"tag": tag}, page_size=50)
             )
@@ -208,7 +207,6 @@ class TestSandboxManagerE2ESync:
             assert s2.is_healthy() is True
             assert s3.is_healthy() is True
 
-            # AND metadata
             tag_and_team = manager.list_sandbox_infos(
                 SandboxFilter(metadata={"tag": tag, "team": "t1"}, page_size=50)
             )
