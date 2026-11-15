@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+	controllerutils "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/controller"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/expectations"
 )
 
@@ -79,4 +80,34 @@ func TestReplacedBatchSandboxDropsOldStatusExpectation(t *testing.T) {
 
 	require.False(t, statusExpectationKept(r, "uid-old"), "the replaced BatchSandbox's status expectation was kept")
 	require.True(t, statusExpectationKept(r, replacement.UID), "the replacement's status expectation was dropped")
+}
+
+// Per-BatchSandbox state is kept in memory by namespace/name. Once the
+// BatchSandbox is gone it must be dropped, or a later BatchSandbox with the
+// same name inherits it: a pending create expectation that holds its scaling
+// back, its predecessor's pod recovery count (generation starts at 1 again),
+// or a task scheduler built for the old object's tasks.
+func TestDeletedBatchSandboxStateIsForgotten(t *testing.T) {
+	previousExpectations := batchSandboxScaleExpectations
+	batchSandboxScaleExpectations = expectations.NewScaleExpectations()
+	t.Cleanup(func() { batchSandboxScaleExpectations = previousExpectations })
+
+	gone := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "gone"}}
+	key := controllerutils.GetControllerKey(gone)
+	t.Cleanup(func() { podRecoveryBudgets.delete(key) })
+
+	r := newTestReconciler()
+	batchSandboxScaleExpectations.ExpectScale(key, expectations.Create, "gone-0")
+	podRecoveryBudgets.increment(key, 1)
+	r.taskSchedulers.Store(key, struct{}{})
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: gone.Namespace, Name: gone.Name},
+	})
+	require.NoError(t, err)
+
+	require.Nil(t, batchSandboxScaleExpectations.GetExpectations(key), "scale expectations kept")
+	require.Zero(t, podRecoveryBudgets.count(key, 1), "pod recovery budget kept")
+	_, kept := r.taskSchedulers.Load(key)
+	require.False(t, kept, "task scheduler kept")
 }

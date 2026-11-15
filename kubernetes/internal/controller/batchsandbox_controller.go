@@ -126,7 +126,7 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Name:      req.Name,
 	}, batchSbx); err != nil {
 		if errors.IsNotFound(err) {
-			r.StatusRVExpectation.DeleteOthers(req.NamespacedName, "")
+			r.forgetBatchSandbox(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -541,6 +541,16 @@ func (r *BatchSandboxReconciler) getTaskScheduler(ctx context.Context, batchSbx 
 		}
 	}
 	return tSch, nil
+}
+
+// forgetBatchSandbox drops the in-memory state kept for a BatchSandbox that no
+// longer exists. Apart from status expectations it is keyed by namespace/name,
+// so a later BatchSandbox with the same name would otherwise inherit it.
+func (r *BatchSandboxReconciler) forgetBatchSandbox(key types.NamespacedName) {
+	r.StatusRVExpectation.DeleteOthers(key, "")
+	batchSandboxScaleExpectations.DeleteExpectations(key.String())
+	podRecoveryBudgets.delete(key.String())
+	r.taskSchedulers.Delete(key.String())
 }
 
 func (r *BatchSandboxReconciler) deleteTaskScheduler(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox) {
