@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import asyncio
+import time
 from datetime import timedelta
 
 import pytest
@@ -129,6 +131,30 @@ async def test_create_times_out_when_code_service_never_ready(monkeypatch) -> No
             ready_timeout=timedelta(milliseconds=50),
             health_check_polling_interval=timedelta(milliseconds=10),
         )
+
+
+@pytest.mark.asyncio
+async def test_create_times_out_when_a_probe_hangs(monkeypatch) -> None:
+    """A probe that never answers must not hold create() past ready_timeout."""
+
+    async def hung_ping(self) -> bool:
+        await asyncio.sleep(3600)
+        return True
+
+    monkeypatch.setattr(CodesAdapter, "ping", hung_ping)
+    sbx = _FakeSandbox()
+    started = time.monotonic()
+
+    with pytest.raises(SandboxReadyTimeoutException):
+        await asyncio.wait_for(
+            CodeInterpreter.create(  # type: ignore[arg-type]
+                sandbox=sbx,
+                ready_timeout=timedelta(milliseconds=200),
+                health_check_polling_interval=timedelta(milliseconds=10),
+            ),
+            timeout=5,
+        )
+    assert time.monotonic() - started < 2
 
 
 @pytest.mark.asyncio

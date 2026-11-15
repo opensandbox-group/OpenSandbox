@@ -282,7 +282,16 @@ class CodeInterpreter:
 
         while time.monotonic() < deadline:
             attempt += 1
-            if await self.is_healthy():
+            # Bound each probe by the remaining budget: ping and the runtime
+            # check carry their own request timeouts, which would otherwise
+            # let one stalled probe run well past ready_timeout.
+            try:
+                healthy = await asyncio.wait_for(
+                    self.is_healthy(), deadline - time.monotonic()
+                )
+            except asyncio.TimeoutError:
+                break
+            if healthy:
                 logger.info(
                     f"Code interpreter {self.id} passed health check "
                     f"after {attempt} attempts"
