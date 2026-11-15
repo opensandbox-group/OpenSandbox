@@ -183,6 +183,31 @@ def test_runtime_execd_run_as_init_parses_from_toml(tmp_path):
     assert loaded_disabled.runtime.execd_run_as_init is False
 
 
+def test_docker_pids_limit_zero_in_toml_disables_limit(tmp_path):
+    """TOML has no null literal, so 0 is the documented way to disable the
+    per-container PID limit."""
+    toml = """
+        [runtime]
+        type = "docker"
+        execd_image = "opensandbox/execd:test"
+
+        [docker]
+        pids_limit = 0
+        """
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml)
+
+    loaded = config_module.load_config(config_path)
+    assert loaded.docker.pids_limit is None
+
+
+def test_docker_pids_limit_keeps_positive_and_rejects_negative():
+    assert config_module.DockerConfig().pids_limit == 4096
+    assert config_module.DockerConfig(pids_limit=512).pids_limit == 512
+    with pytest.raises(ValidationError):
+        config_module.DockerConfig(pids_limit=-1)
+
+
 def test_docker_runtime_disallows_kubernetes_block():
     server_cfg = ServerConfig()
     runtime_cfg = RuntimeConfig(type="docker", execd_image="busybox:latest")

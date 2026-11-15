@@ -1405,8 +1405,11 @@ class DockerConfig(BaseModel):
     )
     pids_limit: Optional[int] = Field(
         default=4096,
-        ge=1,
-        description="Maximum number of processes allowed per sandbox container. Set to null to disable the limit.",
+        ge=0,
+        description=(
+            "Maximum number of processes allowed per sandbox container. "
+            "Set to 0 to disable the limit (TOML cannot express null)."
+        ),
     )
     sandbox_env: dict[str, str] = Field(
         default_factory=dict,
@@ -1425,6 +1428,13 @@ class DockerConfig(BaseModel):
             "volumes. Useful for mounting a private CA certificate into all sandboxes."
         ),
     )
+
+    @field_validator("pids_limit", mode="after")
+    @classmethod
+    def _zero_disables_pids_limit(cls, value: Optional[int]) -> Optional[int]:
+        # TOML has no null literal, so 0 is the only way to disable the limit
+        # from the config file; None leaves pids_limit unset on the container.
+        return None if value == 0 else value
 
     @field_validator("publish_host")
     @classmethod
