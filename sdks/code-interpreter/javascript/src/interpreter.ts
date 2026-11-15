@@ -203,6 +203,31 @@ export class CodeInterpreter {
   }
 
   /**
+   * Run {@link isHealthy} for at most `ms`. Each probe carries its own request
+   * timeout, so a stalled one could otherwise hold the caller past the
+   * readiness deadline: when the time is up its requests are aborted and the
+   * attempt counts as unhealthy, even if the probe ignores the abort.
+   */
+  private async isHealthyWithin(ms: number, signal?: AbortSignal): Promise<boolean> {
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(signal?.reason);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve(false);
+      }, ms);
+    });
+    try {
+      return await Promise.race([this.isHealthy(controller.signal), expired]);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /**
    * Poll the strict health check (execd `GET /ping` + runtime process alive)
    * until it passes, or throw {@link SandboxReadyTimeoutException} when the
    * deadline expires.
@@ -221,7 +246,7 @@ export class CodeInterpreter {
       if (Date.now() >= deadline) break;
       attempt++;
       try {
-        const ok = await this.isHealthy(opts.signal);
+        const ok = await this.isHealthyWithin(deadline - Date.now(), opts.signal);
         throwIfAborted(opts.signal);
         if (ok) {
           return;
