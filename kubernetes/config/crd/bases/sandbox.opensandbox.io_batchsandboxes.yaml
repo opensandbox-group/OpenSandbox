@@ -187,6 +187,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failedPodUIDs:
+                description: FailedPodUIDs records the UIDs of Pods responsible for
+                  the current failure state.
+                items:
+                  type: string
+                type: array
               observedGeneration:
                 description: |-
                   ObservedGeneration is the most recent generation observed for this BatchSandbox. It corresponds to the
