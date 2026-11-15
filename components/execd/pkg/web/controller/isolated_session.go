@@ -340,13 +340,12 @@ func (c *IsolatedSessionController) Run() {
 			return
 		}
 		telemetry.RecordIsolatedRun(ctx, "error", durationMs)
-		ename := "RuntimeError"
-		evalue := err.Error()
-		if strings.HasPrefix(evalue, "command exited with code ") {
-			ename = "ExitError"
-			evalue = strings.TrimPrefix(evalue, "command exited with code ")
+		var exitErr *runtime.ExitCodeError
+		if errors.As(err, &exitErr) {
+			c.writeIsolatedRunError("ExitError", strconv.Itoa(exitErr.Code))
+			return
 		}
-		c.writeIsolatedRunError(ename, evalue)
+		c.writeIsolatedRunError("RuntimeError", err.Error())
 		return
 	}
 	telemetry.RecordIsolatedRun(ctx, "success", durationMs)

@@ -753,3 +753,47 @@ func TestIsolatedSearchRejectsBadGlob(t *testing.T) {
 		t.Fatalf("body = %s, want invalid pattern", rec.Body.String())
 	}
 }
+
+// TestIsolatedRun_NonZeroExitIsAnExitError pins the terminal event for a run
+// whose code exits non-zero: an ExitError carrying just the exit status.
+func TestIsolatedRun_NonZeroExitIsAnExitError(t *testing.T) {
+	previousRunner := isolatedRunner
+	runner, err := runtime.NewIsolatedRunner(
+		runtime.NewController("", ""),
+		lifecycleTestIsolator{},
+		isolation.Config{
+			UpperRoot:     t.TempDir(),
+			UpperMaxBytes: 8 << 30,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	isolatedRunner = runner
+	t.Cleanup(func() {
+		runner.StopGC()
+		isolatedRunner = previousRunner
+	})
+
+	sessionID, err := runner.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: filepath.Join(t.TempDir(), "ws"),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(sessionID) })
+
+	runCtx, runRecorder := newTestContext(
+		http.MethodPost,
+		"/v1/isolated/session/"+sessionID+"/run",
+		[]byte(`{"code":"(exit 13)","timeout_seconds":10}`),
+	)
+	runCtx.Params = gin.Params{{Key: "sessionId", Value: sessionID}}
+	NewIsolatedSessionController(runCtx).Run()
+
+	body := runRecorder.Body.String()
+	if !strings.Contains(body, `"error":{"ename":"ExitError","evalue":"13"`) {
+		t.Fatalf("expected an ExitError with evalue 13, body:\n%s", body)
+	}
+}
