@@ -335,6 +335,77 @@ def test_get_endpoint_bridge_proxy_uses_local_host_not_eip_when_use_proxy_host(
     assert endpoint.headers is None
 
 
+def _bridge_container(mock_client, labels):
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {"Labels": labels},
+        "NetworkSettings": {"IPAddress": "172.17.0.5"},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+
+
+@pytest.mark.parametrize("server_host", ["0.0.0.0", "192.168.1.10"])
+def test_proxy_host_dials_the_publish_host(mock_docker_service, server_host):
+    """Host-mapped ports answer only on [docker].publish_host, whatever the server binds to."""
+    service, mock_client = mock_docker_service
+    service.app_config.server.host = server_host
+    service.app_config.docker.publish_host = "172.17.0.1"
+    _bridge_container(
+        mock_client,
+        {
+            SANDBOX_EMBEDDING_PROXY_PORT_LABEL: "50002",
+            SANDBOX_HTTP_PORT_LABEL: "51000",
+            SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY: "egress-token",
+        },
+    )
+
+    with patch(
+        "opensandbox_server.services.docker.networking._running_inside_docker_container",
+        return_value=False,
+    ):
+        proxied = service.get_endpoint("sbx-123", 8080, use_proxy_host=True)
+        sidecar = service.get_endpoint("sbx-123", 8080, resolve_internal=True)
+        assert service._resolve_proxy_host() == "172.17.0.1"
+
+    assert proxied.endpoint == "172.17.0.1:51000"
+    assert sidecar.endpoint == "172.17.0.1:51000"
+
+
+def test_proxy_host_keeps_docker_host_ip_over_publish_host_in_container(mock_docker_service):
+    service, mock_client = mock_docker_service
+    service.app_config.docker.publish_host = "172.17.0.1"
+    service.app_config.docker.host_ip = "host.docker.internal"
+    _bridge_container(mock_client, {SANDBOX_HTTP_PORT_LABEL: "51000"})
+
+    with patch(
+        "opensandbox_server.services.docker.networking._running_inside_docker_container",
+        return_value=True,
+    ):
+        endpoint = service.get_endpoint("sbx-123", 8080, use_proxy_host=True)
+
+    assert endpoint.endpoint == "host.docker.internal:51000"
+
+
+def test_host_mode_proxy_host_ignores_publish_host(mock_docker_service):
+    """Host networking publishes no ports, so publish_host says nothing about where they answer."""
+    service, mock_client = mock_docker_service
+    service.app_config.docker.network_mode = "host"
+    service.network_mode = "host"
+    service.app_config.docker.publish_host = "172.17.0.1"
+    mock_container = MagicMock()
+    mock_container.attrs = {"State": {"Running": True}}
+    mock_client.containers.list.return_value = [mock_container]
+
+    with patch(
+        "opensandbox_server.services.docker.networking._running_inside_docker_container",
+        return_value=False,
+    ):
+        endpoint = service.get_endpoint("sbx-123", 8080, use_proxy_host=True)
+
+    assert endpoint.endpoint == "127.0.0.1:8080"
+
+
 def test_get_endpoint_bridge_uses_docker_host_ip_when_server_in_container():
     config = AppConfig(
         server=ServerConfig(port=8080, host="0.0.0.0"),

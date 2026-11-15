@@ -438,6 +438,11 @@ class DockerNetworkingMixin:
                 host_ip = self._get_docker_host_ip()
                 if host_ip:
                     return host_ip
+        # Outside host networking, sandbox ports are published on [docker].publish_host; when it
+        # names one address they answer only there, whatever address the server listens on.
+        publish_host = self.app_config.docker.publish_host
+        if self.network_mode != HOST_NETWORK_MODE and publish_host != "0.0.0.0":
+            return publish_host
         if host_key in {"", "0.0.0.0", "::"}:
             return "127.0.0.1"
         return host_cfg
