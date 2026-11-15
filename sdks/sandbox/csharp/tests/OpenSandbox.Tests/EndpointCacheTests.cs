@@ -233,4 +233,54 @@ public class EndpointCacheTests
         Assert.Equal(2, fetchCount);
         Assert.Equal("fresh", third.EndpointAddress);
     }
+
+    [Fact]
+    public async Task GetOrFetchAsync_CachesResult_WhenAnotherSandboxIsInvalidatedMidFetch()
+    {
+        var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
+        var key = new EndpointCacheKey("sb-1", 8080, false);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fetchCount = 0;
+
+        async Task<Endpoint> Fetcher()
+        {
+            Interlocked.Increment(ref fetchCount);
+            await release.Task;
+            return Ep("a");
+        }
+
+        var pending = cache.GetOrFetchAsync(key, Fetcher);
+        // sb-2 has nothing cached or in flight; sb-1's fetch must be unaffected.
+        cache.Invalidate("sb-2");
+        release.TrySetResult(true);
+        await pending;
+
+        Assert.Equal("a", cache.Get(key)?.EndpointAddress);
+        var again = await cache.GetOrFetchAsync(key, Fetcher);
+        Assert.Equal("a", again.EndpointAddress);
+        Assert.Equal(1, fetchCount);
+    }
+
+    [Fact]
+    public async Task GetOrFetchAsync_DoesNotCache_WhenOwnSandboxIsInvalidatedMidFetch()
+    {
+        var cache = new EndpointCache(maxSize: 10, ttlSeconds: 60);
+        var key = new EndpointCacheKey("sb-1", 8080, false);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        async Task<Endpoint> Fetcher()
+        {
+            await release.Task;
+            return Ep("stale");
+        }
+
+        var pending = cache.GetOrFetchAsync(key, Fetcher);
+        cache.Invalidate("sb-1");
+        release.TrySetResult(true);
+
+        // The caller that started before the invalidation still gets its result...
+        Assert.Equal("stale", (await pending).EndpointAddress);
+        // ...but it must not repopulate the cache.
+        Assert.Null(cache.Get(key));
+    }
 }
