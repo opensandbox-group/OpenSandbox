@@ -579,5 +579,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	trap 'on_error vault-verify' ERR
 	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
 	run_stage "MITM CA chain verify (baked CA -> injection -> pinning)" mitm_ca_chain_verify
-	run_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" exchange_resolver_verify
+	# exchange_stage (lib.sh): BLOCKED under credential-bound (I1), never OK.
+	exchange_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" ""
+	[[ "$EGRESS_INTERCEPTION_MODE" != "credential-bound" ]] || stage_summary
 fi

@@ -87,6 +87,14 @@
 #                    firecracker-egress-resource-aware-pool); POOL_NAME and
 #                    the server's fastpath_resource_pool follow the profile
 #   MAX_SANDBOXES_PER_POD per-fastlet sandbox capacity (default 8)
+#   EGRESS_INTERCEPTION_MODE  OSEP-0023 Fast Sandbox interception switch
+#                    (experimental): empty (default — the Pool renders
+#                    unchanged, no switch is passed), all, or
+#                    credential-bound; non-empty renders
+#                    OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE into the
+#                    pool's egress container only. credential-bound also
+#                    registers the credential-bound verify stage on both
+#                    lanes and reports the exchange stage BLOCKED (I1)
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
 #   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (latest from PyPI / preinstalled binary)
 #   SKIP_TOOL_INSTALL / SKIP_LEFTOVER_CLEAN / INOTIFY_VALUE
@@ -186,6 +194,14 @@ case "$POOL_MODE" in
 		exit 1 ;;
 esac
 POOL_NAME="${POOL_NAME:-$POOL_PROFILE}"
+# OSEP-0023 interception switch: validated here, before any action runs.
+EGRESS_INTERCEPTION_MODE="${EGRESS_INTERCEPTION_MODE:-}"
+case "$EGRESS_INTERCEPTION_MODE" in
+	""|all|credential-bound) ;;
+	*)
+		printf '[fast-sandbox-env] ERROR: EGRESS_INTERCEPTION_MODE must be empty, all or credential-bound (got: %s)\n' "$EGRESS_INTERCEPTION_MODE" >&2
+		exit 1 ;;
+esac
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
@@ -318,6 +334,9 @@ ms2s() { awk -v ms="$1" 'BEGIN { printf "%.1f", ms / 1000 }'; }
 
 declare -a STAGE_ORDER=()
 declare -a STAGE_MS_LIST=()
+# Stages/items that ran but proved nothing ("BLOCKED: ..." / "NOT_RUN: ...");
+# listed by stage_summary only when non-empty, never counted as OK.
+declare -a STAGE_UNVERIFIED=()
 STAGE_CUR=""
 STAGE_CUR_LABEL=""
 STAGE_START_NS=0
@@ -347,6 +366,18 @@ run_stage() {
 	stage_done
 }
 
+stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
+	STAGE_UNVERIFIED+=("$1: $2")
+	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
+}
+
+# A registered stage that is known not to work yet: announced, listed in the
+# summary, and never routed through stage_done (no OK line).
+run_blocked_stage() { # <description> <reason>
+	stage_begin "$1"
+	stage_unverified BLOCKED "$2"
+}
+
 stage_summary() {
 	local index name ms total=0
 	highlight "== stage timings =="
@@ -358,6 +389,12 @@ stage_summary() {
 		printf '  %-46s %9ss\n' "$name" "$(ms2s "$ms")"
 	done
 	printf '  \033[1m%-46s %9ss\033[0m\n' "TOTAL" "$(ms2s "$total")"
+	if [[ ${#STAGE_UNVERIFIED[@]} -gt 0 ]]; then
+		highlight "== not verified (excluded from the stages above) =="
+		for name in "${STAGE_UNVERIFIED[@]}"; do
+			printf '  %s\n' "$name"
+		done
+	fi
 }
 
 wait_for() { # description attempts command [args...]
@@ -2399,7 +2436,7 @@ render_pool() { # > $GEN_DIR/$POOL_PROFILE.yaml
 		-v pool_min="$POOL_MIN" -v pool_max="$POOL_MAX" \
 		-v max_per_pod="$MAX_SANDBOXES_PER_POD" \
 		-v warm="$WARM_IMAGES" -v image="$TEMPLATE_ID" \
-		-v mitm_ca="$MITM_CA_SECRET" '
+		-v mitm_ca="$MITM_CA_SECRET" -v interception="$EGRESS_INTERCEPTION_MODE" '
 		{ gsub(/"@FASTLET_IMAGE@"/, fastlet)
 		  gsub(/"@EGRESS_IMAGE@"/, egress)
 		  gsub(/"@POOL_MIN@"/, pool_min)
@@ -2408,6 +2445,11 @@ render_pool() { # > $GEN_DIR/$POOL_PROFILE.yaml
 		  gsub(/maxSandboxesPerPod: 5/, "maxSandboxesPerPod: " max_per_pod) }
 		/^# @WARM_IMAGES@$/ {
 			if (warm == "1") printf "  warmImages:\n  - %s\n", image
+			next }
+		# OSEP-0023 switch (egress container only): an empty mode drops the
+		# marker, so the render is byte-identical to a template without it.
+		/^# @EGRESS_INTERCEPTION_ENV@$/ {
+			if (interception != "") printf "        - name: OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE\n          value: \"%s\"\n", interception
 			next }
 		{ print }
 	' "$src" > "$out"
@@ -2512,6 +2554,8 @@ pool_up() {
 		fi
 	fi
 	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
+	[[ -z "$EGRESS_INTERCEPTION_MODE" ]] \
+		|| log "egress OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE=$EGRESS_INTERCEPTION_MODE (OSEP-0023, experimental)"
 	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null
 	wait_for "fastlet pods Ready (poolMin=$POOL_MIN)" 300 fastlet_pods_ready
 	wait_for "egress container ready in every fastlet pod" 180 egress_containers_ready
@@ -4414,6 +4458,27 @@ require_live_stack() {
 	[[ -x "$OSB_BIN" ]] || die "osb not found at $OSB_BIN (run up first, or set OSB_BIN)"
 }
 
+# OSEP-0023 lane gates. Off/all: the exchange stage runs exactly as before
+# and no credential-bound stage exists. credential-bound: the exchange
+# stage is reported BLOCKED (decision snapshots reject exchange bindings,
+# issue I1) instead of running, and the credential-bound stage
+# (verify/credential-bound.sh, one implementation sourced into this shell)
+# runs on the lane's template.
+exchange_stage() { # <description> <template-id>
+	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+		run_blocked_stage "$1" "exchange under credential-bound (see I1)"
+		return 0
+	fi
+	run_stage "$1" exchange_resolver_verify "$2"
+}
+
+credential_bound_stage() { # <description> <template-id>
+	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] || return 0
+	# shellcheck source=verify/credential-bound.sh
+	source "$SCRIPT_DIR/verify/credential-bound.sh"
+	run_stage "$1" credential_bound_verify "$2"
+}
+
 # The native lane is deliberately thin: the native-rootfs boot path plus the
 # egress network-security-rules baseline (the only native-exclusive stage).
 # The scenario matrix — execd-as-init, pause/resume, vault, MITM CA, exchange
@@ -4427,6 +4492,7 @@ verify_native() {
 	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify "$TEMPLATE_ID" 3
 	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
+	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
 	# Last on purpose: the e2e kill loop started the source's 30s disappearance
 	# grace; the network-security-rules stage consumed it, so this is a
 	# near-free confirmation.
@@ -4490,7 +4556,8 @@ verify_overlaybd() {
 	run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
 	run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
 	run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
-	run_stage "exchange resolver verify (overlaybd template, OSEP-0025)" exchange_resolver_verify "$OCI_TEMPLATE_ID"
+	exchange_stage "exchange resolver verify (overlaybd template, OSEP-0025)" "$OCI_TEMPLATE_ID"
+	credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)" "$OCI_TEMPLATE_ID"
 	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
 	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
 	# Rootfs-only verify (FSEP-0001), default-on: the fastlet-side kernel is
@@ -4906,6 +4973,11 @@ down() {
 	[[ -z "$(docker ps -a --filter "name=$MITM_ECHO_CONTAINER" --format '{{.Names}}' || true)" ]] \
 		|| fail "MITM echo container still present"
 	rm -rf "$MITM_CA_DIR"
+	# credential-bound origin fixtures (verify/credential-bound.sh) left by an
+	# interrupted run: require both fixture type and this cluster's ownership.
+	docker ps -aq --filter "label=opensandbox.io/fast-sandbox-env-fixture=credential-bound-origin" \
+		--filter "label=opensandbox.io/fast-sandbox-env-cluster=$KIND_CLUSTER" \
+		| xargs -r docker rm -f >/dev/null 2>&1 || true
 	# Server/gateway die with the cluster; only the signing key outlives it.
 	rm -f "$WORK/agent-registry.json" "$SIGNING_KEY_FILE"
 	rm -rf "$GEN_DIR" "$FSB_GEN_DIR"
