@@ -14,25 +14,17 @@
 
 """Local tests for the OSEP-0023 credential-bound integration wiring.
 
+Covers mode validation, Pool rendering and the lane/summary gates only.
 Everything runs against disposable fixtures: the real shell functions are
 sourced into a bash >= 4 subprocess with external writers (kubectl, docker,
-osb) replaced by recording stubs, and the real guest client / test origin
-talk real TLS on 127.0.0.1 with a throwaway CA. Nothing here proves the KVM
-behavior; that evidence comes only from the integration workflow.
+osb) replaced by recording stubs. The credential-bound verifier and its
+tests are a follow-up R7 change; nothing here is KVM evidence.
 """
 
-import hashlib
-import importlib.util
-import json
 import os
 import shutil
-import socket
-import ssl
 import subprocess
-import sys
 import tempfile
-import threading
-import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -41,9 +33,6 @@ REPO = os.path.dirname(os.path.dirname(ENV_DIR))
 ENV_SH = os.path.join(ENV_DIR, "integration-env.sh")
 LIB_SH = os.path.join(ENV_DIR, "lib.sh")
 VAULT_SH = os.path.join(ENV_DIR, "verify", "vault.sh")
-CB_SH = os.path.join(ENV_DIR, "verify", "credential-bound.sh")
-CLIENT_PY = os.path.join(ENV_DIR, "verify", "credential-bound-client.py")
-ORIGIN_PY = os.path.join(ENV_DIR, "verify", "credential-bound-origin.py")
 PROFILES = ("firecracker-egress-pool", "firecracker-egress-resource-aware-pool")
 # Pre-change baseline for the byte-for-byte golden comparisons (override with
 # CBV_GOLDEN_BASE; the golden tests skip when the commit is not available,
@@ -64,8 +53,6 @@ def find_bash():
 
 
 BASH = find_bash()
-HAVE_JQ = shutil.which("jq") is not None
-HAVE_OPENSSL = shutil.which("openssl") is not None
 
 # Stubs shared by every sourced run: bash 3-safe clock, quiet logging, and
 # recording replacements for anything that would touch a cluster or Docker.
@@ -242,6 +229,7 @@ jq() { cat >/dev/null; return 0; }
 ublk_pool_state() { echo '[]'; }
 run_stage() { printf 'RUN|%s|%s|%s\n' "$1" "$2" "${3:-}"; }
 stage_begin() { printf 'BEGIN|%s\n' "$1"; }
+source() { printf 'SOURCE|%s\n' "$*"; builtin source "$@"; }
 mkdir -p "$WORK"; echo tpl-native > "$WORK/template-id"
 OCI_TEMPLATE_ID=tpl-oci
 verify_native
@@ -255,14 +243,14 @@ class StageGateTest(ShellCase):
         out = self.sourced(LANES, script=script, EGRESS_INTERCEPTION_MODE=mode, OCI_STACK="1").stdout
         script_dir = os.path.dirname(os.path.abspath(script))
         return [l.replace(script_dir, "<SCRIPT_DIR>") for l in out.splitlines()
-                if l.startswith(("RUN|", "BEGIN|", "UNVERIFIED|"))]
+                if l.startswith(("RUN|", "BEGIN|", "UNVERIFIED|", "SOURCE|"))]
 
     def test_off_and_all_keep_the_stage_list(self):
         off = self.lanes("")
         self.assertEqual(self.lanes("all"), off)
         self.assertTrue(any(l.startswith("RUN|exchange resolver verify") and "|exchange_resolver_verify|tpl-oci" in l
                             for l in off))
-        self.assertFalse(any("credential_bound_verify" in l or l.startswith("BEGIN|") for l in off))
+        self.assertFalse(any("credential-bound" in l or l.startswith("BEGIN|") for l in off))
         self.assertIn("UNVERIFIED|", off)
 
     @unittest.skipUnless(git_available(GOLDEN_BASE), "golden baseline commit not available")
@@ -270,21 +258,27 @@ class StageGateTest(ShellCase):
         base_sh = materialize_base(GOLDEN_BASE, os.path.join(self.tmp, "base"))
         self.assertEqual(self.lanes(""), self.lanes("", script=base_sh))
 
-    def test_credential_bound_registers_both_lanes_and_blocks_exchange(self):
+    def test_credential_bound_marks_both_lanes_not_run_and_blocks_exchange(self):
         off = self.lanes("")
         cb = self.lanes("credential-bound")
-        cb_runs = [l for l in cb if "credential_bound_verify" in l]
-        self.assertEqual(cb_runs, [
-            "RUN|credential-bound interception verify (native template, OSEP-0023)|credential_bound_verify|tpl-native",
-            "RUN|credential-bound interception verify (overlaybd template, OSEP-0023)|credential_bound_verify|tpl-oci",
+        native = "credential-bound interception verify (native template, OSEP-0023)"
+        overlay = "credential-bound interception verify (overlaybd template, OSEP-0023)"
+        exchange = "exchange resolver verify (overlaybd template, OSEP-0025)"
+        self.assertEqual([l for l in cb if l.startswith("BEGIN|")],
+                         ["BEGIN|" + native, "BEGIN|" + exchange, "BEGIN|" + overlay])
+        follow_up = "credential-bound integration verification is delivered in a follow-up R7 change"
+        self.assertEqual([l for l in cb if l.startswith("UNVERIFIED|")], [
+            "UNVERIFIED|NOT_RUN: %s: %s" % (native, follow_up),
+            "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
+            "UNVERIFIED|NOT_RUN: %s: %s" % (overlay, follow_up),
         ])
+        # nothing credential-bound is run or sourced, and exchange never runs
+        self.assertFalse(any(l.startswith("RUN|") and "credential" in l for l in cb))
+        self.assertFalse(any(l.startswith("SOURCE|") and "credential-bound" in l for l in cb))
         self.assertFalse(any("exchange_resolver_verify" in l for l in cb))
-        self.assertIn("BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)", cb)
-        self.assertIn("UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)", cb)
         # every other off-mode stage is still registered, in order
-        kept = [l for l in cb if l.startswith("RUN|") and "credential_bound_verify" not in l]
+        kept = [l for l in cb if l.startswith("RUN|")]
         self.assertEqual(kept, [l for l in off if l.startswith("RUN|") and "exchange_resolver_verify" not in l])
-
 
 GATE = r'''
 exchange_resolver_verify() { echo "EXCHANGE-RAN tpl=$1"; }
@@ -318,6 +312,19 @@ class StageSummaryTest(ShellCase):
             self.assertNotIn("ORDER|exchange", out)
             self.assertEqual(out.count("OK in"), 1)  # only "other stage"
 
+    def test_credential_bound_item_is_not_run_without_ok(self):
+        body = 'credential_bound_stage "cb item"\nrun_stage "other stage" true\nstage_summary\nprintf "ORDER|%s\\n" "${STAGE_ORDER[@]}"\n'
+        for mode in ("", "all"):
+            out = self.sourced(body, EGRESS_INTERCEPTION_MODE=mode)
+            self.assertNotIn("cb item", out.stdout + out.stderr)
+            self.assertNotIn("not verified", out.stdout)
+        cb = self.sourced(body, EGRESS_INTERCEPTION_MODE="credential-bound")
+        _, _, tail = cb.stdout.partition("== not verified (excluded from the stages above) ==")
+        self.assertIn("NOT_RUN: cb item: credential-bound integration verification is delivered", tail)
+        self.assertIn("NOT_RUN: cb item", cb.stderr)
+        self.assertNotIn("ORDER|cb item", cb.stdout)
+        self.assertEqual(cb.stdout.count("OK in"), 1)  # only "other stage"
+
     @unittest.skipUnless(git_available(GOLDEN_BASE), "golden baseline commit not available")
     def test_off_summary_matches_baseline(self):
         base_sh = materialize_base(GOLDEN_BASE, os.path.join(self.tmp, "base"))
@@ -334,364 +341,6 @@ class StageSummaryTest(ShellCase):
         self.assertNotIn("EXCHANGE-RAN", cb.stdout)
         self.assertNotIn("OK in", cb.stdout)
         self.assertIn("BLOCKED: exchange under credential-bound (see I1)", cb.stderr)
-
-
-class SourcingTest(ShellCase):
-    def test_sourcing_keeps_monolith_state(self):
-        body = r'''
-run_stage "earlier" true
-before="$(declare -f wait_for run_stage stage_summary | cksum) ${#STAGE_ORDER[@]} $STAGE_N $WORK $LOGS_DIR"
-source "$SCRIPT_DIR/verify/credential-bound.sh"
-after="$(declare -f wait_for run_stage stage_summary | cksum) ${#STAGE_ORDER[@]} $STAGE_N $WORK $LOGS_DIR"
-[[ "$before" == "$after" ]] && echo SAME
-declare -F credential_bound_verify >/dev/null && echo DEFINED
-[[ -z "${_FSB_ENV_LIB_SOURCED:-}" ]] && echo NO-LIB
-'''
-        out = self.sourced(body, EGRESS_INTERCEPTION_MODE="credential-bound").stdout
-        self.assertIn("SAME", out)
-        self.assertIn("DEFINED", out)
-        self.assertIn("NO-LIB", out)
-
-    def test_verify_refuses_wrong_mode_and_xtrace(self):
-        body = 'source "$SCRIPT_DIR/verify/credential-bound.sh"\nfail() { echo "FAIL:$*"; exit 7; }\ncredential_bound_verify tpl'
-        proc = self.sourced(body, check=False, EGRESS_INTERCEPTION_MODE="all")
-        self.assertEqual(proc.returncode, 7)
-        self.assertIn("requires EGRESS_INTERCEPTION_MODE=credential-bound", proc.stdout)
-        proc = self.sourced("set -x\n" + body, check=False, EGRESS_INTERCEPTION_MODE="credential-bound")
-        self.assertEqual(proc.returncode, 7)
-        self.assertIn("refuses to run under xtrace", proc.stdout)
-        self.assertEqual(self.calls_made(), "")
-
-
-@unittest.skipUnless(BASH and HAVE_JQ and HAVE_OPENSSL, "needs bash>=4, jq and openssl")
-class CleanupTest(ShellCase):
-    def test_failure_path_removes_only_its_fixtures(self):
-        ca = os.path.join(self.work, "mitm-ca")
-        os.makedirs(ca)
-        for name in ("tls.crt", "echo.crt", "echo.key"):
-            with open(os.path.join(ca, name), "w") as handle:
-                handle.write("dummy\n")
-        body = r'''
-source "$SCRIPT_DIR/verify/credential-bound.sh"
-load_mitm_ca_fingerprint() { MITM_CA_FINGERPRINT=abc; }
-kind_network() { echo kind; }
-docker() {
-	printf 'docker %s\n' "$*" >> "$CALLS"
-	case "$1" in
-		run) [[ "$2" == "-d" ]] && return 0; return 1 ;;   # origin starts, host probe fails
-		inspect) echo 172.18.0.9 ;;
-		*) return 0 ;;
-	esac
-}
-wait_for() { "${@:3}" >/dev/null 2>&1 || fail "$1"; }
-fail() { echo "FAIL:$*"; exit 9; }
-CB_SANDBOXES=(pre-existing-should-reset)
-credential_bound_verify tpl
-'''
-        proc = self.sourced(body, check=False, EGRESS_INTERCEPTION_MODE="credential-bound")
-        self.assertEqual(proc.returncode, 9, proc.stdout + proc.stderr)
-        calls = self.calls_made().splitlines()
-        runs = [c for c in calls if c.startswith("docker run -d")]
-        self.assertEqual(len(runs), 1)
-        name = runs[0].split("--name ", 1)[1].split()[0]
-        self.assertTrue(name.startswith("fast-sandbox-env-cb-origin-"))
-        self.assertIn("--label opensandbox.io/fast-sandbox-env-fixture=credential-bound-origin", runs[0])
-        self.assertIn("--label opensandbox.io/fast-sandbox-env-cluster=", runs[0])
-        self.assertEqual(calls[-1], "docker rm -f %s" % name)
-        self.assertEqual([c for c in calls if c.startswith("docker rm")], ["docker rm -f %s" % name])
-        self.assertFalse(any("pre-existing-should-reset" in c for c in calls))
-        gen = os.path.join(self.work, "gen")
-        self.assertEqual([d for d in os.listdir(gen) if d.startswith("credential-bound.")], [])
-
-    def test_cleanup_kills_registered_sandboxes(self):
-        body = r'''
-source "$SCRIPT_DIR/verify/credential-bound.sh"
-osb_api() { printf 'osb %s\n' "$*" >> "$CALLS"; }
-CB_SANDBOXES=(sbx-1 sbx-2)
-cb_forget_sandbox sbx-1
-CB_ORIGIN_CONTAINER=fast-sandbox-env-cb-origin-test
-cb_cleanup
-'''
-        self.sourced(body, EGRESS_INTERCEPTION_MODE="credential-bound")
-        self.assertEqual(self.calls_made().splitlines(), [
-            "osb sandbox kill sbx-2",
-            "docker rm -f fast-sandbox-env-cb-origin-test",
-        ])
-
-    def test_log_scan_reports_verdict_only(self):
-        values = os.path.join(self.tmp, "values")
-        with open(values, "w") as handle:
-            handle.write("fake-osep23-a-0011\nfake-osep23-b-2233\n")
-        body = r'''
-source "$SCRIPT_DIR/verify/credential-bound.sh"
-kubectl() {
-	case "$*" in
-		*"get pods"*) echo pod-1 pod-2 ;;
-		*"logs pod-2 -c egress --since-time"*) printf 'ok line\nleaked fake-osep23-b-2233 here\n' ;;
-		*"logs"*) echo "clean line" ;;
-	esac
-}
-fail() { echo "FAIL:$*"; exit 9; }
-cb_log_scan "$VALUES" 2026-01-01T00:00:00Z && echo CLEAN
-'''
-        proc = self.sourced(body, check=False, EGRESS_INTERCEPTION_MODE="credential-bound", VALUES=values)
-        self.assertEqual(proc.returncode, 9)
-        self.assertIn("pod-2", proc.stdout)
-        self.assertNotIn("fake-osep23", proc.stdout + proc.stderr)
-        clean = body.replace("leaked fake-osep23-b-2233 here", "nothing")
-        proc = self.sourced(clean, EGRESS_INTERCEPTION_MODE="credential-bound", VALUES=values)
-        self.assertIn("CLEAN", proc.stdout)
-
-
-@unittest.skipUnless(BASH and os.path.isdir("/proc/self"), "needs bash>=4 and a Linux /proc")
-class PodPidScanTest(ShellCase):
-    def test_scanner_matches_target_not_itself(self):
-        sleeper = subprocess.Popen(["/bin/sleep", "60"])
-        try:
-            body = r'''
-source "$SCRIPT_DIR/verify/credential-bound.sh"
-kubectl() { while [[ "$1" != "--" ]]; do shift; done; shift; "$@"; }
-printf 'ARGV0|%s\n' "$(cb_pod_pids pod argv0 /bin/sleep)"
-printf 'SCRIPT|%s\n' "$(cb_pod_pids pod script sleep)"
-printf 'NONE|%s\n' "$(cb_pod_pids pod argv0 /no/such/binary)"
-'''
-            out = self.sourced(body, EGRESS_INTERCEPTION_MODE="credential-bound").stdout
-            lines = dict(l.split("|", 1) for l in out.splitlines() if "|" in l)
-            self.assertIn(str(sleeper.pid), lines["ARGV0"].split())
-            self.assertIn(str(sleeper.pid), lines["SCRIPT"].split())
-            self.assertEqual(lines["NONE"].strip(), "")
-        finally:
-            sleeper.kill()
-            sleeper.wait()
-
-
-# --- real TLS fixtures (throwaway CA on 127.0.0.1)
-
-def openssl(*args):
-    subprocess.run(["openssl"] + list(args), check=True, capture_output=True)
-
-
-def make_pki(directory, name):
-    ca_key, ca_crt = os.path.join(directory, name + "-ca.key"), os.path.join(directory, name + "-ca.crt")
-    cnf = os.path.join(directory, name + ".cnf")
-    with open(cnf, "w") as handle:
-        handle.write("[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=cbv-test-%s\n"
-                     "[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n"
-                     "[v3_leaf]\nsubjectAltName=DNS:echo.test\nextendedKeyUsage=serverAuth\n" % name)
-    openssl("req", "-x509", "-new", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-keyout", ca_key,
-            "-out", ca_crt, "-config", cnf, "-extensions", "v3_ca")
-    leaf_key, leaf_csr = os.path.join(directory, name + "-leaf.key"), os.path.join(directory, name + "-leaf.csr")
-    leaf_crt = os.path.join(directory, name + "-leaf.crt")
-    openssl("req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", leaf_key, "-out", leaf_csr,
-            "-subj", "/CN=echo.test")
-    openssl("x509", "-req", "-in", leaf_csr, "-CA", ca_crt, "-CAkey", ca_key, "-CAcreateserial",
-            "-out", leaf_crt, "-days", "2", "-extfile", cnf, "-extensions", "v3_leaf")
-    return ca_crt, leaf_crt, leaf_key
-
-
-def load_module(path, name):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def der_sha256(pem_path):
-    with open(pem_path) as handle:
-        return hashlib.sha256(ssl.PEM_cert_to_DER_cert(handle.read())).hexdigest()
-
-
-@unittest.skipUnless(HAVE_OPENSSL, "openssl CLI required")
-class HelperProtocolTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="cbv-pki-")
-        cls.ca, cls.leaf, cls.key = make_pki(cls.tmp, "main")
-        cls.other_ca, _, _ = make_pki(cls.tmp, "other")
-        origin = load_module(ORIGIN_PY, "cbv_origin")
-        cls.server = origin.build_server(0, cls.leaf, cls.key, host="127.0.0.1")
-        cls.port = cls.server.server_address[1]
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.server.shutdown()
-        cls.server.server_close()
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def client(self, *args, port=None, cafile=None):
-        cmd = [sys.executable, CLIENT_PY] + list(args) + [
-            "--host", "echo.test", "--ip", "127.0.0.1", "--port", str(port or self.port),
-            "--cafile", cafile or self.ca, "--connect-timeout", "3", "--request-timeout", "5"]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-
-    @staticmethod
-    def parse(stdout):
-        lines = [l for l in stdout.splitlines() if l.startswith("CBV-RESULT ")]
-        assert len(lines) == 1, stdout
-        return json.loads(lines[0][len("CBV-RESULT "):])
-
-    def test_once_keeps_one_http11_connection(self):
-        proc = self.client("once", "--count", "3", "--tag", "t1")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        res = self.parse(proc.stdout)
-        self.assertTrue(res["ok"] and res["verified"])
-        self.assertEqual(res["connects"], 1)
-        self.assertEqual(res["leaf_sha256"], der_sha256(self.leaf))
-        conns = {r["origin"]["conn"] for r in res["responses"]}
-        self.assertEqual(len(conns), 1)
-        self.assertEqual([r["origin"]["req"] for r in res["responses"]], [1, 2, 3])
-        self.assertEqual(res["last"]["origin"]["proto"], "HTTP/1.1")
-        self.assertEqual(res["last"]["origin"]["cred"], "absent")
-        self.assertEqual(res["last"]["origin"]["credential_headers"], [])
-        self.assertEqual(res["last"]["origin"]["tag"], "t1")
-
-    def test_origin_reports_digest_never_value(self):
-        ctx = ssl.create_default_context(cafile=self.ca)
-        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as raw:
-            with ctx.wrap_socket(raw, server_hostname="echo.test") as tls:
-                tls.sendall(b"GET /cbv HTTP/1.1\r\nHost: echo.test\r\nX-Api-Key: fake-osep23-x\r\n"
-                            b"Content-Length: 0\r\n\r\n")
-                data = b""
-                while b"}" not in data:
-                    data += tls.recv(4096)
-        self.assertNotIn(b"fake-osep23-x", data)
-        body = json.loads(data.split(b"\r\n\r\n", 1)[1])
-        self.assertEqual(body["cred"], "sha256:" + hashlib.sha256(b"fake-osep23-x").hexdigest())
-        self.assertEqual(body["credential_headers"], ["x-api-key"])
-
-    def test_untrusted_ca_and_wrong_host_fail_verification(self):
-        res = self.parse(self.client("once", cafile=self.other_ca).stdout)
-        self.assertFalse(res["ok"])
-        self.assertEqual((res["error"]["phase"], res["error"]["kind"]), ("handshake", "verify_failed"))
-        proc = subprocess.run([sys.executable, CLIENT_PY, "once", "--host", "other.test", "--ip", "127.0.0.1",
-                               "--port", str(self.port), "--cafile", self.ca], capture_output=True, text=True)
-        self.assertEqual(proc.returncode, 3)
-        self.assertEqual(self.parse(proc.stdout)["error"]["kind"], "verify_failed")
-
-    def test_refused_connect_is_classified(self):
-        sock = socket.socket()
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        sock.close()
-        proc = self.client("once", port=port)
-        self.assertEqual(proc.returncode, 3)
-        res = self.parse(proc.stdout)
-        self.assertEqual((res["error"]["phase"], res["error"]["kind"]), ("connect", "refused"))
-        self.assertNotIn("leaf_sha256", res)
-
-    def test_hold_reuses_the_same_socket(self):
-        hold = os.path.join(self.tmp, "hold-same")
-        proc = subprocess.Popen([sys.executable, CLIENT_PY, "hold", "--dir", hold, "--tag", "h1",
-                                 "--host", "echo.test", "--ip", "127.0.0.1", "--port", str(self.port),
-                                 "--cafile", self.ca, "--wait-timeout", "30"])
-        r1 = wait_json(os.path.join(hold, "r1.json"))
-        open(os.path.join(hold, "go"), "w").close()
-        self.assertEqual(proc.wait(timeout=30), 0)
-        r2 = wait_json(os.path.join(hold, "r2.json"))
-        self.assertEqual((r1["connects"], r2["connects"]), (1, 1))
-        self.assertEqual(r1["socket_id"], r2["socket_id"])
-        self.assertEqual(r1["local_port"], r2["local_port"])
-        self.assertEqual(r1["last"]["origin"]["conn"], r2["last"]["origin"]["conn"])
-        self.assertEqual(r2["last"]["origin"]["req"], 2)
-
-    def test_hold_reports_peer_close_without_reconnecting(self):
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(self.leaf, self.key)
-        listener = socket.socket()
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(4)
-        accepted = []
-
-        def serve_one_then_close():
-            raw, _ = listener.accept()
-            accepted.append(1)
-            tls = ctx.wrap_socket(raw, server_side=True)
-            data = b""
-            while b"\r\n\r\n" not in data:
-                data += tls.recv(4096)
-            body = b'{"v":1,"conn":"x","req":1,"proto":"HTTP/1.1","cred":"absent","credential_headers":[]}'
-            tls.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s" % (len(body), body))
-            time.sleep(0.5)
-            tls.close()
-
-        threading.Thread(target=serve_one_then_close, daemon=True).start()
-        hold = os.path.join(self.tmp, "hold-close")
-        proc = subprocess.Popen([sys.executable, CLIENT_PY, "hold", "--dir", hold, "--tag", "h2",
-                                 "--host", "echo.test", "--ip", "127.0.0.1",
-                                 "--port", str(listener.getsockname()[1]), "--cafile", self.ca,
-                                 "--wait-timeout", "30", "--request-timeout", "5"])
-        r1 = wait_json(os.path.join(hold, "r1.json"))
-        time.sleep(1.0)
-        open(os.path.join(hold, "go"), "w").close()
-        self.assertEqual(proc.wait(timeout=30), 3)
-        listener.close()
-        r2 = wait_json(os.path.join(hold, "r2.json"))
-        self.assertTrue(r1["ok"])
-        self.assertFalse(r2["ok"])
-        self.assertTrue(r2["closed_by_peer"], r2["error"])
-        self.assertEqual(r2["connects"], 1)
-        self.assertEqual(r1["socket_id"], r2["socket_id"])
-        self.assertEqual(len(accepted), 1)
-
-    def test_second_connect_is_refused(self):
-        client = load_module(CLIENT_PY, "cbv_client_reconnect")
-        args = client.parse_args(["once", "--host", "echo.test", "--ip", "127.0.0.1",
-                                  "--port", str(self.port), "--cafile", self.ca])
-        first = client.Connection(args)
-        first.connect()
-        first.close()
-        with self.assertRaises(client.ProbeError) as raised:
-            client.Connection(args).connect()
-        self.assertEqual(raised.exception.kind, "reconnect_forbidden")
-
-    @unittest.skipUnless(BASH and HAVE_JQ, "needs bash>=4 and jq")
-    def test_shell_verdicts_on_real_client_output(self):
-        res = self.client("once", "--tag", "v").stdout
-        leaf = der_sha256(self.leaf)
-        script = r'''
-source "%s"
-%s
-source "$SCRIPT_DIR/verify/credential-bound.sh"
-CB_RESULT="$(cb_extract "$OUT")"; CB_RC=0
-CB_ORIGIN_LEAF="$LEAF"
-cb_result_passthrough && echo PASSTHROUGH
-cb_result_injected sha256:00 || echo NOT-INJECTED
-cb_result_bound_leaf || echo ORIGIN-LEAF
-CB_ORIGIN_LEAF=deadbeef
-cb_result_passthrough || echo NOT-PASSTHROUGH-OTHER-LEAF
-cb_result_bound_leaf && echo BOUND-LEAF
-CB_RC=3; CB_ORIGIN_LEAF="$LEAF"
-cb_result_passthrough || echo RC-NONZERO-REJECTED
-r="$CB_RESULT"
-cb_hold_same_socket "$r" "$r" && echo SAME
-cb_hold_same_socket "$r" "$(printf '%%s' "$r" | jq -c '.local_port += 1')" || echo DIFFERENT
-cb_hold_closed_with_evidence '{"error":{"kind":"reset"}}' && echo CLOSED
-cb_hold_closed_with_evidence '{"error":{"kind":"timeout"}}' || echo TIMEOUT-NOT-CLOSED
-cb_result_summary
-CB_RESULT=""; printf 'EMPTY|%%s\n' "$(cb_result_summary)"
-''' % (ENV_SH, COMMON_STUBS)
-        env = dict(os.environ, OUT=res, LEAF=leaf, EGRESS_INTERCEPTION_MODE="credential-bound",
-                   WORK=self.tmp, CALLS=os.path.join(self.tmp, "calls"))
-        out = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env, check=True).stdout
-        for marker in ("PASSTHROUGH", "NOT-INJECTED", "ORIGIN-LEAF", "NOT-PASSTHROUGH-OTHER-LEAF",
-                       "BOUND-LEAF", "RC-NONZERO-REJECTED", "SAME", "DIFFERENT", "CLOSED",
-                       "TIMEOUT-NOT-CLOSED"):
-            self.assertIn(marker, out.split())
-        self.assertIn('"leaf":"origin"', out)
-        self.assertIn('"cred":"absent"', out)
-        self.assertIn('EMPTY|{"ok":null,"connects":null,"leaf":null,"status":null,"cred":null,"error":null}', out)
-
-
-def wait_json(path, timeout=30):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if os.path.exists(path):
-            with open(path) as handle:
-                return json.load(handle)
-        time.sleep(0.05)
-    raise AssertionError("timed out waiting for %s" % path)
 
 
 if __name__ == "__main__":

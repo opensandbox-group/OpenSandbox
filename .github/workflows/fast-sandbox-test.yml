@@ -39,7 +39,7 @@ jobs:
       area: fast-sandbox
 
   verifier-tests:
-    name: Credential-bound verifier tests
+    name: Credential-bound wiring tests
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
@@ -55,19 +55,16 @@ jobs:
       - name: Install test dependency
         run: python -m pip install PyYAML==6.0.3
       - name: Verify local test prerequisites
+        # Fail instead of letting the golden/YAML tests skip.
         run: |
           bash -c 'test "${BASH_VERSINFO[0]}" -ge 4'
-          command -v jq
-          command -v openssl
-          test -d /proc
+          python -c 'import yaml'
           git cat-file -e '4ae99691ff0a62594614df90a86ecbee07add966^{commit}'
-      - name: Run verifier regression tests
+      - name: Run wiring regression tests
         run: python -m unittest discover -v -s scripts/fast-sandbox-env/tests -p 'test_*.py'
 
   integration:
-    # The default leg keeps the original check name; the OSEP-0023 leg adds
-    # its mode to the name.
-    name: Integration Env (self-hosted kvm${{ matrix.egress_interception_mode != '' && format(', {0}', matrix.egress_interception_mode) || '' }})
+    name: Integration Env (self-hosted kvm)
     needs: changes
     if: >-
       github.event_name != 'pull_request' ||
@@ -75,15 +72,6 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ok-to-test') &&
       ( github.event.action != 'labeled' ||
       github.event.label.name == 'ok-to-test' ) )
-    # OSEP-0023 (experimental): the default leg ('' = switch unset, Pool
-    # rendered unchanged) plus a credential-bound leg. Strictly serial: each
-    # leg owns the runner for a full up -> verify -> teardown, so the pool is
-    # never switched under live Pods and the legs never share a host.
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        egress_interception_mode: ['', 'credential-bound']
     runs-on: kvm
     timeout-minutes: 240
     env:
@@ -96,9 +84,6 @@ jobs:
       POOL_MODE: ${{ inputs.pool_mode || github.event.client_payload.pool_mode || 'resource-aware' }}
       # workflow_dispatch input or repository_dispatch client_payload (empty on PRs).
       FSB_COMMIT_OVERRIDE: ${{ inputs.fsb_commit || github.event.client_payload.fsb_commit }}
-      # Empty on the default leg: integration-env.sh then renders the Pool
-      # exactly as before and passes no switch to egress.
-      EGRESS_INTERCEPTION_MODE: ${{ matrix.egress_interception_mode }}
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)
@@ -136,13 +121,12 @@ jobs:
       # Thin lane: native boot path + egress rules only (~4 min observed);
       # the full scenario matrix runs on the overlaybd template below.
       - name: Run native template verify
-        # The credential-bound leg adds its verify stage to this lane.
-        timeout-minutes: ${{ matrix.egress_interception_mode == 'credential-bound' && 60 || 30 }}
+        timeout-minutes: 30
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
 
       - name: Run overlaybd template verify
         # Builds the overlaybd template first; no-op when OCI_STACK=0.
-        timeout-minutes: ${{ matrix.egress_interception_mode == 'credential-bound' && 120 || 90 }}
+        timeout-minutes: 90
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
 
       - name: Run ResourceAware verify (OSEP-0026)
@@ -180,7 +164,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fast-sandbox-diagnostics-${{ matrix.egress_interception_mode || 'default' }}-${{ github.run_attempt }}
+          name: fast-sandbox-diagnostics-${{ github.run_attempt }}
           path: diagnostics/
           retention-days: 7
 
