@@ -123,3 +123,28 @@ test("run() parses SSE data:-framed events, including an unterminated tail frame
     ["a", "b"],
   );
 });
+
+test("run() infers the exit code the way commands.run() does", async () => {
+  const cases = [
+    [`{"type":"execution_complete","timestamp":2,"execution_time":3}\n`, 0],
+    [
+      `{"type":"error","timestamp":2,"error":{"ename":"SystemExit","evalue":"3","traceback":[],"exit_code":3}}\n`,
+      3,
+    ],
+    [
+      `{"type":"error","timestamp":2,"error":{"ename":"ZeroDivisionError","evalue":"division by zero","traceback":[]}}\n`,
+      null,
+    ],
+  ];
+  for (const [terminal, expected] of cases) {
+    const codes = makeCodes({
+      fetchImpl: async () => new Response("unused", { status: 404 }),
+      sseFetchImpl: async () =>
+        sseResponse([`{"type":"init","timestamp":1,"text":"exec-1"}\n`, terminal]),
+    });
+
+    const execution = await codes.run("raise SystemExit(3)");
+
+    assert.equal(execution.exitCode, expected, terminal);
+  }
+});
