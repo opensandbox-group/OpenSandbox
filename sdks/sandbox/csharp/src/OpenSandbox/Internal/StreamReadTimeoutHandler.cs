@@ -46,7 +46,32 @@ internal sealed class StreamReadTimeoutHandler : DelegatingHandler
             }
         }
 
-        var body = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        return WrapBody(response, await response.Content.ReadAsStreamAsync().ConfigureAwait(false));
+    }
+
+#if NET5_0_OR_GREATER
+    protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        HttpResponseMessage response;
+        using (var headerDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            headerDeadline.CancelAfter(_readTimeout);
+            try
+            {
+                response = base.Send(request, headerDeadline.Token);
+            }
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested && headerDeadline.IsCancellationRequested)
+            {
+                throw ReadTimedOut(_readTimeout, "response headers", ex);
+            }
+        }
+
+        return WrapBody(response, response.Content.ReadAsStream(cancellationToken));
+    }
+#endif
+
+    private HttpResponseMessage WrapBody(HttpResponseMessage response, Stream body)
+    {
         var content = new StreamContent(new ReadTimeoutStream(response.Content, body, _readTimeout));
         foreach (var header in response.Content.Headers)
         {

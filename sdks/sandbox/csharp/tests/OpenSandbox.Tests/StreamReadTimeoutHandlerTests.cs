@@ -117,6 +117,34 @@ public class StreamReadTimeoutHandlerTests
         (ex.Which.InnerException is TimeoutException).Should().BeFalse();
     }
 
+    [Fact]
+    public async Task SynchronousSend_BoundsHeadersAndBodyReads()
+    {
+        using var silent = CreateClient(async ct =>
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            throw new InvalidOperationException("unreachable");
+        });
+        var sendSilent = () => silent.Send(
+            new HttpRequestMessage(HttpMethod.Post, "http://execd.local/command"),
+            HttpCompletionOption.ResponseHeadersRead);
+        await Task.Run(() => sendSilent.Should().Throw<TaskCanceledException>().WithInnerException<TimeoutException>())
+            .WaitAsync(TimeSpan.FromSeconds(10));
+
+        var stream = new ScriptedStream((TimeSpan.Zero, ": ping\n\n"));
+        using var stalled = CreateClient(_ => Task.FromResult(StreamResponse(stream)));
+        using var response = await Task.Run(() => stalled.Send(
+            new HttpRequestMessage(HttpMethod.Post, "http://execd.local/command"),
+            HttpCompletionOption.ResponseHeadersRead)).WaitAsync(TimeSpan.FromSeconds(10));
+        var body = response.Content.ReadAsStream();
+        var buffer = new byte[64];
+        body.Read(buffer, 0, buffer.Length).Should().BeGreaterThan(0);
+
+        var readStalled = () => body.Read(buffer, 0, buffer.Length);
+        await Task.Run(() => readStalled.Should().Throw<TaskCanceledException>().WithInnerException<TimeoutException>())
+            .WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     [Theory]
     [InlineData(5, 30)]
     [InlineData(120, 120)]
@@ -149,6 +177,9 @@ public class StreamReadTimeoutHandlerTests
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
             _respond(cancellationToken);
+
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            _respond(cancellationToken).GetAwaiter().GetResult();
     }
 
     /// <summary>
