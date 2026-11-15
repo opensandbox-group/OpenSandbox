@@ -99,6 +99,7 @@ class TestApplyMetadataPatch:
         with pytest.raises(HTTPException) as exc:
             self._merge(labels, {"opensandbox.io/id": None})
         assert exc.value.status_code == 400
+        assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
         assert "opensandbox.io/id" in exc.value.detail["message"]
 
     def test_reserved_key_rejected_with_non_null_value(self):
@@ -108,6 +109,7 @@ class TestApplyMetadataPatch:
         with pytest.raises(HTTPException) as exc:
             self._merge(labels, {"opensandbox.io/custom": "value"})
         assert exc.value.status_code == 400
+        assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
         assert "opensandbox.io/custom" in exc.value.detail["message"]
 
 
