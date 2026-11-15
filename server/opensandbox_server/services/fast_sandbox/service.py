@@ -680,7 +680,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         current = self._get_cr(sandbox_id)
         if not patch:
             return sandbox_from_cr(current)
-        self._apply_metadata_patch({}, patch)
+        self._validate_metadata_patch(patch)
         metadata = current["metadata"]
         namespace = metadata["namespace"]
         try:
