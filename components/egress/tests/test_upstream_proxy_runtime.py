@@ -327,6 +327,7 @@ class _VaultUnixServer:
         self._lock = threading.Lock()
         self._mode = "normal"
         self.denied_hosts: set[str] = set()
+        self.policy_requests: list[tuple[str, int]] = []
 
     def start(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -359,6 +360,9 @@ class _VaultUnixServer:
             path = data.split(b" ", 2)[1].decode("ascii")
             if path.startswith("/egress/authorize?"):
                 host = parse_qs(urlsplit(path).query).get("host", [""])[0]
+                port = int(parse_qs(urlsplit(path).query)["port"][0])
+                with self._lock:
+                    self.policy_requests.append((host, port))
                 status = 503 if mode == "policy-error" else 403 if host in denied_hosts else 204
                 conn.sendall(f"HTTP/1.1 {status} Policy\r\ncontent-length: 0\r\n\r\n".encode())
                 return
@@ -934,6 +938,170 @@ class UpstreamProxyRuntimeTest(unittest.TestCase):
                 self.assertNotIn(PROXY_AUTH, "\n".join(log))
             finally:
                 conn.close()
+                with self._vault._lock:
+                    self._vault.denied_hosts.clear()
+                _stop(proc)
+                upstream.stop()
+                server.shutdown()
+                server.server_close()
+
+    def test_explicit_tls_cross_layer_identity(self) -> None:
+        """Real CONNECT/TLS/H1 and H2 parsing must not select another origin's vault."""
+        import ssl
+        from h2.config import H2Configuration
+        from h2.connection import H2Connection
+        from h2.events import ConnectionTerminated, ResponseReceived, StreamEnded, StreamReset
+
+        received: list[dict[str, str]] = []
+        server_snis: list[str] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:
+                received.append({k.lower(): v for k, v in self.headers.items()})
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *_args) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cert, key = Path(tmp) / "cert.pem", Path(tmp) / "key.pem"
+            subprocess.run(
+                [
+                    "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                    "-keyout", str(key), "-out", str(cert), "-days", "1",
+                    "-nodes", "-subj", "/CN=code.invalid",
+                    "-addext", "subjectAltName=DNS:code.invalid,DNS:other.invalid",
+                ],
+                check=True, capture_output=True,
+            )
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(cert, key)
+            context.set_servername_callback(lambda _socket, sni, _ctx: server_snis.append(sni))
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            upstream = _ConnectProxy({
+                (host, 443): server.server_address for host in ("code.invalid", "other.invalid")
+            })
+            upstream.start()
+            port = _free_port()
+            proc, log = _start_mitmdump(
+                port,
+                {
+                    "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET": self._vault_path,
+                    "OPENSANDBOX_EGRESS_UPSTREAM_PROXY": f"http://127.0.0.1:{upstream.port}",
+                    "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH": PROXY_AUTH,
+                },
+                "--set", f"confdir={tmp}",
+                "--set", f"ssl_verify_upstream_trusted_ca={cert}",
+                load_system_addon=True,
+            )
+            try:
+                for protocol in ("http/1.1", "h2"):
+                    for connect, sni, authority, host, denied, expected in (
+                        ("code.invalid", "code.invalid", "code.invalid", None, None, 200),
+                        ("other.invalid", "other.invalid", "other.invalid", None, None, 200),
+                        ("other.invalid", "code.invalid", "code.invalid", None, None, 403),
+                        ("code.invalid", "other.invalid", "code.invalid", None, None, 403),
+                        ("code.invalid", "code.invalid", "other.invalid", None, None, 403),
+                        ("other.invalid", "other.invalid", "code.invalid", None, None, 403),
+                        ("code.invalid", "code.invalid", "code.invalid", "other.invalid", None, "protocol_error"),
+                        ("code.invalid", "code.invalid", "code.invalid", None, "code.invalid", 403),
+                    ):
+                        if protocol == "http/1.1" and host is not None:
+                            continue  # H2-only :authority versus Host disagreement.
+                        with self.subTest(protocol=protocol, connect=connect, sni=sni,
+                                          authority=authority, host=host, denied=denied):
+                            target_before = len(received)
+                            upstream_before = len(upstream.requests)
+                            sni_before = len(server_snis)
+                            with self._vault._lock:
+                                policy_before = len(self._vault.policy_requests)
+                            client_context = ssl.create_default_context(
+                                cafile=str(Path(tmp) / "mitmproxy-ca-cert.pem")
+                            )
+                            client_context.set_alpn_protocols([protocol])
+                            with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+                                sock.sendall(
+                                    f"CONNECT {connect}:443 HTTP/1.1\r\nHost: {connect}:443\r\n\r\n".encode()
+                                )
+                                response = http.client.HTTPResponse(sock)
+                                response.begin()
+                                self.assertEqual(200, response.status, log)
+                                response.close()
+                                with client_context.wrap_socket(sock, server_hostname=sni) as tls:
+                                    self.assertEqual(protocol, tls.selected_alpn_protocol(), log)
+                                    # Change policy after CONNECT to prove inner-request admission.
+                                    if denied:
+                                        with self._vault._lock:
+                                            self._vault.denied_hosts.add(denied)
+                                    if protocol == "http/1.1":
+                                        tls.sendall(
+                                            f"GET /v1/secure HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n".encode()
+                                        )
+                                        response = http.client.HTTPResponse(tls)
+                                        response.begin()
+                                        status = response.status
+                                        response.read()
+                                        response.close()
+                                    else:
+                                        h2 = H2Connection(config=H2Configuration(
+                                            client_side=True, header_encoding="utf-8",
+                                            validate_outbound_headers=False, normalize_outbound_headers=False,
+                                        ))
+                                        h2.initiate_connection()
+                                        headers = [(":method", "GET"), (":scheme", "https"),
+                                                   (":authority", authority), (":path", "/v1/secure"),
+                                                   ("content-length", "0")]
+                                        if host is not None:
+                                            headers.append(("host", host))
+                                        h2.send_headers(1, headers, end_stream=True)
+                                        tls.sendall(h2.data_to_send())
+                                        status = None
+                                        ended = False
+                                        while not ended:
+                                            data = tls.recv(65536)
+                                            self.assertTrue(data, log)
+                                            for event in h2.receive_data(data):
+                                                if isinstance(event, ResponseReceived):
+                                                    status = int(dict(event.headers)[":status"])
+                                                if isinstance(event, (StreamEnded, StreamReset)):
+                                                    ended = True
+                                                if isinstance(event, ConnectionTerminated):
+                                                    self.assertEqual(1, event.error_code)
+                                                    status, ended = "protocol_error", True
+                                            tls.sendall(h2.data_to_send())
+                                    with self._vault._lock:
+                                        self._vault.denied_hosts.clear()
+                            self.assertEqual(expected, status, log)
+                            policies = self._vault.policy_requests[policy_before:]
+                            self.assertEqual((connect, 443), policies[0])
+                            if expected == 200:
+                                self.assertEqual([(connect, 443), (authority, 443)], policies)
+                                self.assertEqual([f"{authority}:443"],
+                                                 [r["authority"] for r in upstream.requests[upstream_before:]])
+                                self.assertEqual([sni], server_snis[sni_before:])
+                                self.assertEqual(target_before + 1, len(received))
+                                self.assertEqual(VAULT_AUTH if authority == "code.invalid" else None,
+                                                 received[-1].get("authorization"))
+                                self.assertNotIn("proxy-authorization", received[-1])
+                            else:
+                                self.assertEqual(target_before, len(received), log)
+                                self.assertEqual(upstream_before, len(upstream.requests), log)
+                                if denied:
+                                    self.assertEqual([(connect, 443), (authority, 443)], policies)
+                                else:
+                                    self.assertEqual([(connect, 443)], policies)
+                self.assertTrue(all(r["proxy-authorization"] == PROXY_AUTH and not r["authorization"]
+                                    for r in upstream.requests))
+                self.assertNotIn(VAULT_AUTH, "\n".join(log))
+                self.assertNotIn(PROXY_AUTH, "\n".join(log))
+            finally:
                 with self._vault._lock:
                     self._vault.denied_hosts.clear()
                 _stop(proc)

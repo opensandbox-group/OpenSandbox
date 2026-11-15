@@ -971,6 +971,17 @@ class EgressUpstreamProxyConfig(BaseModel):
         ),
         min_length=1,
     )
+    explicit_proxy_port: Optional[int] = Field(
+        default=None,
+        ge=1024,
+        le=65535,
+        strict=True,
+        description=(
+            "Optional loopback explicit proxy listener port. Disabled when omitted; "
+            "must be unused and different from the transparent listener port. "
+            "Injected into the egress sidecar as OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT."
+        ),
+    )
     authorization: Optional[SecretStr] = Field(
         default=None,
         description=(

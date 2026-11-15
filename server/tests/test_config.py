@@ -2516,3 +2516,21 @@ class TestSecureAccessEnvOverride:
 
         with pytest.raises(ValidationError, match="not found in secure_access.keys"):
             config_module.load_config(config_path)
+
+
+@pytest.mark.parametrize("port", [1024, 18082, 18083, 65535])
+def test_upstream_explicit_proxy_port_is_admin_opt_in(port):
+    from opensandbox_server.services.helpers import upstream_proxy_egress_env
+
+    name = "OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT"
+    cfg = EgressUpstreamProxyConfig(url="http://proxy.local:3128")
+    assert cfg.explicit_proxy_port is None
+    assert name not in upstream_proxy_egress_env(cfg)
+    cfg = EgressUpstreamProxyConfig(url=cfg.url, explicit_proxy_port=port)
+    assert upstream_proxy_egress_env(cfg)[name] == str(port)
+
+
+@pytest.mark.parametrize("port", [0, 1023, 65536, True, "18082", 18082.5])
+def test_upstream_explicit_proxy_port_rejects_invalid_values(port):
+    with pytest.raises(ValidationError):
+        EgressUpstreamProxyConfig(url="http://proxy.local:3128", explicit_proxy_port=port)

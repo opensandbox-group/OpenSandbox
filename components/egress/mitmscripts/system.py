@@ -1962,6 +1962,12 @@ async def _authorize_explicit_proxy(flow: http.HTTPFlow) -> bool:
         if request.method != "CONNECT":
             if request.scheme not in {"http", "https"}:
                 raise ValueError("unsupported scheme")
+            # Regular-mode request.host retains the CONNECT destination. TLS
+            # SNI must not authenticate a different origin before vault lookup.
+            if request.scheme == "https":
+                sni = (getattr(client, "sni", None) or "").encode("idna").decode("ascii").lower().removesuffix(".")
+                if sni != host:
+                    raise ValueError("conflicting SNI")
             default_port = 443 if request.scheme == "https" else 80
             host_headers = request.headers.get_all("host")
             if len(host_headers) > 1:

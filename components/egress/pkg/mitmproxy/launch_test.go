@@ -34,20 +34,31 @@ func TestBuildMitmdumpArgsModeSpecs(t *testing.T) {
 	require.NotContains(t, args, "transparent@::1:18081")
 }
 
-func TestBuildMitmdumpArgsExplicitProxyPortCollision(t *testing.T) {
+func TestExplicitProxyPortOptIn(t *testing.T) {
 	t.Setenv(constants.EnvUpstreamProxy, "http://proxy.example.com:3128")
-	for _, v6 := range []bool{false, true} {
-		args := buildMitmdumpArgs(Config{ListenPort: 18082, ListenV6: &v6})
-		require.Contains(t, args, "transparent@127.0.0.1:18082")
-		require.NotContains(t, args, "regular@127.0.0.1:18082")
-		require.Contains(t, args, "regular@127.0.0.1:18083")
-		if v6 {
-			require.Contains(t, args, "transparent@::1:18082")
-		}
+	t.Setenv(constants.EnvExplicitProxyPort, "")
+	cfg := Config{ListenPort: 18081}
+	port, err := explicitProxyPortFromEnv(cfg)
+	require.NoError(t, err)
+	require.Zero(t, port)
+	require.NotContains(t, buildMitmdumpArgs(cfg), "regular@127.0.0.1:18082")
+	for _, raw := range []string{"1024", "18082", "18083", "65535"} {
+		t.Setenv(constants.EnvExplicitProxyPort, raw)
+		cfg.ExplicitProxyPort, err = explicitProxyPortFromEnv(cfg)
+		require.NoError(t, err)
+		require.Contains(t, buildMitmdumpArgs(cfg), "regular@127.0.0.1:"+raw)
 	}
-	args := buildMitmdumpArgs(Config{ListenPort: 18083})
-	require.Contains(t, args, "transparent@127.0.0.1:18083")
-	require.Contains(t, args, "regular@127.0.0.1:18082")
+	for _, raw := range []string{"0", "1023", "65536", "invalid", "18081"} {
+		t.Setenv(constants.EnvExplicitProxyPort, raw)
+		_, err = explicitProxyPortFromEnv(cfg)
+		require.Error(t, err)
+	}
+	t.Setenv(constants.EnvExplicitProxyPort, "18082")
+	_, err = explicitProxyPortFromEnv(Config{ListenPort: 18081, ListenHost: "0.0.0.0"})
+	require.Error(t, err)
+	t.Setenv(constants.EnvUpstreamProxy, "")
+	_, err = explicitProxyPortFromEnv(cfg)
+	require.Error(t, err)
 }
 
 func TestBuildMitmdumpArgsNoUserScripts(t *testing.T) {
@@ -143,7 +154,7 @@ func TestBuildMitmdumpArgsUpstreamProxyScriptOrdered(t *testing.T) {
 		}
 	}
 	require.Equal(t, []string{systemScriptPath, upstreamProxyScriptPath, "/scripts/auth.py"}, scripts)
-	require.Contains(t, args, "regular@127.0.0.1:18082")
+	require.NotContains(t, args, "regular@127.0.0.1:18082")
 }
 
 func TestBuildMitmdumpArgsNoUpstreamProxyKeepsOrder(t *testing.T) {

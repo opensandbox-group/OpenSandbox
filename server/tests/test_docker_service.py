@@ -2030,6 +2030,7 @@ def test_egress_sidecar_injects_upstream_proxy_env_when_configured(mock_docker):
         upstream_proxy=EgressUpstreamProxyConfig(
             url="http://proxy.local:3128",
             authorization=SecretStr("Basic dGVzdDp0ZXN0"),
+            explicit_proxy_port=18082,
         ),
     )
     service = DockerSandboxService(config=cfg)
@@ -2049,6 +2050,7 @@ def test_egress_sidecar_injects_upstream_proxy_env_when_configured(mock_docker):
         )
 
     sidecar_env = mock_client.api.create_container.call_args.kwargs["environment"]
+    assert "OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT=18082" in sidecar_env
     assert "OPENSANDBOX_EGRESS_UPSTREAM_PROXY=http://proxy.local:3128" in sidecar_env
     assert (
         "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH=Basic dGVzdDp0ZXN0"

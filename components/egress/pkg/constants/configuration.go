@@ -184,6 +184,9 @@ const (
 	// variable.
 	EnvMitmCaSeedDir = "OPENSANDBOX_EGRESS_MITM_CA_SEED_DIR"
 
+	// EnvExplicitProxyPort opts into a loopback explicit listener; unset disables it.
+	EnvExplicitProxyPort = "OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT"
+
 	// EnvUpstreamProxy: chained upstream proxy endpoint ("http://host:port" or
 	// "https://host:port"). When set, the bundled upstream_proxy.py addon is
 	// loaded and all mitm-handled egress is chained through it (fail-closed:

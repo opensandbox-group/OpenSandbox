@@ -169,7 +169,8 @@ class ExplicitProxyPolicyTest(unittest.TestCase):
         flow = _Flow()
         flow.response = None
         flow.client_conn = types.SimpleNamespace(
-            proxy_mode=types.SimpleNamespace(type_name="regular")
+            proxy_mode=types.SimpleNamespace(type_name="regular"),
+            sni="code.example.com",
         )
         flow.request.host_header = "code.example.com"
         flow.request.headers = mock.MagicMock()
@@ -194,6 +195,19 @@ class ExplicitProxyPolicyTest(unittest.TestCase):
                     vault.assert_not_called()
                     self.assertEqual(403 if result == 403 else 503, flow.response.status_code)
                     self.assertNotIn("private diagnostic", flow.response.body)
+
+    def test_conflicting_sni_denied_before_policy_or_credentials(self) -> None:
+        with mock.patch.dict(os.environ, {"OPENSANDBOX_EGRESS_UPSTREAM_PROXY": "http://proxy.example.com:3128"}):
+            system = _load_system_module()
+            flow = self._flow()
+            flow.client_conn.sni = "other.invalid"
+            with mock.patch.object(system, "_proxy_policy_status") as policy_check, mock.patch.object(
+                system, "_load_active_vault"
+            ) as vault:
+                system.requestheaders(flow)
+                policy_check.assert_not_called()
+                vault.assert_not_called()
+                self.assertEqual(403, flow.response.status_code)
 
     def test_conflicting_h2_host_denied_before_policy_or_credentials(self) -> None:
         with mock.patch.dict(os.environ, {"OPENSANDBOX_EGRESS_UPSTREAM_PROXY": "http://proxy.example.com:3128"}):

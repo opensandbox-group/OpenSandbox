@@ -224,6 +224,7 @@ url = "http://proxy.example.com:3128"
 # authorization = "Basic <base64>"
 # ca_cert_path = "/etc/ssl/private-ca/upstream-proxy-ca.pem"   # Docker only
 # ca_secret_name = "corp-proxy-ca"                            # Kubernetes only
+# explicit_proxy_port = 18082                                # Optional loopback listener
 ```
 
 **`otlp_endpoint` notes:** must be `http(s)://` (OTLP over HTTP/protobuf only; gRPC silently fails); use a fully qualified name or IP — the sidecar allow rule matches the configured host exactly; sidecar exports **delta** temporality (Prometheus/GMP needs `deltatocumulative`).
@@ -235,6 +236,7 @@ url = "http://proxy.example.com:3128"
 - Admin config only: the same env var names in request `env` are rejected. Fast sandboxes reject `networkPolicy` on create/patch while configured (pool mode already rejects it).
 - `url`: `http(s)://host[:port]` only; credentials, query, fragment, non-root paths, control/outside-charset characters rejected. Put credentials in `authorization` (injected as literal env var — visible in `docker inspect`/Pod spec; protect the config file).
 - CA fields are runtime-specific and validated at load (`ca_cert_path`: absolute path on the Docker daemon host; `ca_secret_name`: Secret key `ca.crt`, mounted read-only into the sidecar only). They **augment** the system trust store and apply to all mitmproxy upstream TLS verification. Missing/invalid CA fails closed — traffic is never chained with reduced verification.
+- `explicit_proxy_port`: optional integer from `1024` through `65535`; omitted by default (no explicit listener). Injected as `OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT` into the sidecar only. Choose an unused workload port different from the transparent listener; collisions fail startup without an automatic fallback. Existing transparent-only deployments reserve no additional port.
 - Config changes affect newly created sandboxes only.
 - Data-plane details: [`components/egress/docs/mitmproxy-transparent.md`](../components/egress/docs/mitmproxy-transparent.md#6-chain-through-an-upstream-proxy-corporateforward-egress); operations: [`docs/guides/egress-upstream-proxy.md`](../docs/guides/egress-upstream-proxy.md).
 
