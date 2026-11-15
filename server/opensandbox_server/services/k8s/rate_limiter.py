@@ -54,12 +54,7 @@ class TokenBucketRateLimiter:
         return self._try_acquire() <= 0.0
 
     def _try_acquire(self) -> float:
-        """Attempt to take a token.
-
-        Returns:
-            0.0 if a token was consumed successfully, otherwise the approximate
-            number of seconds to wait before retrying.
-        """
+        """Return 0.0 when a token was consumed, else the seconds to wait before retrying."""
         with self._lock:
             self._refill()
             if self._tokens >= 1.0:

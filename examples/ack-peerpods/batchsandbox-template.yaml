@@ -1,0 +1,8 @@
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        example.opensandbox.io/peerpods: "true"

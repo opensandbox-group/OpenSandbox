@@ -120,10 +120,23 @@ class _DispatchStubRuntime:
     def create_snapshot_unsupported_message(self) -> str:
         return ""
 
-    def preflight_create_snapshot(self, sandbox_id: str, *, namespace: str | None = None) -> None:
+    def preflight_create_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+        mode: str | None = None,
+    ) -> None:
         self.preflight.append(sandbox_id)
 
-    def create_snapshot(self, snapshot_id: str, sandbox_id: str, *, namespace: str | None = None):
+    def create_snapshot(
+        self,
+        snapshot_id: str,
+        sandbox_id: str,
+        *,
+        namespace: str | None = None,
+        mode: str | None = None,
+    ):
         self.created.append((snapshot_id, sandbox_id, namespace))
         return None
 

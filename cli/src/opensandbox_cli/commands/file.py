@@ -154,12 +154,7 @@ def file_download(
     local_path: str,
     output_format: str | None,
 ) -> None:
-    """Download a file to the host.
-
-    Regular files are replaced only on success. Devices and named pipes receive
-    data directly, including partial data if the download fails.
-    Destinations referring to stdout stream directly and omit the success message.
-    """
+    """Download a file to the host; regular files are replaced only on success."""
     prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
@@ -178,13 +173,12 @@ def file_download(
                 # macOS reports different stat/fstat identities for /dev/fd entries.
                 destination_is_stdout = destination.samefile(f"/dev/fd/{sys.stdout.fileno()}")
         except (OSError, ValueError):
-            # Embedded callers may capture stdout in a stream without a descriptor.
             destination_is_stdout = False
         if destination_is_stdout or (
             destination_mode is not None and not stat.S_ISREG(destination_mode)
         ):
-            # Special files are stream targets and must never be replaced.
-            # Duplicate stdout to preserve its offset/append mode and keep it open.
+            # Special files stream directly and are never replaced; dup stdout
+            # to preserve its offset/append mode.
             stream = (
                 os.fdopen(os.dup(sys.stdout.fileno()), "wb")
                 if destination_is_stdout

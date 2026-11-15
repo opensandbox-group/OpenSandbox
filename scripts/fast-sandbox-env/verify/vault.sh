@@ -78,16 +78,15 @@
 # re-derives the echo endpoint's kind-network IP from the live container, so
 # both stages run against a live stack from a prior `up`.
 #
-# NOTE: integration-env.sh (the monolith CI drives today) carries working
-# copies of these stages; keep the two in sync until the env.sh split is
-# completed and this file becomes the single home.
+# NOTE: integration-env.sh (the monolith CI drives) carries working copies
+# of these stages; keep the two in sync until the split layout becomes the
+# single home.
 #
 # Housekeeping: the artifact store is pruned at entry — stale checkpoint /
 # template sets are removed, the baseline golden template set and the
 # indexes pointing into it are preserved.
 #
-# Runs as part of `integration.sh up` (the entry chains every verify
-# script) or standalone against a live stack from `env.sh up`.
+# Standalone against a live stack from `integration-env.sh up`.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -101,7 +100,7 @@ MITM_ECHO_DOMAIN="${MITM_ECHO_DOMAIN:-echo.test}"
 MITM_ECHO_PORT=443
 MITM_ECHO_IP=""
 
-# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay) --------
+# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay)
 
 # Status-code-returning variant of server_api for negative-path assertions
 # (curl -f hides the status).
@@ -208,7 +207,7 @@ vault_lifecycle_verify() {
 	wait_for "vault sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning) ----
+# --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning)
 
 # first_pool_pod -> one fastlet pod of the pool (the egress /healthz probe
 # binds Pod loopback, so it must exec into a specific pod).
@@ -396,7 +395,7 @@ mitm_ca_chain_verify() {
 	wait_for "mitm-ca sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: exchange resolver verify (OSEP-0025: per-request dynamic headers) ----
+# --- stage: exchange resolver verify (OSEP-0025: per-request dynamic headers)
 
 # The T6 stub (stdlib-only) delivered via kubectl cp into every pool egress
 # container; the stub enforces the production 0710/0660 UDS layout itself.
@@ -572,7 +571,7 @@ exchange_resolver_verify() {
 	exchange_resolver_stop_all
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	resolve_osb

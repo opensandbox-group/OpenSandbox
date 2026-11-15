@@ -38,21 +38,17 @@ trap cleanup EXIT
 # build execd image locally (context must include internal/)
 docker build -f components/execd/Dockerfile -t opensandbox/execd:local "${REPO_ROOT}"
 
-# prepare required images from registry
 docker pull opensandbox/code-interpreter:${TAG}
 echo "-------- Eval test images --------"
 docker images
 
-# prepare hostpath volume for e2e test
 mkdir -p /tmp/opensandbox-e2e/host-volume-test
 mkdir -p /tmp/opensandbox-e2e/logs
 echo "opensandbox-e2e-marker" > /tmp/opensandbox-e2e/host-volume-test/marker.txt
 chmod -R 755 /tmp/opensandbox-e2e
 
-# prepare Docker named volume for pvc e2e test
 docker volume rm opensandbox-e2e-pvc-test 2>/dev/null || true
 docker volume create opensandbox-e2e-pvc-test
-# seed the named volume with a marker file and subpath test data via a temporary container
 docker run --rm -v opensandbox-e2e-pvc-test:/data alpine sh -c "\
   echo 'pvc-marker-data' > /data/marker.txt && \
   mkdir -p /data/datasets/train && \
@@ -62,7 +58,6 @@ echo "-------- GO E2E test logs for execd --------" > /tmp/opensandbox-e2e/logs/
 export OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE="${OPENSANDBOX_CREDENTIAL_VAULT_E2E_SANDBOX_IMAGE:-opensandbox/code-interpreter:${TAG}}"
 setup_credential_vault_e2e_target
 
-# setup server
 cd server
 export OPENSANDBOX_INSECURE_SERVER=YES
 uv sync
@@ -73,7 +68,6 @@ cd ..
 # wait for server
 sleep 10
 
-# run Go e2e tests
 cd tests/go
 mkdir -p reports
 go test -v -count=1 -timeout 30m ./... 2>&1 | tee reports/test-output.txt

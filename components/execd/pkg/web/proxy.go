@@ -27,6 +27,20 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
+// proxyTransport is shared by every proxied request. A Transport owns its
+// keep-alive pool, so building one per request opened a new upstream
+// connection each time and left it idle in an unreachable pool until
+// IdleConnTimeout.
+var proxyTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   600 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	MaxIdleConns:        100,
+	MaxIdleConnsPerHost: 100,
+	IdleConnTimeout:     600 * time.Second,
+}
+
 func ProxyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if !strings.HasPrefix(c.Request.URL.Path, "/proxy/") {
@@ -85,15 +99,7 @@ func ProxyMiddleware() gin.HandlerFunc {
 			}
 		}
 
-		proxy.Transport = &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout:   600 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     600 * time.Second,
-		}
+		proxy.Transport = proxyTransport
 
 		proxy.ErrorHandler = func(rw http.ResponseWriter, req *http.Request, err error) {
 			log.Error("proxy: %v (request: %s %s)", err, req.Method, req.RequestURI)

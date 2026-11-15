@@ -1390,7 +1390,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
             assertEquals(
                     "kotlin-retry-next-idle-ok\n", result.getLogs().getStdout().get(0).getText());
 
-            // Stale id must not silently reappear in the idle queue.
             List<IdleEntry> remaining = mixedStore.snapshotIdleEntries(mixedPoolName);
             assertTrue(
                     remaining.stream().noneMatch(entry -> staleId.equals(entry.getSandboxId())),

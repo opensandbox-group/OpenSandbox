@@ -125,9 +125,8 @@ def _raw_mode(fd: int) -> Iterator[None]:
 def _make_stdin_reader(fd: int) -> ReadFn:
     """Build a cancellable stdin read driven by event-loop readability.
 
-    A blocking ``os.read`` in the default executor cannot be cancelled: the
-    worker thread stays parked in ``read(2)`` and stalls event-loop shutdown
-    until a key arrives. A reader callback is cancelled with its task.
+    A blocking ``os.read`` in the default executor cannot be cancelled and
+    stalls event-loop shutdown until a key arrives.
     """
 
     async def stdin_read() -> bytes:
@@ -231,9 +230,7 @@ async def stream_pty(
                             # The terminal is in raw mode: CRLF, not LF.
                             error_write(message.encode() + b"\r\n")
         except websockets.ConnectionClosed:
-            # Abnormal close: keep the collected exit state and errors so the
-            # caller can surface them (e.g. execd's START_FAILED closes
-            # without a WebSocket close frame).
+            # Abnormal close (e.g. execd START_FAILED): keep collected state.
             pass
 
     stdin_task = asyncio.create_task(
@@ -242,8 +239,7 @@ async def stream_pty(
     try:
         # Give the stdin pump a head start before the read loop drains frames.
         await asyncio.sleep(0)
-        # A local stdin EOF must not cut the output stream: reap the pump and
-        # keep reading until the server sends ``exit`` or closes.
+        # A local stdin EOF must not cut output: keep reading until exit/close.
         await read_ws()
     finally:
         stdin_task.cancel()
@@ -265,9 +261,8 @@ async def _connect_and_stream(
     async with websockets.connect(ws_url, additional_headers=headers or None) as ws:
         if on_connected is not None:
             on_connected()
-        # websockets forbids concurrent sends: stdin frames and SIGWINCH
-        # resize frames share one lock, and fire-and-forget resize tasks get
-        # their results consumed so failures never surface as task warnings.
+        # websockets forbids concurrent sends: stdin and resize frames share
+        # one lock; fire-and-forget resize tasks never surface task warnings.
         send_lock = asyncio.Lock()
 
         async def send_frame(frame: str) -> None:
@@ -359,8 +354,7 @@ def terminal(
     stdin_read, stdout_write, get_size, stdin_fd = _posix_tty_io()
 
     def report_error(data: bytes) -> None:
-        # CRLF line endings are added by the sender: the terminal is in raw
-        # mode, where a bare LF does not return the carriage.
+        # CRLF: the terminal is in raw mode, a bare LF does not return carriage.
         sys.stderr.buffer.write(data)
         sys.stderr.buffer.flush()
 
@@ -394,10 +388,8 @@ def terminal(
     except (OSError, websockets.WebSocketException) as exc:
         raise click.ClickException(f"Terminal connection failed: {exc}") from exc
     finally:
-        # Clean exit tears the session down, as does a reported failure (e.g.
-        # START_FAILED: the shell never ran, so there is nothing to preserve)
-        # or a WebSocket that never opened (the shell starts on the first
-        # one). A lost connection on a live shell is the one case worth keeping.
+        # Tear down on clean exit, reported failure, or a never-opened socket;
+        # keep the session only when a live shell lost its connection.
         if teardown or not connected:
             _delete_pty_session(http_base, headers, session_id, timeout=timeout)
 

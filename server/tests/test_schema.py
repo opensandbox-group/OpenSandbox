@@ -845,10 +845,8 @@ class TestCreateSandboxRequestWithVolumes:
 
 
 class TestCreateSandboxRequestPoolMode:
-    """Tests for pool mode (extensions.poolRef) validation."""
 
     def test_pool_mode_accepts_only_pool_ref(self):
-        """Happy path: poolRef only, no image/entrypoint/resourceLimits required."""
         request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
         )
@@ -858,7 +856,6 @@ class TestCreateSandboxRequestPoolMode:
         assert request.extensions["poolRef"] == "my-pool"
 
     def test_pool_mode_accepts_pool_ref_with_optional_fields(self):
-        """poolRef with optional env/metadata/timeout should be valid."""
         request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
             env={"KEY": "value"},
@@ -895,7 +892,6 @@ class TestCreateSandboxRequestPoolMode:
         assert request.network_policy is not None
 
     def test_resource_limits_required_without_pool_ref(self):
-        """Without poolRef, resourceLimits is still required (image mode)."""
         with pytest.raises(ValidationError):
             CreateSandboxRequest(
                 image=ImageSpec(uri="python:3.11"),

@@ -286,8 +286,10 @@ def install_windows_oem_scripts(
     ensure_directory: Callable[[object, str, Optional[str]], None],
     docker_operation: Callable[[str, Optional[str]], object],
 ) -> None:
-    """Install OEM script for dockur/windows:
-    - C:\\OEM\\install.bat from execd image
+    """Install OEM scripts for dockur/windows from the execd image:
+
+    - C:\\OEM\\install.bat (execd bootstrap)
+    - C:\\OEM\\execd.exe (Windows execd binary)
     """
     ensure_directory(container, "/oem", sandbox_id)
 

@@ -177,13 +177,8 @@ class CompositeSandboxService(SandboxService, ExtensionService):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: str | None = None,
-        container: str | None = None,
     ) -> str:
-        return self._backend(sandbox_id).get_sandbox_logs(sandbox_id, tail, since, container)
-
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        return self._backend(sandbox_id).get_sandbox_inspect(sandbox_id)
+        return self._backend(sandbox_id).get_sandbox_logs(sandbox_id, tail)
 
     def get_sandbox_events(self, sandbox_id: str, limit: int = 50) -> str:
         return self._backend(sandbox_id).get_sandbox_events(sandbox_id, limit)

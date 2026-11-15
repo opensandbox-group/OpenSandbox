@@ -38,11 +38,11 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install uv
-        run: |
-          pip install uv
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
 
-      - name: Run tests
+      - name: Run tests (Linux, full suite with coverage)
+        if: runner.os == 'Linux'
         run: |
           cd server
           uv sync --all-groups
@@ -53,6 +53,28 @@ jobs:
             --cov-report=term \
             --cov-report=xml:reports/coverage.xml \
             --cov-fail-under=80
+
+      - name: Run tests (Windows, platform-relevant subset)
+        # Windows exists to catch Windows-only breakage (path handling, Windows
+        # profiles, OSSFS mode bits). The full suite is already gated on Linux;
+        # rerunning every OS-independent test here doubles CI time for no
+        # extra signal.
+        if: runner.os == 'Windows'
+        run: |
+          cd server
+          uv sync --all-groups
+          uv run pytest \
+            tests/test_module_imports.py \
+            tests/test_config.py \
+            tests/test_validators.py \
+            tests/test_schema.py \
+            tests/test_docker_service.py \
+            tests/test_docker_windows_profile.py \
+            tests/test_ossfs_mixin.py \
+            tests/k8s/test_k8s_windows_profile.py \
+            tests/k8s/test_batchsandbox_provider.py \
+            tests/k8s/test_agent_sandbox_provider.py \
+            tests/k8s/test_kubernetes_service.py
 
       - name: Upload coverage report
         if: always()
@@ -79,9 +101,8 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install uv
-        run: |
-          pip install uv
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
 
       - name: Set up Docker
         run: |
@@ -115,8 +136,19 @@ jobs:
           # Start server in background
           uv run python -m opensandbox_server.main > app.log 2>&1 &
 
-          # Wait for server to start
-          sleep 10
+          # Wait for the server health endpoint instead of a fixed sleep
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:32888/health > /dev/null 2>&1; then
+              echo "server ready after ${i}s"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "server did not become ready in 30s"
+              cat app.log
+              exit 1
+            fi
+            sleep 1
+          done
 
           # Run smoke test
           chmod +x tests/smoke.sh
@@ -155,8 +187,8 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install uv
-        run: pip install uv
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
 
       - name: Run PostgreSQL repository tests
         working-directory: server

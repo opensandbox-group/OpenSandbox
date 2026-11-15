@@ -27,23 +27,25 @@ from opensandbox.models.sandboxes import SandboxEndpoint
 from code_interpreter import CodeInterpreter
 from code_interpreter.adapters.code_adapter import CodesAdapter
 from code_interpreter.code_interpreter import RUNTIME_PROCESS_CHECK_COMMAND
+from code_interpreter.sync.code_interpreter import CodeInterpreterSync
 
 
 class _FakeCommands:
-    def __init__(self, error=None) -> None:
+    def __init__(self, error=None, exit_code=0) -> None:
         self._error = error
+        self._exit_code = exit_code
         self.commands: list[str] = []
 
     async def run(self, command, *, opts=None, handlers=None):
         self.commands.append(command)
-        return Execution(error=self._error)
+        return Execution(error=self._error, exit_code=self._exit_code)
 
 
 class _FakeSandbox:
-    def __init__(self, commands_error=None) -> None:
+    def __init__(self, commands_error=None, commands_exit_code=0) -> None:
         self._id = str(__import__("uuid").uuid4())
         self.connection_config = ConnectionConfig(protocol="http")
-        self.commands = _FakeCommands(commands_error)
+        self.commands = _FakeCommands(commands_error, commands_exit_code)
         self.files = object()
         self.metrics = object()
 
@@ -176,7 +178,8 @@ async def test_create_times_out_when_runtime_process_missing(monkeypatch) -> Non
     sbx = _FakeSandbox(
         commands_error=ExecutionError(
             name="CommandExecError", value="1", timestamp=0
-        )
+        ),
+        commands_exit_code=1,
     )
 
     with pytest.raises(SandboxReadyTimeoutException):
@@ -185,6 +188,54 @@ async def test_create_times_out_when_runtime_process_missing(monkeypatch) -> Non
             ready_timeout=timedelta(milliseconds=50),
             health_check_polling_interval=timedelta(milliseconds=10),
         )
+
+
+@pytest.mark.asyncio
+async def test_create_times_out_when_runtime_check_is_unconfirmed(monkeypatch) -> None:
+    # A stream that ends without an error or completion event leaves the
+    # exit code unknown; that does not prove the runtime port is open.
+    async def healthy_ping(self) -> bool:
+        return True
+
+    monkeypatch.setattr(CodesAdapter, "ping", healthy_ping)
+    sbx = _FakeSandbox(commands_exit_code=None)
+
+    with pytest.raises(SandboxReadyTimeoutException):
+        await CodeInterpreter.create(  # type: ignore[arg-type]
+            sandbox=sbx,
+            ready_timeout=timedelta(milliseconds=50),
+            health_check_polling_interval=timedelta(milliseconds=10),
+        )
+
+
+class _FakeSyncCommands:
+    def __init__(self, exit_code) -> None:
+        self._exit_code = exit_code
+
+    def run(self, command, *, opts=None, handlers=None):
+        return Execution(error=None, exit_code=self._exit_code)
+
+
+class _FakeSyncSandbox:
+    def __init__(self, exit_code) -> None:
+        self.commands = _FakeSyncCommands(exit_code)
+
+
+class _HealthyCodesSync:
+    def ping(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(("exit_code", "healthy"), [(0, True), (None, False)])
+def test_sync_is_healthy_requires_confirmed_runtime_exit_code(
+    exit_code, healthy
+) -> None:
+    ci = CodeInterpreterSync(
+        _FakeSyncSandbox(exit_code),  # type: ignore[arg-type]
+        _HealthyCodesSync(),  # type: ignore[arg-type]
+    )
+
+    assert ci.is_healthy() is healthy
 
 
 @pytest.mark.asyncio

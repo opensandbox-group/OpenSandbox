@@ -24,7 +24,7 @@
 # capabilities endpoint reports init_mode=subreaper / signal_shield=false.
 #
 # NOTE: integration-env.sh carries an inline copy of this stage; keep the
-# two in sync until the env.sh split is completed.
+# two in sync until the split layout becomes the single home.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -165,7 +165,7 @@ init_mode_verify() { # [template-id]
 	wait_for "init-mode sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	resolve_osb

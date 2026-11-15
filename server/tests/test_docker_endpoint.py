@@ -26,7 +26,6 @@ from opensandbox_server.config import AppConfig, RuntimeConfig, DockerConfig, Se
 
 @pytest.fixture
 def mock_docker_service():
-    """Create a DockerSandboxService with mocked docker client."""
     config = AppConfig(
         server=ServerConfig(port=8080, host="0.0.0.0"),
         runtime=RuntimeConfig(type="docker", execd_image="test/execd:latest"),
@@ -39,7 +38,6 @@ def mock_docker_service():
         mock_docker.return_value = mock_client
 
         service = DockerSandboxService(config=config)
-        # Inject the mock client directly to ensure we control it
         service.docker_client = mock_client
 
         yield service, mock_client
@@ -338,7 +336,6 @@ def test_get_endpoint_bridge_proxy_uses_local_host_not_eip_when_use_proxy_host(
 
 
 def test_get_endpoint_bridge_uses_docker_host_ip_when_server_in_container():
-    """When server runs in container (host=0.0.0.0), endpoint uses [docker].host_ip."""
     config = AppConfig(
         server=ServerConfig(port=8080, host="0.0.0.0"),
         runtime=RuntimeConfig(type="docker", execd_image="test/execd:latest"),
@@ -420,7 +417,6 @@ def test_get_endpoint_user_defined_network_internal_prefers_configured_network(m
 
     endpoint = service.get_endpoint("sbx-123", 8080, resolve_internal=True)
 
-    # Must use the IP from the configured network, not the default bridge entry
     assert endpoint.endpoint == "192.168.100.5:8080"
 
 

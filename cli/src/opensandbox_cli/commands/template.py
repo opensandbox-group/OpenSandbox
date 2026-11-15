@@ -233,6 +233,9 @@ def template_get(obj, template_id: str, output_format: str | None) -> None:
     status_val = d.get("status")
     if isinstance(status_val, dict):
         d["status"] = status_val.get("phase", str(status_val))
+        # model_dump uses the field name; accept the wire alias too.
+        manifest_ref = status_val.get("manifest_ref", status_val.get("manifestRef"))
+        d["manifest_ref"] = manifest_ref
         if status_val.get("message"):
             d["status_message"] = status_val["message"]
     readiness_val = d.get("readiness")
