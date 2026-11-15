@@ -74,6 +74,36 @@ public class CodeInterpreterHealthCheckTests
     }
 
     [Fact]
+    public async Task CreateAsync_TimesOutWhenAProbeNeverCompletes()
+    {
+        var sandbox = await CreateConnectedSandboxAsync();
+        var probeToken = CancellationToken.None;
+        // Never completes and ignores its token, like a stalled custom adapter.
+        var codes = new FakeCodes(pingSucceedsAfter: 1, ping: token =>
+        {
+            probeToken = token;
+            return new TaskCompletionSource<bool>().Task;
+        });
+        var factory = new FakeAdapterFactory(codes);
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        var create = CodeInterpreter.CreateAsync(sandbox, new CodeInterpreterCreateOptions
+        {
+            AdapterFactory = factory,
+            ReadyTimeoutSeconds = 1,
+            HealthCheckPollingInterval = 1
+        });
+        var finished = await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(10)));
+
+        Assert.Same(create, finished);
+        await Assert.ThrowsAsync<SandboxReadyTimeoutException>(() => create);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(3), $"took {stopwatch.Elapsed}");
+        // The stalled probe's requests are canceled rather than left running.
+        Assert.True(probeToken.IsCancellationRequested);
+        await sandbox.DisposeAsync();
+    }
+
+    [Fact]
     public async Task CreateAsync_ThrowsWhenRuntimeProcessNeverAppears()
     {
         // Daemon ping passes, but the runtime process check keeps failing.
@@ -319,18 +349,20 @@ public class CodeInterpreterHealthCheckTests
     private sealed class FakeCodes : ICodes, IExecdHealth
     {
         private readonly int _pingSucceedsAfter;
+        private readonly Func<CancellationToken, Task<bool>>? _ping;
 
         public int PingAttempts { get; private set; }
 
-        public FakeCodes(int pingSucceedsAfter)
+        public FakeCodes(int pingSucceedsAfter, Func<CancellationToken, Task<bool>>? ping = null)
         {
             _pingSucceedsAfter = pingSucceedsAfter;
+            _ping = ping;
         }
 
         public Task<bool> PingAsync(CancellationToken cancellationToken = default)
         {
             PingAttempts++;
-            return Task.FromResult(PingAttempts >= _pingSucceedsAfter);
+            return _ping?.Invoke(cancellationToken) ?? Task.FromResult(PingAttempts >= _pingSucceedsAfter);
         }
 
         public Task<CodeContext> CreateContextAsync(string language, CancellationToken cancellationToken = default) => throw new NotSupportedException();

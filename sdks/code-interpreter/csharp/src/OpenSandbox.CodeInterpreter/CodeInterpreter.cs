@@ -297,6 +297,27 @@ public sealed class CodeInterpreter
     }
 
     /// <summary>
+    /// Runs <see cref="IsHealthyAsync"/> for at most <paramref name="budget"/>. Each probe
+    /// carries its own request timeout, so a stalled one could otherwise hold the caller
+    /// past the readiness deadline: when the time is up its token is canceled and the
+    /// attempt counts as unhealthy, even if the probe ignores the cancellation.
+    /// </summary>
+    private async Task<bool> IsHealthyWithinAsync(TimeSpan budget, CancellationToken cancellationToken)
+    {
+        using var probeDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        probeDeadline.CancelAfter(budget > TimeSpan.Zero ? budget : TimeSpan.Zero);
+        var probe = IsHealthyAsync(probeDeadline.Token);
+        var expired = Task.Delay(Timeout.Infinite, probeDeadline.Token);
+        if (await Task.WhenAny(probe, expired).ConfigureAwait(false) != probe)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return false;
+        }
+
+        return await probe.ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Waits until the strict health check passes (execd answers <c>GET /ping</c>
     /// and the interpreter runtime process is alive).
     /// </summary>
@@ -331,7 +352,7 @@ public sealed class CodeInterpreter
 
             try
             {
-                if (await IsHealthyAsync(cancellationToken).ConfigureAwait(false))
+                if (await IsHealthyWithinAsync(timeout - stopwatch.Elapsed, cancellationToken).ConfigureAwait(false))
                 {
                     _logger.LogInformation("Code interpreter is ready: {SandboxId}", Id);
                     return;
