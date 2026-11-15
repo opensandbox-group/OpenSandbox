@@ -122,7 +122,7 @@ The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no 
 | `sandbox_env` | table | `{}` | Env vars injected into every sandbox; create-request keys override same-named ones. |
 | `sandbox_binds` | string[] | `[]` | Bind mounts for every sandbox (`host:container[:mode]`); prepended to request-derived binds. |
 | `port_range_min` / `port_range_max` | integer | `40000` / `60000` | Host port range for bridge-mode allocation. Range must span ≥ 100 ports; each sandbox needs 2–3 ports (3 with egress). |
-| `publish_host` | string | `"0.0.0.0"` | Address Docker publishes sandbox ports on. Use `127.0.0.1` (server on host) or the bridge gateway IP (server in container) to keep ports off public interfaces. Must be an IPv4 address. |
+| `publish_host` | string | `"0.0.0.0"` | Address Docker publishes sandbox ports on. Use `127.0.0.1` (server on host) or the bridge gateway IP (server in container) to keep ports off public interfaces; the server then reaches sandbox ports at that address. Must be an IPv4 address. |
 
 ---
 
