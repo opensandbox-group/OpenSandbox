@@ -875,10 +875,11 @@ func TestIsMissingTableErrorMatchesOnlyThatTablesDelete(t *testing.T) {
 	require.False(t, IsMissingTableError(missing("add rule inet other forward jump gone"), "other"), "a different missing object")
 	require.False(t, IsMissingTableError(errors.New("delete table inet other: permission denied"), "other"), "a different failure")
 	require.False(t, IsMissingTableError(nil, "other"))
+	require.False(t, IsMissingTableError(missing("delete table inet other-longer"), "other"), "a table whose name only starts with it")
 }
 
 func TestRemoveDeleteTableLineDropsOnlyThatTablesDelete(t *testing.T) {
-	script := "delete table inet other\ndelete table inet keep\n\nadd table inet other\n"
+	script := "delete table inet other\ndelete table inet other-longer\ndelete table inet keep\n\nadd table inet other\n"
 
-	require.Equal(t, "delete table inet keep\nadd table inet other", RemoveDeleteTableLine(script, "other"))
+	require.Equal(t, "delete table inet other-longer\ndelete table inet keep\nadd table inet other", RemoveDeleteTableLine(script, "other"))
 }

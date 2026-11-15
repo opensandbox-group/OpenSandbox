@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -593,6 +594,13 @@ func runNftCommand(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
+// deleteTableStatement matches `delete table inet <table>` naming the whole
+// table, so the statement for "opensandbox" does not also match
+// "opensandbox-fast-sandbox".
+func deleteTableStatement(table string) *regexp.Regexp {
+	return regexp.MustCompile(`delete table inet ` + regexp.QuoteMeta(table) + `(?:[^A-Za-z0-9_./-]|$)`)
+}
+
 // IsMissingTableError reports whether a batch failed because its
 // `delete table inet <table>` line targets a table that does not exist yet
 // (first start, or a reset that already removed it).
@@ -601,16 +609,17 @@ func IsMissingTableError(err error, table string) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such file or directory") && strings.Contains(msg, "delete table inet "+table)
+	return strings.Contains(msg, "no such file or directory") && deleteTableStatement(table).MatchString(msg)
 }
 
 // RemoveDeleteTableLine drops the `delete table inet <table>` line, and blank
 // lines, so a batch that failed on a missing table can be retried.
 func RemoveDeleteTableLine(script, table string) string {
+	statement := deleteTableStatement(table)
 	lines := strings.Split(script, "\n")
 	var filtered []string
 	for _, l := range lines {
-		if strings.HasPrefix(l, "delete table inet "+table) {
+		if loc := statement.FindStringIndex(l); loc != nil && loc[0] == 0 {
 			continue
 		}
 		if strings.TrimSpace(l) == "" {
