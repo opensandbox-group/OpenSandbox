@@ -436,6 +436,10 @@ func (s *fastSandboxPolicyServer) subjectLifecycleDegraded() []string {
 // The vocabulary is closed; never expose targets, socket paths, response bodies
 // or error text. Confirmed failures remain visible until child reconstruction.
 func subjectLifecycleReason(receipt revision.LifecycleReceipt) string {
+	if receipt.LifecycleSequence != 0 && receipt.Result.Unload.UnconfirmedConnections() {
+		// Routing is revoked, but proxied transports were not confirmed closed.
+		return "subject_transport_unconfirmed"
+	}
 	switch receipt.Result.Outcome {
 	case "subject_conflict", "subject_failed", "subject_capacity_exhausted", "subject_generation_mismatch", "invalid_target":
 		return receipt.Result.Outcome
