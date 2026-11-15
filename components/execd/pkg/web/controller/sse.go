@@ -28,6 +28,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
+	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -190,6 +191,47 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	}
 
 	return hooks, stopSSE
+}
+
+// executionTracker follows one streamed execution: it records the execution
+// duration metric once and closes done when the terminal SSE event (complete
+// or error) has been written.
+type executionTracker struct {
+	ctx        context.Context
+	operation  string
+	start      time.Time
+	recordOnce sync.Once
+	doneOnce   sync.Once
+	done       chan struct{}
+}
+
+func newExecutionTracker(ctx context.Context, operation string) *executionTracker {
+	return &executionTracker{ctx: ctx, operation: operation, start: time.Now(), done: make(chan struct{})}
+}
+
+// record reports the execution duration with result; only the first call counts.
+func (t *executionTracker) record(result string) {
+	t.recordOnce.Do(func() {
+		telemetry.RecordExecutionDuration(t.ctx, t.operation, result, float64(time.Since(t.start))/float64(time.Millisecond))
+	})
+}
+
+// wrap makes the terminal hooks record the result and close done after they
+// write their event. Install any replacement hook before calling it.
+func (t *executionTracker) wrap(hooks *runtime.ExecuteResultHook) {
+	finish := func(result string) {
+		t.record(result)
+		t.doneOnce.Do(func() { close(t.done) })
+	}
+	complete, fail := hooks.OnExecuteComplete, hooks.OnExecuteError
+	hooks.OnExecuteComplete = func(executionTime time.Duration) {
+		complete(executionTime)
+		finish("success")
+	}
+	hooks.OnExecuteError = func(err *execute.ErrorOutput) {
+		fail(err)
+		finish("failure")
+	}
 }
 
 // respondRunError reports an error returned by a run. Before any event has

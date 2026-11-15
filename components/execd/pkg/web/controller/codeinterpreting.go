@@ -20,15 +20,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
-	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
-	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -135,44 +132,15 @@ func (c *CodeInterpretingController) RunCode() {
 	}
 
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
-	execStart := time.Now()
-	var recordOnce sync.Once
-	recordExecution := func(result string) {
-		recordOnce.Do(func() {
-			telemetry.RecordExecutionDuration(
-				ctx,
-				"run_code",
-				result,
-				float64(time.Since(execStart))/float64(time.Millisecond),
-			)
-		})
-	}
+	tracker := newExecutionTracker(ctx, "run_code")
 	runCodeRequest := c.buildExecuteCodeRequest(request)
 	eventsHandler, stopSSE := c.setServerEventsHandler(ctx)
 	defer func() { cancel(); stopSSE() }()
 
-	// completeCh is closed when OnExecuteComplete fires, meaning the final SSE
-	// event has been written and flushed. We only wait for this callback as a
-	// safety check and then return immediately to avoid fixed tail latency.
-	completeCh := make(chan struct{})
-	var completeOnce sync.Once
-	signalComplete := func() {
-		completeOnce.Do(func() {
-			close(completeCh)
-		})
-	}
-	origComplete := eventsHandler.OnExecuteComplete
-	eventsHandler.OnExecuteComplete = func(executionTime time.Duration) {
-		origComplete(executionTime)
-		recordExecution("success")
-		signalComplete()
-	}
-	origError := eventsHandler.OnExecuteError
-	eventsHandler.OnExecuteError = func(err *execute.ErrorOutput) {
-		origError(err)
-		recordExecution("failure")
-		signalComplete()
-	}
+	// tracker.done is closed once the final SSE event has been written and
+	// flushed. We only wait for it as a safety check and then return
+	// immediately to avoid fixed tail latency.
+	tracker.wrap(&eventsHandler)
 	runCodeRequest.Hooks = eventsHandler
 
 	// SSE headers are committed lazily on the first event write
@@ -180,12 +148,12 @@ func (c *CodeInterpretingController) RunCode() {
 	// still be surfaced as a structured JSON error response.
 	err = codeRunner.Execute(runCodeRequest)
 	if err != nil {
-		recordExecution("failure")
-		c.respondRunError(runCodeRequest.Hooks, completeCh, fmt.Sprintf("error running codes %v", err))
+		tracker.record("failure")
+		c.respondRunError(runCodeRequest.Hooks, tracker.done, fmt.Sprintf("error running codes %v", err))
 		return
 	}
 
-	waitForExecutionComplete(ctx, completeCh)
+	waitForExecutionComplete(ctx, tracker.done)
 }
 
 func (c *CodeInterpretingController) GetContext() {
@@ -378,47 +346,18 @@ func (c *CodeInterpretingController) RunInSession() {
 		Timeout:  timeout,
 	}
 	ctx, cancel := context.WithCancel(c.ctx.Request.Context())
-	execStart := time.Now()
-	var recordOnce sync.Once
-	recordExecution := func(result string) {
-		recordOnce.Do(func() {
-			telemetry.RecordExecutionDuration(
-				ctx,
-				"run_in_session",
-				result,
-				float64(time.Since(execStart))/float64(time.Millisecond),
-			)
-		})
-	}
+	tracker := newExecutionTracker(ctx, "run_in_session")
 
-	// completeCh is closed when OnExecuteComplete fires, meaning the final SSE
-	// event has been written and flushed. We only wait for this callback as a
-	// safety check and then return immediately to avoid fixed tail latency.
-	completeCh := make(chan struct{})
-	var completeOnce sync.Once
-	signalComplete := func() {
-		completeOnce.Do(func() {
-			close(completeCh)
-		})
-	}
 	hooks, stopSSE := c.setServerEventsHandler(ctx)
 	// Cancel the context first (signals the ping goroutine to stop), then
 	// wait for it to fully exit before the handler returns. This prevents
 	// the ping goroutine from writing to the response after Go's net/http
 	// closes the response writer.
 	defer func() { cancel(); stopSSE() }()
-	origComplete := hooks.OnExecuteComplete
-	hooks.OnExecuteComplete = func(executionTime time.Duration) {
-		origComplete(executionTime)
-		recordExecution("success")
-		signalComplete()
-	}
-	origError := hooks.OnExecuteError
-	hooks.OnExecuteError = func(err *execute.ErrorOutput) {
-		origError(err)
-		recordExecution("failure")
-		signalComplete()
-	}
+	// tracker.done is closed once the final SSE event has been written and
+	// flushed. We only wait for it as a safety check and then return
+	// immediately to avoid fixed tail latency.
+	tracker.wrap(&hooks)
 	runReq.Hooks = hooks
 
 	// SSE headers are committed lazily on the first event write
@@ -426,12 +365,12 @@ func (c *CodeInterpretingController) RunInSession() {
 	// RunInBashSession can still be surfaced as a structured JSON error.
 	err := codeRunner.RunInBashSession(ctx, runReq)
 	if err != nil {
-		recordExecution("failure")
-		c.respondRunError(runReq.Hooks, completeCh, fmt.Sprintf("error running in session. %v", err))
+		tracker.record("failure")
+		c.respondRunError(runReq.Hooks, tracker.done, fmt.Sprintf("error running in session. %v", err))
 		return
 	}
 
-	waitForExecutionComplete(ctx, completeCh)
+	waitForExecutionComplete(ctx, tracker.done)
 }
 
 func (c *CodeInterpretingController) DeleteSession() {
