@@ -211,8 +211,8 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
 	}
 	if _, err := m.run(ctx, script); err != nil {
-		if isMissingTableError(err) {
-			fallback := removeDeleteTableLine(script)
+		if IsMissingTableError(err, tableName) {
+			fallback := RemoveDeleteTableLine(script, tableName)
 			if fallback != script {
 				if _, retryErr := m.run(ctx, fallback); retryErr == nil {
 					m.tracker.clear()
@@ -593,19 +593,24 @@ func runNftCommand(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
 	return output.Bytes(), nil
 }
 
-func isMissingTableError(err error) bool {
+// IsMissingTableError reports whether a batch failed because its
+// `delete table inet <table>` line targets a table that does not exist yet
+// (first start, or a reset that already removed it).
+func IsMissingTableError(err error, table string) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such file or directory") && strings.Contains(msg, "delete table inet "+tableName)
+	return strings.Contains(msg, "no such file or directory") && strings.Contains(msg, "delete table inet "+table)
 }
 
-func removeDeleteTableLine(script string) string {
+// RemoveDeleteTableLine drops the `delete table inet <table>` line, and blank
+// lines, so a batch that failed on a missing table can be retried.
+func RemoveDeleteTableLine(script, table string) string {
 	lines := strings.Split(script, "\n")
 	var filtered []string
 	for _, l := range lines {
-		if strings.HasPrefix(l, "delete table inet "+tableName) {
+		if strings.HasPrefix(l, "delete table inet "+table) {
 			continue
 		}
 		if strings.TrimSpace(l) == "" {

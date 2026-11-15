@@ -93,7 +93,7 @@ func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) err
 		}
 		fmt.Fprintf(&script, "add element inet %s %s { %s }\n", tableName, set, addr)
 		fmt.Fprintf(&script, "delete element inet %s %s { %s }\n", tableName, set, addr)
-		fmt.Fprintf(&script, "add element inet %s %s { %s timeout %ds }\n", tableName, set, addr, int(clampTTL(r.TTL)/time.Second))
+		fmt.Fprintf(&script, "add element inet %s %s { %s timeout %ds }\n", tableName, set, addr, int(ClampTTL(r.TTL)/time.Second))
 	}
 	if script.Len() == 0 {
 		return nil
