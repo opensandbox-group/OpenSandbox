@@ -728,6 +728,10 @@ class ProxyConfig(BaseModel):
 
 
 class KubernetesRuntimeConfig(BaseModel):
+    batch_api_enabled: bool = Field(
+        default=False,
+        description="Enable native Job/CronJob APIs for trusted authenticated callers.",
+    )
     kubeconfig_path: Optional[str] = Field(
         default=None,
         description="Absolute path to the kubeconfig file used for API authentication.",

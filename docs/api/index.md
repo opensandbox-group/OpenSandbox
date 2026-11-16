@@ -5,6 +5,8 @@ description: OpenAPI specification documents defining the complete API interface
 
 # OpenSandbox API Specifications
 
+The optional [Kubernetes Batch API](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/kubernetes-batch-api.yml) adds native Job and CronJob management under `/v1/kubernetes`. See [setup and HTTP examples](/guides/kubernetes-batch). This standalone extension is not part of the sandbox SDK-generated lifecycle clients.
+
 This section contains the OpenAPI specification documents for the OpenSandbox project, defining the complete API interfaces and data models. Use the server base URLs defined in each spec (for example, `http://localhost:8080/v1` for the lifecycle API, `http://localhost:44772` for execd, and `http://localhost:18080` for egress) when constructing requests.
 
 ## Specification Files

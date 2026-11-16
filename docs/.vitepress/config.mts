@@ -225,6 +225,7 @@ export default withMermaid(defineConfig({
               link: "/guides/network-security",
             },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
+            { text: "Kubernetes Jobs and CronJobs", link: "/guides/kubernetes-batch" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "In-Sandbox Privilege Reduction", link: "/guides/privilege-reduction" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },

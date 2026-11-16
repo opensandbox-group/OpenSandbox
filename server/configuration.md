@@ -135,6 +135,7 @@ Missing table → defaults from `KubernetesRuntimeConfig`.
 | `kubeconfig_path` | string \| omitted | `null` | Kubeconfig path; often unset in-cluster. |
 | `insecure_skip_tls_verify` | boolean | `false` | Skip apiserver TLS verification (temporary workaround only). |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
+| `batch_api_enabled` | bool | `false` | Enable native Job/CronJob HTTP APIs for trusted authenticated callers. Requires namespace RBAC and workload admission policies; see [Kubernetes batch workloads](../docs/guides/kubernetes-batch.md). |
 | `workload_provider` | string \| omitted | `null` | **`batchsandbox`** (default) or **`agent-sandbox`**. |
 | `batchsandbox_template_file` | string \| omitted | `null` | BatchSandbox CR YAML template path (batchsandbox only). |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | BatchSandbox main container pull policy (`Always`/`IfNotPresent`/`Never`). |

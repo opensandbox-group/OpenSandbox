@@ -12,6 +12,10 @@ namespaceOverride: ""
 # -- Image pull secrets for the server deployment. Each entry: {name: <secret-name>}.
 imagePullSecrets: []
 
+batchApi:
+  # -- Existing namespaces in which the Server may manage native Jobs/CronJobs. Also enable kubernetes.batch_api_enabled in configToml.
+  namespaces: []
+
 # Server configuration
 server:
   # -- Additional environment variables for the server container.
