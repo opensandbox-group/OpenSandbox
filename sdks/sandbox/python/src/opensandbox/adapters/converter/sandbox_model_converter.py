@@ -211,6 +211,7 @@ class SandboxModelConverter:
             PlatformSpec as ApiPlatformSpec,
         )
         from opensandbox.api.lifecycle.models.resource_limits import ResourceLimits
+        from opensandbox.api.lifecycle.models.resource_requests import ResourceRequests
         from opensandbox.api.lifecycle.models.sandbox_lifecycle import (
             SandboxLifecycle as ApiSandboxLifecycle,
         )
@@ -293,7 +294,7 @@ class SandboxModelConverter:
         )
         api_resource_requests = UNSET
         if resource_requests:
-            api_resource_requests = ResourceLimits.from_dict(resource_requests)
+            api_resource_requests = ResourceRequests.from_dict(resource_requests)
 
         request = CreateSandboxRequest(
             image=image,
@@ -428,12 +429,22 @@ class SandboxModelConverter:
     def to_api_create_snapshot_request(
         request: CreateSnapshotRequest | None,
     ) -> ApiCreateSnapshotRequest:
+        from opensandbox.api.lifecycle.models.create_snapshot_request_mode import (
+            CreateSnapshotRequestMode,
+        )
         from opensandbox.api.lifecycle.types import UNSET
 
         if request is None:
-            return ApiCreateSnapshotRequest()
+            # Explicit UNSET keeps the wire payload free of a default "full":
+            # legacy servers never see the field.
+            return ApiCreateSnapshotRequest(name=UNSET, mode=UNSET)
         return ApiCreateSnapshotRequest(
-            name=request.name if request.name is not None else UNSET
+            name=request.name if request.name is not None else UNSET,
+            mode=(
+                CreateSnapshotRequestMode(request.mode)
+                if request.mode is not None
+                else UNSET
+            ),
         )
 
     @staticmethod
@@ -661,10 +672,21 @@ class SandboxModelConverter:
         if isinstance(name, Unset):
             name = None
 
+        # Absent mode (legacy server rows) reads as the default "full". The
+        # generated enum is a str subclass; map by value so the public model
+        # always carries the plain literal.
+        api_mode = getattr(api_snapshot, "mode", None)
+        mode: Literal["full", "rootfsOnly"]
+        if str(api_mode) == "rootfsOnly":
+            mode = "rootfsOnly"
+        else:
+            mode = "full"
+
         return SnapshotInfo(
             id=api_snapshot.id,
             sandbox_id=api_snapshot.sandbox_id,
             name=name,
+            mode=mode,
             status=SnapshotStatus(
                 state=api_snapshot.status.state,
                 reason=reason,

@@ -16,6 +16,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -162,10 +163,27 @@ func (c *CodeInterpretingController) GetBackgroundCommandOutput() {
 		return
 	}
 
-	cursor := c.QueryInt64(c.ctx.Query("cursor"), 0)
+	var cursor int64
+	if raw := c.ctx.Query("cursor"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "cursor must be an integer")
+			return
+		}
+		cursor = parsed
+	}
+	if cursor < 0 {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "cursor cannot be negative")
+		return
+	}
+
 	output, lastCursor, err := codeRunner.SeekBackgroundCommandOutput(id, cursor)
 	if err != nil {
-		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
+		status := http.StatusBadRequest
+		if errors.Is(err, runtime.ErrCommandNotFound) {
+			status = http.StatusNotFound
+		}
+		c.RespondError(status, model.ErrorCodeInvalidRequest, err.Error())
 		return
 	}
 

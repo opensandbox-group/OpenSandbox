@@ -214,7 +214,7 @@ func sameProcessGroups(uid uint32) bool {
 
 // runCommand executes shell commands and streams their output.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.newCommandID(request)
 
 	signals, stopSignals := subscribeCommandSignals()
 	defer stopSignals()
@@ -228,11 +228,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	defer func() {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		removeCommandOutputFiles(stdoutPath, stderrPath)
+		removeCommandOutputFilesWithID(session, stdoutPath, stderrPath)
 	}()
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve request cwd %s: %w", request.Cwd, err)
@@ -273,7 +273,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EValue:    startErr.Error(),
 			Traceback: []string{startErr.Error()},
 		})
-		log.Error("command: start failed: %v", startErr)
+		log.ErrorWithCommandID(session, "command: start failed: %v", startErr)
 		return nil
 	}
 
@@ -361,7 +361,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			ExitCode:  exitCodePtr,
 		})
 
-		log.Error("command: run failed: %v", err)
+		log.ErrorWithCommandID(session, "command: run failed: %v", err)
 		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
@@ -373,7 +373,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 // runBackgroundCommand executes shell commands in detached mode.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.newCommandID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
@@ -390,7 +390,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	defer stopSignals()
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		cancel()
@@ -433,7 +433,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		cancel()
 		_ = pipe.Close()
 		startErr := credentialStartHint(err, cred)
-		log.Error("command: start failed: %v", startErr)
+		log.ErrorWithCommandID(session, "command: start failed: %v", startErr)
 		kernel.running = false
 		c.storeCommandKernel(session, kernel)
 		c.markCommandFinished(session, 255, startErr.Error())
@@ -455,7 +455,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		close(done)
 		cancel()
 		if err != nil {
-			log.Error("command: run failed: %v", err)
+			log.ErrorWithCommandID(session, "command: run failed: %v", err)
 			exitCode := 1
 			var exitCodeErr exitCoder
 			if errors.As(err, &exitCodeErr) {

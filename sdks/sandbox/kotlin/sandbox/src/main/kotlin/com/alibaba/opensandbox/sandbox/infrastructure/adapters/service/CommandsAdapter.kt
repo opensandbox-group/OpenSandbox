@@ -322,7 +322,7 @@ internal class CommandsAdapter(
 
             response.body?.byteStream()?.bufferedReader(Charsets.UTF_8)?.use { reader ->
                 val dispatcher = ExecutionEventDispatcher(execution, handlers)
-                for (line in reader.lineSequence()) {
+                for (line in ExecdEventSupport.eventLines(reader)) {
                     val eventNode = decodeEventLine(line) ?: continue
                     try {
                         dispatcher.dispatch(eventNode)

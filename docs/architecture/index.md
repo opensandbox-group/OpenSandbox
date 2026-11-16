@@ -80,7 +80,6 @@ The `osb` CLI under `cli/` is a terminal interface for day-to-day sandbox operat
 - `osb command`: command execution, background logs, and shell sessions
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy inspection and mutation
-- `osb devops`: low-level diagnostics
 - `osb skills`: OpenSandbox-specific agent skill installation
 
 The MCP server under `sdks/mcp/sandbox/python` exposes focused sandbox lifecycle, command, and text-file tools to MCP-capable clients such as Claude Code and Cursor.
@@ -103,7 +102,7 @@ Important request features:
 
 - `image` or `snapshotId` for container startup, or `templateId` for the FastSandbox path in Kubernetes mode.
 - `entrypoint`, environment variables, metadata, and opaque `extensions`.
-- `resourceLimits` for CPU, memory, GPU, and future resource keys.
+- `resourceLimits` for CPU, memory, GPU, writable-layer disk (`disk`), and future resource keys.
 - `platform` constraints.
 - `volumes` for host paths, platform-managed named volumes/PVCs, and OSSFS.
 - `networkPolicy` for outbound network policy configuration.
@@ -111,7 +110,7 @@ Important request features:
 
 ### 2.2 Diagnostics API
 
-`specs/diagnostic-api.yml` defines best-effort diagnostic descriptors for sandbox logs and events. The server also exposes practical DevOps diagnostics routes that return plain text for operators and AI troubleshooting workflows.
+`specs/diagnostic-api.yml` defines best-effort diagnostic descriptors for sandbox logs and events, plus structured routing context for locating the runtime backend.
 
 ### 2.3 Execd API
 

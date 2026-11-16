@@ -225,11 +225,12 @@ export default withMermaid(defineConfig({
               link: "/guides/docker-in-docker",
             },
             {
-              text: "Network Isolation on Kubernetes",
-              link: "/guides/network-isolation",
+              text: "Sandbox Network Security",
+              link: "/guides/network-security",
             },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
+            { text: "In-Sandbox Privilege Reduction", link: "/guides/privilege-reduction" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "OCI Templates", link: "/guides/oci-templates" },
             {
@@ -254,6 +255,10 @@ export default withMermaid(defineConfig({
               link: "/guides/egress-sse-truncation",
             },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
+            {
+              text: "Resource-Aware Scheduling for Fast Sandbox",
+              link: "/guides/resource-aware-scheduling",
+            },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
             {
               text: "Node Agent Configuration",
@@ -323,6 +328,7 @@ export default withMermaid(defineConfig({
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
             { text: "Windows", link: "/examples/windows" },
             { text: "AKS Kata", link: "/examples/aks-kata" },
+            { text: "ACK PeerPods", link: "/examples/ack-peerpods" },
             { text: "Harbor Evaluation", link: "/examples/harbor-evaluation" },
           ],
         },

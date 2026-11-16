@@ -34,7 +34,7 @@ import (
 
 // runCommand executes shell commands and streams their output on Windows.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.newCommandID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	stdout, stderr, err := c.stdLogDescriptor(session)
@@ -46,11 +46,11 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	defer func() {
 		_ = stdout.Close()
 		_ = stderr.Close()
-		removeCommandOutputFiles(stdoutPath, stderrPath)
+		removeCommandOutputFilesWithID(session, stdoutPath, stderrPath)
 	}()
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
@@ -76,7 +76,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		close(done)
 		wg.Wait()
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
-		log.Error("command: start failed: %v", err)
+		log.ErrorWithCommandID(session, "command: start failed: %v", err)
 		return nil
 	}
 
@@ -120,7 +120,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			ExitCode:  exitCodePtr,
 		})
 
-		log.Error("command: run failed: %v", err)
+		log.ErrorWithCommandID(session, "command: run failed: %v", err)
 		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
@@ -131,7 +131,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 
 // runBackgroundCommand executes shell commands in detached mode on Windows.
 func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.CancelFunc, request *ExecuteCodeRequest) error {
-	session := c.newContextID()
+	session := c.newCommandID(request)
 	request.Hooks.OnExecuteInit(session)
 
 	pipe, err := c.combinedOutputDescriptor(session)
@@ -142,7 +142,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	stderrPath := c.combinedOutputFileName(session)
 
 	startAt := time.Now()
-	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
+	log.InfoWithCommandID(session, "command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		pipe.Close() // best-effort
@@ -160,7 +160,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	// callers find the session immediately.
 	err = cmd.Start()
 	if err != nil {
-		log.Error("command: start failed: %v", err)
+		log.ErrorWithCommandID(session, "command: start failed: %v", err)
 		pipe.Close() // best-effort
 		cancel()
 		return fmt.Errorf("failed to start commands: %w", err)
@@ -191,7 +191,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		devNull.Close() // best-effort
 
 		if err != nil {
-			log.Error("command: run failed: %v", err)
+			log.ErrorWithCommandID(session, "command: run failed: %v", err)
 			exitCode := 1
 			var exitError *exec.ExitError
 			if errors.As(err, &exitError) {

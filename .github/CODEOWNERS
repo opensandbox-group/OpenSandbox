@@ -10,7 +10,7 @@
 # Runtime components
 /components/execd/ @Pangjiping @hittyt @ninan-nn
 /components/ingress/ @Pangjiping @hittyt @Generalwin @Spground
-/components/egress/ @Pangjiping @hittyt @jwx0925
+/components/egress/ @Pangjiping @hittyt @jwx0925 @hpliStartAgain
 /components/nodeagent/ @jianpingpei @Pangjiping
 
 # Kubernetes controller

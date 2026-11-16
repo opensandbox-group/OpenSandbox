@@ -104,6 +104,26 @@ def _normalize_windows_size_env(limit_value: Optional[str]) -> Optional[str]:
     return None
 
 
+def _windows_size_meets_minimum(limit_value: Optional[str], minimum_gb: int) -> bool:
+    """Compare the requested size, not the ceil'd dockur gigabyte env value."""
+    if not limit_value:
+        return False
+    match = _WINDOWS_SIZE_PATTERN.match(limit_value)
+    if not match:
+        return False
+    amount = int(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if amount <= 0:
+        return False
+    if unit in {"g", "gi", "gb"}:
+        return amount >= minimum_gb
+    if unit in {"m", "mi", "mb"}:
+        return amount >= minimum_gb * 1024
+    if unit in {"t", "ti", "tb"}:
+        return amount * 1024 >= minimum_gb
+    return False
+
+
 def inject_windows_resource_limits_env(
     environment: list[str],
     resource_limits: Optional[dict[str, str]],
@@ -172,8 +192,7 @@ def validate_windows_resource_limits(resource_limits: Optional[dict[str, str]]) 
 
     memory_limit = resource_limits.get("memory")
     if memory_limit is not None:
-        normalized_memory = _normalize_windows_size_env(memory_limit)
-        if normalized_memory is None or int(normalized_memory[:-1]) < WINDOWS_MIN_MEMORY_GB:
+        if not _windows_size_meets_minimum(memory_limit, WINDOWS_MIN_MEMORY_GB):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
@@ -191,8 +210,7 @@ def validate_windows_resource_limits(resource_limits: Optional[dict[str, str]]) 
         or resource_limits.get("ephemeral-storage")
     )
     if disk_limit is not None:
-        normalized_disk = _normalize_windows_size_env(disk_limit)
-        if normalized_disk is None or int(normalized_disk[:-1]) < WINDOWS_MIN_DISK_GB:
+        if not _windows_size_meets_minimum(disk_limit, WINDOWS_MIN_DISK_GB):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={

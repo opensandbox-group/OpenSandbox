@@ -107,6 +107,11 @@ func (c *IsolatedSessionController) SearchFiles() {
 
 	results, err := mv.Search(path, pattern)
 	if err != nil {
+		if errors.Is(err, filepath.ErrBadPattern) {
+			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest,
+				fmt.Sprintf("invalid pattern %s", pattern))
+			return
+		}
 		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
 		return
 	}

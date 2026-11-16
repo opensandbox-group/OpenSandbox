@@ -75,6 +75,22 @@ def test_supports_synchronous_create_is_false_for_docker() -> None:
     assert runtime.supports_synchronous_create() is False
 
 
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("Running", True),
+        ("Paused", True),
+        ("Pausing", False),
+        ("Resuming", False),
+        ("Failed", False),
+    ],
+)
+def test_supports_snapshot_source_state(state: str, expected: bool) -> None:
+    runtime = DockerSnapshotRuntime(SimpleNamespace())
+
+    assert runtime.supports_snapshot_source_state("sbx-001", state) is expected
+
+
 def test_create_snapshot_commits_container_and_marks_ready() -> None:
     commits: list[tuple[str, str]] = []
 

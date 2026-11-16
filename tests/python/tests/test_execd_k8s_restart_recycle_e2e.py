@@ -158,7 +158,6 @@ spec:
 """
         _kubectl("apply", "-f", "-", input=bs_yaml)
         try:
-            # Wait for allocation to land on the pool pod.
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
                 alloc = _kubectl(
@@ -185,8 +184,6 @@ spec:
                     f"container restartCount did not increase after Restart "
                     f"recycle (before={before}, pod={pod})"
                 )
-            # Pod must survive the recycle and come back Running with execd
-            # as PID 1 again — the pool stays usable.
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
                 if self._pod_phase([pod]) and self._container_restart_count(pod) > before:

@@ -21,52 +21,6 @@ from unittest.mock import MagicMock
 from opensandbox_server.services.constants import SandboxErrorCodes
 
 
-class TestMetadataMergePatch:
-    """Test the JSON Merge Patch (RFC 7396) semantics for metadata merging."""
-
-    @staticmethod
-    def apply_patch(current: dict, patch: dict) -> dict:
-        """Reference implementation of merge-patch semantics."""
-        current = dict(current)
-        for key, value in patch.items():
-            if value is None:
-                current.pop(key, None)
-            else:
-                current[key] = value
-        return current
-
-    def test_add_new_key(self):
-        result = self.apply_patch({"a": "1"}, {"b": "2"})
-        assert result == {"a": "1", "b": "2"}
-
-    def test_replace_existing_key(self):
-        result = self.apply_patch({"a": "1"}, {"a": "2"})
-        assert result == {"a": "2"}
-
-    def test_delete_existing_key(self):
-        result = self.apply_patch({"a": "1", "b": "2"}, {"a": None})
-        assert result == {"b": "2"}
-
-    def test_delete_nonexistent_key_silent(self):
-        result = self.apply_patch({"a": "1"}, {"b": None})
-        assert result == {"a": "1"}
-
-    def test_empty_patch_noop(self):
-        result = self.apply_patch({"a": "1"}, {})
-        assert result == {"a": "1"}
-
-    def test_empty_current_empty_patch_noop(self):
-        result = self.apply_patch({}, {})
-        assert result == {}
-
-    def test_mixed_add_replace_delete(self):
-        result = self.apply_patch(
-            {"team": "infra", "env": "staging", "old": "remove"},
-            {"team": "platform", "env": None, "project": "new"},
-        )
-        assert result == {"team": "platform", "old": "remove", "project": "new"}
-
-
 class TestIsSystemLabel:
     """Test system label detection (opensandbox.io/ prefix)."""
 
@@ -145,6 +99,7 @@ class TestApplyMetadataPatch:
         with pytest.raises(HTTPException) as exc:
             self._merge(labels, {"opensandbox.io/id": None})
         assert exc.value.status_code == 400
+        assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
         assert "opensandbox.io/id" in exc.value.detail["message"]
 
     def test_reserved_key_rejected_with_non_null_value(self):
@@ -154,6 +109,7 @@ class TestApplyMetadataPatch:
         with pytest.raises(HTTPException) as exc:
             self._merge(labels, {"opensandbox.io/custom": "value"})
         assert exc.value.status_code == 400
+        assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
         assert "opensandbox.io/custom" in exc.value.detail["message"]
 
 
@@ -197,8 +153,6 @@ class TestPatchLabelsMethod:
 
 
 class TestPatchMetadataValidation:
-    """Test that invalid metadata in the patch is rejected."""
-
     def test_reserved_prefix_rejected(self):
         from opensandbox_server.services.validators import ensure_metadata_labels
 
@@ -221,3 +175,35 @@ class TestPatchMetadataValidation:
             {"Invalid Key!": None},
         )
         assert labels == {"team": "platform"}
+
+
+class TestDockerPatchMetadataReservedKey:
+    """Docker rejects reserved keys with the canonical metadata error code."""
+
+    def test_reserved_key_rejected_with_canonical_code(self, monkeypatch, tmp_path):
+        from unittest.mock import patch
+
+        from opensandbox_server.config import AppConfig, RuntimeConfig
+        from opensandbox_server.services.docker import DockerSandboxService
+
+        monkeypatch.setattr(
+            "opensandbox_server.services.docker.metadata.DEFAULT_STORE_DIR",
+            tmp_path / "metadata",
+        )
+        config = AppConfig(
+            runtime=RuntimeConfig(type="docker", execd_image="opensandbox/execd:test"),
+        )
+        with patch("opensandbox_server.services.docker.docker_service.docker") as mock_docker:
+            mock_client = MagicMock()
+            mock_client.containers.list.return_value = []
+            mock_docker.from_env.return_value = mock_client
+            service = DockerSandboxService(config=config)
+
+        container = MagicMock()
+        container.attrs = {"Config": {"Labels": {"opensandbox.io/id": "sbx-001"}}}
+        monkeypatch.setattr(service, "_get_container_by_sandbox_id", lambda _id: container)
+
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"opensandbox.io/expires-at": "never"})
+        assert exc.value.status_code == 400
+        assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL

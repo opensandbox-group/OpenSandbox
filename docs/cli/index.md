@@ -376,13 +376,8 @@ Older server builds may still return
 `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
 ::: info
-Legacy DevOps diagnostics remain experimental. Prefer `osb diagnostics logs/events` for stable API-backed log and event collection.
+The legacy `osb devops` command group was removed. Use `osb diagnostics logs/events` with `--scope` for log and event collection and `osb sandbox get` for sandbox state. The plain-text filters (`--tail`, `--since`, `--limit`) have no stable equivalents; read the scoped output and filter as needed.
 :::
-
-```bash
-osb devops inspect <sandbox-id> -o raw
-osb devops summary <sandbox-id> -o raw
-```
 
 ## Output Formats
 
@@ -416,7 +411,6 @@ The main command groups are:
 - `osb egress`: runtime egress policy
 - `osb credential-vault`: sandbox-local credentials and bindings
 - `osb diagnostics`: stable diagnostics logs and events
-- `osb devops`: experimental legacy diagnostics
 - `osb config`: local CLI configuration
 - `osb skills`: bundled skills for AI tools
 
@@ -492,6 +486,8 @@ osb config set connection.protocol http
 osb config set defaults.image python:3.12
 osb config set defaults.timeout 30m
 ```
+
+`osb config set` validates the key and the value (for example, `connection.protocol` must be `http` or `https`), so a typo fails immediately instead of breaking every later command. Setting an unknown key prints the full list of supported keys.
 
 The optional `connection`, `output`, and `defaults` sections must be TOML tables (for example, `[connection]`), not scalar values or arrays. Invalid section types produce a configuration error naming the section. Omitted sections use defaults.
 

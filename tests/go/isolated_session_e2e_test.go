@@ -90,26 +90,21 @@ func TestIsolationAttachRoundtrip(t *testing.T) {
 	require.NoError(t, err)
 	sessionID := created.SessionID()
 
-	// Write some state through the original handle so we can prove the
-	// attached handle really targets the same bwrap session.
 	_, err = created.Run(ctx, opensandbox.IsolatedRunRequest{
 		Code: "echo attached-state > /tmp/attach-marker.txt",
 	}, nil)
 	require.NoError(t, err)
 
-	// Simulate a stateless client that only kept the sessionID.
 	attached, err := sb.IsolationAttach(ctx, sessionID)
 	require.NoError(t, err)
 	assert.Equal(t, sessionID, attached.SessionID())
 
-	// Creation-parameter echoes should be populated by GET.
 	info := attached.Info()
 	require.NotNil(t, info)
 	require.NotNil(t, info.Workspace)
 	assert.Equal(t, "/tmp", info.Workspace.Path)
 	assert.Equal(t, "rw", info.Workspace.Mode)
 
-	// Handle works end-to-end via sessionID alone.
 	state, err := attached.Get(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, "active", state.Status)
@@ -135,7 +130,6 @@ func TestIsolationAttachNotFound(t *testing.T) {
 func TestIsolationListSessions(t *testing.T) {
 	ctx, sb := createIsolatedTestSandbox(t)
 
-	// Create two sessions and confirm both appear in the list.
 	sessionA, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
 		Workspace: &opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
 	})
@@ -165,7 +159,6 @@ func TestIsolationListSessions(t *testing.T) {
 	_, okB := ids[sessionB.SessionID()]
 	require.True(t, okB, "sessionB should appear in list")
 
-	// After deleting a session it should no longer be listed.
 	require.NoError(t, sessionB.Delete(ctx))
 	sessions, err = sb.IsolationListSessions(ctx)
 	require.NoError(t, err)
@@ -331,10 +324,6 @@ func TestIsolationOverlayMode(t *testing.T) {
 	assert.True(t, strings.Contains(text, "NOT_FOUND") || strings.Contains(text, "No such file"),
 		"overlay write should not be visible on host, got: %s", text)
 }
-
-// ---------------------------------------------------------------------------
-// RW filesystem API tests
-// ---------------------------------------------------------------------------
 
 func TestIsolationRWFilesUploadDownload(t *testing.T) {
 	ctx, sb := createIsolatedTestSandbox(t)
@@ -614,10 +603,6 @@ func TestIsolationRWHostVisible(t *testing.T) {
 	assert.Contains(t, hostExec.Text(), content)
 }
 
-// ---------------------------------------------------------------------------
-// RO mode tests
-// ---------------------------------------------------------------------------
-
 func TestIsolationROCanReadExistingFiles(t *testing.T) {
 	ctx, sb := createIsolatedTestSandbox(t)
 
@@ -748,10 +733,6 @@ func TestIsolationROFilesAPIListDirectory(t *testing.T) {
 	assert.True(t, found, "expected child.txt in RO directory listing")
 }
 
-// ---------------------------------------------------------------------------
-// Overlay mode tests
-// ---------------------------------------------------------------------------
-
 func skipIfOverlayNotSupported(t *testing.T, ctx context.Context, sb *opensandbox.Sandbox) {
 	t.Helper()
 	caps, err := sb.IsolationCapabilities(ctx)
@@ -832,14 +813,12 @@ func TestIsolationOverlayCOWDoesNotMutateHost(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	// Verify session sees modified content
 	exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
 		Code: fmt.Sprintf("cat %s", filePath),
 	}, nil)
 	require.NoError(t, err)
 	assert.Contains(t, exec.Text(), "modified-content")
 
-	// Verify host still has original content
 	hostExec, err := sb.RunCommand(ctx, fmt.Sprintf("cat %s", filePath), nil)
 	require.NoError(t, err)
 	assert.Contains(t, hostExec.Text(), originalContent)
@@ -872,7 +851,6 @@ func TestIsolationOverlayFilesAPIUploadDownload(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, content, string(data))
 
-	// Verify not visible on host
 	hostExec, err := sb.RunCommand(ctx, fmt.Sprintf("cat %s 2>&1 || echo NOT_FOUND", filePath), nil)
 	require.NoError(t, err)
 	hostText := hostExec.Text()
@@ -1072,10 +1050,6 @@ func TestIsolationOverlayFilesAPIListDirectory(t *testing.T) {
 	assert.True(t, found, "expected child file in overlay directory listing")
 }
 
-// ---------------------------------------------------------------------------
-// RunOnce / WithSession convenience API tests
-// ---------------------------------------------------------------------------
-
 func TestIsolationRunOnce(t *testing.T) {
 	ctx, sb := createIsolatedTestSandbox(t)
 
@@ -1099,10 +1073,6 @@ func TestIsolationRunOnceWithEnvs(t *testing.T) {
 	assert.Contains(t, exec.Text(), "run-once-val")
 }
 
-// ---------------------------------------------------------------------------
-// Bind mount tests (explicit source->dest binds)
-// ---------------------------------------------------------------------------
-
 // TestIsolationBindReadWriteHostVisible verifies a legal read-write bind:
 // data written inside the bwrap namespace at the bind destination is readable
 // on the host at the bind source.
@@ -1110,15 +1080,11 @@ func TestIsolationBindReadWriteHostVisible(t *testing.T) {
 	ctx, sb := createIsolatedTestSandbox(t)
 
 	ts := time.Now().UnixMilli()
-	// Source must fall within the execd writable allowlist (e.g. /data).
 	srcDir := fmt.Sprintf("/data/bind_rw_%d", ts)
 	dest := "/mnt/bind_rw"
 	fileName := "from_sandbox.txt"
 	content := "bind-rw-visible-on-host"
 
-	// Host-side: create the bind source directory and the destination mount
-	// point (bwrap binds onto an existing dir; it cannot create one under the
-	// read-only root).
 	_, err := sb.RunCommand(ctx, fmt.Sprintf("mkdir -p %s %s", srcDir, dest), nil)
 	require.NoError(t, err)
 
@@ -1131,14 +1097,12 @@ func TestIsolationBindReadWriteHostVisible(t *testing.T) {
 	require.NoError(t, err)
 	defer session.Delete(ctx)
 
-	// Read back inside the namespace after writing (write + read in sandbox).
 	exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
 		Code: fmt.Sprintf("echo -n %s > %s/%s && cat %s/%s", content, dest, fileName, dest, fileName),
 	}, nil)
 	require.NoError(t, err)
 	assert.Contains(t, exec.Text(), content, "sandbox should read back what it wrote to the bind")
 
-	// Host-side: the write must be visible at the bind source.
 	hostExec, err := sb.RunCommand(ctx, fmt.Sprintf("cat %s/%s", srcDir, fileName), nil)
 	require.NoError(t, err)
 	assert.Contains(t, hostExec.Text(), content, "bind write should be visible on host")
@@ -1152,7 +1116,6 @@ func TestIsolationBindIllegalRejected(t *testing.T) {
 	_, err := sb.IsolationCreate(ctx, opensandbox.CreateIsolatedSessionRequest{
 		Workspace: &opensandbox.IsolatedWorkspaceSpec{Path: "/tmp", Mode: "rw"},
 		Binds: []opensandbox.BindMount{
-			// /etc is not in the writable allowlist.
 			{Source: "/etc", Dest: "/mnt/etc"},
 		},
 	})
@@ -1172,8 +1135,6 @@ func TestIsolationBindReadOnlyReadable(t *testing.T) {
 	fileName := "host_created.txt"
 	content := "bind-ro-host-content"
 
-	// Host-side: create the source dir (with a file to read), plus the
-	// destination mount point that bwrap will bind onto.
 	_, err := sb.RunCommand(ctx,
 		fmt.Sprintf("mkdir -p %s %s && echo -n %s > %s/%s", srcDir, dest, content, srcDir, fileName), nil)
 	require.NoError(t, err)
@@ -1187,14 +1148,12 @@ func TestIsolationBindReadOnlyReadable(t *testing.T) {
 	require.NoError(t, err)
 	defer session.Delete(ctx)
 
-	// Read the host-created file inside the namespace via the read-only bind.
 	exec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
 		Code: fmt.Sprintf("cat %s/%s", dest, fileName),
 	}, nil)
 	require.NoError(t, err)
 	assert.Contains(t, exec.Text(), content, "read-only bind should be readable inside the sandbox")
 
-	// Writing through the read-only bind must fail.
 	writeExec, err := session.Run(ctx, opensandbox.IsolatedRunRequest{
 		Code: fmt.Sprintf("echo x > %s/newfile.txt 2>&1; echo exit=$?", dest),
 	}, nil)
@@ -1229,10 +1188,6 @@ func TestIsolationWithSessionE2E(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, output, "with-session-val")
 }
-
-// ---------------------------------------------------------------------------
-// Background run tests
-// ---------------------------------------------------------------------------
 
 // waitForBackgroundRun polls a background run's status until it is no longer
 // running or the timeout elapses.
@@ -1286,7 +1241,6 @@ func TestIsolationBackgroundRunCompletes(t *testing.T) {
 	assert.Contains(t, logs, "hello-background")
 	assert.Greater(t, nextCursor, int64(0))
 
-	// Incremental read from the returned cursor returns the remainder.
 	tail, tailCursor, err := session.GetRunLogs(ctx, run.RunID, nextCursor)
 	require.NoError(t, err)
 	assert.Equal(t, "", tail)
@@ -1325,7 +1279,6 @@ func TestIsolationBackgroundRunDoesNotPolluteForeground(t *testing.T) {
 	assert.Contains(t, exec.Text(), "fg-output-line")
 	assert.NotContains(t, exec.Text(), "bg-output-line")
 
-	// The background output must live in the run log instead.
 	logs, _, err := session.GetRunLogs(ctx, run.RunID, 0)
 	require.NoError(t, err)
 	assert.Contains(t, logs, "bg-output-line")

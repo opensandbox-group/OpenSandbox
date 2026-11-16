@@ -23,6 +23,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 )
@@ -32,12 +33,23 @@ var (
 	ErrLifecycleSequenceConflict  = errors.New("subject lifecycle status conflicts with pending command")
 )
 
-// SubjectUnloadResult describes installation-owner closure only. There are no
-// admitted transports in this owner; terminal is not proof of live socket drain.
+// SubjectUnloadResult describes owner closure. Installation-only receipts omit
+// both connection counts and prove nothing about live sockets. Admission
+// receipts carry both: closed counts confirmed proxied disconnects, and any
+// remaining connection makes the result a fenced failure with pending
+// transport obligations. Neither count covers traffic that bypasses the proxy.
+// Older parsers reject the admission shape: upgrade Go and addon together.
 type SubjectUnloadResult struct {
-	RoutingRevoked       bool   `json:"routingRevoked"`
-	TransportObligations string `json:"transportObligations"`
-	Completion           string `json:"completion"`
+	RoutingRevoked       bool    `json:"routingRevoked"`
+	TransportObligations string  `json:"transportObligations"`
+	Completion           string  `json:"completion"`
+	ClosedConnections    *uint64 `json:"closedConnections,omitempty"`
+	RemainingConnections *uint64 `json:"remainingConnections,omitempty"`
+}
+
+// UnconfirmedConnections reports admission teardown that did not confirm closure.
+func (r *SubjectUnloadResult) UnconfirmedConnections() bool {
+	return r != nil && r.RemainingConnections != nil && *r.RemainingConnections > 0
 }
 
 // LifecycleResult is a closed, credential-free result for one consumed command.
@@ -60,6 +72,7 @@ type subjectLifecycleCommand struct {
 	ControlGeneration string        `json:"controlGeneration"`
 	LifecycleSequence int64         `json:"lifecycleSequence"`
 	Target            SubjectTarget `json:"target"`
+	SourceAddresses   *[]string     `json:"sourceAddresses,omitempty"`
 }
 
 type pendingSubjectLifecycle struct {
@@ -106,16 +119,28 @@ func NewSubjectLifecycleClient(socketPath, sessionToken, controlGeneration strin
 // ErrTransportRejected accompanies a confirmed failure receipt. ErrIndeterminate
 // requires Reconcile before any later lifecycle command can be allocated.
 // The caller must supply a context with a deadline; see SubjectLifecycleClient.
-func (c *SubjectLifecycleClient) Register(ctx context.Context, target SubjectTarget) (LifecycleReceipt, error) {
-	return c.command(ctx, "register", target)
+func (c *SubjectLifecycleClient) Register(ctx context.Context, target SubjectTarget, addresses ...netip.Addr) (LifecycleReceipt, error) {
+	canonical := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if !address.IsValid() || address.Zone() != "" {
+			return LifecycleReceipt{}, ErrInvalidTransport
+		}
+		canonical = append(canonical, address.String())
+	}
+	return c.command(ctx, "register", target, &canonical)
 }
 
-// Unload closes exactly this installation owner. A confirmed subject_failed
-// receipt retires its sequence but leaves the remote owner fenced; another
-// explicit Unload may retry closure with a new sequence.
+// Suspend revokes snapshot authority without changing the target or routing.
+// A new prepare/commit is required before dispatch inspection exposes a snapshot.
+func (c *SubjectLifecycleClient) Suspend(ctx context.Context, target SubjectTarget) (LifecycleReceipt, error) {
+	return c.command(ctx, "suspend", target, nil)
+}
+
+// Unload releases the key and source routes even if closure fails. A failed
+// receiver retains its capacity in quarantine until the child process restarts.
 // The caller must supply a context with a deadline; see SubjectLifecycleClient.
 func (c *SubjectLifecycleClient) Unload(ctx context.Context, target SubjectTarget) (LifecycleReceipt, error) {
-	return c.command(ctx, "unload", target)
+	return c.command(ctx, "unload", target, nil)
 }
 
 // Pending reports whether an earlier command still needs exact reconciliation.
@@ -127,7 +152,7 @@ func (c *SubjectLifecycleClient) Pending() bool {
 	return c.pending != nil
 }
 
-func (c *SubjectLifecycleClient) command(ctx context.Context, operation string, target SubjectTarget) (LifecycleReceipt, error) {
+func (c *SubjectLifecycleClient) command(ctx context.Context, operation string, target SubjectTarget, addresses *[]string) (LifecycleReceipt, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pending != nil {
@@ -143,7 +168,7 @@ func (c *SubjectLifecycleClient) command(ctx context.Context, operation string, 
 		return LifecycleReceipt{}, ErrLifecycleSequenceExhausted
 	}
 	sequence := c.last + 1
-	raw, err := json.Marshal(subjectLifecycleCommand{c.control, sequence, target})
+	raw, err := json.Marshal(subjectLifecycleCommand{c.control, sequence, target, addresses})
 	if err != nil || len(raw) > maxSubjectMetadataBytes {
 		return LifecycleReceipt{}, ErrInvalidTransport
 	}
@@ -266,7 +291,7 @@ func decodeLifecycleRecord(data []byte, sequenceKey string, allowInitial bool) (
 	}
 	if record.LifecycleSequence < 1 || isNull(operation) || isNull(digest) || isNull(result) ||
 		json.Unmarshal(operation, &record.Operation) != nil || json.Unmarshal(digest, &record.CommandDigest) != nil ||
-		(record.Operation != "register" && record.Operation != "unload") || !validLifecycleDigest(record.CommandDigest) {
+		(record.Operation != "register" && record.Operation != "unload" && record.Operation != "suspend") || !validLifecycleDigest(record.CommandDigest) {
 		return nil, ErrInvalidTransportResponse
 	}
 	decoded, err := decodeLifecycleResult(result, record.Operation)
@@ -310,8 +335,16 @@ func decodeLifecycleResult(data []byte, operation string) (*LifecycleResult, err
 			expectedStatus = http.StatusServiceUnavailable
 		}
 	case "subject_generation_mismatch":
-		if operation == "unload" {
+		if operation == "unload" || operation == "suspend" {
 			expectedStatus = http.StatusConflict
+		}
+	case "subject_unknown":
+		if operation == "suspend" {
+			expectedStatus = http.StatusNotFound
+		}
+	case "suspended":
+		if operation == "suspend" {
+			expectedStatus = http.StatusOK
 		}
 	case "unloaded", "already_absent":
 		if operation == "unload" {
@@ -332,14 +365,46 @@ func decodeLifecycleResult(data []byte, operation string) (*LifecycleResult, err
 		}
 		return result, nil
 	}
-	closed := &SubjectUnloadResult{}
-	if err := decodeStrictObject(unload, map[string]func(*json.Decoder) error{
-		"routingRevoked":       subjectField(&closed.RoutingRevoked),
-		"transportObligations": subjectField(&closed.TransportObligations),
-		"completion":           subjectField(&closed.Completion),
-	}); err != nil || !closed.RoutingRevoked || closed.TransportObligations != "none" || closed.Completion != completion {
+	closed, err := decodeUnloadResult(unload)
+	if err != nil || !closed.RoutingRevoked || closed.Completion != completion {
+		return nil, ErrInvalidTransportResponse
+	}
+	obligations := "none"
+	if closed.UnconfirmedConnections() {
+		// Unconfirmed teardown is never a clean unload.
+		if result.Outcome != "subject_failed" {
+			return nil, ErrInvalidTransportResponse
+		}
+		obligations = "pending"
+	}
+	if closed.TransportObligations != obligations {
 		return nil, ErrInvalidTransportResponse
 	}
 	result.Unload = closed
 	return result, nil
+}
+
+// decodeUnloadResult accepts the installation-only shape or the admission shape
+// with both counts; a lone count, duplicates and non-integers are rejected.
+func decodeUnloadResult(data []byte) (*SubjectUnloadResult, error) {
+	closed := &SubjectUnloadResult{}
+	fields := map[string]func(*json.Decoder) error{
+		"routingRevoked":       subjectField(&closed.RoutingRevoked),
+		"transportObligations": subjectField(&closed.TransportObligations),
+		"completion":           subjectField(&closed.Completion),
+	}
+	if decodeStrictObject(data, fields) == nil {
+		return closed, nil
+	}
+	closed = &SubjectUnloadResult{ClosedConnections: new(uint64), RemainingConnections: new(uint64)}
+	if err := decodeStrictObject(data, map[string]func(*json.Decoder) error{
+		"routingRevoked":       subjectField(&closed.RoutingRevoked),
+		"transportObligations": subjectField(&closed.TransportObligations),
+		"completion":           subjectField(&closed.Completion),
+		"closedConnections":    subjectField(closed.ClosedConnections),
+		"remainingConnections": subjectField(closed.RemainingConnections),
+	}); err != nil {
+		return nil, ErrInvalidTransportResponse
+	}
+	return closed, nil
 }

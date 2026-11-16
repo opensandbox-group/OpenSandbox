@@ -50,7 +50,15 @@ from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as p
 def _config(namespace: str = "ns-1", runtime: str = "kubernetes") -> AppConfig:
     config = AppConfig(
         server=ServerConfig(host="0.0.0.0", port=8080, api_key="x"),
-        runtime=RuntimeConfig(type=runtime, execd_image="opensandbox/execd:1.1.0"),
+        # Pinned to the classic topology: most tests here assert env projection
+        # without EXECD_INIT. Init-mode projection is covered by the
+        # execd_init_service fixture (the config default is execd_run_as_init
+        # = true; see test_config.py).
+        runtime=RuntimeConfig(
+            type=runtime,
+            execd_image="opensandbox/execd:1.1.0",
+            execd_run_as_init=False,
+        ),
     )
     if runtime != "docker":
         config.kubernetes = KubernetesRuntimeConfig(
@@ -307,6 +315,23 @@ def test_create_rejects_native_oci_before_side_effects(service, crs):
     assert not crs.created
 
 
+@pytest.mark.parametrize("alias", ["storage", "ephemeral-storage"])
+def test_create_rejects_sandbox_disk_quota_aliases(service, crs, alias):
+    """The sandbox writable-layer quota aliases are not template keys.
+
+    Template resourceLimits describe guest machine sizing (disk = guest
+    rootfs size), and the shared sandbox-create component must not promise
+    the aliases here.
+    """
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(resourceLimits={"cpu": "1", alias: "10G"}))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
+    assert alias in excinfo.value.detail["message"]
+    assert "cpu, memory, disk" in excinfo.value.detail["message"]
+    assert not crs.created
+
+
 @pytest.mark.parametrize("manifest_ref", [
     None,
     "oci://registry.example.com/team/templates:latest",
@@ -503,7 +528,6 @@ def execd_init_service(repo, crs, monkeypatch):
 
 
 def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
-    # A client-provided EXECD_INIT must not win over the server switch.
     record = execd_init_service.create_template(
         _create_request(env={"EXECD_INIT": "0", "LOG_LEVEL": "info"})
     )
@@ -516,7 +540,7 @@ def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
     assert crs.created[-1]["spec"]["envs"] == [{"name": "EXECD_INIT", "value": "1"}]
 
 
-def test_create_does_not_inject_execd_init_by_default(service, crs):
+def test_create_does_not_inject_execd_init_when_disabled(service, crs):
     service.create_template(_create_request(env={"LOG_LEVEL": "info"}))
     envs = {e["name"]: e["value"] for e in crs.created[-1]["spec"]["envs"]}
     assert envs == {"LOG_LEVEL": "info"}
@@ -670,7 +694,6 @@ def test_resolve_artifact_requires_succeeded(service, crs):
 
 
 def test_resolve_gate_trusts_db_row_not_crd(service, crs):
-    """The create gate reads the DB projection only."""
     record = service.create_template(_create_request(entrypoint=["sleep", "1"]))
 
     # CR already says Succeeded but the event has not been delivered: 404.
@@ -897,6 +920,16 @@ def test_routes_list_filters_on_empty_metadata_value(client, service):
     payload = listing.json()
     assert payload["pagination"]["totalItems"] == 1
     assert [item["templateId"] for item in payload["items"]] == [empty.template_id]
+
+
+def test_routes_list_rejects_malformed_metadata_filter(client, service):
+    service.create_template(_create_request(metadata={"env": "prod"}))
+
+    listing = client.get("/v1/templates", params={"metadata": "env=prod&broken"})
+    assert listing.status_code == 400, listing.text
+    detail = listing.json()["detail"]
+    assert detail["code"] == "INVALID_METADATA_FORMAT"
+    assert "bad query field" in detail["message"]
 
 
 def test_routes_reject_extra_fields(client):

@@ -27,7 +27,6 @@ BOOTSTRAP_EXECD_ISOLATION_KEY = "bootstrap.execd.isolation"
 # Must match the execd DefaultConfig().UpperRoot value.
 ISOLATION_UPPER_MOUNT_PATH = "/var/lib/execd/isolation"
 
-# Extensions to annotations transformation prefix
 # User-specified extension keys starting with EXTENSIONS_ANNOTATION_PREFIX
 # are automatically propagated to Pod annotations with ANNOTATION_METADATA_PREFIX
 EXTENSIONS_ANNOTATION_PREFIX = "opensandbox.extensions."

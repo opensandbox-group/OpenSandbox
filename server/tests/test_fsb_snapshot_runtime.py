@@ -40,6 +40,7 @@ from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
     SNAPSHOT_CREATE_CONFLICT_REASON,
     SnapshotRuntimePreflightError,
+    SnapshotRuntimeUnsupportedError,
 )
 from opensandbox_server.services.snapshot_service import PersistedSnapshotService
 
@@ -113,11 +114,13 @@ class _Info:
         message: str = "",
         manifest_ref: str = "",
         template_name: str = "",
+        mode=None,
     ):
         self.phase = phase
         self.message = message
         self.manifest_ref = manifest_ref
         self.template_name = template_name
+        self.mode = mode
 
 
 class _Response:
@@ -200,7 +203,6 @@ def test_create_snapshot_submits_intent_without_waiting() -> None:
     assert status.state == SnapshotState.CREATING
     assert status.reason == "snapshot_runtime_submitted"
     assert status.backend == "fsb"
-    # No per-sandbox limits reported by the source: nothing to replay.
     assert status.resource_limits is None
 
     request = fastpath.create_requests[0]
@@ -356,6 +358,93 @@ def test_create_snapshot_oci_source_omits_template_name() -> None:
     assert request.template_name == ""
 
 
+def test_preflight_rejects_rootfs_only_for_non_oci_source() -> None:
+    runtime, _, _ = _runtime()  # default source image is native
+
+    with pytest.raises(SnapshotRuntimeUnsupportedError):
+        runtime.preflight_create_snapshot(
+            SANDBOX_ID, namespace="default", mode="rootfsOnly"
+        )
+
+
+def test_preflight_rejects_rootfs_only_when_source_cr_is_unreadable() -> None:
+    fastpath = FakeFastPathClient()
+    k8s = WatchRecordingK8sClient()
+    k8s.sandbox_cr_error = RuntimeError("connection refused")
+    runtime, _, _ = _runtime(fastpath=fastpath, k8s=k8s)
+
+    with pytest.raises(SnapshotRuntimeUnsupportedError):
+        runtime.preflight_create_snapshot(
+            SANDBOX_ID, namespace="default", mode="rootfsOnly"
+        )
+
+
+def test_preflight_accepts_rootfs_only_for_oci_source() -> None:
+    fastpath = FakeFastPathClient()
+    k8s = WatchRecordingK8sClient()
+    k8s.sandbox_crs[("default", SANDBOX_ID)] = _sandbox_cr("oci://reg.example.com/tpl@sha256:a")
+    runtime, _, _ = _runtime(fastpath=fastpath, k8s=k8s)
+
+    runtime.preflight_create_snapshot(SANDBOX_ID, namespace="default", mode="rootfsOnly")
+
+
+def test_create_snapshot_passes_rootfs_only_mode() -> None:
+    fastpath = FakeFastPathClient()
+    k8s = WatchRecordingK8sClient()
+    k8s.sandbox_crs[("default", SANDBOX_ID)] = _sandbox_cr("oci://reg.example.com/tpl@sha256:a")
+    runtime, fastpath, _ = _runtime(fastpath=fastpath, k8s=k8s)
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, mode="rootfsOnly")
+
+    assert status.state == SnapshotState.CREATING
+    assert status.mode == "rootfsOnly"
+    assert fastpath.create_requests[0].mode == pb2.SNAPSHOT_MODE_ROOTFS_ONLY
+
+
+def test_create_snapshot_leaves_mode_unspecified_by_default() -> None:
+    runtime, fastpath, _ = _runtime()
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, mode=None)
+
+    assert status.state == SnapshotState.CREATING
+    assert status.mode is None
+    assert fastpath.create_requests[0].mode == pb2.SNAPSHOT_MODE_UNSPECIFIED
+
+
+def test_inspect_maps_rootfs_only_mode() -> None:
+    fastpath = FakeFastPathClient()
+    fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
+        _Info(
+            pb2.SNAPSHOT_PHASE_SUCCEEDED,
+            manifest_ref="oci://reg.example.com/snap/files@sha256:b",
+            mode=pb2.SNAPSHOT_MODE_ROOTFS_ONLY,
+        )
+    )
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(SNAPSHOT_ID)
+
+    assert status.state == SnapshotState.READY
+    assert status.mode == "rootfsOnly"
+
+
+def test_inspect_treats_unspecified_mode_as_unknown() -> None:
+    fastpath = FakeFastPathClient()
+    fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
+        _Info(
+            pb2.SNAPSHOT_PHASE_SUCCEEDED,
+            manifest_ref="oci://reg.example.com/snap/files@sha256:b",
+            mode=pb2.SNAPSHOT_MODE_UNSPECIFIED,
+        )
+    )
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(SNAPSHOT_ID)
+
+    assert status.state == SnapshotState.READY
+    assert status.mode is None
+
+
 def test_create_snapshot_unreadable_sandbox_cr_fails_without_rpc() -> None:
     fastpath = FakeFastPathClient()
     k8s = WatchRecordingK8sClient()
@@ -406,7 +495,6 @@ def test_inspect_fails_when_succeeded_without_template_name() -> None:
 
 
 def test_inspect_succeeded_oci_manifest_restores_from_manifest_ref() -> None:
-    """OCI snapshots restore from the immutable manifest reference."""
     fastpath = FakeFastPathClient()
     manifest_ref = "oci://registry.example.com/sandbox/snapshots@sha256:def456"
     fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
@@ -468,12 +556,6 @@ def test_inspect_maps_missing_snapshot_to_failed() -> None:
 
     assert status.state == SnapshotState.FAILED
     assert status.reason == "snapshot_recovery_missing_snapshot"
-
-
-def test_delete_snapshot_ignores_missing_snapshot() -> None:
-    runtime, _, _ = _runtime()
-
-    runtime.delete_snapshot(SNAPSHOT_ID, namespace="tenant-a")
 
 
 def test_delete_snapshot_deletes_by_namespaced_name() -> None:

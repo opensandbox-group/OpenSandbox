@@ -492,6 +492,10 @@ internal sealed class SandboxesAdapter : ISandboxes
             Name = element.TryGetProperty("name", out var name) && name.ValueKind != JsonValueKind.Null
                 ? name.GetString()
                 : null,
+            // Responses that predate the mode field read back as "full".
+            Mode = element.TryGetProperty("mode", out var mode) && mode.ValueKind == JsonValueKind.String
+                ? mode.GetString() ?? SnapshotModes.Full
+                : SnapshotModes.Full,
             Status = new SnapshotStatus
             {
                 State = status.GetProperty("state").GetString() ?? throw new SandboxApiException("Missing status.state in response"),

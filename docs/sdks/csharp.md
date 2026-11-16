@@ -371,6 +371,8 @@ For binary data, use `byte[]` or `Stream` in `WriteEntry.Data`, and download wit
 
 Use `ReadBytesDetailedAsync` or `ReadBytesStreamDetailedAsync` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Check `IsPartial` before appending a resumed download, and dispose a detailed stream body with `await using`. These extension methods are in `OpenSandbox`; custom adapters must implement `IDownloadSandboxFiles` or the methods throw `NotSupportedException`.
 
+For content-encoded responses, `ContentLength` and `ContentRange` describe the encoded HTTP representation when available. The default HTTP client decodes the body and can remove the encoding and length headers; a partial response reports `TotalSize` as `-1` when neither `Content-Length` nor an explicit `identity` encoding is visible.
+
 #### File operations with an explicit identity
 
 Bind a filesystem client to a Linux UID and GID:
@@ -437,6 +439,13 @@ Read current sandbox resource usage with `await sandbox.Metrics.GetMetricsAsync(
 
 Poll snapshot status before restoring. Template builds are asynchronous; wait for `Succeeded` before use. Template-backed creation requires `TimeoutSeconds` and inherits workload configuration from the published template. Metadata patch values add/replace keys; `null` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
 
+Snapshot `mode` selects what the snapshot persists:
+
+- `SnapshotModes.Full` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `SnapshotModes.RootfsOnly`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+
+`SnapshotInfo.Mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `SnapshotModes.Full`.
+
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. This example waits up to 15 minutes and retains the snapshot for reuse:
 
 ```csharp
@@ -460,6 +469,20 @@ await using var restored = await Sandbox.CreateAsync(new SandboxCreateOptions
 try { Console.WriteLine(restored.Id); }
 finally { await restored.KillAsync(); }
 // When no longer needed: await manager.DeleteSnapshotAsync(snapshot.Id);
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```csharp
+var rootfsSnapshot = await sandbox.CreateSnapshotWithModeAsync("workspace-state", SnapshotModes.RootfsOnly);
+// ... poll manager.GetSnapshotAsync(rootfsSnapshot.Id) until Ready, then:
+await using var rebooted = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    SnapshotId = rootfsSnapshot.Id,
+    ConnectionConfig = config,
+});
+// Files written before the snapshot are present; processes were not preserved
+// and the entrypoint re-ran on boot.
 ```
 
 Use an existing template after its build reaches `Succeeded`:

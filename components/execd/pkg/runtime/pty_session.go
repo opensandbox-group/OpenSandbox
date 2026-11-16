@@ -664,6 +664,30 @@ func (s *ptySession) ResizePTY(cols, rows uint16) error {
 	return pty.Setsize(ptmx, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
+// ptyHangUpGrace bounds how long close waits for the shell to exit after
+// SIGHUP before killing its process group.
+const ptyHangUpGrace = 500 * time.Millisecond
+
+// hangUp sends SIGHUP to the PTY shell, as closing a terminal does, and waits
+// up to ptyHangUpGrace for it to exit. Interactive bash passes SIGHUP on to its
+// jobs, which job control puts in their own process groups; killing the
+// shell's group alone leaves them running and holding the terminal open.
+func (s *ptySession) hangUp(pid int) {
+	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+		return
+	}
+	deadline := time.Now().Add(ptyHangUpGrace)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		exited := s.pid != pid
+		s.mu.Unlock()
+		if exited {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // close terminates the session and releases all resources.
 // Safe to call multiple times.
 func (s *ptySession) close() {
@@ -676,9 +700,15 @@ func (s *ptySession) close() {
 	pid := s.pid
 	ptmx := s.ptmx
 	stdin := s.stdin
+	isPTY := s.isPTY
 	s.mu.Unlock()
 
 	if pid != 0 {
+		if isPTY {
+			s.hangUp(pid)
+		}
+		// Kill whatever is left in the shell's group even if the shell has
+		// exited: a group id is not reused while any member is alive.
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
 	if ptmx != nil {

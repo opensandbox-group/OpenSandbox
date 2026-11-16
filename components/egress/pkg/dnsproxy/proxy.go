@@ -300,7 +300,26 @@ func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host s
 		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
 	}
 	p.maybeNotifyResolvedWith(domain, resp, notify)
+	if upstreamNetwork(w) == "udp" && r.IsEdns0() == nil {
+		fitClassicUDPReply(resp)
+	}
 	p.writeReply(w, r, resp, telemetry.DNSReplyStageAnswer)
+}
+
+// fitClassicUDPReply shapes an answer for a UDP client that sent no EDNS0 OPT.
+// forward advertises a 4096-byte buffer upstream, but such a client only
+// accepts 512 bytes (RFC 1035 4.2.1) and must not be sent an OPT record
+// (RFC 6891 7), so drop the OPT and truncate with TC set; the client then
+// retries over TCP.
+func fitClassicUDPReply(resp *dns.Msg) {
+	extra := resp.Extra[:0]
+	for _, rr := range resp.Extra {
+		if _, ok := rr.(*dns.OPT); !ok {
+			extra = append(extra, rr)
+		}
+	}
+	resp.Extra = extra
+	resp.Truncate(dns.MinMsgSize)
 }
 
 // writeReply sends a DNS response and surfaces write failures. A reply can be
@@ -650,7 +669,7 @@ func normalizeEnvUpstreamAddr(s string) (string, error) {
 		return "", fmt.Errorf("empty upstream address")
 	}
 	if host, port, err := net.SplitHostPort(s); err == nil {
-		if port == "" {
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return "", fmt.Errorf("invalid port in %q", s)
 		}
 		if _, err := netip.ParseAddr(host); err != nil {

@@ -25,6 +25,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestInitDBRetriesAfterConnectionFailure(t *testing.T) {
+	orig := sandboxMySQLDSN
+	t.Cleanup(func() { sandboxMySQLDSN = orig })
+	sandboxMySQLDSN = "root:@tcp(127.0.0.1:1)/?timeout=200ms&readTimeout=200ms&writeTimeout=200ms"
+
+	c := NewController("", "")
+	err1 := c.initDB()
+	require.Error(t, err1)
+	require.NotContains(t, err1.Error(), "db is not initialized")
+
+	err2 := c.initDB()
+	require.Error(t, err2)
+	require.NotContains(t, err2.Error(), "db is not initialized")
+}
+
 func TestExecuteSelectSQLQuery_Success(t *testing.T) {
 	driver := &stubDriver{
 		columns: []string{"id", "name"},
@@ -73,6 +88,84 @@ func TestExecuteSelectSQLQuery_Success(t *testing.T) {
 	require.Len(t, qr.Rows, 2, "unexpected rows")
 	require.Equal(t, "1", qr.Rows[0][0])
 	require.Equal(t, "bob", qr.Rows[1][1])
+}
+
+func TestExecuteSelectSQLQuery_RendersByteColumnsAsText(t *testing.T) {
+	driver := &stubDriver{
+		columns: []string{"id", "name", "note"},
+		rows: [][]driver.Value{
+			{int64(1), []byte("alice"), nil},
+		},
+	}
+	db := newStubDB(t, driver)
+
+	c := NewController("", "")
+	c.db = db
+
+	var (
+		gotResult map[string]any
+		gotError  *execute.ErrorOutput
+	)
+	req := &ExecuteCodeRequest{
+		Code: "SELECT * FROM users",
+		Hooks: ExecuteResultHook{
+			OnExecuteResult: func(result map[string]any, _ int) {
+				gotResult = result
+			},
+			OnExecuteError: func(err *execute.ErrorOutput) {
+				gotError = err
+			},
+			OnExecuteComplete: func(time.Duration) {},
+		},
+	}
+
+	require.NoError(t, c.executeSelectSQLQuery(context.Background(), req))
+	require.Nil(t, gotError, "unexpected error hook")
+
+	var qr QueryResult
+	require.NoError(t, json.Unmarshal([]byte(gotResult["text/plain"].(string)), &qr))
+	require.Len(t, qr.Rows, 1)
+	require.Equal(t, []any{"1", "alice", nil}, qr.Rows[0])
+}
+
+func TestExecuteSelectSQLQuery_PreservesNonUTF8ByteColumns(t *testing.T) {
+	driver := &stubDriver{
+		columns: []string{"id", "payload"},
+		rows: [][]driver.Value{
+			{int64(1), []byte{0xFF, 0xFE}},
+		},
+	}
+	db := newStubDB(t, driver)
+
+	c := NewController("", "")
+	c.db = db
+
+	var (
+		gotResult map[string]any
+		gotError  *execute.ErrorOutput
+	)
+	req := &ExecuteCodeRequest{
+		Code: "SELECT * FROM blobs",
+		Hooks: ExecuteResultHook{
+			OnExecuteResult: func(result map[string]any, _ int) {
+				gotResult = result
+			},
+			OnExecuteError: func(err *execute.ErrorOutput) {
+				gotError = err
+			},
+			OnExecuteComplete: func(time.Duration) {},
+		},
+	}
+
+	require.NoError(t, c.executeSelectSQLQuery(context.Background(), req))
+	require.Nil(t, gotError, "unexpected error hook")
+
+	var qr QueryResult
+	require.NoError(t, json.Unmarshal([]byte(gotResult["text/plain"].(string)), &qr))
+	require.Len(t, qr.Rows, 1)
+	// Non-UTF-8 bytes keep the lossless byte-list rendering; json.Marshal
+	// would otherwise silently replace them with U+FFFD.
+	require.Equal(t, []any{"1", "[255 254]"}, qr.Rows[0])
 }
 
 func TestExecuteUpdateSQLQuery_Success(t *testing.T) {

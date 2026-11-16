@@ -915,7 +915,6 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         Assert.Contains("Replaced line.", replaced, StringComparison.Ordinal);
         Assert.DoesNotContain("Appended line.", replaced, StringComparison.Ordinal);
 
-        // No match → ReplacedCount=0
         var noMatchResults = await sandbox.Files.ReplaceContentsDetailedAsync(new[]
         {
             new ContentReplaceEntry { Path = testFile1, OldContent = "nonexistent string", NewContent = "irrelevant" }
@@ -923,7 +922,6 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         Assert.Single(noMatchResults);
         Assert.Equal(0, noMatchResults[0].ReplacedCount);
 
-        // Multiple matches
         await sandbox.Files.WriteFilesAsync(new[]
         {
             new WriteEntry { Path = $"{testDir1}/multi.txt", Data = "foo bar foo baz foo" }
@@ -935,7 +933,6 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         Assert.Single(multiResults);
         Assert.Equal(3, multiResults[0].ReplacedCount);
 
-        // Batch replace across multiple files
         var batchA = $"{testDir1}/batch_a.txt";
         var batchB = $"{testDir1}/batch_b.txt";
         await sandbox.Files.WriteFilesAsync(new[]
@@ -955,7 +952,6 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         Assert.Equal("hi world", await sandbox.Files.ReadFileAsync(batchA, new ReadFileOptions { Encoding = "utf-8" }));
         Assert.Equal("hi hi", await sandbox.Files.ReadFileAsync(batchB, new ReadFileOptions { Encoding = "utf-8" }));
 
-        // Verify original ReplaceContentsAsync (verbose=false, void return) still works
         await sandbox.Files.ReplaceContentsAsync(new[]
         {
             new ContentReplaceEntry { Path = testFile1, OldContent = "Replaced line.", NewContent = "Final line." }
@@ -1012,17 +1008,14 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
             new WriteEntry { Path = testPath, Data = content }
         });
 
-        // offset=2, limit=2 → lines 2-3
         var result1 = await sandbox.Files.ReadFileAsync(
             testPath, new ReadFileOptions { Offset = 2, Limit = 2 });
         Assert.Equal("line2\nline3", result1);
 
-        // offset=4, no limit → lines 4-5
         var result2 = await sandbox.Files.ReadFileAsync(
             testPath, new ReadFileOptions { Offset = 4 });
         Assert.Equal("line4\nline5", result2);
 
-        // limit=2, no offset → lines 1-2
         var result3 = await sandbox.Files.ReadFileAsync(
             testPath, new ReadFileOptions { Limit = 2 });
         Assert.Equal("line1\nline2", result3);
@@ -1110,7 +1103,6 @@ public class SandboxE2ETests : IClassFixture<SandboxE2ETestFixture>
         }
         Assert.True(isHealthy, "Sandbox should be healthy after resume.");
 
-        // Smoke-check command path after resume to ensure execd adapter is usable.
         var echo = await resumed.Commands.RunAsync("echo resume-ok");
         Assert.Null(echo.Error);
         Assert.Single(echo.Logs.Stdout);

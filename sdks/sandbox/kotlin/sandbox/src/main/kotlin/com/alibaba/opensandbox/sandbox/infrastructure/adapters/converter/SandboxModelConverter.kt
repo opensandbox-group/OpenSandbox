@@ -52,6 +52,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotMode
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotStatus
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import java.time.Duration
@@ -502,6 +503,8 @@ internal object SandboxModelConverter {
                     lastTransitionAt = this.status.lastTransitionAt,
                 ),
             createdAt = this.createdAt,
+            // Responses that predate the mode field read back as full.
+            mode = this.mode?.value ?: SnapshotMode.FULL,
         )
     }
 

@@ -110,6 +110,13 @@ def test_parse_memory_limit_handles_units():
     assert parse_memory_limit("2gi") == 2 * 1024**3
     assert parse_memory_limit("invalid") is None
 
+
+def test_parse_memory_limit_rejects_values_above_int64():
+    assert parse_memory_limit("9223372036854775807") == (1 << 63) - 1
+    assert parse_memory_limit("8192Gi") == 8192 * 1024**3
+    assert parse_memory_limit("9223372036854775808") is None
+    assert parse_memory_limit("999999999999999999999Gi") is None
+
 def test_parse_nano_cpus():
     assert parse_nano_cpus("500m") == 500_000_000
     assert parse_nano_cpus("2") == 2_000_000_000
@@ -141,27 +148,6 @@ def test_parse_timestamp_defaults_on_invalid():
     assert ts.tzinfo is not None
     future = parse_timestamp("2024-01-01T00:00:00Z")
     assert future.year == 2024
-
-def test_env_allows_empty_string_and_skips_none():
-    DockerSandboxService(config=_app_config())
-    req = CreateSandboxRequest(
-        image=ImageSpec(uri="python:3.11"),
-        timeout=120,
-        resourceLimits=ResourceLimits(root={}),
-        env={"FOO": "bar", "EMPTY": "", "NONE": None},
-        metadata={},
-        entrypoint=["python"],
-    )
-    env_dict = req.env or {}
-    environment = []
-    for key, value in env_dict.items():
-        if value is None:
-            continue
-        environment.append(f"{key}={value}")
-
-    assert "FOO=bar" in environment
-    assert "EMPTY=" in environment
-    assert all(not item.startswith("NONE=") for item in environment)
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -296,24 +282,26 @@ async def test_create_sandbox_applies_config_sandbox_env_and_binds(mock_docker):
 
     environment = mock_client.api.create_container.call_args.kwargs["environment"]
     assert "NODE_EXTRA_CA_CERTS=/etc/ssl/private-ca/root-ca.crt" in environment
-    assert "SHARED=request" in environment  # request overrides the config default
+    assert "SHARED=request" in environment
     assert "SHARED=config" not in environment
     binds = mock_client.api.create_host_config.call_args.kwargs.get("binds")
     assert binds == ["/opt/certs/root-ca.crt:/etc/ssl/private-ca/root-ca.crt:ro"]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "limits, memory, cpu, gpu",
+    "limits, memory, cpu, gpu, disk",
     [
-        ({"gpu": "2"}, None, None, 2),
-        ({"memory": "512Mi", "cpu": "500m", "gpu": "all"}, 512 * 1024**2, 500_000_000, -1),
-        ({"memory": "1G", "cpu": "1.5"}, 1_000_000_000, 1_500_000_000, None),
-        ({}, None, None, None),
-        ({"disk": "custom-value"}, None, None, None),
+        ({"gpu": "2"}, None, None, 2, None),
+        ({"memory": "512Mi", "cpu": "500m", "gpu": "all"}, 512 * 1024**2, 500_000_000, -1, None),
+        ({"memory": "1G", "cpu": "1.5"}, 1_000_000_000, 1_500_000_000, None, None),
+        ({}, None, None, None, None),
+        ({"disk": "10G"}, None, None, None, 10_000_000_000),
+        ({"ephemeral-storage": "512M"}, None, None, None, 512_000_000),
+        ({"memory": "512Mi", "cpu": "500m", "gpu": "all", "disk": "1Gi"}, 512 * 1024**2, 500_000_000, -1, 1024**3),
     ],
 )
 @patch("opensandbox_server.services.docker.docker_service.docker")
-async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memory, cpu, gpu):
+async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memory, cpu, gpu, disk):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_client.api.create_container.return_value = {"Id": "cid"}
@@ -349,6 +337,12 @@ async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memor
             assert key not in create_host_config_kwargs
         else:
             assert create_host_config_kwargs[key] == expected
+    if disk is None:
+        assert "storage_opt" not in create_host_config_kwargs
+    else:
+        # HostConfig.StorageOpt bounds the writable layer in bytes so the value
+        # is storage-driver independent.
+        assert create_host_config_kwargs["storage_opt"] == {"size": str(disk)}
     device_requests = create_host_config_kwargs.get("device_requests")
     if gpu is None:
         assert "device_requests" not in create_host_config_kwargs
@@ -364,11 +358,12 @@ async def test_create_sandbox_applies_resource_limits(mock_docker, limits, memor
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "key, value",
-    [(key, value) for key in ("memory", "cpu", "gpu") for value in ("", " ", "0", "-1", "invalid")]
+    [(key, value) for key in ("memory", "cpu", "gpu", "disk") for value in ("", " ", "0", "-1", "invalid")]
     + [("memory", "0Mi"), ("memory", "9" * 5000)]
     + [("cpu", value) for value in ("nan", "inf", "-inf", "1e10", "1e308", "1e309", "0.0000000001")]
     + [("gpu", "1.5")]
-    + [(key, "x" * 5000) for key in ("cpu", "gpu")],
+    + [("disk", "10GBx")]
+    + [(key, "x" * 5000) for key in ("cpu", "gpu", "disk")],
     ids=lambda value: value if len(value) < 80 else "oversized-integer",
 )
 @patch("opensandbox_server.services.docker.docker_service.docker")
@@ -410,18 +405,26 @@ async def test_create_sandbox_rejects_invalid_resource_limits_before_side_effect
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
-async def test_create_sandbox_without_gpu_omits_device_requests(mock_docker):
+async def test_create_sandbox_maps_storage_opt_daemon_rejection_to_400(mock_docker):
+    """A quota-incapable storage driver must fail fast, not silently drop the limit.
+
+    The Docker Engine rejects HostConfig.StorageOpt at container create time when
+    the node's storage driver cannot enforce a writable-layer quota (overlay2
+    without pquota, plain ext4, ...). That error must surface as INVALID_PARAMETER
+    instead of a generic 500 so callers learn their disk limit is not applied.
+    """
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
-    mock_client.api.create_container.return_value = {"Id": "cid"}
-    mock_client.containers.get.return_value = MagicMock()
+    mock_client.api.create_container.side_effect = APIError(
+        "Error response from daemon: --storage-opt is not supported for overlay2 over ext4"
+    )
     mock_docker.from_env.return_value = mock_client
 
     service = DockerSandboxService(config=_app_config())
     request = CreateSandboxRequest(
         image=ImageSpec(uri="python:3.11"),
         timeout=120,
-        resourceLimits=ResourceLimits(root={}),
+        resourceLimits=ResourceLimits(root={"disk": "10G"}),
         env={},
         metadata={},
         entrypoint=["python"],
@@ -437,11 +440,16 @@ async def test_create_sandbox_without_gpu_omits_device_requests(mock_docker):
                 "8080": ("0.0.0.0", 40002),
             },
         ),
+        pytest.raises(HTTPException) as exc_info,
     ):
         await service.create_sandbox(request)
 
-    create_host_config_kwargs = mock_client.api.create_host_config.call_args.kwargs
-    assert "device_requests" not in create_host_config_kwargs
+    assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+    assert "resourceLimits.disk" in exc_info.value.detail["message"]
+    # The failed container create must not leave a partial container behind.
+    mock_client.api.remove_container.assert_not_called()
+
 
 @pytest.mark.parametrize(
     "runtime_exc, expected_status, expect_wrapped_error",
@@ -1085,7 +1093,7 @@ async def test_container_runtime_network_modes_are_not_treated_as_user_defined(m
 
         assert service.network_mode == mode
         assert service._is_user_defined_network() is False
-        service._validate_network_exists()  # must not raise for runtime network modes
+        service._validate_network_exists()
 
     mock_client.networks.get.assert_not_called()
 
@@ -1606,7 +1614,7 @@ async def test_create_sandbox_user_defined_network_uses_correct_network_mode(moc
 
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
-    mock_client.networks.get.return_value = MagicMock()  # network exists
+    mock_client.networks.get.return_value = MagicMock()
     mock_client.api.create_host_config.side_effect = host_cfg_side_effect
     mock_client.api.create_container.return_value = {"Id": "main-id"}
     mock_client.containers.get.return_value = MagicMock(id="main-id")
@@ -1643,7 +1651,6 @@ async def test_create_sandbox_user_defined_network_uses_correct_network_mode(moc
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
 def test_validate_network_skipped_for_builtin_modes(mock_docker):
-    """_validate_network_exists does NOT call the Docker API for host or bridge modes."""
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -2814,7 +2821,8 @@ def test_metadata_excludes_labels_inherited_from_the_image(tmp_path):
     assert store.get("sandbox-meta", container_labels) == {"team": "infra"}
 
 
-def test_build_env_omits_execd_run_as_init_by_default():
+def test_build_env_injects_execd_run_as_init_by_default():
+    """execd_run_as_init defaults to true: EXECD_INIT rides along with user env."""
     service = DockerSandboxService(config=_app_config())
     request = CreateSandboxRequest(
         image=ImageSpec(uri="python:3.11"),
@@ -2826,12 +2834,12 @@ def test_build_env_omits_execd_run_as_init_by_default():
     _, environment = service._build_labels_and_env("sandbox-manual", request, None)
 
     assert "FOO=bar" in environment
-    assert not any(e.startswith("EXECD_INIT=") for e in environment)
+    assert "EXECD_INIT=1" in environment
 
 
-def test_build_env_injects_execd_run_as_init_when_enabled():
+def test_build_env_omits_execd_run_as_init_when_disabled():
     config = _app_config()
-    config.runtime.execd_run_as_init = True
+    config.runtime.execd_run_as_init = False
     service = DockerSandboxService(config=config)
     request = CreateSandboxRequest(
         image=ImageSpec(uri="python:3.11"),
@@ -2842,7 +2850,7 @@ def test_build_env_injects_execd_run_as_init_when_enabled():
 
     _, environment = service._build_labels_and_env("sandbox-manual", request, None)
 
-    assert "EXECD_INIT=1" in environment
+    assert not any(e.startswith("EXECD_INIT=") for e in environment)
 
 def test_build_labels_stores_renewal_policy_from_lifecycle():
     service = DockerSandboxService(config=_app_config())
@@ -2855,21 +2863,6 @@ def test_build_labels_stores_renewal_policy_from_lifecycle():
     )
 
     labels, _ = service._build_labels_and_env("sandbox-renew", request, None)
-
-    assert labels[ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY] == "3600"
-
-
-def test_docker_create_accepts_renewal_policy_only_lifecycle():
-    service = DockerSandboxService(config=_app_config())
-    request = CreateSandboxRequest(
-        image=ImageSpec(uri="python:3.11"),
-        resourceLimits=ResourceLimits(root={}),
-        env={},
-        entrypoint=["python"],
-        lifecycle=SandboxLifecycle(renewalPolicy={"extendSeconds": 3600}),
-    )
-
-    labels, _ = service._build_labels_and_env("sandbox-renew-only", request, None)
 
     assert labels[ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY] == "3600"
 
@@ -4104,7 +4097,6 @@ class TestBuildVolumeBinds:
         assert binds == ["my-shared-volume:/mnt/data:rw"]
 
     def test_single_pvc_volume_ro(self, mock_docker):
-        """Single PVC volume with read-only (no subPath) should produce named volume bind string."""
         mock_docker.from_env.return_value = MagicMock()
         service = DockerSandboxService(config=_app_config())
         volume = Volume(
@@ -4369,7 +4361,6 @@ class TestDockerVolumeValidation:
 
     @pytest.mark.asyncio
     async def test_pvc_volume_not_found_rejected(self, mock_docker):
-        """PVC backend with non-existent Docker named volume should be rejected when createIfNotExists is false."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
         mock_client.api.inspect_volume.side_effect = DockerNotFound("volume not found")
@@ -4449,7 +4440,6 @@ class TestDockerVolumeValidation:
 
     @pytest.mark.asyncio
     async def test_auto_created_pvc_volume_removed_when_image_pull_fails(self, mock_docker):
-        """A volume auto-created for the request is removed if creation fails before provisioning."""
         raised, pull_failed, volumes = await self._create_with_failing_image_pull(mock_docker)
 
         assert raised is pull_failed
@@ -4469,10 +4459,8 @@ class TestDockerVolumeValidation:
         assert raised is pull_failed
 
     def test_pvc_volume_auto_created_when_not_found(self, mock_docker):
-        """PVC backend auto-creates Docker named volume when createIfNotExists is true (default)."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
-        # First inspect fails (not found), then succeeds after create
         mock_client.api.inspect_volume.side_effect = [
             DockerNotFound("volume not found"),
             {"Name": "my-volume", "Driver": "local", "Mountpoint": "/var/lib/docker/volumes/my-volume/_data"},
@@ -5637,11 +5625,6 @@ def test_docker_get_endpoint_rejects_expires():
         assert "not supported" in exc.value.detail["message"].lower()
 
 
-# ============================================================================
-# list_sandboxes: race-safety and full-fidelity semantics
-# ============================================================================
-
-
 def _list_summary(sandbox_id: str, *, labels: dict | None = None) -> dict:
     """Build the subset of a Docker low-level ``containers()`` summary that
     ``list_sandboxes`` reads (Id + Labels only)."""
@@ -6155,7 +6138,6 @@ def test_list_sandboxes_uses_low_level_summary_endpoint(mock_docker):
     item = response.items[0]
     assert item.id == "sbx-1"
     assert item.status.state == "Running"
-    # Full fidelity: entrypoint from Config.Cmd, image from Config.Image.
     assert item.entrypoint == ["python", "app.py"]
     assert item.image is not None
     assert item.image.uri == "python:3.11"

@@ -22,7 +22,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from opensandbox.adapters.factory import AdapterFactory
 from opensandbox.config import ConnectionConfig
@@ -390,10 +390,20 @@ class Sandbox:
         """
         return await self._sandbox_service.patch_sandbox_metadata(self.id, patch)
 
-    async def create_snapshot(self, name: str | None = None) -> SnapshotInfo:
-        """Create a persistent snapshot from this sandbox."""
+    async def create_snapshot(
+        self,
+        name: str | None = None,
+        mode: Literal["full", "rootfsOnly"] | None = None,
+    ) -> SnapshotInfo:
+        """Create a persistent snapshot from this sandbox.
+
+        ``mode`` selects what the snapshot persists: ``"full"`` (default)
+        also captures memory and process state; ``"rootfsOnly"`` keeps only
+        the writable filesystem — restoring boots a fresh sandbox, re-runs
+        the entrypoint, and requires the fast-sandbox backend.
+        """
         return await self._sandbox_service.create_snapshot(
-            self.id, CreateSnapshotRequest(name=name)
+            self.id, CreateSnapshotRequest(name=name, mode=mode)
         )
 
     async def get_egress_policy(self) -> NetworkPolicy:

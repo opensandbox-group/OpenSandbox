@@ -31,7 +31,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from kubernetes.client import ApiException, CustomObjectsApi, V1APIResource, V1APIResourceList
 
-from opensandbox_server.api import lifecycle, network_policy
+from opensandbox_server.api import diagnostics, lifecycle, network_policy
 from opensandbox_server.api.schema import RenewSandboxExpirationRequest
 from opensandbox_server.config import (
     AppConfig,
@@ -872,7 +872,6 @@ def test_create_without_network_policy_still_registers_egress_binding(persisted_
     assert [b["handler"] for b in bindings] == ["egress"]
     assert json.loads(bindings[0]["input"]) == {"defaultAction": "allow", "egress": []}
 
-    # The sandbox can adopt a policy later through the relay.
     policy = {"defaultAction": "allow", "egress": [{"action": "allow", "target": "a.com"}]}
     response = client.put(url, json=policy)
     assert response.status_code == 200
@@ -1484,6 +1483,33 @@ def test_diagnostics_use_new_structured_state(http_fsb):
 
     fake.diagnostic_runtime_state = 99
     assert '"runtime_state": "99"' in service.get_sandbox_events(sandbox_id)
+
+
+def test_event_diagnostics_route_serves_events_without_sandbox_logs(http_fsb, monkeypatch):
+    client, _, service = http_fsb
+    sandbox_id = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+        },
+    ).json()["id"]
+    monkeypatch.setattr(diagnostics, "sandbox_service", service)
+    app = FastAPI()
+    app.include_router(diagnostics.router, prefix="/v1")
+
+    with TestClient(app) as diagnostics_client:
+        response = diagnostics_client.get(
+            f"/v1/sandboxes/{sandbox_id}/diagnostics/events?scope=runtime"
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["kind"] == "events"
+    assert body["scope"] == "runtime"
+    assert "sandbox ready" in body["content"]
 
 
 def test_event_diagnostics_enforce_stable_scope_contract(http_fsb):

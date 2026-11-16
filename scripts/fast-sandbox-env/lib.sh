@@ -18,9 +18,9 @@
 # machinery, the ERR/failure-dump/--auto-clean contract, tool installation,
 # and the raw server / osb CLI helpers every verify script shares.
 #
-# Layout: integration.sh (entry/orchestration), env.sh (environment
-# up/down/status/pool), verify/*.sh (one script per verify stage).
-# Usage docs: integration.sh.
+# Layout: integration-env.sh (monolith entry: env lifecycle + all verify
+# stages inline) and verify/*.sh (one script per verify stage, runnable
+# standalone against a live stack). Usage docs: integration-env.sh.
 
 # Source-once guard: re-sourcing must not reset run state.
 [[ -n "${_FSB_ENV_LIB_SOURCED:-}" ]] && return 0
@@ -118,7 +118,7 @@ IMG_EGRESS="${EGRESS_IMAGE:-docker.io/opensandbox/egress:latest}"
 image_repo() { printf '%s' "${1%:*}"; }
 image_tag() { printf '%s' "${1##*:}"; }
 
-# --- OpenSandbox server + ingress gateway (source-built; always deployed) ------
+# --- OpenSandbox server + ingress gateway (source-built; always deployed)
 
 OSB_NS="opensandbox-system"
 IMG_SERVER="${SERVER_IMAGE:-docker.io/opensandbox/server:env}"
@@ -168,7 +168,7 @@ export GOPROXY="$FSB_GOPROXY"
 AUTO_CLEAN=0
 ACTION=""
 
-# --- logging / stage machinery --------------------------------------------------
+# --- logging / stage machinery
 
 log() { printf '\033[1;34m[fast-sandbox-env]\033[0m %s\n' "$*" | tee -a "$WORK/run.log" >&2; }
 die() { printf '\033[1;31m[fast-sandbox-env] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -241,7 +241,7 @@ kubectl_get() { kubectl -n "$RESOURCE_NS" get "$1" -o jsonpath="$2"; }
 
 sudo_() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
 
-# --- helpers ---------------------------------------------------------------------
+# --- helpers
 
 kind_node() { kind get nodes --name "$KIND_CLUSTER" 2>/dev/null | head -1; }
 
@@ -258,7 +258,7 @@ rc() {
 		-v "$RC_CONFIG_DIR:/config" "$RC_IMAGE" "$@"
 }
 
-# --- failure dump ------------------------------------------------------------------
+# --- failure dump
 
 on_error() {
 	local rc=$? task="$1"
@@ -269,7 +269,8 @@ on_error() {
 	trap '' PIPE
 	# Dump before --auto-clean teardown destroys the evidence.
 	failure_dump "$task" || true
-	# down lives in env.sh; standalone verify scripts have no teardown to run.
+	# Only integration-env.sh defines a teardown; standalone verify scripts
+	# have none to run.
 	if [[ "$AUTO_CLEAN" == 1 ]] && declare -F down >/dev/null; then
 		log "$ACTION failed at $task; --auto-clean: running down" || true
 		(down) >/dev/null 2>&1 || true
@@ -351,7 +352,7 @@ failure_dump() {
 	log "failure dump: $dump"
 }
 
-# --- stage: preflight + tooling ------------------------------------------------------
+# --- stage: preflight + tooling
 
 install_release_binary() { # name version url
 	local name="$1" version="$2" url="$3" tmp
@@ -497,7 +498,7 @@ sandbox_state_get() {
 	osb_api sandbox get "$VERIFY_ID" -o json 2>/dev/null | jq -r '.status.state // empty'
 }
 
-# --- standalone-verify helpers ------------------------------------------------------
+# --- standalone-verify helpers
 
 # Locate the osb CLI without installing it (verify scripts run against an
 # already-provisioned stack; only env `up` installs).
@@ -506,7 +507,7 @@ resolve_osb() {
 		OSB_BIN="$OSB_VENV/bin/osb"
 	fi
 	[[ -x "$OSB_BIN" ]] \
-		|| die "osb not found at $OSB_BIN (run 'integration.sh up' first, or set OSB_BIN)"
+		|| die "osb not found at $OSB_BIN (run 'integration-env.sh up' first, or set OSB_BIN)"
 	log "osb version: $("$OSB_BIN" --version 2>/dev/null | tail -n1 || echo unknown)"
 }
 
@@ -514,7 +515,7 @@ resolve_osb() {
 require_template_id() {
 	[[ -n "${TEMPLATE_ID:-}" ]] || TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] \
-		|| die "no template id at $WORK/template-id (run 'integration.sh up' first)"
+		|| die "no template id at $WORK/template-id (run 'integration-env.sh up' first)"
 }
 
 # Shared verify preconditions: cluster up, server reachable, osb resolvable.
@@ -540,7 +541,7 @@ server_api_status() { # method path [json-body]
 	printf '%s' "${out##*$'\n'}"
 }
 
-# --- artifact-store hygiene ---------------------------------------------------------
+# --- artifact-store hygiene
 
 # Prune stale artifact sets from the test S3 (RustFS). Every pause publishes
 # an instance-private checkpoint set (multi-GiB: rootfs + vmstate + memory)

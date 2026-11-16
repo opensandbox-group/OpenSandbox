@@ -303,7 +303,6 @@ class AgentSandboxProvider(WorkloadProvider):
         extensions: Optional[Dict[str, str]] = None,
         sandbox_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Build pod spec dict for the Sandbox CRD."""
         has_egress = egress_settings is not None
         disable_ipv6_for_egress = (
             egress_settings.disable_ipv6 if egress_settings is not None else False
@@ -738,7 +737,9 @@ class AgentSandboxProvider(WorkloadProvider):
                 )
                 for pod in pods:
                     if pod.status and pod.status.pod_ip and pod.status.phase == "Running":
-                        return Endpoint(endpoint=f"{pod.status.pod_ip}:{port}")
+                        pod_ip = pod.status.pod_ip
+                        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                        return Endpoint(endpoint=f"{host}:{port}")
             except Exception as e:
                 logger.warning(f"Failed to resolve pod endpoint: {e}")
 

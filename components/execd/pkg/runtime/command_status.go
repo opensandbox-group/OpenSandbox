@@ -57,7 +57,7 @@ func (c *Controller) commandSnapshot(session string) *commandKernel {
 func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 	kernel := c.commandSnapshot(session)
 	if kernel == nil {
-		return nil, fmt.Errorf("command not found: %s", session)
+		return nil, fmt.Errorf("%w: %s", ErrCommandNotFound, session)
 	}
 
 	status := &CommandStatus{
@@ -81,7 +81,7 @@ func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) ([]byte, int64, error) {
 	kernel := c.commandSnapshot(session)
 	if kernel == nil {
-		return nil, -1, fmt.Errorf("command not found: %s", session)
+		return nil, -1, fmt.Errorf("%w: %s", ErrCommandNotFound, session)
 	}
 
 	if !kernel.isBackground {

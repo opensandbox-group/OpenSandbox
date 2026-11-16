@@ -13,8 +13,10 @@
 # limitations under the License.
 
 import asyncio
+import threading
 import time
 import pytest
+from contextlib import contextmanager
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from typing import cast
@@ -337,7 +339,6 @@ class TestKubernetesSandboxServiceCreate:
     async def test_create_sandbox_with_no_timeout_calls_provider_with_expires_at_none_and_manual_cleanup_label(
         self, k8s_service, create_sandbox_request
     ):
-        """When timeout is None (manual cleanup), provider receives expires_at=None and manual-cleanup label."""
         create_sandbox_request.timeout = None
         k8s_service.workload_provider.create_workload.return_value = {
             "name": "test-id", "uid": "uid-1"
@@ -913,7 +914,6 @@ class TestKubernetesSandboxServiceCreate:
     async def test_create_sandbox_pool_mode_missing_pool_fails_fast(
         self, k8s_service
     ):
-        """Pool mode validates poolRef before creating the BatchSandbox."""
         from opensandbox_server.api.schema import CreateSandboxRequest
 
         pool_request = CreateSandboxRequest(
@@ -975,7 +975,6 @@ class TestKubernetesSandboxServiceCreate:
     async def test_create_sandbox_pool_mode_skips_image_and_entrypoint_validation(
         self, k8s_service, mock_workload
     ):
-        """Pool mode: poolRef only, no image/entrypoint/resourceLimits — should succeed."""
         from opensandbox_server.api.schema import CreateSandboxRequest
 
         pool_request = CreateSandboxRequest(
@@ -1053,7 +1052,6 @@ class TestWaitForSandboxReady:
     
     @pytest.mark.asyncio
     async def test_wait_for_pending_then_running_succeeds(self, k8s_service, mock_workload):
-        # Mock state transition: Pending -> Allocated -> Running
         status_sequence = [
             {"state": "Pending", "reason": "", "message": "Pending", "last_transition_at": datetime.now(timezone.utc)},
             {"state": "Allocated", "reason": "IP_ASSIGNED", "message": "IP assigned", "last_transition_at": datetime.now(timezone.utc)},
@@ -1156,10 +1154,10 @@ class TestWaitForSandboxReady:
             "last_transition_at": datetime.now(timezone.utc),
         }
         
-        with pytest.raises(HTTPException) as exc_info:
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
             await k8s_service._wait_for_sandbox_ready("test-sandbox-id", timeout_seconds=1, poll_interval_seconds=0.5)
-        
-        assert exc_info.value.status_code == 504  # Gateway Timeout
+
+        assert exc_info.value.status_code == 504
         assert "timeout" in exc_info.value.detail["message"].lower()
 
     @pytest.mark.asyncio
@@ -1230,14 +1228,13 @@ class TestWaitForSandboxReady:
             "last_transition_at": datetime.now(timezone.utc),
         }
 
-        with pytest.raises(HTTPException) as exc_info:
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
             await k8s_service._wait_for_sandbox_ready(
                 "test-sandbox-id",
                 timeout_seconds=2.0,
                 poll_interval_seconds=0.05,
                 pool_acquisition_timeout_seconds=0.2,
             )
-
         assert exc_info.value.status_code == 429
         assert (
             exc_info.value.detail["code"]
@@ -1424,6 +1421,40 @@ class TestWaitForSandboxReady:
         assert "exceeded quota" in exc_info.value.detail["message"]
         k8s_service.workload_provider.delete_workload.assert_called_once()
 
+@contextmanager
+def _fake_wait_clock(k8s_service):
+    """Drive _wait_for_sandbox_ready with a virtual clock instead of real sleeps.
+
+    Switches the provider to the polling path (no watch subscription) so the
+    loop's delays go through asyncio.sleep, then makes that sleep advance a
+    virtual monotonic clock. Timeout and deadline logic is exercised
+    instantly and deterministically.
+
+    The mocked monotonic clock is anchored to the real timeline: the event
+    loop's scheduler derives its timer deadlines from time.monotonic too, so
+    a constant mock would freeze loop timers (asyncio.wait_for would never
+    fire). Anchoring keeps both clocks consistent on one advancing timeline.
+    """
+    k8s_service.workload_provider.subscribe_workload.return_value = None
+    clock = SimpleNamespace(now=0.0)
+    anchor = time.monotonic()
+
+    async def advance_clock(seconds: float) -> None:
+        clock.now += seconds
+
+    with (
+        patch(
+            "opensandbox_server.services.k8s.kubernetes_service.time.monotonic",
+            side_effect=lambda: anchor + clock.now,
+        ),
+        patch(
+            "opensandbox_server.services.k8s.kubernetes_service.asyncio.sleep",
+            new=advance_clock,
+        ),
+    ):
+        yield clock
+
+
 def _pending_status():
     return {
         "state": "Pending",
@@ -1486,9 +1517,12 @@ class TestCreateTimeoutStartupDetails:
     async def _wait_timeout(self, k8s_service, mock_workload) -> HTTPException:
         k8s_service.workload_provider.get_workload.return_value = mock_workload
         k8s_service.workload_provider.get_status.return_value = _pending_status()
+        # A tiny real timeout: these tests assert on the timeout error's
+        # detail-collection behavior, which runs on real asyncio.wait_for
+        # timers that a fake monotonic clock would freeze.
         with pytest.raises(HTTPException) as exc_info:
             await k8s_service._wait_for_sandbox_ready(
-                "test-sandbox-123", timeout_seconds=0.2, poll_interval_seconds=0.05
+                "test-sandbox-123", timeout_seconds=0.05, poll_interval_seconds=0.01
             )
         return exc_info.value
 
@@ -1571,19 +1605,26 @@ class TestCreateTimeoutStartupDetails:
 
     @pytest.mark.asyncio
     async def test_slow_detail_lookup_is_bounded(self, k8s_service, mock_workload):
+        release = threading.Event()
+
         def _slow_list_pods(**kwargs):
-            time.sleep(1.0)
+            release.wait(1.0)
             return [_waiting_pod()]
 
         k8s_service.k8s_client.list_pods.side_effect = _slow_list_pods
 
-        with patch(
-            "opensandbox_server.services.k8s.kubernetes_service._STARTUP_DETAILS_TIMEOUT_SECONDS",
-            0.05,
-        ):
-            started = time.monotonic()
-            exc = await self._wait_timeout(k8s_service, mock_workload)
-            elapsed = time.monotonic() - started
+        try:
+            with patch(
+                "opensandbox_server.services.k8s.kubernetes_service._STARTUP_DETAILS_TIMEOUT_SECONDS",
+                0.05,
+            ):
+                started = time.monotonic()
+                exc = await self._wait_timeout(k8s_service, mock_workload)
+                elapsed = time.monotonic() - started
+        finally:
+            # Release the abandoned to_thread worker promptly so it does not
+            # stall executor shutdown at session teardown.
+            release.set()
 
         assert exc.status_code == 504
         assert "Pod startup details" not in cast(dict[str, str], exc.detail)["message"]
@@ -1612,7 +1653,7 @@ class TestCreateTimeoutStartupDetails:
             lambda *args, **kwargs: calls.append("delete_workload")
         )
 
-        with pytest.raises(HTTPException) as exc_info:
+        with _fake_wait_clock(k8s_service), pytest.raises(HTTPException) as exc_info:
             await k8s_service.create_sandbox(create_sandbox_request)
 
         assert exc_info.value.status_code == 504
@@ -1891,7 +1932,6 @@ class TestDeleteSandbox:
         k8s_service.workload_provider.delete_workload.return_value = None
         k8s_service.k8s_client.list_pvcs.side_effect = Exception("forbidden")
 
-        # Should not raise — workload deletion already succeeded.
         k8s_service.delete_sandbox("test-sandbox-id")
         k8s_service.k8s_client.delete_pvc.assert_not_called()
 
@@ -2039,7 +2079,6 @@ class TestEnsurePvcVolumes:
         k8s_service.k8s_client.create_pvc.assert_not_called()
 
     def test_pvc_create_server_error_returns_internal_error(self, k8s_service):
-        """Unexpected PVC create errors must stay structured HTTP failures."""
         from kubernetes.client import ApiException
 
         k8s_service.k8s_client.get_pvc.return_value = None
@@ -2332,7 +2371,6 @@ class TestCreateSandboxPvcFailureCleanup:
             await k8s_service.create_sandbox(request)
 
         assert exc_info.value.status_code == 400
-        # No PVC was created, no workload was attempted, no cleanup needed.
         k8s_service.k8s_client.create_pvc.assert_not_called()
         k8s_service.workload_provider.create_workload.assert_not_called()
 
@@ -2449,7 +2487,6 @@ class TestCreateSandboxPvcFailureCleanup:
             with pytest.raises(HTTPException):
                 await k8s_service.create_sandbox(self._request_with_pvc())
 
-        # Rollback ran, then PVCs were swept.
         k8s_service.workload_provider.delete_workload.assert_called_once()
         mock_cleanup.assert_called_once()
 
@@ -2774,7 +2811,6 @@ class TestListSandboxes:
         base_time = datetime.now(timezone.utc)
         workloads = []
         
-        # We'll create them in random order to verify sorting works
         creation_times = [
             base_time - timedelta(hours=5),  # Oldest
             base_time - timedelta(hours=2),
@@ -2888,25 +2924,6 @@ class TestRenewExpiration:
             expires_at=new_expiration,
         )
     
-    def test_renew_expiration_succeeds(self, k8s_service, mock_workload):
-        new_expiration = datetime.now(timezone.utc) + timedelta(hours=2)
-        
-        k8s_service.workload_provider.get_workload.return_value = mock_workload
-        k8s_service.workload_provider.update_expiration.return_value = None
-        k8s_service.workload_provider.get_expiration.return_value = new_expiration
-        
-        from opensandbox_server.api.schema import RenewSandboxExpirationRequest
-        request = RenewSandboxExpirationRequest(expires_at=new_expiration)
-        
-        response = k8s_service.renew_expiration("test-sandbox-id", request)
-        
-        assert response.expires_at == new_expiration
-        k8s_service.workload_provider.update_expiration.assert_called_once_with(
-            sandbox_id="test-sandbox-id",
-            namespace=k8s_service.namespace,
-            expires_at=new_expiration
-        )
-    
     def test_renew_with_past_time_raises_error(self, k8s_service, mock_workload):
         past_time = datetime.now(timezone.utc) - timedelta(hours=1)
         
@@ -2921,7 +2938,6 @@ class TestRenewExpiration:
         assert exc_info.value.status_code == 400
 
     def test_renew_returns_409_when_sandbox_has_no_expiration(self, k8s_service):
-        """Renew is rejected with 409 when sandbox has no TTL (manual cleanup)."""
         k8s_service.workload_provider.get_workload.return_value = MagicMock()
         k8s_service.workload_provider.get_expiration.return_value = None
         from opensandbox_server.api.schema import RenewSandboxExpirationRequest
@@ -2938,7 +2954,6 @@ class TestRenewExpiration:
 
 
 class TestSignedEndpoint:
-    """Test signed route token generation in get_endpoint."""
 
     BASE64_SECRET = "bXktdGVzdC1zZWNyZXQ="  # "my-test-secret"
 
@@ -2974,7 +2989,6 @@ class TestSignedEndpoint:
         assert len(parts) == 4  # sandbox_id-port-b36-signature
 
     def test_signed_endpoint_omits_secure_access_header(self, k8s_service):
-        """Signed endpoint must NOT include the static SecureAccessToken header."""
         self._setup_gateway_with_secure_access(k8s_service)
         k8s_service.workload_provider.get_workload.return_value = {
             "metadata": {
@@ -2992,7 +3006,6 @@ class TestSignedEndpoint:
             )
 
     def test_unsigned_endpoint_attaches_secure_access_header(self, k8s_service):
-        """Unsigned endpoint must include the static SecureAccessToken header."""
         self._setup_gateway_with_secure_access(k8s_service)
         k8s_service.workload_provider.get_workload.return_value = {
             "metadata": {
@@ -3435,7 +3448,7 @@ async def test_create_wait_cleans_up_and_honors_deadlines(k8s_service, mock_work
 
     provider.get_status.side_effect = status
     task = asyncio.create_task(k8s_service._wait_for_sandbox_ready(
-        "test-sandbox-id", timeout_seconds=1 if outcome == "timeout" else 60,
+        "test-sandbox-id", timeout_seconds=0.1 if outcome == "timeout" else 60,
         poll_interval_seconds=30, pool_acquisition_timeout_seconds=0.02,
     ))
     try:

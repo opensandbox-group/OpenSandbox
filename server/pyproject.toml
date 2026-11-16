@@ -126,6 +126,11 @@ select = [
     "G003",
 ]
 
+[tool.coverage.run]
+# Generated protobuf stubs are machine-written; exclude them from the coverage
+# gate so the 80% threshold measures handwritten code only.
+omit = ["opensandbox_server/services/fast_sandbox/generated/*"]
+
 [tool.pyright]
 typeCheckingMode = "standard"
 pythonVersion = "3.10"
