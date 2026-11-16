@@ -296,6 +296,8 @@ public sealed class CodeInterpreter
         }
     }
 
+    private static readonly TimeSpan MaxProbeBudget = TimeSpan.FromMilliseconds(int.MaxValue);
+
     /// <summary>
     /// Runs <see cref="IsHealthyAsync"/> for at most <paramref name="budget"/>. Each probe
     /// carries its own request timeout, so a stalled one could otherwise hold the caller
@@ -305,7 +307,12 @@ public sealed class CodeInterpreter
     private async Task<bool> IsHealthyWithinAsync(TimeSpan budget, CancellationToken cancellationToken)
     {
         using var probeDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        probeDeadline.CancelAfter(budget > TimeSpan.Zero ? budget : TimeSpan.Zero);
+        // CancelAfter rejects delays beyond int.MaxValue milliseconds (about 24.8 days); a budget
+        // that long cannot run out during a probe, so leave the probe unbounded instead.
+        if (budget < MaxProbeBudget)
+        {
+            probeDeadline.CancelAfter(budget > TimeSpan.Zero ? budget : TimeSpan.Zero);
+        }
         var probe = IsHealthyAsync(probeDeadline.Token);
         var expired = Task.Delay(Timeout.Infinite, probeDeadline.Token);
         if (await Task.WhenAny(probe, expired).ConfigureAwait(false) != probe)

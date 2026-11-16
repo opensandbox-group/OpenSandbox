@@ -104,6 +104,28 @@ public class CodeInterpreterHealthCheckTests
     }
 
     [Fact]
+    public async Task CreateAsync_AcceptsAReadyTimeoutBeyondTheTimerRange()
+    {
+        // int.MaxValue seconds is far beyond what a CancellationTokenSource timer accepts.
+        var commands = CommandsMock(executionErrorOnFirstAttempts: 0);
+        var sandbox = await CreateConnectedSandboxAsync(commands.Object);
+        var codes = new FakeCodes(pingSucceedsAfter: 1);
+        var factory = new FakeAdapterFactory(codes);
+
+        var create = CodeInterpreter.CreateAsync(sandbox, new CodeInterpreterCreateOptions
+        {
+            AdapterFactory = factory,
+            ReadyTimeoutSeconds = int.MaxValue,
+            HealthCheckPollingInterval = 1
+        });
+
+        Assert.Same(create, await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(10))));
+        await create;
+        Assert.Equal(1, codes.PingAttempts);
+        await sandbox.DisposeAsync();
+    }
+
+    [Fact]
     public async Task CreateAsync_ThrowsWhenRuntimeProcessNeverAppears()
     {
         // Daemon ping passes, but the runtime process check keeps failing.
