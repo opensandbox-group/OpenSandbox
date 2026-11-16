@@ -605,6 +605,86 @@ class TestWorkloadInformerStartStop:
         informer._stop_event.wait.assert_called_once_with(1.0)
         informer._full_resync.assert_called_once_with()
 
+    def test_missing_resource_warns_once_and_keeps_retrying(self):
+        """A resource the API server does not serve (CRD not installed) is
+        reported once without a traceback, then retried quietly."""
+        list_fn = MagicMock(
+            side_effect=[
+                ApiException(status=404),
+                ApiException(status=404),
+                ApiException(status=404),
+                _list_response("installed-later"),
+            ]
+        )
+        informer = _make_informer(
+            list_fn=list_fn, enable_watch=True, thread_name="informer-foos-default"
+        )
+        waits = []
+        informer._stop_event.wait = MagicMock(side_effect=lambda timeout: waits.append(timeout))
+        informer._run_watch_loop = MagicMock(side_effect=lambda _timeout: informer.stop())
+
+        with patch("opensandbox_server.services.k8s.informer.logger") as log:
+            informer._run()
+
+        log.warning.assert_called_once()
+        message = log.warning.call_args.args[0]
+        assert "informer-foos-default" in message
+        assert "404" in message
+        assert "exc_info" not in log.warning.call_args.kwargs
+        assert log.debug.call_count == 2
+        assert waits == [1.0, 2.0, 4.0]
+        assert "installed-later" in informer._cache
+
+    def test_missing_resource_warns_again_after_it_was_served(self):
+        list_fn = MagicMock(
+            side_effect=[
+                ApiException(status=404),
+                _list_response("a"),
+                ApiException(status=404),
+                _list_response("a"),
+            ]
+        )
+        informer = _make_informer(list_fn=list_fn, enable_watch=True)
+        informer._stop_event.wait = MagicMock()
+        watch_runs = []
+
+        def watch_once_then_stop(_timeout):
+            watch_runs.append(_timeout)
+            if len(watch_runs) == 1:
+                informer._has_synced = False  # force a fresh LIST
+            else:
+                informer.stop()
+
+        informer._run_watch_loop = MagicMock(side_effect=watch_once_then_stop)
+
+        with patch("opensandbox_server.services.k8s.informer.logger") as log:
+            informer._run()
+
+        assert log.warning.call_count == 2
+        log.debug.assert_not_called()
+
+    def test_other_api_errors_warn_with_traceback_every_time(self):
+        list_fn = MagicMock(
+            side_effect=[
+                ApiException(status=500),
+                ApiException(status=500),
+                _list_response("a"),
+            ]
+        )
+        informer = _make_informer(
+            list_fn=list_fn, enable_watch=True, thread_name="informer-foos-default"
+        )
+        informer._stop_event.wait = MagicMock()
+        informer._run_watch_loop = MagicMock(side_effect=lambda _timeout: informer.stop())
+
+        with patch("opensandbox_server.services.k8s.informer.logger") as log:
+            informer._run()
+
+        assert log.warning.call_count == 2
+        for call in log.warning.call_args_list:
+            assert "informer-foos-default" in call.args[0]
+            assert call.kwargs.get("exc_info") is True
+
     def test_poll_mode_resets_has_synced_after_wait(self):
         """In poll mode (enable_watch=False), _has_synced is reset after each wait so the
         cache is refreshed on the next loop iteration."""

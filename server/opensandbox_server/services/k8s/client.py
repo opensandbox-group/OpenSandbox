@@ -134,7 +134,7 @@ class K8sClient:
                     list_fn=list_fn,
                     resync_period_seconds=self.config.informer_resync_seconds,
                     watch_timeout_seconds=self.config.informer_watch_timeout_seconds,
-                    thread_name=f"workload-informer-{plural}-{namespace}",
+                    thread_name=f"workload-informer-{plural}.{group}-{namespace}",
                     event_handler=event_handler,
                 )
                 self._informers[key] = informer
