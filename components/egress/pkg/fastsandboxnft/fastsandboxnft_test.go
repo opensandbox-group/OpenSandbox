@@ -670,7 +670,7 @@ func TestApplyDenyFirstMissingTableFallback(t *testing.T) {
 	var attempts atomic.Int32
 	runner := &fakeRunner{fail: func(script string) error {
 		if strings.Contains(script, "delete table inet opensandbox-fast-sandbox") && attempts.Add(1) == 1 {
-			return fmt.Errorf("nft apply failed: No such file or directory; did you mean table")
+			return nftMissingObjectError("delete table inet opensandbox-fast-sandbox")
 		}
 		return nil
 	}}
@@ -1396,5 +1396,46 @@ func TestPortScopedPolicyComposesWithPlatformFloor(t *testing.T) {
 			require.Contains(t, script, "subj_s_u_1 tcp dport { 80 } drop")
 			require.Contains(t, script, "subj_s_u_1_in meta l4proto tcp ct original proto-dst { 22, 443 } accept")
 		})
+	}
+}
+
+// nftMissingObjectError mimics `nft -f -` failing on line with "No such file
+// or directory", as DefaultRunner reports it.
+func nftMissingObjectError(line string) error {
+	return fmt.Errorf("nft apply failed: exit status 1 (output: /dev/stdin:1:1-10: Error: Could not process rule: No such file or directory\n%s\n^^^^^^^^^^)", line)
+}
+
+func TestResetRetriesWithoutDeleteWhenTableIsMissing(t *testing.T) {
+	deleteLine := "delete table inet " + TableName
+	runner := &fakeRunner{fail: func(script string) error {
+		if strings.Contains(script, deleteLine) {
+			return nftMissingObjectError(deleteLine)
+		}
+		return nil
+	}}
+	a := NewApplier(runner.Run)
+
+	if err := a.ApplyReset(context.Background()); err != nil {
+		t.Fatalf("ApplyReset: %v", err)
+	}
+	if runner.count() != 2 {
+		t.Fatalf("runs = %d, want the failed batch and one retry", runner.count())
+	}
+	if strings.Contains(runner.last(), deleteLine) {
+		t.Fatalf("retry still deletes the table:\n%s", runner.last())
+	}
+}
+
+func TestResetDoesNotRetryOtherMissingObjectErrors(t *testing.T) {
+	runner := &fakeRunner{fail: func(string) error {
+		return nftMissingObjectError("add rule inet " + TableName + " forward jump subj_gone")
+	}}
+	a := NewApplier(runner.Run)
+
+	if err := a.ApplyReset(context.Background()); err == nil {
+		t.Fatal("ApplyReset succeeded, want the batch error")
+	}
+	if runner.count() != 1 {
+		t.Fatalf("runs = %d, want only the failed batch", runner.count())
 	}
 }
