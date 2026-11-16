@@ -3,7 +3,7 @@ title: Egress Upstream Proxy Forward Mode
 authors:
   - "@hittyt"
 creation-date: 2026-11-13
-last-updated: 2026-11-14
+last-updated: 2026-11-16
 status: draft
 ---
 
@@ -25,6 +25,7 @@ status: draft
   - [Egress data plane in forward mode](#egress-data-plane-in-forward-mode)
   - [Fast Sandbox profile](#fast-sandbox-profile)
   - [Mode consistency check for Fast Sandbox](#mode-consistency-check-for-fast-sandbox)
+  - [Tunnel authentication and sandbox identity](#tunnel-authentication-and-sandbox-identity)
   - [Gateway contract](#gateway-contract)
   - [Observability](#observability)
   - [Relationship to existing proposals](#relationship-to-existing-proposals)
@@ -81,9 +82,10 @@ Platforms that adopt a centralized agent egress gateway want the opposite divisi
 | R5 | No direct-dial fallback: if the tunnel cannot be established, the sandbox connection is closed. |
 | R6 | Everything that is not relayed TCP or DNS to the egress DNS proxy is dropped, including UDP, ICMP and link-local destinations. |
 | R7 | The DNS proxy resolves every name for forward-mode sandboxes. |
-| R8 | The sandbox cannot reach the gateway endpoint directly, so it cannot forge tunnel metadata. |
+| R8 | The sandbox cannot reach the gateway endpoint directly and cannot impersonate the forwarder, so it cannot forge tunnel metadata. The forwarder is identified by a capability-gated socket mark, not by a UID that a sandbox process could assume. |
 | R9 | On Fast Sandbox, a mismatch between the server mode and the egress mode makes the sandbox fail closed (no network) and surface as `Failed`. This holds for every source of a subject's policy: the binding input, binding replays after egress restarts or rollbacks, the persisted policy record, and snapshot restore. |
 | R10 | `mode = "mitm"` and an unset `mode` behave exactly as today, including the binding input format sent to existing Fast Sandbox pools. |
+| R11 | Every tunnel is authenticated: forward mode requires `authorization`, and the gateway treats tunnel metadata as trusted only on authenticated tunnels. |
 
 ## Proposal
 
@@ -113,7 +115,7 @@ mode = "dns+nft"
 [egress.upstream_proxy]
 url = "https://gateway.example.com:3000"
 mode = "forward"            # default "mitm": today's behavior
-# authorization = "Bearer <token>"
+authorization = "Bearer <token>"   # required in forward mode (R11)
 # ca_cert_path / ca_secret_name: trust for the gateway listener (unchanged)
 ```
 
@@ -139,8 +141,11 @@ Responsibilities in forward mode:
 | Risk | Mitigation |
 |---|---|
 | Bypass through non-TCP or uncaptured traffic | R6: forward mode drops everything that is not relayed TCP or DNS to the egress DNS proxy; Fast Sandbox `forward` subjects never receive a per-subject accept mark. |
-| Sandbox forges tunnel identity by dialing the gateway directly | R8: the gateway endpoint is reachable only by the egress forwarder identity (sidecar: existing UID-scoped proxy accept ([nft upstream][nft-upstream]); Fast Sandbox: existing profile-wide endpoint drop ([fsb upstream][fsb-nft-upstream])). |
+| Sandbox forges tunnel identity by dialing the gateway directly | R8: the gateway endpoint is reachable only by forwarder traffic (sidecar: forwarder socket mark, see below; Fast Sandbox: existing profile-wide endpoint drop for sandbox sources ([fsb upstream][fsb-nft-upstream])). |
+| Sandbox process with `CAP_SETUID` assumes the forwarder's UID to skip the redirect and reach the gateway (sidecar shares the netns) | The sidecar exemption matches a forwarder socket mark instead of `meta skuid`. Setting `SO_MARK` requires `CAP_NET_ADMIN` or `CAP_NET_RAW`; forward mode requires and enforces that sandbox containers hold neither (Docker already drops both by default ([caps][docker-caps])). |
+| Platform tunnel credential leaks, allowing impersonation of any sandbox identity | The credential is delivered only to egress (never to the sandbox container, no shared process namespace with egress); per-sandbox credentials or mTLS are a follow-up (see Questions). |
 | SNI or Host spoofing (claim an allowed name, dial an arbitrary IP) | Gateway contract: when authorizing by hostname, the gateway must route to the authorized hostname rather than to the CONNECT IP (same rule as Substrate's trust boundary). |
+| Hostname unavailable (ECH, TLS without SNI, opaque TCP) silently weakens hostname policy | Gateway contract: such connections are either admitted by an explicitly authorized `IP:port` rule or denied; an ECH outer/public name is never treated as the origin name. |
 | Gateway outage silently opens egress | R5: no fallback; connections fail. Readiness reports tunnel health (see Observability). |
 | Fast Sandbox pool not configured while server is in forward mode, so sandboxes egress directly | R9: the forward marker is part of the policy body, so every policy source (binding, persisted record, snapshot bundle) is checked; mismatch fails closed. |
 | Egress rollback or snapshot restore onto an older Fastlet activates a stored allow policy | Forward subjects never store an allow policy; older egress rejects the stored `forward` value and degrades the subject to default-deny. |
@@ -157,7 +162,11 @@ Responsibilities in forward mode:
 mode: Literal["mitm", "forward"] = "mitm"
 ```
 
-Validation when `mode = "forward"`: `url` is required; `[egress] mode` must be `dns+nft`; `[docker] network_mode = "host"` is rejected (no netns to capture); `secure_runtime.type = "gvisor"` is rejected (no nftables, same as today); Kubernetes pool mode is rejected because per-allocation egress cannot be attached. `authorization`, `ca_cert_path` and `ca_secret_name` keep their meaning: tunnel credential and trust for the gateway listener.
+Validation when `mode = "forward"`: `url` and `authorization` are required (R11); `[egress] mode` must be `dns+nft`; `[docker] network_mode = "host"` is rejected (no netns to capture); `secure_runtime.type = "gvisor"` is rejected (no nftables, same as today); Kubernetes pool mode is rejected because per-allocation egress cannot be attached. `ca_cert_path` and `ca_secret_name` keep their meaning: trust for the gateway listener.
+
+Sandbox container privileges (sidecar profile, R8): the sandbox container must hold neither `CAP_NET_ADMIN` nor `CAP_NET_RAW` and must not share a process namespace with the egress container. On Docker the server rejects a forward-mode configuration whose `drop_capabilities` keeps either capability (both are dropped by default ([caps][docker-caps])). On Kubernetes the server drops both in the sandbox container `securityContext` and rejects pod templates that add them back or enable `shareProcessNamespace`.
+
+Unsupported combinations fail explicitly at configuration validation rather than silently dropping guarantees, including combining forward mode with a managed-MITM profile such as the one proposed in [#2308][pr-2308] (see [Relationship to existing proposals](#relationship-to-existing-proposals)).
 
 ### Create and policy API behavior
 
@@ -177,15 +186,17 @@ Fast Sandbox profile: no server-side attachment change is needed. Every fsb sand
 
 ### Egress data plane in forward mode
 
-Startup: `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_MODE=forward` requires `OPENSANDBOX_EGRESS_UPSTREAM_PROXY`, is incompatible with `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` and with Credential Vault, and does not start mitmproxy. A Go forwarder listens on a local port as a dedicated UID.
+Startup: `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_MODE=forward` requires `OPENSANDBOX_EGRESS_UPSTREAM_PROXY` and `OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH`, is incompatible with `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` and with Credential Vault, and does not start mitmproxy. A Go forwarder listens on a local port and sets a dedicated `SO_MARK` (distinct from the DNS proxy's existing `0x1` bypass mark and the Fast Sandbox allow mark) on every socket it opens to the gateway.
 
 Capture and filtering (sidecar `dns+nft`):
 
 1. DNS to the egress DNS proxy is redirected and accepted as today.
-2. All other outbound TCP, except loopback and traffic from the forwarder UID, is redirected to the forwarder.
-3. The forwarder UID may reach only the gateway endpoint (existing UID-scoped proxy sets).
+2. All other outbound TCP, except loopback and sockets carrying the forwarder mark, is redirected to the forwarder.
+3. Only sockets carrying the forwarder mark may reach the gateway endpoint (the existing proxy endpoint sets, matched on the mark instead of the UID).
 4. Link-local destinations (`169.254.0.0/16`, `fe80::/10`) are dropped before redirect.
 5. Everything else is dropped (UDP, ICMP, IPv6 TCP in phase 1). Sandbox `networkPolicy` evaluation does not exist in this mode.
+
+The exemption deliberately does not use `meta skuid`. The sandbox shares the sidecar's network namespace, and a sandbox process holding `CAP_SETUID` (retained by default for root workloads) could assume any UID number, skip the redirect, and dial the gateway directly. Setting `SO_MARK` requires `CAP_NET_ADMIN` or `CAP_NET_RAW`, which forward mode requires the sandbox container not to hold (see [Server configuration](#server-configuration)). The existing mitm-mode exemption is UID-based ([transparent redirect][mitm-uid-redirect], [proxy accept][nft-upstream]); hardening it is out of scope here.
 
 Forwarder, per accepted connection:
 
@@ -203,6 +214,7 @@ The shared egress is configured per pool through the FastletTemplate env, as tod
 - `OnRegistered` ([server][fsb-onregistered]) installs a per-subject TCP redirect to the shared forwarder, modeled on the existing `setMitmRedirect`, in addition to deny-first and the gateway DNS redirect. Registration fails closed if any step fails, as today.
 - A subject whose policy is `defaultAction = "forward"` never receives the per-subject accept mark that `allow` subjects get today ([fsb nft][fsb-nft]). The shared master chain gets a forward-mode rule set ahead of every per-subject jump: accept redirected TCP and DNS to the gateway resolver; everything else falls through to the existing master-chain tail drop, so UDP and ICMP cannot egress directly.
 - The forwarder resolves the subject by source IP (existing subject registry) to fill `OpenSandbox-Sandbox-Id`.
+- Sandboxes do not share the egress network namespace in this profile; they are dispatched by source IP, so a guest cannot assume the forwarder's identity. Gateway containment remains the existing profile-wide endpoint drop for sandbox sources.
 - The DNS proxy resolves every name for `forward` subjects, which satisfies R7.
 
 ### Mode consistency check for Fast Sandbox
@@ -225,14 +237,23 @@ The marker is therefore part of the policy itself, as an internal `defaultAction
 
 The sidecar profile needs no handshake: the server generates the sidecar env, so the modes agree by construction. The sidecar egress `/policy` API rejects `forward` from callers, and a forward-mode sidecar rejects policy updates.
 
+### Tunnel authentication and sandbox identity
+
+- **Authentication (R11).** Forward mode requires `authorization`; egress sends it as `Proxy-Authorization` on every `CONNECT`. A gateway listener dedicated to forward mode must reject unauthenticated tunnels. mTLS client authentication of egress is a compatible future option.
+- **Who may assert identity.** In the first phase the credential is platform-wide: any tunnel authenticated with it may assert any `OpenSandbox-Sandbox-Id`. Identity integrity therefore rests on credential confinement and on R8. The credential is delivered only to egress (sidecar env or Fastlet template), never to the sandbox container, and the sandbox cannot share the egress process namespace. A leaked credential allows impersonation of any sandbox identity until it is rotated; per-sandbox credentials or per-sandbox mTLS client certificates (as in Substrate) would bind identity cryptographically and are left to follow-up review.
+- **Identity scope.** `OpenSandbox-Sandbox-Id` is added only by the forward-mode forwarder; the `mitm` path does not send it. It carries the server-assigned sandbox ID and nothing else. It does not identify or bind a runtime incarnation (restart, pause/resume, snapshot restore, or replacement may keep the same ID). An integration that needs incarnation binding, such as the per-incarnation credential selection in [#2308][pr-2308], must define its own mapping rather than treat this header as equivalent.
+
 ### Gateway contract
 
 OpenSandbox stays gateway-neutral. A conforming gateway must:
 
 1. Accept HTTP/1.1 `CONNECT` with an `IP:port` target and treat the established tunnel as an opaque byte stream.
-2. Authenticate the tunnel (`Proxy-Authorization` or mTLS) and treat `OpenSandbox-Sandbox-Id` as trusted only on authenticated tunnels.
+2. Authenticate the tunnel (`Proxy-Authorization`, or mTLS in a future profile), reject unauthenticated tunnels on the forward-mode listener, and treat `OpenSandbox-Sandbox-Id` as trusted only on authenticated tunnels.
 3. When authorizing by hostname (SNI or Host), connect to the authorized hostname, never to the CONNECT IP on the basis of a client-supplied name.
-4. Restrict its own egress from private and link-local ranges.
+4. When no origin hostname is available (TLS without SNI, ECH where the inner name is hidden, or opaque TCP), either admit the connection under an explicitly authorized `IP:port` rule or deny it. Hostname-based rules must not match such connections, and an ECH outer/public name must never be treated as the origin hostname.
+5. Restrict its own egress from private and link-local ranges.
+
+Forward mode always sends an IP-literal `CONNECT` target. A gateway that also serves clients whose admission rejects IP-literal authorities (for example the reference profile proposed in [#2308][pr-2308]) needs distinct admission behavior selected through trusted configuration or identity, for example separate listeners or separate credentials.
 
 With agentgateway, this corresponds to a bind with `tunnelProtocol: connect` re-entering an internal bind that sniffs SNI, then TLS passthrough (`protocol: TLS` with a dynamic backend) or termination (`protocol: HTTPS`, `tls.mode: dynamicCa`) per hostname; see its [traffic egress proxy examples][ag-egress-example]. The proposal does not depend on agentgateway-specific features.
 
@@ -247,13 +268,16 @@ With agentgateway, this corresponds to a bind with `tunnelProtocol: connect` re-
 - **OSEP-0001 (FQDN egress) and `networkPolicy`:** not applied in forward mode; the gateway owns destination policy.
 - **OSEP-0012 and OSEP-0023 (Credential Vault, credential-bound interception):** mutually exclusive with forward mode; `mode = "mitm"` remains the path for local credential injection.
 - **OSEP-0022 (multi-sandbox egress control plane):** forward mode reuses subject registration, deny-first, binding replay and the fail-closed lifecycle unchanged; it adds one redirect kind and one internal policy value (`forward`).
-- **Proposed managed egress integration ([#2308][pr-2308]):** complementary. That proposal manages durable intent and rotating gateway credentials on top of the MITM chain and keeps local denies in front of every CONNECT. Forward mode instead hands destination policy to the gateway. A rotating credential source defined there could later feed the forwarder's `Proxy-Authorization`.
+- **Proposed managed egress integration ([#2308][pr-2308]):** complementary, and the two can progress independently. That proposal manages durable intent and rotating gateway credentials on top of the MITM chain and keeps local denies in front of every CONNECT; forward mode hands destination policy to the gateway.
+  - *Compatibility boundary.* #2308's initial managed-MITM profile is not supported in forward mode. Reusing a rotating credential source would not carry over that profile's local-deny guarantees, so any combination requires a separately reviewed compatibility profile; until then the combination is rejected at configuration validation.
+  - *Shared enrollment.* Both proposals need sidecar egress attachment when `networkPolicy` is absent. The enrollment hook may be shared while validation stays profile-specific (forward mode rejects a supplied `networkPolicy`; #2308 requires it to match the administrator-selected policy). This is an implementation coordination point, not a dependency.
+  - *Credentials and identity.* A rotating credential source defined there could later feed the forwarder's `Proxy-Authorization` under such a profile. `OpenSandbox-Sandbox-Id` does not bind an incarnation (see [Tunnel authentication and sandbox identity](#tunnel-authentication-and-sandbox-identity)).
 
 ## Test Plan
 
 Unit tests:
 
-- Server config: `mode` defaults to `mitm`; forward-mode validation (`dns+nft`, Docker host network, gVisor, pool mode).
+- Server config: `mode` defaults to `mitm`; forward-mode validation (`authorization` required, `dns+nft`, Docker host network, gVisor, pool mode, sandbox `NET_ADMIN`/`NET_RAW` and `shareProcessNamespace` rejected, managed-MITM combination rejected).
 - Server request handling: 400 for `networkPolicy`, `credentialProxy`, MITM env, `PUT`/`PATCH` network policy in forward mode; unchanged behavior in `mitm` mode.
 - Sidecar attachment: Docker and Kubernetes attach egress without `networkPolicy` in forward mode, with the expected env and no sandbox-container env or CA.
 - Fast Sandbox mapping: `{"defaultAction": "forward", "egress": []}` only in forward mode; today's policy otherwise.
@@ -265,7 +289,9 @@ Integration tests (egress container with a test CONNECT proxy and origin):
 
 - TCP on 443, 80 and a non-standard port is relayed with the original `IP:port` and identity header; TLS bytes arrive unmodified (origin certificate fingerprint preserved).
 - UDP (including UDP/443), ICMP, link-local and IPv6 TCP are dropped.
-- DNS resolves arbitrary names; the gateway endpoint is unreachable from the sandbox UID.
+- DNS resolves arbitrary names; the gateway endpoint is unreachable from the sandbox.
+- Forwarder impersonation: a root sandbox process with `CAP_SETUID` that switches to the forwarder's UID is still redirected and cannot reach the gateway; without `CAP_NET_ADMIN`/`CAP_NET_RAW` it cannot set the forwarder mark.
+- Only forward mode sends `OpenSandbox-Sandbox-Id`; the `mitm` path never does.
 - Gateway down: connections fail, nothing reaches the origin directly.
 
 E2E:
@@ -273,6 +299,7 @@ E2E:
 - Docker bridge and Kubernetes non-pooled sandboxes without `networkPolicy` against agentgateway in passthrough and `dynamicCa` termination modes (sandbox trusting the gateway CA through its image).
 - Fast Sandbox pool in forward mode: sandbox egress relayed; server-forward with pool-not-forward and the reverse both yield `Failed` with no network; egress restart with a changed pool mode is detected on replay.
 - Rollback and restore: with a persisted forward record, roll the pool's egress back to the previous release and restart it, and restore a forward-mode snapshot onto a previous-release Fastlet; in both cases the sandbox has no network and never activates an allow policy.
+- Gateway conformance (reference agentgateway configuration): unauthenticated tunnels are rejected; TLS without SNI and opaque TCP are denied unless an `IP:port` rule authorizes them; hostname rules never match them.
 
 ## Drawbacks
 
@@ -305,7 +332,7 @@ No new services. E2E coverage needs a CONNECT gateway container (agentgateway or
 
 ## Questions for Review
 
-1. Identity header name and form: plain `OpenSandbox-Sandbox-Id` on an authenticated tunnel, or a signed token / per-sandbox mTLS client certificate in a later phase.
+1. Identity binding: per-sandbox credentials or per-sandbox mTLS client certificates in a later phase, replacing the platform-wide credential as the basis for asserting `OpenSandbox-Sandbox-Id`.
 2. Capture scope: all TCP (proposed) versus a configurable port set.
 3. HTTP/2 multiplexed `CONNECT` to reduce per-connection setup cost.
 4. IPv6 relay in the sidecar profile.
@@ -325,6 +352,8 @@ No new services. E2E coverage needs a CONNECT gateway container (agentgateway or
 [fsb-nft]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/fastsandboxnft/fastsandboxnft.go#L27
 [fsb-nft-upstream]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/fastsandboxnft/upstream.go
 [nft-upstream]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/nftables/upstream.go#L67-L68
+[mitm-uid-redirect]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/iptables/transparent.go#L68
+[docker-caps]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/server/opensandbox_server/config.py#L1343-L1354
 [policy-parse]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/policy/policy.go#L154-L161
 [fsb-policy-reload]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/fastsandbox_policy_persist.go#L371-L468
 [fsb-policy-apply]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/fastsandbox_policy_persist.go#L470-L498
