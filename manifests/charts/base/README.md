@@ -18,7 +18,7 @@ Helm chart for deploying OpenSandbox cluster resources and CRDs
 
 ## Requirements
 
-Kubernetes: `>=1.21.1-0`
+Kubernetes: `>=1.22.0-0`
 
 ## Values
 

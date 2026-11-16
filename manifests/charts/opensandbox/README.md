@@ -13,7 +13,7 @@ fast-sandbox runtime) into a single deployment for simplified installation.
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+ (the fast-sandbox subchart's control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
 
 ## Quick Start
