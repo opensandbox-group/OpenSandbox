@@ -128,7 +128,8 @@ test("run() infers the exit code the way commands.run() does", async () => {
   const cases = [
     [`{"type":"execution_complete","timestamp":2,"execution_time":3}\n`, 0],
     [
-      `{"type":"error","timestamp":2,"error":{"ename":"SystemExit","evalue":"3","traceback":[],"exit_code":3}}\n`,
+      // execd reports a kernel error without exit_code; the code comes from evalue.
+      `{"type":"error","timestamp":2,"error":{"ename":"SystemExit","evalue":"3","traceback":[]}}\n`,
       3,
     ],
     [

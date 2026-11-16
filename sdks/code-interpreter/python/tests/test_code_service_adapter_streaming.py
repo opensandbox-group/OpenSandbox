@@ -373,10 +373,11 @@ _EXIT_CODE_CASES = [
         {
             "type": "error",
             "timestamp": 1,
-            "error": {"ename": "SystemExit", "evalue": "3", "traceback": [], "exit_code": 3},
+            # execd reports a kernel error without exit_code; the code comes from evalue.
+            "error": {"ename": "SystemExit", "evalue": "3", "traceback": []},
         },
         3,
-        id="error-exit-code",
+        id="system-exit",
     ),
     pytest.param(
         {
