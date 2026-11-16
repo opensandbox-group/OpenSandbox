@@ -130,6 +130,8 @@ func TestReplacedBatchSandboxStateIsForgotten(t *testing.T) {
 	_, _ = r.Reconcile(ctx, req)
 
 	batchSandboxScaleExpectations.ExpectScale(key, expectations.Create, "reused-stale")
+	podRecoveryBudgets.increment(key, 1)
+	t.Cleanup(func() { podRecoveryBudgets.delete(key) })
 	r.taskSchedulers.Store(key, struct{}{})
 
 	require.NoError(t, fakeClient.Delete(ctx, old.DeepCopy()))
@@ -139,6 +141,7 @@ func TestReplacedBatchSandboxStateIsForgotten(t *testing.T) {
 
 	require.NotContains(t, batchSandboxScaleExpectations.GetExpectations(key)[expectations.Create], "reused-stale",
 		"the predecessor's scale expectation was kept")
+	require.Zero(t, podRecoveryBudgets.count(key, 1), "the predecessor's pod recovery budget was kept")
 	_, kept := r.taskSchedulers.Load(key)
 	require.False(t, kept, "the predecessor's task scheduler was kept")
 }
