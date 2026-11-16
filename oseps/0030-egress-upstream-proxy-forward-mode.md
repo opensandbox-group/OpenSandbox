@@ -192,11 +192,11 @@ Capture and filtering (sidecar `dns+nft`):
 
 1. DNS to the egress DNS proxy is redirected and accepted as today.
 2. All other outbound TCP, except loopback and sockets carrying the forwarder mark, is redirected to the forwarder.
-3. Only sockets carrying the forwarder mark may reach the gateway endpoint (the existing proxy endpoint sets, matched on the mark instead of the UID).
+3. Only sockets carrying the forwarder mark may reach the gateway endpoint (proxy endpoint sets matched on the forwarder mark).
 4. Link-local destinations (`169.254.0.0/16`, `fe80::/10`) are dropped before redirect.
 5. Everything else is dropped (UDP, ICMP, IPv6 TCP in phase 1). Sandbox `networkPolicy` evaluation does not exist in this mode.
 
-The exemption deliberately does not use `meta skuid`. The sandbox shares the sidecar's network namespace, and a sandbox process holding `CAP_SETUID` (retained by default for root workloads) could assume any UID number, skip the redirect, and dial the gateway directly. Setting `SO_MARK` requires `CAP_NET_ADMIN` or `CAP_NET_RAW`, which forward mode requires the sandbox container not to hold (see [Server configuration](#server-configuration)). The existing mitm-mode exemption is UID-based ([transparent redirect][mitm-uid-redirect], [proxy accept][nft-upstream]); hardening it is out of scope here.
+The exemption deliberately uses a socket mark rather than UID matching (`meta skuid`). Because the sandbox shares the sidecar's network namespace, a workload retaining `CAP_SETUID` could assume an arbitrary UID; setting `SO_MARK` instead requires `CAP_NET_ADMIN` or `CAP_NET_RAW`, which forward mode requires the sandbox container not to hold (see [Server configuration](#server-configuration)).
 
 Forwarder, per accepted connection:
 
@@ -351,8 +351,6 @@ No new services. E2E coverage needs a CONNECT gateway container (agentgateway or
 [fsb-onregistered]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/fastsandbox_server.go#L737
 [fsb-nft]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/fastsandboxnft/fastsandboxnft.go#L27
 [fsb-nft-upstream]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/fastsandboxnft/upstream.go
-[nft-upstream]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/nftables/upstream.go#L67-L68
-[mitm-uid-redirect]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/iptables/transparent.go#L68
 [docker-caps]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/server/opensandbox_server/config.py#L1343-L1354
 [policy-parse]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/pkg/policy/policy.go#L154-L161
 [fsb-policy-reload]: https://github.com/opensandbox-group/OpenSandbox/blob/058ac8a599a963099b38ec9b144d8505fed4311e/components/egress/fastsandbox_policy_persist.go#L371-L468
