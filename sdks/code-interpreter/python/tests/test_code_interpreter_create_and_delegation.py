@@ -166,7 +166,7 @@ async def test_create_times_out_when_a_probe_suppresses_cancellation(monkeypatch
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
         return True
 
     monkeypatch.setattr(CodesAdapter, "ping", stubborn_ping)
@@ -174,14 +174,44 @@ async def test_create_times_out_when_a_probe_suppresses_cancellation(monkeypatch
     started = time.monotonic()
 
     with pytest.raises(SandboxReadyTimeoutException):
-        await CodeInterpreter.create(  # type: ignore[arg-type]
-            sandbox=sbx,
-            ready_timeout=timedelta(milliseconds=200),
-            health_check_polling_interval=timedelta(milliseconds=10),
+        await asyncio.wait_for(
+            CodeInterpreter.create(  # type: ignore[arg-type]
+                sandbox=sbx,
+                ready_timeout=timedelta(milliseconds=200),
+                health_check_polling_interval=timedelta(milliseconds=10),
+            ),
+            timeout=5,
         )
-    assert time.monotonic() - started < 0.45
+    assert time.monotonic() - started < 0.9
     # Let the abandoned probe finish before the event loop closes.
-    await asyncio.sleep(0.6)
+    await asyncio.sleep(1.1)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_create_cancels_the_running_probe(monkeypatch) -> None:
+    probe_cancelled = asyncio.Event()
+
+    async def slow_ping(self) -> bool:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            probe_cancelled.set()
+            raise
+        return True
+
+    monkeypatch.setattr(CodesAdapter, "ping", slow_ping)
+    sbx = _FakeSandbox()
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            CodeInterpreter.create(  # type: ignore[arg-type]
+                sandbox=sbx,
+                ready_timeout=timedelta(seconds=30),
+                health_check_polling_interval=timedelta(milliseconds=10),
+            ),
+            timeout=0.1,
+        )
+    await asyncio.wait_for(probe_cancelled.wait(), timeout=1)
 
 
 @pytest.mark.asyncio
