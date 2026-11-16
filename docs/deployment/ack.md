@@ -10,7 +10,7 @@ OpenSandbox 可部署在任何标准 Kubernetes 集群上，ACK 完全兼容标�
 ## 前提条件
 
 - 阿里云账号，已开通容器服务 ACK 并完成默认角色授权
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+
 - Helm 3.x（仅用作模板渲染器）、`kubectl`
 - 集群 KubeConfig 凭证（见[第二步](#第二步-连接集群)）
 
@@ -20,7 +20,7 @@ OpenSandbox 可部署在任何标准 Kubernetes 集群上，ACK 完全兼容标�
 
 | 配置项 | 建议 |
 |--------|------|
-| 集群版本 | ≥ 1.21 |
+| 集群版本 | ≥ 1.22 |
 | 网络插件 | Terway（沙箱 Pod 拥有 VPC 内可直接路由的 Pod IP） |
 | 初始节点池 | 2–3 台通用型实例，承载控制面组件 |
 | 安全组 | 放行 Worker 节点间 VPC 内互通 |

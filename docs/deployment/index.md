@@ -11,7 +11,7 @@ Charts are versioned sources in the [OpenSandbox repository](https://github.com/
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+
 - Helm 3.x
 - `kubectl` configured for your cluster
 
