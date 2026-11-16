@@ -132,6 +132,37 @@ test("the fallback execd ping sends the same data-plane headers as the codes ada
   assert.equal(seen[0].get("OPEN-SANDBOX-API-KEY"), "tenant-key");
 });
 
+test("the fallback execd ping keeps the API key off direct requests", async () => {
+  const codes = {}; // custom adapter without the optional ping capability
+  const adapterFactory = { createCodes: () => codes };
+  const seen = [];
+  const base = fakeSandbox();
+  const sandbox = {
+    ...base.sandbox,
+    connectionConfig: {
+      protocol: "http",
+      useServerProxy: false,
+      apiKey: "tenant-key",
+      headers: { "X-Custom": "from-config", "OPEN-SANDBOX-API-KEY": "tenant-key" },
+      fetch: async (input, init) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        seen.push(request.headers);
+        return new Response("ok", { status: 200 });
+      },
+    },
+  };
+
+  await CodeInterpreter.create(sandbox, {
+    adapterFactory,
+    readyTimeoutSeconds: 5,
+    healthCheckPollingInterval: 10,
+  });
+
+  assert.ok(seen.length >= 1);
+  assert.equal(seen[0].get("X-Custom"), "from-config");
+  assert.equal(seen[0].get("OPEN-SANDBOX-API-KEY"), null);
+});
+
 test("CodeInterpreter.create throws when execd never answers", async () => {
   const codes = {
     async ping() {
