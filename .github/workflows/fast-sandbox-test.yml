@@ -58,10 +58,11 @@ jobs:
       - name: Install test dependency
         run: python -m pip install PyYAML==6.0.3
       - name: Verify local test prerequisites
-        # Fail instead of letting the golden/YAML tests skip.
+        # Fail instead of letting the golden/YAML/TLS helper tests skip.
         run: |
           bash -c 'test "${BASH_VERSINFO[0]}" -ge 4'
           python -c 'import yaml'
+          command -v openssl
           git cat-file -e "${CBV_GOLDEN_BASE}^{commit}" || {
             echo "::error::golden baseline commit ${CBV_GOLDEN_BASE} not present; check CBV_GOLDEN_BASE and fetch history"
             exit 1
