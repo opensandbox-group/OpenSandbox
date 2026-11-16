@@ -19,7 +19,8 @@ Pools are pre-warmed sets of sandbox pods that reduce cold-start latency.
 These endpoints are only available when the runtime is configured as 'kubernetes'.
 """
 
-from typing import Optional
+import threading
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import APIRouter, Header, status
 from fastapi.exceptions import HTTPException
@@ -35,6 +36,9 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.config import get_config
 from opensandbox_server.services.constants import SandboxErrorCodes
 
+if TYPE_CHECKING:
+    from opensandbox_server.services.k8s.pool_service import PoolService
+
 router = APIRouter(tags=["Pools"])
 
 _POOL_NOT_K8S_DETAIL = {
@@ -43,13 +47,23 @@ _POOL_NOT_K8S_DETAIL = {
 }
 
 
-def _get_pool_service():
+_service: Optional["PoolService"] = None
+_service_lock = threading.Lock()
+
+
+def _get_pool_service() -> "PoolService":
     """
     Lazily create the PoolService, raising 501 if the runtime is not Kubernetes.
 
     This deferred approach means the pool router can be registered unconditionally
     in main.py; non-k8s deployments simply receive a clear 501 on every call.
+
+    The service is created once and shared: building a K8sClient reloads the
+    kubeconfig and rewrites the process-global default configuration, and each
+    PoolService opens its own API client. The routes are sync handlers running
+    on a thread pool, so creation is locked (as in the fast-sandbox service).
     """
+    global _service
     from opensandbox_server.services.k8s.client import K8sClient
     from opensandbox_server.services.k8s.pool_service import PoolService
 
@@ -66,8 +80,10 @@ def _get_pool_service():
             detail=_POOL_NOT_K8S_DETAIL,
         )
 
-    k8s_client = K8sClient(config.kubernetes)
-    return PoolService(k8s_client, namespace=config.kubernetes.namespace)
+    with _service_lock:
+        if _service is None:
+            _service = PoolService(K8sClient(config.kubernetes), namespace=config.kubernetes.namespace)
+        return _service
 
 
 @router.post(
