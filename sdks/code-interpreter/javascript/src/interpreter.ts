@@ -205,25 +205,32 @@ export class CodeInterpreter {
   /**
    * Run {@link isHealthy} for at most `ms`. Each probe carries its own request
    * timeout, so a stalled one could otherwise hold the caller past the
-   * readiness deadline: when the time is up its requests are aborted and the
-   * attempt counts as unhealthy, even if the probe ignores the abort.
+   * readiness deadline: when the time is up, or the caller aborts, its requests
+   * are aborted and the attempt counts as unhealthy, even if the probe ignores
+   * the abort.
    */
   private async isHealthyWithin(ms: number, signal?: AbortSignal): Promise<boolean> {
     const controller = new AbortController();
-    const onAbort = () => controller.abort(signal?.reason);
-    signal?.addEventListener("abort", onAbort, { once: true });
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    // Settles when the time is up or the caller aborts; the caller's reason is
+    // then thrown by waitUntilReady.
     const expired = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => {
         controller.abort();
         resolve(false);
       }, ms);
+      onAbort = () => {
+        controller.abort(signal?.reason);
+        resolve(false);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
     try {
       return await Promise.race([this.isHealthy(controller.signal), expired]);
     } finally {
       clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
   }
 
