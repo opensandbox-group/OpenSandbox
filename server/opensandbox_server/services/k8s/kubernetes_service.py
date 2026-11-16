@@ -51,7 +51,7 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.helpers import format_ingress_endpoint
+from opensandbox_server.services.helpers import build_list_sandboxes_response, format_ingress_endpoint
 from opensandbox_server.services.k8s.create_helpers import _build_create_workload_context
 from opensandbox_server.services.k8s.error_helpers import (
     _build_k8s_api_error,
@@ -64,10 +64,7 @@ from opensandbox_server.services.k8s.k8s_diagnostics import (
     K8sStartupDiagnosticsMixin,
 )
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
-from opensandbox_server.services.k8s.list_helpers import (
-    _build_list_sandboxes_response,
-    build_sandbox_label_selector,
-)
+from opensandbox_server.services.k8s.list_helpers import build_sandbox_label_selector
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
     _is_quota_exhausted_status,
@@ -1414,7 +1411,7 @@ class KubernetesSandboxService(
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
             metadata = request.filter.metadata if request.filter else None
-            return _build_list_sandboxes_response(
+            return build_list_sandboxes_response(
                 self.list_sandbox_objects(metadata=metadata),
                 request,
             )

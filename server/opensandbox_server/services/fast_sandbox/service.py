@@ -101,7 +101,7 @@ from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as p
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
 from opensandbox_server.services.sandbox_service import SandboxService
 from opensandbox_server.services.k8s.client import K8sClient
-from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
+from opensandbox_server.services.helpers import build_list_sandboxes_response
 from opensandbox_server.services.validators import (
     ensure_future_expiration,
     ensure_timeout_within_limit,
@@ -594,7 +594,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         return [sandbox_from_cr(cr) for cr in self._cr_reader.list(self._resolve_namespace())]
 
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
-        return _build_list_sandboxes_response(self.list_sandbox_objects(), request)
+        return build_list_sandboxes_response(self.list_sandbox_objects(), request)
 
     def delete_sandbox(self, sandbox_id: str) -> None:
         # Runtime observations can disappear before the CR during finalization.

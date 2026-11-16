@@ -25,7 +25,6 @@ import asyncio
 import inspect
 import json
 import logging
-import math
 import os
 import time
 from _thread import LockType
@@ -51,7 +50,6 @@ from opensandbox_server.api.schema import (
     ImageSpec,
     ListSandboxesRequest,
     ListSandboxesResponse,
-    PaginationInfo,
     PatchSandboxMetadataRequest,
     RenewSandboxExpirationRequest,
     RenewSandboxExpirationResponse,
@@ -113,6 +111,7 @@ from opensandbox_server.services.endpoint_auth import (
     generate_egress_token,
 )
 from opensandbox_server.services.helpers import (
+    build_list_sandboxes_response,
     matches_filter,
     parse_timestamp,
     split_egress_env,
@@ -1101,37 +1100,13 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                         "message": f"Failed to query sandbox containers: {str(exc)}",
                     },
                 ) from exc
+            # Filter per container, before deduplicating by sandbox id, so a
+            # non-matching container never replaces a matching one.
             sandbox_obj = self._container_to_sandbox(container, sandbox_id)
             if matches_filter(sandbox_obj, request.filter):
                 sandboxes_by_id[sandbox_id] = sandbox_obj
 
-        sandboxes: list[Sandbox] = list(sandboxes_by_id.values())
-
-        sandboxes.sort(key=lambda s: s.created_at or datetime.min, reverse=True)
-
-        if request.pagination:
-            page = request.pagination.page
-            page_size = request.pagination.page_size
-        else:
-            page = 1
-            page_size = 20
-
-        total_items = len(sandboxes)
-        total_pages = math.ceil(total_items / page_size) if total_items else 0
-        start_index = (page - 1) * page_size
-        end_index = start_index + page_size
-        items = sandboxes[start_index:end_index]
-        has_next_page = page < total_pages
-
-        pagination_info = PaginationInfo(
-            page=page,
-            page_size=page_size,
-            total_items=total_items,
-            total_pages=total_pages,
-            has_next_page=has_next_page,
-        )
-
-        return ListSandboxesResponse(items=items, pagination=pagination_info)
+        return build_list_sandboxes_response(list(sandboxes_by_id.values()), request)
 
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
         container = self._get_container_by_sandbox_id(sandbox_id)
