@@ -15,6 +15,7 @@
 """The pool routes share one PoolService instead of building a K8sClient per request."""
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -33,6 +34,9 @@ def k8s_clients(monkeypatch):
 
     class FakeK8sClient:
         def __init__(self, k8s_config):
+            # Loading a kubeconfig takes a while; widen the window in which
+            # unsynchronized first requests would each build a client.
+            time.sleep(0.05)
             with lock:
                 built.append(self)
 
@@ -40,7 +44,7 @@ def k8s_clients(monkeypatch):
             return object()
 
     monkeypatch.setattr(k8s_client_module, "K8sClient", FakeK8sClient)
-    monkeypatch.setattr(pool, "_service", None, raising=False)
+    monkeypatch.setattr(pool, "_service", None)
     monkeypatch.setattr(
         pool,
         "get_config",
