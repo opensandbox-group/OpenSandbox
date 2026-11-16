@@ -25,6 +25,7 @@ import (
 	"strings"
 
 	containerd "github.com/containerd/containerd"
+	"golang.org/x/sys/unix"
 
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/imagecommitter"
 )
@@ -42,6 +43,14 @@ type Config struct {
 	TerminationMessagePath   string
 	Output                   io.Writer
 	ErrorOutput              io.Writer
+}
+
+// syncExecutor writes back dirty file pages and filesystem metadata on the node.
+type syncExecutor struct{}
+
+func (syncExecutor) Exec(context.Context, imagecommitter.ResolvedContainer, imagecommitter.ExecRequest) (imagecommitter.ExecResult, error) {
+	unix.Sync()
+	return imagecommitter.ExecResult{}, nil
 }
 
 // Run executes a commit or unpause operation.
@@ -69,7 +78,7 @@ func Run(ctx context.Context, args []string, config Config) error {
 	runtime := imagecommitter.NewContainerdRuntime(client)
 	orchestrator := &imagecommitter.Orchestrator{
 		Runtime:     runtime,
-		Executor:    runtime,
+		Executor:    syncExecutor{},
 		Output:      config.Output,
 		ErrorOutput: config.ErrorOutput,
 	}
