@@ -179,6 +179,12 @@ type BatchSandboxStatus struct {
 	// +optional
 	Phase BatchSandboxPhase `json:"phase,omitempty"`
 
+	// FailedPodUIDs identifies the pods whose failure caused the Failed phase.
+	// Recovery requires every recorded UID to be Ready with its main container running.
+	// Empty for terminal resume failures and cleared after recovery.
+	// +optional
+	FailedPodUIDs []string `json:"failedPodUIDs,omitempty"`
+
 	// PauseObservedGeneration is the generation most recently ACKed by the Controller
 	// when entering pause/resume dispatch logic. Written immediately to prevent reentry (idempotent gating).
 	// +optional
