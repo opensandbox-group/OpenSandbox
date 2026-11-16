@@ -54,7 +54,8 @@ func (c *MetricController) WatchMetrics() {
 
 	// readMetrics samples CPU usage over a second, so an update is due one
 	// second after the previous one started, not one second after it ended;
-	// the wait only matters when reading failed before sampling.
+	// the wait only matters when a read returned early, such as a failure
+	// before the sample.
 	next := time.Now()
 	for {
 		select {
