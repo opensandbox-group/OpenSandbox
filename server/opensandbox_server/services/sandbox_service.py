@@ -235,7 +235,7 @@ class SandboxService(ABC):
 
     @staticmethod
     def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
-        """Apply JSON Merge Patch to labels: separate user metadata, merge, validate, rebuild."""
+        """Apply JSON Merge Patch to labels: validate, separate user metadata, merge, rebuild."""
         SandboxService._validate_metadata_patch(patch)
 
         current_metadata = {
