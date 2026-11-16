@@ -34,8 +34,12 @@ sources:
 maintainers:
   - name: OpenSandbox Team
 
-# Kubernetes version constraints
-kubeVersion: ">=1.21.1-0"
+# Kubernetes version constraints. The fast-sandbox subchart's control
+# authentication needs the TokenRequest API and OIDC discovery (Kubernetes
+# 1.22+); Helm only checks the root chart's kubeVersion for umbrella
+# installs, so this gate keeps unsupported clusters out of an install that
+# fails closed without those APIs.
+kubeVersion: ">=1.22.0-0"
 
 dependencies:
   - name: base
