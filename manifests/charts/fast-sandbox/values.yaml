@@ -98,7 +98,7 @@ controller:
   # fastlet Pods. Defaults to the released companion image published by the
   # umbrella release (build-fast-sandbox.sh); override for clusters that
   # cannot pull from docker.io.
-  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.2.1
+  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.1
   fastletProxy:
     # -- Resource requests and limits for the platform-owned Fastlet Proxy
     # sidecar injected into every fastlet Pod.
