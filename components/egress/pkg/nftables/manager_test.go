@@ -871,6 +871,7 @@ func TestIsMissingTableErrorMatchesOnlyThatTablesDelete(t *testing.T) {
 		return errors.New("nft apply failed: exit status 1 (output: Error: Could not process rule: No such file or directory\n" + line + ")")
 	}
 	require.True(t, IsMissingTableError(missing("delete table inet other"), "other"))
+	require.True(t, IsMissingTableError(missing("delete table inet Other"), "Other"), "the message is compared case-insensitively")
 	require.False(t, IsMissingTableError(missing("delete table inet other"), tableName), "another table's delete")
 	require.False(t, IsMissingTableError(missing("add rule inet other forward jump gone"), "other"), "a different missing object")
 	require.False(t, IsMissingTableError(errors.New("delete table inet other: permission denied"), "other"), "a different failure")

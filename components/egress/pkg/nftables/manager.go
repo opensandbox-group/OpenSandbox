@@ -609,7 +609,7 @@ func IsMissingTableError(err error, table string) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such file or directory") && deleteTableStatement(table).MatchString(msg)
+	return strings.Contains(msg, "no such file or directory") && deleteTableStatement(strings.ToLower(table)).MatchString(msg)
 }
 
 // RemoveDeleteTableLine drops the `delete table inet <table>` line, and blank
