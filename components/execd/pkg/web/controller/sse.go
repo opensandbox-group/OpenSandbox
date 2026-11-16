@@ -195,7 +195,8 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 
 // executionTracker follows one streamed execution: it records the execution
 // duration metric once and closes done when the terminal SSE event (complete
-// or error) has been written.
+// or error) has been written. Handlers wait on done only as a safety check
+// and return as soon as it closes, to avoid fixed tail latency.
 type executionTracker struct {
 	ctx        context.Context
 	operation  string

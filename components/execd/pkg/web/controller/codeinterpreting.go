@@ -137,9 +137,6 @@ func (c *CodeInterpretingController) RunCode() {
 	eventsHandler, stopSSE := c.setServerEventsHandler(ctx)
 	defer func() { cancel(); stopSSE() }()
 
-	// tracker.done is closed once the final SSE event has been written and
-	// flushed. We only wait for it as a safety check and then return
-	// immediately to avoid fixed tail latency.
 	tracker.wrap(&eventsHandler)
 	runCodeRequest.Hooks = eventsHandler
 
@@ -354,9 +351,6 @@ func (c *CodeInterpretingController) RunInSession() {
 	// the ping goroutine from writing to the response after Go's net/http
 	// closes the response writer.
 	defer func() { cancel(); stopSSE() }()
-	// tracker.done is closed once the final SSE event has been written and
-	// flushed. We only wait for it as a safety check and then return
-	// immediately to avoid fixed tail latency.
 	tracker.wrap(&hooks)
 	runReq.Hooks = hooks
 

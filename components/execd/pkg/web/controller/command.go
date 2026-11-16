@@ -63,9 +63,6 @@ func (c *CodeInterpretingController) RunCommand() {
 		}
 		c.writeExecutionComplete(executionTime, exitCode)
 	}
-	// tracker.done is closed once the final SSE event has been written and
-	// flushed. We only wait for it as a safety check and then return
-	// immediately to avoid fixed tail latency.
 	tracker.wrap(&eventsHandler)
 	runCodeRequest.Hooks = eventsHandler
 
