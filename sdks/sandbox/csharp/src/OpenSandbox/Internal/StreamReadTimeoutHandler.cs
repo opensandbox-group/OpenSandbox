@@ -121,9 +121,11 @@ internal sealed class StreamReadTimeoutHandler : DelegatingHandler
             {
                 return await _inner.ReadAsync(buffer, offset, count, linked.Token).ConfigureAwait(false);
             }
-            // _timedOut also covers a deadline that fired just after an earlier read returned:
-            // the inner stream is disposed by then, and this read fails because of it.
-            catch (Exception ex) when (_timedOut && !cancellationToken.IsCancellationRequested)
+            // The deadline's own state is checked because the inner read can fail on the linked
+            // token before the callback above sets _timedOut. _timedOut covers a deadline that
+            // fired just after an earlier read returned: the inner stream is disposed by then,
+            // and this read fails because of it.
+            catch (Exception ex) when ((deadline.IsCancellationRequested || _timedOut) && !cancellationToken.IsCancellationRequested)
             {
                 throw ReadTimedOut(_timeout, "data", ex);
             }

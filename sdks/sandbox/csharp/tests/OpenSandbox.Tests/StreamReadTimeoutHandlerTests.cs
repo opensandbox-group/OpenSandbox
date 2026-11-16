@@ -58,13 +58,13 @@ public class StreamReadTimeoutHandlerTests
         // Every gap stays under the read timeout while the stream as a whole runs past it.
         var stream = new ScriptedStream(
             (TimeSpan.Zero, ": ping\n\n"),
-            (TimeSpan.FromMilliseconds(150), ": ping\n\n"),
-            (TimeSpan.FromMilliseconds(150), ": ping\n\n"),
-            (TimeSpan.FromMilliseconds(150), "data: {\"type\":\"execution_complete\",\"execution_time\":1}\n\n"))
+            (TimeSpan.FromMilliseconds(400), ": ping\n\n"),
+            (TimeSpan.FromMilliseconds(400), ": ping\n\n"),
+            (TimeSpan.FromMilliseconds(400), "data: {\"type\":\"execution_complete\",\"execution_time\":1}\n\n"))
         {
             CloseAfterScript = true
         };
-        using var client = CreateClient(_ => Task.FromResult(StreamResponse(stream)));
+        using var client = CreateClient(_ => Task.FromResult(StreamResponse(stream)), TimeSpan.FromSeconds(1));
 
         using var response = await client.SendAsync(
             new HttpRequestMessage(HttpMethod.Post, "http://execd.local/command"),
@@ -76,6 +76,24 @@ public class StreamReadTimeoutHandlerTests
         }
 
         events.Should().ContainSingle().Which.Type.Should().Be("execution_complete");
+    }
+
+    [Fact]
+    public async Task StalledRead_ThatFailsOnCancellation_ReportsTimeout()
+    {
+        // A socket stream fails its pending read as soon as the token is
+        // canceled, which can happen before the handler's own deadline
+        // callback has run.
+        using var client = CreateClient(_ => Task.FromResult(StreamResponse(new FailsOnCancelStream())));
+        using var response = await client.SendAsync(
+            new HttpRequestMessage(HttpMethod.Post, "http://execd.local/command"),
+            HttpCompletionOption.ResponseHeadersRead);
+        var body = await response.Content.ReadAsStreamAsync();
+
+        var act = () => body.ReadAsync(new byte[16], 0, 16);
+
+        var ex = await act.Should().ThrowAsync<TaskCanceledException>().WaitAsync(TimeSpan.FromSeconds(10));
+        ex.Which.InnerException.Should().BeOfType<TimeoutException>();
     }
 
     [Fact]
@@ -180,6 +198,37 @@ public class StreamReadTimeoutHandlerTests
 
         protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken) =>
             _respond(cancellationToken).GetAwaiter().GetResult();
+    }
+
+    /// <summary>
+    /// Never produces data; a pending read fails with an IOException, inline,
+    /// when its cancellation token fires.
+    /// </summary>
+    private sealed class FailsOnCancelStream : Stream
+    {
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            var read = new TaskCompletionSource<int>();
+            cancellationToken.Register(() => read.TrySetException(new IOException("socket aborted")));
+            return read.Task;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            ReadAsync(buffer, offset, count, CancellationToken.None).GetAwaiter().GetResult();
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     /// <summary>
