@@ -42,6 +42,22 @@ jobs:
         run: |
           make helm-lint
 
+      - name: Verify Fastlet Proxy resource arguments
+        run: |
+          set -euo pipefail
+          rendered="$(helm template fast-sandbox manifests/charts/fast-sandbox \
+            --set controller.fastletProxy.resources.requests.cpu=125m \
+            --set controller.fastletProxy.resources.requests.memory=96Mi \
+            --set controller.fastletProxy.resources.limits.cpu=500m \
+            --set controller.fastletProxy.resources.limits.memory=384Mi)"
+          for argument in \
+            --fastlet-proxy-request-cpu=125m \
+            --fastlet-proxy-request-memory=96Mi \
+            --fastlet-proxy-limit-cpu=500m \
+            --fastlet-proxy-limit-memory=384Mi; do
+            grep -Fq -- "$argument" <<<"$rendered"
+          done
+
       - name: Generate chart documentation
         working-directory: manifests
         run: |

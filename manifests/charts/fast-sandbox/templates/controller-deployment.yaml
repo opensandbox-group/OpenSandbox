@@ -42,6 +42,10 @@ spec:
         - --fastpath-bind-address=:9090
         - --sandboxtemplate-builder-image={{ $builderImage }}
         - --fastlet-proxy-image={{ .Values.controller.fastletProxyImage }}
+        - --fastlet-proxy-request-cpu={{ .Values.controller.fastletProxy.resources.requests.cpu }}
+        - --fastlet-proxy-request-memory={{ .Values.controller.fastletProxy.resources.requests.memory }}
+        - --fastlet-proxy-limit-cpu={{ .Values.controller.fastletProxy.resources.limits.cpu }}
+        - --fastlet-proxy-limit-memory={{ .Values.controller.fastletProxy.resources.limits.memory }}
         # The controller's default namespace for the platform
         # runtime-environment ConfigMap is the upstream-hardcoded
         # fast-sandbox-system; pin it to this chart's system namespace so

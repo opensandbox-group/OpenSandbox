@@ -82,6 +82,7 @@ The following table lists the configurable parameters of the chart and their def
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
 | controller.affinity | object | `{}` | Affinity for the controller pod. |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
+| controller.fastletProxy.resources | object | `{"limits":{"cpu":"250m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Resource requests and limits for the platform-owned Fastlet Proxy sidecar injected into every fastlet Pod. |
 | controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
