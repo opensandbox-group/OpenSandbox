@@ -1454,24 +1454,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
     def patch_sandbox_metadata(self, sandbox_id: str, patch: PatchSandboxMetadataRequest) -> Sandbox:
         """Patch sandbox metadata via JSON Merge Patch (RFC 7396). Docker cannot update labels on running containers, so metadata is persisted to file."""
-        from opensandbox_server.services.validators import ensure_metadata_labels
-
         container = self._get_container_by_sandbox_id(sandbox_id)
         labels = dict(container.attrs.get("Config", {}).get("Labels") or {})
 
-        for key in patch:
-            if SandboxService._is_system_label(key):
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
-                        "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
-                    },
-                )
-
-        patch_additions = {k: str(v) for k, v in patch.items() if v is not None}
-        if patch_additions:
-            ensure_metadata_labels(patch_additions)
+        self._validate_metadata_patch(patch)
 
         self._metadata_store.patch(sandbox_id, labels, patch)
         return self._container_to_sandbox(container, sandbox_id)
