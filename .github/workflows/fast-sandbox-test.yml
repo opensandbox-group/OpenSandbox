@@ -44,6 +44,9 @@ jobs:
     if: github.event_name != 'pull_request' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # Shared by the prerequisite guard and all golden comparisons.
+      CBV_GOLDEN_BASE: 4ae99691ff0a62594614df90a86ecbee07add966
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,7 +62,10 @@ jobs:
         run: |
           bash -c 'test "${BASH_VERSINFO[0]}" -ge 4'
           python -c 'import yaml'
-          git cat-file -e '4ae99691ff0a62594614df90a86ecbee07add966^{commit}'
+          git cat-file -e "${CBV_GOLDEN_BASE}^{commit}" || {
+            echo "::error::golden baseline commit ${CBV_GOLDEN_BASE} not present; check CBV_GOLDEN_BASE and fetch history"
+            exit 1
+          }
       - name: Run wiring regression tests
         run: python -m unittest discover -v -s scripts/fast-sandbox-env/tests -p 'test_*.py'
 

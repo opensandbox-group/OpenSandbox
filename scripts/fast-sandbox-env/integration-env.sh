@@ -462,7 +462,7 @@ failure_dump() {
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
+		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_(IMAGE|INTERCEPTION_MODE)=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
 		echo "--- fast-sandbox checkout ---"
 		git -C "$FSB_DIR" rev-parse HEAD 2>&1 || true
 		echo "--- kind-create.log (tail) ---"
@@ -4940,7 +4940,7 @@ env_summary() {
 	printf '  %-22s %s\n' "kind cluster" "$KIND_CLUSTER ($(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ') nodes)"
 	printf '  %-22s %s\n' "fast-sandbox" "pinned $(git -C "$FSB_DIR" rev-parse --short HEAD 2>/dev/null || echo "$FSB_COMMIT") ($FSB_DIR)"
 	printf '  %-22s %s\n' "RustFS endpoint" "$RUSTFS_ENDPOINT"
-	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
+	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE${EGRESS_INTERCEPTION_MODE:+, interception=$EGRESS_INTERCEPTION_MODE}, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
 	# The echo endpoint line is conditional: the standalone pool action
 	# loads the fingerprint pin but never re-derives the echo container IP.
 	local mitm_echo_at=""

@@ -24,6 +24,7 @@ tests are a follow-up R7 change; nothing here is KVM evidence.
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -341,6 +342,63 @@ class StageSummaryTest(ShellCase):
         self.assertNotIn("EXCHANGE-RAN", cb.stdout)
         self.assertNotIn("OK in", cb.stdout)
         self.assertIn("BLOCKED: exchange under credential-bound (see I1)", cb.stderr)
+
+class ReportingTest(ShellCase):
+    def test_mode_in_summary_and_failure_dump(self):
+        for mode in ("", "all", "credential-bound"):
+            with self.subTest(mode=mode):
+                body = r'''
+runtime_pods() { :; }
+first_pool_pod() { :; }
+git() { return 1; }
+findmnt() { return 1; }
+FSB_DIR="$WORK/absent"
+MITM_CA_DIR="$WORK/absent-ca"
+TEMPLATE_ID=""
+env_summary
+failure_dump mode
+cat "$LOGS_DIR"/failure-mode-*.txt
+'''
+                # Keep the real diagnostic function; stub only external tools.
+                script = 'source "%s"\nsaved=$(declare -f failure_dump)\n%s\neval "$saved"\n%s' % (ENV_SH, COMMON_STUBS, body)
+                out = self.bash(script, EGRESS_INTERCEPTION_MODE=mode).stdout
+                pool = next(line for line in out.splitlines() if "(runtime=firecracker" in line)
+                if mode:
+                    self.assertIn(", interception=" + mode + ", poolMin=", pool)
+                else:
+                    self.assertNotIn("interception=", pool)
+                self.assertIn("EGRESS_INTERCEPTION_MODE=" + mode + "\n", out)
+
+    def test_standalone_failure_dump_records_mode(self):
+        script = 'source "%s"\nsaved=$(declare -f failure_dump)\n%s\neval "$saved"\ngit() { return 1; }\nFSB_DIR="$WORK/absent"\nfailure_dump mode\ncat "$LOGS_DIR"/failure-mode-*.txt' % (LIB_SH, COMMON_STUBS)
+        self.assertIn("EGRESS_INTERCEPTION_MODE=credential-bound\n",
+                      self.bash(script, EGRESS_INTERCEPTION_MODE="credential-bound").stdout)
+
+
+class WorkflowBaselineTest(ShellCase):
+    def test_guard_and_tests_share_job_baseline(self):
+        import yaml
+        with open(os.path.join(REPO, ".github/workflows/fast-sandbox-test.yml")) as handle:
+            job = yaml.safe_load(handle)["jobs"]["verifier-tests"]
+        baseline = job["env"]["CBV_GOLDEN_BASE"]
+        guard = next(s for s in job["steps"] if s.get("name") == "Verify local test prerequisites")
+        runner = next(s for s in job["steps"] if s.get("name") == "Run wiring regression tests")
+        for step in (guard, runner):
+            self.assertNotIn("CBV_GOLDEN_BASE", step.get("env", {}))
+        for value in (baseline, "HEAD"):
+            env = dict(job["env"], CBV_GOLDEN_BASE=value)
+            proc = subprocess.run([BASH, "-c", guard["run"]], cwd=REPO,
+                                  env=dict(os.environ, **env), capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            code = "import runpy; print(runpy.run_path(%r)['GOLDEN_BASE'])" % __file__
+            proc = subprocess.run([sys.executable, "-c", code], cwd=REPO,
+                                  env=dict(os.environ, **env), capture_output=True, text=True, check=True)
+            self.assertEqual(proc.stdout.strip(), value)
+        missing = "missing-osep23-test-baseline"
+        proc = subprocess.run([BASH, "-c", guard["run"]], cwd=REPO,
+                              env=dict(os.environ, CBV_GOLDEN_BASE=missing), capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("::error::golden baseline commit " + missing, proc.stdout)
 
 
 if __name__ == "__main__":
