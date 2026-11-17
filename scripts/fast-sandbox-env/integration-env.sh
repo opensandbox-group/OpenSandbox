@@ -93,9 +93,8 @@
 #                    credential-bound; non-empty renders
 #                    OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE into the
 #                    pool's egress container only. credential-bound also
-#                    reports the exchange stage BLOCKED (I1) and the
-#                    credential-bound verify item NOT_RUN on both lanes
-#                    (that verifier is a follow-up R7 change)
+#                    registers the credential-bound verify stage on both
+#                    lanes and reports the exchange stage BLOCKED (I1)
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
 #   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (latest from PyPI / preinstalled binary)
 #   SKIP_TOOL_INSTALL / SKIP_LEFTOVER_CLEAN / INOTIFY_VALUE
@@ -4460,11 +4459,11 @@ require_live_stack() {
 }
 
 # OSEP-0023 lane gates. Off/all: the exchange stage runs exactly as before
-# and no credential-bound item exists. credential-bound: the exchange
+# and no credential-bound stage exists. credential-bound: the exchange
 # stage is reported BLOCKED (decision snapshots reject exchange bindings,
-# issue I1) instead of running, and each lane reports its credential-bound
-# verify item NOT_RUN: the verifier itself is delivered in a follow-up R7
-# change, so nothing here may count as credential-bound evidence.
+# issue I1) instead of running, and the credential-bound stage
+# (verify/credential-bound.sh, one implementation sourced into this shell)
+# runs on the lane's template.
 exchange_stage() { # <description> <template-id>
 	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
 		run_blocked_stage "$1" "exchange under credential-bound (see I1)"
@@ -4473,10 +4472,11 @@ exchange_stage() { # <description> <template-id>
 	run_stage "$1" exchange_resolver_verify "$2"
 }
 
-credential_bound_stage() { # <description>
+credential_bound_stage() { # <description> <template-id>
 	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] || return 0
-	stage_begin "$1"
-	stage_unverified NOT_RUN "$1: credential-bound integration verification is delivered in a follow-up R7 change"
+	# shellcheck source=verify/credential-bound.sh
+	source "$SCRIPT_DIR/verify/credential-bound.sh"
+	run_stage "$1" credential_bound_verify "$2"
 }
 
 # The native lane is deliberately thin: the native-rootfs boot path plus the
@@ -4492,7 +4492,7 @@ verify_native() {
 	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify "$TEMPLATE_ID" 3
 	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
-	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)"
+	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
 	# Last on purpose: the e2e kill loop started the source's 30s disappearance
 	# grace; the network-security-rules stage consumed it, so this is a
 	# near-free confirmation.
@@ -4557,7 +4557,7 @@ verify_overlaybd() {
 	run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
 	run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
 	exchange_stage "exchange resolver verify (overlaybd template, OSEP-0025)" "$OCI_TEMPLATE_ID"
-	credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)"
+	credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)" "$OCI_TEMPLATE_ID"
 	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
 	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
 	# Rootfs-only verify (FSEP-0001), default-on: the fastlet-side kernel is
@@ -4973,6 +4973,11 @@ down() {
 	[[ -z "$(docker ps -a --filter "name=$MITM_ECHO_CONTAINER" --format '{{.Names}}' || true)" ]] \
 		|| fail "MITM echo container still present"
 	rm -rf "$MITM_CA_DIR"
+	# credential-bound origin fixtures (verify/credential-bound.sh) left by an
+	# interrupted run: require both fixture type and this cluster's ownership.
+	docker ps -aq --filter "label=opensandbox.io/fast-sandbox-env-fixture=credential-bound-origin" \
+		--filter "label=opensandbox.io/fast-sandbox-env-cluster=$KIND_CLUSTER" \
+		| xargs -r docker rm -f >/dev/null 2>&1 || true
 	# Server/gateway die with the cluster; only the signing key outlives it.
 	rm -f "$WORK/agent-registry.json" "$SIGNING_KEY_FILE"
 	rm -rf "$GEN_DIR" "$FSB_GEN_DIR"
