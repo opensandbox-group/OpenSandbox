@@ -362,15 +362,43 @@ public class EgressAdapterNetworkPolicyTests
     }
 
     [Fact]
-    public async Task PatchRulesAsync_DomainTargetWithPorts_FailsLocally()
+    public async Task PatchRulesAsync_DomainTargetsWithPorts_SerializeAndReadBack()
     {
-        var (adapter, _) = CreateAdapter(OkResponse);
+        var (adapter, handler) = CreateAdapter("""
+            {"status":"ok","policy":{"defaultAction":"deny","egress":[
+              {"action":"allow","target":"example.com","ports":[443]},
+              {"action":"deny","target":"example.com","ports":[80]},
+              {"action":"allow","target":"*.example.com","ports":[8443]}
+            ]}}
+            """);
 
-        var ex = await Assert.ThrowsAsync<ArgumentException>(() => adapter.PatchRulesAsync(new[]
+        await adapter.PatchRulesAsync(new[]
         {
             new NetworkRule { Action = NetworkRuleAction.Allow, Target = "example.com", Ports = new List<int> { 443 } },
-        }));
-        Assert.Contains("ports are not supported for domain target", ex.Message);
+            new NetworkRule { Action = NetworkRuleAction.Deny, Target = "example.com", Ports = new List<int> { 80 } },
+            new NetworkRule { Action = NetworkRuleAction.Allow, Target = "*.example.com", Ports = new List<int> { 8443 } },
+        });
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Patch, request.Method);
+        Assert.Equal("/policy", request.Path);
+        using var body = JsonDocument.Parse(request.Body!);
+        var rules = body.RootElement.EnumerateArray().ToArray();
+        Assert.Equal(3, rules.Length);
+        Assert.Equal("allow", rules[0].GetProperty("action").GetString());
+        Assert.Equal("example.com", rules[0].GetProperty("target").GetString());
+        Assert.Equal(443, rules[0].GetProperty("ports")[0].GetInt32());
+        Assert.Equal("deny", rules[1].GetProperty("action").GetString());
+        Assert.Equal("example.com", rules[1].GetProperty("target").GetString());
+        Assert.Equal(80, rules[1].GetProperty("ports")[0].GetInt32());
+        Assert.Equal("*.example.com", rules[2].GetProperty("target").GetString());
+        Assert.Equal(8443, rules[2].GetProperty("ports")[0].GetInt32());
+
+        var policy = await adapter.GetPolicyAsync();
+        Assert.Equal(3, policy.Egress!.Count);
+        Assert.Collection(policy.Egress,
+            rule => { Assert.Equal(NetworkRuleAction.Allow, rule.Action); Assert.Equal("example.com", rule.Target); Assert.Equal(new[] { 443 }, rule.Ports); },
+            rule => { Assert.Equal(NetworkRuleAction.Deny, rule.Action); Assert.Equal("example.com", rule.Target); Assert.Equal(new[] { 80 }, rule.Ports); },
+            rule => { Assert.Equal(NetworkRuleAction.Allow, rule.Action); Assert.Equal("*.example.com", rule.Target); Assert.Equal(new[] { 8443 }, rule.Ports); });
     }
 
     [Fact]

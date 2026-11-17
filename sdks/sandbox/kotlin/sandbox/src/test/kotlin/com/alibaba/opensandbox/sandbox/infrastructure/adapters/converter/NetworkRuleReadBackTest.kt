@@ -17,6 +17,8 @@
 package com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter
 
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toApiEgressNetworkRule
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toApiNetworkRule
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toDomainEgressNetworkRule
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter.toDomainNetworkRule
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -62,5 +64,32 @@ class NetworkRuleReadBackTest {
         assertEquals(lifecycle.action, egress.action)
         assertNull(egress.target)
         assertEquals(lifecycle.ports, egress.ports)
+    }
+
+    @Test
+    fun `domain port scopes serialize and survive lifecycle and egress read-back`() {
+        for (target in listOf("example.com", "*.example.com")) {
+            for (action in NetworkRule.Action.values()) {
+                val port = if (action == NetworkRule.Action.ALLOW) 443 else 80
+                val rule =
+                    NetworkRule.builder()
+                        .action(action)
+                        .target(target)
+                        .ports(listOf(port))
+                        .build()
+                val apiAction = if (action == NetworkRule.Action.ALLOW) ApiNetworkRule.Action.allow else ApiNetworkRule.Action.deny
+                val egressAction =
+                    if (action == NetworkRule.Action.ALLOW) ApiEgressNetworkRule.Action.allow else ApiEgressNetworkRule.Action.deny
+                val lifecycle = ApiNetworkRule(action = apiAction, target = target, ports = setOf(port))
+                val egress = ApiEgressNetworkRule(action = egressAction, target = target, ports = setOf(port))
+                assertEquals(lifecycle, rule.toApiNetworkRule())
+                assertEquals(egress, rule.toApiEgressNetworkRule())
+                for (decoded in listOf(lifecycle.toDomainNetworkRule(), egress.toDomainEgressNetworkRule())) {
+                    assertEquals(action, decoded.action)
+                    assertEquals(target, decoded.target)
+                    assertEquals(listOf(port), decoded.ports)
+                }
+            }
+        }
     }
 }

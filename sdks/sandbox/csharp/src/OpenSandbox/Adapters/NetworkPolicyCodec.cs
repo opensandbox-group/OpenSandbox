@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-using System.Net;
 using System.Text.Json;
-using System.Linq;
 using OpenSandbox.Core;
 using OpenSandbox.Models;
 
@@ -57,11 +55,11 @@ internal static class NetworkPolicyCodec
     }
 
     /// <summary>
-    /// Validates a rule the way the server would, so the most common mistakes
-    /// — no target/ports, an empty or out-of-range ports list, duplicates,
-    /// more than 256 ports, a domain target combined with ports — surface at
-    /// the call site with the offending rule index instead of as a remote
-    /// 422. Every wire path that serializes rules validates through this.
+    /// Validates common wire-shape mistakes — no target/ports, an empty or
+    /// out-of-range ports list, duplicates, or more than 256 ports — at the
+    /// call site with the offending rule index. Runtime capabilities remain
+    /// the deployed server's responsibility. Every wire path that serializes
+    /// rules validates through this.
     /// </summary>
     public static void ValidateRules(IReadOnlyList<NetworkRule> rules, string? paramName = null)
     {
@@ -113,13 +111,6 @@ internal static class NetworkPolicyCodec
                 }
             }
         }
-        if (hasPorts && hasTarget && !IsIpOrCidr(rule.Target!))
-        {
-            throw new ArgumentException(
-                $"NetworkRule[{index}] ports are not supported for domain target '{rule.Target}' " +
-                "(domain rules are evaluated at the DNS layer, which has no port dimension).",
-                paramName);
-        }
     }
 
     private static Dictionary<string, object?> ToRulesPayloadEntry(NetworkRule r, int index, string? paramName)
@@ -150,51 +141,6 @@ internal static class NetworkPolicyCodec
     }
 
     private const int MaxPortsPerRule = 256;
-
-    /// <summary>
-    /// Mirrors the sidecar's netip-based IP-vs-domain classification, on the
-    /// trimmed target.
-    /// </summary>
-    private static bool IsIpOrCidr(string target)
-    {
-        var t = target.Trim();
-        if (t.Count(c => c == '/') > 1)
-        {
-            return false;
-        }
-        var slash = t.IndexOf('/');
-        var addr = slash < 0 ? t : t[..slash];
-        var prefix = slash < 0 ? null : t[(slash + 1)..];
-        if (prefix != null)
-        {
-            if (t.Contains('%') || prefix.Any(c => c is < '0' or > '9'))
-            {
-                return false;
-            }
-            var limit = addr.Contains(':') ? 128 : 32;
-            if (int.Parse(prefix) > limit)
-            {
-                return false;
-            }
-        }
-        var host = addr.Contains('%') ? addr[..addr.IndexOf('%')] : addr;
-        if (host.Length == 0)
-        {
-            return false;
-        }
-        if (addr.Contains(':'))
-        {
-            return IPAddress.TryParse(host, out _);
-        }
-        // IPv4: IPAddress.TryParse accepts shorthand ("1" → 0.0.0.1) and
-        // leading zeros, so require the dotted-quad form explicitly.
-        var octets = host.Split('.');
-        return octets.Length == 4 && octets.All(octet =>
-            octet.Length is >= 1 and <= 3 &&
-            octet.All(c => c is >= '0' and <= '9') &&
-            (octet.Length == 1 || octet[0] != '0') &&
-            int.Parse(octet) <= 255);
-    }
 
     public static NetworkRule ParseNetworkRule(JsonElement element)
     {

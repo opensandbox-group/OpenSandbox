@@ -19,7 +19,6 @@ Sandbox-related data models.
 Models for sandbox creation, configuration, status, and lifecycle management.
 """
 
-import ipaddress
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
@@ -29,26 +28,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 if TYPE_CHECKING:
     from opensandbox.config import ConnectionConfig
     from opensandbox.config.connection_sync import ConnectionConfigSync
-
-
-def _is_ip_or_cidr(value: str) -> bool:
-    """Mirror the sidecar's netip-based target classification."""
-    try:
-        ipaddress.ip_address(value)
-        return True
-    except ValueError:
-        pass
-    if "/" in value and not value.partition("/")[2].isdigit():
-        return False
-    # netip.ParsePrefix rejects scoped prefixes ("fe80::1%eth0/64") even
-    # though Python's ipaddress accepts them; classify those as domains too.
-    if "/" in value and "%" in value:
-        return False
-    try:
-        ipaddress.ip_network(value, strict=False)
-        return True
-    except ValueError:
-        return False
 
 
 class SandboxImageAuth(BaseModel):
@@ -154,8 +133,10 @@ class NetworkRule(BaseModel):
         default=None,
         description=(
             "Restricts this rule to specific TCP destination ports (1-65535, max 256, no "
-            "duplicates). Omitted target with ports set applies to all IPv4/IPv6 destinations; "
-            "a domain target with ports is rejected. TCP only."
+            "duplicates). Omitted target with ports set applies to all IPv4/IPv6 destinations. "
+            "Domain targets with ports can be serialized; support depends on the deployed "
+            "server and egress implementation. A newer SDK does not make older servers "
+            "accept this shape. TCP only."
         ),
         min_length=1,
         max_length=256,
@@ -189,10 +170,6 @@ class NetworkRule(BaseModel):
     def target_or_ports_required(self) -> "NetworkRule":
         if self.target is None and not self.ports:
             raise ValueError("Network rule requires target, ports, or both")
-        # Classify the trimmed target the way the sidecar does, so " 10.0.0.5"
-        # is an IP locally too instead of a misleading domain+ports error.
-        if self.ports and self.target is not None and not _is_ip_or_cidr(self.target.strip()):
-            raise ValueError("Network rule ports are not supported for domain targets")
         return self
 
 

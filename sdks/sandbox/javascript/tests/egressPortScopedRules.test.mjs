@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EgressAdapter } from "../dist/internal.js";
+import { createEgressClient, EgressAdapter } from "../dist/internal.js";
 
 /**
  * Port-scoped egress rules: the JS SDK passes rules through verbatim, so the
@@ -91,6 +91,37 @@ test("EgressAdapter reads back a target+ports rule unchanged", async () => {
   const policy = await adapter.getPolicy();
 
   assert.deepEqual(policy.egress, [{ action: "allow", target: "10.0.0.5", ports: [22, 80] }]);
+});
+
+test("EgressAdapter serializes and reads distinct domain and wildcard port scopes", async () => {
+  const requests = [];
+  const client = createEgressClient({
+    baseUrl: "http://egress.local",
+    fetch: async (request) => {
+      requests.push({
+        method: request.method,
+        path: new URL(request.url).pathname,
+        body: request.body === null ? null : await request.text(),
+      });
+      return new Response(request.method === "GET"
+        ? '{"status":"ok","policy":{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com","ports":[443]},{"action":"deny","target":"example.com","ports":[80]},{"action":"allow","target":"*.example.com","ports":[8443]}]}}'
+        : '{"status":"ok"}', { headers: { "content-type": "application/json" } });
+    },
+  });
+  const adapter = new EgressAdapter(client);
+  const rules = [
+    { action: "allow", target: "example.com", ports: [443] },
+    { action: "deny", target: "example.com", ports: [80] },
+    { action: "allow", target: "*.example.com", ports: [8443] },
+  ];
+
+  await adapter.patchRules(rules);
+  assert.equal(requests[0].method, "PATCH");
+  assert.equal(requests[0].path, "/policy");
+  assert.deepEqual(JSON.parse(requests[0].body), rules);
+  assert.deepEqual((await adapter.getPolicy()).egress, rules);
+  assert.equal(requests[1].method, "GET");
+  assert.equal(requests[1].path, "/policy");
 });
 
 test("NetworkRule union rejects rules with neither target nor ports at compile time", async () => {

@@ -110,9 +110,10 @@ public class NetworkRule
 
     /// <summary>
     /// Gets or sets the FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP,
-    /// or CIDR. May be null when <see cref="Ports"/> is set; otherwise required. A domain
-    /// target combined with ports is rejected by the server/sidecar (domain rules are
-    /// evaluated at the DNS layer, which has no port dimension). The API codec serializes a
+    /// or CIDR. May be null when <see cref="Ports"/> is set; otherwise required.
+    /// Domain targets with ports can be serialized; support depends on the deployed
+    /// server and egress implementation. A newer SDK does not make older servers
+    /// accept this shape. The API codec serializes a
     /// blank target as omitted (the rule degrades to port-only, matching server
     /// normalization) — the model itself stores the value as given.
     /// </summary>

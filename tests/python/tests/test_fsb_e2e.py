@@ -65,7 +65,6 @@ from opensandbox.models.templates import (
     TemplateReadiness,
 )
 from opensandbox.sandbox import Sandbox
-from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -395,9 +394,6 @@ class TestFsbE2E:
         self, manager: SandboxManager, connection_config
     ) -> None:
         """TCP scopes round-trip and merge by target and unordered ports."""
-        with pytest.raises(ValidationError, match="domain targets"):
-            NetworkRule(action="allow", target="echo.test", ports=[443])
-
         target = "192.0.2.10"
         ip_ports = NetworkRule(action="allow", target=target, ports=[18083, 18082])
         port_only = NetworkRule(action="allow", ports=[8443, 443])

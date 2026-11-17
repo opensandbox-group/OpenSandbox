@@ -65,8 +65,9 @@ export type NetworkRuleAction = "allow" | "deny";
  *   across all IPv4/IPv6 destinations, but under `defaultAction: deny` the
  *   DNS proxy only matches domain rules, so hostname lookups still fail —
  *   this shape serves direct-IP clients.
- * - A domain `target` combined with `ports` is rejected (domain rules have
- *   no port dimension).
+ * - Domain targets with `ports` can be serialized; support depends on the
+ *   deployed server and egress implementation. A newer SDK does not make
+ *   older servers accept this shape.
  */
 export type NetworkRule = (
   | { action: NetworkRuleAction; target: string; ports?: number[] }

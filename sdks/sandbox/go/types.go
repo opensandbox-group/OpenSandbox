@@ -142,11 +142,11 @@ type NetworkPolicy struct {
 //
 // Target may be a FQDN, wildcard domain ("*.example.com"), IP, or CIDR. It
 // may be omitted when Ports is set: the rule then scopes by TCP destination
-// port alone, across all IPv4/IPv6 destinations. A domain Target combined
-// with Ports is rejected by the server/sidecar (domain rules have no port
-// dimension). Port limits enforced server-side (this SDK does not
-// pre-validate): each port 1-65535, at most 256 ports per rule, no
-// duplicates.
+// port alone, across all IPv4/IPv6 destinations. Domain targets with Ports
+// can be serialized; support depends on the deployed server and egress
+// implementation. A newer SDK does not make older servers accept this shape.
+// Port limits enforced server-side (this SDK does not pre-validate): each
+// port 1-65535, at most 256 ports per rule, no duplicates.
 type NetworkRule struct {
 	Action string `json:"action"`
 	Target string `json:"target,omitempty"`

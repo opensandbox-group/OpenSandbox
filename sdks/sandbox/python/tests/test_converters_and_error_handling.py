@@ -703,8 +703,8 @@ def test_sandbox_model_converter_to_api_create_request_and_renew_tz() -> None:
 
 
 def test_sandbox_model_converter_serializes_port_scoped_rules() -> None:
-    """A domain-only rule, an IP+ports rule, and a target-less port-only rule
-    must all round-trip to the wire shape the egress sidecar expects: the
+    """Domain-only, IP+ports, port-only, and domain+ports rules
+    must all round-trip through the SDK's lifecycle wire model: the
     port-only rule's `target` key must be entirely absent (not null), since
     the generated client uses its own UNSET sentinel to mean "omit this key".
     """
@@ -722,6 +722,9 @@ def test_sandbox_model_converter_serializes_port_scoped_rules() -> None:
                 NetworkRule(action="allow", target="pypi.org"),
                 NetworkRule(action="allow", target="10.0.0.5", ports=[22, 80]),
                 NetworkRule(action="deny", ports=[25]),
+                NetworkRule(action="allow", target="example.com", ports=[443]),
+                NetworkRule(action="deny", target="example.com", ports=[80]),
+                NetworkRule(action="allow", target="*.example.com", ports=[8443]),
             ],
         ),
         extensions={},
@@ -732,6 +735,9 @@ def test_sandbox_model_converter_serializes_port_scoped_rules() -> None:
         {"action": "allow", "target": "pypi.org"},
         {"action": "allow", "target": "10.0.0.5", "ports": [22, 80]},
         {"action": "deny", "ports": [25]},
+        {"action": "allow", "target": "example.com", "ports": [443]},
+        {"action": "deny", "target": "example.com", "ports": [80]},
+        {"action": "allow", "target": "*.example.com", "ports": [8443]},
     ]
 
     # Round-trip back through the reverse converter (as done for GET /policy
@@ -745,6 +751,7 @@ def test_sandbox_model_converter_serializes_port_scoped_rules() -> None:
     roundtripped = SandboxModelConverter.to_sandbox_network_policy(api_policy)
     assert roundtripped.egress[2].target is None
     assert roundtripped.egress[2].ports == [25]
+    assert [rule.model_dump(exclude_none=True) for rule in roundtripped.egress] == d["networkPolicy"]["egress"]
 
 
 def test_network_rule_requires_target_or_ports() -> None:
@@ -772,13 +779,15 @@ def test_network_rule_rejects_invalid_ports() -> None:
             NetworkRule(action="allow", target="10.0.0.5", ports=bad_ports)
 
 
-def test_network_rule_rejects_domain_target_with_ports() -> None:
-    """The sidecar rejects domain+ports (DNS-layer rules have no port
-    dimension); surfacing that as a local ValidationError beats a 4xx after
-    the sandbox create request is already in flight."""
+def test_network_rule_domain_targets_with_ports_round_trip() -> None:
     for target in ("example.com", "*.example.com", "10.0.0.0/255.0.0.0"):
-        with pytest.raises(ValidationError):
-            NetworkRule(action="allow", target=target, ports=[443])
+        for action, ports in (("allow", [443]), ("deny", [80])):
+            rule = NetworkRule(action=action, target=target, ports=ports)
+            assert NetworkRule.model_validate(rule.model_dump()).model_dump() == {
+                "action": action,
+                "target": target,
+                "ports": ports,
+            }
 
 
 def test_sandbox_model_converter_omits_empty_lifecycle() -> None:
@@ -1101,20 +1110,16 @@ def test_sandbox_model_converter_supports_windows_platform_request() -> None:
     assert dumped["platform"] == {"os": "windows", "arch": "amd64"}
 
 
-def test_network_rule_trims_target_before_classification() -> None:
-    """The sidecar trims before classifying; " 10.0.0.5" with ports must be
-    an IP locally too, not a misleading domain+ports rejection."""
+def test_network_rule_trims_target() -> None:
+    """Targets retain the existing whitespace normalization."""
     rule = NetworkRule(action="allow", target="  10.0.0.5  ", ports=[22])
     assert rule.target == "10.0.0.5"
-    with pytest.raises(ValidationError):
-        NetworkRule(action="allow", target="  example.com  ", ports=[443])
+    rule = NetworkRule(action="allow", target="  example.com  ", ports=[443])
+    assert rule.target == "example.com"
 
 
-def test_network_rule_scoped_ipv6_prefix_with_ports_rejected() -> None:
-    """netip.ParsePrefix rejects scoped prefixes while Python's ipaddress
-    accepts them; the SDK must mirror the sidecar or a valid-looking rule
-    dies remotely as a domain+ports 400."""
-    with pytest.raises(ValidationError):
-        NetworkRule(action="allow", target="fe80::1%eth0/64", ports=[22])
+def test_network_rule_scoped_ipv6_prefix_with_ports_preserved() -> None:
+    rule = NetworkRule(action="allow", target="fe80::1%eth0/64", ports=[22])
+    assert rule.target == "fe80::1%eth0/64"
     rule = NetworkRule(action="allow", target="fe80::1%eth0", ports=[22])
     assert rule.target == "fe80::1%eth0"

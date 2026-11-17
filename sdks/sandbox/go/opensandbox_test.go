@@ -669,6 +669,19 @@ func TestNetworkRule_PortScopedJSONRoundTrip(t *testing.T) {
 	data, err = json.Marshal(NetworkRule{Action: "allow", Target: "10.0.0.5", Ports: []int{22, 80}})
 	require.NoError(t, err)
 	require.Equal(t, `{"action":"allow","target":"10.0.0.5","ports":[22,80]}`, string(data))
+
+	rules := []NetworkRule{
+		{Action: "allow", Target: "example.com", Ports: []int{443}},
+		{Action: "deny", Target: "example.com", Ports: []int{80}},
+		{Action: "allow", Target: "*.example.com", Ports: []int{8443}},
+	}
+	data, err = json.Marshal(rules)
+	require.NoError(t, err)
+	const wire = `[{"action":"allow","target":"example.com","ports":[443]},{"action":"deny","target":"example.com","ports":[80]},{"action":"allow","target":"*.example.com","ports":[8443]}]`
+	require.Equal(t, wire, string(data))
+	var decodedRules []NetworkRule
+	require.NoError(t, json.Unmarshal([]byte(wire), &decodedRules))
+	require.Equal(t, rules, decodedRules)
 }
 
 func TestGetPolicy_PortOnlyRule(t *testing.T) {

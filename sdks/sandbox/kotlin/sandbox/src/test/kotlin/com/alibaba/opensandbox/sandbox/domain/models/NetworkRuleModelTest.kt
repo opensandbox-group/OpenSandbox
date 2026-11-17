@@ -148,9 +148,7 @@ class NetworkRuleModelTest {
     }
 
     @Test
-    fun `builder rejects domain targets combined with ports`() {
-        // Leading zeros, unbounded prefixes, and malformed IPv6 literals are
-        // all classified as domains (or invalid), matching the server.
+    fun `builder accepts domain targets combined with ports without syntax validation`() {
         for (target in listOf(
             "example.com",
             "*.example.com",
@@ -161,19 +159,20 @@ class NetworkRuleModelTest {
             "2001:db8::/129",
             "1:2",
         )) {
-            assertThrows(IllegalArgumentException::class.java) {
+            val rule =
                 NetworkRule
                     .builder()
                     .action(NetworkRule.Action.ALLOW)
                     .target(target)
                     .ports(listOf(443))
                     .build()
-            }
+            assertEquals(target, rule.target)
+            assertEquals(listOf(443), rule.ports)
         }
     }
 
     @Test
-    fun `builder trims the target before classification`() {
+    fun `builder preserves target whitespace`() {
         val rule =
             NetworkRule
                 .builder()

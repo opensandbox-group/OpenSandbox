@@ -265,9 +265,9 @@ class PlatformSpec private constructor(
  * @property target FQDN, wildcard domain (e.g., "example.com", "*.example.com"), IP address, or
  * CIDR. May be null when [ports] is set; otherwise required.
  * @property ports Restricts this rule to specific TCP destination ports (1-65535, max 256, no
- * duplicates). A null [target] with [ports] set applies to all IPv4/IPv6 destinations. A domain
- * [target] combined with [ports] is rejected by the server/sidecar: domain rules are evaluated at
- * the DNS layer, which has no port dimension.
+ * duplicates). A null [target] with [ports] set applies to all IPv4/IPv6 destinations.
+ * Domain targets with [ports] can be serialized; support depends on the deployed server and
+ * egress implementation. A newer SDK does not make older servers accept this shape.
  */
 class NetworkRule private constructor(
     val action: Action,
@@ -334,64 +334,11 @@ class NetworkRule private constructor(
             val targetValue = target
             val portsValue = ports
             require(targetValue != null || portsValue != null) { "Either target or ports must be specified" }
-            if (portsValue != null && targetValue != null && !isIpOrCidr(targetValue)) {
-                throw IllegalArgumentException(
-                    "Ports are not supported for domain targets: \"$targetValue\" " +
-                        "(domain rules are evaluated at the DNS layer, which has no port dimension)",
-                )
-            }
             return NetworkRule(
                 action = actionValue,
                 target = targetValue,
                 ports = portsValue?.toList(),
             )
-        }
-
-        /**
-         * Mirrors the sidecar's netip-based IP-vs-domain classification,
-         * on the trimmed target.
-         */
-        private fun isIpOrCidr(target: String): Boolean {
-            val t = target.trim()
-            if (t.count { it == '/' } > 1) return false
-            val addr = t.substringBefore('/')
-            val prefix = t.substringAfter('/', missingDelimiterValue = "")
-            if (prefix.isNotEmpty()) {
-                if (t.contains('%')) return false // scoped prefixes: netip rejects
-                if (prefix.any { it !in '0'..'9' }) return false
-                val limit = if (addr.contains(':')) 128 else 32
-                if (prefix.toInt() > limit) return false
-            }
-            return if (addr.contains(':')) isIpv6Literal(addr) else isIpv4Literal(addr)
-        }
-
-        private fun isIpv4Literal(addr: String): Boolean {
-            val octets = addr.split('.')
-            return octets.size == 4 &&
-                octets.all { octet ->
-                    // Leading zeros are rejected (server-side too).
-                    octet.length in 1..3 && octet.all { it in '0'..'9' } &&
-                        (octet.length == 1 || octet[0] != '0') && octet.toInt() <= 255
-                }
-        }
-
-        private fun isIpv6Literal(addr: String): Boolean {
-            val host = addr.substringBefore('%')
-            if (host.isEmpty() || host.contains(":::")) return false
-            val halves = host.split("::")
-            if (halves.size > 2) return false
-            var groups = halves.flatMap { half -> half.split(':').filter(String::isNotEmpty) }
-            if (groups.lastOrNull()?.contains('.') == true) {
-                // Embedded IPv4 tail counts as two groups.
-                if (!isIpv4Literal(groups.last())) return false
-                groups = groups.dropLast(1) + listOf("0", "0")
-            }
-            if (groups.any { group -> group.length > 4 || group.any { ch -> ch !in '0'..'9' && ch !in 'a'..'f' && ch !in 'A'..'F' } }) {
-                return false
-            }
-            // "::" compresses one or more all-zero groups; without it the
-            // address must carry exactly eight groups.
-            return if (halves.size == 2) groups.size <= 7 else groups.size == 8
         }
     }
 }
