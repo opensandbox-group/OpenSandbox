@@ -282,7 +282,23 @@ class CodeInterpreter:
 
         while time.monotonic() < deadline:
             attempt += 1
-            if await self.is_healthy():
+            # Bound each probe by the remaining budget: ping and the runtime
+            # check carry their own request timeouts, which would otherwise
+            # let one stalled probe run well past ready_timeout. Like
+            # ReadinessBudget.run, cancel an unfinished probe (late, or the
+            # caller was cancelled) without waiting for it, so one that
+            # suppresses the cancellation cannot hold the caller.
+            probe = asyncio.ensure_future(self.is_healthy())
+            try:
+                done, _ = await asyncio.wait(
+                    {probe}, timeout=max(deadline - time.monotonic(), 0)
+                )
+            finally:
+                if not probe.done():
+                    probe.cancel()
+            if not done:
+                break
+            if probe.result():
                 logger.info(
                     f"Code interpreter {self.id} passed health check "
                     f"after {attempt} attempts"
