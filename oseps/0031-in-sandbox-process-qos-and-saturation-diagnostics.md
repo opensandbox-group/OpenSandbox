@@ -1,0 +1,376 @@
+---
+title: In-Sandbox Process QoS and Saturation Diagnostics
+authors:
+  - "@hittyt"
+creation-date: 2026-11-17
+last-updated: 2026-11-17
+status: draft
+---
+
+# OSEP-0031: In-Sandbox Process QoS and Saturation Diagnostics
+
+<!-- toc -->
+- [Summary](#summary)
+- [Motivation](#motivation)
+  - [Goals](#goals)
+  - [Non-Goals](#non-goals)
+- [Requirements](#requirements)
+- [Proposal](#proposal)
+  - [Architecture](#architecture)
+  - [Notes/Constraints/Caveats](#notesconstraintscaveats)
+  - [Risks and Mitigations](#risks-and-mitigations)
+- [Design Details](#design-details)
+  - [1. Two-Tier QoS Model and Zero Role Assumptions](#1-two-tier-qos-model-and-zero-role-assumptions)
+  - [2. Static Opt-In Surface (TOML and Environment)](#2-static-opt-in-surface-toml-and-environment)
+  - [3. Dynamic Per-Launch QoS (`POST /pty`, `POST /command`, `POST /session`, Lifecycle Hooks)](#3-dynamic-per-launch-qos-post-pty-post-command-post-session-lifecycle-hooks)
+  - [4. Enforcement Mechanics: L1 Scheduler Floor and L2 Cgroup v2 Split](#4-enforcement-mechanics-l1-scheduler-floor-and-l2-cgroup-v2-split)
+  - [5. Orthogonality with OSEP-0018 Privilege Hardening](#5-orthogonality-with-osep-0018-privilege-hardening)
+  - [6. Non-Blocking Saturation and I/O-Stall Diagnostics (`GET /metrics`)](#6-non-blocking-saturation-and-io-stall-diagnostics-get-metrics)
+  - [7. Capability Probing and Degradation Reporting](#7-capability-probing-and-degradation-reporting)
+  - [8. Relationship to Existing Proposals](#8-relationship-to-existing-proposals)
+- [Test Plan](#test-plan)
+- [Drawbacks](#drawbacks)
+- [Alternatives](#alternatives)
+- [Infrastructure Needed](#infrastructure-needed)
+- [Upgrade & Migration Strategy](#upgrade--migration-strategy)
+<!-- /toc -->
+
+## Summary
+
+Building on `execd` as the sandbox init ([OSEP-0018](0018-execd-as-sandbox-init.md)), this proposal introduces an opt-in, two-tier in-sandbox Quality of Service (QoS) model (`high` vs. `standard`) and non-blocking kernel pressure diagnostics on `GET /metrics`. Only `execd` itself defaults to the `high` tier; every child process starts in the `standard` workload tier (unprivileged scheduler priority reduction via `opensandbox-launcher`, plus optional Cgroup v2 `system`/`workload` subtree isolation) unless explicitly promoted via static configuration or a per-request `qos: "high"` field on `POST /pty`, `POST /command`, or `POST /session`. This keeps `execd`, creator-designated platform daemons, and emergency WebShell/command sessions responsive when user workloads saturate sandbox CPU, while letting operators immediately distinguish CPU throttling, storage I/O hangs, and host/runtime failures without adding bespoke process-management APIs or server-side switches.
+
+## Motivation
+
+[OSEP-0018](0018-execd-as-sandbox-init.md) consolidated process-tree ownership under `execd` (PID 1 / subreaper) and routed child launches through `launchManaged` and `opensandbox-launcher`. However, resource accounting and CPU scheduling inside a sandbox remain completely flat: `execd`, in-sandbox platform agents, interactive WebShells (`/pty`), and untrusted user workloads all share the same sandbox cgroup and run at `SCHED_OTHER` with `nice = 0`.
+
+In production multi-tenant and platform-hosted sandboxes, this flat scheduling model causes three recurring operational pain points:
+
+1. **CPU saturation locks out WebShell and starves platform daemons.** A single user build, training script, or tight loop (`make -j`, OpenMP/PyTorch worker pools) saturates the container's CFS CPU quota. Because `execd`'s HTTP/WebSocket runtime, platform daemons running inside the sandbox, and newly spawned `/pty` shells compete at equal weight behind dozens of runnable user threads, WebShell login (`POST /pty` + `GET /pty/{sessionId}/ws`) and in-sandbox control tasks stall or time out.
+2. **CPU exhaustion, I/O hangs, and dead hosts look identical from outside.** When a sandbox stops responding, `GET /metrics` currently sleeps synchronously for 1 second (`resources.CPUPercent(time.Second)`) and exposes only aggregate CPU and memory percentages. Operators cannot tell whether `execd` timed out because the host/VM died, whether the sandbox is healthy but throttled at 100% CPU, or whether processes are wedged in uninterruptible sleep (`D` state) on a hung network/FUSE volume.
+3. **Runtime-specific escape hatches fragment operations.** Kubernetes deployments often fall back to `kubectl exec` for emergency troubleshooting, which does not exist on Fast Sandbox (Firecracker microVMs) or standalone Docker hosts. Unifying emergency WebShell and remediation (`ps`, `kill`) onto `execd`'s `/pty` and `/command` routes requires `execd` to guarantee a high-priority execution lane across every OpenSandbox runtime.
+
+### Goals
+
+1. **Guaranteed control-plane and emergency WebShell responsiveness:** Keep `execd` and `qos: "high"` `/pty` / `/command` / `/session` executions responsive even when `standard` workloads saturate 100% of sandbox CPU, while remaining work-conserving (idle CPU stays 100% available to user workloads).
+2. **Zero hardcoded role assumptions:** Make no built-in assumption about whether `ENTRYPOINT` or lifecycle hooks are "platform" or "user" code; default all child processes to `standard` when QoS is enabled and let sandbox creators or API callers explicitly select `high`.
+3. **Two-level progressive enforcement:** Provide a universal, zero-privilege L1 scheduler floor (`nice` / `SCHED_IDLE` + `RLIMIT_NICE=0`) that works across Docker, Kubernetes, gVisor, Kata, and Fast Sandbox, plus an opt-in L2 Cgroup v2 subtree split (`system` vs. `workload`) for group-level CPU weight/quota, scoped workload OOM, and PID reservation where writable Cgroup v2 is available.
+4. **Orthogonality with privilege hardening:** Keep `[qos]` independent of OSEP-0018 `[hardening]`, and ensure `qos: "high"` never bypasses capability, seccomp, or Landlock restrictions.
+5. **Sub-millisecond saturation vs. I/O-hang triage:** Make `GET /metrics` non-blocking and expose kernel CPU-throttling counters, PSI (`cpu`, `io`, `memory`), and runnable/uninterruptible (`D`-state) process counts read strictly from pseudo-filesystems.
+6. **Formalize `/pty` in the OpenAPI contract:** Document the existing `/pty` endpoints alongside the new `qos` request field in `specs/execd-api.yaml`.
+
+### Non-Goals
+
+1. **New process-management REST endpoints:** Listing and terminating runaway processes (`ps`, `top`, `kill`) are performed through `qos: "high"` `/pty` and `/command` sessions rather than introducing bespoke `/v1/processes` routes.
+2. **Platform-enforced server switches or separate admin tokens:** Like OSEP-0018 `[hardening]`, QoS is creator-opted via in-sandbox TOML or environment variables; no `[runtime]` server config flag or secondary authentication token is introduced in this proposal.
+3. **Disk bandwidth (`io.max`) throttling:** Identifying I/O stalls is in scope; block-device IOPS/BPS throttling (which requires host major:minor device mapping) is out of scope.
+4. **Windows QoS enforcement:** Enforcement and `/proc` / cgroup pressure metrics target Linux sandboxes; non-Linux builds report `unsupported` and treat `qos` fields as no-ops.
+
+## Requirements
+
+| ID | Requirement | Priority |
+|---|---|---|
+| R1 | When QoS is disabled (the default), process scheduling, cgroup placement, and resource limits are unchanged from today | Must |
+| R2 | When QoS is enabled, `execd` stays in `high` and all spawned child processes (`ENTRYPOINT`, lifecycle hooks, `/command`, `/session`, `/pty`, isolated sessions) default to `standard` unless explicitly configured or requested as `high` | Must |
+| R3 | L1 (`nice` / `SCHED_IDLE` + `RLIMIT_NICE=0`) requires no extra container capabilities (`CAP_SYS_NICE`, `CAP_SYS_ADMIN`), works across UID transitions, and prevents `standard` children (including UID 0 without `CAP_SYS_NICE`) from raising their own priority back | Must |
+| R4 | `POST /pty`, `POST /command`, and `POST /session` accept an optional `qos` (`"standard" \| "high"`) field; `qos: "high"` succeeds as a benign no-op when `[qos]` is disabled so unified WebShell clients need not pre-probe sandbox config | Must |
+| R5 | `[qos]` and `[hardening]` operate orthogonally: `[qos]` works with `[hardening]` off, and `qos: "high"` never bypasses `[hardening]` capability drops, `no_new_privs`, seccomp, or Landlock | Must |
+| R6 | L2 Cgroup v2 split (`system/` vs. `workload/`) is opt-in, migrates existing root PIDs (including `execd` and microVM guest `/init`) to satisfy the Cgroup v2 no-internal-processes rule, and fails open to L1 when unavailable | Should |
+| R7 | `GET /metrics` responds without blocking sleeps and exposes optional CPU throttle counters, PSI stall averages, and `R`/`D`-state task counts using only `/proc` and `/sys/fs/cgroup` reads (zero disk/mount `stat` calls) | Must |
+| R8 | Startup QoS enforcement state (`active` / `disabled` / `degraded` / `unsupported` + diagnostic `message`) is reported on `GET /v1/isolated/capabilities` | Must |
+
+## Proposal
+
+### Architecture
+
+```text
+Sandbox root (container cgroup or microVM guest)
+├── [high tier]   nice = 0 · (optional) cgroup: system/ (cpu.weight=1000, PID headroom)
+│   ├── execd (PID 1 / subreaper)  ── always high; serves /ping, /metrics (<1ms), /pty, /command
+│   ├── (optional) guest /init     ── migrated into system/ on Fast Sandbox microVMs
+│   ├── (opt-in) ENTRYPOINT / lifecycle hooks configured with qos = "high"
+│   └── (per-call) POST /pty, /command, /session with {"qos": "high"}  ← Emergency WebShell & ops
+│
+└── [standard tier] (default for all spawned children when [qos] enabled)
+    │   via opensandbox-launcher: RLIMIT_NICE=0 + nice=19 / SCHED_IDLE
+    │   + (optional) cgroup: workload/ (cpu.weight=50, optional cpu.max / memory.max / pids.max)
+    ├── ENTRYPOINT / lifecycle hooks (default qos = "standard")
+    ├── POST /command, /session, /pty (default qos = "standard")
+    ├── /code (Jupyter server & kernels inherit entrypoint's tier)
+    └── /v1/isolated/session (bwrap tree inherits standard tier + session isolation)
+```
+
+### Notes/Constraints/Caveats
+
+- **Why L2 Cgroup v2 split is opt-in separately from L1 (`[qos.cgroup] enabled = false`):**
+  1. Standard Docker and Kubernetes containers mount `/sys/fs/cgroup` read-only and drop `CAP_SYS_ADMIN`, so creating sub-cgroups inside the container is rejected by the kernel.
+  2. Even when `/sys/fs/cgroup` is writable inside an OCI container, enabling domain controllers (`+cpu +memory +pids`) on the container's root cgroup triggers the Linux Cgroup v2 *no internal processes* constraint: host-initiated `docker exec` / `kubectl exec` calls that attempt to attach a process to the container's root `cgroup.procs` fail with `EBUSY` (affecting external `kubectl exec` workflows and the Kubernetes Pool `Restart` recycle `pod-exec kill 1` path).
+  3. Conversely, in **Fast Sandbox (Firecracker microVMs)** — or dedicated Cgroup-delegated environments standardized on `execd` `/pty` — `[qos.cgroup] enabled = true` works cleanly and adds group-level CPU fairness (immune to thousand-thread dilution), workload-scoped OOM (`workload/memory.max` never kills `execd` or platform daemons), and reserved PID capacity (`workload/pids.max`).
+- **Why `RLIMIT_NPROC` is not set by L1:** Linux accounts `RLIMIT_NPROC` per real UID across the user namespace rather than per process subtree. When `execd`, a platform daemon, and a workload share the same UID (e.g., `root` or `sandbox`), a low `RLIMIT_NPROC` on `standard` children would equally block `qos: "high"` `/pty` shells running under that UID from forking `ps`. Subtree PID reservation is therefore handled strictly by L2 `workload/pids.max`.
+
+### Risks and Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Thousand-thread fork storm under L1-only (`nice = 19`) dilutes single-threaded `nice = 0` share | Support `scheduler = "idle"` (`SCHED_IDLE`, weight `3` vs. `1024`, ~341:1 per thread) in L1, and L2 `workload/cpu.weight` + `workload/pids.max` where Cgroup v2 is writable |
+| Caller with `X-EXECD-ACCESS-TOKEN` passes `qos: "high"` to escape security restrictions | `qos` controls scheduling/cgroup placement only; `[hardening]` cap-drop, `no_new_privs`, seccomp, and Landlock apply identically to `high` and `standard` launches (§5) |
+| Hung workspace volume (`/workspace` on wedged NFS/FUSE) blocks `GET /metrics` or emergency WebShell | `GET /metrics` reads only `/proc` and `/sys/fs/cgroup`; emergency `/pty` and `/command` callers can pass `"cwd": "/"` and `"command": "/bin/sh --noprofile --norc"` to avoid touching hung mounts |
+| Concurrent `GET /metrics` and OTel scrapes reset each other's CPU delta window | Replace ad-hoc per-caller baseline mutation with a shared 1-second rolling sampler in `pkg/resources` (§6) |
+
+## Design Details
+
+### 1. Two-Tier QoS Model and Zero Role Assumptions
+
+Every process in the sandbox belongs to one of two QoS classes:
+
+- **`high`** — Runs at `execd`'s baseline scheduling priority (`SCHED_OTHER`, `nice = 0`) and, when L2 is active, resides in the `system` sub-cgroup.
+- **`standard`** — Runs with reduced scheduling priority (`RLIMIT_NICE = 0` plus `nice = 19` or `SCHED_IDLE`) and, when L2 is active, resides in the `workload` sub-cgroup.
+
+**No implicit privilege for `ENTRYPOINT`:**
+- `execd` itself (and, on Fast Sandbox microVMs under L2, the guest `/init` process) is always placed in `high`.
+- When `[qos]` is enabled, **every** child launched by `execd` — including the image `ENTRYPOINT` and `lifecycle` hooks — defaults to `standard`. For general-purpose sandboxes whose `ENTRYPOINT` runs user application code or Jupyter kernels, this ensures a runaway `ENTRYPOINT` cannot starve `execd` or block an emergency `qos: "high"` WebShell.
+- Platform builders whose `ENTRYPOINT` or `lifecycle` hook runs a trusted in-sandbox control daemon explicitly opt that target into `high` via configuration (§2, §3).
+
+### 2. Static Opt-In Surface (TOML and Environment)
+
+Following [OSEP-0018](0018-execd-as-sandbox-init.md), QoS is configured through the existing `execd` isolation TOML (`EXECD_ISOLATION_CONFIG`, `pkg/isolation/config.go`) so all in-sandbox runtime policies live in one file. For creators who want L1 protection on arbitrary third-party images without baking or mounting a TOML file, two environment variables provide a zero-file shorthand.
+
+#### TOML schema (`[qos]` and `[qos.cgroup]`)
+
+```toml
+# Process QoS tiering (OSEP-0031). Default OFF — omit for today's flat behavior.
+[qos]
+enabled = true              # master switch for L1 scheduler tiering (default: false)
+entrypoint = "standard"     # QoS tier for image ENTRYPOINT: "standard" | "high" (default: "standard")
+lifecycle = "standard"      # default QoS tier for lifecycle hooks: "standard" | "high" (default: "standard")
+nice = 19                   # nice value (1..19) for "standard" when scheduler = "other" (default: 19)
+scheduler = "other"         # "other" (SCHED_OTHER + nice) | "idle" (SCHED_IDLE) (default: "other")
+
+# Optional L2 Cgroup v2 subtree isolation on top of [qos]. Default OFF.
+# Recommended on Fast Sandbox microVMs or Cgroup-delegated pods using execd /pty.
+[qos.cgroup]
+enabled = false             # split sandbox cgroup into system/ and workload/ (fail-open to L1)
+system_cpu_weight = 1000    # cpu.weight (1..10000) for high tier (default: 1000)
+workload_cpu_weight = 50    # cpu.weight (1..10000) for standard tier (default: 50)
+workload_cpu_max_pct = 0    # optional hard cap as % of sandbox CPU capacity, 1..100 (0 = uncapped)
+workload_memory_max = ""    # optional memory.max for workload/, e.g. "90%" or "3584Mi" ("" = uncapped)
+workload_pids_max = 0       # optional pids.max for workload/, >0 caps workload tasks (0 = uncapped)
+```
+
+Validation rules (invalid static configuration fails `execd` startup fast, matching OSEP-0018):
+- `entrypoint` and `lifecycle` must be `"standard"` or `"high"`.
+- `nice` must be in `1..19` when `enabled = true`.
+- `scheduler` must be `"other"` or `"idle"`.
+- `[qos.cgroup] enabled = true` requires `[qos] enabled = true`. `system_cpu_weight` and `workload_cpu_weight` must be in `1..10000`; `workload_cpu_max_pct` in `0..100`; `workload_memory_max` accepts byte quantities (`"3584Mi"`, `"4Gi"`) or a percentage (`"1%"`..`"99%"`) of the detected sandbox memory limit (if no finite sandbox/host memory limit exists, a percentage value logs a warning and degrades `memory` to uncapped).
+
+#### Lightweight environment overrides
+
+| Variable | Values | Effect |
+|---|---|---|
+| `EXECD_QOS_ENABLED` | `true` / `1` / `false` / `0` | Overrides `[qos] enabled`. Setting `EXECD_QOS_ENABLED=true` in `CreateSandboxRequest.env` activates L1 QoS with built-in defaults (`nice = 19`, `entrypoint = "standard"`) with no TOML file required. |
+| `EXECD_QOS_ENTRYPOINT` | `standard` / `high` | Overrides `[qos] entrypoint`. |
+
+Both variable names are added to `execdConfigEnvBlacklist` (`pkg/isolation/config.go`) and `bootstrapStripEnv` (`pkg/runtime/initmode_linux.go`) so they are stripped before user code executes.
+
+### 3. Dynamic Per-Launch QoS (`POST /pty`, `POST /command`, `POST /session`, Lifecycle Hooks)
+
+#### Execution API additions (`specs/execd-api.yaml`)
+
+Add a shared schema `ProcessQoS`:
+
+```yaml
+ProcessQoS:
+  type: string
+  enum: [standard, high]
+  default: standard
+  description: >-
+    In-sandbox scheduling and resource QoS tier (OSEP-0031). "standard" places
+    the process in the managed workload tier when [qos] is enabled. "high"
+    keeps the process in the control-plane tier alongside execd (for example,
+    emergency WebShell login or platform health tasks). Accepted as a no-op
+    when [qos] is disabled; never bypasses [hardening] security controls.
+```
+
+Wire `qos` onto the three interactive/command creation requests:
+
+1. **`POST /pty` (`CreatePTYSessionRequest`)** — Formalize `/pty`, `/pty/{sessionId}`, and `/pty/{sessionId}/ws` in `specs/execd-api.yaml` and add `qos`:
+   ```json
+   {
+     "cwd": "/",
+     "command": "/bin/bash",
+     "qos": "high"
+   }
+   ```
+   Console BFF (`console/bff/app/shell.py`) and platform WebShell gateways pass `"qos": "high"` when opening operator/emergency WebShell sessions. Because `"qos": "high"` is a valid no-op on sandboxes where `[qos]` is off, WebShell clients can send it unconditionally without pre-probing sandbox capabilities.
+2. **`POST /command` (`RunCommandRequest`)** — Add optional `"qos": "standard" | "high"`. Platform control planes can run non-interactive inspection (`ps -eo pid,ppid,stat,pcpu,rss,comm,wchan`) or remediation (`kill -9 <pid>`) in the `high` tier even under 100% workload CPU load.
+3. **`POST /session` (`CreateSessionRequest`)** — Add optional `"qos": "standard" | "high"`, governing the persistent shell process and every `run_in_session` child it forks.
+
+Unknown `qos` values (anything other than `""`, `"standard"`, or `"high"`) are rejected with HTTP `400 Bad Request`.
+
+#### Lifecycle hook schema (`pkg/lifecycle/config.go`)
+
+Extend `Hook` and `PeriodicHook` with an optional `qos` field (`"standard" | "high"`):
+
+```json
+{
+  "version": 1,
+  "preStart": { "command": ["/opt/platform/agent", "--daemon"], "qos": "high" },
+  "periodic": [
+    { "name": "watchdog", "schedule": "@every 30s", "command": ["/opt/platform/check.sh"], "qos": "high" }
+  ]
+}
+```
+
+When omitted on a hook, it inherits `[qos] lifecycle` (default `"standard"`).
+
+### 4. Enforcement Mechanics: L1 Scheduler Floor and L2 Cgroup v2 Split
+
+#### L1: Pre-exec scheduler floor in `opensandbox-launcher`
+
+Why apply priority inside `opensandbox-launcher` (`components/execd/native/launcher.c`) rather than calling `unix.Setpriority(PRIO_PROCESS, childPid, nice)` from `execd` after `cmd.Start()`?
+- Under Linux `sys_setpriority`, a parent process running as UID 0 **without** `CAP_SYS_NICE` (Docker's default capability set omits `CAP_SYS_NICE`) gets `EPERM` if it calls `setpriority` on a child that already switched to a non-zero UID via `SysProcAttr.Credential`.
+- Inside `opensandbox-launcher`, the child adjusts **itself** (`who = 0`) before `execve`, so `cred->euid` always matches the target task, zero capabilities are needed, and there is no race window where initial workload threads escape at `nice = 0`.
+
+Policy header extension (`launcher.c` / `hardening_linux.go`, bumping `POLICY_VERSION` to `2` — `execd` and `opensandbox-launcher` are always staged from the same `execd` artifact):
+- Add `FLAG_QOS_LOW (0x4u)`, `uint8_t nice`, and `uint8_t sched_policy` (`0 = SCHED_OTHER`, `1 = SCHED_IDLE`) to `struct policy_header`.
+- Execution sequence in `launcher.c` when `FLAG_QOS_LOW` is set (placed **before** Landlock and seccomp so custom `[seccomp] deny` lists blocking `setpriority`/`setrlimit`/`sched_setscheduler` never block the launcher itself):
+  1. `setrlimit(RLIMIT_NICE, &(struct rlimit){ .rlim_cur = 0, .rlim_max = 0 })` — pins `RLIMIT_NICE` to `0` (`nice_to_rlimit(0) = 20 > 0`), ensuring `can_nice()` in the kernel denies any subsequent attempt by the workload to lower `nice` or exit `SCHED_IDLE`, even if the container runtime inherited a non-zero `RLIMIT_NICE`.
+  2. If `sched_policy == 1`: `sched_setscheduler(0, SCHED_IDLE, &(struct sched_param){ .sched_priority = 0 })`; else `setpriority(PRIO_PROCESS, 0, (int)hdr.nice)`.
+  3. Failures log to stderr and fail open (never aborting workload launch).
+
+#### L2: Opportunistic Cgroup v2 subtree split (`system/` vs. `workload/`)
+
+When `[qos.cgroup] enabled = true`, `runtime.InitQoS` runs at `execd` startup:
+
+1. **Discover and verify:** Resolve `execd`'s unified Cgroup v2 directory `D` via `pkg/cgroupfs`. Verify `D` is on a writable `cgroup2` mount.
+2. **Create leaf sub-cgroups and vacate `D`:**
+   - `mkdir(D/system, 0755)` and `mkdir(D/workload, 0755)`.
+   - Read every PID currently in `D/cgroup.procs` and write each to `D/system/cgroup.procs`.
+   - *Fast Sandbox microVM synergy:* On Fast Sandbox, the guest `/init` PID 1 (`SANDBOX_HEARTBEAT` emitter) resides in the root cgroup alongside `execd`. Migrating all initial `D/cgroup.procs` into `D/system` both satisfies the Cgroup v2 *no internal processes* rule on `D` and protects the guest heartbeat loop inside `system/` from workload CPU starvation.
+3. **Enable controllers selectively:** Read `D/cgroup.controllers` and write available controllers from `{+cpu, +memory, +pids}` to `D/cgroup.subtree_control`. Each controller degrades independently if absent from `cgroup.controllers`.
+4. **Configure `system/` and `workload/`:**
+   - `cpu`: write `system_cpu_weight` to `D/system/cpu.weight` and `workload_cpu_weight` to `D/workload/cpu.weight`. If `workload_cpu_max_pct > 0`, compute quota from the sandbox's `D/cpu.max` (or `CPUCount() * 100000` when `D/cpu.max` is `max`) and write `<quota> 100000` to `D/workload/cpu.max`.
+   - `memory`: if `workload_memory_max` is set, resolve bytes (literal or `%` of `D/memory.max` / guest total) and write to `D/workload/memory.max`. OOM kills triggered by workload memory spikes stay strictly inside `D/workload` and never terminate `execd` or `high`-tier platform daemons in `D/system`.
+   - `pids`: if `workload_pids_max > 0`, write to `D/workload/pids.max`, guaranteeing PID headroom in `D/system` for emergency `qos: "high"` WebShells even during a workload fork bomb.
+5. **Race-free child placement:** Hold `O_PATH | O_DIRECTORY | O_CLOEXEC` file descriptors for `D/system` and `D/workload`. In `launchManagedWith`, attach `SysProcAttr.UseCgroupFD = true` and `CgroupFD = targetFD` (`CLONE_INTO_CGROUP`, Linux >= 5.7). If `clone3` with `CLONE_INTO_CGROUP` returns `ENOSYS`/`EPERM` (e.g., `clone3compat` active or older kernel), retry without `UseCgroupFD` and write the child PID to `<target>/cgroup.procs` under `initReaper.mu` immediately after `Start()`.
+
+### 5. Orthogonality with OSEP-0018 Privilege Hardening
+
+`[qos]` and `[hardening]` compose via independent flags in the shared `opensandbox-launcher` policy:
+
+| `[hardening]` | `[qos]` | Process `qos` | Launcher invoked? | Flags applied in child |
+|---|---|---|---|---|
+| off | off | any | No | Direct `exec` (today's default) |
+| off | on | `"high"` | No | Direct `exec` in `high` / `system` cgroup (`nice = 0`) |
+| off | on | `"standard"` | **Yes** | `FLAG_QOS_LOW` + credential env strip only (no cap-drop, no `no_new_privs`, no seccomp/Landlock) |
+| on | off | any | **Yes** | `FLAG_CAP_DROP` (+ optional UID/Landlock/seccomp) at `nice = 0` |
+| on | on | `"high"` | **Yes** | `FLAG_CAP_DROP` (+ optional UID/Landlock/seccomp) in `system` cgroup at `nice = 0` |
+| on | on | `"standard"` | **Yes** | `FLAG_CAP_DROP` + `FLAG_QOS_LOW` (+ optional UID/Landlock/seccomp) in `workload` cgroup |
+
+Internal helper processes exempted by `withoutHardening()` (`filesystem_worker` and the outer `bwrap` binary for isolated sessions):
+- `filesystem_worker` serves single-shot file API requests on behalf of `execd` and runs in `high`.
+- Isolated sessions (`bwrap`): when `[qos]` is enabled, the outer `bwrap` launch receives `workload` cgroup placement and L1 priority (via a lightweight `FLAG_QOS_LOW`-only wrap or pre-exec priority drop inside `opensandbox-session-gate`), so isolated session workloads also respect the `standard` tier without breaking `bwrap`'s namespace setup.
+
+### 6. Non-Blocking Saturation and I/O-Stall Diagnostics (`GET /metrics`)
+
+#### Eliminating the 1-second blocking sleep
+
+`MetricController.readMetrics()` (`pkg/web/controller/metric.go`) currently calls `resources.CPUPercent(time.Second)`, blocking every `GET /metrics` HTTP request for 1000ms. Meanwhile, `pkg/resources` already reads cumulative cgroup/host CPU counters.
+
+Replace the per-request sleep with a lightweight background 1-second rolling sampler in `pkg/resources`:
+- A single ticker samples cumulative CPU usage every 1s and caches the latest `cpu_used_pct` atomically.
+- Both `GET /metrics`, `GET /metrics/watch`, and OpenTelemetry (`telemetry/system.go`) read the cached sample in `<1ms` without resetting each other's measurement window.
+
+#### Additive pressure and task-state fields on `Metrics`
+
+Extend `Metrics` (`specs/execd-api.yaml` and `pkg/web/model/metric.go`) with optional fields (`omitempty` when unavailable on non-Linux or older kernels; existing 5 required fields remain unchanged):
+
+| Field | Type | Source (in-memory pseudo-FS only) | Diagnostic meaning |
+|---|---|---|---|
+| `cpu_nr_throttled` | `int64` | cgroup v2/v1 `cpu.stat` (`nr_throttled`) | Cumulative count of CFS bandwidth-throttled periods |
+| `cpu_throttled_usec` | `int64` | v2 `cpu.stat` `throttled_usec` (v1 `throttled_time / 1000`) | Cumulative microseconds tasks were throttled by CPU limit |
+| `cpu_some_pressure_avg10` | `float64` | cgroup `cpu.pressure` (`some avg10`), fallback `/proc/pressure/cpu` | % of wall time (10s window) at least one runnable task was delayed waiting for CPU |
+| `io_full_pressure_avg10` | `float64` | cgroup `io.pressure` (`full avg10`), fallback `/proc/pressure/io` | % of wall time (10s window) all non-idle tasks were stalled on block/FS I/O |
+| `mem_full_pressure_avg10` | `float64` | cgroup `memory.pressure` (`full avg10`), fallback `/proc/pressure/memory` | % of wall time (10s window) tasks were stalled in memory reclaim/thrashing |
+| `procs_running` | `int` | `/proc/[pid]/stat` scan (`state == 'R'`) | Runnable threads competing for CPU inside the sandbox PID namespace |
+| `procs_uninterruptible` | `int` | `/proc/[pid]/stat` scan (`state == 'D'`) | Tasks wedged in uninterruptible kernel I/O sleep (`TASK_UNINTERRUPTIBLE`) |
+
+**Strict no-disk-I/O rule:** Reading `Metrics` must only read `/sys/fs/cgroup/*` and `/proc/[pid]/stat` (never `/proc/[pid]/cmdline` if it requires faulting user pages on swap, and never `stat()` on rootfs or mounted volumes). This guarantees `GET /metrics` responds in milliseconds even when `/workspace` is completely wedged.
+
+#### Operator triage matrix
+
+With `execd` protected in the `high` tier and `GET /metrics` non-blocking, platforms classify "unresponsive sandbox" incidents deterministically:
+
+| Probe result | Root cause | Standard remediation |
+|---|---|---|
+| `GET /ping` times out or connection refused | **Host / VM / Runtime failure** (node down, network partition, VMM wedged) | Inspect `GET /sandboxes/{id}/diagnostics/events`; recycle or recreate sandbox |
+| `GET /ping` OK; `cpu_used_pct` near 100%, `cpu_throttled_usec` / `cpu_some_pressure_avg10` high, `procs_uninterruptible == 0` | **In-sandbox CPU saturation** (runaway user workload) | Connect via `POST /pty` (`{"qos": "high"}`) or run `POST /command` (`{"qos": "high"}`) to inspect (`ps`/`top`) and `kill` offending processes |
+| `GET /ping` OK; `procs_uninterruptible > 0` and/or `io_full_pressure_avg10` high | **Storage / I/O hang** (wedged volume, NAS, or FUSE mount) | Connect via `POST /pty` (`{"qos": "high", "cwd": "/", "command": "/bin/sh --noprofile --norc"}`), inspect `/proc/<pid>/wchan`, recover backing mount or recreate sandbox |
+
+### 7. Capability Probing and Degradation Reporting
+
+Extend `CapabilitiesResponse` (`GET /v1/isolated/capabilities` in `specs/execd-api.yaml`) with an optional `qos` sibling object alongside `hardening`, reusing `HardeningLayerState` (`active` | `disabled` | `degraded` | `unsupported` + `message`):
+
+```json
+{
+  "hardening": { "...": "..." },
+  "qos": {
+    "enabled": true,
+    "entrypoint_qos": "standard",
+    "scheduler": {
+      "state": "active"
+    },
+    "cgroup": {
+      "state": "degraded",
+      "message": "cgroup v2 root /sys/fs/cgroup is read-only; falling back to scheduler QoS only"
+    }
+  }
+}
+```
+
+If `[qos] enabled = true` is paired with `init_mode == "none"` (`EXECD_INIT` unset) and `entrypoint == "standard"`, `scheduler` reports `degraded` with a clear message noting that `execd`-spawned processes are covered while the bootstrap-launched `ENTRYPOINT` is not wrapped (mirroring OSEP-0018's drift reporting).
+
+### 8. Relationship to Existing Proposals
+
+- **[OSEP-0018 (execd as Sandbox Init)](0018-execd-as-sandbox-init.md):** Provides the PID 1 / subreaper topology, `launchManaged` process registry, `opensandbox-launcher` binary, and isolation TOML delivery channel that this proposal builds upon directly.
+- **[OSEP-0010 (OpenTelemetry Instrumentation)](0010-opentelemetry-instrumentation.md):** The shared non-blocking sampler in `pkg/resources` serves both `GET /metrics` and OTel gauges without contention.
+- **[OSEP-0020 (Sandbox Lifecycle Hooks)](0020-sandbox-lifecycle-hooks.md):** Lifecycle `preStart` and `periodic` hooks gain optional `qos` selection so platform health hooks are not starved by user workloads.
+
+## Test Plan
+
+- **Unit tests (`components/execd`):**
+  - `[qos]` and `[qos.cgroup]` TOML parsing, validation errors (out-of-range `nice`, invalid `qos` enum, `[qos.cgroup]` without `[qos]`), and `EXECD_QOS_ENABLED` / `EXECD_QOS_ENTRYPOINT` overrides + env-strip verification.
+  - `launcher` policy serialization across all 6 `[hardening]` x `[qos]` combinations (§5 table).
+  - Cgroup v2 setup logic against synthetic cgroupfs trees: PID migration into `system/`, selective controller enablement, `cpu.max` percentage calculation, `memory.max` percentage/byte parsing, and clean `degraded` fallback on read-only mounts or `EBUSY`.
+  - Non-blocking `Metrics` parser tests for v1/v2 `cpu.stat` throttle counters, PSI files, and `/proc/[pid]/stat` `R`/`D` state counting.
+  - HTTP controller tests for `qos` validation on `POST /pty`, `POST /command`, and `POST /session` (including no-op acceptance when `[qos]` is off, and `400` on invalid values).
+- **Linux integration tests (`components/execd`):**
+  - Launch `standard` child (including cross-UID launch without `CAP_SYS_NICE`) and verify `/proc/<pid>/stat` reports `nice = 19` (or `SCHED_IDLE`), `RLIMIT_NICE = 0`, and `renice -n 0` inside the child fails with `EACCES`/`EPERM`.
+  - Launch `qos: "high"` `/command` and `/pty` alongside `[hardening] enabled = true` + `[qos] enabled = true` and verify `nice = 0` **while** `CapEff = 0`, `NoNewPrivs = 1`, and `Seccomp = 2` remain enforced.
+- **End-to-end tests (`tests/python` & `scripts/fast-sandbox-env`):**
+  - **CPU starvation benchmark E2E (Docker & Kubernetes):** Constrain a sandbox to `1.0` CPU (`--cpus=1`), enable `EXECD_QOS_ENABLED=true`, start 16 CPU-bound `standard` spinner processes (`cpu_used_pct ~ 100%`, `cpu_nr_throttled > 0`), and assert:
+    1. `GET /ping` and `GET /metrics` respond in `<100ms` and report throttling + `procs_running >= 16`.
+    2. Opening a `POST /pty` WebSocket session with `{"qos": "high"}` and running `echo ready && kill ...` completes within `<1s` (whereas a baseline test without QoS exhibits severe latency).
+  - **Fast Sandbox L2 Cgroup E2E:** Enable `[qos]` + `[qos.cgroup]` in a Fast Sandbox template, verify `qos.cgroup.state == "active"`, confirm guest `/init` and `execd` reside in `system/`, verify a workload fork storm hits `workload/pids.max` while `qos: "high"` `/pty` still spawns `/bin/sh` and cleans up the storm.
+
+## Drawbacks
+
+1. **Same-token trust model for `qos: "high"`:** Any caller holding `X-EXECD-ACCESS-TOKEN` can pass `"qos": "high"`. This is intentional (matching creator-opted posture without multi-token complexity): an untrusted caller who already holds the sandbox's execution token can run arbitrary commands anyway, while well-behaved SDKs omit `qos` (defaulting to `"standard"`) and platform consoles reserve `"qos": "high"` for operator WebShells and control agents.
+2. **L2 Cgroup v2 requires guest/container cgroup writability:** Standard unprivileged OCI containers only get L1 (`nice` / `SCHED_IDLE`), which solves CPU starvation but cannot cap aggregate workload memory below the container's OOM limit.
+3. **`POLICY_VERSION` bump between `execd` and `opensandbox-launcher`:** Requires both binaries to match, which is already guaranteed because the platform stages `execd` and `opensandbox-launcher` together from the same image.
+
+## Alternatives
+
+1. **Hardcode `ENTRYPOINT` and `/pty` as `high` priority automatically.** Rejected: in standard user sandboxes `ENTRYPOINT` runs user workloads, and AI agents frequently execute heavy builds inside `/pty` terminals. Hardcoding roles would re-introduce starvation whenever user code runs in `ENTRYPOINT` or `/pty`.
+2. **Add dedicated `/v1/processes` list and kill endpoints to `execd`.** Rejected for initial scope (simplicity first): once `qos: "high"` guarantees `/pty` and `/command` responsiveness (and L2 `workload/pids.max` reserves PID headroom where cgroups are writable), standard POSIX tools (`ps`, `top`, `kill`) over existing endpoints cover interactive and automated remediation without expanding `execd`'s API surface. Dedicated endpoints can be reconsidered later if single-UID container `pids_limit` exhaustion without L2 cgroups proves common.
+3. **Separate platform-admin token for `qos: "high"`.** Rejected: adds token distribution, rotation, and RuntimeBinding complexity across Server, K8s Pool, Fast Sandbox, and SDKs, whereas `qos: "high"` grants no security privilege escalation (§5).
+4. **Rely on Kubernetes `kubectl exec` for emergency WebShell.** Rejected: unavailable on Fast Sandbox microVMs and standalone Docker runtimes, and incompatible with Cgroup v2 root controller delegation (`EBUSY`).
+
+## Infrastructure Needed
+
+None. Existing Docker, Kubernetes, and Fast Sandbox E2E lanes in GitHub Actions already exercise CPU-limited sandboxes, `execd` init mode, and `opensandbox-launcher`.
+
+## Upgrade & Migration Strategy
+
+- **100% backward compatible by default:** `[qos]` defaults to `false`; `GET /metrics` keeps all existing required fields and types while adding optional fields; `qos` on `/pty`, `/command`, and `/session` is optional and defaults to `"standard"`.
+- **Smooth WebShell unification:** Console and internal platform WebShell gateways can immediately migrate from `kubectl exec` to `execd` `POST /pty` with `{"qos": "high"}` (against updated `execd` images) even before individual sandbox images turn on `[qos]`, because `"qos": "high"` is accepted as a no-op when `[qos]` is disabled.
+- **SDK alignment:** Per the repository's spec-alignment rule, `specs/execd-api.yaml` (`/pty` routes, `ProcessQoS`, `Metrics` pressure fields, `CapabilitiesResponse.qos`) and generated/handwritten Sandbox SDK models will be updated together in the implementing PRs.
