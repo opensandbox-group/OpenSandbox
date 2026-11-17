@@ -1,0 +1,74 @@
+# ⚠️  DEMO VALUES — NOT FOR PRODUCTION
+# This file uses insecure, well-known demo credentials so the local
+# port-forward walkthrough works out of the box:
+#   - configToml [server].api_key = "eks-nitro-demo-key"
+#   - server.gateway.secureAccess.keys[0].key (a fixed base64 signing key)
+# Replace BOTH with unique secret values (e.g. a random api_key and
+# `openssl rand -base64 32` for the signing key) before exposing the server or
+# ingress gateway to anything other than 127.0.0.1.
+server:
+  replicaCount: 1
+  gateway:
+    enabled: true
+    host: "127.0.0.1:28080"
+    gatewayRouteMode: "header"
+    dataplaneNamespace: "opensandbox"
+    providerType: "batchsandbox"
+    secureAccess:
+      activeKey: "a"
+      keys:
+        - key_id: "a"
+          key: "b3BlbnNhbmRib3gtZWtzLW5pdHJvLXNlY3VyZS1hY2Nlc3Mta2V5"
+  volumeMounts:
+    - name: eks-nitro-template
+      mountPath: /etc/opensandbox/eks-nitro.batchsandbox-template.yaml
+      subPath: batchsandbox-template.yaml
+      readOnly: true
+  volumes:
+    - name: eks-nitro-template
+      configMap:
+        name: eks-nitro-batchsandbox-template
+
+configToml: |
+  [server]
+  host = "0.0.0.0"
+  port = 80
+  api_key = "eks-nitro-demo-key"
+  max_sandbox_timeout_seconds = 86400
+
+  [log]
+  level = "INFO"
+
+  [runtime]
+  type = "kubernetes"
+  execd_image = "ghcr.io/opensandbox-group/opensandbox/execd:v1.0.22"
+
+  [storage]
+  allowed_host_paths = []
+  volume_default_size = "1Gi"
+
+  [kubernetes]
+  kubeconfig_path = ""
+  namespace = "opensandbox"
+  informer_enabled = true
+  informer_resync_seconds = 300
+  informer_watch_timeout_seconds = 60
+  snapshot_create_timeout_seconds = 900
+  workload_provider = "batchsandbox"
+  image_pull_policy = "IfNotPresent"
+  batchsandbox_template_file = "/etc/opensandbox/eks-nitro.batchsandbox-template.yaml"
+
+  [egress]
+  image = "ghcr.io/opensandbox-group/opensandbox/egress:v1.1.6"
+  mode = "dns+nft"
+  disable_ipv6 = true
+
+  # EKS Pod Isolation (Nitro Sandboxes). "nitro" is Kubernetes-only and defaults
+  # k8s_runtime_class to "isolated-sandbox". Set it to "confidential-sandbox" for
+  # the confidential-computing variant. Setting runtimeClassName
+  # is the whole opt-in: the RuntimeClass carries the nitro-sandbox nodeSelector and
+  # the cluster's admission policy injects the workload=isolated:NoSchedule toleration,
+  # so the batchsandbox template must NOT add its own nodeSelector/tolerations.
+  [secure_runtime]
+  type = "nitro"
+  k8s_runtime_class = "isolated-sandbox"

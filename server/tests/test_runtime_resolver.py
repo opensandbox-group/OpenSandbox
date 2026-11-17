@@ -69,6 +69,27 @@ def test_secure_runtime_resolver_prefers_explicit_values_and_defaults() -> None:
     assert default_k8s.get_k8s_runtime_class() == "kata-qemu"
 
 
+def test_secure_runtime_resolver_nitro_defaults_and_override() -> None:
+    default_nitro = SecureRuntimeResolver(
+        _config(runtime_type="kubernetes", secure_runtime=SecureRuntimeConfig(type="nitro"))
+    )
+    confidential_nitro = SecureRuntimeResolver(
+        _config(
+            runtime_type="kubernetes",
+            secure_runtime=SecureRuntimeConfig(
+                type="nitro", k8s_runtime_class="confidential-sandbox"
+            ),
+        )
+    )
+
+    # Nitro is Kubernetes-only: no Docker OCI runtime, and the RuntimeClass
+    # defaults to isolated-sandbox unless explicitly overridden.
+    assert default_nitro.is_enabled() is True
+    assert default_nitro.get_docker_runtime() is None
+    assert default_nitro.get_k8s_runtime_class() == "isolated-sandbox"
+    assert confidential_nitro.get_k8s_runtime_class() == "confidential-sandbox"
+
+
 @pytest.mark.asyncio
 async def test_validate_secure_runtime_skips_when_disabled() -> None:
     docker_client = MagicMock()

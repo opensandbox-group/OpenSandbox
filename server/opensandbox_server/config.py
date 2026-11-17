@@ -886,6 +886,28 @@ class KubernetesRuntimeConfig(BaseModel):
             "If unset, no resource constraints are applied."
         ),
     )
+    # CAUTION: scope this to execd's *binary* handoff over the per-pod execd volume.
+    # Do NOT pin seLinuxOptions.level here (or on the 'sandbox' container) to make a
+    # user RWO PVC readable across containers: on runtimes that attach/mount such a PVC
+    # once PER CONTAINER rather than once per pod, an explicit matching MCS level turns a
+    # visible "permission denied" into SILENT ext4 corruption (each container writes the
+    # same volume incoherently). The per-container MCS denial is accidentally protecting
+    # you there. Rule stays: mount a given RWO PVC into exactly one container per pod.
+    execd_init_security_context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Additional securityContext fields (e.g. seLinuxOptions) applied to the "
+            "execd init container. Merged with any egress-driven security context "
+            "(egress-driven fields win on conflict). Some sandbox runtimes assign a "
+            "fresh SELinux MCS category per container instead of one per pod, which "
+            "breaks the init container -> app container volume handoff execd relies "
+            "on; setting an explicit matching seLinuxOptions.level here (and on the "
+            "'sandbox' container via the BatchSandbox template) works around that. "
+            "Intended for execd's own binary handoff only -- do NOT use it to share a "
+            "user RWO PVC across containers (see the code comment above: that risks "
+            "silent filesystem corruption on once-per-container mount runtimes)."
+        ),
+    )
     image_pull_policy: Optional[str] = Field(
         default="IfNotPresent",
         description=(
@@ -1271,13 +1293,15 @@ class RuntimeConfig(BaseModel):
 
 
 class SecureRuntimeConfig(BaseModel):
-    type: Literal["", "gvisor", "kata", "firecracker"] = Field(
+    type: Literal["", "gvisor", "kata", "firecracker", "nitro"] = Field(
         default="",
         description=(
             "Secure runtime type. Empty means no secure runtime. "
             "gVisor uses runsc OCI runtime. "
             "Kata uses kata-runtime (OCI) or kata-qemu (RuntimeClass). "
-            "Firecracker uses kata-fc (RuntimeClass, Kubernetes only)."
+            "Firecracker uses kata-fc (RuntimeClass, Kubernetes only). "
+            "Nitro uses the EKS Pod Isolation isolated-sandbox / confidential-sandbox "
+            "RuntimeClass (Kubernetes only, EKS Auto Mode); defaults to isolated-sandbox."
         ),
     )
     docker_runtime: Optional[str] = Field(
@@ -1647,8 +1671,10 @@ class AppConfig(BaseModel):
                 raise ValueError("agent_sandbox block must be omitted when runtime.type = 'docker'.")
             if self.ingress is not None and self.ingress.mode != INGRESS_MODE_DIRECT:
                 raise ValueError("ingress.mode must be 'direct' when runtime.type = 'docker'.")
-            if self.secure_runtime is not None and self.secure_runtime.type == "firecracker":
-                raise ValueError( "secure_runtime.type 'firecracker' is only compatible with runtime.type='kubernetes'.")
+            if self.secure_runtime is not None and self.secure_runtime.type in ("firecracker", "nitro"):
+                raise ValueError(
+                    f"secure_runtime.type '{self.secure_runtime.type}' is only compatible with runtime.type='kubernetes'."
+                )
         elif self.runtime.type == "kubernetes":
             if self.kubernetes is None:
                 self.kubernetes = KubernetesRuntimeConfig()

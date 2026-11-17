@@ -28,7 +28,7 @@ def build_security_context_from_dict(
     if not security_context_dict:
         return None
 
-    from kubernetes.client import V1SecurityContext, V1Capabilities
+    from kubernetes.client import V1SecurityContext, V1Capabilities, V1SELinuxOptions
 
     capabilities = None
     if "capabilities" in security_context_dict:
@@ -42,12 +42,23 @@ def build_security_context_from_dict(
 
     privileged = security_context_dict.get("privileged")
 
-    if capabilities is None and privileged is None:
+    se_linux_options = None
+    if "seLinuxOptions" in security_context_dict:
+        selinux_dict = security_context_dict["seLinuxOptions"] or {}
+        se_linux_options = V1SELinuxOptions(
+            level=selinux_dict.get("level"),
+            role=selinux_dict.get("role"),
+            type=selinux_dict.get("type"),
+            user=selinux_dict.get("user"),
+        )
+
+    if capabilities is None and privileged is None and se_linux_options is None:
         return None
 
     return V1SecurityContext(
         capabilities=capabilities,
         privileged=privileged,
+        se_linux_options=se_linux_options,
     )
 
 
@@ -71,6 +82,20 @@ def serialize_security_context_to_dict(
 
     if security_context.privileged is not None:
         result["privileged"] = security_context.privileged
+
+    if getattr(security_context, "se_linux_options", None) is not None:
+        selinux = security_context.se_linux_options
+        selinux_dict: Dict[str, Any] = {}
+        if getattr(selinux, "level", None) is not None:
+            selinux_dict["level"] = selinux.level
+        if getattr(selinux, "role", None) is not None:
+            selinux_dict["role"] = selinux.role
+        if getattr(selinux, "type", None) is not None:
+            selinux_dict["type"] = selinux.type
+        if getattr(selinux, "user", None) is not None:
+            selinux_dict["user"] = selinux.user
+        if selinux_dict:
+            result["seLinuxOptions"] = selinux_dict
 
     if getattr(security_context, "seccomp_profile", None) is not None:
         sp = security_context.seccomp_profile
