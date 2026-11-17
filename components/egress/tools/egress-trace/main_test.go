@@ -41,6 +41,10 @@ func TestMatchDomainAgreesWithEvaluator(t *testing.T) {
 		{"first match, dotted rule first", `{"defaultAction":"deny","egress":[{"action":"allow","target":"api.example.com."},{"action":"deny","target":"api.example.com"}]}`, "api.example.com", "allow"},
 		{"first match, plain rule first", `{"defaultAction":"deny","egress":[{"action":"deny","target":"api.example.com"},{"action":"allow","target":"api.example.com."}]}`, "api.example.com.", "deny"},
 		{"IP and CIDR targets skipped", `{"defaultAction":"deny","egress":[{"action":"allow","target":"10.0.0.0/8"},{"action":"allow","target":"1.2.3.4"},{"action":"allow","target":"pypi.org"}]}`, "pypi.org.", "allow"},
+		{"default allow, dotted IP literal deny", `{"defaultAction":"allow","egress":[{"action":"deny","target":"1.2.3.4."}]}`, "1.2.3.4.", "deny"},
+		{"default deny, dotted IP literal allow", `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4."}]}`, "1.2.3.4.", "allow"},
+		{"plain IP literal is still skipped", `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4"}]}`, "1.2.3.4.", "deny"},
+		{"dotted CIDR literal stays a domain rule", `{"defaultAction":"deny","egress":[{"action":"allow","target":"10.0.0.0/8."}]}`, "example.com", "deny"},
 		{"unmatched query falls to defaultAction", `{"defaultAction":"deny","egress":[{"action":"allow","target":"pypi.org."}]}`, "example.com", "deny"},
 	}
 
