@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import asyncio
+import time
 from datetime import timedelta
 
 import pytest
@@ -129,6 +131,87 @@ async def test_create_times_out_when_code_service_never_ready(monkeypatch) -> No
             ready_timeout=timedelta(milliseconds=50),
             health_check_polling_interval=timedelta(milliseconds=10),
         )
+
+
+@pytest.mark.asyncio
+async def test_create_times_out_when_a_probe_hangs(monkeypatch) -> None:
+    """A probe that never answers must not hold create() past ready_timeout."""
+
+    async def hung_ping(self) -> bool:
+        await asyncio.sleep(3600)
+        return True
+
+    monkeypatch.setattr(CodesAdapter, "ping", hung_ping)
+    sbx = _FakeSandbox()
+    started = time.monotonic()
+
+    with pytest.raises(SandboxReadyTimeoutException):
+        await asyncio.wait_for(
+            CodeInterpreter.create(  # type: ignore[arg-type]
+                sandbox=sbx,
+                ready_timeout=timedelta(milliseconds=200),
+                health_check_polling_interval=timedelta(milliseconds=10),
+            ),
+            timeout=5,
+        )
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.asyncio
+async def test_create_times_out_when_a_probe_suppresses_cancellation(monkeypatch) -> None:
+    """A probe that swallows the cancellation and reports healthy late must not
+    hold create() past ready_timeout or turn the timeout into success."""
+
+    async def stubborn_ping(self) -> bool:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(1)
+        return True
+
+    monkeypatch.setattr(CodesAdapter, "ping", stubborn_ping)
+    sbx = _FakeSandbox()
+    started = time.monotonic()
+
+    with pytest.raises(SandboxReadyTimeoutException):
+        await asyncio.wait_for(
+            CodeInterpreter.create(  # type: ignore[arg-type]
+                sandbox=sbx,
+                ready_timeout=timedelta(milliseconds=200),
+                health_check_polling_interval=timedelta(milliseconds=10),
+            ),
+            timeout=5,
+        )
+    assert time.monotonic() - started < 0.9
+    # Let the abandoned probe finish before the event loop closes.
+    await asyncio.sleep(1.1)
+
+
+@pytest.mark.asyncio
+async def test_cancelling_create_cancels_the_running_probe(monkeypatch) -> None:
+    probe_cancelled = asyncio.Event()
+
+    async def slow_ping(self) -> bool:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            probe_cancelled.set()
+            raise
+        return True
+
+    monkeypatch.setattr(CodesAdapter, "ping", slow_ping)
+    sbx = _FakeSandbox()
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            CodeInterpreter.create(  # type: ignore[arg-type]
+                sandbox=sbx,
+                ready_timeout=timedelta(seconds=30),
+                health_check_polling_interval=timedelta(milliseconds=10),
+            ),
+            timeout=0.1,
+        )
+    await asyncio.wait_for(probe_cancelled.wait(), timeout=1)
 
 
 @pytest.mark.asyncio

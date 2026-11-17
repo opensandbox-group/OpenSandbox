@@ -32,7 +32,7 @@ from opensandbox_server.services.diagnostics import DiagnosticContext, Diagnosti
 from opensandbox_server.services.extension_service import ExtensionService
 from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
-from opensandbox_server.services.k8s.list_helpers import _build_list_sandboxes_response
+from opensandbox_server.services.helpers import build_list_sandboxes_response
 from opensandbox_server.services.sandbox_service import SandboxService
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ class CompositeSandboxService(SandboxService, ExtensionService):
             metadata = request.filter.metadata if request.filter else None
             objects = self._kubernetes.list_sandbox_objects(metadata=metadata) + self._fsb.list_sandbox_objects()
             objects.sort(key=lambda sandbox: sandbox.id)
-            return _build_list_sandboxes_response(objects, request)
+            return build_list_sandboxes_response(objects, request)
         except HTTPException:
             raise
         except Exception as exc:

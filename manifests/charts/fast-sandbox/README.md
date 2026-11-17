@@ -13,7 +13,7 @@ boxlite, containerd-based runtimes and the upstream central sandbox-proxy are ou
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+ (control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
 - The `sandbox.fast.io` CRDs and component RBAC, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here.
 - Install this chart **before the lifecycle server** when the server will serve sandboxes through this runtime: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath` Service) created here.
@@ -82,7 +82,8 @@ The following table lists the configurable parameters of the chart and their def
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
 | controller.affinity | object | `{}` | Affinity for the controller pod. |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
-| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastletProxy.resources | object | `{"limits":{"cpu":"250m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Resource requests and limits for the platform-owned Fastlet Proxy sidecar injected into every fastlet Pod. |
+| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
 | controller.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |

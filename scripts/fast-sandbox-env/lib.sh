@@ -94,6 +94,14 @@ case "$POOL_MODE" in
 		exit 1 ;;
 esac
 POOL_NAME="${POOL_NAME:-$POOL_PROFILE}"
+# OSEP-0023 interception switch (mirrors integration-env.sh).
+EGRESS_INTERCEPTION_MODE="${EGRESS_INTERCEPTION_MODE:-}"
+case "$EGRESS_INTERCEPTION_MODE" in
+	""|all|credential-bound) ;;
+	*)
+		printf '[fast-sandbox-env] ERROR: EGRESS_INTERCEPTION_MODE must be empty, all or credential-bound (got: %s)\n' "$EGRESS_INTERCEPTION_MODE" >&2
+		exit 1 ;;
+esac
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
@@ -182,6 +190,7 @@ ms2s() { awk -v ms="$1" 'BEGIN { printf "%.1f", ms / 1000 }'; }
 
 declare -a STAGE_ORDER=()
 declare -a STAGE_MS_LIST=()
+declare -a STAGE_UNVERIFIED=()
 STAGE_CUR=""
 STAGE_CUR_LABEL=""
 STAGE_START_NS=0
@@ -211,6 +220,27 @@ run_stage() {
 	stage_done
 }
 
+# Mirrors integration-env.sh: BLOCKED / NOT_RUN items never count as OK.
+stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
+	STAGE_UNVERIFIED+=("$1: $2")
+	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
+}
+
+run_blocked_stage() { # <description> <reason>
+	stage_begin "$1"
+	stage_unverified BLOCKED "$2"
+}
+
+# Exchange gate (mirrors integration-env.sh): exchange bindings are rejected
+# by decision snapshots under credential-bound (I1).
+exchange_stage() { # <description> <template-id>
+	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+		run_blocked_stage "$1" "exchange under credential-bound (see I1)"
+		return 0
+	fi
+	run_stage "$1" exchange_resolver_verify "$2"
+}
+
 stage_summary() {
 	local index name ms total=0
 	highlight "== stage timings =="
@@ -222,6 +252,12 @@ stage_summary() {
 		printf '  %-46s %9ss\n' "$name" "$(ms2s "$ms")"
 	done
 	printf '  \033[1m%-46s %9ss\033[0m\n' "TOTAL" "$(ms2s "$total")"
+	if [[ ${#STAGE_UNVERIFIED[@]} -gt 0 ]]; then
+		highlight "== not verified (excluded from the stages above) =="
+		for name in "${STAGE_UNVERIFIED[@]}"; do
+			printf '  %s\n' "$name"
+		done
+	fi
 }
 
 wait_for() { # description attempts command [args...]
@@ -286,7 +322,7 @@ failure_dump() {
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=)' || true
+		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_(IMAGE|INTERCEPTION_MODE)=|EXECD=|WORK=|POOL_(NAME|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=)' || true
 		echo "--- fast-sandbox checkout ---"
 		git -C "$FSB_DIR" rev-parse HEAD 2>&1 || true
 		echo "--- kind-create.log (tail) ---"

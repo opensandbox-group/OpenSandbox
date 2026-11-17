@@ -95,11 +95,6 @@ const (
 	inputChain     = "input"
 	inputPriority  = 0
 	dynSetTimeoutS = 360
-	// nftTTLSlackSec is added to the DNS TTL before clamping (mirrors
-	// pkg/nftables so both profiles behave identically).
-	nftTTLSlackSec = 60
-	minTTLSec      = 60
-	maxTTLSec      = 360
 
 	dohBlockV4Set = "doh_block_v4"
 	dohBlockV6Set = "doh_block_v6"
@@ -270,13 +265,13 @@ func (a *Applier) recordRuleCountLocked() {
 
 // applyWithMissingTableFallback runs the script; if the batch fails because
 // `delete table` targets a missing table (e.g. first boot, or a prior reset
-// already removed it), retry without the delete line. Mirrors the sidecar
-// manager's fallback.
+// already removed it), retry without the delete line, with the same helpers
+// as the sidecar manager's fallback.
 func (a *Applier) applyWithMissingTableFallback(ctx context.Context, script string) error {
 	if _, err := a.run(ctx, script); err == nil {
 		return nil
-	} else if missingTable(err) {
-		if fallback := removeDeleteTableLine(script); fallback != script {
+	} else if nftables.IsMissingTableError(err, TableName) {
+		if fallback := nftables.RemoveDeleteTableLine(script, TableName); fallback != script {
 			if _, retryErr := a.run(ctx, fallback); retryErr == nil {
 				return nil
 			}
@@ -413,7 +408,7 @@ func (a *Applier) trackDynamicIPs(s subject.Subject, ips []nftables.ResolvedIP) 
 		if st.dyn == nil {
 			st.dyn = make(map[netip.Addr]time.Time)
 		}
-		st.dyn[addr] = now.Add(clampTTL(r.TTL))
+		st.dyn[addr] = now.Add(nftables.ClampTTL(r.TTL))
 	}
 }
 
@@ -529,29 +524,6 @@ func (a *Applier) ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy
 	a.recordRuleCountLocked()
 	telemetry.RecordNftablesUpdate()
 	return nil
-}
-
-// missingTable reports whether an nft error means the table does not exist.
-func missingTable(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no such file") || strings.Contains(msg, "does not exist")
-}
-
-// removeDeleteTableLine strips the table-reset line from a failed script so
-// it can be retried on a fresh table (mirrors the sidecar manager).
-func removeDeleteTableLine(script string) string {
-	lines := strings.Split(script, "\n")
-	var filtered []string
-	for _, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "delete table inet "+TableName) {
-			continue
-		}
-		filtered = append(filtered, l)
-	}
-	return strings.Join(filtered, "\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -980,7 +952,7 @@ func writeResolvedIPsFragment(b *strings.Builder, s subject.Subject, ips []nftab
 		} else {
 			continue
 		}
-		nftables.WriteTimedElement(b, TableName, set, addr, clampTTL(r.TTL))
+		nftables.WriteTimedElement(b, TableName, set, addr, nftables.ClampTTL(r.TTL))
 	}
 }
 
@@ -1007,12 +979,6 @@ func writeRemainingLeasesFragment(b *strings.Builder, s subject.Subject, st *ref
 		seconds := int((left + time.Second - 1) / time.Second)
 		fmt.Fprintf(b, "add element inet %s %s { %s timeout %ds }\n", TableName, set, addr, seconds)
 	}
-}
-
-func clampTTL(d time.Duration) time.Duration {
-	sec := int(d.Seconds()) + nftTTLSlackSec
-	sec = min(max(sec, minTTLSec), maxTTLSec)
-	return time.Duration(sec) * time.Second
 }
 
 // Subject names appear in nft identifiers: sanitize to [a-z0-9_].

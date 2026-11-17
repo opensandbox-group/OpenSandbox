@@ -1,5 +1,13 @@
 {{- if .Values.controller.enabled }}
 {{- $builderImage := .Values.controller.sandboxtemplateBuilderImage | default (printf "opensandbox/fsb-sandboxtemplate-builder:release-%s" .Chart.AppVersion) }}
+{{/*
+`helm upgrade --reuse-values` can omit newly added chart defaults, so preserve
+the legacy Fastlet Proxy resources when this subtree is absent.
+*/}}
+{{- $fastletProxy := .Values.controller.fastletProxy | default dict }}
+{{- $fastletProxyResources := $fastletProxy.resources | default dict }}
+{{- $fastletProxyRequests := $fastletProxyResources.requests | default dict }}
+{{- $fastletProxyLimits := $fastletProxyResources.limits | default dict }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -42,6 +50,10 @@ spec:
         - --fastpath-bind-address=:9090
         - --sandboxtemplate-builder-image={{ $builderImage }}
         - --fastlet-proxy-image={{ .Values.controller.fastletProxyImage }}
+        - --fastlet-proxy-request-cpu={{ $fastletProxyRequests.cpu | default "50m" }}
+        - --fastlet-proxy-request-memory={{ $fastletProxyRequests.memory | default "64Mi" }}
+        - --fastlet-proxy-limit-cpu={{ $fastletProxyLimits.cpu | default "250m" }}
+        - --fastlet-proxy-limit-memory={{ $fastletProxyLimits.memory | default "256Mi" }}
         # The controller's default namespace for the platform
         # runtime-environment ConfigMap is the upstream-hardcoded
         # fast-sandbox-system; pin it to this chart's system namespace so

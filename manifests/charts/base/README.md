@@ -1,6 +1,6 @@
 # base
 
-![Version: 1.2.1](https://img.shields.io/badge/Version-1.2.1-informational?style=flat-square)
+![Version: 1.3.0-rc.1](https://img.shields.io/badge/Version-1.3.0--rc.1-informational?style=flat-square)
 
 Helm chart for deploying OpenSandbox cluster resources and CRDs
 
@@ -18,7 +18,7 @@ Helm chart for deploying OpenSandbox cluster resources and CRDs
 
 ## Requirements
 
-Kubernetes: `>=1.21.1-0`
+Kubernetes: `>=1.22.0-0`
 
 ## Values
 

@@ -38,6 +38,38 @@ jobs:
     with:
       area: fast-sandbox
 
+  verifier-tests:
+    name: Credential-bound wiring tests
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Shared by the prerequisite guard and all golden comparisons.
+      CBV_GOLDEN_BASE: 4ae99691ff0a62594614df90a86ecbee07add966
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Golden render/stage tests compare against the pre-change commit.
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test dependency
+        run: python -m pip install PyYAML==6.0.3
+      - name: Verify local test prerequisites
+        # Fail instead of letting the golden/YAML/TLS helper tests skip.
+        run: |
+          bash -c 'test "${BASH_VERSINFO[0]}" -ge 4'
+          python -c 'import yaml'
+          command -v openssl
+          git cat-file -e "${CBV_GOLDEN_BASE}^{commit}" || {
+            echo "::error::golden baseline commit ${CBV_GOLDEN_BASE} not present; check CBV_GOLDEN_BASE and fetch history"
+            exit 1
+          }
+      - name: Run wiring regression tests
+        run: python -m unittest discover -v -s scripts/fast-sandbox-env/tests -p 'test_*.py'
+
   integration:
     name: Integration Env (self-hosted kvm)
     needs: changes

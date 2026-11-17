@@ -27,7 +27,15 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-from opensandbox_server.api.schema import Endpoint, Sandbox, SandboxFilter
+from opensandbox_server.api.schema import (
+    Endpoint,
+    ListSandboxesRequest,
+    ListSandboxesResponse,
+    PaginationInfo,
+    PaginationRequest,
+    Sandbox,
+    SandboxFilter,
+)
 from opensandbox_server.services.constants import (
     ALLOWED_EGRESS_ENV_VARS,
     EGRESS_ENV_PREFIX,
@@ -208,6 +216,33 @@ def matches_filter(sandbox: Sandbox, filter_: SandboxFilter) -> bool:
             if metadata.get(key) != value:
                 return False
     return True
+
+
+def build_pagination_info(page: int, page_size: int, total_items: int) -> PaginationInfo:
+    """Pagination metadata for one page of a list response."""
+    total_pages = math.ceil(total_items / page_size) if page_size > 0 else 0
+    return PaginationInfo(
+        page=page,
+        page_size=page_size,
+        total_items=total_items,
+        total_pages=total_pages,
+        has_next_page=page < total_pages,
+    )
+
+
+def build_list_sandboxes_response(
+    sandboxes: list[Sandbox],
+    request: ListSandboxesRequest,
+) -> ListSandboxesResponse:
+    """Filter, sort newest first and paginate sandboxes into a list response."""
+    filtered = [sandbox for sandbox in sandboxes if matches_filter(sandbox, request.filter)]
+    filtered.sort(key=lambda s: s.created_at or datetime.min, reverse=True)
+    pagination = request.pagination or PaginationRequest.model_validate({})
+    start = (pagination.page - 1) * pagination.page_size
+    return ListSandboxesResponse(
+        items=filtered[start : start + pagination.page_size],
+        pagination=build_pagination_info(pagination.page, pagination.page_size, len(filtered)),
+    )
 
 
 # ============================================================================

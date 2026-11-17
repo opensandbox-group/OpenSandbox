@@ -689,9 +689,18 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 		indexedPodMap[idx] = pod
 	}
 	if satisfied, unsatisfiedDuration, dirtyPods := batchSandboxScaleExpectations.SatisfiedExpectations(controllerutils.GetControllerKey(batchSandbox)); !satisfied {
-		log.Info("scale expectation is not satisfied", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
-		durationStore.Push(types.NamespacedName{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}.String(), expectations.ExpectationTimeout-unsatisfiedDuration)
-		return nil
+		// A Pod deleted before any reconcile listed it is never observed, and
+		// the timed requeue below stops once the timeout has passed, so drop
+		// a timed-out expectation instead of blocking every later scale (as
+		// the Pool controller does).
+		if unsatisfiedDuration >= expectations.ExpectationTimeout {
+			log.Info("scale expectations timed out, clearing stale expectations", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
+			batchSandboxScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(batchSandbox))
+		} else {
+			log.Info("scale expectation is not satisfied", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
+			durationStore.Push(types.NamespacedName{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}.String(), expectations.ExpectationTimeout-unsatisfiedDuration)
+			return nil
+		}
 	}
 	// TODO consider supply Pods if Pods is deleted unexpectedly
 	var needCreateIndex []int

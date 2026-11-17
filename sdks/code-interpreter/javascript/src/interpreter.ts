@@ -18,7 +18,7 @@ import {
   DEFAULT_READY_TIMEOUT_SECONDS,
   SandboxReadyTimeoutException,
 } from "@alibaba-group/opensandbox";
-import { createExecdClient } from "@alibaba-group/opensandbox/internal";
+import { createDataPlaneHeaders, createExecdClient } from "@alibaba-group/opensandbox/internal";
 import { createRedirectSafeExecdFetch } from "./transport.js";
 import type { Sandbox } from "@alibaba-group/opensandbox";
 
@@ -91,17 +91,26 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  *   the same instances as on the underlying {@link Sandbox}.
  */
 export class CodeInterpreter {
+  private pingClient?: ReturnType<typeof createExecdClient>;
+
   private constructor(
     readonly sandbox: Sandbox,
     readonly codes: Codes,
     private readonly execdBaseUrl: string,
-    private readonly execdHeaders: Record<string, string> | undefined,
+    private readonly execdHeaders: Record<string, string>,
   ) {}
 
   static async create(sandbox: Sandbox, opts: CodeInterpreterCreateOptions = {}): Promise<CodeInterpreter> {
     const endpoint = await sandbox.getEndpoint(DEFAULT_EXECD_PORT);
     const execdBaseUrl = `${sandbox.connectionConfig.protocol}://${endpoint.endpoint}`;
-    const execdHeaders = endpoint.headers;
+    // The same data-plane headers the default codes adapter sends, for the
+    // fallback ping below.
+    const execdHeaders = createDataPlaneHeaders(
+      sandbox.connectionConfig.headers ?? {},
+      endpoint.headers,
+      sandbox.connectionConfig.useServerProxy,
+      sandbox.connectionConfig.apiKey,
+    );
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
     const codes = adapterFactory.createCodes({
       sandbox,
@@ -158,11 +167,12 @@ export class CodeInterpreter {
   }
 
   private execdPingClient() {
-    return createExecdClient({
+    this.pingClient ??= createExecdClient({
       baseUrl: this.execdBaseUrl,
-      headers: this.execdHeaders ?? {},
+      headers: this.execdHeaders,
       fetch: createRedirectSafeExecdFetch(this.sandbox, this.execdBaseUrl),
     });
+    return this.pingClient;
   }
 
   /**

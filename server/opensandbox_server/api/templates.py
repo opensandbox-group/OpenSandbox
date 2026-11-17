@@ -31,14 +31,13 @@ from opensandbox_server.api.schema import (
     ErrorResponse,
     FsbTemplate,
     ListFsbTemplatesResponse,
-    PaginationInfo,
 )
 from opensandbox_server.config import get_config
 from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.helpers import build_pagination_info
 from opensandbox_server.services.templates.template_service import (
     FastSandboxTemplateService,
     template_to_response,
-    total_pages,
 )
 
 router = APIRouter(tags=["Templates"])
@@ -159,13 +158,7 @@ def list_templates(
     )
     return ListFsbTemplatesResponse(
         items=[template_to_response(record) for record in items],
-        pagination=PaginationInfo(
-            page=page,
-            pageSize=page_size,
-            totalItems=total_items,
-            totalPages=total_pages(total_items, page_size),
-            hasNextPage=page < total_pages(total_items, page_size),
-        ),
+        pagination=build_pagination_info(page, page_size, total_items),
     )
 
 

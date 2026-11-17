@@ -15,11 +15,13 @@
 package controller
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/flag"
 	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 	"github.com/stretchr/testify/require"
 )
@@ -103,4 +105,43 @@ func TestSseLegacyCompatKeepsErrorExitCodeWhenDisabled(t *testing.T) {
 	})
 
 	require.Contains(t, string(errored.ToJSON()), `"exit_code":3`)
+}
+
+func TestExecutionTrackerSignalsAfterTheTerminalEvent(t *testing.T) {
+	for _, terminal := range []string{"complete", "error"} {
+		t.Run(terminal, func(t *testing.T) {
+			tracker := newExecutionTracker(context.Background(), "run_code")
+			var written []string
+			write := func(event string) {
+				if len(written) == 0 {
+					select {
+					case <-tracker.done:
+						t.Fatalf("done closed before the %s event was written", event)
+					default:
+					}
+				}
+				written = append(written, event)
+			}
+			hooks := runtime.ExecuteResultHook{
+				OnExecuteComplete: func(time.Duration) { write("complete") },
+				OnExecuteError:    func(*execute.ErrorOutput) { write("error") },
+			}
+			tracker.wrap(&hooks)
+
+			if terminal == "complete" {
+				hooks.OnExecuteComplete(time.Millisecond)
+			} else {
+				hooks.OnExecuteError(&execute.ErrorOutput{EName: "Error"})
+			}
+			// A second terminal callback must not close done twice.
+			hooks.OnExecuteError(&execute.ErrorOutput{EName: "Error"})
+
+			select {
+			case <-tracker.done:
+			default:
+				t.Fatal("done not closed after the terminal event")
+			}
+			require.Equal(t, terminal, written[0])
+		})
+	}
 }

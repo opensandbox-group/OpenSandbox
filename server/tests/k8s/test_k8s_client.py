@@ -741,3 +741,18 @@ def test_subscribe_returns_none_if_informer_cannot_start(k8s_runtime_config):
         client = K8sClient(k8s_runtime_config)
         assert client.subscribe_custom_objects("group", "v1", "ns", "items", ["name"], MagicMock()) is None
         assert client._informers == {}
+
+
+def test_informer_thread_name_includes_api_group(k8s_runtime_config):
+    """Same-plural resources in different API groups get distinguishable informers."""
+    with patch("kubernetes.config.load_kube_config"), patch(
+        "opensandbox_server.services.k8s.client.WorkloadInformer", WorkloadInformer
+    ), patch.object(WorkloadInformer, "start"):
+        client = K8sClient(k8s_runtime_config)
+        handler = MagicMock()
+        fsb = client.watch_custom_objects("sandbox.fast.io", "v1alpha1", "ns", "sandboxsnapshots", handler)
+        pod = client.watch_custom_objects("sandbox.opensandbox.io", "v1alpha1", "ns", "sandboxsnapshots", handler)
+
+    assert fsb is not None and pod is not None
+    assert fsb._thread_name == "workload-informer-sandboxsnapshots.sandbox.fast.io-ns"
+    assert pod._thread_name == "workload-informer-sandboxsnapshots.sandbox.opensandbox.io-ns"
