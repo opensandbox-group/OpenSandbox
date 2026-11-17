@@ -26,10 +26,12 @@ import (
 )
 
 func TestSnapshotImageURITemplateDateFunctions(t *testing.T) {
-	// These tests are deliberately sequential because time.Local is process-wide.
-	originalLocal := time.Local
-	time.Local = time.FixedZone("test-local", 8*60*60)
-	t.Cleanup(func() { time.Local = originalLocal })
+	// These tests are deliberately sequential because snapshotLocalLocation is package-wide.
+	// Do not assign time.Local here: time.Now reads it from goroutines that other
+	// tests in this package leave running, so writing it is a data race.
+	originalLocal := snapshotLocalLocation
+	snapshotLocalLocation = time.FixedZone("test-local", 8*60*60)
+	t.Cleanup(func() { snapshotLocalLocation = originalLocal })
 
 	for _, tc := range []struct {
 		name, expression, createdAt, want, wantError string
