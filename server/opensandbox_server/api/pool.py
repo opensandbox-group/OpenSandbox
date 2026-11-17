@@ -47,16 +47,26 @@ _POOL_NOT_K8S_DETAIL = {
 }
 
 
+def _pool_not_supported_for_provider(provider_name: str) -> dict[str, str]:
+    return {
+        "code": SandboxErrorCodes.K8S_POOL_NOT_SUPPORTED,
+        "message": (
+            f"Pool management is not supported by workload provider '{provider_name}'."
+        ),
+    }
+
+
 _service: Optional["PoolService"] = None
 _service_lock = threading.Lock()
 
 
 def _get_pool_service() -> "PoolService":
     """
-    Lazily create the PoolService, raising 501 if the runtime is not Kubernetes.
+    Lazily create the PoolService via the configured WorkloadProvider, raising
+    501 if the runtime is not Kubernetes or the provider does not manage pools.
 
     This deferred approach means the pool router can be registered unconditionally
-    in main.py; non-k8s deployments simply receive a clear 501 on every call.
+    in main.py; non-k8s or unsupported-provider deployments receive a clear 501.
 
     The service is created once and shared: building a K8sClient reloads the
     kubeconfig and rewrites the process-global default configuration, and each
@@ -64,8 +74,13 @@ def _get_pool_service() -> "PoolService":
     on a thread pool, so creation is locked (as in the fast-sandbox service).
     """
     global _service
+    from opensandbox_server.config import AppConfig
     from opensandbox_server.services.k8s.client import K8sClient
-    from opensandbox_server.services.k8s.pool_service import PoolService
+    from opensandbox_server.services.k8s.provider_factory import (
+        create_workload_provider,
+        get_workload_provider_class,
+    )
+    from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
 
     config = get_config()
     if config.runtime.type != "kubernetes":
@@ -80,9 +95,45 @@ def _get_pool_service() -> "PoolService":
             detail=_POOL_NOT_K8S_DETAIL,
         )
 
+    provider_type = getattr(config.kubernetes, "workload_provider", None)
+    try:
+        provider_cls = get_workload_provider_class(provider_type)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": SandboxErrorCodes.K8S_INITIALIZATION_ERROR,
+                "message": f"Invalid workload provider configuration: {exc}",
+            },
+        ) from exc
+
+    if provider_cls.create_pool_service is WorkloadProvider.create_pool_service:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=_pool_not_supported_for_provider(
+                provider_type or provider_cls.__name__
+            ),
+        )
+
     with _service_lock:
         if _service is None:
-            _service = PoolService(K8sClient(config.kubernetes), namespace=config.kubernetes.namespace)
+            app_cfg = config if isinstance(config, AppConfig) else None
+            provider = create_workload_provider(
+                provider_type=provider_type,
+                k8s_client=K8sClient(config.kubernetes),
+                app_config=app_cfg,
+            )
+            pool_service = provider.create_pool_service(
+                config.kubernetes.namespace or "default"
+            )
+            if pool_service is None:
+                raise HTTPException(
+                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                    detail=_pool_not_supported_for_provider(
+                        provider_type or provider_cls.__name__
+                    ),
+                )
+            _service = pool_service
         return _service
 
 

@@ -138,8 +138,8 @@ class AgentSandboxProvider(WorkloadProvider):
         self,
         sandbox_id: str,
         namespace: str,
-        image_spec: ImageSpec,
-        entrypoint: List[str],
+        image_spec: Optional[ImageSpec],
+        entrypoint: Optional[List[str]],
         env: Dict[str, str],
         resource_limits: Dict[str, str],
         labels: Dict[str, str],
@@ -153,6 +153,12 @@ class AgentSandboxProvider(WorkloadProvider):
         resource_requests: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Create an agent-sandbox Sandbox CRD workload."""
+        if (extensions or {}).get("poolRef", "").strip():
+            raise ValueError("poolRef is not supported by agent-sandbox.")
+        if image_spec is None:
+            raise ValueError("image is required for agent-sandbox workloads.")
+        entrypoint = entrypoint or []
+
         if is_windows_profile(platform):
             raise ValueError("agent-sandbox does not support platform.os=windows.")
 

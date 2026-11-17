@@ -81,23 +81,34 @@ class KubernetesSnapshotRuntime:
         *,
         namespace: str,
         postgresql_ha_enabled: bool = False,
+        workload_provider_type: str | None = None,
     ) -> None:
         self._k8s_client = k8s_client
         self._namespace = namespace
         self._postgresql_ha_enabled = postgresql_ha_enabled
+        self._workload_provider_type = (
+            workload_provider_type.strip().lower()
+            if isinstance(workload_provider_type, str) and workload_provider_type.strip()
+            else "batchsandbox"
+        )
         self._snapshot_namespaces: dict[str, str] = {}
         self._watched_namespaces: set[str] = set()
         self._watch_lock = Lock()
         self._on_change: Optional[Callable[[str, str], None]] = None
 
     def supports_create_snapshot(self) -> bool:
-        return True
+        return self._workload_provider_type == "batchsandbox"
 
     def supports_synchronous_create(self) -> bool:
         return True
 
     def create_snapshot_unsupported_message(self) -> str:
-        return ""
+        if self.supports_create_snapshot():
+            return ""
+        return (
+            "Kubernetes snapshots are only supported when workload_provider is "
+            f"'batchsandbox' (configured: '{self._workload_provider_type}')."
+        )
 
     def preflight_create_snapshot(
         self,
@@ -106,6 +117,10 @@ class KubernetesSnapshotRuntime:
         namespace: str | None = None,
         mode: str | None = None,
     ) -> None:
+        if not self.supports_create_snapshot():
+            raise SnapshotRuntimeUnsupportedError(
+                self.create_snapshot_unsupported_message()
+            )
         reject_rootfs_only_mode(
             "Kubernetes rootfs snapshot commits are full-only", mode
         )
@@ -304,6 +319,8 @@ class KubernetesSnapshotRuntime:
         reconciling LIST item invokes the callback. Callbacks run on informer
         threads and must be cheap and thread-safe.
         """
+        if not self.supports_create_snapshot():
+            return
         with self._watch_lock:
             self._on_change = on_change
         for namespace in sorted({*(ns for ns in namespaces if ns), self._namespace}):

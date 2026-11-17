@@ -19,10 +19,24 @@ Abstract workload provider interface for Kubernetes resources.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, List, Any, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Any, Optional
 
-from opensandbox_server.api.schema import Endpoint, ImageSpec, NetworkPolicy, PlatformSpec, Volume
+from fastapi import HTTPException, status
+
+from opensandbox_server.api.schema import (
+    AllocationSummary,
+    CreateSandboxRequest,
+    Endpoint,
+    ImageSpec,
+    NetworkPolicy,
+    PlatformSpec,
+    Volume,
+)
 from opensandbox_server.config import EgressUpstreamProxyConfig
+from opensandbox_server.services.constants import SandboxErrorCodes
+
+if TYPE_CHECKING:
+    from opensandbox_server.services.k8s.pool_service import PoolService
 
 
 @dataclass(frozen=True)
@@ -55,8 +69,8 @@ class WorkloadProvider(ABC):
         self,
         sandbox_id: str,
         namespace: str,
-        image_spec: ImageSpec,
-        entrypoint: List[str],
+        image_spec: Optional[ImageSpec],
+        entrypoint: Optional[List[str]],
         env: Dict[str, str],
         resource_limits: Dict[str, str],
         labels: Dict[str, str],
@@ -75,7 +89,8 @@ class WorkloadProvider(ABC):
         ``expires_at=None`` means no TTL (manual cleanup). ``resource_requests``
         defaults to ``resource_limits`` when omitted. ``egress_settings`` is None
         when no egress policy enforcement is needed. ``extensions`` is a general
-        field for provider extras (e.g. ``poolRef`` for pool-based creation).
+        field for provider extras (e.g. ``poolRef`` for pool-based creation,
+        where ``image_spec`` and ``entrypoint`` may be ``None``).
         """
         pass
     
@@ -128,13 +143,53 @@ class WorkloadProvider(ABC):
     
     @abstractmethod
     def get_status(self, workload: Any) -> Dict[str, Any]:
-        """Return a dict with ``state``, ``reason``, ``message``, ``last_transition_at``."""
+        """Return a dict with ``state``, ``reason``, ``message``, ``last_transition_at``.
+
+        Providers that support pool-based allocation may report
+        ``state="Pending"`` with ``reason="POOL_CAPACITY_EXHAUSTED"`` while
+        waiting for pool capacity; ``KubernetesSandboxService`` enforces
+        ``pool_acquisition_timeout_seconds`` and returns HTTP 429 on timeout.
+        """
         pass
-    
+
     @abstractmethod
     def get_endpoint_info(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Return the sandbox endpoint, or None when not available."""
         pass
+
+    def validate_create_request(
+        self, request: CreateSandboxRequest, namespace: str
+    ) -> None:
+        """Validate provider-specific create constraints before cluster side effects.
+
+        Providers that support ``extensions.poolRef`` should override this
+        method to validate pool-mode field compatibility and verify that the
+        referenced pool resource exists in ``namespace``. Raising ``ValueError``
+        maps to HTTP 400 ``INVALID_PARAMETER``; ``HTTPException`` propagates as-is.
+        """
+        if (request.extensions or {}).get("poolRef", "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.UNSUPPORTED_POOL_REF,
+                    "message": (
+                        f"poolRef is not supported by workload provider "
+                        f"'{self.__class__.__name__}'."
+                    ),
+                },
+            )
+
+    def get_allocation(self, workload: Any) -> Optional[AllocationSummary]:
+        """Return confirmed pool allocation metadata for ``workload``, if any."""
+        return None
+
+    def get_allocated_pod_names(self, workload: Any) -> List[str]:
+        """Return pod names allocated to a pooled workload when pods lack the sandbox ID label."""
+        return []
+
+    def create_pool_service(self, namespace: str) -> Optional["PoolService"]:
+        """Return a PoolService for ``/pools`` management routes, or None if unsupported."""
+        return None
 
     def get_internal_endpoint(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Get the workload endpoint used by the server-side proxy.

@@ -85,3 +85,21 @@ def test_non_kubernetes_runtime_still_returns_501(monkeypatch, k8s_clients):
 
     assert exc.value.status_code == 501
     assert k8s_clients == []
+
+
+def test_agent_sandbox_provider_returns_501_without_building_client(monkeypatch, k8s_clients):
+    monkeypatch.setattr(
+        pool,
+        "get_config",
+        lambda: SimpleNamespace(
+            runtime=SimpleNamespace(type="kubernetes"),
+            kubernetes=SimpleNamespace(namespace="sandboxes", workload_provider="agent-sandbox"),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        pool._get_pool_service()
+
+    assert exc.value.status_code == 501
+    assert exc.value.detail["code"] == "KUBERNETES::POOL_NOT_SUPPORTED"
+    assert k8s_clients == []

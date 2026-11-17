@@ -266,3 +266,19 @@ def test_created_runtimes_declare_synchronous_create_capability() -> None:
     )
     k8s_runtime = create_snapshot_runtime(k8s_config, k8s_client=object())
     assert k8s_runtime.supports_synchronous_create() is True
+
+
+def test_create_snapshot_runtime_passes_workload_provider_to_k8s_runtime() -> None:
+    config = AppConfig(
+        runtime=RuntimeConfig(type="kubernetes", execd_image="opensandbox/execd:test"),
+        kubernetes=KubernetesRuntimeConfig(
+            namespace="default",
+            workload_provider="agent-sandbox",
+        ),
+    )
+
+    runtime = create_snapshot_runtime(config, k8s_client=object())
+
+    assert isinstance(runtime, CompositeSnapshotRuntime)
+    assert runtime.default.supports_create_snapshot() is False
+    assert runtime.supports_create_snapshot() is True

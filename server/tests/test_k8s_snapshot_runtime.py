@@ -564,3 +564,21 @@ def test_create_snapshot_marks_ambiguous_multi_container_restore_failed() -> Non
 
     assert status.state == SnapshotState.FAILED
     assert status.reason == "snapshot_restore_image_ambiguous"
+
+
+def test_non_batchsandbox_provider_disables_kubernetes_snapshot_runtime() -> None:
+    k8s_client = WatchRecordingK8sClient()
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        workload_provider_type="agent-sandbox",
+    )
+
+    assert runtime.supports_create_snapshot() is False
+    assert "batchsandbox" in runtime.create_snapshot_unsupported_message()
+
+    runtime.start_status_watch(lambda _id, _ns: None, namespaces=["default"])
+    assert k8s_client.watch_calls == []
+
+    with pytest.raises(SnapshotRuntimeUnsupportedError, match="agent-sandbox"):
+        runtime.preflight_create_snapshot(SANDBOX_ID)
