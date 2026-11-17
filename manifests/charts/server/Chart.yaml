@@ -38,7 +38,7 @@ maintainers:
   - name: OpenSandbox Team
 
 # Kubernetes version constraints
-kubeVersion: ">=1.21.1-0"
+kubeVersion: ">=1.22.0-0"
 
 annotations:
   artifacthub.io/category: integration-delivery

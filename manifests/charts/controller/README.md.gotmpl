@@ -14,7 +14,7 @@ This chart bootstraps an OpenSandbox Controller deployment on a Kubernetes clust
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+
 - Helm 3.0+
 - Container runtime (Docker, containerd, etc.)
 - The OpenSandbox CRDs, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). This chart no longer installs CRDs itself.

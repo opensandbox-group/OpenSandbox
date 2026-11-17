@@ -19,7 +19,7 @@ Helm chart for deploying the OpenSandbox ingress gateway (components/ingress)
 
 ## Requirements
 
-Kubernetes: `>=1.21.1-0`
+Kubernetes: `>=1.22.0-0`
 
 ## Values
 

@@ -20,7 +20,7 @@ version: 1.3.0-rc.1
 appVersion: "1.3.0-rc.1"
 
 # Kubernetes version constraints
-kubeVersion: ">=1.21.1-0"
+kubeVersion: ">=1.22.0-0"
 
 keywords:
   - sandbox
