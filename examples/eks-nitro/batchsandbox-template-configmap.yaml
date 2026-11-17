@@ -15,9 +15,8 @@ data:
           restartPolicy: Never
           terminationGracePeriodSeconds: 30
           # NOTE: unlike the aks-kata example, do NOT set nodeSelector or
-          # tolerations here. For EKS Pod Isolation the isolated-sandbox
-          # RuntimeClass (applied via secure_runtime.type = "nitro") already
-          # carries scheduling.nodeSelector = {eks.amazonaws.com/nitro-sandbox: "true"},
-          # and the cluster's add-sandbox-toleration admission policy injects the
-          # workload=isolated:NoSchedule toleration the NodePool taint requires.
-          # runtimeClassName alone is the entire opt-in.
+          # tolerations here. The isolated-sandbox RuntimeClass (applied via
+          # secure_runtime.type = "nitro") carries
+          # scheduling.nodeSelector = {eks.amazonaws.com/nitro-sandbox: "true"},
+          # and EKS Auto Mode provisions a matching node. runtimeClassName alone
+          # is the entire opt-in.

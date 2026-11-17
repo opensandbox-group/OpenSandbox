@@ -1214,6 +1214,24 @@ def test_kubernetes_runtime_with_firecracker_is_valid():
     assert cfg.secure_runtime.k8s_runtime_class == "kata-fc"
 
 
+def test_execd_init_security_context_accepts_supported_keys():
+    cfg = config_module.KubernetesRuntimeConfig(
+        execd_init_security_context={"seLinuxOptions": {"level": "s0:c1,c2"}}
+    )
+    assert cfg.execd_init_security_context == {"seLinuxOptions": {"level": "s0:c1,c2"}}
+
+
+def test_execd_init_security_context_rejects_unsupported_keys():
+    with pytest.raises(ValueError) as exc:
+        config_module.KubernetesRuntimeConfig(
+            execd_init_security_context={
+                "seLinuxOptions": {"level": "s0:c1,c2"},
+                "runAsNonRoot": True,
+            }
+        )
+    assert "runAsNonRoot" in str(exc.value)
+
+
 def test_docker_runtime_with_nitro_raises_error():
     """Docker runtime with Nitro secure runtime should raise error.
 

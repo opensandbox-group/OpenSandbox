@@ -1,0 +1,13 @@
+# DEMO VALUES - NOT FOR PRODUCTION
+# The signing key must match server.gateway.secureAccess.keys in server-values.yaml.
+# Replace it (for example with `openssl rand -base64 32`) in both files before
+# exposing the gateway beyond 127.0.0.1.
+gateway:
+  replicaCount: 1
+  dataplaneNamespace: "opensandbox"
+  providerType: "batchsandbox"
+  gatewayRouteMode: "header"
+  secureAccess:
+    keys:
+      - key_id: "a"
+        key: "b3BlbnNhbmRib3gtZWtzLW5pdHJvLXNlY3VyZS1hY2Nlc3Mta2V5"

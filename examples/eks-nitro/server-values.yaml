@@ -41,7 +41,7 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "ghcr.io/opensandbox-group/opensandbox/execd:v1.0.22"
+  execd_image = "opensandbox/execd:release-1.3.0-rc.1"
 
   [storage]
   allowed_host_paths = []
@@ -54,21 +54,23 @@ configToml: |
   informer_resync_seconds = 300
   informer_watch_timeout_seconds = 60
   snapshot_create_timeout_seconds = 900
+  # The first sandbox on EKS Auto Mode can wait for a new node and an image
+  # pull, which takes longer than the 60 s default.
+  sandbox_create_timeout_seconds = 300
   workload_provider = "batchsandbox"
   image_pull_policy = "IfNotPresent"
   batchsandbox_template_file = "/etc/opensandbox/eks-nitro.batchsandbox-template.yaml"
 
   [egress]
-  image = "ghcr.io/opensandbox-group/opensandbox/egress:v1.1.6"
+  image = "opensandbox/egress:release-1.3.0-rc.1"
   mode = "dns+nft"
   disable_ipv6 = true
 
-  # EKS Pod Isolation (Nitro Sandboxes). "nitro" is Kubernetes-only and defaults
+  # AWS Nitro Sandboxes. "nitro" is Kubernetes-only and defaults
   # k8s_runtime_class to "isolated-sandbox". Set it to "confidential-sandbox" for
-  # the confidential-computing variant. Setting runtimeClassName
-  # is the whole opt-in: the RuntimeClass carries the nitro-sandbox nodeSelector and
-  # the cluster's admission policy injects the workload=isolated:NoSchedule toleration,
-  # so the batchsandbox template must NOT add its own nodeSelector/tolerations.
+  # the confidential variant. Setting runtimeClassName is the whole opt-in: the
+  # RuntimeClass carries the nitro-sandbox nodeSelector, so the batchsandbox
+  # template must NOT add its own nodeSelector/tolerations.
   [secure_runtime]
   type = "nitro"
   k8s_runtime_class = "isolated-sandbox"

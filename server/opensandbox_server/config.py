@@ -905,9 +905,29 @@ class KubernetesRuntimeConfig(BaseModel):
             "'sandbox' container via the BatchSandbox template) works around that. "
             "Intended for execd's own binary handoff only -- do NOT use it to share a "
             "user RWO PVC across containers (see the code comment above: that risks "
-            "silent filesystem corruption on once-per-container mount runtimes)."
+            "silent filesystem corruption on once-per-container mount runtimes). "
+            "Supported keys: capabilities, privileged, seLinuxOptions."
         ),
     )
+
+    @field_validator("execd_init_security_context")
+    @classmethod
+    def validate_execd_init_security_context(
+        cls, v: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        # The init-container builder only emits these fields; reject anything else
+        # rather than silently dropping a requested protection.
+        if v is None:
+            return v
+        unsupported = sorted(set(v) - {"capabilities", "privileged", "seLinuxOptions"})
+        if unsupported:
+            raise ValueError(
+                "kubernetes.execd_init_security_context supports only "
+                "capabilities, privileged and seLinuxOptions; got unsupported "
+                f"key(s): {', '.join(unsupported)}"
+            )
+        return v
+
     image_pull_policy: Optional[str] = Field(
         default="IfNotPresent",
         description=(
