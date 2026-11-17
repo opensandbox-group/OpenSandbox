@@ -631,7 +631,7 @@ class StageFlowTest(ShellCase):
     def test_b_is_recreated_until_it_shares_a_s_pod(self):
         proc, events = self.stage(["p1", "p2", "p1", "p1@reuse"])
         self.assertIn("kill sbx-2 bound=0", events)
-        self.assertTrue(any(e.startswith("probe sbx-3 ac3-b passthrough") for e in events))
+        self.assertTrue(any(e.startswith("probe sbx-3 ac3-b-") and e.endswith(" passthrough") for e in events))
         self.assertFalse(any(e.startswith("probe sbx-2 ac") for e in events))
         self.assert_passes(proc, "AC3", "AC6")
 
@@ -681,6 +681,24 @@ class StageFlowTest(ShellCase):
         proc, events = self.stage(["p1", "p1", "p1@reuse"], faults={"ac6-1": ["refused", "refused"]})
         self.assert_passes(proc, "AC6", "AC9")
         self.assertEqual(len([e for e in events if e.startswith("fault ac6-1")]), 2)
+
+    def test_removal_retries_missing_leaf_but_rejects_mitm(self):
+        proc, _ = self.stage(["p1", "p1", "p1@reuse"], faults={"ac5-unbound": ["refused"]})
+        self.assert_passes(proc, "AC5", "AC6", "AC9")
+        proc, events = self.stage(["p1", "p1", "p1@reuse"], faults={"ac5-unbound": ["mitm"]})
+        self.assert_fails_at_first_evidence(proc, events, "ac5-unbound", "still MITM-terminated")
+
+    def test_isolation_controls_retry_only_evidence_free_failures(self):
+        for tag in ("ac3-b", "ac8-control-1"):
+            with self.subTest(tag=tag):
+                proc, events = self.stage(["p1", "p1", "p1@reuse"], faults={tag: ["exec_error", "refused"]})
+                self.assert_passes(proc, "AC3", "AC8", "AC9")
+                proc, events = self.stage(["p1", "p1", "p1@reuse"], faults={tag: ["mitm"]})
+                self.assert_fails_at_first_evidence(proc, events, tag, "contradicting evidence")
+                proc, events = self.stage(["p1", "p1", "p1@reuse"], faults={tag: ["exec_error"] * 31})
+                self.assertEqual(proc.returncode, 1, proc.stderr)
+                self.assertIn("after 30 attempts", proc.stderr)
+                self.assertEqual(sum(e.startswith("fault " + tag) for e in events), 30)
 
     def test_ac7_cross_subject_leak_during_recovery_fails(self):
         proc, events = self.stage(["p1", "p1", "p1@reuse"], faults={"ac7-mitm-b": ["leak"]})
@@ -738,6 +756,23 @@ class StageFlowTest(ShellCase):
                 self.assertIn(reason, proc.stderr)
                 self.assertNotIn("PASS\x1b[0m " + VERDICT["AC5"], proc.stderr)
                 self.assertIn("release sbx-1 hold-a2 fenced-%s" % outcome, events)
+
+
+@unittest.skipUnless(BASH and HAVE_JQ, "needs bash>=4 and jq")
+class GuestDiagnosticsTest(ShellCase):
+    def test_guest_stderr_survives_later_probes_and_hold_calls(self):
+        out = self.sourced(r'''
+source "$SCRIPT_DIR/verify/credential-bound.sh"
+CB_GUEST_DIR=/fixture; CB_GUEST_CAFILE=/fake-ca
+CB_ORIGIN_IP=127.0.0.1
+osb_api() { echo "$DIAG" >&2; echo '{"execution_id":"fixture"}'; }
+DIAG=first-probe; cb_guest_once fixture one
+DIAG=second-probe; cb_guest_once fixture two
+DIAG=hold-start; cb_hold_start fixture hold
+DIAG=hold-release; cb_hold_release fixture hold
+cat "$LOGS_DIR/cb-guest.err"
+''', EGRESS_INTERCEPTION_MODE="credential-bound").stdout
+        self.assertEqual(out.splitlines(), ["first-probe", "second-probe", "hold-start", "hold-release"])
 
 
 # Shell verdicts of verify/credential-bound.sh on real client output.

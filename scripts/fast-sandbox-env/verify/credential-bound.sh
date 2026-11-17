@@ -190,11 +190,11 @@ cb_create_sandbox() {
 	[[ -n "$uid" ]] || fail "credential-bound: sandbox $label CR carried no uid"
 	wait_for "credential-bound: sandbox $label subject registered on egress" 120 \
 		vault_log_contains "subject s-$uid: data-plane-ready, policy active"
-	osb_api command run "$id" -- mkdir -p "$CB_GUEST_DIR" >/dev/null 2>"$LOGS_DIR/cb-guest.err" \
+	osb_api command run "$id" -- mkdir -p "$CB_GUEST_DIR" >/dev/null 2>>"$LOGS_DIR/cb-guest.err" \
 		|| fail "credential-bound: guest mkdir failed in $label"
-	osb_api file upload "$id" "$CB_CLIENT_SRC" "$CB_GUEST_DIR/client.py" >/dev/null 2>"$LOGS_DIR/cb-guest.err" \
+	osb_api file upload "$id" "$CB_CLIENT_SRC" "$CB_GUEST_DIR/client.py" >/dev/null 2>>"$LOGS_DIR/cb-guest.err" \
 		|| fail "credential-bound: client upload failed in $label"
-	version="$(osb_api command run "$id" -- python3 "$CB_GUEST_DIR/client.py" version 2>"$LOGS_DIR/cb-guest.err")" \
+	version="$(osb_api command run "$id" -- python3 "$CB_GUEST_DIR/client.py" version 2>>"$LOGS_DIR/cb-guest.err")" \
 		|| fail "credential-bound: guest python3 client not runnable in $label"
 	[[ "$version" == *"CBV-CLIENT 1"* ]] || fail "credential-bound: unexpected guest client version in $label"
 	CB_LAST_ID="$id"
@@ -267,7 +267,7 @@ cb_guest_once() { # <sandbox-id> <tag>
 	local out rc=0
 	out="$(osb_api command run "$1" -- python3 "$CB_GUEST_DIR/client.py" once \
 		--host "$MITM_ECHO_DOMAIN" --ip "$CB_ORIGIN_IP" --port "$MITM_ECHO_PORT" \
-		--cafile "$CB_GUEST_CAFILE" --tag "$2" 2>"$LOGS_DIR/cb-guest.err")" || rc=$?
+		--cafile "$CB_GUEST_CAFILE" --tag "$2" 2>>"$LOGS_DIR/cb-guest.err")" || rc=$?
 	CB_RESULT="$(cb_extract "$out")"
 	CB_RC=$rc
 }
@@ -289,7 +289,7 @@ cb_result_injected() { # <code>
 
 cb_result_bound_leaf() { # the response came over a MITM (non-origin) leaf
 	[[ -n "$CB_RESULT" ]] || return 1
-	printf '%s' "$CB_RESULT" | jq -e --arg leaf "$CB_ORIGIN_LEAF" '.leaf_sha256 != "" and .leaf_sha256 != $leaf' >/dev/null
+	printf '%s' "$CB_RESULT" | jq -e --arg leaf "$CB_ORIGIN_LEAF" '(.leaf_sha256 // "") != "" and .leaf_sha256 != $leaf' >/dev/null
 }
 
 cb_result_cred_is() { # <code>
@@ -351,7 +351,7 @@ cb_hold_start() { # <sandbox-id> <name>
 	local out
 	out="$(osb_api command run "$1" --background -o json -- python3 "$CB_GUEST_DIR/client.py" hold \
 		--host "$MITM_ECHO_DOMAIN" --ip "$CB_ORIGIN_IP" --port "$MITM_ECHO_PORT" \
-		--cafile "$CB_GUEST_CAFILE" --tag "$2" --dir "$CB_GUEST_DIR/$2" 2>"$LOGS_DIR/cb-guest.err")" \
+		--cafile "$CB_GUEST_CAFILE" --tag "$2" --dir "$CB_GUEST_DIR/$2" 2>>"$LOGS_DIR/cb-guest.err")" \
 		|| fail "credential-bound: background hold client $2 failed to start"
 	[[ -n "$(printf '%s' "$out" | jq -r '.execution_id // empty' 2>/dev/null)" ]] \
 		|| fail "credential-bound: hold client $2 start carried no execution id"
@@ -366,7 +366,7 @@ cb_hold_read() { # <sandbox-id> <name> <r1|r2> -> CB_RESULT
 }
 
 cb_hold_release() { # <sandbox-id> <name>
-	osb_api command run "$1" -- touch "$CB_GUEST_DIR/$2/go" >/dev/null 2>"$LOGS_DIR/cb-guest.err" \
+	osb_api command run "$1" -- touch "$CB_GUEST_DIR/$2/go" >/dev/null 2>>"$LOGS_DIR/cb-guest.err" \
 		|| fail "credential-bound: could not release hold client $2"
 }
 
@@ -619,8 +619,7 @@ credential_bound_verify() {
 			&& printf '%s' "$CB_RESULT" | jq -e '.ok == false and (.error.phase == "connect" or .error.phase == "handshake")
 				and .error.kind != "verify_failed"' >/dev/null; then
 			cb_host_probe || fail "AC8: origin was not reachable during the denied probe (cannot attribute the denial)"
-			cb_probe_passthrough "$sbx_a" "ac8-control-$attempt" \
-				|| fail "AC8: control sandbox A lost the origin during the denied probe"
+			cb_until "AC8: control sandbox A reaches the origin during the denied probe" 30 "$sbx_a" "ac8-control-$attempt" absent
 			denied=1
 			break
 		fi
@@ -637,7 +636,7 @@ credential_bound_verify() {
 	local rev_a="$CB_ACK_REV"
 	cb_until "AC3: A's fresh connection is MITM-terminated and the origin sees A's value" 120 "$sbx_a" ac3-a "$code_a"
 	cb_sandbox_state_is "$sbx_b" Running || fail "AC3: B is not running alongside A"
-	cb_probe_passthrough "$sbx_b" ac3-b || fail "AC3: unbound B is not a pure passthrough ($(cb_result_summary))"
+	cb_until "AC3: unbound B is a pure passthrough alongside bound A" 30 "$sbx_b" ac3-b absent
 	{ cb_on_pod "$sbx_a" "$pod_uid" && cb_on_pod "$sbx_b" "$pod_uid"; } || fail "AC3: A and B are no longer both on Fastlet Pod UID $pod_uid"
 	pass "AC3: same Fastlet Pod — A injected over a MITM leaf, B origin leaf with no credential"
 

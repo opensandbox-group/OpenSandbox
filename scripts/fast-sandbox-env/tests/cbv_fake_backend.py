@@ -26,7 +26,7 @@ misbehaving egress: "faults" maps a probe-tag prefix to a queue of outcomes
 consumed one per probe ("leak" = MITM leaf + another subject's credential,
 the last killed bound sandbox's else a live bound one; "mitm" = MITM leaf
 without a credential; "refused" = a transient connect failure carrying no
-traffic evidence; "bypass" = a request that completes although the sandbox
+traffic evidence; "exec_error" = CLI failure with no client result; "bypass" = a request that completes although the sandbox
 is under a deny policy), and "fenced_hold"
 picks what a request on a socket decrypted before the last-binding removal
 gets ("close" = transport terminated, the default, as the subject path does;
@@ -92,6 +92,8 @@ class Fake(object):
         vault = sbx and sbx["vault"]
         cred = vault["code"] if vault and vault["bound"] else None
         mitm = bool(cred)
+        if fault == "exec_error":
+            return None, "exec-error"
         if fault == "refused":
             base.update(ok=False, error={"phase": "connect", "kind": "refused", "detail": ""}, closed_by_peer=False,
                         responses=[])
@@ -171,6 +173,9 @@ class Fake(object):
                     print(json.dumps({"execution_id": "exec-" + opts["--tag"]}))
                     return 0
                 self.note("probe %s %s %s" % (sid, opts["--tag"], verdict))
+                if res is None:
+                    print("fixture exec transport failure", file=sys.stderr)
+                    return 3
                 print("CBV-RESULT " + json.dumps(res))
                 return 0 if res["ok"] else 3
         raise SystemExit("fake osb: unhandled %r" % args)
