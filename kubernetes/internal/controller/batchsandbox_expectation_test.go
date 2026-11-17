@@ -60,6 +60,7 @@ func TestDeletionDuringStatusPatchDropsStatusExpectation(t *testing.T) {
 	r := &BatchSandboxReconciler{Client: fakeClient, StatusRVExpectation: expectations.NewResourceVersionExpectation()}
 	ctx := context.Background()
 
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(bs), bs))
 	require.NoError(t, r.updateStatus(ctx, bs, &sandboxv1alpha1.BatchSandboxStatus{Phase: sandboxv1alpha1.BatchSandboxPhasePending}))
 	require.True(t, statusExpectationKept(r, bs.UID))
 
