@@ -56,7 +56,7 @@ Execution modes:
 - **Foreground** returns the output as a live Server-Sent-Events stream while the command runs.
 - **Background** returns immediately; you poll status and retrieve incremental logs. Completed background output stays retrievable for 24 hours, and running commands are never cleaned up.
 
-Foreground `stdout` and `stderr` event text preserves the command's line endings (`\n`, `\r`, or `\r\n`). Concatenate event text for each stream to reconstruct its output; the last event may be an unterminated fragment.
+Foreground `stdout` and `stderr` event text preserves the command's line endings (`\n`, `\r`, or `\r\n`). Concatenate event text for each stream to reconstruct its output; the last event may be an unterminated fragment. A line longer than 16 MiB is split across several events, and only the last of them ends with the line ending.
 
 A successful foreground `POST /command` ends with `execution_complete` carrying `exit_code: 0`. This optional field is omitted from background startup acknowledgements and code execution events; absence is not an exit status. Non-zero command exits retain `error.exit_code` on the `error` event. Older execd versions omit the successful exit code, so clients may retain their existing foreground-only completion inference. A stream that ends before a terminal event does not establish success.
 
