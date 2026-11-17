@@ -16,9 +16,13 @@ package opensandbox
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestHasHeaderName_MatchesAnyCasing(t *testing.T) {
@@ -97,4 +101,143 @@ func TestNewClient_DefaultAPIKeyStillAppliedWithoutExplicitHeader(t *testing.T) 
 	err := c.doRequest(context.Background(), http.MethodGet, "/", nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, "configured-key", gotKey)
+}
+
+// rawAuthCapturingServer records the execd auth header of each request.
+func rawAuthCapturingServer(t *testing.T, respond func(w http.ResponseWriter)) (*httptest.Server, *[]string) {
+	t.Helper()
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get(execdAuthHeader))
+		respond(w)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &got
+}
+
+func newExecdClientWithExplicitToken(url string) *ExecdClient {
+	return NewExecdClient(url, "configured-token",
+		WithHeaders(map[string]string{execdAuthHeader: "explicit-token"}))
+}
+
+func TestExecdClient_ExplicitTokenWinsOnGetCommandLogs(t *testing.T) {
+	srv, got := rawAuthCapturingServer(t, func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	})
+	c := newExecdClientWithExplicitToken(srv.URL)
+	_, _ = c.GetCommandLogs(context.Background(), "cmd-1", nil)
+	require.Equal(t, []string{"explicit-token"}, *got)
+}
+
+func TestExecdClient_ExplicitLowercaseTokenWinsOnGetCommandLogs(t *testing.T) {
+	srv, got := rawAuthCapturingServer(t, func(w http.ResponseWriter) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	})
+	c := NewExecdClient(srv.URL, "configured-token",
+		WithHeaders(map[string]string{"x-execd-access-token": "explicit-token"}))
+	_, _ = c.GetCommandLogs(context.Background(), "cmd-1", nil)
+	require.Equal(t, []string{"explicit-token"}, *got)
+}
+
+func TestExecdClient_ExplicitTokenWinsOnUploadFiles(t *testing.T) {
+	srv, got := rawAuthCapturingServer(t, func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	c := newExecdClientWithExplicitToken(srv.URL)
+	_ = c.UploadFiles(context.Background(), []UploadFileEntry{{
+		File:    strings.NewReader("body"),
+		Options: UploadFileOptions{FileName: "a.txt", Metadata: FileMetadata{Path: "/tmp/a.txt"}},
+	}})
+	require.Equal(t, []string{"explicit-token"}, *got)
+}
+
+func TestExecdClient_ExplicitTokenWinsOnDownloadFileResponse(t *testing.T) {
+	srv, got := rawAuthCapturingServer(t, func(w http.ResponseWriter) {
+		_, _ = w.Write([]byte("bytes"))
+	})
+	c := newExecdClientWithExplicitToken(srv.URL)
+	_, _ = c.DownloadFileResponse(context.Background(), "/tmp/a.txt", "")
+	require.Equal(t, []string{"explicit-token"}, *got)
+}
+
+func TestExecdClient_ExplicitTokenWinsOnIsolatedRunLogs(t *testing.T) {
+	srv, got := rawAuthCapturingServer(t, func(w http.ResponseWriter) {
+		_, _ = w.Write([]byte("log text"))
+	})
+	c := newExecdClientWithExplicitToken(srv.URL)
+	_, _, _ = c.IsolatedRunLogs(context.Background(), "sess-1", "run-1", 0)
+	require.Equal(t, []string{"explicit-token"}, *got)
+}
+
+func TestExecdClient_ExplicitTokenWinsOnStreamRequest(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(execdAuthHeader)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"execution_complete\"}\n\n")
+	}))
+	defer srv.Close()
+
+	c := newExecdClientWithExplicitToken(srv.URL)
+	err := c.RunCommand(context.Background(), RunCommandRequest{Command: "echo hi"}, func(StreamEvent) error {
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, "explicit-token", got)
+}
+
+func TestReportSandboxCreateMetric_ExplicitAuthHeaderWins(t *testing.T) {
+	var got atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Get("OPEN-SANDBOX-API-KEY"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cfg := ConnectionConfig{
+		Domain:   server.URL,
+		Protocol: "http",
+		APIKey:   "configured-key",
+		Headers:  map[string]string{"OPEN-SANDBOX-API-KEY": "explicit-key"},
+	}
+	reportSandboxCreateMetric(cfg, "sbx", "python:3.12", 42, true)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := got.Load().(string); ok {
+			require.Equal(t, "explicit-key", v)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("metrics POST was not received")
+}
+
+func TestReportSandboxCreateMetric_ExplicitEmptyAuthHeaderSuppressesKey(t *testing.T) {
+	var got atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Get("OPEN-SANDBOX-API-KEY"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	cfg := ConnectionConfig{
+		Domain:   server.URL,
+		Protocol: "http",
+		APIKey:   "configured-key",
+		Headers:  map[string]string{"OPEN-SANDBOX-API-KEY": ""},
+	}
+	reportSandboxCreateMetric(cfg, "sbx", "python:3.12", 42, true)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := got.Load().(string); ok {
+			require.Equal(t, "", v)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("metrics POST was not received")
 }
