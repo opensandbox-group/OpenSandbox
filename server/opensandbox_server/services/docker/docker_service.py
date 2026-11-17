@@ -1422,6 +1422,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         sandbox_id: str,
         request: RenewSandboxExpirationRequest,
     ) -> RenewSandboxExpirationResponse:
+        with self._sandbox_lifecycle_lock(sandbox_id):
+            return self._renew_expiration_locked(sandbox_id, request)
+
+    def _renew_expiration_locked(
+        self,
+        sandbox_id: str,
+        request: RenewSandboxExpirationRequest,
+    ) -> RenewSandboxExpirationResponse:
         container = self._get_container_by_sandbox_id(sandbox_id)
         new_expiration = ensure_future_expiration(request.expires_at)
 
