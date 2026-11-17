@@ -86,7 +86,7 @@ Egress policy (`Sandbox`):
 
 - [x] `patch_egress_rules` — merge semantics verified **at HTTP level** (newly allowed target serves HTTPS)
 - [x] `delete_egress_rules` — removal verified **at HTTP level** (deleted target stops serving)
-- [x] TCP port-scoped rules — create/get preserve IP+ports and port-only scopes; PATCH keeps distinct scopes and replaces reordered equivalent scopes; DELETE `[""]` removes only port-only rules and DELETE `[target]` removes every scope of that IP; domain+ports remains forbidden, UDP is unsupported
+- [x] TCP port-scoped rules — create/get preserve IP+ports and port-only scopes; PATCH keeps distinct scopes and replaces reordered equivalent scopes; DELETE `[""]` removes only port-only rules and DELETE `[target]` removes every scope of that IP; classic domain+ports has separate kernel coverage, while this delivery rejects it in Fast Sandbox; UDP is unsupported
 - [x] controlled TCP traffic — IP/port-only allows, L3/L4 deny priority, CIDR+443 and original-port MITM enforcement with verified TLS, per-subject isolation, pause/resume policy persistence, and DELETE convergence
 
 State fidelity:
