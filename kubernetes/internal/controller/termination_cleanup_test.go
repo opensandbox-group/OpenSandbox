@@ -700,6 +700,41 @@ func TestDeletionRecoversAfterPodsDisappear(t *testing.T) {
 	require.Empty(t, pods.Items)
 }
 
+func TestDeletionWithMalformedShardTaskPatch(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cachedScheduler=%v", cached), func(t *testing.T) {
+			ctx := context.Background()
+			now := metav1.Now()
+			sandbox := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-shard", Namespace: "default", DeletionTimestamp: &now, Finalizers: []string{finalizerTaskCleanup}},
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{Spec: sandboxv1alpha1.TaskSpec{
+						Process: &sandboxv1alpha1.ProcessTask{Command: []string{"sleep"}},
+					}},
+					ShardTaskPatches: []runtime.RawExtension{{Raw: []byte(`{"spec":{"process":{"args":[3600]}}}`)}},
+				},
+			}
+			r := newTestReconciler(sandbox)
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)}
+			if cached {
+				sch := &recordingTaskScheduler{tasks: []taskscheduler.Task{fakeSchedulerTask{name: "bad-shard-0", state: taskscheduler.RunningTaskState}}}
+				r.taskSchedulers.Store(req.String(), sch)
+				result, err := r.Reconcile(ctx, req)
+				require.NoError(t, err)
+				require.Positive(t, result.RequeueAfter)
+				require.Equal(t, 1, sch.stopCalls)
+				require.NoError(t, r.Get(ctx, req.NamespacedName, sandbox))
+				require.Contains(t, sandbox.Finalizers, finalizerTaskCleanup)
+				sch.tasks = nil // executor confirms cleanup
+			}
+			_, err := r.Reconcile(ctx, req)
+			require.NoError(t, err)
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, req.NamespacedName, sandbox)))
+		})
+	}
+}
+
 func TestExpiryDeletionPolicy(t *testing.T) {
 	for _, taskMode := range []bool{false, true} {
 		t.Run(fmt.Sprintf("task=%v", taskMode), func(t *testing.T) {
