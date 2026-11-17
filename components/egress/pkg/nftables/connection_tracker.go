@@ -32,8 +32,11 @@ type connectionTracker struct {
 	dynamicEndpoints        map[TCPEndpoint]time.Time
 	dynamicDenies           map[TCPEndpoint]time.Time
 	previousActiveEndpoints map[TCPEndpoint]struct{}
-	listConnections         func(context.Context) ([]tcpConnection, error)
-	now                     func() time.Time
+	// Renewal identities outlive a dirty resync, not the next successful activity
+	// scan. They carry no installed deadline; port zero denotes a whole IP.
+	renewalEndpoints map[TCPEndpoint]struct{}
+	listConnections  func(context.Context) ([]tcpConnection, error)
+	now              func() time.Time
 }
 
 type refreshPlan struct {
@@ -197,6 +200,7 @@ func (t *connectionTracker) clear() {
 	t.dynamicIPs = make(map[netip.Addr]time.Time)
 	t.dynamicEndpoints = make(map[TCPEndpoint]time.Time)
 	t.dynamicDenies = make(map[TCPEndpoint]time.Time)
+	t.renewalEndpoints = nil
 	t.clearPreviousActiveIPsLocked()
 }
 

@@ -798,3 +798,109 @@ func TestDomainPortsActivityRecoveryAfterInstalledDeadline(t *testing.T) {
 		}
 	}
 }
+
+func TestDomainPortsDNSRecoveryPreservesExpiredActivityIdentities(t *testing.T) {
+	for _, whole := range []bool{false, true} {
+		for _, closed := range []bool{false, true} {
+			name := map[bool]string{false: "endpoint", true: "whole_ip"}[whole] + "/" + map[bool]string{false: "active", true: "final_grace"}[closed]
+			t.Run(name, func(t *testing.T) {
+				var writeErr error
+				m := NewManagerWithRunner(func(context.Context, string) ([]byte, error) { return nil, writeErr })
+				ctx := context.Background()
+				now := time.Unix(1000, 0)
+				m.tracker.now = func() time.Time { return now }
+				require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[{"action":"allow","target":"broad.example"},{"action":"allow","target":"*.scoped.example","ports":[443,8443]}]}`)))
+				domain := "a.scoped.example"
+				if whole {
+					domain = "broad.example"
+				}
+				addr := netip.MustParseAddr("192.0.2.10")
+				endpoint := TCPEndpoint{Addr: addr, Port: 443}
+				require.NoError(t, m.AddResolvedDomain(ctx, domain, []ResolvedIP{{Addr: addr}}))
+				installedDeadline := func() time.Time {
+					if whole {
+						return m.tracker.dynamicIPs[addr]
+					}
+					return m.tracker.dynamicEndpoints[endpoint]
+				}
+				active := []tcpConnection{{remote: addr, remotePort: 443, state: "ESTABLISHED"}}
+				now = now.Add(30 * time.Second)
+				if closed {
+					require.NoError(t, m.tracker.refreshActiveConnections(ctx, active, m))
+					active = nil
+					now = now.Add(30 * time.Second)
+				}
+				sourceDeadline := m.domains[domain].expires[addr]
+				lastConfirmed := installedDeadline()
+				writeErr = errors.New("activity result unknown")
+				require.Error(t, m.tracker.refreshActiveConnections(ctx, active, m))
+				now = lastConfirmed.Add(time.Second)
+				other := []ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.11")}}
+				require.Error(t, m.AddResolvedDomain(ctx, "b.scoped.example", other), "a failed DNS-triggered reconciliation cannot publish a new snapshot")
+				require.Equal(t, lastConfirmed, installedDeadline())
+				writeErr = nil
+				require.NoError(t, m.AddResolvedDomain(ctx, "b.scoped.example", other))
+				require.True(t, installedDeadline().IsZero(), "the expired member is not installed after DNS reconciliation")
+				require.Equal(t, sourceDeadline, m.domains[domain].expires[addr], "DNS recovery must not extend the original source deadline")
+				writeErr = errors.New("activity retry result unknown")
+				require.Error(t, m.tracker.refreshActiveConnections(ctx, active, m))
+				require.True(t, installedDeadline().IsZero(), "a failed retry cannot publish proposed activity")
+				writeErr = nil
+				now = now.Add(time.Second)
+				require.NoError(t, m.tracker.refreshActiveConnections(ctx, active, m))
+				require.Equal(t, now.Add(360*time.Second), installedDeadline(), "unrelated DNS must not erase known activity or final-grace identity")
+				if !whole {
+					require.NotContains(t, m.tracker.dynamicEndpoints, TCPEndpoint{Addr: addr, Port: 8443}, "recovery cannot revive an inactive sibling port")
+				}
+				if !closed {
+					now = now.Add(time.Second)
+					require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
+				}
+				deadline := installedDeadline()
+				now = now.Add(time.Second)
+				require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
+				require.Equal(t, deadline, installedDeadline(), "final grace must remain bounded without renewed activity")
+			})
+		}
+	}
+}
+
+func TestDomainPortsDNSRecoveryRequiresRetainedSourceAndPolicy(t *testing.T) {
+	for _, retire := range []string{"source", "policy"} {
+		t.Run(retire, func(t *testing.T) {
+			var writeErr error
+			m := NewManagerWithRunner(func(context.Context, string) ([]byte, error) { return nil, writeErr })
+			ctx := context.Background()
+			now := time.Unix(1000, 0)
+			m.tracker.now = func() time.Time { return now }
+			require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[{"action":"allow","target":"*.example","ports":[443]}]}`)))
+			addr, other := netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.11")
+			endpoint := TCPEndpoint{Addr: addr, Port: 443}
+			require.NoError(t, m.AddResolvedDomain(ctx, "a.example", []ResolvedIP{{Addr: addr}}))
+			active := []tcpConnection{{remote: addr, remotePort: 443, state: "ESTABLISHED"}}
+			now = now.Add(30 * time.Second)
+			writeErr = errors.New("activity result unknown")
+			require.Error(t, m.tracker.refreshActiveConnections(ctx, active, m))
+			now = now.Add(31 * time.Second)
+			writeErr = nil
+			require.NoError(t, m.AddResolvedDomain(ctx, "b.example", []ResolvedIP{{Addr: other}}))
+			require.Contains(t, m.tracker.renewalEndpoints, endpoint)
+			if retire == "source" {
+				require.NoError(t, m.AddResolvedDomain(ctx, "a.example", []ResolvedIP{{Addr: other}}))
+				require.NotContains(t, m.domains["a.example"].expires, addr)
+				// A further unknown DNS write followed by full recovery must
+				// prune the retired identity rather than accumulating old sources.
+				writeErr = errors.New("DNS result unknown")
+				require.Error(t, m.AddResolvedDomain(ctx, "b.example", []ResolvedIP{{Addr: other, TTL: 5 * time.Minute}}))
+				writeErr = nil
+				require.NoError(t, m.AddResolvedDomain(ctx, "b.example", []ResolvedIP{{Addr: other}}))
+			} else {
+				require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[{"action":"allow","target":"*.example","ports":[8443]}]}`)))
+			}
+			require.NotContains(t, m.tracker.renewalEndpoints, endpoint)
+			require.NoError(t, m.tracker.refreshActiveConnections(ctx, active, m))
+			require.NotContains(t, m.tracker.dynamicEndpoints, endpoint, "retired ownership cannot authorize renewal")
+			require.Empty(t, m.tracker.renewalEndpoints, "a successful activity scan retires pending identities")
+		})
+	}
+}

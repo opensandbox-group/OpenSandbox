@@ -341,6 +341,39 @@ func (m *Manager) syncDomainLeasesLocked(ctx context.Context, domains map[string
 		}
 		return err
 	}
+	// DNS may recover before the next activity scan. Preserve only identities
+	// still owned by current sources and permissions, without installed deadlines.
+	var renewals map[TCPEndpoint]struct{}
+	remember := func(endpoint TCPEndpoint, known, installed bool) {
+		_, pending := m.tracker.renewalEndpoints[endpoint]
+		if installed || (!known && !pending) {
+			return
+		}
+		if renewals == nil {
+			renewals = make(map[TCPEndpoint]struct{})
+		}
+		renewals[endpoint] = struct{}{}
+	}
+	for domain, entry := range domains {
+		permissions := m.domainPolicy.DomainPermissions(domain)
+		if !permissions.Allowed {
+			continue
+		}
+		for addr := range entry.expires {
+			if permissions.Unrestricted {
+				_, known := m.tracker.dynamicIPs[addr]
+				_, installed := whole[addr]
+				remember(TCPEndpoint{Addr: addr}, known, installed)
+			}
+			for _, port := range permissions.AllowPorts {
+				endpoint := TCPEndpoint{Addr: addr, Port: uint16(port)}
+				_, known := m.tracker.dynamicEndpoints[endpoint]
+				_, installed := allow[endpoint]
+				remember(endpoint, known, installed)
+			}
+		}
+	}
+	m.tracker.renewalEndpoints = renewals
 	m.tracker.dynamicIPs = whole
 	m.tracker.dynamicEndpoints = allow
 	m.tracker.dynamicDenies = deny
@@ -463,7 +496,8 @@ func (m *Manager) refreshScopedConnectionsLocked(ctx context.Context, connection
 			if permissions.Unrestricted {
 				endpoint := TCPEndpoint{Addr: addr}
 				_, known := m.tracker.dynamicIPs[addr]
-				if !known {
+				_, renewable := m.tracker.renewalEndpoints[endpoint]
+				if !known && !renewable {
 					continue
 				}
 				isActive := false
@@ -483,7 +517,9 @@ func (m *Manager) refreshScopedConnectionsLocked(ctx context.Context, connection
 			}
 			for _, port := range permissions.AllowPorts {
 				endpoint := TCPEndpoint{Addr: addr, Port: uint16(port)}
-				if _, known := m.tracker.dynamicEndpoints[endpoint]; !known {
+				_, known := m.tracker.dynamicEndpoints[endpoint]
+				_, renewable := m.tracker.renewalEndpoints[endpoint]
+				if !known && !renewable {
 					continue
 				}
 				_, isActive := active[endpoint]
@@ -502,6 +538,7 @@ func (m *Manager) refreshScopedConnectionsLocked(ctx context.Context, connection
 	}
 	m.domains = domains
 	m.tracker.previousActiveEndpoints = current
+	m.tracker.renewalEndpoints = nil
 	telemetry.RecordNftablesUpdate()
 	return nil
 }
