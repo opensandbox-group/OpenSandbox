@@ -183,6 +183,10 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 		http.Error(w, "invalid policy: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if err := validateFastSandboxDomainPortPolicy(pol); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if len(doc.Policy) > policy.MaxPolicyBodyBytes {
 		http.Error(w, fmt.Sprintf("policy body exceeds %d bytes", policy.MaxPolicyBodyBytes), http.StatusBadRequest)
 		return

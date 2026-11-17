@@ -244,6 +244,9 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 	if parseErr != nil {
 		return http.StatusBadRequest, fmt.Errorf("invalid policy bundle content: %v", parseErr)
 	}
+	if err := validateFastSandboxDomainPortPolicy(pol); err != nil {
+		return http.StatusBadRequest, err
+	}
 	// The authorized incarnation transfer.
 	payload, err := policy.EncodePolicyFile(fence.RuntimeInstanceID, fence.AttachmentID, pf.Revision, body)
 	if err != nil {

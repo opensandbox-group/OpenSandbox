@@ -434,12 +434,19 @@ func TestManagerQuiescence_FallbackAndLegacy(t *testing.T) {
 		m, r := seededQuiescenceManager(t, false)
 		freezeWithStaticFailure(t, m, r)
 		calls := r.calls()
+		require.False(t, m.isQuiesced(), "unknown static state is recoverable without permanent quiescence")
+		require.ErrorIs(t, m.AddResolvedDomain(context.Background(), "old.example.com", quiescenceIPs()), errStaticStateUncertain)
+		require.ErrorIs(t, m.AddUpstreamProxyIPs(context.Background(), quiescenceIPs()), errStaticStateUncertain)
+		require.ErrorIs(t, m.tracker.refreshActiveConnections(context.Background(), []tcpConnection{
+			{remote: quiescenceIPs()[0].Addr, state: "ESTABLISHED"},
+		}, m), errStaticStateUncertain)
+		require.Equal(t, calls, r.calls(), "uncertain static state must not trigger DNS-initiated recovery or element grants")
+		require.NoError(t, m.ApplyStatic(context.Background(), quiescencePolicy(t)))
 		require.NoError(t, m.AddResolvedDomain(context.Background(), "old.example.com", quiescenceIPs()))
 		require.NoError(t, m.AddUpstreamProxyIPs(context.Background(), quiescenceIPs()))
 		require.NoError(t, m.tracker.refreshActiveConnections(context.Background(), []tcpConnection{
 			{remote: quiescenceIPs()[0].Addr, state: "ESTABLISHED"},
 		}, m))
-		require.NoError(t, m.ApplyStatic(context.Background(), quiescencePolicy(t)))
 		require.Equal(t, calls+4, r.calls())
 	})
 	t.Run("build failure", func(t *testing.T) {

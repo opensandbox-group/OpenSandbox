@@ -54,6 +54,10 @@ type EstablishedDrops struct {
 	DenyAddrs     []netip.Addr
 	DenyPrefixes  []netip.Prefix
 	DenyPortDrops []EstablishedPortDrop
+	// DomainPortDenies is the opt-in endpoint snapshot for DNS-derived
+	// established denies. Kernel verdicts additionally require a live timed
+	// deny-set element, never an unconditional carried destination rule.
+	DomainPortDenies []EstablishedPortDrop
 
 	Addrs     []netip.Addr
 	Prefixes  []netip.Prefix
@@ -69,7 +73,7 @@ type EstablishedDrops struct {
 // change the ruleset.
 func (d EstablishedDrops) Empty() bool {
 	return len(d.DenyAddrs) == 0 && len(d.DenyPrefixes) == 0 && len(d.DenyPortDrops) == 0 &&
-		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll
+		len(d.DomainPortDenies) == 0 && len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll
 }
 
 // Matches reports whether addr is covered by this drop set (port-agnostic).
@@ -92,6 +96,9 @@ func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
 		return false
 	}
 	if targetsMatch(d.DenyAddrs, d.DenyPrefixes, d.DenyPortDrops, addr, dport) {
+		return true
+	}
+	if targetsMatch(nil, nil, d.DomainPortDenies, addr, dport) {
 		return true
 	}
 	if targetsMatch(d.KeepAddrs, d.KeepPrefixes, d.KeepPorts, addr, dport) {
@@ -161,14 +168,17 @@ func (m *Manager) SnapshotResolvedDomains() map[string][]netip.Addr {
 func (m *Manager) snapshotResolvedDomainsLocked() map[string][]netip.Addr {
 	out := make(map[string][]netip.Addr, len(m.domains))
 	for domain, entry := range m.domains {
-		if entry == nil || len(entry.addresses) == 0 {
+		if entry == nil || (len(entry.addresses) == 0 && len(entry.expires) == 0) {
 			continue
 		}
-		addrs := make([]netip.Addr, 0, len(entry.addresses))
+		observed := newAddrSet()
 		for addr := range entry.addresses {
-			addrs = append(addrs, addr)
+			observed.add(addr)
 		}
-		sort.Slice(addrs, func(i, j int) bool { return addrs[i].Compare(addrs[j]) < 0 })
+		for addr := range entry.expires {
+			observed.add(addr)
+		}
+		addrs := observed.sorted()
 		out[domain] = addrs
 	}
 	return out
@@ -187,11 +197,10 @@ func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains 
 	if newPol == nil {
 		newPol = policy.DefaultDenyPolicy()
 	}
-
 	// IPs still covered by a surviving domain lease (and not explicitly denied).
 	survivingDomainIPs := make(map[netip.Addr]struct{})
 	for domain, ips := range priorDomains {
-		if newPol.Evaluate(domain) != policy.ActionAllow {
+		if !newPol.DomainPermissions(domain).Unrestricted {
 			continue
 		}
 		for _, ip := range ips {
@@ -213,7 +222,15 @@ func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains 
 	// Removed-domain candidates, excluding shared CDN IPs that a surviving
 	// lease or an explicit IP/CIDR allow still permits.
 	for domain, ips := range priorDomains {
-		if newPol.Evaluate(domain) == policy.ActionAllow {
+		oldPermissions := policy.DomainPermissions{}
+		if oldPol != nil {
+			oldPermissions = oldPol.DomainPermissions(domain)
+		}
+		if !oldPermissions.Unrestricted && len(oldPermissions.AllowPorts) == 0 {
+			continue
+		}
+		newPermissions := newPol.DomainPermissions(domain)
+		if oldPermissions.Unrestricted && newPermissions.Unrestricted {
 			continue
 		}
 		for _, ip := range ips {
@@ -221,6 +238,10 @@ func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains 
 				continue
 			}
 			ip = ip.Unmap()
+			if !oldPermissions.Unrestricted && len(oldPermissions.AllowPorts) > 0 {
+				out.PortDrops = append(out.PortDrops, EstablishedPortDrop{Addr: ip, Ports: append([]int(nil), oldPermissions.AllowPorts...)})
+				continue
+			}
 			if _, keep := survivingDomainIPs[ip]; keep {
 				continue
 			}
@@ -347,6 +368,21 @@ func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains 
 	for _, r := range portAllow {
 		if pd, ok := portDropFromScoped(r); ok {
 			out.KeepPorts = append(out.KeepPorts, pd)
+		}
+	}
+	for domain, ips := range priorDomains {
+		permissions := newPol.DomainPermissions(domain)
+		for _, ip := range ips {
+			if !ip.IsValid() {
+				continue
+			}
+			ip = ip.Unmap()
+			if len(permissions.DenyPorts) > 0 {
+				out.DomainPortDenies = append(out.DomainPortDenies, EstablishedPortDrop{Addr: ip, Ports: append([]int(nil), permissions.DenyPorts...)})
+			}
+			if permissions.Allowed && !ipExplicitlyDenied(newPol, ip) && len(permissions.AllowPorts) > 0 {
+				out.KeepPorts = append(out.KeepPorts, EstablishedPortDrop{Addr: ip, Ports: append([]int(nil), permissions.AllowPorts...)})
+			}
 		}
 	}
 	out.KeepAddrs = keepAddrs.sorted()

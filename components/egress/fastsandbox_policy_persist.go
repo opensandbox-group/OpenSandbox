@@ -453,6 +453,12 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file content rejected (%v)", parseErr))
 		return policy.DefaultDenyPolicy(), true
 	}
+	if err := validateFastSandboxDomainPortPolicy(pol); err != nil {
+		// This is valid durable policy on an unsupported deployment, not
+		// corrupt input: keep the file for a compatible writer or relay heal.
+		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy capability rejected (%v)", err))
+		return policy.DefaultDenyPolicy(), true
+	}
 	entry := &policyEntry{revision: pf.Revision, fence: fence}
 	// A durable seal marker (export acked, teardown not yet delivered)
 	// restores the sealed entry across a restart: relay ops stay 409 until

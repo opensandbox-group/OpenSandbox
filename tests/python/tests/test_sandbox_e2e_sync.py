@@ -54,7 +54,6 @@ from opensandbox.models.sandboxes import (
     SandboxImageSpec,
     Volume,
 )
-from pydantic import ValidationError
 
 from tests.base_e2e_test import (
     TEST_API_KEY,
@@ -411,11 +410,11 @@ class TestSandboxE2ESync:
     @pytest.mark.timeout(180)
     @pytest.mark.order(1)
     def test_01ab_network_policy_port_scoped_rules(self) -> None:
-        """A rule may scope by TCP destination ports alone or pair ports with
-        an IP target. Structural behavior (policy round-trip, PATCH merge
-        keys, domain+ports rejection) is asserted on every runtime; packet
-        level enforcement additionally on the Kubernetes runtime, whose e2e
-        server config runs the egress sidecar in dns+nft mode."""
+        """Round-trip TCP port scopes and PATCH merge keys across runtimes.
+
+        Kubernetes additionally checks IP/port packet enforcement with the
+        dns+nft sidecar; domain-scoped execution has focused kernel coverage.
+        """
         logger.info("=" * 80)
         logger.info("TEST 1ab: networkPolicy port-scoped rules (sync)")
         logger.info("=" * 80)
@@ -459,22 +458,6 @@ class TestSandboxE2ESync:
             assert (None, (53,)) in scopes, "port-only allow rule missing after PATCH"
             assert ("1.1.1.1", (443,)) in scopes, "IP+ports rule must survive the PATCH"
             assert ("pypi.org", ()) in scopes, "domain rule must survive the PATCH"
-
-            # Domain + ports is rejected at validation time (the DNS layer
-            # has no port dimension): the SDK's own model validation raises
-            # locally before any request, mirroring the server's 422.
-            with pytest.raises((ValidationError, SandboxApiException)):
-                SandboxSync.create(
-                    image=SandboxImageSpec(get_sandbox_image()),
-                    resource=get_e2e_sandbox_resource(),
-                    connection_config=cfg,
-                    timeout=timedelta(minutes=5),
-                    ready_timeout=timedelta(seconds=30),
-                    network_policy=NetworkPolicy(
-                        defaultAction="deny",
-                        egress=[NetworkRule(action="allow", target="example.com", ports=[443])],
-                    ),
-                )
 
             if is_kubernetes_runtime():
                 # The Kubernetes e2e server runs [egress] mode = "dns+nft", so

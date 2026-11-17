@@ -510,7 +510,7 @@ def ensure_egress_configured(
     network_policy: Optional["NetworkPolicy"],
     egress_config: Optional["EgressConfig"],
 ) -> None:
-    """Validate that egress.image is configured when network policy is provided."""
+    """Validate classic egress configuration before provisioning side effects."""
     if not network_policy:
         return
     
@@ -521,6 +521,22 @@ def ensure_egress_configured(
             detail={
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
                 "message": "egress.image must be configured when networkPolicy is provided.",
+            },
+        )
+    has_domain_ports = any(rule.is_domain_port_scoped() for rule in network_policy.egress)
+    if has_domain_ports and (
+        egress_config is None
+        or egress_config.mode != "dns+nft"
+        or egress_config.upstream_proxy is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    "Domain targets with ports require server [egress].mode = "
+                    '"dns+nft" without egress.upstream_proxy.'
+                ),
             },
         )
 

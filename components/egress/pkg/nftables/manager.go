@@ -73,6 +73,8 @@ type Options struct {
 	MitmRedirectPort int
 }
 
+var errStaticStateUncertain = errors.New("nftables static state is uncertain; a successful policy apply is required")
+
 type Manager struct {
 	run          runner
 	opts         Options
@@ -81,6 +83,11 @@ type Manager struct {
 	tracker      *connectionTracker
 	domainPolicy *policy.NetworkPolicy
 	domains      map[string]*resolvedDomain
+	// Unknown dynamic writes invalidate only the installed-element snapshot.
+	domainLeasesDirty bool
+	// Unknown static writes require a normal policy apply; DNS must not
+	// automatically restore the last policy over an unconfirmed replacement.
+	staticStateUncertain bool
 	// lastDrops is the teardown set currently installed. A plain ApplyStatic
 	// re-emits its still-relevant part, because every full apply starts with
 	// `delete table` and would otherwise reopen flows a dropEstablished commit
@@ -127,7 +134,15 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	}
 	var carry EstablishedDrops
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
-		carry = m.lastDrops.stillRelevant(p, m.learnedAddrsLocked())
+		var learned []netip.Addr
+		scoped := p.HasDomainPorts() || (m.domainPolicy != nil && m.domainPolicy.HasDomainPorts())
+		if !scoped {
+			learned = m.learnedAddrsLocked()
+		}
+		carry = m.lastDrops.stillRelevant(p, learned)
+		if scoped {
+			carry = carry.withDomainCarry(m.lastDrops, p, m.snapshotResolvedDomainsLocked())
+		}
 	}
 	_, err := m.applyStaticDropEstablishedLocked(ctx, p, carry, 0, m.lastDropsAt)
 	return err
@@ -206,19 +221,46 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	}
 	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
 	log.Infof("nftables: applying static policy: default=%s, allow_v4=%d, allow_v6=%d, deny_v4=%d, deny_v6=%d, established_drops=%d catch_all=%v",
-		p.DefaultAction, len(allowV4), len(allowV6), len(denyV4), len(denyV6), len(drops.DenyAddrs)+len(drops.DenyPrefixes)+len(drops.DenyPortDrops)+len(drops.Addrs)+len(drops.Prefixes)+len(drops.PortDrops), drops.CatchAll)
+		p.DefaultAction, len(allowV4), len(allowV6), len(denyV4), len(denyV6), len(drops.DenyAddrs)+len(drops.DenyPrefixes)+len(drops.DenyPortDrops)+len(drops.DomainPortDenies)+len(drops.Addrs)+len(drops.Prefixes)+len(drops.PortDrops), drops.CatchAll)
 	script, err := buildRuleset(p, m.opts, drops)
 	if err != nil {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
+	}
+	preserve := p.HasDomainPorts() || (m.domainPolicy != nil && m.domainPolicy.HasDomainPorts())
+	domains := make(map[string]*resolvedDomain)
+	var whole map[netip.Addr]time.Time
+	var endpoints map[TCPEndpoint]time.Time
+	var denies map[TCPEndpoint]time.Time
+	if preserve {
+		domains = cloneDomains(m.domains)
+		for domain := range domains {
+			permissions := p.DomainPermissions(domain)
+			if !permissions.Allowed && len(permissions.DenyPorts) == 0 {
+				delete(domains, domain)
+			}
+		}
+		var leases string
+		leases, whole, endpoints, denies = renderDomainLeases(p, domains, m.tracker.now())
+		script += leases
+	}
+	commit := func() {
+		m.tracker.clear()
+		m.domainPolicy = p
+		m.domains = domains
+		m.domainLeasesDirty = false
+		m.staticStateUncertain = false
+		if preserve {
+			m.tracker.dynamicIPs = whole
+			m.tracker.dynamicEndpoints = endpoints
+			m.tracker.dynamicDenies = denies
+		}
 	}
 	if _, err := m.run(ctx, script); err != nil {
 		if IsMissingTableError(err, tableName) {
 			fallback := RemoveDeleteTableLine(script, tableName)
 			if fallback != script {
 				if _, retryErr := m.run(ctx, fallback); retryErr == nil {
-					m.tracker.clear()
-					m.domainPolicy = p
-					m.domains = make(map[string]*resolvedDomain)
+					commit()
 					m.setLastDropsLocked(drops, committedAt)
 					telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 					telemetry.RecordNftablesUpdate()
@@ -232,6 +274,9 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 				}
 			}
 		}
+		if ApplyEffectOf(err) != ApplyUnchanged {
+			m.staticStateUncertain = true
+		}
 		// Keep the failure and freeze in the same critical section so queued
 		// writers cannot publish old permits before the owner receives it.
 		if m.opts.QuiesceOnApplyFailure && ApplyEffectOf(err) != ApplyUnchanged {
@@ -240,9 +285,7 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
 		return 0, err
 	}
-	m.tracker.clear()
-	m.domainPolicy = p
-	m.domains = make(map[string]*resolvedDomain)
+	commit()
 	m.setLastDropsLocked(drops, committedAt)
 	telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 	telemetry.RecordNftablesUpdate()
@@ -265,6 +308,9 @@ func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 	if m.quiesced.Load() {
 		return ErrQuiesced
 	}
+	if m.staticStateUncertain {
+		return &ApplyError{Effect: ApplyUnchanged, Err: errStaticStateUncertain}
+	}
 	return m.addResolvedIPsLocked(ctx, ips)
 }
 
@@ -272,20 +318,47 @@ func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 // m.mu and have checked admission before changing any associated state. Do not
 // recheck here: Quiesce may close admission while that operation is draining.
 func (m *Manager) addResolvedIPsLocked(ctx context.Context, ips []ResolvedIP) error {
-	script := buildAddResolvedIPsScript(tableName, ips)
+	now := m.tracker.now()
+	deadlines := make(map[netip.Addr]time.Time, len(ips))
+	for _, ip := range ips {
+		addr := ip.Addr.Unmap()
+		if addr.IsValid() {
+			expiry := now.Add(ClampTTL(ip.TTL))
+			if expiry.After(deadlines[addr]) {
+				deadlines[addr] = expiry
+			}
+		}
+	}
+	return m.addResolvedDeadlinesLocked(ctx, deadlines, now)
+}
+
+func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[netip.Addr]time.Time, now time.Time) error {
+	elements := make([]ResolvedIP, 0, len(deadlines))
+	for addr, expiry := range deadlines {
+		if previous := m.tracker.dynamicIPs[addr]; previous.After(expiry) {
+			expiry = previous
+		}
+		elements = append(elements, ResolvedIP{Addr: addr, TTL: expiry.Sub(now)})
+	}
+	script := buildResolvedIPElementsScript(tableName, elements)
 	if script == "" {
 		return nil
 	}
-	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(ips), script)
+	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(elements), script)
 	_, err := m.run(ctx, script)
 	if err != nil {
 		// The policy allows these destinations but the kernel does not know it yet, so
 		// the chain's final rule drops them. Indistinguishable from a policy denial
 		// inside the sandbox, hence its own counter.
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
+		if m.opts.QuiesceOnApplyFailure && ApplyEffectOf(err) != ApplyUnchanged {
+			m.quiesced.Store(true)
+		}
 		return err
 	}
-	m.tracker.setDynamicIPs(ips)
+	for _, element := range elements {
+		m.tracker.dynamicIPs[element.Addr] = now.Add(element.TTL)
+	}
 	telemetry.RecordNftablesUpdate()
 	return nil
 }
@@ -323,6 +396,8 @@ func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 	}
 	m.tracker.clear()
 	m.domainPolicy = nil
+	m.domainLeasesDirty = false
+	m.staticStateUncertain = false
 	m.domains = make(map[string]*resolvedDomain)
 	m.setLastDropsLocked(EstablishedDrops{}, time.Time{})
 	return nil
@@ -366,6 +441,12 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr; flags interval; }\n", tableName, denyV6Set)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr; timeout %ds; }\n", tableName, dynAllowV4Set, dynSetTimeoutS)
 	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr; timeout %ds; }\n", tableName, dynAllowV6Set, dynSetTimeoutS)
+	for _, set := range []struct{ name, addressType string }{
+		{dynAllowPortV4Set, "ipv4_addr"}, {dynAllowPortV6Set, "ipv6_addr"},
+		{dynDenyPortV4Set, "ipv4_addr"}, {dynDenyPortV6Set, "ipv6_addr"},
+	} {
+		fmt.Fprintf(&b, "add set inet %s %s { type %s . inet_service; flags timeout; timeout %ds; }\n", tableName, set.name, set.addressType, dynSetTimeoutS)
+	}
 
 	if len(dohBlockV4) > 0 {
 		fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr; flags interval; }\n", tableName, dohBlockV4Set)
@@ -416,11 +497,16 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// new-connection path: an allowed domain that re-resolves to an explicitly
 	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
+	writeEstablishedDomainDenies(&b, drops.DomainPortDenies)
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) is not pinned by a stale drop from a prior apply; the
 	// dyn sets are recreated empty on every full apply.
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
+	if !drops.Empty() {
+		fmt.Fprintf(&b, "add rule inet %s %s ip daddr . tcp dport @%s ct state established,related accept\n", tableName, chainName, dynAllowPortV4Set)
+		fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr . tcp dport @%s ct state established,related accept\n", tableName, chainName, dynAllowPortV6Set)
+	}
 	// Then still-allowed destinations (keeps and the static allow sets), then
 	// removed allows, then the blanket verdict.
 	writeEstablishedTargets(&b, drops.KeepAddrs, drops.KeepPrefixes, drops.KeepPorts, "accept")
@@ -453,9 +539,13 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// Port-scoped deny before every allow; port-scoped allow after the
 	// plain deny set, before the dynamic/plain allow sets.
 	writePortScopedRules(&b, portDeny, "drop")
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr . tcp dport @%s drop\n", tableName, chainName, dynDenyPortV4Set)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr . tcp dport @%s drop\n", tableName, chainName, dynDenyPortV6Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s drop\n", tableName, chainName, denyV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s drop\n", tableName, chainName, denyV6Set)
 	writePortScopedRules(&b, portAllow, "accept")
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr . tcp dport @%s accept\n", tableName, chainName, dynAllowPortV4Set)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr . tcp dport @%s accept\n", tableName, chainName, dynAllowPortV6Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, dynAllowV6Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
@@ -628,4 +718,27 @@ func RemoveDeleteTableLine(script, table string) string {
 		filtered = append(filtered, l)
 	}
 	return strings.Join(filtered, "\n")
+}
+
+// Scope the opt-in to its endpoint snapshot, but let the live DNS lease bound
+// every verdict. A stale carried target cannot stall a new established flow.
+func writeEstablishedDomainDenies(b *strings.Builder, targets []EstablishedPortDrop) {
+	for _, target := range targets {
+		addr := target.Addr.Unmap()
+		if !addr.IsValid() || len(target.Ports) == 0 {
+			continue
+		}
+		daddr, set := "ip daddr", dynDenyPortV4Set
+		if addr.Is6() {
+			daddr, set = "ip6 daddr", dynDenyPortV6Set
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { ", tableName, chainName, daddr, addr)
+		for i, port := range target.Ports {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprintf(b, "%d", port)
+		}
+		fmt.Fprintf(b, " } %s . tcp dport @%s ct state established,related drop\n", daddr, set)
+	}
 }

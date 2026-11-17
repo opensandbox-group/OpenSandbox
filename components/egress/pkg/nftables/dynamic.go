@@ -52,7 +52,10 @@ const (
 )
 
 type resolvedDomain struct {
-	addresses    map[netip.Addr]struct{}
+	addresses map[netip.Addr]struct{}
+	// Absolute source deadlines survive policy changes without re-clamping TTLs.
+	expires      map[netip.Addr]time.Time
+	activity     map[TCPEndpoint]time.Time
 	lastObserved time.Time
 	lastAttempt  time.Time
 	failures     int
@@ -66,6 +69,9 @@ func (e *resolvedDomain) nextExpiry(tracker *connectionTracker) time.Time {
 	var earliest time.Time
 	for address := range e.addresses {
 		expiresAt := tracker.dynamicIPs[address]
+		if expiresAt.IsZero() {
+			expiresAt = e.expires[address]
+		}
 		if earliest.IsZero() || expiresAt.Before(earliest) {
 			earliest = expiresAt
 		}
@@ -80,42 +86,48 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	if m.quiesced.Load() {
 		return ErrQuiesced
 	}
+	if m.staticStateUncertain {
+		return &ApplyError{Effect: ApplyUnchanged, Err: errStaticStateUncertain}
+	}
 	if m.domainPolicy == nil {
 		return fmt.Errorf("no nftables policy applied; dropping resolved domain %q", domain)
 	}
-	if domain == "" || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
+	permissions := m.domainPolicy.DomainPermissions(domain)
+	if domain == "" || !permissions.Allowed {
 		return fmt.Errorf("resolved domain %q is no longer allowed", domain)
 	}
-	if err := m.addResolvedIPsLocked(ctx, ips); err != nil {
+	if m.domainPolicy.HasDomainPorts() {
+		return m.addScopedDomainLocked(ctx, domain, ips)
+	}
+	if len(ips) == 0 {
+		return nil
+	}
+	now := m.tracker.now()
+	entry := cloneDomain(m.domains[domain])
+	if entry == nil {
+		entry = &resolvedDomain{}
+	}
+	if err := mergeDomainAddresses(entry, domain, ips, now); err != nil {
 		return err
 	}
-	if m.domainPolicy.DefaultAction == policy.ActionAllow || len(ips) == 0 {
-		return nil
-	}
-	entry := &resolvedDomain{addresses: make(map[netip.Addr]struct{}), lastObserved: m.tracker.now()}
+	deadlines := make(map[netip.Addr]time.Time, min(len(ips), maxDomainAddresses))
 	for _, ip := range ips {
-		if ip.Addr.IsValid() && len(entry.addresses) < maxDomainAddresses {
-			entry.addresses[ip.Addr.Unmap()] = struct{}{}
+		if addr := ip.Addr.Unmap(); addr.IsValid() {
+			deadlines[addr] = entry.expires[addr]
 		}
 	}
-	if len(entry.addresses) == 0 {
+	if len(deadlines) == 0 {
 		return nil
 	}
-	if previous := m.domains[domain]; previous != nil {
-		entry.lastAttempt = previous.lastAttempt
-		for address := range previous.addresses {
-			if len(entry.addresses) < maxDomainAddresses {
-				entry.addresses[address] = struct{}{}
-			}
-		}
-	} else if len(m.domains) >= maxResolvedDomains {
-		var oldest string
-		for candidate, tracked := range m.domains {
-			if oldest == "" || tracked.lastObserved.Before(m.domains[oldest].lastObserved) {
-				oldest = candidate
-			}
-		}
-		delete(m.domains, oldest)
+	expired, err := m.domainCapacityVictimLocked(domain, now)
+	if err != nil {
+		return err
+	}
+	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now); err != nil {
+		return err
+	}
+	if expired != "" {
+		delete(m.domains, expired)
 	}
 	m.domains[domain] = entry
 	return nil
@@ -165,14 +177,21 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 		m.mu.Unlock()
 		return
 	}
+	if m.domainPolicy != nil && m.domainPolicy.DefaultAction == policy.ActionAllow && !m.domainPolicy.HasDomainPorts() {
+		m.mu.Unlock()
+		return
+	}
 	now := m.tracker.now()
 	due := now.Add(domainRefreshLead)
 	candidates := make([]candidate, 0, len(m.domains))
 	for domain, entry := range m.domains {
+		if m.domainPolicy != nil && !m.domainPolicy.DomainPermissions(domain).Allowed {
+			continue
+		}
 		// Only query domains whose earliest observed-address lease expires
 		// within the lead window (or has already lapsed), unless a previous
 		// failure put the domain on backoff.
-		if now.Before(entry.retryAt) || entry.nextExpiry(m.tracker).After(due) {
+		if len(entry.addresses) == 0 || now.Before(entry.retryAt) || entry.nextExpiry(m.tracker).After(due) {
 			continue
 		}
 		candidates = append(candidates, candidate{domain, entry, entry.lastAttempt})
@@ -258,34 +277,68 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *resolvedDomain, ips []ResolvedIP) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.quiesced.Load() || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
+	if m.quiesced.Load() || m.staticStateUncertain || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
 		return
 	}
-	entry.failures = 0
-	entry.retryAt = time.Time{}
-	var confirmed []ResolvedIP
+	if m.domainPolicy.HasDomainPorts() {
+		confirmed := make([]ResolvedIP, 0, len(ips))
+		for _, ip := range ips {
+			if _, observed := entry.addresses[ip.Addr.Unmap()]; observed {
+				confirmed = append(confirmed, ip)
+			}
+		}
+		if err := m.addScopedDomainLocked(ctx, domain, confirmed); err != nil {
+			log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)
+			return
+		}
+		refreshed := m.domains[domain]
+		addresses := make(map[netip.Addr]struct{}, len(confirmed))
+		for _, ip := range confirmed {
+			addresses[ip.Addr.Unmap()] = struct{}{}
+		}
+		refreshed.addresses = addresses
+		return
+	}
+	deadlines := make(map[netip.Addr]time.Time)
+	sourceDeadlines := make(map[netip.Addr]time.Time)
 	addresses := make(map[netip.Addr]struct{})
 	now := m.tracker.now()
 	for _, ip := range ips {
 		address := ip.Addr.Unmap()
 		if _, observed := entry.addresses[address]; observed {
-			if !m.tracker.dynamicIPs[address].After(now.Add(ClampTTL(ip.TTL))) {
-				confirmed = append(confirmed, ip)
+			expiry := now.Add(ClampTTL(ip.TTL))
+			if expiry.After(sourceDeadlines[address]) {
+				sourceDeadlines[address] = expiry
+			}
+			if !m.tracker.dynamicIPs[address].After(expiry) {
+				deadlines[address] = expiry
 			}
 			addresses[address] = struct{}{}
 		}
 	}
 	if len(addresses) == 0 {
-		delete(m.domains, domain)
+		// Stop revalidation, but retain the bounded provenance while a
+		// learned lease or conntrack flow can still need scoped tightening.
+		entry.addresses = nil
 		return
 	}
 	updateCtx, cancel := context.WithTimeout(ctx, domainLookupTimeout)
 	defer cancel()
-	if err := m.addResolvedIPsLocked(updateCtx, confirmed); err != nil {
+	if err := m.addResolvedDeadlinesLocked(updateCtx, deadlines, now); err != nil {
 		log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)
 		return
 	}
 	entry.addresses = addresses
+	if entry.expires == nil {
+		entry.expires = make(map[netip.Addr]time.Time)
+	}
+	for addr, expiry := range sourceDeadlines {
+		if expiry.After(entry.expires[addr]) {
+			entry.expires[addr] = expiry
+		}
+	}
+	entry.failures = 0
+	entry.retryAt = time.Time{}
 }
 
 const (
@@ -303,19 +356,6 @@ const (
 type ResolvedIP struct {
 	Addr netip.Addr
 	TTL  time.Duration
-}
-
-// buildAddResolvedIPsScript returns a nft script fragment that
-// adds resolved IPs to dyn_allow_v4/v6 with timeout.
-func buildAddResolvedIPsScript(table string, ips []ResolvedIP) string {
-	elements := make([]ResolvedIP, 0, len(ips))
-	for _, r := range ips {
-		elements = append(elements, ResolvedIP{
-			Addr: r.Addr,
-			TTL:  ClampTTL(r.TTL),
-		})
-	}
-	return buildResolvedIPElementsScript(table, elements)
 }
 
 // ClampTTL turns a DNS TTL into the lifetime of a DNS-learned set element:
@@ -365,5 +405,9 @@ func buildResolvedIPElementsScript(table string, elements []ResolvedIP) string {
 func WriteTimedElement(b *strings.Builder, table, set string, addr netip.Addr, ttl time.Duration) {
 	fmt.Fprintf(b, "add element inet %s %s { %s }\n", table, set, addr)
 	fmt.Fprintf(b, "delete element inet %s %s { %s }\n", table, set, addr)
-	fmt.Fprintf(b, "add element inet %s %s { %s timeout %ds }\n", table, set, addr, int(ttl/time.Second))
+	if ttl%time.Second == 0 {
+		fmt.Fprintf(b, "add element inet %s %s { %s timeout %ds }\n", table, set, addr, int(ttl/time.Second))
+	} else {
+		fmt.Fprintf(b, "add element inet %s %s { %s timeout %dms }\n", table, set, addr, max(1, int(ttl/time.Millisecond)))
+	}
 }

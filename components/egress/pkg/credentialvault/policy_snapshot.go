@@ -56,7 +56,11 @@ func (v *Store) FreezeForPolicy(pol *policy.NetworkPolicy) (*PolicySnapshot, err
 	}
 	for _, binding := range v.bindings {
 		for _, host := range binding.Match.Hosts {
-			if !pol.AllowsEntireHostSelector(host) {
+			allowed := pol.AllowsEntireHostSelector(host)
+			if pol.HasDomainPorts() {
+				allowed = explicitAllowCoversHost(pol, host, binding.Match.Schemes)
+			}
+			if !allowed {
 				return nil, fmt.Errorf("binding %q host %q is not entirely allowed by egress policy: %w", binding.Name, host, ErrInvalidCandidate)
 			}
 		}

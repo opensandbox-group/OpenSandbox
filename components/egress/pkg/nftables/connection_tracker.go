@@ -27,10 +27,13 @@ import (
 )
 
 type connectionTracker struct {
-	dynamicIPs        map[netip.Addr]time.Time
-	previousActiveIPs map[netip.Addr]struct{}
-	listConnections   func(context.Context) ([]tcpConnection, error)
-	now               func() time.Time
+	dynamicIPs              map[netip.Addr]time.Time
+	previousActiveIPs       map[netip.Addr]struct{}
+	dynamicEndpoints        map[TCPEndpoint]time.Time
+	dynamicDenies           map[TCPEndpoint]time.Time
+	previousActiveEndpoints map[TCPEndpoint]struct{}
+	listConnections         func(context.Context) ([]tcpConnection, error)
+	now                     func() time.Time
 }
 
 type refreshPlan struct {
@@ -41,20 +44,13 @@ type refreshPlan struct {
 
 func newConnectionTracker() *connectionTracker {
 	return &connectionTracker{
-		dynamicIPs:        make(map[netip.Addr]time.Time),
-		previousActiveIPs: make(map[netip.Addr]struct{}),
-		listConnections:   listTCPConnections,
-		now:               time.Now,
-	}
-}
-
-func (t *connectionTracker) setDynamicIPs(ips []ResolvedIP) {
-	now := t.now()
-	for _, ip := range ips {
-		addr := ip.Addr.Unmap()
-		if addr.IsValid() {
-			t.dynamicIPs[addr] = now.Add(ClampTTL(ip.TTL))
-		}
+		dynamicIPs:              make(map[netip.Addr]time.Time),
+		previousActiveIPs:       make(map[netip.Addr]struct{}),
+		dynamicEndpoints:        make(map[TCPEndpoint]time.Time),
+		dynamicDenies:           make(map[TCPEndpoint]time.Time),
+		previousActiveEndpoints: make(map[TCPEndpoint]struct{}),
+		listConnections:         listTCPConnections,
+		now:                     time.Now,
 	}
 }
 
@@ -106,6 +102,12 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 	if manager.quiesced.Load() {
 		return ErrQuiesced
 	}
+	if manager.staticStateUncertain {
+		return &ApplyError{Effect: ApplyUnchanged, Err: errStaticStateUncertain}
+	}
+	if manager.domainPolicy != nil && manager.domainPolicy.HasDomainPorts() {
+		return manager.refreshScopedConnectionsLocked(ctx, connections)
+	}
 	plan := t.refreshCandidates(connections)
 	if len(plan.addresses) > 0 {
 		script := buildRefreshResolvedIPsScript(tableName, plan.addresses)
@@ -115,6 +117,16 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 		telemetry.RecordNftablesUpdate()
 	}
 	t.recordRefresh(plan)
+	for _, entry := range manager.domains {
+		for _, addr := range plan.addresses {
+			if _, observed := entry.expires[addr]; observed {
+				if entry.activity == nil {
+					entry.activity = make(map[TCPEndpoint]time.Time)
+				}
+				entry.activity[TCPEndpoint{Addr: addr}] = plan.at.Add(dynSetTimeoutS * time.Second)
+			}
+		}
+	}
 	return nil
 }
 
@@ -124,7 +136,7 @@ func (t *connectionTracker) clearPreviousActiveIPs(manager *Manager) {
 	if manager.quiesced.Load() {
 		return
 	}
-	t.previousActiveIPs = make(map[netip.Addr]struct{})
+	t.clearPreviousActiveIPsLocked()
 }
 
 func (t *connectionTracker) refreshCandidates(connections []tcpConnection) refreshPlan {
@@ -178,10 +190,13 @@ func (t *connectionTracker) recordRefresh(plan refreshPlan) {
 
 func (t *connectionTracker) clearPreviousActiveIPsLocked() {
 	t.previousActiveIPs = make(map[netip.Addr]struct{})
+	t.previousActiveEndpoints = make(map[TCPEndpoint]struct{})
 }
 
 func (t *connectionTracker) clear() {
 	t.dynamicIPs = make(map[netip.Addr]time.Time)
+	t.dynamicEndpoints = make(map[TCPEndpoint]time.Time)
+	t.dynamicDenies = make(map[TCPEndpoint]time.Time)
 	t.clearPreviousActiveIPsLocked()
 }
 

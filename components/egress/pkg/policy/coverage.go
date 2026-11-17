@@ -15,6 +15,7 @@
 package policy
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/alibaba/opensandbox/egress/pkg/hostselector"
@@ -35,11 +36,11 @@ func (p *NetworkPolicy) AllowsEntireHostSelector(host string) bool {
 		return false
 	}
 	if !strings.HasPrefix(host, "*.") {
-		return p.Evaluate(host) == ActionAllow
+		return p.evaluateUnscopedDomain(host) == ActionAllow
 	}
 	var allowed []string
 	for _, rule := range p.Egress {
-		if rule.targetKind != targetDomain {
+		if rule.targetKind != targetDomain || len(rule.Ports) != 0 {
 			continue
 		}
 		// Match compileDomainIndex exactly. In particular, a trailing root dot in
@@ -68,6 +69,49 @@ func (p *NetworkPolicy) AllowsEntireHostSelector(host string) bool {
 		}
 	}
 	return p.DefaultAction == ActionAllow
+}
+
+// AllowsEntireHostSelectorPort proves coverage at one TCP port without treating
+// permission to resolve a name as permission to use every credential scheme.
+func (p *NetworkPolicy) AllowsEntireHostSelectorPort(host string, port int) bool {
+	if p == nil || port < 1 || port > 65535 {
+		return false
+	}
+	if _, err := hostselector.ParseCanonical(host); err != nil {
+		return false
+	}
+	if !p.HasDomainPorts() {
+		return p.AllowsEntireHostSelector(host)
+	}
+	if !strings.HasPrefix(host, "*.") {
+		permission := p.DomainPermissions(host)
+		return permission.Allowed && !slices.Contains(permission.DenyPorts, port) &&
+			(permission.Unrestricted || slices.Contains(permission.AllowPorts, port))
+	}
+	// A different fallback proves only that the legacy name gate does not
+	// reject any member; it grants no network permission by itself.
+	gate := *p
+	gate.DefaultAction = ActionAllow
+	if !gate.AllowsEntireHostSelector(host) {
+		return false
+	}
+	covered := p.AllowsEntireHostSelector(host)
+	for _, rule := range p.scopedDomainRules() {
+		if rule.targetKind != targetDomain || !slices.Contains(rule.Ports, port) {
+			continue
+		}
+		target := strings.ToLower(strings.TrimSpace(rule.Target))
+		if _, overlaps := selectorIntersection(host, target); !overlaps {
+			continue
+		}
+		if rule.Action == ActionDeny {
+			return false
+		}
+		if selectorContains(target, host) {
+			covered = true
+		}
+	}
+	return covered
 }
 
 // Domain selector sets are nested or disjoint. These helpers intentionally

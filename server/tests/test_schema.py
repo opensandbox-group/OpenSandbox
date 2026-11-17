@@ -989,18 +989,12 @@ class TestNetworkRule:
         rule = NetworkRule.model_validate({"action": "allow", "target": "2001:db8::1", "ports": [443]})
         assert rule.target == "2001:db8::1"
 
-    def test_rejects_domain_target_with_ports(self):
-        """Regression: the sidecar (policy.go normalizePolicy) rejects
-        domain+ports, but the server validator did not mirror it, so an
-        invalid request would pass the API and only fail once Docker/K8s
-        started the egress sidecar with it — surfacing as a sandbox creation
-        failure instead of a clean 422 from the create-sandbox request."""
-        with pytest.raises(ValidationError):
-            NetworkRule.model_validate({"action": "allow", "target": "example.com", "ports": [443]})
-
-    def test_rejects_wildcard_domain_target_with_ports(self):
-        with pytest.raises(ValidationError):
-            NetworkRule.model_validate({"action": "allow", "target": "*.example.com", "ports": [443]})
+    @pytest.mark.parametrize("target", ["example.com", "*.example.com"])
+    @pytest.mark.parametrize("action,ports", [("allow", [443]), ("deny", [80])])
+    def test_domain_targets_with_ports_round_trip(self, target, action, ports):
+        data = {"action": action, "target": target, "ports": ports}
+        rule = NetworkRule.model_validate(data)
+        assert rule.model_dump(by_alias=True, exclude_none=True) == data
 
     def test_rejects_out_of_range_ports(self):
         for bad_port in (0, -1, 65536):
@@ -1020,13 +1014,9 @@ class TestNetworkRule:
         with pytest.raises(ValidationError):
             NetworkRule.model_validate({"action": "allow", "ports": []})
 
-    def test_rejects_netmask_cidr_with_ports(self):
-        """Regression: `10.0.0.0/255.0.0.0` parses via ipaddress.ip_network but
-        Go's netip.ParsePrefix rejects netmask notation, so the sidecar would
-        classify it as a domain target and fail startup with a confusing
-        "ports are not supported for domain targets" error."""
-        with pytest.raises(ValidationError):
-            NetworkRule.model_validate({"action": "allow", "target": "10.0.0.0/255.0.0.0", "ports": [22]})
+    def test_netmask_cidr_with_ports_preserved(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "10.0.0.0/255.0.0.0", "ports": [22]})
+        assert rule.target == "10.0.0.0/255.0.0.0"
 
     def test_netmask_cidr_without_ports_still_accepted(self):
         """Netmask notation is not port-scoped: it reaches the sidecar as a
@@ -1036,10 +1026,7 @@ class TestNetworkRule:
         assert rule.target == "10.0.0.0/255.0.0.0"
 
     def test_target_is_trimmed_like_the_sidecar(self):
-        """policy.go trims the target before classifying; the server must too,
-        or " 10.0.0.5" would be classified as a domain and rejected with a
-        confusing domain+ports error. The trimmed value is what gets stored
-        and serialized."""
+        """Targets retain the sidecar's existing whitespace normalization."""
         rule = NetworkRule.model_validate({"action": "allow", "target": "  10.0.0.5  ", "ports": [22]})
         assert rule.target == "10.0.0.5"
 
@@ -1092,11 +1079,9 @@ class TestNetworkRuleReadModifyWriteAndClassification:
         with pytest.raises(ValidationError):
             NetworkRule.model_validate({"action": "allow", "target": ""})
 
-    def test_zoned_ipv6_prefix_with_ports_rejected(self):
-        """netip.ParsePrefix rejects scoped prefixes; the sidecar would see a
-        domain and fail at provisioning with a confusing error."""
-        with pytest.raises(ValidationError):
-            NetworkRule.model_validate({"action": "allow", "target": "fe80::1%eth0/64", "ports": [22]})
+    def test_zoned_ipv6_prefix_with_ports_preserved(self):
+        rule = NetworkRule.model_validate({"action": "allow", "target": "fe80::1%eth0/64", "ports": [22]})
+        assert rule.target == "fe80::1%eth0/64"
 
     def test_zoned_ipv6_address_with_ports_accepted(self):
         """Bare zoned addresses parse in both netip.ParseAddr and ipaddress."""

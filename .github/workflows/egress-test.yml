@@ -93,6 +93,15 @@ jobs:
           sudo apt-get install -y nftables iproute2 util-linux
           bash scripts/ci-nft-go-test.sh ./pkg/nftables \
             TestDynamicElementRenewal \
+            TestNftDomainPortsKernelVerdictsOverlapAndTightening \
+            TestNftDomainPortsKernelEstablishedTightening \
+            TestNftDomainPortsKernelDenyExpiryAllowsNewEstablishedFlow \
+            TestNftDomainPortsKernelDisjointAddressOverflowTightening \
+            TestNftDomainPortsKernelDomainCapacityTightening \
+            TestNftTimedPortElementKernelRenewalIsAtomic \
+            TestNftTimedChangesKernelExpiredRemoval \
+            TestNftDomainPortsKernelUnknownDynamicRecovery \
+            TestNftDomainPortsKernelActivityRecoveryAfterDeadline \
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback \

@@ -398,6 +398,7 @@ class FastSandboxService(SandboxService, ExtensionService):
 
     def _create_sandbox_sync(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         if request.network_policy is not None:
+            self._reject_domain_port_rules(request.network_policy.egress)
             self._reject_network_policy_with_upstream_proxy()
         # Validate the opt-in before any side effect.
         idle_policy_annotation = self._validated_idle_policy_annotation(request)
@@ -808,11 +809,13 @@ class FastSandboxService(SandboxService, ExtensionService):
         return policy_relay.relay_get(self, sandbox_id)
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
+        self._reject_domain_port_rules(policy.egress)
         self._reject_network_policy_with_upstream_proxy()
         return policy_relay.relay_put(self, sandbox_id, normalized_policy(policy))
 
     def patch_network_policy(self, sandbox_id: str, rules: list[NetworkRule]) -> dict:
         """Merge rules into the recorded policy (sidecar PATCH semantics)."""
+        self._reject_domain_port_rules(rules)
         self._reject_network_policy_with_upstream_proxy()
         return policy_relay.relay_patch(self, sandbox_id, rules)
 
@@ -838,6 +841,20 @@ class FastSandboxService(SandboxService, ExtensionService):
         return None
 
     # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _reject_domain_port_rules(rules: list[NetworkRule]) -> None:
+        if any(rule.is_domain_port_scoped() for rule in rules):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "Domain targets with ports are not yet supported by Fast Sandbox; "
+                        "use classic dns+nft egress without an upstream proxy."
+                    ),
+                },
+            )
 
     def _reject_network_policy_with_upstream_proxy(self) -> None:
         """The shared-Fastlet egress cannot chain through an upstream proxy, so

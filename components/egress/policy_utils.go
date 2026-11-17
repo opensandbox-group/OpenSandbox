@@ -16,6 +16,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -30,6 +31,30 @@ import (
 )
 
 const maxPolicyBodyBytes = 1 << 20
+
+// Domain+port rules need DNS-learned, port-scoped packet enforcement. Other
+// policy shapes retain their existing DNS-only and chained-proxy behavior.
+func validateDomainPortPolicy(pol *policy.NetworkPolicy, mode string, hasNft bool) error {
+	if pol == nil || !pol.HasDomainPorts() {
+		return nil
+	}
+	if !hasNft || !constants.ModeUsesNft(mode) {
+		return fmt.Errorf("domain+ports rules require dns+nft enforcement")
+	}
+	if strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" {
+		return fmt.Errorf("domain+ports rules are incompatible with a chained upstream proxy")
+	}
+	return nil
+}
+
+// Fast Sandbox keeps legacy static-IP and port-only policies, but its current
+// dataplane cannot enforce DNS-derived TCP endpoints yet.
+func validateFastSandboxDomainPortPolicy(pol *policy.NetworkPolicy) error {
+	if pol != nil && pol.HasDomainPorts() {
+		return fmt.Errorf("domain+ports rules are not yet supported by Fast Sandbox; use classic dns+nft without an upstream proxy")
+	}
+	return nil
+}
 
 func readPolicyRequestBody(r *http.Request) (string, error) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxPolicyBodyBytes))
@@ -181,7 +206,6 @@ func egressRulesSummary(egress []policy.EgressRule) []map[string]string {
 	}
 	return out
 }
-
 func logEgressLoaded(pol *policy.NetworkPolicy) {
 	if pol == nil {
 		pol = policy.DefaultDenyPolicy()

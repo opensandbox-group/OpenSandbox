@@ -80,6 +80,9 @@ func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) err
 	if m.opts.UpstreamProxy == nil {
 		return nil
 	}
+	if m.staticStateUncertain {
+		return &ApplyError{Effect: ApplyUnchanged, Err: errStaticStateUncertain}
+	}
 	var script strings.Builder
 	for _, r := range ips {
 		addr := r.Addr.Unmap()

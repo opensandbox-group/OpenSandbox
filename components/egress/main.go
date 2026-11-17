@@ -84,6 +84,18 @@ func main() {
 		return
 	}
 
+	initialRules, _, err := policy.LoadInitialPolicyDetailed(os.Getenv(constants.EnvEgressPolicyFile), constants.EnvEgressRules)
+	if err != nil {
+		log.Fatalf("failed to load initial egress policy: %v", err)
+	}
+	logEgressLoaded(initialRules)
+
+	mode := parseMode()
+	log.Infof("enforcement mode: %s", mode)
+	if err := validateDomainPortPolicy(initialRules, mode, constants.ModeUsesNft(mode)); err != nil {
+		log.Fatalf("unsupported initial egress policy: %v", err)
+	}
+
 	quarantineOwner, err := newRevisionQuarantine()
 	if err != nil {
 		log.Fatalf("experimental runtime containment: %v", err)
@@ -120,12 +132,6 @@ func main() {
 		}()
 	}
 
-	initialRules, _, err := policy.LoadInitialPolicyDetailed(os.Getenv(constants.EnvEgressPolicyFile), constants.EnvEgressRules)
-	if err != nil {
-		log.Fatalf("failed to load initial egress policy: %v", err)
-	}
-	logEgressLoaded(initialRules)
-
 	alwaysDeny, alwaysAllow, err := policy.LoadAlwaysRuleFiles()
 	if err != nil {
 		log.Fatalf("failed to load always allow/deny rule files: %v", err)
@@ -133,8 +139,6 @@ func main() {
 	alwaysAllow = withTelemetryAllow(alwaysAllow)
 
 	allowIPs := allowIps()
-	mode := parseMode()
-	log.Infof("enforcement mode: %s", mode)
 
 	// upstreamSpec was already validated at startup; it scopes the infra nft
 	// exception and lets DNS exempt the proxy hostname from sandbox policy

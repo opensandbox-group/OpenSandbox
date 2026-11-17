@@ -68,9 +68,8 @@ type NetworkPolicy struct {
 type EgressRule struct {
 	Action string `json:"action"`
 	Target string `json:"target"`
-	// Ports restricts the rule to TCP destination ports (1-65535); empty
-	// with an empty Target means all destinations. Domain targets with
-	// Ports are rejected by normalizePolicy.
+	// Ports restricts the rule to TCP destination ports (1-65535).
+	// Domain targets are enforced through DNS-learned endpoint leases.
 	Ports []int `json:"ports,omitempty"`
 	// PortRanges is the interval form of Ports, set only by the platform
 	// port floor (never serialized: the always overlay is re-read from file
@@ -99,25 +98,28 @@ func ParsePolicy(raw string) (*NetworkPolicy, error) {
 	return ensureDefaults(&p), nil
 }
 
-// Evaluate returns allow or deny for a query name (FQDN with or without trailing dot, lowercased).
+// Evaluate returns the DNS admission decision, not a whole-address grant.
 func (p *NetworkPolicy) Evaluate(domain string) string {
+	if !p.HasDomainPorts() {
+		return p.evaluateUnscopedDomain(domain)
+	}
+	if p.DomainPermissions(domain).Allowed {
+		return ActionAllow
+	}
+	return ActionDeny
+}
+
+func (p *NetworkPolicy) evaluateUnscopedDomain(domain string) string {
 	if p == nil {
 		return ActionDeny
 	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 
-	if p.domainIndex != nil {
-		if action, ok := p.domainIndex.match(domain); ok {
-			if action == "" {
-				return ActionDeny
-			}
-			return action
+	if action, ok := p.matchPortlessDomain(domain); ok {
+		if action == "" {
+			return ActionDeny
 		}
-	} else {
-		// Keep compatibility for policies built manually without ParsePolicy/ensureDefaults.
-		if action, ok := p.evaluateLinear(domain); ok {
-			return action
-		}
+		return action
 	}
 	if p.DefaultAction == "" {
 		return ActionDeny
@@ -127,7 +129,7 @@ func (p *NetworkPolicy) Evaluate(domain string) string {
 
 func (p *NetworkPolicy) evaluateLinear(domain string) (string, bool) {
 	for _, r := range p.Egress {
-		if r.targetKind != targetDomain {
+		if r.targetKind != targetDomain || len(r.Ports) != 0 {
 			continue
 		}
 		if r.matchesDomain(domain) {
@@ -194,9 +196,6 @@ func normalizePolicy(p *NetworkPolicy) error {
 			continue
 		}
 		r.targetKind = targetDomain
-		if len(r.Ports) > 0 {
-			return fmt.Errorf("egress target %q: ports are not supported for domain targets yet", r.Target)
-		}
 	}
 	return nil
 }
@@ -341,8 +340,7 @@ func (p *NetworkPolicy) PortScopedRules() (deny, allow []PortScopedRule) {
 		case targetPortOnly:
 			// rule.Target stays "": applies to all destinations.
 		default:
-			// Domain targets never carry ports; normalizePolicy rejects that
-			// combination before a policy reaches this point.
+			// Domain port rules are enforced by DNS-learned endpoint leases.
 			continue
 		}
 		if r.Action == ActionAllow {

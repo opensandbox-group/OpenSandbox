@@ -199,8 +199,9 @@ class NetworkRule(BaseModel):
         max_length=256,
         description=(
             "Restricts this rule to specific TCP destination ports (1-65535). Omitted target with "
-            "ports set applies to all destinations; a domain target with ports is rejected. TCP "
-            "only, max 256 ports per rule."
+            "ports set applies to all destinations; domain targets scope DNS-derived IPs to these "
+            "TCP ports, not UDP or strict hostname identity. Requires classic dns+nft without "
+            "an upstream proxy; Fast Sandbox temporarily rejects domain+ports. Max 256 ports per rule."
         ),
     )
 
@@ -232,9 +233,10 @@ class NetworkRule(BaseModel):
     def validate_target_or_ports(self) -> "NetworkRule":
         if self.target is None and self.ports is None:
             raise ValueError("NetworkRule requires target, ports, or both.")
-        if self.ports is not None and self.target is not None and not _is_ip_or_cidr(self.target):
-            raise ValueError("NetworkRule ports are not supported for domain targets yet.")
         return self
+
+    def is_domain_port_scoped(self) -> bool:
+        return bool(self.target and self.ports is not None and not _is_ip_or_cidr(self.target))
 
     model_config = ConfigDict(
         alias_generator=to_camel,
@@ -395,7 +397,6 @@ class BasicCredentialAuth(BaseModel):
         populate_by_name=True,
         extra="forbid",
     )
-
 
 class ApiKeyCredentialAuth(BaseModel):
     type: Literal["apiKey"]
@@ -1796,7 +1797,6 @@ class UpdatePoolRequest(BaseModel):
         ...,
         description="New capacity configuration for the pool.",
     )
-
     @model_validator(mode="after")
     def validate_capacity_spec(self) -> "UpdatePoolRequest":
         _check_buffer_bounds(self.capacity_spec)

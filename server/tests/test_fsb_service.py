@@ -1156,7 +1156,10 @@ def test_policy_invalid_ports_rejected_before_write(persisted_fsb, method, rule)
     else:
         response = client.request(method, url, json=[rule] if method == "PATCH" else {"egress": [rule]})
 
-    assert response.status_code == 422
+    domain_scoped = rule.get("target") in ("example.com", "*.example.com")
+    assert response.status_code == (400 if domain_scoped else 422)
+    if domain_scoped:
+        assert "not yet supported by Fast Sandbox" in response.json()["detail"]["message"]
     assert fake.last_create is create_before
     assert fake.last_relay is None
     assert fake.last_update is None

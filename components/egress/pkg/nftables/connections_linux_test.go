@@ -38,7 +38,7 @@ func TestReadTCPConnections(t *testing.T) {
 
 	connections, err := readTCPConnections(context.Background(), path, false)
 	require.NoError(t, err)
-	require.Equal(t, []tcpConnection{{remote: mustAddr("1.1.1.1"), state: "ESTABLISHED"}}, connections)
+	require.Equal(t, []tcpConnection{{remote: mustAddr("1.1.1.1"), remotePort: 443, state: "ESTABLISHED"}}, connections)
 }
 
 func TestDecodeProcAddressIPv6(t *testing.T) {

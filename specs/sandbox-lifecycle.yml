@@ -2683,9 +2683,16 @@ components:
               across all IPv4/IPv6 destinations.
             - `target` is an IP or CIDR, `ports` set: the rule applies to that
               destination only on these ports.
-            - `target` is a domain: `ports` is rejected with a validation
-              error. Domain rules are evaluated at the DNS layer, which has no
-              port dimension; combining them is not supported yet.
+            - `target` is a domain or wildcard, `ports` set: in classic `dns+nft`,
+              DNS-derived IP leases are scoped to these TCP destination ports.
+              Scoped allows permit DNS under default deny; scoped denies win at
+              L4 without denying an otherwise allowed hostname's DNS lookup.
+              Portless domain rules retain ordered first-match DNS behavior.
+              Leases are not strict hostname identity: shared IPs share grants,
+              and default-allow denies cover only learned addresses while leased.
+              DNS-only and chained upstream-proxy deployments reject this shape.
+              Fast Sandbox temporarily rejects domain+ports before applying policy;
+              its existing static IP/CIDR and port-only rules remain supported.
 
             TCP only for now; UDP port scoping is not supported.
 
@@ -2693,8 +2700,13 @@ components:
             lookups for targetless allow rules (it matches domain rules
             only), so this shape serves direct-IP clients; hostname access
             requires explicit domain rules or stable IPs.
+          example: [443]
       required: [action]
       additionalProperties: false
+      example:
+        action: allow
+        target: "*.example.com"
+        ports: [443]
 
     CredentialVaultCreateRequest:
       type: object

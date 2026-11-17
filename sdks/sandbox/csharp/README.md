@@ -496,10 +496,9 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 
 // A rule can scope by TCP destination ports instead of a target — Ports
 // (each 1-65535, at most 256 per rule, no duplicates) may replace Target
-// entirely, and combining a domain Target with Ports is rejected. Docker,
-// Kubernetes, and Fast Sandbox backends all enforce Ports rules; a targetless
-// Ports rule matches direct IP connections only, so under a deny-default
-// policy hostname traffic still needs a domain rule alongside it.
+// entirely, or combine with IP/CIDR targets. Classic dns+nft also supports
+// DNS-learned domain-plus-port scopes; Fast Sandbox rejects those until its
+// separate delivery. Targetless allows do not independently admit DNS.
 var byPorts = await Sandbox.CreateAsync(new SandboxCreateOptions
 {
     ConnectionConfig = config,

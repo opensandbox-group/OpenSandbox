@@ -793,3 +793,60 @@ class TestEgressRuntimeCompatibility:
                 self._secure_runtime("gvisor"),
                 effective_runtime_class="kata-qemu",
             )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "example.com",
+        "*.example.com",
+        "10.0.0.0/255.0.0.0",
+        "fe80::1%eth0/64",
+        "  example.com  ",
+        "  fe80::1%eth0/64  ",
+    ],
+)
+@pytest.mark.parametrize("mode,chained", [("dns", False), ("dns+nft", True)])
+def test_domain_ports_require_classic_nft_without_upstream(target, mode, chained):
+    from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
+    from opensandbox_server.config import EgressConfig, EgressUpstreamProxyConfig
+    from opensandbox_server.services.validators import ensure_egress_configured
+
+    policy = NetworkPolicy(egress=[NetworkRule(action="allow", target=target, ports=[443])])
+    before = policy.model_dump()
+    config = EgressConfig(
+        image="egress:test",
+        mode=mode,
+        upstream_proxy=EgressUpstreamProxyConfig(url="http://proxy.local:3128") if chained else None,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_egress_configured(policy, config)
+    assert exc_info.value.status_code == 400
+    assert "Domain targets with ports require" in exc_info.value.detail["message"]
+    assert policy.model_dump() == before
+
+
+@pytest.mark.parametrize(
+    "target,ports,mode",
+    [
+        ("example.com", [443], "dns+nft"),
+        ("*.example.com", [443], "dns+nft"),
+        ("example.com", None, "dns"),
+        ("10.0.0.5", [443], "dns"),
+        ("2001:db8::/64", [443], "dns"),
+        ("10.0.0.0/8", [443], "dns"),
+        ("fe80::1%eth0", [443], "dns"),
+        ("  10.0.0.5  ", [443], "dns"),
+        ("   ", [443], "dns"),
+        (None, [443], "dns"),
+    ],
+)
+def test_classic_egress_capability_validation_preserves_supported_policies(target, ports, mode):
+    from opensandbox_server.api.schema import NetworkPolicy, NetworkRule
+    from opensandbox_server.config import EgressConfig
+    from opensandbox_server.services.validators import ensure_egress_configured
+
+    policy = NetworkPolicy(egress=[NetworkRule(action="allow", target=target, ports=ports)])
+    before = policy.model_dump()
+    ensure_egress_configured(policy, EgressConfig(image="egress:test", mode=mode))
+    assert policy.model_dump() == before

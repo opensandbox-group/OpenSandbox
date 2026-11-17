@@ -950,3 +950,72 @@ func mustStatusBodyJSON(t *testing.T, srv *fastSandboxPolicyServer) string {
 	require.Equal(t, http.StatusOK, rec.Code)
 	return rec.Body.String()
 }
+
+const unsupportedFastDomainPorts = `{"defaultAction":"deny","egress":[{"action":"allow","target":"api.example.com","ports":[443]}]}`
+
+func TestFastDomainPortsBindingRejectsBeforeEffects(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+	subj := subject.FromSandboxUID(policyTestUID)
+	rec := doAction(t, h.srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(unsupportedFastDomainPorts)))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "not yet supported by Fast Sandbox")
+	_, registered := h.reg.Fence(subj)
+	require.False(t, registered)
+	require.Empty(t, h.nft.denyFirst)
+	require.Zero(t, h.nft.appliedCount())
+	require.Empty(t, h.files, "no policy or vault persistence before rejection")
+	require.NotContains(t, h.srv.policies, subj)
+}
+
+func TestFastDomainPortsRelayRejectsBeforeEffects(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+	subj := h.readySubject(t, policyTestUID, vaultTestIP)
+	beforePolicy := h.reg.EffectivePolicy(subj)
+	beforeWrites := h.nft.appliedCount()
+	beforeFiles := len(h.files)
+	rec := doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(unsupportedFastDomainPorts, 1, false, true), "")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "not yet supported by Fast Sandbox")
+	require.Equal(t, beforeWrites, h.nft.appliedCount())
+	require.Equal(t, beforeFiles, len(h.files))
+	require.Equal(t, beforePolicy, h.reg.EffectivePolicy(subj))
+	rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+	revision, _ := mustPolicyRevision(t, rec)
+	require.Equal(t, int64(1), revision)
+}
+
+func TestFastDomainPortsImportRejectsBeforeEffects(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+	bundlePath := filepath.Join(t.TempDir(), "bundle", "policy.json")
+	original := h.seedPolicyBundle(t, bundlePath, 5, unsupportedFastDomainPorts)
+	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "not yet supported by Fast Sandbox")
+	require.Empty(t, h.files)
+	require.Empty(t, h.nft.denyFirst)
+	require.Zero(t, h.nft.appliedCount())
+	_, registered := h.reg.Fence(subject.FromSandboxUID(policyTestUID))
+	require.False(t, registered)
+	carried, err := os.ReadFile(bundlePath)
+	require.NoError(t, err)
+	require.Equal(t, original, carried)
+}
+
+func TestFastDomainPortsDurableReloadFailsClosedWithoutDiscardingFile(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+	h.seedPolicyFile(t, policyTestUID, testFenceR, testFenceA, 5, unsupportedFastDomainPorts)
+	original := append([]byte(nil), h.fileFor(policyTestUID).data...)
+	rec := doAction(t, h.srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(policyAllow())))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	subj := subject.FromSandboxUID(policyTestUID)
+	require.Equal(t, policy.ActionDeny, h.reg.EffectivePolicy(subj).Evaluate("api.example.com"))
+	require.Equal(t, original, h.fileFor(policyTestUID).data)
+	require.Zero(t, h.nft.appliedCount())
+	rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+	revision, doc := mustPolicyRevision(t, rec)
+	require.Zero(t, revision, "the unsupported durable revision must not become the live image")
+	var served policy.NetworkPolicy
+	require.NoError(t, json.Unmarshal(doc.Policy, &served))
+	require.Equal(t, policy.ActionDeny, served.DefaultAction)
+	require.Empty(t, served.Egress)
+}

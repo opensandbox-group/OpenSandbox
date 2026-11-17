@@ -1150,3 +1150,78 @@ func TestHandleDelete_PortOnlyRulesViaEmptyTarget(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Result().StatusCode)
 	require.Len(t, proxy.updated.Egress, 0, "port-only rules go with the empty entry, domain rule with its target")
 }
+
+func TestDomainPortPolicyCapabilities(t *testing.T) {
+	scoped, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"*.example.com","ports":[443]}]}`)
+	require.NoError(t, err)
+	legacy, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"},{"action":"deny","ports":[25]},{"action":"allow","target":"198.51.100.1","ports":[443]}]}`)
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name, mode, upstream string
+		nft                  bool
+		rejected             bool
+	}{
+		{name: "dns_only", mode: constants.PolicyDnsOnly, rejected: true},
+		{name: "missing_nft", mode: constants.PolicyDnsNft, rejected: true},
+		{name: "incorrect_mode", mode: constants.PolicyDnsOnly, nft: true, rejected: true},
+		{name: "chained", mode: constants.PolicyDnsNft, nft: true, upstream: "http://proxy.example:3128", rejected: true},
+		{name: "supported", mode: constants.PolicyDnsNft, nft: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(constants.EnvUpstreamProxy, tc.upstream)
+			err := validateDomainPortPolicy(scoped, tc.mode, tc.nft)
+			if tc.rejected {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, validateDomainPortPolicy(legacy, tc.mode, tc.nft), "legacy shapes retain their existing mode behavior")
+		})
+	}
+}
+
+func TestPolicyDomainPortsCapabilityGateBeforeEffects(t *testing.T) {
+	for _, profile := range []string{"dns_only", "missing_nft", "chained", "supported"} {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch} {
+			t.Run(profile+"/"+method, func(t *testing.T) {
+				t.Setenv(constants.EnvUpstreamProxy, "")
+				initial := policy.DefaultDenyPolicy()
+				proxy := &stubProxy{updated: initial}
+				nft := &stubNft{}
+				path := filepath.Join(t.TempDir(), "policy.json")
+				const original = `{"defaultAction":"deny"}`
+				require.NoError(t, os.WriteFile(path, []byte(original), 0o600))
+				srv := &policyServer{proxy: proxy, nft: nft, enforcementMode: constants.PolicyDnsNft, policyFile: path}
+				switch profile {
+				case "dns_only":
+					srv.nft = nil
+					srv.enforcementMode = constants.PolicyDnsOnly
+				case "missing_nft":
+					srv.nft = nil
+				case "chained":
+					t.Setenv(constants.EnvUpstreamProxy, "http://proxy.example:3128")
+				}
+				rules := `[{"action":"allow","target":"api.example.com","ports":[443]}]`
+				body := `{"defaultAction":"deny","egress":` + rules + `}`
+				if method == http.MethodPatch {
+					body = rules
+				}
+				rec := httptest.NewRecorder()
+				srv.handlePolicy(rec, httptest.NewRequest(method, "/policy", strings.NewReader(body)))
+				raw, err := os.ReadFile(path)
+				require.NoError(t, err)
+				if profile == "supported" {
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					require.True(t, proxy.updated.HasDomainPorts())
+					require.Equal(t, 1, nft.calls)
+					require.Contains(t, string(raw), "api.example.com")
+				} else {
+					require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+					require.Same(t, initial, proxy.updated)
+					require.Zero(t, nft.calls)
+					require.Equal(t, original, string(raw))
+				}
+			})
+		}
+	}
+}

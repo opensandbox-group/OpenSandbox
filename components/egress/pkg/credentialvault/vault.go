@@ -584,7 +584,7 @@ func (v *Store) validateBindingPolicy(b Binding, pol *policy.NetworkPolicy) erro
 		}
 	}
 	for _, host := range b.Match.Hosts {
-		if !explicitAllowCoversHost(pol, host) {
+		if !explicitAllowCoversHost(pol, host, b.Match.Schemes) {
 			return fmt.Errorf("binding %q host %q is not allowed by egress policy", b.Name, host)
 		}
 		if !v.liveAdmission && bindingHostMatchesIgnoreHosts(host) {
@@ -1237,13 +1237,28 @@ func isValidCredentialFQDN(host string) bool {
 	return true
 }
 
-func explicitAllowCoversHost(pol *policy.NetworkPolicy, host string) bool {
+func explicitAllowCoversHost(pol *policy.NetworkPolicy, host string, schemes []string) bool {
 	if pol == nil {
 		return false
 	}
 	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
 	if host == "" {
 		return false
+	}
+	if pol.HasDomainPorts() {
+		if len(schemes) == 0 {
+			return false
+		}
+		for _, scheme := range schemes {
+			port := 443
+			if scheme == "http" {
+				port = 80
+			}
+			if !pol.AllowsEntireHostSelectorPort(host, port) {
+				return false
+			}
+		}
+		return true
 	}
 	if strings.HasPrefix(host, "*.") {
 		return pol.Evaluate("probe."+strings.TrimPrefix(host, "*.")) == policy.ActionAllow

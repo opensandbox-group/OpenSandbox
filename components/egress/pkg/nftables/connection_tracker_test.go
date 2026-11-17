@@ -15,6 +15,7 @@
 package nftables
 
 import (
+	"context"
 	"net/netip"
 	"testing"
 	"time"
@@ -97,4 +98,13 @@ func TestConnectionTrackerClear(t *testing.T) {
 	tracker.clear()
 	require.Empty(t, tracker.dynamicIPs)
 	require.Empty(t, tracker.previousActiveIPs)
+}
+
+// Seed through the production manager path: the tracker no longer normalizes
+// observations independently of the successful nft transaction.
+func (tracker *connectionTracker) setDynamicIPs(ips []ResolvedIP) {
+	m := Manager{tracker: tracker, run: func(context.Context, string) ([]byte, error) { return nil, nil }}
+	if err := m.AddResolvedIPs(context.Background(), ips); err != nil {
+		panic(err)
+	}
 }

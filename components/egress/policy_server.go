@@ -964,6 +964,10 @@ func (s *policyServer) dropEstablishedSupported(w http.ResponseWriter) bool {
 }
 
 func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, pol *policy.NetworkPolicy, op string, dropEstablished bool) (ok bool, dropped *int) {
+	if err := validateDomainPortPolicy(pol, s.enforcementMode, s.nft != nil); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false, nil
+	}
 	if dropEstablished && !s.dropEstablishedSupported(w) {
 		return false, nil
 	}

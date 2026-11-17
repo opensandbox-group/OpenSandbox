@@ -175,7 +175,12 @@ func (s *fastSandboxPolicyServer) handleActions(w http.ResponseWriter, r *http.R
 		http.Error(w, fmt.Sprintf("invalid action envelope: %v", err), http.StatusBadRequest)
 		return
 	}
-	status, err := s.dispatchAction(r.Context(), env)
+	pol, err := s.parseBindingPolicy(env)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	status, err := s.dispatchAction(r.Context(), env, pol)
 	if err != nil {
 		logEgressUpdateFailedError(fmt.Sprintf("action %s for sandbox %s failed: %v", env.Operation, env.Sandbox.UID, err))
 		http.Error(w, err.Error(), status)
@@ -218,6 +223,11 @@ func (s *fastSandboxPolicyServer) handleActionsV2(w http.ResponseWriter, r *http
 		http.Error(w, "live binding removal is unsupported; use Sandbox Delete", http.StatusNotImplemented)
 		return
 	}
+	pol, err := s.parseBindingPolicy(env)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	record, err := s.readOwnerRecord(subj)
 	if err != nil {
 		http.Error(w, "owner persistence unavailable", http.StatusServiceUnavailable)
@@ -253,7 +263,7 @@ func (s *fastSandboxPolicyServer) handleActionsV2(w http.ResponseWriter, r *http
 			return
 		}
 	}
-	status, err := s.dispatchAction(r.Context(), env)
+	status, err := s.dispatchAction(r.Context(), env, pol)
 	if err != nil {
 		logEgressUpdateFailedError(fmt.Sprintf("Actions v2 %s for sandbox %s failed: %v", env.Operation, env.Sandbox.UID, err))
 		http.Error(w, err.Error(), status)
@@ -422,11 +432,29 @@ func (s *fastSandboxPolicyServer) validateRelayOwner(w http.ResponseWriter, r *h
 	return true
 }
 
-// dispatchAction validates effect-free input before entering the cancellable
-// action gate. Every runtime registry writer is reached through this gate;
-// snapshot transfers retain their own Vault transaction/guard semantics.
-func (s *fastSandboxPolicyServer) dispatchAction(ctx context.Context, env *actionhandler.Envelope) (int, error) {
-	var pol *policy.NetworkPolicy
+// parseBindingPolicy runs before all effects, including Actions v2's durable
+// owner record. Both protocol versions pass the parsed policy to dispatch.
+func (s *fastSandboxPolicyServer) parseBindingPolicy(env *actionhandler.Envelope) (*policy.NetworkPolicy, error) {
+	if env.Operation != actionhandler.OperationSetBinding || env.Binding.IsRemoval() {
+		return nil, nil
+	}
+	input, err := env.Binding.InputString()
+	if err != nil {
+		return nil, err
+	}
+	pol, err := policy.ParsePolicy(input)
+	if err != nil {
+		return nil, fmt.Errorf("invalid binding input policy: %v", err)
+	}
+	if err := validateFastSandboxDomainPortPolicy(pol); err != nil {
+		return nil, err
+	}
+	return pol, nil
+}
+
+// dispatchAction receives validated input before entering the cancellable
+// action gate. Snapshot transfers retain their own transaction guards.
+func (s *fastSandboxPolicyServer) dispatchAction(ctx context.Context, env *actionhandler.Envelope, pol *policy.NetworkPolicy) (int, error) {
 	switch env.Operation {
 	case actionhandler.OperationVaultExport:
 		return s.applyVaultExport(env)
@@ -436,18 +464,7 @@ func (s *fastSandboxPolicyServer) dispatchAction(ctx context.Context, env *actio
 		return s.applyPolicyExport(env)
 	case actionhandler.OperationPolicyImport:
 		return s.applyPolicyImport(env)
-	case actionhandler.OperationSetBinding:
-		if !env.Binding.IsRemoval() {
-			input, err := env.Binding.InputString()
-			if err != nil {
-				return http.StatusBadRequest, err
-			}
-			pol, err = policy.ParsePolicy(input)
-			if err != nil {
-				return http.StatusBadRequest, fmt.Errorf("invalid binding input policy: %v", err)
-			}
-		}
-	case actionhandler.OperationLifecycleHook, actionhandler.OperationRemoveBinding:
+	case actionhandler.OperationSetBinding, actionhandler.OperationLifecycleHook, actionhandler.OperationRemoveBinding:
 	default:
 		return http.StatusBadRequest, fmt.Errorf("unknown operation %q", env.Operation)
 	}

@@ -254,13 +254,13 @@ func TestDomainRefresh_OnlyRenewsObservedAndConfirmedIPs(t *testing.T) {
 		return []ResolvedIP{rotated, newAddress}, nil
 	})
 	require.Len(t, scripts, 4, "rotated or unobserved IPs must not be authorized")
-	require.Empty(t, manager.domains)
+	require.Empty(t, manager.domains["example.com"].addresses)
 
 	require.NoError(t, manager.AddResolvedDomain(ctx, "example.com", []ResolvedIP{first}))
 	now = now.Add(domainRefreshLead)
 	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) { return nil, nil })
 	require.Len(t, scripts, 5, "negative answers must not extend a lease")
-	require.Empty(t, manager.domains)
+	require.Empty(t, manager.domains["example.com"].addresses)
 }
 
 func TestDomainRefresh_PreservesLongerTCPGracePeriod(t *testing.T) {
@@ -292,7 +292,7 @@ func TestDomainRefresh_PreservesLongerTCPGracePeriod(t *testing.T) {
 	now = now.Add(dynSetTimeoutS*time.Second - domainRefreshLead)
 	manager.refreshDomains(ctx, lookup)
 	require.Equal(t, 1, lookups)
-	require.Empty(t, manager.domains)
+	require.Empty(t, manager.domains["example.com"].addresses)
 	require.Len(t, scripts, 4, "negative DNS stops domain refresh without revoking TCP grace")
 }
 
@@ -360,15 +360,15 @@ func TestAddResolvedDomain_BoundsTrackingAndRequiresSuccessfulWrite(t *testing.T
 		require.NoError(t, manager.AddResolvedDomain(ctx, fmt.Sprintf("%d.example.com", index), ips))
 	}
 	require.NoError(t, manager.AddResolvedDomain(ctx, "0.example.com", ips))
-	require.NoError(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
+	require.ErrorContains(t, manager.AddResolvedDomain(ctx, "new.example.com", ips), "capacity")
 	require.Len(t, manager.domains, maxResolvedDomains)
 	require.Contains(t, manager.domains, "0.example.com")
-	require.NotContains(t, manager.domains, "1.example.com")
+	require.Contains(t, manager.domains, "1.example.com", "live domain ownership cannot be evicted")
 	for index := 0; index < maxDomainAddresses+1; index++ {
 		ips = append(ips, ResolvedIP{Addr: netip.AddrFrom4([4]byte{198, 51, 100, byte(index)}), TTL: time.Minute})
 	}
-	require.NoError(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
-	require.Len(t, manager.domains["new.example.com"].addresses, maxDomainAddresses)
+	require.ErrorContains(t, manager.AddResolvedDomain(ctx, "0.example.com", ips), "capacity")
+	require.Len(t, manager.domains["0.example.com"].addresses, 1, "rejected answers cannot replace retained provenance")
 	writeErr = fmt.Errorf("table does not exist")
 	require.NoError(t, manager.RemoveEnforcement(ctx))
 	require.Empty(t, manager.domains)
@@ -379,8 +379,8 @@ func TestAddResolvedDomain_BoundsTrackingAndRequiresSuccessfulWrite(t *testing.T
 	allowAll, err := policy.ParsePolicy(`{"defaultAction":"allow"}`)
 	require.NoError(t, err)
 	require.NoError(t, manager.ApplyStatic(ctx, allowAll))
-	require.NoError(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
-	require.Empty(t, manager.domains, "default-allow needs no background authorization")
+	require.NoError(t, manager.AddResolvedDomain(ctx, "new.example.com", ips[:maxDomainAddresses]))
+	require.Len(t, manager.domains, 1, "default-allow retains bounded observations for future scoped denies")
 }
 
 func TestDomainRefresh_BoundsWorkersAndStopsOnCancellation(t *testing.T) {
@@ -798,7 +798,6 @@ func TestManagerSerializesConcurrentTrackerUpdates(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
-
 func TestApplyStatic_PortFloorRangesDenyBeforeAllows(t *testing.T) {
 	var rendered string
 	m := NewManagerWithRunner(func(_ context.Context, script string) ([]byte, error) {
