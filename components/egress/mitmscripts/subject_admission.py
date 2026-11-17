@@ -9,7 +9,9 @@ transition fences new requests at commit and the drain loop closes decrypted
 transports whose retirement deadline expired. Lifecycle teardown (Unload,
 suspend, receiver failure, owner terminal/close and source reuse before
 Register) closes every proxied client of the old identity, decrypted or
-opaque. Traffic that never reaches mitmproxy is outside this index.
+opaque. A TLS admission deny closes its own exact client through the real
+proxy connection handler as well. Traffic that never reaches mitmproxy is
+outside this index.
 """
 
 from __future__ import annotations
@@ -361,6 +363,69 @@ class SubjectAdmissionRuntime:
             handler = proxyserver.connections.get(client.id)
             if handler is not None:
                 handler.close_connection(client)
+
+    # -- Handshake deny ------------------------------------------------------
+
+    def terminate_handshake(self, client):
+        """Close exactly this denied handshake's transport (Fast Sandbox).
+
+        A deny decision in the subject TLS hook must reach the real mitmproxy
+        connection handler: the shared fail-closed state fence alone leaves
+        the handler running, and clients observe a handshake timeout instead
+        of a close (measured in the R6 probe). The exact client's handler is
+        closed on the captured proxy loop, never under this runtime's lock
+        and never waiting for the disconnect hook. Indexing a deny dooms the
+        member so the connection cannot re-acquire authority; membership and
+        budget stay untouched until client_disconnected. Returns True only
+        when the real handler close was invoked; every other path keeps the
+        fail-closed state fence below and is reported as not closed.
+        """
+        if client is None:
+            return False
+        self._capture_transport()
+        loop, proxyserver = self._transport
+        # Doom under the lock so an indexed client can never admit later.
+        with self._lock:
+            member = self._clients.get(id(client))
+            if member is not None and member.client is client:
+                member.doomed = True
+        closed = False
+        if loop is not None and proxyserver is not None:
+            try:
+                inline = asyncio.get_running_loop() is loop
+            except RuntimeError:
+                inline = False
+            if inline:
+                # The TLS hook runs on the proxy loop itself: close inline.
+                closed = self._close_denied_in_loop(proxyserver, client)
+            else:
+                # Off-loop callers only get a queued close; the callback
+                # rechecks the exact handler identity so a replaced or gone
+                # handler, a dead loop or a raised error never closes the
+                # wrong transport. Scheduling is not a confirmed close.
+                with suppress(Exception):
+                    loop.call_soon_threadsafe(
+                        self._close_denied_in_loop, proxyserver, client)
+        if not closed:
+            # Fail-closed fence, not a transport close: CLOSED state keeps a
+            # handler-less or errored deny from decrypting; the return value
+            # already says the transport was not closed.
+            from credential_bound import close_connection
+
+            with suppress(Exception):
+                close_connection(client)
+        return closed
+
+    def _close_denied_in_loop(self, proxyserver, client):
+        """Close the exact live handler of one denied client; never raises."""
+        try:
+            handler = proxyserver.connections.get(client.id)
+            if handler is None or handler.client is not client:
+                return False
+            handler.close_connection(client)
+            return True
+        except Exception:  # noqa: BLE001 - an errored close is not closure
+            return False
 
     # -- Drain ---------------------------------------------------------------
 

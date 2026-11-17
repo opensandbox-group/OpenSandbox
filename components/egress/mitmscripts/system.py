@@ -415,10 +415,8 @@ def tls_clienthello(data: ClientHelloData) -> None:
         try:
             _tls_clienthello_live(subject, data, subject=True)
         except Exception:  # noqa: BLE001 - hook exceptions must not decrypt by default
-            from credential_bound import terminate_handshake
-
             _record_tls_admission("deny", "invalid_input")
-            terminate_handshake(data.context.client)
+            subject.terminate_handshake(data.context.client)
         return
     live = _live_runtime
     if live is not None:
@@ -568,6 +566,21 @@ def _subject_admission_runtime() -> Any:
     return None if module is None else module.runtime()
 
 
+def _terminate_denied_handshake(live: Any, data: ClientHelloData, *, subject: bool) -> None:
+    """Close one denied handshake through the runtime that owns it.
+
+    The Fast Sandbox subject runtime closes the exact client transport via
+    the real mitmproxy connection handler; the sidecar path keeps calling
+    the shared terminate_handshake with unchanged arguments and call count.
+    """
+    if subject:
+        live.terminate_handshake(data.context.client)
+        return
+    import credential_bound
+
+    credential_bound.terminate_handshake(data.context.client)
+
+
 def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = False) -> None:
     # The live credential-bound mode must never run with insecure upstream
     # verification; deny the handshake outright instead of trusting an
@@ -576,9 +589,7 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = F
         _record_tls_admission("deny", "ssl_insecure")
         with suppress(Exception):
             ctx.log.warn("credential proxy: tls decision deny reason=ssl_insecure")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
     # ECH hides the inner name: inspect the real extension list before any
     # outer-SNI matching so hidden names can never select a credential.
@@ -587,9 +598,7 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = F
         _record_tls_admission("deny", "malformed_extensions")
         with suppress(Exception):
             ctx.log.warn("credential proxy: tls decision deny reason=malformed_extensions")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
     sni = data.client_hello.sni
     from static_passthrough import destination_port
@@ -609,9 +618,7 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = F
         # A deny never degrades into opaque tunneling or decrypt-all.
         with suppress(Exception):
             ctx.log.warn(f"credential proxy: tls decision deny reason={result.reason}")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
     if not subject:
         live.track(result.token, data.context.client)
