@@ -234,7 +234,9 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 		)
 	}
 
-	stagingPerm := os.FileMode(os.ModePerm)
+	// creat uses 0666. umask 022 then yields 0644. An explicit metadata mode
+	// is applied after the write; an omitted mode leaves this result in place.
+	stagingPerm := os.FileMode(0o666)
 	if statErr == nil {
 		// The destination mode is applied before the rename. Keep the content
 		// private while it is being copied instead of exposing it through the
@@ -371,10 +373,9 @@ func rejectStagingPath(path string) error {
 	return nil
 }
 
-// createUploadTemp creates the staging file with perm. A new destination keeps
-// the mode a plain create in this directory has today (os.ModePerm masked by
-// the umask); replacing an existing file starts at 0600 until its mode is
-// restored before the rename.
+// createUploadTemp creates the staging file with perm. A new destination uses
+// 0666 masked by the umask, the same mask as creat. Replacing an existing file
+// starts at 0600 until its mode is restored before the rename.
 func createUploadTemp(dir string, perm os.FileMode) (*os.File, error) {
 	var suffix [8]byte
 	for range 10 {

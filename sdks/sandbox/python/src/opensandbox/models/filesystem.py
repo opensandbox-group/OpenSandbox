@@ -136,7 +136,14 @@ class WriteEntry(BaseModel):
     data: str | bytes | IOBase | None = Field(
         default=None, description="Content to write - can be str or bytes"
     )
-    mode: int = Field(default=755, description="Unix file permissions as integer")
+    mode: int | None = Field(
+        default=None,
+        description=(
+            "Unix permissions as octal digits, for example 644 or 755. "
+            "Omit to let the sandbox choose: a new file uses 0666 masked "
+            "by umask, and an existing file keeps its mode."
+        ),
+    )
     owner: str | None = Field(default=None, description="Owner username to set")
     group: str | None = Field(default=None, description="Group name to set")
     encoding: str = Field(
@@ -153,8 +160,8 @@ class WriteEntry(BaseModel):
 
     @field_validator("mode")
     @classmethod
-    def mode_must_be_non_negative(cls, v: int) -> int:
-        if v < 0:
+    def mode_must_be_non_negative(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
             raise ValueError("Mode must be non-negative")
         return v
 
@@ -164,6 +171,29 @@ class WriteEntry(BaseModel):
         if not v.strip():
             raise ValueError("Encoding cannot be blank")
         return v
+
+    def upload_metadata(self) -> dict[str, object]:
+        """Metadata sent with a file upload.
+
+        ``mode`` is omitted when unset so the sandbox can apply creat semantics.
+        """
+        metadata: dict[str, object] = {
+            "path": self.path,
+            "owner": self.owner,
+            "group": self.group,
+        }
+        if self.mode is not None:
+            metadata["mode"] = self.mode
+        return metadata
+
+    def directory_mode(self) -> int:
+        """Mode used when this entry creates a directory.
+
+        Directory creation keeps 755 when the caller does not set a mode.
+        """
+        if self.mode is None:
+            return 755
+        return self.mode
 
 
 class DirectoryListEntry(BaseModel):

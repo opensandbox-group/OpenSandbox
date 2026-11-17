@@ -300,6 +300,20 @@ def test_filesystem_models_aliases_and_validation() -> None:
     with pytest.raises(ValueError):
         WriteEntry(path="  ", data="x")
 
+    plain = WriteEntry(path="/tmp/notes.txt", data="hello")
+    assert plain.mode is None
+    assert plain.upload_metadata() == {
+        "path": "/tmp/notes.txt",
+        "owner": None,
+        "group": None,
+    }
+    assert plain.directory_mode() == 755
+    script = WriteEntry(path="/tmp/run.sh", data="#!/bin/sh\n", mode=755)
+    assert script.upload_metadata()["mode"] == 755
+    assert WriteEntry(path="/tmp/private", mode=700).directory_mode() == 700
+    with pytest.raises(ValueError):
+        WriteEntry(path="/tmp/notes.txt", data="x", mode=-1)
+
 
 # ============================================================================
 # Volume Model Tests

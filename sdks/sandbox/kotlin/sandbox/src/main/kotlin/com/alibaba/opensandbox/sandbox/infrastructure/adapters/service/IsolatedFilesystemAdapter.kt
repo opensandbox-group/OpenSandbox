@@ -196,7 +196,7 @@ internal class IsolatedFilesystemAdapter(
                         put("path", path)
                         put("owner", entry.owner)
                         put("group", entry.group)
-                        put("mode", entry.mode)
+                        entry.mode?.let { put("mode", it) }
                     }.toString()
 
                 builder.addFormDataPart(
@@ -254,7 +254,7 @@ internal class IsolatedFilesystemAdapter(
                 entries.associate { entry ->
                     entry.path to
                         com.alibaba.opensandbox.sandbox.api.models.execd.Permission(
-                            mode = entry.mode,
+                            mode = entry.mode ?: 755,
                             group = entry.group,
                             owner = entry.owner,
                         )

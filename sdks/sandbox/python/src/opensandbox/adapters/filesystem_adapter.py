@@ -368,13 +368,7 @@ class FilesystemAdapter(Filesystem):
             if entry.data is None:
                 raise InvalidArgumentException("File data cannot be null")
 
-            metadata = {
-                "path": entry.path,
-                "owner": entry.owner,
-                "group": entry.group,
-                "mode": entry.mode,
-            }
-            metadata_json = json.dumps(metadata)
+            metadata_json = json.dumps(entry.upload_metadata())
             multipart_parts.append(
                 ("metadata", ("metadata", metadata_json, "application/json"))
             )
@@ -428,13 +422,7 @@ class FilesystemAdapter(Filesystem):
                 if entry.data is None:
                     raise InvalidArgumentException("File data cannot be null")
 
-                metadata = {
-                    "path": entry.path,
-                    "owner": entry.owner,
-                    "group": entry.group,
-                    "mode": entry.mode,
-                }
-                metadata_json = json.dumps(metadata)
+                metadata_json = json.dumps(entry.upload_metadata())
 
                 content: bytes | str | IOBase
                 content_type: str
@@ -501,7 +489,7 @@ class FilesystemAdapter(Filesystem):
         data: str | bytes | IOBase,
         *,
         encoding: str = "utf-8",
-        mode: int = 755,
+        mode: int | None = None,
         owner: str | None = None,
         group: str | None = None,
     ) -> None:

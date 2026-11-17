@@ -74,7 +74,9 @@ class EntryInfo(
  *
  * @property path Destination file path where content will be written
  * @property data Content to write - can be String or ByteArray
- * @property mode Unix file permissions as integer (default: 755)
+ * @property mode Unix file permissions as octal digits in a decimal integer,
+ *   for example 644 or 755. Null omits the field: a new file uses 0666 masked
+ *   by umask, and an existing file keeps its mode.
  * @property owner Owner username to set (null to use default in sandbox)
  * @property group Group name to set (null to use default in sandbox)
  * @property encoding Character encoding for String data (default: UTF-8)
@@ -82,7 +84,7 @@ class EntryInfo(
 class WriteEntry private constructor(
     val path: String,
     val data: Any?,
-    val mode: Int,
+    val mode: Int?,
     val owner: String?,
     val group: String?,
     val encoding: String,
@@ -95,7 +97,7 @@ class WriteEntry private constructor(
     class Builder {
         private var path: String? = null
         private var data: Any? = null
-        private var mode: Int = 755
+        private var mode: Int? = null
         private var owner: String? = null
         private var group: String? = null
         private var encoding: String = "UTF-8"
