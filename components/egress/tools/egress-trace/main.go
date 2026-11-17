@@ -188,14 +188,17 @@ func (p *NetworkPolicy) matchIP(ip netip.Addr) (string, string) {
 }
 
 // matchDomain mirrors the sidecar's first-match semantics, falling back to
-// defaultAction.
+// defaultAction. Rule targets are normalized exactly like the policy
+// evaluator's normalizeDomainPattern (trim, lowercase, drop one trailing root
+// dot), so a rule written as "pypi.org." reports the same verdict as the
+// sidecar's Evaluate.
 func (p *NetworkPolicy) matchDomain(domain string) (string, string) {
 	if p == nil {
 		return "deny", "policy API unavailable"
 	}
 	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
 	for _, r := range p.Egress {
-		pattern := strings.ToLower(strings.TrimSpace(r.Target))
+		pattern := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.Target)), ".")
 		if pattern == "" || strings.Contains(pattern, "/") || mustAddr(pattern).IsValid() {
 			continue
 		}
