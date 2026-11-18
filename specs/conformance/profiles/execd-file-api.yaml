@@ -52,7 +52,7 @@ claims:
   - id: FILE-UPLOAD-MODE-005
     clause: >-
       Setuid, setgid, and sticky bits carried in an octal metadata mode (for
-      example 4755) reach the created or replaced file.
+      example 7755) reach the created or replaced file.
     status: pending
     pending_ref: https://github.com/opensandbox-group/OpenSandbox/pull/2445
     tests:

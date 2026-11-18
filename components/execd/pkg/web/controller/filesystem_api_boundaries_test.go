@@ -140,28 +140,44 @@ func TestUploadRequestedModeOverridesDestinationMode(t *testing.T) {
 }
 
 // TestUploadRequestedModeAppliesSpecialBits probes the open side of claim
-// FILE-UPLOAD-MODE-005 (PR #2445): a metadata mode such as 4755 carries
-// setuid/setgid/sticky in its high octal digits, and those must reach the
-// file. Main today parses the octal digits and casts the integer straight to
-// os.FileMode, which drops them because Go encodes the special bits at 1<<20
-// and above, leaving 0755. The test skips while the observed mode is still
-// main's; once the behavior lands it passes, and the conformance checker fails
-// the stale pending claim so the profile gets promoted.
+// FILE-UPLOAD-MODE-005 (PR #2445): a metadata mode such as 7755 carries
+// setuid, setgid, and sticky in its high octal digits, and all of them must
+// reach the file. Main today parses the octal digits and casts the integer
+// straight to os.FileMode, which drops them because Go encodes the special
+// bits at 1<<20 and above, leaving 0755. The test skips while the observed
+// mode is still main's; once the behavior lands it passes, and the
+// conformance checker fails the stale pending claim so the profile gets
+// promoted. Promotion replaces the skip below with the require.Equal on
+// wantSpecial, so the enforced form asserts every promised bit, not just the
+// permission bits.
 func TestUploadRequestedModeAppliesSpecialBits(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows only models the read-only bit")
 	}
+	// The probe is only meaningful on a filesystem that keeps special bits on
+	// regular files; distinguish that environment limit from the pending gap.
+	wantSpecial := os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	sanity := filepath.Join(t.TempDir(), "sanity")
+	require.NoError(t, os.WriteFile(sanity, []byte("x"), 0o600))
+	require.NoError(t, os.Chmod(sanity, 0o600|wantSpecial))
+	sanityInfo, err := os.Stat(sanity)
+	require.NoError(t, err)
+	if sanityInfo.Mode()&wantSpecial != wantSpecial {
+		t.Skip("filesystem does not keep setuid/setgid/sticky on regular files")
+	}
+
 	dir := t.TempDir()
 	target := filepath.Join(dir, "privileged.txt")
 
-	rec := doUpload(t, `{"path":"`+filepath.ToSlash(target)+`","mode":4755}`, []byte("payload"))
+	rec := doUpload(t, `{"path":"`+filepath.ToSlash(target)+`","mode":7755}`, []byte("payload"))
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	info, err := os.Stat(target)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o755), info.Mode().Perm(), "unexpected permission bits while claim FILE-UPLOAD-MODE-005 is pending")
-	if info.Mode()&os.ModeSetuid != 0 {
+	got := info.Mode() & wantSpecial
+	if got == wantSpecial {
 		return
 	}
-	t.Skip("claim FILE-UPLOAD-MODE-005 is pending on PR #2445: the requested setuid bit is not applied yet")
+	t.Skipf("claim FILE-UPLOAD-MODE-005 is pending on PR #2445: requested special bits are not applied yet (got %s)", got)
 }

@@ -125,6 +125,7 @@ jobs:
                 path.startsWith("specs/conformance/") ||
                 path.startsWith("specs/tests/") ||
                 path === "specs/execd-api.yaml" ||
+                path === "docs/api/implementation-compatibility.md" ||
                 path.startsWith("scripts/conformance/") ||
                 path === "scripts/execd-ebpf-smoke.sh",
               nodeagent: (path) =>

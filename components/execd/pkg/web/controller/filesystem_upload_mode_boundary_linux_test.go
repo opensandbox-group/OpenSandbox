@@ -48,7 +48,9 @@ func withPinnedUmask(t *testing.T, mask int) {
 // file at os.ModePerm masked by the umask, i.e. 0755 under umask 022. The
 // test skips while the observed mode is still main's; once the behavior lands
 // it passes, and the conformance checker fails the stale pending claim so the
-// profile gets promoted.
+// profile gets promoted. Promotion replaces the skip below with the
+// require.Equal on 0644, so the enforced form asserts the default instead of
+// accepting the old mode.
 func TestUploadOmittedModeForNewFileFollowsCreatDefault(t *testing.T) {
 	withPinnedUmask(t, 0o022)
 	dir := t.TempDir()
