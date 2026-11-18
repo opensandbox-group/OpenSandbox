@@ -187,6 +187,11 @@ func writeUploadFile(resolvedPath string, fileHeader *multipart.FileHeader) *upl
 // flight or after a crash leaves one behind.
 const uploadTempPattern = ".osb-upload-"
 
+// renameUploadStaging commits a fully written staging file. Tests replace it
+// to exercise destinations whose directory allows creating the staging file but
+// rejects replacing the destination.
+var renameUploadStaging = os.Rename
+
 // maxUploadSymlinkDepth bounds the final-component symlink walk; it mirrors the
 // kernel's ELOOP threshold closely enough to reject a link cycle.
 const maxUploadSymlinkDepth = 40
@@ -286,7 +291,24 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 	if err := tmp.Close(); err != nil {
 		return uploadWriteError(resolvedTarget, err)
 	}
-	if err := os.Rename(tmpName, resolvedTarget); err != nil {
+	if err := renameUploadStaging(tmpName, resolvedTarget); err != nil {
+		// A writable destination can still reject the rename: a sticky directory
+		// protects a file owned by another user, and a bind-mounted file cannot
+		// be replaced at all. Keep those replacements working through the
+		// documented in-place fallback, reusing the bytes already staged.
+		if statErr == nil {
+			staged, openErr := os.Open(tmpName)
+			if openErr == nil {
+				fallbackErr := writeUploadInPlace(resolvedTarget, staged)
+				_ = staged.Close()
+				if fallbackErr == nil {
+					log.Warn("upload: rename %s into place failed, used in-place fallback: %v", resolvedTarget, err)
+					return nil
+				}
+				return fallbackErr
+			}
+			log.Warn("upload: reopen staging file %s after rename failure: %v", tmpName, openErr)
+		}
 		return uploadWriteError(resolvedTarget, err)
 	}
 	committed = true

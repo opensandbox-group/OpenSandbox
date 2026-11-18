@@ -529,6 +529,30 @@ func TestFilesystemControllerReplaceContent(t *testing.T) {
 	}
 }
 
+func TestFilesystemControllerReplaceContentFallsBackWhenRenameFails(t *testing.T) {
+	failUploadRename(t)
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "content.txt")
+	require.NoError(t, os.WriteFile(target, []byte("hello world"), 0o640))
+
+	body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
+		target: {
+			Old: "world",
+			New: "universe",
+		},
+	})
+	require.NoError(t, err)
+
+	ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/replace", body)
+
+	ctrl.ReplaceContent()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "hello universe", string(data))
+}
+
 func TestFilesystemControllerReplaceContentSupportsHomePath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

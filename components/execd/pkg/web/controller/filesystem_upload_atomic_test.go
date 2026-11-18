@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"testing/iotest"
 
@@ -54,6 +55,17 @@ func requireNoUploadStaging(t *testing.T, dir string) {
 	for _, entry := range entries {
 		require.NotContainsf(t, entry.Name(), uploadTempPattern, "staging file %s was left behind", entry.Name())
 	}
+}
+
+func failUploadRename(t *testing.T) {
+	t.Helper()
+	original := renameUploadStaging
+	renameUploadStaging = func(string, string) error {
+		return errors.New("rename unavailable")
+	}
+	t.Cleanup(func() {
+		renameUploadStaging = original
+	})
 }
 
 // A copy that fails after the destination was opened must not cost the sandbox
@@ -102,6 +114,29 @@ func TestWriteUploadStreamReplacesContent(t *testing.T) {
 	got, err := os.ReadFile(target)
 	require.NoError(t, err)
 	require.Equal(t, "new content", string(got))
+	requireNoUploadStaging(t, dir)
+}
+
+// A directory that permits creating the staging file can still reject replacing
+// the destination. The already-staged bytes must be written in place instead of
+// failing a route that the previous os.WriteFile implementation supported.
+func TestWriteUploadStreamFallsBackWhenRenameFails(t *testing.T) {
+	failUploadRename(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "notes.md")
+	require.NoError(t, os.WriteFile(target, []byte("old content"), 0o640))
+
+	uerr := writeUploadStream(target, strings.NewReader("new content"))
+
+	require.Nil(t, uerr)
+	got, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "new content", string(got))
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(target)
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o640), info.Mode().Perm())
+	}
 	requireNoUploadStaging(t, dir)
 }
 
