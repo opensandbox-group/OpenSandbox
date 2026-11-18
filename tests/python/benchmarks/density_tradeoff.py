@@ -207,10 +207,10 @@ class SimConfig:
     floor_guarantee: bool = True
     restore_batch: int = 64
     retry_after_s: float = 2.0
-    host_oom_reserve_mib: float = 4096.0
+    host_oom_reserve_mib: float | None = None
     # scenario helpers
     fill_ratio: float = 1.0
-    force_redline_tick: int | None = None
+    force_redline_ticks: tuple[int, ...] = ()
     release_redline_tick: int | None = None
 
 
@@ -426,6 +426,12 @@ class TierResult:
             "cap_mib": cfg.cap_mib,
             "floor_mib": cfg.floor_mib,
             "mix": dict(cfg.mix),
+            "horizon": {
+                "duration_s": cfg.duration_s,
+                "interval_s": cfg.interval_s,
+                "seed": cfg.seed,
+                "create_rate_per_s": cfg.create_rate,
+            },
             "resident_mib": {
                 "mean_total": round(self.resident_mean_mib, 3),
                 "max_total": round(self.resident_max_mib, 3),
@@ -567,6 +573,14 @@ def plan_tighten(
     return amount
 
 
+def host_oom_reserve(cfg: SimConfig) -> float:
+    """Last-resort eviction threshold, scaled to the configured node so the
+    default never sits above the red-line bands on a small node."""
+    if cfg.host_oom_reserve_mib is not None:
+        return cfg.host_oom_reserve_mib
+    return max(256.0, 0.008 * cfg.node_memory_mib)
+
+
 def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
     """Simulate one density tier under one posture."""
     rng = random.Random(f"{cfg.seed}:{posture}:{requested_n}")
@@ -614,6 +628,15 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         counters.granted += 1
         if floor_grant:
             counters.floor_grants += 1
+            if not elastic:
+                # A redline-posture floor grant starts ballooned only until
+                # the red line clears: mark it so the drain deflates it back
+                # to the posture's full-cap baseline. Elastic guests keep
+                # their floor balloon by design, so the drain's restore to
+                # balloon_pre (the floor level) is a no-op for them.
+                grant = sandboxes[-1]
+                grant.tightened = True
+                grant.balloon_pre = 0.0
 
     def tighten_plan(sandbox: SimSandbox, tick_idx: int, margin: float) -> float | None:
         return plan_tighten(sandbox, tick_idx, cfg, margin, counters)
@@ -661,8 +684,9 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         avail_pct = 100.0 * available / cfg.node_memory_mib
 
         # --- host OOM (last-resort eviction) ---------------------------------
-        if available < cfg.host_oom_reserve_mib and sandboxes:
-            while available < cfg.host_oom_reserve_mib and sandboxes:
+        oom_reserve = host_oom_reserve(cfg)
+        if available < oom_reserve and sandboxes:
+            while available < oom_reserve and sandboxes:
                 victim = max(sandboxes, key=lambda s: s.charge_mib(cfg))
                 sandboxes.remove(victim)
                 caps_committed -= victim.cap_mib
@@ -676,16 +700,16 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
             avail_pct = 100.0 * available / cfg.node_memory_mib
 
         # --- red-line state machine ------------------------------------------
-        forced_on = cfg.force_redline_tick == tick_idx
+        forced_on = tick_idx in cfg.force_redline_ticks
         forced_off = cfg.release_redline_tick == tick_idx
         if redline and (forced_off or avail_pct >= cfg.red_line_exit_pct):
             redline = False
             draining = True
-        elif (
-            not redline
-            and not draining
-            and (forced_on or avail_pct < cfg.red_line_enter_pct)
-        ):
+        if not redline and (forced_on or avail_pct < cfg.red_line_enter_pct):
+            # Re-entry is allowed mid-drain: resumed guests can push the node
+            # back under the enter band before the last batch is restored, so
+            # the drain is aborted and the fleet is re-frozen.
+            draining = False
             redline = True
             counters.redline_events += 1
             for sandbox in sandboxes:
@@ -868,7 +892,7 @@ def run_tighten_matrix(cfg: SimConfig) -> list[MatrixRow]:
             throttle_first=ordered,
             fill_ratio=0.7,
             host_oom_reserve_mib=64.0,
-            force_redline_tick=force_tick,
+            force_redline_ticks=(force_tick,),
             release_redline_tick=force_tick + 20,
         )
         # The matrix runs on a tiny fleet so the case is the only variable.
@@ -1154,12 +1178,21 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
         ),
         None,
     )
-    host_oom_delta = (
+    system_oom_delta = (
         None
         if vmstat_first is None or vmstat_last is None
         else max(0, vmstat_last - vmstat_first)
     )
     cgroup_oom_delta = samples[-1]["cgroup_oom_kill_accumulated"]
+    # /proc/vmstat counts every OOM kill, including cgroup-contained guest
+    # failures; derive the node-level share by subtracting the fleet cgroup
+    # delta (floored at zero, since some kills may sit outside the sampled
+    # cgroup root).
+    host_oom_delta = (
+        None
+        if system_oom_delta is None
+        else max(0, system_oom_delta - (cgroup_oom_delta or 0))
+    )
     avail_pct = [100.0 * value / mem_total for value in mem_avail]
     psi_some = [
         s["psi_cpu_some_avg60"] for s in samples if s["psi_cpu_some_avg60"] is not None
@@ -1168,9 +1201,9 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
         s["psi_cpu_full_avg60"] for s in samples if s["psi_cpu_full_avg60"] is not None
     ]
     violations = []
-    if host_oom_delta is None:
+    if system_oom_delta is None:
         violations.append("vmstat_oom_kill_unavailable")
-    elif host_oom_delta > 0 or (cgroup_oom_delta or 0) > 0:
+    elif system_oom_delta > 0:
         violations.append("oom_kills")
     if min(avail_pct) <= 0.0:
         violations.append("memory_exhausted")
@@ -1213,8 +1246,10 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
             "cpu_full": max(psi_full) if psi_full else None,
         },
         "events": {
+            "system_oom_kills_delta": system_oom_delta,
             "host_oom_kills_delta": host_oom_delta,
             "cgroup_oom_kills_delta": cgroup_oom_delta,
+            "host_oom_method": "system_oom_kills_delta - cgroup_oom_kills_delta, floored at 0",
         },
         "verdict": {"ok": not violations, "violations": violations},
     }
@@ -1231,12 +1266,12 @@ def node_line(cfg: SimConfig) -> str:
 
 def horizon_line(cfg: SimConfig) -> str:
     cadence = (
-        f"create rate {cfg.create_rate:.0f}/s"
+        f"create rate {cfg.create_rate:g}/s"
         if cfg.create_rate
         else "instant fleet build"
     )
     return (
-        f"- horizon: {cfg.duration_s:.0f} s at {cfg.interval_s:.0f} s intervals; "
+        f"- horizon: {cfg.duration_s:g} s at {cfg.interval_s:g} s intervals; "
         f"seed {cfg.seed}; {cadence}"
     )
 
@@ -1357,8 +1392,8 @@ def render_host_report(summary: dict, cfg: HostConfig) -> str:
         f"- {GUIDE_NOTE}",
         f"- proposal: OSEP-0033 {OSEP_0033_URL}",
         "",
-        "| oversell | sandboxes | mean resident MiB/sandbox | MemAvailable min % | PSI cpu some/full max % | host OOM delta | cgroup OOM delta | verdict |",
-        "|---|---:|---:|---:|---:|---:|---:|:---|",
+        "| oversell | sandboxes | mean resident MiB/sandbox | MemAvailable min % | PSI cpu some/full max % | system OOM delta | host OOM delta | cgroup OOM delta | verdict |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|:---|",
     ]
     resident = summary["resident_mib"]["mean_per_sandbox"]
     psi_some = summary["psi_max_pct"]["cpu_some"]
@@ -1369,8 +1404,10 @@ def render_host_report(summary: dict, cfg: HostConfig) -> str:
         else "fail: " + ",".join(summary["verdict"]["violations"])
     )
     oversell = summary["oversell_ratio"]
-    host_oom = summary["events"]["host_oom_kills_delta"]
-    cgroup_oom = summary["events"]["cgroup_oom_kills_delta"]
+    events = summary["events"]
+    system_oom = events.get("system_oom_kills_delta")
+    host_oom = events.get("host_oom_kills_delta")
+    cgroup_oom = events.get("cgroup_oom_kills_delta")
     per_sandbox = "n/a" if resident is None else f"{resident:.1f}"
     psi_pair = (
         "n/a"
@@ -1380,6 +1417,7 @@ def render_host_report(summary: dict, cfg: HostConfig) -> str:
     lines.append(
         f"| {'n/a' if oversell is None else f'{oversell:.2f}x'} | {summary['sandboxes']} | "
         f"{per_sandbox} | {summary['mem_available_pct']['min']:.1f} | {psi_pair} | "
+        f"{'n/a' if system_oom is None else system_oom} | "
         f"{'n/a' if host_oom is None else host_oom} | "
         f"{'n/a' if cgroup_oom is None else cgroup_oom} | {verdict} |"
     )
@@ -1407,6 +1445,7 @@ def build_sim_config(args) -> SimConfig:
         duration_s=args.duration,
         seed=args.seed,
         create_rate=args.create_rate,
+        host_oom_reserve_mib=args.host_oom_reserve_mib,
         mix=args.mix,
         snapshot_mib_per_sandbox=snapshot,
         storage_gib=args.storage_gib,
@@ -1472,6 +1511,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--invariant-pct", type=float, default=80.0)
     parser.add_argument("--tighten-margin-mib", type=float, default=512.0)
     parser.add_argument("--oom-margin-threshold-mib", type=float, default=512.0)
+    parser.add_argument(
+        "--host-oom-reserve-mib",
+        type=float,
+        default=None,
+        help="Last-resort eviction threshold; default scales to 0.8%% of node memory (min 256 MiB)",
+    )
     parser.add_argument(
         "--fill-ratio",
         type=float,
@@ -1542,6 +1587,11 @@ def arguments(argv=None) -> argparse.Namespace:
             )
         if args.cgroup_root is None and args.sandboxes is None:
             parser.error("Host backend needs --cgroup-root or --sandboxes")
+        if args.cgroup_root is not None and args.sandboxes is not None:
+            parser.error(
+                "--sandboxes is the fleet-size override for runs without "
+                "--cgroup-root; the cgroup listing already counts sandboxes"
+            )
         if args.cgroup_root is not None and not args.cgroup_root.is_dir():
             parser.error(f"cgroup root {args.cgroup_root} is not a directory")
         if not (args.proc_root / "meminfo").is_file():

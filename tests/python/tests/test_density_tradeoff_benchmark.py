@@ -78,6 +78,10 @@ def test_arguments_reject_infeasible_configurations():
         bench.arguments(["--red-line-exit-pct", "10"])
     with pytest.raises(SystemExit):
         bench.arguments(["--backend", "host"])
+    with pytest.raises(SystemExit):
+        bench.arguments(
+            ["--backend", "host", "--cgroup-root", "/proc", "--sandboxes", "4"]
+        )
     args = bench.arguments(["--tiers", "1,2"])
     assert args.ratios == [1.0, 2.0]
     assert args.mix["idle"] == 0.8
@@ -238,7 +242,7 @@ def test_sigma_caps_invariant_charges_the_platform_baseline():
 def test_red_line_freezes_creates_and_the_floor_guarantee_releases_them():
     cfg = sim_config(
         create_rate=2.0,
-        force_redline_tick=5,
+        force_redline_ticks=(5,),
         release_redline_tick=15,
     )
     frozen = bench.run_tier(cfg, "redline", 30)
@@ -259,7 +263,7 @@ def test_red_line_recovers_when_headroom_returns():
         mix={"dense": 1.0},
         cap_mib=2048.0,
         duration_s=120.0,
-        force_redline_tick=10,
+        force_redline_ticks=(10,),
         release_redline_tick=30,
         tighten_margin_mib=128.0,
     )
@@ -270,6 +274,48 @@ def test_red_line_recovers_when_headroom_returns():
     assert result.samples[-1]["redline_active"] is False
 
 
+def test_red_line_re_enters_when_draining_headroom_collapses():
+    cfg = sim_config(
+        cap_mib=512.0,
+        duration_s=30.0,
+        restore_batch=1,
+        force_redline_ticks=(10, 14),
+        release_redline_tick=12,
+    )
+    # The second trigger lands while the first drain is still restoring its
+    # batch: re-entry must abort the drain instead of suppressing it.
+    result = bench.run_tier(cfg, "redline", 5)
+    assert result.counters.redline_events == 2
+
+
+def test_redline_floor_grants_are_restored_after_recovery():
+    cfg = sim_config(
+        create_rate=1.0,
+        duration_s=20.0,
+        force_redline_ticks=(2,),
+        release_redline_tick=8,
+    )
+    result = bench.run_tier(cfg, "redline", 6)
+    assert result.counters.floor_grants > 0
+    assert result.samples[-1]["balloon_mib"] == 0.0
+
+
+def test_host_oom_reserve_scales_to_the_configured_node():
+    cfg = sim_config(
+        node_memory_mib=4096.0,
+        platform_reserved_mib=1024.0,
+        mix={"dense": 1.0},
+        cap_mib=512.0,
+        duration_s=60.0,
+    )
+    assert bench.host_oom_reserve(cfg) == pytest.approx(256.0)
+    result = bench.run_tier(cfg, "redline", 8)
+    # Dense fill crosses the red-line band before the scaled reserve, so the
+    # policy freezes guests instead of evicting them.
+    assert result.counters.redline_events >= 1
+    assert result.counters.host_oom_kills == 0
+
+
 def test_red_line_restore_keeps_elastic_floor_balloons():
     # An elastic guest already tighter than the tighten target must keep its
     # floor balloon across a red-line cycle instead of being deflated to 0.
@@ -277,7 +323,7 @@ def test_red_line_restore_keeps_elastic_floor_balloons():
         cap_mib=2048.0,
         floor_mib=256.0,
         duration_s=40.0,
-        force_redline_tick=10,
+        force_redline_ticks=(10,),
         release_redline_tick=20,
     )
     result = bench.run_tier(cfg, "elastic", 1)
@@ -603,6 +649,34 @@ def test_cli_host_run_writes_array_summary(tmp_path, capsys):
 # --- CLI end to end (sim, hermetic) -----------------------------------------
 
 
+def test_host_summary_separates_contained_from_node_level_kills():
+    base = {
+        "mem_available_mib": 900.0,
+        "mem_total_mib": 1000.0,
+        "psi_cpu_some_avg60": 0.0,
+        "psi_cpu_full_avg60": 0.0,
+        "psi_mem_some_avg60": 0.0,
+        "cgroups": 2,
+        "cgroup_current_mib": 300.0,
+    }
+    samples = [
+        {**base, "vmstat_oom_kill": 10, "cgroup_oom_kill_accumulated": 0},
+        {**base, "vmstat_oom_kill": 14, "cgroup_oom_kill_accumulated": 3},
+    ]
+    cfg = bench.HostConfig(
+        proc_root=Path("/nonexistent"),
+        cgroup_root=None,
+        duration_s=2.0,
+        interval_s=1.0,
+        cap_mib=512.0,
+        sandboxes_override=None,
+    )
+    summary = bench.summarize_host_samples(samples, cfg)
+    assert summary["events"]["system_oom_kills_delta"] == 4
+    assert summary["events"]["cgroup_oom_kills_delta"] == 3
+    assert summary["events"]["host_oom_kills_delta"] == 1
+
+
 def test_host_per_sandbox_residency_uses_each_samples_live_count():
     base = {
         "mem_available_mib": 900.0,
@@ -650,6 +724,16 @@ def test_cli_matrix_reports_describe_the_executed_configuration(capsys):
     assert bench.main(["--scenario", "tighten-margins"]) == 0
     tighten_report = capsys.readouterr().out
     assert "rows override cap, tighten margin, and ordering" in tighten_report
+
+
+def test_fractional_horizon_is_preserved_in_metadata():
+    args = bench.arguments(["--duration", "0.5", "--interval", "0.1"])
+    cfg = bench.build_sim_config(args)
+    assert "0.5 s at 0.1 s intervals" in bench.horizon_line(cfg)
+    result = bench.run_tier(cfg, "redline", 1)
+    horizon = result.to_summary(cfg, "density")["horizon"]
+    assert horizon["duration_s"] == 0.5
+    assert horizon["interval_s"] == 0.1
 
 
 def test_cli_density_run_writes_all_outputs(tmp_path, capsys):
