@@ -566,6 +566,9 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 		} else if !errors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
+		// Rollback bypasses scaling, so it may have removed the Pod before
+		// its creation was observed. Do not carry that expectation into a retry.
+		batchSandboxScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(bs))
 		bs.Status.Phase = sandboxv1alpha1.BatchSandboxPhasePaused
 		if bs.Spec.Pause != nil && !*bs.Spec.Pause {
 			bs.Status.PauseObservedGeneration = bs.Generation

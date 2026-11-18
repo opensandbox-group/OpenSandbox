@@ -38,6 +38,7 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	taskscheduler "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/scheduler"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
+	controllerutils "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/controller"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/expectations"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/fieldindex"
 	taskexecutor "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
@@ -1102,6 +1103,9 @@ func TestReconcile_RejectResumeWaitsForReplacementPodDeletion(t *testing.T) {
 		Status: sandboxv1alpha1.SandboxSnapshotStatus{Phase: sandboxv1alpha1.SandboxSnapshotPhaseSucceed, Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1},
 	}
 	r := newTestReconciler(bs, pod, snapshot)
+	controllerKey := controllerutils.GetControllerKey(bs)
+	batchSandboxScaleExpectations.ExpectScale(controllerKey, expectations.Create, pod.Name)
+	t.Cleanup(func() { batchSandboxScaleExpectations.DeleteExpectations(controllerKey) })
 	ctx := context.Background()
 	key := client.ObjectKeyFromObject(bs)
 	reconcile := func() {
@@ -1121,6 +1125,23 @@ func TestReconcile_RejectResumeWaitsForReplacementPodDeletion(t *testing.T) {
 	reconcile()
 	require.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, bs.Status.Phase)
 	require.True(t, hasTrueBatchSandboxCondition(bs.Status.Conditions, sandboxv1alpha1.BatchSandboxConditionResumeFailed))
+
+	bs.Generation++
+	bs.Spec.RecreateContainersOnResume = bs.Status.RecreateContainersOnResume
+	bs.Spec.Template = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+		{Name: "main", Image: "registry/main:v1"},
+		{Name: "sidecar", Image: bs.Spec.RecreateContainersOnResume[0].Image},
+	}}}
+	require.NoError(t, r.Update(ctx, bs))
+	snapshot.Status.Containers = []sandboxv1alpha1.ContainerSnapshot{{
+		ContainerName: "main", ImageURI: "registry/main:snapshot", ImageDigest: "sha256:" + strings.Repeat("a", 64),
+	}}
+	require.NoError(t, r.Status().Update(ctx, snapshot))
+	reconcile()
+	reconcile()
+	var retried corev1.Pod
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pod), &retried), "resume retry must create a Pod without waiting for old scale expectations")
+	assert.Nil(t, retried.DeletionTimestamp)
 }
 
 func TestContinueResume_RecreatesPinnedSidecar(t *testing.T) {
