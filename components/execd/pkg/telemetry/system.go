@@ -64,3 +64,17 @@ func systemNetworkConnectionCounts() (tcpCount int64, udpCount int64) {
 	}
 	return tcpCount, udpCount
 }
+
+// systemDiskUsages returns per-mount usage snapshots; nil when the platform
+// cannot provide them (the gauge must not report zeros instead).
+func systemDiskUsages() []resources.DiskUsage {
+	usages, err := resources.DiskUsages()
+	if err != nil {
+		return nil
+	}
+	return usages
+}
+
+func systemDiskIO() (resources.DiskIO, error) {
+	return resources.DiskIOStats()
+}

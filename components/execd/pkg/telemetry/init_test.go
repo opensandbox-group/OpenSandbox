@@ -50,6 +50,17 @@ func TestSystemMetricsReaders(t *testing.T) {
 	tcpCount, udpCount := systemNetworkConnectionCounts()
 	assert.GreaterOrEqual(t, tcpCount, int64(0))
 	assert.GreaterOrEqual(t, udpCount, int64(0))
+	for _, usage := range systemDiskUsages() {
+		assert.NotEmpty(t, usage.Mountpoint)
+		assert.GreaterOrEqual(t, usage.UsedBytes, int64(0))
+		assert.GreaterOrEqual(t, usage.TotalBytes, int64(0))
+	}
+	if io, err := systemDiskIO(); err == nil {
+		assert.GreaterOrEqual(t, io.ReadBytes, int64(0))
+		assert.GreaterOrEqual(t, io.WrittenBytes, int64(0))
+		assert.GreaterOrEqual(t, io.ReadOps, int64(0))
+		assert.GreaterOrEqual(t, io.WriteOps, int64(0))
+	}
 }
 
 func TestExecdSharedAttrs(t *testing.T) {

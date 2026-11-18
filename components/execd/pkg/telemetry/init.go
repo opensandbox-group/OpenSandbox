@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
+	"github.com/alibaba/opensandbox/execd/pkg/resources"
 )
 
 const (
@@ -156,6 +157,76 @@ func registerExecdMetrics() error {
 		return err
 	}
 
+	_, err = meter.Int64ObservableGauge(
+		"execd.system.disk.usage_bytes",
+		metric.WithDescription("Per-mount filesystem used bytes (real mounts only; FUSE/remote values are as reported by the filesystem)"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			base := append([]attribute.KeyValue{}, sharedAttrs()...)
+			for _, usage := range systemDiskUsages() {
+				obs.Observe(usage.UsedBytes, metric.WithAttributes(diskUsageAttrs(base, usage)...))
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"execd.system.disk.total_bytes",
+		metric.WithDescription("Per-mount filesystem total capacity (real mounts only; FUSE/remote values are as reported by the filesystem)"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			base := append([]attribute.KeyValue{}, sharedAttrs()...)
+			for _, usage := range systemDiskUsages() {
+				obs.Observe(usage.TotalBytes, metric.WithAttributes(diskUsageAttrs(base, usage)...))
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableCounter(
+		"execd.system.disk.io.bytes",
+		metric.WithDescription("Cumulative disk IO bytes by direction (sandbox cgroup IO accounting, /proc/diskstats fallback)"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			io, err := systemDiskIO()
+			if err != nil {
+				return nil // Unavailable (e.g. non-Linux) must not be reported as zero.
+			}
+			base := append([]attribute.KeyValue{}, sharedAttrs()...)
+			obs.Observe(io.ReadBytes, metric.WithAttributes(append(base, attribute.String("direction", "read"))...))
+			obs.Observe(io.WrittenBytes, metric.WithAttributes(append(base, attribute.String("direction", "write"))...))
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableCounter(
+		"execd.system.disk.io.operations",
+		metric.WithDescription("Cumulative completed disk IO operations by direction (sandbox cgroup IO accounting, /proc/diskstats fallback)"),
+		metric.WithUnit("{operation}"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			io, err := systemDiskIO()
+			if err != nil {
+				return nil // Unavailable (e.g. non-Linux) must not be reported as zero.
+			}
+			base := append([]attribute.KeyValue{}, sharedAttrs()...)
+			obs.Observe(io.ReadOps, metric.WithAttributes(append(base, attribute.String("direction", "read"))...))
+			obs.Observe(io.WriteOps, metric.WithAttributes(append(base, attribute.String("direction", "write"))...))
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
 	oomKills, err = meter.Int64Counter(
 		"execd.system.oom.kills",
 		metric.WithDescription("OOM kills observed in the sandbox cgroup"),
@@ -233,6 +304,19 @@ func bindingDynamicAttrs(b *binding.RuntimeBinding) []attribute.KeyValue {
 		}
 		attrs = append(attrs, attribute.String(k, v))
 	}
+	return attrs
+}
+
+// diskUsageAttrs returns the attribute set for a per-mount disk usage
+// observation: the shared sandbox attrs plus mount identity.
+func diskUsageAttrs(base []attribute.KeyValue, usage resources.DiskUsage) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, 0, len(base)+3)
+	attrs = append(attrs, base...)
+	attrs = append(attrs,
+		attribute.String("mountpoint", usage.Mountpoint),
+		attribute.String("fstype", usage.FSType),
+		attribute.String("source", usage.Source),
+	)
 	return attrs
 }
 
