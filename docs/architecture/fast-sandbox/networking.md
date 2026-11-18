@@ -111,7 +111,46 @@ With the switch unset, both legacy gates `OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISI
 
 Credential-bound startup requires transparent MITM and `dns+nft`; it rejects nondefault extra interception ports, insecure upstream TLS verification, a chained upstream proxy, and nonempty effective mitmproxy `ignore_hosts` or `allow_hosts`. Go reads the runtime user's `.mitmproxy/config.yaml` followed by `config.yml`, matching mitmdump's load order, before profile dispatch or network setup; unreadable or malformed configuration fails closed. The existing child-side checks remain in place. These restrictions apply to both the new switch and its legacy alias; `all` retains the existing configuration behavior.
 
-This R4 switch only wires existing handshake admission and shared budgets. The current implementation still terminates decrypted HTTP/1.1 and HTTP/2 requests before forwarding or credential lookup; HTTP/1.1 forwarding and opaque-transport teardown remain separate increments. See [egress architecture](/architecture/network/egress#transparent-tls-interception-l7) for current limits and configuration.
+The subject receiver supports HTTP/1.1 requests on admitted decrypted connections. See [egress architecture](/architecture/network/egress#transparent-tls-interception-l7) for current limits and configuration.
+
+#### Enabling credential-bound
+
+The switch is read once at egress startup, before profile dispatch or network setup, and every requirement below fails closed — for the new switch and its deprecated alias alike. Enabling the mode means satisfying all of them:
+
+1. The pool runs the fast-sandbox profile with transparent MITM (`OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true`), `OPENSANDBOX_EGRESS_MODE=dns+nft`, and the default interception ports only — `80,443`. An `OPENSANDBOX_EGRESS_MITMPROXY_EXTRA_PORTS` value that adds a port or fails to parse is rejected; unset, empty, and whitespace-only all pass because they yield the default list. Transparent MITM in this profile requires the pool-pinned CA seed mount (`OPENSANDBOX_EGRESS_MITM_CA_SEED_DIR`); the example pools already mount it.
+2. `OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE` and `OPENSANDBOX_EGRESS_UPSTREAM_PROXY` are unset — insecure upstream verification and a chained upstream proxy are both unsupported in this mode.
+3. The mitmproxy runtime user's `.mitmproxy/config.yaml` (loaded first) and `.mitmproxy/config.yml` do not yield a nonempty effective `ignore_hosts` or `allow_hosts`, or `ssl_insecure: true`. Effective means across both files in mitmproxy's load order, a later file's setting replacing an earlier one for the same option; unreadable or malformed files fail closed, as do typed-but-invalid values.
+4. Set `OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE=credential-bound` in the egress container env of the pool's `fastletTemplate`. The variable must not be set in the sidecar profile, and the gate-combination rules above still apply.
+
+The env item to add, shown commented exactly where the render marker `# @EGRESS_INTERCEPTION_ENV@` sits in both pool templates (`scripts/fast-sandbox-env/manifests/pool/firecracker-egress-pool.yaml` and `firecracker-egress-resource-aware-pool.yaml`); uncomment it in a pool manifest you own:
+
+```yaml
+        # OSEP-0023 experimental opt-in (uncomment to enable): decrypt only
+        # hosts covered by an active vault binding; all other HTTPS stays
+        # opaque. Remove the entry (or set "all") for intercept-all.
+        # - name: OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE
+        #   value: "credential-bound"
+```
+
+In the fast-sandbox integration environment, set the render switch `EGRESS_INTERCEPTION_MODE=credential-bound` on `up`/`pool` instead of editing the shipped templates: it injects this exact env item into the egress container only, and an empty value leaves the rendered manifest byte-identical. The templates themselves carry no commented example on purpose — the render's golden tests compare the empty-mode output byte-for-byte against a fixed baseline, and the wiring tests assert the rendered manifest contains the switch name exactly once and only when a mode is selected.
+
+#### Defaults, unset versus empty, and rollback
+
+With the switch absent and both legacy gates off, startup keeps the pre-switch mitmdump launch arguments and child environment exactly and reads no mitmproxy configuration — that is the default. An explicitly empty value is not the default: the variable present but set to empty text fails startup, as does any value other than `all` or `credential-bound`. Distinguishing absent from empty is deliberate, so a `value: ""` typo can never silently fall back to intercept-all.
+
+The admission budgets `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` (per subject, default 32) and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` (process-wide, default 131072) are handed to the subject process only when TLS admission is active, clamp to 1–1048576, and are caps rather than reserved allocations. These defaults are unmeasured assumptions: no memory or throughput measurements exist for this mode, and release defaults are a separate acceptance item (see [egress architecture](/architecture/network/egress#transparent-tls-interception-l7)).
+
+Rolling back to intercept-all: remove the env item, or set it to `all`, and make sure neither legacy gate is left at `true` — explicit `all` conflicts with either true gate, and with the switch removed, two true gates keep selecting credential-bound through the deprecated alias. With the switch unset and both gates off, launch arguments, child environment, and request paths are identical to a deployment that never had the switch.
+
+#### Mixed pools and cross-Pod restore
+
+The mode belongs to the egress process, one per Fastlet Pod, so it is effectively a per-pool property: every sandbox on a Pod shares its pool's mode, and one cluster may run some pools in `credential-bound` and others in `all`. A sandbox's interception semantics follow the egress of the Fastlet Pod that hosts it. Restore may land a sandbox on any Pod: the vault bundle transfer itself (`VAULT_EXPORT` / `VAULT_IMPORT`, mode-independent) carries the credentials, but decryption and admission on the restored Pod follow the destination Pod's egress configuration — a vault restored into an `all` pool is injected under intercept-all, and one restored into a `credential-bound` pool decrypts only binding-covered hosts.
+
+#### Visibility of unbound HTTPS
+
+Credential-bound forwards TLS for hosts without an active binding as opaque bytes. DNS filtering, nft enforcement, and encrypted-DNS handling are unchanged — both modes enforce the same policy — but mitmproxy addons and any audit or request-level inspection see an unbound HTTPS flow only as a tunnel: its destination and the decrypt/passthrough outcome remain observable, while the HTTP method, headers, and body do not. Deployments that rely on decrypting every HTTPS flow for L7 audit or addon-based filtering keep that visibility only in `all` mode; under `credential-bound` they must add a vault binding for each host they need to inspect.
+
+Client-side usage rules — installing a binding before requests, recycling connections after the first binding for a host, and the HTTP/1.1-only boundary on bound hosts — are covered in the [credential vault guide](/guides/credential-vault#fast-sandbox-credential-bound-vault-usage-experimental).
 
 ### Enforcement
 
