@@ -76,7 +76,7 @@ jobs:
 
       - name: Run conformance profiles
         run: |
-          uv run scripts/conformance/run_profile.py specs/conformance/profiles/execd-file-api.yaml
+          uv run scripts/conformance/run_profile.py --all
 
       - name: Verify filesystem identity permissions as root
         working-directory: components/execd

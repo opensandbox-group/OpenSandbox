@@ -79,6 +79,7 @@ func TestUploadRejectsUndefinedEnvVarPath(t *testing.T) {
 	var resp model.ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Contains(t, resp.Message, "undefined environment variables")
+	require.Contains(t, resp.Message, "OSB_FILE_API_BOUNDARY_UNDEFINED_VAR", "the error must name the undefined variable")
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -138,14 +139,15 @@ func TestUploadRequestedModeOverridesDestinationMode(t *testing.T) {
 	requireNoUploadStaging(t, dir)
 }
 
-// TestUploadRequestedModeAppliesSpecialBits pins the open side of claim
+// TestUploadRequestedModeAppliesSpecialBits probes the open side of claim
 // FILE-UPLOAD-MODE-005 (PR #2445): a metadata mode such as 4755 carries
 // setuid/setgid/sticky in its high octal digits, and those must reach the
 // file. Main today parses the octal digits and casts the integer straight to
 // os.FileMode, which drops them because Go encodes the special bits at 1<<20
-// and above, leaving 0755. Unskip when #2445 lands.
+// and above, leaving 0755. The test skips while the observed mode is still
+// main's; once the behavior lands it passes, and the conformance checker fails
+// the stale pending claim so the profile gets promoted.
 func TestUploadRequestedModeAppliesSpecialBits(t *testing.T) {
-	t.Skip("claim FILE-UPLOAD-MODE-005 is pending on PR #2445: special bits in an octal metadata mode are proposed, not yet merged")
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows only models the read-only bit")
 	}
@@ -157,6 +159,9 @@ func TestUploadRequestedModeAppliesSpecialBits(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	info, err := os.Stat(target)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o755), info.Mode().Perm())
-	require.NotZero(t, info.Mode()&os.ModeSetuid, "requested setuid from the octal metadata mode must be applied")
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm(), "unexpected permission bits while claim FILE-UPLOAD-MODE-005 is pending")
+	if info.Mode()&os.ModeSetuid != 0 {
+		return
+	}
+	t.Skip("claim FILE-UPLOAD-MODE-005 is pending on PR #2445: the requested setuid bit is not applied yet")
 }

@@ -58,9 +58,9 @@ claims:
 | Status | Expected test state today | Rule enforced by the checker |
 | --- | --- | --- |
 | `enforced` | passes | The test must run and pass. A failure, a skip, a missing test, or an unresolvable reference is a violation. |
-| `pending` | skipped | The test must exist and may be skipped. A failure is a violation. A passing test is a stale-profile violation: the behavior landed, so the claim must be promoted. |
+| `pending` | skipped while the behavior has not landed, passing once it has | The test must exist. A failure or missing result is a violation. A pass is a stale-profile violation: the behavior landed, so the claim must be promoted. |
 
-A pending claim keeps its test in the tree as a skipped sample with the exact expectation and the `pending_ref`, and its skip message names the claim id. When the referenced change lands, the checker fails on the stale claim, which is the prompt to remove the skip, set the status to `enforced`, drop `pending_ref`, and bump `metadata.version`.
+A pending test is a probe, not an unconditional skip. It exercises the operation, verifies the parts that must stay stable, and skips only while the observed behavior still matches the pre-change behavior, naming the claim id and `pending_ref` in the skip message. The moment the referenced change lands, the same test passes, and the checker fails the stale claim, which is the prompt to remove the skip, set the status to `enforced`, drop `pending_ref`, and bump `metadata.version`. This keeps the skip hand-off observable in CI even when the referenced PR comes from a different author and never touches the test.
 
 ## Test references
 
@@ -75,13 +75,16 @@ A pending claim keeps its test in the tree as a skipped sample with the exact ex
 # Validate the profile and execute its mapped tests.
 uv run scripts/conformance/run_profile.py specs/conformance/profiles/execd-file-api.yaml
 
+# Validate every profile and execute their mapped tests.
+uv run scripts/conformance/run_profile.py --all
+
 # Validate structure and test references only, without running Go tests.
 uv run scripts/conformance/run_profile.py --check-only specs/conformance/profiles/execd-file-api.yaml
 ```
 
 The checker prints one line per claim pairing the expected state with the observed test result, and exits non-zero on any violation, quoting the claim id and clause. Exit codes: `0` all claims hold, `1` a claim violation, `2` an invalid or unusable profile.
 
-CI runs every profile from the execd test workflow. Changes under `specs/conformance/` or `scripts/conformance/` trigger that workflow.
+CI runs every profile (`--all`) from the execd test workflow, so a newly added profile is picked up without workflow changes. Changes under `specs/conformance/` or `scripts/conformance/` trigger that workflow.
 
 ## Adding a claim
 

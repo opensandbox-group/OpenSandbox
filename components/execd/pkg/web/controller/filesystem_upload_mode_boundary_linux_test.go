@@ -41,14 +41,15 @@ func withPinnedUmask(t *testing.T, mask int) {
 	t.Cleanup(func() { syscall.Umask(old) })
 }
 
-// TestUploadOmittedModeForNewFileFollowsCreatDefault pins the open side of
+// TestUploadOmittedModeForNewFileFollowsCreatDefault probes the open side of
 // claim FILE-UPLOAD-MODE-004 (PR #2661), which proposes that a new file
 // uploaded without a metadata mode is created 0644 (creat(2)'s 0666 shaped by
 // the umask) instead of remaining executable. Main today keeps the staging
-// file at os.ModePerm masked by the umask, i.e. 0755 under umask 022. Unskip
-// when #2661 lands.
+// file at os.ModePerm masked by the umask, i.e. 0755 under umask 022. The
+// test skips while the observed mode is still main's; once the behavior lands
+// it passes, and the conformance checker fails the stale pending claim so the
+// profile gets promoted.
 func TestUploadOmittedModeForNewFileFollowsCreatDefault(t *testing.T) {
-	t.Skip("claim FILE-UPLOAD-MODE-004 is pending on PR #2661: the 0644 default for a new file uploaded without a mode is proposed, not yet merged")
 	withPinnedUmask(t, 0o022)
 	dir := t.TempDir()
 	target := filepath.Join(dir, "defaulted.txt")
@@ -58,6 +59,10 @@ func TestUploadOmittedModeForNewFileFollowsCreatDefault(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	info, err := os.Stat(target)
 	require.NoError(t, err)
-	require.Equal(t, os.FileMode(0o644), info.Mode().Perm(), "a new file uploaded without a mode must follow creat(2)'s 0644 default")
 	requireNoUploadStaging(t, dir)
+	if info.Mode().Perm() == 0o644 {
+		return
+	}
+	require.Equal(t, os.FileMode(0o755), info.Mode().Perm(), "unexpected mode while claim FILE-UPLOAD-MODE-004 is pending; main keeps the 0755 staging mode under umask 022")
+	t.Skip("claim FILE-UPLOAD-MODE-004 is pending on PR #2661: a new file without a metadata mode still inherits the executable staging mode")
 }
