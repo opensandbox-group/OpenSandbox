@@ -63,7 +63,7 @@ Every row shows the requested and placed oversell ratio, the placed sandbox coun
 | `--red-line-enter-pct`, `--red-line-exit-pct` | `15`, `18` | Node MemAvailable bands with hysteresis |
 | `--invariant-pct` | `80` | Sigma-caps budget for the elastic posture |
 | `--tighten-margin-mib` | `512` | Retained-memory margin above touched memory during tighten |
-| `--host-oom-reserve-mib` | scaled | Last-resort eviction threshold; the default is 0.8% of node memory (min 256 MiB) so it never sits above the red-line bands on a small node |
+| `--host-oom-reserve-mib` | scaled | Last-resort eviction threshold; the default is 0.8% of node memory, floored at 256 MiB and capped at 90% of the red-line enter band, so it never sits above the red-line bands on a small node (the cap can pull it below the floor there) |
 | `--inflate-first`, `--no-deflate-on-oom`, `--no-floor-guarantee` | off | Deliberately unsafe policy variants for comparison |
 
 ## Full-inflation demonstration
@@ -80,7 +80,7 @@ Idle-heavy fleets do not make memory the binding axis; this run does. At 1× and
 python3 benchmarks/density_tradeoff.py --scenario tighten-margins
 ```
 
-The matrix mirrors the Test Plan's integration cases: a 512 MiB margin holds with zero guest OOM, the known-bad 128 MiB margin keeps the failure visible, an infeasible floor emits a skip instead of an inflate, and inflate-before-throttle ordering OOMs guests that are still allocating. Each row prints the expected outcome and a pass/fail verdict against it.
+The matrix mirrors the Test Plan's integration cases: a 512 MiB margin holds with zero guest OOM, the known-bad 128 MiB margin keeps the failure visible, an infeasible floor emits a skip instead of an inflate, and inflate-before-throttle ordering OOMs guests that are still allocating. Each row prints the expected outcome and a pass/fail verdict against it. The synthetic red-line trigger is pinned to elapsed time (25 s, or 10 s for the inflate-first case), so `--interval` changes the sampling cadence rather than the case; a horizon shorter than a case needs is extended so the forced window and its release always fit.
 
 ## `deflate_on_oom` rescue
 
@@ -101,7 +101,7 @@ python3 benchmarks/density_tradeoff.py --backend host \
 
 Child directories of `--cgroup-root` are treated as sandboxes; `memory.current`, `memory.max`, `memory.events`, and `memory.pressure` are read for each. Without a cgroup root, pass `--sandboxes N` to report node-level signals only; residency and cgroup OOM fields are then reported as `n/a` rather than zero, and `--sandboxes` only feeds the oversell ratio. The two options are mutually exclusive: with a cgroup root the sandbox count comes from the listing, so an override would contradict it. Bring the fleet up with your own driver and run the sampler per density tier; the sampler is intentionally driver-agnostic.
 
-The report separates OOM sources: `system OOM delta` comes from `/proc/vmstat` and includes cgroup-contained kills, `cgroup OOM delta` comes from the fleet's `memory.events`, and `host OOM delta` is the system delta minus the fleet cgroup delta (floored at zero) — the node-level share.
+The report separates OOM sources: `system OOM delta` comes from `/proc/vmstat` and includes cgroup-contained kills, `cgroup OOM delta` comes from the fleet's `memory.events`, and `host OOM delta` is the system delta minus the fleet cgroup delta (floored at zero) — the node-level share. Cgroup counters are tracked per directory inode, so a sandbox recreated at the same path between two polls counts its fresh counter from zero instead of losing kills to the old value.
 
 ## Output schema
 

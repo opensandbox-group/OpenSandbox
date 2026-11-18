@@ -82,6 +82,10 @@ def test_arguments_reject_infeasible_configurations():
         bench.arguments(
             ["--backend", "host", "--cgroup-root", "/proc", "--sandboxes", "4"]
         )
+    with pytest.raises(SystemExit):
+        bench.arguments(["--backend", "host", "--sandboxes", "-1"])
+    # Zero is an explicit empty-fleet baseline, not an error.
+    assert bench.arguments(["--backend", "host", "--sandboxes", "0"]).sandboxes == 0
     args = bench.arguments(["--tiers", "1,2"])
     assert args.ratios == [1.0, 2.0]
     assert args.mix["idle"] == 0.8
@@ -258,6 +262,34 @@ def test_red_line_freezes_creates_and_the_floor_guarantee_releases_them():
     assert without_guarantee.counters.redline_denied > 0
 
 
+def test_floor_granted_guests_join_the_active_freeze():
+    # A guest admitted while the red line is already active must be frozen
+    # too: otherwise the tighten pass never sees it and deflate_on_oom grows
+    # it toward its cap, raising host charge until evictions fire.
+    cfg = sim_config(
+        node_memory_mib=8192.0,
+        platform_reserved_mib=1024.0,
+        create_rate=1.0,
+        mix={"dense": 1.0},
+        fill_ratio=0.5,
+        duration_s=40.0,
+    )
+    result = bench.run_tier(cfg, "redline", 30)
+    assert result.counters.redline_events == 1
+    assert result.counters.floor_grants > 0
+    assert result.counters.host_oom_kills == 0
+    # While the freeze holds, every guest is stopped: consecutive active
+    # samples with an unchanged fleet size show an unchanged residency.
+    active = [sample for sample in result.samples if sample["redline_active"]]
+    pairs = list(zip(active, active[1:], strict=False))
+    frozen_pairs = [
+        pair for pair in pairs if pair[0]["sandboxes"] == pair[1]["sandboxes"]
+    ]
+    assert frozen_pairs
+    for before, after in frozen_pairs:
+        assert after["resident_mib"] == pytest.approx(before["resident_mib"])
+
+
 def test_red_line_recovers_when_headroom_returns():
     cfg = sim_config(
         mix={"dense": 1.0},
@@ -401,6 +433,28 @@ def test_host_oom_evicts_instead_of_exhausting_the_node():
     assert "host_oom_kills" in summary["verdict"]["violations"]
 
 
+def test_evicted_fleets_still_report_their_per_sandbox_cost():
+    # Every guest is host-evicted before the run ends; the per-sandbox cost
+    # measured while they were alive must survive serialization instead of
+    # collapsing to None (rendered as zero).
+    cfg = sim_config(
+        node_memory_mib=1024.0,
+        platform_reserved_mib=0.0,
+        mix={"dense": 1.0},
+        fill_ratio=0.7,
+        duration_s=12.0,
+        host_oom_reserve_mib=900.0,
+    )
+    result = bench.run_tier(cfg, "redline", 4)
+    assert result.placed_sandboxes == 0
+    assert result.counters.host_oom_kills == 4
+    summary = result.to_summary(cfg, "density")
+    assert summary["resident_mib"]["mean_per_sandbox"] is not None
+    assert summary["resident_mib"]["mean_per_sandbox"] > 0
+    row = bench.density_table_row(cfg, result)
+    assert "n/a" not in row
+
+
 def test_storage_wall_is_reported():
     cfg = sim_config(storage_gib=1.0, storage_headroom_pct=10.0)
     result = bench.run_tier(cfg, "redline", 12)
@@ -436,6 +490,26 @@ def test_tighten_matrix_matches_test_plan_expectations():
     assert by_case["known-bad margin, ordered"].result.counters.guest_oom_kills > 0
     assert by_case["infeasible floor, ordered"].result.counters.tighten_skips > 0
     assert by_case["safe margin, inflate-first"].result.counters.guest_oom_kills > 0
+
+
+def test_tighten_matrix_pins_forced_events_to_elapsed_time():
+    # The forced window is a wall-clock experiment: a finer --interval moves
+    # the trigger to the same elapsed second (25 s), not to tick 25, and a
+    # horizon shorter than the case needs is extended to cover it.
+    fine = bench.run_tighten_matrix(sim_config(interval_s=0.1, duration_s=30.0))
+    by_case = {row.case: row for row in fine}
+    assert by_case["known-bad margin, ordered"].force_tick == 250
+    assert by_case["safe margin, inflate-first"].force_tick == 100
+    assert all(row.to_row()["verdict"]["ok"] for row in fine)
+    coarse = bench.run_tighten_matrix(sim_config(interval_s=1.0, duration_s=5.0))
+    ordered = [row for row in coarse if "inflate-first" not in row.case]
+    inflate_first = next(row for row in coarse if "inflate-first" in row.case)
+    assert all(row.force_tick == 25 for row in ordered)
+    assert inflate_first.force_tick == 10
+    assert all(
+        row.to_row()["summary"]["horizon"]["duration_s"] >= 50.0 for row in ordered
+    )
+    assert inflate_first.to_row()["summary"]["horizon"]["duration_s"] >= 35.0
 
 
 def test_deflate_rescue_scenario_matches_expectations():
@@ -509,6 +583,8 @@ def test_host_parsers_read_proc_and_cgroup_accounting(tmp_path):
     assert sample["oom_kill"] == 2
     unlimited = bench.read_cgroup_sample(dirs[1])
     assert unlimited["max_mib"] is None
+    # The directory inode is the cgroup's generation identity.
+    assert sample["inode"] == dirs[0].stat().st_ino
 
 
 def test_host_summary_aggregates_samples(tmp_path):
@@ -602,38 +678,71 @@ def test_accumulate_cgroup_oom_counts_kills_across_churn():
     # First-snapshot paths are baselines, not deltas.
     assert (
         bench.accumulate_cgroup_oom(
-            state, seen, {"a": 1, "b": 0}, baseline_new_paths=True
+            state, seen, {"a": (10, 1), "b": (11, 0)}, baseline_new_paths=True
         )
         == 0
     )
     # a accumulates; b disappears with its counter already counted.
     assert (
-        bench.accumulate_cgroup_oom(state, seen, {"a": 4}, baseline_new_paths=False)
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": (10, 4)}, baseline_new_paths=False
+        )
         == 3
     )
     # A path that returns after vanishing counts from zero again.
     assert (
         bench.accumulate_cgroup_oom(
-            state, seen, {"a": 4, "b": 2}, baseline_new_paths=False
+            state, seen, {"a": (10, 4), "b": (12, 2)}, baseline_new_paths=False
         )
         == 2
     )
     # A cgroup created during the run counts its first-sighting kills.
     assert (
         bench.accumulate_cgroup_oom(
-            state, seen, {"a": 4, "b": 2, "c": 3}, baseline_new_paths=False
+            state,
+            seen,
+            {"a": (10, 4), "b": (12, 2), "c": (13, 3)},
+            baseline_new_paths=False,
         )
         == 3
     )
-    # A counter that decreases was recreated: count it from zero, never
-    # negative.
+    # A counter that decreases was reset in place: count it from zero,
+    # never negative.
     assert (
-        bench.accumulate_cgroup_oom(state, seen, {"a": 1}, baseline_new_paths=False)
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": (10, 1)}, baseline_new_paths=False
+        )
         == 1
     )
     assert (
-        bench.accumulate_cgroup_oom(state, seen, {"a": 1}, baseline_new_paths=False)
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": (10, 1)}, baseline_new_paths=False
+        )
         == 0
+    )
+
+
+def test_accumulate_cgroup_oom_detects_recreation_at_the_same_counter():
+    state, seen = {}, set()
+    assert (
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": (10, 1)}, baseline_new_paths=False
+        )
+        == 1
+    )
+    assert (
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": (10, 1)}, baseline_new_paths=False
+        )
+        == 0
+    )
+    # Deleted and recreated between polls: the replacement's counter equals
+    # the old value, so only the changed directory inode reveals the kill.
+    assert (
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": (20, 1)}, baseline_new_paths=False
+        )
+        == 1
     )
 
 

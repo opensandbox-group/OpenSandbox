@@ -386,7 +386,7 @@ class TierResult:
     counters: TierCounters
     samples: list
     resident_mean_mib: float
-    resident_mean_per_sandbox_mib: float
+    resident_mean_per_sandbox_mib: float | None
     resident_max_mib: float
     mem_available_min_pct: float
     mem_available_mean_pct: float
@@ -438,9 +438,12 @@ class TierResult:
                 "max_total": round(self.resident_max_mib, 3),
                 # Averaged over live guests per tick, so ramped fleets are
                 # not diluted by ticks before the fleet finished building.
-                "mean_per_sandbox": round(self.resident_mean_per_sandbox_mib, 3)
-                if self.placed_sandboxes
-                else None,
+                # Gated on whether any live-guest samples were collected, not
+                # on the final survivor count: a tier whose last guests are
+                # host-evicted mid-run still recorded a real per-sandbox cost.
+                "mean_per_sandbox": None
+                if self.resident_mean_per_sandbox_mib is None
+                else round(self.resident_mean_per_sandbox_mib, 3),
             },
             "peak_resident_pct": round(
                 100.0 * self.resident_max_mib / cfg.node_memory_mib, 4
@@ -577,9 +580,10 @@ def plan_tighten(
 def host_oom_reserve(cfg: SimConfig) -> float:
     """Last-resort eviction threshold, scaled to the configured node.
 
-    The default is 0.8% of node memory with a 256 MiB floor, capped below
-    the configured red-line enter band so eviction can never preempt the
-    state machine; an explicit override is used as-is.
+    The default is 0.8% of node memory with a 256 MiB floor, capped at 90%
+    of the configured red-line enter band so eviction can never preempt the
+    state machine; on a small node the cap can pull the threshold below the
+    floor. An explicit override is used as-is.
     """
     if cfg.host_oom_reserve_mib is not None:
         return cfg.host_oom_reserve_mib
@@ -635,15 +639,24 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         counters.granted += 1
         if floor_grant:
             counters.floor_grants += 1
+            grant = sandboxes[-1]
             if not elastic:
                 # A redline-posture floor grant starts ballooned only until
                 # the red line clears: mark it so the drain deflates it back
-                # to the posture's full-cap baseline. Elastic guests keep
-                # their floor balloon by design, so the drain's restore to
-                # balloon_pre (the floor level) is a no-op for them.
-                grant = sandboxes[-1]
+                # to the posture's full-cap baseline.
                 grant.tightened = True
                 grant.balloon_pre = 0.0
+            else:
+                # Elastic guests keep their floor balloon by design; the
+                # drain must return them to that level, not to full cap.
+                grant.balloon_pre = grant.balloon
+            if cfg.throttle_first:
+                # A guest admitted mid-freeze joins the freeze. Otherwise the
+                # tighten pass, which only runs on entry, never sees it, and
+                # deflate_on_oom would release its floor balloon on the first
+                # demand spike, growing the guest toward its cap while the
+                # node is still under red-line pressure.
+                grant.throttled = True
 
     def tighten_plan(sandbox: SimSandbox, tick_idx: int, margin: float) -> float | None:
         return plan_tighten(sandbox, tick_idx, cfg, margin, counters)
@@ -799,7 +812,7 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         resident_mean_per_sandbox_mib=(
             resident_per_sandbox_sum / resident_per_sandbox_ticks
             if resident_per_sandbox_ticks
-            else 0.0
+            else None
         ),
         resident_max_mib=resident_max,
         mem_available_min_pct=avail_min,
@@ -880,16 +893,27 @@ def run_tighten_matrix(cfg: SimConfig) -> list[MatrixRow]:
     - the known-bad 128 MiB margin keeps the failure visible;
     - an infeasible floor (floor above the cap) emits skip, never an inflate;
     - inflate-before-throttle ordering OOMs guests that are mid-allocation.
+
+    The synthetic red-line trigger is pinned to elapsed seconds (not tick
+    indexes), so ``--interval`` changes the sampling cadence without changing
+    which case runs; a horizon shorter than the case needs is extended so the
+    forced window and its release always fit.
     """
     cases = [
-        ("safe margin, ordered", 2048.0, 512.0, True, 25, False, False),
-        ("known-bad margin, ordered", 2048.0, 128.0, True, 25, True, False),
-        ("infeasible floor, ordered", 512.0, 512.0, True, 25, False, True),
-        ("thin margin on a 512 MiB cap", 512.0, 128.0, True, 25, True, False),
-        ("safe margin, inflate-first", 2048.0, 512.0, False, 10, True, False),
+        # case, cap, margin, ordered, force at (s), expected OOM, expected skip
+        ("safe margin, ordered", 2048.0, 512.0, True, 25.0, False, False),
+        ("known-bad margin, ordered", 2048.0, 128.0, True, 25.0, True, False),
+        ("infeasible floor, ordered", 512.0, 512.0, True, 25.0, False, True),
+        ("thin margin on a 512 MiB cap", 512.0, 128.0, True, 25.0, True, False),
+        ("safe margin, inflate-first", 2048.0, 512.0, False, 10.0, True, False),
     ]
+    release_after_s = 20.0
     rows = []
-    for case, cap, margin, ordered, force_tick, expect_oom, expect_skip in cases:
+    for case, cap, margin, ordered, force_s, expect_oom, expect_skip in cases:
+        force_tick = max(1, round(force_s / cfg.interval_s))
+        release_tick = force_tick + max(1, round(release_after_s / cfg.interval_s))
+        # A tail after the release lets the drained guests be observed.
+        needed_s = (release_tick + 5) * cfg.interval_s
         row_cfg = replace(
             cfg,
             scenario="tighten-margins",
@@ -903,8 +927,9 @@ def run_tighten_matrix(cfg: SimConfig) -> list[MatrixRow]:
             throttle_first=ordered,
             fill_ratio=0.7,
             host_oom_reserve_mib=64.0,
+            duration_s=max(cfg.duration_s, needed_s),
             force_redline_ticks=(force_tick,),
-            release_redline_tick=force_tick + 20,
+            release_redline_tick=release_tick,
         )
         # The matrix runs on a tiny fleet so the case is the only variable.
         result = run_tier(row_cfg, "redline", 8)
@@ -1048,6 +1073,10 @@ def read_cgroups(root: Path) -> dict[str, dict]:
 
 
 def read_cgroup_sample(path: Path) -> dict:
+    # The directory inode is the cgroup's generation identity: a sandbox
+    # recreated at the same path starts a fresh counter, and only a changed
+    # inode distinguishes that replacement from a monotonic counter.
+    inode = path.stat().st_ino
     current_kib = float((path / "memory.current").read_text(encoding="utf-8").strip())
     maximum = None
     max_file = path / "memory.max"
@@ -1065,6 +1094,7 @@ def read_cgroup_sample(path: Path) -> dict:
         "current_mib": current_kib / (1024.0 * 1024.0),
         "max_mib": None if maximum is None else maximum / (1024.0 * 1024.0),
         "oom_kill": oom_kill,
+        "inode": inode,
     }
     pressure = path / "memory.pressure"
     if pressure.exists():
@@ -1074,33 +1104,49 @@ def read_cgroup_sample(path: Path) -> dict:
 
 
 def accumulate_cgroup_oom(
-    state: dict[str, int],
+    state: dict[str, tuple[int | None, int]],
     seen: set[str],
-    current: dict[str, int],
+    current: dict[str, tuple[int | None, int]],
     *,
     baseline_new_paths: bool,
 ) -> int:
     """Return cgroup OOM kills newly observed since the previous sample.
 
-    ``state`` carries the last cumulative counter per still-present cgroup,
-    so kills are counted even when a cgroup is deleted later in the run.
+    ``state`` carries the last ``(directory inode, cumulative counter)`` pair
+    per still-present cgroup, so kills are counted even when a cgroup is
+    deleted later in the run. The inode is the generation identity: a cgroup
+    recreated at the same path between two polls starts a fresh counter, and
+    without the identity a replacement whose counter reached the old value
+    (old ``1``, new ``1`` after one new kill) would be silently dropped. A
+    filesystem that hands the recycled inode number to the replacement
+    degrades to the counter-only semantics below.
+
     Paths present at the first sample are baselined (their pre-existing
     counters are not attributed to this run); paths that appear later count
-    from zero, as do returning or counter-resetting (recreated) paths.
+    from zero, as do returning, counter-resetting, or recreated paths.
     """
     observed = 0
-    for path, count in current.items():
+    for path, (inode, count) in current.items():
         previous = state.get(path)
         if previous is None:
             if path in seen or not baseline_new_paths:
                 observed += count
             else:
                 seen.add(path)
-        elif count < previous:
-            observed += count
         else:
-            observed += count - previous
-        state[path] = count
+            previous_inode, previous_count = previous
+            recreated = (
+                inode is not None
+                and previous_inode is not None
+                and inode != previous_inode
+            )
+            if recreated or count < previous_count:
+                # A replacement (or an in-place counter reset) starts over;
+                # its current value is entirely new.
+                observed += count
+            else:
+                observed += count - previous_count
+        state[path] = (inode, count)
     # Forget vanished cgroups; ``seen`` keeps their history for recreation.
     for path in list(state):
         if path not in current:
@@ -1111,7 +1157,7 @@ def accumulate_cgroup_oom(
 def collect_host_samples(cfg: HostConfig) -> list[dict]:
     """Sample a live node until ``duration_s`` elapses."""
     samples = []
-    oom_state: dict[str, int] = {}
+    oom_state: dict[str, tuple[int | None, int]] = {}
     oom_paths_seen: set[str] = set()
     cgroup_oom_seen = 0
     deadline = time.monotonic() + cfg.duration_s
@@ -1127,10 +1173,14 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
             counts = {
                 path: sample["oom_kill"] for path, sample in cgroup_samples.items()
             }
+            entries = {
+                path: (sample["inode"], sample["oom_kill"])
+                for path, sample in cgroup_samples.items()
+            }
             cgroup_oom_seen += accumulate_cgroup_oom(
                 oom_state,
                 oom_paths_seen,
-                counts,
+                entries,
                 baseline_new_paths=not samples,  # first sample only
             )
             num_cgroups = len(cgroup_samples)
@@ -1337,7 +1387,8 @@ DENSITY_COLUMNS = "| oversell req/placed | sandboxes | mean resident MiB/sandbox
 
 def density_table_row(cfg: SimConfig, result: TierResult) -> str:
     summary = result.to_summary(cfg, cfg.scenario)
-    resident = summary["resident_mib"]["mean_per_sandbox"] or 0.0
+    resident_value = summary["resident_mib"]["mean_per_sandbox"]
+    resident = "n/a" if resident_value is None else f"{resident_value:.1f}"
     verdict = (
         "pass"
         if summary["verdict"]["ok"]
@@ -1347,7 +1398,7 @@ def density_table_row(cfg: SimConfig, result: TierResult) -> str:
     return (
         f"| {summary['requested_oversell_ratio']:.2f}x/{summary['placed_oversell_ratio']:.2f}x | "
         f"{result.placed_sandboxes} | "
-        f"{resident:.1f} | {summary['peak_resident_pct']:.1f} | "
+        f"{resident} | {summary['peak_resident_pct']:.1f} | "
         f"{summary['mem_available_pct']['min']:.1f} | "
         f"{summary['psi_max_pct']['cpu_some']:.1f}/{summary['psi_max_pct']['cpu_full']:.1f} | "
         f"{result.counters.redline_events} | "
@@ -1534,7 +1585,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--host-oom-reserve-mib",
         type=float,
         default=None,
-        help="Last-resort eviction threshold; default scales to 0.8%% of node memory (min 256 MiB)",
+        help=(
+            "Last-resort eviction threshold; default scales to 0.8%% of node "
+            "memory, floored at 256 MiB and capped at 90%% of the red-line "
+            "enter band"
+        ),
     )
     parser.add_argument(
         "--fill-ratio",
@@ -1560,7 +1615,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sandboxes",
         type=int,
-        help="Fleet size for the host backend when --cgroup-root is not given",
+        help=(
+            "Fleet size for the host backend when --cgroup-root is not given "
+            "(nonnegative)"
+        ),
     )
     return parser
 
@@ -1610,6 +1668,8 @@ def arguments(argv=None) -> argparse.Namespace:
             )
         if args.cgroup_root is None and args.sandboxes is None:
             parser.error("Host backend needs --cgroup-root or --sandboxes")
+        if args.sandboxes is not None and args.sandboxes < 0:
+            parser.error("--sandboxes must be nonnegative")
         if args.cgroup_root is not None and args.sandboxes is not None:
             parser.error(
                 "--sandboxes is the fleet-size override for runs without "
@@ -1679,7 +1739,7 @@ def main(argv=None) -> int:
             "Tighten-ordering matrix (modeled)",
             matrix_meta_lines(
                 cfg_sim,
-                "- rows override cap, tighten margin, and ordering; every row runs a dense workload that fills 70% of its cap, with a synthetic red-line trigger (force tick in the JSON output)",
+                "- rows override cap, tighten margin, and ordering; every row runs a dense workload that fills 70% of its cap, with a synthetic red-line trigger pinned to elapsed time (25 s, or 10 s for the inflate-first case; the derived tick is in the JSON output)",
             )
             + [
                 "",
