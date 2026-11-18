@@ -314,6 +314,8 @@ OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
 # Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
+# The value also flows into the Go-based image builds via --build-arg GOPROXY;
+# empty build args keep the Dockerfile defaults (proxy.golang.org).
 FSB_GOPROXY="${FSB_GOPROXY:-direct}"
 export GOPROXY="$FSB_GOPROXY"
 
@@ -837,6 +839,7 @@ build_images() {
 	# Context is the repo root (COPYs components/egress + components/internal).
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/egress/Dockerfile" -t "$IMG_EGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "egress image build failed"
 	log "building the OpenSandbox server image ($IMG_SERVER)"
@@ -848,6 +851,7 @@ build_images() {
 	log "building the OpenSandbox ingress image ($IMG_INGRESS)"
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/ingress/Dockerfile" -t "$IMG_INGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "ingress image build failed"
 	log "building the OpenSandbox node-agent image from source ($IMG_NODEAGENT)"
@@ -855,6 +859,7 @@ build_images() {
 	# components/nodeagent + components/internal with its pinned Go toolchain.
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/nodeagent/Dockerfile" -t "$IMG_NODEAGENT" "$OSB_ROOT" >/dev/null \
 		|| die "node-agent image build failed"
 	pass "images built (fast-sandbox + OpenSandbox)"
@@ -1630,12 +1635,14 @@ template_up() {
 	if ! docker image inspect "$IMG_OCI_TOOLS" >/dev/null 2>&1; then
 		log "building shared oci build base ($IMG_OCI_TOOLS)"
 		# shellcheck disable=SC2086
-		docker build ${DOCKER_BUILD_FLAGS:-} --quiet -t "$IMG_OCI_TOOLS" \
+		docker build ${DOCKER_BUILD_FLAGS:-} --quiet --build-arg GOPROXY="${GOPROXY:-}" \
+			-t "$IMG_OCI_TOOLS" \
 			-f "$FSB_DIR/build/Dockerfile.oci-tools" "$FSB_DIR" >/dev/null \
 			|| die "oci-tools image build failed"
 	fi
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		--build-arg OCI_TOOLS_IMAGE="$IMG_OCI_TOOLS" -t "$IMG_BUILDER" \
 		-f "$FSB_DIR/build/Dockerfile.sandboxtemplate-builder" "$FSB_DIR" >/dev/null \
 		|| die "sandboxtemplate-builder image build failed"
@@ -5073,7 +5080,8 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
 Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
 DOCKER_MIRROR, RUSTFS_*, RC_IMAGE, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
 FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
-when the host cannot reach module VCS hosts directly),
+when the host cannot reach module VCS hosts directly; also passed into the
+Go-based image builds as --build-arg GOPROXY),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, POOL_MODE=resource-aware (OSEP-0026
 ResourceAware pool fixture), WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1,

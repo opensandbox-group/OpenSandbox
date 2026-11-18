@@ -20,6 +20,10 @@ ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
 ARG GOFLAGS=
 ARG LDFLAGS=
+# Optional module proxy for restricted build networks; empty keeps Go's
+# environment (proxy.golang.org) untouched.
+ARG GOPROXY=
+ENV GOPROXY=${GOPROXY}
 
 COPY components/internal/go.mod components/internal/go.sum ./components/internal/
 COPY components/nodeagent/go.mod components/nodeagent/go.sum ./components/nodeagent/
