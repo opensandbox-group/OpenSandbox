@@ -85,6 +85,23 @@ Pause/resume is currently single-replica only. The internal pause snapshot recor
 
 See [Credential Vault](/guides/credential-vault#persistence-across-pause-and-resume) for the required post-resume credential re-injection procedure.
 
+### Recreate selected containers from pinned images
+
+For a single-replica, non-pooled `BatchSandbox` without shard patches using RootFS pause/resume, set `spec.recreateContainersOnResume` at creation to exclude selected regular containers from the internal pause snapshot. Each entry names a container and repeats its creation-time digest-pinned image reference from the Pod template:
+
+```yaml
+spec:
+  recreateContainersOnResume:
+    - name: egress
+      image: registry.example.com/opensandbox/egress@sha256:<manifest-digest>
+```
+
+On resume, selected containers start from the pinned images without their previous writable layers. Other containers still restore from the snapshot. At least one regular container must remain in the snapshot. The controller records the initial policy before creating the first Pod; adding, changing, or removing it after that point causes pause or resume to reject the request. Selected containers are not frozen by the image committer and can keep running until the source Pod is terminated. The destination node must have access to the pinned image if it is not already cached.
+
+Install the updated CRD and controller before creating BatchSandboxes with this policy. Do not downgrade the controller while managing sandboxes that use it: older controllers do not honor the policy. Leaving it unset preserves the previous behavior. Public snapshots are unaffected.
+
+For Credential Vault, a pinned image does not authenticate the destination of a vault write. Verify that the destination belongs to the current trusted Egress instance before sending credentials.
+
 ### Durability and abnormal termination
 
 The root filesystem is durable only after the snapshot reaches `Succeed` and the OCI image has been pushed to the configured registry. A pause request being accepted, or a snapshot being in `Pending` or `Committing`, does not provide a durability guarantee.

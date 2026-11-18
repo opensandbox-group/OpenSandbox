@@ -200,6 +200,9 @@ func (r *BatchSandboxReconciler) dispatchPauseResume(ctx context.Context, bs *sa
 		if err != nil {
 			return result, true, err
 		}
+		if hasRecreatePolicy(bs) && bs.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseResuming {
+			return result, true, nil
+		}
 		// Return handled=false to let normal flow update phase from Resuming to Succeed.
 		return result, false, nil
 	}
@@ -221,6 +224,11 @@ func (r *BatchSandboxReconciler) dispatchPauseResume(ctx context.Context, bs *sa
 				log.Info("Dispatch: handlePause", "generation", generation, "pauseObservedGeneration", pauseObservedGen)
 				result, err := r.handlePause(ctx, bs)
 				return result, true, err
+			}
+			if hasRecreatePolicy(bs) && bs.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed {
+				// A renew or the controller's image patch can advance generation
+				// after resume has completed and its snapshot has been cleaned up.
+				return ctrl.Result{}, false, nil
 			}
 			log.Info("Dispatch: handleResume", "generation", generation, "pauseObservedGeneration", pauseObservedGen, "currentPhase", bs.Status.Phase)
 			result, err := r.handleResume(ctx, bs)
@@ -260,6 +268,13 @@ func (r *BatchSandboxReconciler) handlePause(ctx context.Context, bs *sandboxv1a
 		return ctrl.Result{}, nil
 	}
 
+	if hasRecreatePolicy(bs) {
+		if err := r.validatePauseRecreatePolicy(ctx, bs); err != nil {
+			bs.Status.PauseObservedGeneration = bs.Generation
+			setConditionInStatus(&bs.Status, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, "InvalidRecreatePolicy", err.Error())
+			return ctrl.Result{}, r.Status().Update(ctx, bs)
+		}
+	}
 	snapshot := &sandboxv1alpha1.SandboxSnapshot{}
 	snapshotName := internalPauseSnapshotName(bs.Name)
 	err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: snapshotName}, snapshot)
@@ -400,6 +415,14 @@ func (r *BatchSandboxReconciler) syncPauseOrClear(ctx context.Context, bs *sandb
 
 	switch snapshot.Status.Phase {
 	case sandboxv1alpha1.SandboxSnapshotPhaseSucceed:
+		if hasRecreatePolicy(bs) {
+			if err := validateRecreateSnapshot(bs, snapshot); err != nil {
+				if statusErr := r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhaseSucceed, ""); statusErr != nil {
+					return ctrl.Result{}, statusErr
+				}
+				return ctrl.Result{}, r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, "InvalidRecreateSnapshot", err.Error())
+			}
+		}
 		log.Info("SandboxSnapshot Succeed, completing pause")
 		if err := r.completePause(ctx, bs); err != nil {
 			return ctrl.Result{}, err
@@ -526,10 +549,45 @@ func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv
 //     the single supported runtime replica from the rewritten template.
 func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	recreate := hasRecreatePolicy(bs)
+	rejectResume := func(reason, message string) error {
+		bs.Status.Phase = sandboxv1alpha1.BatchSandboxPhasePaused
+		if bs.Spec.Pause != nil && !*bs.Spec.Pause {
+			bs.Status.PauseObservedGeneration = bs.Generation
+		}
+		applyBatchSandboxPhaseConditions(&bs.Status)
+		setConditionInStatus(&bs.Status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, reason, message)
+		if err := r.Status().Update(ctx, bs); err != nil {
+			return err
+		}
+		r.StatusRVExpectation.Expect(bs)
+		return nil
+	}
 
+	reader := client.Reader(r.Client)
+	if recreate {
+		if r.APIReader != nil {
+			reader = r.APIReader
+		}
+		latest := &sandboxv1alpha1.BatchSandbox{}
+		if err := reader.Get(ctx, client.ObjectKeyFromObject(bs), latest); err != nil {
+			return ctrl.Result{}, err
+		}
+		if latest.UID != bs.UID {
+			return ctrl.Result{}, fmt.Errorf("BatchSandbox was replaced during resume")
+		}
+		*bs = *latest
+		// The cache can still report Resuming after snapshot cleanup.
+		if latest.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseResuming {
+			return ctrl.Result{}, nil
+		}
+	}
 	snapshot := &sandboxv1alpha1.SandboxSnapshot{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: internalPauseSnapshotName(bs.Name)}, snapshot); err != nil {
+	if err := reader.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: internalPauseSnapshotName(bs.Name)}, snapshot); err != nil {
 		if errors.IsNotFound(err) {
+			if recreate {
+				return ctrl.Result{}, rejectResume("SnapshotNotFound", "Internal rootfs snapshot not found")
+			}
 			readyPodExists, readyErr := r.hasReadyResumePod(ctx, bs)
 			if readyErr != nil {
 				return ctrl.Result{}, readyErr
@@ -551,10 +609,18 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 
 	if snapshot.Status.Phase != sandboxv1alpha1.SandboxSnapshotPhaseSucceed {
 		msg := fmt.Sprintf("snapshot not ready: phase=%s", snapshot.Status.Phase)
+		if recreate {
+			return ctrl.Result{}, rejectResume("SnapshotNotReady", msg)
+		}
 		log.Error(nil, msg)
 		_ = r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhasePaused, "")
 		_ = r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, "SnapshotNotReady", msg)
 		return ctrl.Result{}, nil
+	}
+	if recreate {
+		if err := validateRecreateSnapshot(bs, snapshot); err != nil {
+			return ctrl.Result{}, rejectResume("InvalidRecreateSnapshot", err.Error())
+		}
 	}
 
 	imageMap := make(map[string]string)
@@ -587,6 +653,31 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 			_ = r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, "InvalidQEMURestore", msg)
 			return ctrl.Result{}, nil
 		}
+	}
+
+	if recreate {
+		template := bs.Spec.Template
+		var original *sandboxv1alpha1.BatchSandbox
+		for i := range template.Spec.Containers {
+			c := &template.Spec.Containers[i]
+			if img, ok := imageMap[c.Name]; ok && c.Image != img {
+				if original == nil {
+					original = bs.DeepCopy()
+				}
+				c.Image = img
+			}
+		}
+		if r.ResumePullSecret != "" && !hasImagePullSecret(template, r.ResumePullSecret) {
+			if original == nil {
+				original = bs.DeepCopy()
+			}
+			ensureImagePullSecret(template, r.ResumePullSecret)
+		}
+		if original == nil {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		patch := client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})
+		return ctrl.Result{RequeueAfter: time.Second}, r.Patch(ctx, bs, patch)
 	}
 
 	var patched *sandboxv1alpha1.BatchSandbox

@@ -481,6 +481,33 @@ func TestHandlePause_WaitsForTaskCleanupBeforeCreatingSnapshot(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "snapshot must wait until tasks are released")
 }
 
+func TestHandlePause_InvalidRecreatePolicyDoesNotStopTasks(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default", UID: "sandbox-uid", Generation: 2},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause:        ptr.To(true),
+			Replicas:     ptr.To(int32(1)),
+			Template:     &corev1.PodTemplateSpec{},
+			TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{Spec: sandboxv1alpha1.TaskSpec{Process: &sandboxv1alpha1.ProcessTask{Command: []string{"sleep", "3600"}}}},
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                      sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			RecreateContainersOnResume: []sandboxv1alpha1.RecreateContainerOnResume{{Name: "sidecar", Image: "registry/sidecar@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}},
+		},
+	}
+	r := newTestReconciler(bs)
+	scheduler := &recordingTaskScheduler{}
+	key := client.ObjectKeyFromObject(bs)
+	r.taskSchedulers.Store(key.String(), scheduler)
+	ctx := context.Background()
+	_, err := r.handlePause(ctx, bs)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key, bs))
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, bs.Status.Phase)
+	require.True(t, hasTrueBatchSandboxCondition(bs.Status.Conditions, sandboxv1alpha1.BatchSandboxConditionPauseFailed))
+	assert.Zero(t, scheduler.stopCalls)
+}
+
 func TestHandlePause_CreatesSnapshotAfterTaskCleanup(t *testing.T) {
 	bs := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -896,6 +923,83 @@ func TestContinueResume_NormalFlow(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "imagePullSecrets should contain resume-pull-secret")
+}
+
+func TestReconcile_RecordsPolicyAfterEarlySpecUpdate(t *testing.T) {
+	policy := []sandboxv1alpha1.RecreateContainerOnResume{{Name: "sidecar", Image: "registry/sidecar@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default", UID: "sandbox-uid", Generation: 2},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Replicas:                   ptr.To(int32(1)),
+			RecreateContainersOnResume: policy,
+		},
+	}
+	r := newTestReconciler(bs)
+	ctx := context.Background()
+	key := client.ObjectKeyFromObject(bs)
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, key, bs))
+	require.Equal(t, policy, bs.Status.RecreateContainersOnResume)
+}
+
+func TestContinueResume_RecreatesPinnedSidecar(t *testing.T) {
+	const pinned = "registry/sidecar@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default", UID: "sandbox-uid"},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: "main", Image: "old-main"},
+				{Name: "sidecar", Image: pinned},
+			}}},
+			RecreateContainersOnResume: []sandboxv1alpha1.RecreateContainerOnResume{{Name: "sidecar", Image: pinned}},
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                      sandboxv1alpha1.BatchSandboxPhaseResuming,
+			RecreateContainersOnResume: []sandboxv1alpha1.RecreateContainerOnResume{{Name: "sidecar", Image: pinned}},
+		},
+	}
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-bs-pause", Namespace: bs.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(bs, sandboxv1alpha1.SchemeBuilder.GroupVersion.WithKind("BatchSandbox"))},
+		},
+		Spec: sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: bs.Name},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{
+			Phase: sandboxv1alpha1.SandboxSnapshotPhaseSucceed, Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1,
+			Containers: []sandboxv1alpha1.ContainerSnapshot{
+				{ContainerName: "sidecar", ImageURI: "registry/copied-sidecar:snap", ImageDigest: digest},
+				{ContainerName: "main", ImageURI: "registry/main:snap", ImageDigest: digest},
+			},
+		},
+	}
+	r := newTestReconciler(bs, snapshot)
+	ctx := context.Background()
+	_, handled, err := r.dispatchPauseResume(ctx, bs.DeepCopy())
+	require.NoError(t, err)
+	require.True(t, handled, "mismatched snapshot must block Pod creation")
+	var current sandboxv1alpha1.BatchSandbox
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(bs), &current))
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, current.Status.Phase)
+	require.Equal(t, "old-main", current.Spec.Template.Spec.Containers[0].Image)
+
+	var currentSnapshot sandboxv1alpha1.SandboxSnapshot
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snapshot), &currentSnapshot))
+	currentSnapshot.Status.Containers = currentSnapshot.Status.Containers[1:]
+	require.NoError(t, r.Status().Update(ctx, &currentSnapshot))
+	current.Status.Phase = sandboxv1alpha1.BatchSandboxPhaseResuming
+	require.NoError(t, r.Status().Update(ctx, &current))
+	r.APIReader = r.Client
+	stale := current.DeepCopy()
+	stale.Spec.RecreateContainersOnResume = nil
+	_, handled, err = r.dispatchPauseResume(ctx, stale)
+	require.NoError(t, err)
+	require.False(t, handled, "valid resume must allow Pod creation")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(bs), &current))
+	assert.Equal(t, "registry/main@"+digest, current.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, pinned, current.Spec.Template.Spec.Containers[1].Image)
 }
 
 func TestContinueResume_PreservesExistingReplicas(t *testing.T) {

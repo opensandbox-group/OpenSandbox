@@ -638,6 +638,60 @@ func TestSandboxSnapshotHandlePending_UsesSourcePodContainersWhenTemplateMissing
 	assert.Contains(t, job.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: "SOURCE_POD_UID", Value: "pool-pod-uid"})
 }
 
+func TestSandboxSnapshotHandlePending_RespectsPinnedSidecarsOnlyForPause(t *testing.T) {
+	const pin = "registry/sidecar@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, tc := range []struct {
+		name     string
+		internal bool
+		want     []string
+	}{
+		{name: "pause", internal: true, want: []string{"main"}},
+		{name: "public", want: []string{"main", "sidecar"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replicas := int32(1)
+			containers := []corev1.Container{{Name: "main", Image: "registry/main:v1"}, {Name: "sidecar", Image: pin}}
+			policy := []sandboxv1alpha1.RecreateContainerOnResume{{Name: "sidecar", Image: pin}}
+			bs := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: "sandbox-uid", Generation: 1},
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					Replicas:                   &replicas,
+					Template:                   &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: containers}},
+					RecreateContainersOnResume: policy,
+				},
+				Status: sandboxv1alpha1.BatchSandboxStatus{RecreateContainersOnResume: policy},
+			}
+			owner := *metav1.NewControllerRef(bs, sandboxv1alpha1.SchemeBuilder.GroupVersion.WithKind("BatchSandbox"))
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox-0", Namespace: bs.Namespace, UID: "pod-uid", OwnerReferences: []metav1.OwnerReference{owner}},
+				Spec:       corev1.PodSpec{NodeName: "node-a", Containers: containers},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			snapshot := &sandboxv1alpha1.SandboxSnapshot{
+				ObjectMeta: metav1.ObjectMeta{Name: "osb-snap-public", Namespace: bs.Namespace},
+				Spec:       sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: bs.Name},
+			}
+			if tc.internal {
+				snapshot.Name = "sandbox-pause"
+				snapshot.OwnerReferences = []metav1.OwnerReference{owner}
+			}
+			r := newTestSnapshotReconciler(bs, pod, snapshot)
+			r.SnapshotRegistry = "registry.example/snapshots"
+			ctx := context.Background()
+			_, err := r.handlePending(ctx, snapshot)
+			require.NoError(t, err)
+			var current sandboxv1alpha1.SandboxSnapshot
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snapshot), &current))
+			require.Equal(t, sandboxv1alpha1.SandboxSnapshotPhaseCommitting, current.Status.Phase)
+			var names []string
+			for _, c := range current.Status.Containers {
+				names = append(names, c.ContainerName)
+			}
+			assert.ElementsMatch(t, tc.want, names)
+		})
+	}
+}
+
 func TestSandboxSnapshotHandlePending_PublicSnapshotUsesSnapshotIDTag(t *testing.T) {
 	bs := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{

@@ -311,6 +311,11 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 		applySteadyRuntimePhase(batchSbx, newStatus, pods)
 	}
 
+	if hasRecreatePolicy(batchSbx) && newStatus.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed && isResumeInFlight(batchSbx) {
+		// Acknowledge only the generation that was actually reconciled, not a
+		// newer pause intent that may already be present on the API server.
+		newStatus.PauseObservedGeneration = batchSbx.Generation
+	}
 	applyBatchSandboxPhaseConditions(newStatus)
 
 	return runtimeView{

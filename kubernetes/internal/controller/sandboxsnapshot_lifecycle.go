@@ -99,6 +99,23 @@ func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot 
 	if bs.Spec.Template != nil {
 		sourceContainers = bs.Spec.Template.Spec.Containers
 	}
+	if hasRecreatePolicy(bs) && snapshot.Name == internalPauseSnapshotName(bs.Name) {
+		targets, policyErr := rootfsSnapshotTargets(bs)
+		if policyErr == nil {
+			switch {
+			case !isOwnedPauseSnapshot(snapshot, bs):
+				policyErr = fmt.Errorf("internal pause snapshot is not owned by its BatchSandbox")
+			case snapshotFormat != sandboxv1alpha1.SandboxSnapshotFormatRootfsV1:
+				policyErr = fmt.Errorf("recreateContainersOnResume only supports rootfs-v1")
+			default:
+				policyErr = validateSourceContainerPins(bs, pod)
+			}
+		}
+		if policyErr != nil {
+			return ctrl.Result{}, r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "InvalidRecreatePolicy", policyErr.Error())
+		}
+		sourceContainers = targets
+	}
 
 	if len(sourceContainers) == 0 {
 		msg := fmt.Sprintf("no containers found in BatchSandbox %s template", bs.Name)

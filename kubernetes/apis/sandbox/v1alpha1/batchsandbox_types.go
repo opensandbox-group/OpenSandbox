@@ -139,6 +139,26 @@ type BatchSandboxSpec struct {
 	// Controller never clears this field; Server may temporarily patch nil to force a new generation for retries.
 	// +optional
 	Pause *bool `json:"pause,omitempty"`
+
+	// RecreateContainersOnResume lists regular containers restarted from their
+	// creation-time images instead of restoring their writable layers.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=32
+	RecreateContainersOnResume []RecreateContainerOnResume `json:"recreateContainersOnResume,omitempty"`
+}
+
+type RecreateContainerOnResume struct {
+	// Name identifies a regular container in the template.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
+	// Image is the digest-pinned creation-time image of the container.
+	// +kubebuilder:validation:MaxLength=512
+	// +kubebuilder:validation:Pattern="^[^@[:space:]]+@sha256:[a-f0-9]{64}$"
+	Image string `json:"image"`
 }
 
 type TaskResourcePolicy string
@@ -183,6 +203,13 @@ type BatchSandboxStatus struct {
 	// when entering pause/resume dispatch logic. Written immediately to prevent reentry (idempotent gating).
 	// +optional
 	PauseObservedGeneration int64 `json:"pauseObservedGeneration,omitempty"`
+
+	// RecreateContainersOnResume records the creation-time policy. Pause and
+	// resume reject changes to the policy after the controller has recorded it.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	RecreateContainersOnResume []RecreateContainerOnResume `json:"recreateContainersOnResume,omitempty"`
 
 	// Conditions records lifecycle and operational state details.
 	// +optional
