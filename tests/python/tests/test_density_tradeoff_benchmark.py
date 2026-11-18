@@ -154,6 +154,8 @@ def test_deflation_never_exceeds_the_declared_cap():
         assert sandbox.effective_mib <= sandbox.cap_mib
     assert sandbox.balloon == 0.0
     assert sandbox.oom_kills >= 1
+    # The partial release did not save the workload, so it is not a save.
+    assert sandbox.deflate_saves == 0
 
 
 def test_tighten_plan_uses_cap_minus_floor_derivation():
@@ -204,6 +206,18 @@ def test_tighten_plan_skips_infeasible_floor():
     assert counters.tighten_skips == 1
     assert counters.tighten_actions == 0
     assert sandbox.oom_kills == 0
+
+
+def test_tighten_plan_never_deflates_a_larger_elastic_balloon():
+    cfg = sim_config(cap_mib=2048.0)
+    sandbox = make_sandbox(cfg, kind="idle")
+    sandbox.balloon = 1792.0  # elastic create: cap minus a 256 MiB floor
+    counters = bench.TierCounters()
+    # The plan would be 1512.8 MiB, below the current balloon: no action, and
+    # the controller must leave the balloon and the throttle intact.
+    assert bench.plan_tighten(sandbox, 10, cfg, 512.0, counters) is None
+    assert counters.tighten_skips == 1
+    assert sandbox.balloon == 1792.0
 
 
 # --- policy layers ----------------------------------------------------------
@@ -274,6 +288,15 @@ def test_unrecovered_red_line_is_a_verdict_violation():
     assert "red_line_unrecovered" in summary["verdict"]["violations"]
 
 
+def test_per_sandbox_residency_averages_over_live_guests_only():
+    # A ramped fleet must not dilute the per-sandbox cost with empty ticks.
+    cfg = sim_config(create_rate=1.0, duration_s=20.0)
+    result = bench.run_tier(cfg, "redline", 16)
+    summary = result.to_summary(cfg, "density")
+    assert result.placed_sandboxes == 16
+    assert summary["resident_mib"]["mean_per_sandbox"] == pytest.approx(26.2, abs=0.5)
+
+
 def test_host_oom_evicts_instead_of_exhausting_the_node():
     cfg = sim_config(
         node_memory_mib=4096.0,
@@ -330,7 +353,9 @@ def test_tighten_matrix_matches_test_plan_expectations():
 
 
 def test_deflate_rescue_scenario_matches_expectations():
-    rows = bench.run_deflate_rescue(sim_config())
+    rescue_cfg, rows = bench.run_deflate_rescue(sim_config())
+    assert rescue_cfg.cap_mib == 2048.0
+    assert rescue_cfg.mix == {"dense": 1.0}
     assert len(rows) == 2
     assert all(row["verdict"]["ok"] for row in rows)
     assert rows[0]["deflate_on_oom"] is True
@@ -469,6 +494,22 @@ def test_host_summary_without_cgroups_reports_residency_unavailable(tmp_path):
     assert "| n/a |" in report
 
 
+def test_read_cgroups_tolerates_a_vanished_sandbox(tmp_path, monkeypatch):
+    cgroups = tmp_path / "cgroups"
+    cgroups.mkdir()
+    write_fake_cgroups(cgroups)
+    original = bench.read_cgroup_sample
+
+    def flaky(path):
+        if path.name == "sandbox-a":
+            raise FileNotFoundError(path)
+        return original(path)
+
+    monkeypatch.setattr(bench, "read_cgroup_sample", flaky)
+    samples = bench.read_cgroups(cgroups)
+    assert list(samples) == [str(cgroups / "sandbox-b")]
+
+
 def test_accumulate_cgroup_oom_counts_kills_across_churn():
     state, seen = {}, set()
     # First sighting is a baseline, not a delta.
@@ -516,6 +557,16 @@ def test_cli_host_run_writes_array_summary(tmp_path, capsys):
 
 
 # --- CLI end to end (sim, hermetic) -----------------------------------------
+
+
+def test_cli_matrix_reports_describe_the_executed_configuration(capsys):
+    assert bench.main(["--scenario", "deflate-rescue"]) == 0
+    deflate_report = capsys.readouterr().out
+    assert "cap 2048 MiB, floor 1024 MiB" in deflate_report
+    assert "dense=1.00" in deflate_report
+    assert bench.main(["--scenario", "tighten-margins"]) == 0
+    tighten_report = capsys.readouterr().out
+    assert "rows override cap, tighten margin, and ordering" in tighten_report
 
 
 def test_cli_density_run_writes_all_outputs(tmp_path, capsys):

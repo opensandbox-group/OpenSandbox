@@ -98,7 +98,7 @@ python3 benchmarks/density_tradeoff.py --backend host \
   --out-jsonl host-samples.jsonl --report host-report.md
 ```
 
-Child directories of `--cgroup-root` are treated as sandboxes; `memory.current`, `memory.max`, `memory.events`, and `memory.pressure` are read for each. Without a cgroup root, pass `--sandboxes N` to report node-level signals only. Bring the fleet up with your own driver and run the sampler per density tier; the sampler is intentionally driver-agnostic.
+Child directories of `--cgroup-root` are treated as sandboxes; `memory.current`, `memory.max`, `memory.events`, and `memory.pressure` are read for each. Without a cgroup root, pass `--sandboxes N` to report node-level signals only; residency and cgroup OOM fields are then reported as `n/a` rather than zero, and `--sandboxes` only feeds the oversell ratio. Bring the fleet up with your own driver and run the sampler per density tier; the sampler is intentionally driver-agnostic.
 
 ## Output schema
 

@@ -299,7 +299,8 @@ class SimSandbox:
                     released = min(self.balloon, deficit)
                     self.balloon -= released
                     deficit -= released
-                    self.deflate_saves += 1
+                    if deficit == 0:
+                        self.deflate_saves += 1
                 if deficit > 0:
                     # Guest OOM: the in-guest process dies, the micro-VM
                     # survives, freed pages return via FPR.
@@ -385,6 +386,7 @@ class TierResult:
     counters: TierCounters
     samples: list
     resident_mean_mib: float
+    resident_mean_per_sandbox_mib: float
     resident_max_mib: float
     mem_available_min_pct: float
     mem_available_mean_pct: float
@@ -427,9 +429,9 @@ class TierResult:
             "resident_mib": {
                 "mean_total": round(self.resident_mean_mib, 3),
                 "max_total": round(self.resident_max_mib, 3),
-                "mean_per_sandbox": round(
-                    self.resident_mean_mib / self.placed_sandboxes, 3
-                )
+                # Averaged over live guests per tick, so ramped fleets are
+                # not diluted by ticks before the fleet finished building.
+                "mean_per_sandbox": round(self.resident_mean_per_sandbox_mib, 3)
                 if self.placed_sandboxes
                 else None,
             },
@@ -534,6 +536,12 @@ def plan_tighten(
     if amount <= 0:
         counters.tighten_skips += 1
         return None
+    if amount <= sandbox.balloon:
+        # An elastic sandbox may already hold a larger balloon than the
+        # tighten target. Deflating it would hand memory back while the
+        # pressure persists, so leave the balloon and the throttle alone.
+        counters.tighten_skips += 1
+        return None
     # Growth still pending in the next interval is what a late throttle
     # would let run into the inflate window.
     allocating = (
@@ -616,6 +624,8 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
 
     samples: list = []
     resident_sum = 0.0
+    resident_per_sandbox_sum = 0.0
+    resident_per_sandbox_ticks = 0
     resident_max = 0.0
     avail_min = 100.0
     avail_sum = 0.0
@@ -705,6 +715,9 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
 
         resident_total = sum(s.resident_mib(cfg) for s in sandboxes)
         resident_sum += resident_total
+        if sandboxes:
+            resident_per_sandbox_sum += resident_total / len(sandboxes)
+            resident_per_sandbox_ticks += 1
         resident_max = max(resident_max, resident_total)
         avail_min = min(avail_min, avail_pct)
         avail_sum += avail_pct
@@ -743,6 +756,11 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         counters=counters,
         samples=samples,
         resident_mean_mib=resident_sum / ticks,
+        resident_mean_per_sandbox_mib=(
+            resident_per_sandbox_sum / resident_per_sandbox_ticks
+            if resident_per_sandbox_ticks
+            else 0.0
+        ),
         resident_max_mib=resident_max,
         mem_available_min_pct=avail_min,
         mem_available_mean_pct=avail_sum / ticks,
@@ -838,6 +856,7 @@ def run_tighten_matrix(cfg: SimConfig) -> list[MatrixRow]:
             postures=("redline",),
             cap_mib=cap,
             floor_mib=min(cfg.floor_mib, cap),
+            snapshot_mib_per_sandbox=cap,  # dense snapshot is 1:1 with the cap
             mix={"dense": 1.0},
             create_rate=0.0,
             tighten_margin_mib=margin,
@@ -865,23 +884,28 @@ def run_tighten_matrix(cfg: SimConfig) -> list[MatrixRow]:
     return rows
 
 
-def run_deflate_rescue(cfg: SimConfig) -> list[dict]:
+def run_deflate_rescue(cfg: SimConfig) -> tuple[SimConfig, list[dict]]:
     """deflate_on_oom tail insurance (E5): a burst beyond the effective
     (balloon-reduced) cap is absorbed by automatic deflation; with the
-    escape hatch off the same burst OOMs the guest process."""
+    escape hatch off the same burst OOMs the guest process.
+
+    Returns the shared row config so the report header describes the
+    experiment that actually ran, not the top-level defaults.
+    """
     rows = []
+    base = replace(
+        cfg,
+        scenario="deflate-rescue",
+        postures=("elastic",),
+        mix={"dense": 1.0},
+        cap_mib=2048.0,
+        floor_mib=1024.0,
+        snapshot_mib_per_sandbox=2048.0,
+        fill_ratio=0.6,
+        create_rate=0.0,
+    )
     for deflate_on in (True, False):
-        row_cfg = replace(
-            cfg,
-            scenario="deflate-rescue",
-            postures=("elastic",),
-            mix={"dense": 1.0},
-            cap_mib=2048.0,
-            floor_mib=1024.0,
-            fill_ratio=0.6,
-            create_rate=0.0,
-            deflate_on_oom=deflate_on,
-        )
+        row_cfg = replace(base, deflate_on_oom=deflate_on)
         result = run_tier(row_cfg, "elastic", 1)
         rescued = (
             result.counters.deflate_saves > 0 and result.counters.guest_oom_kills == 0
@@ -900,7 +924,7 @@ def run_deflate_rescue(cfg: SimConfig) -> list[dict]:
                 "summary": result.to_summary(row_cfg, "deflate-rescue"),
             }
         )
-    return rows
+    return base, rows
 
 
 # ---------------------------------------------------------------------------
@@ -963,6 +987,21 @@ def list_cgroup_dirs(root: Path) -> list[Path]:
         for path in root.iterdir()
         if path.is_dir() and (path / "memory.current").exists()
     )
+
+
+def read_cgroups(root: Path) -> dict[str, dict]:
+    """Read every sandbox cgroup under ``root``, tolerating churn.
+
+    A sandbox that vanishes (or is recreated) between the directory listing
+    and the file reads is skipped instead of aborting the sample.
+    """
+    samples: dict[str, dict] = {}
+    for path in list_cgroup_dirs(root):
+        try:
+            samples[str(path)] = read_cgroup_sample(path)
+        except FileNotFoundError:
+            continue
+    return samples
 
 
 def read_cgroup_sample(path: Path) -> dict:
@@ -1037,10 +1076,7 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
         memory = read_pressure(cfg.proc_root / "pressure" / "memory")
         vmstat_oom = read_vmstat_oom_kills(cfg.proc_root)
         if cfg.cgroup_root:
-            cgroup_samples = {
-                str(path): read_cgroup_sample(path)
-                for path in list_cgroup_dirs(cfg.cgroup_root)
-            }
+            cgroup_samples = read_cgroups(cfg.cgroup_root)
             counts = {
                 path: sample["oom_kill"] for path, sample in cgroup_samples.items()
             }
@@ -1160,20 +1196,59 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def node_line(cfg: SimConfig) -> str:
+    return f"- node: {cfg.node_memory_mib:.0f} MiB memory, {cfg.platform_reserved_mib:.0f} MiB platform reserve, {cfg.physical_cores} physical cores"
+
+
+def horizon_line(cfg: SimConfig) -> str:
+    cadence = (
+        f"create rate {cfg.create_rate:.0f}/s"
+        if cfg.create_rate
+        else "instant fleet build"
+    )
+    return (
+        f"- horizon: {cfg.duration_s:.0f} s at {cfg.interval_s:.0f} s intervals; "
+        f"seed {cfg.seed}; {cadence}"
+    )
+
+
+def policy_line(cfg: SimConfig) -> str:
+    return (
+        f"- policy: red line {cfg.red_line_enter_pct:.0f}%/{cfg.red_line_exit_pct:.0f}%, "
+        f"sigma-caps invariant {cfg.invariant_pct:.0f}%, tighten margin {cfg.tighten_margin_mib:.0f} MiB, "
+        f"{'throttle-first' if cfg.throttle_first else 'inflate-first'} ordering, "
+        f"deflate_on_oom {'on' if cfg.deflate_on_oom else 'off'}, "
+        f"floor guarantee {'on' if cfg.floor_guarantee else 'off'}"
+    )
+
+
+def provenance_lines() -> list[str]:
+    return [f"- {GUIDE_NOTE}", f"- proposal: OSEP-0033 {OSEP_0033_URL}"]
+
+
+def matrix_meta_lines(cfg: SimConfig, note: str) -> list[str]:
+    """Report header for scenarios whose rows override the base config."""
+    return [
+        "- backend: sim (modeled projection, not a measurement)",
+        f"- scenario: {cfg.scenario}",
+        node_line(cfg),
+        note,
+        horizon_line(cfg),
+        policy_line(cfg),
+        *provenance_lines(),
+    ]
+
+
 def sim_meta_lines(cfg: SimConfig) -> list[str]:
     return [
         "- backend: sim (modeled projection, not a measurement)",
         f"- scenario: {cfg.scenario}",
-        f"- node: {cfg.node_memory_mib:.0f} MiB memory, {cfg.platform_reserved_mib:.0f} MiB platform reserve, {cfg.physical_cores} physical cores",
+        node_line(cfg),
         f"- sandbox: cap {cfg.cap_mib:.0f} MiB, floor {cfg.floor_mib:.0f} MiB, snapshot {cfg.snapshot_mib_per_sandbox:.0f} MiB",
         f"- workload mix: {format_mix(cfg.mix)}",
-        f"- horizon: {cfg.duration_s:.0f} s at {cfg.interval_s:.0f} s intervals; seed {cfg.seed}; create rate {cfg.create_rate:.0f}/s"
-        if cfg.create_rate
-        else f"- horizon: {cfg.duration_s:.0f} s at {cfg.interval_s:.0f} s intervals; seed {cfg.seed}; instant fleet build",
-        f"- policy: red line {cfg.red_line_enter_pct:.0f}%/{cfg.red_line_exit_pct:.0f}%, sigma-caps invariant {cfg.invariant_pct:.0f}%, tighten margin {cfg.tighten_margin_mib:.0f} MiB, "
-        f"{'throttle-first' if cfg.throttle_first else 'inflate-first'} ordering, deflate_on_oom {'on' if cfg.deflate_on_oom else 'off'}, floor guarantee {'on' if cfg.floor_guarantee else 'off'}",
-        f"- {GUIDE_NOTE}",
-        f"- proposal: OSEP-0033 {OSEP_0033_URL}",
+        horizon_line(cfg),
+        policy_line(cfg),
+        *provenance_lines(),
     ]
 
 
@@ -1500,7 +1575,10 @@ def main(argv=None) -> int:
         ]
         report = render_matrix_report(
             "Tighten-ordering matrix (modeled)",
-            sim_meta_lines(cfg_sim)
+            matrix_meta_lines(
+                cfg_sim,
+                "- rows override cap, tighten margin, and ordering; every row runs a dense workload that fills 70% of its cap, with a synthetic red-line trigger (force tick in the JSON output)",
+            )
             + [
                 "",
                 "Expected outcomes follow the OSEP-0033 Test Plan (E8): safe margin holds, the known-bad margin keeps the failure visible, an infeasible floor skips, and inflate-before-throttle OOMs.",
@@ -1511,7 +1589,7 @@ def main(argv=None) -> int:
         )
         samples_by_tier = summaries
     else:
-        rows = run_deflate_rescue(cfg_sim)
+        rescue_cfg, rows = run_deflate_rescue(cfg_sim)
         summaries = rows
         table_rows = [
             f"| deflate_on_oom={row['deflate_on_oom']} | {row['sandboxes']} | {row['deflate_saves']} | "
@@ -1520,7 +1598,7 @@ def main(argv=None) -> int:
         ]
         report = render_matrix_report(
             "deflate_on_oom rescue (modeled)",
-            sim_meta_lines(cfg_sim)
+            sim_meta_lines(rescue_cfg)
             + [
                 "",
                 "A burst beyond the balloon-reduced effective cap must be absorbed by automatic deflation (E5); with the escape hatch off the guest process OOMs.",
