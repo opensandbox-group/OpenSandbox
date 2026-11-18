@@ -25,6 +25,7 @@ integration workflow.
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -313,6 +314,10 @@ printf 'ORDER|%s\n' "${STAGE_ORDER[@]}"
 '''
 
 LANE = r'''
+# Set after the source: the script's top-level OCI_TEMPLATE_ID="" init wipes
+# any ambient value (the same order verify_native itself runs under).
+OCI_TEMPLATE_ID=%(oci_template_id)s
+LANE_TEMPLATE_ID=%(template_id)s
 read -r lane scheme <<< "$(rootfs_only_lane "$LANE_TEMPLATE_ID")"
 printf '%s|%s\n' "$lane" "$scheme"
 '''
@@ -324,8 +329,9 @@ class RootfsOnlyLaneTest(ShellCase):
     rootfs_only_verify: oci:// on the overlaybd lane, s3:// on native."""
 
     def lane(self, template_id, oci_template_id=""):
-        proc = self.sourced(LANE, LANE_TEMPLATE_ID=template_id, OCI_TEMPLATE_ID=oci_template_id)
-        return proc.stdout.strip()
+        body = LANE % {"oci_template_id": shlex.quote(oci_template_id),
+                       "template_id": shlex.quote(template_id)}
+        return self.sourced(body).stdout.strip()
 
     def test_explicit_oci_template_selects_the_overlaybd_lane(self):
         self.assertEqual(self.lane("tpl-oci", oci_template_id="tpl-oci"), "overlaybd|oci://")
