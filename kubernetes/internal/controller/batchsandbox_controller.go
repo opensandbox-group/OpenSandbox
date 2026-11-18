@@ -148,7 +148,15 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		now := time.Now()
 		if expireAt.Time.Before(now) {
 			log.Info("batch sandbox expired, delete", "expireAt", expireAt)
-			err := r.Delete(ctx, batchSbx, client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			// The cached copy may predate a renewal that is already persisted.
+			// Delete only the exact version judged expired so a newer object
+			// always gets a fresh decision.
+			err := r.Delete(ctx, batchSbx,
+				client.Preconditions{UID: &batchSbx.UID, ResourceVersion: &batchSbx.ResourceVersion},
+				client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			if errors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		} else {
 			durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), expireAt.Time.Sub(now))
