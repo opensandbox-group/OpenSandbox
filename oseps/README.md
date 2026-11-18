@@ -33,4 +33,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0025](0025-credential-vault-provider-spi.md)             |      Credential Vault Exchange and Delegated Header Resolution           |     draft     |  2026-10-28 |
 | [OSEP-0026](0026-resource-oversubscription-accounting-for-fast-sandbox.md) |      Resource Oversubscription Accounting for Fast Sandbox       |  implemented  |  2026-11-09 |
 | [OSEP-0027](0027-optional-e2b-compatibility.md)              |      Optional E2B Compatibility for Core Agent Workflows                 |     draft     |  2026-11-11  |
-| [OSEP-0032](0032-rootfs-only-create-overrides.md) | CPU and Memory Overrides for Rootfs-Only Sandbox Creation | draft | 2026-11-18 |
+| [OSEP-0028](0028-rootfs-only-create-overrides.md) | CPU and Memory Overrides for Rootfs-Only Sandbox Creation | implementing | 2026-11-18 |
