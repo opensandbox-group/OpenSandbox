@@ -1,0 +1,454 @@
+# Copyright 2026 The OpenSandbox Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Offline coverage for the density tradeoff benchmark: model semantics,
+policy layers, scenario expectations, host parsers, and CLI validation.
+No hypervisor, no live node, no network."""
+
+from dataclasses import replace
+
+import pytest
+
+from benchmarks import density_tradeoff as bench
+
+
+def sim_config(**overrides):
+    base = {
+        "node_memory_mib": 16384.0,
+        "platform_reserved_mib": 1024.0,
+        "physical_cores": 8,
+        "cap_mib": 512.0,
+        "floor_mib": 256.0,
+        "interval_s": 1.0,
+        "duration_s": 30.0,
+        "seed": 3,
+        "create_rate": 0.0,
+        "mix": {"idle": 1.0},
+        "snapshot_mib_per_sandbox": 512.0,
+        "storage_gib": 100.0,
+        "storage_headroom_pct": 10.0,
+        "postures": ("redline",),
+        "scenario": "density",
+    }
+    base.update(overrides)
+    return bench.SimConfig(**base)
+
+
+def make_sandbox(cfg, kind="idle", offset=0.0, cap=None):
+    profile = bench.resolve_profile(kind, cfg)
+    return bench.SimSandbox(
+        index=0,
+        cap_mib=cap if cap is not None else cfg.cap_mib,
+        profile=profile,
+        offset=offset,
+        anon=cfg.idle_anon_mib,
+        file=cfg.image_file_mib,
+    )
+
+
+# --- input validation -------------------------------------------------------
+
+
+def test_parse_mix_accepts_valid_and_rejects_invalid():
+    assert bench.parse_mix("idle=0.5,sparse=0.5") == {"idle": 0.5, "sparse": 0.5}
+    for bad in ("idle=0.5", "idle=3", "idle=0.5,nope=0.5", "idle=-1,sparse=2"):
+        with pytest.raises(ValueError):
+            bench.parse_mix(bad)
+
+
+def test_arguments_reject_infeasible_configurations():
+    with pytest.raises(SystemExit):
+        bench.arguments(["--floor-mib", "512"])
+    with pytest.raises(SystemExit):
+        bench.arguments(["--mix", "idle=0.5"])
+    with pytest.raises(SystemExit):
+        bench.arguments(["--red-line-exit-pct", "10"])
+    with pytest.raises(SystemExit):
+        bench.arguments(["--backend", "host"])
+    args = bench.arguments(["--tiers", "1,2"])
+    assert args.ratios == [1.0, 2.0]
+    assert args.mix["idle"] == 0.8
+
+
+# --- model semantics --------------------------------------------------------
+
+
+def test_idle_fleet_residency_matches_the_calibrated_baseline():
+    cfg = sim_config()
+    result = bench.run_tier(cfg, "redline", 12)
+    summary = result.to_summary(cfg, "density")
+    per_sandbox = summary["resident_mib"]["mean_per_sandbox"]
+    # vmm_overhead + idle anon + image file pages ~= 26.2 MiB.
+    assert 25.0 <= per_sandbox <= 27.5
+    assert result.counters.redline_events == 0
+    assert result.counters.guest_oom_kills == 0
+    assert result.counters.host_oom_kills == 0
+    assert summary["verdict"]["ok"] is True
+    # Idle CPU: ~0.3 mcore per sandbox on 8 cores.
+    assert summary["peak_busy_cores"] == pytest.approx(3.6 / 1000.0, abs=0.05)
+
+
+def test_fpr_returns_freed_pages_after_the_measured_delay():
+    cfg = sim_config(mix={"sparse": 1.0}, duration_s=40.0)
+    sandbox = make_sandbox(cfg, kind="sparse", offset=5.0)
+    samples = []
+    for tick in range(40):
+        sandbox.tick(tick, cfg)
+        samples.append(sandbox.resident_mib(cfg))
+    during_hold = samples[2]
+    assert during_hold > 140.0  # 128 MiB working set plus baseline
+    after_reclaim = samples[13]  # freed at tick 5, returned 6 s later
+    assert during_hold - after_reclaim == pytest.approx(128.0, abs=2.0)
+
+
+def test_deflate_on_oom_rescues_a_burst_beyond_the_effective_cap():
+    cfg = sim_config(cap_mib=2048.0, floor_mib=1024.0, mix={"dense": 1.0})
+    sandbox = make_sandbox(cfg, kind="dense", offset=0.0)
+    sandbox.balloon = 1024.0  # elastic create: effective cap is the floor
+    for tick in range(60):
+        sandbox.tick(tick, cfg)
+    assert sandbox.anon + sandbox.file > 1024.0  # burst exceeded the floor
+    assert sandbox.deflate_saves > 0
+    assert sandbox.oom_kills == 0
+
+
+def test_burst_without_deflate_on_oom_kills_the_guest_workload():
+    cfg = sim_config(
+        cap_mib=2048.0, floor_mib=1024.0, mix={"dense": 1.0}, deflate_on_oom=False
+    )
+    sandbox = make_sandbox(cfg, kind="dense", offset=0.0)
+    sandbox.balloon = 1024.0
+    for tick in range(60):
+        sandbox.tick(tick, cfg)
+    assert sandbox.oom_kills >= 1
+    assert sandbox.workload_dead is True
+
+
+def test_tighten_plan_uses_cap_minus_floor_derivation():
+    cfg = sim_config(cap_mib=2048.0)
+    sandbox = make_sandbox(cfg, kind="idle")
+    sandbox.anon = 1000.0
+    sandbox.file = 0.0
+    counters = bench.TierCounters()
+    amount = bench.plan_tighten(sandbox, 10, cfg, 512.0, counters)
+    assert amount == pytest.approx(2048.0 - (1000.0 + 512.0))
+    assert counters.tighten_actions == 1
+    assert counters.tighten_skips == 0
+
+
+def test_thin_margin_on_deep_occupancy_keeps_the_known_failure_visible():
+    cfg = sim_config(cap_mib=2048.0)
+    sandbox = make_sandbox(cfg, kind="idle")
+    sandbox.anon = 1500.0
+    sandbox.file = 0.0
+    counters = bench.TierCounters()
+    assert bench.plan_tighten(sandbox, 10, cfg, 128.0, counters) is None
+    assert sandbox.oom_kills == 1
+    assert counters.tighten_actions == 0
+
+
+def test_inflate_first_ooms_a_still_allocating_guest():
+    counters = bench.TierCounters()
+    unordered = sim_config(cap_mib=2048.0, throttle_first=False)
+    sandbox = make_sandbox(unordered, kind="dense", offset=0.0)
+    sandbox.anon = 250.0
+    sandbox.file = 0.0
+    assert bench.plan_tighten(sandbox, 3, unordered, 512.0, counters) is None
+    assert sandbox.oom_kills == 1
+    ordered_cfg = sim_config(cap_mib=2048.0)
+    ordered = make_sandbox(ordered_cfg, kind="dense", offset=0.0)
+    ordered.anon = 250.0
+    ordered.file = 0.0
+    ordered.throttled = True
+    assert bench.plan_tighten(ordered, 3, ordered_cfg, 512.0, counters) is not None
+    assert ordered.oom_kills == 0
+
+
+def test_tighten_plan_skips_infeasible_floor():
+    cfg = sim_config(cap_mib=512.0)
+    sandbox = make_sandbox(cfg, kind="idle")
+    counters = bench.TierCounters()
+    assert bench.plan_tighten(sandbox, 10, cfg, 512.0, counters) is None
+    assert counters.tighten_skips == 1
+    assert counters.tighten_actions == 0
+    assert sandbox.oom_kills == 0
+
+
+# --- policy layers ----------------------------------------------------------
+
+
+def test_sigma_caps_invariant_charges_the_platform_baseline():
+    cfg = sim_config(node_memory_mib=8192.0, platform_reserved_mib=1024.0)
+    budget = bench.invariant_limit_mib(cfg)
+    assert budget == pytest.approx(0.8 * 8192.0 - 1024.0)
+    result = bench.run_tier(cfg, "elastic", 20)
+    assert result.counters.granted == 10  # floor(5531.2 / 512)
+    assert result.placed_sandboxes == 10
+    assert result.counters.invariant_denied == 10
+    assert result.placed_sandboxes * cfg.cap_mib <= budget
+
+
+def test_red_line_freezes_creates_and_the_floor_guarantee_releases_them():
+    cfg = sim_config(
+        create_rate=2.0,
+        force_redline_tick=5,
+        release_redline_tick=15,
+    )
+    frozen = bench.run_tier(cfg, "redline", 30)
+    assert frozen.counters.redline_events == 1
+    # With the floor guarantee, creates during the freeze are floor grants,
+    # never unchecked admissions.
+    assert frozen.counters.redline_denied == 0
+    assert frozen.counters.floor_grants > 0
+    without_guarantee = bench.run_tier(
+        replace(cfg, floor_guarantee=False), "redline", 30
+    )
+    assert without_guarantee.counters.floor_grants == 0
+    assert without_guarantee.counters.redline_denied > 0
+
+
+def test_red_line_recovers_when_headroom_returns():
+    cfg = sim_config(
+        mix={"dense": 1.0},
+        cap_mib=2048.0,
+        duration_s=120.0,
+        force_redline_tick=10,
+        release_redline_tick=30,
+        tighten_margin_mib=128.0,
+    )
+    result = bench.run_tier(cfg, "redline", 1)
+    assert result.counters.redline_events == 1
+    assert result.counters.restored >= 1
+    assert result.redline_unrecovered is False
+    assert result.samples[-1]["redline_active"] is False
+
+
+def test_unrecovered_red_line_is_a_verdict_violation():
+    # Dense fill pushes the node below the red line; tighten floors are
+    # infeasible at this cap, so the freeze never restores headroom.
+    cfg = sim_config(
+        node_memory_mib=4096.0,
+        platform_reserved_mib=256.0,
+        mix={"dense": 1.0},
+        cap_mib=512.0,
+        duration_s=60.0,
+        host_oom_reserve_mib=64.0,
+    )
+    result = bench.run_tier(cfg, "redline", 8)
+    assert result.counters.redline_events >= 1
+    assert result.counters.tighten_skips > 0
+    assert result.redline_unrecovered is True
+    summary = result.to_summary(cfg, "density")
+    assert "red_line_unrecovered" in summary["verdict"]["violations"]
+
+
+def test_host_oom_evicts_instead_of_exhausting_the_node():
+    cfg = sim_config(
+        node_memory_mib=4096.0,
+        platform_reserved_mib=1024.0,
+        mix={"dense": 1.0},
+        cap_mib=512.0,
+        duration_s=60.0,
+        red_line_enter_pct=1.0,
+        red_line_exit_pct=2.0,
+        host_oom_reserve_mib=64.0,
+    )
+    result = bench.run_tier(cfg, "redline", 8)
+    assert result.counters.host_oom_kills >= 1
+    assert result.mem_available_min_pct > 0.0
+    summary = result.to_summary(cfg, "density")
+    assert "host_oom_kills" in summary["verdict"]["violations"]
+
+
+def test_storage_wall_is_reported():
+    cfg = sim_config(storage_gib=1.0, storage_headroom_pct=10.0)
+    result = bench.run_tier(cfg, "redline", 12)
+    summary = result.to_summary(cfg, "density")
+    assert summary["storage_gib"]["total"] == pytest.approx(12 * 512 / 1024.0)
+    assert "storage_over_limit" in summary["verdict"]["violations"]
+
+
+# --- scenarios --------------------------------------------------------------
+
+
+def test_density_scenario_runs_every_tier_and_posture():
+    cfg = sim_config(postures=("redline", "elastic"))
+    results = bench.run_density_scenario(cfg, [0.5, 1.0])
+    assert len(results) == 4
+    report = bench.render_density_report(cfg, results)
+    assert "Posture: redline" in report
+    assert "Posture: elastic" in report
+    assert "| 0.50x/0.50x |" in report
+
+
+def test_tighten_matrix_matches_test_plan_expectations():
+    cfg = sim_config()
+    rows = bench.run_tighten_matrix(cfg)
+    assert len(rows) == 5
+    assert all(row.to_row(cfg)["verdict"]["ok"] for row in rows)
+    by_case = {row.case: row for row in rows}
+    assert by_case["safe margin, ordered"].result.counters.guest_oom_kills == 0
+    assert by_case["known-bad margin, ordered"].result.counters.guest_oom_kills > 0
+    assert by_case["infeasible floor, ordered"].result.counters.tighten_skips > 0
+    assert by_case["safe margin, inflate-first"].result.counters.guest_oom_kills > 0
+
+
+def test_deflate_rescue_scenario_matches_expectations():
+    rows = bench.run_deflate_rescue(sim_config())
+    assert len(rows) == 2
+    assert all(row["verdict"]["ok"] for row in rows)
+    assert rows[0]["deflate_on_oom"] is True
+    assert rows[0]["deflate_saves"] > 0
+    assert rows[1]["guest_oom_kills"] > 0
+
+
+def test_simulation_is_deterministic_for_a_fixed_seed():
+    cfg = sim_config()
+    first = bench.run_tier(cfg, "redline", 20).to_summary(cfg, "density")
+    second = bench.run_tier(cfg, "redline", 20).to_summary(cfg, "density")
+    assert first == second
+
+
+# --- host backend -----------------------------------------------------------
+
+
+def write_fake_proc(root):
+    (root / "pressure").mkdir()
+    (root / "meminfo").write_text(
+        "MemTotal:       1056896 kB\nMemAvailable:    800000 kB\n", encoding="utf-8"
+    )
+    (root / "pressure" / "cpu").write_text(
+        "some avg10=1.00 avg60=2.50 avg300=3.00\nfull avg10=0.00 avg60=0.50 avg300=0.60\n",
+        encoding="utf-8",
+    )
+    (root / "pressure" / "memory").write_text(
+        "some avg10=0.10 avg60=0.20 avg300=0.30\nfull avg10=0.00 avg60=0.00 avg300=0.00\n",
+        encoding="utf-8",
+    )
+    (root / "vmstat").write_text("nr_free_pages 1\noom_kill 42\n", encoding="utf-8")
+
+
+def write_fake_cgroups(root):
+    first = root / "sandbox-a"
+    first.mkdir()
+    (first / "memory.current").write_text("123456789\n", encoding="utf-8")
+    (first / "memory.max").write_text("536870912\n", encoding="utf-8")
+    (first / "memory.events").write_text("oom 0\noom_kill 2\n", encoding="utf-8")
+    second = root / "sandbox-b"
+    second.mkdir()
+    (second / "memory.current").write_text("234567890\n", encoding="utf-8")
+    (second / "memory.max").write_text("max\n", encoding="utf-8")
+    (second / "memory.events").write_text("oom_kill 1\n", encoding="utf-8")
+
+
+def test_host_parsers_read_proc_and_cgroup_accounting(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    write_fake_proc(proc)
+    cgroups = tmp_path / "cgroups"
+    cgroups.mkdir()
+    write_fake_cgroups(cgroups)
+    meminfo = bench.read_meminfo(proc)
+    assert meminfo["mem_total_mib"] == pytest.approx(1056896 / 1024.0)
+    pressure = bench.read_pressure(proc / "pressure" / "cpu")
+    assert pressure["some_avg60"] == 2.5
+    assert pressure["full_avg60"] == 0.5
+    assert bench.read_vmstat_oom_kills(proc) == 42
+    dirs = bench.list_cgroup_dirs(cgroups)
+    assert [path.name for path in dirs] == ["sandbox-a", "sandbox-b"]
+    sample = bench.read_cgroup_sample(dirs[0])
+    assert sample["current_mib"] == pytest.approx(123456789 / (1024.0 * 1024.0))
+    assert sample["max_mib"] == pytest.approx(512.0)
+    assert sample["oom_kill"] == 2
+    unlimited = bench.read_cgroup_sample(dirs[1])
+    assert unlimited["max_mib"] is None
+
+
+def test_host_summary_aggregates_samples(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    write_fake_proc(proc)
+    cgroups = tmp_path / "cgroups"
+    cgroups.mkdir()
+    write_fake_cgroups(cgroups)
+    cfg = bench.HostConfig(
+        proc_root=proc,
+        cgroup_root=cgroups,
+        duration_s=0.2,
+        interval_s=0.05,
+        cap_mib=512.0,
+        sandboxes_override=None,
+    )
+    samples = bench.collect_host_samples(cfg)
+    assert len(samples) >= 2
+    assert samples[0]["cgroups"] == 2
+    summary = bench.summarize_host_samples(samples, cfg)
+    assert summary["sandboxes"] == 2
+    assert summary["events"]["host_oom_kills_delta"] == 0
+    assert summary["resident_mib"]["mean_per_sandbox"] == pytest.approx(170.7, abs=0.5)
+    assert summary["verdict"]["ok"] is True
+    report = bench.render_host_report(summary, cfg)
+    assert "backend: host" in report
+
+
+def test_host_summary_flags_oom_deltas(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    write_fake_proc(proc)
+    cfg = bench.HostConfig(
+        proc_root=proc,
+        cgroup_root=None,
+        duration_s=0.1,
+        interval_s=0.05,
+        cap_mib=512.0,
+        sandboxes_override=4,
+    )
+    samples = bench.collect_host_samples(cfg)
+    samples[0]["vmstat_oom_kill"] = 10
+    samples[-1]["vmstat_oom_kill"] = 12
+    summary = bench.summarize_host_samples(samples, cfg)
+    assert summary["events"]["host_oom_kills_delta"] == 2
+    assert "oom_kills" in summary["verdict"]["violations"]
+
+
+# --- CLI end to end (sim, hermetic) -----------------------------------------
+
+
+def test_cli_density_run_writes_all_outputs(tmp_path, capsys):
+    out_jsonl = tmp_path / "samples.jsonl"
+    out_summary = tmp_path / "summary.json"
+    report = tmp_path / "report.md"
+    exit_code = bench.main(
+        [
+            "--tiers",
+            "1",
+            "--posture",
+            "redline",
+            "--duration",
+            "20",
+            "--out-jsonl",
+            str(out_jsonl),
+            "--out-summary",
+            str(out_summary),
+            "--report",
+            str(report),
+        ]
+    )
+    assert exit_code == 0
+    assert "Density tradeoff report" in capsys.readouterr().out
+    assert "Density tradeoff report" in report.read_text(encoding="utf-8")
+    lines = out_jsonl.read_text(encoding="utf-8").splitlines()
+    assert any('"type": "summary"' in line for line in lines)
+    assert any('"type": "sample"' in line for line in lines)
+    assert out_summary.read_text(encoding="utf-8").startswith("[")
