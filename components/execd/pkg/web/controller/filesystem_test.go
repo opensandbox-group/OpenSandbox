@@ -119,8 +119,10 @@ func TestFilesystemControllerRenameFilesRejectsEmptyPaths(t *testing.T) {
 		{name: "empty_src", field: "src"},
 		{name: "missing_dest", field: "dest", omit: true},
 		{name: "empty_dest", field: "dest"},
-		{name: "expanded_empty_src", field: "src", value: "${}"},
-		{name: "expanded_empty_dest", field: "dest", value: "${}"},
+		// No "${}" case: expansion substitutes only valid variable names, so
+		// "${}" stays literal (see pathutil.ExpandPathWithEnv) and is not an
+		// empty-expanded path. "Expands to empty" is covered by empty_env_src
+		// and empty_env_dest below.
 		{name: "empty_env_src", field: "src", value: "$EXECD_RENAME_EMPTY_PATH"},
 		{name: "empty_env_dest", field: "dest", value: "$EXECD_RENAME_EMPTY_PATH"},
 	}
