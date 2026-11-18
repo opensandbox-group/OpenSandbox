@@ -17,6 +17,11 @@ on:
         required: false
         type: string
         default: default
+      bench:
+        description: Also run the OSEP-0023 credential-bound cost bench after the verify steps in each leg (PRs opt in with the fast-sandbox-bench label)
+        required: false
+        type: boolean
+        default: false
   repository_dispatch:
     types: [fast-sandbox-pr]
   pull_request:
@@ -151,6 +156,10 @@ jobs:
       # Empty on the default leg: integration-env.sh then renders the Pool
       # exactly as before and passes no switch to egress.
       EGRESS_INTERCEPTION_MODE: ${{ matrix.egress_interception_mode }}
+      # OSEP-0023 cost bench, opt-in: the `bench` dispatch input or the
+      # `fast-sandbox-bench` PR label (present when ok-to-test triggers the
+      # run). 'false' skips the bench and its report steps entirely.
+      FSB_BENCH: ${{ (github.event_name == 'workflow_dispatch' && inputs.bench) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fast-sandbox-bench')) }}
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)
@@ -214,6 +223,35 @@ jobs:
       - name: Run idle-pause SDK e2e
         timeout-minutes: 45
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
+
+      # OSEP-0023 cost measurements (M1-M4) in this leg; only when FSB_BENCH
+      # is 'true'. Reports land under $WORK/bench/<leg> and are uploaded
+      # below whenever this step ran (pass or fail). The budget is a reserved
+      # upper bound, not a measured duration.
+      - name: Run credential-bound cost bench (OSEP-0023)
+        id: bench
+        if: env.FSB_BENCH == 'true'
+        timeout-minutes: 120
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
+
+      - name: Collect bench reports
+        if: always() && steps.bench.outcome != 'skipped'
+        run: |
+          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
+          mkdir -p bench-reports
+          sudo find "$work/bench/${EGRESS_INTERCEPTION_MODE:-default}" -maxdepth 1 -name '*.json' \
+            -exec cp {} bench-reports/ \; 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" bench-reports || true
+          ls -l bench-reports
+
+      - name: Upload bench reports
+        if: always() && steps.bench.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-sandbox-bench-${{ matrix.egress_interception_mode || 'default' }}-${{ github.run_attempt }}
+          path: bench-reports/
+          if-no-files-found: warn
+          retention-days: 30
 
       # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
       # nodes/pods, controller / firecracker-runtime / fastlet / builder /

@@ -26,12 +26,17 @@ Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgr
 ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + full scenario matrix (needs up)
 POOL_MODE=resource-aware ./scripts/fast-sandbox-env/integration-env.sh verify-resourceaware  # OSEP-0026 matrix (needs a resource-aware up)
 EGRESS_INTERCEPTION_MODE=credential-bound ./scripts/fast-sandbox-env/integration-env.sh up  # OSEP-0023 credential-bound egress (same variable for the verify actions)
+./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound  # OSEP-0023 cost measurements in the current leg (needs up; run after the verify actions)
 ./scripts/fast-sandbox-env/integration-env.sh status          # component / pool / DART / OpenSandbox health
 ./scripts/fast-sandbox-env/integration-env.sh pool            # re-apply the pool only
 ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e         # Python SDK e2e suite against the live stack
 ./scripts/fast-sandbox-env/integration-env.sh idle-e2e        # OSEP-0024 idle-pause/wake suite (needs IDLE_PAUSE=1 up)
 ./scripts/fast-sandbox-env/integration-env.sh down            # teardown, host left clean
 ```
+
+### Credential-bound cost bench (OSEP-0023)
+
+`bench-credential-bound` measures what the `credential-bound` interception mode costs, in whichever leg `EGRESS_INTERCEPTION_MODE` selects (empty/`all` or `credential-bound`). It is implemented in `credential-bound-bench.sh`, which reuses the credential-bound verify's TLS origin fixture, guest client and colocation helpers. Each measurement writes a JSON report under `$WORK/bench/<leg>/` (`BENCH_REPORT_DIR` overrides), assembled by `bench-report.py`: M1 create latency (`create-bench.py`, rounds of creates carrying a network policy), M2 guest TCP+TLS connect latency per path (client `handshake-bench` mode), M3 egress cgroup memory per held bound connection (client `hold-many` mode; `credential-bound` leg only, `NOT_RUN` otherwise), and M4 egress cgroup CPU under passthrough-dominated load. `environment.json` and `bench-summary.json` sit next to them. Reports carry closed-vocabulary fields only. Every guest sample's presented leaf and origin-observed credential are classified, and a path whose evidence contradicts it is `INVALID`. M3 recreates the SandboxPool from a bench-only render (egress memory limit and per-subject budget raised, nothing else changed) and re-applies the default Pool afterwards; the default render and the verify lanes are unchanged. The action fails when a measurement is `FAILED`, `INVALID` or `MISSING`; `PARTIAL` (for example, M3 could not reach every step) is recorded with the largest K reached and the closed failure kinds. Method and results: `docs/architecture/fast-sandbox/performance.md` (Credential-bound interception cost). In CI the integration job runs it after the verify steps when the `bench` dispatch input is true or the PR carries the `fast-sandbox-bench` label (add it before `ok-to-test` triggers the run), and uploads `fast-sandbox-bench-<leg>-<attempt>`.
 
 ### Idle-pause / wake-on-access profile (OSEP-0024)
 
@@ -80,6 +85,8 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fast-sand
 
 ```
 integration-env.sh          entrypoint: up / verify-native / verify-overlaybd / down / status / pool
+credential-bound-bench.sh   OSEP-0023 cost measurements (bench-credential-bound action)
+bench-report.py              report assembly for the bench (percentiles, fits, evidence classes)
 architecture.svg             how the environment works (topology, pipeline,
                              P2P delivery, egress actions channel)
 manifests/
@@ -136,6 +143,11 @@ The RustFS migration replaces the previous `MINIO_*` and `MC_IMAGE` overrides. B
 | `POOL_MIN` / `POOL_MAX` | `2` / `2` | pool capacity (auto `1`/`1` when `KIND_SINGLE=1`) |
 | `POOL_MODE` | `legacy` | `resource-aware` = OSEP-0026 ResourceAware pool fixture (`firecracker-egress-resource-aware-pool`: `sandboxResources.mode: ResourceAware` + cpu `2` / memory `2` `overcommitRatio`); `POOL_NAME` follows the profile |
 | `EGRESS_INTERCEPTION_MODE` | — | OSEP-0023 (experimental): `all` or `credential-bound` renders `OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE` into the pool's egress container (empty = Pool rendered unchanged; other values fail before any action). `credential-bound` adds `verify/credential-bound.sh` to `verify-native` and `verify-overlaybd` (standalone: `verify/credential-bound.sh`; `CB_COLOCATE_ATTEMPTS` default `6` bounds the creates that place the unbound sandbox on the bound one's Fastlet Pod, `CB_REUSE_ATTEMPTS` default `4` bounds the address-reuse attempts) and reports the exchange stage `BLOCKED` (I1); `BLOCKED`/`NOT_RUN` items are listed after the stage timings and never count as passed |
+| `BENCH_CREATE_N` / `BENCH_CREATE_CONCURRENCY` / `BENCH_CREATE_ROUNDS` | `200` / `10` / `3` | `bench-credential-bound` M1: creates per round, concurrency, rounds |
+| `BENCH_HANDSHAKES` / `BENCH_HANDSHAKE_WARMUP` | `200` / `10` | M2: timed and discarded handshakes per path (at most 5000) |
+| `BENCH_MEM_STEPS` / `BENCH_MEM_SANDBOXES` / `BENCH_MEM_SETTLE_SECONDS` | `500 1000 2000` / `4` / `20` | M3: increasing cumulative connection targets, colocated holder sandboxes, settle time before each cgroup read |
+| `BENCH_EGRESS_MEMORY_LIMIT` / `BENCH_FSB_TLS_CAPACITY` | `2Gi` / `1024` | M3 bench-only Pool render: egress memory limit and `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` (must fit the largest step's per-sandbox share) |
+| `BENCH_CPU_UNBOUND` / `BENCH_CPU_BOUND` / `BENCH_CPU_IDLE_SECONDS` | `1900` / `100` / `30` | M4: short HTTPS requests from the unbound and bound sandbox, idle window for the correction |
 | `WARM_IMAGES` | `0` | `1` = preheat pool instead of on-demand first-sandbox pull |
 | `SBX_IMAGE` / `EXECD` | `opensandbox/fsb-sandbox-golden:latest` / `opensandbox/execd:latest` | template build inputs; both are published images the template builder pulls from a registry (operator-maintained). `SBX_IMAGE` feeds the plain golden template; the hardened template no longer depends on it (see `HARDENED_SBX_*` below — the lane builds that source image from this checkout) |
 | `HARDENED_SBX_PUSH` / `HARDENED_SBX_REF` / `HARDENED_SBX_PUSH_PORT` | `1` / `<OCI registry>/sandbox/templates/sandbox-golden-hardened:dev` / `18443` | the hardening lane builds the hardened golden image from this checkout's `Dockerfile.sandbox-test-image` (launcher prelude + hardened isolation TOML baked at `/opt/opensandbox/`) and pushes it to the in-cluster OCI registry over a port-forward (runner borrows the registry DNS name in `/etc/hosts` + trusts the env CA via `/etc/docker/certs.d`; both restored after the build). `HARDENED_SBX_PUSH=0` escapes to `SBX_IMAGE` for an operator whose published image already carries the bake |
