@@ -146,19 +146,8 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	if batchSbx.Status.ObservedGeneration == 0 && batchSbx.Status.Phase == "" &&
-		len(batchSbx.Spec.RecreateContainersOnResume) != 0 && len(batchSbx.Status.RecreateContainersOnResume) == 0 {
-		pods, err := r.listPods(ctx, strategy.NewPoolStrategy(batchSbx), batchSbx)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if len(pods) == 0 {
-			batchSbx.Status.RecreateContainersOnResume = batchSbx.Spec.RecreateContainersOnResume
-			if err := r.Status().Update(ctx, batchSbx); err != nil {
-				return ctrl.Result{}, fmt.Errorf("record initial container restore policy: %w", err)
-			}
-			return ctrl.Result{Requeue: true}, nil
-		}
+	if recorded, err := r.recordInitialRecreatePolicy(ctx, batchSbx); err != nil || recorded {
+		return ctrl.Result{Requeue: recorded}, err
 	}
 
 	taskStrategy := strategy.NewTaskSchedulingStrategy(batchSbx)

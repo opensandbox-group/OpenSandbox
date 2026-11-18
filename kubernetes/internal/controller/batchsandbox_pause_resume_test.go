@@ -1020,7 +1020,17 @@ func TestReconcile_ReplaysEarlyPauseAfterSourcePodStarts(t *testing.T) {
 	assert.Equal(t, int64(2), bs.Status.PauseObservedGeneration)
 }
 
-func TestReconcile_AcknowledgesEarlyPauseAfterTerminalSourceFailure(t *testing.T) {
+func TestReconcile_AcknowledgesEarlyPauseAfterTerminalSource(t *testing.T) {
+	t.Run("failed", func(t *testing.T) {
+		assertTerminalSourcePause(t, corev1.PodFailed, sandboxv1alpha1.BatchSandboxPhaseFailed)
+	})
+	t.Run("succeeded", func(t *testing.T) {
+		assertTerminalSourcePause(t, corev1.PodSucceeded, sandboxv1alpha1.BatchSandboxPhasePending)
+	})
+}
+
+func assertTerminalSourcePause(t *testing.T, podPhase corev1.PodPhase, wantPhase sandboxv1alpha1.BatchSandboxPhase) {
+	t.Helper()
 	const pin = "registry/sidecar@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	policy := []sandboxv1alpha1.RecreateContainerOnResume{{Name: "sidecar", Image: pin}}
 	bs := &sandboxv1alpha1.BatchSandbox{
@@ -1046,7 +1056,7 @@ func TestReconcile_AcknowledgesEarlyPauseAfterTerminalSourceFailure(t *testing.T
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(bs, sandboxv1alpha1.SchemeBuilder.GroupVersion.WithKind("BatchSandbox"))},
 		},
 		Spec:   *bs.Spec.Template.Spec.DeepCopy(),
-		Status: corev1.PodStatus{Phase: corev1.PodFailed},
+		Status: corev1.PodStatus{Phase: podPhase},
 	}
 	r := newTestReconciler(bs, pod)
 	ctx := context.Background()
@@ -1056,10 +1066,61 @@ func TestReconcile_AcknowledgesEarlyPauseAfterTerminalSourceFailure(t *testing.T
 		require.NoError(t, err)
 	}
 	require.NoError(t, r.Get(ctx, key, bs))
-	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, bs.Status.Phase)
+	assert.Equal(t, wantPhase, bs.Status.Phase)
 	assert.Equal(t, bs.Generation, bs.Status.PauseObservedGeneration)
 	assert.True(t, hasTrueBatchSandboxCondition(bs.Status.Conditions, sandboxv1alpha1.BatchSandboxConditionPauseFailed))
 	assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKey{Namespace: bs.Namespace, Name: bs.Name + "-pause"}, &sandboxv1alpha1.SandboxSnapshot{})))
+}
+
+func TestReconcile_RejectResumeWaitsForReplacementPodDeletion(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "rejected-resume", Namespace: "default", UID: "sandbox-uid", Generation: 2},
+		Spec:       sandboxv1alpha1.BatchSandboxSpec{Pause: ptr.To(false), Replicas: ptr.To(int32(1))},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase: sandboxv1alpha1.BatchSandboxPhaseResuming,
+			RecreateContainersOnResume: []sandboxv1alpha1.RecreateContainerOnResume{
+				{Name: "sidecar", Image: "registry/sidecar@sha256:" + strings.Repeat("b", 64)},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: bs.Name + "-0", Namespace: bs.Namespace, UID: "replacement-uid",
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(bs, sandboxv1alpha1.SchemeBuilder.GroupVersion.WithKind("BatchSandbox"))},
+			Finalizers:      []string{"test.example/hold"},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodPending},
+	}
+	// The creation-time policy remains in status, but it was removed from spec
+	// after the replacement Pod was created.
+	snapshot := &sandboxv1alpha1.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: internalPauseSnapshotName(bs.Name), Namespace: bs.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(bs, sandboxv1alpha1.SchemeBuilder.GroupVersion.WithKind("BatchSandbox"))},
+		},
+		Spec:   sandboxv1alpha1.SandboxSnapshotSpec{SandboxName: bs.Name},
+		Status: sandboxv1alpha1.SandboxSnapshotStatus{Phase: sandboxv1alpha1.SandboxSnapshotPhaseSucceed, Format: sandboxv1alpha1.SandboxSnapshotFormatRootfsV1},
+	}
+	r := newTestReconciler(bs, pod, snapshot)
+	ctx := context.Background()
+	key := client.ObjectKeyFromObject(bs)
+	reconcile := func() {
+		t.Helper()
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, key, bs))
+	}
+	reconcile()
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseResuming, bs.Status.Phase)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pod), pod))
+	require.NotNil(t, pod.DeletionTimestamp)
+	reconcile()
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseResuming, bs.Status.Phase)
+	pod.Finalizers = nil
+	require.NoError(t, r.Update(ctx, pod))
+	reconcile()
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, bs.Status.Phase)
+	require.True(t, hasTrueBatchSandboxCondition(bs.Status.Conditions, sandboxv1alpha1.BatchSandboxConditionResumeFailed))
 }
 
 func TestContinueResume_RecreatesPinnedSidecar(t *testing.T) {

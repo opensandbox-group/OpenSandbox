@@ -98,9 +98,11 @@ spec:
 
 The image reference may include a tag before `@sha256:...`; the digest pins the image, and the full reference must match the Pod template. A tag without a digest is not accepted.
 
-If pause is requested before the first Pod is running, provisioning continues and the controller processes the same request once the source Pod is running. If provisioning records a terminal Pod failure instead, the controller acknowledges the pause request with `PauseFailed` without creating a snapshot.
+If pause is requested before the first Pod is running, provisioning continues and the controller processes the same request once the source Pod is running. If the source Pod completes or provisioning records a terminal Pod failure instead, the controller acknowledges the pause request with `PauseFailed` without creating a snapshot.
 
 On resume, selected containers start from the pinned images without their previous writable layers. Other containers still restore from the snapshot. At least one regular container must remain in the snapshot. The controller records the initial policy before creating the first Pod; adding, changing, or removing it after that point causes pause or resume to reject the request. Selected containers are not frozen by the image committer and can keep running until the source Pod is terminated. The destination node must have access to the pinned image if it is not already cached.
+
+If resume is rejected after its replacement Pod was created, the controller waits for that Pod to be removed before reporting `Paused` again.
 
 Install the updated CRD and controller before creating BatchSandboxes with this policy. Do not downgrade the controller while managing sandboxes that use it: older controllers do not honor the policy. Leaving it unset preserves the previous behavior. Public snapshots are unaffected.
 

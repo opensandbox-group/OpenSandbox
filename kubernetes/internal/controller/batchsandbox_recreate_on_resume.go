@@ -139,6 +139,22 @@ func validateSourceContainerPins(bs *sandboxv1alpha1.BatchSandbox, pod *corev1.P
 	return nil
 }
 
+func (r *BatchSandboxReconciler) recordInitialRecreatePolicy(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) (bool, error) {
+	if bs.Status.ObservedGeneration != 0 || bs.Status.Phase != "" ||
+		len(bs.Spec.RecreateContainersOnResume) == 0 || len(bs.Status.RecreateContainersOnResume) != 0 {
+		return false, nil
+	}
+	pods, err := r.listPods(ctx, strategy.NewPoolStrategy(bs), bs)
+	if err != nil || len(pods) != 0 {
+		return false, err
+	}
+	bs.Status.RecreateContainersOnResume = bs.Spec.RecreateContainersOnResume
+	if err := r.Status().Update(ctx, bs); err != nil {
+		return false, fmt.Errorf("record initial container restore policy: %w", err)
+	}
+	return true, nil
+}
+
 // dispatchRecreatePause waits for provisioning to produce a running source Pod,
 // but acknowledges a terminal source failure without starting the pause workflow.
 func (r *BatchSandboxReconciler) dispatchRecreatePause(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) (ctrl.Result, bool, error) {
@@ -155,6 +171,11 @@ func (r *BatchSandboxReconciler) dispatchRecreatePause(ctx context.Context, bs *
 			return ctrl.Result{}, true, err
 		}
 		for _, pod := range pods {
+			if pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodSucceeded {
+				reason = "SourcePodCompleted"
+				pauseErr = fmt.Errorf("source Pod completed before it could be paused")
+				break
+			}
 			if pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning {
 				pauseErr = validateRecreateSourcePod(bs, pod)
 				if pauseErr == nil {

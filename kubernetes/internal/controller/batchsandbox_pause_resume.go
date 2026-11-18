@@ -200,7 +200,7 @@ func (r *BatchSandboxReconciler) dispatchPauseResume(ctx context.Context, bs *sa
 		if err != nil {
 			return result, true, err
 		}
-		if hasRecreatePolicy(bs) && bs.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseResuming {
+		if hasRecreatePolicy(bs) && (result.Requeue || bs.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseResuming) {
 			return result, true, nil
 		}
 		// Return handled=false to let normal flow update phase from Resuming to Succeed.
@@ -546,7 +546,26 @@ func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv
 func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	recreate := hasRecreatePolicy(bs)
-	rejectResume := func(reason, message string) error {
+	reader := client.Reader(r.Client)
+	rejectResume := func(reason, message string) (ctrl.Result, error) {
+		// The pinned-sidecar policy owns only the single, non-pooled Pod.
+		// Read through the same authoritative reader as the resume policy.
+		var pod corev1.Pod
+		key := types.NamespacedName{Namespace: bs.Namespace, Name: fmt.Sprintf("%s-%d", bs.Name, batchSandboxFirstPodIndex)}
+		if err := reader.Get(ctx, key, &pod); err == nil {
+			if !metav1.IsControlledBy(&pod, bs) {
+				return ctrl.Result{}, fmt.Errorf("cannot roll back resume: Pod %s is not owned by the BatchSandbox", key)
+			}
+			if pod.DeletionTimestamp == nil {
+				if err := r.Delete(ctx, &pod, client.Preconditions{UID: &pod.UID}); client.IgnoreNotFound(err) != nil {
+					return ctrl.Result{}, err
+				}
+			}
+			// Do not let normal reconciliation recreate the Pod while rolling back.
+			return ctrl.Result{Requeue: true}, nil
+		} else if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
 		bs.Status.Phase = sandboxv1alpha1.BatchSandboxPhasePaused
 		if bs.Spec.Pause != nil && !*bs.Spec.Pause {
 			bs.Status.PauseObservedGeneration = bs.Generation
@@ -554,13 +573,12 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 		applyBatchSandboxPhaseConditions(&bs.Status)
 		setConditionInStatus(&bs.Status, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, reason, message)
 		if err := r.Status().Update(ctx, bs); err != nil {
-			return err
+			return ctrl.Result{}, err
 		}
 		r.StatusRVExpectation.Expect(bs)
-		return nil
+		return ctrl.Result{}, nil
 	}
 
-	reader := client.Reader(r.Client)
 	if recreate {
 		if r.APIReader != nil {
 			reader = r.APIReader
@@ -582,7 +600,7 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 	if err := reader.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: internalPauseSnapshotName(bs.Name)}, snapshot); err != nil {
 		if errors.IsNotFound(err) {
 			if recreate {
-				return ctrl.Result{}, rejectResume("SnapshotNotFound", "Internal rootfs snapshot not found")
+				return rejectResume("SnapshotNotFound", "Internal rootfs snapshot not found")
 			}
 			readyPodExists, readyErr := r.hasReadyResumePod(ctx, bs)
 			if readyErr != nil {
@@ -606,7 +624,7 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 	if snapshot.Status.Phase != sandboxv1alpha1.SandboxSnapshotPhaseSucceed {
 		msg := fmt.Sprintf("snapshot not ready: phase=%s", snapshot.Status.Phase)
 		if recreate {
-			return ctrl.Result{}, rejectResume("SnapshotNotReady", msg)
+			return rejectResume("SnapshotNotReady", msg)
 		}
 		log.Error(nil, msg)
 		_ = r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhasePaused, "")
@@ -615,7 +633,7 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 	}
 	if recreate {
 		if err := validateRecreateSnapshot(bs, snapshot); err != nil {
-			return ctrl.Result{}, rejectResume("InvalidRecreateSnapshot", err.Error())
+			return rejectResume("InvalidRecreateSnapshot", err.Error())
 		}
 	}
 
