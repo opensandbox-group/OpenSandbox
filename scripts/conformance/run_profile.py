@@ -158,7 +158,38 @@ def load_profile(profile_path: Path, repo_root: Path) -> Profile:
             Claim(id=claim_id, clause=clause.strip(), status=status, tests=tests, pending_ref=pending_ref)
         )
 
+    for claim in claims:
+        if claim.status == "pending":
+            for test in claim.tests:
+                check_pending_probe(claim.id, test)
+
     return Profile(name=name, version=version, claims=claims)
+
+
+def check_pending_probe(claim_id: str, test: TestRef) -> None:
+    """A pending test must be a probe, not an unconditional skip: the checker
+    detects a landed referenced change by the probe passing, which an
+    unconditional skip makes impossible."""
+    body = test.source.read_text(encoding="utf-8")
+    match = re.search(r"\bfunc\s+" + re.escape(test.name) + r"\s*\([^)]*\)\s*\{", body)
+    if not match:
+        return  # existence was validated earlier
+    func_text = body[match.start():]
+    next_func = re.search(r"\nfunc\s+", func_text[1:])
+    if next_func:
+        func_text = func_text[: next_func.start() + 1]
+    first_statement = func_text[func_text.find("{") + 1 :]
+    for line in first_statement.splitlines():
+        line = line.strip()
+        if not line or line.startswith("//"):
+            continue
+        if re.match(r"^t\.Skip(Now|f)?\b", line):
+            fail(
+                f"pending claim {claim_id} test {test.name} skips unconditionally; "
+                "write it as a probe that skips only while the pre-change behavior "
+                "is still observed (see specs/conformance/README.md)"
+            )
+        break
 
 
 def resolve_test_ref(claim_id: str, raw: object, repo_root: Path) -> TestRef:

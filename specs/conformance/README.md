@@ -65,6 +65,7 @@ A pending test is a probe, not an unconditional skip. It exercises the operation
 ## Test references
 
 - Only Go tests are executable by the current checker. A reference to another language fails validation instead of running unenforced; extend `scripts/conformance/run_profile.py` before adding such a reference.
+- A pending test may not skip unconditionally: the checker rejects a pending test whose first statement is `t.Skip`, because an unconditional skip can never observe the referenced change landing. Write it as a probe instead.
 - Mapped tests must be hermetic: handler-level, temporary directories, no sandbox, daemon, or network dependency. The profile runs in the normal unit-test job.
 - A claim may map to multiple tests, and a test may enforce more than one claim.
 - Do not map claims to undocumented extension routes (for example `/pty`, which [Implementation compatibility](../api/implementation-compatibility.md) notes is absent from `execd-api.yaml`).
