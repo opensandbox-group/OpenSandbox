@@ -22,20 +22,21 @@ status: draft
 
 ## Summary
 
-A caller with a RootfsOnly snapshot of a 2-vCPU, 2-GiB environment should be able to create a new Sandbox with 4 GiB of RAM while retaining the source CPU limit. This draft proposes an explicit create operation for that purpose. OpenSandbox owns source authorization, the HTTP contract and SDK behavior. Fast Sandbox (FSB) resolves the artifact and applies the requested limits. The [companion FSEP](https://github.com/opensandbox-group/fast-sandbox/pull/219) defines admission, boot and recapture.
+Reuse `POST /sandboxes` and its existing top-level `resourceLimits` field. When a tenant creates a new Sandbox from a verified FSB RootfsOnly source, each CPU or memory value present on the wire sets that dimension for the new guest. The other dimension inherits its source default. For example, a memory-only request can retain a snapshot's half-core CPU quota while booting with 4 GiB of RAM. The [companion FSEP](https://github.com/opensandbox-group/fast-sandbox/pull/219) covers resource admission, cold boot and recapture.
 
 ## Motivation and scope
 
-Today the FSB adapter checks snapshot restore limits against the original settings. Template-based creates reject caller resource limits. These rules suit a Full restore, where the saved VM state determines the machine configuration. RootfsOnly creates boot a fresh kernel from disk, so the same filesystem can serve workloads of different sizes. This proposal extends the ResourceAware admission model in [OSEP-0026](0026-resource-oversubscription-accounting-for-fast-sandbox.md).
+A RootfsOnly artifact boots a fresh kernel from disk, so the new guest can have a different machine shape. Full restores must honor the saved VM state. This change applies to RootfsOnly sources on qualified ResourceAware FSB pools. Full checkpoint resume, other runtimes and ordinary image creation follow their existing rules. Changing the business entrypoint is a separate use case.
 
-Scope is creation of a **new** FSB Sandbox from an authorized RootfsOnly snapshot or template. Existing create, Full checkpoint resume and live instances keep their behavior. Entrypoint override is a future candidate for workloads whose baked command must never start. It needs its own use case and guest-init design. This proposal adds no startup-command parameter or guest protocol.
+**Amendments proposed for the implementation release:**
+
+- [OSEP-0007](0007-fast-sandbox-runtime-support.md) and the [lifecycle OpenAPI specification](../specs/sandbox-lifecycle.yml): qualify the `templateId` paragraph that rejects `resourceLimits` with 400. An authorized, ready template whose artifact is verified RootfsOnly may accept CPU and memory overrides. Other template classes retain the rejection. Document the corresponding `snapshotId` and `resourceLimits` conditions.
+- [OSEP-0026](0026-resource-oversubscription-accounting-for-fast-sandbox.md): its build-time machine tuple stays immutable. For a RootfsOnly template, it supplies the default size for a new instance; resizing that instance does not require rebuilding the template. For a RootfsOnly snapshot, per-dimension overrides relax the recorded-limit equality check. Full restore and existing pool budget/admission rules still apply.
 
 ## Public contract
 
-**Proposed for review:** add `POST /sandboxes/from-rootfs`. It shares the existing creation service, authentication, tenant checks, lifecycle and response model. A distinct route gives both raw HTTP clients and SDKs an observable failure on an older server before a Sandbox can be created. The proposed route below is not a released endpoint.
-
 ```http
-POST /sandboxes/from-rootfs HTTP/1.1
+POST /sandboxes HTTP/1.1
 Content-Type: application/json
 
 {
@@ -45,16 +46,18 @@ Content-Type: application/json
 }
 ```
 
-| Input | Contract |
-|---|---|
-| Source | Exactly one nonempty `snapshotId` or `templateId`. Resolve it under the caller's tenant. The authorized artifact must be ready and RootfsOnly. |
-| Limits | A nonempty object with `cpu`, `memory`, or both. Values are positive Kubernetes quantity strings within supported FSB bounds. Each omitted dimension inherits the source **resource limit**, including fractional CPU. A complete pair can be used when an older artifact lacks inheritance metadata. |
-| Lifecycle | Use the existing FSB create timeout and lifecycle rules. Preserve existing per-source rules for pool selection and other supported controls. Reject conflicting sources, nulls in the limits object, unknown limit keys, and unsupported workload settings such as `entrypoint` or `resourceRequests`. |
-| SDK | Expose an explicit opt-in creation method or option. Serialize only supplied dimensions. A client sending an ordinary create continues to use its existing SDK defaults. Never retry an unsupported route through ordinary create. |
+| Authorized source | CPU or memory omitted from a partial override | Missing inheritance data |
+|---|---|---|
+| `snapshotId` | Use the captured Sandbox's admitted limits, represented today by `SnapshotRestoreConfig.limits`. A recorded `500m` remains `500m` even if the guest saw one vCPU. | If a legacy snapshot lacks a required dimension, ask the caller to supply it. An explicit complete pair needs no inherited values. |
+| `templateId` | Use the effective build-time `spec_json.machine` of the catalog template. An integer count of two vCPUs supplies a default of two cores. A fractional quota first enters this chain through an explicit override or a later snapshot. | Use the existing OSEP-0026 derivation for pre-existing catalog rows. An invalid effective machine after derivation is a template data error. |
 
-For example, setting only memory to 4 GiB on a source admitted at `500m` keeps a half-core CPU quota even though the Guest sees one online vCPU. An artifact without a recorded CPU limit cannot supply that default: ask for an explicit CPU value. A mode guess or an inferred CPU limit from a vCPU count is insufficient.
+Accept CPU only, memory only or both as positive Kubernetes quantities within runtime limits. For a verified RootfsOnly source, omitting the entire object requests both source defaults. Reject explicitly empty objects, null dimension values and unsupported override dimensions. Preserve existing handling of pool-owned constraints on legacy requests; a pool constraint such as `pids` cannot resize a guest. Treat all transmitted CPU and memory quantities literally, including values inserted by older SDKs. Existing workload and tenant restrictions continue to apply.
 
-Use the existing create response and status polling contract, including HTTP 202. Acceptance reports creation status; runtime readiness confirms startup. V1 adds no public response fields for measured RAM, vCPU count or effective limits. Implementations verify these independently in E2E tests. A synchronous validation failure rejects the request. A failure after asynchronous acceptance is visible through the existing failed lifecycle state.
+**Timeout:** the public request validator requires a non-null `timeout` with `templateId`. With `snapshotId`, the public timeout field is optional; omission or null requests no automatic expiry where the backend supports it. FSB currently persists an absolute expiration and rejects a missing timeout in its create mapping. FSB callers of this feature must therefore supply one for either source. This proposal does not extend FSB to non-expiring Sandboxes.
+
+**Discovery:** callers can inspect public `Snapshot.mode` (`full` or `rootfsOnly`; legacy records report `full`). For templates, propose an optional read-only artifact mode on `FsbTemplate`, populated from FSB only when known. Template storage `format` and build `status.phase` do not establish eligibility. Reject template overrides if the artifact's RootfsOnly mode cannot be verified.
+
+**Response:** retain the existing create/status contract, including HTTP 202. Public observability of effective resource limits is **deferred**. A follow-up can expose admitted CPU/memory on `GET /sandboxes/{sandboxId}`, distinguishing them from measured usage and guest hardware. Do not infer either inherited limits or successful boot from an accepted create response.
 
 ## Runtime integration
 
@@ -62,37 +65,44 @@ Use the existing create response and status polling contract, including HTTP 202
 sequenceDiagram
     participant C as Caller
     participant O as OpenSandbox
-    participant F as Fast Sandbox
-    participant V as Firecracker
-    C->>O: Create from rootfs with partial limits
-    O->>O: Authorize snapshot or template ID
-    O->>F: gRPC with source identity and supplied limits
-    F->>F: Pin digest, resolve limits, persist intent and admit
-    F->>V: Configure guest machine and start
-    Note over O,V: Create acceptance can precede guest readiness
+    participant F as FSB control plane
+    participant V as FSB runtime
+    C->>O: POST /sandboxes with source and resourceLimits
+    O->>O: Validate request structure and authorize source
+    O->>F: Resolve trusted source mode and immutable identity
+    O->>F: RootfsOnly create with supplied dimensions
+    F->>F: Resolve defaults and admit effective limits
+    F->>V: Verify artifact and cold boot at admitted shape
 ```
 
-OSB validates structure and ownership. It uses FSB's typed metadata over gRPC for the immutable source reference and reported mode where needed. FSB owns source defaults, deployment support and the final admission decision. A source lookup may reuse an existing RPC or cached FSB result bound to the same digest. OSB requires no storage credentials, OverlayBD mount, S3 object access, or manifest parser.
+Delay mode-specific validation until the source has been authorized and classified. A Full template with limits still receives 400; a Full snapshot retains existing restore validation. OpenSandbox forwards the immutable source reference, source kind and supplied dimensions over gRPC, preserving absence before applying any legacy defaults. Bind source defaults to that identity, using the catalog/recorded values above or their authoritative FSB projection. FSB resolves the final resource pair once and verifies mode/digest before launch. OSB does not mount or read artifact manifests.
 
-The override path requires an explicit gRPC operation or equivalent fail-closed negotiation; adding optional fields to legacy Create alone would let an older receiver silently discard them. Prefer a distinct create RPC reusing the existing handler internally. An old FSB returns `UNIMPLEMENTED`; OSB surfaces unsupported operation and never retries legacy Create. The selected Fastlet must also support the operation. Revalidation against the pinned artifact before launch prevents a tag move or stale cache from changing the source.
-
-Malformed or conflicting input receives the current lifecycle invalid-parameter treatment. Cross-tenant or missing sources use the same non-disclosing lookup result as existing creates. Full sources, unsupported runtime/pool combinations, and missing inherited dimensions receive actionable errors. Preserve the existing distinction between capacity failure and transient backend unavailability.
+Keep the distinct override-aware gRPC create operation. An old FSB returns `UNIMPLEMENTED`; do not retry a reshape through legacy Create. Qualify the pool and selected Fastlet before enabling the new behavior. Preserve current behavior on deployments where this feature is disabled, including legacy creates that only replay recorded limits. Capacity rejection and invalid input retain their existing error mappings.
 
 ## Compatibility and rollout
 
-Ship and qualify FSB support before enabling the new OSB route and SDK option. Publish the OpenAPI request, examples, error mappings, server validation and SDK changes in the implementation release. Deployments with mixed runtime versions must restrict admission to compatible workers. Disable new override creates first on rollback; retain compatible workers until admitted instances and pending retries have drained. Ordinary creation and existing clients need no migration.
+| Wire request | Pre-feature OSB | OSB with RootfsOnly support enabled |
+|---|---|---|
+| RootfsOnly snapshot with recorded limits, different CPU/memory | Source equality check rejects the change | Create with the transmitted values if admitted |
+| Same snapshot, values equal to recorded limits | Existing restore can succeed | Same intended limits |
+| RootfsOnly catalog template with limits | Template validation rejects | Apply supplied dimensions and inherit the rest |
+| Full template with limits or Full snapshot with changed recorded limits | Reject | Reject |
+| Snapshot with missing recorded limits | Existing pool-based validation can apply | For a verified RootfsOnly override, require any value that cannot be inherited |
+
+Python's existing `Sandbox.create(snapshot_id=...)` supplies `1 CPU / 2Gi` when no resources are passed to that SDK method. On a source recorded at `4 CPU / 8Gi`, the same request can change from rejection to successful creation at `1 CPU / 2Gi`. This is an intentional consequence of honoring the wire values. Document it in release notes. Provide an SDK method such as `createFromRootfs()` on the same endpoint that serializes only caller-supplied dimensions. Raw HTTP has identical semantics. SDK calls requiring the new behavior should target a qualified server; the legacy pool fallback makes a universal old-server rejection guarantee impossible.
+
+Qualify FSB before enabling the OSB mapping. Disable new reshapes first on rollback, retaining compatible workers for admitted instances, pending retries and recapture.
 
 ## Test plan
 
-| Case | Required evidence |
+| Case | Acceptance |
 |---|---|
-| Wire compatibility | Send a valid override request to a pre-feature OSB using the SDK and raw HTTP. The route fails, the ordinary create handler receives no request and no Sandbox exists. Repeat against new OSB with old FSB and an unsupported Fastlet. |
-| Source and omission | Exercise both source ID forms. Reject ambiguous IDs, inaccessible sources, Full artifacts and empty limits. Verify SDK serialization of CPU only, memory only and both; reject missing inheritance metadata only for dimensions that need it. |
-| Resource inheritance | Boot at `500m / 2Gi`, recapture, request only `4Gi` and verify the second Guest still has one vCPU and its host quota is still `500m`. Exercise growing and shrinking within admission limits. |
-| Lifecycle | Check HTTP 202 and subsequent success or failure independently. Verify budget rejection before launch, retry convergence and unchanged existing Full restore. Verify recaptured Full machine metadata and cold-boot behavior on qualified OCI/OverlayBD and native/S3 backends. |
+| Wire and SDK | Exercise the compatibility matrix using raw HTTP and SDK payloads, including the old Python default pair. Confirm the new helper preserves complete and partial omission. |
+| Source defaults | Override only memory on a `500m` snapshot and on a two-vCPU template. Verify quotas of `500m` and two cores respectively. Cover a legacy snapshot missing the omitted value and a legacy catalog row with derivable build defaults. |
+| Timeout | Template with absent/null timeout fails public validation. Snapshot with absent/null timeout and otherwise valid fields passes timeout validation; FSB then rejects unsupported non-expiring creation. A supported explicit timeout reaches admission for both source types. |
+| Eligibility | Verify reported snapshot/template mode, missing metadata, inaccessible sources, Full rejection and pool constraints. An old FSB or ineligible worker cannot silently create a reshaped guest through legacy Create. |
+| Runtime | Test smaller and larger guests, quota inheritance across recapture, asynchronous failures and subsequent Full restore. Qualify each supported storage backend with the FSEP tests. |
 
 ## Alternatives and review decision
 
-The original draft proposed a `rootfsOnlyOverrides` object alongside `templateId` on the existing endpoint. A pre-feature server can discard the unknown object and proceed with a valid legacy template create. An SDK-only capability probe would still leave raw HTTP and mixed-server routing exposed. The dedicated path costs one public operation and one SDK dispatch, but shares the implementation and gives older servers no matching create operation. A versioned request on the existing path is viable if maintainers can demonstrate the same rejection guarantee before side effects.
-
-**Decision requested:** approve or replace the proposed HTTP operation before changing the [OpenAPI contract](../specs/sandbox-lifecycle.yml). Its public spelling can change during review. The scope, omission rules and cross-version failure behavior are the contract to preserve.
+A separate HTTP route would make unsupported-version rejection independent of existing validators, but would duplicate the public create operation. Reusing the known field is sufficient under the agreed wire semantics; its compatibility behavior depends on the existing validation rules and should have regression coverage. A new field on the old route would be unsafe because older servers can ignore it. Review the RootfsOnly-only amendments, the two sources of defaults and the proposed read-only template mode before updating the OpenAPI specification.
