@@ -29,6 +29,9 @@ export interface ExecdCommands {
 
   /**
    * Convenience: run a command, consume the stream, and build a structured execution result.
+   *
+   * @throws SandboxInternalException if a foreground stream ends normally without a
+   * completion or execution error event. Handlers may have received partial output.
    */
   run(command: string | string[], opts?: RunCommandOpts, handlers?: ExecutionHandlers, signal?: AbortSignal): Promise<CommandExecution>;
 
