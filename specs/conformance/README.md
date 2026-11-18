@@ -2,7 +2,7 @@
 
 A conformance profile is a machine-readable index of documented behavior claims. Each claim states one observable behavior in reviewable prose and points at the test that enforces it, so the promise and its executable form cannot drift apart silently.
 
-Profiles are internal to this repository's test process. They do not define a new wire contract, a formal v1 conformance profile, certification, or capability negotiation; [Implementation compatibility](../api/implementation-compatibility.md) remains the document that scopes those topics, and the OpenAPI files under [`specs/`](../) remain the wire contracts. A profile interprets promises the project already documents and links them to tests of the reference implementation.
+Profiles are internal to this repository's test process. They do not define a new wire contract, a formal v1 conformance profile, certification, or capability negotiation; [Implementation compatibility](../../docs/api/implementation-compatibility.md) remains the document that scopes those topics, and the OpenAPI files under [`specs/`](../) remain the wire contracts. A profile interprets promises the project already documents and links them to tests of the reference implementation.
 
 ## Layout
 
@@ -68,7 +68,7 @@ A pending test is a probe, not an unconditional skip. It exercises the operation
 - A pending test may not skip unconditionally: the checker rejects a pending test whose first statement is `t.Skip`, because an unconditional skip can never observe the referenced change landing. Write it as a probe instead.
 - Mapped tests must be hermetic: handler-level, temporary directories, no sandbox, daemon, or network dependency. The profile runs in the normal unit-test job.
 - A claim may map to multiple tests, and a test may enforce more than one claim.
-- Do not map claims to undocumented extension routes (for example `/pty`, which [Implementation compatibility](../api/implementation-compatibility.md) notes is absent from `execd-api.yaml`).
+- Do not map claims to undocumented extension routes (for example `/pty`, which [Implementation compatibility](../../docs/api/implementation-compatibility.md) notes is absent from `execd-api.yaml`).
 
 ## Running a profile
 
