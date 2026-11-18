@@ -111,12 +111,12 @@ func TestRealMountEntriesGarbage(t *testing.T) {
 }
 
 func TestIsPseudoDevice(t *testing.T) {
-	for _, name := range []string{"loop0", "ram1", "fd0", "sr0", "zram2"} {
+	for _, name := range []string{"loop0", "ram1", "fd0", "sr0", "zram2", "dm-0", "md0", "md127"} {
 		if !isPseudoDevice(name) {
 			t.Fatalf("isPseudoDevice(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"vda", "nvme0n1", "sda1", "dm-0", "pmem0"} {
+	for _, name := range []string{"vda", "nvme0n1", "sda1", "pmem0"} {
 		if isPseudoDevice(name) {
 			t.Fatalf("isPseudoDevice(%q) = true, want false", name)
 		}
@@ -129,7 +129,9 @@ func TestIsPartitionDevice(t *testing.T) {
 			t.Fatalf("isPartitionDevice(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"sda", "vda", "nvme0n1", "mmcblk0", "dm-0", "pmem0", "md0"} {
+	// Whole disks: a trailing digit on a digit-suffixed base is a namespace
+	// number, not a partition suffix (nvme0n12 = controller 0, namespace 12).
+	for _, name := range []string{"sda", "vda", "nvme0n1", "nvme0n12", "mmcblk0", "pmem0"} {
 		if isPartitionDevice(name) {
 			t.Fatalf("isPartitionDevice(%q) = true, want false", name)
 		}

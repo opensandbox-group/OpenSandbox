@@ -107,9 +107,10 @@ func TestStatfsTimeoutReusesPendingCall(t *testing.T) {
 	dir := t.TempDir()
 	release := make(chan struct{})
 	origSyscall, origTimeout := statfsSyscall, statfsTimeout
+	realStatfs := unix.Statfs // captured: the woken goroutine must not read the package var while cleanup restores it
 	statfsSyscall = func(_ string, st *unix.Statfs_t) error {
 		<-release
-		return unix.Statfs(dir, st)
+		return realStatfs(dir, st)
 	}
 	statfsTimeout = 20 * time.Millisecond
 	t.Cleanup(func() {
@@ -122,24 +123,42 @@ func TestStatfsTimeoutReusesPendingCall(t *testing.T) {
 	}
 	afterFirst := runtime.NumGoroutine()
 
-	// Second call reuses the pending call instead of stacking a new one.
+	// Later collections skip the hung mount at O(1) cost instead of
+	// re-paying the timeout, and never stack a new goroutine.
+	start := time.Now()
 	if _, ok := statfsWithTimeout("/hung"); ok {
-		t.Fatal("second call should time out too")
+		t.Fatal("hung mount should be skipped fast")
+	}
+	if elapsed := time.Since(start); elapsed > statfsTimeout/2 {
+		t.Fatalf("hung skip took %s, want well under the %s timeout", elapsed, statfsTimeout)
 	}
 	if got := runtime.NumGoroutine(); got != afterFirst {
 		t.Fatalf("goroutines = %d, want %d (no new statfs goroutine)", got, afterFirst)
 	}
 
-	// When the blocked syscall finally returns, the pending entry is
-	// consumed and later calls succeed with real values.
+	// When the blocked syscall finally returns, the pending result is
+	// consumed by the next collection and normal scanning resumes. The
+	// peek is non-blocking by design, so the recovery may take a round
+	// to land; retry within a generous budget.
 	statfsTimeout = origTimeout
 	close(release)
-	st, ok := statfsWithTimeout("/hung")
-	if !ok {
-		t.Fatal("call after recovery should succeed")
+	deadline := time.Now().Add(time.Second)
+	var st unix.Statfs_t
+	var ok bool
+	for {
+		if st, ok = statfsWithTimeout("/hung"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("recovered result should surface")
+		}
 	}
 	if st.Blocks == 0 {
 		t.Fatal("expected real statfs values after recovery")
+	}
+	st, ok = statfsWithTimeout("/hung")
+	if !ok || st.Blocks == 0 {
+		t.Fatal("subsequent call should statfs normally after recovery")
 	}
 }
 

@@ -88,14 +88,16 @@ var diskUsageMemoTTL = 500 * time.Millisecond
 func systemDiskUsages() []resources.DiskUsage {
 	diskUsageMemo.Lock()
 	defer diskUsageMemo.Unlock()
-	now := time.Now()
-	if diskUsageMemo.have && now.Sub(diskUsageMemo.at) < diskUsageMemoTTL {
+	if diskUsageMemo.have && time.Since(diskUsageMemo.at) < diskUsageMemoTTL {
 		return diskUsageMemo.usages
 	}
 	// A platform error (non-Linux) yields nil and is memoized the same way,
 	// so both gauges of one collection stay consistent instead of retrying.
 	usages, _ := resources.DiskUsages()
-	diskUsageMemo.have, diskUsageMemo.at, diskUsageMemo.usages = true, now, usages
+	// Stamp after the scan: a slow scan (statfs timeouts on network mounts)
+	// must not eat into the memo TTL, or the second gauge callback of the
+	// same collection would rescan.
+	diskUsageMemo.have, diskUsageMemo.at, diskUsageMemo.usages = true, time.Now(), usages
 	return usages
 }
 

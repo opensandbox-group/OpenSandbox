@@ -46,7 +46,15 @@ type statfsResult struct {
 	err error
 }
 
-// statfsPending holds the in-flight statfs channel per mount point. A call
+// statfsCall is the in-flight statfs of one mount point.
+type statfsCall struct {
+	ch chan statfsResult
+	// hung marks a call that already timed out once: later collections
+	// skip it without re-paying the timeout, until the kernel returns.
+	hung bool
+}
+
+// statfsPending holds the in-flight statfs call per mount point. A call
 // that hit the timeout keeps its entry: its goroutine is still blocked in
 // the syscall, and the next collection reuses the same channel instead of
 // stacking a new one, so a permanently hung mount leaks at most one
@@ -55,7 +63,7 @@ type statfsResult struct {
 // gauges), so the channel's single result always reaches its only waiter.
 var (
 	statfsMu      sync.Mutex
-	statfsPending = map[string]chan statfsResult{}
+	statfsPending = map[string]*statfsCall{}
 )
 
 // diskUsages snapshots every visible real mount. Per-mount failures are
@@ -88,25 +96,41 @@ func diskUsages() ([]DiskUsage, error) {
 
 // statfsWithTimeout runs statfs off-thread so a hung mount cannot stall the
 // metrics pipeline. The syscall itself is not interruptible: on timeout the
-// goroutine stays blocked until the kernel returns, and its pending entry
-// makes later collections reuse it instead of spawning fresh calls.
+// goroutine stays blocked until the kernel returns, its pending entry makes
+// later collections reuse it instead of spawning fresh calls, and those
+// collections skip the mount without re-paying the full timeout.
 func statfsWithTimeout(path string) (unix.Statfs_t, bool) {
 	statfsMu.Lock()
-	ch, pending := statfsPending[path]
+	call, pending := statfsPending[path]
 	if !pending {
-		ch = make(chan statfsResult, 1)
-		statfsPending[path] = ch
+		call = &statfsCall{ch: make(chan statfsResult, 1)}
+		statfsPending[path] = call
 		statfsMu.Unlock()
 		go func() {
 			var st unix.Statfs_t
 			err := statfsSyscall(path, &st)
-			ch <- statfsResult{st, err}
+			call.ch <- statfsResult{st, err}
 		}()
+	} else if call.hung {
+		// A previous collection already waited the full timeout on this
+		// call. Peek without blocking: if the kernel finally returned,
+		// consume the result and resume normal scanning; otherwise skip
+		// this mount for now at O(1) cost.
+		statfsMu.Unlock()
+		select {
+		case r := <-call.ch:
+			statfsMu.Lock()
+			delete(statfsPending, path)
+			statfsMu.Unlock()
+			return r.st, r.err == nil
+		default:
+			return unix.Statfs_t{}, false
+		}
 	} else {
 		statfsMu.Unlock()
 	}
 	select {
-	case r := <-ch:
+	case r := <-call.ch:
 		statfsMu.Lock()
 		delete(statfsPending, path)
 		statfsMu.Unlock()
@@ -115,7 +139,10 @@ func statfsWithTimeout(path string) (unix.Statfs_t, bool) {
 		}
 		return r.st, true
 	case <-time.After(statfsTimeout):
-		log.Warn("resources: statfs %s timed out, skipping mount", path)
+		statfsMu.Lock()
+		call.hung = true
+		statfsMu.Unlock()
+		log.Warn("resources: statfs %s timed out, skipping mount until it returns", path)
 		// Keep the pending entry: the blocked syscall owns its goroutine.
 		return unix.Statfs_t{}, false
 	}

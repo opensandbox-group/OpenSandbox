@@ -177,9 +177,11 @@ func underAny(path string, prefixes ...string) bool {
 // device-filtering policy on top.
 
 // isPseudoDevice reports whether a diskstats device name is kernel plumbing
-// whose throughput is not sandbox storage.
+// or a virtual stacking layer whose throughput is already charged elsewhere
+// (device-mapper and soft-raid I/O also lands on their underlying devices),
+// so summing both levels would double-count.
 func isPseudoDevice(name string) bool {
-	for _, prefix := range []string{"loop", "ram", "fd", "sr", "zram"} {
+	for _, prefix := range []string{"loop", "ram", "fd", "sr", "zram", "dm", "md"} {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}
@@ -187,10 +189,13 @@ func isPseudoDevice(name string) bool {
 	return false
 }
 
-// diskstatsPartition matches partition device names (sda1, vdb12,
-// nvme0n1p2, mmcblk0p1). The kernel charges partition I/O to the whole
-// device as well, so an aggregate must not sum both layers.
-var diskstatsPartition = regexp.MustCompile(`^(?:(?:sd|hd|vd|xvd)[a-z]+|nvme\d+n\d+|mmcblk\d+)p?\d+$`)
+// diskstatsPartition matches partition device names: sda1, vdb12, xvdz3 on
+// whole-disk lettering, and explicit pN suffixes on digit-suffixed bases
+// (nvme0n1p2, mmcblk0p1). A plain trailing digit is NOT enough for the
+// digit-suffixed bases: nvme0n12 is a whole disk (namespace 12), not a
+// partition. The kernel charges partition I/O to the whole device as well,
+// so an aggregate must not sum both layers.
+var diskstatsPartition = regexp.MustCompile(`^(?:(?:sd|hd|vd|xvd)[a-z]+\d+|nvme\d+n\d+p\d+|mmcblk\d+p\d+)$`)
 
 // isPartitionDevice reports whether a diskstats device name is a partition
 // of a whole disk.
