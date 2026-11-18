@@ -259,6 +259,33 @@ class TestComputeLayer:
         detail = layer.checks[0].detail
         assert "exit 1" in detail and "torch.cuda.is_available()" in detail
 
+    def test_auto_import_consuming_budget_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stamps = iter([0.0, 100.0])
+        monkeypatch.setattr(gpu_probe, "_monotonic", lambda: next(stamps))
+        fake = _fake_capture(0, "", "")
+        layer = gpu_probe.collect_compute_layer("auto", 10, capture=fake)
+        assert layer.status == gpu_probe.FAIL
+        assert "--compute-timeout" in layer.checks[0].detail
+
+    def test_auto_shares_budget_between_import_and_smoke(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stamps = iter([0.0, 4.0])
+        monkeypatch.setattr(gpu_probe, "_monotonic", lambda: next(stamps))
+        seen: List[float] = []
+
+        def capture(command: Any, timeout: float, shell: bool = False):
+            seen.append(timeout)
+            if len(seen) == 1:
+                return 0, "", ""
+            return 0, json.dumps({"deviceCount": 1, "checksums": {}}), ""
+
+        layer = gpu_probe.collect_compute_layer("auto", 10, capture=capture)
+        assert layer.status == gpu_probe.PASS
+        assert seen == [10, 6.0]
+
     def test_auto_device_count_shortfall_fails(self) -> None:
         calls: List[int] = []
 

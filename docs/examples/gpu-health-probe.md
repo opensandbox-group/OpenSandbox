@@ -22,6 +22,7 @@ The complete source, including unit tests, lives in [`examples/gpu-health-probe`
 - An OpenSandbox server whose runtime exposes GPUs: Docker with `nvidia-container-toolkit`, or a Kubernetes cluster with a GPU device plugin (Kubernetes requires a positive integer for `resourceLimits.gpu`; the `all` sentinel is Docker-only).
 - A GPU image that includes `python3` (the probe runs inside the sandbox). The demo's default image bundles Python and PyTorch; a lighter CUDA image works for layers 1-2 but needs Python.
 - Python SDK: `uv pip install opensandbox`.
+- For a first run on Kubernetes, note that the image pull happens inside the create request and is bounded by the server's `sandbox_create_timeout_seconds` (60s by default): pre-pull large GPU images on the nodes or raise that setting.
 
 ## Run it
 
@@ -49,7 +50,7 @@ python3 /tmp/gpu-health-probe/gpu_probe.py --expect 1 --compute auto
 | `--compute auto` | Run a PyTorch smoke test when PyTorch is importable, otherwise report layer 3 as `skipped` |
 | `--compute skip` | Disable layer 3 |
 | `--compute '<command>'` | Run a workload-native compute check; exit code `0` means pass |
-| `--compute-timeout SECONDS` | Timeout for the compute probe (default: 60) |
+| `--compute-timeout SECONDS` | Overall timeout for the compute-layer probe, including the PyTorch import in auto mode (default: 60) |
 | `--no-smi` | Skip the `nvidia-smi` inventory check (device nodes remain authoritative) |
 | `--quiet` | Suppress the human-readable summary on stderr |
 

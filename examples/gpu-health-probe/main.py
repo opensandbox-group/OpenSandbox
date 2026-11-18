@@ -32,6 +32,9 @@ Prerequisites:
 1. An OpenSandbox server whose runtime exposes GPUs (Docker with
    nvidia-container-toolkit, or Kubernetes nodes with a GPU device plugin)
 2. Python SDK: `uv pip install opensandbox`
+3. Large GPU images should be pre-pulled on the nodes (or the server's
+   `sandbox_create_timeout_seconds` raised): the first pull happens inside
+   the create request and is not extended by this script's sandbox TTL.
 
 Usage:
     export SANDBOX_DOMAIN=your-server:8080        # default: localhost:8080
@@ -79,7 +82,11 @@ CONNECTION_CONFIG = ConnectionConfig(
 EXIT_DEVICE_FAILED = 2
 EXIT_COMPUTE_FAILED = 3
 
-# GPU images are large; give the initial pull room to finish.
+# Sandbox lifetime (TTL), not a create/pull allowance: the image pull and
+# readiness wait happen inside the create request and are bounded by the
+# server's sandbox_create_timeout_seconds (60s by default on Kubernetes),
+# so pre-pull large GPU images on the nodes or raise that server setting
+# before relying on the 60-minute TTL below.
 SANDBOX_TIMEOUT = timedelta(minutes=60)
 
 

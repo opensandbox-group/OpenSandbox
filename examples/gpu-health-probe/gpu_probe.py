@@ -309,6 +309,11 @@ def run_capture(
         return 124, "", f"timed out after {timeout_seconds}s (process group terminated)"
 
 
+def _monotonic() -> float:
+    """Clock indirection so tests can exercise timeout budgeting."""
+    return time.monotonic()
+
+
 def _tail(text: str, limit: int = 400) -> str:
     collapsed = " ".join(text.split())
     if len(collapsed) <= limit:
@@ -575,6 +580,10 @@ def collect_compute_layer(
                     )
                 ],
             )
+        # The configured timeout is a single budget for the whole layer:
+        # the import check and the kernel launch must not each get a fresh
+        # full allowance.
+        deadline = _monotonic() + timeout_seconds
         import_exit, _, import_stderr = capture(
             [python, "-c", "import torch"], timeout_seconds
         )
@@ -608,8 +617,22 @@ def collect_compute_layer(
                     f"(exit {import_exit}): " + _tail(import_stderr)
                 )
             return Layer("compute", [Check("compute-probe", FAIL, detail)])
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            return Layer(
+                "compute",
+                [
+                    Check(
+                        "compute-probe",
+                        FAIL,
+                        f"the PyTorch import consumed the whole "
+                        f"{timeout_seconds:g}s --compute-timeout budget; no "
+                        "kernel was launched",
+                    )
+                ],
+            )
         exit_code, stdout, stderr = capture(
-            [python, "-c", TORCH_SMOKE_SCRIPT], timeout_seconds
+            [python, "-c", TORCH_SMOKE_SCRIPT], remaining
         )
         if exit_code != 0:
             return Layer(
@@ -825,7 +848,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         type=float,
         default=60.0,
         metavar="SECONDS",
-        help="Timeout for the compute-layer probe (default: 60).",
+        help=(
+            "Overall timeout for the compute-layer probe, including the "
+            "PyTorch import in auto mode (default: 60)."
+        ),
     )
     parser.add_argument(
         "--dev-dir",
