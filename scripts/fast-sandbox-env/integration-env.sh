@@ -110,14 +110,17 @@
 #                    registry (CA baked into the fsb images), the chart's
 #                    runtime.oci node stack, and a full overlaybd verify
 #                    pass beside native. Nodes need ublk support. 0 = native-only.
-#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify
-#                    (overlaybd lane). On by default: the fastlet-side
-#                    prerequisites are provisioned automatically whenever
-#                    OCI_STACK=1, the capture qualification is
-#                    deployment-derived upstream (fast-sandbox#185), and
-#                    capture runs on the managed Firecracker 1.17.0 the
-#                    pinned stack installs (the v1.16.1 thaw failure,
-#                    fast-sandbox#187, is a legacy capture version).
+#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify on
+#                    both template lanes (native and overlaybd). On by
+#                    default whenever OCI_STACK=1: the fastlet-side
+#                    prerequisites are provisioned automatically, the
+#                    capture qualification is deployment-derived upstream
+#                    (fast-sandbox#185), and capture runs on the managed
+#                    Firecracker 1.17.0 the pinned stack installs (the
+#                    v1.16.1 thaw failure, fast-sandbox#187, is a legacy
+#                    capture version). Native-only stacks (OCI_STACK=0)
+#                    skip the stage regardless: the FSEP-0001 restore
+#                    kernel is staged on the OCI lane only.
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -2507,8 +2510,9 @@ VOLUMES
 	# Guest-kernel fragment (FSEP-0001): cold-boot restore resolves the
 	# kernel on the node under /usr/local/share/firecracker, so the fastlet
 	# mounts the staged node copy (rootfs_only_kernel_up). Inert for Full
-	# snapshots — the restore path is the only consumer. Requires the OCI
-	# lane: rootfs-only capture is OverlayBD-only.
+	# snapshots — the restore path is the only consumer. Staged on the OCI
+	# lane only in this environment; native-only stacks (OCI_STACK=0) skip
+	# it together with the native rootfs-only snapshot verify.
 	if [[ "$OCI_STACK" == 1 ]]; then
 		local gk_mounts gk_volumes
 		gk_mounts="$(cat <<'MOUNTS'
@@ -4214,6 +4218,17 @@ rootfs_only_wait_ready() { # <snapshot-id> <max-attempts>
 	done
 }
 
+rootfs_only_lane() { # <template-id> -> "<lane> <artifact-scheme>"
+	# The durable artifact reference differs per lane: the overlaybd lane
+	# publishes an OCI manifest pair (oci://), the native lane an S3
+	# manifest URI (s3://).
+	if [[ -n "$OCI_TEMPLATE_ID" && "$1" == "$OCI_TEMPLATE_ID" ]]; then
+		printf 'overlaybd oci://\n'
+	else
+		printf 'native s3://\n'
+	fi
+}
+
 rootfs_only_verify() {
 	# One experiment on the given template lane: create a sandbox ->
 	# rootfs-only snapshot -> verify the snapshot metadata (server row mode,
@@ -4228,11 +4243,7 @@ rootfs_only_verify() {
 	# reference differs per lane (oci:// pair vs s3:// manifest URI).
 	local template_id="${1:-$TEMPLATE_ID}"
 	local lane artifact_scheme
-	if [[ -n "$OCI_TEMPLATE_ID" && "$template_id" == "$OCI_TEMPLATE_ID" ]]; then
-		lane="overlaybd" artifact_scheme="oci://"
-	else
-		lane="native" artifact_scheme="s3://"
-	fi
+	read -r lane artifact_scheme <<< "$(rootfs_only_lane "$template_id")"
 	log "verify (rootfs-only): lane=$lane templateId=$template_id"
 	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
 	t0="$(now_ms)"
@@ -4506,10 +4517,17 @@ verify_native() {
 	# Rootfs-only verify (FSEP-0001) on the native lane, default-on: the
 	# capture qualification is deployment-derived upstream (fast-sandbox#185),
 	# the artifact set publishes to the S3 store, and fast-sandbox#223
-	# admitted native RootfsOnly at the FastPath gRPC gate. ROOTFS_ONLY=0
-	# skips the stage.
+	# admitted native RootfsOnly at the FastPath gRPC gate. Two gates:
+	# ROOTFS_ONLY=0 skips the stage outright, and OCI_STACK=0 skips it
+	# because this environment stages the FSEP-0001 restore kernel on the
+	# OCI lane only (rootfs_only_kernel_up + the fastlet guest-kernel
+	# fragment), so a native-only stack cannot cold-boot the artifact.
 	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
-		run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
+		if [[ "$OCI_STACK" == "1" ]]; then
+			run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
+		else
+			log "OCI_STACK=0: skipping the native rootfs-only snapshot verify (the FSEP-0001 restore kernel is staged on the OCI lane only)"
+		fi
 	else
 		log "ROOTFS_ONLY=0: skipping the rootfs-only snapshot verify"
 	fi
