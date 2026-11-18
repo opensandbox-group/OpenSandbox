@@ -62,8 +62,7 @@ func rootfsSnapshotTargets(bs *sandboxv1alpha1.BatchSandbox) ([]corev1.Container
 		}
 		parsed, err := reference.Parse(entry.Image)
 		pinned, ok := parsed.(reference.Canonical)
-		_, tagged := parsed.(reference.Tagged)
-		if err != nil || !ok || tagged {
+		if err != nil || !ok {
 			return nil, fmt.Errorf("recreate container %q requires an image pinned by manifest digest", entry.Name)
 		}
 		if _, err := snapshotcontract.ParseSHA256Digest(pinned.Digest().String()); err != nil {
@@ -140,31 +139,37 @@ func validateSourceContainerPins(bs *sandboxv1alpha1.BatchSandbox, pod *corev1.P
 	return nil
 }
 
-// dispatchRecreatePause leaves the request unacknowledged until provisioning
-// produces a running source Pod. Policy errors still fail before tasks stop.
+// dispatchRecreatePause waits for provisioning to produce a running source Pod,
+// but acknowledges a terminal source failure without starting the pause workflow.
 func (r *BatchSandboxReconciler) dispatchRecreatePause(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) (ctrl.Result, bool, error) {
-	_, policyErr := rootfsSnapshotTargets(bs)
-	if policyErr == nil {
+	_, pauseErr := rootfsSnapshotTargets(bs)
+	reason := "InvalidRecreatePolicy"
+	if pauseErr == nil && bs.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseFailed &&
+		hasTerminalPodFailureCondition(bs.Status.Conditions) {
+		reason = "SourcePodFailed"
+		pauseErr = fmt.Errorf("source Pod failed before it could be paused")
+	}
+	if pauseErr == nil {
 		pods, err := r.listPods(ctx, strategy.NewPoolStrategy(bs), bs)
 		if err != nil {
 			return ctrl.Result{}, true, err
 		}
 		for _, pod := range pods {
 			if pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning {
-				policyErr = validateRecreateSourcePod(bs, pod)
-				if policyErr == nil {
+				pauseErr = validateRecreateSourcePod(bs, pod)
+				if pauseErr == nil {
 					result, err := r.handlePause(ctx, bs)
 					return result, true, err
 				}
 				break
 			}
 		}
-		if policyErr == nil {
+		if pauseErr == nil {
 			return ctrl.Result{}, false, nil
 		}
 	}
 	bs.Status.PauseObservedGeneration = bs.Generation
-	setConditionInStatus(&bs.Status, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, "InvalidRecreatePolicy", policyErr.Error())
+	setConditionInStatus(&bs.Status, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, reason, pauseErr.Error())
 	return ctrl.Result{}, true, r.Status().Update(ctx, bs)
 }
 
