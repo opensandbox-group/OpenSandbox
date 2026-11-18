@@ -1,6 +1,6 @@
 ---
 title: Fast Sandbox Performance
-description: ACK measurements of the fast-sandbox integration — serial and concurrent creates, request latency, live snapshot, and same-node pause/resume.
+description: ACK measurements of the fast-sandbox integration — serial and concurrent creates, request latency, live snapshot, and same-node pause/resume — plus the OSEP-0023 credential-bound interception cost method, with results pending CI.
 ---
 
 # Performance
@@ -132,6 +132,100 @@ XFS reflink support and GNU `cp` keep warm rootfs preparation in the millisecond
 
 Concurrency changes admission contention; durable pause includes dumping, hashing, and uploading a checkpoint; SDK readiness includes endpoint resolution, HTTP timeouts, and retries. The saturation failures under [Create](#create) are control-plane evidence, not a host-only explanation. The same-node resume gap also remains unresolved. A warm `/ping`, completed command stream, runtime restore, and SDK resume have different completion boundaries.
 
+## Credential-bound interception cost (OSEP-0023)
+
+This section answers two questions about the experimental Fast Sandbox `credential-bound` interception mode (see [Egress](/architecture/network/egress)): how much the mode adds to sandbox creation latency, and what the per-subject and process connection budgets should be. The numbers come from the KVM integration environment (`scripts/fast-sandbox-env`), not from the ACK cluster above, so they are not comparable with the earlier sections. Every value below is `pending CI` until a workflow run's bench artifacts are recorded here with the run link, commit and environment fields.
+
+### Method
+
+The `bench-credential-bound` action of [`integration-env.sh`](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/integration-env.sh) runs after the verify actions in each integration leg. The default leg leaves `OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE` unset (interception `all`); the second leg sets `credential-bound`. Both legs use the same pool, template, origin and client, so the legs differ only in the interception mode and run serially on the same runner. Each measurement writes a JSON report with closed-vocabulary fields only: no credential value, digest, sandbox hostname or subject UID.
+
+| Measurement | What is measured | Legs |
+|---|---|---|
+| M1 create latency | [`create-bench.py`](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/create-bench.py): 3 rounds of 200 creates at concurrency 10 from the native template, each create carrying a network policy so that every sandbox registers an egress subject. Timing ends at guest `/ping` 200 through the gateway. | Both |
+| M2 TLS connect latency | From inside the guest to the persistent HTTP/1.1 TLS test origin used by the credential-bound verify: 200 samples per path, a new TCP connection and TLS handshake per sample, measured client-side. One request per sample confirms which path was taken. | Both, per path |
+| M3 memory per connection | Idle bound HTTP/1.1 keep-alive connections held from 4 sandboxes on one Fastlet Pod, cumulative K = 500, 1000 and 2000. The egress container's cgroup `memory.current` and `memory.stat` `anon` are read after each step. Bytes per connection are fitted by least squares over the raw points, including the K = 0 baseline. | `credential-bound` only |
+| M4 CPU | Passthrough-dominated load: 1900 short HTTPS requests (new connection, one request, close) from an unbound sandbox, plus 100 from a bound sandbox, on one Fastlet Pod. Reported as the egress container's cgroup `cpu.stat` `usage_usec` delta, minus the idle rate from a 30-second window before the load. | Both |
+
+M2 paths:
+
+| Path | Leg | Sandbox | Expected evidence |
+|---|---|---|---|
+| `all_unbound` | default (`all`) | no Vault | MITM leaf, no credential (full decrypt) |
+| `all_bound` | default (`all`) | Vault bound to the origin host | MITM leaf, injected credential |
+| `cb_bound` | `credential-bound` | Vault bound to the origin host | MITM leaf, injected credential (decrypt) |
+| `cb_unbound` | `credential-bound` | no Vault | origin leaf, no credential (opaque passthrough) |
+
+The guest client compares each sample's presented leaf certificate digest with the origin's own leaf, because origin and MITM leaves chain to the same test CA. It also reports which credential the origin observed. A path is reported `INVALID` instead of a number when any sample contradicts the expected evidence. Warmup samples (10 per path) are discarded. Percentiles use the nearest-rank method.
+
+M1 writes no Vault: `create-bench.py` has no Vault step. The cost of binding a credential to a created sandbox is reported separately as the Vault relay acknowledgement times (`vault_bind_ack_ms`) in the M2 and M3 reports, and the per-connection cost of a bound sandbox is covered by M2 and M3.
+
+M3 runs on a bench-only Pool render that raises the egress container memory limit to 2Gi and `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` to 1024, so that K = 2000 fits. The default render and the verify lanes are unchanged, and the default Pool is re-applied after M3. If a step cannot be reached, the report keeps every point collected so far, the largest K reached, and the closed failure kinds. The step is never dropped. An egress container restart or OOM kill also stops the series and is recorded.
+
+### Environment
+
+Each leg's `environment.json` records: leg and interception mode, recording time, OpenSandbox and fast-sandbox commits, pool name, mode, `poolMin` and `maxSandboxesPerPod`, OverlayBD profile, host kernel, CPU model and count, host memory, Kubernetes version, egress image, and the egress container resources as deployed.
+
+| Dimension | Value |
+|---|---|
+| Workflow run | pending CI |
+| OpenSandbox commit | pending CI |
+| Host CPU / memory / kernel | pending CI |
+| Pool | pending CI |
+| Egress container resources (M1, M2, M4) | pending CI |
+| Egress container resources (M3 bench render) | 2Gi memory limit, per-subject budget 1024 |
+
+### Results
+
+M1 create latency, per leg (milliseconds):
+
+| Leg | Round | Success | p50 | p90 | p99 | Mean |
+|---|---|---:|---:|---:|---:|---:|
+| default (`all`) | 1–3 | pending CI | pending CI | pending CI | pending CI | pending CI |
+| `credential-bound` | 1–3 | pending CI | pending CI | pending CI | pending CI | pending CI |
+
+M2 guest TCP + TLS connect latency (milliseconds, 200 samples per path):
+
+| Path | Success | p50 | p90 | p99 | Mean |
+|---|---:|---:|---:|---:|---:|
+| `all_unbound` | pending CI | pending CI | pending CI | pending CI | pending CI |
+| `all_bound` | pending CI | pending CI | pending CI | pending CI | pending CI |
+| `cb_bound` | pending CI | pending CI | pending CI | pending CI | pending CI |
+| `cb_unbound` | pending CI | pending CI | pending CI | pending CI | pending CI |
+
+M3 egress memory, `credential-bound` leg (raw points and fit):
+
+| K held | `memory.current` | `anon` |
+|---:|---:|---:|
+| 0 | pending CI | pending CI |
+| 500 | pending CI | pending CI |
+| 1000 | pending CI | pending CI |
+| 2000 | pending CI | pending CI |
+| Fit: bytes per connection (r²) | pending CI | pending CI |
+
+M4 egress CPU under passthrough-dominated load:
+
+| Leg | Requests succeeded | Load CPU (cores) | Idle-corrected CPU per request | Throttled time |
+|---|---:|---:|---:|---:|
+| default (`all`) | pending CI | pending CI | pending CI | pending CI |
+| `credential-bound` | pending CI | pending CI | pending CI | pending CI |
+
+### Recommended budgets
+
+The release defaults are currently `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY=32` per subject and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY=131072` per egress process. Both are unmeasured. The recommendation will be derived from the M3 fit as follows. Values are pending until M3 lands.
+
+- **Per-subject budget** `S`: the number of concurrent decrypted connections one sandbox may hold. It is a cap, not a reservation, so the egress memory it implies is `S × sandboxes per Fastlet Pod × bytes per connection`, which only materializes if every sandbox on the Pod uses its full budget. With `maxSandboxesPerPod` sandboxes per Pod and bytes per connection `m` from M3, this worst case must stay below the egress container memory limit `L` minus the idle baseline `B`: `S × maxSandboxesPerPod × m ≤ L − B`.
+- **Process budget** `P`: the total decrypted connections one egress process admits across all its subjects. Because per-subject budgets are not reservations, `P` is the bound that actually protects the container: `P × m ≤ L − B`. A `P` larger than `(L − B) / m` lets the process reach the memory limit before the budget rejects handshakes. Exhaustion of either budget terminates only new bound handshakes.
+- **Consistency**: `P` should not be below `S × maxSandboxesPerPod`, or a single Pod's sandboxes cannot all reach their per-subject budget. At the defaults, `S × maxSandboxesPerPod` is 32 × 8 = 256 in the integration environment, far below `P = 131072`, so the per-subject budget, not `P`, is what limits a Pod's decrypted connections today.
+
+| Input | Value |
+|---|---|
+| Bytes per bound connection `m` (M3 `anon` fit) | pending CI |
+| Idle baseline `B` | pending CI |
+| Egress memory limit `L` in the shipped Pool examples | 256Mi (integration environment Pool) |
+| Recommended `S` | pending CI |
+| Recommended `P` for `L` | pending CI |
+
 ## Reproducing
 
 ### SDK measurements
@@ -166,3 +260,14 @@ For the other measurements, retain the same SDK connection settings:
 Capture runtime dump, publish, restore, and route-publication log timestamps to distinguish checkpoint I/O from later SDK readiness. Clean up only the artifacts created by the test after their sandbox/snapshot resources are gone.
 
 Keep hardware, kernel, Firecracker version, template digest, pool shape, client placement, and artifact-store placement fixed when comparing load shapes.
+
+### Credential-bound interception cost
+
+Run after `up` and the verify actions, with the same `EGRESS_INTERCEPTION_MODE` as `up`. Reports are written under `$WORK/bench/<leg>/` (`m1-create.json`, `m2-handshake.json`, `m3-memory.json`, `m4-cpu.json`, `environment.json`, `bench-summary.json`):
+
+```bash
+./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
+EGRESS_INTERCEPTION_MODE=credential-bound ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
+```
+
+In CI, the integration workflow runs the bench in both legs when the `bench` dispatch input is set or the pull request carries the `fast-sandbox-bench` label, and uploads the reports as `fast-sandbox-bench-<leg>-<attempt>` artifacts. The `BENCH_*` variables listed in the [environment README](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/README.md) change sample counts, steps and the M3 render.
