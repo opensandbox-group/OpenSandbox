@@ -22,6 +22,7 @@
 
 Usage:
     uv run scripts/conformance/run_profile.py specs/conformance/profiles/execd-file-api.yaml
+    uv run scripts/conformance/run_profile.py --all
     uv run scripts/conformance/run_profile.py --check-only <profile>
 
 Exit codes: 0 = every claim holds, 1 = claim violation, 2 = invalid profile
@@ -307,22 +308,10 @@ def print_report(profile: Profile, results: dict[tuple[str, str, str], str]) -> 
             print(f"  {action.upper():5s} {claim.id} [{tag}] {test.name} {expectation}".rstrip())
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate a conformance profile and execute its mapped tests.")
-    parser.add_argument("profile", type=Path, help="Path to the profile YAML file.")
-    parser.add_argument(
-        "--check-only",
-        action="store_true",
-        help="Validate the profile structure and test references without running tests.",
-    )
-    parser.add_argument("--timeout", type=int, default=300, help="Per-package go test timeout in seconds.")
-    parser.add_argument("--go", default="go", help="Go executable to use.")
-    args = parser.parse_args(argv)
-
-    repo_root = Path(__file__).resolve().parents[2]
+def run_one_profile(profile_path: Path, repo_root: Path, check_only: bool, timeout: int, go_executable: str) -> int:
     try:
-        profile = load_profile(args.profile.resolve(), repo_root)
-        if args.check_only:
+        profile = load_profile(profile_path, repo_root)
+        if check_only:
             enforced = sum(1 for claim in profile.claims if claim.status == "enforced")
             print(
                 f"profile {profile.name}@{profile.version} is valid "
@@ -330,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
-        results = run_tests(profile, timeout=args.timeout, go_executable=args.go)
+        results = run_tests(profile, timeout=timeout, go_executable=go_executable)
         print_report(profile, results)
         violations = evaluate(profile, results)
         if violations:
@@ -343,6 +332,50 @@ def main(argv: list[str] | None = None) -> int:
     except ProfileError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+
+
+def discover_profiles(repo_root: Path) -> list[Path]:
+    profile_dir = repo_root / "specs" / "conformance" / "profiles"
+    profiles = sorted(path for path in profile_dir.glob("*.yaml") if path.is_file())
+    if not profiles:
+        fail(f"no conformance profiles found under {profile_dir.relative_to(repo_root)}")
+    return profiles
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Validate a conformance profile and execute its mapped tests.")
+    parser.add_argument("profile", nargs="?", type=Path, help="Path to the profile YAML file. Omit with --all.")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run every profile under specs/conformance/profiles/.",
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Validate the profile structure and test references without running tests.",
+    )
+    parser.add_argument("--timeout", type=int, default=300, help="Per-package go test timeout in seconds.")
+    parser.add_argument("--go", default="go", help="Go executable to use.")
+    args = parser.parse_args(argv)
+    if args.all and args.profile is not None:
+        parser.error("pass either a profile path or --all, not both")
+    if not args.all and args.profile is None:
+        parser.error("pass a profile path or --all")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        profiles = discover_profiles(repo_root) if args.all else [args.profile.resolve()]
+    except ProfileError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    exit_code = 0
+    for profile_path in profiles:
+        if len(profiles) > 1:
+            print(f"==> {profile_path.name}")
+        exit_code = max(exit_code, run_one_profile(profile_path, repo_root, args.check_only, args.timeout, args.go))
+    return exit_code
 
 
 if __name__ == "__main__":
