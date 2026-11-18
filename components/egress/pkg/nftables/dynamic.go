@@ -269,7 +269,7 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 	for _, ip := range ips {
 		address := ip.Addr.Unmap()
 		if _, observed := entry.addresses[address]; observed {
-			if !m.tracker.dynamicIPs[address].After(now.Add(clampTTL(ip.TTL))) {
+			if !m.tracker.dynamicIPs[address].After(now.Add(ClampTTL(ip.TTL))) {
 				confirmed = append(confirmed, ip)
 			}
 			addresses[address] = struct{}{}
@@ -312,13 +312,15 @@ func buildAddResolvedIPsScript(table string, ips []ResolvedIP) string {
 	for _, r := range ips {
 		elements = append(elements, ResolvedIP{
 			Addr: r.Addr,
-			TTL:  clampTTL(r.TTL),
+			TTL:  ClampTTL(r.TTL),
 		})
 	}
 	return buildResolvedIPElementsScript(table, elements)
 }
 
-func clampTTL(d time.Duration) time.Duration {
+// ClampTTL turns a DNS TTL into the lifetime of a DNS-learned set element:
+// the TTL plus nftTTLSlackSec, kept within [minTTLSec, maxTTLSec].
+func ClampTTL(d time.Duration) time.Duration {
 	sec := int(d.Seconds()) + nftTTLSlackSec
 	sec = min(max(sec, minTTLSec), maxTTLSec)
 	return time.Duration(sec) * time.Second

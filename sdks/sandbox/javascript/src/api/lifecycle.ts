@@ -615,6 +615,10 @@ export interface paths {
          * @description Request sandbox deletion. Runtime cleanup may continue after the response.
          *     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
          *     and return 404 once the resource is removed.
+         *     A 204 response means deletion was accepted, not that the sandbox's runtime
+         *     execution has terminated: the control object can disappear (and queries
+         *     can start returning 404) while runtime cleanup is still in progress, so a
+         *     404 after deletion must not be read as confirmed termination.
          */
         delete: {
             parameters: {
@@ -1186,6 +1190,23 @@ export interface components {
         CreateSnapshotRequest: {
             /** @description Optional human-readable snapshot name. */
             name?: string;
+            /**
+             * @description What the snapshot persists.
+             *
+             *     - `full` (default): the most complete capture the runtime
+             *       supports. On the fast-sandbox backend that includes memory and
+             *       process state, and restoring resumes the sandbox in place;
+             *       Docker and Kubernetes snapshots capture the filesystem only and
+             *       do not restore running processes.
+             *     - `rootfsOnly`: only the writable filesystem; restoring boots a
+             *       fresh sandbox from the disk. Running processes and in-memory
+             *       state are discarded, and the entrypoint re-runs on restore.
+             *       Supported only on the fast-sandbox backend with OCI-backed
+             *       sandboxes; rejected otherwise.
+             * @default full
+             * @enum {string}
+             */
+            mode: "full" | "rootfsOnly";
         };
         /** @description Persistent point-in-time capture of a sandbox. */
         Snapshot: {
@@ -1195,6 +1216,15 @@ export interface components {
             sandboxId: string;
             /** @description Optional human-readable snapshot name */
             name?: string;
+            /**
+             * @description Artifact class of the snapshot: `full` is the runtime's most
+             *     complete capture (memory and process state on the fast-sandbox
+             *     backend; filesystem-only on Docker and Kubernetes),
+             *     `rootfsOnly` preserves only the writable filesystem. Snapshots
+             *     created before this field existed report `full`.
+             * @enum {string}
+             */
+            mode?: "full" | "rootfsOnly";
             /** @description Current snapshot lifecycle status and detailed state information */
             status: components["schemas"]["SnapshotStatus"];
             /**
@@ -1648,7 +1678,7 @@ export interface components {
              *     resulting in Guaranteed QoS class.
              *     Only meaningful for Kubernetes-based runtimes; ignored by Docker runtime.
              */
-            resourceRequests?: components["schemas"]["ResourceLimits"];
+            resourceRequests?: components["schemas"]["ResourceRequests"];
             /**
              * @description Environment variables to inject into the sandbox runtime.
              * @example {
@@ -1795,6 +1825,14 @@ export interface components {
          *     - `cpu`: CPU allocation in millicores (e.g., "250m" for 0.25 CPU cores)
          *     - `memory`: Memory allocation in bytes or human-readable format (e.g., "512Mi", "1Gi")
          *     - `gpu`: Number of GPU devices (e.g., "1")
+         *     - `disk`: Writable-layer disk quota (e.g., "10G", "512M"); `storage` and
+         *       `ephemeral-storage` are accepted as aliases. On the Docker runtime this
+         *       bounds only the container's writable layer via HostConfig.StorageOpt —
+         *       bind mounts, named volumes, and read-only image layers are not covered —
+         *       and requires a quota-capable storage driver (for example overlay2 on XFS
+         *       with pquota); the create request fails with INVALID_PARAMETER if the
+         *       daemon cannot enforce it. On the Windows profile this maps to the
+         *       sandbox disk size.
          *
          *     New resource types can be added without API changes.
          * @example {
@@ -1804,6 +1842,45 @@ export interface components {
          *     }
          */
         ResourceLimits: {
+            [key: string]: string;
+        };
+        /**
+         * @description Resource reservations for the sandbox, as key-value pairs in Kubernetes
+         *     resource specification syntax (same key space as `resourceLimits`):
+         *     - `cpu`: CPU reservation (e.g., "250m" for 0.25 CPU cores)
+         *     - `memory`: Memory reservation (e.g., "512Mi", "1Gi")
+         *
+         *     On Kubernetes-based runtimes these become the sandbox container's
+         *     `requests` — scheduling guarantees, not hard caps. This field is
+         *     ignored by the Docker runtime, which reads only `resourceLimits`, so
+         *     a `disk` reservation here does not create a writable-layer quota.
+         * @example {
+         *       "cpu": "500m",
+         *       "memory": "512Mi"
+         *     }
+         */
+        ResourceRequests: {
+            [key: string]: string;
+        };
+        /**
+         * @description Guest machine sizing for a Fast Sandbox template, as key-value pairs:
+         *     - `cpu`: guest vCPUs (e.g., "1")
+         *     - `memory`: guest memory (e.g., "512Mi")
+         *     - `disk`: logical size of the guest rootfs (e.g., "2Gi"); the artifact
+         *       set is stored and P2P-pulled at this size, so keep it just above the
+         *       expanded source image.
+         *
+         *     Defaults when omitted: cpu `1`, memory `512Mi`, disk `2Gi`.
+         *     Only these three keys are accepted: `storage` and `ephemeral-storage`
+         *     are sandbox writable-layer quota aliases and are not template keys —
+         *     the request fails with HTTP 400 if they are set here.
+         * @example {
+         *       "cpu": "1",
+         *       "memory": "512Mi",
+         *       "disk": "2Gi"
+         *     }
+         */
+        FsbTemplateResourceLimits: {
             [key: string]: string;
         };
         RenewSandboxExpirationRequest: {
@@ -2285,7 +2362,7 @@ export interface components {
              *     it just above the expanded source image. Defaults when omitted:
              *     cpu `1`, memory `512Mi`, disk `2Gi`.
              */
-            resourceLimits?: components["schemas"]["ResourceLimits"];
+            resourceLimits?: components["schemas"]["FsbTemplateResourceLimits"];
             /**
              * @description Guest business command (argv); empty defaults to
              *     `["tail", "-f", "/dev/null"]`.
@@ -2348,7 +2425,7 @@ export interface components {
             templateId: string;
             /** @description Source OCI image reference. */
             image: string;
-            resourceLimits?: components["schemas"]["ResourceLimits"];
+            resourceLimits?: components["schemas"]["FsbTemplateResourceLimits"];
             /** @description Guest business command (argv). */
             entrypoint?: string[];
             /** @description Environment variables baked into the golden image. */

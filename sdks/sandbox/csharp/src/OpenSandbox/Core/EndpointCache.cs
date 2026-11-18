@@ -35,7 +35,6 @@ internal sealed class EndpointCache
     private readonly Dictionary<EndpointCacheKey, LinkedListNode<CacheEntry>> _entries = new();
     private readonly LinkedList<CacheEntry> _order = new();
     private readonly ConcurrentDictionary<EndpointCacheKey, Lazy<Task<Endpoint>>> _inflight = new();
-    private long _generation;
 
     private sealed record CacheEntry(EndpointCacheKey Key, Endpoint Endpoint, long ExpiresAtTimestamp);
 
@@ -100,7 +99,6 @@ internal sealed class EndpointCache
     {
         lock (_lock)
         {
-            _generation++;
             var toRemove = new List<LinkedListNode<CacheEntry>>();
             foreach (var kvp in _entries)
             {
@@ -110,11 +108,16 @@ internal sealed class EndpointCache
 
             foreach (var node in toRemove)
                 RemoveLocked(node);
-        }
-        foreach (var key in _inflight.Keys)
-        {
-            if (key.SandboxId == sandboxId)
-                _inflight.TryRemove(key, out _);
+
+            // Dropped under the lock: FetchAndCache only caches while its own
+            // entry is still registered, so a fetch for this sandbox that is
+            // in flight now can no longer repopulate the cache. Fetches for
+            // other sandboxes keep their entries and cache as usual.
+            foreach (var key in _inflight.Keys)
+            {
+                if (key.SandboxId == sandboxId)
+                    _inflight.TryRemove(key, out _);
+            }
         }
     }
 
@@ -127,9 +130,9 @@ internal sealed class EndpointCache
         if (cached != null)
             return cached;
 
-        long genBefore;
-        lock (_lock) { genBefore = _generation; }
-        var lazy = _inflight.GetOrAdd(key, _ => new Lazy<Task<Endpoint>>(() => FetchAndCache(key, fetcher, genBefore)));
+        Lazy<Task<Endpoint>>? created = null;
+        created = new Lazy<Task<Endpoint>>(() => FetchAndCache(key, fetcher, created!));
+        var lazy = _inflight.GetOrAdd(key, created);
 
         var fetchTask = lazy.Value;
         // Drop the entry when the fetch settles, even with no waiters left
@@ -156,12 +159,17 @@ internal sealed class EndpointCache
         return await fetchTask.ConfigureAwait(false);
     }
 
-    private async Task<Endpoint> FetchAndCache(EndpointCacheKey key, Func<Task<Endpoint>> fetcher, long genBefore)
+    private async Task<Endpoint> FetchAndCache(
+        EndpointCacheKey key,
+        Func<Task<Endpoint>> fetcher,
+        Lazy<Task<Endpoint>> self)
     {
         var endpoint = await fetcher().ConfigureAwait(false);
         lock (_lock)
         {
-            if (_generation == genBefore)
+            // Invalidate() for this sandbox removes the entry, and a later
+            // fetch replaces it; either way this result is stale.
+            if (_inflight.TryGetValue(key, out var current) && ReferenceEquals(current, self))
                 PutLocked(key, endpoint);
         }
         return endpoint;

@@ -39,7 +39,7 @@ func TestAllowsEntireHostSelector(t *testing.T) {
 		{"apex not included", "*.example.com", "deny", []EgressRule{{Action: "deny", Target: "example.com"}, {Action: "allow", Target: "*.example.com"}}, true},
 		{"disjoint deny", "*.example.com", "deny", []EgressRule{{Action: "deny", Target: "other.com"}, {Action: "allow", Target: "*.example.com"}}, true},
 		{"top level wildcard", "*.example.com", "deny", []EgressRule{{Action: "allow", Target: "*.com"}}, true},
-		{"trailing dot is inert", "*.example.com", "deny", []EgressRule{{Action: "allow", Target: "*.example.com."}}, false},
+		{"trailing root dot normalized", "*.example.com", "deny", []EgressRule{{Action: "allow", Target: "*.example.com."}}, true},
 		{"case and whitespace", "*.example.com", "deny", []EgressRule{{Action: "allow", Target: " *.EXAMPLE.COM "}}, true},
 		{"IP and CIDR cannot authorize hosts", "*.example.com", "deny", []EgressRule{{Action: "allow", Target: "1.2.3.4"}, {Action: "allow", Target: "0.0.0.0/0"}}, false},
 		{"default allow", "*.example.com", "allow", nil, true},

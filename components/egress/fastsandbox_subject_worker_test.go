@@ -930,6 +930,14 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 				return
 			}
 		}
+		if isTarget && failOperation == "suspend-ack" && event.Path == "/v2/revisions/prepare" && !firstPrepare {
+			fault.retryOnce.Do(func() { close(fault.retryReached) })
+			select {
+			case <-fault.retryRelease:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		if isTarget && strings.HasSuffix(r.URL.Path, "/"+failOperation) && outcome != "" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(409)
@@ -957,6 +965,14 @@ func startSnapshotFault(t *testing.T, h *mitmproxy.SubjectRevisionIPCConfig, out
 		body, err := io.ReadAll(response.Body)
 		if err != nil {
 			return
+		}
+		if failOperation == "suspend-ack" && isTarget && event.Path == "/v2/revisions/commit" && !duplicateCommit {
+			fault.once.Do(func() { close(fault.reached) })
+			select {
+			case <-fault.release:
+			case <-r.Context().Done():
+				return
+			}
 		}
 		if failOperation == "commit-after" && isTarget && strings.HasSuffix(event.Path, "/commit") {
 			replace := false

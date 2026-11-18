@@ -12,11 +12,12 @@ Use these guides to add capabilities to a working [sandbox application](/getting
 - [Pause and resume](/guides/pause-resume)
 - [Lifecycle hooks](/guides/lifecycle-hooks)
 - [Isolation sessions](/guides/isolation-sessions)
+- [In-sandbox privilege reduction](/guides/privilege-reduction)
 - [Credential Vault](/guides/credential-vault)
 - [Chained upstream proxy](/guides/egress-upstream-proxy)
 - [Secure access](/guides/secure-access)
 - [Secure container runtimes](/guides/secure-container)
-- [Network isolation on Kubernetes](/guides/network-isolation)
+- [Sandbox network security](/guides/network-security)
 - [Multi-tenancy](/guides/multi-tenancy)
 - [Windows sandboxes](/guides/windows-sandbox)
 

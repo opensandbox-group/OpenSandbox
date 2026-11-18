@@ -229,6 +229,22 @@ public sealed class SandboxManager : IAsyncDisposable
             cancellationToken);
     }
 
+    /// <summary>
+    /// Creates a snapshot with an explicit mode. See
+    /// <see cref="Sandbox.CreateSnapshotWithModeAsync"/> for why this is a distinct method.
+    /// </summary>
+    public Task<SnapshotInfo> CreateSnapshotWithModeAsync(
+        string sandboxId,
+        string? name,
+        string? mode,
+        CancellationToken cancellationToken = default)
+    {
+        return _sandboxes.CreateSnapshotAsync(
+            sandboxId,
+            new CreateSnapshotRequest { Name = name, Mode = mode },
+            cancellationToken);
+    }
+
     public Task<SnapshotInfo> GetSnapshotAsync(
         string snapshotId,
         CancellationToken cancellationToken = default)

@@ -19,7 +19,8 @@ Pools are pre-warmed sets of sandbox pods that reduce cold-start latency.
 These endpoints are only available when the runtime is configured as 'kubernetes'.
 """
 
-from typing import Optional
+import threading
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import APIRouter, Header, status
 from fastapi.exceptions import HTTPException
@@ -35,6 +36,9 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.config import get_config
 from opensandbox_server.services.constants import SandboxErrorCodes
 
+if TYPE_CHECKING:
+    from opensandbox_server.services.k8s.pool_service import PoolService
+
 router = APIRouter(tags=["Pools"])
 
 _POOL_NOT_K8S_DETAIL = {
@@ -43,13 +47,23 @@ _POOL_NOT_K8S_DETAIL = {
 }
 
 
-def _get_pool_service():
+_service: Optional["PoolService"] = None
+_service_lock = threading.Lock()
+
+
+def _get_pool_service() -> "PoolService":
     """
     Lazily create the PoolService, raising 501 if the runtime is not Kubernetes.
 
     This deferred approach means the pool router can be registered unconditionally
     in main.py; non-k8s deployments simply receive a clear 501 on every call.
+
+    The service is created once and shared: building a K8sClient reloads the
+    kubeconfig and rewrites the process-global default configuration, and each
+    PoolService opens its own API client. The routes are sync handlers running
+    on a thread pool, so creation is locked (as in the fast-sandbox service).
     """
+    global _service
     from opensandbox_server.services.k8s.client import K8sClient
     from opensandbox_server.services.k8s.pool_service import PoolService
 
@@ -66,8 +80,10 @@ def _get_pool_service():
             detail=_POOL_NOT_K8S_DETAIL,
         )
 
-    k8s_client = K8sClient(config.kubernetes)
-    return PoolService(k8s_client, namespace=config.kubernetes.namespace)
+    with _service_lock:
+        if _service is None:
+            _service = PoolService(K8sClient(config.kubernetes), namespace=config.kubernetes.namespace)
+        return _service
 
 
 @router.post(
@@ -94,13 +110,6 @@ def create_pool(
     Creates a Pool CRD resource that manages a set of pre-warmed pods.
     Once created, sandboxes can reference the pool via ``extensions.poolRef``
     during sandbox creation to benefit from reduced cold-start latency.
-
-    Args:
-        request: Pool creation request including name, pod template, and capacity spec.
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        PoolResponse: The newly created pool.
     """
     pool_service = _get_pool_service()
     return pool_service.create_pool(request)
@@ -124,12 +133,6 @@ def list_pools(
     List all pre-warmed resource pools.
 
     Returns all Pool resources in the configured namespace.
-
-    Args:
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        ListPoolsResponse: Collection of all pools.
     """
     pool_service = _get_pool_service()
     return pool_service.list_pools()
@@ -153,13 +156,6 @@ def get_pool(
 ) -> PoolResponse:
     """
     Retrieve a pool by name.
-
-    Args:
-        pool_name: Name of the pool to retrieve.
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        PoolResponse: Current state of the pool including runtime status.
     """
     pool_service = _get_pool_service()
     return pool_service.get_pool(pool_name)
@@ -189,14 +185,6 @@ def update_pool(
     Only ``capacitySpec`` (bufferMax, bufferMin, poolMax, poolMin) can be
     modified after creation. To change the pod template, delete and recreate
     the pool.
-
-    Args:
-        pool_name: Name of the pool to update.
-        request: Update request with the new capacity spec.
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        PoolResponse: Updated pool state.
     """
     pool_service = _get_pool_service()
     return pool_service.update_pool(pool_name, request)
@@ -222,13 +210,6 @@ def delete_pool(
 
     Removes the Pool CRD resource. Pre-warmed pods managed by the pool will
     be terminated by the pool controller.
-
-    Args:
-        pool_name: Name of the pool to delete.
-        x_request_id: Optional request tracing identifier.
-
-    Returns:
-        Response: 204 No Content.
     """
     pool_service = _get_pool_service()
     pool_service.delete_pool(pool_name)

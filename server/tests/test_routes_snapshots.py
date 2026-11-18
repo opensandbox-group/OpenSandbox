@@ -272,11 +272,12 @@ def test_snapshot_routes_can_use_persisted_service(
             sandbox_id: str,
             *,
             namespace: str | None = None,
+            mode: str | None = None,
         ) -> None:
             return None
 
         @staticmethod
-        def create_snapshot(snapshot_id: str, sandbox_id: str):
+        def create_snapshot(snapshot_id: str, sandbox_id: str, *, mode: str | None = None):
             return None
 
         @staticmethod

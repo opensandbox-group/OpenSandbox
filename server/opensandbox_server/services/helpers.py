@@ -27,7 +27,15 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-from opensandbox_server.api.schema import Endpoint, Sandbox, SandboxFilter
+from opensandbox_server.api.schema import (
+    Endpoint,
+    ListSandboxesRequest,
+    ListSandboxesResponse,
+    PaginationInfo,
+    PaginationRequest,
+    Sandbox,
+    SandboxFilter,
+)
 from opensandbox_server.services.constants import (
     ALLOWED_EGRESS_ENV_VARS,
     EGRESS_ENV_PREFIX,
@@ -84,7 +92,13 @@ def parse_memory_limit(value: Optional[str]) -> Optional[int]:
     if not multiplier:
         logger.warning(f"Unsupported memory unit '{unit}'; ignoring.")
         return None
-    return amount * multiplier
+    # Docker HostConfig.Memory and DiskQuota are signed int64. An unbounded
+    # Python int is accepted here and then fails inside the daemon as a 500.
+    result = amount * multiplier
+    if result > (1 << 63) - 1:
+        logger.warning(f"Memory limit is too large. Got '{value}'. Ignoring.")
+        return None
+    return result
 
 
 def parse_nano_cpus(value: Optional[str]) -> Optional[int]:
@@ -118,13 +132,10 @@ def parse_nano_cpus(value: Optional[str]) -> Optional[int]:
 
 
 def parse_gpu_request(value: Optional[str]) -> Optional[int]:
-    """Convert GPU limit string to a device count.
+    """Convert a GPU limit string to a device count.
 
-    Accepts a positive integer string (e.g. ``"1"``, ``"2"``) or the literal
-    ``"all"`` to request every available GPU. Returns ``-1`` for ``"all"``
-    (the sentinel the Docker Engine uses for unbounded device requests),
-    a positive int for a numeric count, and ``None`` when unset or the
-    value cannot be parsed.
+    ``"all"`` returns ``-1`` (the Docker Engine sentinel for unbounded device
+    requests); ``None`` when unset or unparseable.
     """
     if not value:
         return None
@@ -172,7 +183,7 @@ def parse_timestamp(timestamp: Optional[str]) -> datetime:
         else:
             frac = rest[:tz_sep]
             tz = rest[tz_sep:]
-        frac = frac[:6]  # truncate to microseconds precision
+        frac = frac[:6]
         normalized = f"{main}.{frac:0<6}{tz}" if frac else f"{main}{tz}"
 
     try:
@@ -205,6 +216,33 @@ def matches_filter(sandbox: Sandbox, filter_: SandboxFilter) -> bool:
             if metadata.get(key) != value:
                 return False
     return True
+
+
+def build_pagination_info(page: int, page_size: int, total_items: int) -> PaginationInfo:
+    """Pagination metadata for one page of a list response."""
+    total_pages = math.ceil(total_items / page_size) if page_size > 0 else 0
+    return PaginationInfo(
+        page=page,
+        page_size=page_size,
+        total_items=total_items,
+        total_pages=total_pages,
+        has_next_page=page < total_pages,
+    )
+
+
+def build_list_sandboxes_response(
+    sandboxes: list[Sandbox],
+    request: ListSandboxesRequest,
+) -> ListSandboxesResponse:
+    """Filter, sort newest first and paginate sandboxes into a list response."""
+    filtered = [sandbox for sandbox in sandboxes if matches_filter(sandbox, request.filter)]
+    filtered.sort(key=lambda s: s.created_at or datetime.min, reverse=True)
+    pagination = request.pagination or PaginationRequest.model_validate({})
+    start = (pagination.page - 1) * pagination.page_size
+    return ListSandboxesResponse(
+        items=filtered[start : start + pagination.page_size],
+        pagination=build_pagination_info(pagination.page, pagination.page_size, len(filtered)),
+    )
 
 
 # ============================================================================

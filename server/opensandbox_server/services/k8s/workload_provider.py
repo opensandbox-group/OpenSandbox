@@ -45,9 +45,9 @@ class EgressWorkloadSettings:
 class WorkloadProvider(ABC):
     """
     Abstract interface for managing Kubernetes workload resources.
-    
-    This abstraction allows supporting different K8s resource types
-    (Pod, Job, StatefulSet, etc.) with a unified interface.
+
+    This abstraction allows supporting different workload CRDs
+    (BatchSandbox, agent-sandbox Sandbox, etc.) with a unified interface.
     """
     
     @abstractmethod
@@ -70,29 +70,12 @@ class WorkloadProvider(ABC):
         resource_requests: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
-        Create a new workload resource.
+        Create a new workload resource, raising ApiException on failure.
 
-        Args:
-            sandbox_id: Unique sandbox identifier
-            namespace: Kubernetes namespace
-            image_spec: Container image specification
-            entrypoint: Container entrypoint command
-            env: Environment variables
-            resource_limits: Resource limits (cpu, memory)
-            resource_requests: Resource requests (guaranteed minimums). When omitted, limits are used.
-            labels: Labels to apply to the workload
-            expires_at: Expiration time, or None for manual cleanup (no TTL)
-            execd_image: execd daemon image
-            extensions: General extension field for passing additional configuration.
-                This is a flexible field for various use cases (e.g., ``poolRef`` for pool-based creation).
-            egress_settings: Complete settings for an egress sidecar, or None when the workload does not require egress policy enforcement.
-            volumes: Optional list of volume mounts for the sandbox.
-
-        Returns:
-            Dict containing workload metadata (name, uid, etc.)
-
-        Raises:
-            ApiException: If creation fails
+        ``expires_at=None`` means no TTL (manual cleanup). ``resource_requests``
+        defaults to ``resource_limits`` when omitted. ``egress_settings`` is None
+        when no egress policy enforcement is needed. ``extensions`` is a general
+        field for provider extras (e.g. ``poolRef`` for pool-based creation).
         """
         pass
     
@@ -104,44 +87,17 @@ class WorkloadProvider(ABC):
 
     @abstractmethod
     def get_workload(self, sandbox_id: str, namespace: str) -> Optional[Any]:
-        """
-        Get workload by sandbox ID.
-        
-        Args:
-            sandbox_id: Unique sandbox identifier
-            namespace: Kubernetes namespace
-            
-        Returns:
-            Workload object or None if not found
-        """
+        """Get workload by sandbox ID; returns None when not found."""
         pass
     
     @abstractmethod
     def delete_workload(self, sandbox_id: str, namespace: str) -> None:
-        """
-        Delete a workload resource.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-            namespace: Kubernetes namespace
-
-        Raises:
-            ApiException: If deletion fails
-        """
+        """Delete a workload resource, raising ApiException on failure."""
         pass
     
     @abstractmethod
     def list_workloads(self, namespace: str, label_selector: str) -> List[Any]:
-        """
-        List workloads matching label selector.
-        
-        Args:
-            namespace: Kubernetes namespace
-            label_selector: Label selector query
-            
-        Returns:
-            List of workload objects
-        """
+        """List workloads matching the label selector."""
         pass
     
     def list_workloads_all_namespaces(self, label_selector: str) -> List[Any]:
@@ -162,58 +118,22 @@ class WorkloadProvider(ABC):
     
     @abstractmethod
     def update_expiration(self, sandbox_id: str, namespace: str, expires_at: datetime) -> None:
-        """
-        Update workload expiration time.
-        
-        Args:
-            sandbox_id: Unique sandbox identifier
-            namespace: Kubernetes namespace
-            expires_at: New expiration time
-            
-        Raises:
-            Exception: If update fails
-        """
+        """Update workload expiration time, raising if the update fails."""
         pass
     
     @abstractmethod
     def get_expiration(self, workload: Any) -> Optional[datetime]:
-        """
-        Get expiration time from workload.
-        
-        Args:
-            workload: Workload object
-            
-        Returns:
-            Expiration datetime or None if not set
-        """
+        """Get expiration time from workload, or None if not set."""
         pass
     
     @abstractmethod
     def get_status(self, workload: Any) -> Dict[str, Any]:
-        """
-        Get status from workload object.
-        
-        Args:
-            workload: Workload object
-            
-        Returns:
-            Dict with state, reason, message, last_transition_at
-        """
+        """Return a dict with ``state``, ``reason``, ``message``, ``last_transition_at``."""
         pass
     
     @abstractmethod
     def get_endpoint_info(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
-        """
-        Get endpoint information from workload.
-
-        Args:
-            workload: Workload object
-            port: Port number
-            sandbox_id: Sandbox identifier for ingress-based endpoints
-
-        Returns:
-            Endpoint object (including optional headers) or None if not available
-        """
+        """Return the sandbox endpoint, or None when not available."""
         pass
 
     def get_internal_endpoint(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
@@ -227,23 +147,15 @@ class WorkloadProvider(ABC):
 
     def pause_sandbox(self, sandbox_id: str, namespace: str) -> None:
         """
-        Pause a running sandbox.
-
-        The provider validates the current state and signals the pause intent.
-        Raises NotImplementedError if the provider does not support pause.
-        Raises ValueError if the sandbox is in an invalid state for pause.
-        Raises Exception if the sandbox is not found or the API call fails.
+        Pause a running sandbox; raises NotImplementedError when unsupported
+        and ValueError when the current state does not allow pause.
         """
         raise NotImplementedError("Pause is not supported by this provider")
 
     def resume_sandbox(self, sandbox_id: str, namespace: str) -> None:
         """
-        Resume a paused sandbox.
-
-        The provider validates the current state and signals the resume intent.
-        Raises NotImplementedError if the provider does not support resume.
-        Raises ValueError if the sandbox is in an invalid state for resume.
-        Raises Exception if the sandbox is not found or the API call fails.
+        Resume a paused sandbox; raises NotImplementedError when unsupported
+        and ValueError when the current state does not allow resume.
         """
         raise NotImplementedError("Resume is not supported by this provider")
 
@@ -292,11 +204,6 @@ class WorkloadProvider(ABC):
             return False
         normalized = reason.strip().lower()
         return normalized in {"unschedulable", "failedscheduling"} or "unschedulable" in normalized
-
-    @staticmethod
-    def has_platform_constraints_in_pod_spec(pod_spec: Any) -> bool:
-        has_platform, _ = WorkloadProvider.analyze_platform_constraints_in_pod_spec(pod_spec)
-        return has_platform
 
     @staticmethod
     def analyze_platform_constraints_in_pod_spec(pod_spec: Any) -> tuple[bool, bool]:

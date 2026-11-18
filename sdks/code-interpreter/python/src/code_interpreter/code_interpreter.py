@@ -249,15 +249,15 @@ class CodeInterpreter:
         """
         Check if the code interpreter runtime (Jupyter) is serving.
 
-        Probes the runtime listen port through the sandbox command service and
-        treats a failed command (non-zero exit surfaced as an execution error)
-        as an unhealthy runtime.
+        Probes the runtime listen port through the sandbox command service.
+        Only a confirmed exit code 0 counts as serving: a stream that ends
+        without an error or completion event does not prove the port is open.
         """
         try:
             execution = await self._sandbox.commands.run(
                 RUNTIME_PROCESS_CHECK_COMMAND
             )
-            return execution.error is None
+            return execution.error is None and execution.exit_code == 0
         except Exception:
             return False
 
@@ -282,7 +282,23 @@ class CodeInterpreter:
 
         while time.monotonic() < deadline:
             attempt += 1
-            if await self.is_healthy():
+            # Bound each probe by the remaining budget: ping and the runtime
+            # check carry their own request timeouts, which would otherwise
+            # let one stalled probe run well past ready_timeout. Like
+            # ReadinessBudget.run, cancel an unfinished probe (late, or the
+            # caller was cancelled) without waiting for it, so one that
+            # suppresses the cancellation cannot hold the caller.
+            probe = asyncio.ensure_future(self.is_healthy())
+            try:
+                done, _ = await asyncio.wait(
+                    {probe}, timeout=max(deadline - time.monotonic(), 0)
+                )
+            finally:
+                if not probe.done():
+                    probe.cancel()
+            if not done:
+                break
+            if probe.result():
                 logger.info(
                     f"Code interpreter {self.id} passed health check "
                     f"after {attempt} attempts"

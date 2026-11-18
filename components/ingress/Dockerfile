@@ -29,6 +29,10 @@ ARG CXXFLAGS=
 ARG CGO_CFLAGS=
 ARG CGO_CXXFLAGS=
 ARG CGO_LDFLAGS=
+# Optional module proxy for restricted build networks; empty keeps Go's
+# environment (proxy.golang.org) untouched.
+ARG GOPROXY=
+ENV GOPROXY=${GOPROXY}
 
 COPY kubernetes ./kubernetes
 # Prepare local modules to satisfy replace directives.

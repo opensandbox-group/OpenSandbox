@@ -32,7 +32,6 @@ from abc import ABC, abstractmethod
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 import logging
-from math import ceil
 from threading import Event, Lock, Thread
 import time
 from uuid import uuid4
@@ -43,20 +42,24 @@ from opensandbox_server.api.schema import (
     CreateSnapshotRequest,
     ListSnapshotsRequest,
     ListSnapshotsResponse,
-    PaginationInfo,
     Snapshot,
     SnapshotStatus,
 )
 from opensandbox_server.config import get_config
 from opensandbox_server.repositories.snapshots.factory import get_snapshot_repository
 from opensandbox_server.services.constants import SnapshotErrorCodes
+from opensandbox_server.services.helpers import build_pagination_info
 from opensandbox_server.services.snapshot_runtime import (
     SNAPSHOT_CREATE_CONFLICT_REASON,
+    SNAPSHOT_MODE_FULL,
+    SNAPSHOT_MODE_ROOTFS_ONLY,
     NoopSnapshotRuntime,
     SnapshotRuntime,
     SnapshotRuntimePreflightError,
     SnapshotRuntimeStatus,
     SnapshotRuntimeUnsupportedError,
+    is_snapshot_source_state_supported,
+    normalize_snapshot_mode,
 )
 from opensandbox_server.services.snapshot_runtime_factory import create_snapshot_runtime
 from opensandbox_server.services.snapshot_models import (
@@ -141,7 +144,12 @@ class PersistedSnapshotService(SnapshotService):
 
     def create_snapshot(self, sandbox_id: str, request: CreateSnapshotRequest) -> Snapshot:
         sandbox = self._sandbox_service.get_sandbox(sandbox_id)
-        self._ensure_source_sandbox_running(sandbox)
+        namespace = self._get_tenant_namespace()
+        self._ensure_source_sandbox_state(
+            sandbox_id,
+            sandbox,
+            namespace=namespace,
+        )
 
         if not self._snapshot_runtime.supports_create_snapshot():
             raise HTTPException(
@@ -152,11 +160,12 @@ class PersistedSnapshotService(SnapshotService):
                 },
             )
 
-        namespace = self._get_tenant_namespace()
+        mode = normalize_snapshot_mode(request.mode)
         try:
             self._snapshot_runtime.preflight_create_snapshot(
                 sandbox_id,
                 namespace=namespace,
+                mode=mode,
             )
         except SnapshotRuntimeUnsupportedError as exc:
             raise HTTPException(
@@ -181,6 +190,7 @@ class PersistedSnapshotService(SnapshotService):
             source_sandbox_id=sandbox_id,
             namespace=namespace,
             name=request.name,
+            mode=mode,
             restore_config=self._default_restore_config(),
             status=SnapshotStatusRecord(
                 state=SnapshotState.CREATING,
@@ -206,6 +216,7 @@ class PersistedSnapshotService(SnapshotService):
                 record.id,
                 record.source_sandbox_id,
                 namespace=record.namespace,
+                mode=record.mode,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller
             logger.exception(
@@ -287,7 +298,6 @@ class PersistedSnapshotService(SnapshotService):
             )
         )
 
-        total_pages = ceil(result.total_items / pagination.page_size) if result.total_items > 0 else 0
         page_items = list(result.items)
         self._sync_creating_records(page_items)
         if request.filter.state:
@@ -301,12 +311,8 @@ class PersistedSnapshotService(SnapshotService):
             page_items = [item for item in page_items if item.status.state.value in wanted_states]
         return ListSnapshotsResponse(
             items=[self._to_snapshot_response(item) for item in page_items],
-            pagination=PaginationInfo(
-                page=pagination.page,
-                pageSize=pagination.page_size,
-                totalItems=result.total_items,
-                totalPages=total_pages,
-                hasNextPage=pagination.page < total_pages,
+            pagination=build_pagination_info(
+                pagination.page, pagination.page_size, result.total_items
             ),
         )
 
@@ -505,6 +511,7 @@ class PersistedSnapshotService(SnapshotService):
             namespace=record.namespace,
             name=record.name,
             description=record.description,
+            mode=record.mode,
             restore_config=record.restore_config,
             status=SnapshotStatusRecord(
                 state=SnapshotState.DELETING,
@@ -541,6 +548,7 @@ class PersistedSnapshotService(SnapshotService):
                 record.id,
                 record.source_sandbox_id,
                 namespace=record.namespace,
+                mode=record.mode,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -726,11 +734,53 @@ class PersistedSnapshotService(SnapshotService):
                     namespace=record.namespace,
                     name=record.name,
                     description=record.description,
+                    mode=record.mode,
                     restore_config=record.restore_config,
                     status=SnapshotStatusRecord(
                         state=SnapshotState.FAILED,
                         reason="snapshot_runtime_missing_image",
                         message="Runtime reported Ready without a snapshot image.",
+                        last_transition_at=now,
+                    ),
+                    created_at=record.created_at,
+                    updated_at=now,
+                )
+
+            # Mode-confirmation fence: the server is the compatibility
+            # boundary across fast-sandbox versions, so a requested
+            # rootfs-only snapshot is only Ready when the runtime EXPLICITLY
+            # confirmed a rootfs-only artifact. An absent (or full)
+            # confirmation means the backend predates the mode field (the
+            # old protobuf silently drops it and captures Full) or the
+            # fastlet produced Full artifacts: never publish that as a
+            # rootfs-only snapshot. Mirrors upstream's SnapshotModeDrift
+            # fence at the OpenSandbox layer. Legacy/full requests keep the
+            # permissive fallback (unconfirmed == full).
+            if (
+                normalize_snapshot_mode(record.mode) == SNAPSHOT_MODE_ROOTFS_ONLY
+                and normalize_snapshot_mode(runtime_status.mode)
+                != SNAPSHOT_MODE_ROOTFS_ONLY
+            ):
+                reported = runtime_status.mode or "full"
+                return SnapshotRecord(
+                    id=record.id,
+                    source_sandbox_id=record.source_sandbox_id,
+                    namespace=record.namespace,
+                    name=record.name,
+                    description=record.description,
+                    mode=record.mode,
+                    restore_config=record.restore_config,
+                    status=SnapshotStatusRecord(
+                        state=SnapshotState.FAILED,
+                        reason="snapshot_mode_unconfirmed",
+                        message=(
+                            "The snapshot backend reported "
+                            f"'{reported}' artifacts for a rootfsOnly "
+                            "request instead of confirming a rootfs-only "
+                            "artifact. The fast-sandbox deployment likely "
+                            "predates rootfs-only snapshot support; upgrade "
+                            "it before requesting mode=rootfsOnly."
+                        ),
                         last_transition_at=now,
                     ),
                     created_at=record.created_at,
@@ -743,6 +793,10 @@ class PersistedSnapshotService(SnapshotService):
                 namespace=record.namespace,
                 name=record.name,
                 description=record.description,
+                # The runtime-confirmed artifact class wins on READY; the
+                # request mode stays as the fallback for runtimes that
+                # cannot report one.
+                mode=runtime_status.mode or record.mode,
                 restore_config=SnapshotRestoreConfig(
                     image=runtime_status.image,
                     backend=runtime_status.backend or record.restore_config.backend,
@@ -767,6 +821,7 @@ class PersistedSnapshotService(SnapshotService):
                 namespace=record.namespace,
                 name=record.name,
                 description=record.description,
+                mode=record.mode,
                 restore_config=record.restore_config,
                 status=SnapshotStatusRecord(
                     state=SnapshotState.FAILED,
@@ -805,10 +860,20 @@ class PersistedSnapshotService(SnapshotService):
             )
             return False
 
-    @staticmethod
-    def _ensure_source_sandbox_running(sandbox) -> None:
-        state = PersistedSnapshotService._sandbox_state(sandbox)
-        if state == "Running":
+    def _ensure_source_sandbox_state(
+        self,
+        sandbox_id: str,
+        sandbox,
+        *,
+        namespace: str | None = None,
+    ) -> None:
+        state = self._sandbox_state(sandbox)
+        if state is not None and is_snapshot_source_state_supported(
+            self._snapshot_runtime,
+            sandbox_id,
+            state,
+            namespace=namespace,
+        ):
             return
 
         raise HTTPException(
@@ -838,6 +903,7 @@ class PersistedSnapshotService(SnapshotService):
             id=record.id,
             sandboxId=record.source_sandbox_id,
             name=record.name,
+            mode=record.mode or SNAPSHOT_MODE_FULL,
             status=SnapshotStatus(
                 state=record.status.state.value,
                 reason=record.status.reason,

@@ -186,7 +186,7 @@ class SubjectOwnerTest(unittest.TestCase):
         self.assertEqual(self.owner.lifecycle_status(CONTROL), status)
         self.assertNotIn("secret", repr(self.owner._last))
 
-    def test_receiver_failure_fences_only_subject_and_failed_close_is_retryable(self):
+    def test_receiver_failure_releases_key_and_quarantines_capacity(self):
         self.register(1)
         self.register(2, B)
         a_receiver = self.owner._entries[A.subject_key].receiver
@@ -206,9 +206,12 @@ class SubjectOwnerTest(unittest.TestCase):
             self.assertEqual(self.owner.lifecycle("unload", raw), receipt)
             close.assert_called_once()
             self.assertEqual(self.register(5, subject.Target("s-c", "new"))["result"]["outcome"], "subject_capacity_exhausted")
-        self.assertEqual(self.owner.lifecycle("unload", command(6))["result"]["outcome"], "unloaded")
+        self.assertEqual(self.owner.lifecycle("unload", command(6))["result"]["outcome"], "already_absent")
         self.assertEqual(self.owner.acquire(B), b)
-        self.assertEqual(self.register(7, subject.Target("s-a", "new"))["result"]["outcome"], "registered")
+        self.assertEqual(self.register(7, subject.Target("s-a", "new"))["result"]["outcome"], "subject_capacity_exhausted")
+        self.owner.lifecycle("unload", command(8, B))
+        self.assertEqual(self.register(9, subject.Target("s-a", "new"))["result"]["outcome"], "registered")
+        self.assertEqual(len(self.owner._quarantined), 1)
 
     def test_receiver_construction_failure_consumes_without_half_entry(self):
         with mock.patch.object(subject, "InstallationReceiver", side_effect=RuntimeError("secret")):
@@ -279,7 +282,12 @@ class SubjectOwnerTest(unittest.TestCase):
         self.assertEqual(self.owner._entries, {})
         self.assertEqual(self.owner._last.sequence, 20000)
         self.assertLessEqual(len(self.owner._last.raw_body), 8192)
-        self.assertEqual(set(self.owner.__dict__), {"_control", "_max_subjects", "_max_snapshot_bytes", "_entries", "_last", "_operation_lock", "_terminal", "_closed"})
+        self.assertEqual(set(self.owner.__dict__), {"_control", "_max_subjects", "_max_snapshot_bytes", "_entries", "_last", "_operation_lock", "_terminal", "_closed", "_source_index", "_quarantined", "_tls_capacity", "_accounting", "_static_passthrough", "_drain_timeout",
+                                                   "_idle", "_pending", "_teardown", "_deferred"})
+        self.assertEqual((self.owner._pending, self.owner._teardown, self.owner._deferred), (None, None, []))
+        self.assertIsNone(self.owner._tls_capacity)
+        self.assertIsNone(self.owner._accounting)
+        self.assertEqual(self.owner._static_passthrough, ())
 
     def test_abort_history_limit_does_not_consume_other_subject_budget(self):
         self.register(1)
@@ -414,6 +422,21 @@ class SubjectBoundsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             subject.request_body_limit(sys.maxsize)
         make_owner().close()
+
+    def test_drain_timeout_is_admission_only_bounded_and_reaches_registry(self):
+        admission = dict(tls_capacity=1, process_tls_capacity=1, static_passthrough=())
+        for supplied, expected in ((None, 30), (1, 1), (300, 300)):
+            with self.subTest(supplied=supplied):
+                extra = {} if supplied is None else {"drain_timeout_seconds": supplied}
+                owner = make_owner(**admission, **extra)
+                owner.lifecycle("register", command(1))
+                self.assertEqual(owner._entries[A.subject_key].registry._drain_timeout, expected)
+                owner.close()
+        for invalid in (0, 301, -1, True, 30.0, "30"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                make_owner(**admission, drain_timeout_seconds=invalid)
+        with self.assertRaises(ValueError):
+            make_owner(drain_timeout_seconds=30)
 
     def test_maximum_unicode_and_control_escape_metadata_fit(self):
         for text in ("\U0001f680", "\x00"):

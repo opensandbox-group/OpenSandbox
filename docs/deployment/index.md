@@ -11,7 +11,7 @@ Charts are versioned sources in the [OpenSandbox repository](https://github.com/
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+
 - Helm 3.x
 - `kubectl` configured for your cluster
 
@@ -398,5 +398,5 @@ kubectl delete namespace opensandbox-dataplane
 - [Kubernetes Overview](/architecture/control-plane/operator) — Operator features and CRDs
 - [Pause & Resume](/guides/pause-resume) — Snapshot-based pause/resume on Kubernetes
 - [Secure Container](/guides/secure-container) — gVisor and Kata on Kubernetes
-- [Network Isolation on Kubernetes](/guides/network-isolation) — Egress policy design for Kubernetes
+- [Sandbox Network Security](/guides/network-security) — Cluster-wide egress isolation baseline (CIDRs, domains, ports)
 - [Helm charts source](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts) — Chart sources and values reference

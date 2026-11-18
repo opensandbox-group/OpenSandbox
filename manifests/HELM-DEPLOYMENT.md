@@ -6,7 +6,7 @@ This document describes how to deploy OpenSandbox with Helm: the cluster foundat
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+ (matching the charts' `kubeVersion`)
+- Kubernetes 1.22+ (matching the charts' `kubeVersion`)
 - Helm 3.0+
 - kubectl configured and able to access the target cluster
 

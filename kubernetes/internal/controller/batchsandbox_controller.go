@@ -90,6 +90,9 @@ type BatchSandboxReconciler struct {
 	FeatureConfig *FeatureConfig
 	// podRecoveryNow overrides the clock used by pod recovery; tests only.
 	podRecoveryNow func() time.Time
+	// stateOwners maps namespace/name to the UID whose name-keyed in-memory
+	// state (scale expectations, pod recovery budget, task scheduler) is held.
+	stateOwners sync.Map
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -117,20 +120,26 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
 	batchSbx := &sandboxv1alpha1.BatchSandbox{}
-	// Status expectations are keyed by UID, and a deleted or replaced
-	// BatchSandbox is never reconciled again under its old UID, so drop them
-	// here. This runs after any earlier reconcile of this key that recorded
-	// one, since the workqueue never processes the same key concurrently.
+	// A deleted or replaced BatchSandbox is never reconciled again under its
+	// old UID, so drop its in-memory state here. This runs after any earlier
+	// reconcile of this key that recorded some, since the workqueue never
+	// processes the same key concurrently.
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: req.Namespace,
 		Name:      req.Name,
 	}, batchSbx); err != nil {
 		if errors.IsNotFound(err) {
-			r.StatusRVExpectation.DeleteOthers(req.NamespacedName, "")
+			r.forgetBatchSandbox(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+	// The informer may report a delete and a same-name recreation as one
+	// update, so a replacement can show up without a NotFound in between.
+	if owner, seen := r.stateOwners.Load(req.String()); seen && owner != batchSbx.UID {
+		r.forgetBatchSandbox(req.NamespacedName)
+	}
+	r.stateOwners.Store(req.String(), batchSbx.UID)
 	r.StatusRVExpectation.DeleteOthers(req.NamespacedName, batchSbx.UID)
 	if batchSbx.DeletionTimestamp != nil {
 		return r.reconcileDeletion(ctx, batchSbx)
@@ -139,7 +148,15 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		now := time.Now()
 		if expireAt.Time.Before(now) {
 			log.Info("batch sandbox expired, delete", "expireAt", expireAt)
-			err := r.Delete(ctx, batchSbx, client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			// The cached copy may predate a renewal that is already persisted.
+			// Delete only the exact version judged expired so a newer object
+			// always gets a fresh decision.
+			err := r.Delete(ctx, batchSbx,
+				client.Preconditions{UID: &batchSbx.UID, ResourceVersion: &batchSbx.ResourceVersion},
+				client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			if errors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		} else {
 			durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), expireAt.Time.Sub(now))
@@ -549,6 +566,17 @@ func (r *BatchSandboxReconciler) getTaskScheduler(ctx context.Context, batchSbx 
 	return tSch, nil
 }
 
+// forgetBatchSandbox drops the in-memory state kept for a BatchSandbox that no
+// longer exists. Apart from status expectations it is keyed by namespace/name,
+// so a later BatchSandbox with the same name would otherwise inherit it.
+func (r *BatchSandboxReconciler) forgetBatchSandbox(key types.NamespacedName) {
+	r.StatusRVExpectation.DeleteOthers(key, "")
+	r.stateOwners.Delete(key.String())
+	batchSandboxScaleExpectations.DeleteExpectations(key.String())
+	podRecoveryBudgets.delete(key.String())
+	r.taskSchedulers.Delete(key.String())
+}
+
 func (r *BatchSandboxReconciler) deleteTaskScheduler(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox) {
 	key := types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String()
 	if _, ok := r.taskSchedulers.LoadAndDelete(key); ok {
@@ -675,9 +703,18 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 		indexedPodMap[idx] = pod
 	}
 	if satisfied, unsatisfiedDuration, dirtyPods := batchSandboxScaleExpectations.SatisfiedExpectations(controllerutils.GetControllerKey(batchSandbox)); !satisfied {
-		log.Info("scale expectation is not satisfied", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
-		durationStore.Push(types.NamespacedName{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}.String(), expectations.ExpectationTimeout-unsatisfiedDuration)
-		return nil
+		// A Pod deleted before any reconcile listed it is never observed, and
+		// the timed requeue below stops once the timeout has passed, so drop
+		// a timed-out expectation instead of blocking every later scale (as
+		// the Pool controller does).
+		if unsatisfiedDuration >= expectations.ExpectationTimeout {
+			log.Info("scale expectations timed out, clearing stale expectations", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
+			batchSandboxScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(batchSandbox))
+		} else {
+			log.Info("scale expectation is not satisfied", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
+			durationStore.Push(types.NamespacedName{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}.String(), expectations.ExpectationTimeout-unsatisfiedDuration)
+			return nil
+		}
 	}
 	// TODO consider supply Pods if Pods is deleted unexpectedly
 	var needCreateIndex []int

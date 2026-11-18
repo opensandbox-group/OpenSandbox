@@ -41,7 +41,7 @@ def _read_payload(payload_file: str) -> dict[str, Any]:
         raise
     except Exception as exc:
         raise click.ClickException(
-            f"Failed to read credential vault payload from {payload_file}."
+            f"Failed to read credential vault payload from {payload_file}: {exc}"
         ) from exc
 
     if not isinstance(payload, dict):

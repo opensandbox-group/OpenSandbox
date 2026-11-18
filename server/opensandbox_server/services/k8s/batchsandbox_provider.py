@@ -506,7 +506,6 @@ class BatchSandboxProvider(WorkloadProvider):
         extra_mounts: list[Dict[str, Any]],
         extra_security_context: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Merge template-provided volumes, mounts, and securityContext into runtime pod spec."""
         try:
             spec = batchsandbox["spec"]["template"]["spec"]
         except KeyError:
@@ -634,6 +633,14 @@ class BatchSandboxProvider(WorkloadProvider):
         return "Background" if batchsandbox.get("spec", {}).get("taskTemplate") is not None else "Foreground"
 
     def delete_workload(self, sandbox_id: str, namespace: str) -> None:
+        """Submit deletion of the BatchSandbox custom object and return.
+
+        The Kubernetes delete request is accepted asynchronously: the
+        finalizer and deletion propagation run after this method returns, so
+        returning does not confirm that the sandbox's runtime execution has
+        terminated. A later 404 for the control object is acceptance-level
+        only and must not be read as confirmed termination.
+        """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
             raise Exception(f"BatchSandbox for sandbox {sandbox_id} not found")
@@ -869,7 +876,8 @@ class BatchSandboxProvider(WorkloadProvider):
             return None
 
     def _expired_status(self, workload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Running is pod readiness, not TTL. A past expireTime must leave Running.
+        """Running is pod readiness, not TTL: once expireTime passes the sandbox
+        must stop being reported as Running.
 
         last_transition_at is the expireTime itself so wall-clock billing stops
         at the configured timeout instead of creation time or "now".
@@ -1080,7 +1088,8 @@ class BatchSandboxProvider(WorkloadProvider):
         pod_ip = self._parse_pod_ip(workload)
         if not pod_ip:
             return None
-        return Endpoint(endpoint=f"{pod_ip}:{port}")
+        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+        return Endpoint(endpoint=f"{host}:{port}")
 
     def get_endpoint_info(self, workload: Dict[str, Any], port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Resolve endpoint using gateway ingress or parsed pod IP."""

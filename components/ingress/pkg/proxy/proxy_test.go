@@ -161,6 +161,22 @@ func TestGetClientIP(t *testing.T) {
 	req.RemoteAddr = "192.0.2.1:12345"
 	req.Header.Set(XForwardedFor, "10.0.0.1, 198.51.100.2")
 	assert.Equal(t, "10.0.0.1", proxy.getClientIP(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.1:12345"
+	req.Header.Set(XForwardedFor, "10.0.0.1,198.51.100.2")
+	assert.Equal(t, "10.0.0.1", proxy.getClientIP(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.1:12345"
+	req.Header.Set(XForwardedFor, " 10.0.0.1 ")
+	assert.Equal(t, "10.0.0.1", proxy.getClientIP(req))
+
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.1:12345"
+	req.Header.Set(XForwardedFor, ", 198.51.100.2")
+	req.Header.Set(XRealIP, "203.0.113.5")
+	assert.Equal(t, "203.0.113.5", proxy.getClientIP(req))
 }
 
 func findAvailablePort() (int, error) {

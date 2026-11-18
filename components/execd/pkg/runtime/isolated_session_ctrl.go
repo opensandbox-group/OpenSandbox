@@ -805,7 +805,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	s.mu.Unlock()
 
 	if exitCode != 0 {
-		return fmt.Errorf("command exited with code %d", exitCode)
+		return &ExitCodeError{Code: exitCode}
 	}
 
 	return nil

@@ -13,10 +13,7 @@
 # limitations under the License.
 
 """
-Sandbox service layer for business logic.
-
-This module contains the business logic for sandbox lifecycle management.
-This module defines the abstract interface for sandbox services.
+Abstract interface for sandbox service implementations.
 """
 
 from abc import ABC, abstractmethod
@@ -57,12 +54,7 @@ class SandboxService(ABC):
 
     @staticmethod
     def generate_sandbox_id() -> str:
-        """
-        Generate a unique sandbox identifier.
-
-        Returns:
-            str: A RFC4122-compliant UUID4 string (with hyphens)
-        """
+        """Generate a unique RFC4122 UUID4 sandbox identifier (with hyphens)."""
         return str(uuid4())
 
     @staticmethod
@@ -100,15 +92,7 @@ class SandboxService(ABC):
 
     @staticmethod
     def validate_port(port: int) -> None:
-        """
-        Validate that the supplied port falls within the allowed range.
-
-        Args:
-            port: Port to validate
-
-        Raises:
-            ValueError: If port is outside 1-65535
-        """
+        """Validate that the port is within 1-65535; raises HTTPException(400) otherwise."""
         ensure_valid_port(port)
 
     @abstractmethod
@@ -226,9 +210,13 @@ class SandboxService(ABC):
         return key.startswith("opensandbox.io/")
 
     @staticmethod
-    def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
-        """Apply JSON Merge Patch to labels: separate user metadata, merge, validate, rebuild."""
+    def _validate_metadata_patch(patch: dict) -> None:
+        """Reject a metadata patch that touches reserved keys or adds invalid labels.
+
+        Only the incoming values are validated, not the labels already present.
+        """
         from fastapi import HTTPException
+        from opensandbox_server.services.constants import SandboxErrorCodes
         from opensandbox_server.services.validators import ensure_metadata_labels
 
         for key in patch:
@@ -236,15 +224,19 @@ class SandboxService(ABC):
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "code": "INVALID_METADATA_LABEL",
+                        "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
                         "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
                     },
                 )
 
-        # Validate only incoming patch values, not existing labels
         patch_additions = {k: str(v) for k, v in patch.items() if v is not None}
         if patch_additions:
             ensure_metadata_labels(patch_additions)
+
+    @staticmethod
+    def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
+        """Apply JSON Merge Patch to labels: validate, separate user metadata, merge, rebuild."""
+        SandboxService._validate_metadata_patch(patch)
 
         current_metadata = {
             k: v for k, v in labels.items() if not SandboxService._is_system_label(k)
@@ -261,7 +253,7 @@ class SandboxService(ABC):
             new_labels[k] = str(v)
         return new_labels
 
-    # Diagnostics (DevOps)
+    # Diagnostics
     # ------------------------------------------------------------------
 
     def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
@@ -280,15 +272,7 @@ class SandboxService(ABC):
         sandbox_id: str,
         scope: str,
     ) -> DiagnosticResult:
-        """Collect stable log diagnostics using runtime-specific policy.
-
-        Args:
-            sandbox_id: Unique sandbox identifier.
-            scope: Diagnostic scope requested by the caller.
-
-        Returns:
-            Runtime-provided stable diagnostic result.
-        """
+        """Collect stable log diagnostics using runtime-specific policy."""
         pass
 
     @abstractmethod
@@ -297,15 +281,7 @@ class SandboxService(ABC):
         sandbox_id: str,
         scope: str,
     ) -> DiagnosticResult:
-        """Collect stable event diagnostics using runtime-specific policy.
-
-        Args:
-            sandbox_id: Unique sandbox identifier.
-            scope: Diagnostic scope requested by the caller.
-
-        Returns:
-            Runtime-provided stable diagnostic result.
-        """
+        """Collect stable event diagnostics using runtime-specific policy."""
         pass
 
     @abstractmethod
@@ -313,8 +289,6 @@ class SandboxService(ABC):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: str | None = None,
-        container: str | None = None,
     ) -> str:
         """
         Retrieve container logs for a sandbox.
@@ -322,25 +296,9 @@ class SandboxService(ABC):
         Args:
             sandbox_id: Unique sandbox identifier
             tail: Number of trailing log lines to return
-            since: Only return logs newer than this duration (e.g. "10m", "1h")
-            container: Optional container name. When omitted, backends select a
-                sensible default (typically the user "sandbox" container).
 
         Returns:
             str: Plain-text log output
-        """
-        pass
-
-    @abstractmethod
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        """
-        Retrieve detailed inspection info for a sandbox container.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Returns:
-            str: Plain-text inspection output
         """
         pass
 

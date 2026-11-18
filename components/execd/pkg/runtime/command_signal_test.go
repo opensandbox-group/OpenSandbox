@@ -257,7 +257,7 @@ func TestKillPid_ZombieLeaderDoesNotFail(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	c := &Controller{}
-	require.NoError(t, c.killPid(cmd.Process.Pid),
+	require.NoError(t, c.killPid("slow-teardown", cmd.Process.Pid),
 		"slow post-SIGKILL teardown must not be reported as a hard failure")
 }
 
@@ -300,7 +300,7 @@ func TestKillPid_TerminatesEntireProcessGroup(t *testing.T) {
 	require.NoError(t, syscall.Kill(childPid, 0), "child should be alive before kill")
 
 	c := &Controller{}
-	require.NoError(t, c.killPid(cmd.Process.Pid))
+	require.NoError(t, c.killPid("process-group", cmd.Process.Pid))
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {

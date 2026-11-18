@@ -13,9 +13,32 @@
 # limitations under the License.
 
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from app.k8s_resources import _event_matches_sandbox, pod_name_candidates_for_sandbox
+from app.k8s_resources import (
+    _event_matches_sandbox,
+    _event_row,
+    _event_sort_key,
+    pod_name_candidates_for_sandbox,
+)
+
+
+def _event(**overrides):
+    fields = {
+        "type": "Warning",
+        "reason": "FailedScheduling",
+        "message": "0/3 nodes are available",
+        "count": None,
+        "first_timestamp": None,
+        "last_timestamp": None,
+        "event_time": None,
+        "series": None,
+        "involved_object": SimpleNamespace(kind="Pod", name="abc-0"),
+        "metadata": SimpleNamespace(creation_timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
 
 class K8sEventFilterTests(unittest.TestCase):
@@ -34,6 +57,33 @@ class K8sEventFilterTests(unittest.TestCase):
                 names,
             )
         )
+
+
+class K8sEventTimeTests(unittest.TestCase):
+    def test_legacy_event_keeps_its_timestamps(self):
+        first = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        last = datetime(2026, 1, 2, 3, 9, 5, tzinfo=timezone.utc)
+        row = _event_row(_event(first_timestamp=first, last_timestamp=last, count=4), "acme", "ns")
+        self.assertEqual(row["firstTimestamp"], first.isoformat())
+        self.assertEqual(row["lastTimestamp"], last.isoformat())
+
+    def test_events_v1_event_uses_event_time(self):
+        occurred = datetime(2026, 1, 2, 3, 4, 5, 123456, tzinfo=timezone.utc)
+        row = _event_row(_event(event_time=occurred), "acme", "ns")
+        self.assertEqual(row["firstTimestamp"], occurred.isoformat())
+        self.assertEqual(row["lastTimestamp"], occurred.isoformat())
+
+    def test_events_v1_series_uses_last_observed_time(self):
+        occurred = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        observed = datetime(2026, 1, 2, 3, 20, 0, tzinfo=timezone.utc)
+        ev = _event(
+            event_time=occurred,
+            series=SimpleNamespace(count=7, last_observed_time=observed),
+        )
+        row = _event_row(ev, "acme", "ns")
+        self.assertEqual(row["firstTimestamp"], occurred.isoformat())
+        self.assertEqual(row["lastTimestamp"], observed.isoformat())
+        self.assertEqual(_event_sort_key(ev), observed)
 
 
 if __name__ == "__main__":

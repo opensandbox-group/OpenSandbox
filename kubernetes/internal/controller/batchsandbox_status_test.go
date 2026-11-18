@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,11 +26,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -37,6 +40,115 @@ import (
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/expectations"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils/fieldindex"
 )
+
+type expiredStatusExpectation struct {
+	expectations.ResourceVersionExpectation
+}
+
+func (expiredStatusExpectation) IsSatisfied(metav1.Object) (bool, time.Duration) {
+	return false, 11 * time.Second
+}
+
+func TestPersistRuntimeView_RejectsStaleLifecycleStatus(t *testing.T) {
+	testEnvironment := &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+		BinaryAssetsDirectory: getFirstFoundEnvTestBinaryDir(),
+	}
+	config, err := testEnvironment.Start()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, testEnvironment.Stop()) })
+	apiClient, err := client.NewWithWatch(config, client.Options{Scheme: testscheme})
+	require.NoError(t, err)
+	ctx := context.Background()
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "runtime-status-"}}
+	require.NoError(t, apiClient.Create(ctx, namespace))
+	t.Cleanup(func() { require.NoError(t, apiClient.Delete(ctx, namespace)) })
+
+	for _, conditionType := range []sandboxv1alpha1.BatchSandboxConditionType{
+		sandboxv1alpha1.BatchSandboxConditionPauseFailed,
+		sandboxv1alpha1.BatchSandboxConditionResumeFailed,
+	} {
+		for _, timedOut := range []bool{false, true} {
+			name := strings.ToLower(string(conditionType)) + map[bool]string{false: "-no-expectation", true: "-cache-timeout"}[timedOut]
+			t.Run(name, func(t *testing.T) {
+				pause := conditionType == sandboxv1alpha1.BatchSandboxConditionPauseFailed
+				phase := sandboxv1alpha1.BatchSandboxPhasePaused
+				if pause {
+					phase = sandboxv1alpha1.BatchSandboxPhaseSucceed
+				}
+				bs := &sandboxv1alpha1.BatchSandbox{
+					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace.Name,
+						Annotations: map[string]string{annotationSandboxEndpoints: "[]"}},
+					Spec: sandboxv1alpha1.BatchSandboxSpec{Replicas: ptr.To(int32(1)), Pause: ptr.To(pause)},
+				}
+				require.NoError(t, apiClient.Create(ctx, bs))
+				bs.Status = sandboxv1alpha1.BatchSandboxStatus{
+					Phase: phase, PauseObservedGeneration: bs.Generation, Replicas: 1, Allocated: 1, Ready: 1,
+					Conditions: []sandboxv1alpha1.BatchSandboxCondition{{Type: sandboxv1alpha1.BatchSandboxConditionReady, Status: sandboxv1alpha1.ConditionTrue}},
+				}
+				require.NoError(t, apiClient.Status().Update(ctx, bs))
+				cached := bs.DeepCopy()
+				pod := &corev1.Pod{Spec: corev1.PodSpec{NodeName: "node"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.10",
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+				view := buildRuntimeView(cached, []*corev1.Pod{pod})
+
+				// The lifecycle handler writes after this runtime view was computed.
+				failure := sandboxv1alpha1.BatchSandboxCondition{Type: conditionType, Status: sandboxv1alpha1.ConditionTrue,
+					Reason: "SnapshotFailed", Message: "Lifecycle operation failed"}
+				bs.Status.Conditions = append(bs.Status.Conditions, failure)
+				require.NoError(t, apiClient.Status().Update(ctx, bs))
+				failureVersion := bs.ResourceVersion
+				cachedClient := interceptor.NewClient(apiClient, interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if target, ok := obj.(*sandboxv1alpha1.BatchSandbox); ok && key == client.ObjectKeyFromObject(cached) {
+							cached.DeepCopyInto(target)
+							return nil
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+				})
+				r := &BatchSandboxReconciler{Client: cachedClient, StatusRVExpectation: expectations.NewResourceVersionExpectation()}
+				if timedOut {
+					r.StatusRVExpectation = expiredStatusExpectation{r.StatusRVExpectation}
+				}
+				_, errs := r.persistRuntimeView(ctx, cached, view)
+				assert.Len(t, errs, 1, "the stale runtime write must conflict")
+				if len(errs) == 1 {
+					assert.True(t, apierrors.IsConflict(errs[0]), "%v", errs[0])
+				}
+				latest := &sandboxv1alpha1.BatchSandbox{}
+				require.NoError(t, apiClient.Get(ctx, client.ObjectKeyFromObject(bs), latest))
+				require.Contains(t, latest.Status.Conditions, failure)
+				assert.Equal(t, "[]", latest.Annotations[annotationSandboxEndpoints], "a rejected runtime view must not publish its endpoints")
+
+				// Once the cache catches up, both status and changed endpoints can persist.
+				r.Client = apiClient
+				r.StatusRVExpectation = expectations.NewResourceVersionExpectation()
+				_, errs = r.persistRuntimeView(ctx, latest, buildRuntimeView(latest, []*corev1.Pod{pod}))
+				require.Empty(t, errs)
+				require.NoError(t, apiClient.Get(ctx, client.ObjectKeyFromObject(bs), latest))
+				assert.Contains(t, latest.Status.Conditions, failure)
+				assert.Equal(t, latest.Generation, latest.Status.ObservedGeneration)
+				assert.Equal(t, `["10.0.0.10"]`, latest.Annotations[annotationSandboxEndpoints])
+
+				// Server retries bridge through null so the already-ACKed intent becomes new.
+				body := []byte(`{"spec":{"pause":false}}`)
+				if pause {
+					body = []byte(`{"spec":{"pause":true}}`)
+				}
+				generation := latest.Generation
+				require.NoError(t, apiClient.Patch(ctx, latest, client.RawPatch(types.MergePatchType, body)))
+				assert.Equal(t, generation, latest.Generation)
+				require.NoError(t, apiClient.Patch(ctx, latest, client.RawPatch(types.MergePatchType, []byte(`{"spec":{"pause":null}}`))))
+				require.NoError(t, apiClient.Patch(ctx, latest, client.RawPatch(types.MergePatchType, body)))
+				assert.Greater(t, latest.Generation, latest.Status.PauseObservedGeneration)
+				t.Logf("stale RV=%s rejected after lifecycle RV=%s; condition preserved; retry generation=%d, acknowledged=%d",
+					cached.ResourceVersion, failureVersion, latest.Generation, latest.Status.PauseObservedGeneration)
+			})
+		}
+	}
+}
 
 func TestPersistRuntimeView_DeletingSandbox(t *testing.T) {
 	for _, withPod := range []bool{false, true} {

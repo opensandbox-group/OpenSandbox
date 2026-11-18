@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import type { ExecdClient, ExecdPaths } from "@alibaba-group/opensandbox/internal";
+import { inferExecutionExitCode } from "@alibaba-group/opensandbox/internal";
 import type { ServerStreamEvent } from "@alibaba-group/opensandbox";
 import type { Execution, ExecutionHandlers } from "@alibaba-group/opensandbox";
 import {
@@ -201,6 +202,7 @@ export class CodesAdapter implements Codes {
     for await (const ev of this.runStream(req, opts.signal)) {
       await dispatcher.dispatch(ev as any);
     }
+    execution.exitCode = inferExecutionExitCode(execution);
 
     return execution;
   }

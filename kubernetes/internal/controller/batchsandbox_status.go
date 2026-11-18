@@ -555,9 +555,6 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 
 	var aggErrors []error
 	log := logf.FromContext(ctx)
-	if err := r.patchBatchSandboxEndpoints(ctx, batchSbx, view.endpointIPs); err != nil {
-		aggErrors = append(aggErrors, err)
-	}
 	if !equality.Semantic.DeepEqual(*view.status, batchSbx.Status) {
 		if isInitialUnallocatedSandbox(batchSbx, view) {
 			return 0, aggErrors
@@ -571,17 +568,17 @@ func (r *BatchSandboxReconciler) persistRuntimeView(
 				return time.Second, aggErrors
 			}
 			log.Info("Proceeding with status update despite stale cache (timeout exceeded)", "unsatisfiedDuration", dur.String())
-			// Fetch the latest object so lifecycle conditions (PauseFailed/ResumeFailed)
-			// written by pause/resume handlers are not overwritten by the stale cache.
-			latest := &sandboxv1alpha1.BatchSandbox{}
-			if err := r.Get(ctx, types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}, latest); err == nil {
-				batchSbx = latest
-			}
 		}
 		if err := r.updateStatus(ctx, batchSbx, view.status); err != nil {
 			aggErrors = append(aggErrors, err)
 			return 0, aggErrors
 		}
+	}
+
+	// Updating endpoints advances resourceVersion; persist status first so its
+	// optimistic lock still matches the object used to compute the runtime view.
+	if err := r.patchBatchSandboxEndpoints(ctx, batchSbx, view.endpointIPs); err != nil {
+		aggErrors = append(aggErrors, err)
 	}
 
 	if view.status.Phase == sandboxv1alpha1.BatchSandboxPhaseSucceed ||
@@ -624,7 +621,10 @@ func (r *BatchSandboxReconciler) updateStatus(ctx context.Context, batchSandbox 
 	log := logf.FromContext(ctx)
 	mergedStatus := newStatus.DeepCopy()
 	mergedStatus.Conditions = mergeLifecycleConditions(mergedStatus.Conditions, batchSandbox.Status.Conditions)
-	patchData, err := json.Marshal(map[string]any{"status": mergedStatus})
+	patchData, err := json.Marshal(map[string]any{
+		"metadata": map[string]string{"resourceVersion": batchSandbox.ResourceVersion},
+		"status":   mergedStatus,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to marshal status patch: %w", err)
 	}

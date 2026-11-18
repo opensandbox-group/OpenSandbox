@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Kubernetes-based implementation of SandboxService.
-
-This module provides a Kubernetes implementation of the sandbox service interface,
-using Kubernetes resources for sandbox lifecycle management.
-"""
+"""Kubernetes-based implementation of SandboxService."""
 
 import asyncio
 import logging
@@ -56,7 +51,7 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.helpers import format_ingress_endpoint
+from opensandbox_server.services.helpers import build_list_sandboxes_response, format_ingress_endpoint
 from opensandbox_server.services.k8s.create_helpers import _build_create_workload_context
 from opensandbox_server.services.k8s.error_helpers import (
     _build_k8s_api_error,
@@ -69,10 +64,7 @@ from opensandbox_server.services.k8s.k8s_diagnostics import (
     K8sStartupDiagnosticsMixin,
 )
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
-from opensandbox_server.services.k8s.list_helpers import (
-    _build_list_sandboxes_response,
-    build_sandbox_label_selector,
-)
+from opensandbox_server.services.k8s.list_helpers import build_sandbox_label_selector
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
     _is_quota_exhausted_status,
@@ -138,8 +130,6 @@ _STARTUP_DETAILS_TIMEOUT_SECONDS = 5.0
 def _is_namespace_not_found(exc: Exception) -> bool:
     """True when a K8s ApiException indicates the target namespace does not exist."""
     try:
-        from kubernetes.client import ApiException
-
         if not isinstance(exc, ApiException):
             return False
         return exc.status == 404 and "namespace" in str(exc).lower()
@@ -353,7 +343,8 @@ class KubernetesSandboxService(
         pool_acquisition_timeout_seconds: float | None = None,
     ) -> Dict[str, Any]:
         """
-        Wait for Pod to be Running and have an IP address.
+        Wait until the workload reports Running (or pool-Allocated), raising
+        early on terminal failure states.
 
         Args:
             pool_acquisition_timeout_seconds: Maximum cumulative time to wait
@@ -799,7 +790,6 @@ class KubernetesSandboxService(
         scheduling if the PVC truly doesn't exist).
         """
         from kubernetes.client import V1PersistentVolumeClaim, V1ObjectMeta
-        from kubernetes.client import ApiException
 
         default_size = self.app_config.storage.volume_default_size
 
@@ -1083,9 +1073,8 @@ class KubernetesSandboxService(
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
-        Create a new sandbox using Kubernetes Pod.
-
-        Wait for the Pod to be Running and have an IP address before returning.
+        Create a new sandbox workload via the workload provider and wait for
+        it to report Running (or pool-Allocated) before returning.
         """
         pool_ref = (request.extensions or {}).get("poolRef", "").strip()
         has_pool_ref = bool(pool_ref)
@@ -1422,7 +1411,7 @@ class KubernetesSandboxService(
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
             metadata = request.filter.metadata if request.filter else None
-            return _build_list_sandboxes_response(
+            return build_list_sandboxes_response(
                 self.list_sandbox_objects(metadata=metadata),
                 request,
             )
@@ -1476,8 +1465,6 @@ class KubernetesSandboxService(
         claims in ``Terminating`` through the ``kubernetes.io/pvc-protection``
         finalizer until pod teardown completes.
         """
-        from kubernetes.client import ApiException
-
         selector = (
             f"{SANDBOX_MANAGED_VOLUMES_LABEL}=server,"
             f"{SANDBOX_ID_LABEL}={sandbox_id}"
@@ -1641,7 +1628,8 @@ class KubernetesSandboxService(
         """
         Renew sandbox expiration time.
 
-        Updates both the BatchSandbox spec.expireTime and label for consistency.
+        Persists the new expiration via the workload provider
+        (BatchSandbox spec.expireTime or Sandbox spec.shutdownTime).
         """
         new_expiration = ensure_future_expiration(request.expires_at)
 

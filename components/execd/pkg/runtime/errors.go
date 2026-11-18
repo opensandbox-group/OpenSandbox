@@ -14,9 +14,15 @@
 
 package runtime
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var ErrContextNotFound = errors.New("context not found")
+
+// ErrCommandNotFound indicates that no command is tracked under the given ID.
+var ErrCommandNotFound = errors.New("command not found")
 
 // ErrUidModeUnavailable indicates that the requested isolation uid mode did
 // not pass the startup capability probe in the current environment.
@@ -57,3 +63,21 @@ var ErrIsolatedRunnerClosed = errors.New("isolated session runner is closed")
 // accepts run or filesystem operations. Cleanup may still be retried through
 // Delete while the controller retains ownership of the session resources.
 var ErrSessionNotActive = errors.New("isolated session is not active")
+
+// ErrUnsupportedLanguage indicates that the language runtime is reachable but
+// offers no kernel for the requested language, so retrying cannot succeed.
+var ErrUnsupportedLanguage = errors.New("unsupported language")
+
+// ErrInvalidContextCwd indicates that a code context's working directory
+// cannot be resolved or created, so retrying the Jupyter request cannot help.
+var ErrInvalidContextCwd = errors.New("invalid code context cwd")
+
+// ExitCodeError reports that code run in an isolated session finished with a
+// non-zero exit status.
+type ExitCodeError struct {
+	Code int
+}
+
+func (e *ExitCodeError) Error() string {
+	return fmt.Sprintf("command exited with code %d", e.Code)
+}

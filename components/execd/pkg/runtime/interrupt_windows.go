@@ -42,19 +42,19 @@ func (c *Controller) Interrupt(sessionID string) error {
 		if snapshot == nil || !snapshot.running || snapshot.pid <= 0 {
 			return fmt.Errorf("command session %s is not running", sessionID)
 		}
-		return c.killPid(snapshot.pid)
+		return c.killPid(sessionID, snapshot.pid)
 	default:
 		return errors.New("no such session")
 	}
 }
 
 // killPid terminates a process on Windows.
-func (c *Controller) killPid(pid int) error {
+func (c *Controller) killPid(commandID string, pid int) error {
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return err
 	}
-	log.Warn("interrupt: terminating process %d", pid)
+	log.WarnWithCommandID(commandID, "interrupt: terminating process %d", pid)
 
 	if err := process.Kill(); err != nil {
 		return fmt.Errorf("failed to kill process %d: %w", pid, err)
@@ -70,7 +70,7 @@ func (c *Controller) killPid(pid int) error {
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		log.Warn("interrupt: process %d kill wait timed out", pid)
+		log.WarnWithCommandID(commandID, "interrupt: process %d kill wait timed out", pid)
 	}
 
 	return nil

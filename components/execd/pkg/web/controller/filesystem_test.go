@@ -107,6 +107,138 @@ func TestFilesystemControllerRenameFilesReturnsNotFoundForMissingSource(t *testi
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
+func TestFilesystemControllerRenameFilesRejectsEmptyPaths(t *testing.T) {
+	t.Setenv("EXECD_RENAME_EMPTY_PATH", "")
+	tests := []struct {
+		name  string
+		field string
+		omit  bool
+		value string
+	}{
+		{name: "missing_src", field: "src", omit: true},
+		{name: "empty_src", field: "src"},
+		{name: "missing_dest", field: "dest", omit: true},
+		{name: "empty_dest", field: "dest"},
+		// No "${}" case: expansion substitutes only valid variable names, so
+		// "${}" stays literal (see pathutil.ExpandPathWithEnv) and is not an
+		// empty-expanded path. "Expands to empty" is covered by empty_env_src
+		// and empty_env_dest below.
+		{name: "empty_env_src", field: "src", value: "$EXECD_RENAME_EMPTY_PATH"},
+		{name: "empty_env_dest", field: "dest", value: "$EXECD_RENAME_EMPTY_PATH"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			workDir := filepath.Join(root, "cwd")
+			require.NoError(t, os.Mkdir(workDir, 0o755))
+			t.Chdir(workDir)
+			originalCwd, err := os.Getwd()
+			require.NoError(t, err)
+
+			firstSrc := filepath.Join(root, "first.txt")
+			badSrc := filepath.Join(root, "invalid.txt")
+			lastSrc := filepath.Join(root, "last.txt")
+			marker := filepath.Join(workDir, "marker.txt")
+			sources := []string{firstSrc, badSrc, lastSrc, marker}
+			for _, src := range sources {
+				require.NoError(t, os.WriteFile(src, []byte(src), 0o644))
+			}
+			outputDir := filepath.Join(root, "renamed")
+			firstDest := filepath.Join(outputDir, "first.txt")
+			badDest := filepath.Join(root, "moved-cwd")
+			lastDest := filepath.Join(outputDir, "last.txt")
+			invalid := map[string]string{"src": badSrc, "dest": badDest}
+			if tt.omit {
+				delete(invalid, tt.field)
+			} else {
+				invalid[tt.field] = tt.value
+			}
+			payload, err := json.Marshal([]map[string]string{
+				{"src": firstSrc, "dest": firstDest},
+				invalid,
+				{"src": lastSrc, "dest": lastDest},
+			})
+			require.NoError(t, err)
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", payload)
+
+			ctrl.RenameFiles()
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+			}
+			require.DirExists(t, workDir, "the daemon's working directory was moved")
+			cwd, err := os.Getwd()
+			require.NoError(t, err)
+			require.Equal(t, originalCwd, cwd)
+			for _, src := range sources {
+				content, err := os.ReadFile(src)
+				require.NoError(t, err, "source changed: %s", src)
+				require.Equal(t, src, string(content))
+			}
+			for _, dest := range []string{firstDest, badDest, lastDest, outputDir} {
+				_, err := os.Stat(dest)
+				require.ErrorIs(t, err, os.ErrNotExist, "destination created: %s", dest)
+			}
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+		})
+	}
+}
+
+func TestFilesystemControllerRenameFilesPreservesExpansionErrors(t *testing.T) {
+	t.Setenv("EXECD_RENAME_UNDEFINED_PATH", "")
+	require.NoError(t, os.Unsetenv("EXECD_RENAME_UNDEFINED_PATH"))
+	for _, field := range []string{"src", "dest"} {
+		t.Run(field, func(t *testing.T) {
+			root := t.TempDir()
+			src := filepath.Join(root, "source.txt")
+			dest := filepath.Join(root, "destination.txt")
+			require.NoError(t, os.WriteFile(src, []byte(src), 0o644))
+			item := map[string]string{"src": src, "dest": dest}
+			item[field] = "$EXECD_RENAME_UNDEFINED_PATH"
+			payload, err := json.Marshal([]map[string]string{item})
+			require.NoError(t, err)
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", payload)
+
+			ctrl.RenameFiles()
+
+			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeRuntimeError, resp.Code)
+			content, err := os.ReadFile(src)
+			require.NoError(t, err)
+			require.Equal(t, src, string(content))
+			require.NoFileExists(t, dest)
+		})
+	}
+}
+
+func TestFilesystemControllerRenameFilesValidBatch(t *testing.T) {
+	root := t.TempDir()
+	items := []model.RenameFileItem{
+		{Src: filepath.Join(root, "first.txt"), Dest: filepath.Join(root, "moved-first.txt")},
+		{Src: filepath.Join(root, "last.txt"), Dest: filepath.Join(root, "moved-last.txt")},
+	}
+	for _, item := range items {
+		require.NoError(t, os.WriteFile(item.Src, []byte(item.Src), 0o644))
+	}
+	payload, err := json.Marshal(items)
+	require.NoError(t, err)
+	ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", payload)
+
+	ctrl.RenameFiles()
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, item := range items {
+		content, err := os.ReadFile(item.Dest)
+		require.NoError(t, err)
+		require.Equal(t, item.Src, string(content))
+		require.NoFileExists(t, item.Src)
+	}
+}
+
 func TestFilesystemControllerSearchFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	a := filepath.Join(tmpDir, "alpha.txt")
@@ -555,6 +687,11 @@ func TestFormatContentDisposition(t *testing.T) {
 			name:     "Backslash in filename",
 			filename: `a\b.txt`,
 			want:     "attachment; filename=\"a%5Cb.txt\"; filename*=UTF-8''a%5Cb.txt",
+		},
+		{
+			name:     "CRLF in filename",
+			filename: "ok\r\nSet-Cookie: x",
+			want:     "attachment; filename=\"ok%0D%0ASet-Cookie%3A%20x\"; filename*=UTF-8''ok%0D%0ASet-Cookie%3A%20x",
 		},
 	}
 

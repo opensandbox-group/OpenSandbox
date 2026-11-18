@@ -19,7 +19,7 @@ Synchronous SandboxManager implementation.
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
@@ -256,10 +256,19 @@ class SandboxManagerSync:
         logger.info(f"Resuming sandbox: {sandbox_id}")
         self._sandbox_service.resume_sandbox(sandbox_id)
 
-    def create_snapshot(self, sandbox_id: str, name: str | None = None) -> SnapshotInfo:
-        """Create a snapshot from a sandbox (blocking)."""
+    def create_snapshot(
+        self,
+        sandbox_id: str,
+        name: str | None = None,
+        mode: Literal["full", "rootfsOnly"] | None = None,
+    ) -> SnapshotInfo:
+        """Create a snapshot from a sandbox (blocking).
+
+        ``mode`` selects what the snapshot persists; see the async
+        :meth:`SandboxManager.create_snapshot` for details.
+        """
         return self._sandbox_service.create_snapshot(
-            sandbox_id, CreateSnapshotRequest(name=name)
+            sandbox_id, CreateSnapshotRequest(name=name, mode=mode)
         )
 
     def get_snapshot(self, snapshot_id: str) -> SnapshotInfo:

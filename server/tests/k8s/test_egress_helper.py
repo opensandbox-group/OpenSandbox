@@ -292,7 +292,6 @@ class TestEgressSidecarViaApply:
         assert policy_dict["egress"] == []
 
     def test_handles_missing_default_action(self):
-        """Test that missing default_action is handled (exclude_none=True)."""
         egress_image = "opensandbox/egress:v1.1.7"
         network_policy = NetworkPolicy(
             egress=[NetworkRule(action="allow", target="example.com")],

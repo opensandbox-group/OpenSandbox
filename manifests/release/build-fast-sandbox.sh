@@ -55,6 +55,8 @@
 #   TAG          image tag          (default dev)
 #   GHCR_REPO    extra push registry (only with bare --push, mirrors components/*)
 #   DOCKER_BUILD_FLAGS  extra docker build flags (e.g. --platform linux/amd64)
+#   GOPROXY      module proxy passed into Go-based image builds (--build-arg
+#                GOPROXY); empty keeps the Dockerfile default (proxy.golang.org)
 
 set -euo pipefail
 
@@ -97,6 +99,8 @@ Environment overrides:
   TAG          image tag          (default dev)
   GHCR_REPO    extra push registry (only with bare --push, mirrors components/*)
   DOCKER_BUILD_FLAGS  extra docker build flags (e.g. --platform linux/amd64)
+  GOPROXY      module proxy passed into Go-based image builds; empty keeps
+               the Dockerfile default (proxy.golang.org)
 EOF
 	exit 0
 }
@@ -219,6 +223,7 @@ build_images() {
 	log "building $oci_tools_ref (shared oci build base)"
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-t "$oci_tools_ref" -f "$FSB_SRC_DIR/build/Dockerfile.oci-tools" \
 		"$FSB_SRC_DIR" >/dev/null || die "oci-tools image build failed"
 	for entry in "${IMAGES[@]}"; do
@@ -228,6 +233,7 @@ build_images() {
 		if [[ "$component" == "sandboxtemplate-builder" ]]; then
 			# shellcheck disable=SC2086
 			docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+				--build-arg GOPROXY="${GOPROXY:-}" \
 				--build-arg OCI_TOOLS_IMAGE="$oci_tools_ref" \
 				-t "$image" -f "$FSB_SRC_DIR/build/Dockerfile.sandboxtemplate-builder" \
 				"$FSB_SRC_DIR" >/dev/null || die "sandboxtemplate-builder image build failed"

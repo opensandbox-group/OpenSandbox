@@ -45,8 +45,8 @@ class K8sClient:
     """
     Unified Kubernetes API client.
 
-    Encapsulates all cluster resource operations (CustomObject, Secret, Pod,
-    RuntimeClass). Callers never hold raw API handles directly.
+    Encapsulates all cluster resource operations (CustomObject, Secret, PVC,
+    Pod, RuntimeClass). Callers never hold raw API handles directly.
     """
 
     def __init__(self, k8s_config: KubernetesRuntimeConfig):
@@ -134,7 +134,7 @@ class K8sClient:
                     list_fn=list_fn,
                     resync_period_seconds=self.config.informer_resync_seconds,
                     watch_timeout_seconds=self.config.informer_watch_timeout_seconds,
-                    thread_name=f"workload-informer-{plural}-{namespace}",
+                    thread_name=f"workload-informer-{plural}.{group}-{namespace}",
                     event_handler=event_handler,
                 )
                 self._informers[key] = informer

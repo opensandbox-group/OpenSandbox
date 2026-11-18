@@ -488,10 +488,10 @@ func (w *statusCapturingResponseWriter) Flush() {
 // finally falls back to the remote address.
 func (p *Proxy) getClientIP(r *http.Request) string {
 	if xff := r.Header.Get(XForwardedFor); xff != "" {
-		if idx := strings.Index(xff, ", "); idx != -1 {
-			return xff[:idx]
+		first, _, _ := strings.Cut(xff, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
 		}
-		return xff
 	}
 	if realIP := r.Header.Get(XRealIP); realIP != "" {
 		return realIP

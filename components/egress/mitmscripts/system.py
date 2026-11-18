@@ -71,15 +71,18 @@ import json
 import os
 import re
 import socket
+import sys
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
 from urllib.parse import quote, quote_plus, unquote
+from uuid import UUID
 
 from mitmproxy import ctx, http
 from mitmproxy.tls import ClientHelloData
 
 if TYPE_CHECKING:
+    from mitmproxy.tls import TlsData
     from revision_receiver import Revision
 
 CREDENTIAL_PROXY_SOCKET_ENV = "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET"
@@ -103,6 +106,7 @@ FLOW_BINDING_KEY = "opensandbox_credential_binding"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
 FLOW_VAULT_SUPPRESS_KEY = "opensandbox_credential_vault_suppress"
 FLOW_REJECTION_KEY = "opensandbox_credential_rejected"
+FLOW_SUBJECT_REQUEST_KEY = "opensandbox_subject_request"
 FLOW_REQUEST_HANDLE_KEY = "opensandbox_credential_request_handle"
 FLOW_H2_AUTHORITY_KEY = "opensandbox_credential_h2_authority"
 HEADER_SUBSTITUTION_DENYLIST = {
@@ -332,7 +336,8 @@ def configure(updated: set) -> None:
     """Fence insecure TLS and native pre-TLS bypasses in the live runtime."""
     if not {"ssl_insecure", "ignore_hosts", "allow_hosts"}.intersection(updated):
         return
-    if _live_runtime is None and not _live_admission_requested():
+    if (_live_runtime is None and not _live_admission_requested()
+            and _subject_admission_runtime() is None):
         return
     _validate_live_options()
 
@@ -381,6 +386,41 @@ class UnixSocketHTTPConnection(http_client.HTTPConnection):
         self.sock = sock
 
 
+# OpenSSL X509_V_ERR_* values; never classify a raw TLS error string.
+_UPSTREAM_VERIFY_REASONS = {
+    10: "expired",
+    18: "self_signed",
+    19: "self_signed",
+    20: "unknown_ca",
+    21: "unknown_ca",
+    62: "hostname_mismatch",
+    64: "hostname_mismatch",
+}
+
+
+def tls_failed_server(data: TlsData) -> None:
+    """Report upstream TLS failure without changing forwarding or trust."""
+    from OpenSSL import SSL
+
+    reason = "unknown"
+    conn = data.ssl_conn
+    if isinstance(conn, SSL.Connection):
+        with suppress(AttributeError, TypeError, ValueError, SSL.Error):
+            if conn.get_context().get_verify_mode() & SSL.VERIFY_PEER:
+                # mitmproxy's pinned TLS layer uses this same OpenSSL result.
+                result = SSL._lib.SSL_get_verify_result(conn._ssl)
+                reason = _UPSTREAM_VERIFY_REASONS.get(result, "unknown")
+    with suppress(AttributeError, TypeError, ValueError):
+        record = {
+            "level": "warn",
+            "component": "egress",
+            "event": "upstream_tls_failure",
+            "reason": reason,
+            "connection_id": str(UUID(str(data.conn.id))),
+        }
+        ctx.log.warn("credential proxy: upstream-tls-failure " + json.dumps(record))
+
+
 def tls_clienthello(data: ClientHelloData) -> None:
     """Decide TLS interception for this ClientHello.
 
@@ -407,6 +447,14 @@ def tls_clienthello(data: ClientHelloData) -> None:
     MITM remains possible and the escape hatch keeps working. TCP-layer
     enforcement (deny/allow rules) still applies.
     """
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        try:
+            _tls_clienthello_live(subject, data, subject=True)
+        except Exception:  # noqa: BLE001 - hook exceptions must not decrypt by default
+            _record_tls_admission("deny", "invalid_input")
+            subject.terminate_handshake(data.context.client)
+        return
     live = _live_runtime
     if live is not None:
         _tls_clienthello_live(live, data)
@@ -547,7 +595,30 @@ def _record_tls_admission(decision: str, reason: str) -> None:
             ctx.log.warn(f"credential proxy: tls-admission-v1 {decision} {reason}")
 
 
-def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
+def _subject_admission_runtime() -> Any:
+    # subject_runtime.load() guards its import with admission; subject_revision
+    # imports lazily on enabled paths. The gate is runtime() is not None, not
+    # module presence. Never import here: disabled deployments may omit it.
+    module = sys.modules.get("subject_admission")
+    return None if module is None else module.runtime()
+
+
+def _terminate_denied_handshake(live: Any, data: ClientHelloData, *, subject: bool) -> None:
+    """Close one denied handshake through the runtime that owns it.
+
+    The Fast Sandbox subject runtime closes the exact client transport via
+    the real mitmproxy connection handler; the sidecar path keeps calling
+    the shared terminate_handshake with unchanged arguments and call count.
+    """
+    if subject:
+        live.terminate_handshake(data.context.client)
+        return
+    import credential_bound
+
+    credential_bound.terminate_handshake(data.context.client)
+
+
+def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = False) -> None:
     # The live credential-bound mode must never run with insecure upstream
     # verification; deny the handshake outright instead of trusting an
     # unverified origin identity with a credential.
@@ -555,9 +626,7 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
         _record_tls_admission("deny", "ssl_insecure")
         with suppress(Exception):
             ctx.log.warn("credential proxy: tls decision deny reason=ssl_insecure")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
     # ECH hides the inner name: inspect the real extension list before any
     # outer-SNI matching so hidden names can never select a credential.
@@ -566,15 +635,16 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
         _record_tls_admission("deny", "malformed_extensions")
         with suppress(Exception):
             ctx.log.warn("credential proxy: tls decision deny reason=malformed_extensions")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
     sni = data.client_hello.sni
     from static_passthrough import destination_port
 
     port = destination_port(getattr(getattr(data.context, "server", None), "address", None))
-    result = live.admit_tls(sni, ech_hidden=ech_hidden, destination_port=port)
+    if subject:
+        result = live.admit_tls(data.context.client, sni, ech_hidden=ech_hidden, destination_port=port)
+    else:
+        result = live.admit_tls(sni, ech_hidden=ech_hidden, destination_port=port)
     _record_tls_admission(result.action, result.reason)
     if result.action == "passthrough":
         data.ignore_connection = True
@@ -585,11 +655,10 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData) -> None:
         # A deny never degrades into opaque tunneling or decrypt-all.
         with suppress(Exception):
             ctx.log.warn(f"credential proxy: tls decision deny reason={result.reason}")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
-    live.track(result.token, data.context.client)
+    if not subject:
+        live.track(result.token, data.context.client)
 
 
 def _load_active_vault(client_ip: str | None = None) -> ActiveVault | None:
@@ -1380,6 +1449,12 @@ def _flow_rejected(flow: http.HTTPFlow) -> bool:
     return bool(flow.metadata.get(FLOW_REJECTION_KEY))
 
 
+def _binding_log(flow: http.HTTPFlow, level: str, event: str, detail: str) -> None:
+    if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY):
+        detail = "credential proxy: subject request reason=" + event
+    getattr(ctx.log, level)(detail)
+
+
 def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] | None:
     matches: list[tuple[int, dict[str, Any]]] = []
     for binding in vault.bindings:
@@ -1393,9 +1468,10 @@ def _select_binding(flow: http.HTTPFlow, vault: ActiveVault) -> dict[str, Any] |
     selected = [binding for precedence, binding in matches if precedence == highest]
     if len(selected) != 1:
         _reject_request(flow, b"credential binding ambiguous\n")
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "ambiguous_binding",
             "credential proxy: ambiguous binding match for "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
         )
         return None
     return selected[0]
@@ -1525,9 +1601,10 @@ def _apply_path_query_substitutions(
             _reject_request(
                 flow, b"request path contains ambiguous substituted segments\n"
             )
-            ctx.log.warn(
+            _binding_log(
+                flow, "warn", "invalid_substitution",
                 "credential proxy: rejected request after path substitution: "
-                f"{flow.request.method} {_request_host(flow)} path=[REDACTED]"
+                f"{flow.request.method} {_request_host(flow)} path=[REDACTED]",
             )
             return applied
 
@@ -1831,7 +1908,10 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> None:
 def _finish_live_request(flow: http.HTTPFlow) -> None:
     """H1 hooks finish immediately; H2 retains transport output obligations."""
     handle = flow.metadata.get(FLOW_REQUEST_HANDLE_KEY)
-    live = _live_runtime
+    live = (
+        _subject_admission_runtime()
+        if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY) else _live_runtime
+    )
     if handle is not None and live is not None:
         if getattr(handle, "client_stream_id", None) is not None:
             adapter = live.h2_for(getattr(flow, "client_conn", None))
@@ -1902,6 +1982,28 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
     continues: exchange bindings defer resolve I/O to the single await
     below; static and live paths stay inline and never suspend.
     """
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        flow.metadata[FLOW_SUBJECT_REQUEST_KEY] = True
+        client = getattr(flow, "client_conn", None)
+        version = (flow.request.http_version or "").upper()
+        if (getattr(client, "alpn", None) == b"h2"
+                or version in ("HTTP/2", "HTTP/2.0")
+                or ((flow.request.scheme or "").lower() == "https" and version != "HTTP/1.1")):
+            flow.metadata[FLOW_REJECTION_KEY] = True
+            if flow.killable:
+                flow.kill()
+            ctx.log.warn("credential proxy: request denied reason=subject_protocol_unsupported")
+            return
+        _requestheaders_live(subject, flow)
+        if _flow_rejected(flow):
+            # Subject denials terminate transport, including streamed requests:
+            # discard the shared path's 403/503 response (used by sidecar mode).
+            _finish_live_request(flow)
+            flow.response = None
+            if flow.killable:
+                flow.kill()
+        return
     live = _live_runtime
     if live is not None:
         _requestheaders_live(live, flow)
@@ -2052,17 +2154,19 @@ def _reject_ambiguous_binding_path(
     raw_path = flow.request.path or "/"
     if _path_is_ambiguous(raw_path, allow_encoded_slash=True):
         _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "ambiguous_path",
             "credential proxy: rejected request with ambiguous path: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
         )
         return True
     if _path_decoding_changes_binding(flow, vault):
         _reject_request(flow, b"request path contains ambiguous segments\n")
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "ambiguous_path",
             "credential proxy: rejected request whose percent-decoding crosses "
             "the credential binding boundary: "
-            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}"
+            f"{flow.request.method} {_request_host(flow)}{_request_path(flow)}",
         )
         return True
     return False
@@ -2114,18 +2218,20 @@ def _apply_vault_binding(
 
     if injected_names or substituted_surfaces:
         flow.metadata[FLOW_REDACTIONS_KEY] = list(flow.metadata[FLOW_VAULT_REDACTIONS_KEY])
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "binding_processed",
             "credential proxy: applied binding="
             f"{binding.get('name')} revision={vault.revision} "
             f"host={_request_host(flow)} method={flow.request.method} "
             f"headers={','.join(injected_names)} "
-            f"substitutions={','.join(sorted(set(substituted_surfaces)))}"
+            f"substitutions={','.join(sorted(set(substituted_surfaces)))}",
         )
     elif _has_substitutions_on(binding, {"path", "query", "header"}):
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "binding_processed",
             "credential proxy: substitution miss binding="
             f"{binding.get('name')} revision={vault.revision} "
-            f"host={_request_host(flow)} method={flow.request.method}"
+            f"host={_request_host(flow)} method={flow.request.method}",
         )
     return None
 
@@ -2142,9 +2248,10 @@ def _apply_exchange_binding(
     them); the defensive branch stays fail closed."""
     if live is not None:
         _reject_request(flow, b"credential exchange unavailable\n", status_code=503)
-        ctx.log.warn(
+        _binding_log(
+            flow, "warn", "exchange_denied",
             "credential proxy: exchange binding unsupported binding="
-            f"{binding.get('name')}"
+            f"{binding.get('name')}",
         )
         return None
     if _reject_ambiguous_binding_path(flow, vault):
@@ -2310,18 +2417,20 @@ def request(flow: http.HTTPFlow) -> None:
             flow.metadata[FLOW_REDACTIONS_KEY] = list(
                 flow.metadata.get(FLOW_VAULT_REDACTIONS_KEY, [])
             )
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "body_processed",
             "credential proxy: applied body substitutions binding="
             f"{binding.get('name')} host={_request_host(flow)} "
-            f"method={flow.request.method}"
+            f"method={flow.request.method}",
         )
     elif FLOW_REDACTIONS_KEY not in flow.metadata and _has_substitutions_on(
         binding, {"body"}
     ):
-        ctx.log.info(
+        _binding_log(
+            flow, "info", "body_processed",
             "credential proxy: substitution miss binding="
             f"{binding.get('name')} host={_request_host(flow)} "
-            f"method={flow.request.method}"
+            f"method={flow.request.method}",
         )
 
 
@@ -2355,8 +2464,21 @@ def error(flow: http.HTTPFlow) -> None:
     _finish_live_request(flow)
 
 
+def client_connected(client_conn: Any) -> None:
+    """Index every proxied subject client, decrypted or opaque, at connect."""
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        try:
+            subject.client_connected(client_conn)
+        except Exception:  # noqa: BLE001 - an unindexed client must not proceed
+            client_conn.error = "connection fenced"
+
+
 def client_disconnected(client_conn: Any) -> None:
     """Release the transport's live admission on confirmed disconnect."""
+    subject = _subject_admission_runtime()
+    if subject is not None:
+        subject.client_disconnected(client_conn)
     live = _live_runtime
     if live is not None:
         live.client_disconnected(client_conn)

@@ -131,6 +131,7 @@ EGRESS_SIDECAR_LABEL = "opensandbox.io/egress-sidecar-for"
 class DockerNetworkingMixin:
     """Mixin providing network validation, endpoint resolution, and egress sidecar."""
 
+
     def _is_user_defined_network(self) -> bool:
         """Return True when network_mode is a named user-defined network.
 
@@ -178,7 +179,6 @@ class DockerNetworkingMixin:
         if not request.network_policy:
             return
 
-        # Docker-specific validation: network_mode must be bridge
         if self.network_mode == HOST_NETWORK_MODE:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -220,7 +220,6 @@ class DockerNetworkingMixin:
                 },
             )
 
-        # Common validation: egress.image must be configured
         ensure_egress_configured(request.network_policy, self.app_config.egress)
         ensure_credential_proxy_configured(
             request.credential_proxy, request.network_policy, self.app_config.egress
@@ -439,6 +438,11 @@ class DockerNetworkingMixin:
                 host_ip = self._get_docker_host_ip()
                 if host_ip:
                     return host_ip
+        # Outside host networking, sandbox ports are published on [docker].publish_host; when it
+        # names one address they answer only there, whatever address the server listens on.
+        publish_host = self.app_config.docker.publish_host
+        if self.network_mode != HOST_NETWORK_MODE and publish_host != "0.0.0.0":
+            return publish_host
         if host_key in {"", "0.0.0.0", "::"}:
             return "127.0.0.1"
         return host_cfg
@@ -453,10 +457,6 @@ class DockerNetworkingMixin:
         labels = container.attrs.get("Config", {}).get("Labels") or {}
         self._attach_egress_auth_headers(endpoint, labels, port)
         return endpoint
-
-    # ---------------------------
-    # Common helpers for creation
-    # ---------------------------
 
     def _cleanup_egress_sidecar(self, sandbox_id: str) -> None:
         """
@@ -510,7 +510,6 @@ class DockerNetworkingMixin:
             EGRESS_SIDECAR_LABEL: sandbox_id,
         }
 
-        # Ensure sidecar image is available before create/start.
         egress_image = self.app_config.egress.image if self.app_config.egress else None
         if not egress_image:
             raise ValueError("egress.image must be configured when networkPolicy is provided.")
@@ -736,16 +735,13 @@ class DockerNetworkingMixin:
         ip_address: Optional[str] = None
 
         if self._is_user_defined_network():
-            # Prefer the explicit network entry for the configured named network.
             net_conf = networks.get(self.network_mode) or {}
             ip_address = net_conf.get("IPAddress") or None
 
         if not ip_address:
-            # Default bridge path (or fallback): check the top-level IPAddress first.
             ip_address = network_settings.get("IPAddress") or None
 
         if not ip_address:
-            # Last resort: iterate all network entries and take the first populated IP.
             for net_conf in networks.values():
                 if net_conf and net_conf.get("IPAddress"):
                     ip_address = net_conf.get("IPAddress")

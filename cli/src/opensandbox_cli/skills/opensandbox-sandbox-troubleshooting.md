@@ -89,7 +89,7 @@ osb diagnostics logs <sandbox-id> --scope all -o raw
 Important properties of the diagnostics commands:
 
 - `diagnostics events` and `diagnostics logs` are stable API-backed commands
-- `--scope` is required for stable diagnostics; requests without scope use deprecated plain-text DevOps behavior
+- `--scope` is required; requests without scope fail with a validation error (HTTP 422) on current server builds
 - older server builds may return `DIAGNOSTICS_NOT_IMPLEMENTED`; state that stable diagnostics are unavailable on that server and stop diagnostics collection
 - use built-in server scopes first: `events:runtime`, `events:all`, `logs:container`, and `logs:all`
 - best-effort scopes may include `warnings` when the backend contributes only a subset; preserve those warnings in the evidence

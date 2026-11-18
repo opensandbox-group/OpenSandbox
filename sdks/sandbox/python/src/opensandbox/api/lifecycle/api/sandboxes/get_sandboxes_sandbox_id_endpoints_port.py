@@ -34,6 +34,7 @@ def _get_kwargs(
     use_server_proxy: bool | Unset = False,
     expires: str | Unset = UNSET,
 ) -> dict[str, Any]:
+
     params: dict[str, Any] = {}
 
     params["use_server_proxy"] = use_server_proxy

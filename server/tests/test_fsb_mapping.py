@@ -31,6 +31,7 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
     RenewalPolicy,
     ResourceLimits,
+    ResourceRequests,
     SandboxLifecycle,
     Volume,
 )
@@ -145,7 +146,7 @@ def test_map_create_request_strips_pool_ref():
         ("platform", {"platform": PlatformSpec(os="linux", arch="amd64")}),
         (
             "resourceRequests",
-            {"resource_requests": ResourceLimits(root={"cpu": "1"})},
+            {"resource_requests": ResourceRequests(root={"cpu": "1"})},
         ),
         ("secureAccess", {"secure_access": True}),
         ("volumes", {"volumes": [_host_volume()]}),
@@ -517,7 +518,6 @@ def test_map_template_rejects_invalid_machine(machine):
 
 
 def test_map_template_remap_is_byte_identical_with_same_inputs():
-    """A retry with the same inputs serializes to the identical request."""
     request = _template_request()
     first = _map_template(
         request,

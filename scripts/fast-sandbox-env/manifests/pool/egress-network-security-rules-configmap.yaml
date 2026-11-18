@@ -1,0 +1,31 @@
+# egress-network-security-rules-configmap.yaml — operator rule files for the
+# firecracker pools' egress containers (the optional `egress-rules` mount at
+# /var/egress/rules). Apply once; edits hot-reload every minute, no restart:
+#   kubectl apply -f egress-network-security-rules-configmap.yaml
+#
+# Semantics (docs/architecture/network/egress.md): deny.always wins over
+# allow.always, both ahead of every user rule (targets: IP/CIDR/domain, '#'
+# comments allowed); reachable.ports.cap is a TCP-only whitelist enforced as
+# its complement, profile-wide.
+#
+# Baseline: 10.0.0.0/8 (cluster Pod/Service network) + 172.30.0.0/24 (the
+# Fastlet slot bridge — keep in sync with FAST_SANDBOX_NETWORK_CIDR if
+# overridden) denied; example.com allowed (exact name only); TCP 53/80/443
+# reachable (sandbox DNS is REDIRECTed into the shared proxy, never gated by
+# the cap).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: egress-network-security-rules
+  namespace: opensandbox-dataplane
+data:
+  deny.always: |
+    # cluster Pod/Service network
+    10.0.0.0/8
+    172.30.0.0/24
+  allow.always: |
+    example.com
+  reachable.ports.cap: |
+    53
+    80
+    443

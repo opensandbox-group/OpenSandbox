@@ -85,6 +85,7 @@ test("public type declarations export lifecycle models", async () => {
   assert.equal(exportedNames.has("LifecycleHook"), true);
   assert.equal(exportedNames.has("PeriodicLifecycleHook"), true);
   assert.equal(exportedNames.has("SandboxLifecycle"), true);
+  assert.equal(exportedNames.has("SnapshotMode"), true);
 });
 
 test("public package exports client-side pool APIs", async () => {

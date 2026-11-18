@@ -34,6 +34,8 @@ class _LegacyJsonSseNormalizer:
         self._legacy: bool | None = None
         self._buffer = bytearray()
         self._at_start = True
+        self._detect_offset = 0
+        self._scan_offset = 0
 
     def decode(self, chunk: bytes) -> list[bytes]:
         if self._legacy is False:
@@ -41,15 +43,16 @@ class _LegacyJsonSseNormalizer:
 
         self._buffer.extend(chunk)
         if self._at_start:
-            prefix = bytes(self._buffer)
+            prefix = bytes(self._buffer[: len(BOM_UTF8)])
             if len(prefix) < len(BOM_UTF8) and BOM_UTF8.startswith(prefix):
                 return []
             if prefix.startswith(BOM_UTF8):
                 del self._buffer[: len(BOM_UTF8)]
             self._at_start = False
         if self._legacy is None:
-            first = bytes(self._buffer).lstrip()[:1]
+            first = self._buffer[self._detect_offset :].lstrip()[:1]
             if not first:
+                self._detect_offset = len(self._buffer)
                 return []
             self._legacy = first in (b"{", b"[")
             if not self._legacy:
@@ -59,13 +62,20 @@ class _LegacyJsonSseNormalizer:
 
         output: list[bytes] = []
         separator = b"\n\n"
+        consumed = 0
         while True:
-            boundary = self._buffer.find(separator)
+            boundary = self._buffer.find(separator, self._scan_offset)
             if boundary < 0:
                 break
-            frame = bytes(self._buffer[:boundary])
-            del self._buffer[: boundary + len(separator)]
+            frame = bytes(self._buffer[consumed:boundary])
+            consumed = boundary + len(separator)
+            self._scan_offset = consumed
             output.append(b"data: " + frame + separator)
+        # Keep one byte of overlap for a separator split across chunks. Compact
+        # only once, so multiple frames do not repeatedly move the same tail.
+        self._scan_offset = max(consumed, len(self._buffer) - 1) - consumed
+        if consumed:
+            del self._buffer[:consumed]
         return output
 
     def flush(self) -> list[bytes]:
@@ -73,6 +83,8 @@ class _LegacyJsonSseNormalizer:
             return []
         data = bytes(self._buffer)
         self._buffer.clear()
+        self._detect_offset = 0
+        self._scan_offset = 0
         if self._legacy:
             return [b"data: " + data + b"\n\n"]
         return [data]
