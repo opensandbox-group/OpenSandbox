@@ -1,6 +1,6 @@
 ---
 title: Fast Sandbox Performance
-description: ACK measurements of the fast-sandbox integration — serial and concurrent creates, request latency, live snapshot, and same-node pause/resume — plus the OSEP-0023 credential-bound interception cost method, with results pending CI.
+description: ACK measurements of the fast-sandbox integration — serial and concurrent creates, request latency, live snapshot, and same-node pause/resume — plus the OSEP-0023 credential-bound interception cost and recommended connection budgets.
 ---
 
 # Performance
@@ -134,7 +134,7 @@ Concurrency changes admission contention; durable pause includes dumping, hashin
 
 ## Credential-bound interception cost (OSEP-0023)
 
-This section answers two questions about the experimental Fast Sandbox `credential-bound` interception mode (see [Egress](/architecture/network/egress)): how much the mode adds to sandbox creation latency, and what the per-subject and process connection budgets should be. The numbers come from the KVM integration environment (`scripts/fast-sandbox-env`), not from the ACK cluster above, so they are not comparable with the earlier sections. Every value below is `pending CI` until a workflow run's bench artifacts are recorded here with the run link, commit and environment fields.
+This section answers two questions about the experimental Fast Sandbox `credential-bound` interception mode (see [Egress](/architecture/network/egress)): how much the mode adds to sandbox creation latency, and what the per-subject and process connection budgets should be. The numbers come from the KVM integration environment (`scripts/fast-sandbox-env`), not from the ACK cluster above, so they are not comparable with the earlier sections. The values below come from the bench artifacts of workflow run [44396818387](https://github.com/opensandbox-group/OpenSandbox/actions/runs/44396818387), recorded on 2026-11-18.
 
 ### Method
 
@@ -168,11 +168,11 @@ Each leg's `environment.json` records: leg and interception mode, recording time
 
 | Dimension | Value |
 |---|---|
-| Workflow run | pending CI |
-| OpenSandbox commit | pending CI |
-| Host CPU / memory / kernel | pending CI |
-| Pool | pending CI |
-| Egress container resources (M1, M2, M4) | pending CI |
+| Workflow run | [44396818387](https://github.com/opensandbox-group/OpenSandbox/actions/runs/44396818387) (pull request merge commit `b957c8ab`, fast-sandbox `37421d95`) |
+| Topology | kind (Kubernetes v1.31.0) on the self-hosted `kvm` runner |
+| Host CPU / memory / kernel | Intel Xeon Platinum 8163 @ 2.50GHz, 96 CPUs / about 503 GiB / `6.6.102-5.600.al8.x86_64` |
+| Pool | `firecracker-egress-resource-aware-pool`, ResourceAware, `poolMin` 2, `maxSandboxesPerPod` 8, native template |
+| Egress container resources (M1, M2, M4) | requests 100m CPU / 64Mi, limits 500m CPU / 256Mi |
 | Egress container resources (M3 bench render) | 2Gi memory limit, per-subject budget 1024 |
 
 ### Results
@@ -181,50 +181,69 @@ M1 create latency, per leg (milliseconds):
 
 | Leg | Round | Success | p50 | p90 | p99 | Mean |
 |---|---|---:|---:|---:|---:|---:|
-| default (`all`) | 1–3 | pending CI | pending CI | pending CI | pending CI | pending CI |
-| `credential-bound` | 1–3 | pending CI | pending CI | pending CI | pending CI | pending CI |
+| default (`all`) | 1 | 200/200 | 593.4 | 805.5 | 888.2 | 606.2 |
+| default (`all`) | 2 | 198/200 | 613.1 | 812.4 | 1233.6 | 609.1 |
+| default (`all`) | 3 | 198/200 | 587.4 | 745.3 | 956.5 | 588.4 |
+| default (`all`) | pooled | 596/600 | 595.2 | 801.1 | 933.3 | 601.3 |
+| `credential-bound` | 1 | 200/200 | 631.6 | 816.9 | 907.9 | 624.7 |
+| `credential-bound` | 2 | 198/200 | 597.3 | 779.6 | 1089.9 | 617.5 |
+| `credential-bound` | 3 | 198/200 | 611.6 | 794.1 | 890.6 | 606.0 |
+| `credential-bound` | pooled | 596/600 | 617.1 | 798.6 | 907.9 | 616.1 |
+
+Both legs report M1 as `PARTIAL`. Seven of the eight failures are `SandboxRateLimitException` (HTTP 429, the integration Pool's 16 sandbox slots at concurrency 10 with asynchronous deletion); the eighth, in the third `credential-bound` round, is one `SandboxReadyTimeoutException`. Latencies cover successful attempts only. Pooled over the successful creates, `credential-bound` is 21.9 ms (3.7%) higher at p50 and 14.8 ms (2.5%) higher in the mean, while p90 and p99 are not higher. The per-round p50 spread within one leg (587–613 ms in the default leg) is of the same size, so this run does not separate a create-latency cost of the mode from run-to-run variation. These creates carry a network policy but no Vault. The integration environment is much slower than the ACK cluster above (about 600 ms versus about 100 ms at concurrency 10), so only the comparison between the two legs is meaningful.
 
 M2 guest TCP + TLS connect latency (milliseconds, 200 samples per path):
 
 | Path | Success | p50 | p90 | p99 | Mean |
 |---|---:|---:|---:|---:|---:|
-| `all_unbound` | pending CI | pending CI | pending CI | pending CI | pending CI |
-| `all_bound` | pending CI | pending CI | pending CI | pending CI | pending CI |
-| `cb_bound` | pending CI | pending CI | pending CI | pending CI | pending CI |
-| `cb_unbound` | pending CI | pending CI | pending CI | pending CI | pending CI |
+| `all_unbound` | 200/200 | 4.29 | 4.94 | 6.00 | 4.48 |
+| `all_bound` | 200/200 | 4.41 | 4.95 | 5.78 | 4.54 |
+| `cb_bound` | 200/200 | 4.86 | 5.47 | 6.72 | 5.01 |
+| `cb_unbound` | 200/200 | 4.58 | 5.20 | 6.60 | 4.75 |
+
+Every sample matched its path's expected evidence: the `all_*` and `cb_bound` samples presented the MITM leaf, the `cb_unbound` samples presented the origin leaf, and the origin saw the credential exactly on the bound paths. TCP connect took about 0.17 ms at p50 on every path, so the differences are in the TLS handshake. Within the `credential-bound` leg, passthrough was 0.28 ms faster at p50 than decrypt. The two legs were measured in separate environment bring-ups, so cross-leg differences below 1 ms are not attributed to the mode. In the `credential-bound` leg, the five Vault relay acknowledgements recorded while binding the bench sandboxes took 48–53 ms.
 
 M3 egress memory, `credential-bound` leg (raw points and fit):
 
 | K held | `memory.current` | `anon` |
 |---:|---:|---:|
-| 0 | pending CI | pending CI |
-| 500 | pending CI | pending CI |
-| 1000 | pending CI | pending CI |
-| 2000 | pending CI | pending CI |
-| Fit: bytes per connection (r²) | pending CI | pending CI |
+| 0 | 66,195,456 | 65,708,032 |
+| 500 | 143,253,504 | 142,233,600 |
+| 1000 | 224,583,680 | 223,834,112 |
+| 2000 | 383,152,128 | 381,063,168 |
+| Fit: bytes per connection (r²) | 158,847 (0.9999) | 158,100 (0.9999) |
+| Fit: intercept (bytes) | 65,304,986 | 64,872,448 |
+
+M3 reached every step with all targeted connections held (4 sandboxes × 125, 125 and 250 connections), no egress container restart and no OOM kill; all 2000 connections served one more request at release. Each held connection is a decrypted client connection plus its upstream TLS connection inside mitmproxy, idle after one small request. Active transfers add buffer memory that this measurement does not include. Opaque passthrough connections are not charged to either budget and are not measured here.
 
 M4 egress CPU under passthrough-dominated load:
 
 | Leg | Requests succeeded | Load CPU (cores) | Idle-corrected CPU per request | Throttled time |
 |---|---:|---:|---:|---:|
-| default (`all`) | pending CI | pending CI | pending CI | pending CI |
-| `credential-bound` | pending CI | pending CI | pending CI | pending CI |
+| default (`all`) | 2000/2000 | 0.109 | 9.92 ms | 163.8 ms (3 periods) |
+| `credential-bound` | 2000/2000 | 0.051 | 4.28 ms | 217.1 ms (2 periods) |
+
+With 95% of the requests to an unbound host, `credential-bound` used 57% less egress CPU per request than `all`, because unbound connections are passed through instead of being decrypted and re-encrypted. The CPU limit of 500m was not saturated in either leg.
 
 ### Recommended budgets
 
-The release defaults are currently `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY=32` per subject and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY=131072` per egress process. Both are unmeasured. The recommendation will be derived from the M3 fit as follows. Values are pending until M3 lands.
+The defaults are `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY=32` per subject and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY=32768` per egress process. The process default was 131072 before this measurement; at about 158 KB per held connection that budget allows about 20.7 GB of connection memory, which no shipped or proposed egress container limit covers. The budgets follow from the M3 fit as below.
 
 - **Per-subject budget** `S`: the number of concurrent decrypted connections one sandbox may hold. It is a cap, not a reservation, so the egress memory it implies is `S × sandboxes per Fastlet Pod × bytes per connection`, which only materializes if every sandbox on the Pod uses its full budget. With `maxSandboxesPerPod` sandboxes per Pod and bytes per connection `m` from M3, this worst case must stay below the egress container memory limit `L` minus the idle baseline `B`: `S × maxSandboxesPerPod × m ≤ L − B`.
 - **Process budget** `P`: the total decrypted connections one egress process admits across all its subjects. Because per-subject budgets are not reservations, `P` is the bound that actually protects the container: `P × m ≤ L − B`. A `P` larger than `(L − B) / m` lets the process reach the memory limit before the budget rejects handshakes. Exhaustion of either budget terminates only new bound handshakes.
-- **Consistency**: `P` should not be below `S × maxSandboxesPerPod`, or a single Pod's sandboxes cannot all reach their per-subject budget. At the defaults, `S × maxSandboxesPerPod` is 32 × 8 = 256 in the integration environment, far below `P = 131072`, so the per-subject budget, not `P`, is what limits a Pod's decrypted connections today.
+- **Consistency**: `P` should not be below `S × maxSandboxesPerPod`, or a single Pod's sandboxes cannot all reach their per-subject budget. At the defaults, `S × maxSandboxesPerPod` is 32 × 8 = 256 in the integration environment, far below `P = 32768`, so the per-subject budget, not `P`, is what limits a Pod's decrypted connections there.
+- **Headroom**: M3 measures idle connections. Keep `P × m` well below `L − B` so active transfers and Python allocator growth fit; the recommendations below leave at least a third of `L − B` unused.
 
 | Input | Value |
 |---|---|
-| Bytes per bound connection `m` (M3 `anon` fit) | pending CI |
-| Idle baseline `B` | pending CI |
-| Egress memory limit `L` in the shipped Pool examples | 256Mi (integration environment Pool) |
-| Recommended `S` | pending CI |
-| Recommended `P` for `L` | pending CI |
+| Bytes per bound connection `m` (M3 `anon` fit) | 158,100 bytes (about 154 KiB) |
+| Idle baseline `B` | about 65 MB (M3 intercept) |
+| Recommended `S` | 32 (the default) |
+| `L` = 256Mi (integration environment Pool, 8 sandboxes per Pod) | `(L − B) / m` ≈ 1,280; recommend `P` = 256 (`S × 8`, ≈ 40 MB) |
+| `L` = 8Gi with 100 sandboxes per Pod | `S × 100` = 3,200 connections ≈ 506 MB; recommend `P` = 4096 (≈ 648 MB) |
+| `L` = 8Gi, process default | `P` = 32768 ≈ 5.2 GB, within `L − B` with about a third unused |
+
+For another Pool, set `P` to the smaller of `S × maxSandboxesPerPod` rounded up to a power of two and about two thirds of `(L − B) / m`.
 
 ## Reproducing
 

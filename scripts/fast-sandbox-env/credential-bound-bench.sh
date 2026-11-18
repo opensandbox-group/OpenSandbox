@@ -455,7 +455,7 @@ bench_m3() {
 		--argjson steps "$(printf '%s\n' $BENCH_MEM_STEPS | jq -s -c 'map(tonumber)')" \
 		--arg mem "$BENCH_EGRESS_MEMORY_LIMIT" --argjson cap "$BENCH_FSB_TLS_CAPACITY" --argjson settle "$BENCH_MEM_SETTLE_SECONDS" \
 		'{leg: $leg, origin_leaf: $leaf, settings: {sandboxes: $s, steps: $steps, egress_memory_limit: $mem,
-		  fsb_tls_capacity_per_subject: $cap, fsb_process_tls_capacity: "default (131072)", settle_s: $settle,
+		  fsb_tls_capacity_per_subject: $cap, fsb_process_tls_capacity: "default (32768)", settle_s: $settle,
 		  connection: "HTTP/1.1 keep-alive over TLS to a bound host, one request then idle"}, points: [], stopped: null,
 		  notes: ["bench-only Pool render; the default render and verify lanes are unchanged"]}' > "$spec"
 	cb_kill_sandbox "$BENCH_U"; cb_kill_sandbox "$BENCH_B"
