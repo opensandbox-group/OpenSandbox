@@ -270,7 +270,9 @@ class StageGateTest(ShellCase):
         self.assertEqual([l for l in off if l.startswith("BEGIN|")],
                          ["BEGIN|rootfs-only snapshot verify (native template, FSEP-0001)"])
         self.assertFalse(any("credential-bound" in l for l in off))
-        self.assertIn("UNVERIFIED|", off)
+        # The harness joins STAGE_UNVERIFIED into one UNVERIFIED| line once
+        # the array is non-empty, so match by prefix rather than exact item.
+        self.assertTrue(any(l.startswith("UNVERIFIED|") for l in off))
 
     @unittest.skipUnless(git_available(GOLDEN_BASE), "golden baseline commit not available")
     def test_off_stage_list_matches_baseline(self):
@@ -308,9 +310,11 @@ class StageGateTest(ShellCase):
                          ["SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh"] * 2)
         # every other blocked/announced line belongs to the exchange gate —
         # the native rootfs-only stage is blocked in every mode (see
-        # StageGateTest) and is excluded here.
+        # StageGateTest) and is excluded here; its UNVERIFIED entry carries
+        # only the reason text, not the stage description.
         others = [l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))
-                  and "rootfs-only snapshot verify (native template" not in l]
+                  and "rootfs-only snapshot verify (native template" not in l
+                  and "natively qualified storage profile" not in l]
         self.assertEqual(others, [
             "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
             "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
