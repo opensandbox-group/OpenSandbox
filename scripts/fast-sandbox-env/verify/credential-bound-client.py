@@ -320,6 +320,16 @@ def origin_cred(response):
     return origin.get("cred") or "absent"
 
 
+def origin_response(response):
+    """Bench modes count only a 200 from the origin fixture. A proxy-local
+    403/503 or a body that is not origin evidence is a failed sample."""
+    if response.get("status") != 200:
+        raise ProbeError("response", "http_%d" % response.get("status", 0))
+    if not isinstance(response.get("origin"), dict):
+        raise ProbeError("response", "no_origin_body")
+    return response
+
+
 def client_context(args):
     ctx = ssl.create_default_context(cafile=args.cafile)
     ctx.check_hostname = True
@@ -353,7 +363,7 @@ def run_handshake_bench(args):
             conn.connect()
             tally(leaves, conn.info.get("leaf_sha256") or "none")
             sent = time.perf_counter()
-            response = conn.request(args.tag, seq)
+            response = origin_response(conn.request(args.tag, seq))
             request.append((time.perf_counter() - sent) * 1000.0)
             tcp.append(conn.timing["tcp_ms"])
             handshake.append(conn.timing["handshake_ms"])
@@ -402,7 +412,7 @@ def run_hold_many(args):
             try:
                 conn.connect()
                 tally(leaves, conn.info.get("leaf_sha256") or "none")
-                tally(creds, origin_cred(conn.request(args.tag, 1)))
+                tally(creds, origin_cred(origin_response(conn.request(args.tag, 1))))
                 held.append(conn)
             except ProbeError as exc:
                 tally(errors, error_key(exc))
@@ -438,7 +448,7 @@ def run_hold_many(args):
     alive, closed = 0, {}
     for conn in held:
         try:
-            conn.request(args.tag, 2)
+            origin_response(conn.request(args.tag, 2))
             alive += 1
         except ProbeError as exc:
             tally(closed, error_key(exc))

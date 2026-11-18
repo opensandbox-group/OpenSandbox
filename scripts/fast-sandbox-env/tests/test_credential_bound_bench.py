@@ -102,6 +102,21 @@ class ClientBenchModeTest(OriginFixture):
         self.assertEqual((done["phase"], done["alive_at_release"], done["release_errors"]), ("done", 4, {}))
         self.assertTrue(done["released"])
 
+    def test_bench_samples_require_an_origin_200(self):
+        # Codex review: a proxy-local 403/503 must be a failed sample, not a
+        # successful latency measurement.
+        spec = importlib.util.spec_from_file_location("cbv_client_origin", CLIENT_PY)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        ok = {"status": 200, "origin": {"cred": "absent"}}
+        self.assertIs(client.origin_response(ok), ok)
+        for response, kind in (({"status": 503, "origin": None}, "http_503"),
+                               ({"status": 403, "origin": {"cred": "absent"}}, "http_403"),
+                               ({"status": 200, "origin": None}, "no_origin_body")):
+            with self.assertRaises(client.ProbeError) as caught:
+                client.origin_response(response)
+            self.assertEqual((caught.exception.phase, caught.exception.kind), ("response", kind))
+
     def test_hold_many_shares_one_client_context(self):
         spec = importlib.util.spec_from_file_location("cbv_client_ctx", CLIENT_PY)
         client = importlib.util.module_from_spec(spec)
@@ -247,7 +262,7 @@ class ReportBuildTest(unittest.TestCase):
                                                     "origin_cred": {CODE: 300}, "errors": {"handshake/eof": 200}})
         base = {"leg": "credential-bound", "origin_leaf": ORIGIN, "settings": {"steps": [500, 1000]},
                 "baseline": {"memory_current": 100000, "anon": 50000}}
-        spec = dict(base, points=[
+        spec = dict(base, release={"held": 1000, "alive_at_release": 1000, "errors": {}}, points=[
             {"k_target": 500, "k_held": 500, "reading": {"memory_current": 100000 + 500 * 80000, "anon": 50000 + 500 * 60000},
              "holders": [{"target": 500, "expect_cred": CODE, "raw": ok_holder}]},
             {"k_target": 1000, "k_held": 1000, "reading": {"memory_current": 100000 + 1000 * 80000, "anon": 50000 + 1000 * 60000},
@@ -282,6 +297,20 @@ class ReportBuildTest(unittest.TestCase):
         tail_fits = {f["field"]: f for f in short_tail["fit"]}
         self.assertEqual(tail_fits["memory_current"]["bytes_per_connection"], 80000.0)
         self.assertEqual(tail_fits["memory_current"]["n"], 3)
+
+        # Codex review: connections lost before release make the counts stale.
+        lost = REPORT.build_m3(dict(spec, release={"held": 1000, "alive_at_release": 0, "errors": {"recv/eof": 1000}}))
+        self.assertEqual((lost["status"], lost["release_verified"]), ("PARTIAL", False))
+        self.assertEqual(REPORT.build_m3(dict(spec, release=None))["status"], "PARTIAL")
+        self.assertTrue(report["release_verified"])
+
+        # Codex review: a reading from a restarted egress never enters the fit.
+        restarted = REPORT.build_m3(dict(spec, baseline_restart_count=0, points=[
+            dict(spec["points"][0], restart_count=0),
+            dict(spec["points"][1], restart_count=1, reading={"memory_current": 1, "anon": 1})]))
+        self.assertEqual(restarted["status"], "PARTIAL")
+        self.assertEqual(restarted["fit_excluded_k_targets"], [1000])
+        self.assertEqual({f["field"]: f for f in restarted["fit"]}["memory_current"]["bytes_per_connection"], 80000.0)
 
         unbound = write_json(self.tmp, "ub.json", {"held": 5, "leaf_sha256": {ORIGIN: 5}, "origin_cred": {"absent": 5}})
         invalid = REPORT.build_m3(dict(base, points=[

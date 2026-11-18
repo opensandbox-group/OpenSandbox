@@ -284,6 +284,10 @@ def fit_block(points, field):
     }
 
 
+def largest_held(points):
+    return max([p["k_held"] or 0 for p in points] or [0])
+
+
 def build_m3(spec):
     if spec.get("not_run"):
         return not_run("m3", spec)
@@ -309,14 +313,30 @@ def build_m3(spec):
             "holders": holders,
         })
     measured = [p for p in points if p["k_target"]]
-    fit_points = [p for p in points if p["k_held"] == p["k_target"]]
+    # A reading taken after an egress restart or OOM kill belongs to a
+    # replacement process whose connections were destroyed: keep it for
+    # diagnostics, never in the fit.
+    base_restarts = spec.get("baseline_restart_count")
+    base_oom = (baseline or {}).get("oom_kill", 0)
+
+    def same_process(p):
+        return (p.get("restart_count") == base_restarts
+                and (p.get("reading") or {}).get("oom_kill", 0) == base_oom)
+
+    fit_points = [p for p in points if p["k_held"] == p["k_target"] and same_process(p)]
+    # Held counts come from the holders' open-time status; only the release
+    # probe proves every counted connection was still alive at the end.
+    release = spec.get("release") or {}
+    release_ok = (bool(release) and release.get("alive_at_release") == release.get("held")
+                  and release.get("held") == largest_held(points) and not release.get("errors"))
     steps = spec.get("settings", {}).get("steps", [])
     largest = max([p["k_held"] for p in measured] or [0])
     if contradiction_total:
         status = "INVALID"
     elif not baseline or not measured:
         status = "FAILED"
-    elif spec.get("stopped") or len(measured) < len(steps) or any(p["k_held"] != p["k_target"] for p in measured):
+    elif (spec.get("stopped") or len(measured) < len(steps) or not release_ok
+          or any(p["k_held"] != p["k_target"] or not same_process(p) for p in measured)):
         status = "PARTIAL"
     else:
         status = "OK"
@@ -334,6 +354,7 @@ def build_m3(spec):
         # cannot be placed on the x axis and never enters the fit.
         "fit": [fit_block(fit_points, "memory_current"), fit_block(fit_points, "anon")],
         "fit_excluded_k_targets": [p["k_target"] for p in points if p not in fit_points],
+        "release_verified": release_ok,
         "release": spec.get("release"),
         "vault_bind_ack_ms": spec.get("vault_bind_ack_ms", []),
         "notes": spec.get("notes", []),
