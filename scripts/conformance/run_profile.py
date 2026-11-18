@@ -115,7 +115,10 @@ def load_profile(profile_path: Path, repo_root: Path) -> Profile:
     for entry in contract:
         if not isinstance(entry, str) or not entry:
             fail("every contract entry must be a non-empty string")
-        if not (repo_root / entry).is_file():
+        resolved = (repo_root / entry).resolve()
+        if not resolved.is_relative_to(repo_root):
+            fail(f"contract reference escapes the repository: {entry}")
+        if not resolved.is_file():
             fail(f"contract reference does not exist: {entry}")
 
     raw_claims = document.get("claims")
@@ -275,6 +278,7 @@ def run_tests(profile: Profile, timeout: int, go_executable: str) -> dict[tuple[
             fail(f"go test timed out after {timeout}s in {module_root} ({package_pattern})")
 
         observed: dict[str, str] = {}
+        child_results: dict[str, set[str]] = {}
         unparsed: list[str] = []
         for line in completed.stdout.splitlines():
             line = line.strip()
@@ -291,9 +295,22 @@ def run_tests(profile: Profile, timeout: int, go_executable: str) -> dict[tuple[
             action = event.get("Action")
             if not isinstance(test_name, str) or not isinstance(action, str):
                 continue
-            if not test_name or "/" in test_name or action not in {"pass", "fail", "skip"}:
+            if not test_name or action not in {"pass", "fail", "skip"}:
+                continue
+            if "/" in test_name:
+                # A skipped subtest does not fail its parent, so propagate
+                # descendant results to the mapped root test.
+                root = test_name.split("/", 1)[0]
+                if root in names:
+                    child_results.setdefault(root, set()).add(action)
                 continue
             observed[test_name] = action
+
+        for root, child_actions in child_results.items():
+            if "fail" in child_actions:
+                observed[root] = "fail"
+            elif observed.get(root) == "pass" and "skip" in child_actions:
+                observed[root] = "skip"
 
         missing = sorted(set(names) - set(observed))
         if missing:
@@ -301,6 +318,12 @@ def run_tests(profile: Profile, timeout: int, go_executable: str) -> dict[tuple[
             fail(
                 f"go test did not report results for {', '.join(missing)} "
                 f"({package_pattern}); compile error or missing test: {detail or 'no diagnostic output'}"
+            )
+        if completed.returncode != 0 and not any(observed.get(name) == "fail" for name in names):
+            detail = completed.stderr.strip()[-800:] or "; ".join(unparsed[-5:])
+            fail(
+                f"go test exited with {completed.returncode} for {package_pattern} without a mapped "
+                f"test failure; package-level error: {detail or 'no diagnostic output'}"
             )
         for name, action in observed.items():
             if name in names:
