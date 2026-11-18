@@ -48,7 +48,7 @@ The report has one section per posture:
 - `redline` — no invariant; placement is limited only by the red-line bands and `deflate_on_oom`. This is the posture behind the 4000-sandbox idle-sparse evidence.
 - `elastic` — a declared floor/cap tier plus the host-wide sigma-caps invariant: the sum of declared caps stays within 80% of node memory, with the platform baseline charged against the same budget, so simultaneous full inflation fits by construction.
 
-Every row shows the requested and placed oversell ratio, the placed sandbox count, per-sandbox resident memory, peak resident share of the node, minimum MemAvailable, peak modeled PSI, red-line events, tighten actions and skips, guest and host OOM counts, deflate saves, snapshot storage, and a verdict. The verdict fails on host OOM kills, guest OOM kills, memory exhaustion, an unrecovered red line, or storage over the configured limit. During recovery the drain resumes frozen guests in batches only while the projected resumption growth keeps the node above the red-line enter band; guests that do not fit stay frozen and are retried on later ticks.
+Every row shows the requested and placed oversell ratio, the placed sandbox count, per-sandbox resident memory, peak resident share of the node, minimum MemAvailable, peak modeled PSI, red-line events, tighten actions and skips, guest and host OOM counts, deflate saves, snapshot storage, and a verdict. The verdict fails on host OOM kills, guest OOM kills, memory exhaustion, an unrecovered red line, or storage over the configured limit. The red-line state machine reacts to a fresh crossing before last-resort eviction runs, so a single coarse tick that steps over both the enter band and the eviction reserve engages the freeze rather than bypassing it. During recovery the drain resumes frozen guests in batches only while the projected resumption growth keeps the node above the red-line enter band; guests that do not fit stay frozen and are retried on later ticks.
 
 ### Options that change the answer
 
@@ -80,7 +80,7 @@ Idle-heavy fleets do not make memory the binding axis; this run does. At 1× and
 python3 benchmarks/density_tradeoff.py --scenario tighten-margins
 ```
 
-The matrix mirrors the Test Plan's integration cases: a 512 MiB margin holds with zero guest OOM, the known-bad 128 MiB margin keeps the failure visible, an infeasible floor emits a skip instead of an inflate, and inflate-before-throttle ordering OOMs guests that are still allocating. Each row prints the expected outcome and a pass/fail verdict against it. The synthetic red-line trigger is pinned to elapsed time (25 s, or 10 s for the inflate-first case), so `--interval` changes the sampling cadence rather than the case; a horizon shorter than a case needs is extended so the forced window and its release always fit.
+The matrix mirrors the Test Plan's integration cases: a 512 MiB margin holds with zero guest OOM, the known-bad 128 MiB margin keeps the failure visible, an infeasible floor emits a skip instead of an inflate, and inflate-before-throttle ordering OOMs guests that are still allocating. Each row prints the expected outcome and a pass/fail verdict against it. The synthetic red-line trigger is pinned to elapsed time (25 s, or 10 s for the inflate-first case) and stays engaged until its release tick even while headroom is high, so `--interval` changes the sampling cadence rather than the case; a horizon shorter than a case needs is extended so the forced window and its release always fit.
 
 ## `deflate_on_oom` rescue
 
@@ -88,7 +88,7 @@ The matrix mirrors the Test Plan's integration cases: a 512 MiB margin holds wit
 python3 benchmarks/density_tradeoff.py --scenario deflate-rescue
 ```
 
-A burst beyond the balloon-reduced effective cap must be absorbed by automatic deflation. With the escape hatch disabled the same burst kills the guest workload, and the row says so.
+A burst beyond the balloon-reduced effective cap must be absorbed by automatic deflation. With the escape hatch disabled the same burst kills the guest workload, and the row says so. A horizon too short to ramp the dense guest to that cap is extended, so a short `--duration` cannot silently skip the comparison.
 
 ## Sample a live node
 

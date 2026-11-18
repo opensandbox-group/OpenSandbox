@@ -456,6 +456,8 @@ class TierResult:
                 "red_line_exit_pct": cfg.red_line_exit_pct,
                 "invariant_pct": cfg.invariant_pct,
                 "tighten_margin_mib": cfg.tighten_margin_mib,
+                "oom_margin_threshold_mib": cfg.oom_margin_threshold_mib,
+                "oom_occupancy_ratio": cfg.oom_occupancy_ratio,
                 "throttle_first": cfg.throttle_first,
                 "deflate_on_oom": cfg.deflate_on_oom,
                 "floor_guarantee": cfg.floor_guarantee,
@@ -585,9 +587,12 @@ def plan_tighten(
         counters.tighten_skips += 1
         return None
     # Growth still pending in the next interval is what a late throttle
-    # would let run into the inflate window.
+    # would let run into the inflate window. The guest clock runs from its
+    # own admission, like tick() does.
     allocating = (
-        sandbox.profile.anon_target((tick_idx + 1) * cfg.interval_s, sandbox.offset)
+        sandbox.profile.anon_target(
+            (tick_idx + 1 - sandbox.birth_tick) * cfg.interval_s, sandbox.offset
+        )
         > sandbox.anon
     )
     if not cfg.throttle_first and allocating:
@@ -751,26 +756,22 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         available = cfg.node_memory_mib - cfg.platform_reserved_mib - fleet_charge
         avail_pct = 100.0 * available / cfg.node_memory_mib
 
-        # --- host OOM (last-resort eviction) ---------------------------------
-        oom_reserve = host_oom_reserve(cfg)
-        if available < oom_reserve and sandboxes:
-            while available < oom_reserve and sandboxes:
-                victim = max(sandboxes, key=lambda s: s.charge_mib(cfg))
-                sandboxes.remove(victim)
-                caps_committed -= victim.cap_mib
-                evicted_oom_kills += victim.oom_kills
-                evicted_deflate_saves += victim.deflate_saves
-                counters.host_oom_kills += 1
-                fleet_charge = sum(s.charge_mib(cfg) for s in sandboxes)
-                available = (
-                    cfg.node_memory_mib - cfg.platform_reserved_mib - fleet_charge
-                )
-            avail_pct = 100.0 * available / cfg.node_memory_mib
-
         # --- red-line state machine ------------------------------------------
+        # The state machine reacts to a fresh crossing before last-resort
+        # eviction runs: a single tick can step over both the enter band and
+        # the eviction reserve, and eviction must never pre-empt the freeze
+        # that the policy prescribes for exactly that crossing.
         forced_on = tick_idx in cfg.force_redline_ticks
         forced_off = cfg.release_redline_tick == tick_idx
-        if redline and (forced_off or avail_pct >= cfg.red_line_exit_pct):
+        # A synthetic trigger holds the red line until its release tick even
+        # when headroom is high (the matrix cases freeze on a relaxed node);
+        # runs without a release tick exit through the normal bands.
+        forced_window = (
+            cfg.release_redline_tick is not None and tick_idx < cfg.release_redline_tick
+        )
+        if redline and (
+            forced_off or (avail_pct >= cfg.red_line_exit_pct and not forced_window)
+        ):
             redline = False
             draining = True
         if not redline and (forced_on or avail_pct < cfg.red_line_enter_pct):
@@ -794,6 +795,22 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
                 plan = tighten_plan(sandbox, tick_idx, cfg.tighten_margin_mib)
                 if plan is not None:
                     sandbox.balloon_target = plan
+        # --- host OOM (last-resort eviction) ---------------------------------
+        oom_reserve = host_oom_reserve(cfg)
+        if available < oom_reserve and sandboxes:
+            while available < oom_reserve and sandboxes:
+                victim = max(sandboxes, key=lambda s: s.charge_mib(cfg))
+                sandboxes.remove(victim)
+                caps_committed -= victim.cap_mib
+                evicted_oom_kills += victim.oom_kills
+                evicted_deflate_saves += victim.deflate_saves
+                counters.host_oom_kills += 1
+                fleet_charge = sum(s.charge_mib(cfg) for s in sandboxes)
+                available = (
+                    cfg.node_memory_mib - cfg.platform_reserved_mib - fleet_charge
+                )
+            avail_pct = 100.0 * available / cfg.node_memory_mib
+
         if redline:
             counters.ticks_redline += 1
         if draining:
@@ -1032,6 +1049,12 @@ def run_deflate_rescue(cfg: SimConfig) -> tuple[SimConfig, list[dict]]:
         fill_ratio=0.6,
         create_rate=0.0,
     )
+    # The comparison means nothing until the dense guest has ramped to the
+    # balloon-reduced effective cap (E5), so a horizon too short to reach the
+    # burst is extended, the way the tighten matrix extends for its window.
+    profile = resolve_profile("dense", base)
+    burst_s = profile.working_set_mib / DENSE_RAMP_MIB_PER_S + DENSE_STAGGER_S + 5.0
+    base = replace(base, duration_s=max(cfg.duration_s, burst_s))
     for deflate_on in (True, False):
         row_cfg = replace(base, deflate_on_oom=deflate_on)
         result = run_tier(row_cfg, "elastic", 1)

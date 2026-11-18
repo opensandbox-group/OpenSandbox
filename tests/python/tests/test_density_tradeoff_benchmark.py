@@ -286,6 +286,31 @@ def test_red_line_freezes_creates_and_the_floor_guarantee_releases_them():
     assert without_guarantee.counters.redline_denied > 0
 
 
+def test_red_line_reacts_before_last_resort_eviction():
+    # One dense tick can step over both the enter band and the eviction
+    # reserve on a small node; the crossing must engage the freeze before
+    # last-resort eviction runs, so the policy is never bypassed.
+    cfg = sim_config(
+        node_memory_mib=1024.0,
+        platform_reserved_mib=0.0,
+        mix={"dense": 1.0},
+        duration_s=30.0,
+    )
+    result = bench.run_tier(cfg, "redline", 2)
+    assert result.counters.redline_events >= 1
+
+
+def test_forced_red_line_holds_until_its_release_tick():
+    # The synthetic trigger freezes for its whole forced window even on a
+    # relaxed node; a one-tick freeze would never exercise the documented
+    # 20-second window.
+    rows = bench.run_tighten_matrix(sim_config())
+    ordered = [row for row in rows if row.throttle_first]
+    assert ordered
+    for row in ordered:
+        assert row.result.counters.ticks_redline == 20
+
+
 def test_floor_granted_guests_join_the_active_freeze():
     # A guest admitted while the red line is already active must be frozen
     # too: otherwise the tighten pass never sees it and deflate_on_oom grows
@@ -552,6 +577,28 @@ def test_tighten_matrix_pins_forced_events_to_elapsed_time():
         row.to_row()["summary"]["horizon"]["duration_s"] >= 50.0 for row in ordered
     )
     assert inflate_first.to_row()["summary"]["horizon"]["duration_s"] >= 35.0
+
+
+def test_tighten_ordering_uses_guest_age_for_late_arrivals():
+    # The inflate-first OOM law fires only for a guest that is genuinely
+    # still allocating in the next interval; a guest admitted one tick ago
+    # (inside its own ramp stagger) is not.
+    cfg = sim_config(cap_mib=2048.0, mix={"dense": 1.0}, throttle_first=False)
+    late = make_sandbox(cfg, kind="dense", offset=5.0, cap=2048.0)
+    late.birth_tick = 100
+    counters = bench.TierCounters()
+    plan = bench.plan_tighten(late, 100, cfg, 512.0, counters)
+    assert plan is not None
+    assert late.oom_kills == 0
+    assert counters.tighten_actions == 1
+
+
+def test_deflate_rescue_extends_a_short_horizon_to_reach_the_burst():
+    # A 1 s horizon cannot ramp the guest to its effective cap; the scenario
+    # extends it so the advertised deflate comparison is actually exercised.
+    rescue_cfg, rows, _ = bench.run_deflate_rescue(sim_config(duration_s=1.0))
+    assert rescue_cfg.duration_s >= 20.0
+    assert all(row["verdict"]["ok"] for row in rows)
 
 
 def test_deflate_rescue_scenario_matches_expectations():
@@ -865,6 +912,7 @@ def test_summary_serializes_the_effective_configuration():
         invariant_pct=50.0,
         red_line_enter_pct=20.0,
         tighten_margin_mib=128.0,
+        oom_margin_threshold_mib=256.0,
         storage_gib=42.0,
     )
     summary = bench.run_tier(cfg, "elastic", 4).to_summary(cfg, "density")
@@ -873,6 +921,8 @@ def test_summary_serializes_the_effective_configuration():
     assert config["invariant_pct"] == 50.0
     assert config["red_line_enter_pct"] == 20.0
     assert config["tighten_margin_mib"] == 128.0
+    assert config["oom_margin_threshold_mib"] == 256.0
+    assert config["oom_occupancy_ratio"] == 0.5
     assert config["throttle_first"] is True
     assert config["deflate_on_oom"] is True
     assert config["storage_gib"] == 42.0
