@@ -763,7 +763,7 @@ class Sandbox internal constructor(
      * @param name Optional human-readable snapshot name
      * @param mode What the snapshot persists: [SnapshotMode.FULL] (the server
      * default when null) or [SnapshotMode.ROOTFS_ONLY] (writable filesystem
-     * only, fast-sandbox backend with OCI-backed sandboxes). Restoring a
+     * only, fast-sandbox backend). Restoring a
      * rootfs-only snapshot cold-boots a fresh sandbox and re-runs the entrypoint.
      */
     fun createSnapshot(

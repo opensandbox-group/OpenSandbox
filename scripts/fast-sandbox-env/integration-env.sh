@@ -25,7 +25,8 @@
 # The two template lanes are split by cost: verify-native keeps the
 # native-rootfs boot path (sandbox create via the opensandbox CLI, execd
 # /ping through the signed gateway route, delete, the DART peer pull, warm
-# creates) plus the egress network-security-rules baseline, while
+# creates), the egress network-security-rules baseline, and the native-lane
+# rootfs-only snapshot verify, while
 # verify-overlaybd builds the OCI-published template and runs the full
 # scenario matrix on it: the same boot path over ublk on-demand devices, a
 # pause/resume round trip, a snapshot -> restore-from-snapshotId boot, the
@@ -58,7 +59,7 @@
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up             # environment: stack + pool + server/ingress + native template
-#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules verify (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules + rootfs-only snapshot verify (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + full scenario matrix (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh pool           # re-apply the pool only
 #   ./scripts/fast-sandbox-env/integration-env.sh status         # component/pool/DART/OpenSandbox health
@@ -4214,17 +4215,25 @@ rootfs_only_wait_ready() { # <snapshot-id> <max-attempts>
 }
 
 rootfs_only_verify() {
-	# One experiment on the overlaybd (OCI) template: create a sandbox ->
+	# One experiment on the given template lane: create a sandbox ->
 	# rootfs-only snapshot -> verify the snapshot metadata (server row mode,
-	# SandboxSnapshot CR spec/status mode, oci:// manifest pair) -> prove the
-	# source survived the capture (Running + execd /ping) -> cold-boot a new
-	# sandbox from the snapshot -> one pause/resume round on the restored
+	# SandboxSnapshot CR spec/status mode, published artifact reference) ->
+	# prove the source survived the capture (Running + execd /ping) -> cold-boot
+	# a new sandbox from the snapshot -> one pause/resume round on the restored
 	# sandbox (pause is full-only upstream, so a cold-booted descendant must
 	# still produce a durable full checkpoint).
-	# Optional template override (the overlaybd second pass); default native
-	# — rootfs-only capture requires an OCI-backed source, so the stage is
-	# chained from verify-overlaybd only.
+	# Optional template override (the overlaybd lane passes its OCI template);
+	# default native. Both lanes run the stage since fast-sandbox#223 admitted
+	# native RootfsOnly at the FastPath gRPC gate; the durable artifact
+	# reference differs per lane (oci:// pair vs s3:// manifest URI).
 	local template_id="${1:-$TEMPLATE_ID}"
+	local lane artifact_scheme
+	if [[ -n "$OCI_TEMPLATE_ID" && "$template_id" == "$OCI_TEMPLATE_ID" ]]; then
+		lane="overlaybd" artifact_scheme="oci://"
+	else
+		lane="native" artifact_scheme="s3://"
+	fi
+	log "verify (rootfs-only): lane=$lane templateId=$template_id"
 	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
 	t0="$(now_ms)"
 
@@ -4262,16 +4271,17 @@ rootfs_only_verify() {
 	log "verify (rootfs-only): $snapshot_id create->Ready $(( (t2 - t1) / 1000000 ))ms"
 
 	# Metadata: the SandboxSnapshot CR carries the requested mode on spec,
-	# the fastlet-confirmed produced mode on status, and publishes the OCI
-	# pair (rootfs-only is OverlayBD-path-only).
+	# the fastlet-confirmed produced mode on status, and a lane-specific
+	# durable artifact reference (OCI manifest pair on the overlaybd lane,
+	# S3 manifest URI on the native lane).
 	cr="osb-snap-$(printf '%s' "$snapshot_id" | tr -d '-')"
 	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.spec.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
 		|| fail "SandboxSnapshot $cr spec.mode is not RootfsOnly"
 	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
 		|| fail "SandboxSnapshot $cr status.mode is not RootfsOnly (fastlet-confirmed artifact class)"
-	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.manifestRef}' 2>/dev/null)" == oci://* ]] \
-		|| fail "SandboxSnapshot $cr manifestRef is not an oci:// pair reference"
-	pass "rootfs-only snapshot: CR spec.mode=status.mode=RootfsOnly, oci:// pair published"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.manifestRef}' 2>/dev/null)" == "$artifact_scheme"* ]] \
+		|| fail "SandboxSnapshot $cr manifestRef is not a $artifact_scheme reference"
+	pass "rootfs-only snapshot ($lane): CR spec.mode=status.mode=RootfsOnly, $artifact_scheme artifact published"
 
 	# Source survival: the guest freeze -> pause -> cut -> resume -> thaw
 	# capture cycle must leave the source sandbox serving.
@@ -4493,6 +4503,16 @@ verify_native() {
 	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
 	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
+	# Rootfs-only verify (FSEP-0001) on the native lane, default-on: the
+	# capture qualification is deployment-derived upstream (fast-sandbox#185),
+	# the artifact set publishes to the S3 store, and fast-sandbox#223
+	# admitted native RootfsOnly at the FastPath gRPC gate. ROOTFS_ONLY=0
+	# skips the stage.
+	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
+		run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
+	else
+		log "ROOTFS_ONLY=0: skipping the rootfs-only snapshot verify"
+	fi
 	# Last on purpose: the e2e kill loop started the source's 30s disappearance
 	# grace; the network-security-rules stage consumed it, so this is a
 	# near-free confirmation.
