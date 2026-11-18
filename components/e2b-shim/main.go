@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Command e2b-shim is the scaffold for the optional OSEP-0027 E2B
-// compatibility component. Both subcommands serve a liveness check only;
-// no E2B protocol or proxy behavior is implemented.
+// compatibility component. Both subcommands validate configuration and serve
+// a liveness check only; no E2B protocol or proxy behavior is implemented.
 package main
 
 import (
@@ -52,18 +52,22 @@ Commands:
   help      print this help
 
 Flags for adapter and router:
-  --listen string   listen address (default 127.0.0.1:8080)
+  --config string   JSON configuration file (optional)
+  --listen string   listen address; overrides E2B_SHIM_LISTEN and the file
+
+See docs/guides/e2b-compatibility.md for configuration.
 `
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, os.LookupEnv)
 	stop()
 	os.Exit(code)
 }
 
-// run executes the CLI and returns the process exit code.
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+// run executes the CLI and returns the process exit code. Errors are written
+// to stderr; they come from config validation, which never echoes values.
+func run(ctx context.Context, args []string, stdout, stderr io.Writer, lookupEnv func(string) (string, bool)) int {
 	if len(args) == 0 {
 		_, _ = io.WriteString(stderr, usage)
 		return exitUsage
@@ -76,17 +80,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		version.EchoVersion("OpenSandbox E2B Shim")
 		return exitOK
 	case "adapter", "router":
-		return serve(ctx, args[0], args[1:], stdout, stderr)
+		return serve(ctx, args[0], args[1:], stdout, stderr, lookupEnv)
 	default:
 		_, _ = fmt.Fprint(stderr, "e2b-shim: unknown command\n\n", usage)
 		return exitUsage
 	}
 }
 
-func serve(ctx context.Context, role string, args []string, stdout, stderr io.Writer) int {
+func serve(ctx context.Context, role string, args []string, stdout, stderr io.Writer, lookupEnv func(string) (string, bool)) int {
 	fs := flag.NewFlagSet(role, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	listen := fs.String("listen", config.DefaultListen, "listen address")
+	configPath := fs.String("config", "", "JSON configuration file")
+	listen := fs.String("listen", "", "listen address")
 	fs.Usage = func() {}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -101,7 +106,19 @@ func serve(ctx context.Context, role string, args []string, stdout, stderr io.Wr
 		return exitUsage
 	}
 
-	ln, err := net.Listen("tcp", *listen)
+	src := config.Source{Path: *configPath, LookupEnv: lookupEnv}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "listen" {
+			src.Listen = listen
+		}
+	})
+	cfg, err := config.Load(src)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "e2b-shim %s: invalid configuration:\n%v\n", role, err)
+		return exitError
+	}
+
+	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "e2b-shim %s: listen failed: %v\n", role, err)
 		return exitError
