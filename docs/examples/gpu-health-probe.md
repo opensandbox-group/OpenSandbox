@@ -20,6 +20,7 @@ The complete source, including unit tests, lives in [`examples/gpu-health-probe`
 ## Prerequisites
 
 - An OpenSandbox server whose runtime exposes GPUs: Docker with `nvidia-container-toolkit`, or a Kubernetes cluster with a GPU device plugin (Kubernetes requires a positive integer for `resourceLimits.gpu`; the `all` sentinel is Docker-only).
+- A GPU image that includes `python3` (the probe runs inside the sandbox). The demo's default image bundles Python and PyTorch; a lighter CUDA image works for layers 1-2 but needs Python.
 - Python SDK: `uv pip install opensandbox`.
 
 ## Run it
@@ -32,7 +33,7 @@ export GPU_EXPECT=1                      # resourceLimits.gpu to request and ver
 python main.py
 ```
 
-The demo creates a sandbox with `resourceLimits.gpu`, uploads `gpu_probe.py` into it, runs the probe with `--expect` and `--compute auto`, prints the report, and maps the exit code to an operator action. `SANDBOX_IMAGE` selects the image (default: `nvidia/cuda:12.4.1-base-ubuntu22.04`); images without a compute runtime (PyTorch) report layer 3 as `skipped` unless a custom `--compute '<command>'` is used. Set `GPU_COMPUTE_MODE=skip` to make that intent explicit.
+The demo creates a sandbox with `resourceLimits.gpu`, uploads `gpu_probe.py` into it, runs the probe with `--expect` and `--compute auto`, prints the report, and maps the exit code to an operator action. `SANDBOX_IMAGE` selects the image (default: `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`, so all three layers run out of the box); images without a compute runtime report layer 3 as `skipped`, and the demo prints that the result covers the device layer only. Set `GPU_COMPUTE_MODE=skip` to make that intent explicit.
 
 The probe reads only in-sandbox state, so you can also run it from any other channel (your own orchestrator, a lifecycle hook, a debugging shell) as long as `gpu_probe.py` is available inside the sandbox:
 

@@ -225,11 +225,25 @@ class TestComputeLayer:
         assert layer.checks[0].status == gpu_probe.SKIPPED
 
     def test_auto_without_torch_skips(self) -> None:
-        fake = _fake_capture(1, "", "No module named torch")
+        fake = _fake_capture(1, "", "ModuleNotFoundError: No module named 'torch'")
         layer = gpu_probe.collect_compute_layer("auto", 10, capture=fake)
         assert layer.status == gpu_probe.PASS
         assert layer.checks[0].status == gpu_probe.SKIPPED
         assert "--compute" in layer.checks[0].detail
+
+    def test_auto_broken_torch_import_fails(self) -> None:
+        fake = _fake_capture(
+            1, "", "OSError: libcuda.so.1: cannot open shared object file"
+        )
+        layer = gpu_probe.collect_compute_layer("auto", 10, capture=fake)
+        assert layer.status == gpu_probe.FAIL
+        assert "installed but cannot be imported" in layer.checks[0].detail
+
+    def test_auto_import_timeout_fails(self) -> None:
+        fake = _fake_capture(124, "", "timed out")
+        layer = gpu_probe.collect_compute_layer("auto", 10, capture=fake)
+        assert layer.status == gpu_probe.FAIL
+        assert "timed out" in layer.checks[0].detail
 
     def test_auto_failure_attributed(self) -> None:
         calls: List[Tuple[Any, float, bool]] = []
@@ -292,6 +306,35 @@ class TestComputeLayer:
             "exit 3", 10, capture=_fake_capture(3, "", "boom")
         )
         assert bad.status == gpu_probe.FAIL
+
+
+class TestRunCapture:
+    def test_timeout_terminates_process_group(self) -> None:
+        # A compound command that leaves a background child behind: the probe
+        # must not return while descendants keep running.
+        import time
+
+        start = time.monotonic()
+        exit_code, _, stderr = gpu_probe.run_capture(
+            "sleep 30 & wait", 1, shell=True
+        )
+        elapsed = time.monotonic() - start
+        assert exit_code == 124
+        assert "timed out" in stderr
+        assert elapsed < 15
+
+    def test_missing_executable_maps_to_127(self) -> None:
+        exit_code, _, _ = gpu_probe.run_capture(
+            ["/nonexistent/probe-binary"], 5
+        )
+        assert exit_code == 127
+
+    def test_success_captures_output(self) -> None:
+        exit_code, stdout, _ = gpu_probe.run_capture(
+            [sys.executable, "-c", "print('ok')"], 30
+        )
+        assert exit_code == 0
+        assert stdout.strip() == "ok"
 
 
 class TestReport:
@@ -360,12 +403,22 @@ class TestMain:
         assert payload["status"] == gpu_probe.PASS
         assert payload["observed"]["deviceNodeCount"] == 1
 
-    def test_invalid_expect_errors(
+    def test_invalid_expect_is_probe_error(
         self, tmp_path: Path, capsys: Any
     ) -> None:
-        with pytest.raises(SystemExit) as excinfo:
-            gpu_probe.main(["--expect", "0"])
-        assert excinfo.value.code == 2
+        # Argument errors must not reuse exit 2, which the contract reserves
+        # for device-layer failures.
+        exit_code = gpu_probe.main(["--expect", "0", "--quiet"])
+        assert exit_code == gpu_probe.EXIT_PROBE_ERROR
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
+        assert "--expect" in payload["error"]
+
+    def test_unknown_argument_is_probe_error(self, capsys: Any) -> None:
+        exit_code = gpu_probe.main(["--bogus", "--quiet"])
+        assert exit_code == gpu_probe.EXIT_PROBE_ERROR
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "error"
 
     def test_probe_never_crashes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any

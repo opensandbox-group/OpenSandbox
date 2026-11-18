@@ -54,8 +54,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -225,6 +227,54 @@ def read_text(path: str) -> Optional[str]:
         return None
 
 
+def _group_alive(pgid: int) -> bool:
+    """Return whether any process still exists in the process group."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # PermissionError and friends mean the group exists but is not ours.
+        return True
+    return True
+
+
+def _terminate_process_group(process: subprocess.Popen) -> None:
+    """Terminate a timed-out probe and all of its descendants.
+
+    Custom compute probes may be compound shell commands. Killing only the
+    direct child would leave background descendants running in the sandbox,
+    and periodic health checks would accumulate orphaned GPU workloads, so the
+    whole process group gets SIGTERM, a bounded grace window, then SIGKILL.
+    """
+    try:
+        pgid = os.getpgid(process.pid)
+    except OSError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        return
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    # The group leader may be gone while other members survive or ignore
+    # SIGTERM; give them a short window, then SIGKILL whatever remains.
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and _group_alive(pgid):
+        time.sleep(0.1)
+    if _group_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_capture(
     command: Any, timeout_seconds: float, shell: bool = False
 ) -> Tuple[int, str, str]:
@@ -232,23 +282,31 @@ def run_capture(
 
     Missing executables map to exit code 127 and timeouts to 124, following
     the shell convention, so callers can treat both as probe-local failures.
+    Commands run in their own process group so a timeout can terminate the
+    whole tree, not just the direct child.
     """
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
             shell=shell,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
-            check=False,
+            start_new_session=True,
         )
-        return completed.returncode, completed.stdout, completed.stderr
     except FileNotFoundError as exc:
         return 127, "", str(exc)
-    except subprocess.TimeoutExpired as exc:
-        return 124, exc.stdout or "", f"timed out after {timeout_seconds}s"
     except OSError as exc:
         return 126, "", str(exc)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+        return process.returncode, stdout or "", stderr or ""
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(process)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        return 124, "", f"timed out after {timeout_seconds}s (process group terminated)"
 
 
 def _tail(text: str, limit: int = 400) -> str:
@@ -514,21 +572,39 @@ def collect_compute_layer(
                     )
                 ],
             )
-        probe_timeout = max(5.0, min(timeout_seconds, 30.0))
-        import_exit, _, _ = capture([python, "-c", "import torch"], probe_timeout)
+        import_exit, _, import_stderr = capture(
+            [python, "-c", "import torch"], timeout_seconds
+        )
         if import_exit != 0:
-            return Layer(
-                "compute",
-                [
-                    Check(
-                        "compute-probe",
-                        SKIPPED,
-                        "PyTorch is not importable in this image; pass "
-                        "--compute '<command>' with a workload-native smoke "
-                        "test to enable layer-3 reporting",
-                    )
-                ],
-            )
+            # Distinguish "PyTorch is not installed" (skip) from "PyTorch is
+            # installed but broken" (fail): a CUDA/shared-library or ABI
+            # problem is exactly the compute-layer failure this probe exists
+            # to surface, and skipping it would mask a broken GPU stack.
+            if import_exit != 124 and "No module named 'torch'" in import_stderr:
+                return Layer(
+                    "compute",
+                    [
+                        Check(
+                            "compute-probe",
+                            SKIPPED,
+                            "PyTorch is not installed in this image; pass "
+                            "--compute '<command>' with a workload-native "
+                            "smoke test to enable layer-3 reporting",
+                        )
+                    ],
+                )
+            if import_exit == 124:
+                detail = (
+                    "importing PyTorch timed out: a hung import is a broken "
+                    "compute environment (raise --compute-timeout if the "
+                    "image loads PyTorch from slow storage)"
+                )
+            else:
+                detail = (
+                    f"PyTorch is installed but cannot be imported "
+                    f"(exit {import_exit}): " + _tail(import_stderr)
+                )
+            return Layer("compute", [Check("compute-probe", FAIL, detail)])
         exit_code, stdout, stderr = capture(
             [python, "-c", TORCH_SMOKE_SCRIPT], timeout_seconds
         )
@@ -681,8 +757,41 @@ def _summary(report: Dict[str, Any]) -> str:
     return summary
 
 
+class _ProbeArgumentError(Exception):
+    """Raised instead of argparse's ``SystemExit(2)``.
+
+    The probe's exit-code contract reserves 2 for device-layer failures, so
+    argument errors must surface as probe errors (4) with a JSON report
+    instead of an unlabeled exit 2 without output.
+    """
+
+
+class _ProbeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:  # type: ignore[override]
+        raise _ProbeArgumentError(message)
+
+
+def _print_probe_error(message: str) -> int:
+    """Emit the JSON error contract for probe-level failures."""
+    print(
+        json.dumps(
+            {
+                "probe": PROBE_NAME,
+                "version": PROBE_VERSION,
+                "status": "error",
+                "exitCode": EXIT_PROBE_ERROR,
+                "error": message,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    print(f"{PROBE_NAME}: ERROR {message}", file=sys.stderr)
+    return EXIT_PROBE_ERROR
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _ProbeArgumentParser(
         description=(
             "Layered GPU health probe for OpenSandbox sandboxes "
             "(see docs/guides/gpu-health.md)."
@@ -743,7 +852,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Suppress the human-readable summary on stderr.",
     )
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except _ProbeArgumentError as exc:
+        return _print_probe_error(f"argument error: {exc}")
 
     try:
         if args.expect is not None and args.expect != "all":
@@ -751,7 +863,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if int(args.expect) <= 0:
                     raise ValueError
             except ValueError:
-                parser.error("--expect must be a positive integer or 'all'")
+                raise _ProbeArgumentError(
+                    "--expect must be a positive integer or 'all'"
+                ) from None
 
         smi_path = None if args.no_smi else (args.smi_path or shutil.which("nvidia-smi"))
         device_layer, observed = collect_device_layer(
@@ -764,18 +878,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.compute, args.compute_timeout, args.expect
         )
         report = build_report(device_layer, compute_layer, observed, args.expect)
+    except _ProbeArgumentError as exc:
+        return _print_probe_error(f"argument error: {exc}")
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - the probe must never crash silently
-        report = {
-            "probe": PROBE_NAME,
-            "version": PROBE_VERSION,
-            "status": "error",
-            "exitCode": EXIT_PROBE_ERROR,
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return EXIT_PROBE_ERROR
+        return _print_probe_error(f"{type(exc).__name__}: {exc}")
 
     print(json.dumps(report, indent=2, sort_keys=True))
     if not args.quiet:

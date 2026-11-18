@@ -57,9 +57,11 @@ DOMAIN = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
 API_KEY = os.getenv("SANDBOX_API_KEY")
 PROBE_DIR = "/tmp/gpu-health-probe"
 PROBE_PATH = f"{PROBE_DIR}/gpu_probe.py"
+# The default includes python3 and PyTorch so the demo exercises all three
+# layers out of the box; any GPU image with python3 works via SANDBOX_IMAGE.
 IMAGE = os.getenv(
     "SANDBOX_IMAGE",
-    "nvidia/cuda:12.4.1-base-ubuntu22.04",
+    "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime",
 )
 GPU_EXPECT = os.getenv("GPU_EXPECT", "1")
 GPU_COMPUTE_MODE = os.getenv("GPU_COMPUTE_MODE", "auto")  # auto | skip
@@ -83,6 +85,14 @@ SANDBOX_TIMEOUT = timedelta(minutes=60)
 
 def _diagnosis(exit_code: int, report: dict) -> str:
     """Turn the probe's exit code into a one-line operator action."""
+    compute_status = report.get("layers", {}).get("compute", {}).get("status")
+    if exit_code == 0 and compute_status == "skipped":
+        return (
+            "Device layer is healthy; the compute layer was skipped, so no "
+            "kernel launch was verified. Run the probe with a compute "
+            "runtime (--compute auto or a custom command) to certify "
+            "end-to-end health."
+        )
     if exit_code == 0:
         return "GPU stack is healthy end to end."
     if exit_code == EXIT_DEVICE_FAILED:
