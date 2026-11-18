@@ -1245,19 +1245,30 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 		if _, ok := podAllocation[pod.Name]; ok {
 			continue
 		}
-		if !utils.IsPodReady(pod) {
+		if isTerminalPhasePod(pod) || !utils.IsPodReady(pod) {
 			continue
 		}
 		availableCnt++
 	}
 	updatedCnt := int32(0)
+	totalCnt := int32(0)
 	for _, pod := range pods {
+		// A pod in a terminal phase (Failed or Succeeded) holds no capacity and
+		// can never serve a sandbox again. Core workloads report only
+		// non-terminated pods in their replicas counters, and this count feeds
+		// both the exported capacity metrics and the cross-pool rebalance
+		// scorer (Allocated/Total), so a finished pod that has not been reaped
+		// yet must not inflate it.
+		if isTerminalPhasePod(pod) {
+			continue
+		}
 		if pod.Labels[labelPoolRevision] == updateRevision {
 			updatedCnt++
 		}
+		totalCnt++
 	}
 	pool.Status.ObservedGeneration = pool.Generation
-	pool.Status.Total = int32(len(pods))
+	pool.Status.Total = totalCnt
 	pool.Status.Allocated = int32(len(podAllocation))
 	pool.Status.Available = availableCnt
 	pool.Status.Revision = updateRevision
@@ -1272,6 +1283,12 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 		return err
 	}
 	return nil
+}
+
+// isTerminalPhasePod reports whether the pod has reached a terminal phase
+// (Failed or Succeeded) and can no longer serve a sandbox.
+func isTerminalPhasePod(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded
 }
 
 func podsByName(pods []*corev1.Pod) map[string]*corev1.Pod {
