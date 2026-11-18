@@ -16,6 +16,7 @@
 policy layers, scenario expectations, host parsers, and CLI validation.
 No hypervisor, no live node, no network."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -113,7 +114,9 @@ def test_fpr_returns_freed_pages_after_the_measured_delay():
 
 
 def test_deflate_on_oom_rescues_a_burst_beyond_the_effective_cap():
-    cfg = sim_config(cap_mib=2048.0, floor_mib=1024.0, mix={"dense": 1.0})
+    cfg = sim_config(
+        cap_mib=2048.0, floor_mib=1024.0, mix={"dense": 1.0}, fill_ratio=0.6
+    )
     sandbox = make_sandbox(cfg, kind="dense", offset=0.0)
     sandbox.balloon = 1024.0  # elastic create: effective cap is the floor
     for tick in range(60):
@@ -125,7 +128,11 @@ def test_deflate_on_oom_rescues_a_burst_beyond_the_effective_cap():
 
 def test_burst_without_deflate_on_oom_kills_the_guest_workload():
     cfg = sim_config(
-        cap_mib=2048.0, floor_mib=1024.0, mix={"dense": 1.0}, deflate_on_oom=False
+        cap_mib=2048.0,
+        floor_mib=1024.0,
+        mix={"dense": 1.0},
+        fill_ratio=0.6,
+        deflate_on_oom=False,
     )
     sandbox = make_sandbox(cfg, kind="dense", offset=0.0)
     sandbox.balloon = 1024.0
@@ -133,6 +140,20 @@ def test_burst_without_deflate_on_oom_kills_the_guest_workload():
         sandbox.tick(tick, cfg)
     assert sandbox.oom_kills >= 1
     assert sandbox.workload_dead is True
+
+
+def test_deflation_never_exceeds_the_declared_cap():
+    # A burst larger than the balloon can cover must OOM the workload, not
+    # push the balloon negative and grant capacity above the declared cap.
+    cfg = sim_config(cap_mib=256.0, floor_mib=128.0, mix={"bursty": 1.0})
+    sandbox = make_sandbox(cfg, kind="bursty", offset=0.0)
+    sandbox.balloon = 128.0
+    for tick in range(30):
+        sandbox.tick(tick, cfg)
+        assert sandbox.balloon >= 0.0
+        assert sandbox.effective_mib <= sandbox.cap_mib
+    assert sandbox.balloon == 0.0
+    assert sandbox.oom_kills >= 1
 
 
 def test_tighten_plan_uses_cap_minus_floor_derivation():
@@ -296,7 +317,11 @@ def test_tighten_matrix_matches_test_plan_expectations():
     cfg = sim_config()
     rows = bench.run_tighten_matrix(cfg)
     assert len(rows) == 5
-    assert all(row.to_row(cfg)["verdict"]["ok"] for row in rows)
+    assert all(row.to_row()["verdict"]["ok"] for row in rows)
+    # Each row serializes with its own cap and mix, not the top-level ones.
+    row_2048 = next(row for row in rows if row.cap_mib == 2048.0)
+    assert row_2048.to_row()["summary"]["cap_mib"] == 2048.0
+    assert row_2048.to_row()["summary"]["mix"] == {"dense": 1.0}
     by_case = {row.case: row for row in rows}
     assert by_case["safe margin, ordered"].result.counters.guest_oom_kills == 0
     assert by_case["known-bad margin, ordered"].result.counters.guest_oom_kills > 0
@@ -420,6 +445,74 @@ def test_host_summary_flags_oom_deltas(tmp_path):
     summary = bench.summarize_host_samples(samples, cfg)
     assert summary["events"]["host_oom_kills_delta"] == 2
     assert "oom_kills" in summary["verdict"]["violations"]
+
+
+def test_host_summary_without_cgroups_reports_residency_unavailable(tmp_path):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    write_fake_proc(proc)
+    cfg = bench.HostConfig(
+        proc_root=proc,
+        cgroup_root=None,
+        duration_s=0.1,
+        interval_s=0.05,
+        cap_mib=512.0,
+        sandboxes_override=4,
+    )
+    samples = bench.collect_host_samples(cfg)
+    assert all(sample["cgroup_current_mib"] is None for sample in samples)
+    summary = bench.summarize_host_samples(samples, cfg)
+    assert summary["resident_mib"]["mean_total"] is None
+    assert summary["resident_mib"]["mean_per_sandbox"] is None
+    assert summary["events"]["cgroup_oom_kills_delta"] is None
+    report = bench.render_host_report(summary, cfg)
+    assert "| n/a |" in report
+
+
+def test_accumulate_cgroup_oom_counts_kills_across_churn():
+    state, seen = {}, set()
+    # First sighting is a baseline, not a delta.
+    assert bench.accumulate_cgroup_oom(state, seen, {"a": 1, "b": 0}) == 0
+    # a accumulates; b disappears with its counter already counted.
+    assert bench.accumulate_cgroup_oom(state, seen, {"a": 4}) == 3
+    # A path that returns after vanishing counts from zero again.
+    assert bench.accumulate_cgroup_oom(state, seen, {"a": 4, "b": 2}) == 2
+    # A counter that decreases was recreated: count it from zero, never
+    # negative.
+    assert bench.accumulate_cgroup_oom(state, seen, {"a": 1}) == 1
+    assert bench.accumulate_cgroup_oom(state, seen, {"a": 1}) == 0
+
+
+def test_cli_host_run_writes_array_summary(tmp_path, capsys):
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    write_fake_proc(proc)
+    cgroups = tmp_path / "cgroups"
+    cgroups.mkdir()
+    write_fake_cgroups(cgroups)
+    out_summary = tmp_path / "host-summary.json"
+    exit_code = bench.main(
+        [
+            "--backend",
+            "host",
+            "--proc-root",
+            str(proc),
+            "--cgroup-root",
+            str(cgroups),
+            "--duration",
+            "0.1",
+            "--interval",
+            "0.05",
+            "--out-summary",
+            str(out_summary),
+        ]
+    )
+    assert exit_code == 0
+    assert "backend: host" in capsys.readouterr().out
+    data = json.loads(out_summary.read_text(encoding="utf-8"))
+    assert isinstance(data, list)
+    assert data[0]["backend"] == "host"
+    assert data[0]["sandboxes"] == 2
 
 
 # --- CLI end to end (sim, hermetic) -----------------------------------------

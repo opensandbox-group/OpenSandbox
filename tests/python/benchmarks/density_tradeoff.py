@@ -63,6 +63,8 @@ MIB_PER_GIB = 1024.0
 # Dense profiles fill the guest at this rate (MiB/s), mirroring the ramping
 # memory hog used in the tighten-ordering measurements.
 DENSE_RAMP_MIB_PER_S = 100.0
+# Dense ramp start times are staggered within this window.
+DENSE_STAGGER_S = 8.0
 
 
 @dataclass(frozen=True)
@@ -93,7 +95,7 @@ class WorkloadProfile:
         if self.kind == "dense":
             return min(
                 self.working_set_mib,
-                DENSE_RAMP_MIB_PER_S * max(0.0, t - (offset % 8.0)),
+                DENSE_RAMP_MIB_PER_S * max(0.0, t - (offset % DENSE_STAGGER_S)),
             )
         phase = self.phase(t, offset)
         if phase < self.hold_s:
@@ -252,9 +254,14 @@ class SimSandbox:
         return cfg.vmm_overhead_mib + self.anon + pending + self.file
 
     def charge_mib(self, cfg: SimConfig) -> float:
-        """Memory the node cannot trivially reclaim (MemAvailable debit)."""
+        """Memory the node cannot trivially reclaim (MemAvailable debit).
+
+        Freed anonymous pages stay resident until free-page reporting returns
+        them, so ``pending_reclaim`` is charged like live anonymous memory.
+        """
+        pending = sum(amount for _, amount in self.pending_reclaim)
         keep = 1.0 - cfg.file_reclaimable_fraction
-        return cfg.vmm_overhead_mib + self.anon + keep * self.file
+        return cfg.vmm_overhead_mib + self.anon + pending + keep * self.file
 
     def tick(self, tick_idx: int, cfg: SimConfig) -> None:
         # A balloon move decided last tick actuates now (sub-second in the
@@ -284,12 +291,16 @@ class SimSandbox:
             need = target - self.anon
             room = self.effective_mib - self.touched_mib
             if need > room:
+                deficit = need - room
                 if cfg.deflate_on_oom and self.balloon > 0:
                     # deflate_on_oom is the guest-side tail insurance: the
-                    # balloon releases just enough for the burst to fit.
-                    self.balloon -= need - room
+                    # balloon releases at most what it holds, never more (that
+                    # would push the effective cap above the declared cap).
+                    released = min(self.balloon, deficit)
+                    self.balloon -= released
+                    deficit -= released
                     self.deflate_saves += 1
-                else:
+                if deficit > 0:
                     # Guest OOM: the in-guest process dies, the micro-VM
                     # survives, freed pages return via FPR.
                     self.oom_kills += 1
@@ -763,7 +774,7 @@ def run_density_scenario(cfg: SimConfig, ratios: list[float]) -> list[TierResult
 
 @dataclass(frozen=True)
 class MatrixRow:
-    """One tighten-ordering matrix case: a config plus its expected outcome."""
+    """One tighten-ordering matrix case: its config and expected outcome."""
 
     case: str
     cap_mib: float
@@ -772,10 +783,13 @@ class MatrixRow:
     force_tick: int
     expect_oom: bool
     expect_skip: bool
+    config: SimConfig
     result: TierResult
 
-    def to_row(self, cfg: SimConfig) -> dict:
-        summary = self.result.to_summary(cfg, "tighten-margins")
+    def to_row(self) -> dict:
+        # Serialize against this row's own configuration so cap, mix, and
+        # oversell match the run that produced the counters.
+        summary = self.result.to_summary(self.config, "tighten-margins")
         inflated = self.result.counters.tighten_actions
         ok = (
             (self.result.counters.guest_oom_kills > 0) == self.expect_oom
@@ -844,6 +858,7 @@ def run_tighten_matrix(cfg: SimConfig) -> list[MatrixRow]:
                 force_tick=force_tick,
                 expect_oom=expect_oom,
                 expect_skip=expect_skip,
+                config=row_cfg,
                 result=result,
             )
         )
@@ -976,17 +991,69 @@ def read_cgroup_sample(path: Path) -> dict:
     return sample
 
 
+def accumulate_cgroup_oom(
+    state: dict[str, int], seen: set[str], current: dict[str, int]
+) -> int:
+    """Return cgroup OOM kills newly observed since the previous sample.
+
+    ``state`` carries the last cumulative counter per still-present cgroup,
+    so kills are counted even when a cgroup is deleted later in the run.
+    The first sighting of a path establishes a baseline; a path that returns
+    after vanishing, or whose counter decreases, was recreated and counts
+    from zero.
+    """
+    observed = 0
+    for path, count in current.items():
+        previous = state.get(path)
+        if previous is None:
+            if path in seen:
+                observed += count
+            else:
+                seen.add(path)
+        elif count < previous:
+            observed += count
+        else:
+            observed += count - previous
+        state[path] = count
+    # Forget vanished cgroups; ``seen`` keeps their history for recreation.
+    for path in list(state):
+        if path not in current:
+            del state[path]
+    return observed
+
+
 def collect_host_samples(cfg: HostConfig) -> list[dict]:
     """Sample a live node until ``duration_s`` elapses."""
     samples = []
+    oom_state: dict[str, int] = {}
+    oom_paths_seen: set[str] = set()
+    cgroup_oom_seen = 0
     deadline = time.monotonic() + cfg.duration_s
     while True:
         meminfo = read_meminfo(cfg.proc_root)
+        if meminfo["mem_total_mib"] <= 0:
+            raise ValueError("Node reports nonpositive MemTotal; refusing to sample")
         cpu = read_pressure(cfg.proc_root / "pressure" / "cpu")
         memory = read_pressure(cfg.proc_root / "pressure" / "memory")
         vmstat_oom = read_vmstat_oom_kills(cfg.proc_root)
-        cgroups = list_cgroup_dirs(cfg.cgroup_root) if cfg.cgroup_root else []
-        cgroup_samples = [read_cgroup_sample(path) for path in cgroups]
+        if cfg.cgroup_root:
+            cgroup_samples = {
+                str(path): read_cgroup_sample(path)
+                for path in list_cgroup_dirs(cfg.cgroup_root)
+            }
+            counts = {
+                path: sample["oom_kill"] for path, sample in cgroup_samples.items()
+            }
+            cgroup_oom_seen += accumulate_cgroup_oom(oom_state, oom_paths_seen, counts)
+            num_cgroups = len(cgroup_samples)
+            cgroup_current = round(
+                sum(item["current_mib"] for item in cgroup_samples.values()), 3
+            )
+            cgroup_oom_now = sum(counts.values())
+        else:
+            num_cgroups = None
+            cgroup_current = None
+            cgroup_oom_now = None
         samples.append(
             {
                 "type": "sample",
@@ -997,11 +1064,12 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
                 "psi_cpu_full_avg60": cpu.get("full_avg60"),
                 "psi_mem_some_avg60": memory.get("some_avg60"),
                 "vmstat_oom_kill": vmstat_oom,
-                "cgroups": len(cgroup_samples),
-                "cgroup_current_mib": round(
-                    sum(item["current_mib"] for item in cgroup_samples), 3
-                ),
-                "cgroup_oom_kill": sum(item["oom_kill"] for item in cgroup_samples),
+                "cgroups": num_cgroups,
+                "cgroup_current_mib": cgroup_current,
+                "cgroup_oom_kill": cgroup_oom_now,
+                "cgroup_oom_kill_accumulated": cgroup_oom_seen
+                if cfg.cgroup_root
+                else None,
             }
         )
         if time.monotonic() >= deadline:
@@ -1013,11 +1081,14 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
 def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
     mem_total = samples[0]["mem_total_mib"]
     mem_avail = [s["mem_available_mib"] for s in samples]
-    cgroup_current = [s["cgroup_current_mib"] for s in samples]
+    cgroup_current = [
+        s["cgroup_current_mib"] for s in samples if s["cgroup_current_mib"] is not None
+    ]
     sandboxes = cfg.sandboxes_override
     if sandboxes is None:
-        sandboxes = max(s["cgroups"] for s in samples)
-    oversell = sandboxes * cfg.cap_mib / mem_total if mem_total else None
+        counts = [s["cgroups"] for s in samples if s["cgroups"] is not None]
+        sandboxes = max(counts) if counts else 0
+    oversell = sandboxes * cfg.cap_mib / mem_total if mem_total and sandboxes else None
     vmstat_first = next(
         (s["vmstat_oom_kill"] for s in samples if s["vmstat_oom_kill"] is not None),
         None,
@@ -1035,9 +1106,7 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
         if vmstat_first is None or vmstat_last is None
         else max(0, vmstat_last - vmstat_first)
     )
-    cgroup_oom_delta = max(
-        0, samples[-1]["cgroup_oom_kill"] - samples[0]["cgroup_oom_kill"]
-    )
+    cgroup_oom_delta = samples[-1]["cgroup_oom_kill_accumulated"]
     avail_pct = [100.0 * value / mem_total for value in mem_avail]
     psi_some = [
         s["psi_cpu_some_avg60"] for s in samples if s["psi_cpu_some_avg60"] is not None
@@ -1048,10 +1117,13 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
     violations = []
     if host_oom_delta is None:
         violations.append("vmstat_oom_kill_unavailable")
-    elif host_oom_delta > 0 or cgroup_oom_delta > 0:
+    elif host_oom_delta > 0 or (cgroup_oom_delta or 0) > 0:
         violations.append("oom_kills")
     if min(avail_pct) <= 0.0:
         violations.append("memory_exhausted")
+    resident_mean = (
+        sum(cgroup_current) / len(cgroup_current) if cgroup_current else None
+    )
     return {
         "type": "summary",
         "backend": "host",
@@ -1061,15 +1133,11 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
         "samples": len(samples),
         "duration_s": cfg.duration_s,
         "resident_mib": {
-            "mean_total": round(sum(cgroup_current) / len(cgroup_current), 3)
-            if cgroup_current
-            else None,
-            "max_total": round(max(cgroup_current), 3) if cgroup_current else None,
-            "mean_per_sandbox": round(
-                sum(cgroup_current) / len(cgroup_current) / sandboxes, 3
-            )
-            if cgroup_current and sandboxes
-            else None,
+            "mean_total": None if resident_mean is None else round(resident_mean, 3),
+            "max_total": None if not cgroup_current else round(max(cgroup_current), 3),
+            "mean_per_sandbox": None
+            if resident_mean is None or not sandboxes
+            else round(resident_mean / sandboxes, 3),
         },
         "mem_available_pct": {
             "min": round(min(avail_pct), 4),
@@ -1197,12 +1265,19 @@ def render_host_report(summary: dict, cfg: HostConfig) -> str:
         else "fail: " + ",".join(summary["verdict"]["violations"])
     )
     oversell = summary["oversell_ratio"]
+    host_oom = summary["events"]["host_oom_kills_delta"]
+    cgroup_oom = summary["events"]["cgroup_oom_kills_delta"]
+    per_sandbox = "n/a" if resident is None else f"{resident:.1f}"
+    psi_pair = (
+        "n/a"
+        if psi_some is None or psi_full is None
+        else f"{psi_some:.1f}/{psi_full:.1f}"
+    )
     lines.append(
         f"| {'n/a' if oversell is None else f'{oversell:.2f}x'} | {summary['sandboxes']} | "
-        f"{'n/a' if resident is None else f'{resident:.1f}'} | "
-        f"{summary['mem_available_pct']['min']:.1f} | "
-        f"{'n/a' if psi_some is None else f'{psi_some:.1f}'}/{'n/a' if psi_full is None else f'{psi_full:.1f}'} | "
-        f"{summary['events']['host_oom_kills_delta']} | {summary['events']['cgroup_oom_kills_delta']} | {verdict} |"
+        f"{per_sandbox} | {summary['mem_available_pct']['min']:.1f} | {psi_pair} | "
+        f"{'n/a' if host_oom is None else host_oom} | "
+        f"{'n/a' if cgroup_oom is None else cgroup_oom} | {verdict} |"
     )
     return "\n".join(lines) + "\n"
 
@@ -1390,8 +1465,9 @@ def main(argv=None) -> int:
                     handle.write(json.dumps(sample) + "\n")
                 handle.write(json.dumps(summary) + "\n")
         if args.out_summary:
+            # Same array schema as the simulator branches, per the guide.
             args.out_summary.write_text(
-                json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+                json.dumps([summary], indent=2) + "\n", encoding="utf-8"
             )
         if args.report:
             args.report.write_text(report, encoding="utf-8")
@@ -1415,7 +1491,7 @@ def main(argv=None) -> int:
             samples_by_tier.append(summary)
     elif cfg_sim.scenario == "tighten-margins":
         rows = run_tighten_matrix(cfg_sim)
-        summaries = [row.to_row(cfg_sim) for row in rows]
+        summaries = [row.to_row() for row in rows]
         table_rows = [
             f"| {row['case']} | {row['cap_mib']:.0f} | {row['tighten_margin_mib']:.0f} | {row['ordering']} | "
             f"{row['tighten_actions']}/{row['tighten_skips']} | {row['guest_oom_kills']} | {row['host_oom_kills']} | "
