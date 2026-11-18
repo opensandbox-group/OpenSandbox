@@ -27,7 +27,7 @@ func TestRunHelpAndUsage(t *testing.T) {
 		if code := run(context.Background(), args, &out, &errOut); code != exitOK {
 			t.Errorf("%v: exit code = %d, want 0", args, code)
 		}
-		if strings.Count(out.String(), "Usage: e2b-compat") != 1 || errOut.Len() != 0 {
+		if strings.Count(out.String(), "Usage: e2b-shim") != 1 || errOut.Len() != 0 {
 			t.Errorf("%v: stdout = %q, stderr = %q, want usage once on stdout", args, out.String(), errOut.String())
 		}
 	}
@@ -54,7 +54,7 @@ func TestRunNoArguments(t *testing.T) {
 	if code := run(context.Background(), nil, &out, &errOut); code != exitUsage {
 		t.Errorf("exit code = %d, want %d", code, exitUsage)
 	}
-	if !strings.Contains(errOut.String(), "Usage: e2b-compat") {
+	if !strings.Contains(errOut.String(), "Usage: e2b-shim") {
 		t.Errorf("stderr = %q, want usage", errOut.String())
 	}
 }
@@ -64,7 +64,7 @@ func TestRunFlagErrors(t *testing.T) {
 		{"adapter", "--bogus"},
 		{"adapter", "extra-arg"},
 		{"router", "--listen"},
-		{"router", "--config", "e2b-compat.json"},
+		{"router", "--config", "e2b-shim.json"},
 	} {
 		var out, errOut bytes.Buffer
 		code := run(context.Background(), args, &out, &errOut)

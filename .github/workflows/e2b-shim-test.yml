@@ -1,4 +1,4 @@
-name: E2B Compat Tests
+name: E2B Shim Tests
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ jobs:
   changes:
     uses: ./.github/workflows/detect-changes.yml
     with:
-      area: e2b-compat
+      area: e2b-shim
 
   test:
     needs: changes
@@ -32,10 +32,10 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
-          cache-dependency-path: components/e2b-compat/go.mod
+          cache-dependency-path: components/e2b-shim/go.mod
 
       - name: Check gofmt
-        working-directory: components/e2b-compat
+        working-directory: components/e2b-shim
         run: |
           files="$(gofmt -l .)"
           if [ -n "$files" ]; then
@@ -44,22 +44,22 @@ jobs:
           fi
 
       - name: Run Build
-        working-directory: components/e2b-compat
+        working-directory: components/e2b-shim
         run: |
           make build
 
       - name: Run tests
-        working-directory: components/e2b-compat
+        working-directory: components/e2b-shim
         run: |
           go test ./...
 
       - name: Run race tests
-        working-directory: components/e2b-compat
+        working-directory: components/e2b-shim
         run: |
           go test -race ./...
 
   required:
-    name: E2B Compat CI
+    name: E2B Shim CI
     if: always()
     needs: [changes, test]
     runs-on: ubuntu-latest

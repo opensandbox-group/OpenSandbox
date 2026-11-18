@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Command e2b-compat is the scaffold for the optional OSEP-0027 E2B
+// Command e2b-shim is the scaffold for the optional OSEP-0027 E2B
 // compatibility component. Both subcommands serve a liveness check only;
 // no E2B protocol or proxy behavior is implemented.
 package main
@@ -29,8 +29,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/alibaba/opensandbox/e2b-compat/pkg/config"
-	"github.com/alibaba/opensandbox/e2b-compat/pkg/service"
+	"github.com/alibaba/opensandbox/e2b-shim/pkg/config"
+	"github.com/alibaba/opensandbox/e2b-shim/pkg/service"
 	"github.com/alibaba/opensandbox/internal/version"
 )
 
@@ -40,7 +40,7 @@ const (
 	exitUsage = 2
 )
 
-const usage = `Usage: e2b-compat <command> [flags]
+const usage = `Usage: e2b-shim <command> [flags]
 
 Scaffold for the optional OpenSandbox E2B compatibility component (OSEP-0027).
 No E2B operation is implemented; both commands serve only GET/HEAD /healthz.
@@ -73,12 +73,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = io.WriteString(stdout, usage)
 		return exitOK
 	case "version":
-		version.EchoVersion("OpenSandbox E2B Compat")
+		version.EchoVersion("OpenSandbox E2B Shim")
 		return exitOK
 	case "adapter", "router":
 		return serve(ctx, args[0], args[1:], stdout, stderr)
 	default:
-		_, _ = fmt.Fprint(stderr, "e2b-compat: unknown command\n\n", usage)
+		_, _ = fmt.Fprint(stderr, "e2b-shim: unknown command\n\n", usage)
 		return exitUsage
 	}
 }
@@ -97,13 +97,13 @@ func serve(ctx context.Context, role string, args []string, stdout, stderr io.Wr
 		return exitUsage
 	}
 	if fs.NArg() > 0 {
-		_, _ = fmt.Fprintf(stderr, "e2b-compat %s: unexpected arguments\n", role)
+		_, _ = fmt.Fprintf(stderr, "e2b-shim %s: unexpected arguments\n", role)
 		return exitUsage
 	}
 
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "e2b-compat %s: listen failed: %v\n", role, err)
+		_, _ = fmt.Fprintf(stderr, "e2b-shim %s: listen failed: %v\n", role, err)
 		return exitError
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))

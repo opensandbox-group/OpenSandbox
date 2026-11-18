@@ -7,9 +7,9 @@
 ## Build & Run
 
 ```bash
-make build          # binary at bin/e2b-compat with ldflags version info
-./bin/e2b-compat --help
-./bin/e2b-compat adapter --listen 127.0.0.1:8080
+make build          # binary at bin/e2b-shim with ldflags version info
+./bin/e2b-shim --help
+./bin/e2b-shim adapter --listen 127.0.0.1:8080
 ./build.sh          # same local build without make
 ```
 

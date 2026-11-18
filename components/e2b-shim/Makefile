@@ -46,7 +46,7 @@ GO_LDFLAGS := $(strip $(LDFLAGS) $(PROJECT_LDFLAGS))
 .PHONY: build
 build: vet ## Build the binary.
 	@mkdir -p bin
-	go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/e2b-compat main.go
+	go build $(GO_BUILD_FLAGS) -ldflags "$(GO_LDFLAGS)" -o bin/e2b-shim main.go
 
 .PHONY: clean
 clean: ## Clean build artifacts.

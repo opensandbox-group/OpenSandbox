@@ -1,4 +1,4 @@
-module github.com/alibaba/opensandbox/e2b-compat
+module github.com/alibaba/opensandbox/e2b-shim
 
 go 1.25.0
 

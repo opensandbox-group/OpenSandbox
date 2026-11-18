@@ -24,7 +24,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/alibaba/opensandbox/e2b-compat/pkg/config"
+	"github.com/alibaba/opensandbox/e2b-shim/pkg/config"
 )
 
 const (

@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alibaba/opensandbox/e2b-compat/pkg/service"
+	"github.com/alibaba/opensandbox/e2b-shim/pkg/service"
 )
 
 func TestHealthzGET(t *testing.T) {

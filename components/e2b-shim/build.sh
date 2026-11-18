@@ -40,4 +40,4 @@ go build -trimpath -buildvcs=false \
     -X 'github.com/alibaba/opensandbox/internal/version.Version=${VERSION}' \
     -X 'github.com/alibaba/opensandbox/internal/version.BuildTime=${BUILD_TIME}' \
     -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
-  -o bin/e2b-compat main.go
+  -o bin/e2b-shim main.go
