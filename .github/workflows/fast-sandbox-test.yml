@@ -48,7 +48,7 @@ jobs:
       # Shared by the prerequisite guard and all golden comparisons. Bump in
       # lockstep with GOLDEN_BASE in scripts/fast-sandbox-env/tests/test_credential_bound.py
       # whenever a stage-list change is intentional.
-      CBV_GOLDEN_BASE: 9ba98db7f78be0ef1a1b2041e758eb5768304952
+      CBV_GOLDEN_BASE: 02be68b5fde9c74d69f5ba69a2dbb97c76f23c06
     steps:
       - uses: actions/checkout@v6
         with:

@@ -49,7 +49,7 @@ PROFILES = ("firecracker-egress-pool", "firecracker-egress-resource-aware-pool")
 # e.g. in a shallow clone). Bump in lockstep with CBV_GOLDEN_BASE in
 # .github/workflows/fast-sandbox-test.yml whenever a stage-list change is
 # intentional — WorkflowBaselineTest enforces the pairing.
-GOLDEN_BASE = os.environ.get("CBV_GOLDEN_BASE", "9ba98db7f78be0ef1a1b2041e758eb5768304952")
+GOLDEN_BASE = os.environ.get("CBV_GOLDEN_BASE", "02be68b5fde9c74d69f5ba69a2dbb97c76f23c06")
 
 
 def find_bash():
