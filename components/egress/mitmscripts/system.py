@@ -76,11 +76,13 @@ import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
 from urllib.parse import quote, quote_plus, unquote
+from uuid import UUID
 
 from mitmproxy import ctx, http
 from mitmproxy.tls import ClientHelloData
 
 if TYPE_CHECKING:
+    from mitmproxy.tls import TlsData
     from revision_receiver import Revision
 
 CREDENTIAL_PROXY_SOCKET_ENV = "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET"
@@ -382,6 +384,41 @@ class UnixSocketHTTPConnection(http_client.HTTPConnection):
             sock.close()
             raise
         self.sock = sock
+
+
+# OpenSSL X509_V_ERR_* values; never classify a raw TLS error string.
+_UPSTREAM_VERIFY_REASONS = {
+    10: "expired",
+    18: "self_signed",
+    19: "self_signed",
+    20: "unknown_ca",
+    21: "unknown_ca",
+    62: "hostname_mismatch",
+    64: "hostname_mismatch",
+}
+
+
+def tls_failed_server(data: TlsData) -> None:
+    """Report upstream TLS failure without changing forwarding or trust."""
+    from OpenSSL import SSL
+
+    reason = "unknown"
+    conn = data.ssl_conn
+    if isinstance(conn, SSL.Connection):
+        with suppress(AttributeError, TypeError, ValueError, SSL.Error):
+            if conn.get_context().get_verify_mode() & SSL.VERIFY_PEER:
+                # mitmproxy's pinned TLS layer uses this same OpenSSL result.
+                result = SSL._lib.SSL_get_verify_result(conn._ssl)
+                reason = _UPSTREAM_VERIFY_REASONS.get(result, "unknown")
+    with suppress(AttributeError, TypeError, ValueError):
+        record = {
+            "level": "warn",
+            "component": "egress",
+            "event": "upstream_tls_failure",
+            "reason": reason,
+            "connection_id": str(UUID(str(data.conn.id))),
+        }
+        ctx.log.warn("credential proxy: upstream-tls-failure " + json.dumps(record))
 
 
 def tls_clienthello(data: ClientHelloData) -> None:
