@@ -371,6 +371,11 @@ class SimSandbox:
         self.tightened = True
 
     def guest_oom(self, tick_idx: int, cfg: SimConfig) -> None:
+        if self.workload_dead:
+            # Nothing restarts the workload, so an already-dead process
+            # cannot be killed twice; repeated red-line entries must not
+            # recount the same kill.
+            return
         self.oom_kills += 1
         freed = self.anon - cfg.idle_anon_mib
         if freed > 0:
@@ -667,6 +672,7 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
     caps_committed = 0.0
     redline = False
     draining = False
+    resumed_reservations: set[int] = set()
     evicted_oom_kills = 0
     evicted_deflate_saves = 0
 
@@ -762,6 +768,11 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
 
         available = cfg.node_memory_mib - cfg.platform_reserved_mib - fleet_charge
         avail_pct = 100.0 * available / cfg.node_memory_mib
+        # Peak / minimum metrics describe the pressure the policy had to
+        # handle, so they capture the triggering state before last-resort
+        # eviction removes it from the fleet.
+        resident_max = max(resident_max, sum(s.resident_mib(cfg) for s in sandboxes))
+        avail_min = min(avail_min, avail_pct)
 
         # --- red-line state machine ------------------------------------------
         # The state machine reacts to a fresh crossing before last-resort
@@ -781,12 +792,14 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         ):
             redline = False
             draining = True
+            resumed_reservations.clear()
         if not redline and (forced_on or avail_pct < cfg.red_line_enter_pct):
             # Re-entry is allowed mid-drain: resumed guests can push the node
             # back under the enter band before the last batch is restored, so
             # the drain is aborted and the fleet is re-frozen.
             draining = False
             redline = True
+            resumed_reservations.clear()
             counters.redline_events += 1
             for sandbox in sandboxes:
                 # Capture the pre-entry balloon even for no-op plans, so the
@@ -826,8 +839,16 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
             # last-resort eviction runs ahead of the next re-entry check, so a
             # batch that would dive through the enter band would be evicted
             # before the red line could re-freeze it. Guests that do not fit
-            # stay frozen and are retried on later ticks.
-            projected_available = available
+            # stay frozen and are retried on later ticks. Guests resumed by
+            # earlier batches keep their outstanding-growth reservation until
+            # that growth is actually charged, so later batches cannot reuse
+            # the same headroom.
+            live = {s.index: s for s in sandboxes}
+            resumed_reservations &= set(live)
+            reserved = sum(
+                live[i].projected_charge_growth(cfg) for i in resumed_reservations
+            )
+            projected_available = available - reserved
             for sandbox in pending[: max(1, cfg.restore_batch)]:
                 growth = sandbox.projected_charge_growth(cfg)
                 projected_pct = (
@@ -840,8 +861,10 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
                 )
                 counters.restored += 1
                 projected_available -= growth
+                resumed_reservations.add(sandbox.index)
             if not pending:
                 draining = False
+                resumed_reservations.clear()
 
         # --- PSI projection ---------------------------------------------------
         util = (busy_mcore / 1000.0) / max(1, cfg.physical_cores)
@@ -1834,6 +1857,8 @@ def arguments(argv=None) -> argparse.Namespace:
         or args.snapshot_mib_per_sandbox < 0
     ):
         parser.error("Snapshot size must be finite and nonnegative")
+    if not math.isfinite(args.fill_ratio) or args.fill_ratio < 0:
+        parser.error("Fill ratio must be finite and nonnegative")
     if args.backend == "sim":
         try:
             args.ratios = [

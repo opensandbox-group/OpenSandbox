@@ -357,6 +357,26 @@ def test_drain_resumes_only_with_projected_headroom():
     assert result.counters.restored >= 1
 
 
+def test_drain_keeps_reservations_until_growth_is_charged():
+    # Guests resumed by an earlier batch still owe their projected growth;
+    # later batches must not reuse that headroom while the ramp is pending.
+    # Without the carry, the second batch triggers a second avoidable
+    # host eviction in this configuration.
+    cfg = sim_config(
+        node_memory_mib=1024.0,
+        platform_reserved_mib=0.0,
+        mix={"sparse": 0.5, "dense": 0.5},
+        interval_s=0.5,
+        duration_s=200.0,
+        restore_batch=1,
+        create_rate=0.5,
+    )
+    result = bench.run_tier(cfg, "redline", 6)
+    assert result.counters.host_oom_kills == 1
+    assert result.counters.redline_events == 1
+    assert result.counters.restored <= 3
+
+
 def test_red_line_recovers_when_headroom_returns():
     cfg = sim_config(
         mix={"dense": 1.0},
@@ -495,9 +515,41 @@ def test_host_oom_evicts_instead_of_exhausting_the_node():
     )
     result = bench.run_tier(cfg, "redline", 8)
     assert result.counters.host_oom_kills >= 1
-    assert result.mem_available_min_pct > 0.0
+    # The summary minimum captures the pre-eviction crossing (the pressure
+    # the policy had to handle); the sampled state after last-resort eviction
+    # stays positive because the reserve worked.
+    assert min(sample["mem_available_pct"] for sample in result.samples) > 0.0
     summary = result.to_summary(cfg, "density")
     assert "host_oom_kills" in summary["verdict"]["violations"]
+
+
+def test_pressure_extrema_capture_the_pre_eviction_crossing():
+    # The peak/minimum metrics describe the pressure the policy handled; the
+    # triggering state must not be erased by the eviction it caused.
+    cfg = sim_config(
+        node_memory_mib=4096.0,
+        platform_reserved_mib=1024.0,
+        mix={"dense": 1.0},
+        cap_mib=512.0,
+        duration_s=60.0,
+        red_line_enter_pct=1.0,
+        red_line_exit_pct=2.0,
+        host_oom_reserve_mib=64.0,
+    )
+    result = bench.run_tier(cfg, "redline", 8)
+    assert result.counters.host_oom_kills >= 1
+    sample_min = min(sample["mem_available_pct"] for sample in result.samples)
+    assert result.mem_available_min_pct < sample_min
+
+
+def test_guest_oom_is_idempotent_for_a_dead_workload():
+    cfg = sim_config(cap_mib=24.0, floor_mib=23.2, mix={"dense": 1.0})
+    guest = make_sandbox(cfg, kind="dense", cap=24.0)
+    guest.guest_oom(0, cfg)
+    assert guest.oom_kills == 1
+    assert guest.workload_dead is True
+    guest.guest_oom(5, cfg)
+    assert guest.oom_kills == 1
 
 
 def test_evicted_fleets_still_report_their_per_sandbox_cost():
@@ -1081,6 +1133,14 @@ def test_snapshot_size_must_be_finite_and_nonnegative():
         bench.arguments(["--snapshot-mib-per-sandbox", "-1"])
     with pytest.raises(SystemExit):
         bench.arguments(["--snapshot-mib-per-sandbox", "nan"])
+
+
+def test_fill_ratio_must_be_finite_and_nonnegative():
+    with pytest.raises(SystemExit):
+        bench.arguments(["--fill-ratio", "-1"])
+    with pytest.raises(SystemExit):
+        bench.arguments(["--fill-ratio", "nan"])
+    assert bench.arguments(["--fill-ratio", "0.5"]).fill_ratio == 0.5
 
 
 def test_host_backend_accepts_cap_only_without_floor():
