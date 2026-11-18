@@ -18,6 +18,7 @@ No hypervisor, no live node, no network."""
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -269,6 +270,23 @@ def test_red_line_recovers_when_headroom_returns():
     assert result.samples[-1]["redline_active"] is False
 
 
+def test_red_line_restore_keeps_elastic_floor_balloons():
+    # An elastic guest already tighter than the tighten target must keep its
+    # floor balloon across a red-line cycle instead of being deflated to 0.
+    cfg = sim_config(
+        cap_mib=2048.0,
+        floor_mib=256.0,
+        duration_s=40.0,
+        force_redline_tick=10,
+        release_redline_tick=20,
+    )
+    result = bench.run_tier(cfg, "elastic", 1)
+    assert result.counters.redline_events == 1
+    balloon = [sample["balloon_mib"] for sample in result.samples]
+    assert balloon[0] == pytest.approx(1792.0)
+    assert all(value == pytest.approx(1792.0) for value in balloon)
+
+
 def test_unrecovered_red_line_is_a_verdict_violation():
     # Dense fill pushes the node below the red line; tighten floors are
     # infeasible at this cap, so the freeze never restores headroom.
@@ -353,10 +371,10 @@ def test_tighten_matrix_matches_test_plan_expectations():
 
 
 def test_deflate_rescue_scenario_matches_expectations():
-    rescue_cfg, rows = bench.run_deflate_rescue(sim_config())
+    rescue_cfg, rows, results = bench.run_deflate_rescue(sim_config())
     assert rescue_cfg.cap_mib == 2048.0
     assert rescue_cfg.mix == {"dense": 1.0}
-    assert len(rows) == 2
+    assert len(rows) == len(results) == 2
     assert all(row["verdict"]["ok"] for row in rows)
     assert rows[0]["deflate_on_oom"] is True
     assert rows[0]["deflate_saves"] > 0
@@ -512,16 +530,42 @@ def test_read_cgroups_tolerates_a_vanished_sandbox(tmp_path, monkeypatch):
 
 def test_accumulate_cgroup_oom_counts_kills_across_churn():
     state, seen = {}, set()
-    # First sighting is a baseline, not a delta.
-    assert bench.accumulate_cgroup_oom(state, seen, {"a": 1, "b": 0}) == 0
+    # First-snapshot paths are baselines, not deltas.
+    assert (
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": 1, "b": 0}, baseline_new_paths=True
+        )
+        == 0
+    )
     # a accumulates; b disappears with its counter already counted.
-    assert bench.accumulate_cgroup_oom(state, seen, {"a": 4}) == 3
+    assert (
+        bench.accumulate_cgroup_oom(state, seen, {"a": 4}, baseline_new_paths=False)
+        == 3
+    )
     # A path that returns after vanishing counts from zero again.
-    assert bench.accumulate_cgroup_oom(state, seen, {"a": 4, "b": 2}) == 2
+    assert (
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": 4, "b": 2}, baseline_new_paths=False
+        )
+        == 2
+    )
+    # A cgroup created during the run counts its first-sighting kills.
+    assert (
+        bench.accumulate_cgroup_oom(
+            state, seen, {"a": 4, "b": 2, "c": 3}, baseline_new_paths=False
+        )
+        == 3
+    )
     # A counter that decreases was recreated: count it from zero, never
     # negative.
-    assert bench.accumulate_cgroup_oom(state, seen, {"a": 1}) == 1
-    assert bench.accumulate_cgroup_oom(state, seen, {"a": 1}) == 0
+    assert (
+        bench.accumulate_cgroup_oom(state, seen, {"a": 1}, baseline_new_paths=False)
+        == 1
+    )
+    assert (
+        bench.accumulate_cgroup_oom(state, seen, {"a": 1}, baseline_new_paths=False)
+        == 0
+    )
 
 
 def test_cli_host_run_writes_array_summary(tmp_path, capsys):
@@ -557,6 +601,45 @@ def test_cli_host_run_writes_array_summary(tmp_path, capsys):
 
 
 # --- CLI end to end (sim, hermetic) -----------------------------------------
+
+
+def test_host_per_sandbox_residency_uses_each_samples_live_count():
+    base = {
+        "mem_available_mib": 900.0,
+        "mem_total_mib": 1000.0,
+        "psi_cpu_some_avg60": 0.0,
+        "psi_cpu_full_avg60": 0.0,
+        "psi_mem_some_avg60": 0.0,
+        "vmstat_oom_kill": 0,
+        "cgroup_oom_kill": 0,
+        "cgroup_oom_kill_accumulated": 0,
+    }
+    samples = [
+        {**base, "cgroups": 1, "cgroup_current_mib": 100.0},
+        {**base, "cgroups": 2, "cgroup_current_mib": 200.0},
+    ]
+    cfg = bench.HostConfig(
+        proc_root=Path("/nonexistent"),
+        cgroup_root=None,
+        duration_s=2.0,
+        interval_s=1.0,
+        cap_mib=512.0,
+        sandboxes_override=None,
+    )
+    summary = bench.summarize_host_samples(samples, cfg)
+    assert summary["sandboxes"] == 2
+    # (100/1 + 200/2) / 2, not (100 + 200) / 2 / 2.
+    assert summary["resident_mib"]["mean_per_sandbox"] == pytest.approx(100.0)
+
+
+def test_cli_matrix_jsonl_carries_tick_samples(tmp_path):
+    out_jsonl = tmp_path / "matrix.jsonl"
+    assert (
+        bench.main(["--scenario", "deflate-rescue", "--out-jsonl", str(out_jsonl)]) == 0
+    )
+    types = [json.loads(line)["type"] for line in out_jsonl.read_text().splitlines()]
+    assert "sample" in types
+    assert "matrix-row" in types
 
 
 def test_cli_matrix_reports_describe_the_executed_configuration(capsys):

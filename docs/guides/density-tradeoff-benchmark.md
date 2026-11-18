@@ -102,7 +102,7 @@ Child directories of `--cgroup-root` are treated as sandboxes; `memory.current`,
 
 ## Output schema
 
-- `--out-jsonl`: one `sample` record per simulated tick (or host sample) plus one `summary` record per tier, all JSON lines.
+- `--out-jsonl`: one `sample` record per simulated tick (or host sample), tagged with its tier or matrix case, plus one `summary` or `matrix-row` record per tier or case — all JSON lines.
 - `--out-summary`: a JSON array of tier (or matrix row) summaries.
 - `--report`: the markdown table printed to stdout.
 

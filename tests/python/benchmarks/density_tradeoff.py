@@ -691,9 +691,12 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
             for sandbox in sandboxes:
                 if cfg.throttle_first:
                     sandbox.throttled = True
+                # Capture the pre-entry balloon even for no-op plans, so the
+                # restore path returns elastic guests to their floor posture
+                # instead of deflating them to zero.
+                sandbox.balloon_pre = sandbox.balloon
                 plan = tighten_plan(sandbox, tick_idx, cfg.tighten_margin_mib)
                 if plan is not None:
-                    sandbox.balloon_pre = sandbox.balloon
                     sandbox.balloon_target = plan
         if redline:
             counters.ticks_redline += 1
@@ -714,6 +717,7 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         psi_mem = min(100.0, max(0.0, (0.25 - avail_pct / 100.0) * 400.0))
 
         resident_total = sum(s.resident_mib(cfg) for s in sandboxes)
+        balloon_total = sum(s.balloon for s in sandboxes)
         resident_sum += resident_total
         if sandboxes:
             resident_per_sandbox_sum += resident_total / len(sandboxes)
@@ -739,6 +743,7 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
                 "t_s": round(tick_idx * cfg.interval_s, 3),
                 "sandboxes": len(sandboxes),
                 "resident_mib": round(resident_total, 3),
+                "balloon_mib": round(balloon_total, 3),
                 "mem_available_pct": round(avail_pct, 4),
                 "psi_cpu_some_pct": round(psi_some, 4),
                 "psi_cpu_full_pct": round(psi_full, 4),
@@ -890,9 +895,11 @@ def run_deflate_rescue(cfg: SimConfig) -> tuple[SimConfig, list[dict]]:
     escape hatch off the same burst OOMs the guest process.
 
     Returns the shared row config so the report header describes the
-    experiment that actually ran, not the top-level defaults.
+    experiment that actually ran, not the top-level defaults, plus the
+    per-row results for JSONL sample output.
     """
     rows = []
+    results = []
     base = replace(
         cfg,
         scenario="deflate-rescue",
@@ -907,6 +914,7 @@ def run_deflate_rescue(cfg: SimConfig) -> tuple[SimConfig, list[dict]]:
     for deflate_on in (True, False):
         row_cfg = replace(base, deflate_on_oom=deflate_on)
         result = run_tier(row_cfg, "elastic", 1)
+        results.append(result)
         rescued = (
             result.counters.deflate_saves > 0 and result.counters.guest_oom_kills == 0
         )
@@ -924,7 +932,7 @@ def run_deflate_rescue(cfg: SimConfig) -> tuple[SimConfig, list[dict]]:
                 "summary": result.to_summary(row_cfg, "deflate-rescue"),
             }
         )
-    return base, rows
+    return base, rows, results
 
 
 # ---------------------------------------------------------------------------
@@ -1031,21 +1039,25 @@ def read_cgroup_sample(path: Path) -> dict:
 
 
 def accumulate_cgroup_oom(
-    state: dict[str, int], seen: set[str], current: dict[str, int]
+    state: dict[str, int],
+    seen: set[str],
+    current: dict[str, int],
+    *,
+    baseline_new_paths: bool,
 ) -> int:
     """Return cgroup OOM kills newly observed since the previous sample.
 
     ``state`` carries the last cumulative counter per still-present cgroup,
     so kills are counted even when a cgroup is deleted later in the run.
-    The first sighting of a path establishes a baseline; a path that returns
-    after vanishing, or whose counter decreases, was recreated and counts
-    from zero.
+    Paths present at the first sample are baselined (their pre-existing
+    counters are not attributed to this run); paths that appear later count
+    from zero, as do returning or counter-resetting (recreated) paths.
     """
     observed = 0
     for path, count in current.items():
         previous = state.get(path)
         if previous is None:
-            if path in seen:
+            if path in seen or not baseline_new_paths:
                 observed += count
             else:
                 seen.add(path)
@@ -1080,7 +1092,12 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
             counts = {
                 path: sample["oom_kill"] for path, sample in cgroup_samples.items()
             }
-            cgroup_oom_seen += accumulate_cgroup_oom(oom_state, oom_paths_seen, counts)
+            cgroup_oom_seen += accumulate_cgroup_oom(
+                oom_state,
+                oom_paths_seen,
+                counts,
+                baseline_new_paths=not samples,  # first sample only
+            )
             num_cgroups = len(cgroup_samples)
             cgroup_current = round(
                 sum(item["current_mib"] for item in cgroup_samples.values()), 3
@@ -1160,6 +1177,18 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
     resident_mean = (
         sum(cgroup_current) / len(cgroup_current) if cgroup_current else None
     )
+    # Per-sandbox cost is averaged over each sample's live cgroup count, so
+    # fleet churn does not dilute it.
+    per_sandbox_ratios = [
+        s["cgroup_current_mib"] / s["cgroups"]
+        for s in samples
+        if s["cgroup_current_mib"] is not None and s["cgroups"]
+    ]
+    per_sandbox_mean = (
+        sum(per_sandbox_ratios) / len(per_sandbox_ratios)
+        if per_sandbox_ratios
+        else None
+    )
     return {
         "type": "summary",
         "backend": "host",
@@ -1172,8 +1201,8 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
             "mean_total": None if resident_mean is None else round(resident_mean, 3),
             "max_total": None if not cgroup_current else round(max(cgroup_current), 3),
             "mean_per_sandbox": None
-            if resident_mean is None or not sandboxes
-            else round(resident_mean / sandboxes, 3),
+            if per_sandbox_mean is None
+            else round(per_sandbox_mean, 3),
         },
         "mem_available_pct": {
             "min": round(min(avail_pct), 4),
@@ -1587,9 +1616,20 @@ def main(argv=None) -> int:
             "|---|---:|---:|---|---:|---:|---:|:---|",
             table_rows,
         )
-        samples_by_tier = summaries
+        samples_by_tier = []
+        for row in rows:
+            ordering = "throttle-first" if row.throttle_first else "inflate-first"
+            tag = {
+                "case": row.case,
+                "cap_mib": row.cap_mib,
+                "tighten_margin_mib": row.margin_mib,
+                "ordering": ordering,
+            }
+            for sample in row.result.samples:
+                samples_by_tier.append({**tag, **sample})
+        samples_by_tier.extend(summaries)
     else:
-        rescue_cfg, rows = run_deflate_rescue(cfg_sim)
+        rescue_cfg, rows, results = run_deflate_rescue(cfg_sim)
         summaries = rows
         table_rows = [
             f"| deflate_on_oom={row['deflate_on_oom']} | {row['sandboxes']} | {row['deflate_saves']} | "
@@ -1607,7 +1647,12 @@ def main(argv=None) -> int:
             "|---|---:|---:|---:|---:|:---|",
             table_rows,
         )
-        samples_by_tier = summaries
+        samples_by_tier = []
+        for deflate_on, result in zip((True, False), results, strict=True):
+            tag = {"case": "deflate-rescue", "deflate_on_oom": deflate_on}
+            for sample in result.samples:
+                samples_by_tier.append({**tag, **sample})
+        samples_by_tier.extend(summaries)
 
     if args.out_jsonl:
         with args.out_jsonl.open("w", encoding="utf-8") as handle:
