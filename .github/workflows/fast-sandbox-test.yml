@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: resource-aware
+      egress_modes:
+        description: Comma-separated egress modes (default, credential-bound); PRs always run both
+        required: false
+        type: string
+        default: default
   repository_dispatch:
     types: [fast-sandbox-pr]
   pull_request:
@@ -23,14 +28,15 @@ permissions:
   pull-requests: read
   actions: write
 
-# Unique group per dispatch run (GitHub concurrency would otherwise fold
-# queued runs away); PR pushes keep superseding each other. Unrelated
-# `labeled` events get their own group: the job gate skips them anyway, and
-# a shared group would let workflow-level cancel-in-progress kill an
-# in-flight KVM run before the gate gets a chance to skip.
+# PR pushes supersede each other. Dispatch runs key on client_payload.pr so a
+# new push to the same fast-sandbox PR cancels the in-flight KVM run (its
+# dispatcher is already gone); no pr -> unique group per run. Unrelated
+# `labeled` events get their own group: the job gate skips them anyway, and a
+# shared group would let cancel-in-progress kill an in-flight KVM run before
+# the gate gets a chance to skip.
 concurrency:
-  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test') && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test') && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '' && format('fsb-pr-{0}', github.event.client_payload.pr)) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '') }}
 
 jobs:
   changes:
@@ -72,11 +78,48 @@ jobs:
       - name: Run verifier regression tests
         run: python -m unittest discover -v -s scripts/fast-sandbox-env/tests -p 'test_*.py'
 
+  # Emits the integration matrix: PRs keep both OSEP-0023 legs; dispatch runs
+  # default to the default leg and opt into more via egress_modes.
+  egress-modes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.modes.outputs.matrix }}
+    steps:
+      - id: modes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.egress_modes || github.event.client_payload.egress_modes || '' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          values = {"default": "", "credential-bound": "credential-bound"}
+          requested = os.environ["REQUESTED"]
+          if os.environ["EVENT_NAME"] == "pull_request":
+              requested = "default,credential-bound"
+          modes = []
+          for part in (p.strip() for p in requested.split(",")):
+              if not part:
+                  continue
+              if part not in values:
+                  print(f"::error::unknown egress mode '{part}' (valid: {', '.join(values)})")
+                  sys.exit(1)
+              if values[part] not in modes:
+                  modes.append(values[part])
+          if not modes:
+              modes = [""]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"matrix={json.dumps(modes)}\n")
+          PY
+
   integration:
     # The default leg keeps the original check name; the OSEP-0023 leg adds
     # its mode to the name.
     name: Integration Env (self-hosted kvm${{ matrix.egress_interception_mode != '' && format(', {0}', matrix.egress_interception_mode) || '' }})
-    needs: changes
+    needs: [changes, egress-modes]
     if: >-
       github.event_name != 'pull_request' ||
       ( needs.changes.outputs.relevant == 'true' &&
@@ -84,14 +127,15 @@ jobs:
       ( github.event.action != 'labeled' ||
       github.event.label.name == 'ok-to-test' ) )
     # OSEP-0023 (experimental): the default leg ('' = switch unset, Pool
-    # rendered unchanged) plus a credential-bound leg. Strictly serial: each
-    # leg owns the runner for a full up -> verify -> teardown, so the pool is
-    # never switched under live Pods and the legs never share a host.
+    # rendered unchanged) plus an opt-in credential-bound leg (see
+    # egress-modes). Strictly serial: each leg owns the runner for a full
+    # up -> verify -> teardown, so the pool is never switched under live
+    # Pods and the legs never share a host.
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        egress_interception_mode: ['', 'credential-bound']
+        egress_interception_mode: ${{ fromJSON(needs.egress-modes.outputs.matrix) }}
     runs-on: kvm
     timeout-minutes: 240
     env:
