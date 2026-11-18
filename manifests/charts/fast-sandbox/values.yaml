@@ -64,7 +64,7 @@ controller:
     tag: ""
     # -- Image pull policy
     pullPolicy: IfNotPresent
-  # -- Number of controller replicas (no leader election; keep 1)
+  # -- Controller replica count. Only 1 is supported because the all-in-one controller does not use leader election.
   replicaCount: 1
   # -- Image that executes SandboxTemplate golden-image builds (builder Pods
   # are created by the controller; build it with manifests/release/build-fast-sandbox.sh).

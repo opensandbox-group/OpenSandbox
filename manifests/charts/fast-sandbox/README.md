@@ -9,6 +9,8 @@ The chart deploys:
 - **fast-sandbox-controller** (Deployment + `fast-sandbox-fastpath` Service): one process running the `sandbox.fast.io` reconcilers and the FastPath gRPC API (development topology, no leader election)
 - **firecracker-runtime** (DaemonSet + `dart` headless Service): the node-level firecracker agent (UDS management API used by fastlet Firecracker drivers, node-local DART child for P2P artifact delivery, janitor sidecar sweeping orphaned fastlet resources) running the node readiness loop — host checks, Firecracker asset install, the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` scheduling labels and the `FirecrackerReady` condition (the kata-deploy pattern; no manual node labeling)
 
+The controller topology is intentionally single-replica: the chart always passes `--role=all`, which does not use leader election, so `controller.replicaCount` must be `1`. The Deployment uses the `Recreate` strategy to stop the old Pod before starting its replacement, preventing overlapping reconcilers during upgrades at the cost of a brief FastPath interruption.
+
 boxlite, containerd-based runtimes and the upstream central sandbox-proxy are out of scope for this chart (the standalone containerd janitor DaemonSet is therefore not deployed): OpenSandbox deployments reach fastlets through the ingress gateway's direct route resolution (see `manifests/release/build-fast-sandbox.sh`).
 
 ## Prerequisites
@@ -93,7 +95,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.nodeSelector | object | `{}` | Node selector for the controller pod. |
 | controller.podAnnotations | object | `{}` | Extra annotations merged into the controller pod template annotations. |
 | controller.podLabels | object | `{}` | Extra labels merged into the controller pod template labels. |
-| controller.replicaCount | int | `1` | Number of controller replicas (no leader election; keep 1) |
+| controller.replicaCount | int | `1` | Controller replica count. Only 1 is supported because the all-in-one controller does not use leader election. |
 | controller.resources | object | `{"limits":{"cpu":"1","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits for the controller |
 | controller.sandboxtemplateBuilderImage | string | `""` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh). Empty uses the release-<appVersion> companion image tag. |
 | controller.sandboxtemplateBuilderPodSpec | string | `""` | Raw PodSpec fragment (YAML) merged into every SandboxTemplate build Pod by the controller: whitelisted scheduling fields only (tolerations appended; affinity and topologySpreadConstraints replaced). Rendered as the fast-sandbox-builder-pod-template ConfigMap; editing the live ConfigMap applies to the next build without a rollout. |

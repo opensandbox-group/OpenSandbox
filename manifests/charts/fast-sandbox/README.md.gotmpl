@@ -9,6 +9,8 @@ The chart deploys:
 - **fast-sandbox-controller** (Deployment + `fast-sandbox-fastpath` Service): one process running the `sandbox.fast.io` reconcilers and the FastPath gRPC API (development topology, no leader election)
 - **firecracker-runtime** (DaemonSet + `dart` headless Service): the node-level firecracker agent (UDS management API used by fastlet Firecracker drivers, node-local DART child for P2P artifact delivery, janitor sidecar sweeping orphaned fastlet resources) running the node readiness loop — host checks, Firecracker asset install, the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` scheduling labels and the `FirecrackerReady` condition (the kata-deploy pattern; no manual node labeling)
 
+The controller topology is intentionally single-replica: the chart always passes `--role=all`, which does not use leader election, so `controller.replicaCount` must be `1`. The Deployment uses the `Recreate` strategy to stop the old Pod before starting its replacement, preventing overlapping reconcilers during upgrades at the cost of a brief FastPath interruption.
+
 boxlite, containerd-based runtimes and the upstream central sandbox-proxy are out of scope for this chart (the standalone containerd janitor DaemonSet is therefore not deployed): OpenSandbox deployments reach fastlets through the ingress gateway's direct route resolution (see `manifests/release/build-fast-sandbox.sh`).
 
 ## Prerequisites

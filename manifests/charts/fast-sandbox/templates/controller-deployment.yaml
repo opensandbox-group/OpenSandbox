@@ -1,4 +1,7 @@
 {{- if .Values.controller.enabled }}
+{{- if ne (toString .Values.controller.replicaCount) "1" }}
+{{- fail "controller.replicaCount must be 1 because the fast-sandbox chart runs --role=all without leader election" }}
+{{- end }}
 {{- $builderImage := .Values.controller.sandboxtemplateBuilderImage | default (printf "opensandbox/fsb-sandboxtemplate-builder:release-%s" .Chart.AppVersion) }}
 {{/*
 `helm upgrade --reuse-values` can omit newly added chart defaults, so preserve
@@ -21,6 +24,8 @@ metadata:
     fast-sandbox.io/control-plane-role: all
 spec:
   replicas: {{ .Values.controller.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fast-sandbox.controllerSelectorLabels" . | nindent 6 }}
