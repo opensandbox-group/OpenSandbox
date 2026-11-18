@@ -53,7 +53,7 @@ Content-Type: application/json
 
 Accept CPU only, memory only or both as positive Kubernetes quantities within runtime limits. For a verified RootfsOnly source, omitting the entire object requests both source defaults. Reject explicitly empty objects, null dimension values and unsupported override dimensions. Preserve existing handling of pool-owned constraints on legacy requests; a pool constraint such as `pids` cannot resize a guest. Treat all transmitted CPU and memory quantities literally, including values inserted by older SDKs. Existing workload and tenant restrictions continue to apply.
 
-**Timeout:** the public request validator requires a non-null `timeout` with `templateId`. With `snapshotId`, the public timeout field is optional; omission or null requests no automatic expiry where the backend supports it. FSB currently persists an absolute expiration and rejects a missing timeout in its create mapping. FSB callers of this feature must therefore supply one for either source. This proposal does not extend FSB to non-expiring Sandboxes.
+**Timeout:** the public request validator requires a non-null `timeout` with `templateId`. With `snapshotId`, the public schema permits omission or null for backends that support non-expiring Sandboxes. For an otherwise valid FSB snapshot create, the OpenSandbox Server's FSB adapter returns HTTP 400 synchronously in either case, before calling FastPath CreateSandbox. FSB callers must supply a timeout for either source.
 
 **Discovery:** callers can inspect public `Snapshot.mode` (`full` or `rootfsOnly`; legacy records report `full`). For templates, propose an optional read-only artifact mode on `FsbTemplate`, populated from FSB only when known. Template storage `format` and build `status.phase` do not establish eligibility. Reject template overrides if the artifact's RootfsOnly mode cannot be verified.
 
@@ -89,7 +89,7 @@ Keep the distinct override-aware gRPC create operation. An old FSB returns `UNIM
 | Full template with limits or Full snapshot with changed recorded limits | Reject | Reject |
 | Snapshot with missing recorded limits | Existing pool-based validation can apply | For a verified RootfsOnly override, require any value that cannot be inherited |
 
-Python's existing `Sandbox.create(snapshot_id=...)` supplies `1 CPU / 2Gi` when no resources are passed to that SDK method. On a source recorded at `4 CPU / 8Gi`, the same request can change from rejection to successful creation at `1 CPU / 2Gi`. This is an intentional consequence of honoring the wire values. Document it in release notes. Provide an SDK method such as `createFromRootfs()` on the same endpoint that serializes only caller-supplied dimensions. Raw HTTP has identical semantics. SDK calls requiring the new behavior should target a qualified server; the legacy pool fallback makes a universal old-server rejection guarantee impossible.
+The ordinary snapshot create paths in the Python, Go, C#, JavaScript and Kotlin SDKs send `1 CPU / 2Gi` by default when the caller supplies no resources. For a source recorded at `4 CPU / 8Gi`, upgrading the server can therefore turn a rejected request into a successful create at `1 CPU / 2Gi`. Release notes must name all five affected SDKs and explain that the server applies the transmitted values. For callers who want to inherit source limits, document a method such as `createFromRootfs()` that uses the same endpoint and serializes only caller-supplied dimensions. Raw HTTP follows the same omission rules. SDK calls requiring the new behavior should target a qualified server; the legacy pool fallback makes a universal old-server rejection guarantee impossible.
 
 Qualify FSB before enabling the OSB mapping. Disable new reshapes first on rollback, retaining compatible workers for admitted instances, pending retries and recapture.
 
@@ -97,9 +97,9 @@ Qualify FSB before enabling the OSB mapping. Disable new reshapes first on rollb
 
 | Case | Acceptance |
 |---|---|
-| Wire and SDK | Exercise the compatibility matrix using raw HTTP and SDK payloads, including the old Python default pair. Confirm the new helper preserves complete and partial omission. |
+| Wire and SDK | For Python, Go, C#, JavaScript and Kotlin, inspect the outgoing body of an ordinary snapshot create with no caller-supplied resources and verify the default pair against the compatibility matrix. For the new helper in each SDK and for raw HTTP, verify that a memory-only request inherits CPU and that omitting both dimensions inherits both source limits. |
 | Source defaults | Override only memory on a `500m` snapshot and on a two-vCPU template. Verify quotas of `500m` and two cores respectively. Cover a legacy snapshot missing the omitted value and a legacy catalog row with derivable build defaults. |
-| Timeout | Template with absent/null timeout fails public validation. Snapshot with absent/null timeout and otherwise valid fields passes timeout validation; FSB then rejects unsupported non-expiring creation. A supported explicit timeout reaches admission for both source types. |
+| Timeout | Test omitted and explicit null separately. For a template, expect public validation to reject the request. For an otherwise valid FSB snapshot create, assert a synchronous HTTP 400 and zero FastPath CreateSandbox calls. A supported explicit timeout reaches admission for both source types. |
 | Eligibility | Verify reported snapshot/template mode, missing metadata, inaccessible sources, Full rejection and pool constraints. An old FSB or ineligible worker cannot silently create a reshaped guest through legacy Create. |
 | Runtime | Test smaller and larger guests, quota inheritance across recapture, asynchronous failures and subsequent Full restore. Qualify each supported storage backend with the FSEP tests. |
 
