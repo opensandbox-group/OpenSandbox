@@ -14,12 +14,14 @@
 
 package controller
 
-// Boundary-condition samples for the file upload API. Each test pins one edge
-// of the upload surface that several concurrent PRs converge on from different
-// directions. Tests whose expected behavior is still only proposed by an open
-// PR are skipped with the PR number and the exact expectation, so they can be
-// unskipped the moment that behavior lands. They are the empirical base for a
-// spec issue on the file API surface.
+// Boundary-condition tests for the file upload API. Each test enforces one
+// claim of the execd-file-api conformance profile
+// (specs/conformance/profiles/execd-file-api.yaml, format proposed in
+// issue #2926): the claim is the reviewable normative statement, the test is
+// its executable form, and the checker in scripts/conformance keeps the two
+// in sync. Tests whose expected behavior is still only proposed by an open PR
+// are skipped with the PR number and the exact expectation, so they can be
+// unskipped the moment that behavior lands.
 
 import (
 	"bytes"
@@ -62,12 +64,11 @@ func doUpload(t *testing.T, metadata string, content []byte) *httptest.ResponseR
 	return rec
 }
 
-// TestUploadRejectsUndefinedEnvVarPath pins the boundary behind PR #2690: a
+// TestUploadRejectsUndefinedEnvVarPath enforces claim FILE-PATH-ENV-001: a
 // path that references an environment variable which is not set must be
-// rejected as a validation error, never silently expanded (which would land
-// the file at a literal "${VAR}" path). The validation itself is already in
-// main; the open PR remaps the same rejection from a 500 to a 400, which the
-// status range assertion below survives.
+// rejected as an error, never silently expanded (which would land the file at
+// a literal "${VAR}" path). The status-range assertion survives the route's
+// error mapping moving between 4xx and 5xx while the rejection itself stays.
 func TestUploadRejectsUndefinedEnvVarPath(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.ToSlash(filepath.Join(dir, "${OSB_FILE_API_BOUNDARY_UNDEFINED_VAR}", "file.txt"))
@@ -84,11 +85,11 @@ func TestUploadRejectsUndefinedEnvVarPath(t *testing.T) {
 	require.Empty(t, entries, "a rejected upload must not create anything on disk")
 }
 
-// TestUploadReplacementThroughAPIKeepsDestinationSetuid pins the boundary the
-// staging upload path has to uphold end to end (PRs #2445 and #2750 both touch
-// it): replacing an existing file through the public route must not strip the
-// setuid bit, because the rename swaps the inode and the bit would otherwise
-// be lost for good.
+// TestUploadReplacementThroughAPIKeepsDestinationSetuid enforces claim
+// FILE-UPLOAD-SETUID-002: the staging upload path must keep the destination's
+// special bits end to end. Replacing an existing file through the public route
+// must not strip the setuid bit, because the rename swaps the inode and the
+// bit would otherwise be lost for good.
 func TestUploadReplacementThroughAPIKeepsDestinationSetuid(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows only models the read-only bit")
@@ -113,10 +114,10 @@ func TestUploadReplacementThroughAPIKeepsDestinationSetuid(t *testing.T) {
 	requireNoUploadStaging(t, dir)
 }
 
-// TestUploadRequestedModeOverridesDestinationMode pins the other side of the
-// mode boundary discussed in PRs #2661 and #2445: when the metadata carries an
-// explicit mode, that request wins even for a replacement, where the staging
-// path first restores the destination's previous mode.
+// TestUploadRequestedModeOverridesDestinationMode enforces claim
+// FILE-UPLOAD-MODE-003: when the metadata carries an explicit mode, that
+// request wins even for a replacement, where the staging path first restores
+// the destination's previous mode.
 func TestUploadRequestedModeOverridesDestinationMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows only models the read-only bit")
@@ -137,14 +138,14 @@ func TestUploadRequestedModeOverridesDestinationMode(t *testing.T) {
 	requireNoUploadStaging(t, dir)
 }
 
-// TestUploadRequestedModeAppliesSpecialBits pins the boundary behind open PRs
-// #2750 and #2445: a metadata mode such as 4755 carries setuid/setgid/sticky
-// in its high octal digits, and those must reach the file. Main today parses
-// the octal digits and casts the integer straight to os.FileMode, which drops
-// them because Go encodes the special bits at 1<<20 and above, leaving 0755.
-// Unskip when one of those PRs lands.
+// TestUploadRequestedModeAppliesSpecialBits pins the open side of claim
+// FILE-UPLOAD-MODE-005 (PR #2445): a metadata mode such as 4755 carries
+// setuid/setgid/sticky in its high octal digits, and those must reach the
+// file. Main today parses the octal digits and casts the integer straight to
+// os.FileMode, which drops them because Go encodes the special bits at 1<<20
+// and above, leaving 0755. Unskip when #2445 lands.
 func TestUploadRequestedModeAppliesSpecialBits(t *testing.T) {
-	t.Skip("boundary sample for open PRs #2750/#2445: special bits in an octal metadata mode are proposed, not yet merged")
+	t.Skip("claim FILE-UPLOAD-MODE-005 is pending on PR #2445: special bits in an octal metadata mode are proposed, not yet merged")
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows only models the read-only bit")
 	}

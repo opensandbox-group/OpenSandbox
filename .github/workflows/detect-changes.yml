@@ -117,6 +117,8 @@ jobs:
                 workflowChanged(path, "execd-test.yml") ||
                 path.startsWith("components/execd/") ||
                 path.startsWith("components/internal/") ||
+                path.startsWith("specs/conformance/") ||
+                path.startsWith("scripts/conformance/") ||
                 path === "scripts/execd-ebpf-smoke.sh",
               nodeagent: (path) =>
                 workflowChanged(path, "nodeagent-test.yml") ||
@@ -130,7 +132,7 @@ jobs:
                 workflowChanged(path, "sdk-tests.yml") ||
                 path.startsWith("cli/") ||
                 path.startsWith("sdks/") ||
-                path.startsWith("specs/"),
+                (path.startsWith("specs/") && !path.startsWith("specs/conformance/")),
             };
 
             const area = process.env.AREA;

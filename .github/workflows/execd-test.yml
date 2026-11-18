@@ -57,6 +57,17 @@ jobs:
         run: |
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run contract schema tests
+        run: |
+          uv run specs/tests/test_execd_schema.py
+
+      - name: Run conformance profiles
+        run: |
+          uv run scripts/conformance/run_profile.py specs/conformance/profiles/execd-file-api.yaml
+
       - name: Verify filesystem identity permissions as root
         working-directory: components/execd
         run: |

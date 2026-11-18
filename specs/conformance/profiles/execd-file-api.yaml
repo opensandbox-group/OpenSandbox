@@ -1,0 +1,78 @@
+# Conformance profile for the execd file API (upload and info surface).
+#
+# Format and status semantics: ../README.md. Checked in CI by
+# scripts/conformance/run_profile.py.
+apiVersion: opensandbox.io/v1alpha1
+kind: ConformanceProfile
+metadata:
+  name: execd-file-api
+  version: 0.1.0
+  description: Behavioral claims for the execd file upload and info surface.
+contract:
+  - docs/api/implementation-compatibility.md
+  - specs/execd-api.yaml
+claims:
+  - id: FILE-PATH-ENV-001
+    clause: >-
+      A file path that references an undefined environment variable is rejected
+      with an error status and an error message naming the undefined variables;
+      nothing is created on disk.
+    status: enforced
+    tests:
+      - components/execd/pkg/web/controller/filesystem_api_boundaries_test.go::TestUploadRejectsUndefinedEnvVarPath
+
+  - id: FILE-UPLOAD-SETUID-002
+    clause: >-
+      Replacing an existing file through the file upload API preserves the
+      destination's setuid bit, and a successful upload leaves no staging file
+      in the destination directory.
+    status: enforced
+    tests:
+      - components/execd/pkg/web/controller/filesystem_api_boundaries_test.go::TestUploadReplacementThroughAPIKeepsDestinationSetuid
+
+  - id: FILE-UPLOAD-MODE-003
+    clause: >-
+      An explicit mode in upload metadata is applied to the uploaded file,
+      winning over the destination's previous mode when an existing file is
+      replaced.
+    status: enforced
+    tests:
+      - components/execd/pkg/web/controller/filesystem_api_boundaries_test.go::TestUploadRequestedModeOverridesDestinationMode
+
+  - id: FILE-UPLOAD-MODE-004
+    clause: >-
+      A new file uploaded without a metadata mode is created with creat(2)'s
+      default (0666 shaped by the process umask, i.e. 0644 under umask 022)
+      instead of inheriting the executable staging mode.
+    status: pending
+    pending_ref: https://github.com/opensandbox-group/OpenSandbox/pull/2661
+    tests:
+      - components/execd/pkg/web/controller/filesystem_upload_mode_boundary_linux_test.go::TestUploadOmittedModeForNewFileFollowsCreatDefault
+
+  - id: FILE-UPLOAD-MODE-005
+    clause: >-
+      Setuid, setgid, and sticky bits carried in an octal metadata mode (for
+      example 4755) reach the created or replaced file.
+    status: pending
+    pending_ref: https://github.com/opensandbox-group/OpenSandbox/pull/2445
+    tests:
+      - components/execd/pkg/web/controller/filesystem_api_boundaries_test.go::TestUploadRequestedModeAppliesSpecialBits
+
+  - id: FILE-INFO-BTIME-006
+    clause: >-
+      created_at reports the file's birth time while the path still resolves to
+      the captured inode, and falls back to the captured inode's ctime when the
+      directory entry was replaced, never mixing another inode's birth time
+      into the result.
+    status: enforced
+    tests:
+      - components/execd/pkg/web/controller/filesystem_created_at_linux_test.go::TestFilesystemControllerGetFilesInfoCreatedAtSurvivesChmod
+      - components/execd/pkg/web/controller/filesystem_created_at_linux_test.go::TestGetFileCreateTimeFallsBackForDifferentInode
+
+  - id: FILE-INFO-BTIME-007
+    clause: >-
+      For a symlink entry, created_at reports the link's own birth time, even
+      when the link target cannot be followed.
+    status: enforced
+    tests:
+      - components/execd/pkg/web/controller/filesystem_created_at_linux_test.go::TestFilesystemControllerGetFilesInfoCreatedAtUsesSymlinkBirthTime
