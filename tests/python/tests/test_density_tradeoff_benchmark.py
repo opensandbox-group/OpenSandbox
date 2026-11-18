@@ -300,6 +300,28 @@ def test_redline_floor_grants_are_restored_after_recovery():
     assert result.samples[-1]["balloon_mib"] == 0.0
 
 
+def test_mid_drain_re_entry_preserves_original_balloons():
+    cfg = sim_config(
+        cap_mib=2048.0,
+        fill_ratio=0.7,
+        duration_s=30.0,
+        restore_batch=1,
+        force_redline_ticks=(10, 14),
+        release_redline_tick=12,
+    )
+    result = bench.run_tier(cfg, "redline", 2)
+    assert result.counters.redline_events == 2
+    # A guest still tightened from the aborted cycle keeps its original
+    # pre-cycle balloon, so the next recovery deflates it fully.
+    assert result.samples[-1]["balloon_mib"] == 0.0
+
+
+def test_host_oom_reserve_default_stays_below_the_enter_band():
+    for node in (1024.0, 2048.0, 4096.0, 16384.0, 515745.0):
+        cfg = sim_config(node_memory_mib=node)
+        assert bench.host_oom_reserve(cfg) < cfg.red_line_enter_pct / 100.0 * node
+
+
 def test_host_oom_reserve_scales_to_the_configured_node():
     cfg = sim_config(
         node_memory_mib=4096.0,
@@ -511,6 +533,7 @@ def test_host_summary_aggregates_samples(tmp_path):
     assert summary["sandboxes"] == 2
     assert summary["events"]["host_oom_kills_delta"] == 0
     assert summary["resident_mib"]["mean_per_sandbox"] == pytest.approx(170.7, abs=0.5)
+    assert summary["psi_max_pct"]["mem_some"] == pytest.approx(0.2)
     assert summary["verdict"]["ok"] is True
     report = bench.render_host_report(summary, cfg)
     assert "backend: host" in report
@@ -675,6 +698,21 @@ def test_host_summary_separates_contained_from_node_level_kills():
     assert summary["events"]["system_oom_kills_delta"] == 4
     assert summary["events"]["cgroup_oom_kills_delta"] == 3
     assert summary["events"]["host_oom_kills_delta"] == 1
+
+
+def test_effective_oom_reserve_is_recorded_in_outputs():
+    cfg = sim_config(node_memory_mib=4096.0)
+    assert "host OOM reserve 256 MiB" in bench.policy_line(cfg)
+    result = bench.run_tier(cfg, "redline", 1)
+    summary = result.to_summary(cfg, "density")
+    assert summary["host_oom_reserve_mib"] == pytest.approx(256.0)
+
+
+def test_host_backend_accepts_cap_only_without_floor():
+    args = bench.arguments(
+        ["--backend", "host", "--sandboxes", "10", "--cap-mib", "256"]
+    )
+    assert args.cap_mib == 256.0
 
 
 def test_host_per_sandbox_residency_uses_each_samples_live_count():

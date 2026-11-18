@@ -432,6 +432,7 @@ class TierResult:
                 "seed": cfg.seed,
                 "create_rate_per_s": cfg.create_rate,
             },
+            "host_oom_reserve_mib": round(host_oom_reserve(cfg), 3),
             "resident_mib": {
                 "mean_total": round(self.resident_mean_mib, 3),
                 "max_total": round(self.resident_max_mib, 3),
@@ -574,11 +575,17 @@ def plan_tighten(
 
 
 def host_oom_reserve(cfg: SimConfig) -> float:
-    """Last-resort eviction threshold, scaled to the configured node so the
-    default never sits above the red-line bands on a small node."""
+    """Last-resort eviction threshold, scaled to the configured node.
+
+    The default is 0.8% of node memory with a 256 MiB floor, capped below
+    the configured red-line enter band so eviction can never preempt the
+    state machine; an explicit override is used as-is.
+    """
     if cfg.host_oom_reserve_mib is not None:
         return cfg.host_oom_reserve_mib
-    return max(256.0, 0.008 * cfg.node_memory_mib)
+    auto = max(256.0, 0.008 * cfg.node_memory_mib)
+    ceiling = 0.9 * (cfg.red_line_enter_pct / 100.0) * cfg.node_memory_mib
+    return min(auto, ceiling)
 
 
 def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
@@ -713,12 +720,16 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
             redline = True
             counters.redline_events += 1
             for sandbox in sandboxes:
-                if cfg.throttle_first:
-                    sandbox.throttled = True
                 # Capture the pre-entry balloon even for no-op plans, so the
                 # restore path returns elastic guests to their floor posture
-                # instead of deflating them to zero.
-                sandbox.balloon_pre = sandbox.balloon
+                # instead of deflating them to zero. A guest still tightened
+                # or throttled from a drain that re-entry aborted keeps its
+                # original pre-cycle value.
+                already_engaged = sandbox.tightened or sandbox.throttled
+                if cfg.throttle_first:
+                    sandbox.throttled = True
+                if not already_engaged:
+                    sandbox.balloon_pre = sandbox.balloon
                 plan = tighten_plan(sandbox, tick_idx, cfg.tighten_margin_mib)
                 if plan is not None:
                     sandbox.balloon_target = plan
@@ -1200,6 +1211,9 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
     psi_full = [
         s["psi_cpu_full_avg60"] for s in samples if s["psi_cpu_full_avg60"] is not None
     ]
+    psi_mem = [
+        s["psi_mem_some_avg60"] for s in samples if s["psi_mem_some_avg60"] is not None
+    ]
     violations = []
     if system_oom_delta is None:
         violations.append("vmstat_oom_kill_unavailable")
@@ -1244,6 +1258,7 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
         "psi_max_pct": {
             "cpu_some": max(psi_some) if psi_some else None,
             "cpu_full": max(psi_full) if psi_full else None,
+            "mem_some": max(psi_mem) if psi_mem else None,
         },
         "events": {
             "system_oom_kills_delta": system_oom_delta,
@@ -1282,7 +1297,8 @@ def policy_line(cfg: SimConfig) -> str:
         f"sigma-caps invariant {cfg.invariant_pct:.0f}%, tighten margin {cfg.tighten_margin_mib:.0f} MiB, "
         f"{'throttle-first' if cfg.throttle_first else 'inflate-first'} ordering, "
         f"deflate_on_oom {'on' if cfg.deflate_on_oom else 'off'}, "
-        f"floor guarantee {'on' if cfg.floor_guarantee else 'off'}"
+        f"floor guarantee {'on' if cfg.floor_guarantee else 'off'}, "
+        f"host OOM reserve {host_oom_reserve(cfg):g} MiB"
     )
 
 
@@ -1392,7 +1408,7 @@ def render_host_report(summary: dict, cfg: HostConfig) -> str:
         f"- {GUIDE_NOTE}",
         f"- proposal: OSEP-0033 {OSEP_0033_URL}",
         "",
-        "| oversell | sandboxes | mean resident MiB/sandbox | MemAvailable min % | PSI cpu some/full max % | system OOM delta | host OOM delta | cgroup OOM delta | verdict |",
+        "| oversell | sandboxes | mean resident MiB/sandbox | MemAvailable min % | PSI max % (cpu some/full; mem some) | system OOM delta | host OOM delta | cgroup OOM delta | verdict |",
         "|---|---:|---:|---:|---:|---:|---:|---:|:---|",
     ]
     resident = summary["resident_mib"]["mean_per_sandbox"]
@@ -1409,11 +1425,14 @@ def render_host_report(summary: dict, cfg: HostConfig) -> str:
     host_oom = events.get("host_oom_kills_delta")
     cgroup_oom = events.get("cgroup_oom_kills_delta")
     per_sandbox = "n/a" if resident is None else f"{resident:.1f}"
+    psi_mem = summary["psi_max_pct"].get("mem_some")
     psi_pair = (
         "n/a"
         if psi_some is None or psi_full is None
         else f"{psi_some:.1f}/{psi_full:.1f}"
     )
+    if psi_mem is not None:
+        psi_pair += f"; {psi_mem:.1f}"
     lines.append(
         f"| {'n/a' if oversell is None else f'{oversell:.2f}x'} | {summary['sandboxes']} | "
         f"{per_sandbox} | {summary['mem_available_pct']['min']:.1f} | {psi_pair} | "
@@ -1553,7 +1572,11 @@ def arguments(argv=None) -> argparse.Namespace:
         args.mix = parse_mix(args.mix)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.cap_mib <= 0 or args.floor_mib < 0 or args.floor_mib >= args.cap_mib:
+    if args.cap_mib <= 0:
+        parser.error("cap_mib must be positive")
+    if args.backend == "sim" and (args.floor_mib < 0 or args.floor_mib >= args.cap_mib):
+        # The floor is an elastic-tier simulator concept; the host sampler
+        # never consumes it.
         parser.error("Require 0 <= floor_mib < cap_mib")
     if args.duration <= 0 or args.interval <= 0:
         parser.error("Duration and interval must be positive")
