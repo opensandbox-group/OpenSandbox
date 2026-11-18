@@ -56,6 +56,17 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
+	var timedOut bool
+	cancel := cmd.Cancel
+	cmd.Cancel = func() error {
+		deadline := errors.Is(ctx.Err(), context.DeadlineExceeded)
+		err := cancel()
+		// Wait joins this callback before reading timedOut. A successful kill
+		// can still coincide with an independent process exit.
+		timedOut = deadline && err == nil
+		return err
+	}
+
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
@@ -94,38 +105,42 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	err = cmd.Wait()
 	close(done)
 	wg.Wait()
-	if err != nil {
-		var eName, eValue string
-		eCode := 1
-		var exitCodePtr *int
-		var traceback []string
-
-		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
-			exitCode := exitError.ExitCode()
-			eName = "CommandExecError"
-			eValue = strconv.Itoa(exitCode)
-			eCode = exitCode
-			exitCodePtr = &exitCode
-		} else {
-			eName = "CommandExecError"
-			eValue = err.Error()
-		}
-		traceback = []string{err.Error()}
-
-		request.Hooks.OnExecuteError(&execute.ErrorOutput{
-			EName:     eName,
-			EValue:    eValue,
-			Traceback: traceback,
-			ExitCode:  exitCodePtr,
-		})
-
-		log.ErrorWithCommandID(session, "command: run failed: %v", err)
-		c.markCommandFinished(session, eCode, err.Error())
+	if err == nil {
+		c.markCommandFinished(session, 0, "")
+		request.Hooks.OnExecuteComplete(time.Since(startAt))
 		return nil
 	}
-	c.markCommandFinished(session, 0, "")
-	request.Hooks.OnExecuteComplete(time.Since(startAt))
+
+	var eName, eValue string
+	eCode := 1
+	var exitCodePtr *int
+
+	var exitError *exec.ExitError
+	if errors.As(err, &exitError) {
+		exitCode := exitError.ExitCode()
+		eName = "CommandExecError"
+		eValue = strconv.Itoa(exitCode)
+		eCode = exitCode
+		exitCodePtr = &exitCode
+	} else {
+		eName = "CommandExecError"
+		eValue = err.Error()
+	}
+	errorMessage := err.Error()
+	if timedOut {
+		eName = "CommandTimeout"
+		errorMessage = fmt.Sprintf("command timed out after %s: %s", request.Timeout, errorMessage)
+	}
+
+	request.Hooks.OnExecuteError(&execute.ErrorOutput{
+		EName:     eName,
+		EValue:    eValue,
+		Traceback: []string{errorMessage},
+		ExitCode:  exitCodePtr,
+	})
+
+	log.ErrorWithCommandID(session, "command: run failed: %s", errorMessage)
+	c.markCommandFinished(session, eCode, errorMessage)
 	return nil
 }
 
