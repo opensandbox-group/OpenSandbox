@@ -127,7 +127,7 @@ The mode belongs to the egress process, one per Fastlet Pod, so it is effectivel
 
 #### Visibility of unbound HTTPS
 
-Credential-bound forwards TLS for hosts without an active binding as opaque bytes. DNS filtering, nft enforcement, and encrypted-DNS handling are unchanged — both modes enforce the same policy — but mitmproxy addons and any audit or request-level inspection see an unbound HTTPS flow only as a tunnel: its destination and the decrypt/passthrough outcome remain observable, while the HTTP method, headers, and body do not. Deployments that rely on decrypting every HTTPS flow for L7 audit or addon-based filtering keep that visibility only in `all` mode; under `credential-bound` they must add a vault binding for each host they need to inspect.
+For a known subject with a current decision snapshot, credential-bound forwards unbound TLS/443 traffic opaquely when egress policy permits it. DNS filtering, nft enforcement, and encrypted-DNS handling are unchanged — both modes enforce the same policy — but mitmproxy addons and any audit or request-level inspection see an unbound HTTPS flow only as a tunnel: its destination and the decrypt/passthrough outcome remain observable, while the HTTP method, headers, and body do not. Deployments that rely on decrypting every HTTPS flow for L7 audit or addon-based filtering keep that visibility only in `all` mode; under `credential-bound` they must add a vault binding for each host they need to inspect.
 
 Client-side usage rules — installing a binding before requests, recycling connections after the first binding for a host, and the HTTP/1.1-only boundary on bound hosts — are covered in the [credential vault guide](/guides/credential-vault#fast-sandbox-credential-bound-vault-usage-experimental).
 
