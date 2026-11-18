@@ -595,10 +595,32 @@ def test_tighten_ordering_uses_guest_age_for_late_arrivals():
 
 def test_deflate_rescue_extends_a_short_horizon_to_reach_the_burst():
     # A 1 s horizon cannot ramp the guest to its effective cap; the scenario
-    # extends it so the advertised deflate comparison is actually exercised.
+    # extends it so the advertised deflate comparison is actually exercised,
+    # in whole ticks so even a coarse cadence samples the burst.
     rescue_cfg, rows, _ = bench.run_deflate_rescue(sim_config(duration_s=1.0))
     assert rescue_cfg.duration_s >= 20.0
     assert all(row["verdict"]["ok"] for row in rows)
+    coarse_cfg, coarse_rows, _ = bench.run_deflate_rescue(
+        sim_config(duration_s=1.0, interval_s=8.0)
+    )
+    assert coarse_cfg.duration_s >= 48.0
+    assert all(row["verdict"]["ok"] for row in coarse_rows)
+
+
+def test_deflate_rescue_verdict_rejects_host_evicted_guests():
+    # A guest that the host evicted absorbed nothing; the outer row verdict
+    # must fail even though no guest OOM was recorded.
+    rescue_cfg, rows, _ = bench.run_deflate_rescue(
+        sim_config(
+            node_memory_mib=4096.0,
+            platform_reserved_mib=0.0,
+            host_oom_reserve_mib=3000.0,
+        )
+    )
+    rescued = next(row for row in rows if row["deflate_on_oom"])
+    assert rescued["sandboxes"] == 0
+    assert rescued["host_oom_kills"] == 1
+    assert rescued["verdict"]["ok"] is False
 
 
 def test_deflate_rescue_scenario_matches_expectations():
@@ -926,6 +948,53 @@ def test_summary_serializes_the_effective_configuration():
     assert config["throttle_first"] is True
     assert config["deflate_on_oom"] is True
     assert config["storage_gib"] == 42.0
+
+
+def test_host_summary_fails_on_cgroup_only_oom_delta():
+    # vmstat is read before the cgroup files: a kill landing in that window
+    # appears only in the fleet delta and must still fail the verdict.
+    base = {
+        "mem_available_mib": 900.0,
+        "mem_total_mib": 1000.0,
+        "psi_cpu_some_avg60": 0.0,
+        "psi_cpu_full_avg60": 0.0,
+        "psi_mem_some_avg60": 0.0,
+        "vmstat_oom_kill": 0,
+        "cgroups": 2,
+        "cgroup_current_mib": 300.0,
+    }
+    samples = [
+        {**base, "cgroup_oom_kill_accumulated": 0},
+        {**base, "cgroup_oom_kill_accumulated": 1},
+    ]
+    cfg = bench.HostConfig(
+        proc_root=Path("/nonexistent"),
+        cgroup_root=None,
+        duration_s=2.0,
+        interval_s=1.0,
+        cap_mib=512.0,
+        sandboxes_override=None,
+    )
+    summary = bench.summarize_host_samples(samples, cfg)
+    assert summary["events"]["system_oom_kills_delta"] == 0
+    assert summary["events"]["cgroup_oom_kills_delta"] == 1
+    assert "oom_kills" in summary["verdict"]["violations"]
+
+
+def test_arguments_reject_impossible_node_shapes():
+    with pytest.raises(SystemExit):
+        # The default reserve is larger than the overridden node.
+        bench.arguments(["--node-memory-mib", "16384"])
+    with pytest.raises(SystemExit):
+        bench.arguments(
+            ["--node-memory-mib", "16384", "--platform-reserved-mib", "16384"]
+        )
+    with pytest.raises(SystemExit):
+        # The matrix's earliest forced trigger cannot be resolved at this
+        # cadence.
+        bench.arguments(["--scenario", "tighten-margins", "--interval", "30"])
+    with pytest.raises(ValueError):
+        bench.run_tighten_matrix(sim_config(interval_s=30.0))
 
 
 def test_host_backend_accepts_cap_only_without_floor():

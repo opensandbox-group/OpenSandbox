@@ -57,7 +57,7 @@ Every row shows the requested and placed oversell ratio, the placed sandbox coun
 | `--tiers` | `0.5,1,2,4` | Oversell ratios to sweep; sandbox count is derived from node memory and cap |
 | `--cap-mib`, `--floor-mib` | `512`, `256` | Declared cap and elastic floor per sandbox; the floor must cover the modeled ~23 MiB boot footprint |
 | `--mix` | `idle=0.8,sparse=0.1,bursty=0.1` | Workload mix; also accepts `dense` for full-inflation runs. Every guest's clock starts at its own admission, so a dense guest admitted mid-run ramps at the profile rate rather than materializing a full working set |
-| `--node-memory-mib`, `--platform-reserved-mib`, `--physical-cores` | evidence-class node | Node shape; the reserve is charged against MemAvailable and the invariant |
+| `--node-memory-mib`, `--platform-reserved-mib`, `--physical-cores` | evidence-class node | Node shape; the reserve is charged against MemAvailable and the invariant, and must be smaller than node memory |
 | `--duration`, `--interval`, `--seed` | `300`, `1`, `7` | Horizon and determinism |
 | `--storage-gib`, `--storage-headroom-pct` | `3500`, `10` | Snapshot storage axis; the first wall in the measured evidence |
 | `--red-line-enter-pct`, `--red-line-exit-pct` | `15`, `18` | Node MemAvailable bands with hysteresis |
@@ -80,7 +80,7 @@ Idle-heavy fleets do not make memory the binding axis; this run does. At 1× and
 python3 benchmarks/density_tradeoff.py --scenario tighten-margins
 ```
 
-The matrix mirrors the Test Plan's integration cases: a 512 MiB margin holds with zero guest OOM, the known-bad 128 MiB margin keeps the failure visible, an infeasible floor emits a skip instead of an inflate, and inflate-before-throttle ordering OOMs guests that are still allocating. Each row prints the expected outcome and a pass/fail verdict against it. The synthetic red-line trigger is pinned to elapsed time (25 s, or 10 s for the inflate-first case) and stays engaged until its release tick even while headroom is high, so `--interval` changes the sampling cadence rather than the case; a horizon shorter than a case needs is extended so the forced window and its release always fit.
+The matrix mirrors the Test Plan's integration cases: a 512 MiB margin holds with zero guest OOM, the known-bad 128 MiB margin keeps the failure visible, an infeasible floor emits a skip instead of an inflate, and inflate-before-throttle ordering OOMs guests that are still allocating. Each row prints the expected outcome and a pass/fail verdict against it. The synthetic red-line trigger is pinned to elapsed time (25 s, or 10 s for the inflate-first case) and stays engaged until its release tick even while headroom is high, so `--interval` changes the sampling cadence rather than the case; a cadence coarser than the 10 s trigger cannot resolve it and is rejected, and a horizon shorter than a case needs is extended so the forced window and its release always fit.
 
 ## `deflate_on_oom` rescue
 

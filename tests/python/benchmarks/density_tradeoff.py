@@ -66,6 +66,12 @@ DENSE_RAMP_MIB_PER_S = 100.0
 # Dense ramp start times are staggered within this window.
 DENSE_STAGGER_S = 8.0
 
+# Forced red-line triggers for the tighten matrix, in elapsed seconds; the
+# sampling cadence must resolve the earliest one (the inflate-first case).
+MATRIX_TRIGGER_S = 25.0
+MATRIX_INFLATE_FIRST_TRIGGER_S = 10.0
+MATRIX_RELEASE_AFTER_S = 20.0
+
 
 @dataclass(frozen=True)
 class WorkloadProfile:
@@ -975,21 +981,61 @@ def run_tighten_matrix(cfg: SimConfig) -> list[MatrixRow]:
     The synthetic red-line trigger is pinned to elapsed seconds (not tick
     indexes), so ``--interval`` changes the sampling cadence without changing
     which case runs; a horizon shorter than the case needs is extended so the
-    forced window and its release always fit.
+    forced window and its release always fit. A cadence coarser than the
+    earliest trigger cannot resolve it and is rejected.
     """
+    if cfg.interval_s > MATRIX_INFLATE_FIRST_TRIGGER_S:
+        raise ValueError(
+            "the tighten matrix's forced triggers need --interval <= "
+            f"{MATRIX_INFLATE_FIRST_TRIGGER_S:g} s so the earliest trigger "
+            "lands on its elapsed time"
+        )
     cases = [
         # case, cap, margin, ordered, force at (s), expected OOM, expected skip
-        ("safe margin, ordered", 2048.0, 512.0, True, 25.0, False, False),
-        ("known-bad margin, ordered", 2048.0, 128.0, True, 25.0, True, False),
-        ("infeasible floor, ordered", 512.0, 512.0, True, 25.0, False, True),
-        ("thin margin on a 512 MiB cap", 512.0, 128.0, True, 25.0, True, False),
-        ("safe margin, inflate-first", 2048.0, 512.0, False, 10.0, True, False),
+        ("safe margin, ordered", 2048.0, 512.0, True, MATRIX_TRIGGER_S, False, False),
+        (
+            "known-bad margin, ordered",
+            2048.0,
+            128.0,
+            True,
+            MATRIX_TRIGGER_S,
+            True,
+            False,
+        ),
+        (
+            "infeasible floor, ordered",
+            512.0,
+            512.0,
+            True,
+            MATRIX_TRIGGER_S,
+            False,
+            True,
+        ),
+        (
+            "thin margin on a 512 MiB cap",
+            512.0,
+            128.0,
+            True,
+            MATRIX_TRIGGER_S,
+            True,
+            False,
+        ),
+        (
+            "safe margin, inflate-first",
+            2048.0,
+            512.0,
+            False,
+            MATRIX_INFLATE_FIRST_TRIGGER_S,
+            True,
+            False,
+        ),
     ]
-    release_after_s = 20.0
     rows = []
     for case, cap, margin, ordered, force_s, expect_oom, expect_skip in cases:
         force_tick = max(1, round(force_s / cfg.interval_s))
-        release_tick = force_tick + max(1, round(release_after_s / cfg.interval_s))
+        release_tick = force_tick + max(
+            1, round(MATRIX_RELEASE_AFTER_S / cfg.interval_s)
+        )
         # A tail after the release lets the drained guests be observed.
         needed_s = (release_tick + 5) * cfg.interval_s
         row_cfg = replace(
@@ -1051,18 +1097,27 @@ def run_deflate_rescue(cfg: SimConfig) -> tuple[SimConfig, list[dict]]:
     )
     # The comparison means nothing until the dense guest has ramped to the
     # balloon-reduced effective cap (E5), so a horizon too short to reach the
-    # burst is extended, the way the tighten matrix extends for its window.
+    # burst is extended in whole ticks, the way the tighten matrix extends for
+    # its window; a coarse cadence must still sample at or after the burst.
     profile = resolve_profile("dense", base)
     burst_s = profile.working_set_mib / DENSE_RAMP_MIB_PER_S + DENSE_STAGGER_S + 5.0
-    base = replace(base, duration_s=max(cfg.duration_s, burst_s))
+    burst_ticks = math.ceil(burst_s / cfg.interval_s) + 2
+    base = replace(base, duration_s=max(cfg.duration_s, burst_ticks * cfg.interval_s))
     for deflate_on in (True, False):
         row_cfg = replace(base, deflate_on_oom=deflate_on)
         result = run_tier(row_cfg, "elastic", 1)
         results.append(result)
+        # The advertised comparison needs the guest to survive the burst: a
+        # host-evicted sandbox absorbed nothing.
         rescued = (
-            result.counters.deflate_saves > 0 and result.counters.guest_oom_kills == 0
+            result.counters.deflate_saves > 0
+            and result.counters.guest_oom_kills == 0
+            and result.counters.host_oom_kills == 0
+            and result.placed_sandboxes > 0
         )
-        oomed = result.counters.guest_oom_kills > 0
+        oomed = (
+            result.counters.guest_oom_kills > 0 or result.counters.host_oom_kills > 0
+        )
         rows.append(
             {
                 "type": "matrix-row",
@@ -1351,7 +1406,10 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
     violations = []
     if system_oom_delta is None:
         violations.append("vmstat_oom_kill_unavailable")
-    elif system_oom_delta > 0:
+    elif system_oom_delta > 0 or cgroup_oom_delta:
+        # vmstat is read before the cgroup files, so a kill that lands in that
+        # window shows up only in the fleet delta; either observed delta is
+        # an OOM.
         violations.append("oom_kills")
     if min(avail_pct) <= 0.0:
         violations.append("memory_exhausted")
@@ -1745,8 +1803,22 @@ def arguments(argv=None) -> argparse.Namespace:
             )
     if args.duration <= 0 or args.interval <= 0:
         parser.error("Duration and interval must be positive")
-    if args.node_memory_mib <= 0 or args.platform_reserved_mib < 0:
-        parser.error("Node memory must be positive and the reserve nonnegative")
+    if (
+        args.node_memory_mib <= 0
+        or args.platform_reserved_mib < 0
+        or args.platform_reserved_mib >= args.node_memory_mib
+    ):
+        parser.error(
+            "Node memory must be positive and the platform reserve must be "
+            "nonnegative and smaller than node memory"
+        )
+    if args.scenario == "tighten-margins" and args.interval > (
+        MATRIX_INFLATE_FIRST_TRIGGER_S
+    ):
+        parser.error(
+            "The tighten matrix's forced triggers need --interval <= "
+            f"{MATRIX_INFLATE_FIRST_TRIGGER_S:g} s"
+        )
     if args.physical_cores < 1:
         parser.error("Physical cores must be positive")
     if args.create_rate < 0:
