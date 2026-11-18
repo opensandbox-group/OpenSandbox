@@ -594,8 +594,9 @@ def plan_tighten(
         return None
     # Growth still pending in the next interval is what a late throttle
     # would let run into the inflate window. The guest clock runs from its
-    # own admission, like tick() does.
-    allocating = (
+    # own admission, like tick() does, and a dead workload is not allocating:
+    # nothing restarts it, so counting it again would recount the same kill.
+    allocating = not sandbox.workload_dead and (
         sandbox.profile.anon_target(
             (tick_idx + 1 - sandbox.birth_tick) * cfg.interval_s, sandbox.offset
         )
@@ -1306,7 +1307,10 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
             raise ValueError("Node reports nonpositive MemTotal; refusing to sample")
         cpu = read_pressure(cfg.proc_root / "pressure" / "cpu")
         memory = read_pressure(cfg.proc_root / "pressure" / "memory")
-        vmstat_oom = read_vmstat_oom_kills(cfg.proc_root)
+        # The cgroup counters are read before vmstat: the first vmstat read is
+        # the system baseline, and a kill landing between the two reads must
+        # not be baselined out of the fleet counters only to surface later as
+        # a node-level delta (the fleet read starts at or after the baseline).
         if cfg.cgroup_root:
             cgroup_samples = read_cgroups(cfg.cgroup_root)
             counts = {
@@ -1331,6 +1335,7 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
             num_cgroups = None
             cgroup_current = None
             cgroup_oom_now = None
+        vmstat_oom = read_vmstat_oom_kills(cfg.proc_root)
         samples.append(
             {
                 "type": "sample",
@@ -1436,6 +1441,7 @@ def summarize_host_samples(samples: list[dict], cfg: HostConfig) -> dict:
         "oversell_ratio": None if oversell is None else round(oversell, 4),
         "samples": len(samples),
         "duration_s": cfg.duration_s,
+        "interval_s": cfg.interval_s,
         "resident_mib": {
             "mean_total": None if resident_mean is None else round(resident_mean, 3),
             "max_total": None if not cgroup_current else round(max(cgroup_current), 3),
@@ -1485,8 +1491,8 @@ def horizon_line(cfg: SimConfig) -> str:
 
 def policy_line(cfg: SimConfig) -> str:
     return (
-        f"- policy: red line {cfg.red_line_enter_pct:.0f}%/{cfg.red_line_exit_pct:.0f}%, "
-        f"sigma-caps invariant {cfg.invariant_pct:.0f}%, tighten margin {cfg.tighten_margin_mib:.0f} MiB, "
+        f"- policy: red line {cfg.red_line_enter_pct:g}%/{cfg.red_line_exit_pct:g}%, "
+        f"sigma-caps invariant {cfg.invariant_pct:g}%, tighten margin {cfg.tighten_margin_mib:g} MiB, "
         f"{'throttle-first' if cfg.throttle_first else 'inflate-first'} ordering, "
         f"deflate_on_oom {'on' if cfg.deflate_on_oom else 'off'}, "
         f"floor guarantee {'on' if cfg.floor_guarantee else 'off'}, "
@@ -1823,6 +1829,11 @@ def arguments(argv=None) -> argparse.Namespace:
         parser.error("Physical cores must be positive")
     if args.create_rate < 0:
         parser.error("Create rate must be nonnegative")
+    if args.snapshot_mib_per_sandbox is not None and (
+        not math.isfinite(args.snapshot_mib_per_sandbox)
+        or args.snapshot_mib_per_sandbox < 0
+    ):
+        parser.error("Snapshot size must be finite and nonnegative")
     if args.backend == "sim":
         try:
             args.ratios = [

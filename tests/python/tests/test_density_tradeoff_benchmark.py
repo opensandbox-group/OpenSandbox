@@ -579,6 +579,35 @@ def test_tighten_matrix_pins_forced_events_to_elapsed_time():
     assert inflate_first.to_row()["summary"]["horizon"]["duration_s"] >= 35.0
 
 
+def test_dead_workloads_are_not_counted_as_allocating():
+    # Nothing restarts a guest workload, so a dead guest must not be
+    # re-classified as allocating and re-OOMed on every red-line entry.
+    cfg = sim_config(cap_mib=2048.0, mix={"dense": 1.0}, throttle_first=False)
+    dead = make_sandbox(cfg, kind="dense", cap=2048.0)
+    dead.workload_dead = True
+    counters = bench.TierCounters()
+    plan = bench.plan_tighten(dead, 30, cfg, 512.0, counters)
+    assert plan is not None
+    assert dead.oom_kills == 0
+    assert counters.tighten_actions == 1
+
+
+def test_inflate_first_counts_each_guest_kill_once():
+    # The fleet-level regression for the same bug: repeated entries must not
+    # multiply the kill count past one per guest.
+    cfg = sim_config(
+        node_memory_mib=4096.0,
+        platform_reserved_mib=0.0,
+        cap_mib=2048.0,
+        create_rate=0.5,
+        mix={"dense": 1.0},
+        throttle_first=False,
+        duration_s=60.0,
+    )
+    result = bench.run_tier(cfg, "redline", 20)
+    assert result.counters.guest_oom_kills <= result.counters.granted
+
+
 def test_tighten_ordering_uses_guest_age_for_late_arrivals():
     # The inflate-first OOM law fires only for a guest that is genuinely
     # still allocating in the next interval; a guest admitted one tick ago
@@ -718,6 +747,7 @@ def test_host_summary_aggregates_samples(tmp_path):
     assert samples[0]["cgroups"] == 2
     summary = bench.summarize_host_samples(samples, cfg)
     assert summary["sandboxes"] == 2
+    assert summary["interval_s"] == 0.05
     assert summary["events"]["host_oom_kills_delta"] == 0
     assert summary["resident_mib"]["mean_per_sandbox"] == pytest.approx(170.7, abs=0.5)
     assert summary["psi_max_pct"]["mem_some"] == pytest.approx(0.2)
@@ -995,6 +1025,62 @@ def test_arguments_reject_impossible_node_shapes():
         bench.arguments(["--scenario", "tighten-margins", "--interval", "30"])
     with pytest.raises(ValueError):
         bench.run_tighten_matrix(sim_config(interval_s=30.0))
+
+
+def test_host_first_poll_reads_cgroups_before_vmstat(tmp_path, monkeypatch):
+    # The first vmstat read is the system baseline; if the cgroup counters
+    # were read after it, a kill landing in between would be baselined out of
+    # the fleet delta and misattributed as a node-level kill.
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    write_fake_proc(proc)
+    cgroups = tmp_path / "cgroups"
+    cgroups.mkdir()
+    write_fake_cgroups(cgroups)
+    order = []
+    original_cgroups = bench.read_cgroups
+    original_vmstat = bench.read_vmstat_oom_kills
+
+    def recording_cgroups(root):
+        order.append("cgroups")
+        return original_cgroups(root)
+
+    def recording_vmstat(root):
+        order.append("vmstat")
+        return original_vmstat(root)
+
+    monkeypatch.setattr(bench, "read_cgroups", recording_cgroups)
+    monkeypatch.setattr(bench, "read_vmstat_oom_kills", recording_vmstat)
+    cfg = bench.HostConfig(
+        proc_root=proc,
+        cgroup_root=cgroups,
+        duration_s=0.1,
+        interval_s=0.05,
+        cap_mib=512.0,
+        sandboxes_override=None,
+    )
+    bench.collect_host_samples(cfg)
+    assert order[:2] == ["cgroups", "vmstat"]
+
+
+def test_policy_line_preserves_fractional_overrides():
+    cfg = sim_config(
+        red_line_enter_pct=15.4,
+        red_line_exit_pct=15.49,
+        invariant_pct=79.5,
+        tighten_margin_mib=127.5,
+    )
+    line = bench.policy_line(cfg)
+    assert "15.4%/15.49%" in line
+    assert "invariant 79.5%" in line
+    assert "tighten margin 127.5 MiB" in line
+
+
+def test_snapshot_size_must_be_finite_and_nonnegative():
+    with pytest.raises(SystemExit):
+        bench.arguments(["--snapshot-mib-per-sandbox", "-1"])
+    with pytest.raises(SystemExit):
+        bench.arguments(["--snapshot-mib-per-sandbox", "nan"])
 
 
 def test_host_backend_accepts_cap_only_without_floor():

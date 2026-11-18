@@ -108,7 +108,7 @@ The report separates OOM sources: `system OOM delta` comes from `/proc/vmstat` a
 - `--out-jsonl`: one `sample` record per simulated tick (or host sample), tagged with its tier or matrix case, plus one `summary` or `matrix-row` record per tier or case — all JSON lines.
 - `--out-summary`: a JSON array of tier (or matrix row) summaries.
 - `--report`: the markdown table printed to stdout.
-- Every simulator summary carries a `config` block with the full effective node shape, policy bands, and storage settings, so a saved run can be reproduced without re-stating overrides alongside it.
+- Every simulator summary carries a `config` block with the full effective node shape, policy bands, and storage settings, so a saved run can be reproduced without re-stating overrides alongside it. Host summaries carry the sampling cadence (`duration_s`, `interval_s`, `samples`).
 
 ## Calibration and provenance (`sim` backend)
 
