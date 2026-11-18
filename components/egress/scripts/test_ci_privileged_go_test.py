@@ -41,6 +41,7 @@ NFT_TESTS = [
 ]
 NFT_IPTABLES_TESTS = [
     "TestGatewayDNSRedirectKernelPrivateNS",
+    "TestEnforcementAnchorKernelPrivateNS",
 ]
 NFT_OWNER_TESTS = [
     "TestRevisionNftEffectsRealFileAndKernel",
@@ -382,7 +383,8 @@ class NftGoTestRunnerTests(PrivilegedGoTestRunnerTests):
         slash = chr(92)
         call = (
             f"          bash scripts/ci-nft-go-test.sh ./pkg/iptables {slash}{newline}"
-            "            TestGatewayDNSRedirectKernelPrivateNS" + newline
+            "            TestGatewayDNSRedirectKernelPrivateNS " + slash + newline
+            + "            TestEnforcementAnchorKernelPrivateNS" + newline
         )
         quarantine_step = "      - name: Run privileged quarantine packet regressions"
         moved = workflow.replace(call, "", 1).replace(
@@ -397,8 +399,8 @@ class NftGoTestRunnerTests(PrivilegedGoTestRunnerTests):
             1,
         )
         commented = workflow.replace(
-            "            TestGatewayDNSRedirectKernelPrivateNS" + newline,
-            "            # TestGatewayDNSRedirectKernelPrivateNS" + newline,
+            "            TestGatewayDNSRedirectKernelPrivateNS " + slash + newline,
+            "            # TestGatewayDNSRedirectKernelPrivateNS " + slash + newline,
             1,
         )
         wrong_package = workflow.replace(

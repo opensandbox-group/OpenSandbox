@@ -48,8 +48,51 @@ var (
 	credentialVaultTransitions   metric.Int64Counter
 	credentialVaultTransitionDur metric.Float64Histogram
 
+	enforcementDrift         metric.Int64Counter
+	enforcementRestoreFailed metric.Int64Counter
+
 	lastNftRuleCount atomic.Int64
+
+	enforcementStateSource atomic.Pointer[func() []EnforcementTableState]
 )
+
+// EnforcementTableState is one table's enforcement-state record as projected
+// by the anchor ledger for the state and consecutive-failure gauges.
+type EnforcementTableState struct {
+	Family string
+	Table  string
+	// State is one of the EnforcementState* values below.
+	State               string
+	ConsecutiveFailures int64
+}
+
+// Enforcement state names, mirroring the anchor ledger's three-state model.
+// Kept as plain strings here so telemetry does not depend on the nftables
+// package.
+const (
+	EnforcementStateConfirmed = "confirmed"
+	EnforcementStateDrifted   = "drifted"
+	EnforcementStateUnknown   = "unknown"
+)
+
+// enforcementStateValues maps each state name to the gauge value of
+// egress.nftables.enforcement.state: 0 unknown, 1 drifted, 2 confirmed.
+var enforcementStateValues = map[string]int64{
+	EnforcementStateUnknown:   0,
+	EnforcementStateDrifted:   1,
+	EnforcementStateConfirmed: 2,
+}
+
+// SetEnforcementStateSource registers the per-table state source read by the
+// enforcement gauges at export time. Nil (no source) exports no series, so a
+// disabled ledger is an absent metric rather than a misleading zero.
+func SetEnforcementStateSource(source func() []EnforcementTableState) {
+	if source == nil {
+		enforcementStateSource.Store(nil)
+		return
+	}
+	enforcementStateSource.Store(&source)
+}
 
 // Bounded reason values for RecordDNSQueryFailed. A closed set keeps the counter's
 // cardinality fixed: error strings and queried names must never reach an attribute.
@@ -105,6 +148,33 @@ func egressMetricOptWith(kv attribute.KeyValue) metric.MeasurementOption {
 	attrs = append(attrs, shared...)
 	attrs = append(attrs, kv)
 	return metric.WithAttributes(attrs...)
+}
+
+// enforcementMetricOpt tags one enforcement-state observation with its bounded
+// (family, table) identity on top of the shared attributes.
+func enforcementMetricOpt(family, table string) metric.MeasurementOption {
+	shared := egressSharedAttrs()
+	attrs := make([]attribute.KeyValue, 0, len(shared)+2)
+	attrs = append(attrs, shared...)
+	attrs = append(attrs, attribute.String("family", family), attribute.String("table", table))
+	return metric.WithAttributes(attrs...)
+}
+
+// RecordEnforcementDrift counts one drift detection: live state differed from
+// the anchor of an owned table. A failed observation must never reach here.
+func RecordEnforcementDrift(family, table string) {
+	if enforcementDrift == nil {
+		return
+	}
+	enforcementDrift.Add(context.Background(), 1, enforcementMetricOpt(family, table))
+}
+
+// RecordEnforcementRestoreFailed counts one restoration that did not converge.
+func RecordEnforcementRestoreFailed(family, table string) {
+	if enforcementRestoreFailed == nil {
+		return
+	}
+	enforcementRestoreFailed.Add(context.Background(), 1, enforcementMetricOpt(family, table))
 }
 
 func EgressLogFields() []slogger.Field {
@@ -264,6 +334,68 @@ func registerEgressMetrics() error {
 		metric.WithUnit("{element}"),
 		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
 			obs.Observe(lastNftRuleCount.Load(), egressMetricOpt())
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Enforcement-state anchors (issue #2718, OSEP-0029). The table/family
+	// attributes come from a closed set (the tables the egress owns), so
+	// cardinality is bounded. Gate on state=2 (confirmed); treat 0 (unknown)
+	// as a delay, not a denial.
+	enforcementDrift, err = meter.Int64Counter(
+		"egress.nftables.enforcement.drift_total",
+		metric.WithDescription("Drift detections per owned table: a well-formed observation of "+
+			"live state that differs from the recorded anchor (absent, altered, or foreign "+
+			"content inside the table). A failed observation is never counted as drift."),
+	)
+	if err != nil {
+		return err
+	}
+	enforcementRestoreFailed, err = meter.Int64Counter(
+		"egress.nftables.enforcement.restore_failed_total",
+		metric.WithDescription("Restoration attempts per owned table whose re-apply or re-read "+
+			"did not converge; consecutive failures surface on the consecutive_failures gauge."),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = meter.Int64ObservableGauge(
+		"egress.nftables.enforcement.state",
+		metric.WithDescription("Per-table enforcement state: 0 unknown, 1 drifted, 2 confirmed. "+
+			"Unknown means the observation failed; it asserts neither absence nor success."),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			source := enforcementStateSource.Load()
+			if source == nil {
+				return nil
+			}
+			for _, table := range (*source)() {
+				value, known := enforcementStateValues[table.State]
+				if !known {
+					continue
+				}
+				obs.Observe(value, enforcementMetricOpt(table.Family, table.Table))
+			}
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+	_, err = meter.Int64ObservableGauge(
+		"egress.nftables.enforcement.consecutive_failures",
+		metric.WithDescription("Consecutive failed restorations per owned table, reset by a "+
+			"confirmed verification."),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			source := enforcementStateSource.Load()
+			if source == nil {
+				return nil
+			}
+			for _, table := range (*source)() {
+				obs.Observe(table.ConsecutiveFailures, enforcementMetricOpt(table.Family, table.Table))
+			}
 			return nil
 		}),
 	)

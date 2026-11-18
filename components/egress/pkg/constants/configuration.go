@@ -135,6 +135,14 @@ const (
 	EnvNameserverExempt          = "OPENSANDBOX_EGRESS_NAMESERVER_EXEMPT"
 	EnvCredentialVaultRequireTLS = "OPENSANDBOX_EGRESS_CREDENTIAL_VAULT_REQUIRE_TLS"
 
+	// Enforcement-state anchors (issue #2718, OSEP-0029): the reconcile loop is
+	// default-off behind EnvEnforcementReconcile until baked. Deletion
+	// detection is native-nft-only: getting the guarantee on redirects today
+	// means running the native backend (RedirectBackendEnv=nft).
+	EnvEnforcementReconcile            = "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE"
+	EnvEnforcementReconcileIntervalSec = "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC"
+	EnvEnforcementMaxRestoreFailures   = "OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES"
+
 	// MITM: mitmdump transparent; Linux + CAP_NET_ADMIN, runs as a dedicated user.
 	// Static mitm options (mode, connection_strategy, listen_host, stream_large_bodies,
 	// ignore_hosts, ssl_verify_upstream_trusted_confdir default) live in
@@ -222,6 +230,12 @@ const (
 	DefaultRevisionTLSCapacity         = 1024
 	DefaultRevisionRequestCapacity     = 4096
 	DefaultRevisionDrainTimeoutSeconds = 30
+	// Enforcement-state anchor defaults (issue #2718, OSEP-0029): reconcile
+	// roughly once a minute and escalate after three consecutive failed
+	// restorations. Both are starting points for discussion, not decided
+	// values.
+	DefaultEnforcementReconcileIntervalSec = 60
+	DefaultEnforcementMaxRestoreFailures   = 3
 )
 
 func EnvIntOrDefault(key string, defaultVal int) int {

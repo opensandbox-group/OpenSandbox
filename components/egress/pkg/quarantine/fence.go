@@ -131,10 +131,10 @@ var fenceTableReadback = nftables.TableReadback{
 		"output":  {Type: "filter", Hook: "output", Prio: json.Number("-450"), Policy: "drop"},
 		"forward": {Type: "filter", Hook: "forward", Prio: json.Number("-450"), Policy: "drop"},
 	},
-	Rules: map[string]nftables.RuleMatcher{
-		"input":   nftables.UnconditionalDrop,
-		"output":  nftables.UnconditionalDrop,
-		"forward": nftables.UnconditionalDrop,
+	Rules: map[string][]nftables.RuleMatcher{
+		"input":   {nftables.UnconditionalDrop},
+		"output":  {nftables.UnconditionalDrop},
+		"forward": {nftables.UnconditionalDrop},
 	},
 	Text: fenceExpectedTable,
 }

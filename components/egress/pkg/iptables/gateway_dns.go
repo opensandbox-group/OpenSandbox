@@ -30,7 +30,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
-const gatewayDNSNftTable = "opensandbox_gateway_dns"
+const GatewayDNSNftTable = "opensandbox_gateway_dns"
 
 // gatewayDNSRedirectScript builds one transactional replacement of the
 // shared table. Empty gateways means remove the table; addresses are
@@ -54,19 +54,19 @@ func gatewayDNSRedirectScript(gateways []netip.Addr, port int) (string, int, err
 	sort.Slice(normalized, func(i, j int) bool { return normalized[i].Compare(normalized[j]) < 0 })
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "delete table inet %s\n", gatewayDNSNftTable)
+	fmt.Fprintf(&b, "delete table inet %s\n", GatewayDNSNftTable)
 	if len(normalized) == 0 {
 		return b.String(), len(normalized), nil
 	}
-	fmt.Fprintf(&b, "add table inet %s\n", gatewayDNSNftTable)
-	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", gatewayDNSNftTable)
+	fmt.Fprintf(&b, "add table inet %s\n", GatewayDNSNftTable)
+	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", GatewayDNSNftTable)
 	for _, gateway := range normalized {
 		family, addr := "ip6", gateway.String()
 		if gateway.Is4() {
 			family = "ip"
 		}
-		fmt.Fprintf(&b, "add rule inet %s gw %s daddr %s udp dport 53 redirect to :%d\n", gatewayDNSNftTable, family, addr, port)
-		fmt.Fprintf(&b, "add rule inet %s gw %s daddr %s tcp dport 53 redirect to :%d\n", gatewayDNSNftTable, family, addr, port)
+		fmt.Fprintf(&b, "add rule inet %s gw %s daddr %s udp dport 53 redirect to :%d\n", GatewayDNSNftTable, family, addr, port)
+		fmt.Fprintf(&b, "add rule inet %s gw %s daddr %s tcp dport 53 redirect to :%d\n", GatewayDNSNftTable, family, addr, port)
 	}
 	return b.String(), len(normalized), nil
 }
@@ -89,13 +89,13 @@ func replaceGatewayDNSRedirects(ctx context.Context, r redirectRunner, gateways 
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("gateway DNS redirect replace: %w (output: %s)", ctxErr, strings.TrimSpace(string(out)))
 		}
-		if !isNftMissingTableErrorFor(out, err, gatewayDNSNftTable) {
+		if !isNftMissingTableErrorFor(out, err, GatewayDNSNftTable) {
 			return fmt.Errorf("gateway DNS redirect replace: %w (output: %s)", err, strings.TrimSpace(string(out)))
 		}
 		if len(gateways) == 0 {
 			return nil
 		}
-		retryScript := removeNftDeleteTableLineFor(script, gatewayDNSNftTable)
+		retryScript := removeNftDeleteTableLineFor(script, GatewayDNSNftTable)
 		retryOut, retryErr := r.runNft(ctx, retryScript)
 		if retryErr != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {

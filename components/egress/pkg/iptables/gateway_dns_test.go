@@ -38,8 +38,8 @@ func TestGatewayDNSRedirectScriptExactIPv4IPv6Set(t *testing.T) {
 		netip.MustParseAddr("10.0.0.10"),
 	}, 15353)
 	require.NoError(t, err)
-	require.Contains(t, script, "delete table inet "+gatewayDNSNftTable+"\nadd table inet "+gatewayDNSNftTable)
-	require.Contains(t, script, "add chain inet "+gatewayDNSNftTable+" gw { type nat hook prerouting priority dstnat; }")
+	require.Contains(t, script, "delete table inet "+GatewayDNSNftTable+"\nadd table inet "+GatewayDNSNftTable)
+	require.Contains(t, script, "add chain inet "+GatewayDNSNftTable+" gw { type nat hook prerouting priority dstnat; }")
 	assert.Equal(t, 3, uniqueGatewayCount, "five inputs normalize to three unique gateways")
 	assert.Equal(t, 6, strings.Count(script, "add rule "), "three unique gateways each need UDP and TCP rules")
 	assert.Contains(t, script, "ip daddr 10.0.0.1 udp dport 53 redirect to :15353")
@@ -55,7 +55,7 @@ func TestGatewayDNSRedirectScriptEmptySetAndValidation(t *testing.T) {
 	empty, uniqueGatewayCount, err := gatewayDNSRedirectScript(nil, 15353)
 	require.NoError(t, err)
 	assert.Equal(t, 0, uniqueGatewayCount)
-	assert.Equal(t, "delete table inet "+gatewayDNSNftTable+"\n", empty)
+	assert.Equal(t, "delete table inet "+GatewayDNSNftTable+"\n", empty)
 	assert.Error(t, func() error {
 		_, _, err := gatewayDNSRedirectScript([]netip.Addr{netip.Addr{}}, 15353)
 		return err
@@ -79,9 +79,9 @@ func TestReplaceGatewayDNSRedirectsRetriesMissingTableWithoutDelete(t *testing.T
 	err := replaceGatewayDNSRedirects(context.Background(), r, []netip.Addr{netip.MustParseAddr("10.0.0.1")}, 15353)
 	require.NoError(t, err)
 	require.Len(t, scripts, 2)
-	assert.Contains(t, scripts[0], "delete table inet "+gatewayDNSNftTable)
-	assert.NotContains(t, scripts[1], "delete table inet "+gatewayDNSNftTable)
-	assert.Contains(t, scripts[1], "add table inet "+gatewayDNSNftTable)
+	assert.Contains(t, scripts[0], "delete table inet "+GatewayDNSNftTable)
+	assert.NotContains(t, scripts[1], "delete table inet "+GatewayDNSNftTable)
+	assert.Contains(t, scripts[1], "add table inet "+GatewayDNSNftTable)
 	assert.Contains(t, scripts[1], "ip daddr 10.0.0.1")
 }
 
@@ -156,7 +156,7 @@ func TestReplaceGatewayDNSRedirectsTreatsMissingEmptyTableAsSuccess(t *testing.T
 	calls := 0
 	r := redirectRunner{runNft: func(_ context.Context, script string) ([]byte, error) {
 		calls++
-		assert.Equal(t, "delete table inet "+gatewayDNSNftTable+"\n", script)
+		assert.Equal(t, "delete table inet "+GatewayDNSNftTable+"\n", script)
 		return []byte("Error: No such file or directory\n" + script), errors.New("exit status 1")
 	}}
 
