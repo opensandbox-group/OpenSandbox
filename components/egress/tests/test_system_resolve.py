@@ -418,21 +418,48 @@ class ExchangeResolveTest(TestCase):
             calls[0][3]["request"]["headers"],
         )
 
-    def test_resolve_request_header_repeats_last_value_wins(self) -> None:
+    def test_resolve_request_header_duplicates_fail_closed(self) -> None:
         self._install_vault()
-        calls = self._decision_transport()
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        # The payload carries one value per identity while mitmproxy forwards
+        # every field line upstream: a resolver signature over either value
+        # would fail against the reconstructed wire form.
         flow = _Flow()
-        # Repeated and case-variant field lines name one header identity.
         flow.request.headers = _RepeatedHeaders(
-            [("X-Test", "first"), ("x-test", "second"), ("Accept", "a")]
+            [("X-Amz-Meta-Tag", "first"), ("x-amz-meta-tag", "second")]
         )
 
         asyncio.run(self.system.requestheaders(flow))
 
-        self.assertEqual(
-            {"x-test": "second", "accept": "a"},
-            calls[0][3]["request"]["headers"],
+        self.assertEqual([], calls)
+        self.assertEqual(407, flow.response.status_code)
+
+        # Identical duplicates are just as unreconstructable.
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        flow = _Flow()
+        flow.request.headers = _RepeatedHeaders(
+            [("X-Double", "a"), ("x-double", "a")]
         )
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual([], calls)
+        self.assertEqual(407, flow.response.status_code)
+
+    def test_resolve_request_header_denylist_duplicates_pass(self) -> None:
+        # Structural fields never reach the resolver, so their repetition
+        # cannot create a signature mismatch.
+        self._install_vault()
+        calls = self._decision_transport()
+        flow = _Flow()
+        flow.request.headers = _RepeatedHeaders(
+            [("Connection", "keep-alive"), ("connection", "close")]
+        )
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual(1, len(calls))
+        self.assertNotIn("connection", calls[0][3]["request"]["headers"])
 
     def test_resolve_request_header_over_count_fails_closed(self) -> None:
         self._install_vault()

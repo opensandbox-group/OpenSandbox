@@ -1221,19 +1221,25 @@ def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
     """Select the outbound headers a resolver may bind its proof to.
 
     Everything except the structural denylist, lowercased. Field lines come
-    from ``items(multi=True)`` — the default view comma-folds repeats — and
-    the last occurrence of a header identity wins. Over-cap fails closed.
+    from ``items(multi=True)``. A forwarded identity must appear exactly once:
+    the payload carries a single value while mitmproxy forwards every line
+    upstream, so a repeated (or case-variant) identity would let the resolver
+    sign a value the upstream cannot reconstruct. Over-cap fails closed.
     """
     selected: dict[str, str] = {}
+    lines: dict[str, int] = {}
     for name, value in flow.request.headers.items(multi=True):
         lowered = name.lower()
         if lowered in RESOLVE_REQUEST_HEADER_DENYLIST:
             continue
+        lines[lowered] = lines.get(lowered, 0) + 1
         if not name or not value:
             continue
         if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
             raise CredentialResolveError("resolve_header_too_long")
         selected[lowered] = value
+    if any(count > 1 for count in lines.values()):
+        raise CredentialResolveError("resolve_ambiguous_header")
     if len(selected) > MAX_RESOLVE_REQUEST_HEADERS:
         raise CredentialResolveError("resolve_too_many_headers")
     return selected
