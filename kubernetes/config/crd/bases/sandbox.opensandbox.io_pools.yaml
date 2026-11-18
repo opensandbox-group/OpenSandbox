@@ -173,8 +173,9 @@ spec:
                 format: int32
                 type: integer
               updated:
-                description: Updated is the number of nodes that have been updated
-                  to the latest revision.
+                description: |-
+                  Updated is the number of non-terminated nodes that have been updated to
+                  the latest revision.
                 format: int32
                 type: integer
             required:

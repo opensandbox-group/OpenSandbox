@@ -122,7 +122,8 @@ type PoolStatus struct {
 	Allocated int32 `json:"allocated"`
 	// Available is the number of nodes currently available in the pool.
 	Available int32 `json:"available"`
-	// Updated is the number of nodes that have been updated to the latest revision.
+	// Updated is the number of non-terminated nodes that have been updated to
+	// the latest revision.
 	Updated int32 `json:"updated,omitempty"`
 }
 
