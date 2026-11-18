@@ -56,7 +56,7 @@ Status separates sandbox health from task progress: `replicas` / `allocated` / `
 | `updateStrategy` | Same cap for rolling out template changes across existing pods |
 | `recycleStrategy` | What happens when an allocated pod is released back: `Delete` (default), `Restart`, or `Noop` |
 
-Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template. `total` counts the pods the pool accounts for: non-terminated pods plus terminal pods that are still allocated to a sandbox (they stay owed until handback), so `allocated / total` stays a utilization fraction. Terminal idle pods are excluded from `total`, `available`, and `updated` — they can never serve again and must not make a pool with a dead buffer look healthy. Unreaped terminal pods still hold their slot in the `poolMax` budget until the controller reclaims them.
+Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template. `total` counts the pods the pool accounts for: non-terminated pods plus terminal pods that are still allocated to a sandbox (they stay owed until handback), so `allocated / total` stays a utilization fraction. Terminal idle pods are excluded from `total` and `updated`; no terminal pod is ever counted as `available`, because it can never serve again — otherwise a pool with a dead buffer would look healthy. Unreaped terminal pods still hold their slot in the `poolMax` budget until the controller reclaims them.
 
 ### Pool design
 

@@ -123,8 +123,8 @@ type PoolStatus struct {
 	Allocated int32 `json:"allocated"`
 	// Available is the number of nodes currently available in the pool.
 	Available int32 `json:"available"`
-	// Updated is the number of non-terminated nodes that have been updated to
-	// the latest revision.
+	// Updated is the number of nodes the pool accounts for that have been
+	// updated to the latest revision. It covers the same population as Total.
 	Updated int32 `json:"updated,omitempty"`
 }
 
@@ -132,7 +132,7 @@ type PoolStatus struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="TOTAL",type="integer",JSONPath=".status.total",description="The number of non-terminated nodes in pool."
+// +kubebuilder:printcolumn:name="TOTAL",type="integer",JSONPath=".status.total",description="The number of nodes the pool accounts for."
 // +kubebuilder:printcolumn:name="ALLOCATED",type="integer",JSONPath=".status.allocated",description="The number of allocated nodes in pool."
 // +kubebuilder:printcolumn:name="AVAILABLE",type="integer",JSONPath=".status.available",description="The number of available nodes in pool."
 // +kubebuilder:printcolumn:name="UPDATED",type="integer",JSONPath=".status.updated",description="The number of nodes updated to the latest revision."

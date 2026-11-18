@@ -15,7 +15,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: The number of non-terminated nodes in pool.
+    - description: The number of nodes the pool accounts for.
       jsonPath: .status.total
       name: TOTAL
       type: integer
@@ -175,8 +175,8 @@ spec:
                 type: integer
               updated:
                 description: |-
-                  Updated is the number of non-terminated nodes that have been updated to
-                  the latest revision.
+                  Updated is the number of nodes the pool accounts for that have been
+                  updated to the latest revision. It covers the same population as Total.
                 format: int32
                 type: integer
             required:
