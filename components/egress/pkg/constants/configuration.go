@@ -222,6 +222,12 @@ const (
 	DefaultRevisionTLSCapacity         = 1024
 	DefaultRevisionRequestCapacity     = 4096
 	DefaultRevisionDrainTimeoutSeconds = 30
+	// OSEP-0023 Fast Sandbox credential-bound admission budgets. The process
+	// budget is sized from the measured ~158 KB of egress memory per held
+	// decrypted connection: 32768 connections stay within an 8 GiB egress
+	// container with headroom (docs/architecture/fast-sandbox/performance.md).
+	DefaultFSBTLSCapacity        = 32
+	DefaultFSBProcessTLSCapacity = 32768
 )
 
 func EnvIntOrDefault(key string, defaultVal int) int {
