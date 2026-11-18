@@ -278,25 +278,31 @@ def run_tests(profile: Profile, timeout: int, go_executable: str) -> dict[tuple[
 
 
 def evaluate(profile: Profile, results: dict[tuple[str, str, str], str]) -> list[str]:
+    def violation(claim: Claim, detail: str) -> str:
+        return f"{claim.id}: {detail}\n    clause: {claim.clause}"
+
     violations: list[str] = []
     for claim in profile.claims:
         for test in claim.tests:
             key = (str(test.module_root), test.package_pattern, test.name)
             action = results.get(key)
-            label = f"{claim.id} ({test.name})"
             if action == "fail":
-                violations.append(f"{label}: test failed")
+                violations.append(violation(claim, f"{test.name}: test failed"))
             elif action == "pass":
                 if claim.status == "pending":
                     violations.append(
-                        f"{label}: claim is pending ({claim.pending_ref}) but the test now passes; "
-                        "promote the claim to enforced, remove the skip, and bump metadata.version"
+                        violation(
+                            claim,
+                            f"{test.name}: claim is pending ({claim.pending_ref}) but the test now passes; "
+                            "promote the claim: set status to enforced, replace the probe's skip branch with "
+                            "the assertion documented in the test, drop pending_ref, and bump metadata.version",
+                        )
                     )
             elif action == "skip":
                 if claim.status == "enforced":
-                    violations.append(f"{label}: enforced claim is skipped")
+                    violations.append(violation(claim, f"{test.name}: enforced claim is skipped"))
             else:
-                violations.append(f"{label}: no test result was recorded")
+                violations.append(violation(claim, f"{test.name}: no test result was recorded"))
     return violations
 
 

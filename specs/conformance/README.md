@@ -60,7 +60,7 @@ claims:
 | `enforced` | passes | The test must run and pass. A failure, a skip, a missing test, or an unresolvable reference is a violation. |
 | `pending` | skipped while the behavior has not landed, passing once it has | The test must exist. A failure or missing result is a violation. A pass is a stale-profile violation: the behavior landed, so the claim must be promoted. |
 
-A pending test is a probe, not an unconditional skip. It exercises the operation, verifies the parts that must stay stable, and skips only while the observed behavior still matches the pre-change behavior, naming the claim id and `pending_ref` in the skip message. The moment the referenced change lands, the same test passes, and the checker fails the stale claim, which is the prompt to remove the skip, set the status to `enforced`, drop `pending_ref`, and bump `metadata.version`. This keeps the skip hand-off observable in CI even when the referenced PR comes from a different author and never touches the test.
+A pending test is a probe, not an unconditional skip. It exercises the operation, verifies the parts that must stay stable, and skips only while the observed behavior still matches the pre-change behavior, naming the claim id and `pending_ref` in the skip message. The moment the referenced change lands, the same test passes, and the checker fails the stale claim, which is the prompt to promote it: set the status to `enforced`, replace the probe's skip branch with the enforced assertion the test documents (deleting only the `t.Skip` call would leave a test that still accepts the old behavior), drop `pending_ref`, and bump `metadata.version`. This keeps the skip hand-off observable in CI even when the referenced PR comes from a different author and never touches the test.
 
 ## Test references
 
@@ -84,7 +84,7 @@ uv run scripts/conformance/run_profile.py --check-only specs/conformance/profile
 
 The checker prints one line per claim pairing the expected state with the observed test result, and exits non-zero on any violation, quoting the claim id and clause. Exit codes: `0` all claims hold, `1` a claim violation, `2` an invalid or unusable profile.
 
-CI runs every profile (`--all`) from the execd test workflow, so a newly added profile is picked up without workflow changes. Changes under `specs/conformance/` or `scripts/conformance/` trigger that workflow.
+CI runs every profile (`--all`) from the execd test workflow, so a newly added profile is picked up without workflow changes. Changes under `specs/conformance/`, `scripts/conformance/`, or the referenced contract documents trigger that workflow.
 
 ## Adding a claim
 
