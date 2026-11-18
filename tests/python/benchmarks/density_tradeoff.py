@@ -673,11 +673,15 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
     redline = False
     draining = False
     resumed_reservations: set[int] = set()
+    # Monotonic identity: evictions shrink the list, so len(sandboxes) would
+    # hand a fresh guest a survivor's index and collapse the drain's
+    # per-guest reservations.
+    next_identity = 0
     evicted_oom_kills = 0
     evicted_deflate_saves = 0
 
     def attempt(kind: str, tick_idx: int, retry_queue: deque) -> None:
-        nonlocal caps_committed
+        nonlocal caps_committed, next_identity
         if elastic and caps_committed + cap > invariant_budget + 1e-9:
             counters.invariant_denied += 1
             return
@@ -691,7 +695,7 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
         balloon0 = floor_balloon if (elastic or floor_grant) else 0.0
         sandboxes.append(
             SimSandbox(
-                index=len(sandboxes),
+                index=next_identity,
                 cap_mib=cap,
                 profile=profile,
                 offset=offset,
@@ -701,6 +705,7 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
                 balloon=balloon0,
             )
         )
+        next_identity += 1
         caps_committed += cap
         counters.granted += 1
         if floor_grant:
@@ -849,7 +854,14 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
                 live[i].projected_charge_growth(cfg) for i in resumed_reservations
             )
             projected_available = available - reserved
-            for sandbox in pending[: max(1, cfg.restore_batch)]:
+            # Fill the batch with guests that actually fit: testing only the
+            # first slice would retry the same ineligible prefix forever and
+            # leave eligible (zero-growth) guests frozen behind it.
+            restored_this_batch = 0
+            batch_limit = max(1, cfg.restore_batch)
+            for sandbox in pending:
+                if restored_this_batch >= batch_limit:
+                    break
                 growth = sandbox.projected_charge_growth(cfg)
                 projected_pct = (
                     100.0 * (projected_available - growth) / cfg.node_memory_mib
@@ -860,6 +872,7 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
                     sandbox.balloon_pre if sandbox.balloon_pre is not None else 0.0
                 )
                 counters.restored += 1
+                restored_this_batch += 1
                 projected_available -= growth
                 resumed_reservations.add(sandbox.index)
             if not pending:
@@ -1324,6 +1337,7 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
     oom_paths_seen: set[str] = set()
     cgroup_oom_seen = 0
     deadline = time.monotonic() + cfg.duration_s
+    next_poll = time.monotonic()
     while True:
         meminfo = read_meminfo(cfg.proc_root)
         if meminfo["mem_total_mib"] <= 0:
@@ -1379,7 +1393,20 @@ def collect_host_samples(cfg: HostConfig) -> list[dict]:
         )
         if time.monotonic() >= deadline:
             break
-        time.sleep(min(cfg.interval_s, max(0.0, deadline - time.monotonic())))
+        # Polls are scheduled from fixed deadlines, not "interval after the
+        # previous poll finished": reading thousands of cgroups must not
+        # stretch the cadence the report advertises.
+        next_poll += cfg.interval_s
+        now = time.monotonic()
+        if next_poll <= now:
+            # The collection overran the cadence; start the next poll
+            # immediately and re-anchor so the schedule does not burst
+            # through a backlog of missed deadlines.
+            next_poll = now
+            remaining = 0.0
+        else:
+            remaining = next_poll - now
+        time.sleep(min(remaining, max(0.0, deadline - time.monotonic())))
     return samples
 
 
@@ -1850,8 +1877,8 @@ def arguments(argv=None) -> argparse.Namespace:
         )
     if args.physical_cores < 1:
         parser.error("Physical cores must be positive")
-    if args.create_rate < 0:
-        parser.error("Create rate must be nonnegative")
+    if not math.isfinite(args.create_rate) or args.create_rate < 0:
+        parser.error("Create rate must be finite and nonnegative")
     if args.snapshot_mib_per_sandbox is not None and (
         not math.isfinite(args.snapshot_mib_per_sandbox)
         or args.snapshot_mib_per_sandbox < 0

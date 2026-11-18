@@ -17,6 +17,7 @@ policy layers, scenario expectations, host parsers, and CLI validation.
 No hypervisor, no live node, no network."""
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -375,6 +376,24 @@ def test_drain_keeps_reservations_until_growth_is_charged():
     assert result.counters.host_oom_kills == 1
     assert result.counters.redline_events == 1
     assert result.counters.restored <= 3
+
+
+def test_restore_batch_fills_with_eligible_guests():
+    # On this node only the zero-growth idle guests fit under the enter
+    # band; with restore_batch=1 the batch must skip the blocked dense guest
+    # in front of them instead of retrying the same prefix forever.
+    cfg = sim_config(
+        node_memory_mib=2048.0,
+        platform_reserved_mib=1024.0,
+        mix={"dense": 0.5, "idle": 0.5},
+        duration_s=60.0,
+        restore_batch=1,
+        force_redline_ticks=tuple(range(5, 15)),
+        release_redline_tick=15,
+    )
+    result = bench.run_tier(cfg, "redline", 4)
+    assert result.counters.redline_events >= 1
+    assert result.counters.restored >= 3
 
 
 def test_red_line_recovers_when_headroom_returns():
@@ -1133,6 +1152,49 @@ def test_snapshot_size_must_be_finite_and_nonnegative():
         bench.arguments(["--snapshot-mib-per-sandbox", "-1"])
     with pytest.raises(SystemExit):
         bench.arguments(["--snapshot-mib-per-sandbox", "nan"])
+
+
+def test_create_rate_must_be_finite():
+    with pytest.raises(SystemExit):
+        bench.arguments(["--create-rate", "nan"])
+
+
+def test_host_polls_keep_their_deadline_spacing_under_slow_collection(
+    tmp_path, monkeypatch
+):
+    # A slow poll (many cgroups) must not stretch the advertised cadence:
+    # polls are scheduled from fixed deadlines, not from the previous poll's
+    # completion time.
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    write_fake_proc(proc)
+    cgroups = tmp_path / "cgroups"
+    cgroups.mkdir()
+    write_fake_cgroups(cgroups)
+    original = bench.read_cgroups
+
+    def slow(root):
+        time.sleep(0.12)
+        return original(root)
+
+    monkeypatch.setattr(bench, "read_cgroups", slow)
+    cfg = bench.HostConfig(
+        proc_root=proc,
+        cgroup_root=cgroups,
+        duration_s=0.3,
+        interval_s=0.05,
+        cap_mib=512.0,
+        sandboxes_override=None,
+    )
+    samples = bench.collect_host_samples(cfg)
+    assert len(samples) >= 2
+    spacing = [
+        after["t_s"] - before["t_s"]
+        for before, after in zip(samples, samples[1:], strict=False)
+    ]
+    # Post-fix spacing tracks the collection cost (~0.12 s), not
+    # collection + interval (~0.17 s).
+    assert all(gap <= 0.15 for gap in spacing)
 
 
 def test_fill_ratio_must_be_finite_and_nonnegative():
