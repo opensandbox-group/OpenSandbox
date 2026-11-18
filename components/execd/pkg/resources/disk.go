@@ -16,6 +16,7 @@ package resources
 
 import (
 	"maps"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -184,6 +185,17 @@ func isPseudoDevice(name string) bool {
 		}
 	}
 	return false
+}
+
+// diskstatsPartition matches partition device names (sda1, vdb12,
+// nvme0n1p2, mmcblk0p1). The kernel charges partition I/O to the whole
+// device as well, so an aggregate must not sum both layers.
+var diskstatsPartition = regexp.MustCompile(`^(?:(?:sd|hd|vd|xvd)[a-z]+|nvme\d+n\d+|mmcblk\d+)p?\d+$`)
+
+// isPartitionDevice reports whether a diskstats device name is a partition
+// of a whole disk.
+func isPartitionDevice(name string) bool {
+	return diskstatsPartition.MatchString(name)
 }
 
 // parseV1BlkioFile sums the Read and Write values of a cgroup v1 blkio

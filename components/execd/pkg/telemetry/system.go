@@ -15,9 +15,13 @@
 package telemetry
 
 import (
+	"sync"
+	"time"
+
 	gopsnet "github.com/shirou/gopsutil/net"
 	"github.com/shirou/gopsutil/process"
 
+	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/resources"
 )
 
@@ -66,15 +70,71 @@ func systemNetworkConnectionCounts() (tcpCount int64, udpCount int64) {
 }
 
 // systemDiskUsages returns per-mount usage snapshots; nil when the platform
-// cannot provide them (the gauge must not report zeros instead).
+// cannot provide them (the gauge must not report zeros instead). One scan
+// is shared between the usage and total gauges: their observable-gauge
+// callbacks run back to back within a collection, and a scan with many
+// mounts can take seconds.
+var diskUsageMemo struct {
+	sync.Mutex
+	at     time.Time
+	usages []resources.DiskUsage
+	have   bool
+}
+
+// diskUsageMemoTTL only dedupes the callbacks of a single collection; it is
+// far shorter than any export period.
+var diskUsageMemoTTL = 500 * time.Millisecond
+
 func systemDiskUsages() []resources.DiskUsage {
-	usages, err := resources.DiskUsages()
-	if err != nil {
-		return nil
+	diskUsageMemo.Lock()
+	defer diskUsageMemo.Unlock()
+	now := time.Now()
+	if diskUsageMemo.have && now.Sub(diskUsageMemo.at) < diskUsageMemoTTL {
+		return diskUsageMemo.usages
 	}
+	// A platform error (non-Linux) yields nil and is memoized the same way,
+	// so both gauges of one collection stay consistent instead of retrying.
+	usages, _ := resources.DiskUsages()
+	diskUsageMemo.have, diskUsageMemo.at, diskUsageMemo.usages = true, now, usages
 	return usages
 }
 
+// diskIORebaser rebases cumulative IO counters at binding handoffs: a pooled
+// execd reassigned by POST /internal/init keeps the same process and the
+// same underlying counters, and the totals accumulated under the previous
+// binding must not be attributed to the new sandbox identity. Observed
+// values are therefore cumulative since the current binding's first sample.
+type diskIORebaser struct {
+	mu       sync.Mutex
+	gen      uint64
+	haveGen  bool
+	baseline resources.DiskIO
+}
+
+func (r *diskIORebaser) rebase(gen uint64, io resources.DiskIO) resources.DiskIO {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.haveGen || gen != r.gen {
+		r.haveGen, r.gen, r.baseline = true, gen, io
+	}
+	return resources.DiskIO{
+		ReadBytes:    max(io.ReadBytes-r.baseline.ReadBytes, 0),
+		WrittenBytes: max(io.WrittenBytes-r.baseline.WrittenBytes, 0),
+		ReadOps:      max(io.ReadOps-r.baseline.ReadOps, 0),
+		WriteOps:     max(io.WriteOps-r.baseline.WriteOps, 0),
+	}
+}
+
+var systemDiskIORebaser diskIORebaser
+
 func systemDiskIO() (resources.DiskIO, error) {
-	return resources.DiskIOStats()
+	io, err := resources.DiskIOStats()
+	if err != nil {
+		return resources.DiskIO{}, err
+	}
+	var gen uint64
+	if b := binding.Current(); b != nil {
+		gen = b.Generation
+	}
+	return systemDiskIORebaser.rebase(gen, io), nil
 }

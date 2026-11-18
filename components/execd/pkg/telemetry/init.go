@@ -191,7 +191,7 @@ func registerExecdMetrics() error {
 
 	_, err = meter.Int64ObservableCounter(
 		"execd.system.disk.io.bytes",
-		metric.WithDescription("Cumulative disk IO bytes by direction (sandbox cgroup IO accounting, /proc/diskstats fallback)"),
+		metric.WithDescription("Cumulative disk IO bytes by direction since the current binding (rebased at warm-rebind handoffs; sandbox cgroup IO accounting, /proc/diskstats fallback)"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
 			io, err := systemDiskIO()
@@ -210,7 +210,7 @@ func registerExecdMetrics() error {
 
 	_, err = meter.Int64ObservableCounter(
 		"execd.system.disk.io.operations",
-		metric.WithDescription("Cumulative completed disk IO operations by direction (sandbox cgroup IO accounting, /proc/diskstats fallback)"),
+		metric.WithDescription("Cumulative completed disk IO operations by direction since the current binding (rebased at warm-rebind handoffs; sandbox cgroup IO accounting, /proc/diskstats fallback)"),
 		metric.WithUnit("{operation}"),
 		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
 			io, err := systemDiskIO()

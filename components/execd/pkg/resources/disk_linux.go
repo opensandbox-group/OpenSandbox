@@ -29,12 +29,34 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
-// Test-overridable input path.
-var cgroupV1BlkioDir = "/sys/fs/cgroup/blkio"
+// Test-overridable inputs.
+var (
+	cgroupV1BlkioDir = "/sys/fs/cgroup/blkio"
+	// statfsTimeout bounds each per-mount statfs: a stale network mount
+	// (NFS hard mount, hung FUSE daemon) can otherwise block the caller
+	// for minutes. A variable so tests can shrink it.
+	statfsTimeout = 2 * time.Second
+	// statfsSyscall is the syscall behind statfsWithTimeout; a variable so
+	// tests can simulate mounts that never return.
+	statfsSyscall = unix.Statfs
+)
 
-// statfsTimeout bounds each per-mount statfs: a stale network mount (NFS
-// hard mount, hung FUSE daemon) can otherwise block the caller for minutes.
-const statfsTimeout = 2 * time.Second
+type statfsResult struct {
+	st  unix.Statfs_t
+	err error
+}
+
+// statfsPending holds the in-flight statfs channel per mount point. A call
+// that hit the timeout keeps its entry: its goroutine is still blocked in
+// the syscall, and the next collection reuses the same channel instead of
+// stacking a new one, so a permanently hung mount leaks at most one
+// goroutine for the whole process lifetime. Callers for one mount are
+// serialized upstream (one scan per collection, shared between the usage
+// gauges), so the channel's single result always reaches its only waiter.
+var (
+	statfsMu      sync.Mutex
+	statfsPending = map[string]chan statfsResult{}
+)
 
 // diskUsages snapshots every visible real mount. Per-mount failures are
 // skipped best-effort: one broken mount must not hide the others.
@@ -66,26 +88,35 @@ func diskUsages() ([]DiskUsage, error) {
 
 // statfsWithTimeout runs statfs off-thread so a hung mount cannot stall the
 // metrics pipeline. The syscall itself is not interruptible: on timeout the
-// goroutine lingers until the kernel returns, bounded by the mount count.
+// goroutine stays blocked until the kernel returns, and its pending entry
+// makes later collections reuse it instead of spawning fresh calls.
 func statfsWithTimeout(path string) (unix.Statfs_t, bool) {
-	type result struct {
-		st  unix.Statfs_t
-		err error
+	statfsMu.Lock()
+	ch, pending := statfsPending[path]
+	if !pending {
+		ch = make(chan statfsResult, 1)
+		statfsPending[path] = ch
+		statfsMu.Unlock()
+		go func() {
+			var st unix.Statfs_t
+			err := statfsSyscall(path, &st)
+			ch <- statfsResult{st, err}
+		}()
+	} else {
+		statfsMu.Unlock()
 	}
-	done := make(chan result, 1)
-	go func() {
-		var st unix.Statfs_t
-		err := unix.Statfs(path, &st)
-		done <- result{st, err}
-	}()
 	select {
-	case r := <-done:
+	case r := <-ch:
+		statfsMu.Lock()
+		delete(statfsPending, path)
+		statfsMu.Unlock()
 		if r.err != nil {
 			return unix.Statfs_t{}, false
 		}
 		return r.st, true
 	case <-time.After(statfsTimeout):
 		log.Warn("resources: statfs %s timed out, skipping mount", path)
+		// Keep the pending entry: the blocked syscall owns its goroutine.
 		return unix.Statfs_t{}, false
 	}
 }
@@ -144,7 +175,10 @@ func newDiskIOSource() diskIOReader {
 		}
 		var totals DiskIO
 		for name, counter := range counters {
-			if isPseudoDevice(name) {
+			// Skip pseudo devices and partitions: the kernel charges
+			// partition I/O to the whole device too, and summing both
+			// layers double-counts.
+			if isPseudoDevice(name) || isPartitionDevice(name) {
 				continue
 			}
 			totals.ReadOps += int64(counter.ReadCount)

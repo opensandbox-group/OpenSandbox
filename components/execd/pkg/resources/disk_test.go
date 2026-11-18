@@ -123,6 +123,19 @@ func TestIsPseudoDevice(t *testing.T) {
 	}
 }
 
+func TestIsPartitionDevice(t *testing.T) {
+	for _, name := range []string{"sda1", "vdb12", "xvdf3", "hda9", "nvme0n1p2", "mmcblk0p1"} {
+		if !isPartitionDevice(name) {
+			t.Fatalf("isPartitionDevice(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"sda", "vda", "nvme0n1", "mmcblk0", "dm-0", "pmem0", "md0"} {
+		if isPartitionDevice(name) {
+			t.Fatalf("isPartitionDevice(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestParseV1BlkioFile(t *testing.T) {
 	data := []byte("8:0 Read 1000\n8:0 Write 2000\n8:0 Discard 5\n254:1 read 7\n8:0 Sync 3\n8:0 Total 3005\nbad line\n")
 	read, written := parseV1BlkioFile(data)

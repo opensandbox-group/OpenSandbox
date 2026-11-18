@@ -19,7 +19,11 @@ package resources
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func overrideDiskPaths(t *testing.T, cgroup, mountinfo string, v2Dir, v1BlkioDir string) {
@@ -93,6 +97,49 @@ func TestNewDiskIOSourceFallsBackToDiskstats(t *testing.T) {
 	}
 	if io.ReadBytes != 200*512 || io.WrittenBytes != 400*512 {
 		t.Fatalf("bytes = (%d, %d), want diskstats sectors*512", io.ReadBytes, io.WrittenBytes)
+	}
+}
+
+// TestStatfsTimeoutReusesPendingCall pins the hung-mount contract: a timed
+// out statfs keeps its in-flight goroutine, later collections reuse it
+// instead of stacking new ones, and a recovered mount unblocks cleanly.
+func TestStatfsTimeoutReusesPendingCall(t *testing.T) {
+	dir := t.TempDir()
+	release := make(chan struct{})
+	origSyscall, origTimeout := statfsSyscall, statfsTimeout
+	statfsSyscall = func(_ string, st *unix.Statfs_t) error {
+		<-release
+		return unix.Statfs(dir, st)
+	}
+	statfsTimeout = 20 * time.Millisecond
+	t.Cleanup(func() {
+		statfsSyscall, statfsTimeout = origSyscall, origTimeout
+	})
+
+	// First call times out; the blocked syscall goroutine stays pending.
+	if _, ok := statfsWithTimeout("/hung"); ok {
+		t.Fatal("first call should time out")
+	}
+	afterFirst := runtime.NumGoroutine()
+
+	// Second call reuses the pending call instead of stacking a new one.
+	if _, ok := statfsWithTimeout("/hung"); ok {
+		t.Fatal("second call should time out too")
+	}
+	if got := runtime.NumGoroutine(); got != afterFirst {
+		t.Fatalf("goroutines = %d, want %d (no new statfs goroutine)", got, afterFirst)
+	}
+
+	// When the blocked syscall finally returns, the pending entry is
+	// consumed and later calls succeed with real values.
+	statfsTimeout = origTimeout
+	close(release)
+	st, ok := statfsWithTimeout("/hung")
+	if !ok {
+		t.Fatal("call after recovery should succeed")
+	}
+	if st.Blocks == 0 {
+		t.Fatal("expected real statfs values after recovery")
 	}
 }
 
