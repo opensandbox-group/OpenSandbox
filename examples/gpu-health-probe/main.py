@@ -53,6 +53,8 @@ from opensandbox.exceptions import SandboxException
 from opensandbox.models import WriteEntry
 
 # Configuration
+DOMAIN = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
+API_KEY = os.getenv("SANDBOX_API_KEY")
 PROBE_DIR = "/tmp/gpu-health-probe"
 PROBE_PATH = f"{PROBE_DIR}/gpu_probe.py"
 IMAGE = os.getenv(
@@ -67,6 +69,8 @@ GPU_COMPUTE_MODE = os.getenv("GPU_COMPUTE_MODE", "auto")  # auto | skip
 COMPUTE_FLAG = "--compute skip" if GPU_COMPUTE_MODE == "skip" else "--compute auto"
 
 CONNECTION_CONFIG = ConnectionConfig(
+    domain=DOMAIN,
+    api_key=API_KEY,
     request_timeout=timedelta(minutes=10),
 )
 
@@ -118,7 +122,9 @@ async def main() -> None:
     print(f"Sandbox created: {sandbox.id} (resourceLimits.gpu={GPU_EXPECT})")
     try:
         await sandbox.files.create_directories([WriteEntry(path=PROBE_DIR)])
-        await sandbox.files.write_file(PROBE_PATH, probe_source, mode=0o755)
+        # The file API takes octal permission *digits* as a decimal integer
+        # (755 means 0o755), so 0o755 (decimal 493) would be rejected.
+        await sandbox.files.write_file(PROBE_PATH, probe_source, mode=755)
 
         command = (
             f"python3 {PROBE_PATH} --expect {GPU_EXPECT} {COMPUTE_FLAG}"
@@ -137,15 +143,21 @@ async def main() -> None:
             sys.exit(1)
 
         stdout = "".join(message.text or "" for message in execution.logs.stdout)
+        stderr = "".join(message.text or "" for message in execution.logs.stderr)
         exit_code = execution.exit_code
         try:
             report = json.loads(stdout)
         except json.JSONDecodeError:
+            # The exec channel worked, so the platform layer passed; the
+            # actionable error is whatever the invocation printed.
             print(stdout)
+            if stderr:
+                print(stderr)
             print(
-                f"The probe produced no JSON (exit {exit_code}); "
-                "if the sandbox cannot even start the probe, that is a "
-                "platform-layer failure — check sandbox status and execd logs."
+                f"The probe produced no JSON (exit {exit_code}): this is a "
+                "probe-invocation problem (python3 missing, unreadable "
+                "script, or the probe crashed before writing output), not a "
+                "platform failure."
             )
             sys.exit(1)
 

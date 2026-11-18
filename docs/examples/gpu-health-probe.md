@@ -5,14 +5,9 @@ description: Run a layered GPU health probe inside a sandbox and attribute "the 
 
 # GPU Health Probe
 
-A GPU sandbox can report `Running` while no GPU work is possible. This example
-runs a small, standard-library-only probe **inside** the sandbox and reports
-which layer is healthy: platform, device, or compute. It is the reference
-implementation of the [GPU sandbox health checks](/guides/gpu-health)
-convention.
+A GPU sandbox can report `Running` while no GPU work is possible. This example runs a small, standard-library-only probe **inside** the sandbox and reports which layer is healthy: platform, device, or compute. It is the reference implementation of the [GPU sandbox health checks](/guides/gpu-health) convention.
 
-The complete source, including unit tests, lives in
-[`examples/gpu-health-probe`](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/gpu-health-probe).
+The complete source, including unit tests, lives in [`examples/gpu-health-probe`](https://github.com/opensandbox-group/OpenSandbox/tree/main/examples/gpu-health-probe).
 
 ## What it checks
 
@@ -20,12 +15,11 @@ The complete source, including unit tests, lives in
 |-------|--------|
 | platform | Reaching the sandbox at all (observed by the caller — if `exec` fails, this layer failed) |
 | device | `/dev/nvidiactl`, `/dev/nvidia-uvm`, `/dev/nvidiaN` nodes, driver version, `nvidia-smi -L` inventory, requested vs. observed GPU count |
-| compute | A short kernel launch through the full stack — PyTorch smoke test by default, or any custom command |
+| compute | A short kernel launch through the full stack on every visible device — PyTorch smoke test by default, or any custom command |
 
 ## Prerequisites
 
-- An OpenSandbox server whose runtime exposes GPUs (Docker with
-  `nvidia-container-toolkit`, or a Kubernetes cluster with a GPU device plugin).
+- An OpenSandbox server whose runtime exposes GPUs: Docker with `nvidia-container-toolkit`, or a Kubernetes cluster with a GPU device plugin (Kubernetes requires a positive integer for `resourceLimits.gpu`; the `all` sentinel is Docker-only).
 - Python SDK: `uv pip install opensandbox`.
 
 ## Run it
@@ -38,19 +32,33 @@ export GPU_EXPECT=1                      # resourceLimits.gpu to request and ver
 python main.py
 ```
 
-The demo creates a sandbox with `resourceLimits.gpu`, uploads `gpu_probe.py`
-into it, runs the probe with `--expect` and `--compute auto`, and prints the
-diagnosis. `SANDBOX_IMAGE` selects the image; images without a compute runtime
-(PyTorch) report layer 3 as `skipped` unless you pass `--compute '<command>'`.
+The demo creates a sandbox with `resourceLimits.gpu`, uploads `gpu_probe.py` into it, runs the probe with `--expect` and `--compute auto`, prints the report, and maps the exit code to an operator action. `SANDBOX_IMAGE` selects the image (default: `nvidia/cuda:12.4.1-base-ubuntu22.04`); images without a compute runtime (PyTorch) report layer 3 as `skipped` unless a custom `--compute '<command>'` is used. Set `GPU_COMPUTE_MODE=skip` to make that intent explicit.
+
+The probe reads only in-sandbox state, so you can also run it from any other channel (your own orchestrator, a lifecycle hook, a debugging shell) as long as `gpu_probe.py` is available inside the sandbox:
+
+```shell
+python3 /tmp/gpu-health-probe/gpu_probe.py --expect 1 --compute auto
+```
+
+## Probe options
+
+| Option | Meaning |
+|--------|---------|
+| `--expect N` | Compare the observed GPU count with the count requested at creation (`resourceLimits.gpu`); `all` records the sentinel but skips the comparison |
+| `--compute auto` | Run a PyTorch smoke test when PyTorch is importable, otherwise report layer 3 as `skipped` |
+| `--compute skip` | Disable layer 3 |
+| `--compute '<command>'` | Run a workload-native compute check; exit code `0` means pass |
+| `--compute-timeout SECONDS` | Timeout for the compute probe (default: 60) |
+| `--no-smi` | Skip the `nvidia-smi` inventory check (device nodes remain authoritative) |
+| `--quiet` | Suppress the human-readable summary on stderr |
 
 ## Output contract
 
-stdout is one JSON document; a one-line human summary goes to stderr. The exit
-code is the alerting signal:
+stdout is exactly one JSON document; a one-line human summary goes to stderr. The exit code is the alerting signal:
 
 | Exit code | Meaning |
 |-----------|---------|
-| `0` | All executed layers passed |
+| `0` | All executed layers passed (a `skipped` compute layer does not fail the probe) |
 | `2` | Device layer failed — GPU not attached/visible, or requested-vs-observed count drift |
 | `3` | Compute layer failed — device visible, kernel launch broken |
 | `4` | Probe error |
@@ -58,25 +66,42 @@ code is the alerting signal:
 ```json
 {
   "probe": "gpu-health-probe",
+  "version": "1.0",
   "status": "pass",
   "exitCode": 0,
   "expectedCount": 1,
   "layers": {
-    "device": {"status": "pass", "checks": []},
-    "compute": {"status": "pass", "checks": []}
+    "device": {"status": "pass", "checks": [{"name": "requested-count", "status": "pass", "detail": "observed 1 device(s), requested 1"}]},
+    "compute": {"status": "pass", "checks": [{"name": "compute-probe", "status": "pass", "detail": "PyTorch CUDA smoke test passed: {...}"}]}
   },
-  "observed": {"deviceNodeCount": 1, "driverVersion": "535.104.05"}
+  "observed": {"deviceNodeCount": 1, "driverVersion": "535.104.05", "smiGpuCount": 1},
+  "warnings": []
 }
 ```
+
+## Requested vs. observed GPU count
+
+`resourceLimits.gpu` records what was *requested*; nothing verifies what was *actually attached*. Pass the requested count with `--expect N` and the device layer compares it against the `/dev/nvidiaN` nodes it observes:
+
+```
+requested 2 GPU(s) but observed 1 device node(s): requested vs attached drift
+```
+
+For long-lived sandboxes, running the probe periodically (or at attach time in your own orchestration) turns silent accounting drift into a visible, alertable signal. `resourceLimits.gpu=all` cannot be verified inside the sandbox — the resolved count depends on the host inventory — so `--expect all` records the sentinel but skips the comparison; the sentinel itself is Docker-runtime only. Under MIG, express `--expect` in the same unit as `resourceLimits.gpu`; the probe reports physical devices and MIG instances separately.
+
+## Tests
+
+```shell
+python -m pytest examples/gpu-health-probe/test_gpu_probe.py
+```
+
+The tests are hermetic: they model device state with temporary files and inject `nvidia-smi` output, so they run on machines without GPUs.
 
 ## From a one-off check to a health signal
 
 - Run the probe periodically (or at attach) from your orchestrator.
-- Alert on exit code `2` (device) and `3` (compute) separately — they page
-  different teams.
-- Pass `--expect N` so requested-vs-observed GPU count drift is detected
-  instead of silently corrupting capacity accounting.
+- Alert on exit code `2` (device) and `3` (compute) separately — they page different teams.
+- Pass `--expect N` so requested-vs-observed GPU count drift is detected instead of silently corrupting capacity accounting.
 - A probe that cannot be started is a platform-layer alarm.
 
-See [GPU sandbox health checks](/guides/gpu-health) for the full convention
-and the failure-attribution table.
+See [GPU sandbox health checks](/guides/gpu-health) for the full convention and the failure-attribution table.

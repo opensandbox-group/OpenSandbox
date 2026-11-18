@@ -245,6 +245,44 @@ class TestComputeLayer:
         detail = layer.checks[0].detail
         assert "exit 1" in detail and "torch.cuda.is_available()" in detail
 
+    def test_auto_device_count_shortfall_fails(self) -> None:
+        calls: List[int] = []
+
+        def capture(command: Any, timeout: float, shell: bool = False):
+            calls.append(1)
+            if len(calls) == 1:
+                return 0, "", ""
+            return 0, json.dumps({"deviceCount": 1, "checksums": {"cuda:0": 1.0}}), ""
+
+        layer = gpu_probe.collect_compute_layer(
+            "auto", 10, expected_count="2", capture=capture
+        )
+        assert layer.status == gpu_probe.FAIL
+        check = {c.name: c for c in layer.checks}["compute-count"]
+        assert check.status == gpu_probe.FAIL
+        assert "PyTorch sees 1 device(s) but 2 were requested" in check.detail
+
+    def test_auto_device_count_surplus_warns(self) -> None:
+        calls: List[int] = []
+
+        def capture(command: Any, timeout: float, shell: bool = False):
+            calls.append(1)
+            if len(calls) == 1:
+                return 0, "", ""
+            return 0, json.dumps({"deviceCount": 3, "checksums": {}}), ""
+
+        layer = gpu_probe.collect_compute_layer(
+            "auto", 10, expected_count="1", capture=capture
+        )
+        assert layer.status == gpu_probe.PASS
+        check = {c.name: c for c in layer.checks}["compute-count"]
+        assert check.status == gpu_probe.WARN
+
+    def test_torch_device_count_parsing(self) -> None:
+        assert gpu_probe._torch_device_count('{"deviceCount": 2}') == 2
+        assert gpu_probe._torch_device_count("not json") is None
+        assert gpu_probe._torch_device_count('{"deviceCount": true}') is None
+
     def test_custom_command_pass_and_fail(self) -> None:
         ok = gpu_probe.collect_compute_layer(
             "echo ok", 10, capture=_fake_capture(0, "ok\n", "")

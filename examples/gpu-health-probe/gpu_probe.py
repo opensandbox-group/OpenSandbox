@@ -86,8 +86,10 @@ _NVRM_RE = re.compile(r"NVRM version:.*?(\d+\.\d+(?:\.\d+)?)", re.DOTALL)
 
 #: Short kernel launch used by ``--compute auto`` when PyTorch is available.
 #: It goes through device selection, allocation, a matmul and a host
-#: synchronization, which is the smallest sequence that exercises the whole
-#: driver + library + runtime stack.
+#: synchronization on *every* visible device, which is the smallest sequence
+#: that exercises the whole driver + library + runtime stack per GPU: a
+#: secondary GPU that cannot allocate or launch kernels must not be certified
+#: by a device-0-only smoke test.
 TORCH_SMOKE_SCRIPT = """\
 import json
 import sys
@@ -103,12 +105,16 @@ if not torch.cuda.is_available():
     sys.exit(1)
 
 count = torch.cuda.device_count()
-x = torch.randn(256, 256, device="cuda")
-checksum = float((x @ x).sum().item())
-if checksum != checksum:  # NaN check
-    print("kernel produced NaN", file=sys.stderr)
-    sys.exit(1)
-print(json.dumps({"deviceCount": count, "checksum": round(checksum, 4)}))
+checksums = {}
+for index in range(count):
+    with torch.cuda.device(index):
+        x = torch.randn(256, 256, device=f"cuda:{index}")
+        value = float((x @ x).sum().item())
+        if value != value:  # NaN check
+            print(f"kernel produced NaN on cuda:{index}", file=sys.stderr)
+            sys.exit(1)
+        checksums[f"cuda:{index}"] = round(value, 4)
+print(json.dumps({"deviceCount": count, "checksums": checksums}))
 """
 
 
@@ -457,12 +463,31 @@ def collect_device_layer(
     return Layer("device", checks), observed
 
 
+def _torch_device_count(stdout: str) -> Optional[int]:
+    """Extract the framework's visible device count from the smoke-test JSON."""
+    try:
+        parsed = json.loads(stdout)
+    except (TypeError, ValueError):
+        return None
+    count = parsed.get("deviceCount") if isinstance(parsed, dict) else None
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return None
+
+
 def collect_compute_layer(
     compute_mode: str,
     timeout_seconds: float,
+    expected_count: Optional[str] = None,
     capture: Callable[..., Tuple[int, str, str]] = run_capture,
 ) -> Layer:
-    """Run the compute probe (layer 3) and attribute failures to this layer."""
+    """Run the compute probe (layer 3) and attribute failures to this layer.
+
+    In ``auto`` mode the PyTorch smoke test launches a kernel on every device
+    the framework sees, and the framework's device count is cross-checked
+    against the requested count: a framework that sees fewer GPUs than were
+    requested cannot certify the sandbox even if device 0 works.
+    """
     if compute_mode == "skip":
         return Layer(
             "compute",
@@ -507,28 +532,59 @@ def collect_compute_layer(
         exit_code, stdout, stderr = capture(
             [python, "-c", TORCH_SMOKE_SCRIPT], timeout_seconds
         )
-        if exit_code == 0:
+        if exit_code != 0:
             return Layer(
                 "compute",
                 [
                     Check(
                         "compute-probe",
-                        PASS,
-                        "PyTorch CUDA smoke test passed: " + _tail(stdout, 200),
+                        FAIL,
+                        f"PyTorch CUDA smoke test failed (exit {exit_code}): "
+                        + _tail(stderr or stdout),
                     )
                 ],
             )
-        return Layer(
-            "compute",
-            [
-                Check(
-                    "compute-probe",
-                    FAIL,
-                    f"PyTorch CUDA smoke test failed (exit {exit_code}): "
-                    + _tail(stderr or stdout),
+        checks: List[Check] = [
+            Check(
+                "compute-probe",
+                PASS,
+                "PyTorch CUDA smoke test passed: " + _tail(stdout, 200),
+            )
+        ]
+        torch_count = _torch_device_count(stdout)
+        if torch_count is not None and expected_count is not None:
+            if expected_count == "all":
+                checks.append(
+                    Check(
+                        "compute-count",
+                        SKIPPED,
+                        "requested resourceLimits.gpu='all': the resolved "
+                        "count depends on the host inventory",
+                    )
                 )
-            ],
-        )
+            else:
+                expected = int(expected_count)
+                if torch_count < expected:
+                    checks.append(
+                        Check(
+                            "compute-count",
+                            FAIL,
+                            f"PyTorch sees {torch_count} device(s) but "
+                            f"{expected} were requested: the extra GPU(s) are "
+                            "attached but not usable through the framework",
+                        )
+                    )
+                elif torch_count > expected:
+                    checks.append(
+                        Check(
+                            "compute-count",
+                            WARN,
+                            f"PyTorch sees {torch_count} device(s) but only "
+                            f"{expected} were requested: the sandbox sees more "
+                            "GPUs than it asked for",
+                        )
+                    )
+        return Layer("compute", checks)
 
     exit_code, stdout, stderr = capture(
         compute_mode, timeout_seconds, shell=True
@@ -704,7 +760,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             smi_path=smi_path,
             expected_count=args.expect,
         )
-        compute_layer = collect_compute_layer(args.compute, args.compute_timeout)
+        compute_layer = collect_compute_layer(
+            args.compute, args.compute_timeout, args.expect
+        )
         report = build_report(device_layer, compute_layer, observed, args.expect)
     except SystemExit:
         raise
