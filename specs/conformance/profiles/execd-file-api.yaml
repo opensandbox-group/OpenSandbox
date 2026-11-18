@@ -10,6 +10,8 @@ metadata:
   description: Behavioral claims for the execd file upload and info surface.
 contract:
   - docs/api/implementation-compatibility.md
+  - docs/api/index.md
+  - docs/architecture/data-plane/execd.md
   - specs/execd-api.yaml
 claims:
   - id: FILE-PATH-ENV-001
@@ -32,9 +34,9 @@ claims:
 
   - id: FILE-UPLOAD-MODE-003
     clause: >-
-      An explicit mode in upload metadata is applied to the uploaded file,
-      winning over the destination's previous mode when an existing file is
-      replaced.
+      An explicit, non-zero mode in upload metadata is applied to the uploaded
+      file, winning over the destination's previous mode when an existing file
+      is replaced.
     status: enforced
     tests:
       - components/execd/pkg/web/controller/filesystem_api_boundaries_test.go::TestUploadRequestedModeOverridesDestinationMode

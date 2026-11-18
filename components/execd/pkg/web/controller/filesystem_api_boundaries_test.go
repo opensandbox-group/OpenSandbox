@@ -116,9 +116,11 @@ func TestUploadReplacementThroughAPIKeepsDestinationSetuid(t *testing.T) {
 }
 
 // TestUploadRequestedModeOverridesDestinationMode enforces claim
-// FILE-UPLOAD-MODE-003: when the metadata carries an explicit mode, that
-// request wins even for a replacement, where the staging path first restores
-// the destination's previous mode.
+// FILE-UPLOAD-MODE-003: when the metadata carries an explicit, non-zero mode,
+// that request wins even for a replacement, where the staging path first
+// restores the destination's previous mode. A metadata mode of 0 is the
+// omitted-mode sentinel in the request model, not an explicit request to
+// clear permissions, so this claim deliberately covers non-zero modes only.
 func TestUploadRequestedModeOverridesDestinationMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows only models the read-only bit")
