@@ -22,8 +22,10 @@ import (
 	"github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
+	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/strategy"
 	snapshotcontract "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/snapshot"
 )
 
@@ -138,14 +140,35 @@ func validateSourceContainerPins(bs *sandboxv1alpha1.BatchSandbox, pod *corev1.P
 	return nil
 }
 
-func (r *BatchSandboxReconciler) validatePauseRecreatePolicy(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) error {
-	if _, err := rootfsSnapshotTargets(bs); err != nil {
-		return err
+// dispatchRecreatePause leaves the request unacknowledged until provisioning
+// produces a running source Pod. Policy errors still fail before tasks stop.
+func (r *BatchSandboxReconciler) dispatchRecreatePause(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) (ctrl.Result, bool, error) {
+	_, policyErr := rootfsSnapshotTargets(bs)
+	if policyErr == nil {
+		pods, err := r.listPods(ctx, strategy.NewPoolStrategy(bs), bs)
+		if err != nil {
+			return ctrl.Result{}, true, err
+		}
+		for _, pod := range pods {
+			if pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning {
+				policyErr = validateRecreateSourcePod(bs, pod)
+				if policyErr == nil {
+					result, err := r.handlePause(ctx, bs)
+					return result, true, err
+				}
+				break
+			}
+		}
+		if policyErr == nil {
+			return ctrl.Result{}, false, nil
+		}
 	}
-	pod, err := r.findPodForSandbox(ctx, bs)
-	if err != nil {
-		return err
-	}
+	bs.Status.PauseObservedGeneration = bs.Generation
+	setConditionInStatus(&bs.Status, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, "InvalidRecreatePolicy", policyErr.Error())
+	return ctrl.Result{}, true, r.Status().Update(ctx, bs)
+}
+
+func validateRecreateSourcePod(bs *sandboxv1alpha1.BatchSandbox, pod *corev1.Pod) error {
 	contract, err := snapshotcontract.ContractFromPod(pod)
 	if err != nil {
 		return err

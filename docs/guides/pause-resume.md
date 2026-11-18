@@ -96,6 +96,8 @@ spec:
       image: registry.example.com/opensandbox/egress@sha256:<manifest-digest>
 ```
 
+If pause is requested before the first Pod is running, provisioning continues and the controller processes the same pause request once the source Pod is running.
+
 On resume, selected containers start from the pinned images without their previous writable layers. Other containers still restore from the snapshot. At least one regular container must remain in the snapshot. The controller records the initial policy before creating the first Pod; adding, changing, or removing it after that point causes pause or resume to reject the request. Selected containers are not frozen by the image committer and can keep running until the source Pod is terminated. The destination node must have access to the pinned image if it is not already cached.
 
 Install the updated CRD and controller before creating BatchSandboxes with this policy. Do not downgrade the controller while managing sandboxes that use it: older controllers do not honor the policy. Leaving it unset preserves the previous behavior. Public snapshots are unaffected.

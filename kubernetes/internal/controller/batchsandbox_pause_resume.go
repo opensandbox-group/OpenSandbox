@@ -221,6 +221,9 @@ func (r *BatchSandboxReconciler) dispatchPauseResume(ctx context.Context, bs *sa
 					log.Info("Dispatch: already Paused, skipping pause", "generation", generation, "pauseObservedGeneration", pauseObservedGen)
 					return ctrl.Result{}, false, nil
 				}
+				if hasRecreatePolicy(bs) && bs.Spec.Replicas != nil && *bs.Spec.Replicas == supportedPauseReplicas {
+					return r.dispatchRecreatePause(ctx, bs)
+				}
 				log.Info("Dispatch: handlePause", "generation", generation, "pauseObservedGeneration", pauseObservedGen)
 				result, err := r.handlePause(ctx, bs)
 				return result, true, err
@@ -268,13 +271,6 @@ func (r *BatchSandboxReconciler) handlePause(ctx context.Context, bs *sandboxv1a
 		return ctrl.Result{}, nil
 	}
 
-	if hasRecreatePolicy(bs) {
-		if err := r.validatePauseRecreatePolicy(ctx, bs); err != nil {
-			bs.Status.PauseObservedGeneration = bs.Generation
-			setConditionInStatus(&bs.Status, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, "InvalidRecreatePolicy", err.Error())
-			return ctrl.Result{}, r.Status().Update(ctx, bs)
-		}
-	}
 	snapshot := &sandboxv1alpha1.SandboxSnapshot{}
 	snapshotName := internalPauseSnapshotName(bs.Name)
 	err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: snapshotName}, snapshot)

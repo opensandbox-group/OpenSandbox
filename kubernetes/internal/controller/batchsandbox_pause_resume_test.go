@@ -500,7 +500,7 @@ func TestHandlePause_InvalidRecreatePolicyDoesNotStopTasks(t *testing.T) {
 	key := client.ObjectKeyFromObject(bs)
 	r.taskSchedulers.Store(key.String(), scheduler)
 	ctx := context.Background()
-	_, err := r.handlePause(ctx, bs)
+	_, _, err := r.dispatchPauseResume(ctx, bs)
 	require.NoError(t, err)
 	require.NoError(t, r.Get(ctx, key, bs))
 	require.Equal(t, sandboxv1alpha1.BatchSandboxPhaseSucceed, bs.Status.Phase)
@@ -941,6 +941,71 @@ func TestReconcile_RecordsPolicyAfterEarlySpecUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Get(ctx, key, bs))
 	require.Equal(t, policy, bs.Status.RecreateContainersOnResume)
+}
+
+func TestReconcile_ReplaysEarlyPauseAfterSourcePodStarts(t *testing.T) {
+	const pin = "registry/sidecar@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "early-pause", Namespace: "default", UID: "early-pause-uid", Generation: 2},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause:                      ptr.To(true),
+			Replicas:                   ptr.To(int32(1)),
+			RecreateContainersOnResume: []sandboxv1alpha1.RecreateContainerOnResume{{Name: "sidecar", Image: pin}},
+			Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{
+				{Name: "main", Image: "registry/main:v1"},
+				{Name: "sidecar", Image: pin},
+			}}},
+		},
+	}
+	r := newTestReconciler(bs)
+	ctx := context.Background()
+	key := client.ObjectKeyFromObject(bs)
+	reconcile := func() {
+		t.Helper()
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, key, bs))
+	}
+	reconcile()
+	reconcile()
+	require.Less(t, bs.Status.PauseObservedGeneration, bs.Generation)
+	require.False(t, hasTrueBatchSandboxCondition(bs.Status.Conditions, sandboxv1alpha1.BatchSandboxConditionPauseFailed))
+	var pod corev1.Pod
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: bs.Namespace, Name: bs.Name + "-0"}, &pod))
+	pod.Status.Phase = corev1.PodRunning
+	require.NoError(t, r.Status().Update(ctx, &pod))
+	// A transient source lookup failure must not consume the pending request.
+	base := r.Client
+	lookupErr := fmt.Errorf("temporary Pod list failure")
+	r.Client = interceptor.NewClient(base.(client.WithWatch), interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if _, ok := list.(*corev1.PodList); ok {
+				return lookupErr
+			}
+			return c.List(ctx, list, opts...)
+		},
+	})
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.ErrorIs(t, err, lookupErr)
+	r.Client = base
+	require.NoError(t, r.Get(ctx, key, bs))
+	require.Less(t, bs.Status.PauseObservedGeneration, bs.Generation)
+	require.False(t, hasTrueBatchSandboxCondition(bs.Status.Conditions, sandboxv1alpha1.BatchSandboxConditionPauseFailed))
+
+	reconcile()
+	require.Equal(t, sandboxv1alpha1.BatchSandboxPhasePausing, bs.Status.Phase)
+
+	var snapshot sandboxv1alpha1.SandboxSnapshot
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: bs.Namespace, Name: bs.Name + "-pause"}, &snapshot))
+	snapshot.Status.Phase = sandboxv1alpha1.SandboxSnapshotPhaseSucceed
+	snapshot.Status.Format = sandboxv1alpha1.SandboxSnapshotFormatRootfsV1
+	snapshot.Status.Containers = []sandboxv1alpha1.ContainerSnapshot{
+		{ContainerName: "main", ImageURI: "registry/main:snapshot", ImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	}
+	require.NoError(t, r.Status().Update(ctx, &snapshot))
+	reconcile()
+	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, bs.Status.Phase)
+	assert.Equal(t, int64(2), bs.Status.PauseObservedGeneration)
 }
 
 func TestContinueResume_RecreatesPinnedSidecar(t *testing.T) {
