@@ -397,6 +397,27 @@ func TestResolveHandlerScopedInvalidationUnrelatedMutationSucceeds(t *testing.T)
 	}
 }
 
+// Pull-mode D12 permits unrelated mutations; live admission pins the whole
+// snapshot, including when the selected binding's fingerprint is unchanged.
+func TestResolveHandlerPinnedRevisionInvalidatesUnrelatedMutation(t *testing.T) {
+	h := newResolveHarness(t)
+	expected := int64(1)
+	h.access.ExpectedRevision = &expected
+	release, _, done := startDelayedResolve(t, h)
+	_, err := h.store.Patch(MutationRequest{Credentials: &CredentialMutationSet{Add: []Credential{{
+		Name: "unused", Source: mustMarshal(map[string]string{"type": "inline", "value": "unused-value"}),
+	}}}}, testExchangePolicy(t))
+	require.NoError(t, err)
+	release()
+	rec := <-done
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Contains(t, rec.Body.String(), "resolution invalidated")
+	// The same pinned request must also fail before making another resolver call.
+	rec = h.postResolve(validResolveBody())
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Len(t, h.client.recorded(), 1)
+}
+
 func TestResolveHandlerScopedInvalidationBindingTouchedFails(t *testing.T) {
 	original := testExchangeVaultRequest()
 	cases := []struct {

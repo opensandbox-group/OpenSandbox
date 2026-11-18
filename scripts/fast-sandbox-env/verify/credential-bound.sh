@@ -53,6 +53,10 @@
 # credential the probe must not see, or a MITM leaf where passthrough is
 # expected, fails the stage at once and is never overwritten by a later
 # clean probe.
+# Exchange bindings are also verified in both template lanes by the shared
+# exchange_resolver_verify stage (verify/vault.sh): per-request signed headers,
+# mixed static bindings, resolver outage/transport closure, recovery and replay.
+#
 #   AC9  the current and previous egress container logs (and this env's
 #        own logs) are collected in full, then scanned for the fake
 #        credential values; a collection error is a failure, never clean;

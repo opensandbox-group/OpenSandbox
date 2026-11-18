@@ -839,7 +839,7 @@ class ExchangeResolveTest(TestCase):
 
     # -- defensive branches ----------------------------------------------------
 
-    def test_live_mode_exchange_keeps_placeholder_fail_closed(self) -> None:
+    def test_live_mode_exchange_without_admission_fails_closed(self) -> None:
         self._install_vault()
         calls = self._decision_transport()
         flow = _Flow()
@@ -849,10 +849,10 @@ class ExchangeResolveTest(TestCase):
             flow, _exchange_vault(self.system), live=object()
         )
 
-        self.assertIsNone(deferred)
+        asyncio.run(deferred)
         self.assertEqual([], calls)
         self.assertTrue(flow.metadata[self.system.FLOW_REJECTION_KEY])
-        self.assertEqual(503, flow.response.status_code)
+        self.assertEqual(407, flow.response.status_code)
 
     def test_static_lookup_failure_still_503(self) -> None:
         def raise_lookup(_client_ip=None):

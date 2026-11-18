@@ -4466,16 +4466,10 @@ require_live_stack() {
 }
 
 # OSEP-0023 lane gates. Off/all: the exchange stage runs exactly as before
-# and no credential-bound stage exists. credential-bound: the exchange
-# stage is reported BLOCKED (decision snapshots reject exchange bindings,
-# issue I1) instead of running, and the credential-bound stage
-# (verify/credential-bound.sh, one implementation sourced into this shell)
-# runs on the lane's template.
+# and no credential-bound stage exists. credential-bound: exchange also
+# runs, followed by the credential-bound stage (verify/credential-bound.sh,
+# one implementation sourced into this shell) on the lane's template.
 exchange_stage() { # <description> <template-id>
-	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
-		run_blocked_stage "$1" "exchange under credential-bound (see I1)"
-		return 0
-	fi
 	run_stage "$1" exchange_resolver_verify "$2"
 }
 

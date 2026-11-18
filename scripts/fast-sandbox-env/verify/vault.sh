@@ -466,7 +466,21 @@ exchange_guest_status() { # <path>
 		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT$1"
 }
 
-exchange_vault_status_is_407() {
+exchange_vault_fails_closed() {
+	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+		# Subject admission terminates the transport on resolve failure. Only
+		# an empty reply/reset counts; timeouts and unreachable origins do not.
+		local out
+		out="$(osb_api command run "$VERIFY_ID" -- sh -c '
+			code=$(curl -s --http1.1 -o /dev/null -w "%{http_code}" -m 20 --resolve "$1" "$2")
+			rc=$?
+			if [ "$code" = 000 ] && { [ "$rc" = 52 ] || [ "$rc" = 56 ]; }; then
+				echo EXCHANGE_DENIED
+			fi
+		' sh "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" "https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/vault/echo?x=1")" || return 1
+		[[ "$out" == "EXCHANGE_DENIED" ]]
+		return
+	fi
 	[[ "$(exchange_guest_status "/vault/echo?x=1")" == "407" ]]
 }
 
@@ -536,13 +550,13 @@ exchange_resolver_verify() {
 	fi
 	pass "off-scope path stays static (resolver engaged only on /vault/*)"
 
-	# 4) fail-closed: resolver down in every pod -> 407 on the exchange
-	#    path while the static binding keeps flowing.
+	# 4) fail-closed: resolver down in every pod -> 407 (pull) or closed
+	#    subject transport while the static binding keeps flowing.
 	exchange_resolver_stop_all
-	wait_for "resolver outage fails closed with 407 on the exchange path" 60 exchange_vault_status_is_407
+	wait_for "resolver outage fails closed on the exchange path" 60 exchange_vault_fails_closed
 	wait_for "static binding unaffected by the resolver outage" 120 \
 		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
-	pass "resolver outage fails closed (407) while the static binding flows"
+	pass "resolver outage fails closed while the static binding flows"
 
 	# 5) recovery: the next resolve is fresh (a failure never poisons the
 	#    following request).
@@ -579,7 +593,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	trap 'on_error vault-verify' ERR
 	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
 	run_stage "MITM CA chain verify (baked CA -> injection -> pinning)" mitm_ca_chain_verify
-	# exchange_stage (lib.sh): BLOCKED under credential-bound (I1), never OK.
+	# exchange_stage (lib.sh) runs in both interception modes.
 	exchange_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" ""
 	[[ "$EGRESS_INTERCEPTION_MODE" != "credential-bound" ]] || stage_summary
 fi
