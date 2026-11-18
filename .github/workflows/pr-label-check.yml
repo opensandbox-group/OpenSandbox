@@ -133,6 +133,7 @@ jobs:
               if (dirs.has("components/egress")) s.push("component/egress");
               if (dirs.has("components/ingress")) s.push("component/ingress");
               if (dirs.has("components/execd")) s.push("component/execd");
+              if (dirs.has("components/e2b-compat")) s.push("component/e2b-compat");
               if (dirs.has("components/code-interpreter")) s.push("component/code-interpreter");
               if (dirs.has("components/internal")) {
                 s.push("component/egress", "component/ingress");

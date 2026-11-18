@@ -264,6 +264,10 @@ export default withMermaid(defineConfig({
               text: "Telemetry",
               link: "/guides/telemetry",
             },
+            {
+              text: "E2B Compatibility (Scaffold)",
+              link: "/guides/e2b-compatibility",
+            },
           ],
         },
       ],

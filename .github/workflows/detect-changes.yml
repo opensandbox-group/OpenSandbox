@@ -113,6 +113,10 @@ jobs:
                 workflowChanged(path, "ingress-test.yaml") ||
                 path.startsWith("components/ingress/") ||
                 path.startsWith("components/internal/"),
+              "e2b-compat": (path) =>
+                workflowChanged(path, "e2b-compat-test.yml") ||
+                path.startsWith("components/e2b-compat/") ||
+                path.startsWith("components/internal/"),
               execd: (path) =>
                 workflowChanged(path, "execd-test.yml") ||
                 path.startsWith("components/execd/") ||
