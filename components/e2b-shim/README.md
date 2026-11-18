@@ -21,7 +21,7 @@ HTTP behavior:
 - Other methods on `/healthz` return `405`.
 - Every other path returns `404`, including `/`, `/v2/sandboxes`, `/sandboxes`, and the same paths under the compatibility prefix. No E2B route is registered at the root or under the prefix.
 
-All configuration errors are reported before the server starts listening. Config decode and validation errors identify the affected field or failure category.
+All configuration errors are reported before the server starts listening. Errors name the field or category only; they never echo secret values, raw configuration, or URLs.
 
 ## Build and run
 
@@ -35,7 +35,7 @@ make build
 
 ## Configuration file
 
-The file must contain a JSON object. The loader rejects unknown fields, trailing data, and `null` for top-level fields. Scalar settings are decoded after applying overrides. Decode errors are reported before semantic validation errors.
+The file must contain a JSON object. The loader rejects unknown fields, trailing data, and `null` for top-level fields. Secret fields accept references only. The loader decodes file-based secret references even when an environment override is present. Scalar settings are decoded after applying overrides. Decode and secret-resolution errors precede semantic validation errors.
 
 ```json
 {
@@ -56,7 +56,10 @@ The file must contain a JSON object. The loader rejects unknown fields, trailing
       "revision": "envd-only-base@rev-1",
       "expected_envd_version": "0.8.0"
     }
-  ]
+  ],
+  "adapter_api_key": { "env": "MY_ADAPTER_API_KEY" },
+  "native_api_key": { "file": "/run/secrets/native-api-key" },
+  "hmac_key": { "file": "/run/secrets/hmac-key" }
 }
 ```
 
@@ -72,6 +75,7 @@ The file must contain a JSON object. The loader rejects unknown fields, trailing
 | `timeout_min_seconds` | No | `60` | Integer, at least `1`. |
 | `timeout_max_seconds` | Yes | — | Integer. Copy it explicitly from the native deployment; the scaffold does not verify it against the native server. |
 | `templates` | No | `[]` | See below. An empty list means no template is available. |
+| `adapter_api_key`, `native_api_key`, `hmac_key` | Yes | — | Secret reference: exactly one of `{"env": "NAME"}` or `{"file": "/path"}`. |
 
 Timeouts must be integer seconds and satisfy `timeout_min_seconds` ≤ `timeout_default_seconds` ≤ `timeout_max_seconds`. Each value must fit in a Go `time.Duration` after conversion to nanoseconds (at most `9223372036` seconds). The scaffold does not apply any request-level timeout rule.
 
@@ -93,8 +97,18 @@ Environment variables override the file. An explicit empty value is used as the 
 | `E2B_SHIM_TIMEOUT_MIN_SECONDS` | `timeout_min_seconds` |
 | `E2B_SHIM_TIMEOUT_MAX_SECONDS` | `timeout_max_seconds` |
 | `E2B_SHIM_TEMPLATES` | `templates`, as a JSON array with the same schema |
+| `E2B_SHIM_ADAPTER_API_KEY` or `E2B_SHIM_ADAPTER_API_KEY_FILE` | `adapter_api_key` |
+| `E2B_SHIM_NATIVE_API_KEY` or `E2B_SHIM_NATIVE_API_KEY_FILE` | `native_api_key` |
+| `E2B_SHIM_HMAC_KEY` or `E2B_SHIM_HMAC_KEY_FILE` | `hmac_key` |
 
 Precedence, highest first: `--listen` flag, environment variable, configuration file, default. `--config` is optional; without it, all required settings must come from the environment.
+
+## Secrets
+
+- A secret comes from one source. Setting both `E2B_SHIM_X` and `E2B_SHIM_X_FILE` for the same secret is an error.
+- Missing, empty, or unreadable secrets are errors.
+- For file sources, one trailing `\n` or `\r\n` is removed. No other trimming is applied. Environment values are used as is.
+- Loaded secrets are redacted in every formatted, JSON, and log output of the configuration.
 
 ## Limitations
 
