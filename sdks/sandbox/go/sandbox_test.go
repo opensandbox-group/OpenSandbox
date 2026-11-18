@@ -25,6 +25,32 @@ import (
 	"time"
 )
 
+func TestSandboxRunCommandRequiresTerminalEvent(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		events     string
+		wantStdout string
+		wantError  bool
+	}{
+		{"incomplete stream", `data: {"type":"stdout","text":"partial"}` + "\n\n", "partial", true},
+		{"execution error without exit code", `data: {"type":"error","error":{"ename":"CommandExecError","evalue":"permission denied"}}` + "\n\n", "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, client := newExecdServer(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, tt.events)
+			})
+			sandbox := &Sandbox{execd: client}
+			result, err := sandbox.RunCommandWithOpts(context.Background(), RunCommandRequest{Command: "echo example"}, nil)
+			if (err != nil) != tt.wantError {
+				t.Fatalf("RunCommandWithOpts error = %v, want error: %t", err, tt.wantError)
+			}
+			require.NotNil(t, result)
+			require.Equal(t, tt.wantStdout, result.Text())
+		})
+	}
+}
+
 func TestCreateSandbox_ForwardsLifecycle(t *testing.T) {
 	timeout := 300
 	var received *SandboxLifecycle

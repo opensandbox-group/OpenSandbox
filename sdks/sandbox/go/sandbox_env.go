@@ -86,13 +86,10 @@ func (s *Sandbox) SetEnv(ctx context.Context, key, value string) error {
 	}
 
 	exec, err := s.RunCommand(ctx, command, nil)
-	if err != nil {
+	if err != nil && err != errIncompleteCommand {
 		return fmt.Errorf("opensandbox: SetEnv %q: %w", key, err)
 	}
-	// A foreground command only reports ExitCode 0 after a confirmed
-	// execution_complete event; a missing exit code (e.g. a dropped stream)
-	// is treated as failure because the append was never confirmed.
-	if exec.Error == nil && exec.ExitCode != nil && *exec.ExitCode == 0 {
+	if err == nil && exec.Error == nil && exec.ExitCode != nil && *exec.ExitCode == 0 {
 		return nil
 	}
 
