@@ -266,7 +266,7 @@ bench_live_egress_is() { # <memory-limit> <capacity|"">
 # Recreate the pool from <manifest> (a template change must not wait on the
 # controller to roll Pods) and wait for the same readiness as pool_up.
 bench_pool_apply() { # <manifest> <memory-limit> <capacity|"">
-	kubectl delete sandboxpool "$POOL_NAME" --wait --timeout=300s >/dev/null 2>&1 \
+	kubectl delete sandboxpool "$POOL_NAME" --ignore-not-found --wait --timeout=300s >/dev/null 2>&1 \
 		|| fail "bench: deleting SandboxPool $POOL_NAME failed"
 	wait_for "bench: previous pool Pods gone" 150 bench_pool_pods_gone
 	kubectl apply -f "$1" >/dev/null || fail "bench: applying $1 failed"
@@ -500,7 +500,11 @@ bench_m3() {
 		done
 		held_total=$(( held_total + actual ))
 		sleep "$BENCH_MEM_SETTLE_SECONDS"
-		reading="$(bench_egress_cgroup "$BENCH_POD")" || reading='{}'
+		if ! reading="$(bench_egress_cgroup "$BENCH_POD")"; then
+			# An unread point must never reach the fit as a measured one.
+			bench_json_set "$spec" '.stopped = {at_k: $k, reason: "egress cgroup read failed"}' --argjson k "$k"
+			break
+		fi
 		restarts="$(bench_egress_restarts "$BENCH_POD")" || restarts=""
 		bench_json_set "$spec" '.points += [{k_target: $k, k_held: $h, reading: $r, restart_count: ($c | tonumber? // null), settle_s: $s, holders: $hs}]' \
 			--argjson k "$k" --argjson h "$held_total" --argjson r "$reading" --arg c "$restarts" \
@@ -602,6 +606,8 @@ credential_bound_bench() {
 	run_stage "bench M2: guest TLS connect latency ($BENCH_HANDSHAKES per path)" bench_m2 "$code_b"
 	run_stage "bench M4: egress CPU under passthrough-dominated load" bench_m4 "$code_b"
 	if [[ "$BENCH_LEG" == credential-bound ]]; then
+		# M3 recreates the pool; scan the current Pods' egress logs before they go.
+		run_stage "bench: no fake credential value in the logs before the M3 pool recreate" cb_log_scan "$CB_WORK_DIR/values" "$since"
 		run_stage "bench M3: egress memory per held bound connection (K: $BENCH_MEM_STEPS)" bench_m3
 	else
 		cb_kill_sandbox "$BENCH_U"; cb_kill_sandbox "$BENCH_B"
