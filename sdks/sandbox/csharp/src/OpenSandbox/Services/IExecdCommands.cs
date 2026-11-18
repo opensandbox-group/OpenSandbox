@@ -29,6 +29,10 @@ public interface IExecdCommands
         CancellationToken cancellationToken = default);
 
     /// <summary>Runs native executable arguments and collects the result.</summary>
+    /// <exception cref="SandboxInternalException">
+    /// Thrown when a foreground stream ends normally without a completion or execution error event.
+    /// Handlers may have received partial output.
+    /// </exception>
     Task<Execution> RunAsync(
         IReadOnlyList<string> argv,
         RunCommandOptions? options = null,
@@ -60,6 +64,10 @@ public interface IExecdCommands
     /// <returns>The command execution result.</returns>
     /// <exception cref="InvalidArgumentException">Thrown when request values are invalid.</exception>
     /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
+    /// <exception cref="SandboxInternalException">
+    /// Thrown when a foreground stream ends normally without a completion or execution error event.
+    /// Handlers may have received partial output.
+    /// </exception>
     Task<Execution> RunAsync(
         string command,
         RunCommandOptions? options = null,

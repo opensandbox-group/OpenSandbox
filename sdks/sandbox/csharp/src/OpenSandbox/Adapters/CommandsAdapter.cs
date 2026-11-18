@@ -104,7 +104,7 @@ internal sealed class CommandsAdapter : IExecdCommands
     {
         return ConsumeExecutionAsync(
             RunStreamAsync(argv, options, cancellationToken), handlers,
-            isBackground: options?.Background ?? false, cancellationToken);
+            isBackground: options?.Background ?? false, cancellationToken, requireTerminal: true);
     }
 
     public async Task<Execution> RunAsync(
@@ -119,13 +119,18 @@ internal sealed class CommandsAdapter : IExecdCommands
             stream,
             handlers,
             isBackground: options?.Background ?? false,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            requireTerminal: true).ConfigureAwait(false);
     }
 
     public async Task SetEnvAsync(string key, string value, CancellationToken cancellationToken = default)
     {
         var command = BuildSetEnvCommand(key, value);
-        var execution = await RunAsync(command, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var execution = await ConsumeExecutionAsync(
+            RunStreamAsync(command, cancellationToken: cancellationToken),
+            handlers: null,
+            isBackground: false,
+            cancellationToken).ConfigureAwait(false);
         // A foreground command only reports ExitCode 0 after a confirmed
         // execution_complete event; a missing exit code (e.g. a dropped
         // stream) is treated as failure because the append was never confirmed.
@@ -420,7 +425,8 @@ internal sealed class CommandsAdapter : IExecdCommands
         IAsyncEnumerable<ServerStreamEvent> stream,
         ExecutionHandlers? handlers,
         bool isBackground,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireTerminal = false)
     {
         var execution = new Execution();
         var dispatcher = new ExecutionEventDispatcher(execution, handlers);
@@ -435,6 +441,9 @@ internal sealed class CommandsAdapter : IExecdCommands
 
         if (!isBackground)
         {
+            if (requireTerminal && execution.Complete == null && execution.Error == null)
+                throw new SandboxInternalException("Foreground command stream ended without a terminal event");
+
             execution.ExitCode = InferForegroundExitCode(execution);
         }
 
