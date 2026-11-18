@@ -62,6 +62,8 @@ helm install opensandbox-server manifests/charts/server \
 
 See the [Kubernetes deployment guide](../../../docs/deployment/index.md) for production configuration, verification, and upgrades.
 
+To enable the optional native Job/CronJob API, set `kubernetes.batch_api_enabled = true` in `configToml` and list the existing workload namespaces in `batchApi.namespaces`. The chart grants namespace-scoped batch permissions to the Server ServiceAccount. See the [Kubernetes batch guide](../../../docs/guides/kubernetes-batch.md) for authentication, workload policy requirements, and usage.
+
 ## Install from local source
 
 ```bash
@@ -128,6 +130,7 @@ The following table lists the configurable parameters of the chart and their def
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| batchApi.namespaces | list | `[]` | Existing namespaces in which the Server may manage native Jobs/CronJobs. Also enable kubernetes.batch_api_enabled in configToml. |
 | configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.1\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.1\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. [kubernetes].namespace below is the sandbox workload namespace: the chart does not create it, so create it before submitting workloads (see README). |
 | fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
 | imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |

@@ -1,0 +1,665 @@
+openapi: 3.1.0
+info:
+  title: OpenSandbox Kubernetes Batch API
+  version: 0.1.0
+  description: Optional authenticated API for native Jobs and CronJobs on Kubernetes 1.27+. Enable kubernetes.batch_api_enabled and grant namespace-scoped RBAC. Kubernetes owns scheduling and execution. Only resources with matching managed-by and tenant labels are visible; child diagnostics also verify owner UIDs.
+servers:
+- url: http://localhost:8080/v1
+security:
+- apiKeyAuth: []
+paths:
+  /kubernetes/jobs:
+    post:
+      tags:
+      - Kubernetes Batch
+      operationId: createKubernetesJob
+      summary: Create a Job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobManifest'
+      responses:
+        '201':
+          description: Resource created; execution is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeResource'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+    get:
+      tags:
+      - Kubernetes Batch
+      operationId: listKubernetesJobs
+      summary: List owned Jobs
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceList'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /kubernetes/jobs/{name}:
+    get:
+      tags:
+      - Kubernetes Batch
+      operationId: getKubernetesJob
+      summary: Get a Job and native status
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeResource'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+    delete:
+      tags:
+      - Kubernetes Batch
+      operationId: deleteKubernetesJob
+      summary: Request background cascading deletion
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      responses:
+        '202':
+          description: Deletion accepted; resources may still be terminating.
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /kubernetes/jobs/{name}/pods:
+    get:
+      tags:
+      - Kubernetes Batch
+      operationId: listKubernetesJobPods
+      summary: Read Pods owned by the Job UID
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceList'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /kubernetes/jobs/{name}/pods/{pod_name}/logs:
+    get:
+      tags:
+      - Kubernetes Batch
+      operationId: getKubernetesJobPodLogs
+      summary: Read bounded Pod logs
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      - name: pod_name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 253
+          pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+      - name: container
+        in: query
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      - name: tailLines
+        in: query
+        schema:
+          type: integer
+          default: 100
+          minimum: 1
+          maximum: 10000
+      - name: limitBytes
+        in: query
+        schema:
+          type: integer
+          default: 65536
+          minimum: 1
+          maximum: 1048576
+      responses:
+        '200':
+          description: Success
+          content:
+            text/plain:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /kubernetes/cronjobs:
+    post:
+      tags:
+      - Kubernetes Batch
+      operationId: createKubernetesCronJob
+      summary: Create a CronJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CronJobManifest'
+      responses:
+        '201':
+          description: Resource created; execution is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeResource'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+    get:
+      tags:
+      - Kubernetes Batch
+      operationId: listKubernetesCronJobs
+      summary: List owned CronJobs
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceList'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /kubernetes/cronjobs/{name}:
+    get:
+      tags:
+      - Kubernetes Batch
+      operationId: getKubernetesCronJob
+      summary: Get a CronJob
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeResource'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+    put:
+      tags:
+      - Kubernetes Batch
+      operationId: replaceKubernetesCronJob
+      summary: Replace desired CronJob state, including suspend/resume
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CronJobManifest'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NativeResource'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+    delete:
+      tags:
+      - Kubernetes Batch
+      operationId: deleteKubernetesCronJob
+      summary: Request background cascading deletion
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      responses:
+        '202':
+          description: Deletion accepted; resources may still be terminating.
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+  /kubernetes/cronjobs/{name}/jobs:
+    get:
+      tags:
+      - Kubernetes Batch
+      operationId: listKubernetesCronJobJobs
+      summary: List Jobs owned by the CronJob UID
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceList'
+        '400':
+          $ref: '#/components/responses/Error400'
+        '401':
+          $ref: '#/components/responses/Error401'
+        '403':
+          $ref: '#/components/responses/Error403'
+        '404':
+          $ref: '#/components/responses/Error404'
+        '409':
+          $ref: '#/components/responses/Error409'
+        '422':
+          $ref: '#/components/responses/Error422'
+        '429':
+          $ref: '#/components/responses/Error429'
+        '501':
+          $ref: '#/components/responses/Error501'
+        '503':
+          $ref: '#/components/responses/Error503'
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: OPEN-SANDBOX-API-KEY
+  schemas:
+    BatchMetadata:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+        namespace:
+          type:
+          - string
+          - 'null'
+          description: Must match the namespace selected by the authenticated tenant or server configuration.
+        labels:
+          type: object
+          description: User labels. opensandbox.io/batch-managed-by and opensandbox.io/tenant are reserved for the server.
+          additionalProperties:
+            type: string
+        annotations:
+          type: object
+          additionalProperties:
+            type: string
+    JobManifest:
+      type: object
+      additionalProperties: false
+      required:
+      - apiVersion
+      - kind
+      - metadata
+      - spec
+      properties:
+        apiVersion:
+          type: string
+          const: batch/v1
+        kind:
+          type: string
+          const: Job
+        metadata:
+          $ref: '#/components/schemas/BatchMetadata'
+        spec:
+          type: object
+          additionalProperties: true
+          description: Native Kubernetes JobSpec, validated by the API server using fieldValidation=Strict.
+    CronJobManifest:
+      type: object
+      additionalProperties: false
+      required:
+      - apiVersion
+      - kind
+      - metadata
+      - spec
+      properties:
+        apiVersion:
+          type: string
+          const: batch/v1
+        kind:
+          type: string
+          const: CronJob
+        metadata:
+          $ref: '#/components/schemas/BatchMetadata'
+        spec:
+          type: object
+          additionalProperties: true
+          description: Native Kubernetes CronJobSpec, validated by the API server using fieldValidation=Strict. CronJob jobTemplate metadata accepts only labels and annotations; server ownership labels are reserved. CronJob names are limited to 52 characters.
+    NativeResource:
+      type: object
+      additionalProperties: true
+      description: Native Kubernetes object with metadata, spec and status; fields use Kubernetes JSON names.
+    ResourceList:
+      type: object
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NativeResource'
+    ErrorResponse:
+      type: object
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    ValidationErrorResponse:
+      type: object
+      description: Request validation errors follow the Server's sanitized FastAPI error format; submitted input is omitted.
+      required:
+      - detail
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            required:
+            - loc
+            - msg
+            - type
+            properties:
+              loc:
+                type: array
+                items:
+                  type: [string, integer]
+              msg:
+                type: string
+              type:
+                type: string
+  responses:
+    Error400:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error401:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error403:
+      description: Namespace or Kubernetes permission denied; authentication must be configured
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error404:
+      description: Resource absent or outside the authenticated owner
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error409:
+      description: Resource already exists or concurrent update/deletion
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error422:
+      description: Invalid envelope or native Kubernetes spec
+      content:
+        application/json:
+          schema:
+            oneOf:
+            - $ref: '#/components/schemas/ErrorResponse'
+            - $ref: '#/components/schemas/ValidationErrorResponse'
+    Error429:
+      description: Kubernetes throttled the request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error501:
+      description: Batch API disabled or unsupported runtime
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Error503:
+      description: Kubernetes API unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

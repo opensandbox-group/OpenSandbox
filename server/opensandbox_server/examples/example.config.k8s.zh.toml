@@ -67,6 +67,9 @@ kubeconfig_path = "~/.kube/config"
 # Namespace for sandbox workloads
 namespace = "opensandbox"
 
+# 原生 Job/CronJob API（默认关闭；仅向可信平台调用方开放）。
+batch_api_enabled = false
+
 # [Beta] informer 缓存的 resync 与 watch 调优参数。
 informer_resync_seconds = 300
 informer_watch_timeout_seconds = 60

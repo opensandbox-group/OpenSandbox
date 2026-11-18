@@ -20,10 +20,10 @@ operations. All API access goes through this class.
 import logging
 import threading
 from functools import partial
-from typing import Callable, Any, Dict, List, Optional, Tuple
+from typing import Callable, Any, Dict, List, Literal, Optional, Tuple
 
 from kubernetes import client, config
-from kubernetes.client import ApiException, CoreV1Api, CustomObjectsApi, NodeV1Api
+from kubernetes.client import ApiException, BatchV1Api, CoreV1Api, CustomObjectsApi, NodeV1Api
 
 from opensandbox_server.config import KubernetesRuntimeConfig
 from opensandbox_server.services.k8s.informer import WorkloadInformer
@@ -55,6 +55,7 @@ class K8sClient:
         self._core_v1_api: Optional[CoreV1Api] = None
         self._custom_objects_api: Optional[CustomObjectsApi] = None
         self._node_v1_api: Optional[NodeV1Api] = None
+        self._batch_v1_api: Optional[BatchV1Api] = None
         self._informers: Dict[_InformerKey, WorkloadInformer] = {}
         self._informers_lock = threading.Lock()
         self._read_limiter: Optional[TokenBucketRateLimiter] = (
@@ -100,6 +101,47 @@ class K8sClient:
         if self._node_v1_api is None:
             self._node_v1_api = client.NodeV1Api()
         return self._node_v1_api
+
+    def get_batch_v1_api(self) -> BatchV1Api:
+        """Return the shared native batch API client."""
+        if self._batch_v1_api is None:
+            self._batch_v1_api = client.BatchV1Api()
+        return self._batch_v1_api
+
+    def batch_request(
+        self, kind: Literal["job", "cron_job"],
+        operation: Literal["create", "read", "list", "replace", "delete"],
+        namespace: str, **kwargs: Any,
+    ) -> Any:
+        """Dispatch native batch operations with shared read/write rate limits.
+
+        Only internal Job/CronJob services select the resource and operation.
+        The explicit allowlists prevent this helper becoming a generic API proxy.
+        """
+        if kind not in ("job", "cron_job") or operation not in (
+            "create", "read", "list", "replace", "delete"
+        ):
+            raise ValueError("Unsupported Kubernetes batch operation.")
+        limiter = self._read_limiter if operation in ("read", "list") else self._write_limiter
+        if limiter:
+            limiter.acquire()
+        if operation in ("create", "replace"):
+            kwargs["field_validation"] = "Strict"
+        method = getattr(self.get_batch_v1_api(), f"{operation}_namespaced_{kind}")
+        return method(namespace=namespace, _request_timeout=30, **kwargs)
+
+    def read_pod_logs(
+        self, namespace: str, name: str, container: Optional[str],
+        tail_lines: int, limit_bytes: int,
+    ) -> str:
+        """Read a bounded, non-streaming log response for an authorized Pod."""
+        if self._read_limiter:
+            self._read_limiter.acquire()
+        kwargs = {"container": container} if container is not None else {}
+        return self.get_core_v1_api().read_namespaced_pod_log(
+            namespace=namespace, name=name, tail_lines=tail_lines,
+            limit_bytes=limit_bytes, _request_timeout=30, **kwargs,
+        )
 
 
     def _lookup_informer(self, group: str, version: str, plural: str, namespace: str) -> Optional[WorkloadInformer]:

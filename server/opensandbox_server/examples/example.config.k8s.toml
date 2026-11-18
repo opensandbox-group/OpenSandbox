@@ -63,6 +63,8 @@ path = "~/.opensandbox/opensandbox.db"
 # snapshot_recovery_interval_seconds = 15
 
 [kubernetes]
+# Native Job/CronJob APIs for trusted platform callers; requires API key auth and batch RBAC.
+batch_api_enabled = false
 # Path to kubeconfig file. Leave as null to use in-cluster configuration
 kubeconfig_path = "~/.kube/config"
 

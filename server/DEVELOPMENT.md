@@ -42,6 +42,20 @@ uv run pyright                                   # type check
 uv run pytest --cov=opensandbox_server --cov-report=term  # with coverage
 ```
 
+### Native Kubernetes batch smoke test
+
+Enable the Batch API and its namespace-scoped RBAC as described in the [batch guide](../docs/guides/kubernetes-batch.md). The standalone smoke test requires Kubernetes 1.27+, `kubectl` access to the same workload namespace, and `OPEN_SANDBOX_API_KEY` set to the Server's API key. It creates uniquely named Jobs and a CronJob, waits for actual scheduling across minute boundaries, checks ownership and cascading cleanup, and removes its fixtures in a `finally` block. Allow about four minutes. It does not create or delete the namespace.
+
+```bash
+uv run python tests/smoke_kubernetes_batch.py \
+  --url http://localhost:8080 \
+  --context docker-desktop \
+  --namespace opensandbox \
+  --report reports/kubernetes-batch-smoke.json
+```
+
+Use `--image` for an available image containing `/bin/sh`, `echo`, and `sleep`, and optionally `--node` to select a node by hostname. The script is explicitly invoked and is not part of ordinary pytest collection.
+
 ### FastPath stub regeneration
 
 The gRPC stubs under `opensandbox_server/services/fast_sandbox/generated/` are generated from the fast-sandbox repo's `api/proto/v2/fastpath.proto`. Regenerate them after fast-sandbox proto changes (version must match `grpcio-tools` in `pyproject.toml` — currently protobuf Python 7.35.x / grpcio 1.83.x):

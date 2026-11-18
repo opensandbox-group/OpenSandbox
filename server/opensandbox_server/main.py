@@ -104,6 +104,7 @@ def _idle_pause_namespaces() -> list[str]:
 from opensandbox_server.api.diagnostics import router as diagnostics_router  # noqa: E402
 from opensandbox_server.api.metrics import router as metrics_router  # noqa: E402
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
+from opensandbox_server.api.batch import router as batch_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
 from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
 from opensandbox_server.api.network_policy import router as policy_router  # noqa: E402
@@ -284,6 +285,7 @@ app.include_router(credential_vault_router)
 app.include_router(router, prefix="/v1")
 app.include_router(diagnostics_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
+app.include_router(batch_router, prefix="/v1")
 app.include_router(templates_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")
 app.include_router(proxy_router, prefix="/v1")

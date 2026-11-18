@@ -23,4 +23,5 @@ Use these guides to add capabilities to a working [sandbox application](/getting
 
 ## Operations
 
+- [Kubernetes Jobs and CronJobs](/guides/kubernetes-batch)
 - [Telemetry](/guides/telemetry)

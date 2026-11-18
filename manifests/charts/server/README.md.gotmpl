@@ -62,6 +62,8 @@ helm install opensandbox-server manifests/charts/server \
 
 See the [Kubernetes deployment guide](../../../docs/deployment/index.md) for production configuration, verification, and upgrades.
 
+To enable the optional native Job/CronJob API, set `kubernetes.batch_api_enabled = true` in `configToml` and list the existing workload namespaces in `batchApi.namespaces`. The chart grants namespace-scoped batch permissions to the Server ServiceAccount. See the [Kubernetes batch guide](../../../docs/guides/kubernetes-batch.md) for authentication, workload policy requirements, and usage.
+
 ## Install from local source
 
 ```bash
