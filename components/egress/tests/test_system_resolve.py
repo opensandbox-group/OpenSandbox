@@ -66,7 +66,8 @@ class _Headers:
                 return value
         return default
 
-    def items(self) -> list[tuple[str, str]]:
+    def items(self, multi: bool = False) -> list[tuple[str, str]]:
+        # Dict-backed: combined and multi views coincide.
         return list(self._values.items())
 
     def __getitem__(self, name: str) -> str:
@@ -94,14 +95,23 @@ class _Headers:
 
 
 class _RepeatedHeaders:
-    """Headers object exposing repeated and case-variant field lines, as
-    mitmproxy's multi-dict can."""
+    """Repeated and case-variant field lines in wire order, like mitmproxy's
+    ``items(multi=True)``; the default view comma-folds them."""
 
     def __init__(self, items: list[tuple[str, str]]) -> None:
         self._items = list(items)
 
-    def items(self) -> list[tuple[str, str]]:
-        return list(self._items)
+    def items(self, multi: bool = False) -> list[tuple[str, str]]:
+        if multi:
+            return list(self._items)
+        combined: dict[str, str] = {}
+        for key, value in self._items:
+            combined[key.lower()] = (
+                f"{combined[key.lower()]}, {value}"
+                if key.lower() in combined
+                else value
+            )
+        return list(combined.items())
 
     def __contains__(self, name: str) -> bool:
         lowered = name.lower()
@@ -412,8 +422,7 @@ class ExchangeResolveTest(TestCase):
         self._install_vault()
         calls = self._decision_transport()
         flow = _Flow()
-        # mitmproxy Headers allow repeated and case-variant field lines; one
-        # header identity must carry exactly one value on the resolver wire.
+        # Repeated and case-variant field lines name one header identity.
         flow.request.headers = _RepeatedHeaders(
             [("X-Test", "first"), ("x-test", "second"), ("Accept", "a")]
         )
@@ -464,6 +473,36 @@ class ExchangeResolveTest(TestCase):
             self.system.MAX_RESOLVE_REQUEST_HEADERS,
             len(calls[0][3]["request"]["headers"]),
         )
+
+    def test_resolve_payload_over_aggregate_budget_fails_closed(self) -> None:
+        # Passes the per-value and count caps, but the serialized payload
+        # exceeds the endpoint's 64KiB bound: classified locally, not http_400.
+        self._install_vault()
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        flow = _Flow()
+        for i in range(9):
+            flow.request.headers[f"x-h{i}"] = "v" * 8000
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual([], calls)
+        self.assertEqual(407, flow.response.status_code)
+
+    def test_resolve_payload_under_aggregate_budget_resolves(self) -> None:
+        self._install_vault()
+        calls = self._decision_transport()
+        flow = _Flow()
+        for i in range(4):
+            flow.request.headers[f"x-h{i}"] = "v" * 8000
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual(
+            4, len(calls[0][3]["request"]["headers"])
+        )
+        self.assertFalse(flow.killed)
+        self.assertIsNone(flow.response)
 
     def test_fast_sandbox_mode_appends_client_ip(self) -> None:
         self._install_vault()

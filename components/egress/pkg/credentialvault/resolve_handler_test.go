@@ -201,8 +201,7 @@ func TestResolveHandlerForwardsRequestHeaders(t *testing.T) {
 	rec := h.postResolve(body)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	// Names are case-insensitive header identities, forwarded in the
-	// lowercase canonical form; values keep their exact bytes.
+	// Lowercase canonical form; values keep their exact bytes.
 	recorded := h.client.recorded()
 	require.Len(t, recorded, 1)
 	require.Equal(t, map[string]string{
@@ -214,8 +213,8 @@ func TestResolveHandlerForwardsRequestHeaders(t *testing.T) {
 
 func TestResolveHandlerRequestHeadersDiscipline(t *testing.T) {
 	h := newResolveHarness(t)
-	// Unblock up front: a case that unexpectedly decodes must fail its
-	// status assertion loudly instead of blocking the fake client forever.
+	// Unblock up front: an unexpectedly-decoding case fails its assertion
+	// instead of blocking the fake client forever.
 	h.client.decision = &ResolverDecision{Headers: map[string]string{}, Suppress: map[string]struct{}{}, Redactions: []string{}}
 	h.client.unblock()
 	headerObject := func(entries string) string {

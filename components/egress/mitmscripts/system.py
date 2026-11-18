@@ -99,11 +99,10 @@ CREDENTIAL_RESOLVER_TIMEOUT_BOUNDS = (1, 120)
 DEFAULT_CREDENTIAL_RESOLVER_CONCURRENCY = 32
 CREDENTIAL_RESOLVER_CONCURRENCY_BOUNDS = (1, 1024)
 MAX_RESOLVE_RESPONSE_BYTES = 256 * 1024
-# Forwarded request headers for exchange resolves. Structural and hop-by-hop
-# fields are excluded (they are either carried as dedicated payload fields or
-# meaningless to a resolver proof); the caps mirror the Go `_resolve`
-# endpoint, which fails closed on the same bounds — the addon raises first so
-# the denial classification stays local.
+# Forwarded request headers for exchange resolves: structural/hop-by-hop
+# fields are excluded, and the caps mirror the Go `_resolve` endpoint — the
+# addon fails closed on all of them first, payload size included.
+MAX_RESOLVE_REQUEST_BYTES = 64 * 1024
 MAX_RESOLVE_REQUEST_HEADERS = 64
 MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES = 8 * 1024
 RESOLVE_REQUEST_HEADER_DENYLIST = {
@@ -1221,14 +1220,12 @@ def _request_path(flow: http.HTTPFlow) -> str:
 def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
     """Select the outbound headers a resolver may bind its proof to.
 
-    Everything the sandbox sent except the structural denylist, lowercased
-    (the resolver wire canonical form). Repeated or case-variant fields name
-    one header; the last occurrence wins, matching mitmproxy's own
-    case-insensitive replace semantics. Over-cap selects fail the resolve
-    (the Go endpoint would deny the same request anyway).
+    Everything except the structural denylist, lowercased. Field lines come
+    from ``items(multi=True)`` — the default view comma-folds repeats — and
+    the last occurrence of a header identity wins. Over-cap fails closed.
     """
     selected: dict[str, str] = {}
-    for name, value in flow.request.headers.items():
+    for name, value in flow.request.headers.items(multi=True):
         lowered = name.lower()
         if lowered in RESOLVE_REQUEST_HEADER_DENYLIST:
             continue
@@ -2320,6 +2317,10 @@ async def _resolve_exchange_binding(
                 "headers": _resolve_request_headers(flow),
             },
         }
+        # Same serialization the RPC sends, so per-header caps cannot hide
+        # an oversized selection (or path) from the endpoint's 64KiB bound.
+        if len(json.dumps(payload).encode("utf-8")) > MAX_RESOLVE_REQUEST_BYTES:
+            raise CredentialResolveError("resolve_payload_too_large")
         async with _resolve_limiter():
             # The deadline covers semaphore and executor queueing too, not
             # just the socket: a queued resolve fails within the budget

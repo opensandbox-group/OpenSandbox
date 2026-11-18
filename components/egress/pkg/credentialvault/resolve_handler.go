@@ -299,10 +299,8 @@ type resolveEndpointHTTPRequest struct {
 	PortPresent bool
 	Method      string
 	Path        string
-	// Headers carries the forwarded outbound request headers the resolver
-	// may bind its proof to. Names are lowercased and deduplicated by the
-	// decode; absent ("headers" omitted) decodes to nil and lands as an
-	// empty object on the wire.
+	// Headers carries the forwarded request headers, lowercased and
+	// deduplicated at decode; nil (omitted) lands as an empty object.
 	Headers map[string]string
 }
 
@@ -370,15 +368,14 @@ func decodeResolveRequest(data []byte) (resolveEndpointRequest, error) {
 	return document, nil
 }
 
-// maxResolveRequestHeaderCount caps the forwarded request headers per
-// resolve; the bundled addon mirrors this bound and fails closed first.
+// maxResolveRequestHeaderCount caps forwarded headers per resolve; the
+// bundled addon mirrors this bound and fails closed first.
 const maxResolveRequestHeaderCount = 64
 
 // decodeResolveRequestHeaders strictly decodes the optional forwarded header
-// map: an object of non-empty strings, legal field names and values, capped
-// count and value length. Names are case-insensitive header identities —
-// byte-different keys naming one header are one header, not two — and are
-// normalized to lowercase, the canonical form on the resolver wire.
+// map: non-empty string values, legal field names and values, capped count
+// and value length. Case-variant keys name one header; names are normalized
+// to lowercase, the resolver wire canonical form.
 func decodeResolveRequestHeaders(raw json.RawMessage) (map[string]string, error) {
 	fields, err := strictJSONObject(raw)
 	if err != nil {
@@ -470,8 +467,7 @@ func buildResolveTarget(document resolveEndpointRequest) (ResolveDestination, Re
 	if binding == "" || method == "" || !strings.HasPrefix(path, "/") {
 		return ResolveDestination{}, ResolveRequestFrame{}, badRequest
 	}
-	// Forwarded headers were validated and lowercased at decode; an absent
-	// map still serializes as an empty object, never null.
+	// Absent headers serialize as an empty object, never null.
 	headers := document.Request.Headers
 	if headers == nil {
 		headers = map[string]string{}
