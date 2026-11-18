@@ -29,9 +29,12 @@ import (
 
 // A Pool whose buffer died reports the finished pods as capacity: `total`
 // stays at the old count and `available` cannot rise, which is exactly the
-// status shape an operator sees when the pool stops refilling. Finished pods
-// hold no capacity and must not count toward total/available/updated.
-func TestUpdatePoolStatusCountsOnlyServiceablePods(t *testing.T) {
+// status shape an operator sees when the pool stops refilling. Finished idle
+// pods hold no capacity and must not count toward total/available/updated. A
+// finished pod that is still allocated stays counted — it is owed to its
+// sandbox until handback — so `allocated / total` remains a utilization
+// fraction.
+func TestUpdatePoolStatusExcludesFinishedIdlePodsButKeepsAllocatedOnes(t *testing.T) {
 	now := time.Now()
 
 	idleReady := stabilityTestPod("idle-ready", true, now)
@@ -40,10 +43,15 @@ func TestUpdatePoolStatusCountsOnlyServiceablePods(t *testing.T) {
 	allocatedReady := stabilityTestPod("allocated-ready", true, now)
 	allocatedReady.Labels = map[string]string{labelPoolRevision: "rev-1"}
 
-	evicted := stabilityTestPod("evicted", false, now)
-	evicted.Status.Phase = corev1.PodFailed
-	evicted.Status.Reason = "Evicted"
-	evicted.Labels = map[string]string{labelPoolRevision: "rev-1"}
+	evictedAllocated := stabilityTestPod("evicted-allocated", false, now)
+	evictedAllocated.Status.Phase = corev1.PodFailed
+	evictedAllocated.Status.Reason = "Evicted"
+	evictedAllocated.Labels = map[string]string{labelPoolRevision: "rev-1"}
+
+	evictedIdle := stabilityTestPod("evicted-idle", false, now)
+	evictedIdle.Status.Phase = corev1.PodFailed
+	evictedIdle.Status.Reason = "Evicted"
+	evictedIdle.Labels = map[string]string{labelPoolRevision: "rev-1"}
 
 	// A completed pod can keep a stale Ready condition; its phase still says
 	// it can never serve another sandbox.
@@ -61,8 +69,11 @@ func TestUpdatePoolStatusCountsOnlyServiceablePods(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pods := []*corev1.Pod{idleReady, allocatedReady, evicted, succeeded}
-	allocation := map[string]string{allocatedReady.Name: "sandbox-a"}
+	pods := []*corev1.Pod{idleReady, allocatedReady, evictedAllocated, evictedIdle, succeeded}
+	allocation := map[string]string{
+		allocatedReady.Name:   "sandbox-a",
+		evictedAllocated.Name: "sandbox-b",
+	}
 	if err := r.updatePoolStatus(context.Background(), "rev-1", latest, pods, pods, allocation); err != nil {
 		t.Fatal(err)
 	}
@@ -71,16 +82,20 @@ func TestUpdatePoolStatusCountsOnlyServiceablePods(t *testing.T) {
 	if err := r.Get(context.Background(), types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, updated); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Status.Total != 2 {
-		t.Fatalf("Status.Total = %d, want 2 (finished pods hold no capacity)", updated.Status.Total)
+	if updated.Status.Total != 3 {
+		t.Fatalf("Status.Total = %d, want 3 (live pods plus the finished pod still allocated)", updated.Status.Total)
 	}
-	if updated.Status.Updated != 2 {
-		t.Fatalf("Status.Updated = %d, want 2 (only live pods on the current revision)", updated.Status.Updated)
+	if updated.Status.Updated != 3 {
+		t.Fatalf("Status.Updated = %d, want 3 (same pod population as Total)", updated.Status.Updated)
 	}
 	if updated.Status.Available != 1 {
-		t.Fatalf("Status.Available = %d, want 1 (a stale Ready condition on a finished pod is not availability)", updated.Status.Available)
+		t.Fatalf("Status.Available = %d, want 1 (finished and allocated pods are not availability)", updated.Status.Available)
 	}
-	if updated.Status.Allocated != 1 {
-		t.Fatalf("Status.Allocated = %d, want 1", updated.Status.Allocated)
+	if updated.Status.Allocated != 2 {
+		t.Fatalf("Status.Allocated = %d, want 2", updated.Status.Allocated)
+	}
+	if updated.Status.Total < updated.Status.Allocated {
+		t.Fatalf("Status.Total (%d) < Status.Allocated (%d); allocated/total would exceed 1",
+			updated.Status.Total, updated.Status.Allocated)
 	}
 }

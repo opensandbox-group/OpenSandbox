@@ -1253,13 +1253,16 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 	updatedCnt := int32(0)
 	totalCnt := int32(0)
 	for _, pod := range pods {
-		// A pod in a terminal phase (Failed or Succeeded) holds no capacity and
-		// can never serve a sandbox again. Core workloads report only
-		// non-terminated pods in their replicas counters, and this count feeds
-		// both the exported capacity metrics and the cross-pool rebalance
-		// scorer (Allocated/Total), so a finished pod that has not been reaped
-		// yet must not inflate it.
-		if isTerminalPhasePod(pod) {
+		allocated := false
+		if _, ok := podAllocation[pod.Name]; ok {
+			allocated = true
+		}
+		// A terminal pod can never serve a sandbox again. An idle one holds no
+		// capacity at all, so it must not inflate the reported totals; an
+		// allocated one is still owed to its sandbox until handback, so it
+		// stays counted and the exported allocated/total utilization pair
+		// keeps covering one pod population.
+		if isTerminalPhasePod(pod) && !allocated {
 			continue
 		}
 		if pod.Labels[labelPoolRevision] == updateRevision {

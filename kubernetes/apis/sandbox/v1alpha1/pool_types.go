@@ -112,11 +112,12 @@ type PoolStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// Revision is the latest version of pool
 	Revision string `json:"revision"`
-	// Total is the number of non-terminated nodes in the pool. Terminal pods
-	// (Failed or Succeeded) that have not been reclaimed yet do not count:
-	// they cannot serve a sandbox, so reporting them as capacity would make a
-	// pool with a dead buffer look healthy. They still consume the PoolMax
-	// budget until the controller reclaims them.
+	// Total is the number of nodes the pool accounts for: non-terminated pods
+	// plus terminal pods that are still allocated to a sandbox (they stay owed
+	// until handback). Terminal idle pods are excluded — they can never serve
+	// again and must not make a pool with a dead buffer look healthy. Unreaped
+	// terminal pods still consume the PoolMax budget until the controller
+	// reclaims them.
 	Total int32 `json:"total"`
 	// Allocated is the number of nodes currently allocated to sandboxes.
 	Allocated int32 `json:"allocated"`
