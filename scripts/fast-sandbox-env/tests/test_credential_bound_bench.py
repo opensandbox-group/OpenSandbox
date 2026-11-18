@@ -381,6 +381,34 @@ bench_egress_cgroup pod-b || echo UNREADABLE
         self.assertEqual(out[1], "UNREADABLE")
         self.assertIn("exec pod-a -c egress -- sh -c", self.calls_made())
 
+    def test_pool_recreate_targets_the_pool_namespace(self):
+        # Regression: an unnamespaced delete was a NotFound no-op, so the old
+        # Pods never went away and the bench timed out waiting for them.
+        body = r'''
+source "$SCRIPT_DIR/credential-bound-bench.sh"
+LIVE=1
+kubectl() {
+	printf 'kubectl %s\n' "$*" >> "$CALLS"
+	case "$*" in
+		"-n $RESOURCE_NS delete sandboxpool $POOL_NAME"*) LIVE=0 ;;
+		"-n $RESOURCE_NS get sandboxpool $POOL_NAME --ignore-not-found -o name") [[ "$LIVE" == 1 ]] && echo "sandboxpool/$POOL_NAME"; return 0 ;;
+		*"get sandboxpool"*) return 1 ;;
+	esac
+}
+bench_pool_object_gone && echo GONE-BEFORE || echo LIVE-BEFORE
+kubectl -n "$RESOURCE_NS" delete sandboxpool "$POOL_NAME" --ignore-not-found >/dev/null
+bench_pool_object_gone && echo GONE-AFTER || echo LIVE-AFTER
+kubectl() { return 1; }
+bench_pool_object_gone && echo GONE-ON-ERROR || echo NOT-GONE-ON-ERROR
+'''
+        out = self.sourced(body).stdout.splitlines()
+        self.assertEqual(out, ["LIVE-BEFORE", "GONE-AFTER", "NOT-GONE-ON-ERROR"])
+        with open(BENCH_SH) as handle:
+            src = handle.read()
+        for line in src.splitlines():
+            if "sandboxpool" in line and "kubectl" in line:
+                self.assertIn('-n "$RESOURCE_NS"', line, line)
+
     def test_bench_refuses_xtrace(self):
         proc = self.sourced('source "$SCRIPT_DIR/credential-bound-bench.sh"; set -x; credential_bound_bench',
                             check=False)

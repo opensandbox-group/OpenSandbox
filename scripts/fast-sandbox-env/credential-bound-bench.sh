@@ -263,11 +263,22 @@ bench_live_egress_is() { # <memory-limit> <capacity|"">
 		and ([$e.env[]? | select(.name == "OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY") | .value] == (if $cap == "" then [] else [$cap] end)))' >/dev/null
 }
 
+# The SandboxPool object is absent from its namespace. An API error is not
+# "absent": --ignore-not-found prints nothing only for NotFound.
+bench_pool_object_gone() {
+	local out
+	out="$(kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" --ignore-not-found -o name 2>/dev/null)" || return 1
+	[[ -z "$out" ]]
+}
+
 # Recreate the pool from <manifest> (a template change must not wait on the
 # controller to roll Pods) and wait for the same readiness as pool_up.
+# SandboxPool is namespaced: deleting it outside $RESOURCE_NS is a NotFound
+# no-op, so the object's absence is checked before waiting on its Pods.
 bench_pool_apply() { # <manifest> <memory-limit> <capacity|"">
-	kubectl delete sandboxpool "$POOL_NAME" --ignore-not-found --wait --timeout=300s >/dev/null 2>&1 \
+	kubectl -n "$RESOURCE_NS" delete sandboxpool "$POOL_NAME" --ignore-not-found --wait --timeout=300s >/dev/null 2>&1 \
 		|| fail "bench: deleting SandboxPool $POOL_NAME failed"
+	wait_for "bench: SandboxPool $POOL_NAME deleted" 30 bench_pool_object_gone
 	wait_for "bench: previous pool Pods gone" 150 bench_pool_pods_gone
 	kubectl apply -f "$1" >/dev/null || fail "bench: applying $1 failed"
 	wait_for "bench: fastlet pods Ready (poolMin=$POOL_MIN)" 300 fastlet_pods_ready
