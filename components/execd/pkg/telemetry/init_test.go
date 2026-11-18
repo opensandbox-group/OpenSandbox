@@ -55,7 +55,7 @@ func TestSystemMetricsReaders(t *testing.T) {
 		assert.GreaterOrEqual(t, usage.UsedBytes, int64(0))
 		assert.GreaterOrEqual(t, usage.TotalBytes, int64(0))
 	}
-	if io, err := systemDiskIO(); err == nil {
+	if io, ok := systemDiskIO(); ok {
 		assert.GreaterOrEqual(t, io.ReadBytes, int64(0))
 		assert.GreaterOrEqual(t, io.WrittenBytes, int64(0))
 		assert.GreaterOrEqual(t, io.ReadOps, int64(0))

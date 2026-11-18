@@ -127,14 +127,14 @@ func (r *diskIORebaser) rebase(gen uint64, io resources.DiskIO) resources.DiskIO
 
 var systemDiskIORebaser diskIORebaser
 
-func systemDiskIO() (resources.DiskIO, error) {
+func systemDiskIO() (resources.DiskIO, bool) {
 	io, err := resources.DiskIOStats()
 	if err != nil {
-		return resources.DiskIO{}, err
+		return resources.DiskIO{}, false
 	}
 	var gen uint64
 	if b := binding.Current(); b != nil {
 		gen = b.Generation
 	}
-	return systemDiskIORebaser.rebase(gen, io), nil
+	return systemDiskIORebaser.rebase(gen, io), true
 }
