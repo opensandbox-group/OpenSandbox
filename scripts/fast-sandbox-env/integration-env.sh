@@ -4245,6 +4245,18 @@ rootfs_only_verify() {
 	local lane artifact_scheme
 	read -r lane artifact_scheme <<< "$(rootfs_only_lane "$template_id")"
 	log "verify (rootfs-only): lane=$lane templateId=$template_id"
+	if [[ "$lane" == "native" ]]; then
+		# The pinned Firecracker driver cuts native captures with XFS reflink
+		# and has no full-copy fallback. Fail fast on a non-XFS StateRoot
+		# with the prerequisite named, instead of stalling in capture
+		# qualification; a deliberately XFS-less setup (XFS_STATEROOT=0)
+		# never registers this stage.
+		local fs_type
+		fs_type="$(findmnt -n -o FSTYPE --target "${XFS_MOUNT_POINT}/firecracker" 2>/dev/null)" \
+			|| fail "native rootfs-only capture requires the XFS reflink StateRoot at ${XFS_MOUNT_POINT}/firecracker (findmnt failed; is the pool up?)"
+		[[ "$fs_type" == "xfs" ]] \
+			|| fail "the StateRoot filesystem at ${XFS_MOUNT_POINT}/firecracker is '$fs_type'; native capture requires XFS reflink (keep XFS_STATEROOT=1, or skip this stage with ROOTFS_ONLY=0)"
+	fi
 	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
 	t0="$(now_ms)"
 
@@ -4525,7 +4537,11 @@ verify_native() {
 	#                     the OCI lane only)
 	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
 		if [[ "$OCI_STACK" == "1" ]]; then
-			run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
+			if [[ "${XFS_STATEROOT:-1}" == "1" ]]; then
+				run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
+			else
+				log "XFS_STATEROOT=0: skipping the native rootfs-only snapshot verify (native capture requires the XFS reflink StateRoot; the pool renders ${XFS_MOUNT_POINT}/firecracker on the host root filesystem)"
+			fi
 		else
 			log "OCI_STACK=0: skipping the native rootfs-only snapshot verify (the FSEP-0001 restore kernel is staged on the OCI lane only)"
 		fi
