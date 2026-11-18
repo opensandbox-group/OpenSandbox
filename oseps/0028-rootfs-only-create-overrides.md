@@ -5,10 +5,10 @@ authors:
   - "@Yeaury"
 creation-date: 2026-11-17
 last-updated: 2026-11-18
-status: draft
+status: implementing
 ---
 
-# OSEP-0032: CPU and Memory Overrides for Rootfs-Only Sandbox Creation
+# OSEP-0028: CPU and Memory Overrides for Rootfs-Only Sandbox Creation
 
 <!-- toc -->
 - [Summary](#summary)
