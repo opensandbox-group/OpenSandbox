@@ -144,6 +144,10 @@ class Layer:
     def status(self) -> str:
         if any(check.status == FAIL for check in self.checks):
             return FAIL
+        if self.checks and all(check.status == SKIPPED for check in self.checks):
+            # Nothing was verified in this layer; callers must be able to
+            # tell "healthy" from "not examined".
+            return SKIPPED
         return PASS
 
     def as_dict(self) -> Dict[str, Any]:
@@ -780,14 +784,17 @@ def _summary(report: Dict[str, Any]) -> str:
     ]
     if observed.get("driverVersion"):
         parts.append(f"driver={observed['driverVersion']}")
-    parts.append(
-        f"gpus={observed.get('deviceNodeCount')}"
-        + (
-            f"/{report['expectedCount']}"
-            if report.get("expectedCount") not in (None, "all")
-            else ""
-        )
-    )
+    expected = report.get("expectedCount")
+    mig_count = observed.get("migInstanceCount")
+    if expected not in (None, "all"):
+        # Report the count in the unit the requested-count check compared:
+        # MIG instances when MIG is visible, physical device nodes otherwise.
+        if mig_count:
+            parts.append(f"gpus={mig_count} MIG/{expected}")
+        else:
+            parts.append(f"gpus={observed.get('deviceNodeCount')}/{expected}")
+    else:
+        parts.append(f"gpus={observed.get('deviceNodeCount')}")
     failed = [
         f"{layer_name}.{check['name']}: {check['detail']}"
         for layer_name, layer in layers.items()

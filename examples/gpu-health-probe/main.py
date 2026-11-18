@@ -39,6 +39,7 @@ Prerequisites:
 Usage:
     export SANDBOX_DOMAIN=your-server:8080        # default: localhost:8080
     export SANDBOX_API_KEY=your-api-key           # if the server requires auth
+    export SANDBOX_PROTOCOL=https                 # if the server uses TLS (default: http)
     export GPU_EXPECT=1                           # resourceLimits.gpu to request and verify
     python main.py
 """
@@ -58,6 +59,10 @@ from opensandbox.models import WriteEntry
 # Configuration
 DOMAIN = os.getenv("SANDBOX_DOMAIN", "localhost:8080")
 API_KEY = os.getenv("SANDBOX_API_KEY")
+# The protocol is used for the exec/files plane as well as the lifecycle API,
+# so a TLS deployment must set it explicitly (the lifecycle URL can derive it
+# from a scheme in SANDBOX_DOMAIN, the exec plane cannot).
+PROTOCOL = os.getenv("SANDBOX_PROTOCOL", "http")
 PROBE_DIR = "/tmp/gpu-health-probe"
 PROBE_PATH = f"{PROBE_DIR}/gpu_probe.py"
 # The default includes python3 and PyTorch so the demo exercises all three
@@ -76,6 +81,7 @@ COMPUTE_FLAG = "--compute skip" if GPU_COMPUTE_MODE == "skip" else "--compute au
 CONNECTION_CONFIG = ConnectionConfig(
     domain=DOMAIN,
     api_key=API_KEY,
+    protocol=PROTOCOL,
     request_timeout=timedelta(minutes=10),
 )
 

@@ -250,13 +250,13 @@ class TestDeviceLayer:
 class TestComputeLayer:
     def test_skip(self) -> None:
         layer = gpu_probe.collect_compute_layer("skip", 10, capture=_fake_capture())
-        assert layer.status == gpu_probe.PASS
+        assert layer.status == gpu_probe.SKIPPED
         assert layer.checks[0].status == gpu_probe.SKIPPED
 
     def test_auto_without_torch_skips(self) -> None:
         fake = _fake_capture(1, "", "ModuleNotFoundError: No module named 'torch'")
         layer = gpu_probe.collect_compute_layer("auto", 10, capture=fake)
-        assert layer.status == gpu_probe.PASS
+        assert layer.status == gpu_probe.SKIPPED
         assert layer.checks[0].status == gpu_probe.SKIPPED
         assert "--compute" in layer.checks[0].detail
 
@@ -431,6 +431,25 @@ class TestReport:
         compute = gpu_probe.Layer("compute", [])
         report = gpu_probe.build_report(device, compute, {}, None)
         assert report["warnings"] == ["device.b: something to watch"]
+
+    def test_summary_reports_comparison_unit(self) -> None:
+        device = gpu_probe.Layer("device", [gpu_probe.Check("c", gpu_probe.PASS, "ok")])
+        compute = gpu_probe.Layer("compute", [])
+        observed = {
+            "deviceNodeCount": 1,
+            "migInstanceCount": 2,
+            "driverVersion": "550.54.14",
+        }
+        summary = gpu_probe._summary(
+            gpu_probe.build_report(device, compute, observed, "2")
+        )
+        # The MIG check compared MIG instances, so the summary must not read
+        # as an apparent 1-of-2 attach drift.
+        assert "gpus=2 MIG/2" in summary
+        plain = gpu_probe._summary(
+            gpu_probe.build_report(device, compute, {"deviceNodeCount": 1}, "1")
+        )
+        assert "gpus=1/1" in plain
 
 
 class TestMain:

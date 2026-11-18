@@ -30,6 +30,7 @@ The complete source, including unit tests, lives in [`examples/gpu-health-probe`
 cd examples/gpu-health-probe
 export SANDBOX_DOMAIN=your-server:8080   # default: localhost:8080
 export SANDBOX_API_KEY=your-api-key      # if the server requires auth
+export SANDBOX_PROTOCOL=https            # if the server uses TLS (default: http)
 export GPU_EXPECT=1                      # resourceLimits.gpu to request and verify
 python main.py
 ```
