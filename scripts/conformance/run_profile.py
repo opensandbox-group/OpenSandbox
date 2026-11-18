@@ -186,8 +186,9 @@ def resolve_test_ref(claim_id: str, raw: object, repo_root: Path) -> TestRef:
     if not re.search(GO_TEST_FUNC_RE.format(name=re.escape(name)), body):
         fail(f"claim {claim_id} references a missing Go test: {relpath}::{name}")
 
-    module_root = find_module_root(source)
-    package_pattern = "./" + source.parent.relative_to(module_root).as_posix()
+    module_root = find_module_root(source, repo_root)
+    package_path = source.parent.relative_to(module_root).as_posix()
+    package_pattern = "./." if package_path == "." else f"./{package_path}"
     return TestRef(
         raw=raw,
         relpath=relpath,
@@ -198,11 +199,15 @@ def resolve_test_ref(claim_id: str, raw: object, repo_root: Path) -> TestRef:
     )
 
 
-def find_module_root(source: Path) -> Path:
+def find_module_root(source: Path, repo_root: Path) -> Path:
     for parent in (source.parent, *source.parent.parents):
+        if not parent.is_relative_to(repo_root):
+            break
         if (parent / "go.mod").is_file():
             return parent
-    fail(f"no go.mod found above {source}")
+        if parent == repo_root:
+            break
+    fail(f"no go.mod found between {source} and the repository root")
 
 
 def run_tests(profile: Profile, timeout: int, go_executable: str) -> dict[tuple[str, str, str], str]:
@@ -249,8 +254,12 @@ def run_tests(profile: Profile, timeout: int, go_executable: str) -> dict[tuple[
             except json.JSONDecodeError:
                 unparsed.append(line)
                 continue
+            if not isinstance(event, dict):
+                continue
             test_name = event.get("Test")
             action = event.get("Action")
+            if not isinstance(test_name, str) or not isinstance(action, str):
+                continue
             if not test_name or "/" in test_name or action not in {"pass", "fail", "skip"}:
                 continue
             observed[test_name] = action
