@@ -185,6 +185,25 @@ func TestFastSandboxSubjectRecoveryRebindRemoveAcrossGeneration(t *testing.T) {
 	require.Empty(t, s.subjectLifecycleDegraded())
 }
 
+// recoveryRestart reopens both managers as startup does, sharing only paths
+// with the seed. In particular, no cached per-subject file store survives.
+func recoveryRestart(t *testing.T, seed *fastSandboxPolicyServer) *fastSandboxPolicyServer {
+	t.Helper()
+	pp, err := newPolicyPersistence(seed.policyFiles.dir)
+	require.NoError(t, err)
+	vp, err := newVaultPersistence(seed.vaultFiles.dir)
+	require.NoError(t, err)
+	require.NotSame(t, seed.policyFiles, pp)
+	require.NotSame(t, seed.vaultFiles, vp)
+	require.Empty(t, pp.files)
+	require.Empty(t, vp.files)
+	s, _, _ := fastSandboxTestServer(t)
+	s.SetPolicyFiles(pp)
+	s.SetVaultFiles(vp)
+	readinessDrain(t, s)
+	return s
+}
+
 // AC3: control-plane rebuild. A new server object shares only the persisted
 // files with the seed server: no drain state, snapshot mirror, or in-memory
 // vault is reused. After the SET_BINDING replay, same-fence vault content is
@@ -206,7 +225,7 @@ func TestFastSandboxSubjectRecoveryControlPlaneRebuildTwoSubjects(t *testing.T) 
 	waitReadiness(t, seed, testUID, testFenceR, testFenceA)
 	waitReadiness(t, seed, "other", "r2", "a2")
 
-	rebuilt := readinessRestart(t, seed, false)
+	rebuilt := recoveryRestart(t, seed)
 	require.Equal(t, 200, doAction(t, rebuilt, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
 	require.Equal(t, 200, doAction(t, rebuilt, bindBody(t, "other", "10.0.0.9", "r2", "a2", 1, vaultAllowPolicy())).Code)
 	// Nothing is acknowledged before a receiver exists.
@@ -255,7 +274,7 @@ func TestFastSandboxSubjectRecoveryUnreadableNotWashedByChildGeneration(t *testi
 	require.NoError(t, os.Remove(path))
 	require.NoError(t, os.Mkdir(path, 0700))
 
-	s := readinessRestart(t, seed, false)
+	s := recoveryRestart(t, seed)
 	require.Equal(t, 200, doAction(t, s, bindBody(t, testUID, testIP, testFenceR, testFenceA, 1, vaultAllowPolicy())).Code)
 	require.Equal(t, 200, doAction(t, s, bindBody(t, "other", "10.0.0.9", "r2", "a2", 1, vaultAllowPolicy())).Code)
 	subjA := subject.FromSandboxUID(testUID)
@@ -318,6 +337,9 @@ func TestFastSandboxSubjectRecoveryVaultHistoryDifferential(t *testing.T) {
 				require.NoError(t, err)
 			}
 			switch history {
+			case "never-created":
+				_, err := os.Stat(path)
+				require.True(t, os.IsNotExist(err), "never-created must have no vault file before rebuild; stat error: %v", err)
 			case "created-then-missing":
 				require.NoError(t, os.Remove(path))
 			case "stale-fence":
@@ -329,7 +351,7 @@ func TestFastSandboxSubjectRecoveryVaultHistoryDifferential(t *testing.T) {
 				require.NoError(t, os.WriteFile(path, b, 0600))
 			}
 
-			s := readinessRestart(t, seed, false)
+			s := recoveryRestart(t, seed)
 			require.Equal(t, 200, doAction(t, s, bindBody(t, uid, testIP, "rh-r", "rh-a", 1, vaultAllowPolicy())).Code)
 			h := readinessReceiver(t, s)
 			snap := latestSubjectSnapshot(t, s, uid)
