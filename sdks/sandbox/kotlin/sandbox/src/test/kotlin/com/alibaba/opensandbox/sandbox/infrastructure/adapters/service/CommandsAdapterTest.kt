@@ -105,6 +105,18 @@ class CommandsAdapterTest {
     }
 
     @Test
+    fun `foreground rejects EOF without a terminal event`() {
+        mockWebServer.enqueue(MockResponse().setBody("""data: {"type":"stdout","text":"partial","timestamp":1}""" + "\n\n"))
+
+        val error =
+            assertThrows<SandboxInternalException> {
+                commandsAdapter.run(RunCommandRequest.builder().command("echo test").build())
+            }
+
+        assertTrue(error.message.orEmpty().contains("without a terminal event"))
+    }
+
+    @Test
     fun `foreground drains immediate EOF and output after terminal`() {
         for (failure in listOf(false, true)) {
             for (late in listOf(false, true)) {
@@ -534,7 +546,7 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
         mockWebServer.enqueue(
             MockResponse()
                 .setResponseCode(200)
-                .setBody("""{"type":"init","text":"cmd-123","timestamp":1672531200000}""" + "\n"),
+                .setBody("""{"type":"execution_complete","execution_time":1,"timestamp":1}""" + "\n"),
         )
 
         commandsAdapter.run(

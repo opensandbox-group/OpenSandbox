@@ -133,6 +133,14 @@ internal class CommandsAdapter(
         )
 
     override fun run(request: RunCommandRequest): Execution {
+        val execution = runCommand(request)
+        if (!request.background && execution.complete == null && execution.error == null) {
+            throw SandboxInternalException("Foreground command stream ended without a terminal event")
+        }
+        return execution
+    }
+
+    private fun runCommand(request: RunCommandRequest): Execution {
         if (request.argv == null && request.command.isEmpty()) {
             throw InvalidArgumentException("Command cannot be empty")
         }
@@ -165,7 +173,7 @@ internal class CommandsAdapter(
         value: String,
     ) {
         val command = buildSetEnvCommand(key, value)
-        val execution = run(RunCommandRequest.builder().command(command).build())
+        val execution = runCommand(RunCommandRequest.builder().command(command).build())
         // A foreground command only reports exitCode 0 after a confirmed
         // execution_complete event; a missing exit code (e.g. a dropped
         // stream) is treated as failure because the append was never confirmed.

@@ -41,6 +41,8 @@ interface Commands {
      * @param request Configuration for the command execution including command text,
      *                working directory, and timeout settings
      * @return An [Execution] handle representing the running command instance
+     * @throws SandboxInternalException if a foreground stream ends normally without a
+     *         completion or execution error event. Handlers may have received partial output.
      */
     fun run(request: RunCommandRequest): Execution
 
