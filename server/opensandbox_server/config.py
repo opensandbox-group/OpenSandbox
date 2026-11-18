@@ -728,6 +728,13 @@ class ProxyConfig(BaseModel):
 
 
 class KubernetesRuntimeConfig(BaseModel):
+    metadata_sync_pods: bool = Field(
+        default=False,
+        description=(
+            "Synchronize all metadata PATCH label changes to dedicated BatchSandbox Pods "
+            "and persist recreation overrides. Disabled by default."
+        ),
+    )
     kubeconfig_path: Optional[str] = Field(
         default=None,
         description="Absolute path to the kubeconfig file used for API authentication.",

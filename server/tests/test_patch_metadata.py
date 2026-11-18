@@ -22,7 +22,7 @@ from opensandbox_server.services.constants import SandboxErrorCodes
 
 
 class TestIsSystemLabel:
-    """Test system label detection (opensandbox.io/ prefix)."""
+    """Test system label detection for controller-owned prefixes."""
 
     def test_user_label_not_system(self):
         from opensandbox_server.services.sandbox_service import SandboxService
@@ -37,6 +37,7 @@ class TestIsSystemLabel:
         assert SandboxService._is_system_label("opensandbox.io/id")
         assert SandboxService._is_system_label("opensandbox.io/expires-at")
         assert SandboxService._is_system_label("opensandbox.io/custom-key")
+        assert SandboxService._is_system_label("batch-sandbox.sandbox.opensandbox.io/name")
 
 
 class TestApplyMetadataPatch:
@@ -89,7 +90,10 @@ class TestApplyMetadataPatch:
         result = self._merge(labels, {})
         assert result == labels
 
-    def test_reserved_key_rejected_even_with_null_value(self):
+    @pytest.mark.parametrize(
+        "reserved_key", ["opensandbox.io/id", "batch-sandbox.sandbox.opensandbox.io/name"]
+    )
+    def test_reserved_key_rejected_even_with_null_value(self, reserved_key):
         from fastapi import HTTPException
 
         labels = {
@@ -97,20 +101,23 @@ class TestApplyMetadataPatch:
             "team": "infra",
         }
         with pytest.raises(HTTPException) as exc:
-            self._merge(labels, {"opensandbox.io/id": None})
+            self._merge(labels, {reserved_key: None})
         assert exc.value.status_code == 400
         assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
-        assert "opensandbox.io/id" in exc.value.detail["message"]
+        assert reserved_key in exc.value.detail["message"]
 
-    def test_reserved_key_rejected_with_non_null_value(self):
+    @pytest.mark.parametrize(
+        "reserved_key", ["opensandbox.io/custom", "batch-sandbox.sandbox.opensandbox.io/name"]
+    )
+    def test_reserved_key_rejected_with_non_null_value(self, reserved_key):
         from fastapi import HTTPException
 
         labels = {"opensandbox.io/id": "sbx-001"}
         with pytest.raises(HTTPException) as exc:
-            self._merge(labels, {"opensandbox.io/custom": "value"})
+            self._merge(labels, {reserved_key: "value"})
         assert exc.value.status_code == 400
         assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
-        assert "opensandbox.io/custom" in exc.value.detail["message"]
+        assert reserved_key in exc.value.detail["message"]
 
 
 class TestPatchLabelsMethod:

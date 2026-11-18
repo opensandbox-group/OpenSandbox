@@ -136,6 +136,7 @@ Missing table → defaults from `KubernetesRuntimeConfig`.
 | `insecure_skip_tls_verify` | boolean | `false` | Skip apiserver TLS verification (temporary workaround only). |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
 | `workload_provider` | string \| omitted | `null` | **`batchsandbox`** (default) or **`agent-sandbox`**. |
+| `metadata_sync_pods` | boolean | `false` | When enabled, synchronize all accepted metadata label changes to dedicated BatchSandbox Pods and persist recreation overrides. Pooled Pods and other providers are excluded. See [Pod label updates](../docs/getting-started/configuration.md#updating-kubernetes-pod-labels-from-metadata). |
 | `batchsandbox_template_file` | string \| omitted | `null` | BatchSandbox CR YAML template path (batchsandbox only). |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | BatchSandbox main container pull policy (`Always`/`IfNotPresent`/`Never`). |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max wait for a new sandbox to become ready. |
