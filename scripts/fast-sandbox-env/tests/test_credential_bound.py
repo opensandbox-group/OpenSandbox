@@ -264,29 +264,21 @@ class StageGateTest(ShellCase):
         self.assertEqual(self.lanes("all"), off)
         self.assertTrue(any(l.startswith("RUN|exchange resolver verify") and "|exchange_resolver_verify|tpl-oci" in l
                             for l in off))
-        # The native rootfs-only stage is registered but blocked by default
-        # (no natively qualified storage profile) — the one legitimate
-        # BEGIN| line in off mode.
-        self.assertEqual([l for l in off if l.startswith("BEGIN|")],
-                         ["BEGIN|rootfs-only snapshot verify (native template, FSEP-0001)"])
+        self.assertFalse(any(l.startswith("BEGIN|") for l in off))
         self.assertFalse(any("credential-bound" in l for l in off))
-        # The harness joins STAGE_UNVERIFIED into one UNVERIFIED| line once
-        # the array is non-empty, so match by prefix rather than exact item.
-        self.assertTrue(any(l.startswith("UNVERIFIED|") for l in off))
+        self.assertIn("UNVERIFIED|", off)
 
     @unittest.skipUnless(git_available(GOLDEN_BASE), "golden baseline commit not available")
     def test_off_stage_list_matches_baseline(self):
         base_sh = materialize_base(GOLDEN_BASE, os.path.join(self.tmp, "base"))
         self.assertEqual(self.lanes(""), self.lanes("", script=base_sh))
 
-    def test_native_rootfs_only_stage_is_blocked_by_default_on_the_oci_lane(self):
-        # Registered so the gap stays visible, but BLOCKED: the fastlet only
-        # advertises nativeRootfsOnlySnapshots with a natively qualified
-        # storage profile, which this environment does not render yet.
+    def test_native_rootfs_only_stage_registers_on_the_oci_lane(self):
+        # Both lanes register the stage by default; the native lane publishes
+        # an s3:// manifest, the overlaybd lane an oci:// pair.
         off = self.lanes("")
-        self.assertNotIn("RUN|rootfs-only snapshot verify (native template, FSEP-0001)|rootfs_only_verify|tpl-native", off)
-        self.assertIn("BEGIN|rootfs-only snapshot verify (native template, FSEP-0001)", off)
-        self.assertTrue(any(l.startswith("UNVERIFIED|") and "natively qualified storage profile" in l for l in off))
+        self.assertIn("RUN|rootfs-only snapshot verify (native template, FSEP-0001)|rootfs_only_verify|tpl-native", off)
+        self.assertIn("RUN|rootfs-only snapshot verify (overlaybd template, FSEP-0001)|rootfs_only_verify|tpl-oci", off)
 
     def test_native_rootfs_only_stage_skips_without_the_oci_stack(self):
         # OCI_STACK=0 native-only stacks cannot cold-boot a rootfs-only
@@ -308,13 +300,8 @@ class StageGateTest(ShellCase):
         # the one real implementation is sourced for each lane; no placeholder
         self.assertEqual([l for l in cb if l.startswith("SOURCE|")],
                          ["SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh"] * 2)
-        # every other blocked/announced line belongs to the exchange gate —
-        # the native rootfs-only stage is blocked in every mode (see
-        # StageGateTest) and is excluded here; its UNVERIFIED entry carries
-        # only the reason text, not the stage description.
-        others = [l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))
-                  and "rootfs-only snapshot verify (native template" not in l
-                  and "natively qualified storage profile" not in l]
+        # every other blocked/announced line belongs to the exchange gate.
+        others = [l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))]
         self.assertEqual(others, [
             "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
             "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",

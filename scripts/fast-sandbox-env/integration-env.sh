@@ -112,22 +112,15 @@
 #                    pass beside native. Nodes need ublk support. 0 = native-only.
 #   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify on
 #                    both template lanes (native and overlaybd). On by
-#                    default whenever OCI_STACK=1: the fastlet-side
-#                    prerequisites are provisioned automatically, the
-#                    capture qualification is deployment-derived upstream
-#                    (fast-sandbox#185), and capture runs on the managed
-#                    Firecracker 1.17.0 the pinned stack installs (the
-#                    v1.16.1 thaw failure, fast-sandbox#187, is a legacy
-#                    capture version). Native-only stacks (OCI_STACK=0)
-#                    skip the stage regardless: the FSEP-0001 restore
-#                    kernel is staged on the OCI lane only.
-#   NATIVE_ROOTFS_ONLY 1 = run the native-lane rootfs-only snapshot verify
-#                    instead of leaving it BLOCKED. Requires a natively
-#                    qualified storage profile rendered into the pool
-#                    (FAST_SANDBOX_ROOTFS_QUALIFICATION: backend=native,
-#                    storageRevision, exclusiveExt4) so the fastlet
-#                    advertises nativeRootfsOnlySnapshots; this env does
-#                    not provision one yet (default 0).
+#                    default whenever OCI_STACK=1: qualification derives
+#                    from the standard deployment (fast-sandbox#185 plus
+#                    #224), capture runs on the managed Firecracker 1.17.0
+#                    the pinned stack installs (the v1.16.1 thaw failure,
+#                    fast-sandbox#187, is a legacy capture version), and
+#                    fast-sandbox#223/#225 admit the mode on both artifact
+#                    paths. Native-only stacks (OCI_STACK=0) skip the stage
+#                    regardless: the FSEP-0001 restore kernel is staged on
+#                    the OCI lane only.
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -4521,25 +4514,18 @@ verify_native() {
 	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
 	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
-	# Rootfs-only verify (FSEP-0001) on the native lane. Registration gates:
+	# Rootfs-only verify (FSEP-0001) on the native lane, default-on: the
+	# pinned fast-sandbox derives qualification from the deployment (managed
+	# VMM directory + the standard StateRoot this env renders), the fastlet
+	# advertises nativeRootfsOnlySnapshots, and fast-sandbox#223 admitted
+	# native RootfsOnly at the FastPath gRPC gate. The artifact set publishes
+	# an s3:// manifest. Registration gates:
 	#   ROOTFS_ONLY=0  -> not registered (both lanes)
 	#   OCI_STACK=0    -> not registered (the restore kernel is staged on
 	#                     the OCI lane only)
-	# Otherwise the stage is registered but BLOCKED unless
-	# NATIVE_ROOTFS_ONLY=1: the fastlet only advertises
-	# nativeRootfsOnlySnapshots when the node carries a natively qualified
-	# storage profile (FAST_SANDBOX_ROOTFS_QUALIFICATION with backend=native,
-	# storageRevision and exclusiveExt4 — the #185 self-derivation covers the
-	# OverlayBD path only), and this environment does not render one into the
-	# pool yet. Set NATIVE_ROOTFS_ONLY=1 once the profile is provisioned.
 	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
 		if [[ "$OCI_STACK" == "1" ]]; then
-			if [[ "${NATIVE_ROOTFS_ONLY:-0}" == "1" ]]; then
-				run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
-			else
-				run_blocked_stage "rootfs-only snapshot verify (native template, FSEP-0001)" \
-					"needs a natively qualified storage profile (FAST_SANDBOX_ROOTFS_QUALIFICATION backend=native + storageRevision + exclusiveExt4; set NATIVE_ROOTFS_ONLY=1 once the pool renders one)"
-			fi
+			run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
 		else
 			log "OCI_STACK=0: skipping the native rootfs-only snapshot verify (the FSEP-0001 restore kernel is staged on the OCI lane only)"
 		fi
