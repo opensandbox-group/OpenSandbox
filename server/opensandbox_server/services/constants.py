@@ -84,6 +84,7 @@ OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY = (
 # Server-injected from [egress.upstream_proxy]; admin-only, deliberately not in
 # ALLOWED_EGRESS_ENV_VARS so request env cannot set them.
 # Must match components/egress/pkg/constants/configuration.go EnvUpstreamProxy{,Auth}.
+OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT = "OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT"
 OPENSANDBOX_EGRESS_UPSTREAM_PROXY = "OPENSANDBOX_EGRESS_UPSTREAM_PROXY"
 OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH = "OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH"
 # Server-injected when [egress.upstream_proxy] configures a CA source;

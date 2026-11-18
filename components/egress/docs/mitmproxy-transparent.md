@@ -199,6 +199,8 @@ export OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH="Basic $(printf 'user:pass' | base
 
 When set, the bundled `upstream_proxy.py` addon is loaded after the system addon and all mitmproxy-handled egress is chained: mitmproxy dials the configured proxy and issues `CONNECT <request.host>:<port>`. For intercepted TLS the authority is the SNI/Host-derived FQDN (not the intercepted IP), so the upstream proxy resolves and dials the original destination itself; flows where only an IP is known keep `IP:port` as the authority.
 
+The sidecar can opt into a loopback regular HTTP proxy listener using `OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT` (1024–65535) when chaining is configured. It is disabled by default to avoid taking a workload port in the shared network namespace; the chosen port must differ from the transparent listener and be unused. See the [explicit proxy guide](../../../docs/guides/egress-upstream-proxy.md#explicit-proxy-without-external-dns) for server configuration, application settings, and fail-closed policy limits.
+
 Semantics and limits:
 
 - **`https://` endpoints** get TLS to the proxy with SNI and hostname verification against the proxy host, using the same `ssl_verify_upstream_trusted_confdir`/`_trusted_ca` options that verify real upstreams (default `/etc/ssl/certs`, overridable via `OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_TRUST_DIR`). To trust a private CA for the proxy connection, deliver the PEM via `OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA` — it is additive to the system roots and also applies to intercepted origin TLS.

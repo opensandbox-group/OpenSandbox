@@ -638,11 +638,13 @@ class TestApplyEgressToSpec:
                 upstream_proxy=EgressUpstreamProxyConfig(
                     url="http://proxy.local:3128",
                     authorization=SecretStr("Basic dGVzdDp0ZXN0"),
+                    explicit_proxy_port=18082,
                 ),
             ),
         )
 
         env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
+        assert env_by_name["OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT"] == "18082"
         assert env_by_name[OPENSANDBOX_EGRESS_UPSTREAM_PROXY] == "http://proxy.local:3128"
         assert (
             env_by_name[OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH]
@@ -668,6 +670,7 @@ class TestApplyEgressToSpec:
 
         env_by_name = {e["name"]: e["value"] for e in containers[0]["env"]}
         assert env_by_name[OPENSANDBOX_EGRESS_UPSTREAM_PROXY] == "https://proxy.local:8443"
+        assert "OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT" not in env_by_name
         assert OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH not in env_by_name
 
     def test_upstream_proxy_env_omitted_when_not_configured(self):
@@ -905,13 +908,14 @@ class TestSplitEgressEnv:
             # OPENSANDBOX_EGRESS_UPSTREAM_PROXY comes only from [egress.upstream_proxy].
             ("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "http://proxy.local:3128"),
             ("OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH", "Basic abc"),
+            ("OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT", "18082"),
             # The extra CA env is admin-only and must not be request-settable.
             ("OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA", "/tmp/evil.pem"),
         ],
         ids=[
             "rules", "mode", "token", "http-addr", "dns-upstream",
             "nameserver-exempt", "sandbox-id", "upstream-proxy",
-            "upstream-proxy-auth", "upstream-extra-ca",
+            "upstream-proxy-auth", "explicit-proxy-port", "upstream-extra-ca",
         ],
     )
     def test_rejects_disallowed_env_var(self, env_key, env_value):

@@ -58,6 +58,50 @@ url = "https://proxy.example.com:8443"
 ca_secret_name = "upstream-proxy-ca"
 ```
 
+## Explicit proxy without external DNS
+
+The explicit listener is disabled by default, so existing transparent-only deployments do not reserve another port in the shared network namespace. Administrators can opt in by setting `explicit_proxy_port` in the lifecycle server configuration, then recreating affected sandboxes:
+
+```toml
+[egress.upstream_proxy]
+url = "http://proxy.example.com:3128"
+explicit_proxy_port = 18082
+```
+
+Choose an unused port from `1024` through `65535`, different from the transparent listener port (`OPENSANDBOX_EGRESS_MITMPROXY_PORT`, default `18081`) and any workload listener. The server injects `OPENSANDBOX_EGRESS_EXPLICIT_PROXY_PORT` into the egress sidecar only; standalone sidecar deployments can set that variable directly. An explicitly configured port that is already occupied causes mitmdump startup/readiness to fail; there is no automatic port fallback. Omit `explicit_proxy_port` to preserve transparent-only behavior even when workloads occupy `18082` or `18083`.
+
+The opted-in listener binds to loopback inside the sandbox network namespace. Configure proxy-aware applications to use the chosen port:
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:18082
+export HTTPS_PROXY=http://127.0.0.1:18082
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export NO_PROXY=localhost,127.0.0.1,::1
+export no_proxy="$NO_PROXY"
+```
+
+Applications send the destination hostname to this listener without resolving it locally. The sidecar checks the current network policy, applies Credential Vault bindings, and chains the request through the configured upstream proxy, which resolves the destination. Only the upstream proxy's hostname needs infrastructure DNS; a literal proxy IP needs no lookup. Applications must trust the sidecar's interception CA as with transparent interception. Do not configure applications with the upstream proxy address or its credentials directly.
+
+Domain rules, platform overlays, and TCP port restrictions are checked before CONNECT and again on each HTTP request, including requests on existing connections. Denied requests receive HTTP 403; unavailable policy checks fail closed with HTTP 503. Requests that may be streamed can instead have their stream or connection terminated. CONNECT destination, TLS SNI, and inner HTTP authority must agree before credential lookup; HTTP/2 `:authority`/`Host` conflicts are rejected by the protocol parser. IP/CIDR rules apply to literal destination IPs; zoned IPv6 destinations are rejected. Since remotely resolved addresses are unavailable locally, any IP/CIDR deny applicable to the destination port conservatively rejects hostname requests; put resolved-address restrictions on the upstream proxy if required. With `OPENSANDBOX_EGRESS_BLOCK_DOH_443` enabled, explicit requests to port 443 are conservatively rejected because local DNS cannot classify remotely resolved addresses.
+
+For example, this common policy allows traffic by default but denies private IPv4 ranges:
+
+```json
+{
+  "defaultAction": "allow",
+  "egress": [
+    {"action": "deny", "target": "10.0.0.0/8"},
+    {"action": "deny", "target": "172.16.0.0/12"},
+    {"action": "deny", "target": "192.168.0.0/16"}
+  ]
+}
+```
+
+Through the explicit listener, `https://www.example.com` receives HTTP 403 under this policy even if the upstream proxy would resolve it to a public IP. Adding a domain allow does not override the applicable CIDR denies. To retain this resolved-address boundary with upstream DNS, enforce private-address denies on the upstream proxy and remove the corresponding local CIDR denies only after that enforcement is in place. Otherwise, keep the local denies and use transparent interception with working destination DNS. A deny scoped to port `22` does not block hostname requests on port `443`; enabling `OPENSANDBOX_EGRESS_BLOCK_DOH_443` still blocks all explicit port-443 requests.
+
+This listener is available for the sidecar profile only, not the shared Fast Sandbox profile. Existing transparent interception remains available and still requires destination DNS. Applications that ignore explicit proxy settings may fail when external DNS is unavailable; no synthetic DNS answers are provided. Set proxy variables through the sandbox environment or application configuration; they are not injected automatically.
+
 ## Traffic and security model
 
 For a detailed overview of egress packet flows, see [/architecture/network/egress](/architecture/network/egress).
@@ -130,7 +174,7 @@ The default-off experimental OSEP-0023 revision runtime has a narrower live HTTP
 
 ## Known limits and references
 
-- **No Per-Request Proxy**: Proxy settings cannot be modified per request or through environment variables.
+- **No Per-Request Upstream Proxy**: The upstream endpoint, credentials, and CA settings cannot be overridden by sandbox request environments. Applications can select the local explicit proxy listener using standard proxy environment variables.
 - **No Hot Reload**: Existing sandbox sidecars cannot reload proxy configurations dynamically.
 - **No Dedicated OTLP Metrics**: There is no dedicated chained-proxy metric family; rely on egress health checks, DNS/nftables metrics, and proxy logs.
 - **Runtime Scope**: No production certification is claimed for every Kata implementation, custom RuntimeClass, CNI, or kernel combination.

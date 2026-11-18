@@ -91,6 +91,9 @@ const systemScriptPath = "/var/egress/mitmscripts/system.py"
 // components/egress/mitmproxy/config.yaml).
 type Config struct {
 	ListenPort int
+	// ExplicitProxyPort is populated from the administrator environment at launch.
+	// Zero disables the additional listener.
+	ExplicitProxyPort int
 	// ListenHost overrides the baked-in config.yaml listen_host
 	// (127.0.0.1 for the sidecar). The fast-sandbox profile passes 0.0.0.0: the
 	// per-subject interception DNAT lands traffic on the gateway veth
@@ -282,6 +285,11 @@ func Launch(cfg Config) (*Running, error) {
 	if err := validateSubjectRevisionIPCConfig(cfg); err != nil {
 		return nil, err
 	}
+	port, err := explicitProxyPortFromEnv(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ExplicitProxyPort = port
 	uname := cfg.UserName
 	if strings.TrimSpace(uname) == "" {
 		uname = RunAsUser
@@ -348,6 +356,23 @@ func loopbackV6Available() *bool {
 	return &ok
 }
 
+// explicitProxyPortFromEnv keeps legacy upstream-proxy deployments transparent-only.
+// An opted-in port is operator-owned: reject collisions, never silently move it.
+func explicitProxyPortFromEnv(cfg Config) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(constants.EnvExplicitProxyPort))
+	if raw == "" {
+		return 0, nil
+	}
+	port, err := strconv.Atoi(raw)
+	if err != nil || port < 1024 || port > 65535 || port == cfg.ListenPort {
+		return 0, fmt.Errorf("mitmproxy: %s must be 1024-65535 and differ from the transparent port", constants.EnvExplicitProxyPort)
+	}
+	if strings.TrimSpace(cfg.ListenHost) != "" || strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) == "" {
+		return 0, fmt.Errorf("mitmproxy: %s requires a sidecar with an upstream proxy", constants.EnvExplicitProxyPort)
+	}
+	return port, nil
+}
+
 func buildMitmdumpArgs(cfg Config) []string {
 	// Explicit mode specs replace config.yaml's `mode: [transparent]` + `listen_host`: the ip6
 	// OUTPUT REDIRECT delivers to [::1]:<port>, which an IPv4 loopback listener never sees. Both
@@ -362,6 +387,9 @@ func buildMitmdumpArgs(cfg Config) []string {
 	}
 	if host == listenHostLoopback && cfg.ListenV6 != nil && *cfg.ListenV6 {
 		args = append(args, "--mode", fmt.Sprintf("transparent@%s:%d", listenHostLoopbackV6, cfg.ListenPort))
+	}
+	if cfg.ExplicitProxyPort != 0 {
+		args = append(args, "--mode", fmt.Sprintf("regular@127.0.0.1:%d", cfg.ExplicitProxyPort))
 	}
 	args = append(args,
 		"--listen-port", strconv.Itoa(cfg.ListenPort),

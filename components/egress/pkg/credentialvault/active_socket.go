@@ -32,7 +32,7 @@ func StartActiveSocketServer(
 	if activeHandler == nil {
 		return nil, nil, fmt.Errorf("active credential vault handler is required")
 	}
-	return startActiveSocketServer(func(w http.ResponseWriter, _ *http.Request) { activeHandler(w) }, nil, socketPath, socketGID)
+	return startActiveSocketServer(func(w http.ResponseWriter, _ *http.Request) { activeHandler(w) }, nil, socketPath, socketGID, nil)
 }
 
 // StartActiveSocketServerRequestAware passes the request to active-vault
@@ -40,16 +40,23 @@ func StartActiveSocketServer(
 // handlers additionally dispatch clientIp (source IP -> subject -> snapshot).
 // resolveHandler serves POST /credential-vault/_resolve; nil mounts the route
 // forbidden.
+// proxyPolicyHandler optionally authorizes explicit proxy destinations over the
+// same private socket. It is never exposed on the public policy API.
 func StartActiveSocketServerRequestAware(
 	activeHandler func(http.ResponseWriter, *http.Request),
 	resolveHandler http.Handler,
 	socketPath string,
 	socketGID int,
+	proxyPolicyHandler ...http.Handler,
 ) (*http.Server, func(context.Context) error, error) {
 	if activeHandler == nil {
 		return nil, nil, fmt.Errorf("active credential vault handler is required")
 	}
-	return startActiveSocketServer(activeHandler, resolveHandler, socketPath, socketGID)
+	var proxyPolicy http.Handler
+	if len(proxyPolicyHandler) > 0 {
+		proxyPolicy = proxyPolicyHandler[0]
+	}
+	return startActiveSocketServer(activeHandler, resolveHandler, socketPath, socketGID, proxyPolicy)
 }
 
 func startActiveSocketServer(
@@ -57,6 +64,7 @@ func startActiveSocketServer(
 	resolveHandler http.Handler,
 	socketPath string,
 	socketGID int,
+	proxyPolicyHandler http.Handler,
 ) (*http.Server, func(context.Context) error, error) {
 	if socketPath == "" {
 		return nil, nil, fmt.Errorf("socket path is required")
@@ -102,6 +110,9 @@ func startActiveSocketServer(
 	}
 
 	mux := http.NewServeMux()
+	if proxyPolicyHandler != nil {
+		mux.Handle("/egress/authorize", proxyPolicyHandler)
+	}
 	mux.HandleFunc("/credential-vault/_active", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
