@@ -16,10 +16,11 @@
 
 package controller
 
-// Upload mode boundary samples that depend on the process umask, extracted
-// from open PR #2661. The umask decides what a create-mode becomes on disk,
-// so these tests pin it explicitly instead of inheriting the CI
-// environment's.
+// Upload mode boundary tests that depend on the process umask. The umask
+// decides what a create-mode becomes on disk, so these tests pin it
+// explicitly instead of inheriting the CI environment's. They enforce the
+// umask-dependent claims of the execd-file-api conformance profile
+// (specs/conformance/profiles/execd-file-api.yaml).
 
 import (
 	"net/http"
@@ -40,13 +41,14 @@ func withPinnedUmask(t *testing.T, mask int) {
 	t.Cleanup(func() { syscall.Umask(old) })
 }
 
-// TestUploadOmittedModeForNewFileFollowsCreatDefault pins the boundary behind
-// open PR #2661, which proposes that a new file uploaded without a metadata
-// mode is created 0644 (creat(2)'s 0666 shaped by the umask) instead of
-// remaining executable. Main today keeps the staging file at os.ModePerm
-// masked by the umask, i.e. 0755 under umask 022. Unskip when #2661 lands.
+// TestUploadOmittedModeForNewFileFollowsCreatDefault pins the open side of
+// claim FILE-UPLOAD-MODE-004 (PR #2661), which proposes that a new file
+// uploaded without a metadata mode is created 0644 (creat(2)'s 0666 shaped by
+// the umask) instead of remaining executable. Main today keeps the staging
+// file at os.ModePerm masked by the umask, i.e. 0755 under umask 022. Unskip
+// when #2661 lands.
 func TestUploadOmittedModeForNewFileFollowsCreatDefault(t *testing.T) {
-	t.Skip("boundary sample for open PR #2661: the 0644 default for a new file uploaded without a mode is proposed, not yet merged")
+	t.Skip("claim FILE-UPLOAD-MODE-004 is pending on PR #2661: the 0644 default for a new file uploaded without a mode is proposed, not yet merged")
 	withPinnedUmask(t, 0o022)
 	dir := t.TempDir()
 	target := filepath.Join(dir, "defaulted.txt")

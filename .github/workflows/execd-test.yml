@@ -67,6 +67,17 @@ jobs:
           "${RUNNER_TEMP}/execd-qos.test" -test.run '^(TestQoS|TestHardening)' -test.v -test.count=1 -test.timeout=120s
           sudo "${RUNNER_TEMP}/execd-qos.test" -test.run '^(TestQoS|TestHardening)' -test.v -test.count=1 -test.timeout=120s
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Run contract schema tests
+        run: |
+          uv run specs/tests/test_execd_schema.py
+
+      - name: Run conformance profiles
+        run: |
+          uv run scripts/conformance/run_profile.py specs/conformance/profiles/execd-file-api.yaml
+
       - name: Verify filesystem identity permissions as root
         working-directory: components/execd
         run: |
