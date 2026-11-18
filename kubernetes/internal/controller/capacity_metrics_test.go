@@ -166,6 +166,32 @@ func TestCapacityMetricsUseSchedulerEquivalentPodRequests(t *testing.T) {
 	}, intGaugePoints(t, &rm, poolMemoryRequestsMetricName))
 }
 
+func TestPoolResourceCapacityExcludesFinishedPods(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, sandboxv1alpha1.AddToScheme(scheme))
+
+	pool := &sandboxv1alpha1.Pool{
+		ObjectMeta: metav1.ObjectMeta{Name: "warm", Namespace: "tenant-a", UID: "warm-a"},
+		Status:     sandboxv1alpha1.PoolStatus{Total: 1, Available: 1, Updated: 1},
+	}
+	running := poolPod("running", "warm", true, "1", "1Gi")
+	evicted := poolPod("evicted", "warm", false, "4", "4Gi")
+	evicted.Status.Phase = corev1.PodFailed
+	evicted.Status.Reason = "Evicted"
+	// A completed pod can keep a stale Ready condition; it still holds no
+	// capacity.
+	succeeded := poolPod("succeeded", "warm", true, "8", "8Gi")
+	succeeded.Status.Phase = corev1.PodSucceeded
+	setPoolOwner(pool, running, evicted, succeeded)
+	client := capacityMetricsClient(scheme, pool, running, evicted, succeeded)
+
+	capacity, err := collectPoolCapacity(context.Background(), client, capacityAllocationReaderStub{}, pool)
+	require.NoError(t, err)
+	require.Equal(t, map[string]float64{"total": 1, "allocated": 0, "available": 1}, capacity.cpu)
+	require.Equal(t, map[string]int64{"total": 1073741824, "allocated": 0, "available": 1073741824}, capacity.memory)
+}
+
 func TestCapacityMetricsRunnerRequiresLeaderElection(t *testing.T) {
 	require.True(t, (&capacityMetricsRunner{}).NeedLeaderElection())
 }

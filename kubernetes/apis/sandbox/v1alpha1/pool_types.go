@@ -112,7 +112,11 @@ type PoolStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// Revision is the latest version of pool
 	Revision string `json:"revision"`
-	// Total is the total number of nodes in the pool.
+	// Total is the number of non-terminated nodes in the pool. Terminal pods
+	// (Failed or Succeeded) that have not been reclaimed yet do not count:
+	// they cannot serve a sandbox, so reporting them as capacity would make a
+	// pool with a dead buffer look healthy. They still consume the PoolMax
+	// budget until the controller reclaims them.
 	Total int32 `json:"total"`
 	// Allocated is the number of nodes currently allocated to sandboxes.
 	Allocated int32 `json:"allocated"`
@@ -126,7 +130,7 @@ type PoolStatus struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="TOTAL",type="integer",JSONPath=".status.total",description="The number of all nodes in pool."
+// +kubebuilder:printcolumn:name="TOTAL",type="integer",JSONPath=".status.total",description="The number of non-terminated nodes in pool."
 // +kubebuilder:printcolumn:name="ALLOCATED",type="integer",JSONPath=".status.allocated",description="The number of allocated nodes in pool."
 // +kubebuilder:printcolumn:name="AVAILABLE",type="integer",JSONPath=".status.available",description="The number of available nodes in pool."
 // +kubebuilder:printcolumn:name="UPDATED",type="integer",JSONPath=".status.updated",description="The number of nodes updated to the latest revision."

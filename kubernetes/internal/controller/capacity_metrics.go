@@ -225,7 +225,10 @@ func collectPoolCapacity(ctx context.Context, reader client.Reader, allocations 
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !pod.DeletionTimestamp.IsZero() {
+		if !pod.DeletionTimestamp.IsZero() || isTerminalPhasePod(pod) {
+			// A finished pod holds no node resources and no capacity; keep the
+			// resource series aligned with the status counters, which exclude
+			// terminal pods too.
 			continue
 		}
 		requests := resourcehelper.PodRequests(pod, resourcehelper.PodResourcesOptions{})

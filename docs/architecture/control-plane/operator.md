@@ -56,7 +56,7 @@ Status separates sandbox health from task progress: `replicas` / `allocated` / `
 | `updateStrategy` | Same cap for rolling out template changes across existing pods |
 | `recycleStrategy` | What happens when an allocated pod is released back: `Delete` (default), `Restart`, or `Noop` |
 
-Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template.
+Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template. `total`, `available`, and `updated` count only non-terminated pods: a pod that reached `Failed` or `Succeeded` can never serve a sandbox again, so it is not reported as capacity (it still holds its slot in the `poolMax` budget until the controller reclaims it).
 
 ### Pool design
 
@@ -65,7 +65,7 @@ The pool maintains a **two-level capacity model**:
 ![Pool capacity model](../../public/images/operator-pool-capacity.svg)
 
 - **Buffer** — warm, unallocated pods that are Running and Ready. This is what allocations draw from, kept between `bufferMin` and `bufferMax`. The controller continuously reconciles toward this band: an allocation that drains the buffer triggers a scale-up; released capacity above `bufferMax` triggers a scale-down.
-- **Total pool** — everything the pool owns, allocated or not, bounded by `poolMin` and `poolMax`. Pods that are still starting count toward the total but are never advertised as available buffer, so the pool never promises capacity it cannot hand out.
+- **Total pool** — everything the pool owns that can still serve, allocated or not, bounded by `poolMin` and `poolMax`. Pods that are still starting count toward the total but are never advertised as available buffer, so the pool never promises capacity it cannot hand out. Terminal pods (Failed or Succeeded) are excluded from the reported total; they keep consuming the `poolMax` budget until the controller reclaims them, so a pool with unreaped terminal pods can report `total` below `poolMax` while it is not creating replacements.
 
 Scaling is deliberately paced: each reconcile creates or deletes at most `maxUnavailable` pods (minus the ones already not-ready), so a burst of allocations produces a measured ramp of new pods, not a thundering herd.
 

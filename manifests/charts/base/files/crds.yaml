@@ -275,7 +275,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: The number of all nodes in pool.
+    - description: The number of non-terminated nodes in pool.
       jsonPath: .status.total
       name: TOTAL
       type: integer
@@ -424,7 +424,12 @@ spec:
                 description: Revision is the latest version of pool
                 type: string
               total:
-                description: Total is the total number of nodes in the pool.
+                description: |-
+                  Total is the number of non-terminated nodes in the pool. Terminal pods
+                  (Failed or Succeeded) that have not been reclaimed yet do not count:
+                  they cannot serve a sandbox, so reporting them as capacity would make a
+                  pool with a dead buffer look healthy. They still consume the PoolMax
+                  budget until the controller reclaims them.
                 format: int32
                 type: integer
               updated:
