@@ -49,7 +49,7 @@ PROFILES = ("firecracker-egress-pool", "firecracker-egress-resource-aware-pool")
 # e.g. in a shallow clone). Bump in lockstep with CBV_GOLDEN_BASE in
 # .github/workflows/fast-sandbox-test.yml whenever a stage-list change is
 # intentional — WorkflowBaselineTest enforces the pairing.
-GOLDEN_BASE = os.environ.get("CBV_GOLDEN_BASE", "e5d599fb511df9c0f3e3a4b2bcc465b1c9105290")
+GOLDEN_BASE = os.environ.get("CBV_GOLDEN_BASE", "9ba98db7f78be0ef1a1b2041e758eb5768304952")
 
 
 def find_bash():
@@ -264,7 +264,12 @@ class StageGateTest(ShellCase):
         self.assertEqual(self.lanes("all"), off)
         self.assertTrue(any(l.startswith("RUN|exchange resolver verify") and "|exchange_resolver_verify|tpl-oci" in l
                             for l in off))
-        self.assertFalse(any("credential-bound" in l or l.startswith("BEGIN|") for l in off))
+        # The native rootfs-only stage is registered but blocked by default
+        # (no natively qualified storage profile) — the one legitimate
+        # BEGIN| line in off mode.
+        self.assertEqual([l for l in off if l.startswith("BEGIN|")],
+                         ["BEGIN|rootfs-only snapshot verify (native template, FSEP-0001)"])
+        self.assertFalse(any("credential-bound" in l for l in off))
         self.assertIn("UNVERIFIED|", off)
 
     @unittest.skipUnless(git_available(GOLDEN_BASE), "golden baseline commit not available")
@@ -272,9 +277,14 @@ class StageGateTest(ShellCase):
         base_sh = materialize_base(GOLDEN_BASE, os.path.join(self.tmp, "base"))
         self.assertEqual(self.lanes(""), self.lanes("", script=base_sh))
 
-    def test_native_rootfs_only_stage_registers_on_the_oci_lane(self):
+    def test_native_rootfs_only_stage_is_blocked_by_default_on_the_oci_lane(self):
+        # Registered so the gap stays visible, but BLOCKED: the fastlet only
+        # advertises nativeRootfsOnlySnapshots with a natively qualified
+        # storage profile, which this environment does not render yet.
         off = self.lanes("")
-        self.assertIn("RUN|rootfs-only snapshot verify (native template, FSEP-0001)|rootfs_only_verify|tpl-native", off)
+        self.assertNotIn("RUN|rootfs-only snapshot verify (native template, FSEP-0001)|rootfs_only_verify|tpl-native", off)
+        self.assertIn("BEGIN|rootfs-only snapshot verify (native template, FSEP-0001)", off)
+        self.assertTrue(any(l.startswith("UNVERIFIED|") and "natively qualified storage profile" in l for l in off))
 
     def test_native_rootfs_only_stage_skips_without_the_oci_stack(self):
         # OCI_STACK=0 native-only stacks cannot cold-boot a rootfs-only
@@ -283,6 +293,7 @@ class StageGateTest(ShellCase):
         # lane (the other rootfs-only registration) is a no-op there too.
         off = self.lanes("", oci_stack="0")
         self.assertFalse(any("rootfs_only_verify" in l for l in off))
+        self.assertFalse(any("rootfs-only snapshot verify (native template" in l for l in off))
 
     def test_credential_bound_registers_both_lanes_and_blocks_exchange(self):
         off = self.lanes("")
@@ -295,7 +306,12 @@ class StageGateTest(ShellCase):
         # the one real implementation is sourced for each lane; no placeholder
         self.assertEqual([l for l in cb if l.startswith("SOURCE|")],
                          ["SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh"] * 2)
-        self.assertEqual([l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))], [
+        # every other blocked/announced line belongs to the exchange gate —
+        # the native rootfs-only stage is blocked in every mode (see
+        # StageGateTest) and is excluded here.
+        others = [l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))
+                  and "rootfs-only snapshot verify (native template" not in l]
+        self.assertEqual(others, [
             "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
             "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
         ])
@@ -319,7 +335,7 @@ LANE = r'''
 OCI_TEMPLATE_ID=%(oci_template_id)s
 LANE_TEMPLATE_ID=%(template_id)s
 read -r lane scheme <<< "$(rootfs_only_lane "$LANE_TEMPLATE_ID")"
-printf '%s|%s\n' "$lane" "$scheme"
+printf '%%s|%%s\n' "$lane" "$scheme"
 '''
 
 
