@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -249,9 +250,13 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 	tmp, err := createUploadTemp(filepath.Dir(resolvedTarget), stagingPerm)
 	if err != nil {
 		// A directory that is only traversable (0555, or a 0666 file in it) was
-		// writable in place before staging existed. Keep that upload working
-		// through the legacy path; its tradeoff is documented on the route.
-		if statErr == nil && errors.Is(err, fs.ErrPermission) {
+		// writable in place before staging existed. Some pseudo-filesystems
+		// reject the sibling create outright (procfs control files), and a
+		// read-only filesystem cannot host a staging file either. Keep those
+		// uploads working through the legacy path; its tradeoff is documented
+		// on the route. Space and I/O failures stay errors: falling back would
+		// truncate the destination before the same failure resurfaced.
+		if statErr == nil && uploadStagingUnsupported(err) {
 			return writeUploadInPlace(resolvedTarget, r)
 		}
 		return newUploadError(
@@ -288,30 +293,33 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 	if err := tmp.Sync(); err != nil {
 		return uploadWriteError(resolvedTarget, err)
 	}
-	if err := tmp.Close(); err != nil {
-		return uploadWriteError(resolvedTarget, err)
-	}
 	if err := renameUploadStaging(tmpName, resolvedTarget); err != nil {
 		// A writable destination can still reject the rename: a sticky directory
 		// protects a file owned by another user, and a bind-mounted file cannot
 		// be replaced at all. Keep those replacements working through the
-		// documented in-place fallback, reusing the bytes already staged.
+		// documented in-place fallback, reusing the bytes already staged through
+		// the descriptor pinned since the exclusive create. Reopening the name
+		// would let a process that can write the directory swap in a symlink.
 		if statErr == nil {
-			staged, openErr := os.Open(tmpName)
-			if openErr == nil {
-				fallbackErr := writeUploadInPlace(resolvedTarget, staged)
-				_ = staged.Close()
+			if _, seekErr := tmp.Seek(0, io.SeekStart); seekErr != nil {
+				log.Warn("upload: rewind staging file %s after rename failure: %v", tmpName, seekErr)
+			} else {
+				fallbackErr := writeUploadInPlace(resolvedTarget, tmp)
 				if fallbackErr == nil {
 					log.Warn("upload: rename %s into place failed, used in-place fallback: %v", resolvedTarget, err)
 					return nil
 				}
 				return fallbackErr
 			}
-			log.Warn("upload: reopen staging file %s after rename failure: %v", tmpName, openErr)
 		}
 		return uploadWriteError(resolvedTarget, err)
 	}
 	committed = true
+	if err := tmp.Close(); err != nil {
+		// The bytes are already synced and renamed into place, so a close error
+		// describes durability of an applied write rather than a failed one.
+		log.Warn("upload: close staging file %s after commit: %v", tmpName, err)
+	}
 
 	// fsync parent directory so the new dirent is durable and visible on
 	// weakly-coherent filesystems (virtio-fs, 9pfs, etc.). Best-effort:
@@ -349,10 +357,20 @@ func writeUploadInPlace(target string, r io.Reader) *uploadError {
 	if _, err := io.Copy(file, r); err != nil {
 		return uploadWriteError(target, err)
 	}
-	if err := file.Sync(); err != nil {
+	if err := file.Sync(); err != nil && !uploadSyncUnsupported(err) {
 		return uploadWriteError(target, err)
 	}
 	return nil
+}
+
+// uploadSyncUnsupported reports whether Sync failed because the destination
+// cannot be synced at all. Pseudo-filesystems such as procfs reject fsync on
+// writable control files with EINVAL, and the legacy os.WriteFile path never
+// synced them. Synchronisation failures on a real file still surface.
+func uploadSyncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.ENOTSUP) ||
+		errors.Is(err, syscall.ENOSYS)
 }
 
 func uploadWriteError(path string, err error) *uploadError {
@@ -404,7 +422,7 @@ func createUploadTemp(dir string, perm os.FileMode) (*os.File, error) {
 			return nil, err
 		}
 		name := filepath.Join(dir, uploadTempPattern+hex.EncodeToString(suffix[:]))
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 		if err == nil {
 			return f, nil
 		}
@@ -413,6 +431,20 @@ func createUploadTemp(dir string, perm os.FileMode) (*os.File, error) {
 		}
 	}
 	return nil, errors.New("could not allocate a unique staging file name")
+}
+
+// uploadStagingUnsupported reports whether a staging-create failure means the
+// destination's filesystem cannot host a sibling staging file at all, so the
+// legacy in-place path is the only way to write it. Space and I/O failures are
+// excluded: an in-place fallback would truncate the destination before hitting
+// the same failure.
+func uploadStagingUnsupported(err error) bool {
+	if errors.Is(err, fs.ErrPermission) || errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	return errors.Is(err, syscall.ENOTSUP) ||
+		errors.Is(err, syscall.ENOSYS) ||
+		errors.Is(err, syscall.EROFS)
 }
 
 // resolveUploadTargetPath follows a symlink in the final path component, so the
