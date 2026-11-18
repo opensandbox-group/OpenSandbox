@@ -70,7 +70,7 @@ The runtime also closes the seam with sandbox lifecycle. OpenSandbox already pau
 - Normalized streaming events independent of the underlying CLI and its output format.
 - A hard cancellation floor below the protocol, so callers always get a terminal event with a machine-readable reason.
 - Headless permission and elicitation decisions with an explicit, auditable policy.
-- Per-session scoped credentials injected at `session/new`, never long-lived account secrets.
+- Per-agent-run credentials scoped at `session/new` and delivered destination-bound through the credential proxy, never as sandbox environment values or long-lived account secrets.
 - Survival on pause/resume through persisted ACP session identity and `session/resume`.
 - Additive API with no change to `/command`, `/session`, `/code`, `/files` or the existing isolated execution endpoints.
 
@@ -129,7 +129,7 @@ An adapter is data, not code in the sandbox: a manifest naming a stdio command, 
 
 | Kind | Adapter source | Notes |
 | --- | --- | --- |
-| `claude-code` | `zed-industries/claude-agent-acp` | Needs `ANTHROPIC_API_KEY` or a vault-provided token |
+| `claude-code` | `zed-industries/claude-agent-acp` | Needs a model credential, delivered through the vault proxy rather than the environment |
 | `codex` | `agentclientprotocol/codex-acp` | Auth through the Codex CLI's own credential path |
 | `gemini` | Gemini CLI ACP mode | Native ACP support |
 | `qwen` | Qwen Code ACP mode | Native ACP support |
@@ -165,25 +165,27 @@ ACP `session/update` notifications are normalized into OpenSandbox events carrie
 
 | Event | Payload |
 | --- | --- |
-| `agent.session` | `sessionId`, adapter, negotiated protocol version, capabilities |
+| `agent.session` | `sessionId`, adapter, negotiated protocol version, capabilities; on resume also `resumed: true` and `resumeMode` (`process_preserved` or `workspace_restore`) |
 | `agent.update` | `kind` (`text_delta`, `thought`, `tool_call`, `tool_call_update`, `plan`, `available_commands`, `usage`, `mode`), plus the ACP payload fields that carry no local paths or credentials |
 | `agent.permission_request` | request id, tool call, options, deadline |
-| `agent.result` | `stopReason`, usage, turn duration, artifact manifest |
+| `agent.result` | per-turn `stopReason` (including `end_turn`), usage, turn duration, artifact manifest |
 | `agent.error` | typed error code and message |
-| `agent.stopped` | terminal `stopReason` (`end_turn`, `cancelled`, `failed`, `resume_unsupported`, `expired`) |
+| `agent.stopped` | terminal session `stopReason` (`cancelled`, `failed`, `resume_unsupported`, `expired`) |
 
-Every event carries a monotonically increasing `seq` per session. `GET /v1/agents/sessions/<id>/events` accepts `Last-Event-ID` and replays from the buffer, so a dropped connection does not lose events. The buffer is bounded (default 1 MiB per session, configurable); on overflow the stream emits `agent.error` with `buffer_overrun` and the session's terminal state, instead of silently skipping events.
+`agent.result` ends a turn, not the session: a normal `end_turn` leaves the session `idle` and accepts a follow-up prompt, so clients must not close the handle on it. `agent.stopped` is reserved for session teardown and is the only event after which the session and its process are gone.
+
+Every event carries a monotonically increasing `seq` per session. `GET /v1/agents/sessions/<id>/events` accepts `Last-Event-ID` and replays from the buffer, so a dropped connection does not lose events. The buffer is bounded (default 1 MiB per session, configurable) and is per subscription, not per session: overflow detaches only that subscription, emits `agent.error` with `buffer_overrun` to it, and leaves the agent running so the caller can re-attach. A re-attach whose `Last-Event-ID` has already been evicted receives `agent.error` with `replay_gap` and the first retained `seq`, rather than a silent hole.
 
 ### Cancellation
 
-ACP cancellation is deliberately optional: `session/cancel` (or `$/cancel_request`) MAY be implemented by an adapter, and the terminal signal is a `state_update: idle` carrying a `stopReason`. The runtime therefore defines an escalation ladder:
+Two operations are distinct: `cancel` ends the current turn and leaves the session `idle`, while `stop` tears the session down. ACP cancellation is deliberately optional: `session/cancel` (or `$/cancel_request`) MAY be implemented by an adapter, and its acknowledgement is a `state_update: idle` carrying a `stopReason`. That acknowledgement does not terminate a long-lived ACP child, so `stop()` always follows it with process teardown:
 
-1. Send `session/cancel` and wait `cancel_grace` (default 5 s).
-2. If the adapter has not produced a terminal state, send `SIGTERM` to the agent process group inside the isolated session.
-3. After `kill_grace` (default 5 s), send `SIGKILL`.
-4. Always emit `agent.stopped` with a machine-readable `stopReason`.
+1. Send `session/cancel` and wait `cancel_grace` (default 5 s) for the turn to reach `idle`.
+2. Send `SIGTERM` to the agent process group inside the isolated session, whether or not step 1 was acknowledged; a cooperative adapter exits on it.
+3. After `kill_grace` (default 5 s), send `SIGKILL` and reap the process group.
+4. Release the isolated session and emit `agent.stopped` with a machine-readable `stopReason` only once the process group is gone.
 
-`stop()` is idempotent: a second call returns the recorded terminal state instead of starting a second ladder. Deleting a sandbox stops every agent session in it through the same ladder, and the record says `cancelled` with `reason=sandbox_deleted`.
+`stop()` is idempotent: a second call returns the recorded terminal state instead of starting a second ladder. If reaping fails within the deadline the session ends `failed` with `reason=reap_timeout`, so a leak is reported instead of being hidden. Deleting a sandbox stops every agent session in it through the same ladder, and the record says `cancelled` with `reason=sandbox_deleted`.
 
 ### Permissions and Elicitation
 
@@ -199,17 +201,17 @@ The policy lives in the runtime, not in per-CLI flags. Every decision is recorde
 
 ### Scoped Identity
 
-Credentials are injected at `session/new`, not at sandbox creation, so scope follows the agent run rather than the sandbox lifetime. The runtime resolves the requested vault scope through the credential vault, passes allowed values as environment or ACP `mcpServers` headers, and records only the vault key and scope in the session record. If the vault is unavailable the spawn fails closed with `identity_unavailable`, unless the caller explicitly sets `identity: none`. On resume, credentials are re-injected before `session/resume` so a restored session never runs with stale or missing tokens; the OSEP-0025 delegated-header path is the same mechanism, so no second credential channel is introduced.
+Credentials are scoped to the agent run at `session/new`, not to the sandbox lifetime, but they stay destination-bound in the credential proxy: the runtime configures the vault scope for the session and the egress proxy injects the material on outbound requests, exactly as [OSEP-0012](0012-credential-vault.md) and [OSEP-0025](0025-credential-vault-provider-spi.md) define for every other consumer. The secret never enters the sandbox, so a prompt cannot read it back and the "never in events or artifacts" property does not depend on redaction. Only the vault key and scope are recorded in the session record. If the vault is unavailable the spawn fails closed with `identity_unavailable`, unless the caller explicitly sets `identity: none`. On resume the runtime re-applies the same vault scope before `session/resume`, so a restored session never runs with a stale or missing binding; a session cannot widen the scope it was created with.
 
 ### Pause and Resume
 
-Sandbox pause freezes the agent's process tree; resume either continues it (same host, same process) or restores the workspace without the process (cross-host, snapshot restore, fast-sandbox wake). The runtime defines both outcomes:
+Pausing and resuming a sandbox does not guarantee that the agent's process survives: [OSEP-0008](0008-pause-resume-rootfs-snapshot.md) replaces the `BatchSandbox` on resume and restores the rootfs, not process state, and [OSEP-0013](0013-isolated-execution-api.md) notes that the isolated session's overlay upper directory does not persist across a Pod migration. The runtime therefore does not branch on "same host"; it selects the resume path from what the backend actually preserves and from observed process liveness:
 
-- On pause the session record is marked `paused` with the last `seq`. The default `on_pause` policy is `cancel`: the runtime stops the agent cleanly before the sandbox freezes, so a frozen turn is never reported as running. `on_pause: wait` is available for deployments that can guarantee the process survives.
-- On resume the runtime reads the record, re-injects vault identity, and calls `session/resume` with the persisted ACP `sessionId` and `replayFrom` where the adapter supports it. A resumed session emits `agent.session` with `resumed: true` and continues the previous `seq`.
-- If the adapter has no resume support, the session ends `resume_unsupported`; the transcript, artifacts and last events remain readable, and the caller decides whether to spawn a new session with a replayed prompt.
+- `process_preserved`: the backend keeps the same process tree across pause and wake (the fast-sandbox `vmstate` plus rootfs checkpoint restore in [OSEP-0024](0024-auto-pause-and-wake-on-access-for-fast-sandbox.md)) and execd observes the agent child alive after resume. The runtime re-attaches to the existing stream and continues the previous `seq`.
+- `workspace_restore`: the backend creates a new Pod or session and only the workspace survives. The runtime exports the isolated session's upper directory (the same `GET /v1/isolated/session/<id>/diff` path used for artifacts) at the end of each turn, and again when the platform exposes a pause request, so the record always names an export no older than the last completed turn; after resume it restores that export into the new session's workspace, re-applies the vault scope and calls `session/resume` with the persisted ACP `sessionId` and `replayFrom` where the adapter supports it. The runtime does not assume it can run code during an externally triggered freeze: a pause whose request it never observed resumes from the last turn-end export.
+- If no export exists, or the adapter has no resume support, the session ends `resume_unsupported`; the transcript, artifacts and last events remain readable, and the caller decides whether to spawn a new session with a replayed prompt.
 
-This makes pause/resume a defined lifecycle rather than an implicit assumption, and it matches the on-disk rollout files that Claude Code and Codex already persist.
+`on_pause` stays `cancel` by default so a frozen turn is never reported as running; `on_pause: wait` is only valid on backends that advertise `process_preserved`. A resumed session emits `agent.session` with `resumed: true` and the chosen resume mode, so clients can tell continuation from reconstruction. This also carries the rollout files that Claude Code and Codex persist inside the workspace, which is why they must be part of the exported overlay rather than an assumed home-directory location.
 
 ### Logs and Artifacts
 
@@ -236,9 +238,9 @@ Artifacts are listed in `agent.result` and downloadable through a session-scoped
 | ACP v2 churn | Negotiate the lowest common version; feature flags; v2 remains optional |
 | Cancellation hangs behind a stuck adapter | Hard SIGTERM/SIGKILL ladder with a bounded deadline; terminal event is guaranteed |
 | Headless auto-approval widens blast radius | `deny` default; `sandbox` is explicit; decisions are recorded; egress policy remains the boundary |
-| Event volume overwhelms the buffer | Bounded per-session buffer plus `buffer_overrun`; callers can attach with `Last-Event-ID` |
-| Credentials leak into events or artifacts | Injection at `session/new`; redaction before persistence; no plaintext in records or logs |
-| Resume restores a session without identity | Re-inject before `session/resume`; fail closed if identity cannot be restored |
+| Event volume overwhelms the buffer | Bounded per-subscription buffer plus `buffer_overrun`; the agent keeps running and callers re-attach with `Last-Event-ID` |
+| Credentials leak into events or artifacts | Destination-bound proxy delivery, so no secret is in the sandbox; redaction stays as defense in depth; only vault keys in records |
+| Resume restores a session without identity | Re-apply the recorded vault scope before `session/resume`; fail closed if it cannot be restored |
 
 ## Design Details
 
@@ -316,9 +318,12 @@ Permission events carry the request id and the options the adapter offered, so a
 kind: codex
 displayName: Codex CLI
 transport: stdio
-command: ["npx", "-y", "@agentclientprotocol/codex-acp"]
+# Exact version or digest, or a preinstalled locked binary; a bare package name
+# would let npm exec resolve a local or remote version at spawn time.
+command: ["npx", "-y", "@agentclientprotocol/codex-acp@2.7.0"]
 env:
-  allow: ["OPENAI_API_KEY", "CODEX_HOME"]
+  # Non-secret state only; credentials are destination-bound in the proxy.
+  allow: ["CODEX_HOME"]
 readiness:
   initialize: true
   sessionNew: true
@@ -331,7 +336,7 @@ permissions:
   supported: true
 ```
 
-Manifests ship as data in the SDK/server image and can be overridden by a sandbox image path for private adapters, but the override is only honored when the sandbox policy allows custom adapters.
+Manifests ship as data in the SDK/server image and carry an exact adapter version or digest; a sandbox image may pin a preinstalled binary instead. The override is only honored when the sandbox policy allows custom adapters. A manifest without a pinned version fails `adapter_unavailable` rather than fetching an arbitrary package.
 
 ### Protocol Negotiation
 
@@ -359,21 +364,22 @@ One in-flight `session/prompt` per session; a prompt while running answers `agen
 | `identity_unavailable` | The vault could not deliver the requested scope |
 | `resume_unsupported` | The adapter cannot restore the session |
 | `cancelled` | Terminal stop reason from `stop()` or sandbox deletion |
-| `buffer_overrun` | The event buffer exceeded its budget |
+| `buffer_overrun` | A subscription fell behind its byte budget and was detached; the agent keeps running |
+| `replay_gap` | A re-attach named a `Last-Event-ID` older than the retained buffer; the first retained `seq` is returned |
 | `process_gone` | execd no longer holds the process |
 
 ### Security and Redaction
 
-Adapters run inside the isolated session under its uid/gid and mounts, so they inherit the sandbox's network and filesystem policy. The custom-adapter path is a policy switch, not a default. The runtime redacts vault values, tokens and absolute paths from events before they are persisted, and stores only vault keys in the session record. Permission decisions and adapter commands are logged with the session id so the planned agent audit trail can attribute actions; no log line contains a credential.
+Adapters run inside the isolated session under its uid/gid and mounts, so they inherit the sandbox's network and filesystem policy. The custom-adapter path is a policy switch, not a default. No vault value enters the sandbox, so events, artifacts and logs cannot contain one by construction; redaction of adapter-produced output (tokens a CLI prints, absolute paths) remains as defense in depth, and the session record stores only vault keys and scopes. Permission decisions and adapter commands are logged with the session id so the planned agent audit trail can attribute actions; no log line contains a credential.
 
 ## Test Plan
 
 - Unit tests: manifest resolution, unknown-kind errors, event normalization, sequence/replay, state machine transitions, cancellation ladder with a fake adapter, permission policies, redaction, `stop()` idempotency.
 - Integration tests with a deterministic fake ACP adapter (no model calls): spawn, stream ordering, follow-up prompt, cancel during a tool call, permission ask and answer, adapter that ignores cancel (verifies SIGTERM/SIGKILL), adapter that fails `initialize`.
-- Resume tests: pause and resume on the same host, resume after a simulated cross-host restore, adapter without resume support.
-- E2E with one real adapter (Claude Code through `claude-agent-acp`) on Docker and Kubernetes: create a sandbox, spawn, stream a turn, stop, confirm a terminal event and artifacts; run the same scenario after pause/resume.
-- Negative authorization: a second sandbox cannot read another sandbox's session events or artifacts; an `external` permission request times out to deny.
-- Concurrency: session limit, `agent_busy`, slow consumer with `buffer_overrun`, server restart reconciliation.
+- Resume tests: a backend that advertises `process_preserved` and one that only restores the workspace (`workspace_restore`), an export that does not complete before pause, an adapter without resume support, and a stale ACP `sessionId`.
+- E2E with one real adapter (Claude Code through `claude-agent-acp`) on Docker and Kubernetes: create a sandbox, spawn, stream a turn, stop, confirm a terminal event and artifacts; run the same scenario after pause/resume on both resume modes.
+- Negative authorization: a second sandbox cannot read another sandbox's session events or artifacts; an `external` permission request times out to deny; a re-attached subscription cannot widen the recorded vault scope.
+- Concurrency: session limit, `agent_busy`, slow consumer with `buffer_overrun` (the agent keeps running), stale `Last-Event-ID` with `replay_gap`, server restart reconciliation.
 
 ## Drawbacks
 
