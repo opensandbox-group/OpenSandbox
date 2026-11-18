@@ -151,6 +151,7 @@ func startPolicyServer(
 	mux.HandleFunc("/credential-vault", handler.handleCredentialVault)
 	mux.HandleFunc("/credential-vault/", handler.handleCredentialVaultSubresource)
 	mux.HandleFunc("/healthz", handler.handleHealthz)
+	mux.HandleFunc("/enforcement", handler.handleEnforcement)
 
 	var activeSrv *http.Server
 	var cleanupActiveSocket func(context.Context) error
@@ -246,6 +247,39 @@ type policyServer struct {
 
 	// One-way health projection; reason, base and tickets remain owned under mu.
 	revisionRecoveryRequired atomic.Bool
+
+	// enforcement is the enforcement-state anchor ledger, attached right after
+	// startPolicyServer returns (nil = feature off). The atomic pointer keeps
+	// the /enforcement handler honest across that attach window.
+	enforcement atomic.Pointer[nftables.AnchorLedger]
+}
+
+// SetEnforcementLedger attaches the anchor ledger (may be nil) for the
+// /enforcement read-only surface.
+func (s *policyServer) SetEnforcementLedger(ledger *nftables.AnchorLedger) {
+	s.enforcement.Store(ledger)
+}
+
+// handleEnforcement serves the per-table kernel-enforcement state recorded by
+// the anchor ledger (issue #2718, OSEP-0029): confirmed (live state exactly
+// matches the recorded anchor), drifted (a well-formed read differs;
+// restoration attempted), unknown (the observation failed — a delay, not a
+// denial). Read-only and additive: probes and existing consumers of /healthz
+// are unaffected.
+func (s *policyServer) handleEnforcement(w http.ResponseWriter, _ *http.Request) {
+	type enforcementResponse struct {
+		Enabled bool                        `json:"enabled"`
+		Tables  []nftables.TableEnforcement `json:"tables"`
+	}
+	resp := enforcementResponse{}
+	if ledger := s.enforcement.Load(); ledger != nil {
+		resp.Enabled = true
+		resp.Tables = ledger.Enforcement()
+	}
+	if resp.Tables == nil {
+		resp.Tables = []nftables.TableEnforcement{}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type policyStatusResponse struct {

@@ -53,7 +53,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
-const gatewayMitmNftTable = "opensandbox_gateway_mitm"
+const GatewayMitmNftTable = "opensandbox_gateway_mitm"
 
 // MitmRedirectEntry is one sandbox's interception mapping: HTTP(S) from
 // SandboxIP is DNATed to Gateway:port in the Pod netns.
@@ -65,9 +65,9 @@ type MitmRedirectEntry struct {
 // mitmRedirectScript builds the wholesale table rebuild for the given entries.
 func mitmRedirectScript(entries []MitmRedirectEntry, port int, dports []int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "delete table inet %s\n", gatewayMitmNftTable)
-	fmt.Fprintf(&b, "add table inet %s\n", gatewayMitmNftTable)
-	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", gatewayMitmNftTable)
+	fmt.Fprintf(&b, "delete table inet %s\n", GatewayMitmNftTable)
+	fmt.Fprintf(&b, "add table inet %s\n", GatewayMitmNftTable)
+	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", GatewayMitmNftTable)
 	dportList := mitmDportList(dports)
 	for _, e := range entries {
 		key := "ip"
@@ -81,10 +81,10 @@ func mitmRedirectScript(entries []MitmRedirectEntry, port int, dports []int) str
 				gwKey = "ip"
 			}
 			fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s %s daddr %s tcp dport %s return\n",
-				gatewayMitmNftTable, key, addr, gwKey, e.Gateway.Unmap(), dportList)
+				GatewayMitmNftTable, key, addr, gwKey, e.Gateway.Unmap(), dportList)
 		}
 		fmt.Fprintf(&b, "add rule inet %s gw %s saddr %s tcp dport %s dnat to %s:%d\n",
-			gatewayMitmNftTable, key, addr, dportList, e.Gateway.Unmap(), port)
+			GatewayMitmNftTable, key, addr, dportList, e.Gateway.Unmap(), port)
 	}
 	return b.String()
 }
@@ -130,7 +130,7 @@ func InstallMitmRedirects(entries []MitmRedirectEntry, port int, dports []int) e
 // missing table is not an error).
 func RemoveMitmRedirects() error {
 	r := defaultRedirectRunner()
-	out, err := r.runNft(context.Background(), fmt.Sprintf("delete table inet %s\n", gatewayMitmNftTable))
+	out, err := r.runNft(context.Background(), fmt.Sprintf("delete table inet %s\n", GatewayMitmNftTable))
 	if err != nil {
 		if isMitmMissingTableError(out, err) {
 			return nil
@@ -150,14 +150,14 @@ func isMitmMissingTableError(output []byte, err error) bool {
 	}
 	msg := strings.ToLower(err.Error() + " " + string(output))
 	return (strings.Contains(msg, "no such file") || strings.Contains(msg, "does not exist")) &&
-		strings.Contains(msg, gatewayMitmNftTable)
+		strings.Contains(msg, GatewayMitmNftTable)
 }
 
 func removeMitmDeleteTableLine(script string) string {
 	lines := strings.Split(script, "\n")
 	var filtered []string
 	for _, l := range lines {
-		if strings.HasPrefix(strings.TrimSpace(l), "delete table inet "+gatewayMitmNftTable) {
+		if strings.HasPrefix(strings.TrimSpace(l), "delete table inet "+GatewayMitmNftTable) {
 			continue
 		}
 		filtered = append(filtered, l)

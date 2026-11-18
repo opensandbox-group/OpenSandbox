@@ -27,7 +27,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 )
 
-const dnsRedirectNftTable = "opensandbox_dns_redirect"
+const DNSRedirectNftTable = "opensandbox_dns_redirect"
 
 var dnsRedirectNftFamilies = []string{"inet", "ip", "ip6"}
 
@@ -109,7 +109,7 @@ func (r redirectRunner) runRedirectRules(ctx context.Context, rules [][]string) 
 	return applied, nil
 }
 
-func (r redirectRunner) setupRedirect(ctx context.Context, port int, exemptDst []netip.Addr) error {
+func (r redirectRunner) setupRedirect(ctx context.Context, anchors EnforcementAnchors, port int, exemptDst []netip.Addr) error {
 	if cleanupErr := r.removeNftRedirectTables(ctx); cleanupErr != nil {
 		if !isNftUnavailableError(cleanupErr) {
 			return cleanupErr
@@ -118,17 +118,11 @@ func (r redirectRunner) setupRedirect(ctx context.Context, port int, exemptDst [
 	}
 	if redirectBackend() == backendNft {
 		// Native nft from the start: no xtables extensions involved, both families in one script.
-		script := dnsRedirectNftScript(port, exemptDst)
-		if output, nftErr := r.runNft(ctx, script); nftErr != nil {
-			if isNftMissingTableError(output, nftErr) {
-				if retryOutput, retryErr := r.runNft(ctx, removeNftDeleteTableLine(script)); retryErr != nil {
-					return fmt.Errorf("nft DNS redirect failed: %w (output: %s)", retryErr, strings.TrimSpace(string(retryOutput)))
-				}
-			} else {
-				return fmt.Errorf("nft DNS redirect failed: %w (output: %s)", nftErr, strings.TrimSpace(string(output)))
-			}
+		if err := r.installDNSRedirectNft(ctx, port, exemptDst); err != nil {
+			return err
 		}
 		log.Infof("nft DNS redirect installed (%s=nft)", RedirectBackendEnv)
+		r.anchorDNSRedirect(ctx, anchors, port, exemptDst)
 		return nil
 	}
 	rules := dnsRedirectRules(port, exemptDst, "-A")
@@ -141,22 +135,48 @@ func (r redirectRunner) setupRedirect(ctx context.Context, port int, exemptDst [
 		if rollbackErr := r.rollbackRedirectRules(ctx, applied); rollbackErr != nil {
 			return fmt.Errorf("iptables rollback failed before nft DNS redirect fallback after iptables error %v: %w", err, rollbackErr)
 		}
-		script := dnsRedirectNftScript(port, exemptDst)
-		if output, nftErr := r.runNft(ctx, script); nftErr != nil {
-			if isNftMissingTableError(output, nftErr) {
-				if retryOutput, retryErr := r.runNft(ctx, removeNftDeleteTableLine(script)); retryErr == nil {
-					log.Infof("nft DNS redirect fallback installed successfully after missing-table retry")
-					return nil
-				} else {
-					return fmt.Errorf("nft DNS redirect fallback retry failed after iptables error %v: %w (output: %s)", err, retryErr, strings.TrimSpace(string(retryOutput)))
-				}
-			}
-			return fmt.Errorf("nft DNS redirect fallback failed after iptables error %v: %w (output: %s)", err, nftErr, strings.TrimSpace(string(output)))
+		if nftErr := r.installDNSRedirectNft(ctx, port, exemptDst); nftErr != nil {
+			return fmt.Errorf("nft DNS redirect fallback failed after iptables error %v: %w", err, nftErr)
 		}
 		log.Infof("nft DNS redirect fallback installed successfully")
+		r.anchorDNSRedirect(ctx, anchors, port, exemptDst)
 		return nil
 	}
 	return nil
+}
+
+// installDNSRedirectNft installs (or replays) both address-family redirect
+// tables as one nft transaction. It is idempotent: the script deletes then
+// re-adds each table, and a first install with no table to delete retries
+// without the delete line. The same function is the anchor's restore path, so
+// a drift restore runs exactly the install the applier ran.
+func (r redirectRunner) installDNSRedirectNft(ctx context.Context, port int, exemptDst []netip.Addr) error {
+	script := dnsRedirectNftScript(port, exemptDst)
+	if output, nftErr := r.runNft(ctx, script); nftErr != nil {
+		if isNftMissingTableError(output, nftErr) {
+			if retryOutput, retryErr := r.runNft(ctx, removeNftDeleteTableLine(script)); retryErr != nil {
+				return fmt.Errorf("nft DNS redirect failed: %w (output: %s)", retryErr, strings.TrimSpace(string(retryOutput)))
+			}
+		} else {
+			return fmt.Errorf("nft DNS redirect failed: %w (output: %s)", nftErr, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
+}
+
+// anchorDNSRedirect records both family tables after a successful native
+// install. The restore path replays the same transactional script, which
+// atomically rebuilds both families; restoring one drifted family therefore
+// never leaves the other one unenforced in between.
+func (r redirectRunner) anchorDNSRedirect(ctx context.Context, anchors EnforcementAnchors, port int, exemptDst []netip.Addr) {
+	if anchors == nil {
+		return
+	}
+	reapply := func(restoreCtx context.Context) error {
+		return r.installDNSRedirectNft(restoreCtx, port, exemptDst)
+	}
+	anchorRedirectTable(ctx, anchors, "ip", DNSRedirectNftTable, reapply)
+	anchorRedirectTable(ctx, anchors, "ip6", DNSRedirectNftTable, reapply)
 }
 
 func (r redirectRunner) rollbackRedirectRules(ctx context.Context, applied [][]string) error {
@@ -180,7 +200,7 @@ func (r redirectRunner) rollbackRedirectRules(ctx context.Context, applied [][]s
 func (r redirectRunner) removeNftRedirectTables(ctx context.Context) error {
 	var errs []error
 	for _, family := range dnsRedirectNftFamilies {
-		script := fmt.Sprintf("delete table %s %s\n", family, dnsRedirectNftTable)
+		script := fmt.Sprintf("delete table %s %s\n", family, DNSRedirectNftTable)
 		if output, err := r.runNft(ctx, script); err != nil && !isNftMissingTableError(output, err) {
 			errs = append(errs, fmt.Errorf("%w (output: %s)", err, strings.TrimSpace(string(output))))
 		}
@@ -220,7 +240,7 @@ func isNftUnavailableError(err error) bool {
 }
 
 func isNftMissingTableError(output []byte, err error) bool {
-	return isNftMissingTableErrorFor(output, err, dnsRedirectNftTable)
+	return isNftMissingTableErrorFor(output, err, DNSRedirectNftTable)
 }
 
 func isNftMissingTableErrorFor(output []byte, err error, table string) bool {
@@ -234,7 +254,7 @@ func isNftMissingTableErrorFor(output []byte, err error, table string) bool {
 }
 
 func removeNftDeleteTableLine(script string) string {
-	return removeNftDeleteTableLineFor(script, dnsRedirectNftTable)
+	return removeNftDeleteTableLineFor(script, DNSRedirectNftTable)
 }
 
 func removeNftDeleteTableLineFor(script string, table string) string {
@@ -264,36 +284,45 @@ func isIptablesNftOutputAppendMissingChain(err error) bool {
 
 func dnsRedirectNftScript(port int, exemptDst []netip.Addr) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "delete table ip %s\n", dnsRedirectNftTable)
-	fmt.Fprintf(&b, "delete table ip6 %s\n", dnsRedirectNftTable)
-	fmt.Fprintf(&b, "add table ip %s\n", dnsRedirectNftTable)
-	fmt.Fprintf(&b, "add chain ip %s output { type nat hook output priority -100; policy accept; }\n", dnsRedirectNftTable)
-	fmt.Fprintf(&b, "add table ip6 %s\n", dnsRedirectNftTable)
-	fmt.Fprintf(&b, "add chain ip6 %s output { type nat hook output priority -100; policy accept; }\n", dnsRedirectNftTable)
+	fmt.Fprintf(&b, "delete table ip %s\n", DNSRedirectNftTable)
+	fmt.Fprintf(&b, "delete table ip6 %s\n", DNSRedirectNftTable)
+	fmt.Fprintf(&b, "add table ip %s\n", DNSRedirectNftTable)
+	fmt.Fprintf(&b, "add chain ip %s output { type nat hook output priority -100; policy accept; }\n", DNSRedirectNftTable)
+	fmt.Fprintf(&b, "add table ip6 %s\n", DNSRedirectNftTable)
+	fmt.Fprintf(&b, "add chain ip6 %s output { type nat hook output priority -100; policy accept; }\n", DNSRedirectNftTable)
 	for _, addr := range exemptDst {
 		if addr.Is4() {
-			fmt.Fprintf(&b, "add rule ip %s output udp dport 53 ip daddr %s return\n", dnsRedirectNftTable, addr.String())
-			fmt.Fprintf(&b, "add rule ip %s output tcp dport 53 ip daddr %s return\n", dnsRedirectNftTable, addr.String())
+			fmt.Fprintf(&b, "add rule ip %s output udp dport 53 ip daddr %s return\n", DNSRedirectNftTable, addr.String())
+			fmt.Fprintf(&b, "add rule ip %s output tcp dport 53 ip daddr %s return\n", DNSRedirectNftTable, addr.String())
 		} else {
-			fmt.Fprintf(&b, "add rule ip6 %s output udp dport 53 ip6 daddr %s return\n", dnsRedirectNftTable, addr.String())
-			fmt.Fprintf(&b, "add rule ip6 %s output tcp dport 53 ip6 daddr %s return\n", dnsRedirectNftTable, addr.String())
+			fmt.Fprintf(&b, "add rule ip6 %s output udp dport 53 ip6 daddr %s return\n", DNSRedirectNftTable, addr.String())
+			fmt.Fprintf(&b, "add rule ip6 %s output tcp dport 53 ip6 daddr %s return\n", DNSRedirectNftTable, addr.String())
 		}
 	}
-	fmt.Fprintf(&b, "add rule ip %s output meta mark %s udp dport 53 return\n", dnsRedirectNftTable, constants.MarkHex)
-	fmt.Fprintf(&b, "add rule ip %s output meta mark %s tcp dport 53 return\n", dnsRedirectNftTable, constants.MarkHex)
-	fmt.Fprintf(&b, "add rule ip %s output udp dport 53 redirect to :%d\n", dnsRedirectNftTable, port)
-	fmt.Fprintf(&b, "add rule ip %s output tcp dport 53 redirect to :%d\n", dnsRedirectNftTable, port)
-	fmt.Fprintf(&b, "add rule ip6 %s output meta mark %s udp dport 53 return\n", dnsRedirectNftTable, constants.MarkHex)
-	fmt.Fprintf(&b, "add rule ip6 %s output meta mark %s tcp dport 53 return\n", dnsRedirectNftTable, constants.MarkHex)
-	fmt.Fprintf(&b, "add rule ip6 %s output udp dport 53 redirect to :%d\n", dnsRedirectNftTable, port)
-	fmt.Fprintf(&b, "add rule ip6 %s output tcp dport 53 redirect to :%d\n", dnsRedirectNftTable, port)
+	fmt.Fprintf(&b, "add rule ip %s output meta mark %s udp dport 53 return\n", DNSRedirectNftTable, constants.MarkHex)
+	fmt.Fprintf(&b, "add rule ip %s output meta mark %s tcp dport 53 return\n", DNSRedirectNftTable, constants.MarkHex)
+	fmt.Fprintf(&b, "add rule ip %s output udp dport 53 redirect to :%d\n", DNSRedirectNftTable, port)
+	fmt.Fprintf(&b, "add rule ip %s output tcp dport 53 redirect to :%d\n", DNSRedirectNftTable, port)
+	fmt.Fprintf(&b, "add rule ip6 %s output meta mark %s udp dport 53 return\n", DNSRedirectNftTable, constants.MarkHex)
+	fmt.Fprintf(&b, "add rule ip6 %s output meta mark %s tcp dport 53 return\n", DNSRedirectNftTable, constants.MarkHex)
+	fmt.Fprintf(&b, "add rule ip6 %s output udp dport 53 redirect to :%d\n", DNSRedirectNftTable, port)
+	fmt.Fprintf(&b, "add rule ip6 %s output tcp dport 53 redirect to :%d\n", DNSRedirectNftTable, port)
 	return b.String()
 }
 
 // SetupRedirect: OUTPUT 53 (udp/tcp) → port; sk_mark RETURN (proxy) and per-dst RETURN (exempt list) first.
 func SetupRedirect(port int, exemptDst []netip.Addr) error {
+	return SetupRedirectAnchored(nil, port, exemptDst)
+}
+
+// SetupRedirectAnchored is SetupRedirect with enforcement-state anchoring:
+// when the native nft backend installs the owned redirect tables, their live
+// state is recorded so the anchor ledger can detect and restore drift. On the
+// iptables backend there is no owned table to read back and no anchor is
+// recorded — deletion detection there remains out of scope (OSEP-0029).
+func SetupRedirectAnchored(anchors EnforcementAnchors, port int, exemptDst []netip.Addr) error {
 	log.Infof("installing iptables DNS redirect: OUTPUT port 53 -> %d (mark %s bypass)", port, constants.MarkHex)
-	if err := defaultRedirectRunner().setupRedirect(context.Background(), port, exemptDst); err != nil {
+	if err := defaultRedirectRunner().setupRedirect(context.Background(), anchors, port, exemptDst); err != nil {
 		return err
 	}
 	log.Infof("DNS redirect installed successfully")

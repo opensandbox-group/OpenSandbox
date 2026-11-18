@@ -28,9 +28,9 @@ func TestMitmRedirectScriptV4(t *testing.T) {
 		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
 	}, 18081, []int{80, 443})
 
-	require.Contains(t, script, "delete table inet "+gatewayMitmNftTable)
-	require.Contains(t, script, "add table inet "+gatewayMitmNftTable)
-	require.Contains(t, script, "add chain inet "+gatewayMitmNftTable+" gw { type nat hook prerouting priority dstnat; }")
+	require.Contains(t, script, "delete table inet "+GatewayMitmNftTable)
+	require.Contains(t, script, "add table inet "+GatewayMitmNftTable)
+	require.Contains(t, script, "add chain inet "+GatewayMitmNftTable+" gw { type nat hook prerouting priority dstnat; }")
 
 	// management-plane exception: sandbox -> gateway must NOT be intercepted
 	require.Contains(t, script, `ip saddr 10.0.0.5 ip daddr 10.0.0.1 tcp dport {80,443} return`)
@@ -54,7 +54,7 @@ func TestMitmRedirectScriptExtraPortsAndEmpty(t *testing.T) {
 	require.Contains(t, script, `tcp dport {80,443,8080} dnat to 10.0.0.1:18081`)
 
 	empty := mitmRedirectScript(nil, 18081, []int{80, 443})
-	require.Contains(t, empty, "add chain inet "+gatewayMitmNftTable+" gw")
+	require.Contains(t, empty, "add chain inet "+GatewayMitmNftTable+" gw")
 	require.NotContains(t, empty, "dnat to")
 	assert.True(t, strings.HasSuffix(empty, "\n"))
 }

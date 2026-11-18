@@ -207,7 +207,10 @@ func main() {
 	if len(exemptDst) > 0 {
 		log.Infof("nameserver exempt list: %v (proxy upstream in this list will not set SO_MARK)", exemptDst)
 	}
-	if err := iptables.SetupRedirect(15353, exemptDst); err != nil {
+	// Enforcement-state anchors (default-off): built before the installs so the
+	// appliers record each native table as it lands.
+	enforcement := newEnforcementLedger()
+	if err := iptables.SetupRedirectAnchored(enforcement, 15353, exemptDst); err != nil {
 		log.Fatalf("failed to install iptables redirect: %v", err)
 	}
 	log.Infof("iptables redirect configured (OUTPUT 53 -> 15353) with SO_MARK bypass for proxy upstream traffic")
@@ -220,9 +223,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to start policy server: %v", err)
 	}
+	policyHandler.SetEnforcementLedger(enforcement)
 	log.Infof("policy server listening on %s (POST /policy)", httpAddr)
 
-	mitm, err := startMitmproxyTransparentIfEnabled(ctx, policyHandler)
+	mitm, err := startMitmproxyTransparentIfEnabled(ctx, policyHandler, enforcement)
 	if err != nil {
 		log.Fatalf("mitmproxy transparent: %v", err)
 	}
@@ -237,6 +241,9 @@ func main() {
 	if mitm != nil {
 		mitm.watchMitmproxy(ctx, mitmGate)
 	}
+
+	// All native tables are installed; start the enforcement reconcile loop.
+	startEnforcementReconcile(ctx, enforcement)
 
 	if err := startup.RunPost(ctx); err != nil {
 		log.Errorf("startup hooks (post) error: %v", err)

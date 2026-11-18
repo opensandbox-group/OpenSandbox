@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -69,10 +70,10 @@ var testTableReadback = TableReadback{
 		"output":  {Type: "filter", Hook: "output", Prio: json.Number("-450"), Policy: "drop"},
 		"forward": {Type: "filter", Hook: "forward", Prio: json.Number("-450"), Policy: "drop"},
 	},
-	Rules: map[string]RuleMatcher{
-		"input":   UnconditionalDrop,
-		"output":  UnconditionalDrop,
-		"forward": UnconditionalDrop,
+	Rules: map[string][]RuleMatcher{
+		"input":   {UnconditionalDrop},
+		"output":  {UnconditionalDrop},
+		"forward": {UnconditionalDrop},
 	},
 	Text: testTableText,
 }
@@ -253,9 +254,124 @@ func TestVerifyTableTextStrict(t *testing.T) {
 
 func TestInspectTableJSONNilMatcherIsAnError(t *testing.T) {
 	spec := testTableReadback
-	spec.Rules = map[string]RuleMatcher{"input": nil, "output": UnconditionalDrop, "forward": UnconditionalDrop}
+	spec.Rules = map[string][]RuleMatcher{"input": {nil}, "output": {UnconditionalDrop}, "forward": {UnconditionalDrop}}
 	_, err := InspectTableJSON(testTableJSON(), spec)
 	require.Error(t, err, "a nil rule matcher must fail verification, never panic")
+}
+
+// multiRuleJSON mirrors a nat redirect table: one base chain holding several
+// ordered rules, the shape the redirect appliers anchor.
+func multiRuleJSON() []byte {
+	return []byte(`{"nftables":[
+ {"metainfo":{"version":"1.0.9","json_schema_version":1}},
+ {"table":{"family":"ip","name":"opensandbox_multi","handle":1}},
+ {"chain":{"family":"ip","table":"opensandbox_multi","name":"output","handle":2,"type":"nat","hook":"output","prio":-100,"policy":"accept"}},
+ {"rule":{"family":"ip","table":"opensandbox_multi","chain":"output","handle":3,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"127.0.0.1"}}]}},
+ {"rule":{"family":"ip","table":"opensandbox_multi","chain":"output","handle":4,"expr":[{"redirect":{"port":15353}}]}}
+ ]}`)
+}
+
+func multiRuleReadback() TableReadback {
+	return TableReadback{
+		Family: "ip",
+		Table:  "opensandbox_multi",
+		Chains: map[string]ChainReadback{
+			"output": {Type: "nat", Hook: "output", Prio: json.Number("-100"), Policy: "accept"},
+		},
+		Rules: map[string][]RuleMatcher{
+			"output": {
+				func(expr any) bool { return strings.Contains(fmt.Sprintf("%v", expr), "127.0.0.1") },
+				func(expr any) bool { return strings.Contains(fmt.Sprintf("%v", expr), "redirect") },
+			},
+		},
+		Text: "table ip opensandbox_multi {\n\tchain output {\n\t\ttype nat hook output priority -100; policy accept;\n\t\tip daddr 127.0.0.1\n\t\tredirect to :15353\n\t}\n}\n",
+	}
+}
+
+func TestInspectTableJSONOrderedRules(t *testing.T) {
+	// Order is semantic: the expected matchers must align with the live rules
+	// positionally.
+	present, err := InspectTableJSON(multiRuleJSON(), multiRuleReadback())
+	require.NoError(t, err)
+	require.True(t, present)
+
+	// Swapping two rules is a mismatch, not a match.
+	swapped := multiRuleJSON()
+	swappedExpr := []any{
+		map[string]any{"redirect": map[string]any{"port": json.Number("15353")}},
+		map[string]any{"match": map[string]any{"op": "==", "left": map[string]any{"payload": map[string]any{"protocol": "ip", "field": "daddr"}}, "right": "127.0.0.1"}},
+	}
+	var doc struct {
+		Nftables []map[string]any `json:"nftables"`
+	}
+	require.NoError(t, json.Unmarshal(swapped, &doc))
+	doc.Nftables[3]["rule"].(map[string]any)["expr"] = swappedExpr[0]
+	doc.Nftables[4]["rule"].(map[string]any)["expr"] = swappedExpr[1]
+	data, err := json.Marshal(doc)
+	require.NoError(t, err)
+	present, err = InspectTableJSON(data, multiRuleReadback())
+	require.Error(t, err, "a reordered chain must not verify")
+	require.False(t, present)
+
+	// Removing one of the expected rules is a mismatch.
+	require.NoError(t, json.Unmarshal(multiRuleJSON(), &doc))
+	doc.Nftables = append(doc.Nftables[:4], doc.Nftables[5:]...)
+	data, err = json.Marshal(doc)
+	require.NoError(t, err)
+	present, err = InspectTableJSON(data, multiRuleReadback())
+	require.Error(t, err, "a missing rule must not verify")
+	require.False(t, present)
+
+	// Adding an extra rule is a mismatch.
+	require.NoError(t, json.Unmarshal(multiRuleJSON(), &doc))
+	doc.Nftables = append(doc.Nftables, doc.Nftables[4])
+	data, err = json.Marshal(doc)
+	require.NoError(t, err)
+	present, err = InspectTableJSON(data, multiRuleReadback())
+	require.Error(t, err, "an extra rule must not verify")
+	require.False(t, present)
+}
+
+// TestReadbackMismatchClassification pins the boundary the anchor ledger
+// depends on: a well-formed observation of different state is a
+// ReadbackMismatch (drift), while a failed or malformed read is not (unknown).
+func TestReadbackMismatchClassification(t *testing.T) {
+	isMismatch := func(err error) bool {
+		var target *ReadbackMismatch
+		return errors.As(err, &target)
+	}
+	injected := errors.New("injected nft failure")
+	for _, tc := range []struct {
+		name      string
+		json      []byte
+		jsonErr   error
+		text      string
+		textErr   error
+		wantMatch bool
+	}{
+		{"changed-rule", []byte(strings.ReplaceAll(string(testTableJSON()), `"drop":null`, `"accept":null`)), nil, testTableText, nil, true},
+		{"text-mismatch", testTableJSON(), nil, strings.Replace(testTableText, "policy drop", "policy accept", 1), nil, true},
+		{"extra-foreign-object-in-owned-table", []byte(strings.Replace(string(testTableJSON()), `{"rule":{"family":"inet","table":"opensandbox_test","chain":"input","handle":5,"expr":[{"drop":null}]}}`,
+			`{"rule":{"family":"inet","table":"opensandbox_test","chain":"input","handle":5,"expr":[{"drop":null}]}},{"set":{"family":"inet","table":"opensandbox_test","name":"unexpected"}}`, 1)), nil, testTableText, nil, true},
+		{"malformed-json", []byte(`{"nftables":`), nil, testTableText, nil, false},
+		{"trailing-data", []byte(`{"nftables":[]} {}`), nil, testTableText, nil, false},
+		{"list-failure", testTableJSON(), injected, testTableText, nil, false},
+		{"text-list-failure", testTableJSON(), nil, testTableText, injected, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			run := func(_ context.Context, args ...string) ([]byte, error) {
+				calls++
+				if calls == 1 {
+					return tc.json, tc.jsonErr
+				}
+				return []byte(tc.text), tc.textErr
+			}
+			_, err := VerifyTable(context.Background(), run, testTableReadback)
+			require.Error(t, err, tc.name)
+			require.Equal(t, tc.wantMatch, isMismatch(err), tc.name)
+		})
+	}
 }
 
 func TestUnconditionalDrop(t *testing.T) {
