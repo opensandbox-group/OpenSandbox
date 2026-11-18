@@ -15,6 +15,7 @@
 package pathutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -115,6 +116,10 @@ func ExpandAbsPath(path string) (string, error) {
 	expanded, err := ExpandPathWithEnv(path, nil)
 	if err != nil {
 		return "", err
+	}
+	// filepath.Abs("") is the working directory, which no caller asked for.
+	if expanded == "" {
+		return "", errors.New("path is empty")
 	}
 	return filepath.Abs(expanded)
 }
