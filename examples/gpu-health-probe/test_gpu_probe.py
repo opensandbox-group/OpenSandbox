@@ -203,6 +203,35 @@ class TestDeviceLayer:
         assert check["status"] == gpu_probe.WARN
         assert "partial attach" in check["detail"]
 
+    def _mig_case(self, tmp_path: Path, expected: str):
+        dev_dir = _make_dev_dir(tmp_path / "dev", ["nvidiactl", "nvidia-uvm", "nvidia0"])
+        driver_path = _write_driver_version(tmp_path / "proc" / "nvidia" / "version", "550.54.14")
+        smi_stdout = (
+            "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-cccc)\n"
+            "  MIG 1g.5gb Device 0: (UUID: MIG-GPU-cccc/1/0)\n"
+            "  MIG 1g.5gb Device 1: (UUID: MIG-GPU-cccc/2/0)\n"
+        )
+        return gpu_probe.collect_device_layer(
+            dev_dir=dev_dir,
+            driver_version_path=driver_path,
+            smi_path="/fake/nvidia-smi",
+            expected_count=expected,
+            capture=_fake_capture(0, smi_stdout, ""),
+        )
+
+    def test_mig_count_compares_mig_instances(self, tmp_path: Path) -> None:
+        # Two MIG slices on one physical card: requested 2 must pass.
+        layer, _ = self._mig_case(tmp_path, expected="2")
+        assert layer.status == gpu_probe.PASS
+        check = self._check(layer, "requested-count")
+        assert check["status"] == gpu_probe.PASS
+        assert "2 MIG instance(s)" in check["detail"]
+
+    def test_mig_count_mismatch_fails(self, tmp_path: Path) -> None:
+        layer, _ = self._mig_case(tmp_path, expected="1")
+        assert layer.status == gpu_probe.FAIL
+        assert "2 MIG instance(s)" in self._check(layer, "requested-count")["detail"]
+
     def test_smi_unavailable_warns(self, tmp_path: Path) -> None:
         dev_dir = _make_dev_dir(tmp_path / "dev", ["nvidiactl", "nvidia0"])
         driver_path = _write_driver_version(tmp_path / "proc" / "nvidia" / "version", "550.54.14")
@@ -446,6 +475,17 @@ class TestMain:
         assert exit_code == gpu_probe.EXIT_PROBE_ERROR
         payload = json.loads(capsys.readouterr().out)
         assert payload["status"] == "error"
+
+    @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-5"])
+    def test_non_positive_or_non_finite_timeout_rejected(
+        self, value: str, capsys: Any
+    ) -> None:
+        # These values must be rejected before any subprocess is launched:
+        # nan/inf would act as an unbounded timeout inside communicate().
+        exit_code = gpu_probe.main(["--compute-timeout", value, "--quiet"])
+        assert exit_code == gpu_probe.EXIT_PROBE_ERROR
+        payload = json.loads(capsys.readouterr().out)
+        assert "compute-timeout" in payload["error"]
 
     def test_probe_never_crashes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any

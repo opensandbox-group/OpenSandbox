@@ -89,7 +89,7 @@ stdout is exactly one JSON document; a one-line human summary goes to stderr. Th
 requested 2 GPU(s) but observed 1 device node(s): requested vs attached drift
 ```
 
-For long-lived sandboxes, running the probe periodically (or at attach time in your own orchestration) turns silent accounting drift into a visible, alertable signal. `resourceLimits.gpu=all` cannot be verified inside the sandbox — the resolved count depends on the host inventory — so `--expect all` records the sentinel but skips the comparison; the sentinel itself is Docker-runtime only. Under MIG, express `--expect` in the same unit as `resourceLimits.gpu`; the probe reports physical devices and MIG instances separately.
+For long-lived sandboxes, running the probe periodically (or at attach time in your own orchestration) turns silent accounting drift into a visible, alertable signal. `resourceLimits.gpu=all` cannot be verified inside the sandbox — the resolved count depends on the host inventory — so `--expect all` records the sentinel but skips the comparison; the sentinel itself is Docker-runtime only. Under MIG, `resourceLimits.gpu` counts MIG instances, so when MIG instances are visible the probe compares `--expect` against the MIG instance count and reports physical devices separately.
 
 ## Tests
 

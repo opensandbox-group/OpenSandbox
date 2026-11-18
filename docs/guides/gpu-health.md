@@ -107,7 +107,7 @@ The compute layer cross-checks the framework's visible device count against the 
 Two caveats:
 
 - The `resourceLimits.gpu=all` sentinel is Docker-runtime only — the Kubernetes runtime rejects it and requires a positive integer. It also cannot be verified inside the sandbox — the count it resolves to depends on the host inventory — so `--expect all` records the sentinel but skips the comparison.
-- Under MIG, one physical GPU presents several devices. Express `--expect` in the same unit as `resourceLimits.gpu`; the probe reports both the physical device count and the MIG instance count so the comparison is interpretable.
+- Under MIG, `resourceLimits.gpu` counts MIG instances while `/dev/nvidiaN` nodes count parent cards. When MIG instances are visible, the probe compares `--expect` against the MIG instance count (and still reports the physical device count separately), so two slices on one card satisfy `--expect 2` instead of failing as attach drift.
 
 ## Runtime notes
 

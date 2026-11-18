@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -307,6 +308,15 @@ def run_capture(
             if stream is not None:
                 stream.close()
         return 124, "", f"timed out after {timeout_seconds}s (process group terminated)"
+    except (ValueError, OverflowError) as exc:
+        # Non-finite or out-of-range timeout values make communicate() raise
+        # before any timeout bookkeeping happens; the workload must still be
+        # terminated.
+        _terminate_process_group(process)
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+        return 126, "", f"invalid timeout {timeout_seconds!r}: {exc}"
 
 
 def _monotonic() -> float:
@@ -485,9 +495,9 @@ def collect_device_layer(
                 Check(
                     "mig-mode",
                     WARN,
-                    f"{parsed['migInstanceCount']} MIG instance(s) detected; "
-                    "count checks compare physical device nodes, so express "
-                    "--expect in the same unit as resourceLimits.gpu",
+                    f"{parsed['migInstanceCount']} MIG instance(s) detected: "
+                    "the requested-count check compares MIG instances, since "
+                    "resourceLimits.gpu counts them on MIG-enabled pools",
                 )
             )
 
@@ -504,12 +514,20 @@ def collect_device_layer(
             )
         else:
             expected = int(expected_count)
-            if len(device_nodes) == expected:
+            # Under MIG, resourceLimits.gpu / nvidia.com/gpu counts MIG
+            # instances while /dev/nvidiaN nodes count parent cards, so the
+            # comparison must use the same unit as the request.
+            mig_count = (smi or {}).get("migInstanceCount") or 0
+            if mig_count > 0:
+                observed_count, unit = mig_count, "MIG instance(s)"
+            else:
+                observed_count, unit = len(device_nodes), "device node(s)"
+            if observed_count == expected:
                 checks.append(
                     Check(
                         "requested-count",
                         PASS,
-                        f"observed {len(device_nodes)} device(s), requested {expected}",
+                        f"observed {observed_count} {unit}, requested {expected}",
                     )
                 )
             else:
@@ -518,8 +536,7 @@ def collect_device_layer(
                         "requested-count",
                         FAIL,
                         f"requested {expected} GPU(s) but observed "
-                        f"{len(device_nodes)} device node(s): requested vs "
-                        "attached drift",
+                        f"{observed_count} {unit}: requested vs attached drift",
                     )
                 )
 
@@ -895,6 +912,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 raise _ProbeArgumentError(
                     "--expect must be a positive integer or 'all'"
                 ) from None
+        if not math.isfinite(args.compute_timeout) or args.compute_timeout <= 0:
+            raise _ProbeArgumentError(
+                "--compute-timeout must be a positive finite number of seconds"
+            )
 
         smi_path = None if args.no_smi else (args.smi_path or shutil.which("nvidia-smi"))
         device_layer, observed = collect_device_layer(
