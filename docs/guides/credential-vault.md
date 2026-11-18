@@ -298,14 +298,14 @@ A resolver is any service that answers one route: `POST /resolve` with a JSON do
   "credential": "spi-signer",
   "binding": "internal-api",
   "destination": { "scheme": "https", "authority": "api.internal.example.com:443", "sni": "api.internal.example.com" },
-  "request": { "method": "GET", "host": "api.internal.example.com", "path": "/v1/foo?a=1", "headers": {} }
+  "request": { "method": "GET", "host": "api.internal.example.com", "path": "/v1/foo?a=1", "headers": { "accept": "application/json", "x-acs-action": "CreateDeployment" } }
 }
 
 // 200 OK
 { "headers": { "authorization": "Bearer ...", "x-signature": "..." } }
 ```
 
-`request.path` is the full request target including the query string, so a resolver can bind signatures to the complete target. The `headers` field is reserved and currently always empty — request headers are not forwarded to the resolver, so proofs can only bind to the method, host, and path today. The optional `redactions` field on the response is additive only — the egress redacts every returned header regardless.
+`request.path` is the full request target including the query string, so a resolver can bind signatures to the complete target. The `headers` object carries the outbound request headers the sandbox sent, so proofs can bind to the method, host, path, and headers: every header is forwarded except structural and hop-by-hop fields (`host`, `content-length`, `transfer-encoding`, `connection`, `keep-alive`, `upgrade`, `te`, `trailer`, `expect`, `proxy-*`), names are lowercased, repeated or case-variant fields collapse to their last value, and empty values are skipped. Forwarded headers are capped at 64 entries and 8KiB per value — a resolve that exceeds either is denied (407) like any other resolver failure. The optional `redactions` field on the response is additive only — the egress redacts every returned header regardless.
 
 Hard requirements on a resolver endpoint:
 

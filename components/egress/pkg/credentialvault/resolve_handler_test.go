@@ -190,6 +190,77 @@ func TestResolveHandlerPortAuthorityNormalization(t *testing.T) {
 	require.Equal(t, "api.internal.example.com", h.client.recorded()[1].Destination.SNI)
 }
 
+func TestResolveHandlerForwardsRequestHeaders(t *testing.T) {
+	h := newResolveHarness(t)
+	h.client.decision = &ResolverDecision{Headers: map[string]string{}, Suppress: map[string]struct{}{}, Redactions: []string{}}
+	h.client.unblock()
+
+	body := `{"binding":"internal-api","sni":"api.internal.example.com",` +
+		`"request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/v1/foo",` +
+		`"headers":{"X-ACS-Action":"CreateDeployment","content-type":"application/json","content-md5":"abc="}}}`
+	rec := h.postResolve(body)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Names are case-insensitive header identities, forwarded in the
+	// lowercase canonical form; values keep their exact bytes.
+	recorded := h.client.recorded()
+	require.Len(t, recorded, 1)
+	require.Equal(t, map[string]string{
+		"x-acs-action": "CreateDeployment",
+		"content-type": "application/json",
+		"content-md5":  "abc=",
+	}, recorded[0].Request.Headers)
+}
+
+func TestResolveHandlerRequestHeadersDiscipline(t *testing.T) {
+	h := newResolveHarness(t)
+	// Unblock up front: a case that unexpectedly decodes must fail its
+	// status assertion loudly instead of blocking the fake client forever.
+	h.client.decision = &ResolverDecision{Headers: map[string]string{}, Suppress: map[string]struct{}{}, Redactions: []string{}}
+	h.client.unblock()
+	headerObject := func(entries string) string {
+		return `{"binding":"internal-api","sni":"api.internal.example.com",` +
+			`"request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/x","headers":` + entries + `}}`
+	}
+	cases := []struct {
+		name   string
+		body   string
+		status int
+	}{
+		{"null headers", headerObject(`null`), http.StatusBadRequest},
+		{"array headers", headerObject(`[]`), http.StatusBadRequest},
+		{"non-string value", headerObject(`{"x-a":1}`), http.StatusBadRequest},
+		{"empty value", headerObject(`{"x-a":""}`), http.StatusBadRequest},
+		{"empty name", headerObject(`{"":"v"}`), http.StatusBadRequest},
+		{"invalid name", headerObject(`{"x a":"v"}`), http.StatusBadRequest},
+		{"invalid value", headerObject(`{"x-a":"v\nwer"}`), http.StatusBadRequest},
+		{"case variant duplicate", headerObject(`{"X-A":"v1","x-a":"v2"}`), http.StatusBadRequest},
+		{"too many headers", headerObject(`{` + manyResolveHeaderEntries(maxResolveRequestHeaderCount+1) + `}`), http.StatusBadRequest},
+		{"value too long", headerObject(`{"x-a":"` + strings.Repeat("v", maxResolverValueBytes+1) + `"}`), http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := h.postResolve(tc.body)
+			require.Equal(t, tc.status, rec.Code)
+			require.Equal(t, "malformed request", strings.TrimSpace(rec.Body.String()))
+		})
+	}
+	// The cap admits exactly maxResolveRequestHeaderCount entries.
+	rec := h.postResolve(headerObject(`{` + manyResolveHeaderEntries(maxResolveRequestHeaderCount) + `}`))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, h.client.recorded()[0].Request.Headers, maxResolveRequestHeaderCount)
+}
+
+// manyResolveHeaderEntries builds a header object with count distinct
+// lowercase names.
+func manyResolveHeaderEntries(count int) string {
+	entries := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		entries = append(entries, fmt.Sprintf(`"x-h%d":"v"`, i))
+	}
+	return strings.Join(entries, ",")
+}
+
 func TestResolveHandlerRequestDiscipline(t *testing.T) {
 	h := newResolveHarness(t)
 	cases := []struct {
@@ -215,7 +286,7 @@ func TestResolveHandlerRequestDiscipline(t *testing.T) {
 			`{"binding":"a","sni":"api.internal.example.com","extra":1,"request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/"}}`,
 			http.StatusBadRequest, "malformed request"},
 		{"unknown request field", http.MethodPost, "application/json",
-			`{"binding":"a","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/","headers":{}}}`,
+			`{"binding":"a","sni":"api.internal.example.com","request":{"scheme":"https","host":"api.internal.example.com","method":"GET","path":"/","body":"{}"}}`,
 			http.StatusBadRequest, "malformed request"},
 		{"missing request", http.MethodPost, "application/json", `{"binding":"a","sni":"api.internal.example.com"}`, http.StatusBadRequest, "malformed request"},
 		{"null binding", http.MethodPost, "application/json",

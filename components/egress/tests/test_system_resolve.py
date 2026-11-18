@@ -93,6 +93,34 @@ class _Headers:
             del self._values[key]
 
 
+class _RepeatedHeaders:
+    """Headers object exposing repeated and case-variant field lines, as
+    mitmproxy's multi-dict can."""
+
+    def __init__(self, items: list[tuple[str, str]]) -> None:
+        self._items = list(items)
+
+    def items(self) -> list[tuple[str, str]]:
+        return list(self._items)
+
+    def __contains__(self, name: str) -> bool:
+        lowered = name.lower()
+        return any(key.lower() == lowered for key, _ in self._items)
+
+    def __getitem__(self, name: str) -> str:
+        lowered = name.lower()
+        for key, value in self._items:
+            if key.lower() == lowered:
+                return value
+        raise KeyError(name)
+
+    def get(self, name: str, default: str = "") -> str:
+        try:
+            return self[name]
+        except KeyError:
+            return default
+
+
 class _Request:
     def __init__(self) -> None:
         self.pretty_host = HOST
@@ -311,6 +339,7 @@ class ExchangeResolveTest(TestCase):
                     "port": 443,
                     "method": "GET",
                     "path": "/api/v8/projects",
+                    "headers": {"authorization": "client-side-token"},
                 },
             },
             payload,
@@ -349,6 +378,91 @@ class ExchangeResolveTest(TestCase):
 
         self.assertEqual(
             "/api/v8/projects?cursor=zzz", calls[0][3]["request"]["path"]
+        )
+
+    # -- forwarded request headers ----------------------------------------
+
+    def test_resolve_forwards_filtered_request_headers(self) -> None:
+        self._install_vault()
+        calls = self._decision_transport()
+        flow = _Flow()
+        flow.request.headers["X-ACS-Action"] = "CreateDeployment"
+        flow.request.headers["content-type"] = "application/json"
+        flow.request.headers["Content-MD5"] = "abc="
+        # Structural / hop-by-hop fields never cross the resolve boundary.
+        flow.request.headers["Host"] = "code.example.com"
+        flow.request.headers["Content-Length"] = "12"
+        flow.request.headers["Connection"] = "keep-alive"
+        flow.request.headers["Keep-Alive"] = "timeout=5"
+        flow.request.headers["Transfer-Encoding"] = "chunked"
+        flow.request.headers["X-Empty"] = ""
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual(
+            {
+                "x-acs-action": "CreateDeployment",
+                "content-type": "application/json",
+                "content-md5": "abc=",
+            },
+            calls[0][3]["request"]["headers"],
+        )
+
+    def test_resolve_request_header_repeats_last_value_wins(self) -> None:
+        self._install_vault()
+        calls = self._decision_transport()
+        flow = _Flow()
+        # mitmproxy Headers allow repeated and case-variant field lines; one
+        # header identity must carry exactly one value on the resolver wire.
+        flow.request.headers = _RepeatedHeaders(
+            [("X-Test", "first"), ("x-test", "second"), ("Accept", "a")]
+        )
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual(
+            {"x-test": "second", "accept": "a"},
+            calls[0][3]["request"]["headers"],
+        )
+
+    def test_resolve_request_header_over_count_fails_closed(self) -> None:
+        self._install_vault()
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        flow = _Flow()
+        for i in range(self.system.MAX_RESOLVE_REQUEST_HEADERS + 1):
+            flow.request.headers[f"x-h{i}"] = "v"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual([], calls)
+        self.assertEqual(407, flow.response.status_code)
+        self.assertNotIn("authorization", flow.request.headers)
+
+    def test_resolve_request_header_over_value_budget_fails_closed(self) -> None:
+        self._install_vault()
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        flow = _Flow()
+        flow.request.headers["X-Big"] = "v" * (
+            self.system.MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES + 1
+        )
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual([], calls)
+        self.assertEqual(407, flow.response.status_code)
+
+    def test_resolve_request_header_count_cap_admits_boundary(self) -> None:
+        self._install_vault()
+        calls = self._decision_transport()
+        flow = _Flow()
+        for i in range(self.system.MAX_RESOLVE_REQUEST_HEADERS):
+            flow.request.headers[f"x-h{i}"] = "v"
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual(
+            self.system.MAX_RESOLVE_REQUEST_HEADERS,
+            len(calls[0][3]["request"]["headers"]),
         )
 
     def test_fast_sandbox_mode_appends_client_ip(self) -> None:
@@ -751,6 +865,7 @@ class ExchangeResolveTest(TestCase):
                     "port": 443,
                     "method": "GET",
                     "path": "/api/v8/projects",
+                    "headers": {},
                 },
             },
             json.loads(body.decode("utf-8")),

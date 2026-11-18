@@ -31,6 +31,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
+
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
@@ -297,6 +299,11 @@ type resolveEndpointHTTPRequest struct {
 	PortPresent bool
 	Method      string
 	Path        string
+	// Headers carries the forwarded outbound request headers the resolver
+	// may bind its proof to. Names are lowercased and deduplicated by the
+	// decode; absent ("headers" omitted) decodes to nil and lands as an
+	// empty object on the wire.
+	Headers map[string]string
 }
 
 // decodeResolveRequest strictly decodes the addon request: exact field sets,
@@ -325,7 +332,7 @@ func decodeResolveRequest(data []byte) (resolveEndpointRequest, error) {
 		return resolveEndpointRequest{}, err
 	}
 	for name := range requestFields {
-		if name != "scheme" && name != "host" && name != "port" && name != "method" && name != "path" {
+		if name != "scheme" && name != "host" && name != "port" && name != "method" && name != "path" && name != "headers" {
 			return resolveEndpointRequest{}, errors.New("request carries an unknown field")
 		}
 	}
@@ -355,7 +362,58 @@ func decodeResolveRequest(data []byte) (resolveEndpointRequest, error) {
 		}
 		document.Request.PortPresent = true
 	}
+	if headersRaw, ok := requestFields["headers"]; ok {
+		if document.Request.Headers, err = decodeResolveRequestHeaders(headersRaw); err != nil {
+			return resolveEndpointRequest{}, err
+		}
+	}
 	return document, nil
+}
+
+// maxResolveRequestHeaderCount caps the forwarded request headers per
+// resolve; the bundled addon mirrors this bound and fails closed first.
+const maxResolveRequestHeaderCount = 64
+
+// decodeResolveRequestHeaders strictly decodes the optional forwarded header
+// map: an object of non-empty strings, legal field names and values, capped
+// count and value length. Names are case-insensitive header identities —
+// byte-different keys naming one header are one header, not two — and are
+// normalized to lowercase, the canonical form on the resolver wire.
+func decodeResolveRequestHeaders(raw json.RawMessage) (map[string]string, error) {
+	fields, err := strictJSONObject(raw)
+	if err != nil {
+		return nil, errors.New("request headers must be an object")
+	}
+	if len(fields) > maxResolveRequestHeaderCount {
+		return nil, errors.New("too many request headers")
+	}
+	headers := make(map[string]string, len(fields))
+	for name := range fields {
+		lowerName := strings.ToLower(name)
+		if _, duplicate := headers[lowerName]; duplicate {
+			return nil, errors.New("duplicate request header name")
+		}
+		if !httpguts.ValidHeaderFieldName(name) {
+			return nil, errors.New("invalid request header name")
+		}
+		value, err := decodeStrictStringField(fields, name)
+		if err != nil {
+			return nil, err
+		}
+		if value == "" {
+			return nil, errors.New("request header values must be non-empty")
+		}
+		if len(value) > maxResolverValueBytes {
+			return nil, errors.New("request header value too long")
+		}
+		// Values bind resolver proofs; reject illegal field-values here so
+		// the denial happens before the resolver call.
+		if !httpguts.ValidHeaderFieldValue(value) {
+			return nil, errors.New("invalid request header value")
+		}
+		headers[lowerName] = value
+	}
+	return headers, nil
 }
 
 func decodeStrictStringField(fields map[string]json.RawMessage, name string) (string, error) {
@@ -412,6 +470,12 @@ func buildResolveTarget(document resolveEndpointRequest) (ResolveDestination, Re
 	if binding == "" || method == "" || !strings.HasPrefix(path, "/") {
 		return ResolveDestination{}, ResolveRequestFrame{}, badRequest
 	}
+	// Forwarded headers were validated and lowercased at decode; an absent
+	// map still serializes as an empty object, never null.
+	headers := document.Request.Headers
+	if headers == nil {
+		headers = map[string]string{}
+	}
 	return ResolveDestination{
 			Scheme:    scheme,
 			Authority: host + ":" + strconv.Itoa(port),
@@ -420,7 +484,7 @@ func buildResolveTarget(document resolveEndpointRequest) (ResolveDestination, Re
 			Method:  method,
 			Host:    host,
 			Path:    path,
-			Headers: map[string]string{},
+			Headers: headers,
 		}, nil
 }
 
