@@ -91,6 +91,16 @@ def test_arguments_reject_infeasible_configurations():
     assert args.mix["idle"] == 0.8
 
 
+def test_floor_must_cover_the_modeled_boot_footprint():
+    # A floor below the guest's idle anonymous + image-file pages would put a
+    # born guest permanently over its effective cap.
+    with pytest.raises(SystemExit):
+        bench.arguments(["--floor-mib", "1"])
+    assert bench.arguments(["--floor-mib", "30"]).floor_mib == 30.0
+    with pytest.raises(ValueError):
+        bench.run_tier(sim_config(floor_mib=1.0), "elastic", 1)
+
+
 # --- model semantics --------------------------------------------------------
 
 
@@ -120,6 +130,20 @@ def test_fpr_returns_freed_pages_after_the_measured_delay():
     assert during_hold > 140.0  # 128 MiB working set plus baseline
     after_reclaim = samples[13]  # freed at tick 5, returned 6 s later
     assert during_hold - after_reclaim == pytest.approx(128.0, abs=2.0)
+
+
+def test_dense_ramp_starts_at_the_guests_admission():
+    cfg = sim_config(mix={"dense": 1.0}, cap_mib=512.0)
+    late = make_sandbox(cfg, kind="dense", cap=512.0)
+    late.birth_tick = 13  # admitted mid-run
+    for tick in range(13, 16):
+        late.tick(tick, cfg)
+    # Two seconds after admission the guest holds two seconds of ramp
+    # (2 + 100*2 MiB), not the fleet's 15 seconds of accumulated ramp.
+    assert late.anon == pytest.approx(202.2, abs=2.0)
+    early = make_sandbox(cfg, kind="dense", cap=512.0)
+    early.tick(3, cfg)
+    assert early.anon == pytest.approx(302.2, abs=2.0)
 
 
 def test_deflate_on_oom_rescues_a_burst_beyond_the_effective_cap():
@@ -269,12 +293,12 @@ def test_floor_granted_guests_join_the_active_freeze():
     cfg = sim_config(
         node_memory_mib=8192.0,
         platform_reserved_mib=1024.0,
-        create_rate=1.0,
+        create_rate=2.0,
         mix={"dense": 1.0},
         fill_ratio=0.5,
         duration_s=40.0,
     )
-    result = bench.run_tier(cfg, "redline", 30)
+    result = bench.run_tier(cfg, "redline", 40)
     assert result.counters.redline_events == 1
     assert result.counters.floor_grants > 0
     assert result.counters.host_oom_kills == 0
@@ -288,6 +312,24 @@ def test_floor_granted_guests_join_the_active_freeze():
     assert frozen_pairs
     for before, after in frozen_pairs:
         assert after["resident_mib"] == pytest.approx(before["resident_mib"])
+
+
+def test_drain_resumes_only_with_projected_headroom():
+    # 3x oversell on a 1 GiB node: full resumption would dive straight
+    # through the enter band into the eviction reserve, and last-resort
+    # eviction runs before the next re-entry check can freeze the fleet. The
+    # drain must therefore restore only what the node can absorb.
+    cfg = sim_config(
+        node_memory_mib=1024.0,
+        platform_reserved_mib=0.0,
+        mix={"sparse": 0.5, "dense": 0.5},
+        interval_s=0.25,
+        duration_s=120.0,
+    )
+    result = bench.run_tier(cfg, "redline", 6)
+    assert result.counters.redline_events >= 1
+    assert result.counters.host_oom_kills == 0
+    assert result.counters.restored >= 1
 
 
 def test_red_line_recovers_when_headroom_returns():
@@ -817,6 +859,25 @@ def test_effective_oom_reserve_is_recorded_in_outputs():
     assert summary["host_oom_reserve_mib"] == pytest.approx(256.0)
 
 
+def test_summary_serializes_the_effective_configuration():
+    cfg = sim_config(
+        node_memory_mib=8192.0,
+        invariant_pct=50.0,
+        red_line_enter_pct=20.0,
+        tighten_margin_mib=128.0,
+        storage_gib=42.0,
+    )
+    summary = bench.run_tier(cfg, "elastic", 4).to_summary(cfg, "density")
+    config = summary["config"]
+    assert config["node_memory_mib"] == 8192.0
+    assert config["invariant_pct"] == 50.0
+    assert config["red_line_enter_pct"] == 20.0
+    assert config["tighten_margin_mib"] == 128.0
+    assert config["throttle_first"] is True
+    assert config["deflate_on_oom"] is True
+    assert config["storage_gib"] == 42.0
+
+
 def test_host_backend_accepts_cap_only_without_floor():
     args = bench.arguments(
         ["--backend", "host", "--sandboxes", "10", "--cap-mib", "256"]
@@ -870,7 +931,17 @@ def test_cli_matrix_reports_describe_the_executed_configuration(capsys):
     assert "dense=1.00" in deflate_report
     assert bench.main(["--scenario", "tighten-margins"]) == 0
     tighten_report = capsys.readouterr().out
-    assert "rows override cap, tighten margin, and ordering" in tighten_report
+    assert (
+        "rows override cap, tighten margin, ordering, mix, fill ratio" in tighten_report
+    )
+    assert "host OOM reserve 64 MiB" in tighten_report
+    assert "- horizon: 300 s at 1 s intervals" in tighten_report
+    # A too-short user horizon must not leak into the header: the rows
+    # extended their horizon to contain the forced window.
+    assert bench.main(["--scenario", "tighten-margins", "--duration", "5"]) == 0
+    short_report = capsys.readouterr().out
+    assert "- horizon: per row (35 s, 50 s) at 1 s intervals" in short_report
+    assert "- horizon: 5 s" not in short_report
 
 
 def test_fractional_horizon_is_preserved_in_metadata():

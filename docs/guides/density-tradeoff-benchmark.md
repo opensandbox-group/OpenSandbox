@@ -48,15 +48,15 @@ The report has one section per posture:
 - `redline` — no invariant; placement is limited only by the red-line bands and `deflate_on_oom`. This is the posture behind the 4000-sandbox idle-sparse evidence.
 - `elastic` — a declared floor/cap tier plus the host-wide sigma-caps invariant: the sum of declared caps stays within 80% of node memory, with the platform baseline charged against the same budget, so simultaneous full inflation fits by construction.
 
-Every row shows the requested and placed oversell ratio, the placed sandbox count, per-sandbox resident memory, peak resident share of the node, minimum MemAvailable, peak modeled PSI, red-line events, tighten actions and skips, guest and host OOM counts, deflate saves, snapshot storage, and a verdict. The verdict fails on host OOM kills, guest OOM kills, memory exhaustion, an unrecovered red line, or storage over the configured limit.
+Every row shows the requested and placed oversell ratio, the placed sandbox count, per-sandbox resident memory, peak resident share of the node, minimum MemAvailable, peak modeled PSI, red-line events, tighten actions and skips, guest and host OOM counts, deflate saves, snapshot storage, and a verdict. The verdict fails on host OOM kills, guest OOM kills, memory exhaustion, an unrecovered red line, or storage over the configured limit. During recovery the drain resumes frozen guests in batches only while the projected resumption growth keeps the node above the red-line enter band; guests that do not fit stay frozen and are retried on later ticks.
 
 ### Options that change the answer
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--tiers` | `0.5,1,2,4` | Oversell ratios to sweep; sandbox count is derived from node memory and cap |
-| `--cap-mib`, `--floor-mib` | `512`, `256` | Declared cap and elastic floor per sandbox |
-| `--mix` | `idle=0.8,sparse=0.1,bursty=0.1` | Workload mix; also accepts `dense` for full-inflation runs |
+| `--cap-mib`, `--floor-mib` | `512`, `256` | Declared cap and elastic floor per sandbox; the floor must cover the modeled ~23 MiB boot footprint |
+| `--mix` | `idle=0.8,sparse=0.1,bursty=0.1` | Workload mix; also accepts `dense` for full-inflation runs. Every guest's clock starts at its own admission, so a dense guest admitted mid-run ramps at the profile rate rather than materializing a full working set |
 | `--node-memory-mib`, `--platform-reserved-mib`, `--physical-cores` | evidence-class node | Node shape; the reserve is charged against MemAvailable and the invariant |
 | `--duration`, `--interval`, `--seed` | `300`, `1`, `7` | Horizon and determinism |
 | `--storage-gib`, `--storage-headroom-pct` | `3500`, `10` | Snapshot storage axis; the first wall in the measured evidence |
@@ -108,6 +108,7 @@ The report separates OOM sources: `system OOM delta` comes from `/proc/vmstat` a
 - `--out-jsonl`: one `sample` record per simulated tick (or host sample), tagged with its tier or matrix case, plus one `summary` or `matrix-row` record per tier or case — all JSON lines.
 - `--out-summary`: a JSON array of tier (or matrix row) summaries.
 - `--report`: the markdown table printed to stdout.
+- Every simulator summary carries a `config` block with the full effective node shape, policy bands, and storage settings, so a saved run can be reproduced without re-stating overrides alongside it.
 
 ## Calibration and provenance (`sim` backend)
 

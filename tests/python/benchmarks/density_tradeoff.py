@@ -230,6 +230,7 @@ class SimSandbox:
     offset: float
     anon: float
     file: float
+    birth_tick: int = 0
     balloon: float = 0.0
     balloon_target: float | None = None
     balloon_pre: float | None = None
@@ -252,6 +253,16 @@ class SimSandbox:
     def resident_mib(self, cfg: SimConfig) -> float:
         pending = sum(amount for _, amount in self.pending_reclaim)
         return cfg.vmm_overhead_mib + self.anon + pending + self.file
+
+    def projected_charge_growth(self, cfg: SimConfig) -> float:
+        """Upper bound on the charge this guest still adds once resumed.
+
+        The profile's working set is the ceiling on anonymous memory, and the
+        guest's file pages and VMM overhead are already resident, so the only
+        growth left is anonymous memory up to the working-set target.
+        """
+        target = cfg.idle_anon_mib + self.profile.working_set_mib
+        return max(0.0, target - self.anon)
 
     def charge_mib(self, cfg: SimConfig) -> float:
         """Memory the node cannot trivially reclaim (MemAvailable debit).
@@ -279,7 +290,10 @@ class SimSandbox:
             self.busy_mcore = cfg.idle_cpu_mcore
             return
 
-        t = tick_idx * cfg.interval_s
+        # Workload clocks start at the guest's own admission: a late arrival
+        # must ramp at the profile rate instead of inheriting the fleet's
+        # elapsed time and materializing a full working set on arrival.
+        t = (tick_idx - self.birth_tick) * cfg.interval_s
         if self.workload_dead:
             # A guest OOM killed the workload process; the micro-VM survives
             # but nothing restarts the allocation.
@@ -432,6 +446,24 @@ class TierResult:
                 "seed": cfg.seed,
                 "create_rate_per_s": cfg.create_rate,
             },
+            # The full effective configuration, so a saved summary remains
+            # reproducible without re-stating every override alongside it.
+            "config": {
+                "node_memory_mib": cfg.node_memory_mib,
+                "platform_reserved_mib": cfg.platform_reserved_mib,
+                "physical_cores": cfg.physical_cores,
+                "red_line_enter_pct": cfg.red_line_enter_pct,
+                "red_line_exit_pct": cfg.red_line_exit_pct,
+                "invariant_pct": cfg.invariant_pct,
+                "tighten_margin_mib": cfg.tighten_margin_mib,
+                "throttle_first": cfg.throttle_first,
+                "deflate_on_oom": cfg.deflate_on_oom,
+                "floor_guarantee": cfg.floor_guarantee,
+                "fill_ratio": cfg.fill_ratio,
+                "snapshot_mib_per_sandbox": cfg.snapshot_mib_per_sandbox,
+                "storage_gib": cfg.storage_gib,
+                "storage_headroom_pct": cfg.storage_headroom_pct,
+            },
             "host_oom_reserve_mib": round(host_oom_reserve(cfg), 3),
             "resident_mib": {
                 "mean_total": round(self.resident_mean_mib, 3),
@@ -577,6 +609,16 @@ def plan_tighten(
     return amount
 
 
+def boot_footprint_mib(cfg: SimConfig) -> float:
+    """Guest-side memory a sandbox needs before its workload starts.
+
+    The elastic floor (and any inflate-derived effective cap) must cover it:
+    a guest born with an effective cap below its own footprint would sit
+    permanently over-cap without ever being reclaimed or reported.
+    """
+    return cfg.idle_anon_mib + cfg.image_file_mib
+
+
 def host_oom_reserve(cfg: SimConfig) -> float:
     """Last-resort eviction threshold, scaled to the configured node.
 
@@ -594,6 +636,11 @@ def host_oom_reserve(cfg: SimConfig) -> float:
 
 def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
     """Simulate one density tier under one posture."""
+    if cfg.floor_mib < boot_footprint_mib(cfg) - 1e-9:
+        raise ValueError(
+            "floor_mib must cover the modeled boot footprint "
+            f"({boot_footprint_mib(cfg):g} MiB)"
+        )
     rng = random.Random(f"{cfg.seed}:{posture}:{requested_n}")
     counters = TierCounters()
     kinds = assign_kinds(requested_n, cfg.mix, rng)
@@ -632,6 +679,7 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
                 offset=offset,
                 anon=cfg.idle_anon_mib,
                 file=cfg.image_file_mib,
+                birth_tick=tick_idx,
                 balloon=balloon0,
             )
         )
@@ -750,11 +798,24 @@ def run_tier(cfg: SimConfig, posture: str, requested_n: int) -> TierResult:
             counters.ticks_redline += 1
         if draining:
             pending = [s for s in sandboxes if s.tightened or s.throttled]
+            # Resume only while the node can absorb the batch's full growth:
+            # last-resort eviction runs ahead of the next re-entry check, so a
+            # batch that would dive through the enter band would be evicted
+            # before the red line could re-freeze it. Guests that do not fit
+            # stay frozen and are retried on later ticks.
+            projected_available = available
             for sandbox in pending[: max(1, cfg.restore_batch)]:
+                growth = sandbox.projected_charge_growth(cfg)
+                projected_pct = (
+                    100.0 * (projected_available - growth) / cfg.node_memory_mib
+                )
+                if projected_pct < cfg.red_line_enter_pct:
+                    continue
                 sandbox.balloon_target = (
                     sandbox.balloon_pre if sandbox.balloon_pre is not None else 0.0
                 )
                 counters.restored += 1
+                projected_available -= growth
             if not pending:
                 draining = False
 
@@ -1356,15 +1417,32 @@ def provenance_lines() -> list[str]:
     return [f"- {GUIDE_NOTE}", f"- proposal: OSEP-0033 {OSEP_0033_URL}"]
 
 
-def matrix_meta_lines(cfg: SimConfig, note: str) -> list[str]:
-    """Report header for scenarios whose rows override the base config."""
+def matrix_meta_lines(base: SimConfig, rows: list, note: str) -> list[str]:
+    """Report header for scenarios whose rows override the base config.
+
+    Node shape and red-line bands are shared with the base run; everything
+    the rows override (cap, floor, mix, tighten margin, ordering, horizon,
+    OOM reserve) is rendered from the executed rows or named in the note, so
+    the header cannot contradict the per-row summaries it introduces.
+    """
+    horizons = sorted({row.config.duration_s for row in rows})
+    if len(horizons) == 1:
+        horizon = f"- horizon: {horizons[0]:g} s at {base.interval_s:g} s intervals; seed {base.seed}"
+    else:
+        listed = ", ".join(f"{duration:g} s" for duration in horizons)
+        horizon = (
+            f"- horizon: per row ({listed}) at {base.interval_s:g} s intervals; "
+            f"seed {base.seed}"
+        )
     return [
         "- backend: sim (modeled projection, not a measurement)",
-        f"- scenario: {cfg.scenario}",
-        node_line(cfg),
+        f"- scenario: {base.scenario}",
+        node_line(base),
         note,
-        horizon_line(cfg),
-        policy_line(cfg),
+        horizon,
+        f"- policy: host OOM reserve {host_oom_reserve(rows[0].config):g} MiB; "
+        "cap, mix, tighten margin, and ordering are per row (table columns "
+        "and the JSON output)",
         *provenance_lines(),
     ]
 
@@ -1632,10 +1710,16 @@ def arguments(argv=None) -> argparse.Namespace:
         parser.error(str(exc))
     if args.cap_mib <= 0:
         parser.error("cap_mib must be positive")
-    if args.backend == "sim" and (args.floor_mib < 0 or args.floor_mib >= args.cap_mib):
+    if args.backend == "sim":
         # The floor is an elastic-tier simulator concept; the host sampler
-        # never consumes it.
-        parser.error("Require 0 <= floor_mib < cap_mib")
+        # never consumes it. It must also cover the modeled boot footprint,
+        # or a floor-capped guest would be born above its effective cap.
+        footprint = SimConfig.idle_anon_mib + SimConfig.image_file_mib
+        if args.floor_mib < footprint or args.floor_mib >= args.cap_mib:
+            parser.error(
+                f"Require floor_mib >= {footprint:g} MiB (the modeled boot "
+                "footprint) and < cap_mib"
+            )
     if args.duration <= 0 or args.interval <= 0:
         parser.error("Duration and interval must be positive")
     if args.node_memory_mib <= 0 or args.platform_reserved_mib < 0:
@@ -1739,7 +1823,8 @@ def main(argv=None) -> int:
             "Tighten-ordering matrix (modeled)",
             matrix_meta_lines(
                 cfg_sim,
-                "- rows override cap, tighten margin, and ordering; every row runs a dense workload that fills 70% of its cap, with a synthetic red-line trigger pinned to elapsed time (25 s, or 10 s for the inflate-first case; the derived tick is in the JSON output)",
+                rows,
+                "- rows override cap, tighten margin, ordering, mix, fill ratio, horizon, and the OOM reserve; every row runs a dense workload that fills 70% of its cap, with a synthetic red-line trigger pinned to elapsed time (25 s, or 10 s for the inflate-first case) and its release 20 s later; every row's exact configuration and derived tick are in the JSON output",
             )
             + [
                 "",
