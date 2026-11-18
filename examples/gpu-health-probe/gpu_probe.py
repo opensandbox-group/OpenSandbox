@@ -559,7 +559,10 @@ def collect_compute_layer(
         )
 
     if compute_mode == "auto":
-        python = shutil.which("python3") or sys.executable
+        # Prefer the interpreter the probe itself runs under: PyTorch may be
+        # installed only in that environment, while `python3` on PATH can
+        # resolve to a different base interpreter.
+        python = sys.executable or shutil.which("python3")
         if not python:
             return Layer(
                 "compute",
