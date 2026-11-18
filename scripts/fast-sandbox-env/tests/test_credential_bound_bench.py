@@ -102,6 +102,16 @@ class ClientBenchModeTest(OriginFixture):
         self.assertEqual((done["phase"], done["alive_at_release"], done["release_errors"]), ("done", 4, {}))
         self.assertTrue(done["released"])
 
+    def test_hold_many_shares_one_client_context(self):
+        spec = importlib.util.spec_from_file_location("cbv_client_ctx", CLIENT_PY)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        args = type("A", (), {"cafile": self.ca})()
+        shared = client.client_context(args)
+        self.assertIs(client.Connection(args, multi=True, ctx=shared).ctx, shared)
+        self.assertIsNone(client.Connection(args, multi=True).ctx)
+        self.assertIn("ctx=ctx", open(CLIENT_PY).read().split("def run_hold_many", 1)[1].split("status = {", 1)[0])
+
     def test_bench_limits_are_usage_errors(self):
         for args in (["handshake-bench", "--samples", "0"], ["handshake-bench", "--samples", "5001"],
                      ["hold-many", "--conns", "0", "--dir", self.tmp], ["hold-many", "--conns", "2"],
@@ -256,6 +266,20 @@ class ReportBuildTest(unittest.TestCase):
         self.assertEqual(partial["status"], "PARTIAL")
         self.assertEqual(partial["largest_k_reached"], 300)
         self.assertEqual(partial["points"][1]["holders"][0]["errors"], {"handshake/eof": 200})
+
+        # Regression (KVM run 2): holders that never reported leave k_held below
+        # k_target while the egress reading reflects the sockets they opened;
+        # that point must not bend the fit.
+        silent = write_json(self.tmp, "silent.json", {})
+        short_tail = REPORT.build_m3(dict(base, settings={"steps": [500, 1000, 2000]}, points=spec["points"] + [
+            {"k_target": 2000, "k_held": 1000, "reading": {"memory_current": 100000 + 2000 * 80000, "anon": 1},
+             "holders": [{"target": 1000, "expect_cred": CODE, "raw": silent}]}],
+            stopped={"at_k": 2000, "reason": "fewer connections opened than targeted"}))
+        self.assertEqual(short_tail["status"], "PARTIAL")
+        self.assertEqual(short_tail["fit_excluded_k_targets"], [2000])
+        tail_fits = {f["field"]: f for f in short_tail["fit"]}
+        self.assertEqual(tail_fits["memory_current"]["bytes_per_connection"], 80000.0)
+        self.assertEqual(tail_fits["memory_current"]["n"], 3)
 
         unbound = write_json(self.tmp, "ub.json", {"held": 5, "leaf_sha256": {ORIGIN: 5}, "origin_cred": {"absent": 5}})
         invalid = REPORT.build_m3(dict(base, points=[

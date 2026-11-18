@@ -112,9 +112,10 @@ class Connection(object):
 
     connects = 0
 
-    def __init__(self, args, multi=False):
+    def __init__(self, args, multi=False, ctx=None):
         self.args = args
         self.multi = multi
+        self.ctx = ctx  # shared context (hold-many); None = one per connect
         self.sock = None
         self.socket_id = uuid.uuid4().hex
         self.buf = b""
@@ -125,13 +126,7 @@ class Connection(object):
         if Connection.connects and not self.multi:
             raise ProbeError("connect", "reconnect_forbidden")
         Connection.connects += 1
-        ctx = ssl.create_default_context(cafile=self.args.cafile)
-        ctx.check_hostname = True
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        try:
-            ctx.set_alpn_protocols(["http/1.1"])
-        except (AttributeError, NotImplementedError):
-            pass
+        ctx = self.ctx or client_context(self.args)
         start = time.perf_counter()
         try:
             raw = socket.create_connection((self.args.ip, self.args.port), timeout=self.args.connect_timeout)
@@ -325,6 +320,17 @@ def origin_cred(response):
     return origin.get("cred") or "absent"
 
 
+def client_context(args):
+    ctx = ssl.create_default_context(cafile=args.cafile)
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    try:
+        ctx.set_alpn_protocols(["http/1.1"])
+    except (AttributeError, NotImplementedError):
+        pass
+    return ctx
+
+
 def raise_nofile(want):
     """Best effort: lift the soft fd limit for hold-many (never above hard)."""
     try:
@@ -386,20 +392,32 @@ def run_hold_many(args):
     raise_nofile(args.conns + 64)
     held, leaves, creds, errors = [], {}, {}, {}
     started = time.time()
-    for seq in range(1, args.conns + 1):
-        conn = Connection(args, multi=True)
-        try:
-            conn.connect()
-            tally(leaves, conn.info.get("leaf_sha256") or "none")
-            tally(creds, origin_cred(conn.request(args.tag, 1)))
-            held.append(conn)
-        except ProbeError as exc:
-            tally(errors, error_key(exc))
-            conn.close()
+    # One context for every held socket: a context per connection keeps its
+    # CA store alive per socket and inflates guest memory at large K.
+    ctx = client_context(args)
+    phase = "holding"
+    try:
+        for seq in range(1, args.conns + 1):
+            conn = Connection(args, multi=True, ctx=ctx)
+            try:
+                conn.connect()
+                tally(leaves, conn.info.get("leaf_sha256") or "none")
+                tally(creds, origin_cred(conn.request(args.tag, 1)))
+                held.append(conn)
+            except ProbeError as exc:
+                tally(errors, error_key(exc))
+                conn.close()
+            except OSError as exc:  # e.g. EMFILE outside connect/request
+                tally(errors, error_key(classify("hold", exc)))
+                conn.close()
+    except MemoryError:
+        # Report what is held instead of dying without a status file.
+        tally(errors, "hold/memory_error")
+        phase = "aborted"
     status = {
         "v": PROTOCOL_VERSION,
         "mode": "hold-many",
-        "phase": "holding",
+        "phase": phase,
         "target": args.conns,
         "held": len(held),
         "failed": args.conns - len(held),

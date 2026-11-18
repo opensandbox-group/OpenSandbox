@@ -309,6 +309,7 @@ def build_m3(spec):
             "holders": holders,
         })
     measured = [p for p in points if p["k_target"]]
+    fit_points = [p for p in points if p["k_held"] == p["k_target"]]
     steps = spec.get("settings", {}).get("steps", [])
     largest = max([p["k_held"] for p in measured] or [0])
     if contradiction_total:
@@ -324,11 +325,15 @@ def build_m3(spec):
         "leg": spec.get("leg"),
         "status": status,
         "settings": spec.get("settings", {}),
-        "method": "cumulative K idle bound HTTP/1.1 keep-alive connections from sandboxes colocated on one Fastlet Pod; egress container cgroup read after each step; least-squares fit over (k_held, bytes) including the K=0 baseline",
+        "method": "cumulative K idle bound HTTP/1.1 keep-alive connections from sandboxes colocated on one Fastlet Pod; egress container cgroup read after each step; least-squares fit over (k_held, bytes) including the K=0 baseline and only points whose held count equals the target",
         "largest_k_reached": largest,
         "stopped": spec.get("stopped"),
         "points": points,
-        "fit": [fit_block(points, "memory_current"), fit_block(points, "anon")],
+        # A short step's held count is a lower bound on live connections (a
+        # holder that never reported may still hold sockets), so its reading
+        # cannot be placed on the x axis and never enters the fit.
+        "fit": [fit_block(fit_points, "memory_current"), fit_block(fit_points, "anon")],
+        "fit_excluded_k_targets": [p["k_target"] for p in points if p not in fit_points],
         "release": spec.get("release"),
         "vault_bind_ack_ms": spec.get("vault_bind_ack_ms", []),
         "notes": spec.get("notes", []),
