@@ -110,7 +110,9 @@ class ClientBenchModeTest(OriginFixture):
         shared = client.client_context(args)
         self.assertIs(client.Connection(args, multi=True, ctx=shared).ctx, shared)
         self.assertIsNone(client.Connection(args, multi=True).ctx)
-        self.assertIn("ctx=ctx", open(CLIENT_PY).read().split("def run_hold_many", 1)[1].split("status = {", 1)[0])
+        with open(CLIENT_PY) as handle:
+            source = handle.read()
+        self.assertIn("ctx=ctx", source.split("def run_hold_many", 1)[1].split("status = {", 1)[0])
 
     def test_bench_limits_are_usage_errors(self):
         for args in (["handshake-bench", "--samples", "0"], ["handshake-bench", "--samples", "5001"],

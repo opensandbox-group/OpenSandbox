@@ -241,7 +241,7 @@ The defaults are `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY=32` per subject and `OPENS
 | Recommended `S` | 32 (the default) |
 | `L` = 256Mi (integration environment Pool, 8 sandboxes per Pod) | `(L − B) / m` ≈ 1,280; recommend `P` = 256 (`S × 8`, ≈ 40 MB) |
 | `L` = 8Gi with 100 sandboxes per Pod | `S × 100` = 3,200 connections ≈ 506 MB; recommend `P` = 4096 (≈ 648 MB) |
-| `L` = 8Gi, process default | `P` = 32768 ≈ 5.2 GB, within `L − B` with about a third unused |
+| `L` = 8Gi, process default | `P` = 32768 ≈ 5.2 GB, within `L − B` with more than a third unused |
 
 For another Pool, set `P` to the smaller of `S × maxSandboxesPerPod` rounded up to a power of two and about two thirds of `(L − B) / m`.
 
