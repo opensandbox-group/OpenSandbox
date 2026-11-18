@@ -673,28 +673,41 @@ func newUpdateRoundsReconciler(t *testing.T, allocatedCnt, unreadyAllocated, idl
 // TestPoolUpdateWaitsWhileScaleUpIsRateLimited is the regression test for the
 // warm buffer being drained by an update whose replacements cannot be started.
 // With defaults (25% / 25%), 2 unready allocated pods use up the scale-up rate
-// limit (25% of 7 desired = 2). The update's own budget ignores allocated
-// pods, so without the gate it deleted one ready idle pod per round and none
-// came back: 4 -> 0. Now it waits, and resumes once the allocated pods are
-// ready again.
+// limit (25% of 7 desired = 2). An absolute scale-up limit of 1 is likewise
+// exhausted by a single unready allocation, even though the update budget
+// ignores it. Both cases must preserve all 4 ready idle pods while waiting,
+// then finish the rollout once the allocated pods become ready again.
 func TestPoolUpdateWaitsWhileScaleUpIsRateLimited(t *testing.T) {
-	r, pool := newUpdateRoundsReconciler(t, 2, 2, 4, intstr.FromString("25%"), intstr.FromString("25%"))
+	for _, tt := range []struct {
+		name      string
+		allocated int
+		limit     intstr.IntOrString
+	}{
+		{name: "percentage limit", allocated: 2, limit: intstr.FromString("25%")},
+		{name: "absolute limit", allocated: 1, limit: intstr.FromInt(1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, pool := newUpdateRoundsReconciler(t, tt.allocated, tt.allocated, 4, tt.limit, tt.limit)
 
-	readyOld, readyNew, starting := runPoolUpdateRounds(t, r, pool, 4, true)
-	if readyOld != 4 || readyNew != 0 || starting != 0 {
-		t.Fatalf("while rate limited: readyOld=%d readyNew=%d starting=%d, want 4/0/0 (buffer kept)", readyOld, readyNew, starting)
-	}
+			readyOld, readyNew, starting := runPoolUpdateRounds(t, r, pool, 4, true)
+			if readyOld != 4 || readyNew != 0 || starting != 0 {
+				t.Fatalf("while rate limited: readyOld=%d readyNew=%d starting=%d, want 4/0/0 (buffer kept)", readyOld, readyNew, starting)
+			}
 
-	for _, name := range []string{"alloc-0", "alloc-1"} {
-		pod := &corev1.Pod{}
-		if err := r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: name}, pod); err != nil {
-			t.Fatal(err)
-		}
-		setPodReady(t, r, pod, true)
-	}
-	readyOld, readyNew, starting = runPoolUpdateRounds(t, r, pool, 8, true)
-	if readyOld != 0 || readyNew != 4 || starting != 0 {
-		t.Fatalf("after allocated pods recover: readyOld=%d readyNew=%d starting=%d, want 0/4/0 (rollout done)", readyOld, readyNew, starting)
+			// Recover every allocation so the same scale allowance becomes
+			// available again; the waiting rollout must then finish normally.
+			for i := range tt.allocated {
+				pod := &corev1.Pod{}
+				if err := r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: fmt.Sprintf("alloc-%d", i)}, pod); err != nil {
+					t.Fatal(err)
+				}
+				setPodReady(t, r, pod, true)
+			}
+			readyOld, readyNew, starting = runPoolUpdateRounds(t, r, pool, 8, true)
+			if readyOld != 0 || readyNew != 4 || starting != 0 {
+				t.Fatalf("after allocated pods recover: readyOld=%d readyNew=%d starting=%d, want 0/4/0 (rollout done)", readyOld, readyNew, starting)
+			}
+		})
 	}
 }
 
@@ -717,6 +730,15 @@ func TestPoolUpdateDoesNotOutrunScaleUp(t *testing.T) {
 // room (25% of 21 desired = 6, minus 1), and a pool at PoolMax, where the
 // update's own deletions free the slots its replacements need.
 func TestPoolUpdateProgressesWhenScaleUpHasRoom(t *testing.T) {
+	// An unready allocation must not block the rollout once an absolute
+	// scale limit leaves a spare slot: 2 allowed - 1 unready = 1 replacement.
+	t.Run("absolute scale limit leaves room", func(t *testing.T) {
+		r, pool := newUpdateRoundsReconciler(t, 1, 1, 4, intstr.FromInt(2), intstr.FromInt(1))
+		readyOld, readyNew, starting := runPoolUpdateRounds(t, r, pool, 8, true)
+		if readyOld != 0 || readyNew != 4 || starting != 0 {
+			t.Fatalf("readyOld=%d readyNew=%d starting=%d, want 0/4/0", readyOld, readyNew, starting)
+		}
+	})
 	t.Run("unready allocated pod on a busy pool", func(t *testing.T) {
 		r, pool := newUpdateRoundsReconciler(t, 16, 1, 4, intstr.FromString("25%"), intstr.FromString("25%"))
 		readyOld, readyNew, starting := runPoolUpdateRounds(t, r, pool, 8, true)

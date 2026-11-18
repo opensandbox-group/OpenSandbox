@@ -1187,7 +1187,9 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	// values are unchanged) because the template update's deletions now
 	// depend on it too: createRoom is how many more pods may be starting at
 	// once under scaleStrategy.maxUnavailable. Unready pods of every kind,
-	// allocated ones included, use it up.
+	// allocated ones included, use it up. Ignoring allocated readiness in the
+	// update budget therefore does not guarantee progress: a scale limit of 1
+	// and one unready allocation still pause ready-pod update deletions.
 	scaleMaxUnavailable := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
 	notReadyCnt := r.countNotReadyPods(pods)
 	createRoom := max(scaleMaxUnavailable-notReadyCnt, 0)
