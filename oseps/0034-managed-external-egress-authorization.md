@@ -8,9 +8,9 @@ last-updated: 2026-11-19
 status: draft
 ---
 
-# OSEP-0031: Managed Egress Control-Plane Integration
+# OSEP-0034: Managed Egress Control-Plane Integration
 
-Renumbered from provisional 0026 because upstream assigned it to Fast Sandbox resource accounting. OSEP-0028 is merged. Open proposals [#2740](https://github.com/opensandbox-group/OpenSandbox/pull/2740), [#2837][forward-proposal], [#2887](https://github.com/opensandbox-group/OpenSandbox/pull/2887), [#2913](https://github.com/opensandbox-group/OpenSandbox/pull/2913), and [#2915](https://github.com/opensandbox-group/OpenSandbox/pull/2915) use provisional numbers 0029–0033; this draft's provisional 0031 conflicts with #2887. Before merge, use the maintainer-assigned number to update the filename, H1, frontmatter, index row, and PR description together; retain the existing title and filename slug. This document proposes behavior; it does not claim implementation acceptance or production readiness.
+A maintainer assigned OSEP-0034 [on the proposal PR](https://github.com/opensandbox-group/OpenSandbox/pull/2308#issuecomment-7007841876). Earlier drafts used provisional 0026, which upstream assigned to Fast Sandbox resource accounting, and provisional 0031, which remains with [#2887](https://github.com/opensandbox-group/OpenSandbox/pull/2887). This document proposes behavior; it does not claim implementation acceptance or production readiness.
 
 <!-- toc -->
 
