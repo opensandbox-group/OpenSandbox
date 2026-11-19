@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.25.9 AS builder
+FROM golang:1.26.11 AS builder
 
 WORKDIR /build
 
@@ -108,7 +108,7 @@ RUN rm /usr/lib/libcap.so /usr/lib/libcap.so.2 && \
 # touch (resolved by name against the target kernel BTF at load time), so
 # no per-arch vmlinux.h or host kernel BTF is needed — this stage is fully
 # hermetic and cross-compiles for every TARGETARCH.
-FROM golang:1.25.9 AS ebpf-builder
+FROM golang:1.26.11 AS ebpf-builder
 ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
