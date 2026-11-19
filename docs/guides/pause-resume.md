@@ -611,4 +611,6 @@ See [Kubernetes Resume Benchmark](/guides/kubernetes-resume-benchmark) for an op
 
 On a qualified FSB ResourceAware pool, set `rootfs_resource_overrides = true` in the server's `[kubernetes]` configuration after upgrading the controller and Fastlets. Use the existing `POST /sandboxes` route with a ready RootfsOnly source. For example, `{"snapshotId":"snap_example","timeout":600,"resourceLimits":{"memory":"4Gi"}}` boots a fresh guest with 4 GiB and the source Sandbox's recorded CPU quota. Missing snapshot limits must be supplied explicitly. For a RootfsOnly catalog template, omitted dimensions inherit the template machine settings. Full checkpoint restore retains its original machine.
 
+The standard FSB golden-image builder currently produces Full templates. Use a RootfsOnly `snapshotId` to exercise overrides with that builder. A `templateId` with limits requires a producer that publishes a RootfsOnly artifact and reports its mode. An unknown or Full template mode is rejected.
+
 An SDK-transmitted default such as `1 CPU / 2Gi` counts as a request for that size. Use partial limits or omit them when inheritance is intended. FSB requires a timeout. During rollback, disable new overrides before draining instances created with the feature.

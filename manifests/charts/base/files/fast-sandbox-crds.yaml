@@ -1223,8 +1223,9 @@ spec:
                 description: |-
                   Mode selects what the snapshot persists. RootfsOnly persists only the
                   writable rootfs layer (consumers boot from disk) and requires the
-                  OverlayBD artifact path; Full (default) also captures memory and
-                  device state. Immutable per the one-shot spec convention.
+                  assigned fastlet to advertise the matching rootfs-only capability;
+                  Full (default) also captures memory and device state. Immutable per
+                  the one-shot spec convention.
                 enum:
                 - Full
                 - RootfsOnly
@@ -1892,6 +1893,13 @@ spec:
               manifestRef:
                 description: ManifestRef points at the published manifest in the object
                   store.
+                type: string
+              mode:
+                description: Mode is the artifact class confirmed by the builder.
+                  Empty means unknown.
+                enum:
+                - Full
+                - RootfsOnly
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the generation of the last applied
