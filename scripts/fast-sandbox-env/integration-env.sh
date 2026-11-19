@@ -3770,7 +3770,7 @@ exchange_vault_fails_closed() {
 			else
 				printf "EXCHANGE_PROBE http_code=%s curl_rc=%s\n" "$code" "$rc"
 			fi
-		' sh "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" "https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/vault/echo?x=1")" 2>>"$LOGS_DIR/exchange-guest-curl.err" || return 1
+		' sh "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" "https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/vault/echo?x=1" 2>>"$LOGS_DIR/exchange-guest-curl.err")" || return 1
 		case "$out" in EXCHANGE_PROBE\ *) printf '%s\n' "$out" >>"$LOGS_DIR/exchange-guest-curl.err" ;; esac
 		[[ "$out" == "EXCHANGE_DENIED" ]]
 		return

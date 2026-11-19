@@ -353,6 +353,23 @@ class StageSummaryTest(ShellCase):
         self.assertNotIn("BLOCKED", cb.stdout + cb.stderr)
 
 class ExchangeOutageTest(ShellCase):
+    def test_exchange_probe_preserves_command_stderr(self):
+        stub = os.path.join(self.tmp, "curl")
+        with open(stub, "w") as handle:
+            handle.write('#!/bin/sh\nprintf "000"\nexit 28\n')
+        os.chmod(stub, 0o755)
+        body = r'''
+VERIFY_ID=subject
+osb_api() { echo 'osb diagnostic marker' >&2; shift 4; "$@"; }
+exchange_vault_fails_closed || :
+'''
+        for script in (VAULT_SH, ENV_SH):
+            with self.subTest(script=script):
+                self.sourced(body, script=script, EGRESS_INTERCEPTION_MODE="credential-bound",
+                             PATH=self.tmp + os.pathsep + os.environ["PATH"])
+                with open(os.path.join(self.work, "logs", "exchange-guest-curl.err")) as log:
+                    self.assertIn("osb diagnostic marker", log.read())
+
     def test_only_reply_or_reset_counts_as_subject_outage(self):
         stub = os.path.join(self.tmp, "curl")
         with open(stub, "w") as handle:
