@@ -163,6 +163,13 @@ jobs:
       # (checksum mismatch on the runner while the public endpoint verifies
       # clean). ",direct" keeps mirror-missed modules fetchable.
       FSB_GOPROXY: https://mirrors.aliyun.com/goproxy/,direct
+      # Checksum-database verification is unreliable from this network: every
+      # mirror's /sumdb relay or direct sum.golang.org access fails the image
+      # builds (runner-verified: all mirrors + default GOSUMDB fail, GOSUMDB=off
+      # passes). build-fast-sandbox.sh injects ENV GOSUMDB=off into the
+      # fast-sandbox build Dockerfiles; go.sum in each repo still verifies
+      # every downloaded module, only the sumdb cross-check is skipped.
+      FSB_GOSUMDB: "off"
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)

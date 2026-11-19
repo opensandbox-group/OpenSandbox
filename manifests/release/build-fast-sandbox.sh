@@ -213,6 +213,23 @@ actual="$(git -C "$FSB_SRC_DIR" rev-parse HEAD)"
 [[ "$actual" == "$FSB_COMMIT" ]] || die "checkout at $actual, expected $FSB_COMMIT"
 log "fast-sandbox checkout ready @ $(git -C "$FSB_SRC_DIR" rev-parse --short HEAD)"
 
+# FSB_GOSUMDB=off (set by the KVM integration lane): checksum-database
+# verification is unreliable from Alibaba networks — sum.golang.org is
+# unreachable directly and the mirror /sumdb relays observed serving stale
+# data (checksum mismatch on containerd/v2@v2.3.3) — so `go mod download`
+# fails inside the image builds even with a working GOPROXY. Inject
+# GOSUMDB=off next to the existing per-stage GOPROXY env lines; every
+# module is still verified against each repo's own go.sum, only the
+# third-party sumdb cross-check is skipped.
+if [[ "${FSB_GOSUMDB:-}" == "off" ]]; then
+	log "FSB_GOSUMDB=off: patching GOSUMDB=off into build/Dockerfile.*"
+	for df in "$FSB_SRC_DIR"/build/Dockerfile.*; do
+		[[ -f "$df" ]] || continue
+		grep -q '^ENV GOSUMDB=' "$df" && continue
+		sed -i '/^ENV GOPROXY=/a ENV GOSUMDB=off' "$df"
+	done
+fi
+
 # --- build ------------------------------------------------------------------------------------
 
 build_images() {
