@@ -8,6 +8,19 @@
 base:
   # -- Whether the cluster-scoped resources (CRDs + RBAC) are installed.
   enabled: true
+  fastSandbox:
+    rbac:
+      # -- Whether the fast-sandbox control-plane ServiceAccounts,
+      # ClusterRoles and ClusterRoleBindings are installed. They follow
+      # `fast-sandbox.enabled`; this chart renders them itself so they are
+      # absent while the runtime is disabled. Set it false when the RBAC is
+      # managed outside this release (for example by an external policy
+      # controller), which keeps every object out of this chart's output.
+      create: true
+      # Rendering is handed to this chart, which can follow
+      # `fast-sandbox.enabled`; the base sub-chart keeps its `create` opt-out
+      # but stays out of the render itself.
+      managedByParent: true
 
 # Controller component values
 opensandbox-controller:

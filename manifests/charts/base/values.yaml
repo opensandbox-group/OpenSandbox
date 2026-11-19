@@ -77,5 +77,13 @@ fastSandbox:
   rbac:
     # -- Specifies whether the fast-sandbox control-plane ServiceAccounts,
     # ClusterRoles and ClusterRoleBindings should be installed (the
-    # workloads using them live in the fast-sandbox chart)
+    # workloads using them live in the fast-sandbox chart). Standalone
+    # releases render them by default; a parent chart that renders this RBAC
+    # itself keeps this value as the user-facing opt-out and turns rendering
+    # here off through `managedByParent`.
     create: true
+    # -- Internal handoff for a parent chart (the opensandbox umbrella) that
+    # renders this RBAC itself so it can follow its `fast-sandbox.enabled`
+    # switch: the objects are then skipped here while `create` remains the
+    # user's opt-out. Not meant to be set by users.
+    managedByParent: false

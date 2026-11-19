@@ -52,7 +52,10 @@ helm install opensandbox ./opensandbox \
 This chart installs:
 
 1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`)
-   and their RBAC (cluster-scoped)
+   and the user-facing CRD RBAC (cluster-scoped). The fast-sandbox
+   control-plane RBAC follows `fast-sandbox.enabled`: this chart renders it
+   only when the runtime is enabled, so a disabled runtime leaves no leftover
+   ServiceAccounts, ClusterRoles or anonymous issuer-discovery binding behind.
 2. **OpenSandbox Controller** (`opensandbox-controller`)
    - Manages Pool and BatchSandbox CRDs
    - Handles resource pooling and batch delivery
@@ -83,6 +86,7 @@ The following table lists the configurable parameters of the chart and their def
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | base.enabled | bool | `true` | Whether the cluster-scoped resources (CRDs + RBAC) are installed. |
+| base.fastSandbox.rbac.create | bool | `true` | Whether the fast-sandbox control-plane ServiceAccounts, ClusterRoles and ClusterRoleBindings are installed. They follow `fast-sandbox.enabled`; this chart renders them itself so they are absent while the runtime is disabled. Set it false when the RBAC is managed outside this release (for example by an external policy controller), which keeps every object out of this chart's output. |
 | fast-sandbox.enabled | bool | `false` | Whether the fast-sandbox control plane + node runtime is enabled. |
 | global | object | `{}` | Global values passed to all sub-charts (e.g. shared imagePullSecrets). |
 | ingress-gateway.enabled | bool | `false` | Whether the ingress gateway is enabled. |

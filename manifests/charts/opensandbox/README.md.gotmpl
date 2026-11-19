@@ -52,7 +52,10 @@ helm install opensandbox ./opensandbox \
 This chart installs:
 
 1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`)
-   and their RBAC (cluster-scoped)
+   and the user-facing CRD RBAC (cluster-scoped). The fast-sandbox
+   control-plane RBAC follows `fast-sandbox.enabled`: this chart renders it
+   only when the runtime is enabled, so a disabled runtime leaves no leftover
+   ServiceAccounts, ClusterRoles or anonymous issuer-discovery binding behind.
 2. **OpenSandbox Controller** (`opensandbox-controller`)
    - Manages Pool and BatchSandbox CRDs
    - Handles resource pooling and batch delivery
