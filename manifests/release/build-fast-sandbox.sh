@@ -240,6 +240,25 @@ if [[ "${FSB_GOSUMDB:-}" == "off" ]]; then
 	done
 fi
 
+# build_logged runs a build command with output captured to a log file —
+# quiet on success, full log printed on failure. `--quiet` alone swallows
+# the failing RUN step's stderr (the actual go/git error) and leaves CI
+# failures undiagnosable; today's debugging needed a separate probe just to
+# recover "lookup nhooyr.io: no such host".
+build_logged() {
+	local label="$1" buildlog rc
+	shift
+	buildlog="$(mktemp)"
+	if "$@" >"$buildlog" 2>&1; then
+		rm -f "$buildlog"
+	else
+		rc=$?
+		cat "$buildlog"
+		rm -f "$buildlog"
+		die "$label"
+	fi
+}
+
 # --- build ------------------------------------------------------------------------------------
 
 build_images() {
@@ -249,27 +268,29 @@ build_images() {
 	local oci_tools_ref="$REGISTRY/oci-tools:$TAG"
 	log "building $oci_tools_ref (shared oci build base)"
 	# shellcheck disable=SC2086
-	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+	build_logged "oci-tools image build failed" \
+		docker build ${DOCKER_BUILD_FLAGS:-} --progress=plain \
 		--build-arg GOPROXY="${GOPROXY:-}" \
 		-t "$oci_tools_ref" -f "$FSB_SRC_DIR/build/Dockerfile.oci-tools" \
-		"$FSB_SRC_DIR" >/dev/null || die "oci-tools image build failed"
+		"$FSB_SRC_DIR"
 	for entry in "${IMAGES[@]}"; do
 		image="$REGISTRY/${entry%%:*}:$TAG"
 		component="$(cut -d: -f2 <<<"$entry")"
 		log "building $image"
 		if [[ "$component" == "sandboxtemplate-builder" ]]; then
 			# shellcheck disable=SC2086
-			docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+			build_logged "sandboxtemplate-builder image build failed" \
+				docker build ${DOCKER_BUILD_FLAGS:-} --progress=plain \
 				--build-arg GOPROXY="${GOPROXY:-}" \
 				--build-arg OCI_TOOLS_IMAGE="$oci_tools_ref" \
 				-t "$image" -f "$FSB_SRC_DIR/build/Dockerfile.sandboxtemplate-builder" \
-				"$FSB_SRC_DIR" >/dev/null || die "sandboxtemplate-builder image build failed"
+				"$FSB_SRC_DIR"
 		else
 			var="$(cut -d: -f3 <<<"$entry")"
-			(make -C "$FSB_SRC_DIR" images "COMPONENT=$component" \
+			build_logged "make images COMPONENT=$component failed" \
+				make -C "$FSB_SRC_DIR" images "COMPONENT=$component" \
 				"REGISTRY=$REGISTRY" "$var=$image" \
-				"OCI_TOOLS_IMAGE=$oci_tools_ref" >/dev/null) ||
-				die "make images COMPONENT=$component failed"
+				"OCI_TOOLS_IMAGE=$oci_tools_ref"
 		fi
 	done
 	log "images built (firecracker scope)"

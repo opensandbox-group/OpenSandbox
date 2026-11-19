@@ -153,21 +153,16 @@ jobs:
       # Empty on the default leg: integration-env.sh then renders the Pool
       # exactly as before and passes no switch to egress.
       EGRESS_INTERCEPTION_MODE: ${{ matrix.egress_interception_mode }}
-      # Runner-verified: this network's goproxy mirror edges serve non-
-      # canonical module bytes (containerd/v2@v2.3.3 failed the repo's own
-      # go.sum from every mirror tested), while direct VCS fetches from
-      # github.com work reliably from the runner — so modules come straight
-      # from origin. Pair with FSB_GOSUMDB=off below: sum.golang.org is
-      # unreachable from Alibaba networks and would otherwise fail the
-      # builds; each repo's own go.sum still verifies every module.
-      FSB_GOPROXY: direct
-      # Checksum-database verification is impossible from this network:
-      # direct sum.golang.org access and every mirror's /sumdb relay fail
-      # (runner-verified matrix). build-fast-sandbox.sh and
-      # integration-env.sh inject ENV GOSUMDB=off into the build Dockerfiles
-      # when this is set; go.sum in each repo still verifies every downloaded
-      # module, only the sumdb cross-check is skipped.
-      FSB_GOSUMDB: "off"
+      # This runner is OVERSEAS (Alibaba Cloud Singapore, hostname *sg52):
+      # github.com and proxy.golang.org are directly reachable, while the
+      # China mirrors (goproxy.cn, mirrors.aliyun.com) are cross-border and
+      # the VPC mirror edge serves stale bytes. The one thing that must NOT
+      # stay is the script's GOPROXY=direct default: direct mode resolves
+      # every module's vanity domain, and fast-sandbox's tree includes
+      # nhooyr.io/websocket — a dead domain (runner-verified: "lookup
+      # nhooyr.io: no such host"). proxy.golang.org serves it from cache and
+      # keeps full sumdb verification working.
+      FSB_GOPROXY: https://proxy.golang.org,direct
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)
