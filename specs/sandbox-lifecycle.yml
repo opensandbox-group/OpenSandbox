@@ -2232,7 +2232,7 @@ components:
         or a pre-configured pool (via `extensions.poolRef`).
 
         **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-        and `resourceLimits` is required.
+        and `resourceLimits` is required except for a qualified FSB RootfsOnly restore with resource overrides enabled.
 
         When `image` is provided, `entrypoint` is required. When `snapshotId` is
         provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -2268,8 +2268,8 @@ components:
             Fsb (fast-sandbox microVM) template to create the sandbox from; on the
             `kubernetes` runtime this routes the create to the fsb catalog.
             Mutually exclusive with `image` and `snapshotId`; in template mode
-            the workload shape is fixed by the template's golden image, so
-            `entrypoint`, `env`, `resourceLimits`, `resourceRequests`,
+            the workload shape is fixed unless RootfsOnly resource overrides are enabled. Only a verified RootfsOnly template may accept CPU/memory limits.
+            `entrypoint`, `env`, `resourceRequests`,
             `volumes`, `platform`, `secureAccess` and
             lifecycle hooks are rejected (400), and `timeout` is required.
             `credentialProxy` is accepted and ignored: the vault is not
@@ -2307,7 +2307,7 @@ components:
           $ref: '#/components/schemas/ResourceLimits'
           description: |
             Runtime resource constraints (hard caps) for the sandbox instance.
-            Required when `extensions.poolRef` is not set.
+            For enabled FSB RootfsOnly creates, supply CPU, memory or both. Omitted dimensions inherit the snapshot's recorded limits or the catalog template's machine defaults. Other standard creates require limits.
             Optional when using pool mode (resource limits are defined by the Pool CRD template).
             SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
 
@@ -3318,6 +3318,11 @@ components:
           type: string
           enum: [native, overlaybd]
           description: Snapshot storage encoding.
+        mode:
+          type: string
+          enum: [full, rootfsOnly]
+          readOnly: true
+          description: Builder-confirmed artifact class, omitted when unknown.
         status:
           $ref: '#/components/schemas/FsbTemplateStatus'
         createdAt:

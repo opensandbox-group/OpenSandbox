@@ -280,6 +280,7 @@ class TemplateInfo(
     val env: Map<String, String>? = null,
     val metadata: Map<String, String>? = null,
     val readiness: TemplateReadiness? = null,
+    val mode: String? = null,
 )
 
 /**

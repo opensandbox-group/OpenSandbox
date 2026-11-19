@@ -74,6 +74,7 @@ internal object TemplateModelConverter {
             image = this.image,
             publish = this.publish,
             format = toDomainTemplateFormat(this.format),
+            mode = this.mode?.value,
             status =
                 TemplateStatus(
                     phase = this.status.phase.value,
@@ -118,9 +119,11 @@ internal object TemplateModelConverter {
         networkPolicy: NetworkPolicy?,
         extensions: Map<String, String>,
         idlePolicy: IdlePolicy? = null,
+        resourceLimits: Map<String, String>? = null,
     ): CreateSandboxRequest {
         return CreateSandboxRequest(
             templateId = templateId,
+            resourceLimits = resourceLimits,
             timeout = timeout.seconds.toInt(),
             metadata = metadata,
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),

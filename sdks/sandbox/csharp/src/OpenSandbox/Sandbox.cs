@@ -233,7 +233,7 @@ public sealed class Sandbox : IAsyncDisposable
                 ? options.Entrypoint ?? Constants.DefaultEntrypoint
                 : null,
             Timeout = options.ManualCleanup ? null : options.TimeoutSeconds ?? Constants.DefaultTimeoutSeconds,
-            ResourceLimits = options.Resource ?? Constants.DefaultResourceLimits,
+            ResourceLimits = options.Resource ?? (options.InheritSnapshotResources && options.SnapshotId != null ? null : Constants.DefaultResourceLimits),
             ResourceRequests = options.ResourceRequests,
             Env = options.Env,
             SecureAccess = options.SecureAccess,
@@ -304,6 +304,7 @@ public sealed class Sandbox : IAsyncDisposable
         var request = new CreateSandboxRequest
         {
             TemplateId = options.TemplateId,
+            ResourceLimits = options.Resource,
             Timeout = options.TimeoutSeconds,
             Metadata = options.Metadata,
             NetworkPolicy = options.NetworkPolicy != null

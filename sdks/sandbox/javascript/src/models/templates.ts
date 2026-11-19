@@ -102,6 +102,7 @@ export interface CreateTemplateRequest extends Record<string, unknown> {
 }
 
 export interface TemplateInfo extends Record<string, unknown> {
+  mode?: "full" | "rootfsOnly";
   /**
    * Server-generated template ID (`tpl_<uuid>`).
    */

@@ -129,7 +129,7 @@ class SandboxesAdapterSync(SandboxesSync):
         env: dict[str, str],
         metadata: dict[str, str],
         timeout: timedelta | None,
-        resource: dict[str, str],
+        resource: dict[str, str] | None,
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str],
         volumes: list[Volume] | None,
@@ -189,6 +189,7 @@ class SandboxesAdapterSync(SandboxesSync):
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
         idle_policy: IdlePolicy | None = None,
+        resource: dict[str, str] | None = None,
     ) -> SandboxCreateResponse:
         try:
             from opensandbox.api.lifecycle.api.sandboxes import post_sandboxes
@@ -203,6 +204,7 @@ class SandboxesAdapterSync(SandboxesSync):
                 network_policy=network_policy,
                 extensions=extensions,
                 idle_policy=idle_policy,
+                resource=resource,
             )
             response_obj = post_sandboxes.sync_detailed(
                 client=self._get_client(), body=create_request

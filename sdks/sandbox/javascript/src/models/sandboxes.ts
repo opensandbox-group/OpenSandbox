@@ -620,7 +620,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    * Timeout in seconds (server semantics).
    */
   timeout?: number | null;
-  resourceLimits: ResourceLimits;
+  resourceLimits?: ResourceLimits;
   resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
@@ -641,6 +641,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
 }
 
 export interface CreateSandboxFromTemplateRequest extends Record<string, unknown> {
+  resourceLimits?: ResourceLimits;
   /**
    * Succeeded fsb template to create the sandbox from.
    *

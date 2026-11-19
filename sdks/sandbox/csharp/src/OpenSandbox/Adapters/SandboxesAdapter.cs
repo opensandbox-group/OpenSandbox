@@ -557,6 +557,7 @@ internal sealed class SandboxesAdapter : ISandboxes
             Image = element.GetProperty("image").GetString() ?? throw new SandboxApiException("Missing image in response"),
             Publish = element.GetProperty("publish").GetString() ?? throw new SandboxApiException("Missing publish in response"),
             Format = element.GetProperty("format").GetString() ?? throw new SandboxApiException("Missing format in response"),
+            Mode = element.TryGetProperty("mode", out var mode) ? mode.GetString() : null,
             Status = new TemplateStatus
             {
                 Phase = status.GetProperty("phase").GetString() ?? throw new SandboxApiException("Missing status.phase in response"),

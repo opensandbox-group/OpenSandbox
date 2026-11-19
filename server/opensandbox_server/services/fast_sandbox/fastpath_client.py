@@ -154,6 +154,16 @@ class FastPathClient:
         )
         return self._call(lambda: self._require_stub().CreateSandbox(request, timeout=deadline))
 
+    def create_rootfs_sandbox(
+        self,
+        request: fastpath_pb2.CreateRootfsSandboxRequest,
+        *,
+        wait_timeout_millis: int,
+    ) -> fastpath_pb2.CreateSandboxResponse:
+        return self._call(lambda: self._require_stub().CreateRootfsSandbox(
+            request, timeout=self._rpc_timeout(wait_timeout_millis),
+        ))
+
     def get_sandbox(
         self,
         namespace: str,

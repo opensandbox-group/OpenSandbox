@@ -354,7 +354,7 @@ type CreateSandboxRequest struct {
 	// is required.
 	TemplateID       string                 `json:"templateId,omitempty"`
 	Timeout          *int                   `json:"timeout,omitempty"`
-	ResourceLimits   ResourceLimits         `json:"resourceLimits"`
+	ResourceLimits   ResourceLimits         `json:"resourceLimits,omitempty"`
 	ResourceRequests ResourceLimits         `json:"resourceRequests,omitempty"`
 	Env              map[string]string      `json:"env,omitempty"`
 	SecureAccess     bool                   `json:"secureAccess,omitempty"`
@@ -622,6 +622,7 @@ type CreateTemplateRequest struct {
 // TemplateInfo is a fsb template: a golden image whose build is declared and
 // executed by fast-sandbox.
 type TemplateInfo struct {
+	Mode       string         `json:"mode,omitempty"`
 	TemplateID string         `json:"templateId"`
 	Image      string         `json:"image"`
 	Publish    string         `json:"publish"`

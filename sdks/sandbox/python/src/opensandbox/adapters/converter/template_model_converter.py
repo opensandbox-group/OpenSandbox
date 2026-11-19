@@ -154,6 +154,7 @@ class TemplateModelConverter:
 
         return TemplateInfo(
             templateId=api_template.template_id,
+            mode=None if isinstance(api_template.mode, Unset) else api_template.mode.value,
             image=api_template.image,
             publish=api_template.publish,
             format=cast(

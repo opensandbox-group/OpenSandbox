@@ -178,6 +178,7 @@ class TemplateInfo(BaseModel):
     format: Literal["native", "overlaybd"] = Field(
         description="Snapshot storage encoding."
     )
+    mode: Literal["full", "rootfsOnly"] | None = None
     status: TemplateStatus = Field(description="Current build status.")
     created_at: datetime = Field(description="Creation timestamp (RFC 3339 UTC).")
     updated_at: datetime = Field(description="Last update timestamp (RFC 3339 UTC).")

@@ -807,6 +807,7 @@ class KubernetesRuntimeConfig(BaseModel):
         ge=1.0,
         description="Per-RPC gRPC deadline for FastPath calls.",
     )
+    rootfs_resource_overrides: bool = Field(default=False, description="Enable per-create RootfsOnly resource limits on qualified FSB pools.")
     fastpath_wait_ready_seconds: float = Field(
         default=30.0,
         ge=1.0,

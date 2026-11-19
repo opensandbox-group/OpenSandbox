@@ -62,6 +62,7 @@ from .fsb_template import FsbTemplate
 from .fsb_template_env import FsbTemplateEnv
 from .fsb_template_format import FsbTemplateFormat
 from .fsb_template_metadata import FsbTemplateMetadata
+from .fsb_template_mode import FsbTemplateMode
 from .fsb_template_readiness import FsbTemplateReadiness
 from .fsb_template_resource_limits import FsbTemplateResourceLimits
 from .fsb_template_status import FsbTemplateStatus
@@ -153,6 +154,7 @@ __all__ = (
     "FsbTemplateEnv",
     "FsbTemplateFormat",
     "FsbTemplateMetadata",
+    "FsbTemplateMode",
     "FsbTemplateReadiness",
     "FsbTemplateResourceLimits",
     "FsbTemplateStatus",

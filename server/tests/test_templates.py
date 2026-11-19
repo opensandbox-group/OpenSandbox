@@ -964,10 +964,11 @@ def test_routes_501_for_non_kubernetes_runtime(monkeypatch, tmp_path):
 def test_template_mode_request_validation():
     CreateSandboxRequest.model_validate({"templateId": "tpl-x", "timeout": 3600})
 
+    CreateSandboxRequest.model_validate({"templateId": "tpl-x", "timeout": 3600, "resourceLimits": {"cpu": "1"}})
+
     for field, value in [
         ("entrypoint", ["x"]),
         ("env", {"A": "1"}),
-        ("resourceLimits", {"cpu": "1"}),
         ("snapshotId", "snap-1"),
         ("secureAccess", True),
     ]:

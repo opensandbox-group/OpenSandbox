@@ -25,6 +25,9 @@ namespace OpenSandbox.Models;
 /// </remarks>
 public static class TemplatePhases
 {
+    /// <summary>Builder-confirmed artifact class, when available.</summary>
+    public string? Mode { get; set; }
+
     /// <summary>
     /// Build accepted, not started yet.
     /// </summary>

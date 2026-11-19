@@ -219,6 +219,12 @@ test("createSandboxFromTemplate forwards only template-mode fields", async () =>
     extensions: { "storage.id": "ext-1" },
   });
   assert.equal(created.id, "sbx-tpl");
+  await adapter.createSandboxFromTemplate({
+    templateId: "tpl_123",
+    timeout: 300,
+    resourceLimits: { memory: "4Gi" },
+  });
+  assert.deepEqual(requests[1].resourceLimits, { memory: "4Gi" });
 });
 
 test("endpoints capture the OPEN-SANDBOX-ORIGIN response header", async () => {
