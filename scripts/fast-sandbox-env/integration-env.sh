@@ -4252,10 +4252,10 @@ rootfs_only_verify() {
 		# qualification; a deliberately XFS-less setup (XFS_STATEROOT=0)
 		# never registers this stage.
 		local fs_type
-		fs_type="$(findmnt -n -o FSTYPE --target "${XFS_MOUNT_POINT}/firecracker" 2>/dev/null)" \
-			|| fail "native rootfs-only capture requires the XFS reflink StateRoot at ${XFS_MOUNT_POINT}/firecracker (findmnt failed; is the pool up?)"
+		fs_type="$(findmnt -n -o FSTYPE --target "${XFS_MOUNT_POINT}" 2>/dev/null)" \
+			|| fail "native rootfs-only capture requires the XFS reflink StateRoot mounted at ${XFS_MOUNT_POINT} (findmnt failed; is the pool up?)"
 		[[ "$fs_type" == "xfs" ]] \
-			|| fail "the StateRoot filesystem at ${XFS_MOUNT_POINT}/firecracker is '$fs_type'; native capture requires XFS reflink (keep XFS_STATEROOT=1, or skip this stage with ROOTFS_ONLY=0)"
+			|| fail "the StateRoot filesystem mounted at ${XFS_MOUNT_POINT} is '$fs_type'; native capture requires XFS reflink (keep XFS_STATEROOT=1, or skip this stage with ROOTFS_ONLY=0)"
 	fi
 	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
 	t0="$(now_ms)"
