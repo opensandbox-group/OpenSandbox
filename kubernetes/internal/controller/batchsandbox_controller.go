@@ -90,6 +90,9 @@ type BatchSandboxReconciler struct {
 	FeatureConfig *FeatureConfig
 	// podRecoveryNow overrides the clock used by pod recovery; tests only.
 	podRecoveryNow func() time.Time
+	// stateOwners maps namespace/name to the UID whose name-keyed in-memory
+	// state (scale expectations, pod recovery budget, task scheduler) is held.
+	stateOwners sync.Map
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -117,20 +120,26 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
 	batchSbx := &sandboxv1alpha1.BatchSandbox{}
-	// Status expectations are keyed by UID, and a deleted or replaced
-	// BatchSandbox is never reconciled again under its old UID, so drop them
-	// here. This runs after any earlier reconcile of this key that recorded
-	// one, since the workqueue never processes the same key concurrently.
+	// A deleted or replaced BatchSandbox is never reconciled again under its
+	// old UID, so drop its in-memory state here. This runs after any earlier
+	// reconcile of this key that recorded some, since the workqueue never
+	// processes the same key concurrently.
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: req.Namespace,
 		Name:      req.Name,
 	}, batchSbx); err != nil {
 		if errors.IsNotFound(err) {
-			r.StatusRVExpectation.DeleteOthers(req.NamespacedName, "")
+			r.forgetBatchSandbox(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+	// The informer may report a delete and a same-name recreation as one
+	// update, so a replacement can show up without a NotFound in between.
+	if owner, seen := r.stateOwners.Load(req.String()); seen && owner != batchSbx.UID {
+		r.forgetBatchSandbox(req.NamespacedName)
+	}
+	r.stateOwners.Store(req.String(), batchSbx.UID)
 	r.StatusRVExpectation.DeleteOthers(req.NamespacedName, batchSbx.UID)
 	if batchSbx.DeletionTimestamp != nil {
 		return r.reconcileDeletion(ctx, batchSbx)
@@ -139,7 +148,15 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		now := time.Now()
 		if expireAt.Time.Before(now) {
 			log.Info("batch sandbox expired, delete", "expireAt", expireAt)
-			err := r.Delete(ctx, batchSbx, client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			// The cached copy may predate a renewal that is already persisted.
+			// Delete only the exact version judged expired so a newer object
+			// always gets a fresh decision.
+			err := r.Delete(ctx, batchSbx,
+				client.Preconditions{UID: &batchSbx.UID, ResourceVersion: &batchSbx.ResourceVersion},
+				client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			if errors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		} else {
 			durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), expireAt.Time.Sub(now))
@@ -210,9 +227,11 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}).Sort)
 	// Normal mode owns pod lifecycle except while a sandbox is fully paused. In Paused, the
 	// snapshot-backed runtime is quiesced and pods must stay absent until resume rewrites the
-	// template images and transitions back through Resuming.
+	// template images and transitions back through Resuming. Completed sandboxes skip scaling
+	// too: a finished workload must not re-run, so a removed pod stays removed until expireTime.
 	if !poolStrategy.IsPooledMode() &&
 		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused &&
+		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseCompleted &&
 		!hasTerminalPodFailureCondition(batchSbx.Status.Conditions) {
 		// Bounded replacement of stuck provisioning pods; scale recreates them.
 		r.recoverStuckPods(ctx, batchSbx, pods)
@@ -240,7 +259,11 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
 	}
 
-	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused
+	// Completed is terminal like Paused: the runtime is gone, so task scheduling
+	// must stop and stale scheduler state must be cleared instead of re-polling
+	// (and possibly dispatching new work to an exited executor) until expireTime.
+	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused ||
+		batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted
 	if skipTaskScheduling {
 		r.deleteTaskScheduler(ctx, batchSbx)
 	}
@@ -541,6 +564,17 @@ func (r *BatchSandboxReconciler) getTaskScheduler(ctx context.Context, batchSbx 
 		}
 	}
 	return tSch, nil
+}
+
+// forgetBatchSandbox drops the in-memory state kept for a BatchSandbox that no
+// longer exists. Apart from status expectations it is keyed by namespace/name,
+// so a later BatchSandbox with the same name would otherwise inherit it.
+func (r *BatchSandboxReconciler) forgetBatchSandbox(key types.NamespacedName) {
+	r.StatusRVExpectation.DeleteOthers(key, "")
+	r.stateOwners.Delete(key.String())
+	batchSandboxScaleExpectations.DeleteExpectations(key.String())
+	podRecoveryBudgets.delete(key.String())
+	r.taskSchedulers.Delete(key.String())
 }
 
 func (r *BatchSandboxReconciler) deleteTaskScheduler(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox) {

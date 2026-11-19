@@ -12,6 +12,7 @@
 /components/ingress/ @Pangjiping @hittyt @Generalwin @Spground
 /components/egress/ @Pangjiping @hittyt @jwx0925 @hpliStartAgain
 /components/nodeagent/ @jianpingpei @Pangjiping
+/components/e2b-shim/ @hpliStartAgain @jianpingpei @jwx0925
 
 # Kubernetes controller
 /kubernetes/ @Spground @Generalwin @fengcone @kevinlynx @ninan-nn @hittyt @Pangjiping

@@ -29,6 +29,7 @@ from ...types import Response
 def _get_kwargs(
     sandbox_id: str,
 ) -> dict[str, Any]:
+
     _kwargs: dict[str, Any] = {
         "method": "delete",
         "url": "/sandboxes/{sandbox_id}".format(
@@ -109,6 +110,10 @@ def sync_detailed(
      Request sandbox deletion. Runtime cleanup may continue after the response.
     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
     and return 404 once the resource is removed.
+    A 204 response means deletion was accepted, not that the sandbox's runtime
+    execution has terminated: the control object can disappear (and queries
+    can start returning 404) while runtime cleanup is still in progress, so a
+    404 after deletion must not be read as confirmed termination.
 
     Args:
         sandbox_id (str):
@@ -142,6 +147,10 @@ def sync(
      Request sandbox deletion. Runtime cleanup may continue after the response.
     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
     and return 404 once the resource is removed.
+    A 204 response means deletion was accepted, not that the sandbox's runtime
+    execution has terminated: the control object can disappear (and queries
+    can start returning 404) while runtime cleanup is still in progress, so a
+    404 after deletion must not be read as confirmed termination.
 
     Args:
         sandbox_id (str):
@@ -170,6 +179,10 @@ async def asyncio_detailed(
      Request sandbox deletion. Runtime cleanup may continue after the response.
     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
     and return 404 once the resource is removed.
+    A 204 response means deletion was accepted, not that the sandbox's runtime
+    execution has terminated: the control object can disappear (and queries
+    can start returning 404) while runtime cleanup is still in progress, so a
+    404 after deletion must not be read as confirmed termination.
 
     Args:
         sandbox_id (str):
@@ -201,6 +214,10 @@ async def asyncio(
      Request sandbox deletion. Runtime cleanup may continue after the response.
     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
     and return 404 once the resource is removed.
+    A 204 response means deletion was accepted, not that the sandbox's runtime
+    execution has terminated: the control object can disappear (and queries
+    can start returning 404) while runtime cleanup is still in progress, so a
+    404 after deletion must not be read as confirmed termination.
 
     Args:
         sandbox_id (str):

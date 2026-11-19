@@ -112,3 +112,12 @@ func TestExpandPath_UndefinedEnvVarOnlyReturnsError(t *testing.T) {
 	require.Contains(t, err.Error(), "NOT_SET")
 	require.Equal(t, "", got)
 }
+
+func TestExpandAbsPath_EmptyReturnsError(t *testing.T) {
+	t.Setenv("EMPTY_DIR", "")
+	for _, path := range []string{"", "$EMPTY_DIR", "${EMPTY_DIR}"} {
+		got, err := ExpandAbsPath(path)
+		require.Error(t, err, "path %q", path)
+		require.Equal(t, "", got)
+	}
+}

@@ -615,6 +615,10 @@ export interface paths {
          * @description Request sandbox deletion. Runtime cleanup may continue after the response.
          *     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
          *     and return 404 once the resource is removed.
+         *     A 204 response means deletion was accepted, not that the sandbox's runtime
+         *     execution has terminated: the control object can disappear (and queries
+         *     can start returning 404) while runtime cleanup is still in progress, so a
+         *     404 after deletion must not be read as confirmed termination.
          */
         delete: {
             parameters: {
@@ -1197,8 +1201,12 @@ export interface components {
              *     - `rootfsOnly`: only the writable filesystem; restoring boots a
              *       fresh sandbox from the disk. Running processes and in-memory
              *       state are discarded, and the entrypoint re-runs on restore.
-             *       Supported only on the fast-sandbox backend with OCI-backed
-             *       sandboxes; rejected otherwise.
+             *       Supported only on the fast-sandbox backend, for sandboxes on
+             *       either artifact path (native S3 templates and OCI/OverlayBD
+             *       templates); Docker and Kubernetes reject the mode before any
+             *       capture starts. Capture additionally requires a node qualified
+             *       for rootfs-only snapshots — an unqualified node fails the
+             *       snapshot instead of silently producing a `full` artifact.
              * @default full
              * @enum {string}
              */

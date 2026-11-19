@@ -281,3 +281,45 @@ func TestCommandOutputCleanupLogCompatibility(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "keep", string(data))
 }
+
+func TestCommandTimeoutLogAndStatus(t *testing.T) {
+	path, child := captureCommandLog(t, 6)
+	if !child {
+		return
+	}
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	c := NewController("", "")
+	var session string
+	var failure *execute.ErrorOutput
+	request := &ExecuteCodeRequest{
+		Language: Command,
+		Argv:     []string{executable, "-test.run=^TestCommandLogProcess$"},
+		Timeout:  time.Second,
+		Envs: map[string]string{
+			"EXECD_COMMAND_LOG_HELPER": "1",
+			"EXECD_COMMAND_LOG_EXIT":   "0",
+			"EXECD_COMMAND_LOG_GATE":   filepath.Join(t.TempDir(), "unreleased"),
+		},
+		Hooks: ExecuteResultHook{
+			OnExecuteInit:  func(id string) { session = id },
+			OnExecuteError: func(e *execute.ErrorOutput) { failure = e },
+		},
+	}
+	request.SetDefaultHooks()
+	require.NoError(t, c.Execute(request))
+	require.NotNil(t, failure)
+	require.Equal(t, "CommandTimeout", failure.EName)
+	require.Len(t, failure.Traceback, 1)
+	require.True(t, strings.HasPrefix(failure.Traceback[0], "command timed out after 1s: "), "%s", failure.Traceback[0])
+	require.NotNil(t, failure.ExitCode)
+	require.Equal(t, strconv.Itoa(*failure.ExitCode), failure.EValue)
+	status, err := c.GetCommandStatus(session)
+	require.NoError(t, err)
+	require.False(t, status.Running)
+	require.Equal(t, failure.ExitCode, status.ExitCode)
+	require.Equal(t, failure.Traceback[0], status.Error)
+	matches := commandLogEvents(commandLogRecords(t, path), session, "command: run failed: "+status.Error)
+	require.Len(t, matches, 1)
+	require.Equal(t, "error", matches[0]["level"])
+}

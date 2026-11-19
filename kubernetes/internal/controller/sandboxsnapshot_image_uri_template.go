@@ -31,6 +31,11 @@ const DefaultSnapshotImageURITemplate = "{{.Registry}}/{{.SandboxName}}-{{.Conta
 
 var defaultSnapshotImageURITemplate = template.Must(ParseSnapshotImageURITemplate(DefaultSnapshotImageURITemplate))
 
+// snapshotLocalLocation is the zone templates treat as local. It is time.Local
+// in production; tests replace it instead of the process-wide time.Local, which
+// time.Now reads from every goroutine.
+var snapshotLocalLocation = time.Local
+
 // snapshotImageURITemplateData is the named-field contract for operator templates.
 type snapshotImageURITemplateData struct {
 	Registry             string
@@ -76,7 +81,7 @@ func formatSnapshotDateInZone(layout string, value time.Time, zone string) (stri
 func snapshotTimeZone(zone string) (*time.Location, error) {
 	switch zone {
 	case "", "Local":
-		return time.Local, nil
+		return snapshotLocalLocation, nil
 	case "UTC", "Z":
 		return time.UTC, nil
 	}
@@ -123,7 +128,7 @@ func (r *SandboxSnapshotReconciler) snapshotImageURI(
 		SandboxName:          bs.Name,
 		SnapshotName:         snapshot.Name,
 		SnapshotUID:          string(snapshot.UID),
-		SnapshotCreationTime: snapshot.CreationTimestamp.Time.Local(),
+		SnapshotCreationTime: snapshot.CreationTimestamp.Time.In(snapshotLocalLocation),
 		ContainerName:        containerName,
 		SnapshotTag:          snapshotImageTag(snapshot, bs),
 		ArtifactKind:         artifactKind,

@@ -1,4 +1,7 @@
 {{- if .Values.controller.enabled }}
+{{- if ne (toString .Values.controller.replicaCount) "1" }}
+{{- fail "controller.replicaCount must be 1 because the fast-sandbox chart runs --role=all without leader election" }}
+{{- end }}
 {{- $builderImage := .Values.controller.sandboxtemplateBuilderImage | default (printf "opensandbox/fsb-sandboxtemplate-builder:release-%s" .Chart.AppVersion) }}
 {{/*
 `helm upgrade --reuse-values` can omit newly added chart defaults, so preserve
@@ -21,6 +24,8 @@ metadata:
     fast-sandbox.io/control-plane-role: all
 spec:
   replicas: {{ .Values.controller.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fast-sandbox.controllerSelectorLabels" . | nindent 6 }}
@@ -48,6 +53,11 @@ spec:
         - --metrics-bind-address=:9091
         - --health-probe-bind-address=:5758
         - --fastpath-bind-address=:9090
+        {{- if gt (.Values.controller.fastpathHTTPPort | int) 0 }}
+        # Optional gRPC-Web listener (HTTP/1.1 clients); the value above keeps
+        # it disabled when 0.
+        - --fastpath-http-port={{ .Values.controller.fastpathHTTPPort }}
+        {{- end }}
         - --sandboxtemplate-builder-image={{ $builderImage }}
         - --fastlet-proxy-image={{ .Values.controller.fastletProxyImage }}
         - --fastlet-proxy-request-cpu={{ $fastletProxyRequests.cpu | default "50m" }}
@@ -101,6 +111,10 @@ spec:
         ports:
         - name: grpc
           containerPort: 9090
+        {{- if gt (.Values.controller.fastpathHTTPPort | int) 0 }}
+        - name: grpc-web
+          containerPort: {{ .Values.controller.fastpathHTTPPort }}
+        {{- end }}
         - name: health
           containerPort: 5758
         - name: metrics

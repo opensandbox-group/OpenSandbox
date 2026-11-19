@@ -4011,6 +4011,65 @@ def test_expire_sandbox_renewed_reschedules_timer():
     container.kill.assert_not_called()
     container.remove.assert_not_called()
 
+
+def test_renew_waits_for_inflight_expiration_before_reporting_success():
+    service = DockerSandboxService(config=_app_config())
+    expired_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    container = _mock_container(
+        "sandbox-id", extra_labels={SANDBOX_EXPIRES_AT_LABEL: expired_at.isoformat()}
+    )
+    service._sandbox_expirations["sandbox-id"] = expired_at
+    expiration_started = threading.Event()
+    release_expiration = threading.Event()
+    removed = threading.Event()
+    renewal_outcomes: list[int] = []
+    renewed_until = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    def delayed_kill():
+        expiration_started.set()
+        assert release_expiration.wait(5)
+        container.attrs["State"]["Running"] = False
+
+    def delayed_remove(**_kwargs):
+        removed.set()
+
+    def lookup(sandbox_id):
+        if removed.is_set():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail={})
+        return container
+
+    def renew():
+        try:
+            service.renew_expiration(
+                "sandbox-id", RenewSandboxExpirationRequest(expires_at=renewed_until)
+            )
+        except HTTPException as exc:
+            renewal_outcomes.append(exc.status_code)
+        else:
+            renewal_outcomes.append(status.HTTP_200_OK)
+
+    container.kill.side_effect = delayed_kill
+    container.remove.side_effect = delayed_remove
+    with (
+        patch.object(service, "_get_container_by_sandbox_id", side_effect=lookup),
+        patch.object(service, "_schedule_expiration"),
+        patch.object(service, "_update_container_labels"),
+        patch.object(service, "_cleanup_egress_sidecar"),
+        patch.object(service, "_cleanup_windows_oem_volume"),
+        patch.object(service, "_cleanup_managed_volumes"),
+    ):
+        _run_lifecycle_interleaving(
+            lambda: service._expire_sandbox("sandbox-id"),
+            renew,
+            expiration_started,
+            release_expiration,
+        )
+
+    assert removed.is_set()
+    assert renewal_outcomes == [status.HTTP_404_NOT_FOUND]
+    assert service._metadata_store.get_expiration("sandbox-id") is None
+
+
 @patch("opensandbox_server.services.docker.docker_service.docker")
 class TestBuildVolumeBinds:
 

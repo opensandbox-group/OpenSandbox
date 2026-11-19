@@ -1869,3 +1869,35 @@ class TestAgentSandboxProviderEgress:
 
         main_container = containers[0]
         assert "securityContext" not in main_container
+
+    def test_pool_spi_rejects_pool_ref_and_exposes_no_pool_service(self, mock_k8s_client):
+        from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.constants import SandboxErrorCodes
+
+        provider = AgentSandboxProvider(mock_k8s_client)
+
+        with pytest.raises(HTTPException) as exc_info:
+            provider.validate_create_request(
+                CreateSandboxRequest(extensions={"poolRef": "warm-pool-1"}),
+                "test-ns",
+            )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.UNSUPPORTED_POOL_REF
+
+        with pytest.raises(ValueError, match="poolRef is not supported"):
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=None,
+                entrypoint=None,
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=None,
+                execd_image="execd:latest",
+                extensions={"poolRef": "warm-pool-1"},
+            )
+
+        assert provider.create_pool_service("test-ns") is None
+        assert provider.get_allocation({}) is None
+        assert provider.get_allocated_pod_names({}) == []

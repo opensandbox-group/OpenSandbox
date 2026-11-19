@@ -76,11 +76,13 @@ import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any, Awaitable, NoReturn
 from urllib.parse import quote, quote_plus, unquote
+from uuid import UUID
 
 from mitmproxy import ctx, http
 from mitmproxy.tls import ClientHelloData
 
 if TYPE_CHECKING:
+    from mitmproxy.tls import TlsData
     from revision_receiver import Revision
 
 CREDENTIAL_PROXY_SOCKET_ENV = "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET"
@@ -99,6 +101,26 @@ CREDENTIAL_RESOLVER_TIMEOUT_BOUNDS = (1, 120)
 DEFAULT_CREDENTIAL_RESOLVER_CONCURRENCY = 32
 CREDENTIAL_RESOLVER_CONCURRENCY_BOUNDS = (1, 1024)
 MAX_RESOLVE_RESPONSE_BYTES = 256 * 1024
+# Forwarded request headers for exchange resolves: structural/hop-by-hop
+# fields are excluded, and the caps mirror the Go `_resolve` endpoint — the
+# addon fails closed on all of them first, payload size included.
+MAX_RESOLVE_REQUEST_BYTES = 64 * 1024
+MAX_RESOLVE_REQUEST_HEADERS = 64
+MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES = 8 * 1024
+RESOLVE_REQUEST_HEADER_DENYLIST = {
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "upgrade",
+    "te",
+    "trailer",
+    "expect",
+    "proxy-connection",
+    "proxy-authorization",
+    "proxy-authenticate",
+}
 FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
 FLOW_BINDING_KEY = "opensandbox_credential_binding"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
@@ -384,6 +406,41 @@ class UnixSocketHTTPConnection(http_client.HTTPConnection):
         self.sock = sock
 
 
+# OpenSSL X509_V_ERR_* values; never classify a raw TLS error string.
+_UPSTREAM_VERIFY_REASONS = {
+    10: "expired",
+    18: "self_signed",
+    19: "self_signed",
+    20: "unknown_ca",
+    21: "unknown_ca",
+    62: "hostname_mismatch",
+    64: "hostname_mismatch",
+}
+
+
+def tls_failed_server(data: TlsData) -> None:
+    """Report upstream TLS failure without changing forwarding or trust."""
+    from OpenSSL import SSL
+
+    reason = "unknown"
+    conn = data.ssl_conn
+    if isinstance(conn, SSL.Connection):
+        with suppress(AttributeError, TypeError, ValueError, SSL.Error):
+            if conn.get_context().get_verify_mode() & SSL.VERIFY_PEER:
+                # mitmproxy's pinned TLS layer uses this same OpenSSL result.
+                result = SSL._lib.SSL_get_verify_result(conn._ssl)
+                reason = _UPSTREAM_VERIFY_REASONS.get(result, "unknown")
+    with suppress(AttributeError, TypeError, ValueError):
+        record = {
+            "level": "warn",
+            "component": "egress",
+            "event": "upstream_tls_failure",
+            "reason": reason,
+            "connection_id": str(UUID(str(data.conn.id))),
+        }
+        ctx.log.warn("credential proxy: upstream-tls-failure " + json.dumps(record))
+
+
 def tls_clienthello(data: ClientHelloData) -> None:
     """Decide TLS interception for this ClientHello.
 
@@ -415,10 +472,8 @@ def tls_clienthello(data: ClientHelloData) -> None:
         try:
             _tls_clienthello_live(subject, data, subject=True)
         except Exception:  # noqa: BLE001 - hook exceptions must not decrypt by default
-            from credential_bound import terminate_handshake
-
             _record_tls_admission("deny", "invalid_input")
-            terminate_handshake(data.context.client)
+            subject.terminate_handshake(data.context.client)
         return
     live = _live_runtime
     if live is not None:
@@ -568,6 +623,21 @@ def _subject_admission_runtime() -> Any:
     return None if module is None else module.runtime()
 
 
+def _terminate_denied_handshake(live: Any, data: ClientHelloData, *, subject: bool) -> None:
+    """Close one denied handshake through the runtime that owns it.
+
+    The Fast Sandbox subject runtime closes the exact client transport via
+    the real mitmproxy connection handler; the sidecar path keeps calling
+    the shared terminate_handshake with unchanged arguments and call count.
+    """
+    if subject:
+        live.terminate_handshake(data.context.client)
+        return
+    import credential_bound
+
+    credential_bound.terminate_handshake(data.context.client)
+
+
 def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = False) -> None:
     # The live credential-bound mode must never run with insecure upstream
     # verification; deny the handshake outright instead of trusting an
@@ -576,9 +646,7 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = F
         _record_tls_admission("deny", "ssl_insecure")
         with suppress(Exception):
             ctx.log.warn("credential proxy: tls decision deny reason=ssl_insecure")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
     # ECH hides the inner name: inspect the real extension list before any
     # outer-SNI matching so hidden names can never select a credential.
@@ -587,9 +655,7 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = F
         _record_tls_admission("deny", "malformed_extensions")
         with suppress(Exception):
             ctx.log.warn("credential proxy: tls decision deny reason=malformed_extensions")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
     sni = data.client_hello.sni
     from static_passthrough import destination_port
@@ -609,9 +675,7 @@ def _tls_clienthello_live(live: Any, data: ClientHelloData, *, subject: bool = F
         # A deny never degrades into opaque tunneling or decrypt-all.
         with suppress(Exception):
             ctx.log.warn(f"credential proxy: tls decision deny reason={result.reason}")
-        import credential_bound
-
-        credential_bound.terminate_handshake(data.context.client)
+        _terminate_denied_handshake(live, data, subject=subject)
         return
     if not subject:
         live.track(result.token, data.context.client)
@@ -1188,6 +1252,34 @@ def _request_port(flow: http.HTTPFlow) -> int:
 def _request_path(flow: http.HTTPFlow) -> str:
     path = flow.request.path or "/"
     return path.split("?", 1)[0] or "/"
+
+
+def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
+    """Select the outbound headers a resolver may bind its proof to.
+
+    Everything except the structural denylist, lowercased. Field lines come
+    from ``items(multi=True)``. A forwarded identity must appear exactly once:
+    the payload carries a single value while mitmproxy forwards every line
+    upstream, so a repeated (or case-variant) identity would let the resolver
+    sign a value the upstream cannot reconstruct. Over-cap fails closed.
+    """
+    selected: dict[str, str] = {}
+    lines: dict[str, int] = {}
+    for name, value in flow.request.headers.items(multi=True):
+        lowered = name.lower()
+        if lowered in RESOLVE_REQUEST_HEADER_DENYLIST:
+            continue
+        lines[lowered] = lines.get(lowered, 0) + 1
+        if not name or not value:
+            continue
+        if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
+            raise CredentialResolveError("resolve_header_too_long")
+        selected[lowered] = value
+    if any(count > 1 for count in lines.values()):
+        raise CredentialResolveError("resolve_ambiguous_header")
+    if len(selected) > MAX_RESOLVE_REQUEST_HEADERS:
+        raise CredentialResolveError("resolve_too_many_headers")
+    return selected
 
 
 _DOT_SEGMENT_RE = re.compile(r"/\.\.(/|$)")
@@ -2253,20 +2345,25 @@ async def _resolve_exchange_binding(
         os.environ.get(CREDENTIAL_PROXY_SOCKET_ENV, "").strip()
         or DEFAULT_CREDENTIAL_PROXY_SOCKET
     )
-    payload = {
-        "binding": name,
-        "sni": sni,
-        "request": {
-            "scheme": (flow.request.scheme or "").lower(),
-            "host": _request_host(flow),
-            "port": _request_port(flow),
-            "method": (flow.request.method or "").upper(),
-            "path": flow.request.path or "/",
-        },
-    }
     budget = _resolve_budget_seconds()
     try:
         deadline = time.monotonic() + budget
+        payload = {
+            "binding": name,
+            "sni": sni,
+            "request": {
+                "scheme": (flow.request.scheme or "").lower(),
+                "host": _request_host(flow),
+                "port": _request_port(flow),
+                "method": (flow.request.method or "").upper(),
+                "path": flow.request.path or "/",
+                "headers": _resolve_request_headers(flow),
+            },
+        }
+        # Same serialization the RPC sends, so per-header caps cannot hide
+        # an oversized selection (or path) from the endpoint's 64KiB bound.
+        if len(json.dumps(payload).encode("utf-8")) > MAX_RESOLVE_REQUEST_BYTES:
+            raise CredentialResolveError("resolve_payload_too_large")
         async with _resolve_limiter():
             # The deadline covers semaphore and executor queueing too, not
             # just the socket: a queued resolve fails within the budget

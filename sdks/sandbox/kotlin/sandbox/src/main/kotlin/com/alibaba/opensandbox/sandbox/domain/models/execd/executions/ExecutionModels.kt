@@ -31,10 +31,9 @@ package com.alibaba.opensandbox.sandbox.domain.models.execd.executions
  * @property exitCode Foreground command exit code: `0` for completed
  *   foreground commands, the numeric `error.value` when the command failed
  *   with one, `null` for unfinished/background commands. For streamed code
- *   runs (code-interpreter SDKs in Kotlin/C#) it is inferred best-effort the
- *   same way — `0` on completion, or the numeric kernel `error.value` (e.g.
- *   a `SystemExit` code) — while the Python and JS code-interpreter SDKs do
- *   not expose an exit code at all and always report `null` there.
+ *   runs (the code-interpreter SDKs) it is inferred best-effort the same
+ *   way: `0` on completion, or the numeric kernel `error.value` (e.g. a
+ *   `SystemExit` code).
  * @property logs Container for stdout and stderr output messages
  */
 class Execution(
@@ -151,10 +150,10 @@ class ExecutionError
         val timestamp: Long,
         val traceback: List<String> = emptyList(),
         /**
-         * Exit status reported by execd for a CommandExecError when the command ran
-         * and finished with a non-zero status (-1 when terminated by a signal).
-         * Null when the process failed to start, for non-command errors, and on
-         * servers that predate error.exit_code.
+         * Exit status for CommandExecError or CommandTimeout after a command exits
+         * non-zero (-1 when terminated by a signal). Null when the process failed to
+         * start, no exit status was observed, or the error is not from a command.
+         * Also null on servers that predate error.exit_code.
          */
         val exitCode: Int? = null,
     )

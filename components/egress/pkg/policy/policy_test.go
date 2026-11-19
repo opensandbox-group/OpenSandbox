@@ -268,3 +268,68 @@ func TestEvaluate_CompiledIndexKeepsFirstMatchPriority(t *testing.T) {
 func normalizeQueryForTest(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(domain, "."))
 }
+
+func TestEvaluate_DomainTargetWithTrailingDot(t *testing.T) {
+	p, err := ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"pypi.org."},
+			{"action":"allow","target":"*.github.com."}
+		]
+	}`)
+	require.NoError(t, err)
+
+	for _, q := range []string{"pypi.org.", "pypi.org", "api.github.com.", "api.github.com"} {
+		require.Equalf(t, ActionAllow, p.Evaluate(q), "query=%s", q)
+	}
+	require.Equal(t, ActionDeny, p.Evaluate("github.com."), "wildcard must still not match the apex")
+
+	manual := &NetworkPolicy{
+		DefaultAction: ActionDeny,
+		Egress:        []EgressRule{{Action: ActionAllow, Target: "pypi.org.", targetKind: targetDomain}},
+	}
+	require.Equal(t, ActionAllow, manual.Evaluate("pypi.org."), "linear fallback must agree with the compiled index")
+}
+
+func TestEvaluate_TrailingDotDenyRules(t *testing.T) {
+	p, err := ParsePolicy(`{
+		"defaultAction":"allow",
+		"egress":[
+			{"action":"deny","target":"pypi.org."},
+			{"action":"deny","target":"*.github.com."}
+		]
+	}`)
+	require.NoError(t, err)
+
+	for _, q := range []string{"pypi.org", "pypi.org.", "api.github.com", "api.github.com."} {
+		require.Equalf(t, ActionDeny, p.Evaluate(q), "query=%s", q)
+	}
+	require.Equal(t, ActionAllow, p.Evaluate("github.com."), "wildcard deny must still not cover the apex")
+	require.Equal(t, ActionAllow, p.Evaluate("example.com"), "unrelated hosts keep the default action")
+}
+
+func TestEvaluate_TrailingDotKeepsFirstMatchPriority(t *testing.T) {
+	// The dotted and non-dotted spellings compile to one pattern, so the
+	// first rule in list order wins in both orders.
+	dottedFirst, err := ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"allow","target":"api.example.com."},
+			{"action":"deny","target":"api.example.com"}
+		]
+	}`)
+	require.NoError(t, err)
+	require.Equal(t, ActionAllow, dottedFirst.Evaluate("api.example.com"))
+	require.Equal(t, ActionAllow, dottedFirst.Evaluate("api.example.com."))
+
+	plainFirst, err := ParsePolicy(`{
+		"defaultAction":"deny",
+		"egress":[
+			{"action":"deny","target":"api.example.com"},
+			{"action":"allow","target":"api.example.com."}
+		]
+	}`)
+	require.NoError(t, err)
+	require.Equal(t, ActionDeny, plainFirst.Evaluate("api.example.com"))
+	require.Equal(t, ActionDeny, plainFirst.Evaluate("api.example.com."))
+}

@@ -369,13 +369,22 @@ public sealed class ConnectionConfig
     }
 
     /// <summary>
+    /// How long an SSE stream may go without data before it fails: the request timeout, but at
+    /// least <see cref="Constants.SseReadTimeoutFloorSeconds"/>.
+    /// </summary>
+    internal TimeSpan SseReadTimeout =>
+        TimeSpan.FromSeconds(Math.Max(RequestTimeoutSeconds, Constants.SseReadTimeoutFloorSeconds));
+
+    /// <summary>
     /// Creates a new HttpClient configured for SSE (Server-Sent Events) streaming.
-    /// This client has no timeout to allow for long-running streams.
+    /// This client has no whole-call timeout, so a long-running stream can stay open, but it
+    /// fails when the response headers or the next bytes take longer than the SSE read timeout
+    /// (the request timeout, at least 30 seconds).
     /// </summary>
     /// <returns>A new configured HttpClient instance for SSE.</returns>
     public HttpClient CreateSseHttpClient()
     {
-        return CreateStreamingHttpClient();
+        return CreateStreamingHttpClient(SseReadTimeout);
     }
 
     /// <summary>
@@ -392,7 +401,7 @@ public sealed class ConnectionConfig
         return CreateStreamingHttpClient();
     }
 
-    private HttpClient CreateStreamingHttpClient()
+    private HttpClient CreateStreamingHttpClient(TimeSpan? readTimeout = null)
     {
         var handler = new HttpClientHandler
         {
@@ -400,7 +409,13 @@ public sealed class ConnectionConfig
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
         };
 
-        var client = new HttpClient(new ProtectedRedirectHandler(handler))
+        HttpMessageHandler pipeline = new ProtectedRedirectHandler(handler);
+        if (readTimeout is { } timeout)
+        {
+            pipeline = new StreamReadTimeoutHandler(pipeline, timeout);
+        }
+
+        var client = new HttpClient(pipeline)
         {
             Timeout = Timeout.InfiniteTimeSpan
         };

@@ -238,6 +238,8 @@ export interface paths {
          *     In foreground mode, stdout and stderr event text preserves the original line endings
          *     (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
          *     the final event may contain an unterminated fragment.
+         *     A line longer than 16 MiB is split across several events, and only the last of them
+         *     ends with the line ending.
          *     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
          *     terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
          *     with specific user/group IDs, and `envs` to inject environment variables.
@@ -1455,12 +1457,12 @@ export interface components {
             /** @description Execution error details if an error occurred */
             error?: {
                 /**
-                 * @description Error name/type
+                 * @description Error name/type. Foreground commands that fail after their execution deadline use `CommandTimeout`; other command failures use `CommandExecError`.
                  * @example NameError
                  */
                 ename?: string;
                 /**
-                 * @description Error value/message. For `CommandExecError` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when the process could not be started; use `exit_code` to tell the two apart.
+                 * @description Error value/message. For `CommandExecError` and `CommandTimeout` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when no exit status is available; use `exit_code` to tell the two apart.
                  * @example name 'undefined_var' is not defined
                  */
                 evalue?: string;
@@ -1474,7 +1476,7 @@ export interface components {
                  */
                 traceback?: string[];
                 /**
-                 * @description Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` events emitted after the process ran; omitted when the process failed to start and for non-command errors.
+                 * @description Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` and `CommandTimeout` events emitted after the process ran; omitted when the process failed to start, no exit status was observed, or the error is not from a command.
                  * @example 3
                  */
                 exit_code?: number;
@@ -1569,7 +1571,7 @@ export interface components {
              */
             mode?: number;
         };
-        /** @description File rename/move operation */
+        /** @description File rename/move operation. Both src and dest must be non-empty. On ordinary filesystem routes, including execution-identity routes, paths must also remain non-empty after environment-variable and home-directory expansion; isolated-session paths are literal. Missing or empty paths, or empty expansions on ordinary routes, return 400 INVALID_REQUEST_BODY before any rename in the batch. Other path-expansion and filesystem errors retain their existing handling and can leave earlier renames applied. */
         RenameFileItem: {
             /**
              * @description Source file path

@@ -446,7 +446,7 @@ Poll snapshot status before restoring. Template builds are asynchronous; wait fo
 Snapshot `mode` selects what the snapshot persists:
 
 - `"full"` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
-- `"rootfsOnly"`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+- `"rootfsOnly"`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend; other backends reject the mode before any capture starts, and an unqualified fast-sandbox node fails the snapshot instead of silently producing a full artifact.
 
 `SnapshotInfo.mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `"full"`.
 
