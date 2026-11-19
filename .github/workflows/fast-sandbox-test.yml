@@ -153,22 +153,20 @@ jobs:
       # Empty on the default leg: integration-env.sh then renders the Pool
       # exactly as before and passes no switch to egress.
       EGRESS_INTERCEPTION_MODE: ${{ matrix.egress_interception_mode }}
-      # The self-hosted runner's direct-VCS egress (the GOPROXY=direct default
-      # in integration-env.sh) cannot verify modules: sum.golang.org is
-      # unreachable from Alibaba networks, so `go mod download` fails under
-      # GOPROXY=direct. Use the PUBLIC Aliyun goproxy endpoint, which resolves
-      # to internal edges on Alibaba networks and serves sumdb-verified
-      # copies: the VPC-only mirrors.cloud.aliyuncs.com endpoint was observed
-      # serving a stale copy of github.com/containerd/containerd/v2@v2.3.3
-      # (checksum mismatch on the runner while the public endpoint verifies
-      # clean). ",direct" keeps mirror-missed modules fetchable.
-      FSB_GOPROXY: https://mirrors.aliyun.com/goproxy/,direct
-      # Checksum-database verification is unreliable from this network: every
-      # mirror's /sumdb relay or direct sum.golang.org access fails the image
-      # builds (runner-verified: all mirrors + default GOSUMDB fail, GOSUMDB=off
-      # passes). build-fast-sandbox.sh injects ENV GOSUMDB=off into the
-      # fast-sandbox build Dockerfiles; go.sum in each repo still verifies
-      # every downloaded module, only the sumdb cross-check is skipped.
+      # Runner-verified: this network's goproxy mirror edges serve non-
+      # canonical module bytes (containerd/v2@v2.3.3 failed the repo's own
+      # go.sum from every mirror tested), while direct VCS fetches from
+      # github.com work reliably from the runner — so modules come straight
+      # from origin. Pair with FSB_GOSUMDB=off below: sum.golang.org is
+      # unreachable from Alibaba networks and would otherwise fail the
+      # builds; each repo's own go.sum still verifies every module.
+      FSB_GOPROXY: direct
+      # Checksum-database verification is impossible from this network:
+      # direct sum.golang.org access and every mirror's /sumdb relay fail
+      # (runner-verified matrix). build-fast-sandbox.sh and
+      # integration-env.sh inject ENV GOSUMDB=off into the build Dockerfiles
+      # when this is set; go.sum in each repo still verifies every downloaded
+      # module, only the sumdb cross-check is skipped.
       FSB_GOSUMDB: "off"
     steps:
       # actions/checkout always executes as the runner user; the script
