@@ -87,7 +87,7 @@ type intField struct {
 
 var stringFields = []stringField{
 	{"listen", "E2B_SHIM_LISTEN", func(c *Config) *string { return &c.Listen }},
-	{"compat_prefix", "E2B_SHIM_PREFIX", func(c *Config) *string { return &c.CompatPrefix }},
+	{"compat_prefix", "E2B_SHIM_COMPAT_PREFIX", func(c *Config) *string { return &c.CompatPrefix }},
 	{"native_api_url", "E2B_SHIM_NATIVE_API_URL", func(c *Config) *string { return &c.NativeAPIURL }},
 	{"adapter_id", "E2B_SHIM_ADAPTER_ID", func(c *Config) *string { return &c.AdapterID }},
 	{"domain", "E2B_SHIM_DOMAIN", func(c *Config) *string { return &c.Domain }},
@@ -149,14 +149,15 @@ func Load(src Source) (*Config, error) {
 	}
 	var errs []error
 	for _, f := range stringFields {
-		if v, ok := lookupEnv(f.env); ok {
+		// The --listen flag outranks both lower-priority sources, so neither
+		// is decoded when it is set.
+		if f.key == "listen" && src.Listen != nil {
+			cfg.Listen = *src.Listen
+		} else if v, ok := lookupEnv(f.env); ok {
 			*f.dst(cfg) = v
 		} else if err := decodeField(raw, f.key, f.dst(cfg)); err != nil {
 			errs = append(errs, err)
 		}
-	}
-	if src.Listen != nil {
-		cfg.Listen = *src.Listen
 	}
 	for _, f := range intFields {
 		if v, ok := lookupEnv(f.env); ok {

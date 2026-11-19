@@ -128,7 +128,7 @@ func TestLoadNormalizesTrailingSlashes(t *testing.T) {
 func TestLoadEnvOverridesFile(t *testing.T) {
 	env := map[string]string{
 		"E2B_SHIM_LISTEN":                  "127.0.0.1:19090",
-		"E2B_SHIM_PREFIX":                  "/compat/e2b-test",
+		"E2B_SHIM_COMPAT_PREFIX":           "/compat/e2b-test",
 		"E2B_SHIM_NATIVE_API_URL":          "http://native2.example.internal",
 		"E2B_SHIM_ADAPTER_ID":              "adapter-2",
 		"E2B_SHIM_DOMAIN":                  "sbx2.example.internal",
@@ -164,6 +164,23 @@ func TestLoadListenFlagOverridesEnv(t *testing.T) {
 	}
 }
 
+func TestLoadListenFlagSkipsLowerPrioritySources(t *testing.T) {
+	listen := "127.0.0.1:19292"
+	for _, file := range []string{`"listen": null`, `"listen": 8080`, `"listen": "8080"`} {
+		data := strings.Replace(validFile, `"listen": "127.0.0.1:18080"`, file, 1)
+		cfg := mustLoad(t, config.Source{Path: writeConfig(t, data), Listen: &listen}, nil)
+		if cfg.Listen != listen {
+			t.Errorf("file %s: listen = %q, want %q", file, cfg.Listen, listen)
+		}
+	}
+	cfg := mustLoad(t, config.Source{Path: writeConfig(t, validFile), Listen: &listen}, map[string]string{
+		"E2B_SHIM_LISTEN": "8080",
+	})
+	if cfg.Listen != listen {
+		t.Errorf("invalid env: listen = %q, want %q", cfg.Listen, listen)
+	}
+}
+
 func TestLoadFailures(t *testing.T) {
 	dir := t.TempDir()
 	cases := []struct {
@@ -186,16 +203,16 @@ func TestLoadFailures(t *testing.T) {
 		{name: "invalid listen host", file: `{"listen": "8080"}`, wantErr: "listen: must be host:port"},
 		{name: "invalid listen port", file: `{"listen": "127.0.0.1:http"}`, wantErr: "listen: port must be a decimal"},
 		{name: "padded listen port", file: `{"listen": "127.0.0.1:080"}`, wantErr: "listen: port must be a decimal"},
-		{name: "prefix not absolute", env: map[string]string{"E2B_SHIM_PREFIX": "compat/e2b"}, wantErr: "compat_prefix: must be an absolute path"},
-		{name: "prefix root", env: map[string]string{"E2B_SHIM_PREFIX": "/"}, wantErr: "compat_prefix: must not be the root path"},
-		{name: "prefix empty segment", env: map[string]string{"E2B_SHIM_PREFIX": "/compat//e2b"}, wantErr: "compat_prefix: must not contain empty"},
-		{name: "prefix dot segment", env: map[string]string{"E2B_SHIM_PREFIX": "/compat/./e2b"}, wantErr: "compat_prefix: must not contain empty"},
-		{name: "prefix parent segment", env: map[string]string{"E2B_SHIM_PREFIX": "/compat/../e2b"}, wantErr: "compat_prefix: must not contain empty"},
-		{name: "prefix query", env: map[string]string{"E2B_SHIM_PREFIX": "/compat?x=1"}, wantErr: "compat_prefix: must not contain a query"},
-		{name: "prefix fragment", env: map[string]string{"E2B_SHIM_PREFIX": "/compat#f"}, wantErr: "compat_prefix: must not contain a query"},
-		{name: "prefix percent encoding", env: map[string]string{"E2B_SHIM_PREFIX": "/compat%2Fe2b"}, wantErr: "compat_prefix: must not contain percent-encoding"},
-		{name: "prefix is health path", env: map[string]string{"E2B_SHIM_PREFIX": "/healthz"}, wantErr: "compat_prefix: must not overlap the health check path"},
-		{name: "prefix under health path", env: map[string]string{"E2B_SHIM_PREFIX": "/healthz/e2b"}, wantErr: "compat_prefix: must not overlap the health check path"},
+		{name: "prefix not absolute", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "compat/e2b"}, wantErr: "compat_prefix: must be an absolute path"},
+		{name: "prefix root", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/"}, wantErr: "compat_prefix: must not be the root path"},
+		{name: "prefix empty segment", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/compat//e2b"}, wantErr: "compat_prefix: must not contain empty"},
+		{name: "prefix dot segment", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/compat/./e2b"}, wantErr: "compat_prefix: must not contain empty"},
+		{name: "prefix parent segment", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/compat/../e2b"}, wantErr: "compat_prefix: must not contain empty"},
+		{name: "prefix query", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/compat?x=1"}, wantErr: "compat_prefix: must not contain a query"},
+		{name: "prefix fragment", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/compat#f"}, wantErr: "compat_prefix: must not contain a query"},
+		{name: "prefix percent encoding", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/compat%2Fe2b"}, wantErr: "compat_prefix: must not contain percent-encoding"},
+		{name: "prefix is health path", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/healthz"}, wantErr: "compat_prefix: must not overlap the health check path"},
+		{name: "prefix under health path", env: map[string]string{"E2B_SHIM_COMPAT_PREFIX": "/healthz/e2b"}, wantErr: "compat_prefix: must not overlap the health check path"},
 		{name: "native url empty override", env: map[string]string{"E2B_SHIM_NATIVE_API_URL": ""}, wantErr: "native_api_url: must not be empty"},
 		{name: "native url bad scheme", env: map[string]string{"E2B_SHIM_NATIVE_API_URL": "ftp://native.example.internal"}, wantErr: "native_api_url: scheme must be http or https"},
 		{name: "native url user info", env: map[string]string{"E2B_SHIM_NATIVE_API_URL": "https://user:pass@native.example.internal"}, wantErr: "native_api_url: must not contain user info"},

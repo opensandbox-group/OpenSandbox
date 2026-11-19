@@ -90,7 +90,7 @@ Environment variables override the file. An explicit empty value is used as the 
 | Variable | Overrides |
 |---|---|
 | `E2B_SHIM_LISTEN` | `listen` (the `--listen` flag overrides this variable) |
-| `E2B_SHIM_PREFIX` | `compat_prefix` |
+| `E2B_SHIM_COMPAT_PREFIX` | `compat_prefix` |
 | `E2B_SHIM_NATIVE_API_URL` | `native_api_url` |
 | `E2B_SHIM_ADAPTER_ID` | `adapter_id` |
 | `E2B_SHIM_DOMAIN` | `domain` |
