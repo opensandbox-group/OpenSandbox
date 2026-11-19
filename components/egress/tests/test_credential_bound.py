@@ -114,7 +114,7 @@ class _Headers:
             value for key, value in self._values.items() if key.lower() == name.lower()
         ]
 
-    def items(self) -> list[tuple[str, str]]:
+    def items(self, multi: bool = False) -> list[tuple[str, str]]:
         return list(self._values.items())
 
     def __setitem__(self, name: str, value: str) -> None:
