@@ -430,6 +430,42 @@ osb file --help
 osb skills --help
 ```
 
+## Plugin Commands
+
+Third-party packages can extend `osb` with their own command groups. Plugins are discovered through the `opensandbox.cli.plugins` Python entry-point group, declared in the plugin package's `pyproject.toml`:
+
+```toml
+[project.entry-points."opensandbox.cli.plugins"]
+workflow = "my_pkg.cli:workflow"
+```
+
+The entry-point name is the command name, so this example adds `osb workflow` to the root command. The entry point must resolve to a `click.Command` or `click.Group`:
+
+```python
+import click
+
+from opensandbox_cli.client import ClientContext
+
+
+@click.group()
+@click.pass_context
+def workflow(ctx: click.Context) -> None:
+    """Run team workflows against OpenSandbox."""
+    client: ClientContext = ctx.obj
+    click.echo(f"connected to {client.resolved_config['domain']}")
+
+
+@workflow.command()
+@click.argument("name")
+def run(name: str) -> None:
+    """Run a named workflow."""
+    click.echo(f"running {name}")
+```
+
+Plugins are loaded once at startup, after the built-in commands, as installed code. They share the root `ctx.obj` (`ClientContext`), so plugin commands can use the same resolved configuration, SDK manager, and output formatting as built-in commands.
+
+Built-in names win: if a plugin uses the name of an existing command, it is skipped and a one-line warning is printed to stderr. A plugin that fails to load, or whose entry point does not resolve to a Click command or group, is skipped the same way, and the rest of the CLI keeps working. With no plugins installed, `osb` behaves exactly as before.
+
 ## Agent Skills
 
 The CLI ships with built-in OpenSandbox skills for coding agents and agent-oriented tools.
