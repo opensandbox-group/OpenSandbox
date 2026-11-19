@@ -24,6 +24,7 @@ from .create_fsb_template_request import CreateFsbTemplateRequest
 from .create_fsb_template_request_env import CreateFsbTemplateRequestEnv
 from .create_fsb_template_request_format import CreateFsbTemplateRequestFormat
 from .create_fsb_template_request_metadata import CreateFsbTemplateRequestMetadata
+from .create_fsb_template_request_mode import CreateFsbTemplateRequestMode
 from .create_sandbox_request import CreateSandboxRequest
 from .create_sandbox_request_env import CreateSandboxRequestEnv
 from .create_sandbox_request_extensions import CreateSandboxRequestExtensions
@@ -116,6 +117,7 @@ __all__ = (
     "CreateFsbTemplateRequestEnv",
     "CreateFsbTemplateRequestFormat",
     "CreateFsbTemplateRequestMetadata",
+    "CreateFsbTemplateRequestMode",
     "CreateSandboxRequest",
     "CreateSandboxRequestEnv",
     "CreateSandboxRequestExtensions",
