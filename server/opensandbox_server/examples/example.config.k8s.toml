@@ -61,6 +61,9 @@ path = "~/.opensandbox/opensandbox.db"
 # only when PostgreSQL is paired with the Kubernetes runtime.
 # [store.postgresql]
 # snapshot_recovery_interval_seconds = 15
+#
+# [store.lifecycle_audit]
+# enabled = true
 
 [kubernetes]
 # Path to kubeconfig file. Leave as null to use in-cluster configuration
