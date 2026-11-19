@@ -323,6 +323,30 @@ OSB_VENV="$WORK/tools/osb-venv"
 FSB_GOPROXY="${FSB_GOPROXY:-direct}"
 export GOPROXY="$FSB_GOPROXY"
 
+# FSB_GOSUMDB=off (set by the KVM integration lane): the runner's network
+# cannot reach sum.golang.org and the mirror /sumdb relays serve stale data,
+# so checksum-database verification fails every Go build. Export GOSUMDB=off
+# for host-level go commands and inject ENV GOSUMDB=off into the OpenSandbox
+# component Dockerfiles that carry a GOPROXY line (the CI workspace checkout
+# is reset by actions/checkout every run; build-fast-sandbox.sh patches the
+# pinned fast-sandbox checkout the same way and restores it on exit). Each
+# repo's own go.sum still verifies every downloaded module.
+if [[ "${FSB_GOSUMDB:-}" == "off" ]]; then
+	export GOSUMDB=off
+	for df in \
+		"$OSB_ROOT/components/egress/Dockerfile" \
+		"$OSB_ROOT/components/ingress/Dockerfile" \
+		"$OSB_ROOT/components/nodeagent/Dockerfile"; do
+		[[ -f "$df" ]] || continue
+		grep -q '^ENV GOSUMDB=' "$df" && continue
+		if grep -q '^ENV GOPROXY=' "$df"; then
+			sed -i '/^ENV GOPROXY=/a ENV GOSUMDB=off' "$df"
+		elif grep -q '^ARG GOPROXY=' "$df"; then
+			sed -i '0,/^ARG GOPROXY=/s//ARG GOPROXY=\nENV GOSUMDB=off/' "$df"
+		fi
+	done
+fi
+
 AUTO_CLEAN=0
 ACTION=""
 
@@ -478,6 +502,15 @@ failure_dump() {
 		kubectl get pods -n "$NS" -o wide 2>&1 || true
 		echo "--- controller logs (tail) ---"
 		kubectl logs -n "$NS" deploy/fast-sandbox-controller --tail=80 2>&1 || true
+		echo "--- controller + fastlet component logs (klog writes to /var/log/fast-sandbox files, NOT stdout: a crash-looping fastlet shows an empty `kubectl logs`) ---"
+		kubectl exec -n "$NS" deploy/fast-sandbox-controller -c manager -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			echo "### $pod component logs (/var/log/fast-sandbox)"
+			# Exec through the always-running fastlet-proxy container (it mounts
+			# the same component-log volume): a crash-looping fastlet container
+			# cannot be exec'd into ("container not found").
+			kubectl exec -n "$RESOURCE_NS" "$pod" -c fastlet-proxy -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		done
 		echo "--- firecracker-runtime logs (every pod + container, tail) ---"
 		# `kubectl logs daemonset/...` resolves to ONE pod only, so a wedged
 		# ublkd on the other node stays invisible. Loop the pods instead,
@@ -1187,6 +1220,14 @@ credentials_up() {
 	# Namespaces exist even after a partial up (resume support).
 	kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	kubectl create namespace "$RESOURCE_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	# Component logs (fastlet, fastlet-proxy) go to files under
+	# /var/log/fast-sandbox by default, so a crash-looping fastlet shows an
+	# EMPTY `kubectl logs` — the crash reason only exists inside the pod's
+	# log volume. Tee klog to stderr as well in this environment: the
+	# existing dump/kubectl-logs capture then carries the startup error.
+	kubectl -n "$RESOURCE_NS" create configmap fast-sandbox-logging \
+		--from-literal=logging.yaml='alsoStderr: true' \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	local host
 	host="${RUSTFS_ENDPOINT#http://}"
 	host="${host#https://}"
