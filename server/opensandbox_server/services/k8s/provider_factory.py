@@ -36,12 +36,7 @@ _PROVIDER_REGISTRY: Dict[str, Type[WorkloadProvider]] = {
 }
 
 
-def create_workload_provider(
-    provider_type: str | None,
-    k8s_client: K8sClient,
-    app_config: Optional[AppConfig] = None,
-) -> WorkloadProvider:
-    """Create a workload provider instance by provider type."""
+def _resolve_workload_provider(provider_type: str | None) -> tuple[str, Type[WorkloadProvider]]:
     if provider_type is None:
         if not _PROVIDER_REGISTRY:
             raise ValueError(
@@ -49,7 +44,7 @@ def create_workload_provider(
                 "Cannot create a default provider."
             )
         provider_type = next(iter(_PROVIDER_REGISTRY.keys()))
-        logger.info(f"No provider specified, using default: {provider_type}")
+        logger.debug(f"No provider specified, using default: {provider_type}")
 
     provider_type_lower = provider_type.lower()
 
@@ -60,10 +55,25 @@ def create_workload_provider(
             f"Available providers: {available}"
         )
 
-    provider_class = _PROVIDER_REGISTRY[provider_type_lower]
+    return provider_type_lower, _PROVIDER_REGISTRY[provider_type_lower]
+
+
+def get_workload_provider_class(provider_type: str | None) -> Type[WorkloadProvider]:
+    """Resolve a registered WorkloadProvider class by provider type."""
+    _, provider_class = _resolve_workload_provider(provider_type)
+    return provider_class
+
+
+def create_workload_provider(
+    provider_type: str | None,
+    k8s_client: K8sClient,
+    app_config: Optional[AppConfig] = None,
+) -> WorkloadProvider:
+    """Create a workload provider instance by provider type."""
+    resolved_type, provider_class = _resolve_workload_provider(provider_type)
     logger.info(f"Creating workload provider: {provider_class.__name__}")
 
-    if provider_type_lower in (PROVIDER_TYPE_BATCHSANDBOX, PROVIDER_TYPE_AGENT_SANDBOX):
+    if resolved_type in (PROVIDER_TYPE_BATCHSANDBOX, PROVIDER_TYPE_AGENT_SANDBOX):
         return provider_class(k8s_client, app_config=app_config)
 
     return provider_class(k8s_client)

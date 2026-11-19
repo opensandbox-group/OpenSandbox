@@ -198,6 +198,7 @@ def create_snapshot_runtime(
             k8s_client,
             namespace=namespace,
             postgresql_ha_enabled=active_config.store.type == "postgresql",
+            workload_provider_type=kubernetes_config.workload_provider,
         )
         # fsb sandboxes (fsb-*) coexist with pod sandboxes under the same
         # Kubernetes-mode server; their snapshots go through FastPath. Both

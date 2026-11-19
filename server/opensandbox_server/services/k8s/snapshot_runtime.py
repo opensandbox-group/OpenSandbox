@@ -26,6 +26,7 @@ from uuid import UUID
 
 from kubernetes.client import ApiException
 
+from opensandbox_server.services.k8s.provider_factory import PROVIDER_TYPE_BATCHSANDBOX
 from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
@@ -81,23 +82,34 @@ class KubernetesSnapshotRuntime:
         *,
         namespace: str,
         postgresql_ha_enabled: bool = False,
+        workload_provider_type: str | None = None,
     ) -> None:
         self._k8s_client = k8s_client
         self._namespace = namespace
         self._postgresql_ha_enabled = postgresql_ha_enabled
+        self._workload_provider_type = (
+            workload_provider_type.lower()
+            if workload_provider_type is not None
+            else PROVIDER_TYPE_BATCHSANDBOX
+        )
         self._snapshot_namespaces: dict[str, str] = {}
         self._watched_namespaces: set[str] = set()
         self._watch_lock = Lock()
         self._on_change: Optional[Callable[[str, str], None]] = None
 
     def supports_create_snapshot(self) -> bool:
-        return True
+        return self._workload_provider_type == PROVIDER_TYPE_BATCHSANDBOX
 
     def supports_synchronous_create(self) -> bool:
         return True
 
     def create_snapshot_unsupported_message(self) -> str:
-        return ""
+        if self.supports_create_snapshot():
+            return ""
+        return (
+            "Kubernetes snapshots are only supported when workload_provider is "
+            f"'{PROVIDER_TYPE_BATCHSANDBOX}' (configured: '{self._workload_provider_type}')."
+        )
 
     def preflight_create_snapshot(
         self,
@@ -106,6 +118,10 @@ class KubernetesSnapshotRuntime:
         namespace: str | None = None,
         mode: str | None = None,
     ) -> None:
+        if not self.supports_create_snapshot():
+            raise SnapshotRuntimeUnsupportedError(
+                self.create_snapshot_unsupported_message()
+            )
         reject_rootfs_only_mode(
             "Kubernetes rootfs snapshot commits are full-only", mode
         )
@@ -171,6 +187,12 @@ class KubernetesSnapshotRuntime:
         namespace: str | None = None,
         mode: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
+        if not self.supports_create_snapshot():
+            return SnapshotRuntimeStatus(
+                state=SnapshotState.FAILED,
+                reason="snapshot_runtime_unsupported",
+                message=self.create_snapshot_unsupported_message(),
+            )
         del mode  # rootfsOnly is rejected in preflight; rootfs commits are full.
         snapshot_name = build_public_snapshot_name(snapshot_id)
         ns = namespace if namespace is not None else self._namespace
@@ -304,6 +326,8 @@ class KubernetesSnapshotRuntime:
         reconciling LIST item invokes the callback. Callbacks run on informer
         threads and must be cheap and thread-safe.
         """
+        if not self.supports_create_snapshot():
+            return
         with self._watch_lock:
             self._on_change = on_change
         for namespace in sorted({*(ns for ns in namespaces if ns), self._namespace}):

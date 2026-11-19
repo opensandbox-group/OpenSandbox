@@ -3326,3 +3326,38 @@ spec:
                 "subPath": "user1",
             },
         ]
+
+    def test_validate_create_request_pool_api_error_raises_500(self, mock_k8s_client):
+        from fastapi import HTTPException
+        from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.constants import SandboxErrorCodes
+
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.side_effect = RuntimeError("apiserver down")
+
+        with pytest.raises(HTTPException) as exc_info:
+            provider.validate_create_request(
+                CreateSandboxRequest(extensions={"poolRef": "my-pool"}),
+                "test-ns",
+            )
+
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_POOL_API_ERROR
+
+    def test_pool_spi_hooks_return_batchsandbox_implementations(self, mock_k8s_client):
+        from opensandbox_server.services.k8s.pool_service import PoolService
+
+        provider = BatchSandboxProvider(mock_k8s_client)
+        assert isinstance(provider.create_pool_service("test-ns"), PoolService)
+        workload = {
+            "metadata": {
+                "annotations": {
+                    "sandbox.opensandbox.io/alloc-status": '{"pods":["pod-1"],"poolRef":"pool-a"}'
+                },
+                "finalizers": ["pool.sandbox.opensandbox.io/pool-allocation"],
+            },
+            "spec": {"poolRef": "pool-a"},
+            "status": {"allocated": 1},
+        }
+        assert provider.get_allocation(workload).pool_ref == "pool-a"
+        assert provider.get_allocated_pod_names(workload) == ["pod-1"]

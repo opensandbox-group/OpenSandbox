@@ -121,7 +121,9 @@ def test_find_pod_uses_label_selector_and_maps_errors() -> None:
 def _pooled_service(
     pod_names: list[str], released: list[str] | None = None
 ) -> _DiagnosticsService:
-    """A service whose sandbox has no labelled pod but a pool allocation."""
+    """A service whose sandbox has no labelled pod but a BatchSandbox pool allocation."""
+    from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
     annotations = {
         "sandbox.opensandbox.io/alloc-status": json.dumps(
             {"pods": pod_names, "poolRef": "pool-a"}
@@ -130,11 +132,32 @@ def _pooled_service(
     if released is not None:
         annotations["sandbox.opensandbox.io/alloc-release"] = json.dumps({"pods": released})
     service = _DiagnosticsService([])
+    batch_provider = BatchSandboxProvider(service.k8s_client)
     service.workload_provider = MagicMock()
     service.workload_provider.get_workload.return_value = {
         "metadata": {"annotations": annotations},
     }
+    service.workload_provider.get_allocated_pod_names.side_effect = (
+        batch_provider.get_allocated_pod_names
+    )
     return service
+
+
+def test_find_pod_uses_custom_provider_allocated_pod_names() -> None:
+    service = _DiagnosticsService([])
+    service.workload_provider = MagicMock()
+    service.workload_provider.get_workload.return_value = {
+        "metadata": {"name": "sbx-1"},
+        "status": {"podName": "sandboxset-pod-9"},
+    }
+    service.workload_provider.get_allocated_pod_names.side_effect = (
+        lambda w: [w["status"]["podName"]]
+    )
+    pool_pod = _pod()
+    service.k8s_client.read_pod.return_value = pool_pod
+
+    assert service._find_pod_for_sandbox("sbx-1") is pool_pod
+    service.k8s_client.read_pod.assert_called_once_with("sandbox-system", "sandboxset-pod-9")
 
 
 def test_find_pod_falls_back_to_pool_allocation() -> None:
