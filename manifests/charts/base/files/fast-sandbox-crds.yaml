@@ -1390,6 +1390,15 @@ spec:
                 - Succeeded
                 - Failed
                 type: string
+              resourceLimits:
+                description: ResourceLimits records the admitted limits bundled with
+                  the published artifact.
+                properties:
+                  cpu:
+                    type: string
+                  memory:
+                    type: string
+                type: object
               sandboxUID:
                 description: SandboxUID is the UID of the snapshotted Sandbox incarnation.
                 type: string
