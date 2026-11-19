@@ -55,7 +55,7 @@ Flags for adapter and router:
   --config string   JSON configuration file (optional)
   --listen string   listen address; overrides E2B_SHIM_LISTEN and the file
 
-See docs/guides/e2b-compatibility.md for configuration.
+See components/e2b-shim/README.md for configuration.
 `
 
 func main() {
