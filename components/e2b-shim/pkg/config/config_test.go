@@ -181,16 +181,41 @@ func TestLoadListenFlagSkipsLowerPrioritySources(t *testing.T) {
 	}
 }
 
+func TestLoadBoundaryValues(t *testing.T) {
+	env := requiredEnv()
+	env["E2B_SHIM_LISTEN"] = ":0"
+	env["E2B_SHIM_NATIVE_API_URL"] = "https://[::1]:65535/v1"
+	env["E2B_SHIM_TIMEOUT_MIN_SECONDS"] = "9223372036"
+	env["E2B_SHIM_TIMEOUT_DEFAULT_SECONDS"] = "9223372036"
+	env["E2B_SHIM_TIMEOUT_MAX_SECONDS"] = "9223372036"
+	cfg := mustLoad(t, config.Source{}, env)
+	if cfg.Listen != ":0" || cfg.NativeAPIURL != "https://[::1]:65535/v1" {
+		t.Errorf("listen = %q, native API URL = %q", cfg.Listen, cfg.NativeAPIURL)
+	}
+	if cfg.TimeoutMinSeconds != 9223372036 || cfg.TimeoutDefaultSeconds != 9223372036 || cfg.TimeoutMaxSeconds != 9223372036 {
+		t.Errorf("timeouts = %d, %d, %d", cfg.TimeoutMinSeconds, cfg.TimeoutDefaultSeconds, cfg.TimeoutMaxSeconds)
+	}
+}
+
+func TestLoadNullAliases(t *testing.T) {
+	file := strings.Replace(validFile, `"aliases": ["base-envd"]`, `"aliases": null`, 1)
+	cfg := mustLoad(t, config.Source{Path: writeConfig(t, file)}, nil)
+	if len(cfg.Templates) != 1 || len(cfg.Templates[0].Aliases) != 0 {
+		t.Errorf("templates = %+v, want one mapping with no aliases", cfg.Templates)
+	}
+}
+
 func TestLoadFailures(t *testing.T) {
 	dir := t.TempDir()
 	cases := []struct {
-		name    string
-		file    string
-		env     map[string]string
-		listen  *string
-		wantErr string
+		name      string
+		file      string
+		env       map[string]string
+		listen    *string
+		wantErr   string
+		doNotEcho string
 	}{
-		{name: "missing config file", file: filepath.Join(dir, "nope.json"), wantErr: "config file:"},
+		{name: "missing config file", file: filepath.Join(dir, "nope.json"), wantErr: "config file: is not readable", doNotEcho: "nope.json"},
 		{name: "unknown field", file: `{"bogus": 1}`, wantErr: `unknown field "bogus"`},
 		{name: "trailing data", file: validFile + " {}", wantErr: "unexpected data after JSON value"},
 		{name: "incomplete JSON", file: `{`, wantErr: "incomplete JSON"},
@@ -234,6 +259,35 @@ func TestLoadFailures(t *testing.T) {
 		{name: "empty alias", file: `{"templates":[{"template_id":"b","aliases":[""],"native_template_id":"t","revision":"r","expected_envd_version":"0.8.0"}]}`, wantErr: "templates[0].aliases[0]: must not be empty"},
 		{name: "empty templates env", env: map[string]string{"E2B_SHIM_TEMPLATES": ""}, wantErr: "E2B_SHIM_TEMPLATES"},
 		{name: "null templates env", env: map[string]string{"E2B_SHIM_TEMPLATES": "null"}, wantErr: "E2B_SHIM_TEMPLATES: must not be null"},
+		{name: "null config file", file: " \nnull\t", wantErr: "config file: must not be null"},
+		{name: "null template element in file", file: `{"templates": [null]}`, wantErr: "templates[0]: must not be null"},
+		{name: "null template element in env", env: map[string]string{"E2B_SHIM_TEMPLATES": `[{}, null]`}, wantErr: "templates[1]: must not be null"},
+		{name: "listen port out of range", file: `{"listen": "127.0.0.1:99999"}`, wantErr: "listen: port must be a decimal number", doNotEcho: "99999"},
+		{name: "listen host whitespace", file: `{"listen": "foo bar:8080"}`, wantErr: "listen: host may contain only", doNotEcho: "foo bar"},
+		{name: "listen host punctuation", file: `{"listen": "!!:8080"}`, wantErr: "listen: host may contain only"},
+		{name: "prefix backslash", file: `{"compat_prefix": "/compat\\e2b"}`, wantErr: "compat_prefix: must not contain percent-encoding"},
+		{name: "prefix whitespace", file: `{"compat_prefix": "/compat/e2 b"}`, wantErr: "compat_prefix: must not contain percent-encoding"},
+		{name: "prefix control character", file: `{"compat_prefix": "/compat/e2b\u0000"}`, wantErr: "compat_prefix: must not contain percent-encoding"},
+		{name: "native url parse error", file: `{"native_api_url": "https://user:pass@native.example/%zz"}`, wantErr: "native_api_url: is not a valid URL", doNotEcho: "native.example"},
+		{name: "native url opaque", file: `{"native_api_url": "http:opaque"}`, wantErr: "native_api_url: must be a hierarchical URL"},
+		{name: "native url force query", file: `{"native_api_url": "https://native.example/?"}`, wantErr: "native_api_url: must not contain a query"},
+		{name: "native url port out of range", file: `{"native_api_url": "https://native.example:65536/v1"}`, wantErr: "native_api_url: port must be a number between 1 and 65535", doNotEcho: "65536"},
+		{name: "native url port zero", file: `{"native_api_url": "https://native.example:0"}`, wantErr: "native_api_url: port must be a number between 1 and 65535"},
+		{name: "native url empty explicit port", file: `{"native_api_url": "https://native.example:/v1"}`, wantErr: "native_api_url: port must be a number between 1 and 65535"},
+		{name: "adapter id whitespace", env: map[string]string{"E2B_SHIM_ADAPTER_ID": " "}, wantErr: "adapter_id: must not be empty or contain whitespace"},
+		{name: "adapter id control character", file: `{"adapter_id": "adapter\u0000"}`, wantErr: "adapter_id: must not be empty or contain whitespace"},
+		{name: "hmac key version whitespace", env: map[string]string{"E2B_SHIM_HMAC_KEY_VERSION": "v1\n"}, wantErr: "hmac_key_version: must not be empty or contain whitespace"},
+		{name: "hmac key version control character", file: `{"hmac_key_version": "v1\u0000"}`, wantErr: "hmac_key_version: must not be empty or contain whitespace"},
+		{name: "domain contains port", file: `{"domain": "sandbox.example:443"}`, wantErr: "domain: must be a host name", doNotEcho: "sandbox.example"},
+		{name: "domain control character", file: `{"domain": "sandbox.example\u0000"}`, wantErr: "domain: must be a host name"},
+		{name: "timeout min overflows duration", file: `{"timeout_min_seconds": 9223372037}`, wantErr: "timeout_min_seconds: exceeds the maximum representable time.Duration", doNotEcho: "9223372037"},
+		{name: "timeout default overflows duration", file: `{"timeout_default_seconds": 9223372037}`, wantErr: "timeout_default_seconds: exceeds the maximum representable time.Duration"},
+		{name: "timeout max overflows duration", file: `{"timeout_max_seconds": 9223372037}`, wantErr: "timeout_max_seconds: exceeds the maximum representable time.Duration"},
+		{name: "template id whitespace", file: strings.Replace(validFile, `"template_id": "base"`, `"template_id": "base "`, 1), wantErr: "templates[0].template_id: must not contain whitespace or control characters"},
+		{name: "template alias control character", file: strings.Replace(validFile, `"base-envd"`, `"base-envd\u0000"`, 1), wantErr: "templates[0].aliases[0]: must not contain whitespace or control characters"},
+		{name: "native template id whitespace", file: strings.Replace(validFile, `"tpl-base"`, `"tpl base"`, 1), wantErr: "templates[0].native_template_id: must not contain whitespace or control characters"},
+		{name: "template revision control character", file: strings.Replace(validFile, `"tpl-base@rev-1"`, `"tpl-base@rev-1\u0000"`, 1), wantErr: "templates[0].revision: must not contain whitespace or control characters"},
+		{name: "expected envd version whitespace", file: strings.Replace(validFile, `"0.8.0"`, `"0.8.0 "`, 1), wantErr: "templates[0].expected_envd_version: must not contain whitespace or control characters"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -250,6 +304,9 @@ func TestLoadFailures(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "user:pass") {
 				t.Error("error leaks native URL user info")
+			}
+			if tc.doNotEcho != "" && strings.Contains(err.Error(), tc.doNotEcho) {
+				t.Errorf("error echoes an input value: %q", err)
 			}
 		})
 	}

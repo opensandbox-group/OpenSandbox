@@ -106,12 +106,21 @@ func serve(ctx context.Context, role string, args []string, stdout, stderr io.Wr
 		return exitUsage
 	}
 
-	src := config.Source{Path: *configPath, LookupEnv: lookupEnv}
+	src := config.Source{LookupEnv: lookupEnv}
+	configSet := false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "listen" {
+		switch f.Name {
+		case "config":
+			configSet = true
+			src.Path = *configPath
+		case "listen":
 			src.Listen = listen
 		}
 	})
+	if configSet && src.Path == "" {
+		_, _ = fmt.Fprintf(stderr, "e2b-shim %s: --config must not be empty\n", role)
+		return exitUsage
+	}
 	cfg, err := config.Load(src)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "e2b-shim %s: invalid configuration:\n%v\n", role, err)
@@ -120,7 +129,14 @@ func serve(ctx context.Context, role string, args []string, stdout, stderr io.Wr
 
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "e2b-shim %s: listen failed: %v\n", role, err)
+		// Report the cause (for example "bind: address already in use")
+		// without the address that net.OpError would include.
+		cause := ""
+		var opErr *net.OpError
+		if errors.As(err, &opErr) && opErr.Err != nil {
+			cause = ": " + opErr.Err.Error()
+		}
+		_, _ = fmt.Fprintf(stderr, "e2b-shim %s: listen failed%s\n", role, cause)
 		return exitError
 	}
 	logger := slog.New(slog.NewTextHandler(stderr, nil))

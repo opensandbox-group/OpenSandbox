@@ -127,10 +127,10 @@ func Load(src Source) (*Config, error) {
 	if src.Path != "" {
 		data, err := os.ReadFile(src.Path)
 		if err != nil {
-			return nil, fmt.Errorf("config file: %w", err)
+			return nil, errors.New("config file: is not readable")
 		}
-		if err := strictUnmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf("config file: %w", err)
+		if err := decodeStrict("config file", data, &raw); err != nil {
+			return nil, err
 		}
 		known := knownKeys()
 		for k := range raw {
@@ -172,12 +172,12 @@ func Load(src Source) (*Config, error) {
 		}
 	}
 	if v, ok := lookupEnv(templatesEnv); ok {
-		if err := decodeTemplates([]byte(v), &cfg.Templates); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %s: %w", templatesKey, templatesEnv, err))
+		if err := decodeTemplates(templatesKey+": "+templatesEnv, []byte(v), &cfg.Templates); err != nil {
+			errs = append(errs, err)
 		}
 	} else if msg, ok := raw[templatesKey]; ok {
-		if err := decodeTemplates(msg, &cfg.Templates); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", templatesKey, err))
+		if err := decodeTemplates(templatesKey, msg, &cfg.Templates); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if len(errs) > 0 {
@@ -208,13 +208,17 @@ func decodeStrict(key string, msg json.RawMessage, dst any) error {
 	return nil
 }
 
-func decodeTemplates(data []byte, dst *[]TemplateMapping) error {
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return errors.New("must not be null")
-	}
-	var out []TemplateMapping
-	if err := strictUnmarshal(data, &out); err != nil {
+func decodeTemplates(field string, data []byte, dst *[]TemplateMapping) error {
+	var entries []*TemplateMapping
+	if err := decodeStrict(field, data, &entries); err != nil {
 		return err
+	}
+	out := make([]TemplateMapping, len(entries))
+	for i, entry := range entries {
+		if entry == nil {
+			return fmt.Errorf("%s[%d]: must not be null", templatesKey, i)
+		}
+		out[i] = *entry
 	}
 	*dst = out
 	return nil

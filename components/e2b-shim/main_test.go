@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"net"
 	"strings"
 	"testing"
 )
@@ -119,5 +120,38 @@ func TestRunInvalidListenDoesNotListen(t *testing.T) {
 	}
 	if strings.Contains(errOut.String(), "listening") {
 		t.Error("server started listening despite an invalid listen address")
+	}
+}
+
+func TestRunExplicitEmptyConfig(t *testing.T) {
+	var out, errOut bytes.Buffer
+	lookupEnv := func(string) (string, bool) {
+		t.Error("environment read despite invalid --config flag")
+		return "", false
+	}
+	code := run(context.Background(), []string{"adapter", "--config", ""}, &out, &errOut, lookupEnv)
+	if code != exitUsage {
+		t.Errorf("exit code = %d, want %d", code, exitUsage)
+	}
+	if !strings.Contains(errOut.String(), "--config must not be empty") {
+		t.Errorf("stderr = %q, want an empty flag error", errOut.String())
+	}
+}
+
+func TestRunListenErrorDoesNotEchoAddress(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	addr := ln.Addr().String()
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), []string{"router"}, &out, &errOut, lookup(serveEnv(addr)))
+	if code != exitError {
+		t.Errorf("exit code = %d, want %d", code, exitError)
+	}
+	stderr := errOut.String()
+	if !strings.Contains(stderr, "listen failed: bind:") || strings.Contains(stderr, addr) {
+		t.Errorf("stderr = %q, want the bind cause without the address", stderr)
 	}
 }

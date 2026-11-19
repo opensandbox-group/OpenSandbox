@@ -31,11 +31,11 @@ make build
 ./bin/e2b-shim adapter --config ./e2b-shim.json
 ```
 
-`--listen` overrides the listen address from the environment and the file. `SIGINT` and `SIGTERM` stop the server with a bounded graceful shutdown.
+`--listen` overrides the listen address from the environment and the file. An explicitly empty `--config` is a usage error (exit code `2`). `SIGINT` and `SIGTERM` stop the server with a bounded graceful shutdown.
 
 ## Configuration file
 
-The file is JSON. Unknown fields, `null` field values, and trailing data are rejected. Scalar settings are decoded after applying overrides. Decode errors are reported before semantic validation errors.
+The file must contain a JSON object. The loader rejects unknown fields, trailing data, and `null` for top-level fields. Scalar settings are decoded after applying overrides. Decode errors are reported before semantic validation errors.
 
 ```json
 {
@@ -62,20 +62,20 @@ The file is JSON. Unknown fields, `null` field values, and trailing data are rej
 
 | Field | Required | Default | Rules |
 |---|---|---|---|
-| `listen` | No | `127.0.0.1:8080` | `host:port` with a numeric port `0`–`65535`. An empty host listens on all interfaces. |
-| `compat_prefix` | No | `/compat/e2b` | Absolute path, not `/`. One trailing `/` is removed. No query, fragment, `%`, `\`, whitespace, empty segment (`//`), `.` or `..` segment. Must not be `/healthz` or start with `/healthz/`. |
-| `native_api_url` | Yes | — | `http` or `https` with a host. A base path such as `/v1` is allowed. No user info, query, or fragment. The scaffold does not connect to it. |
-| `adapter_id` | Yes | — | Non-empty deployment identity, reserved for the future E2B `clientID`. |
-| `domain` | No | empty | Host name only; must not contain `/`, `?`, `#`, `@`, or whitespace. |
-| `hmac_key_version` | Yes | — | Non-empty label for the HMAC key configuration. |
+| `listen` | No | `127.0.0.1:8080` | `host:port` with a decimal port `0`–`65535`. The host may contain letters, digits, and `.-_:[]`. An empty host listens on all interfaces. |
+| `compat_prefix` | No | `/compat/e2b` | Absolute path below `/`. One trailing `/` is removed. Disallows queries, fragments, `%`, `\`, whitespace, control characters, and empty, `.` or `..` segments. Must not be `/healthz` or start with `/healthz/`. |
+| `native_api_url` | Yes | — | Hierarchical `http` or `https` URL with a host. A base path such as `/v1` is allowed. An explicit port must be `1`–`65535`. No user info, query, or fragment. The scaffold does not connect to it. |
+| `adapter_id` | Yes | — | Non-empty deployment identity for the future E2B `clientID`. Whitespace and control characters are disallowed. |
+| `domain` | No | empty | Bare host name. Disallows `/`, `?`, `#`, `@`, `:`, whitespace, and control characters. |
+| `hmac_key_version` | Yes | — | Non-empty HMAC key configuration label. Whitespace and control characters are disallowed. |
 | `timeout_default_seconds` | No | `300` | Integer. Omitted-timeout create default reserved for later stages. |
 | `timeout_min_seconds` | No | `60` | Integer, at least `1`. |
 | `timeout_max_seconds` | Yes | — | Integer. Copy it explicitly from the native deployment; the scaffold does not verify it against the native server. |
 | `templates` | No | `[]` | See below. An empty list means no template is available. |
 
-Timeouts must satisfy `timeout_min_seconds` ≤ `timeout_default_seconds` ≤ `timeout_max_seconds`. Values are integers; fractions, strings, and booleans are rejected rather than converted. The scaffold does not apply any request-level timeout rule.
+Timeouts must be integer seconds and satisfy `timeout_min_seconds` ≤ `timeout_default_seconds` ≤ `timeout_max_seconds`. Each value must fit in a Go `time.Duration` after conversion to nanoseconds (at most `9223372036` seconds). The scaffold does not apply any request-level timeout rule.
 
-Each template mapping requires a non-empty `template_id`, `native_template_id`, `revision`, and `expected_envd_version`; `aliases` is optional; omitting it or setting it to `null` means an empty list. Template IDs and aliases share one selector namespace and must be unique across all mappings, and each `revision` must be unique. The scaffold stores mappings only; it does not check template readiness.
+Each element of `templates` must be an object with a non-empty `template_id`, `native_template_id`, `revision`, and `expected_envd_version`. Omitting `aliases` or setting it to `null` means an empty list. Each alias must be non-empty. Whitespace and control characters are disallowed in the four required fields and in aliases. Template IDs and aliases share one selector namespace and must be unique across all mappings. Each `revision` must also be unique. The scaffold stores mappings only; it does not check template readiness.
 
 ## Environment variables
 

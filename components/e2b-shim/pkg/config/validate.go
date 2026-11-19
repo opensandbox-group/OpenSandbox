@@ -17,10 +17,12 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -45,14 +47,14 @@ func (c *Config) Validate() error {
 	if err == nil {
 		c.NativeAPIURL = nativeURL
 	}
-	if c.AdapterID == "" {
-		add(errors.New("adapter_id: must not be empty"))
+	if c.AdapterID == "" || hasWhitespaceOrControl(c.AdapterID) {
+		add(errors.New("adapter_id: must not be empty or contain whitespace or control characters"))
 	}
-	if c.HMACKeyVersion == "" {
-		add(errors.New("hmac_key_version: must not be empty"))
+	if c.HMACKeyVersion == "" || hasWhitespaceOrControl(c.HMACKeyVersion) {
+		add(errors.New("hmac_key_version: must not be empty or contain whitespace or control characters"))
 	}
-	if strings.ContainsFunc(c.Domain, func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune("/?#@", r) }) {
-		add(errors.New("domain: must be a host name without scheme, path, query, fragment or user info"))
+	if strings.ContainsAny(c.Domain, "/?#@:") || hasWhitespaceOrControl(c.Domain) {
+		add(errors.New("domain: must be a host name without scheme, path, query, fragment, user info, port, whitespace or control characters"))
 	}
 	add(c.validateTimeouts())
 	add(validateTemplates(c.Templates))
@@ -60,14 +62,23 @@ func (c *Config) Validate() error {
 }
 
 func validateListen(addr string) error {
-	_, port, err := net.SplitHostPort(addr)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return errors.New("listen: must be host:port")
 	}
 	if n, err := strconv.ParseUint(port, 10, 16); err != nil || strconv.FormatUint(n, 10) != port {
 		return errors.New("listen: port must be a decimal number between 0 and 65535")
 	}
+	if strings.ContainsFunc(host, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !strings.ContainsRune(".-_:[]", r)
+	}) {
+		return errors.New("listen: host may contain only letters, digits and .-_:[]")
+	}
 	return nil
+}
+
+func hasWhitespaceOrControl(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
 }
 
 // normalizePrefix accepts an absolute, unambiguous path below the root and
@@ -80,7 +91,7 @@ func normalizePrefix(p string) (string, error) {
 	if strings.ContainsAny(p, "?#") {
 		return "", errors.New(field + ": must not contain a query or fragment")
 	}
-	if strings.ContainsFunc(p, func(r rune) bool { return r == '%' || r == '\\' || unicode.IsSpace(r) || unicode.IsControl(r) }) {
+	if strings.ContainsAny(p, "%\\") || hasWhitespaceOrControl(p) {
 		return "", errors.New(field + ": must not contain percent-encoding, backslashes, whitespace or control characters")
 	}
 	p = strings.TrimSuffix(p, "/")
@@ -112,6 +123,8 @@ func normalizeNativeURL(raw string) (string, error) {
 	switch {
 	case u.Scheme != "http" && u.Scheme != "https":
 		return "", errors.New(field + ": scheme must be http or https")
+	case u.Opaque != "":
+		return "", errors.New(field + ": must be a hierarchical URL")
 	case u.User != nil:
 		return "", errors.New(field + ": must not contain user info")
 	case u.Host == "" || u.Hostname() == "":
@@ -120,8 +133,12 @@ func normalizeNativeURL(raw string) (string, error) {
 		return "", errors.New(field + ": must not contain a query")
 	case u.Fragment != "" || strings.Contains(raw, "#"):
 		return "", errors.New(field + ": must not contain a fragment")
-	case u.Opaque != "":
-		return "", errors.New(field + ": must be a hierarchical URL")
+	}
+	// Port returns an empty string for both an absent port and an explicit empty port.
+	if port := u.Port(); port != "" || strings.HasSuffix(u.Host, ":") {
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+			return "", errors.New(field + ": port must be a number between 1 and 65535")
+		}
 	}
 	return strings.TrimRight(u.String(), "/"), nil
 }
@@ -143,6 +160,19 @@ func (c *Config) validateTimeouts() error {
 	if c.TimeoutMaxSeconds != 0 && c.TimeoutMinSeconds > c.TimeoutMaxSeconds {
 		errs = append(errs, errors.New("timeout_min_seconds: must not exceed timeout_max_seconds"))
 	}
+	const maxDurationSeconds = math.MaxInt64 / int64(time.Second)
+	for _, f := range []struct {
+		name    string
+		seconds int64
+	}{
+		{"timeout_min_seconds", c.TimeoutMinSeconds},
+		{"timeout_default_seconds", c.TimeoutDefaultSeconds},
+		{"timeout_max_seconds", c.TimeoutMaxSeconds},
+	} {
+		if f.seconds > maxDurationSeconds {
+			errs = append(errs, fmt.Errorf("%s: exceeds the maximum representable time.Duration in seconds", f.name))
+		}
+	}
 	return errors.Join(errs...)
 }
 
@@ -163,6 +193,8 @@ func validateTemplates(ts []TemplateMapping) error {
 		} {
 			if f.v == "" {
 				errs = append(errs, fmt.Errorf("%s.%s: must not be empty", at, f.name))
+			} else if hasWhitespaceOrControl(f.v) {
+				errs = append(errs, fmt.Errorf("%s.%s: must not contain whitespace or control characters", at, f.name))
 			}
 		}
 		for j, sel := range append([]string{t.TemplateID}, t.Aliases...) {
@@ -171,6 +203,9 @@ func validateTemplates(ts []TemplateMapping) error {
 					errs = append(errs, fmt.Errorf("%s.aliases[%d]: must not be empty", at, j-1))
 				}
 				continue
+			}
+			if j > 0 && hasWhitespaceOrControl(sel) {
+				errs = append(errs, fmt.Errorf("%s.aliases[%d]: must not contain whitespace or control characters", at, j-1))
 			}
 			if selectors[sel] {
 				errs = append(errs, fmt.Errorf("%s: duplicate template selector", at))
