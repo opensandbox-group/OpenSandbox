@@ -40,13 +40,23 @@ from opensandbox_server.services.diagnostics import (
 )
 from opensandbox_server.services.k8s.workload_access import _get_owned_workload_or_404
 from opensandbox_server.services.k8s.error_helpers import _build_k8s_api_error
-from opensandbox_server.services.k8s.workload_mapper import (
-    _build_sandbox_from_workload,
-    allocated_pod_names,
-)
+from opensandbox_server.services.k8s.workload_mapper import _build_sandbox_from_workload
 
 if TYPE_CHECKING:
     from opensandbox_server.services.k8s.client import K8sClient
+
+
+def _allocated_pods_from_provider(workload_provider: Any, workload: Any) -> list[str]:
+    """Ask the workload provider for pool-allocated pod names when unlabelled."""
+    if workload is None or workload_provider is None:
+        return []
+    getter = getattr(workload_provider, "get_allocated_pod_names", None)
+    if not callable(getter):
+        return []
+    names = getter(workload)
+    if not isinstance(names, (list, tuple)):
+        return []
+    return [name for name in names if isinstance(name, str) and name]
 
 _SUPPORTED_LOG_SCOPES = ("container", "all")
 logger = logging.getLogger(__name__)
@@ -83,7 +93,9 @@ class K8sDiagnosticsMixin:
             identifiers["workloadName"] = name
         if uid:
             identifiers["workloadUid"] = str(uid)
-        pod_names = allocated_pod_names(workload)
+        pod_names = _allocated_pods_from_provider(
+            getattr(self, "workload_provider", None), workload
+        )
         if len(pod_names) == 1:
             identifiers["podName"] = pod_names[0]
         return DiagnosticContext(
@@ -177,7 +189,7 @@ class K8sDiagnosticsMixin:
                 # Pool-allocated pods don't carry the sandbox ID label.
                 pods = [
                     pod
-                    for name in allocated_pod_names(workload)
+                    for name in _allocated_pods_from_provider(workload_provider, workload)
                     if (pod := self.k8s_client.read_pod(namespace, name)) is not None
                 ]
         except Exception as exc:
@@ -402,9 +414,10 @@ class K8sStartupDiagnosticsMixin:
         )
         if not pods:
             # Pool-allocated pods don't carry the sandbox ID label.
+            workload_provider = getattr(self, "workload_provider", None)
             pods = [
                 pod
-                for name in allocated_pod_names(workload)
+                for name in _allocated_pods_from_provider(workload_provider, workload)
                 if (pod := self.k8s_client.read_pod(namespace, name)) is not None
             ]
 

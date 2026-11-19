@@ -1463,7 +1463,10 @@ class CreateSnapshotRequest(BaseModel):
             "'rootfsOnly' captures only the writable filesystem; restoring "
             "boots a fresh sandbox from the disk, so the entrypoint re-runs "
             "and resume takes seconds instead of milliseconds. 'rootfsOnly' "
-            "requires the fast-sandbox backend with OCI-backed sandboxes."
+            "requires the fast-sandbox backend; other backends reject it "
+            "before any capture starts, and an unqualified fast-sandbox "
+            "node fails the snapshot instead of silently producing a "
+            "full artifact."
         ),
     )
 

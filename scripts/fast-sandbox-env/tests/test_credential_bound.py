@@ -25,6 +25,7 @@ integration workflow.
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -45,8 +46,10 @@ FAKE_PY = os.path.join(HERE, "cbv_fake_backend.py")
 PROFILES = ("firecracker-egress-pool", "firecracker-egress-resource-aware-pool")
 # Pre-change baseline for the byte-for-byte golden comparisons (override with
 # CBV_GOLDEN_BASE; the golden tests skip when the commit is not available,
-# e.g. in a shallow clone).
-GOLDEN_BASE = os.environ.get("CBV_GOLDEN_BASE", "4ae99691ff0a62594614df90a86ecbee07add966")
+# e.g. in a shallow clone). Bump in lockstep with CBV_GOLDEN_BASE in
+# .github/workflows/fast-sandbox-test.yml whenever a stage-list change is
+# intentional — WorkflowBaselineTest enforces the pairing.
+GOLDEN_BASE = os.environ.get("CBV_GOLDEN_BASE", "02be68b5fde9c74d69f5ba69a2dbb97c76f23c06")
 
 
 def find_bash():
@@ -250,8 +253,8 @@ printf 'UNVERIFIED|%s\n' "${STAGE_UNVERIFIED[@]+${STAGE_UNVERIFIED[@]}}"
 
 
 class StageGateTest(ShellCase):
-    def lanes(self, mode, script=ENV_SH):
-        out = self.sourced(LANES, script=script, EGRESS_INTERCEPTION_MODE=mode, OCI_STACK="1").stdout
+    def lanes(self, mode, oci_stack="1", script=ENV_SH):
+        out = self.sourced(LANES, script=script, EGRESS_INTERCEPTION_MODE=mode, OCI_STACK=oci_stack).stdout
         script_dir = os.path.dirname(os.path.abspath(script))
         return [l.replace(script_dir, "<SCRIPT_DIR>") for l in out.splitlines()
                 if l.startswith(("RUN|", "BEGIN|", "UNVERIFIED|", "SOURCE|"))]
@@ -261,13 +264,30 @@ class StageGateTest(ShellCase):
         self.assertEqual(self.lanes("all"), off)
         self.assertTrue(any(l.startswith("RUN|exchange resolver verify") and "|exchange_resolver_verify|tpl-oci" in l
                             for l in off))
-        self.assertFalse(any("credential-bound" in l or l.startswith("BEGIN|") for l in off))
+        self.assertFalse(any(l.startswith("BEGIN|") for l in off))
+        self.assertFalse(any("credential-bound" in l for l in off))
         self.assertIn("UNVERIFIED|", off)
 
     @unittest.skipUnless(git_available(GOLDEN_BASE), "golden baseline commit not available")
     def test_off_stage_list_matches_baseline(self):
         base_sh = materialize_base(GOLDEN_BASE, os.path.join(self.tmp, "base"))
         self.assertEqual(self.lanes(""), self.lanes("", script=base_sh))
+
+    def test_native_rootfs_only_stage_registers_on_the_oci_lane(self):
+        # Both lanes register the stage by default; the native lane publishes
+        # an s3:// manifest, the overlaybd lane an oci:// pair.
+        off = self.lanes("")
+        self.assertIn("RUN|rootfs-only snapshot verify (native template, FSEP-0001)|rootfs_only_verify|tpl-native", off)
+        self.assertIn("RUN|rootfs-only snapshot verify (overlaybd template, FSEP-0001)|rootfs_only_verify|tpl-oci", off)
+
+    def test_native_rootfs_only_stage_skips_without_the_oci_stack(self):
+        # OCI_STACK=0 native-only stacks cannot cold-boot a rootfs-only
+        # artifact: the FSEP-0001 restore kernel is staged on the OCI lane
+        # only, so the native stage must not register — and the overlaybd
+        # lane (the other rootfs-only registration) is a no-op there too.
+        off = self.lanes("", oci_stack="0")
+        self.assertFalse(any("rootfs_only_verify" in l for l in off))
+        self.assertFalse(any("rootfs-only snapshot verify (native template" in l for l in off))
 
     def test_credential_bound_registers_both_lanes_and_runs_exchange(self):
         off = self.lanes("")
@@ -295,6 +315,37 @@ run_stage "other stage" true
 stage_summary
 printf 'ORDER|%s\n' "${STAGE_ORDER[@]}"
 '''
+
+LANE = r'''
+# Set after the source: the script's top-level OCI_TEMPLATE_ID="" init wipes
+# any ambient value (the same order verify_native itself runs under).
+OCI_TEMPLATE_ID=%(oci_template_id)s
+LANE_TEMPLATE_ID=%(template_id)s
+read -r lane scheme <<< "$(rootfs_only_lane "$LANE_TEMPLATE_ID")"
+printf '%%s|%%s\n' "$lane" "$scheme"
+'''
+
+
+@unittest.skipUnless(BASH, "bash >= 4 is required to source the env scripts")
+class RootfsOnlyLaneTest(ShellCase):
+    """rootfs_only_lane picks the durable-artifact assertion for
+    rootfs_only_verify: oci:// on the overlaybd lane, s3:// on native."""
+
+    def lane(self, template_id, oci_template_id=""):
+        body = LANE % {"oci_template_id": shlex.quote(oci_template_id),
+                       "template_id": shlex.quote(template_id)}
+        return self.sourced(body).stdout.strip()
+
+    def test_explicit_oci_template_selects_the_overlaybd_lane(self):
+        self.assertEqual(self.lane("tpl-oci", oci_template_id="tpl-oci"), "overlaybd|oci://")
+
+    def test_native_template_selects_the_native_lane(self):
+        self.assertEqual(self.lane("tpl-native", oci_template_id="tpl-oci"), "native|s3://")
+
+    def test_empty_oci_template_id_selects_the_native_lane(self):
+        # Native-only stacks leave OCI_TEMPLATE_ID empty (the script
+        # initializes it to ""), so the lane must default to native.
+        self.assertEqual(self.lane("tpl-native"), "native|s3://")
 
 
 class StageSummaryTest(ShellCase):

@@ -566,6 +566,75 @@ func TestFastSandboxSubjectExchangeResolveAdmission(t *testing.T) {
 	require.Empty(t, resolver.requests)
 }
 
+// Fast-sandbox exchange currently fences the entire acknowledged decision
+// identity at the end of a resolver round trip. Even a policy-only update,
+// which leaves the Vault revision intact, invalidates an in-flight exchange.
+// This pins the documented limitation until exchange admission can retain
+// proven pre-transition authority without crossing a Vault incarnation.
+func TestFastSandboxSubjectExchangePolicyOnlyUpdateInvalidatesInFlight(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	mutationPersistence(t, s)
+	readinessDrain(t, s)
+	readinessReceiver(t, s)
+	subj := bindExchangeSubject(t, s, testUID, "exchange-sandbox", testIP, testFenceR, testFenceA, 1)
+	resolver := startFakeResolverServer(t, 0)
+	release := make(chan struct{})
+	resolver.release = release
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	rec := doVault(t, s, http.MethodPost, testUID, exchangeVaultBody(resolver.endpoint()), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	fence := subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA}
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.subjectSnapshotAcknowledgedLocked(subj, fence)
+	}, 5*time.Second, 5*time.Millisecond)
+	s.mu.Lock()
+	admission := credentialvault.ResolveAdmission{SubjectKey: string(subj), Revision: s.subjectDrain.acked[subj].identity}
+	s.mu.Unlock()
+	raw, err := json.Marshal(admission)
+	require.NoError(t, err)
+	req := exchangeResolveRequest(testIP)
+	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result := httptest.NewRecorder()
+		resolveHandlerFor(s).ServeHTTP(result, req)
+		done <- result
+	}()
+	select {
+	case <-resolver.requests: // The resolver has accepted the pre-update request.
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolver was not called")
+	}
+	rec = doPolicy(t, s, http.MethodPut, testUID, policyPutDoc(policyAllow(), 0, false, false), "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.subjectSnapshotAcknowledgedLocked(subj, fence) &&
+			s.subjectDrain.acked[subj].identity.PolicyEpoch > admission.Revision.PolicyEpoch
+	}, 5*time.Second, 5*time.Millisecond)
+	s.mu.Lock()
+	current := s.subjectDrain.acked[subj].identity
+	s.mu.Unlock()
+	require.Equal(t, admission.Revision.VaultRevision, current.VaultRevision, "a policy-only write preserves the Vault revision")
+	close(release)
+	select {
+	case result := <-done:
+		require.Equal(t, http.StatusConflict, result.Code, result.Body.String())
+		require.Equal(t, "resolution invalidated", strings.TrimSpace(result.Body.String()))
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight resolve did not complete")
+	}
+}
+
 // The addon pins the receiver's wire identity, not the coordinator-local
 // decision epoch. A rebind in the same child advances the transport's epoch
 // base, so an ACK stamped with the local identity denies every valid resolve.

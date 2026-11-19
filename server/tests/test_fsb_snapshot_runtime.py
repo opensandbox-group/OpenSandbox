@@ -40,7 +40,6 @@ from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
     SNAPSHOT_CREATE_CONFLICT_REASON,
     SnapshotRuntimePreflightError,
-    SnapshotRuntimeUnsupportedError,
 )
 from opensandbox_server.services.snapshot_service import PersistedSnapshotService
 
@@ -358,25 +357,12 @@ def test_create_snapshot_oci_source_omits_template_name() -> None:
     assert request.template_name == ""
 
 
-def test_preflight_rejects_rootfs_only_for_non_oci_source() -> None:
+def test_preflight_accepts_rootfs_only_for_native_source() -> None:
     runtime, _, _ = _runtime()  # default source image is native
 
-    with pytest.raises(SnapshotRuntimeUnsupportedError):
-        runtime.preflight_create_snapshot(
-            SANDBOX_ID, namespace="default", mode="rootfsOnly"
-        )
-
-
-def test_preflight_rejects_rootfs_only_when_source_cr_is_unreadable() -> None:
-    fastpath = FakeFastPathClient()
-    k8s = WatchRecordingK8sClient()
-    k8s.sandbox_cr_error = RuntimeError("connection refused")
-    runtime, _, _ = _runtime(fastpath=fastpath, k8s=k8s)
-
-    with pytest.raises(SnapshotRuntimeUnsupportedError):
-        runtime.preflight_create_snapshot(
-            SANDBOX_ID, namespace="default", mode="rootfsOnly"
-        )
+    # Native (S3 artifact) sandboxes take the same preflight as OCI ones:
+    # mode compatibility is gated authoritatively by fast-sandbox.
+    runtime.preflight_create_snapshot(SANDBOX_ID, namespace="default", mode="rootfsOnly")
 
 
 def test_preflight_accepts_rootfs_only_for_oci_source() -> None:
@@ -399,6 +385,20 @@ def test_create_snapshot_passes_rootfs_only_mode() -> None:
     assert status.state == SnapshotState.CREATING
     assert status.mode == "rootfsOnly"
     assert fastpath.create_requests[0].mode == pb2.SNAPSHOT_MODE_ROOTFS_ONLY
+
+
+def test_create_snapshot_passes_rootfs_only_mode_for_native_source() -> None:
+    # Native publishes under the template-name index key, so a native
+    # rootfsOnly request must carry both the mode and the template name.
+    runtime, fastpath, _ = _runtime()  # default source image is native
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, mode="rootfsOnly")
+
+    assert status.state == SnapshotState.CREATING
+    assert status.mode == "rootfsOnly"
+    request = fastpath.create_requests[0]
+    assert request.mode == pb2.SNAPSHOT_MODE_ROOTFS_ONLY
+    assert request.template_name == build_public_snapshot_name(SNAPSHOT_ID)
 
 
 def test_create_snapshot_leaves_mode_unspecified_by_default() -> None:
