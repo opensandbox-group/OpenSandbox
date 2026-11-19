@@ -101,6 +101,26 @@ CREDENTIAL_RESOLVER_TIMEOUT_BOUNDS = (1, 120)
 DEFAULT_CREDENTIAL_RESOLVER_CONCURRENCY = 32
 CREDENTIAL_RESOLVER_CONCURRENCY_BOUNDS = (1, 1024)
 MAX_RESOLVE_RESPONSE_BYTES = 256 * 1024
+# Forwarded request headers for exchange resolves: structural/hop-by-hop
+# fields are excluded, and the caps mirror the Go `_resolve` endpoint — the
+# addon fails closed on all of them first, payload size included.
+MAX_RESOLVE_REQUEST_BYTES = 64 * 1024
+MAX_RESOLVE_REQUEST_HEADERS = 64
+MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES = 8 * 1024
+RESOLVE_REQUEST_HEADER_DENYLIST = {
+    "host",
+    "content-length",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "upgrade",
+    "te",
+    "trailer",
+    "expect",
+    "proxy-connection",
+    "proxy-authorization",
+    "proxy-authenticate",
+}
 FLOW_REDACTIONS_KEY = "opensandbox_credential_redactions"
 FLOW_BINDING_KEY = "opensandbox_credential_binding"
 FLOW_VAULT_REDACTIONS_KEY = "opensandbox_credential_vault_redactions"
@@ -1234,6 +1254,34 @@ def _request_path(flow: http.HTTPFlow) -> str:
     return path.split("?", 1)[0] or "/"
 
 
+def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
+    """Select the outbound headers a resolver may bind its proof to.
+
+    Everything except the structural denylist, lowercased. Field lines come
+    from ``items(multi=True)``. A forwarded identity must appear exactly once:
+    the payload carries a single value while mitmproxy forwards every line
+    upstream, so a repeated (or case-variant) identity would let the resolver
+    sign a value the upstream cannot reconstruct. Over-cap fails closed.
+    """
+    selected: dict[str, str] = {}
+    lines: dict[str, int] = {}
+    for name, value in flow.request.headers.items(multi=True):
+        lowered = name.lower()
+        if lowered in RESOLVE_REQUEST_HEADER_DENYLIST:
+            continue
+        lines[lowered] = lines.get(lowered, 0) + 1
+        if not name or not value:
+            continue
+        if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
+            raise CredentialResolveError("resolve_header_too_long")
+        selected[lowered] = value
+    if any(count > 1 for count in lines.values()):
+        raise CredentialResolveError("resolve_ambiguous_header")
+    if len(selected) > MAX_RESOLVE_REQUEST_HEADERS:
+        raise CredentialResolveError("resolve_too_many_headers")
+    return selected
+
+
 _DOT_SEGMENT_RE = re.compile(r"/\.\.(/|$)")
 
 
@@ -2297,20 +2345,25 @@ async def _resolve_exchange_binding(
         os.environ.get(CREDENTIAL_PROXY_SOCKET_ENV, "").strip()
         or DEFAULT_CREDENTIAL_PROXY_SOCKET
     )
-    payload = {
-        "binding": name,
-        "sni": sni,
-        "request": {
-            "scheme": (flow.request.scheme or "").lower(),
-            "host": _request_host(flow),
-            "port": _request_port(flow),
-            "method": (flow.request.method or "").upper(),
-            "path": flow.request.path or "/",
-        },
-    }
     budget = _resolve_budget_seconds()
     try:
         deadline = time.monotonic() + budget
+        payload = {
+            "binding": name,
+            "sni": sni,
+            "request": {
+                "scheme": (flow.request.scheme or "").lower(),
+                "host": _request_host(flow),
+                "port": _request_port(flow),
+                "method": (flow.request.method or "").upper(),
+                "path": flow.request.path or "/",
+                "headers": _resolve_request_headers(flow),
+            },
+        }
+        # Same serialization the RPC sends, so per-header caps cannot hide
+        # an oversized selection (or path) from the endpoint's 64KiB bound.
+        if len(json.dumps(payload).encode("utf-8")) > MAX_RESOLVE_REQUEST_BYTES:
+            raise CredentialResolveError("resolve_payload_too_large")
         async with _resolve_limiter():
             # The deadline covers semaphore and executor queueing too, not
             # just the socket: a queued resolve fails within the budget
