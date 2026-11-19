@@ -18,6 +18,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, adminApi, sandboxApi } from '../api/client';
 import type { DiagnosticContentResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { useI18n } from '../i18n';
 import { SandboxColoredLogViewer } from './SandboxColoredLogViewer';
 
 type Props = {
@@ -39,6 +40,7 @@ export function SandboxArchiveLogPanel({
   maxHeight = 420,
 }: Props) {
   const { user } = useAuth();
+  const { t } = useI18n();
   const requestSeq = useRef(0);
   const [contentVersion, setContentVersion] = useState(0);
   const [data, setData] = useState<DiagnosticContentResponse | null>(null);
@@ -48,7 +50,7 @@ export function SandboxArchiveLogPanel({
   const fetchArchive = useCallback(async () => {
     if (!sandboxId.trim()) return;
     if (user?.role === 'admin' && !tenant) {
-      message.warning('Admins must specify a tenant to view archived logs');
+      message.warning(t('archivePanel.adminTenantWarning'));
       return;
     }
     const seq = ++requestSeq.current;
@@ -68,12 +70,12 @@ export function SandboxArchiveLogPanel({
       if (e instanceof ApiError && ARCHIVE_DISABLED_CODES.has(e.code)) {
         setDisabledNote(e.message);
       } else {
-        message.error(e instanceof Error ? e.message : 'Failed to load archived logs');
+        message.error(e instanceof Error ? e.message : t('archivePanel.loadFailed'));
       }
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [sandboxId, tenant, user?.role]);
+  }, [sandboxId, t, tenant, user?.role]);
 
   useEffect(() => {
     if (autoLoad && sandboxId) void fetchArchive();
@@ -84,18 +86,18 @@ export function SandboxArchiveLogPanel({
       <Alert
         type="info"
         showIcon
-        message="Archived logs are not enabled"
+        message={t('archivePanel.notEnabled')}
         description={
           <>
             {disabledNote}
             <Typography.Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0 }}>
-              Enable node-agent in the cluster and configure read-only OSS credentials in the BFF to use archived logs. The BFF cannot centrally read file sinks. You can still use the Live Logs tab.
+              {t('archivePanel.enableHint')}
             </Typography.Paragraph>
           </>
         }
         action={
           <Button size="small" onClick={() => void fetchArchive()}>
-            Retry
+            {t('archivePanel.retry')}
           </Button>
         }
       />
@@ -106,11 +108,11 @@ export function SandboxArchiveLogPanel({
     <div>
       <Space style={{ marginBottom: 12 }}>
         <Button type="primary" loading={loading} onClick={() => void fetchArchive()}>
-          Refresh Archive
+          {t('archivePanel.refresh')}
         </Button>
         {data?.archive?.objectKey && (
           <Typography.Text type="secondary" copyable={{ text: data.archive.objectKey }}>
-            OSS: {data.archive.objectKey}
+            {t('archivePanel.objectKey', { objectKey: data.archive.objectKey })}
           </Typography.Text>
         )}
       </Space>
@@ -122,11 +124,11 @@ export function SandboxArchiveLogPanel({
           type="warning"
           showIcon
           style={{ marginBottom: 8 }}
-          message="Content was truncated to maxBytes. Download the complete object from OSS."
+          message={t('archivePanel.truncated')}
         />
       )}
       {!data && !loading && (
-        <Typography.Text type="secondary">Select “Refresh Archive” to load logs from node-agent storage</Typography.Text>
+        <Typography.Text type="secondary">{t('archivePanel.selectRefresh')}</Typography.Text>
       )}
       {data?.content != null && (
         <SandboxColoredLogViewer
