@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM --platform=$BUILDPLATFORM golang:1.25.9-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.11-bookworm AS builder
 
 WORKDIR /workspace
 ARG VERSION=dev
