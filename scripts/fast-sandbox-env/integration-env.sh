@@ -502,6 +502,12 @@ failure_dump() {
 		kubectl get pods -n "$NS" -o wide 2>&1 || true
 		echo "--- controller logs (tail) ---"
 		kubectl logs -n "$NS" deploy/fast-sandbox-controller --tail=80 2>&1 || true
+		echo "--- controller + fastlet component logs (klog writes to /var/log/fast-sandbox files, NOT stdout: a crash-looping fastlet shows an empty `kubectl logs`) ---"
+		kubectl exec -n "$NS" deploy/fast-sandbox-controller -c manager -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			echo "### $pod component logs (/var/log/fast-sandbox)"
+			kubectl exec -n "$RESOURCE_NS" "$pod" -c fastlet -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		done
 		echo "--- firecracker-runtime logs (every pod + container, tail) ---"
 		# `kubectl logs daemonset/...` resolves to ONE pod only, so a wedged
 		# ublkd on the other node stays invisible. Loop the pods instead,
