@@ -26,6 +26,7 @@ from uuid import UUID
 
 from kubernetes.client import ApiException
 
+from opensandbox_server.services.k8s.provider_factory import PROVIDER_TYPE_BATCHSANDBOX
 from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
 from opensandbox_server.services.snapshot_models import SnapshotState
 from opensandbox_server.services.snapshot_runtime import (
@@ -87,9 +88,9 @@ class KubernetesSnapshotRuntime:
         self._namespace = namespace
         self._postgresql_ha_enabled = postgresql_ha_enabled
         self._workload_provider_type = (
-            workload_provider_type.strip().lower()
-            if isinstance(workload_provider_type, str) and workload_provider_type.strip()
-            else "batchsandbox"
+            workload_provider_type.lower()
+            if workload_provider_type is not None
+            else PROVIDER_TYPE_BATCHSANDBOX
         )
         self._snapshot_namespaces: dict[str, str] = {}
         self._watched_namespaces: set[str] = set()
@@ -97,7 +98,7 @@ class KubernetesSnapshotRuntime:
         self._on_change: Optional[Callable[[str, str], None]] = None
 
     def supports_create_snapshot(self) -> bool:
-        return self._workload_provider_type == "batchsandbox"
+        return self._workload_provider_type == PROVIDER_TYPE_BATCHSANDBOX
 
     def supports_synchronous_create(self) -> bool:
         return True
@@ -107,7 +108,7 @@ class KubernetesSnapshotRuntime:
             return ""
         return (
             "Kubernetes snapshots are only supported when workload_provider is "
-            f"'batchsandbox' (configured: '{self._workload_provider_type}')."
+            f"'{PROVIDER_TYPE_BATCHSANDBOX}' (configured: '{self._workload_provider_type}')."
         )
 
     def preflight_create_snapshot(
@@ -186,6 +187,12 @@ class KubernetesSnapshotRuntime:
         namespace: str | None = None,
         mode: str | None = None,
     ) -> Optional[SnapshotRuntimeStatus]:
+        if not self.supports_create_snapshot():
+            return SnapshotRuntimeStatus(
+                state=SnapshotState.FAILED,
+                reason="snapshot_runtime_unsupported",
+                message=self.create_snapshot_unsupported_message(),
+            )
         del mode  # rootfsOnly is rejected in preflight; rootfs commits are full.
         snapshot_name = build_public_snapshot_name(snapshot_id)
         ns = namespace if namespace is not None else self._namespace

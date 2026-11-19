@@ -19,6 +19,7 @@ Pools are pre-warmed sets of sandbox pods that reduce cold-start latency.
 These endpoints are only available when the runtime is configured as 'kubernetes'.
 """
 
+import logging
 import threading
 from typing import TYPE_CHECKING, Optional
 
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from opensandbox_server.services.k8s.pool_service import PoolService
 
 router = APIRouter(tags=["Pools"])
+logger = logging.getLogger(__name__)
 
 _POOL_NOT_K8S_DETAIL = {
     "code": SandboxErrorCodes.K8S_POOL_NOT_SUPPORTED,
@@ -57,6 +59,7 @@ def _pool_not_supported_for_provider(provider_name: str) -> dict[str, str]:
 
 
 _service: Optional["PoolService"] = None
+_pool_unsupported = False
 _service_lock = threading.Lock()
 
 
@@ -73,7 +76,7 @@ def _get_pool_service() -> "PoolService":
     PoolService opens its own API client. The routes are sync handlers running
     on a thread pool, so creation is locked (as in the fast-sandbox service).
     """
-    global _service
+    global _service, _pool_unsupported
     from opensandbox_server.config import AppConfig
     from opensandbox_server.services.k8s.client import K8sClient
     from opensandbox_server.services.k8s.provider_factory import (
@@ -116,24 +119,33 @@ def _get_pool_service() -> "PoolService":
         )
 
     with _service_lock:
-        if _service is None:
+        if _service is None and not _pool_unsupported:
             app_cfg = config if isinstance(config, AppConfig) else None
-            provider = create_workload_provider(
-                provider_type=provider_type,
-                k8s_client=K8sClient(config.kubernetes),
-                app_config=app_cfg,
-            )
-            pool_service = provider.create_pool_service(
+            k8s_client = K8sClient(config.kubernetes)
+            try:
+                provider = create_workload_provider(
+                    provider_type=provider_type, k8s_client=k8s_client, app_config=app_cfg
+                )
+            except (ValueError, FileNotFoundError, RuntimeError) as exc:
+                logger.exception(f"Failed to initialize workload provider {provider_cls.__name__}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": SandboxErrorCodes.K8S_INITIALIZATION_ERROR,
+                        "message": f"Failed to initialize workload provider {provider_cls.__name__}.",
+                    },
+                ) from exc
+            _service = provider.create_pool_service(
                 config.kubernetes.namespace or "default"
             )
-            if pool_service is None:
-                raise HTTPException(
-                    status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                    detail=_pool_not_supported_for_provider(
-                        provider_type or provider_cls.__name__
-                    ),
-                )
-            _service = pool_service
+            _pool_unsupported = _service is None
+        if _service is None:
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail=_pool_not_supported_for_provider(
+                    provider_type or provider_cls.__name__
+                ),
+            )
         return _service
 
 
