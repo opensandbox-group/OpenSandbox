@@ -41,7 +41,8 @@ const (
 	DefaultTimeoutMinSeconds     = 60
 )
 
-// Config is the validated configuration.
+// Config is the validated, resolved configuration. Secret fields are exported
+// so fmt's %v/%+v/%#v reach Secret's redacting Formatter.
 type Config struct {
 	Listen                string            `json:"listen"`
 	CompatPrefix          string            `json:"compat_prefix"`
@@ -53,6 +54,9 @@ type Config struct {
 	TimeoutMinSeconds     int64             `json:"timeout_min_seconds"`
 	TimeoutMaxSeconds     int64             `json:"timeout_max_seconds"`
 	Templates             []TemplateMapping `json:"templates"`
+	AdapterAPIKey         Secret            `json:"adapter_api_key"`
+	NativeAPIKey          Secret            `json:"native_api_key"`
+	HMACKey               Secret            `json:"hmac_key"`
 }
 
 // TemplateMapping maps an E2B template ID and aliases to an immutable native
@@ -105,6 +109,15 @@ const (
 	templatesEnv = "E2B_SHIM_TEMPLATES"
 )
 
+var secretSpecs = []struct {
+	secretSpec
+	dst func(*Config) *Secret
+}{
+	{secretSpec{"adapter_api_key", "E2B_SHIM_ADAPTER_API_KEY"}, func(c *Config) *Secret { return &c.AdapterAPIKey }},
+	{secretSpec{"native_api_key", "E2B_SHIM_NATIVE_API_KEY"}, func(c *Config) *Secret { return &c.NativeAPIKey }},
+	{secretSpec{"hmac_key", "E2B_SHIM_HMAC_KEY"}, func(c *Config) *Secret { return &c.HMACKey }},
+}
+
 func knownKeys() map[string]bool {
 	keys := map[string]bool{templatesKey: true}
 	for _, f := range stringFields {
@@ -113,10 +126,13 @@ func knownKeys() map[string]bool {
 	for _, f := range intFields {
 		keys[f.key] = true
 	}
+	for _, s := range secretSpecs {
+		keys[s.field] = true
+	}
 	return keys
 }
 
-// Load reads all sources and validates the result. No
+// Load reads all sources, resolves secrets and validates the result. No
 // network access happens here.
 func Load(src Source) (*Config, error) {
 	lookupEnv := src.LookupEnv
@@ -179,6 +195,22 @@ func Load(src Source) (*Config, error) {
 		if err := decodeTemplates(templatesKey, msg, &cfg.Templates); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	for _, s := range secretSpecs {
+		var ref *SecretRef
+		if msg, ok := raw[s.field]; ok {
+			ref = &SecretRef{}
+			if err := decodeStrict(s.field, msg, ref); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+		}
+		secret, err := resolveSecret(s.secretSpec, ref, lookupEnv)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		*s.dst(cfg) = secret
 	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
