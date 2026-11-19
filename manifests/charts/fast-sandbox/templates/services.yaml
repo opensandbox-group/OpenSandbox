@@ -13,6 +13,11 @@ spec:
   - name: grpc
     port: 9090
     targetPort: grpc
+  {{- if gt (.Values.controller.fastpathHTTPPort | int) 0 }}
+  - name: grpc-web
+    port: {{ .Values.controller.fastpathHTTPPort }}
+    targetPort: grpc-web
+  {{- end }}
   selector:
     {{- include "fast-sandbox.controllerSelectorLabels" . | nindent 4 }}
 {{- end }}
