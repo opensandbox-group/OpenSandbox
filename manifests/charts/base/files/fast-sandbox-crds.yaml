@@ -1765,6 +1765,13 @@ spec:
                     - native
                     - overlaybd
                     type: string
+                  mode:
+                    description: Mode selects the published boot artifact. RootfsOnly
+                      requires native storage.
+                    enum:
+                    - Full
+                    - RootfsOnly
+                    type: string
                   prime:
                     description: |-
                       Prime optionally selects seed nodes (by label selector) whose agent
