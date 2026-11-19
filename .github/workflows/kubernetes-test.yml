@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: '1.25'
+  GO_VERSION: '1.26.11'
 
 jobs:
   changes:
@@ -83,7 +83,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.0'
+          go-version: '1.26.11'
           cache-dependency-path: kubernetes/go.sum
 
       - name: Check gofmt

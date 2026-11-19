@@ -7,7 +7,8 @@
       "rollup": "4.60.2",
       "postcss": "8.5.23",
       "esbuild": "0.25.2",
-      "vite": "6.4.4"
+      "vite": "6.4.5",
+      "katex": "^0.18.2"
     }
   },
   "scripts": {
@@ -16,7 +17,7 @@
     "docs:preview": "vitepress preview"
   },
   "devDependencies": {
-    "mermaid": "10",
+    "mermaid": "^11.17.2",
     "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17"
   }
