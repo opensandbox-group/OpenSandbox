@@ -300,7 +300,7 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 		// documented in-place fallback, reusing the bytes already staged through
 		// the descriptor pinned since the exclusive create. Reopening the name
 		// would let a process that can write the directory swap in a symlink.
-		if statErr == nil {
+		if statErr == nil && uploadRenameUnsupported(err) {
 			if _, seekErr := tmp.Seek(0, io.SeekStart); seekErr != nil {
 				log.Warn("upload: rewind staging file %s after rename failure: %v", tmpName, seekErr)
 			} else {
@@ -309,6 +309,7 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 					log.Warn("upload: rename %s into place failed, used in-place fallback: %v", resolvedTarget, err)
 					return nil
 				}
+				log.Warn("upload: rename %s into place failed, in-place fallback also failed: %v", resolvedTarget, err)
 				return fallbackErr
 			}
 		}
@@ -422,7 +423,7 @@ func createUploadTemp(dir string, perm os.FileMode) (*os.File, error) {
 			return nil, err
 		}
 		name := filepath.Join(dir, uploadTempPattern+hex.EncodeToString(suffix[:]))
-		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
+		f, err := openUploadStagingFile(name, perm)
 		if err == nil {
 			return f, nil
 		}
@@ -445,6 +446,16 @@ func uploadStagingUnsupported(err error) bool {
 	return errors.Is(err, syscall.ENOTSUP) ||
 		errors.Is(err, syscall.ENOSYS) ||
 		errors.Is(err, syscall.EROFS)
+}
+
+// uploadRenameUnsupported reports whether a rename failure means the
+// destination cannot be replaced by a rename even though the file itself is
+// writable. A sticky directory protects a file owned by another user, and a
+// bind-mounted file cannot be replaced at all. Space and I/O failures are
+// excluded: the in-place fallback would truncate the destination before the
+// same failure resurfaced.
+func uploadRenameUnsupported(err error) bool {
+	return errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EBUSY)
 }
 
 // resolveUploadTargetPath follows a symlink in the final path component, so the

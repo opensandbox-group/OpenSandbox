@@ -58,15 +58,22 @@ func requireNoUploadStaging(t *testing.T, dir string) {
 	}
 }
 
-func failUploadRename(t *testing.T) {
+func failUploadRenameWith(t *testing.T, renameErr error) {
 	t.Helper()
 	original := renameUploadStaging
 	renameUploadStaging = func(string, string) error {
-		return errors.New("rename unavailable")
+		return renameErr
 	}
 	t.Cleanup(func() {
 		renameUploadStaging = original
 	})
+}
+
+// failUploadRename models a writable destination whose directory refuses the
+// replacing rename: another user's file in a sticky directory.
+func failUploadRename(t *testing.T) {
+	t.Helper()
+	failUploadRenameWith(t, &os.LinkError{Op: "rename", Old: "staging", New: "destination", Err: fs.ErrPermission})
 }
 
 // A copy that fails after the destination was opened must not cost the sandbox
@@ -141,6 +148,36 @@ func TestWriteUploadStreamFallsBackWhenRenameFails(t *testing.T) {
 	requireNoUploadStaging(t, dir)
 }
 
+// A rename can fail after the staged copy consumed the last free blocks.
+// Falling back would truncate the destination before the same failure
+// resurfaced, so these errors must leave the old content intact.
+func TestWriteUploadStreamRenameIOFailureKeepsDestination(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"no space", syscall.ENOSPC},
+		{"quota", syscall.EDQUOT},
+		{"io", syscall.EIO},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failUploadRenameWith(t, &os.LinkError{Op: "rename", Old: "staging", New: "destination", Err: tc.err})
+			dir := t.TempDir()
+			target := filepath.Join(dir, "notes.md")
+			original := []byte("old content")
+			require.NoError(t, os.WriteFile(target, original, 0o640))
+
+			uerr := writeUploadStream(target, strings.NewReader("new content"))
+
+			require.NotNil(t, uerr)
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Equal(t, string(original), string(got))
+			requireNoUploadStaging(t, dir)
+		})
+	}
+}
+
 // The rename fallback must read the inode the exclusive create pinned, not
 // reopen the staging name. A process that can write the destination directory
 // could otherwise move the staging file aside and put a symlink in its place.
@@ -163,7 +200,7 @@ func TestWriteUploadStreamFallbackKeepsPinnedStagingInode(t *testing.T) {
 		if err := os.Symlink(decoy, staging); err != nil {
 			return err
 		}
-		return errors.New("injected rename failure")
+		return &os.LinkError{Op: "rename", Old: staging, New: destination, Err: fs.ErrPermission}
 	}
 	t.Cleanup(func() { renameUploadStaging = originalRename })
 
@@ -220,6 +257,29 @@ func TestUploadStagingUnsupported(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.Equal(t, tc.want, uploadStagingUnsupported(tc.err))
+		})
+	}
+}
+
+func TestUploadRenameUnsupported(t *testing.T) {
+	linkError := func(err error) error {
+		return &os.LinkError{Op: "rename", Old: "staging", New: "destination", Err: err}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"permission denied", linkError(syscall.EACCES), true},
+		{"operation not permitted", linkError(syscall.EPERM), true},
+		{"busy", linkError(syscall.EBUSY), true},
+		{"no space", linkError(syscall.ENOSPC), false},
+		{"quota", linkError(syscall.EDQUOT), false},
+		{"io", linkError(syscall.EIO), false},
+		{"unknown", errors.New("rename unavailable"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, uploadRenameUnsupported(tc.err))
 		})
 	}
 }
