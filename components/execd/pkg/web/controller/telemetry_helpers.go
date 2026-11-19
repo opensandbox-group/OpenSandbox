@@ -15,6 +15,7 @@
 package controller
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
@@ -39,7 +40,9 @@ func (r *filesystemMetricRecorder) MarkSuccess() {
 
 func (r *filesystemMetricRecorder) Finish(ctrl *basicController) {
 	result := "failure"
-	if r.success {
+	// Helpers such as line validation and http.ServeContent may write an
+	// error response after the operation has been marked successful.
+	if r.success && ctrl.ctx.Writer.Status() < http.StatusBadRequest {
 		result = "success"
 	}
 	telemetry.RecordFilesystemOperation(
