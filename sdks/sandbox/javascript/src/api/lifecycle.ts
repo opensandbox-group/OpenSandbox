@@ -2400,6 +2400,11 @@ export interface components {
              * @enum {string}
              */
             format: "native" | "overlaybd";
+            /**
+             * @description Requested build mode. Defaults to full. rootfsOnly requires native storage.
+             * @enum {string}
+             */
+            mode?: "full" | "rootfsOnly";
         };
         /** @description Status of a fsb template build. */
         FsbTemplateStatus: {

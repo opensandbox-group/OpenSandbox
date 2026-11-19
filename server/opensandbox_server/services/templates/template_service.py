@@ -352,6 +352,8 @@ class FastSandboxTemplateService:
         }
         # OSEP-0026: pin the machine shape; resourceLimits stays verbatim.
         spec["machine"] = effective_machine(spec)
+        if request.mode == "rootfsOnly":
+            spec["buildMode"] = request.mode
         record = FastSandboxTemplateRecord(
             template_id=template_id,
             namespace=namespace,
@@ -538,6 +540,8 @@ class FastSandboxTemplateService:
                 "publishSecretRef": {"name": self._publish_secret_name(fmt)},
             },
         }
+        if record.spec.get("buildMode") == "rootfsOnly":
+            spec["output"]["mode"] = "RootfsOnly"
         env = record.spec.get("env") or {}
         if self._execd_run_as_init:
             # Copy first: the stored row keeps the client env untouched, and

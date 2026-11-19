@@ -50,6 +50,7 @@ internal object TemplateModelConverter {
         return CreateFsbTemplateRequest(
             image = this.image,
             publish = this.publish,
+            mode = this.mode?.let { value -> CreateFsbTemplateRequest.Mode.entries.first { it.value == value } },
             resourceLimits = this.resourceLimits,
             entrypoint = this.entrypoint,
             env = this.env,

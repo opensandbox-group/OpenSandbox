@@ -1939,6 +1939,13 @@ class CreateFsbTemplateRequest(BaseModel):
         "overlaybd",
         description="Storage encoding of the produced snapshot set",
     )
+    mode: Literal["full", "rootfsOnly"] = "full"
+
+    @model_validator(mode="after")
+    def validate_build_mode(self) -> "CreateFsbTemplateRequest":
+        if self.mode == "rootfsOnly" and self.format != "native":
+            raise ValueError("RootfsOnly template builds require native storage")
+        return self
 
     model_config = ConfigDict(
         alias_generator=to_camel,

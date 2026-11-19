@@ -99,6 +99,7 @@ export interface CreateTemplateRequest extends Record<string, unknown> {
    * Storage encoding of the produced snapshot set. Defaults to `overlaybd`.
    */
   format?: TemplateFormat;
+  mode?: "full" | "rootfsOnly";
 }
 
 export interface TemplateInfo extends Record<string, unknown> {

@@ -158,6 +158,10 @@ public class CreateTemplateRequest
     /// </summary>
     [JsonPropertyName("format")]
     public string? Format { get; set; }
+
+    /// <summary>Requested template build mode. RootfsOnly requires native storage.</summary>
+    [JsonPropertyName("mode")]
+    public string? Mode { get; set; }
 }
 
 /// <summary>

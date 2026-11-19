@@ -34,6 +34,9 @@ from opensandbox.api.lifecycle.models.create_fsb_template_request_format import 
 from opensandbox.api.lifecycle.models.create_fsb_template_request_metadata import (
     CreateFsbTemplateRequestMetadata,
 )
+from opensandbox.api.lifecycle.models.create_fsb_template_request_mode import (
+    CreateFsbTemplateRequestMode,
+)
 from opensandbox.api.lifecycle.models.fsb_template import FsbTemplate as ApiTemplate
 from opensandbox.api.lifecycle.models.fsb_template_readiness import (
     FsbTemplateReadiness as ApiTemplateReadiness,
@@ -104,6 +107,7 @@ class TemplateModelConverter:
         )
         api_env = CreateFsbTemplateRequestEnv.from_dict(request.env) if request.env else UNSET
         return ApiCreateTemplateRequest(
+            mode=CreateFsbTemplateRequestMode(request.mode) if request.mode else UNSET,
             image=request.image,
             publish=request.publish,
             resource_limits=(

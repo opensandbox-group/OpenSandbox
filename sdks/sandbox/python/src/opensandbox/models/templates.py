@@ -148,6 +148,7 @@ class CreateTemplateRequest(BaseModel):
         default=None,
         description="Build-side readiness gate.",
     )
+    mode: Literal["full", "rootfsOnly"] | None = None
     format: Literal["native", "overlaybd"] | None = Field(
         default=None,
         description="Storage encoding of the produced snapshot set. Defaults to overlaybd.",

@@ -617,6 +617,7 @@ type CreateTemplateRequest struct {
 	// Format is the storage encoding of the produced snapshot set. Defaults
 	// to overlaybd.
 	Format TemplateFormat `json:"format,omitempty"`
+	Mode   SnapshotMode   `json:"mode,omitempty"`
 }
 
 // TemplateInfo is a fsb template: a golden image whose build is declared and

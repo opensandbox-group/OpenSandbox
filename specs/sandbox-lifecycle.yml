@@ -3258,6 +3258,10 @@ components:
           enum: [native, overlaybd]
           default: overlaybd
           description: Storage encoding of the produced snapshot set.
+        mode:
+          type: string
+          enum: [full, rootfsOnly]
+          description: Requested build mode. Defaults to full. rootfsOnly requires native storage.
       required: [image, publish]
       additionalProperties: false
 
