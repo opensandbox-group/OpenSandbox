@@ -1466,8 +1466,8 @@ public static class SnapshotModes
 
     /// <summary>
     /// Only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint
-    /// re-runs, and resume moves from milliseconds to seconds. Requires the fast-sandbox backend
-    /// with OCI-backed sandboxes; other backends reject the mode before any capture starts.
+    /// re-runs, and resume moves from milliseconds to seconds. Requires the fast-sandbox backend;
+    /// other backends reject the mode before any capture starts.
     /// </summary>
     public const string RootfsOnly = "rootfsOnly";
 }

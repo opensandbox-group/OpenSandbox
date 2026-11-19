@@ -49,7 +49,6 @@ from opensandbox_server.services.snapshot_runtime import (
     SNAPSHOT_MODE_ROOTFS_ONLY,
     SnapshotRuntimePreflightError,
     SnapshotRuntimeStatus,
-    SnapshotRuntimeUnsupportedError,
     normalize_snapshot_mode,
 )
 
@@ -135,6 +134,11 @@ class FastSandboxSnapshotRuntime:
         namespace: str | None = None,
         mode: str | None = None,
     ) -> None:
+        # Mode compatibility (full vs rootfsOnly, native vs OCI artifact
+        # paths) is gated authoritatively by fast-sandbox: FastPath persists
+        # no intent on rejection, and the Fastlet re-checks node capability
+        # fail-closed. Keep only the existence check here.
+        del mode
         ns = namespace if namespace is not None else self._namespace
         try:
             self._fastpath.get_sandbox(ns, sandbox_id)
@@ -146,16 +150,6 @@ class FastSandboxSnapshotRuntime:
             raise SnapshotRuntimePreflightError(
                 f"Cannot verify snapshot runtime for sandbox {sandbox_id}."
             ) from exc
-        if mode == SNAPSHOT_MODE_ROOTFS_ONLY:
-            # Mirror FastPath's own gate so the mismatch fails as a
-            # client-side 409 before any intent is persisted upstream; the
-            # Fastlet re-checks the effective source authoritatively.
-            source_image = self._source_sandbox_image(ns, sandbox_id)
-            if source_image is None or not source_image.startswith(OCI_IMAGE_PREFIX):
-                raise SnapshotRuntimeUnsupportedError(
-                    "Snapshot mode 'rootfsOnly' requires a sandbox on the OCI "
-                    f"artifact path; sandbox {sandbox_id} is not OCI-backed."
-                )
 
     def create_snapshot(
         self,

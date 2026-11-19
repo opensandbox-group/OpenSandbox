@@ -51,8 +51,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # Shared by the prerequisite guard and all golden comparisons.
-      CBV_GOLDEN_BASE: 4ae99691ff0a62594614df90a86ecbee07add966
+      # Shared by the prerequisite guard and all golden comparisons. Bump in
+      # lockstep with GOLDEN_BASE in scripts/fast-sandbox-env/tests/test_credential_bound.py
+      # whenever a stage-list change is intentional.
+      CBV_GOLDEN_BASE: 02be68b5fde9c74d69f5ba69a2dbb97c76f23c06
     steps:
       - uses: actions/checkout@v6
         with:
