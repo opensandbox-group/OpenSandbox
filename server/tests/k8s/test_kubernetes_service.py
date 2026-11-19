@@ -25,6 +25,7 @@ from fastapi import HTTPException
 from kubernetes.client import ApiException
 from pydantic import SecretStr
 
+from opensandbox_server.services.k8s import kubernetes_service as kubernetes_service_module
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
 from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
@@ -1050,6 +1051,75 @@ class TestWaitForSandboxReady:
         
         assert result == mock_workload
     
+    @pytest.mark.asyncio
+    async def test_wait_fails_fast_when_pending_sandbox_is_unschedulable(
+        self, k8s_service, mock_workload, monkeypatch
+    ):
+        """The status read and the probe may list pods, a blocking Kubernetes
+        API call that must not run on the event loop."""
+        monkeypatch.setattr(kubernetes_service_module, "_UNSCHEDULABLE_PROBE_INTERVAL_SECONDS", 0)
+        loop_thread = threading.get_ident()
+        status_threads: list[int] = []
+        probe_threads: list[int] = []
+
+        def get_status(_workload):
+            status_threads.append(threading.get_ident())
+            return {
+                "state": "Pending",
+                "reason": "BATCHSANDBOX_PENDING",
+                "message": "BatchSandbox is pending allocation",
+                "last_transition_at": datetime.now(timezone.utc),
+            }
+
+        def get_unschedulable_status(_workload):
+            probe_threads.append(threading.get_ident())
+            return {
+                "state": "Failed",
+                "reason": "POD_PLATFORM_UNSCHEDULABLE",
+                "message": "0/1 nodes are available: 1 node(s) didn't match Pod's node affinity.",
+                "last_transition_at": datetime.now(timezone.utc),
+            }
+
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.side_effect = get_status
+        k8s_service.workload_provider.get_unschedulable_status.side_effect = (
+            get_unschedulable_status
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready("test-sandbox-id", timeout_seconds=10)
+
+        assert exc_info.value.status_code == 400
+        assert "didn't match Pod's node affinity" in exc_info.value.detail["message"]
+        assert status_threads and probe_threads
+        assert loop_thread not in status_threads + probe_threads
+
+    @pytest.mark.asyncio
+    async def test_wait_probes_unschedulable_at_a_limited_rate(
+        self, k8s_service, mock_workload, monkeypatch
+    ):
+        """The first probe also waits one interval, so 0.5s of polling with a
+        0.3s interval probes once."""
+        monkeypatch.setattr(kubernetes_service_module, "_UNSCHEDULABLE_PROBE_INTERVAL_SECONDS", 0.3)
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Pending",
+            "reason": "BATCHSANDBOX_PENDING",
+            "message": "BatchSandbox is pending allocation",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service._wait_for_sandbox_ready(
+                "test-sandbox-id", timeout_seconds=0.5, poll_interval_seconds=0.01
+            )
+
+        assert exc_info.value.status_code == 504
+        assert k8s_service.workload_provider.get_status.call_count > 10
+        k8s_service.workload_provider.get_unschedulable_status.assert_called_once_with(
+            mock_workload
+        )
+
     @pytest.mark.asyncio
     async def test_wait_for_pending_then_running_succeeds(self, k8s_service, mock_workload):
         status_sequence = [
