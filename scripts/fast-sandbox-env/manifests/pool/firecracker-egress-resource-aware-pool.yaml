@@ -103,6 +103,7 @@ spec:
           value: /var/egress/mitm-ca-seed
         - name: OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA
           value: /var/egress/mitm-ca-seed/tls.crt
+# @EGRESS_INTERCEPTION_ENV@
         volumeMounts:
         - name: egress-vault
           # Plaintext v1 posture: the vault volume joins the credential

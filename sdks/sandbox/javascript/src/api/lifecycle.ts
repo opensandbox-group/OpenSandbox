@@ -615,6 +615,10 @@ export interface paths {
          * @description Request sandbox deletion. Runtime cleanup may continue after the response.
          *     For Kubernetes BatchSandbox workloads, queries report Stopping during cleanup
          *     and return 404 once the resource is removed.
+         *     A 204 response means deletion was accepted, not that the sandbox's runtime
+         *     execution has terminated: the control object can disappear (and queries
+         *     can start returning 404) while runtime cleanup is still in progress, so a
+         *     404 after deletion must not be read as confirmed termination.
          */
         delete: {
             parameters: {
@@ -1186,6 +1190,27 @@ export interface components {
         CreateSnapshotRequest: {
             /** @description Optional human-readable snapshot name. */
             name?: string;
+            /**
+             * @description What the snapshot persists.
+             *
+             *     - `full` (default): the most complete capture the runtime
+             *       supports. On the fast-sandbox backend that includes memory and
+             *       process state, and restoring resumes the sandbox in place;
+             *       Docker and Kubernetes snapshots capture the filesystem only and
+             *       do not restore running processes.
+             *     - `rootfsOnly`: only the writable filesystem; restoring boots a
+             *       fresh sandbox from the disk. Running processes and in-memory
+             *       state are discarded, and the entrypoint re-runs on restore.
+             *       Supported only on the fast-sandbox backend, for sandboxes on
+             *       either artifact path (native S3 templates and OCI/OverlayBD
+             *       templates); Docker and Kubernetes reject the mode before any
+             *       capture starts. Capture additionally requires a node qualified
+             *       for rootfs-only snapshots — an unqualified node fails the
+             *       snapshot instead of silently producing a `full` artifact.
+             * @default full
+             * @enum {string}
+             */
+            mode: "full" | "rootfsOnly";
         };
         /** @description Persistent point-in-time capture of a sandbox. */
         Snapshot: {
@@ -1195,6 +1220,15 @@ export interface components {
             sandboxId: string;
             /** @description Optional human-readable snapshot name */
             name?: string;
+            /**
+             * @description Artifact class of the snapshot: `full` is the runtime's most
+             *     complete capture (memory and process state on the fast-sandbox
+             *     backend; filesystem-only on Docker and Kubernetes),
+             *     `rootfsOnly` preserves only the writable filesystem. Snapshots
+             *     created before this field existed report `full`.
+             * @enum {string}
+             */
+            mode?: "full" | "rootfsOnly";
             /** @description Current snapshot lifecycle status and detailed state information */
             status: components["schemas"]["SnapshotStatus"];
             /**

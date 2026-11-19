@@ -25,7 +25,8 @@
 # The two template lanes are split by cost: verify-native keeps the
 # native-rootfs boot path (sandbox create via the opensandbox CLI, execd
 # /ping through the signed gateway route, delete, the DART peer pull, warm
-# creates) plus the egress network-security-rules baseline, while
+# creates), the egress network-security-rules baseline, and the native-lane
+# rootfs-only snapshot verify, while
 # verify-overlaybd builds the OCI-published template and runs the full
 # scenario matrix on it: the same boot path over ublk on-demand devices, a
 # pause/resume round trip, a snapshot -> restore-from-snapshotId boot, the
@@ -58,7 +59,7 @@
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up             # environment: stack + pool + server/ingress + native template
-#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules verify (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules + rootfs-only snapshot verify (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + full scenario matrix (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh pool           # re-apply the pool only
 #   ./scripts/fast-sandbox-env/integration-env.sh status         # component/pool/DART/OpenSandbox health
@@ -87,6 +88,14 @@
 #                    firecracker-egress-resource-aware-pool); POOL_NAME and
 #                    the server's fastpath_resource_pool follow the profile
 #   MAX_SANDBOXES_PER_POD per-fastlet sandbox capacity (default 8)
+#   EGRESS_INTERCEPTION_MODE  OSEP-0023 Fast Sandbox interception switch
+#                    (experimental): empty (default — the Pool renders
+#                    unchanged, no switch is passed), all, or
+#                    credential-bound; non-empty renders
+#                    OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE into the
+#                    pool's egress container only. credential-bound also
+#                    registers the credential-bound verify stage on both
+#                    lanes and reports the exchange stage BLOCKED (I1)
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
 #   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (latest from PyPI / preinstalled binary)
 #   SKIP_TOOL_INSTALL / SKIP_LEFTOVER_CLEAN / INOTIFY_VALUE
@@ -101,14 +110,17 @@
 #                    registry (CA baked into the fsb images), the chart's
 #                    runtime.oci node stack, and a full overlaybd verify
 #                    pass beside native. Nodes need ublk support. 0 = native-only.
-#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify
-#                    (overlaybd lane). On by default: the fastlet-side
-#                    prerequisites are provisioned automatically whenever
-#                    OCI_STACK=1, the capture qualification is
-#                    deployment-derived upstream (fast-sandbox#185), and
-#                    capture runs on the managed Firecracker 1.17.0 the
-#                    pinned stack installs (the v1.16.1 thaw failure,
-#                    fast-sandbox#187, is a legacy capture version).
+#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify on
+#                    both template lanes (native and overlaybd). On by
+#                    default whenever OCI_STACK=1: qualification derives
+#                    from the standard deployment (fast-sandbox#185 plus
+#                    #224), capture runs on the managed Firecracker 1.17.0
+#                    the pinned stack installs (the v1.16.1 thaw failure,
+#                    fast-sandbox#187, is a legacy capture version), and
+#                    fast-sandbox#223/#225 admit the mode on both artifact
+#                    paths. Native-only stacks (OCI_STACK=0) skip the stage
+#                    regardless: the FSEP-0001 restore kernel is staged on
+#                    the OCI lane only.
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -186,6 +198,14 @@ case "$POOL_MODE" in
 		exit 1 ;;
 esac
 POOL_NAME="${POOL_NAME:-$POOL_PROFILE}"
+# OSEP-0023 interception switch: validated here, before any action runs.
+EGRESS_INTERCEPTION_MODE="${EGRESS_INTERCEPTION_MODE:-}"
+case "$EGRESS_INTERCEPTION_MODE" in
+	""|all|credential-bound) ;;
+	*)
+		printf '[fast-sandbox-env] ERROR: EGRESS_INTERCEPTION_MODE must be empty, all or credential-bound (got: %s)\n' "$EGRESS_INTERCEPTION_MODE" >&2
+		exit 1 ;;
+esac
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
@@ -298,6 +318,8 @@ OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
 # Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
+# The value also flows into the Go-based image builds via --build-arg GOPROXY;
+# empty build args keep the Dockerfile defaults (proxy.golang.org).
 FSB_GOPROXY="${FSB_GOPROXY:-direct}"
 export GOPROXY="$FSB_GOPROXY"
 
@@ -318,6 +340,9 @@ ms2s() { awk -v ms="$1" 'BEGIN { printf "%.1f", ms / 1000 }'; }
 
 declare -a STAGE_ORDER=()
 declare -a STAGE_MS_LIST=()
+# Items reported but not verified ("BLOCKED: ..." / "NOT_RUN: ...");
+# listed by stage_summary only when non-empty, never counted as OK.
+declare -a STAGE_UNVERIFIED=()
 STAGE_CUR=""
 STAGE_CUR_LABEL=""
 STAGE_START_NS=0
@@ -347,6 +372,18 @@ run_stage() {
 	stage_done
 }
 
+stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
+	STAGE_UNVERIFIED+=("$1: $2")
+	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
+}
+
+# A registered stage that is known not to work yet: announced, listed in the
+# summary, and never routed through stage_done (no OK line).
+run_blocked_stage() { # <description> <reason>
+	stage_begin "$1"
+	stage_unverified BLOCKED "$2"
+}
+
 stage_summary() {
 	local index name ms total=0
 	highlight "== stage timings =="
@@ -358,6 +395,12 @@ stage_summary() {
 		printf '  %-46s %9ss\n' "$name" "$(ms2s "$ms")"
 	done
 	printf '  \033[1m%-46s %9ss\033[0m\n' "TOTAL" "$(ms2s "$total")"
+	if [[ ${#STAGE_UNVERIFIED[@]} -gt 0 ]]; then
+		highlight "== not verified (excluded from the stages above) =="
+		for name in "${STAGE_UNVERIFIED[@]}"; do
+			printf '  %s\n' "$name"
+		done
+	fi
 }
 
 wait_for() { # description attempts command [args...]
@@ -424,7 +467,7 @@ failure_dump() {
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
+		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_(IMAGE|INTERCEPTION_MODE)=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
 		echo "--- fast-sandbox checkout ---"
 		git -C "$FSB_DIR" rev-parse HEAD 2>&1 || true
 		echo "--- kind-create.log (tail) ---"
@@ -800,6 +843,7 @@ build_images() {
 	# Context is the repo root (COPYs components/egress + components/internal).
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/egress/Dockerfile" -t "$IMG_EGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "egress image build failed"
 	log "building the OpenSandbox server image ($IMG_SERVER)"
@@ -811,6 +855,7 @@ build_images() {
 	log "building the OpenSandbox ingress image ($IMG_INGRESS)"
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/ingress/Dockerfile" -t "$IMG_INGRESS" "$OSB_ROOT" >/dev/null \
 		|| die "ingress image build failed"
 	log "building the OpenSandbox node-agent image from source ($IMG_NODEAGENT)"
@@ -818,6 +863,7 @@ build_images() {
 	# components/nodeagent + components/internal with its pinned Go toolchain.
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		-f "$OSB_ROOT/components/nodeagent/Dockerfile" -t "$IMG_NODEAGENT" "$OSB_ROOT" >/dev/null \
 		|| die "node-agent image build failed"
 	pass "images built (fast-sandbox + OpenSandbox)"
@@ -1593,12 +1639,14 @@ template_up() {
 	if ! docker image inspect "$IMG_OCI_TOOLS" >/dev/null 2>&1; then
 		log "building shared oci build base ($IMG_OCI_TOOLS)"
 		# shellcheck disable=SC2086
-		docker build ${DOCKER_BUILD_FLAGS:-} --quiet -t "$IMG_OCI_TOOLS" \
+		docker build ${DOCKER_BUILD_FLAGS:-} --quiet --build-arg GOPROXY="${GOPROXY:-}" \
+			-t "$IMG_OCI_TOOLS" \
 			-f "$FSB_DIR/build/Dockerfile.oci-tools" "$FSB_DIR" >/dev/null \
 			|| die "oci-tools image build failed"
 	fi
 	# shellcheck disable=SC2086
 	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg GOPROXY="${GOPROXY:-}" \
 		--build-arg OCI_TOOLS_IMAGE="$IMG_OCI_TOOLS" -t "$IMG_BUILDER" \
 		-f "$FSB_DIR/build/Dockerfile.sandboxtemplate-builder" "$FSB_DIR" >/dev/null \
 		|| die "sandboxtemplate-builder image build failed"
@@ -2399,7 +2447,7 @@ render_pool() { # > $GEN_DIR/$POOL_PROFILE.yaml
 		-v pool_min="$POOL_MIN" -v pool_max="$POOL_MAX" \
 		-v max_per_pod="$MAX_SANDBOXES_PER_POD" \
 		-v warm="$WARM_IMAGES" -v image="$TEMPLATE_ID" \
-		-v mitm_ca="$MITM_CA_SECRET" '
+		-v mitm_ca="$MITM_CA_SECRET" -v interception="$EGRESS_INTERCEPTION_MODE" '
 		{ gsub(/"@FASTLET_IMAGE@"/, fastlet)
 		  gsub(/"@EGRESS_IMAGE@"/, egress)
 		  gsub(/"@POOL_MIN@"/, pool_min)
@@ -2408,6 +2456,11 @@ render_pool() { # > $GEN_DIR/$POOL_PROFILE.yaml
 		  gsub(/maxSandboxesPerPod: 5/, "maxSandboxesPerPod: " max_per_pod) }
 		/^# @WARM_IMAGES@$/ {
 			if (warm == "1") printf "  warmImages:\n  - %s\n", image
+			next }
+		# OSEP-0023 switch (egress container only): an empty mode drops the
+		# marker, so the render is byte-identical to a template without it.
+		/^# @EGRESS_INTERCEPTION_ENV@$/ {
+			if (interception != "") printf "        - name: OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE\n          value: \"%s\"\n", interception
 			next }
 		{ print }
 	' "$src" > "$out"
@@ -2464,8 +2517,9 @@ VOLUMES
 	# Guest-kernel fragment (FSEP-0001): cold-boot restore resolves the
 	# kernel on the node under /usr/local/share/firecracker, so the fastlet
 	# mounts the staged node copy (rootfs_only_kernel_up). Inert for Full
-	# snapshots — the restore path is the only consumer. Requires the OCI
-	# lane: rootfs-only capture is OverlayBD-only.
+	# snapshots — the restore path is the only consumer. Staged on the OCI
+	# lane only in this environment; native-only stacks (OCI_STACK=0) skip
+	# it together with the native rootfs-only snapshot verify.
 	if [[ "$OCI_STACK" == 1 ]]; then
 		local gk_mounts gk_volumes
 		gk_mounts="$(cat <<'MOUNTS'
@@ -2512,6 +2566,8 @@ pool_up() {
 		fi
 	fi
 	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
+	[[ -z "$EGRESS_INTERCEPTION_MODE" ]] \
+		|| log "egress OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE=$EGRESS_INTERCEPTION_MODE (OSEP-0023, experimental)"
 	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null
 	wait_for "fastlet pods Ready (poolMin=$POOL_MIN)" 300 fastlet_pods_ready
 	wait_for "egress container ready in every fastlet pod" 180 egress_containers_ready
@@ -4169,18 +4225,45 @@ rootfs_only_wait_ready() { # <snapshot-id> <max-attempts>
 	done
 }
 
+rootfs_only_lane() { # <template-id> -> "<lane> <artifact-scheme>"
+	# The durable artifact reference differs per lane: the overlaybd lane
+	# publishes an OCI manifest pair (oci://), the native lane an S3
+	# manifest URI (s3://).
+	if [[ -n "$OCI_TEMPLATE_ID" && "$1" == "$OCI_TEMPLATE_ID" ]]; then
+		printf 'overlaybd oci://\n'
+	else
+		printf 'native s3://\n'
+	fi
+}
+
 rootfs_only_verify() {
-	# One experiment on the overlaybd (OCI) template: create a sandbox ->
+	# One experiment on the given template lane: create a sandbox ->
 	# rootfs-only snapshot -> verify the snapshot metadata (server row mode,
-	# SandboxSnapshot CR spec/status mode, oci:// manifest pair) -> prove the
-	# source survived the capture (Running + execd /ping) -> cold-boot a new
-	# sandbox from the snapshot -> one pause/resume round on the restored
+	# SandboxSnapshot CR spec/status mode, published artifact reference) ->
+	# prove the source survived the capture (Running + execd /ping) -> cold-boot
+	# a new sandbox from the snapshot -> one pause/resume round on the restored
 	# sandbox (pause is full-only upstream, so a cold-booted descendant must
 	# still produce a durable full checkpoint).
-	# Optional template override (the overlaybd second pass); default native
-	# — rootfs-only capture requires an OCI-backed source, so the stage is
-	# chained from verify-overlaybd only.
+	# Optional template override (the overlaybd lane passes its OCI template);
+	# default native. Both lanes run the stage since fast-sandbox#223 admitted
+	# native RootfsOnly at the FastPath gRPC gate; the durable artifact
+	# reference differs per lane (oci:// pair vs s3:// manifest URI).
 	local template_id="${1:-$TEMPLATE_ID}"
+	local lane artifact_scheme
+	read -r lane artifact_scheme <<< "$(rootfs_only_lane "$template_id")"
+	log "verify (rootfs-only): lane=$lane templateId=$template_id"
+	if [[ "$lane" == "native" ]]; then
+		# The pinned Firecracker driver cuts native captures with XFS reflink
+		# and has no full-copy fallback. Fail fast on a non-XFS StateRoot
+		# with the prerequisite named, instead of stalling in capture
+		# qualification; a deliberately XFS-less setup (XFS_STATEROOT=0)
+		# never registers this stage.
+		local fs_type
+		fs_type="$(findmnt -n -o FSTYPE --target "${XFS_MOUNT_POINT}" 2>/dev/null)" \
+			|| fail "native rootfs-only capture requires the XFS reflink StateRoot mounted at ${XFS_MOUNT_POINT} (findmnt failed; is the pool up?)"
+		[[ "$fs_type" == "xfs" ]] \
+			|| fail "the StateRoot filesystem mounted at ${XFS_MOUNT_POINT} is '$fs_type'; native capture requires XFS reflink (keep XFS_STATEROOT=1, or skip this stage with ROOTFS_ONLY=0)"
+	fi
 	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
 	t0="$(now_ms)"
 
@@ -4218,16 +4301,17 @@ rootfs_only_verify() {
 	log "verify (rootfs-only): $snapshot_id create->Ready $(( (t2 - t1) / 1000000 ))ms"
 
 	# Metadata: the SandboxSnapshot CR carries the requested mode on spec,
-	# the fastlet-confirmed produced mode on status, and publishes the OCI
-	# pair (rootfs-only is OverlayBD-path-only).
+	# the fastlet-confirmed produced mode on status, and a lane-specific
+	# durable artifact reference (OCI manifest pair on the overlaybd lane,
+	# S3 manifest URI on the native lane).
 	cr="osb-snap-$(printf '%s' "$snapshot_id" | tr -d '-')"
 	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.spec.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
 		|| fail "SandboxSnapshot $cr spec.mode is not RootfsOnly"
 	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
 		|| fail "SandboxSnapshot $cr status.mode is not RootfsOnly (fastlet-confirmed artifact class)"
-	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.manifestRef}' 2>/dev/null)" == oci://* ]] \
-		|| fail "SandboxSnapshot $cr manifestRef is not an oci:// pair reference"
-	pass "rootfs-only snapshot: CR spec.mode=status.mode=RootfsOnly, oci:// pair published"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.manifestRef}' 2>/dev/null)" == "$artifact_scheme"* ]] \
+		|| fail "SandboxSnapshot $cr manifestRef is not a $artifact_scheme reference"
+	pass "rootfs-only snapshot ($lane): CR spec.mode=status.mode=RootfsOnly, $artifact_scheme artifact published"
 
 	# Source survival: the guest freeze -> pause -> cut -> resume -> thaw
 	# capture cycle must leave the source sandbox serving.
@@ -4414,6 +4498,27 @@ require_live_stack() {
 	[[ -x "$OSB_BIN" ]] || die "osb not found at $OSB_BIN (run up first, or set OSB_BIN)"
 }
 
+# OSEP-0023 lane gates. Off/all: the exchange stage runs exactly as before
+# and no credential-bound stage exists. credential-bound: the exchange
+# stage is reported BLOCKED (decision snapshots reject exchange bindings,
+# issue I1) instead of running, and the credential-bound stage
+# (verify/credential-bound.sh, one implementation sourced into this shell)
+# runs on the lane's template.
+exchange_stage() { # <description> <template-id>
+	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+		run_blocked_stage "$1" "exchange under credential-bound (see I1)"
+		return 0
+	fi
+	run_stage "$1" exchange_resolver_verify "$2"
+}
+
+credential_bound_stage() { # <description> <template-id>
+	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] || return 0
+	# shellcheck source=verify/credential-bound.sh
+	source "$SCRIPT_DIR/verify/credential-bound.sh"
+	run_stage "$1" credential_bound_verify "$2"
+}
+
 # The native lane is deliberately thin: the native-rootfs boot path plus the
 # egress network-security-rules baseline (the only native-exclusive stage).
 # The scenario matrix — execd-as-init, pause/resume, vault, MITM CA, exchange
@@ -4427,6 +4532,29 @@ verify_native() {
 	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify "$TEMPLATE_ID" 3
 	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
+	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
+	# Rootfs-only verify (FSEP-0001) on the native lane, default-on: the
+	# pinned fast-sandbox derives qualification from the deployment (managed
+	# VMM directory + the standard StateRoot this env renders), the fastlet
+	# advertises nativeRootfsOnlySnapshots, and fast-sandbox#223 admitted
+	# native RootfsOnly at the FastPath gRPC gate. The artifact set publishes
+	# an s3:// manifest. Registration gates:
+	#   ROOTFS_ONLY=0  -> not registered (both lanes)
+	#   OCI_STACK=0    -> not registered (the restore kernel is staged on
+	#                     the OCI lane only)
+	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
+		if [[ "$OCI_STACK" == "1" ]]; then
+			if [[ "${XFS_STATEROOT:-1}" == "1" ]]; then
+				run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
+			else
+				log "XFS_STATEROOT=0: skipping the native rootfs-only snapshot verify (native capture requires the XFS reflink StateRoot; the pool renders ${XFS_MOUNT_POINT}/firecracker on the host root filesystem)"
+			fi
+		else
+			log "OCI_STACK=0: skipping the native rootfs-only snapshot verify (the FSEP-0001 restore kernel is staged on the OCI lane only)"
+		fi
+	else
+		log "ROOTFS_ONLY=0: skipping the rootfs-only snapshot verify"
+	fi
 	# Last on purpose: the e2e kill loop started the source's 30s disappearance
 	# grace; the network-security-rules stage consumed it, so this is a
 	# near-free confirmation.
@@ -4490,7 +4618,8 @@ verify_overlaybd() {
 	run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
 	run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
 	run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
-	run_stage "exchange resolver verify (overlaybd template, OSEP-0025)" exchange_resolver_verify "$OCI_TEMPLATE_ID"
+	exchange_stage "exchange resolver verify (overlaybd template, OSEP-0025)" "$OCI_TEMPLATE_ID"
+	credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)" "$OCI_TEMPLATE_ID"
 	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
 	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
 	# Rootfs-only verify (FSEP-0001), default-on: the fastlet-side kernel is
@@ -4873,7 +5002,7 @@ env_summary() {
 	printf '  %-22s %s\n' "kind cluster" "$KIND_CLUSTER ($(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ') nodes)"
 	printf '  %-22s %s\n' "fast-sandbox" "pinned $(git -C "$FSB_DIR" rev-parse --short HEAD 2>/dev/null || echo "$FSB_COMMIT") ($FSB_DIR)"
 	printf '  %-22s %s\n' "RustFS endpoint" "$RUSTFS_ENDPOINT"
-	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
+	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE${EGRESS_INTERCEPTION_MODE:+, interception=$EGRESS_INTERCEPTION_MODE}, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
 	# The echo endpoint line is conditional: the standalone pool action
 	# loads the fingerprint pin but never re-derives the echo container IP.
 	local mitm_echo_at=""
@@ -4906,6 +5035,11 @@ down() {
 	[[ -z "$(docker ps -a --filter "name=$MITM_ECHO_CONTAINER" --format '{{.Names}}' || true)" ]] \
 		|| fail "MITM echo container still present"
 	rm -rf "$MITM_CA_DIR"
+	# credential-bound origin fixtures (verify/credential-bound.sh) left by an
+	# interrupted run: require both fixture type and this cluster's ownership.
+	docker ps -aq --filter "label=opensandbox.io/fast-sandbox-env-fixture=credential-bound-origin" \
+		--filter "label=opensandbox.io/fast-sandbox-env-cluster=$KIND_CLUSTER" \
+		| xargs -r docker rm -f >/dev/null 2>&1 || true
 	# Server/gateway die with the cluster; only the signing key outlives it.
 	rm -f "$WORK/agent-registry.json" "$SIGNING_KEY_FILE"
 	rm -rf "$GEN_DIR" "$FSB_GEN_DIR"
@@ -5001,7 +5135,8 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
 Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
 DOCKER_MIRROR, RUSTFS_*, RC_IMAGE, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
 FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
-when the host cannot reach module VCS hosts directly),
+when the host cannot reach module VCS hosts directly; also passed into the
+Go-based image builds as --build-arg GOPROXY),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, POOL_MODE=resource-aware (OSEP-0026
 ResourceAware pool fixture), WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1,

@@ -1428,6 +1428,25 @@ bindings: []
         data = json.loads(result.output)
         assert data["revision"] == 1
 
+    def test_create_reports_the_yaml_parser_error(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        mock_sb = MagicMock()
+        payload_path = tmp_path / "vault.yaml"
+        payload_path.write_text("credentials: [\n")
+
+        result = _invoke(
+            runner,
+            ["credential-vault", "create", "sb-1", "--file", str(payload_path)],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code != 0
+        assert "line" in result.output
+        assert str(payload_path) in result.output
+        mock_sb.connect_sandbox.assert_not_called()
+        mock_sb.credential_vault.create.assert_not_called()
+
     def test_get_calls_sdk(self, runner: CliRunner) -> None:
         mock_sb = MagicMock()
         mock_state = MagicMock()

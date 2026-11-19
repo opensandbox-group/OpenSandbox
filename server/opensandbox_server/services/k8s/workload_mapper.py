@@ -51,7 +51,6 @@ def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandb
     snapshot_id = labels.get(SANDBOX_SNAPSHOT_ID_LABEL)
     expires_at = workload_provider.get_expiration(workload)
     status_info = workload_provider.get_status(workload)
-    workload_status = workload.get("status", {}) if isinstance(workload, dict) else workload.status
 
     user_metadata = {
         k: v for k, v in labels.items() if not _is_opensandbox_label(k)
@@ -76,7 +75,9 @@ def _build_sandbox_from_workload(workload: Any, workload_provider: Any) -> Sandb
     if not snapshot_id:
         image_spec = ImageSpec(uri=image_uri) if image_uri else ImageSpec(uri="unknown")
     platform_spec = _extract_platform_from_workload(workload)
-    allocation = _extract_confirmed_pool_allocation(metadata, spec, workload_status)
+    get_allocation = getattr(workload_provider, "get_allocation", None)
+    raw_allocation = get_allocation(workload) if callable(get_allocation) else None
+    allocation = raw_allocation if isinstance(raw_allocation, AllocationSummary) else None
     return Sandbox(
         id=sandbox_id,
         status=SandboxStatus(
@@ -102,6 +103,19 @@ _ALLOCATION_RELEASE_ANNOTATION_KEYS = (
     "sandbox.opensandbox.io/alloc-release",
     "sandbox.opensandbox.io/alloc-released",
 )
+
+
+def extract_confirmed_pool_allocation_from_workload(
+    workload: Any,
+) -> Optional[AllocationSummary]:
+    """Extract confirmed BatchSandbox Pool allocation from a workload dict or object."""
+    if workload is None:
+        return None
+    return _extract_confirmed_pool_allocation(
+        _field(workload, "metadata"),
+        _field(workload, "spec"),
+        _field(workload, "status"),
+    )
 
 
 def _extract_confirmed_pool_allocation(

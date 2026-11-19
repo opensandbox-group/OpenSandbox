@@ -42,9 +42,9 @@ func (p *NetworkPolicy) AllowsEntireHostSelector(host string) bool {
 		if rule.targetKind != targetDomain {
 			continue
 		}
-		// Match compileDomainIndex exactly. In particular, a trailing root dot in
-		// a rule is not removed, and Unicode is not converted to an ASCII A-label.
-		target := strings.ToLower(strings.TrimSpace(rule.Target))
+		// Match compileDomainIndex exactly. In particular, Unicode is not
+		// converted to an ASCII A-label.
+		target := normalizeDomainPattern(rule.Target)
 		overlap, ok := selectorIntersection(host, target)
 		if !ok {
 			continue

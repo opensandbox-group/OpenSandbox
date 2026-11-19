@@ -30,7 +30,8 @@ _FIELDS = {
     "MODE", "SOCKET", "TOKEN", "CONTROL_GENERATION", "MAX_SUBJECTS",
     "MAX_SNAPSHOT_BYTES", "RETAINED_PAYLOAD_BUDGET",
 }
-_ADMISSION_FIELDS = {"TLS_ADMISSION", "TLS_CAPACITY", "PROCESS_TLS_CAPACITY"}
+_ADMISSION_FIELDS = {"TLS_ADMISSION", "TLS_CAPACITY", "PROCESS_TLS_CAPACITY",
+                     "DRAIN_TIMEOUT_SECONDS"}
 _ERROR = "credential proxy: invalid revision runtime configuration"
 _owner: SubjectRevisionOwner | None = None
 _server: Server | None = None
@@ -70,6 +71,11 @@ def _configuration(environ: Mapping[str, str]) -> dict[str, Any]:
                     or not 1 <= int(text) <= 1 << 20 or str(int(text)) != text):
                 _fatal()
             values[name] = int(text)
+        text = values["DRAIN_TIMEOUT_SECONDS"]
+        if (not text.isascii() or not text.isdecimal() or len(text) > 3
+                or not 1 <= int(text) <= 300 or str(int(text)) != text):
+            _fatal()
+        values["DRAIN_TIMEOUT_SECONDS"] = int(text)
     return values
 
 
@@ -77,7 +83,7 @@ def load(_loader: Any) -> None:
     global _owner, _server, _admission_enabled
     if _owner is not None or _server is not None:
         _fatal()
-    owner = server = None
+    owner = server = runtime = None
     try:
         values = _configuration(os.environ)
         admission = {}
@@ -90,17 +96,29 @@ def load(_loader: Any) -> None:
                 _fatal()
             admission = dict(tls_capacity=values["TLS_CAPACITY"],
                              process_tls_capacity=values["PROCESS_TLS_CAPACITY"],
-                             static_passthrough=parse_handoff(os.environ.get(ENV)))
+                             static_passthrough=parse_handoff(os.environ.get(ENV)),
+                             drain_timeout_seconds=values["DRAIN_TIMEOUT_SECONDS"])
         owner = SubjectRevisionOwner(
             values["CONTROL_GENERATION"], max_subjects=values["MAX_SUBJECTS"],
             max_snapshot_bytes=values["MAX_SNAPSHOT_BYTES"],
             retained_payload_budget=values["RETAINED_PAYLOAD_BUDGET"],
             **admission,
         )
+        if admission:
+            import subject_admission
+            runtime = subject_admission.SubjectAdmissionRuntime(owner)
+            # Teardown is wired before the IPC socket can accept a command.
+            owner.attach_teardown(runtime)
         server = Server(owner, values["SOCKET"], values["TOKEN"],
                         request_timeout=1, max_concurrent_requests=4)
         server.start()
+        if runtime is not None:
+            # One process-level drain loop, only when admission is enabled.
+            runtime.start()
     except Exception:  # noqa: BLE001 - never expose a token or handoff in errors
+        if runtime is not None:
+            with suppress(Exception):
+                runtime.close()
         if server is not None:
             with suppress(Exception):
                 server.close()
@@ -112,12 +130,19 @@ def load(_loader: Any) -> None:
     _admission_enabled = bool(admission)
     if _admission_enabled:
         import subject_admission
-        subject_admission._runtime = subject_admission.SubjectAdmissionRuntime(owner)
+        subject_admission._runtime = runtime
 
 
 def done() -> None:
     global _owner, _server, _admission_enabled
     if _server is not None:
+        if _admission_enabled:
+            import subject_admission
+            runtime = subject_admission._runtime
+            if runtime is not None:
+                # Stop sweeping before the owner deactivates its registries;
+                # the proxy loop and handlers stay for owner teardown.
+                runtime.close()
         try:
             _server.close()
         except Exception:  # noqa: BLE001 - cleanup failure remains fatal and retryable

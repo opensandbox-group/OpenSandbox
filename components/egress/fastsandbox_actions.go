@@ -175,6 +175,11 @@ func (s *fastSandboxPolicyServer) handleActions(w http.ResponseWriter, r *http.R
 		http.Error(w, fmt.Sprintf("invalid action envelope: %v", err), http.StatusBadRequest)
 		return
 	}
+	if env.Operation == actionhandler.OperationLifecycleHook && env.Hook != nil && env.Hook.Name == constants.HookDataPlaneReady {
+		// Before the action gate: other subjects' actions must not queue
+		// behind this wait. Actions v2 holds an owner stripe and is unchanged.
+		s.awaitSubjectReadyACK(r.Context(), subject.FromSandboxUID(env.Sandbox.UID), subject.FromRevision(env))
+	}
 	status, err := s.dispatchAction(r.Context(), env)
 	if err != nil {
 		logEgressUpdateFailedError(fmt.Sprintf("action %s for sandbox %s failed: %v", env.Operation, env.Sandbox.UID, err))

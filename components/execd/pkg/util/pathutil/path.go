@@ -15,6 +15,7 @@
 package pathutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,8 +81,16 @@ func ExpandPathWithEnv(path string, envOverrides map[string]string) (string, err
 		return "", err
 	}
 
-	expanded := os.Expand(path, func(key string) string {
-		return env[EnvKey(key)]
+	// Substitute only the names validateEnvVars checked. os.Expand would also
+	// treat "$1", "$$", "$@" and "${}" as variables and drop them, so a path
+	// such as "Outer$1.class" would silently resolve to "Outer.class".
+	expanded := envVarPattern.ReplaceAllStringFunc(path, func(ref string) string {
+		m := envVarPattern.FindStringSubmatch(ref)
+		name := m[1]
+		if name == "" {
+			name = m[2]
+		}
+		return env[EnvKey(name)]
 	})
 	if expanded == "~" || strings.HasPrefix(expanded, "~/") || strings.HasPrefix(expanded, `~\`) {
 		home, err := os.UserHomeDir()
@@ -107,6 +116,10 @@ func ExpandAbsPath(path string) (string, error) {
 	expanded, err := ExpandPathWithEnv(path, nil)
 	if err != nil {
 		return "", err
+	}
+	// filepath.Abs("") is the working directory, which no caller asked for.
+	if expanded == "" {
+		return "", errors.New("path is empty")
 	}
 	return filepath.Abs(expanded)
 }

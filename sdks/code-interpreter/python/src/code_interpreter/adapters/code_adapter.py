@@ -25,6 +25,9 @@ import logging
 import time
 
 import httpx
+from opensandbox.adapters.converter.command_execution import (
+    infer_foreground_exit_code,
+)
 from opensandbox.adapters.converter.event_node import EventNode
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
@@ -342,14 +345,17 @@ class CodesAdapter(Codes):
                     try:
                         event_dict = _normalize_sse_event(json.loads(data))
                         event_node = EventNode(**event_dict)
-                        await dispatcher.dispatch(event_node)
                     except json.JSONDecodeError:
                         logger.debug(f"Failed to parse SSE line: {line}")
                         continue
                     except Exception as e:
-                        logger.error(f"Error processing event: {data}", exc_info=e)
+                        logger.error(f"Failed to decode SSE event: {data}", exc_info=e)
                         continue
+                    await dispatcher.dispatch(event_node)
 
+            # Same inference as commands.run and the other SDKs' code interpreters:
+            # 0 on completion, otherwise the error's exit code when it has one.
+            execution.exit_code = infer_foreground_exit_code(execution)
             return execution
 
         except Exception as e:

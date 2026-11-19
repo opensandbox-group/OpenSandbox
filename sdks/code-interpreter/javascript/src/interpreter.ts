@@ -18,7 +18,7 @@ import {
   DEFAULT_READY_TIMEOUT_SECONDS,
   SandboxReadyTimeoutException,
 } from "@alibaba-group/opensandbox";
-import { createExecdClient } from "@alibaba-group/opensandbox/internal";
+import { createDataPlaneHeaders, createExecdClient } from "@alibaba-group/opensandbox/internal";
 import { createRedirectSafeExecdFetch } from "./transport.js";
 import type { Sandbox } from "@alibaba-group/opensandbox";
 
@@ -91,17 +91,26 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  *   the same instances as on the underlying {@link Sandbox}.
  */
 export class CodeInterpreter {
+  private pingClient?: ReturnType<typeof createExecdClient>;
+
   private constructor(
     readonly sandbox: Sandbox,
     readonly codes: Codes,
     private readonly execdBaseUrl: string,
-    private readonly execdHeaders: Record<string, string> | undefined,
+    private readonly execdHeaders: Record<string, string>,
   ) {}
 
   static async create(sandbox: Sandbox, opts: CodeInterpreterCreateOptions = {}): Promise<CodeInterpreter> {
     const endpoint = await sandbox.getEndpoint(DEFAULT_EXECD_PORT);
     const execdBaseUrl = `${sandbox.connectionConfig.protocol}://${endpoint.endpoint}`;
-    const execdHeaders = endpoint.headers;
+    // The same data-plane headers the default codes adapter sends, for the
+    // fallback ping below.
+    const execdHeaders = createDataPlaneHeaders(
+      sandbox.connectionConfig.headers ?? {},
+      endpoint.headers,
+      sandbox.connectionConfig.useServerProxy,
+      sandbox.connectionConfig.apiKey,
+    );
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
     const codes = adapterFactory.createCodes({
       sandbox,
@@ -158,11 +167,12 @@ export class CodeInterpreter {
   }
 
   private execdPingClient() {
-    return createExecdClient({
+    this.pingClient ??= createExecdClient({
       baseUrl: this.execdBaseUrl,
-      headers: this.execdHeaders ?? {},
+      headers: this.execdHeaders,
       fetch: createRedirectSafeExecdFetch(this.sandbox, this.execdBaseUrl),
     });
+    return this.pingClient;
   }
 
   /**
@@ -203,6 +213,38 @@ export class CodeInterpreter {
   }
 
   /**
+   * Run {@link isHealthy} for at most `ms`. Each probe carries its own request
+   * timeout, so a stalled one could otherwise hold the caller past the
+   * readiness deadline: when the time is up, or the caller aborts, its requests
+   * are aborted and the attempt counts as unhealthy, even if the probe ignores
+   * the abort.
+   */
+  private async isHealthyWithin(ms: number, signal?: AbortSignal): Promise<boolean> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    // Settles when the time is up or the caller aborts; the caller's reason is
+    // then thrown by waitUntilReady.
+    const expired = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve(false);
+      }, ms);
+      onAbort = () => {
+        controller.abort(signal?.reason);
+        resolve(false);
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([this.isHealthy(controller.signal), expired]);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /**
    * Poll the strict health check (execd `GET /ping` + runtime process alive)
    * until it passes, or throw {@link SandboxReadyTimeoutException} when the
    * deadline expires.
@@ -221,7 +263,7 @@ export class CodeInterpreter {
       if (Date.now() >= deadline) break;
       attempt++;
       try {
-        const ok = await this.isHealthy(opts.signal);
+        const ok = await this.isHealthyWithin(deadline - Date.now(), opts.signal);
         throwIfAborted(opts.signal);
         if (ok) {
           return;

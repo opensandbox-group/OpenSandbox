@@ -439,6 +439,13 @@ Read current sandbox resource usage with `await sandbox.Metrics.GetMetricsAsync(
 
 Poll snapshot status before restoring. Template builds are asynchronous; wait for `Succeeded` before use. Template-backed creation requires `TimeoutSeconds` and inherits workload configuration from the published template. Metadata patch values add/replace keys; `null` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
 
+Snapshot `mode` selects what the snapshot persists:
+
+- `SnapshotModes.Full` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `SnapshotModes.RootfsOnly`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend; other backends reject the mode before any capture starts, and an unqualified fast-sandbox node fails the snapshot instead of silently producing a full artifact.
+
+`SnapshotInfo.Mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `SnapshotModes.Full`.
+
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. This example waits up to 15 minutes and retains the snapshot for reuse:
 
 ```csharp
@@ -462,6 +469,20 @@ await using var restored = await Sandbox.CreateAsync(new SandboxCreateOptions
 try { Console.WriteLine(restored.Id); }
 finally { await restored.KillAsync(); }
 // When no longer needed: await manager.DeleteSnapshotAsync(snapshot.Id);
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```csharp
+var rootfsSnapshot = await sandbox.CreateSnapshotWithModeAsync("workspace-state", SnapshotModes.RootfsOnly);
+// ... poll manager.GetSnapshotAsync(rootfsSnapshot.Id) until Ready, then:
+await using var rebooted = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    SnapshotId = rootfsSnapshot.Id,
+    ConnectionConfig = config,
+});
+// Files written before the snapshot are present; processes were not preserved
+// and the entrypoint re-ran on boot.
 ```
 
 Use an existing template after its build reaches `Succeeded`:
@@ -494,7 +515,7 @@ The `ConnectionConfig` class manages API server connection settings.
 An explicit `OPEN-SANDBOX-API-KEY` entry in `Headers` takes precedence over `ApiKey` and its environment fallback, regardless of header-name casing. A present-but-empty entry is preserved rather than replaced with the configured key. This also applies to SDK telemetry requests.
 
 ::: info Transfer timeouts
-`RequestTimeoutSeconds` bounds the wait for response headers, not the whole transfer. The deadline starts with the request (so the connect phase is bounded too), is cleared while the request body is written, and is re-armed once the body of the current hop has been sent: a healthy upload or download that keeps making progress is never cut off by it. A download that gets no response headers, or an upload that gets none within the timeout after its body has been sent, fails with a `TaskCanceledException` carrying a `TimeoutException` instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract); a caller cancellation still surfaces as an `OperationCanceledException` with the caller's token. All non-transfer calls keep the whole-call request timeout.
+`RequestTimeoutSeconds` bounds the wait for response headers, not the whole transfer. The deadline starts with the request (so the connect phase is bounded too), is cleared while the request body is written, and is re-armed once the body of the current hop has been sent: a healthy upload or download that keeps making progress is never cut off by it. A download that gets no response headers, or an upload that gets none within the timeout after its body has been sent, fails with a `TaskCanceledException` carrying a `TimeoutException` instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract); a caller cancellation still surfaces as an `OperationCanceledException` with the caller's token. Streaming (SSE) calls are not capped as a whole either: they fail when the response headers or the next stream bytes take longer than `max(RequestTimeoutSeconds, 30s)`. All other calls keep the whole-call request timeout.
 
 A request body that never finishes being sent, and a response body that stops making progress after the headers have arrived, are bounded only by the `CancellationToken` you pass to the call, so pass one when a transfer needs an end-to-end cap. The upload guarantee assumes the HTTP handler streams the request body (for example `SocketsHttpHandler` on .NET 5+): the default `HttpClientHandler` on .NET Framework buffers the request body before sending it, so a slow but progressing upload can still count against the header timeout there.
 
@@ -506,7 +527,7 @@ A 307/308 redirect resends the request body once per hop. A seekable upload sour
 | `ApiKey` | API key for authentication | Optional | `OPEN_SANDBOX_API_KEY` |
 | `Domain` | Sandbox service domain (`host[:port]`) | `localhost:8080` | `OPEN_SANDBOX_DOMAIN` |
 | `Protocol` | HTTP protocol (`Http`/`Https`) | `Http` | - |
-| `RequestTimeoutSeconds` | Request timeout applied to SDK HTTP calls | `30` | - |
+| `RequestTimeoutSeconds` | Request timeout applied to SDK HTTP calls; command, code and isolated-session streams (SSE) wait at most `max(RequestTimeoutSeconds, 30s)` for the response and between stream bytes | `30` | - |
 | `Headers` | Extra headers applied to every request | `{}` | - |
 | `DisableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
 
@@ -701,7 +722,7 @@ See [Credential Vault](/guides/credential-vault) for auth types, binding guidanc
 
 ### 6. Timeout and Retry Behavior
 
-- `ConnectionConfig.RequestTimeoutSeconds` controls timeout for SDK HTTP calls. File uploads and downloads are exempt while they keep making progress; the timeout still bounds the connect phase and how long a transfer waits for response headers before failing.
+- `ConnectionConfig.RequestTimeoutSeconds` controls timeout for SDK HTTP calls. File uploads and downloads are exempt while they keep making progress; the timeout still bounds the connect phase and how long a transfer waits for response headers before failing. Streaming (SSE) calls run for as long as the command does, but fail after `max(RequestTimeoutSeconds, 30s)` without response headers or stream bytes.
 - `RunCommandOptions.TimeoutSeconds` controls command execution timeout for command runs.
 - `RunInSessionOptions.TimeoutSeconds` controls command execution timeout for session runs.
 - `SandboxCreateOptions.TimeoutSeconds` controls sandbox server-side TTL.

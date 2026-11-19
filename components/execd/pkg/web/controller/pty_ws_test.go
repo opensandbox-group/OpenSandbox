@@ -44,7 +44,6 @@ import (
 // buildPTYRouter assembles a minimal Gin router with only the /pty routes,
 // avoiding any import cycle with pkg/web.
 func buildPTYRouter() *gin.Engine {
-	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 

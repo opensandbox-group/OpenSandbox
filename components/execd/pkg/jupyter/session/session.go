@@ -18,10 +18,14 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 )
+
+// ErrSessionNotFound reports that Jupyter has no session with the given ID.
+var ErrSessionNotFound = errors.New("jupyter session not found")
 
 type Client struct {
 	baseURL string
@@ -148,6 +152,9 @@ func (c *Client) DeleteSession(sessionId string) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: %s", ErrSessionNotFound, sessionId)
+	}
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server returned error status code: %d", resp.StatusCode)
 	}

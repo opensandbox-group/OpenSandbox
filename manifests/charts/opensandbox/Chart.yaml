@@ -16,8 +16,8 @@ apiVersion: v2
 name: opensandbox
 description: All-in-one Helm chart for deploying OpenSandbox controller and server
 type: application
-version: 1.2.1
-appVersion: "1.2.1"
+version: 1.3.0-rc.1
+appVersion: "1.3.0-rc.1"
 
 keywords:
   - sandbox
@@ -34,30 +34,34 @@ sources:
 maintainers:
   - name: OpenSandbox Team
 
-# Kubernetes version constraints
-kubeVersion: ">=1.21.1-0"
+# Kubernetes version constraints. The fast-sandbox subchart's control
+# authentication needs the TokenRequest API and OIDC discovery (Kubernetes
+# 1.22+); Helm only checks the root chart's kubeVersion for umbrella
+# installs, so this gate keeps unsupported clusters out of an install that
+# fails closed without those APIs.
+kubeVersion: ">=1.22.0-0"
 
 dependencies:
   - name: base
-    version: "1.2.1"
+    version: "1.3.0-rc.1"
     repository: "file://../base"
     condition: base.enabled
   - name: opensandbox-controller
-    version: "1.2.1"
+    version: "1.3.0-rc.1"
     repository: "file://../controller"
   - name: opensandbox-server
-    version: "1.2.1"
+    version: "1.3.0-rc.1"
     repository: "file://../server"
   - name: ingress-gateway
-    version: "1.2.1"
+    version: "1.3.0-rc.1"
     repository: "file://../ingress-gateway"
     condition: ingress-gateway.enabled
   - name: opensandbox-node-agent
-    version: "1.2.1"
+    version: "1.3.0-rc.1"
     repository: "file://../node-agent"
     condition: opensandbox-node-agent.enabled
   - name: fast-sandbox
-    version: "1.2.1"
+    version: "1.3.0-rc.1"
     repository: "file://../fast-sandbox"
     condition: fast-sandbox.enabled
 

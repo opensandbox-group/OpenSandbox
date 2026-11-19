@@ -85,6 +85,7 @@ export type {
   RenewSandboxExpirationRequest,
   RenewSandboxExpirationResponse,
   SnapshotInfo,
+  SnapshotMode,
   SnapshotState,
   SnapshotStatus,
   SandboxId,

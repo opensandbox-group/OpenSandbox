@@ -210,9 +210,13 @@ class SandboxService(ABC):
         return key.startswith("opensandbox.io/")
 
     @staticmethod
-    def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
-        """Apply JSON Merge Patch to labels: separate user metadata, merge, validate, rebuild."""
+    def _validate_metadata_patch(patch: dict) -> None:
+        """Reject a metadata patch that touches reserved keys or adds invalid labels.
+
+        Only the incoming values are validated, not the labels already present.
+        """
         from fastapi import HTTPException
+        from opensandbox_server.services.constants import SandboxErrorCodes
         from opensandbox_server.services.validators import ensure_metadata_labels
 
         for key in patch:
@@ -220,15 +224,19 @@ class SandboxService(ABC):
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "code": "INVALID_METADATA_LABEL",
+                        "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
                         "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
                     },
                 )
 
-        # Validate only incoming patch values, not existing labels
         patch_additions = {k: str(v) for k, v in patch.items() if v is not None}
         if patch_additions:
             ensure_metadata_labels(patch_additions)
+
+    @staticmethod
+    def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
+        """Apply JSON Merge Patch to labels: validate, separate user metadata, merge, rebuild."""
+        SandboxService._validate_metadata_patch(patch)
 
         current_metadata = {
             k: v for k, v in labels.items() if not SandboxService._is_system_label(k)

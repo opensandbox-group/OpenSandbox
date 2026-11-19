@@ -88,7 +88,7 @@ func TestNewIpynbPath_ExpandsHome(t *testing.T) {
 func TestListContextUnsupportedLanguage(t *testing.T) {
 	c := NewController("", "")
 	_, err := c.ListContext(Command.String())
-	require.Error(t, err, "expected error for command language")
+	require.ErrorIs(t, err, ErrUnsupportedLanguage, "expected error for command language")
 	_, err = c.ListContext(BackgroundCommand.String())
 	require.Error(t, err, "expected error for background-command language")
 	_, err = c.ListContext(SQL.String())
@@ -117,6 +117,29 @@ func TestDeleteContext_RemovesCacheOnSuccess(t *testing.T) {
 		require.Equal(t, http.MethodDelete, r.Method, "unexpected method")
 		require.True(t, strings.HasSuffix(r.URL.Path, "/api/sessions/"+sessionID), "unexpected path: %s", r.URL.Path)
 		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	c := NewController(server.URL, "token")
+	c.jupyterClientMap.Store(sessionID, &jupyterKernel{language: Python})
+	c.defaultLanguageSessions.Store(Python, sessionID)
+
+	require.NoError(t, c.DeleteContext(sessionID))
+
+	require.Nil(t, c.getJupyterKernel(sessionID), "expected cache to be cleared")
+	_, ok := c.defaultLanguageSessions.Load(Python)
+	require.False(t, ok, "expected default session entry to be removed")
+}
+
+func TestDeleteContext_RemovesCacheWhenJupyterSessionIsGone(t *testing.T) {
+	sessionID := "sess-gone"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodDelete, r.Method, "unexpected method")
+		require.True(t, strings.HasSuffix(r.URL.Path, "/api/sessions/"+sessionID), "unexpected path: %s", r.URL.Path)
+		// Jupyter answers 404 for a session it no longer has, for example
+		// after the Jupyter server restarted.
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
 
@@ -515,4 +538,31 @@ func TestCreateContextDeletesSessionWhenKernelCheckFails(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, int32(1), created.Load())
 	require.Equal(t, created.Load(), deleted.Load(), "every session created by a failed attempt is deleted")
+}
+
+func TestCreateContextFailsFastWhenCwdIsAFile(t *testing.T) {
+	var specRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/api/kernelspecs") {
+			specRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"default":"python","kernelspecs":{"python":{"name":"python","spec":{"language":"python","display_name":"Python"}}}}`))
+			return
+		}
+		require.Failf(t, "unexpected request", "%s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	cwd := filepath.Join(t.TempDir(), "file.txt")
+	require.NoError(t, os.WriteFile(cwd, []byte("x"), 0o644))
+
+	c := NewController(server.URL, "token")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.CreateContext(ctx, &CreateContextRequest{Language: Python, Cwd: cwd})
+	require.ErrorIs(t, err, ErrInvalidContextCwd)
+	require.Less(t, time.Since(start), 500*time.Millisecond)
+	require.Equal(t, int32(1), specRequests.Load(), "an unusable cwd must not be retried")
 }

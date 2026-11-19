@@ -31,14 +31,13 @@ from opensandbox_server.api.schema import (
     ErrorResponse,
     FsbTemplate,
     ListFsbTemplatesResponse,
-    PaginationInfo,
 )
 from opensandbox_server.config import get_config
 from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.helpers import build_pagination_info
 from opensandbox_server.services.templates.template_service import (
     FastSandboxTemplateService,
     template_to_response,
-    total_pages,
 )
 
 router = APIRouter(tags=["Templates"])
@@ -136,8 +135,22 @@ def list_templates(
     """
     from urllib.parse import parse_qsl
 
-    # keep "env=" as {"env": ""}: empty label values are valid filters
-    metadata_filter = dict(parse_qsl(metadata, keep_blank_values=True)) if metadata else None
+    metadata_filter = None
+    if metadata:
+        try:
+            # keep "env=" as {"env": ""}: empty label values are valid filters;
+            # strict_parsing=True rejects malformed segments like "a=1&broken"
+            metadata_filter = dict(
+                parse_qsl(metadata, keep_blank_values=True, strict_parsing=True)
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_METADATA_FORMAT",
+                    "message": f"Invalid metadata format: {e}",
+                },
+            ) from e
     items, total_items = _get_template_service().list_templates(
         metadata=metadata_filter,
         page=page,
@@ -145,13 +158,7 @@ def list_templates(
     )
     return ListFsbTemplatesResponse(
         items=[template_to_response(record) for record in items],
-        pagination=PaginationInfo(
-            page=page,
-            pageSize=page_size,
-            totalItems=total_items,
-            totalPages=total_pages(total_items, page_size),
-            hasNextPage=page < total_pages(total_items, page_size),
-        ),
+        pagination=build_pagination_info(page, page_size, total_items),
     )
 
 

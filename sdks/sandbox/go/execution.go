@@ -45,10 +45,10 @@ type ExecutionError struct {
 	Value     string   `json:"value"`
 	Timestamp int64    `json:"timestamp"`
 	Traceback []string `json:"traceback"`
-	// ExitCode is the exit status reported by execd for a CommandExecError
-	// when the command ran and finished with a non-zero status (-1 when it was
-	// terminated by a signal). Nil when the process failed to start, for
-	// non-command errors, and on servers that predate error.exit_code.
+	// ExitCode is the exit status for CommandExecError or CommandTimeout after
+	// a command exits non-zero (-1 when terminated by a signal).
+	// Nil when the process failed to start, no exit status was observed, or
+	// the error is not from a command. Also nil on servers that predate error.exit_code.
 	ExitCode *int `json:"exit_code,omitempty"`
 }
 

@@ -355,7 +355,7 @@ func (p *NetworkPolicy) PortScopedRules() (deny, allow []PortScopedRule) {
 }
 
 func (r *EgressRule) matchesDomain(domain string) bool {
-	pattern := strings.ToLower(strings.TrimSpace(r.Target))
+	pattern := normalizeDomainPattern(r.Target)
 	domain = strings.ToLower(domain)
 
 	if pattern == "" {
@@ -370,4 +370,11 @@ func (r *EgressRule) matchesDomain(domain string) bool {
 		return strings.HasSuffix(domain, suffix) && domain != strings.TrimPrefix(pattern, "*.")
 	}
 	return false
+}
+
+// normalizeDomainPattern lowercases a domain target and drops a trailing root
+// dot, so "example.com." and "*.example.com." match the same queries as
+// "example.com" and "*.example.com" (Evaluate strips the dot from the query).
+func normalizeDomainPattern(target string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(target)), ".")
 }

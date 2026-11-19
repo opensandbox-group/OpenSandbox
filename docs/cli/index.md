@@ -487,6 +487,8 @@ osb config set defaults.image python:3.12
 osb config set defaults.timeout 30m
 ```
 
+`osb config set` validates the key and the value (for example, `connection.protocol` must be `http` or `https`), so a typo fails immediately instead of breaking every later command. Setting an unknown key prints the full list of supported keys.
+
 The optional `connection`, `output`, and `defaults` sections must be TOML tables (for example, `[connection]`), not scalar values or arrays. Invalid section types produce a configuration error naming the section. Omitted sections use defaults.
 
 Example config file:

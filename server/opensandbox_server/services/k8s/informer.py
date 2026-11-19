@@ -89,6 +89,8 @@ class WorkloadInformer:
         self._write_sequence = 0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Only the informer thread reads or writes this flag.
+        self._missing_resource_reported = False
 
     @property
     def _staleness_limit_seconds(self) -> float:
@@ -265,6 +267,7 @@ class WorkloadInformer:
                         continue
                     last_full_resync_at = time.monotonic()
                     backoff = 1.0
+                    self._missing_resource_reported = False
 
                 if not self.enable_watch:
                     self._stop_event.wait(self.resync_period_seconds)
@@ -294,13 +297,32 @@ class WorkloadInformer:
                     self._resource_version = None
                     self._has_synced = False
                 else:
-                    logger.warning(f"Informer watch error: {exc}", exc_info=True)
+                    self._log_api_error(exc)
                     self._has_synced = False
                     backoff = self._wait_before_retry(backoff)
             except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(f"Unexpected informer error: {exc}", exc_info=True)
+                logger.warning(f"Unexpected error in informer {self._thread_name}: {exc}", exc_info=True)
                 self._has_synced = False
                 backoff = self._wait_before_retry(backoff)
+
+    def _log_api_error(self, exc: ApiException) -> None:
+        """Log a failed LIST or WATCH without flooding the log while a resource is absent.
+
+        A 404 means the API server does not serve the resource, typically
+        because its CRD is not installed. That stays true until someone
+        installs it, so it is reported once per outage and retried quietly.
+        """
+        if exc.status != 404:
+            logger.warning(f"Informer {self._thread_name} watch error: {exc}", exc_info=True)
+            return
+        if self._missing_resource_reported:
+            logger.debug(f"Informer {self._thread_name}: resource still not served (404)")
+            return
+        self._missing_resource_reported = True
+        logger.warning(
+            f"Informer {self._thread_name}: the API server does not serve this resource (404); "
+            "its CRD is probably not installed. Retrying in the background."
+        )
 
     def _wait_before_retry(self, backoff: float) -> float:
         """Wait interruptibly and return the next bounded retry delay."""

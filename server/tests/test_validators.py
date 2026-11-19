@@ -297,6 +297,21 @@ class TestEnsureValidSubPath:
         assert exc_info.value.status_code == 400
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_SUB_PATH
 
+    @pytest.mark.parametrize(
+        "sub_path",
+        [r"foo\..\secret", r"..\secret", r"a\..\..\b", "a/..\\b", r"\Windows\System32"],
+    )
+    def test_backslash_traversal_or_absolute_raises(self, sub_path):
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_valid_sub_path(sub_path)
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_SUB_PATH
+
+    def test_dotdot_inside_a_component_is_allowed(self):
+        assert ensure_valid_sub_path("..cache") is None
+        assert ensure_valid_sub_path(r"foo\..cache") is None
+        assert ensure_valid_sub_path(r"foo\bar") is None
+
 class TestEnsureValidHostPath:
 
     def test_valid_absolute_path(self):
