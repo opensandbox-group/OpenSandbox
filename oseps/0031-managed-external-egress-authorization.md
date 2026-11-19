@@ -4,13 +4,13 @@ description: Reconcile administrator-managed egress intent across sandbox lifecy
 authors:
   - "@hpliStartAgain"
 creation-date: 2026-10-20
-last-updated: 2026-10-24
+last-updated: 2026-11-14
 status: draft
 ---
 
-# OSEP-0026: Managed Egress Control-Plane Integration
+# OSEP-0031: Managed Egress Control-Plane Integration
 
-The number 0026 is provisional pending upstream OSEP numbering review. This document proposes behavior; it does not claim implementation acceptance or production readiness.
+Renumbered from provisional 0026 because upstream assigned it to Fast Sandbox resource accounting. The number 0031 is provisional pending maintainer assignment; 0027 is merged and open proposals currently claim 0028–0030. This document proposes behavior; it does not claim implementation acceptance or production readiness.
 
 <!-- toc -->
 
@@ -50,7 +50,9 @@ Define an opt-in managed egress integration that preserves administrator-authori
 
 ## Motivation
 
-The current upstream proxy integration supplies the transport path to an external CONNECT gateway. Its documented server configuration attaches egress when a create request includes `networkPolicy`, and changes to proxy configuration apply to new sandboxes. The current addon loads proxy authorization into process-wide state at startup. These behaviors support administrator-configured chaining, but do not establish mandatory enrollment for a managed population or rotation of short-lived authorization in a running sandbox. See the [configuration][current-config], [upstream guide][upstream-guide], and [addon implementation][upstream-addon] at the review baseline.
+The current upstream proxy integration supplies the transport path to an external CONNECT gateway. On its supported non-pooled Docker/Kubernetes paths, the documented server configuration attaches the egress sidecar when a create request includes `networkPolicy`, and changes to proxy configuration apply to new sandboxes. The current addon loads proxy authorization into process-wide state at startup. These behaviors support administrator-configured chaining, but do not establish mandatory enrollment for a managed population or rotation of short-lived authorization in a running sandbox. See the [configuration][current-config], [upstream guide][upstream-guide], and [addon implementation][upstream-addon] at the review baseline.
+
+Current upstream also provides [OSEP-0025 exchange credentials][osep-0025] for per-request origin-header resolution and has advanced OSEP-0022/0023 shared-subject and admission work. Those capabilities do not rotate the outer `Proxy-Authorization` value or establish this proposal's managed enrollment and durable association contract. [PR #2837][forward-proposal] proposes a different, forward-only gateway path; it is unmerged at this review baseline. The integration boundaries are detailed below.
 
 A platform may need to apply one external policy across several sandbox instances, rotate gateway credentials without recreating those instances, and stop future CONNECT admissions for one retired instance, subject to the declared credential-expiry and policy-propagation bounds, without disabling the policy shared by others. Reimplementing these requirements independently in each deployment creates ambiguity at the boundary between sandbox lifecycle, credential delivery, and CONNECT admission.
 
@@ -63,7 +65,7 @@ Long-lived Agent workloads also need policy continuity after restart or authoriz
 1. Make required egress enrollment an administrator decision that a sandbox create request cannot omit or weaken.
 2. Allow a trusted runtime adapter to provide rotating, instance-scoped gateway authorization to egress without exposing it to the workload.
 3. Specify when each new CONNECT uses a credential, how local and external decisions compose, and what happens on expiry or failure.
-4. Preserve the responsibilities and compatibility boundaries of upstream CONNECT, OSEP-0022, and OSEP-0023.
+4. Preserve the responsibilities and compatibility boundaries of upstream CONNECT, OSEP-0012, OSEP-0022, OSEP-0023, and OSEP-0025.
 5. Define a testable reconciliation contract across sandbox instances, with durable desired intent, separate observation points, and fenced recovery after controller or egress restart.
 6. Demonstrate the contract with a reference reconciler and a three-target rotation/recovery scenario; report incomplete targets explicitly instead of claiming fleet-wide atomicity.
 
@@ -74,7 +76,7 @@ Long-lived Agent workloads also need policy continuity after restart or authoriz
 - Standardizing an enterprise JWT claim schema, Envoy configuration, or an identity issuer implementation.
 - Promising authorization for every request inside an admitted tunnel or immediate termination of existing tunnels.
 - Claiming initial parity across shared egress, Fast, Pool, gVisor, Kata, IPv6, arbitrary TCP, UDP, or QUIC.
-- Adding public management resources, a new SDK lifecycle, dynamic local-baseline rollout, or application-secret rotation in this first profile. Those extensions require separate API and compatibility review.
+- Adding public management resources, a new SDK lifecycle, managed sandbox-policy rollout, or application-secret rotation in this first profile. Those extensions require separate API and compatibility review.
 
 ## Requirements
 
@@ -101,7 +103,7 @@ The public data path remains sandbox traffic through local egress, then through 
 
 The proposed core changes cover administrator-required enrollment, a trusted runtime adapter contract, rotatable upstream authorization, local CONNECT admission using the existing network policy, and sanitized runtime observations. The management integration maintains desired associations and coordinates recovery across egress instances through those contracts. An optional reference reconciler demonstrates this closed loop; its storage and deployment topology are not mandatory core dependencies.
 
-This management layer complements the lifecycle server and OSEP-0022's local shared-egress control plane. It does not resolve packet identities or allocate sandbox resources. Existing server/runtime responsibilities remain in place, and a separate always-required management service is not proposed. The first profile keeps the administrator's local baseline fixed for an instance; it manages gateway-credential rotation and observes external policy updates within that baseline.
+This management layer complements the lifecycle server and OSEP-0022's local shared-egress control plane. It does not resolve packet identities or allocate sandbox resources. Existing server/runtime responsibilities remain in place, and a separate always-required management service is not proposed. The first profile keeps the administrator-selected sandbox policy fixed for an instance; it manages gateway-credential rotation and observes external policy updates within that boundary. Existing platform overlays and port-floor reloads remain authoritative and must be included in effective local admission, rather than frozen or bypassed by this management layer.
 
 ### Ownership and integration boundary
 
@@ -122,7 +124,7 @@ For that profile, managed public traffic is HTTPS to approved public FQDNs over 
 
 The profile explicitly permits only the infrastructure routes needed for operation, such as the configured DNS resolver and upstream endpoint. Any internal direct destinations require administrator-defined rules with a documented scope. All remaining protocols, address families, ports, and destinations are denied in this profile. “Managed egress” describes control of this complete routing partition; it does not mean CONNECT carries every outbound packet.
 
-The existing upstream-chain path also handles HTTP/80, and [port-scoped network rules do not govern intercepted traffic][egress-architecture]. The proposed 443-only profile therefore needs explicit, tested rejection of HTTP/80 and other out-of-profile traffic at the appropriate interception or enforcement boundary. An ordinary port rule or port floor alone must not be assumed to establish this restriction. Local authority and original-destination checks are required as described in Design Details; mandatory routing through a gateway alone does not establish composed policy enforcement.
+The existing upstream-chain path also handles HTTP/80. In the classic sidecar profile, [the redirected workload leg is accepted before port-scoped rules][egress-architecture]; those rules and the port floor can constrain direct re-originated origin sockets, but the [dedicated upstream gateway socket is accepted ahead of them][policy-output]. They therefore do not validate the inner CONNECT destination or port. The proposed 443-only profile needs explicit, tested rejection of HTTP/80 and other out-of-profile traffic at the appropriate interception or enforcement boundary. An ordinary port rule or port floor alone must not be assumed to establish this restriction. Local authority and original-destination checks are required as described in Design Details; mandatory routing through a gateway alone does not establish composed policy enforcement.
 
 ### Risks and Mitigations
 
@@ -194,11 +196,11 @@ Policy references, desired generations, credential-delivery revisions, local egr
 
 For example, a credential update for three targets can validate on A, remain paused on B, and have an unknown delivery result on C. Report all three outcomes. After controller restart, read back C before retrying and reconcile B against current intent before resume. No rollback of A is implied by B or C failing. An administrator-requested rollback creates a new generation, reauthorizes the old intent, and uses fresh credentials; it never decreases revisions or resurrects revoked material.
 
-The first profile supports external policy updates only within the fixed local baseline. Changing that baseline or the trusted proxy endpoint requires an explicit recreation/migration; it is not claimed as hot rollout. Application API-key injection remains owned by [OSEP-0012][osep-0012] and OSEP-0023. A later origin-vault adapter may reuse management intent and status concepts, but needs its own source-to-destination authorization, conditional mutation, and recovery review. It must not equate outer CONNECT credential selection with per-request secret injection.
+The first profile supports external policy updates within the administrator-selected sandbox policy and currently accepted platform restrictions. Changing the selected sandbox policy or trusted proxy endpoint requires explicit recreation/migration; this proposal does not add managed hot rollout for those inputs. Existing platform overlay/port-floor reloads remain subject to the consistent local-admission checks below. Application credential injection and per-request origin-header resolution remain owned by [OSEP-0012][osep-0012], OSEP-0023, and [OSEP-0025][osep-0025]. A later origin-vault adapter may reuse management intent and status concepts, but needs its own source-to-destination authorization, conditional mutation, and recovery review. It must not equate outer CONNECT credential selection with per-request secret injection.
 
 ### Administrator-required enrollment
 
-An administrator selects the mode for a deployment or a trusted runtime profile. The preferred behavior is for the server to install the required egress configuration even when the create request omits `networkPolicy`. The first profile uses one explicit administrator-owned restrictive local baseline. A supplied `networkPolicy` must match that baseline after normal request validation, or creation fails before workload execution. The same restriction applies to subsequent policy mutation and restore paths. General composition with caller policies is deferred rather than inferred from rule concatenation. The final configuration field spelling is a review decision; arbitrary request metadata and ordinary environment variables are not configuration authorities.
+An administrator selects the mode for a deployment or a trusted runtime profile. The preferred behavior is for the server to install the required egress configuration even when the create request omits `networkPolicy`. The first profile uses one explicit administrator-selected restrictive sandbox policy. A supplied `networkPolicy` must match that policy after normal request validation, or creation fails before workload execution. The same restriction applies to subsequent mutations of that sandbox policy and to restore paths; platform overlay/port-floor reloads retain the separate handling described above. General composition with caller policies is deferred rather than inferred from rule concatenation. The final configuration field spelling is a review decision; arbitrary request metadata and ordinary environment variables are not configuration authorities.
 
 Managed enrollment does not require an origin Credential Vault or origin credential bindings. The selected runtime profile must provision transparent MITM independently of those optional application capabilities, and must reject requests or environment settings that disable or conflict with the required interception path.
 
@@ -216,7 +218,7 @@ The adapter fences stale delivery work using its authoritative incarnation and u
 
 In the initial profile, the expected binding is immutable for an egress admission lifecycle; credential rotation does not change it. Assignment to another incarnation requires retiring the previous lifecycle, cancelling its pending CONNECT attempts, and discarding its pooled connection state before activating the replacement. Recovery of an egress process may retain the same still-active sandbox incarnation if the trusted adapter revalidates it. The adapter remains responsible for update fencing across that recovery; an in-memory revision high-water mark is not persistent replay protection.
 
-A later shared-egress integration must reuse OSEP-0022's trusted subject resolution and attachment fencing. It must select authorization from that resolved context and partition connection state accordingly. This proposal adds neither a competing subject registry nor a client-selectable identity header, and its first implementation must reject a shared-egress configuration.
+A later shared-egress integration must reuse OSEP-0022's trusted subject resolution and complete runtime-owner/attachment fencing context, rather than reducing it to a sandbox name or adding another authority. It must select authorization from that resolved context and partition connection state accordingly. This proposal adds neither a competing subject registry nor a client-selectable identity header, and its first implementation must reject a shared-egress configuration.
 
 ### File credential source and rotation
 
@@ -246,9 +248,9 @@ The selected authorization is attached only to the outer CONNECT sent to the con
 
 Each new upstream CONNECT is admitted only when the local route and network policy allow it, the selected instance credential is valid, any applicable credential-bound interception admission permits it, and the external gateway allows the requested destination using valid policy state. Each layer may deny; an allow at one layer does not override another layer.
 
-At the review baseline, the [transparent redirect][transparent-redirect] runs at output priority `-100`, before the [network-policy output hook][policy-output] at priority `0`, whose loopback accept precedes destination and port rules. A workload can dial a hard-coded IPv4 address on 443 without a DNS query and supply an SNI denied by the local baseline but allowed externally. DNS filtering and containment of the upstream endpoint are not proof that this CONNECT authority passed local authorization. The managed profile requires the local admission and original-destination checks below before it can claim R5.
+At the review baseline, the [transparent redirect][transparent-redirect] runs at output priority `-100`, before the [network-policy output hook][policy-output] at priority `0`. That hook accepts loopback and the rewritten MITM listener destination before destination and port rules, and separately admits the trusted upstream-gateway socket. A workload can dial a hard-coded IPv4 address on 443 without a DNS query and supply an SNI denied by the local baseline but allowed externally. DNS filtering and containment of the upstream endpoint are not proof that this CONNECT authority passed local authorization. The managed profile requires the local admission and original-destination checks below before it can claim R5.
 
-Before emitting every new upstream CONNECT, including retries and attempts caused by connection pooling, egress MUST normalize and validate the actual CONNECT authority and port and evaluate its normalized hostname against the administrator baseline using the [existing domain-policy first-match and default-action semantics][domain-policy]. This is not a new deny-overrides rule order. Missing, invalid, or conflicting destination identity (including inconsistent SNI, Host, or CONNECT authority when present) MUST fail closed. A change to the authority or port after a check invalidates that result and requires a new check before the CONNECT is emitted; a prior DNS decision or an admission for another authority is insufficient.
+Before emitting every new upstream CONNECT, including retries and attempts caused by connection pooling, egress MUST normalize and validate the actual CONNECT authority and port and evaluate its normalized hostname against the effective administrator baseline using the [existing domain-policy first-match and default-action semantics][domain-policy], with platform `deny.always` first, then `allow.always`, then the selected sandbox policy. The effective baseline includes the currently accepted platform overlays and port floor; a reload must be reflected in subsequent local CONNECT admission using a consistent accepted policy snapshot. This preserves domain-rule ordering; network-layer IP/CIDR/port deny-before-allow behavior remains a separate check. Missing, invalid, or conflicting destination identity (including inconsistent SNI, Host, or CONNECT authority when present) MUST fail closed. A change to the authority or port after a check invalidates that result and requires a new check before the CONNECT is emitted; a prior DNS decision or an admission for another authority is insufficient.
 
 The profile MUST also preserve applicable local restrictions on the workload's original destination IP/CIDR and port at a pre-redirect check or an equivalent enforcement point that retains the original destination context. An allowed authority must not erase an original-destination denial, and a pre-redirect IP check alone does not evaluate a denied SNI. These are proposed local enforcement requirements, separate from the gateway's authorization of the address it actually dials. They apply to new CONNECT admission and do not require reauthorization or immediate draining of established tunnels.
 
@@ -281,6 +283,8 @@ The external integration owns the relationship between credential revisions and 
 
 A control-plane update acknowledgment is not evidence that every gateway has observed the update. Fleet-level completion requires observation from all gateways eligible to receive traffic, or isolation of unconfirmed gateways. The initial core interface does not introduce that distributed transaction. It reports local validation and selection; the management integration correlates those observations with the gateway's independently reported policy state. The reference integration must define eligible replica membership and its observation-freshness bound; adding a replica invalidates a prior fleet-completion report until that replica is confirmed or isolated.
 
+Current upstream supports opt-in `dropEstablished=true` for supported policy `PATCH`/`DELETE` operations on the `dns+nft` sidecar, but [rejects it with HTTP 501 without changing policy when upstream proxy chaining and transparent MITM are combined][policy-api]. It therefore supplies no established-CONNECT termination guarantee for this profile and does not change this proposal's admission-only baseline.
+
 CONNECT admission authorizes establishment of a tunnel, not every HTTP request, HTTP/2 stream, or other exchange inside it. Established tunnels can survive credential expiry, a policy change, or loss of the control plane. This OSEP claims no bounded termination time for an executor without explicit tunnel-lifetime enforcement; evidence from one gateway implementation cannot establish that capability for another.
 
 ### Readiness and diagnostics
@@ -301,12 +305,18 @@ Diagnostics may expose opaque binding references, revisions, deadlines, and boun
 | [OSEP-0012][osep-0012] | Sandbox-local origin credentials, destination bindings, and atomic vault mutations. | Origin credential reconciliation is a future adapter with separate authorization and acceptance; gateway credentials never become origin headers. |
 | [OSEP-0022][osep-0022] | Resolving trusted local subjects and fencing runtime attachments when one egress serves multiple sandboxes. | An eventual external-authorization consumer of that context; no replacement subject registry. Shared operation is deferred from the initial profile. |
 | [OSEP-0023][osep-0023] | Credential-bound TLS interception, local binding acknowledgment, fencing, and transition behavior. | External gateway admission and its independent credential/policy lifecycle. A local binding acknowledgment does not acknowledge an external policy rollout. |
+| [OSEP-0025][osep-0025] | Per-request origin-header resolution through exchange credentials and its resolver trust boundary. | Rotating outer CONNECT authorization, durable associations, and gateway observations; no reuse of the origin-header response as a gateway credential or rollout acknowledgment. |
+| [Forward-mode proposal, PR #2837][forward-proposal] (unmerged) | Proposes opaque TCP forwarding with destination-policy authority at the gateway, without local MITM or Credential Vault. | A possible future consumer of management contracts, requiring a separately reviewed compatibility profile; not the initial local-baseline profile. |
 
-OSEP-0022's control plane is local to a shared egress domain. This proposal coordinates desired associations and observations across egress instances through runtime adapters. It does not replace OSEP-0022's policy/vault channels, persistence, or authorized snapshot transfer, and its first sidecar profile establishes no shared-runtime parity.
+OSEP-0022's control plane is local to a shared egress domain. This proposal coordinates desired associations and observations across egress instances through runtime adapters. It does not replace OSEP-0022's policy/vault channels, persistence, or profile-specific state-transfer contracts, and its first sidecar profile establishes no shared-runtime parity. The current experimental Actions v2 strict-owner path accepts `legacy` mode and excludes snapshots, state transfer, pause/resume, and restore; v1 state-transfer support must not be inferred for that path. Existing strict-owner fences are foundations for a future shared adapter, not evidence that managed recovery is already supported.
+
+OSEP-0025 exchange support does not establish the managed credential-delivery contract: HTTPS resolver caller authentication is designed but not implemented at this baseline, and exchange integration with the OSEP-0023 live revision runtime remains separately gated. This proposal does not route gateway credentials through the origin vault or treat a resolver response as gateway-policy observation. Any later origin-vault reconciliation adapter must reuse that work rather than invent another exchange API.
+
+The forward-mode proposal in PR #2837 sends original TCP bytes through CONNECT to a gateway that owns destination policy; its proposed profile rejects local `networkPolicy` and Credential Vault inputs. This draft retains local-deny composition on the existing MITM chain. A future forward-mode adapter could reuse enrollment, rotating outer authorization, fencing, and observations, but cannot claim this draft's local-baseline guarantees unchanged. Neither proposal establishes support for the other's runtime profile.
 
 Removing an origin credential or interception binding and revoking external network access express different intent. The former follows OSEP-0023's local behavior; the latter may deny a new connection at the gateway. A remote policy allow cannot reactivate a locally revoked credential capability.
 
-The initial profile uses the currently documented upstream-chain mode and does not require completion of every OSEP-0023 experimental feature. Combining managed authorization with selective interception or a shared-egress runtime requires a later explicit compatibility profile. Unsupported combinations must be rejected rather than inferred from component-only support.
+The initial profile uses the currently documented upstream-chain mode and does not require completion of every OSEP-0023 experimental feature. Current Fast Sandbox subject snapshots, TLS handshake admission, and HTTP/1.1 request admission do not imply chained-proxy support: its credential-bound mode explicitly rejects an upstream proxy, while the sidecar live HTTP/2 path also rejects configured chaining. Combining managed authorization with selective interception or a shared-egress runtime requires a later explicit compatibility profile. Unsupported combinations must be rejected rather than inferred from component-only support.
 
 ## Test Plan
 
@@ -314,14 +324,14 @@ This documentation PR provides a proposal and no runtime conformance results. Im
 
 | Acceptance case | Required observation | Requirements |
 | --- | --- | --- |
-| T1: Enrollment cannot be omitted | Omitting `networkPolicy` or origin bindings does not remove the boundary; conflicting policies, runtime policy mutations, attempts to disable required interception, and unsupported runtimes are rejected. Ordinary environment/metadata cannot bypass the profile. | R1, R8 |
+| T1: Enrollment cannot be omitted | Omitting `networkPolicy` or origin bindings does not remove the boundary; conflicting policies, mutations of the selected sandbox policy, attempts to disable required interception, and unsupported runtimes are rejected. Ordinary environment/metadata cannot bypass the profile. | R1, R8 |
 | T2: Routing partition and startup | During creation, restart, and credential absence, direct public access, alternate proxy use, raw IP, HTTP/80, IPv6, UDP/QUIC, and unsupported ports fail; only declared infrastructure/direct exceptions work. | R1, R2, R6 |
 | T3: Identity isolation | A workload cannot read the source, impersonate a trusted process exemption, or use another runtime's binding. Egress rejects stale writes and nonmatching records; pending attempts and pooled state cannot pass to a replacement incarnation. Already-issued credentials after issuance revocation follow T7. | R3, R4 |
 | T4: Rotation under concurrency | New attempts observe complete revisions; retries reread the source; invalid reads deny. Equal-revision mutation and regression fail, including a paused revision-7 reader after revision 8 is selected. Pooling cannot cross bindings or relabel an existing tunnel's admission revision. | R4, R6 |
 | T5: Credential validation and secrecy | Wrong issuer/audience, invalid credential, CR/LF injection, expired record, and invalid gateway TLS fail; gateway authorization is absent from origin requests, workload interfaces, and logs. | R3, R4, R5 |
-| T6: Policy and destination composition | With no workload DNS query, dialing a hard-coded IPv4 address on 443 with locally denied SNI but external allow emits zero upstream CONNECTs; a matching both-allow control succeeds. Verify existing first-match/default domain semantics, missing/invalid/conflicting identity rejection, and a fresh local check on every new CONNECT, including retries and authority/port changes. Local original-destination IP/CIDR or port denies still block an allowed authority. External deny wins over local allow; unknown or expired policy fails; DNS rebinding, mixed answers, cache hits, and retries cannot make the gateway dial an unapproved address. | R2, R5, R6 |
+| T6: Policy and destination composition | With no workload DNS query, dialing a hard-coded IPv4 address on 443 with locally denied SNI but external allow emits zero upstream CONNECTs; a matching both-allow control succeeds. Verify existing first-match/default domain semantics and platform overlay precedence, including a newly accepted overlay denial before a subsequent CONNECT, missing/invalid/conflicting identity rejection, and a fresh local check on every new CONNECT, including retries and authority/port changes. Local original-destination IP/CIDR or port denies still block an allowed authority. External deny wins over local allow; unknown or expired policy fails; DNS rebinding, mixed answers, cache hits, and retries cannot make the gateway dial an unapproved address. | R2, R5, R6 |
 | T7: Revocation and replica observation | Race renewal against one instance's binding revocation while another shares its policy. Verify the effective issuance cutoff and latest outstanding expiry; measure policy rollout lag, stale replica behavior, and clock error separately. | R7, R9 |
-| T8: Existing-tunnel semantics | A long-lived CONNECT is observed across expiry and policy changes; results match the declared admission-only behavior. A termination capability, if advertised separately, has executor-specific tests. | R7 |
+| T8: Existing-tunnel semantics | A long-lived CONNECT is observed across expiry and policy changes; results match the declared admission-only behavior. Local `dropEstablished` is not accepted as proof of CONNECT tunnel termination. A termination capability, if advertised separately, has executor-specific tests. | R7 |
 | T9: Compatibility and recovery | Mode off preserves current static behavior; enabling it rejects dual credential sources and unsupported interception/shared profiles; rollback and restore never create an unmanaged fallback. | R1, R8 |
 | T10: Readiness and failures | Delayed file projection and policy rollout produce distinct observations; issuer, source, gateway, and authorizer failures yield the documented new-admission decisions without leaking secrets. | R6, R9 |
 | T11: Durable reconciliation | Crash the reconciler after issuance, publication, and before status commit; lose delivery acknowledgments and replay events. Readback and idempotency recover the correct record; ambiguous issuance remains included in revoke accounting; different contents never reuse a revision. | R10, R11 |
@@ -336,13 +346,13 @@ Reconciler unit tests use a fake clock and fault-injected durable store, issuer,
 
 ## Drawbacks
 
-Required enrollment adds a lifecycle dependency: incomplete identity or policy delivery can delay or deny network access. The first profile also rejects caller policies that differ from its administrator baseline, so adopting it may require changes to existing create or policy-update callers. Strict reads favor a clear security boundary over availability during projection or source failures. Reading a record for each CONNECT also has a cost that implementation benchmarks should measure under realistic connection churn.
+Required enrollment adds a lifecycle dependency: incomplete identity or policy delivery can delay or deny network access. The first profile also rejects caller policies that differ from the administrator-selected sandbox policy, so adopting it may require changes to existing create or policy-update callers. Strict reads favor a clear security boundary over availability during projection or source failures. Reading a record for each CONNECT also has a cost that implementation benchmarks should measure under realistic connection churn.
 
 Admission-only revocation leaves a long-lived access window for established tunnels. Operators requiring a hard disconnect deadline need an executor that enforces it. Shorter credential lifetimes improve the new-connection bound but increase rotation load and sensitivity to clock or delivery problems.
 
 Even a small core interface imposes compatibility and test obligations on runtime adapters. Keeping policy storage and gateway choice external limits that maintenance burden, but does not eliminate the need to verify destination pinning, credential isolation, and failure behavior for each supported profile.
 
-Durable reconciliation adds operation records, tombstone retention, HA fencing, and recovery complexity. Strict single-owner management limits ad hoc changes; external policy and local credentials can temporarily disagree and conservatively deny traffic. Observation lag means completion is a scoped, expiring report, not a permanent fleet safety guarantee. The first fixed-baseline profile also requires recreation for changes that a more general policy controller could eventually apply live.
+Durable reconciliation adds operation records, tombstone retention, HA fencing, and recovery complexity. Strict single-owner management limits ad hoc changes; external policy and local credentials can temporarily disagree and conservatively deny traffic. Observation lag means completion is a scoped, expiring report, not a permanent fleet safety guarantee. The first profile also requires recreation to change the selected sandbox policy, which a more general policy controller could eventually update live.
 
 ## Alternatives
 
@@ -378,15 +388,16 @@ Disabling the profile for future creation is an explicit administrator action. E
 
 The draft selects strict per-attempt file reads, denial after a source read failure, and admission-only baseline revocation. Review is requested on these decisions and on the smallest upstream interface needed to support them:
 
-1. Should mandatory enrollment be a server deployment setting or a trusted runtime-profile setting, and can an existing configuration mechanism satisfy it without a new public API? Is a fixed administrator baseline sufficient for v1, with general caller-policy composition deferred?
-2. Is the proposed internal file delivery plus sanitized validation/selection readback the right first contract, or can an existing egress-owned abstraction provide the same binding, revision, expiry, and observation semantics?
+1. Should mandatory enrollment be a server deployment setting or a trusted runtime-profile setting, and can an existing configuration mechanism satisfy it without a new public API? Is a fixed administrator-selected sandbox policy sufficient for v1, with general caller-policy composition deferred?
+2. Is the proposed internal file delivery plus sanitized validation/selection readback the right first contract, or can an existing egress-owned abstraction provide the same binding, revision, expiry, and observation semantics? Which OSEP-0025 provider primitives can be reused without conflating origin-header resolution and outer CONNECT authorization?
 3. Is non-pooled BatchSandbox the right first reference provider, including its managed resume gate, before adding AgentSandbox, Docker, or OSEP-0022 shared egress?
 4. Should the optional reference reconciler live alongside existing server integrations or in a runnable example, with its durable state adapter external to core? Are the desired-state ownership and sink-fencing requirements sufficient without a new public management API?
-5. Which credential-lifetime, clock-error, policy-freshness, and observation-freshness bounds should the reference integration publish, while keeping immediate tunnel termination a separately negotiated executor capability?
+5. Should the unmerged forward-mode proposal in PR #2837 later consume this management contract through a separate profile, with its different destination-policy authority stated explicitly?
+6. Which credential-lifetime, clock-error, policy-freshness, and observation-freshness bounds should the reference integration publish, while keeping immediate tunnel termination a separately negotiated executor capability?
 
 ## References
 
-Current-behavior statements use upstream commit [`0b6cdb286d38b145f3a69fecaa57b30046b03303`](https://github.com/opensandbox-group/OpenSandbox/commit/0b6cdb286d38b145f3a69fecaa57b30046b03303), reviewed on 2026-10-24. Proposed management records, adapter operations, reconciliation, and acceptance cases are not current release capabilities.
+Current-behavior statements use upstream commit [`e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5`](https://github.com/opensandbox-group/OpenSandbox/commit/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5), reviewed on 2026-11-14. PR #2837 is referenced at its separately pinned, unmerged proposal revision. Proposed management records, adapter operations, reconciliation, and acceptance cases are not current release capabilities; merged implementation slices and draft proposal text must not be treated as equivalent evidence.
 
 - [Server configuration and upstream proxy settings][current-config]
 - [Upstream proxy integration and support boundaries][upstream-guide]
@@ -395,16 +406,21 @@ Current-behavior statements use upstream commit [`0b6cdb286d38b145f3a69fecaa57b3
 - [OSEP-0012: Credential Vault and Credential Proxy][osep-0012]
 - [OSEP-0022: Multi-Sandbox Egress Control Plane][osep-0022]
 - [OSEP-0023: Credential-Bound TLS Interception][osep-0023]
+- [OSEP-0025: Credential Vault Provider SPI and Delegated Token Exchange][osep-0025]
+- [Unmerged forward-mode proposal (PR #2837)][forward-proposal]
 - [OSEP contribution process][osep-process]
 
-[current-config]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/server/configuration.md
-[upstream-guide]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/docs/guides/egress-upstream-proxy.md
-[upstream-addon]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/components/egress/mitmscripts/upstream_proxy.py
-[egress-architecture]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/docs/architecture/network/egress.md
-[osep-0022]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/oseps/0022-multi-sandbox-egress-control-plane.md
-[osep-0023]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/oseps/0023-credential-bound-tls-interception.md
-[osep-process]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/oseps/CONTRIBUTING.md
-[transparent-redirect]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/components/egress/pkg/iptables/transparent.go#L62-L69
-[policy-output]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/components/egress/pkg/nftables/manager.go#L284-L327
-[domain-policy]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/components/egress/pkg/policy/policy.go#L102-L140
-[osep-0012]: https://github.com/opensandbox-group/OpenSandbox/blob/0b6cdb286d38b145f3a69fecaa57b30046b03303/oseps/0012-credential-vault.md
+[current-config]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/server/configuration.md
+[upstream-guide]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/docs/guides/egress-upstream-proxy.md
+[upstream-addon]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/components/egress/mitmscripts/upstream_proxy.py
+[egress-architecture]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/docs/architecture/network/egress.md
+[osep-0022]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/oseps/0022-multi-sandbox-egress-control-plane.md
+[osep-0023]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/oseps/0023-credential-bound-tls-interception.md
+[osep-process]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/oseps/CONTRIBUTING.md
+[transparent-redirect]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/components/egress/pkg/iptables/transparent.go#L62-L69
+[policy-output]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/components/egress/pkg/nftables/manager.go#L383-L461
+[domain-policy]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/components/egress/pkg/policy/policy.go#L100-L143
+[osep-0012]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/oseps/0012-credential-vault.md
+[osep-0025]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/oseps/0025-credential-vault-provider-spi.md
+[forward-proposal]: https://github.com/hittyt/OpenSandbox/blob/493c23c41935d394910a39bc900453446b1a3bd7/oseps/0030-egress-upstream-proxy-forward-mode.md
+[policy-api]: https://github.com/opensandbox-group/OpenSandbox/blob/e564cd1896ffa0d53a4ae09a7c610e30c26bb5f5/specs/egress-api.yaml#L81-L98
