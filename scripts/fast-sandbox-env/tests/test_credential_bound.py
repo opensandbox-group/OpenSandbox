@@ -363,14 +363,22 @@ VERIFY_ID=subject
 osb_api() { shift 4; "$@"; }
 if exchange_vault_fails_closed; then echo DENIED; else echo NOT_DENIED; fi
 '''
-        for status, rc, expected in (("000", "52", "DENIED"), ("000", "56", "DENIED"),
-                                     ("000", "28", "NOT_DENIED"), ("000", "7", "NOT_DENIED"),
-                                     ("200", "0", "NOT_DENIED"), ("407", "0", "NOT_DENIED")):
-            with self.subTest(status=status, rc=rc):
-                result = self.sourced(body, script=VAULT_SH, EGRESS_INTERCEPTION_MODE="credential-bound",
-                                      PATH=self.tmp + os.pathsep + os.environ["PATH"],
-                                      MOCK_STATUS=status, MOCK_RC=rc)
-                self.assertEqual(result.stdout.strip(), expected)
+        for script in (VAULT_SH, ENV_SH):
+            for mode, cases in (
+                ("credential-bound", (("000", "52", "DENIED"), ("000", "56", "DENIED"),
+                                      ("000", "28", "NOT_DENIED"), ("000", "7", "NOT_DENIED"),
+                                      ("200", "0", "NOT_DENIED"), ("407", "0", "NOT_DENIED"))),
+                ("all", (("407", "0", "DENIED"), ("000", "52", "NOT_DENIED"))),
+            ):
+                for status, rc, expected in cases:
+                    with self.subTest(script=script, mode=mode, status=status, rc=rc):
+                        result = self.sourced(body, script=script, EGRESS_INTERCEPTION_MODE=mode,
+                                              PATH=self.tmp + os.pathsep + os.environ["PATH"],
+                                              MOCK_STATUS=status, MOCK_RC=rc)
+                        self.assertEqual(result.stdout.strip(), expected)
+                        if mode == "credential-bound" and expected == "NOT_DENIED":
+                            with open(os.path.join(self.work, "logs", "exchange-guest-curl.err")) as log:
+                                self.assertIn("http_code=%s curl_rc=%s" % (status, rc), log.read())
 
 
 class ReportingTest(ShellCase):

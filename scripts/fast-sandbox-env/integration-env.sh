@@ -94,7 +94,7 @@
 #                    OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE into the
 #                    pool's egress container only. credential-bound also
 #                    registers the credential-bound verify stage on both
-#                    lanes and reports the exchange stage BLOCKED (I1)
+#                    lanes; overlaybd runs the real exchange verification
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
 #   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (latest from PyPI / preinstalled binary)
 #   SKIP_TOOL_INSTALL / SKIP_LEFTOVER_CLEAN / INOTIFY_VALUE
@@ -371,13 +371,6 @@ run_stage() {
 stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
 	STAGE_UNVERIFIED+=("$1: $2")
 	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
-}
-
-# A registered stage that is known not to work yet: announced, listed in the
-# summary, and never routed through stage_done (no OK line).
-run_blocked_stage() { # <description> <reason>
-	stage_begin "$1"
-	stage_unverified BLOCKED "$2"
 }
 
 stage_summary() {
@@ -3764,7 +3757,24 @@ exchange_guest_status() { # <path>
 		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT$1"
 }
 
-exchange_vault_status_is_407() {
+exchange_vault_fails_closed() {
+	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+		# In subject mode the addon kills the transport instead of returning 407.
+		# A timeout or an unreachable origin is not evidence of a denied resolve.
+		local out
+		out="$(osb_api command run "$VERIFY_ID" -- sh -c '
+			code=$(curl -s --http1.1 -o /dev/null -w "%{http_code}" -m 20 --resolve "$1" "$2")
+			rc=$?
+			if [ "$code" = 000 ] && { [ "$rc" = 52 ] || [ "$rc" = 56 ]; }; then
+				echo EXCHANGE_DENIED
+			else
+				printf "EXCHANGE_PROBE http_code=%s curl_rc=%s\n" "$code" "$rc"
+			fi
+		' sh "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" "https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/vault/echo?x=1")" 2>>"$LOGS_DIR/exchange-guest-curl.err" || return 1
+		case "$out" in EXCHANGE_PROBE\ *) printf '%s\n' "$out" >>"$LOGS_DIR/exchange-guest-curl.err" ;; esac
+		[[ "$out" == "EXCHANGE_DENIED" ]]
+		return
+	fi
 	[[ "$(exchange_guest_status "/vault/echo?x=1")" == "407" ]]
 }
 
@@ -3833,13 +3843,13 @@ exchange_resolver_verify() {
 	fi
 	pass "off-scope path stays static (resolver engaged only on /vault/*)"
 
-	# 4) fail-closed: resolver down in every pod -> 407 on the exchange
-	#    path while the static binding keeps flowing.
+	# 4) fail-closed: resolver down in every pod -> 407 in all-mode or a
+	#    closed subject transport in credential-bound mode; static keeps flowing.
 	exchange_resolver_stop_all
-	wait_for "resolver outage fails closed with 407 on the exchange path" 60 exchange_vault_status_is_407
+	wait_for "resolver outage fails closed on the exchange path" 60 exchange_vault_fails_closed
 	wait_for "static binding unaffected by the resolver outage" 120 \
 		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
-	pass "resolver outage fails closed (407) while the static binding flows"
+	pass "resolver outage fails closed while the static binding flows"
 
 	# 5) recovery: the next resolve is fresh (a failure never poisons the
 	#    following request).

@@ -565,3 +565,44 @@ func TestFastSandboxSubjectExchangeResolveAdmission(t *testing.T) {
 	require.Equal(t, http.StatusConflict, resolve(admission, false).Code)
 	require.Empty(t, resolver.requests)
 }
+
+// The addon pins the receiver's wire identity, not the coordinator-local
+// decision epoch. A rebind in the same child advances the transport's epoch
+// base, so an ACK stamped with the local identity denies every valid resolve.
+func TestFastSandboxSubjectExchangeRebindWireAdmission(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	mutationPersistence(t, s)
+	readinessDrain(t, s)
+	receiver := readinessReceiver(t, s)
+	resolver := startFakeResolverServer(t, 0)
+	bindExchangeSubject(t, s, testUID, "exchange-sandbox", testIP, testFenceR, testFenceA, 1)
+	rec := doVault(t, s, http.MethodPost, testUID, exchangeVaultBody(resolver.endpoint()), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	first := waitSubjectInstalled(t, receiver, lifecycleTarget(t, testUID, testFenceR, testFenceA), latestSubjectSnapshot(t, s, testUID))
+
+	const newRuntime, newAttachment = "exchange-next-runtime", "exchange-next-attachment"
+	rec = doAction(t, s, bindBodyWithName(t, testUID, "exchange-sandbox", testIP, newRuntime, newAttachment, 2, vaultAllowPolicy()))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doAction(t, s, hookBody(t, testUID, newRuntime, newAttachment, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doVault(t, s, http.MethodPost, testUID, exchangeVaultBody(resolver.endpoint()), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	wire := waitSubjectInstalled(t, receiver, lifecycleTarget(t, testUID, newRuntime, newAttachment), latestSubjectSnapshot(t, s, testUID))
+	require.Greater(t, wire.DecisionEpoch, first.DecisionEpoch, "rebind must advance the receiver's epoch in the same child")
+	waitReadiness(t, s, testUID, newRuntime, newAttachment)
+
+	subj := subject.FromSandboxUID(testUID)
+	s.mu.Lock()
+	ack := s.subjectDrain.acked[subj].identity
+	s.mu.Unlock()
+	require.Equal(t, wire, ack, "the ACK must retain the wire identity seen by the addon")
+	admission := credentialvault.ResolveAdmission{SubjectKey: string(subj), Revision: wire}
+	raw, err := json.Marshal(admission)
+	require.NoError(t, err)
+	req := exchangeResolveRequest(testIP)
+	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+	result := httptest.NewRecorder()
+	resolveHandlerFor(s).ServeHTTP(result, req)
+	require.Equal(t, http.StatusOK, result.Code, result.Body.String())
+	require.Equal(t, "exchange-sandbox", (<-resolver.requests).Subject)
+}

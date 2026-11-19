@@ -2294,6 +2294,7 @@ async def _resolve_exchange_binding(
             path += "?admission=" + quote(json.dumps(admission, separators=(",", ":")), safe="")
         except Exception:  # noqa: BLE001 - no fallback from missing admission
             _reject_request(flow, b"credential resolution unavailable\n", status_code=407)
+            ctx.log.warn("credential proxy: exchange resolve denied reason=missing_admission")
             return
     elif _fast_sandbox_mode_enabled:
         client_ip = _flow_client_ip(flow)

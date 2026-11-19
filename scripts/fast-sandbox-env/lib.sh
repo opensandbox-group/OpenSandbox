@@ -226,11 +226,6 @@ stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
 	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
 }
 
-run_blocked_stage() { # <description> <reason>
-	stage_begin "$1"
-	stage_unverified BLOCKED "$2"
-}
-
 # Both interception modes run the real per-request exchange stage.
 exchange_stage() { # <description> <template-id>
 	run_stage "$1" exchange_resolver_verify "$2"
