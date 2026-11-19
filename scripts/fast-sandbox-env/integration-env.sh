@@ -506,7 +506,10 @@ failure_dump() {
 		kubectl exec -n "$NS" deploy/fast-sandbox-controller -c manager -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
 		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
 			echo "### $pod component logs (/var/log/fast-sandbox)"
-			kubectl exec -n "$RESOURCE_NS" "$pod" -c fastlet -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+			# Exec through the always-running fastlet-proxy container (it mounts
+			# the same component-log volume): a crash-looping fastlet container
+			# cannot be exec'd into ("container not found").
+			kubectl exec -n "$RESOURCE_NS" "$pod" -c fastlet-proxy -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
 		done
 		echo "--- firecracker-runtime logs (every pod + container, tail) ---"
 		# `kubectl logs daemonset/...` resolves to ONE pod only, so a wedged
@@ -1217,6 +1220,14 @@ credentials_up() {
 	# Namespaces exist even after a partial up (resume support).
 	kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	kubectl create namespace "$RESOURCE_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	# Component logs (fastlet, fastlet-proxy) go to files under
+	# /var/log/fast-sandbox by default, so a crash-looping fastlet shows an
+	# EMPTY `kubectl logs` — the crash reason only exists inside the pod's
+	# log volume. Tee klog to stderr as well in this environment: the
+	# existing dump/kubectl-logs capture then carries the startup error.
+	kubectl -n "$RESOURCE_NS" create configmap fast-sandbox-logging \
+		--from-literal=logging.yaml='alsoStderr: true' \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	local host
 	host="${RUSTFS_ENDPOINT#http://}"
 	host="${host#https://}"
