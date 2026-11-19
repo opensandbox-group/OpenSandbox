@@ -57,6 +57,21 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: fast-sandbox-integration
+# Fastlet control authentication (FSEP-0003, fast-sandbox#232) pins the
+# issuer origin: the JWKS URL from the OIDC discovery document must share
+# scheme+host with the issuer anchor. kubeadm mints tokens with
+# issuer=https://kubernetes.default.svc.cluster.local but leaves
+# --service-account-jwks-uri unset, so the discovery document points at
+# the advertise address (https://172.18.0.x:6443/openid/v1/jwks) and every
+# fastlet rejects it ("jwks_uri is not served by the pinned issuer origin")
+# before serving a single request — the pool never becomes Ready. Align the
+# JWKS URI with the issuer the way real FSEP-0003 deployments must.
+kubeadmConfigPatches:
+- |
+  kind: ClusterConfiguration
+  apiServer:
+    extraArgs:
+      service-account-jwks-uri: https://kubernetes.default.svc.cluster.local/openid/v1/jwks
 nodes:
 - role: control-plane
   extraMounts:
