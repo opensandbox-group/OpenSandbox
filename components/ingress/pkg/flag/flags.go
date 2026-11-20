@@ -85,6 +85,8 @@ var (
 	// FastPathEndpoint is the FastPath v2 gRPC endpoint; non-empty enables Fast Sandbox routing.
 	FastPathEndpoint string
 
+	FastSandboxNamespace string
+
 	// FastPathAccessMode selects the Fast Sandbox data-plane mode (central-proxy or direct-fastlet-proxy).
 	FastPathAccessMode string
 

@@ -30,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.11'
           cache-dependency-path: components/egress/go.sum
 
       - name: Set up Python
@@ -166,7 +166,7 @@ jobs:
           python -m unittest discover -v -s tests -p "test_*.py"
 
       - name: Set up exact Go for held-old HTTP/2 fixture
-        # Keep the repository's Go 1.25.9 tests above on their pinned toolchain.
+        # Keep the repository's Go 1.26.11 tests above on their pinned toolchain.
         uses: actions/setup-go@v6
         with:
           go-version: '1.27.2'
@@ -361,7 +361,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.11'
           cache-dependency-path: components/egress/go.sum
 
       - name: Install nftables

@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.11'
           cache-dependency-path: |
             components/nodeagent/go.sum
             components/internal/go.sum

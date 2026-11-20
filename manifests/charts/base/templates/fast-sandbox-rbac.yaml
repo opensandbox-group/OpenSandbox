@@ -271,7 +271,7 @@ subjects:
   name: fast-sandbox-fastpath
   namespace: {{ .Values.fastSandbox.namespaces.system }}
 ---
-# Fastlet control authentication, three grants (mirrors fast-sandbox
+# Fastlet control authentication, two grants (mirrors fast-sandbox
 # config/rbac/base.yaml):
 #
 # 1. Token minting is per identity and namespaced: serviceaccounts/token RBAC
@@ -281,10 +281,13 @@ subjects:
 #    thereby inherit its broader cluster-wide permissions), and a
 #    cluster-scoped rule could not mint for same-named ServiceAccounts in
 #    tenant namespaces.
-# 2. The credential-less fastlet reads OIDC discovery and JWKS anonymously;
-#    this extends the default system:service-account-issuer-discovery role
-#    (normally bound only to system:serviceaccounts) to unauthenticated
-#    callers, exposing exactly the two public-key endpoints.
+# 2. The Fastlet fetches OIDC discovery and JWKS with a credential: its
+#    dedicated fast-sandbox-fastlet ServiceAccount (provisioned per Pool
+#    namespace, projected-token mounted) is covered by Kubernetes' built-in
+#    binding of system:service-account-issuer-discovery to the
+#    system:serviceaccounts group. The ClusterRole and ClusterRoleBinding
+#    below restate that grant for clusters that stripped the bootstrap
+#    bindings. Nothing binds to system:unauthenticated.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -356,6 +359,20 @@ subjects:
   namespace: {{ .Values.fastSandbox.namespaces.system }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fast-sandbox-fastlet-issuer-discovery
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- verbs:
+  - get
+  nonResourceURLs:
+  - /.well-known/openid-configuration
+  - /openid/v1/jwks
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: fast-sandbox-fastlet-issuer-discovery
@@ -365,9 +382,9 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: system:service-account-issuer-discovery
+  name: fast-sandbox-fastlet-issuer-discovery
 subjects:
 - kind: Group
-  name: system:unauthenticated
+  name: system:serviceaccounts
   apiGroup: rbac.authorization.k8s.io
 {{- end }}

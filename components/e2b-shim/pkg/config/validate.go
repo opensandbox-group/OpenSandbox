@@ -58,6 +58,14 @@ func (c *Config) Validate() error {
 	}
 	add(c.validateTimeouts())
 	add(validateTemplates(c.Templates))
+	for _, s := range []struct {
+		name   string
+		secret Secret
+	}{{"adapter_api_key", c.AdapterAPIKey}, {"native_api_key", c.NativeAPIKey}, {"hmac_key", c.HMACKey}} {
+		if s.secret.IsZero() {
+			add(fmt.Errorf("%s: %w", s.name, errSecretMissing))
+		}
+	}
 	return errors.Join(errs...)
 }
 

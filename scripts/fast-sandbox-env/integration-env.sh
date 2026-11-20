@@ -323,6 +323,30 @@ OSB_VENV="$WORK/tools/osb-venv"
 FSB_GOPROXY="${FSB_GOPROXY:-direct}"
 export GOPROXY="$FSB_GOPROXY"
 
+# FSB_GOSUMDB=off (set by the KVM integration lane): the runner's network
+# cannot reach sum.golang.org and the mirror /sumdb relays serve stale data,
+# so checksum-database verification fails every Go build. Export GOSUMDB=off
+# for host-level go commands and inject ENV GOSUMDB=off into the OpenSandbox
+# component Dockerfiles that carry a GOPROXY line (the CI workspace checkout
+# is reset by actions/checkout every run; build-fast-sandbox.sh patches the
+# pinned fast-sandbox checkout the same way and restores it on exit). Each
+# repo's own go.sum still verifies every downloaded module.
+if [[ "${FSB_GOSUMDB:-}" == "off" ]]; then
+	export GOSUMDB=off
+	for df in \
+		"$OSB_ROOT/components/egress/Dockerfile" \
+		"$OSB_ROOT/components/ingress/Dockerfile" \
+		"$OSB_ROOT/components/nodeagent/Dockerfile"; do
+		[[ -f "$df" ]] || continue
+		grep -q '^ENV GOSUMDB=' "$df" && continue
+		if grep -q '^ENV GOPROXY=' "$df"; then
+			sed -i '/^ENV GOPROXY=/a ENV GOSUMDB=off' "$df"
+		elif grep -q '^ARG GOPROXY=' "$df"; then
+			sed -i '0,/^ARG GOPROXY=/s//ARG GOPROXY=\nENV GOSUMDB=off/' "$df"
+		fi
+	done
+fi
+
 AUTO_CLEAN=0
 ACTION=""
 
@@ -458,6 +482,10 @@ failure_dump() {
 	local task="$1"
 	local dump="$LOGS_DIR/failure-$task-$(date +%s).txt"
 	mkdir -p "$LOGS_DIR"
+	# Bash dynamic scope exposes these locals only during rootfs-only verification.
+	if [[ -n "${rootfs_log_id:-}" ]]; then
+		dump_latency_evidence "$rootfs_log_id" "$rootfs_log_label (failure)" || true
+	fi
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
 		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_(IMAGE|INTERCEPTION_MODE)=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
@@ -471,6 +499,15 @@ failure_dump() {
 		kubectl get pods -n "$NS" -o wide 2>&1 || true
 		echo "--- controller logs (tail) ---"
 		kubectl logs -n "$NS" deploy/fast-sandbox-controller --tail=80 2>&1 || true
+		echo "--- controller + fastlet component logs (klog writes to /var/log/fast-sandbox files, NOT stdout: a crash-looping fastlet shows an empty `kubectl logs`) ---"
+		kubectl exec -n "$NS" deploy/fast-sandbox-controller -c manager -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			echo "### $pod component logs (/var/log/fast-sandbox)"
+			# Exec through the always-running fastlet-proxy container (it mounts
+			# the same component-log volume): a crash-looping fastlet container
+			# cannot be exec'd into ("container not found").
+			kubectl exec -n "$RESOURCE_NS" "$pod" -c fastlet-proxy -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		done
 		echo "--- firecracker-runtime logs (every pod + container, tail) ---"
 		# `kubectl logs daemonset/...` resolves to ONE pod only, so a wedged
 		# ublkd on the other node stays invisible. Loop the pods instead,
@@ -1180,6 +1217,14 @@ credentials_up() {
 	# Namespaces exist even after a partial up (resume support).
 	kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	kubectl create namespace "$RESOURCE_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	# Component logs (fastlet, fastlet-proxy) go to files under
+	# /var/log/fast-sandbox by default, so a crash-looping fastlet shows an
+	# EMPTY `kubectl logs` — the crash reason only exists inside the pod's
+	# log volume. Tee klog to stderr as well in this environment: the
+	# existing dump/kubectl-logs capture then carries the startup error.
+	kubectl -n "$RESOURCE_NS" create configmap fast-sandbox-logging \
+		--from-literal=logging.yaml='alsoStderr: true' \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	local host
 	host="${RUSTFS_ENDPOINT#http://}"
 	host="${host#https://}"
@@ -3045,32 +3090,52 @@ verify_lifecycle_ops() { # <sandbox-id>
 # invocations (fastlet action invoke:), egress sidecar SET_BINDING / hook
 # steps (timing fields on its subject lines), and fastpath create totals.
 # Append-only evidence for create-latency analysis (issue #2323 style).
-dump_latency_evidence() {
-	local out="$LOGS_DIR/latency-evidence-$(date +%s).txt"
+dump_latency_evidence() (
+	# Keep diagnostic failures from re-entering the caller's ERR trap.
+	trap - ERR
+	local sandbox_id="${1:-}" label="${2:-create}" sandbox_uid="" log_tail=3000 out timings
+	out="$(mktemp "$LOGS_DIR/latency-evidence-XXXXXX")" || return 0
 	{
-		echo "=== latency evidence $(date -u +%FT%TZ) ==="
-		echo
-		echo "--- fastlet: create phase + action-invoke timing ---"
-		kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet --tail=3000 2>/dev/null \
-			| grep -E "fastlet create timing|fastlet action invoke" || true
-		echo
-		echo "--- egress sidecar: SET_BINDING / hook timing ---"
-		kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=3000 2>/dev/null \
-			| grep -E "deny-first enforced|SET_BINDING applied|data-plane-ready" || true
-		echo
-		echo "--- server: fsb create served (authoritative control-plane timing) ---"
-		kubectl -n "$OSB_NS" logs deploy/opensandbox-server --tail=3000 2>/dev/null \
-			| grep "fsb create served" | tail -30 || true
-		echo
-		echo "--- fastpath create totals (controller) ---"
-		kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=3000 2>/dev/null \
-			| grep "fastpath sandbox created" | tail -30 || true
+		echo "=== latency evidence: $label ($(date -u +%FT%TZ)) ==="
+		if [[ -n "$sandbox_id" ]]; then
+			# Runtime sandboxID fields carry the CR UID, not the API sandbox ID.
+			sandbox_uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$sandbox_id" \
+				--request-timeout=15s -o jsonpath='{.metadata.uid}' 2>/dev/null)" || true
+			echo "sandbox=$sandbox_id uid=${sandbox_uid:-<unavailable>}"
+			log_tail=-1
+		fi
+		if [[ -z "$sandbox_id" || -n "$sandbox_uid" ]]; then
+			echo "--- fastlet: create phase + Firecracker + action-invoke timing ---"
+			if ! timings="$(kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c fastlet \
+				--request-timeout=15s --timestamps --prefix --tail="$log_tail" 2>/dev/null \
+				| grep -E 'fastlet create timing|fastlet action invoke|firecracker oci (cli|prepare) timing|firecracker sandbox created|fsb-vm create timing:' \
+				| grep -F -- "$sandbox_uid")"; then
+				echo "WARNING: fastlet timing logs unavailable or no matching entries"
+			fi
+			printf '%s\n' "$timings"
+		else
+			echo "WARNING: cannot resolve Sandbox CR UID; skipping scoped fastlet logs"
+		fi
+		if [[ -z "$sandbox_id" ]]; then
+			echo
+			echo "--- egress sidecar: SET_BINDING / hook timing ---"
+			kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=3000 2>/dev/null \
+				| grep -E "deny-first enforced|SET_BINDING applied|data-plane-ready" || true
+			echo
+			echo "--- server: fsb create served (authoritative control-plane timing) ---"
+			kubectl -n "$OSB_NS" logs deploy/opensandbox-server --tail=3000 2>/dev/null \
+				| grep "fsb create served" | tail -30 || true
+			echo
+			echo "--- fastpath create totals (controller) ---"
+			kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=3000 2>/dev/null \
+				| grep "fastpath sandbox created" | tail -30 || true
+		fi
 	} > "$out" 2>&1 || true
 	log "latency evidence: $out"
-	# CI runners discard $WORK between runs, so the content must also land
-	# in the job log to be analyzable.
-	cat "$out"
-}
+	printf '::group::Latency evidence: %s\n' "$label"
+	cat "$out" || true
+	printf '::endgroup::\n'
+)
 
 # --- vm-console collection assertions (ride the e2e matrix's own sandboxes)
 #
@@ -4262,6 +4327,7 @@ rootfs_only_verify() {
 	local lane artifact_scheme
 	read -r lane artifact_scheme <<< "$(rootfs_only_lane "$template_id")"
 	log "verify (rootfs-only): lane=$lane templateId=$template_id"
+	local rootfs_log_id="" rootfs_log_label="rootfs-only $lane"
 	if [[ "$lane" == "native" ]]; then
 		# The pinned Firecracker driver cuts native captures with XFS reflink
 		# and has no full-copy fallback. Fail fast on a non-XFS StateRoot
@@ -4284,6 +4350,7 @@ rootfs_only_verify() {
 	source_id="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
 	VERIFY_ID="$source_id"
+	rootfs_log_id="$source_id"
 	wait_for "rootfs-only source sandbox Running" 300 sandbox_running
 	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
 	t1="$(now_ms)"
@@ -4339,6 +4406,7 @@ rootfs_only_verify() {
 	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
 	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
 	VERIFY_ID="$restore_id"
+	rootfs_log_id="$restore_id"
 	# Cold boot is seconds-scale; the generous ceiling only covers a slow
 	# registry pull of the artifact pair.
 	wait_for "cold-booted sandbox Running" 300 sandbox_running
@@ -4346,6 +4414,7 @@ rootfs_only_verify() {
 	log "verify (rootfs-only): cold boot create->Running $(( (t3 - t2) / 1000000 ))ms"
 	wait_for "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 180 execd_ping_ok
 	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
+	dump_latency_evidence "$restore_id" "$rootfs_log_label cold boot" || true
 
 	# One pause/resume round on the cold-booted descendant: PauseSandbox is
 	# full-only upstream, so a sandbox booted from a rootfs-only artifact

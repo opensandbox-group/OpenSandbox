@@ -482,9 +482,9 @@ helm install opensandbox-server manifests/charts/server \
   --set server.gateway.host=gateway.example.com
 ```
 
-Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode` of the ingress-gateway chart.
+Use ingress `gateway.gatewayRouteMode=header` for server `server.gateway.gatewayRouteMode=header` or `wildcard`; use `uri` on both charts for URI routing.
 
-When serving sandboxes through the **fast-sandbox** runtime, set the provider, the FastPath endpoint, and the secure-access key ring (the chart fails at render time without the key ring — FastPath routing serves only authenticated route scopes):
+For **fast-sandbox** signed header/URI routes, configure the provider, FastPath endpoint, and a signing key ring shared with the server:
 
 ```bash
 KEY=$(openssl rand -base64 32)   # share with server.gateway.secureAccess
@@ -496,6 +496,30 @@ helm install ingress-gateway manifests/charts/ingress-gateway \
   --set 'gateway.secureAccess.keys[0].key_id=a' \
   --set "gateway.secureAccess.keys[0].key=$KEY"
 ```
+
+### Fast Sandbox unsigned wildcard routing
+
+For a single fixed namespace, signing keys are optional: configure ingress in `header` mode with `gateway.fastSandboxNamespace`, and the server in `wildcard` mode with a wildcard host. Apply these settings alongside your Fast Sandbox runtime configuration:
+
+```bash
+helm upgrade --install ingress-gateway manifests/charts/ingress-gateway \
+  --namespace opensandbox-system \
+  --set gateway.providerType=fast-sandbox \
+  --set gateway.fastpathEndpoint=fast-sandbox-fastpath.opensandbox-system.svc:9090 \
+  --set gateway.gatewayRouteMode=header \
+  --set gateway.fastSandboxNamespace=opensandbox
+
+helm upgrade --install opensandbox-server manifests/charts/server \
+  --namespace opensandbox-system \
+  --values values-server.yaml \
+  --set server.gateway.enabled=true \
+  --set server.gateway.gatewayRouteMode=wildcard \
+  --set 'server.gateway.host=*.sandbox.example.com'
+```
+
+`values-server.yaml` must contain your Fast Sandbox server configuration, with the sandbox namespace matching `gateway.fastSandboxNamespace`. Ingress accepts one namespace, not a list or wildcard, and rejects signed scopes for other namespaces too. `getEndpoint` returns `<sandbox-id>-<port>.sandbox.example.com` without routing headers. Configure wildcard DNS/TLS at the front proxy and preserve Host.
+
+Unsigned routes do not authenticate clients, including access to execd. Protect the gateway with network isolation or an authenticating front proxy.
 
 ### Secure-Access Keys (OSEP-0011)
 
