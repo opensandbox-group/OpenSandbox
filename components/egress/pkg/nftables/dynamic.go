@@ -52,11 +52,10 @@ const (
 )
 
 type resolvedDomain struct {
-	addresses    map[netip.Addr]struct{}
-	lastObserved time.Time
-	lastAttempt  time.Time
-	failures     int
-	retryAt      time.Time
+	addresses   map[netip.Addr]struct{}
+	lastAttempt time.Time
+	failures    int
+	retryAt     time.Time
 }
 
 // nextExpiry returns the earliest dynamic-lease expiry across the entry's
@@ -86,39 +85,74 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	if domain == "" || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
 		return fmt.Errorf("resolved domain %q is no longer allowed", domain)
 	}
-	if err := m.addResolvedIPsLocked(ctx, ips); err != nil {
-		return err
-	}
 	if m.domainPolicy.DefaultAction == policy.ActionAllow || len(ips) == 0 {
-		return nil
+		return m.addResolvedIPsLocked(ctx, ips)
 	}
-	entry := &resolvedDomain{addresses: make(map[netip.Addr]struct{}), lastObserved: m.tracker.now()}
+	entry := &resolvedDomain{addresses: make(map[netip.Addr]struct{}, min(len(ips), maxDomainAddresses))}
 	for _, ip := range ips {
-		if ip.Addr.IsValid() && len(entry.addresses) < maxDomainAddresses {
-			entry.addresses[ip.Addr.Unmap()] = struct{}{}
+		if address := ip.Addr.Unmap(); address.IsValid() {
+			entry.addresses[address] = struct{}{}
+			if len(entry.addresses) > maxDomainAddresses {
+				return fmt.Errorf("too many DNS addresses to track for %q (limit %d)", domain, maxDomainAddresses)
+			}
 		}
 	}
 	if len(entry.addresses) == 0 {
 		return nil
 	}
+	now := m.tracker.now()
+	var victim string
 	if previous := m.domains[domain]; previous != nil {
 		entry.lastAttempt = previous.lastAttempt
+		// Retain live addresses first. Expired observations can use any
+		// remaining tracking slots but must not displace a live lease.
 		for address := range previous.addresses {
-			if len(entry.addresses) < maxDomainAddresses {
+			if m.holdsDomainCapacity(address, now) {
 				entry.addresses[address] = struct{}{}
+				if len(entry.addresses) > maxDomainAddresses {
+					return fmt.Errorf("no expired DNS address slot for %q (limit %d)", domain, maxDomainAddresses)
+				}
 			}
+		}
+		for address := range previous.addresses {
+			if len(entry.addresses) == maxDomainAddresses {
+				break
+			}
+			entry.addresses[address] = struct{}{}
 		}
 	} else if len(m.domains) >= maxResolvedDomains {
-		var oldest string
 		for candidate, tracked := range m.domains {
-			if oldest == "" || tracked.lastObserved.Before(m.domains[oldest].lastObserved) {
-				oldest = candidate
+			live := false
+			for address := range tracked.addresses {
+				if m.holdsDomainCapacity(address, now) {
+					live = true
+					break
+				}
+			}
+			if !live {
+				victim = candidate
+				break
 			}
 		}
-		delete(m.domains, oldest)
+		if victim == "" {
+			return fmt.Errorf("no expired DNS domain slot for %q (limit %d)", domain, maxResolvedDomains)
+		}
+	}
+	if err := m.addResolvedIPsLocked(ctx, ips); err != nil {
+		return err
+	}
+	if victim != "" {
+		delete(m.domains, victim)
 	}
 	m.domains[domain] = entry
 	return nil
+}
+
+// holdsDomainCapacity is called with m.mu held. Keep a pending TCP refresh
+// eligible even if its most recent kernel lease has already expired.
+func (m *Manager) holdsDomainCapacity(addr netip.Addr, now time.Time) bool {
+	_, active := m.tracker.previousActiveIPs[addr]
+	return active || m.tracker.dynamicIPs[addr].After(now)
 }
 
 func (m *Manager) StartDomainRefresh(ctx context.Context, lookup func(context.Context, string) ([]ResolvedIP, error)) {

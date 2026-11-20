@@ -345,12 +345,18 @@ func TestDomainRefresh_PolicyReplacementDiscardsInflightResult(t *testing.T) {
 }
 
 func TestAddResolvedDomain_BoundsTrackingAndRequiresSuccessfulWrite(t *testing.T) {
+	var writes int
 	var writeErr error
-	manager := NewManagerWithRunner(func(context.Context, string) ([]byte, error) { return nil, writeErr })
+	manager := NewManagerWithRunner(func(context.Context, string) ([]byte, error) {
+		writes++
+		return nil, writeErr
+	})
 	allowed, err := policy.ParsePolicy(`{"egress":[{"action":"allow","target":"*.example.com"}]}`)
 	require.NoError(t, err)
 	ctx := context.Background()
 	require.NoError(t, manager.ApplyStatic(ctx, allowed))
+	now := time.Unix(1_000, 0)
+	manager.tracker.now = func() time.Time { return now }
 	ips := []ResolvedIP{{Addr: netip.MustParseAddr("192.0.2.1"), TTL: time.Minute}}
 	writeErr = fmt.Errorf("nft unavailable")
 	require.Error(t, manager.AddResolvedDomain(ctx, "failed.example.com", ips))
@@ -360,15 +366,26 @@ func TestAddResolvedDomain_BoundsTrackingAndRequiresSuccessfulWrite(t *testing.T
 		require.NoError(t, manager.AddResolvedDomain(ctx, fmt.Sprintf("%d.example.com", index), ips))
 	}
 	require.NoError(t, manager.AddResolvedDomain(ctx, "0.example.com", ips))
+	before := writes
+	require.Error(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
+	require.Equal(t, before, writes, "do not install a grant before reserving tracking capacity")
+	require.Contains(t, manager.domains, "1.example.com", "a still-live observation must not be evicted")
+
+	now = now.Add(ClampTTL(ips[0].TTL) + time.Second)
+	writeErr = fmt.Errorf("nft unavailable")
+	require.Error(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
+	require.Len(t, manager.domains, maxResolvedDomains, "failed kernel write must put no observation at risk")
+	require.NotContains(t, manager.domains, "new.example.com")
+	writeErr = nil
 	require.NoError(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
 	require.Len(t, manager.domains, maxResolvedDomains)
-	require.Contains(t, manager.domains, "0.example.com")
-	require.NotContains(t, manager.domains, "1.example.com")
 	for index := 0; index < maxDomainAddresses+1; index++ {
 		ips = append(ips, ResolvedIP{Addr: netip.AddrFrom4([4]byte{198, 51, 100, byte(index)}), TTL: time.Minute})
 	}
-	require.NoError(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
-	require.Len(t, manager.domains["new.example.com"].addresses, maxDomainAddresses)
+	before = writes
+	require.Error(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
+	require.Equal(t, before, writes)
+	require.Len(t, manager.domains["new.example.com"].addresses, 1)
 	writeErr = fmt.Errorf("table does not exist")
 	require.NoError(t, manager.RemoveEnforcement(ctx))
 	require.Empty(t, manager.domains)
@@ -381,6 +398,34 @@ func TestAddResolvedDomain_BoundsTrackingAndRequiresSuccessfulWrite(t *testing.T
 	require.NoError(t, manager.ApplyStatic(ctx, allowAll))
 	require.NoError(t, manager.AddResolvedDomain(ctx, "new.example.com", ips))
 	require.Empty(t, manager.domains, "default-allow needs no background authorization")
+}
+
+func TestAddResolvedDomain_RejectsOverflowAcrossAnswersBeforeWrite(t *testing.T) {
+	var writes int
+	manager := NewManagerWithRunner(func(context.Context, string) ([]byte, error) {
+		writes++
+		return nil, nil
+	})
+	ctx := context.Background()
+	p, err := policy.ParsePolicy(`{"egress":[{"action":"allow","target":"example.com"}]}`)
+	require.NoError(t, err)
+	require.NoError(t, manager.ApplyStatic(ctx, p))
+	now := time.Unix(1_000, 0)
+	manager.tracker.now = func() time.Time { return now }
+	previous := make([]ResolvedIP, maxDomainAddresses)
+	for i := range previous {
+		previous[i] = ResolvedIP{Addr: netip.AddrFrom4([4]byte{192, 0, 2, byte(i + 1)}), TTL: time.Minute}
+	}
+	require.NoError(t, manager.AddResolvedDomain(ctx, "example.com", previous))
+	written := writes
+	newIP := []ResolvedIP{{Addr: netip.MustParseAddr("198.51.100.1"), TTL: time.Minute}}
+	require.Error(t, manager.AddResolvedDomain(ctx, "example.com", newIP))
+	require.Equal(t, written, writes)
+	require.Contains(t, manager.domains["example.com"].addresses, previous[0].Addr)
+	now = now.Add(ClampTTL(previous[0].TTL) + time.Second)
+	require.NoError(t, manager.AddResolvedDomain(ctx, "example.com", newIP))
+	require.Equal(t, written+1, writes)
+	require.Contains(t, manager.domains["example.com"].addresses, newIP[0].Addr)
 }
 
 func TestDomainRefresh_BoundsWorkersAndStopsOnCancellation(t *testing.T) {
