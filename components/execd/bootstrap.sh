@@ -313,6 +313,7 @@ trust_mitm_ca() {
 # Requires certutil (e.g. Alpine: nss-tools, Debian/Ubuntu: libnss3-tools).
 trust_mitm_ca_nss() {
 	cert="$1"
+	_MITM_CA_NSS_FAILED=0
 	[ -f "$cert" ] || return 0
 	if ! command -v certutil >/dev/null 2>&1; then
 		echo "warning: certutil not found; Chromium/Chrome may not trust the mitm CA in NSS (install nss-tools on Alpine or libnss3-tools on Debian/Ubuntu)" >&2
@@ -321,6 +322,7 @@ trust_mitm_ca_nss() {
 	[ -n "${HOME:-}" ] && [ -d "$HOME" ] || return 0
 	pki="${HOME}/.pki/nssdb"
 	if ! mkdir -p "$pki" 2>/dev/null; then
+		_MITM_CA_NSS_FAILED=1
 		return 0
 	fi
 	if [ -f "$pki/cert9.db" ]; then
@@ -330,13 +332,17 @@ trust_mitm_ca_nss() {
 	else
 		nssdb="sql:$pki"
 		if ! certutil -N -d "$nssdb" --empty-password 2>/dev/null; then
-			[ -f "$pki/cert9.db" ] || return 0
+			if [ ! -f "$pki/cert9.db" ]; then
+				_MITM_CA_NSS_FAILED=1
+				return 0
+			fi
 		fi
 	fi
 	nick="opensandbox-mitmproxy"
 	certutil -D -d "$nssdb" -n "$nick" 2>/dev/null || true
 	if ! certutil -A -d "$nssdb" -n "$nick" -t "C,," -i "$cert"; then
 		echo "warning: failed to import mitm CA into NSS at $pki (Chrome may still distrust); need certutil" >&2
+		_MITM_CA_NSS_FAILED=1
 		return 0
 	fi
 	return 0
@@ -412,6 +418,7 @@ $ks
 "
 	else
 		echo "warning: failed to import mitm CA into $ks" >&2
+		_MITM_CA_JDK_FAILED=1
 	fi
 }
 
@@ -431,6 +438,7 @@ _try_jdk() {
 
 trust_mitm_ca_jdk() {
 	cert="$1"
+	_MITM_CA_JDK_FAILED=0
 	[ -f "$cert" ] || return 0
 	_SEEN_JDKS=""
 	_SEEN_JDK_STORES=""
@@ -555,6 +563,7 @@ _discover_jdk_cacerts() {
 }
 
 _mitm_ca_nss_state() {
+	_cert="$1"
 	if ! command -v certutil >/dev/null 2>&1; then
 		printf 'none\n'
 		return 0
@@ -572,7 +581,10 @@ _mitm_ca_nss_state() {
 		printf 'missing:%s\n' "$_pki"
 		return 0
 	fi
-	if certutil -L -d "$_nssdb" -n "opensandbox-mitmproxy" >/dev/null 2>&1; then
+	_exported="$(certutil -L -d "$_nssdb" -n "opensandbox-mitmproxy" -a 2>/dev/null || true)"
+	_exported_pem="$(printf '%s\n' "$_exported" | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' | tr -d '[:space:]')"
+	_incoming_pem="$(sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$_cert" 2>/dev/null | tr -d '[:space:]')"
+	if [ -n "$_incoming_pem" ] && [ "$_exported_pem" = "$_incoming_pem" ]; then
 		printf 'ok:%s\n' "$_nssdb"
 	else
 		printf 'missing:%s\n' "$_nssdb"
@@ -580,7 +592,8 @@ _mitm_ca_nss_state() {
 }
 
 _mitm_ca_trust_state() {
-	_ca_fp="$1"
+	_cert="$1"
+	_ca_fp="$2"
 	_merged_file="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
 	_merged_fp=""
 	if [ -f "$_merged_file" ] && [ -s "$_merged_file" ]; then
@@ -602,7 +615,7 @@ _mitm_ca_trust_state() {
 	printf 'ca=%s\n' "$_ca_fp"
 	printf 'merged=%s\n' "${_merged_fp:-absent}"
 	printf 'sys=%s:%s\n' "$_sys_tool" "$_sys_fp"
-	printf 'nss=%s\n' "$(_mitm_ca_nss_state)"
+	printf 'nss=%s\n' "$(_mitm_ca_nss_state "$_cert")"
 	_discover_jdk_cacerts | while IFS= read -r _ks_path; do
 		[ -n "$_ks_path" ] || continue
 		printf 'jdk=%s:%s\n' "$_ks_path" "$(_ca_fingerprint "$_ks_path")"
@@ -610,11 +623,12 @@ _mitm_ca_trust_state() {
 }
 
 _write_mitm_ca_marker() {
-	_marker_fp="$1"
+	_cert="$1"
+	_marker_fp="$2"
 	[ -n "$_marker_fp" ] || return 0
 	_marker_file="$(_mitm_ca_marker_path)"
 	_marker_dir="$(dirname "$_marker_file")"
-	_marker_state="$(_mitm_ca_trust_state "$_marker_fp")"
+	_marker_state="$(_mitm_ca_trust_state "$_cert" "$_marker_fp")"
 	if ( mkdir -p "$_marker_dir" && printf '%s\n' "$_marker_state" > "$_marker_file.tmp.$$" && mv "$_marker_file.tmp.$$" "$_marker_file" ) 2>/dev/null; then
 		return 0
 	fi
@@ -624,14 +638,21 @@ _write_mitm_ca_marker() {
 	return 0
 }
 
+_clear_mitm_ca_marker() {
+	_marker_file="$(_mitm_ca_marker_path)"
+	rm -f "$_marker_file" 2>/dev/null || _sudo rm -f "$_marker_file" 2>/dev/null || true
+	return 0
+}
+
 _mitm_ca_already_installed() {
-	_expected_fp="$1"
+	_cert="$1"
+	_expected_fp="$2"
 	_merged_file="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
 	_marker_file="$(_mitm_ca_marker_path)"
 	[ -n "$_expected_fp" ] || return 1
 	[ -f "$_merged_file" ] && [ -s "$_merged_file" ] || return 1
 	[ -r "$_marker_file" ] || return 1
-	_current_state="$(_mitm_ca_trust_state "$_expected_fp")"
+	_current_state="$(_mitm_ca_trust_state "$_cert" "$_expected_fp")"
 	case "$_current_state" in
 	*"nss=missing:"*) return 1 ;;
 	esac
@@ -735,8 +756,12 @@ watch_mitm_ca() {
 			trust_mitm_ca_nss "$ca" || true
 			trust_mitm_ca_jdk "$ca" || true
 			if [ "$_install_failed" -eq 0 ]; then
-				if command -v _write_mitm_ca_marker >/dev/null 2>&1; then
-					_write_mitm_ca_marker "$_cur"
+				if [ "${_MITM_CA_NSS_FAILED:-0}" -eq 0 ] && [ "${_MITM_CA_JDK_FAILED:-0}" -eq 0 ]; then
+					if command -v _write_mitm_ca_marker >/dev/null 2>&1; then
+						_write_mitm_ca_marker "$ca" "$_cur"
+					fi
+				elif command -v _clear_mitm_ca_marker >/dev/null 2>&1; then
+					_clear_mitm_ca_marker
 				fi
 				_prev="$_cur"
 				_watch_attempts=0
@@ -763,7 +788,7 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 		# baseline empty, so the watcher installs (and retries) on its
 		# first poll.
 		_baseline_fp="$(_ca_fingerprint "$MITM_CA")"
-		if _mitm_ca_already_installed "$_baseline_fp"; then
+		if _mitm_ca_already_installed "$MITM_CA" "$_baseline_fp"; then
 			OPENSANDBOX_MERGED_CA="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
 			_mitm_already_installed=1
 			echo "mitm CA already installed in trust stores; skipping reinstall"
@@ -781,8 +806,10 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	if [ "$_mitm_already_installed" -eq 0 ] && [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
 		trust_mitm_ca_nss "$MITM_CA" || true
 		trust_mitm_ca_jdk "$MITM_CA" || true
-		if [ -n "$_baseline_fp" ]; then
-			_write_mitm_ca_marker "$_baseline_fp"
+		if [ -n "$_baseline_fp" ] && [ "${_MITM_CA_NSS_FAILED:-0}" -eq 0 ] && [ "${_MITM_CA_JDK_FAILED:-0}" -eq 0 ]; then
+			_write_mitm_ca_marker "$MITM_CA" "$_baseline_fp"
+		else
+			_clear_mitm_ca_marker
 		fi
 	fi
 

@@ -50,9 +50,9 @@ MERGED="$VOL/merged-ca-certificates.pem"
 CA_STALE="$TESTDIR/ca-stale.pem"
 CA_FRESH="$TESTDIR/ca-fresh.pem"
 CA_ROTATED="$TESTDIR/ca-rotated.pem"
-printf '%s\n' 'certificate-generation-stale' > "$CA_STALE"
-printf '%s\n' 'certificate-generation-fresh' > "$CA_FRESH"
-printf '%s\n' 'certificate-generation-rotated' > "$CA_ROTATED"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' 'certificate-generation-stale' '-----END CERTIFICATE-----' > "$CA_STALE"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' 'certificate-generation-fresh' '-----END CERTIFICATE-----' > "$CA_FRESH"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' 'certificate-generation-rotated' '-----END CERTIFICATE-----' > "$CA_ROTATED"
 
 # Hermetic merged-bundle source: fake certifi module, never host CA bundles.
 FAKE_CERTIFI_PEM="$TESTDIR/certifi-bundle.pem"
@@ -74,6 +74,13 @@ PYEOF
 cat > "$SHIM/sudo" <<STUB
 #!/bin/sh
 echo "sudo \$1" >> "$SHIM/sudo.log"
+if [ "\${FAIL_KEYTOOL_IMPORT:-0}" = "1" ]; then
+  for _arg in "\$@"; do
+    if [ "\$_arg" = "-importcert" ]; then
+      exit 1
+    fi
+  done
+fi
 exit 0
 STUB
 cat > "$SHIM/cp" <<'STUB'
@@ -95,9 +102,40 @@ STUB
 cat > "$SHIM/keytool" <<STUB
 #!/bin/sh
 echo "keytool \$*" >> "$SHIM/keytool.log"
+if [ "\${FAIL_KEYTOOL_IMPORT:-0}" = "1" ]; then
+  for _arg in "\$@"; do
+    if [ "\$_arg" = "-importcert" ]; then
+      exit 1
+    fi
+  done
+fi
 exit 0
 STUB
-chmod +x "$SHIM/sudo" "$SHIM/cp" "$SHIM/update-ca-certificates" "$SHIM/update-ca-trust" "$SHIM/java" "$SHIM/keytool"
+cat > "$SHIM/certutil" <<STUB
+#!/bin/sh
+mode=""
+db=""
+nick=""
+cert=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -N|-D|-A|-L) mode="\$1"; shift ;;
+    -d) db="\${2#sql:}"; db="\${db#dbm:}"; shift 2 ;;
+    -n) nick="\$2"; shift 2 ;;
+    -i) cert="\$2"; shift 2 ;;
+    -t) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$mode" in
+  -N) : > "\$db/cert9.db" ;;
+  -D) rm -f "\$db/\$nick.pem" ;;
+  -A) echo "certutil -A \$nick" >> "$SHIM/certutil.log"; cat "\$cert" > "\$db/\$nick.pem" ;;
+  -L) [ -f "\$db/\$nick.pem" ] || exit 1; cat "\$db/\$nick.pem" ;;
+esac
+exit 0
+STUB
+chmod +x "$SHIM/sudo" "$SHIM/cp" "$SHIM/update-ca-certificates" "$SHIM/update-ca-trust" "$SHIM/java" "$SHIM/keytool" "$SHIM/certutil"
 
 # Fixture JDK: keeps the JDK trust branch in a sandboxed store.
 FAKE_JDK="$TESTDIR/fake-jdk"
@@ -305,7 +343,7 @@ cp "$CA_FRESH" "$MITM_CA3"
 
 count_trust_runs() {
   _c=0
-  for _f in "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"; do
+  for _f in "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log" "$SHIM/certutil.log"; do
     if [ -f "$_f" ]; then
       _c=$((_c + $(wc -l < "$_f" | tr -d ' ')))
     fi
@@ -334,7 +372,7 @@ run_p3_boot() {
   bash "$BOOTSTRAP" > "$_out_log" 2>&1
 }
 
-rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log" "$SHIM/certutil.log"
 run_p3_boot "$LOG3_1" "true" || fail "phase 3 boot 1 failed"
 [ -s "$STATE3" ] || fail "phase 3 boot 1: installed CA marker not written"
 [ -s "$MERGED3" ] || fail "phase 3 boot 1: merged bundle missing"
@@ -343,13 +381,14 @@ grep -q 'watcher disabled' "$LOG3_1" || fail "phase 3 boot 1: watcher was not di
 boot1_trust="$(count_trust_runs)"
 [ "$boot1_trust" -ge 1 ] || fail "phase 3 boot 1: expected system trust install, got $boot1_trust"
 
-rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log" "$SHIM/certutil.log"
 run_p3_boot "$LOG3_2" "printf 'NODE=%s\nREQ=%s\nSSL=%s\n' \"\$NODE_EXTRA_CA_CERTS\" \"\$REQUESTS_CA_BUNDLE\" \"\$SSL_CERT_FILE\" > \"$ENV3_2\"" \
   || fail "phase 3 boot 2 failed"
 grep -q 'skipping reinstall' "$LOG3_2" || fail "phase 3 boot 2: did not take idempotent skip path"
 boot2_trust="$(count_trust_runs)"
 [ "$boot2_trust" -eq 0 ] || fail "phase 3 boot 2: expected 0 system trust installs on cold-boot skip, got $boot2_trust"
 [ ! -s "$SHIM/keytool.log" ] || fail "phase 3 boot 2: keytool should not run on cold-boot skip"
+[ ! -s "$SHIM/certutil.log" ] || fail "phase 3 boot 2: certutil -A should not run on cold-boot skip"
 grep -q "^NODE=$MITM_CA3$" "$ENV3_2" || fail "phase 3 boot 2: NODE_EXTRA_CA_CERTS not exported"
 grep -q "^REQ=$MERGED3$" "$ENV3_2" || fail "phase 3 boot 2: REQUESTS_CA_BUNDLE not exported"
 grep -q "^SSL=$MERGED3$" "$ENV3_2" || fail "phase 3 boot 2: SSL_CERT_FILE not exported"
@@ -362,12 +401,34 @@ mkdir -p "$FAKE_JDK2/bin" "$FAKE_JDK2/lib/security"
 cp "$SHIM/keytool" "$FAKE_JDK2/bin/keytool"
 printf 'new-jdk-cacerts\n' > "$FAKE_JDK2/lib/security/cacerts"
 LOG3_2B="$TESTDIR/bootstrap-p3-2b.log"
-rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log" "$SHIM/certutil.log"
 P3_JAVA_HOME="$FAKE_JDK2" run_p3_boot "$LOG3_2B" "true" || fail "phase 3 boot 2b failed"
 grep -q 'skipping reinstall' "$LOG3_2B" && fail "phase 3 boot 2b: must reinstall when a new JDK appears" || true
 [ -s "$SHIM/keytool.log" ] || fail "phase 3 boot 2b: keytool must run for the newly installed JDK"
 
-rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
+# Boot 2c: overwriting the NSS alias with a different certificate must
+# invalidate the skip path even though the alias still exists.
+LOG3_2C="$TESTDIR/bootstrap-p3-2c.log"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' 'certificate-other-nss' '-----END CERTIFICATE-----' > "$HOME_DIR/.pki/nssdb/opensandbox-mitmproxy.pem"
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log" "$SHIM/certutil.log"
+P3_JAVA_HOME="$FAKE_JDK2" run_p3_boot "$LOG3_2C" "true" || fail "phase 3 boot 2c failed"
+grep -q 'skipping reinstall' "$LOG3_2C" && fail "phase 3 boot 2c: must reinstall when NSS alias cert drifts" || true
+[ -s "$SHIM/certutil.log" ] || fail "phase 3 boot 2c: certutil -A must run when NSS alias cert drifts"
+
+# Boot 2d: a failed JDK import must NOT persist the marker, so the next boot
+# retries instead of skipping broken Java trust.
+LOG3_2D_1="$TESTDIR/bootstrap-p3-2d-1.log"
+LOG3_2D_2="$TESTDIR/bootstrap-p3-2d-2.log"
+rm -f "$STATE3" "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log" "$SHIM/certutil.log"
+FAIL_KEYTOOL_IMPORT=1 P3_JAVA_HOME="$FAKE_JDK2" run_p3_boot "$LOG3_2D_1" "true" || fail "phase 3 boot 2d-1 failed"
+[ ! -e "$STATE3" ] || fail "phase 3 boot 2d-1: failed JDK import must not persist installed marker"
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log" "$SHIM/certutil.log"
+P3_JAVA_HOME="$FAKE_JDK2" run_p3_boot "$LOG3_2D_2" "true" || fail "phase 3 boot 2d-2 failed"
+grep -q 'skipping reinstall' "$LOG3_2D_2" && fail "phase 3 boot 2d-2: must retry after prior failed JDK import" || true
+[ -s "$SHIM/keytool.log" ] || fail "phase 3 boot 2d-2: keytool must run on retry"
+[ -s "$STATE3" ] || fail "phase 3 boot 2d-2: marker should be written once all stores succeed"
+
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log" "$SHIM/certutil.log"
 cp "$CA_ROTATED" "$MITM_CA3"
 run_p3_boot "$LOG3_3" "true" || fail "phase 3 boot 3 failed"
 grep -q 'skipping reinstall' "$LOG3_3" && fail "phase 3 boot 3: must reinstall when CA changes" || true
