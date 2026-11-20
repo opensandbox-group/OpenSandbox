@@ -365,7 +365,9 @@ def build_m3(spec):
 
 
 def counter_delta(window, field):
-    a, b = window.get("start", {}).get(field), window.get("end", {}).get(field)
+    # An unreadable endpoint is serialized as JSON null, not omitted.
+    window = window or {}
+    a, b = (window.get("start") or {}).get(field), (window.get("end") or {}).get(field)
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return b - a
     return None
@@ -375,7 +377,8 @@ def build_m4(spec):
     if spec.get("not_run"):
         return not_run("m4", spec)
     origin_leaf = spec.get("origin_leaf", "")
-    idle, load = spec.get("idle", {}), spec.get("load", {})
+    idle, load = spec.get("idle") or {}, spec.get("load") or {}
+    continuity = spec.get("egress_continuity") or {}
     runs, ok_requests, statuses = [], 0, []
     for entry in spec.get("runs", []):
         raw = load_json(entry.get("raw"))
@@ -396,9 +399,17 @@ def build_m4(spec):
     cpu = {"idle_usage_usec": idle_usec, "idle_wall_ms": idle_ms, "load_usage_usec": load_usec,
            "load_wall_ms": load_ms, "load_throttled_usec": counter_delta(load, "throttled_usec"),
            "load_nr_throttled": counter_delta(load, "nr_throttled"), "ok_requests": ok_requests}
+    restarts = (continuity.get("restart_count_start"), continuity.get("restart_count_end"))
     if None in (idle_usec, load_usec) or not idle_ms or not load_ms:
         statuses.append("FAILED")
         cpu["reason"] = "cgroup cpu.stat not readable"
+    elif continuity.get("same_container") is not True or None in restarts or restarts[0] != restarts[1]:
+        # Counters of a replaced container restart from zero: never publish such a delta.
+        statuses.append("FAILED")
+        cpu["reason"] = "egress container restarted, was replaced or had no readable identity during M4"
+    elif idle_usec < 0 or load_usec < 0:
+        statuses.append("FAILED")
+        cpu["reason"] = "cgroup cpu.stat usage decreased within a window"
     else:
         idle_rate = idle_usec / (idle_ms / 1000.0)
         net = load_usec - idle_rate * (load_ms / 1000.0)
@@ -416,6 +427,8 @@ def build_m4(spec):
         "settings": spec.get("settings", {}),
         "method": "egress container cgroup cpu.stat usage_usec delta over the load window, idle rate from an equal-shaped window before the load subtracted",
         "cpu": cpu,
+        "egress_continuity": {"restart_count_start": restarts[0], "restart_count_end": restarts[1],
+                              "same_container": continuity.get("same_container") is True},
         "runs": runs,
         "notes": spec.get("notes", []),
     }

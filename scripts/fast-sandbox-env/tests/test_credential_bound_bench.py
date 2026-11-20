@@ -318,17 +318,25 @@ class ReportBuildTest(unittest.TestCase):
         self.assertEqual(invalid["status"], "INVALID")
         self.assertEqual(REPORT.build_m3({"leg": "default", "not_run": "credential-bound only"})["status"], "NOT_RUN")
 
-    def test_m4_idle_corrected_cpu(self):
+    def m4_spec(self, **override):
         unbound = self.bench_raw("u.json", {ORIGIN: 1900}, {"absent": 1900}, 1900)
         bound = self.bench_raw("b.json", {MITM: 100}, {CODE: 100}, 100)
-        report = REPORT.build_m4({"leg": "credential-bound", "origin_leaf": ORIGIN,
-                                  "idle": {"start": {"usage_usec": 1000}, "end": {"usage_usec": 31000}, "wall_ms": 30000},
-                                  "load": {"start": {"usage_usec": 50000, "nr_throttled": 0, "throttled_usec": 0},
-                                           "end": {"usage_usec": 4050000, "nr_throttled": 2, "throttled_usec": 900},
-                                           "wall_ms": 100000},
-                                  "runs": [{"name": "unbound", "requests": 1900, "expect_leaf": "origin", "expect_cred": "absent", "raw": unbound},
-                                           {"name": "bound", "requests": 100, "expect_leaf": "mitm", "expect_cred": CODE, "raw": bound}]})
+        spec = {"leg": "credential-bound", "origin_leaf": ORIGIN,
+                "idle": {"start": {"usage_usec": 1000}, "end": {"usage_usec": 31000}, "wall_ms": 30000},
+                "load": {"start": {"usage_usec": 50000, "nr_throttled": 0, "throttled_usec": 0},
+                         "end": {"usage_usec": 4050000, "nr_throttled": 2, "throttled_usec": 900},
+                         "wall_ms": 100000},
+                "egress_continuity": {"restart_count_start": 0, "restart_count_end": 0, "same_container": True},
+                "runs": [{"name": "unbound", "requests": 1900, "expect_leaf": "origin", "expect_cred": "absent", "raw": unbound},
+                         {"name": "bound", "requests": 100, "expect_leaf": "mitm", "expect_cred": CODE, "raw": bound}]}
+        spec.update(override)
+        return spec
+
+    def test_m4_idle_corrected_cpu(self):
+        report = REPORT.build_m4(self.m4_spec())
         self.assertEqual(report["status"], "OK")
+        self.assertEqual(report["egress_continuity"],
+                         {"restart_count_start": 0, "restart_count_end": 0, "same_container": True})
         cpu = report["cpu"]
         self.assertEqual(cpu["idle_usec_per_s"], 1000.0)
         self.assertEqual(cpu["net_usage_usec"], 4000000 - 100000)
@@ -339,6 +347,39 @@ class ReportBuildTest(unittest.TestCase):
         self.assert_no_digest(report)
         broken = REPORT.build_m4({"leg": "x", "origin_leaf": ORIGIN, "idle": {}, "load": {}, "runs": []})
         self.assertEqual(broken["status"], "FAILED")
+
+    def test_m4_rejects_windows_across_an_egress_container_change(self):
+        # A restart after the traffic, before the last read: the counter
+        # regresses although every request succeeded.
+        reset_load = {"start": {"usage_usec": 10040000}, "end": {"usage_usec": 500000}, "wall_ms": 100000}
+        cases = {
+            "restarted": dict(egress_continuity={"restart_count_start": 0, "restart_count_end": 1, "same_container": False}),
+            "replaced": dict(egress_continuity={"restart_count_start": 0, "restart_count_end": 0, "same_container": False}),
+            "identity unread": dict(egress_continuity={"restart_count_start": None, "restart_count_end": None,
+                                                       "same_container": False}),
+            "no continuity evidence": dict(egress_continuity=None),
+            "counter regression": dict(load=reset_load),
+        }
+        for name, override in cases.items():
+            with self.subTest(name):
+                report = REPORT.build_m4(self.m4_spec(**override))
+                self.assertEqual(report["status"], "FAILED")
+                self.assertIn("reason", report["cpu"])
+                self.assertNotIn("net_usec_per_request", report["cpu"])
+
+    def test_m4_null_cgroup_endpoint_is_a_failed_report(self):
+        for window in ("idle", "load"):
+            for end in ("start", "end"):
+                with self.subTest(window=window, end=end):
+                    spec = self.m4_spec()
+                    spec[window] = dict(spec[window], **{end: None})
+                    report = REPORT.build_m4(spec)
+                    self.assertEqual(report["status"], "FAILED")
+                    self.assertEqual(report["cpu"]["reason"], "cgroup cpu.stat not readable")
+        spec = write_json(self.tmp, "m4-null.json", self.m4_spec(idle=None))
+        out = os.path.join(self.tmp, "m4-out.json")
+        proc = subprocess.run([sys.executable, REPORT_PY, "m4", spec, out], capture_output=True, text=True)
+        self.assertEqual((proc.returncode, proc.stdout.strip()), (0, "m4 FAILED"), proc.stderr)
 
     def test_summary_and_cli(self):
         env = write_json(self.tmp, "environment.json", {"leg": "default"})
@@ -405,6 +446,36 @@ class BenchRenderTest(ShellCase):
                         self.assertNotIn("OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY",
                                          [e["name"] for e in containers["fastlet"].get("env", [])])
                         self.assertEqual(egress_env.get("OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE"), mode or None)
+
+    def test_bench_renders_use_the_template_id_written_by_up(self):
+        try:
+            import yaml  # noqa: PLC0415
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        with open(os.path.join(self.work, "template-id"), "w") as handle:
+            handle.write("tpl-from-up")
+        body = r'''
+TEMPLATE_ID=""
+source "$SCRIPT_DIR/credential-bound-bench.sh"
+bench_load_template_id
+bench_render_pool
+cat "$GEN_DIR/$POOL_PROFILE.bench.yaml"
+echo ---
+bench_require_template_id
+render_pool
+cat "$GEN_DIR/$POOL_PROFILE.yaml"
+'''
+        for profile in PROFILES:
+            with self.subTest(profile=profile):
+                out = self.sourced(body, WARM_IMAGES="1", POOL_MODE=pool_mode_for(profile)).stdout
+                bench, restore = (yaml.safe_load(part) for part in out.split("\n---\n"))
+                self.assertEqual(bench["spec"]["warmImages"], ["tpl-from-up"])
+                self.assertEqual(restore["spec"]["warmImages"], ["tpl-from-up"])
+        guard = 'TEMPLATE_ID=""; source "$SCRIPT_DIR/credential-bound-bench.sh"; bench_render_pool; echo RENDERED'
+        proc = self.sourced(guard, check=False, WARM_IMAGES="1")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertNotIn("RENDERED", proc.stdout)
+        self.assertIn("WARM_IMAGES=1 needs TEMPLATE_ID", proc.stdout + proc.stderr)
 
     def test_knob_validation(self):
         check = 'source "$SCRIPT_DIR/credential-bound-bench.sh"; bench_validate_knobs; echo VALID'

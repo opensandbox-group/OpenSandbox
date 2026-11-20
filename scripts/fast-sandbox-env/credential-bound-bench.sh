@@ -163,6 +163,13 @@ bench_egress_restarts() { # <pod>
 		-o jsonpath='{.status.containerStatuses[?(@.name=="egress")].restartCount}' 2>/dev/null
 }
 
+# "<container-id> <restart-count>" of one Pod's egress container. The id
+# stays in the shell: reports carry only whether it changed.
+bench_egress_identity() { # <pod>
+	kubectl -n "$RESOURCE_NS" get pod "$1" \
+		-o jsonpath='{range .status.containerStatuses[?(@.name=="egress")]}{.containerID} {.restartCount}{end}' 2>/dev/null
+}
+
 # --- guest runs (the client is uploaded by cb_create_sandbox)
 
 bench_guest_start() { # <sandbox-id> <client args...>
@@ -231,8 +238,25 @@ bench_bind_ms_json() {
 # --- bench-only Pool render (M3): the default render plus two edits inside
 # the egress container — the per-subject budget env and the memory limit.
 
+# render_pool keys warmImages on TEMPLATE_ID. bench_pool_apply deletes the
+# live Pool before applying a render, so an empty id must stop the bench
+# before either render instead of producing `warmImages: [null]`.
+bench_require_template_id() {
+	[[ "$WARM_IMAGES" != 1 || -n "$TEMPLATE_ID" ]] \
+		|| die "bench: WARM_IMAGES=1 needs TEMPLATE_ID for the Pool render (run up first)"
+}
+
+# The action runs in its own process: load the template id that `up` wrote,
+# for the bench sandboxes (CB_TEMPLATE_ID) and the Pool renders (TEMPLATE_ID).
+bench_load_template_id() {
+	CB_TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
+	[[ -n "$CB_TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first)"
+	TEMPLATE_ID="$CB_TEMPLATE_ID"
+}
+
 bench_render_pool() { # -> $GEN_DIR/$POOL_PROFILE.bench.yaml
 	local out="$GEN_DIR/$POOL_PROFILE.bench.yaml"
+	bench_require_template_id
 	render_pool
 	awk -v mem="$BENCH_EGRESS_MEMORY_LIMIT" -v cap="$BENCH_FSB_TLS_CAPACITY" '
 		/^      - name: / { egress = ($0 == "      - name: egress"); limits = 0 }
@@ -293,6 +317,7 @@ bench_pool_apply() { # <manifest> <memory-limit> <capacity|"">
 bench_pool_restore() {
 	[[ "$BENCH_POOL_RENDERED" == 1 ]] || return 0
 	local mem
+	bench_require_template_id
 	render_pool
 	mem="$(awk '/^      - name: / { e = ($0 == "      - name: egress") } e && /^          limits:$/ { l = 1; next } l && /^            memory: / { print $2; exit }' "$GEN_DIR/$POOL_PROFILE.yaml")"
 	bench_pool_apply "$GEN_DIR/$POOL_PROFILE.yaml" "$mem" ""
@@ -415,9 +440,12 @@ bench_m2() {
 }
 
 bench_m4() {
-	local code_b="$1" spec="$BENCH_RAW/m4-spec.json" idle0 idle1 load0 load1 t0 idle_ms load_ms leaf
+	local code_b="$1" spec="$BENCH_RAW/m4-spec.json" idle0 idle1 load0 load1 t0 idle_ms load_ms leaf ident0 ident1
 	leaf=mitm
 	[[ "$BENCH_LEG" != credential-bound ]] || leaf=origin
+	# cgroup counters reset with the container: both windows count only when
+	# one egress container instance spans them.
+	ident0="$(bench_egress_identity "$BENCH_POD")" || ident0=""
 	idle0="$(bench_egress_cgroup "$BENCH_POD")" || idle0=""
 	t0="$(bench_ns)"
 	sleep "$BENCH_CPU_IDLE_SECONDS"
@@ -431,7 +459,9 @@ bench_m4() {
 	(( BENCH_CPU_BOUND == 0 )) || bench_handshakes_collect "$BENCH_B" m4-bound "$BENCH_CPU_BOUND" "$BENCH_RAW/m4-bound.json"
 	load1="$(bench_egress_cgroup "$BENCH_POD")" || load1=""
 	load_ms="$(bench_elapsed_ms "$t0")"
+	ident1="$(bench_egress_identity "$BENCH_POD")" || ident1=""
 	jq -n --arg leg "$BENCH_LEG" --arg leaf "$CB_ORIGIN_LEAF" \
+		--arg c0 "${ident0%% *}" --arg c1 "${ident1%% *}" --arg r0 "${ident0##* }" --arg r1 "${ident1##* }" \
 		--argjson i0 "${idle0:-null}" --argjson i1 "${idle1:-null}" --argjson im "$idle_ms" \
 		--argjson l0 "${load0:-null}" --argjson l1 "${load1:-null}" --argjson lm "$load_ms" \
 		--argjson nu "$BENCH_CPU_UNBOUND" --argjson nb "$BENCH_CPU_BOUND" --argjson is "$BENCH_CPU_IDLE_SECONDS" \
@@ -440,6 +470,8 @@ bench_m4() {
 		  settings: {unbound_requests: $nu, bound_requests: $nb, idle_window_s: $is,
 		    request: "new TCP+TLS connection, one HTTP/1.1 request, close; U and B run concurrently on one Fastlet Pod"},
 		  idle: {start: $i0, end: $i1, wall_ms: $im}, load: {start: $l0, end: $l1, wall_ms: $lm},
+		  egress_continuity: {restart_count_start: ($r0 | tonumber? // null), restart_count_end: ($r1 | tonumber? // null),
+		    same_container: ($c0 != "" and $c0 == $c1)},
 		  runs: ([if $nu > 0 then {name: "unbound", description: "unbound sandbox U", requests: $nu, expect_leaf: $ul, expect_cred: "absent", raw: $ru} else empty end]
 		    + [if $nb > 0 then {name: "bound", description: "bound sandbox B", requests: $nb, expect_leaf: "mitm", expect_cred: $code, raw: $rb} else empty end])}' > "$spec"
 	bench_report m4 "$spec" "$BENCH_DIR/m4-cpu.json"
@@ -588,8 +620,7 @@ credential_bound_bench() {
 	for f in tls.crt echo.crt echo.key; do
 		[[ -s "$MITM_CA_DIR/$f" ]] || die "missing $MITM_CA_DIR/$f (run up first)"
 	done
-	CB_TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
-	[[ -n "$CB_TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first)"
+	bench_load_template_id
 	BENCH_LEG="${EGRESS_INTERCEPTION_MODE:-default}"
 	BENCH_DIR="${BENCH_REPORT_DIR:-$WORK/bench/$BENCH_LEG}"
 	BENCH_RAW="$BENCH_DIR/raw"
