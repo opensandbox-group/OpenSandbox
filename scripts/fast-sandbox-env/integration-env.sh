@@ -25,7 +25,8 @@
 # The two template lanes are split by cost: verify-native keeps the
 # native-rootfs boot path (sandbox create via the opensandbox CLI, execd
 # /ping through the signed gateway route, delete, the DART peer pull, warm
-# creates) plus the egress network-security-rules baseline, while
+# creates), the egress network-security-rules baseline, and the native-lane
+# rootfs-only snapshot verify, while
 # verify-overlaybd builds the OCI-published template and runs the full
 # scenario matrix on it: the same boot path over ublk on-demand devices, a
 # pause/resume round trip, a snapshot -> restore-from-snapshotId boot, the
@@ -58,7 +59,7 @@
 #
 # Usage:
 #   ./scripts/fast-sandbox-env/integration-env.sh up             # environment: stack + pool + server/ingress + native template
-#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules verify (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules + rootfs-only snapshot verify (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + full scenario matrix (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh pool           # re-apply the pool only
 #   ./scripts/fast-sandbox-env/integration-env.sh status         # component/pool/DART/OpenSandbox health
@@ -109,14 +110,17 @@
 #                    registry (CA baked into the fsb images), the chart's
 #                    runtime.oci node stack, and a full overlaybd verify
 #                    pass beside native. Nodes need ublk support. 0 = native-only.
-#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify
-#                    (overlaybd lane). On by default: the fastlet-side
-#                    prerequisites are provisioned automatically whenever
-#                    OCI_STACK=1, the capture qualification is
-#                    deployment-derived upstream (fast-sandbox#185), and
-#                    capture runs on the managed Firecracker 1.17.0 the
-#                    pinned stack installs (the v1.16.1 thaw failure,
-#                    fast-sandbox#187, is a legacy capture version).
+#   ROOTFS_ONLY      0 = skip the FSEP-0001 rootfs-only snapshot verify on
+#                    both template lanes (native and overlaybd). On by
+#                    default whenever OCI_STACK=1: qualification derives
+#                    from the standard deployment (fast-sandbox#185 plus
+#                    #224), capture runs on the managed Firecracker 1.17.0
+#                    the pinned stack installs (the v1.16.1 thaw failure,
+#                    fast-sandbox#187, is a legacy capture version), and
+#                    fast-sandbox#223/#225 admit the mode on both artifact
+#                    paths. Native-only stacks (OCI_STACK=0) skip the stage
+#                    regardless: the FSEP-0001 restore kernel is staged on
+#                    the OCI lane only.
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -319,6 +323,30 @@ OSB_VENV="$WORK/tools/osb-venv"
 FSB_GOPROXY="${FSB_GOPROXY:-direct}"
 export GOPROXY="$FSB_GOPROXY"
 
+# FSB_GOSUMDB=off (set by the KVM integration lane): the runner's network
+# cannot reach sum.golang.org and the mirror /sumdb relays serve stale data,
+# so checksum-database verification fails every Go build. Export GOSUMDB=off
+# for host-level go commands and inject ENV GOSUMDB=off into the OpenSandbox
+# component Dockerfiles that carry a GOPROXY line (the CI workspace checkout
+# is reset by actions/checkout every run; build-fast-sandbox.sh patches the
+# pinned fast-sandbox checkout the same way and restores it on exit). Each
+# repo's own go.sum still verifies every downloaded module.
+if [[ "${FSB_GOSUMDB:-}" == "off" ]]; then
+	export GOSUMDB=off
+	for df in \
+		"$OSB_ROOT/components/egress/Dockerfile" \
+		"$OSB_ROOT/components/ingress/Dockerfile" \
+		"$OSB_ROOT/components/nodeagent/Dockerfile"; do
+		[[ -f "$df" ]] || continue
+		grep -q '^ENV GOSUMDB=' "$df" && continue
+		if grep -q '^ENV GOPROXY=' "$df"; then
+			sed -i '/^ENV GOPROXY=/a ENV GOSUMDB=off' "$df"
+		elif grep -q '^ARG GOPROXY=' "$df"; then
+			sed -i '0,/^ARG GOPROXY=/s//ARG GOPROXY=\nENV GOSUMDB=off/' "$df"
+		fi
+	done
+fi
+
 AUTO_CLEAN=0
 ACTION=""
 
@@ -461,6 +489,10 @@ failure_dump() {
 	local task="$1"
 	local dump="$LOGS_DIR/failure-$task-$(date +%s).txt"
 	mkdir -p "$LOGS_DIR"
+	# Bash dynamic scope exposes these locals only during rootfs-only verification.
+	if [[ -n "${rootfs_log_id:-}" ]]; then
+		dump_latency_evidence "$rootfs_log_id" "$rootfs_log_label (failure)" || true
+	fi
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
 		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_(IMAGE|INTERCEPTION_MODE)=|EXECD=|WORK=|POOL_(NAME|MODE|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=|MITM_(CA_SECRET|CA_DIR|ECHO_CONTAINER|ECHO_DOMAIN)=)' || true
@@ -474,6 +506,15 @@ failure_dump() {
 		kubectl get pods -n "$NS" -o wide 2>&1 || true
 		echo "--- controller logs (tail) ---"
 		kubectl logs -n "$NS" deploy/fast-sandbox-controller --tail=80 2>&1 || true
+		echo "--- controller + fastlet component logs (klog writes to /var/log/fast-sandbox files, NOT stdout: a crash-looping fastlet shows an empty `kubectl logs`) ---"
+		kubectl exec -n "$NS" deploy/fast-sandbox-controller -c manager -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			echo "### $pod component logs (/var/log/fast-sandbox)"
+			# Exec through the always-running fastlet-proxy container (it mounts
+			# the same component-log volume): a crash-looping fastlet container
+			# cannot be exec'd into ("container not found").
+			kubectl exec -n "$RESOURCE_NS" "$pod" -c fastlet-proxy -- sh -c 'tail -n 120 /var/log/fast-sandbox/* 2>/dev/null' 2>&1 || true
+		done
 		echo "--- firecracker-runtime logs (every pod + container, tail) ---"
 		# `kubectl logs daemonset/...` resolves to ONE pod only, so a wedged
 		# ublkd on the other node stays invisible. Loop the pods instead,
@@ -1183,6 +1224,14 @@ credentials_up() {
 	# Namespaces exist even after a partial up (resume support).
 	kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	kubectl create namespace "$RESOURCE_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	# Component logs (fastlet, fastlet-proxy) go to files under
+	# /var/log/fast-sandbox by default, so a crash-looping fastlet shows an
+	# EMPTY `kubectl logs` — the crash reason only exists inside the pod's
+	# log volume. Tee klog to stderr as well in this environment: the
+	# existing dump/kubectl-logs capture then carries the startup error.
+	kubectl -n "$RESOURCE_NS" create configmap fast-sandbox-logging \
+		--from-literal=logging.yaml='alsoStderr: true' \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	local host
 	host="${RUSTFS_ENDPOINT#http://}"
 	host="${host#https://}"
@@ -2513,8 +2562,9 @@ VOLUMES
 	# Guest-kernel fragment (FSEP-0001): cold-boot restore resolves the
 	# kernel on the node under /usr/local/share/firecracker, so the fastlet
 	# mounts the staged node copy (rootfs_only_kernel_up). Inert for Full
-	# snapshots — the restore path is the only consumer. Requires the OCI
-	# lane: rootfs-only capture is OverlayBD-only.
+	# snapshots — the restore path is the only consumer. Staged on the OCI
+	# lane only in this environment; native-only stacks (OCI_STACK=0) skip
+	# it together with the native rootfs-only snapshot verify.
 	if [[ "$OCI_STACK" == 1 ]]; then
 		local gk_mounts gk_volumes
 		gk_mounts="$(cat <<'MOUNTS'
@@ -3047,32 +3097,52 @@ verify_lifecycle_ops() { # <sandbox-id>
 # invocations (fastlet action invoke:), egress sidecar SET_BINDING / hook
 # steps (timing fields on its subject lines), and fastpath create totals.
 # Append-only evidence for create-latency analysis (issue #2323 style).
-dump_latency_evidence() {
-	local out="$LOGS_DIR/latency-evidence-$(date +%s).txt"
+dump_latency_evidence() (
+	# Keep diagnostic failures from re-entering the caller's ERR trap.
+	trap - ERR
+	local sandbox_id="${1:-}" label="${2:-create}" sandbox_uid="" log_tail=3000 out timings
+	out="$(mktemp "$LOGS_DIR/latency-evidence-XXXXXX")" || return 0
 	{
-		echo "=== latency evidence $(date -u +%FT%TZ) ==="
-		echo
-		echo "--- fastlet: create phase + action-invoke timing ---"
-		kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet --tail=3000 2>/dev/null \
-			| grep -E "fastlet create timing|fastlet action invoke" || true
-		echo
-		echo "--- egress sidecar: SET_BINDING / hook timing ---"
-		kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=3000 2>/dev/null \
-			| grep -E "deny-first enforced|SET_BINDING applied|data-plane-ready" || true
-		echo
-		echo "--- server: fsb create served (authoritative control-plane timing) ---"
-		kubectl -n "$OSB_NS" logs deploy/opensandbox-server --tail=3000 2>/dev/null \
-			| grep "fsb create served" | tail -30 || true
-		echo
-		echo "--- fastpath create totals (controller) ---"
-		kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=3000 2>/dev/null \
-			| grep "fastpath sandbox created" | tail -30 || true
+		echo "=== latency evidence: $label ($(date -u +%FT%TZ)) ==="
+		if [[ -n "$sandbox_id" ]]; then
+			# Runtime sandboxID fields carry the CR UID, not the API sandbox ID.
+			sandbox_uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$sandbox_id" \
+				--request-timeout=15s -o jsonpath='{.metadata.uid}' 2>/dev/null)" || true
+			echo "sandbox=$sandbox_id uid=${sandbox_uid:-<unavailable>}"
+			log_tail=-1
+		fi
+		if [[ -z "$sandbox_id" || -n "$sandbox_uid" ]]; then
+			echo "--- fastlet: create phase + Firecracker + action-invoke timing ---"
+			if ! timings="$(kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c fastlet \
+				--request-timeout=15s --timestamps --prefix --tail="$log_tail" 2>/dev/null \
+				| grep -E 'fastlet create timing|fastlet action invoke|firecracker oci (cli|prepare) timing|firecracker sandbox created|fsb-vm create timing:' \
+				| grep -F -- "$sandbox_uid")"; then
+				echo "WARNING: fastlet timing logs unavailable or no matching entries"
+			fi
+			printf '%s\n' "$timings"
+		else
+			echo "WARNING: cannot resolve Sandbox CR UID; skipping scoped fastlet logs"
+		fi
+		if [[ -z "$sandbox_id" ]]; then
+			echo
+			echo "--- egress sidecar: SET_BINDING / hook timing ---"
+			kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=3000 2>/dev/null \
+				| grep -E "deny-first enforced|SET_BINDING applied|data-plane-ready" || true
+			echo
+			echo "--- server: fsb create served (authoritative control-plane timing) ---"
+			kubectl -n "$OSB_NS" logs deploy/opensandbox-server --tail=3000 2>/dev/null \
+				| grep "fsb create served" | tail -30 || true
+			echo
+			echo "--- fastpath create totals (controller) ---"
+			kubectl -n "$NS" logs deploy/fast-sandbox-controller --tail=3000 2>/dev/null \
+				| grep "fastpath sandbox created" | tail -30 || true
+		fi
 	} > "$out" 2>&1 || true
 	log "latency evidence: $out"
-	# CI runners discard $WORK between runs, so the content must also land
-	# in the job log to be analyzable.
-	cat "$out"
-}
+	printf '::group::Latency evidence: %s\n' "$label"
+	cat "$out" || true
+	printf '::endgroup::\n'
+)
 
 # --- vm-console collection assertions (ride the e2e matrix's own sandboxes)
 #
@@ -4220,18 +4290,46 @@ rootfs_only_wait_ready() { # <snapshot-id> <max-attempts>
 	done
 }
 
+rootfs_only_lane() { # <template-id> -> "<lane> <artifact-scheme>"
+	# The durable artifact reference differs per lane: the overlaybd lane
+	# publishes an OCI manifest pair (oci://), the native lane an S3
+	# manifest URI (s3://).
+	if [[ -n "$OCI_TEMPLATE_ID" && "$1" == "$OCI_TEMPLATE_ID" ]]; then
+		printf 'overlaybd oci://\n'
+	else
+		printf 'native s3://\n'
+	fi
+}
+
 rootfs_only_verify() {
-	# One experiment on the overlaybd (OCI) template: create a sandbox ->
+	# One experiment on the given template lane: create a sandbox ->
 	# rootfs-only snapshot -> verify the snapshot metadata (server row mode,
-	# SandboxSnapshot CR spec/status mode, oci:// manifest pair) -> prove the
-	# source survived the capture (Running + execd /ping) -> cold-boot a new
-	# sandbox from the snapshot -> one pause/resume round on the restored
+	# SandboxSnapshot CR spec/status mode, published artifact reference) ->
+	# prove the source survived the capture (Running + execd /ping) -> cold-boot
+	# a new sandbox from the snapshot -> one pause/resume round on the restored
 	# sandbox (pause is full-only upstream, so a cold-booted descendant must
 	# still produce a durable full checkpoint).
-	# Optional template override (the overlaybd second pass); default native
-	# — rootfs-only capture requires an OCI-backed source, so the stage is
-	# chained from verify-overlaybd only.
+	# Optional template override (the overlaybd lane passes its OCI template);
+	# default native. Both lanes run the stage since fast-sandbox#223 admitted
+	# native RootfsOnly at the FastPath gRPC gate; the durable artifact
+	# reference differs per lane (oci:// pair vs s3:// manifest URI).
 	local template_id="${1:-$TEMPLATE_ID}"
+	local lane artifact_scheme
+	read -r lane artifact_scheme <<< "$(rootfs_only_lane "$template_id")"
+	log "verify (rootfs-only): lane=$lane templateId=$template_id"
+	local rootfs_log_id="" rootfs_log_label="rootfs-only $lane"
+	if [[ "$lane" == "native" ]]; then
+		# The pinned Firecracker driver cuts native captures with XFS reflink
+		# and has no full-copy fallback. Fail fast on a non-XFS StateRoot
+		# with the prerequisite named, instead of stalling in capture
+		# qualification; a deliberately XFS-less setup (XFS_STATEROOT=0)
+		# never registers this stage.
+		local fs_type
+		fs_type="$(findmnt -n -o FSTYPE --target "${XFS_MOUNT_POINT}" 2>/dev/null)" \
+			|| fail "native rootfs-only capture requires the XFS reflink StateRoot mounted at ${XFS_MOUNT_POINT} (findmnt failed; is the pool up?)"
+		[[ "$fs_type" == "xfs" ]] \
+			|| fail "the StateRoot filesystem mounted at ${XFS_MOUNT_POINT} is '$fs_type'; native capture requires XFS reflink (keep XFS_STATEROOT=1, or skip this stage with ROOTFS_ONLY=0)"
+	fi
 	local created out source_id snapshot_id restore_id cr t0 t1 t2 t3
 	t0="$(now_ms)"
 
@@ -4242,6 +4340,7 @@ rootfs_only_verify() {
 	source_id="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "create response carried no id"
 	VERIFY_ID="$source_id"
+	rootfs_log_id="$source_id"
 	wait_for "rootfs-only source sandbox Running" 300 sandbox_running
 	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
 	t1="$(now_ms)"
@@ -4269,16 +4368,17 @@ rootfs_only_verify() {
 	log "verify (rootfs-only): $snapshot_id create->Ready $(( (t2 - t1) / 1000000 ))ms"
 
 	# Metadata: the SandboxSnapshot CR carries the requested mode on spec,
-	# the fastlet-confirmed produced mode on status, and publishes the OCI
-	# pair (rootfs-only is OverlayBD-path-only).
+	# the fastlet-confirmed produced mode on status, and a lane-specific
+	# durable artifact reference (OCI manifest pair on the overlaybd lane,
+	# S3 manifest URI on the native lane).
 	cr="osb-snap-$(printf '%s' "$snapshot_id" | tr -d '-')"
 	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.spec.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
 		|| fail "SandboxSnapshot $cr spec.mode is not RootfsOnly"
 	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.mode}' 2>/dev/null)" == "RootfsOnly" ]] \
 		|| fail "SandboxSnapshot $cr status.mode is not RootfsOnly (fastlet-confirmed artifact class)"
-	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.manifestRef}' 2>/dev/null)" == oci://* ]] \
-		|| fail "SandboxSnapshot $cr manifestRef is not an oci:// pair reference"
-	pass "rootfs-only snapshot: CR spec.mode=status.mode=RootfsOnly, oci:// pair published"
+	[[ "$(kubectl_get "sandboxsnapshot/$cr" '{.status.manifestRef}' 2>/dev/null)" == "$artifact_scheme"* ]] \
+		|| fail "SandboxSnapshot $cr manifestRef is not a $artifact_scheme reference"
+	pass "rootfs-only snapshot ($lane): CR spec.mode=status.mode=RootfsOnly, $artifact_scheme artifact published"
 
 	# Source survival: the guest freeze -> pause -> cut -> resume -> thaw
 	# capture cycle must leave the source sandbox serving.
@@ -4296,6 +4396,7 @@ rootfs_only_verify() {
 	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
 	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
 	VERIFY_ID="$restore_id"
+	rootfs_log_id="$restore_id"
 	# Cold boot is seconds-scale; the generous ceiling only covers a slow
 	# registry pull of the artifact pair.
 	wait_for "cold-booted sandbox Running" 300 sandbox_running
@@ -4303,6 +4404,7 @@ rootfs_only_verify() {
 	log "verify (rootfs-only): cold boot create->Running $(( (t3 - t2) / 1000000 ))ms"
 	wait_for "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 180 execd_ping_ok
 	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
+	dump_latency_evidence "$restore_id" "$rootfs_log_label cold boot" || true
 
 	# One pause/resume round on the cold-booted descendant: PauseSandbox is
 	# full-only upstream, so a sandbox booted from a rootfs-only artifact
@@ -4500,6 +4602,28 @@ verify_native() {
 	# Lives in verify/network-security-rules.sh (the split copy this stage executes).
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
 	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
+	# Rootfs-only verify (FSEP-0001) on the native lane, default-on: the
+	# pinned fast-sandbox derives qualification from the deployment (managed
+	# VMM directory + the standard StateRoot this env renders), the fastlet
+	# advertises nativeRootfsOnlySnapshots, and fast-sandbox#223 admitted
+	# native RootfsOnly at the FastPath gRPC gate. The artifact set publishes
+	# an s3:// manifest. Registration gates:
+	#   ROOTFS_ONLY=0  -> not registered (both lanes)
+	#   OCI_STACK=0    -> not registered (the restore kernel is staged on
+	#                     the OCI lane only)
+	if [[ "${ROOTFS_ONLY:-1}" == "1" ]]; then
+		if [[ "$OCI_STACK" == "1" ]]; then
+			if [[ "${XFS_STATEROOT:-1}" == "1" ]]; then
+				run_stage "rootfs-only snapshot verify (native template, FSEP-0001)" rootfs_only_verify "$TEMPLATE_ID"
+			else
+				log "XFS_STATEROOT=0: skipping the native rootfs-only snapshot verify (native capture requires the XFS reflink StateRoot; the pool renders ${XFS_MOUNT_POINT}/firecracker on the host root filesystem)"
+			fi
+		else
+			log "OCI_STACK=0: skipping the native rootfs-only snapshot verify (the FSEP-0001 restore kernel is staged on the OCI lane only)"
+		fi
+	else
+		log "ROOTFS_ONLY=0: skipping the rootfs-only snapshot verify"
+	fi
 	# Last on purpose: the e2e kill loop started the source's 30s disappearance
 	# grace; the network-security-rules stage consumed it, so this is a
 	# near-free confirmation.

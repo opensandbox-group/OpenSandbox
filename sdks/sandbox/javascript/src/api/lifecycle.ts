@@ -1201,8 +1201,12 @@ export interface components {
              *     - `rootfsOnly`: only the writable filesystem; restoring boots a
              *       fresh sandbox from the disk. Running processes and in-memory
              *       state are discarded, and the entrypoint re-runs on restore.
-             *       Supported only on the fast-sandbox backend with OCI-backed
-             *       sandboxes; rejected otherwise.
+             *       Supported only on the fast-sandbox backend, for sandboxes on
+             *       either artifact path (native S3 templates and OCI/OverlayBD
+             *       templates); Docker and Kubernetes reject the mode before any
+             *       capture starts. Capture additionally requires a node qualified
+             *       for rootfs-only snapshots — an unqualified node fails the
+             *       snapshot instead of silently producing a `full` artifact.
              * @default full
              * @enum {string}
              */

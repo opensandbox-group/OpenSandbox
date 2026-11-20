@@ -20,23 +20,45 @@ import logging
 import json
 import shlex
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Any, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Any, Optional
+
+from fastapi import HTTPException, status
 
 from opensandbox_server.config import (
     AppConfig,
     INGRESS_MODE_GATEWAY,
 )
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
-from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
+from opensandbox_server.services.constants import (
+    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+    SandboxErrorCodes,
+)
 from opensandbox_server.services.helpers import format_ingress_endpoint
-from opensandbox_server.api.schema import Endpoint, ImageSpec, PlatformSpec, Volume
+from opensandbox_server.api.schema import (
+    AllocationSummary,
+    CreateSandboxRequest,
+    Endpoint,
+    ImageSpec,
+    PlatformSpec,
+    Volume,
+)
 from opensandbox_server.services.k8s.image_pull_secret_helper import (
     build_image_pull_secret,
     build_image_pull_secret_name,
 )
 from opensandbox_server.services.k8s.batchsandbox_template import BatchSandboxTemplateManager
-from opensandbox_server.services.k8s.client import K8sClient
+from opensandbox_server.services.k8s.client import (
+    K8sClient,
+    OPENSANDBOX_API_GROUP,
+    OPENSANDBOX_API_VERSION,
+    POOL_AUTO_ASSIGN_REF,
+    POOL_PLURAL,
+)
 from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
+from opensandbox_server.services.k8s.workload_mapper import (
+    allocated_pod_names,
+    extract_confirmed_pool_allocation_from_workload,
+)
 from opensandbox_server.services.validators import ensure_egress_runtime_compatible
 from opensandbox_server.services.k8s.provider_common import (
     DEFAULT_ENTRYPOINT,
@@ -61,6 +83,9 @@ from opensandbox_server.services.k8s.workload_provider import (
     WorkloadProvider,
 )
 from opensandbox_server.services.runtime_resolver import SecureRuntimeResolver
+
+if TYPE_CHECKING:
+    from opensandbox_server.services.k8s.pool_service import PoolService
 
 logger = logging.getLogger(__name__)
 
@@ -131,12 +156,101 @@ class BatchSandboxProvider(WorkloadProvider):
     def supports_image_auth(self) -> bool:
         return True
 
+    def validate_create_request(
+        self, request: CreateSandboxRequest, namespace: str
+    ) -> None:
+        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
+        if not pool_ref:
+            return
+        if request.network_policy is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "networkPolicy cannot be used together with extensions.poolRef "
+                        "because pooled pods are pre-created. Remove 'networkPolicy' "
+                        "from the request or use template mode."
+                    ),
+                },
+            )
+        if request.credential_proxy and request.credential_proxy.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "credentialProxy.enabled cannot be used together with "
+                        "extensions.poolRef because pooled pods are pre-created. "
+                        "Disable credential proxy or use template mode."
+                    ),
+                },
+            )
+        if request.volumes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "Pool mode (extensions.poolRef) does not support volumes. "
+                        "Remove 'volumes' from the request or use template mode."
+                    ),
+                },
+            )
+        if request.platform is not None:
+            raise ValueError(
+                "platform is not supported together with extensions.poolRef yet. "
+                "Pool-level platform modeling is not available in this iteration."
+            )
+        if pool_ref != POOL_AUTO_ASSIGN_REF:
+            self._ensure_pool_ref_exists(pool_ref, namespace)
+
+    def _ensure_pool_ref_exists(self, pool_ref: str, namespace: str) -> None:
+        """Validate that the referenced Pool exists before creating a BatchSandbox."""
+        try:
+            pool = self.k8s_client.get_custom_object(
+                group=OPENSANDBOX_API_GROUP,
+                version=OPENSANDBOX_API_VERSION,
+                namespace=namespace,
+                plural=POOL_PLURAL,
+                name=pool_ref,
+            )
+        except Exception as e:
+            logger.exception(f"Failed to validate poolRef {pool_ref}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_API_ERROR,
+                    "message": f"Failed to validate pool '{pool_ref}': {str(e)}",
+                },
+            ) from e
+
+        if pool is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
+                    "message": f"Pool '{pool_ref}' not found.",
+                },
+            )
+
+    def get_allocation(self, workload: Any) -> Optional[AllocationSummary]:
+        return extract_confirmed_pool_allocation_from_workload(workload)
+
+    def get_allocated_pod_names(self, workload: Any) -> List[str]:
+        return allocated_pod_names(workload)
+
+    def create_pool_service(self, namespace: str) -> Optional["PoolService"]:
+        from opensandbox_server.services.k8s.pool_service import PoolService
+
+        return PoolService(self.k8s_client, namespace=namespace)
+
     def create_workload(
         self,
         sandbox_id: str,
         namespace: str,
-        image_spec: ImageSpec,
-        entrypoint: List[str],
+        image_spec: Optional[ImageSpec],
+        entrypoint: Optional[List[str]],
         env: Dict[str, str],
         resource_limits: Dict[str, str],
         labels: Dict[str, str],
@@ -182,6 +296,10 @@ class BatchSandboxProvider(WorkloadProvider):
                 env=env,
                 annotations=annotations,
             )
+
+        if image_spec is None:
+            raise ValueError("image is required when extensions.poolRef is not set.")
+        entrypoint = entrypoint or []
 
         extra_volumes, extra_mounts, extra_security_context = self._extract_template_pod_extras()
 
@@ -391,7 +509,7 @@ class BatchSandboxProvider(WorkloadProvider):
         labels: Dict[str, str],
         pool_ref: str,
         expires_at: Optional[datetime],
-        entrypoint: List[str],
+        entrypoint: Optional[List[str]],
         env: Dict[str, str],
         annotations: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:

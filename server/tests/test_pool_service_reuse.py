@@ -23,7 +23,9 @@ import pytest
 from fastapi.exceptions import HTTPException
 
 from opensandbox_server.api import pool
+from opensandbox_server.config import AppConfig
 from opensandbox_server.services.k8s import client as k8s_client_module
+from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 
 
 @pytest.fixture
@@ -45,6 +47,7 @@ def k8s_clients(monkeypatch):
 
     monkeypatch.setattr(k8s_client_module, "K8sClient", FakeK8sClient)
     monkeypatch.setattr(pool, "_service", None)
+    monkeypatch.setattr(pool, "_pool_unsupported", False)
     monkeypatch.setattr(
         pool,
         "get_config",
@@ -85,3 +88,59 @@ def test_non_kubernetes_runtime_still_returns_501(monkeypatch, k8s_clients):
 
     assert exc.value.status_code == 501
     assert k8s_clients == []
+
+
+def test_agent_sandbox_provider_returns_501_without_building_client(monkeypatch, k8s_clients):
+    monkeypatch.setattr(
+        pool,
+        "get_config",
+        lambda: SimpleNamespace(
+            runtime=SimpleNamespace(type="kubernetes"),
+            kubernetes=SimpleNamespace(namespace="sandboxes", workload_provider="agent-sandbox"),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        pool._get_pool_service()
+
+    assert exc.value.status_code == 501
+    assert exc.value.detail["code"] == "KUBERNETES::POOL_NOT_SUPPORTED"
+    assert k8s_clients == []
+
+
+def test_provider_returning_none_builds_one_client(monkeypatch, k8s_clients):
+    monkeypatch.setattr(BatchSandboxProvider, "create_pool_service", lambda self, namespace: None)
+
+    def request_pool_service(_):
+        with pytest.raises(HTTPException) as exc:
+            pool._get_pool_service()
+        assert exc.value.status_code == 501
+        assert isinstance(exc.value.detail, dict)
+        assert exc.value.detail.get("code") == "KUBERNETES::POOL_NOT_SUPPORTED"
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(request_pool_service, range(8)))
+    assert len(k8s_clients) == 1
+
+
+@pytest.mark.parametrize("template", [None, "[]", "spec: ["])
+def test_invalid_provider_template_returns_503_and_can_be_retried(
+    monkeypatch, k8s_clients, tmp_path, template
+):
+    path = tmp_path / "batchsandbox.yaml"
+    if template is not None:
+        path.write_text(template)
+    config = AppConfig.model_validate({
+        "runtime": {"type": "kubernetes", "execd_image": "test"},
+        "kubernetes": {"batchsandbox_template_file": str(path)},
+    })
+    monkeypatch.setattr(pool, "get_config", lambda: config)
+
+    with pytest.raises(HTTPException) as exc:
+        pool._get_pool_service()
+    assert exc.value.status_code == 503
+    assert isinstance(exc.value.detail, dict)
+    assert exc.value.detail.get("code") == "KUBERNETES::INITIALIZATION_ERROR"
+
+    path.write_text("{}")
+    assert pool._get_pool_service() is not None

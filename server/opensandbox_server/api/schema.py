@@ -1463,7 +1463,10 @@ class CreateSnapshotRequest(BaseModel):
             "'rootfsOnly' captures only the writable filesystem; restoring "
             "boots a fresh sandbox from the disk, so the entrypoint re-runs "
             "and resume takes seconds instead of milliseconds. 'rootfsOnly' "
-            "requires the fast-sandbox backend with OCI-backed sandboxes."
+            "requires the fast-sandbox backend; other backends reject it "
+            "before any capture starts, and an unqualified fast-sandbox "
+            "node fails the snapshot instead of silently producing a "
+            "full artifact."
         ),
     )
 
@@ -1812,7 +1815,14 @@ class PoolStatus(BaseModel):
     """
     Observed runtime state of a pool.
     """
-    total: int = Field(..., description="Total number of nodes in the pool.")
+    total: int = Field(
+        ...,
+        description=(
+            "Number of nodes the pool accounts for: non-terminated pods plus "
+            "terminal pods still allocated to a sandbox. Terminal idle pods are "
+            "excluded."
+        ),
+    )
     allocated: int = Field(..., description="Number of nodes currently allocated to sandboxes.")
     available: int = Field(..., description="Number of nodes currently available in the pool.")
     revision: str = Field(..., description="Latest revision identifier of the pool.")

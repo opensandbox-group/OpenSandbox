@@ -882,8 +882,8 @@ public sealed class Sandbox : IAsyncDisposable
     /// <param name="name">Optional snapshot name.</param>
     /// <param name="mode">
     /// What the snapshot persists: see <see cref="SnapshotModes"/>. Null lets the server apply its
-    /// default ("full"). <see cref="SnapshotModes.RootfsOnly"/> requires the fast-sandbox backend
-    /// with OCI-backed sandboxes; restoring it cold-boots a fresh sandbox.
+    /// default ("full"). <see cref="SnapshotModes.RootfsOnly"/> requires the fast-sandbox backend;
+    /// restoring it cold-boots a fresh sandbox.
     /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <remarks>

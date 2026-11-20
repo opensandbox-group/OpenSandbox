@@ -432,7 +432,8 @@ const (
 	// SnapshotModeRootfsOnly preserves only the writable filesystem:
 	// restoring boots a fresh sandbox from the disk, the entrypoint re-runs,
 	// and resume moves from milliseconds to seconds. Requires the fast-sandbox
-	// backend with OCI-backed sandboxes; other backends reject the mode.
+	// backend; other backends reject the mode, and an unqualified fast-sandbox
+	// node fails the snapshot instead of silently producing a full artifact.
 	SnapshotModeRootfsOnly SnapshotMode = "rootfsOnly"
 )
 

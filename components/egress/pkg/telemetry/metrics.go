@@ -68,6 +68,7 @@ const (
 	DNSReplyStageUnknownSource = "unknown_source"
 	DNSReplyStageDeny          = "deny"
 	DNSReplyStageUpstreamError = "upstream_error"
+	DNSReplyStagePolicyError   = "policy_error"
 	DNSReplyStageAnswer        = "answer"
 )
 
@@ -396,7 +397,6 @@ func RecordDNSDenied() {
 	}
 	policyDenied.Add(context.Background(), 1, egressMetricOpt())
 }
-
 func SetNftablesRuleCount(n int64) {
 	lastNftRuleCount.Store(n)
 }

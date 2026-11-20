@@ -101,8 +101,9 @@ helm install opensandbox-server ./manifests/charts/server \
   --set server.gateway.host=gateway.example.com
 ```
 
-Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode`
-of the ingress-gateway chart.
+Use ingress `gateway.gatewayRouteMode=header` for server `server.gateway.gatewayRouteMode=header` or `wildcard`; use `uri` on both charts for URI routing.
+
+For unsigned Fast Sandbox wildcard endpoints, set `server.gateway.gatewayRouteMode=wildcard` and `server.gateway.host=*.sandbox.example.com`. Configure ingress with `gateway.gatewayRouteMode=header`, `gateway.fastpathEndpoint`, and a single `gateway.fastSandboxNamespace` matching the server's sandbox namespace. No signing keys are required. Protect unsigned access with network isolation or an authenticating front proxy. See the [Helm deployment guide](../../HELM-DEPLOYMENT.md#fast-sandbox-unsigned-wildcard-routing).
 
 ### OSEP-0011 secure-access keys
 
@@ -128,7 +129,7 @@ The following table lists the configurable parameters of the chart and their def
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.1\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.1\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. [kubernetes].namespace below is the sandbox workload namespace: the chart does not create it, so create it before submitting workloads (see README). |
+| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.2\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.2\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. [kubernetes].namespace below is the sandbox workload namespace: the chart does not create it, so create it before submitting workloads (see README). |
 | fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
 | imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |
 | nameOverride | string | `""` | Override the name of the chart |
@@ -137,7 +138,7 @@ The following table lists the configurable parameters of the chart and their def
 | server.containerSecurityContext | object | `{}` | Container-level security context for the server container. |
 | server.env | list | `[]` | Additional environment variables for the server container. |
 | server.gateway.enabled | bool | `false` | Whether the server announces an ingress gateway (config [ingress] mode = "gateway"). |
-| server.gateway.gatewayRouteMode | string | `"header"` | Gateway route mode: header or uri. Must match gateway.gatewayRouteMode in the ingress-gateway chart. |
+| server.gateway.gatewayRouteMode | string | `"header"` | Route mode: header, wildcard, or uri. Ingress uses header for header/wildcard, uri otherwise. |
 | server.gateway.host | string | `"opensandbox.example.com"` | Gateway host/address returned to clients when the gateway is enabled. |
 | server.gateway.secureAccess.activeKey | string | `""` | Active signing key id, one character in [0-9a-z]. |
 | server.gateway.secureAccess.existingSecret | string | `""` | Name of an existing Secret holding the signing keys (keys + active-key), as an alternative to plaintext `keys` above (mutually exclusive). The Secret must carry two entries:   keys:       the key ring, "a=<base64-secret>[,b=<base64-secret>...]"   active-key: the active signing key id, one character in [0-9a-z] The chart wires it into the server as environment variables (OPENSANDBOX_SECURE_ACCESS_*), so key material never appears in values, the server ConfigMap, or pod args. The ingress-gateway chart consumes the same Secret for verification. Env-sourced Secrets are read once at container start: after updating the Secret in place, `kubectl rollout restart` the server Deployment (or version the Secret name to get a spec-driven rollout). |
@@ -168,7 +169,7 @@ Versioning note:
 - To deploy a specific image build, override `server.image.tag` explicitly
   (for example `--set server.image.tag=v0.1.13`).
 
-**Gateway**: When `server.gateway.enabled=true`, the chart writes `[ingress] mode = "gateway"` in config.toml so the server returns the gateway address to clients. The gateway workload itself runs from the separate `ingress-gateway` chart (`manifests/charts/ingress-gateway`); its `--mode` must match `server.gateway.gatewayRouteMode`. External access must be configured separately.
+**Gateway**: When `server.gateway.enabled=true`, the chart writes `[ingress] mode = "gateway"` in config.toml so the server returns the gateway address to clients. The gateway workload itself runs from the separate `ingress-gateway` chart (`manifests/charts/ingress-gateway`); its `--mode` is `header` for server `header`/`wildcard` routing, or `uri` for server `uri` routing. External access must be configured separately.
 
 Set `[kubernetes].namespace` in config for the sandbox workload namespace and create that namespace before submitting workloads. Configure `OPENSANDBOX_SERVER_API_KEY` from a Secret in production. The container and its Service use port `80`; keep `[server].port = 80` when replacing `configToml`. The Service is `ClusterIP` unless `server.service.type` says otherwise.
 
