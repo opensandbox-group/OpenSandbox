@@ -102,20 +102,25 @@ RBAC apiVersion
 {{- end }}
 {{- end }}
 
-{{/*
-Validate secureAccess: keys and existingSecret are mutually exclusive, and
-the fast-sandbox provider requires a signing key ring (FastPath routing
-serves only authenticated route scopes; the binary panics at startup without
---secure-access-keys) and a FastPath gRPC endpoint (the gateway fails startup
-without a FastPath connection). Failing at render time beats a
-CrashLoopBackOff.
-*/}}
 {{- define "opensandbox-ingress-gateway.secureAccess.validate" -}}
 {{- if and .Values.gateway.secureAccess.keys .Values.gateway.secureAccess.existingSecret }}
 {{- fail "gateway.secureAccess: set either keys or existingSecret, not both" }}
 {{- end }}
-{{- if and (eq .Values.gateway.providerType "fast-sandbox") (empty .Values.gateway.secureAccess.keys) (empty .Values.gateway.secureAccess.existingSecret) }}
-{{- fail "gateway.secureAccess: providerType=fast-sandbox requires a signing key ring (set gateway.secureAccess.keys or gateway.secureAccess.existingSecret); FastPath routing requires --secure-access-keys for authenticated route scopes" }}
+{{- $namespace := .Values.gateway.fastSandboxNamespace | default "" }}
+{{- if $namespace }}
+{{- if not (kindIs "string" $namespace) }}
+{{- fail "gateway.fastSandboxNamespace must be one Kubernetes namespace string" }}
+{{- end }}
+{{- if or (gt (len $namespace) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $namespace)) }}
+{{- fail "gateway.fastSandboxNamespace must be one Kubernetes namespace, not a list or wildcard" }}
+{{- end }}
+{{- if empty .Values.gateway.fastpathEndpoint }}
+{{- fail "gateway.fastSandboxNamespace requires gateway.fastpathEndpoint" }}
+{{- end }}
+{{- end }}
+{{- $unsignedHost := and $namespace (eq .Values.gateway.gatewayRouteMode "header") }}
+{{- if and (or (eq .Values.gateway.providerType "fast-sandbox") .Values.gateway.fastpathEndpoint) (empty .Values.gateway.secureAccess.keys) (empty .Values.gateway.secureAccess.existingSecret) (not $unsignedHost) }}
+{{- fail "gateway.secureAccess: FastPath routing requires a signing key ring or gateway.fastSandboxNamespace with gatewayRouteMode=header for unsigned wildcard routes" }}
 {{- end }}
 {{- if and (eq .Values.gateway.providerType "fast-sandbox") (empty .Values.gateway.fastpathEndpoint) }}
 {{- fail "gateway.fastpathEndpoint: providerType=fast-sandbox requires a FastPath gRPC endpoint (e.g. fast-sandbox-fastpath.opensandbox-system.svc:9090); the gateway fails startup without a FastPath connection" }}

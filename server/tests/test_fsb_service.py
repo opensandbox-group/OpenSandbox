@@ -1681,12 +1681,12 @@ def test_endpoint_binds_port_and_default_namespace(http_fsb, port):
 
 
 @pytest.mark.parametrize(
-    "invalid", ["no_gateway", "no_keys", "wildcard", "expires", "port", "identity"]
+    "invalid", ["no_gateway", "no_keys", "expires", "port", "identity"]
 )
 def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
     _, _, service = http_fsb
     config = service._app_config
-    config.ingress = _gateway_config("wildcard" if invalid == "wildcard" else "header")
+    config.ingress = _gateway_config()
     if invalid == "no_gateway":
         config.ingress = None
     elif invalid == "no_keys":
@@ -1697,6 +1697,51 @@ def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
             0 if invalid == "port" else 44772,
             expires=2_000_000_000 if invalid == "expires" else None,
         )
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.parametrize("with_keys", [False, True])
+@pytest.mark.parametrize("port", [1, 8080, 44772, 65535])
+def test_http_wildcard_endpoint_without_routing_headers(http_fsb, monkeypatch, with_keys, port):
+    client, _, service = http_fsb
+    service._app_config.ingress = _gateway_config("wildcard")
+    if not with_keys:
+        service._app_config.ingress.secure_access = None
+    fastpath = Mock(spec=FastPathClient)
+    monkeypatch.setattr(service, "_fastpath", fastpath)
+    sandbox_id = service.generate_sandbox_id()
+
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/{port}")
+
+    assert response.status_code == 200
+    assert response.json() == {"endpoint": f"{sandbox_id}-{port}.example.com"}
+    assert fastpath.mock_calls == []
+
+
+@pytest.mark.parametrize("sandbox_id", ["fsb-a.b", "fsb-A", "fsb-a_b", "fsb-a-", "sandbox-123", "fsb-" + "a" * 54])
+def test_wildcard_endpoint_rejects_invalid_dns_labels(http_fsb, sandbox_id):
+    _, _, service = http_fsb
+    service._app_config.ingress = _gateway_config("wildcard")
+    with pytest.raises(HTTPException) as exc_info:
+        service.get_endpoint(sandbox_id, 44772)
+    assert exc_info.value.status_code == 400
+
+
+def test_wildcard_endpoint_accepts_maximum_dns_label(http_fsb):
+    _, _, service = http_fsb
+    service._app_config.ingress = _gateway_config("wildcard")
+    sandbox_id = "fsb-" + "a" * 53
+    endpoint = service.get_endpoint(sandbox_id, 44772)
+    assert endpoint.endpoint == f"{sandbox_id}-44772.example.com"
+    assert len(endpoint.endpoint.split(".")[0]) == 63
+    assert not endpoint.headers
+
+
+def test_wildcard_endpoint_rejects_expires(http_fsb):
+    _, _, service = http_fsb
+    service._app_config.ingress = _gateway_config("wildcard")
+    with pytest.raises(HTTPException) as exc_info:
+        service.get_endpoint("fsb-123", 44772, expires=2_000_000_000)
     assert exc_info.value.status_code == 400
 
 
