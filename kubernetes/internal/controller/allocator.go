@@ -262,13 +262,12 @@ type allocationSyncer interface {
 }
 
 type annoAllocationSyncer struct {
-	client client.Client
+	client    client.Client
+	apiReader client.Reader
 }
 
-func newAnnoAllocationSyncer(client client.Client) allocationSyncer {
-	return &annoAllocationSyncer{
-		client: client,
-	}
+func newAnnoAllocationSyncer(c client.Client, apiReader client.Reader) allocationSyncer {
+	return &annoAllocationSyncer{client: c, apiReader: apiReader}
 }
 
 func (syncer *annoAllocationSyncer) SetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, allocation *sandboxAllocation) error {
@@ -363,16 +362,20 @@ func (syncer *annoAllocationSyncer) GetReleased(ctx context.Context, sandbox *sa
 }
 
 func (syncer *annoAllocationSyncer) SetReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, released *allocationReleased) error {
+	if syncer.apiReader == nil {
+		return fmt.Errorf("uncached API reader is not configured")
+	}
 	js, err := json.Marshal(released)
 	if err != nil {
 		return err
 	}
 	// Finalizers are shared with other cleanup controllers. Recompute from the
 	// latest object on every optimistic-lock retry so a stale array cannot
-	// restore a finalizer another controller has already removed.
+	// restore a finalizer another controller has already removed. Bypass the
+	// informer cache so every retry can observe the conflicting API write.
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		latest := &sandboxv1alpha1.BatchSandbox{}
-		if err := syncer.client.Get(ctx, client.ObjectKeyFromObject(sandbox), latest); err != nil {
+		if err := syncer.apiReader.Get(ctx, client.ObjectKeyFromObject(sandbox), latest); err != nil {
 			return client.IgnoreNotFound(err)
 		}
 		if sandbox.UID != "" && sandbox.UID != latest.UID {
@@ -430,11 +433,12 @@ type defaultAllocator struct {
 	recoverOnce sync.Once
 }
 
-func NewDefaultAllocator(client client.Client) Allocator {
+// NewDefaultAllocator requires an uncached reader for release/finalizer retries.
+func NewDefaultAllocator(c client.Client, apiReader client.Reader) Allocator {
 	return &defaultAllocator{
 		store:     newInMemoryAllocationStore(),
-		syncer:    newAnnoAllocationSyncer(client),
-		client:    client,
+		syncer:    newAnnoAllocationSyncer(c, apiReader),
+		client:    c,
 		algorithm: &algorithm.PackedSchedule{},
 	}
 }

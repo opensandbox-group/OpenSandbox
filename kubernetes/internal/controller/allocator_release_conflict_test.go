@@ -47,8 +47,8 @@ func TestSetReleasedPreservesConcurrentCleanup(t *testing.T) {
 	require.NoError(t, apiClient.Create(ctx, namespace))
 	t.Cleanup(func() { require.NoError(t, apiClient.Delete(ctx, namespace)) })
 
-	for _, beforeRead := range []bool{true, false} {
-		name := map[bool]string{true: "stale-input", false: "write-conflict"}[beforeRead]
+	for _, name := range []string{"stale-input", "write-conflict", "stale-cache"} {
+		beforeRead := name == "stale-input"
 		t.Run(name, func(t *testing.T) {
 			allocation, err := marshalJSON(&sandboxAllocation{Pods: []string{"pod-1"}})
 			require.NoError(t, err)
@@ -72,8 +72,16 @@ func TestSetReleasedPreservesConcurrentCleanup(t *testing.T) {
 			if beforeRead {
 				removeTaskFinalizer()
 			}
-			patches := 0
+			patches, cachedReads := 0, 0
 			conflictClient := interceptor.NewClient(apiClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if name == "stale-cache" {
+						cachedReads++
+						cached.DeepCopyInto(obj.(*sandboxv1alpha1.BatchSandbox))
+						return nil
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
 				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 					patches++
 					if !beforeRead && patches == 1 {
@@ -82,7 +90,7 @@ func TestSetReleasedPreservesConcurrentCleanup(t *testing.T) {
 					return c.Patch(ctx, obj, patch, opts...)
 				},
 			})
-			syncer := &annoAllocationSyncer{client: conflictClient}
+			syncer := NewDefaultAllocator(conflictClient, apiClient).(*defaultAllocator).syncer
 			require.NoError(t, syncer.SetReleased(ctx, cached, &allocationReleased{Pods: []string{"pod-1"}}))
 			stored := &sandboxv1alpha1.BatchSandbox{}
 			require.NoError(t, apiClient.Get(ctx, client.ObjectKeyFromObject(sandbox), stored))
@@ -94,6 +102,7 @@ func TestSetReleasedPreservesConcurrentCleanup(t *testing.T) {
 			if !beforeRead {
 				require.GreaterOrEqual(t, patches, 2, "a conflicting patch must reread and retry")
 			}
+			require.Zero(t, cachedReads, "retry reads must bypass the informer cache")
 			stored.Finalizers = nil
 			require.NoError(t, apiClient.Update(ctx, stored))
 		})
@@ -123,7 +132,7 @@ func TestSetReleasedPreservesConcurrentCleanup(t *testing.T) {
 				return c.Patch(ctx, obj, patch, opts...)
 			},
 		})
-		syncer := &annoAllocationSyncer{client: conflictClient}
+		syncer := &annoAllocationSyncer{client: conflictClient, apiReader: apiClient}
 		require.NoError(t, syncer.SetReleased(ctx, sandbox, &allocationReleased{Pods: []string{"pod-1"}}))
 		require.GreaterOrEqual(t, patches, 2)
 		stored := &sandboxv1alpha1.BatchSandbox{}
@@ -141,7 +150,7 @@ func TestSetReleasedPreservesConcurrentCleanup(t *testing.T) {
 		require.NoError(t, apiClient.Create(ctx, replacement))
 		stale := replacement.DeepCopy()
 		stale.UID = "previous-sandbox"
-		syncer := &annoAllocationSyncer{client: apiClient}
+		syncer := &annoAllocationSyncer{client: apiClient, apiReader: apiClient}
 		require.NoError(t, syncer.SetReleased(ctx, stale, &allocationReleased{Pods: []string{"old-pod"}}))
 		stored := &sandboxv1alpha1.BatchSandbox{}
 		require.NoError(t, apiClient.Get(ctx, client.ObjectKeyFromObject(replacement), stored))
@@ -150,7 +159,7 @@ func TestSetReleasedPreservesConcurrentCleanup(t *testing.T) {
 	})
 
 	t.Run("already-deleted", func(t *testing.T) {
-		syncer := &annoAllocationSyncer{client: apiClient}
+		syncer := &annoAllocationSyncer{client: apiClient, apiReader: apiClient}
 		gone := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{Name: "gone", Namespace: namespace.Name}}
 		require.True(t, apierrors.IsNotFound(apiClient.Get(ctx, client.ObjectKeyFromObject(gone), &sandboxv1alpha1.BatchSandbox{})))
 		require.NoError(t, syncer.SetReleased(ctx, gone, &allocationReleased{}))
