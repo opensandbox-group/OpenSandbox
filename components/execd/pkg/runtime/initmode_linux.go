@@ -237,6 +237,8 @@ type managedProcess struct {
 	exited      bool
 	preReap     func()
 	noHardening bool
+	noQoS       bool
+	entrypoint  bool
 	stripEnv    []string // nil = default blacklist; explicit list overrides
 	done        chan struct{}
 	once        sync.Once
@@ -331,6 +333,18 @@ func withoutHardening() launchOption {
 	}
 }
 
+func withoutQoS() launchOption {
+	return func(mp *managedProcess) {
+		mp.noQoS = true
+	}
+}
+
+func asEntrypoint() launchOption {
+	return func(mp *managedProcess) {
+		mp.entrypoint = true
+	}
+}
+
 // bootstrapEnv overrides the env strip for the user entrypoint: its scripts
 // may need JUPYTER_TOKEN/EXECD_ENVS to configure themselves (e.g. the
 // code-interpreter entrypoint), but credentials and lifecycle transport must
@@ -359,7 +373,8 @@ func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption
 	for _, o := range opts {
 		o(mp)
 	}
-	policyFile, err := hardenCmd(cmd, mp.noHardening, mp.stripEnv)
+	noQoS := mp.noQoS || (mp.entrypoint && qos.config.Entrypoint == "high")
+	policyFile, err := hardenCmd(cmd, mp.noHardening, noQoS, mp.stripEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -666,7 +681,7 @@ func launchEntrypoint(args []string) (*managedProcess, error) {
 	// /init RuntimeBinding envs; transport/credential names are stripped both
 	// here and again by the launcher at execve time (bootstrapEnv).
 	cmd.Env = mergeEnvs(filterEnvNames(os.Environ(), bootstrapStripEnv), UserEnvOverlay())
-	mp, err := launchManaged(cmd, bootstrapEnv())
+	mp, err := launchManaged(cmd, bootstrapEnv(), asEntrypoint())
 	if err != nil {
 		return nil, fmt.Errorf("start user entrypoint %q: %w", args[0], err)
 	}

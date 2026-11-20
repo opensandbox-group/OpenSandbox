@@ -129,6 +129,37 @@ Seccomp:  2                  # seccomp filter mode
 
 Each layer's `state` is `active` (enforced), `disabled` (not configured), `degraded` (configured but a prerequisite was missing — see the `message` field for the concrete reason), or `unsupported` (this kernel or build cannot provide it).
 
+## Optional process QoS
+
+Process QoS is independent of privilege reduction. To give execd a better CPU share under contention and make ordinary workloads more likely OOM victims, add this section to the same creator-provided isolation TOML:
+
+```toml
+[qos]
+enabled = true
+entrypoint = "standard"
+nice = 19
+scheduler = "other"
+oom_score_adj = 500
+```
+
+Omitting `[qos]` or `enabled` leaves QoS off and preserves existing scheduling, OOM adjustments, resource limits, and cgroup placement. Invalid QoS values are rejected at startup, even in a disabled section. Stock images need the TOML mounted or baked in using the delivery routes above; no new API parameters or SDK methods are required.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `false` | Enable best-effort Linux process QoS without enabling hardening. |
+| `entrypoint` | `"standard"` | `standard` applies QoS to the execd-managed image ENTRYPOINT; `high` retains its inherited settings, without bypassing configured hardening. |
+| `nice` | `19` | Nice value in `1..19`, used with `scheduler = "other"`. |
+| `scheduler` | `"other"` | `other` selects normal scheduling with the configured nice value; `idle` selects `SCHED_IDLE` for background work. |
+| `oom_score_adj` | `500` | Initial OOM adjustment in `0..1000`. `0` disables adjustment; an inherited value above the target is never lowered. |
+
+Commands, shell sessions, PTYs, lifecycle hooks, and isolated workloads always start as `standard`, regardless of the ENTRYPOINT setting. There is no per-request priority override or high-priority emergency shell. Internal file API helpers retain execd's baseline treatment. Only choose `entrypoint = "high"` for a trusted daemon: its descendants also inherit baseline treatment, including any builds it launches. Without init mode (`EXECD_INIT`), the external bootstrap starts the ENTRYPOINT outside QoS coverage; execd logs that limitation while still applying QoS to its managed workloads.
+
+The native launcher applies scheduling and sets both `RLIMIT_NICE` limits to zero before running a standard workload. It opens the OOM adjustment file before any in-launcher UID change and raises the adjustment after identity/capability changes, before Landlock and seccomp. An unprivileged OOM write does not lock the value: the workload can lower it again as far as its existing kernel minimum permits. No extra Linux capabilities or writable cgroup are needed. A missing launcher or unsupported QoS operation is logged and skipped; existing identity and hardening failure behavior is unchanged. Non-Linux platforms log that QoS is unsupported and leave launches unchanged.
+
+::: warning Best effort, not resource isolation
+All processes still share the sandbox's cgroup. Exhausting its CPU quota throttles execd too; memory reclaim can stall it before an OOM. QoS reserves no CPU, memory, or PID headroom and guarantees neither survival nor response latency. With hardening off, standard launches incur an additional launcher exec. This core implementation does not add QoS capability response fields or saturation metrics: inspect startup logs, launcher stderr, and the workload's Linux process settings to verify behavior.
+:::
+
 ## Configuration reference
 
 All keys are optional. A missing file or a missing key falls back to the default shown. The same surface is documented inline, with every default written out, in [`configs/isolation.example.toml`](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/execd/configs/isolation.example.toml); sources of truth: [`pkg/isolation/config.go`](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/execd/pkg/isolation/config.go) and [`pkg/runtime/hardening_linux.go`](https://github.com/opensandbox-group/OpenSandbox/blob/main/components/execd/pkg/runtime/hardening_linux.go).
