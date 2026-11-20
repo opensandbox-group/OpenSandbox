@@ -98,8 +98,9 @@ type ScaleStrategy struct {
 
 // UpdateStrategy controls how pool pods are updated when the pool template changes.
 type UpdateStrategy struct {
-	// MaxUnavailable is the maximum number of pods that can be unavailable during an update.
-	// Can be an absolute number (ex: 5) or a percentage of desired pods (ex: "20%").
+	// MaxUnavailable is the maximum number of idle pods that can be unavailable during an update.
+	// Can be an absolute number (ex: 5) or a percentage of idle pods (ex: "20%").
+	// Only idle (unallocated) pods are counted: allocated pods are never recreated by an update.
 	// Defaults to 25%.
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
