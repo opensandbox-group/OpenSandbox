@@ -65,6 +65,14 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 		}
 		return nil, ingressRouteErrHTTPStatus(err), fmt.Errorf("invalid ingress route: %w", err)
 	}
+	if pr.routeKind == sandbox.RouteKindLegacy && strings.HasPrefix(pr.sandboxID, "fsb-") {
+		err = fmt.Errorf("%w: Fast Sandbox routes require a signed scope or configured wildcard Host routing", routescope.ErrUnauthorized)
+		return nil, ingressRouteErrHTTPStatus(err), err
+	}
+	if pr.routeKind == sandbox.RouteKindFastSandbox && p.fastSandboxNamespace != "" && pr.namespace != p.fastSandboxNamespace {
+		err = fmt.Errorf("%w: Fast Sandbox namespace is not allowed", routescope.ErrUnauthorized)
+		return nil, ingressRouteErrHTTPStatus(err), err
+	}
 	if _, required := p.sandboxProvider.(sandbox.AuthenticatedRouteProvider); required && pr.namespace == "" {
 		err = fmt.Errorf("%w: Fast Sandbox provider requires an authenticated route scope", routescope.ErrUnauthorized)
 		return nil, ingressRouteErrHTTPStatus(err), err
@@ -154,8 +162,21 @@ func (p *Proxy) parseRequestedHeaderRoute(r *http.Request) (parsedRoute, int, er
 		pr, err := p.parseFastSandboxScope(targetHost, "")
 		return pr, 0, err
 	}
+	if r.Header.Get(SandboxIngress) == "" && r.Header.Get(DeprecatedSandboxIngress) == "" {
+		targetHost = strings.ToLower(targetHost)
+	}
 	pr, err := parseHostRoute(targetHost)
-	return pr, 0, err
+	if err != nil {
+		return pr, 0, err
+	}
+	if strings.HasPrefix(pr.sandboxID, "fsb-") {
+		if p.fastSandboxNamespace == "" || pr.signature != "" || r.Header.Get(SandboxIngress) != "" || r.Header.Get(DeprecatedSandboxIngress) != "" {
+			return parsedRoute{}, 0, fmt.Errorf("%w: unsigned Fast Sandbox routes require Host routing and --fast-sandbox-namespace", routescope.ErrUnauthorized)
+		}
+		pr.routeKind = sandbox.RouteKindFastSandbox
+		pr.namespace = p.fastSandboxNamespace
+	}
+	return pr, 0, nil
 }
 
 func (p *Proxy) parseRequestedURIRoute(r *http.Request) (parsedRoute, int, error) {

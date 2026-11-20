@@ -57,8 +57,9 @@ type Proxy struct {
 	activity             activity.Recorder
 	waker                *wake.Waker
 
-	secure *signature.Verifier
-	scope  *routescope.Verifier
+	secure               *signature.Verifier
+	scope                *routescope.Verifier
+	fastSandboxNamespace string
 
 	httpTransport             http.RoundTripper
 	websocketClient           *http.Client
@@ -82,6 +83,7 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		waker:                     options.waker,
 		secure:                    secure,
 		scope:                     scope,
+		fastSandboxNamespace:      options.fastSandboxNamespace,
 		httpTransport:             newObservedHTTPTransport(options.connectObserver),
 		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
 		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,

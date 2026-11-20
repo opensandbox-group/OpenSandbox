@@ -15,6 +15,7 @@
 import base64
 import hashlib
 import hmac
+import re
 import unicodedata
 
 from fastapi import HTTPException
@@ -23,6 +24,7 @@ from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.config import (
     GATEWAY_ROUTE_MODE_HEADER,
     GATEWAY_ROUTE_MODE_URI,
+    GATEWAY_ROUTE_MODE_WILDCARD,
     INGRESS_MODE_GATEWAY,
     IngressConfig,
 )
@@ -58,6 +60,22 @@ def build_endpoint(
                 "message": "Fsb route scopes do not support the expires parameter.",
             },
         )
+    if (
+        ingress is not None
+        and ingress.mode == INGRESS_MODE_GATEWAY
+        and ingress.gateway is not None
+        and ingress.gateway.route.mode == GATEWAY_ROUTE_MODE_WILDCARD
+    ):
+        label = f"{sandbox_id}-{port}"
+        if len(label) > 63 or not re.fullmatch(r"fsb-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", sandbox_id):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": "Fsb wildcard endpoints require a DNS-safe fsb- sandbox ID and a route label of at most 63 characters.",
+                },
+            )
+        return Endpoint(endpoint=f"{label}.{ingress.gateway.address[2:]}")
     if (
         ingress is None
         or ingress.mode != INGRESS_MODE_GATEWAY
