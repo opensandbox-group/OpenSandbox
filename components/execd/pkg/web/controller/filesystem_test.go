@@ -1040,3 +1040,104 @@ func TestDownloadFileRegularFileControls(t *testing.T) {
 		})
 	}
 }
+
+// A literal path must keep a "$VAR" in a file name intact: with the variable
+// defined, expansion would silently point at another file; with literal=true
+// the caller reads exactly the path it wrote.
+func TestFilesystemControllerGetFilesInfoLiteralKeepsDollarPaths(t *testing.T) {
+	t.Setenv("OS2960_VERSION", "7")
+
+	tmpDir := t.TempDir()
+	literalName := filepath.Join(tmpDir, "report-$OS2960_VERSION.txt")
+	require.NoError(t, os.WriteFile(literalName, []byte("demo"), 0o644))
+
+	query := fmt.Sprintf("/files/info?literal=true&path=%s", url.QueryEscape(literalName))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, query, nil)
+
+	ctrl.GetFilesInfo()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	info, ok := resp[literalName]
+	require.True(t, ok, "response missing literal entry for %s", literalName)
+	require.Equal(t, "file", info.Type)
+
+	// Without literal, the same path expands to report-7.txt and is not found.
+	expandingQuery := fmt.Sprintf("/files/info?path=%s", url.QueryEscape(literalName))
+	ctrl, rec = newFilesystemController(t, http.MethodGet, expandingQuery, nil)
+
+	ctrl.GetFilesInfo()
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// follow=true must report what download would serve: a symlink to a file
+// resolves to the target's metadata, while the default keeps reporting the
+// link itself.
+func TestFilesystemControllerGetFilesInfoFollowResolvesSymlinkTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target.txt")
+	linkPath := filepath.Join(tmpDir, "link.txt")
+	require.NoError(t, os.WriteFile(target, []byte("demo"), 0o644))
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	query := fmt.Sprintf("/files/info?follow=true&path=%s", url.QueryEscape(linkPath))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, query, nil)
+
+	ctrl.GetFilesInfo()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	info, ok := resp[linkPath]
+	require.True(t, ok, "response missing entry for %s", linkPath)
+	require.Equal(t, "file", info.Type)
+	require.EqualValues(t, len("demo"), info.Size)
+}
+
+// A dangling symlink reports as missing under follow=true, matching the
+// download endpoint's open semantics, instead of claiming a file is present.
+func TestFilesystemControllerGetFilesInfoFollowReportsDanglingSymlinkAsMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	linkPath := filepath.Join(tmpDir, "dangling.txt")
+	if err := os.Symlink(filepath.Join(tmpDir, "missing-target"), linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	query := fmt.Sprintf("/files/info?follow=true&path=%s", url.QueryEscape(linkPath))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, query, nil)
+
+	ctrl.GetFilesInfo()
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
+}
+
+// Download with literal=true serves a file whose name contains a "$" that the
+// default expansion would otherwise reject or resolve away.
+func TestDownloadFileLiteralKeepsDollarPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	literalName := filepath.Join(tmpDir, "data-$OS2960_UNSET.txt")
+	require.NoError(t, os.WriteFile(literalName, []byte("payload"), 0o644))
+
+	rawURL := fmt.Sprintf("/files/download?literal=true&path=%s", url.QueryEscape(literalName))
+	ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "payload", rec.Body.String())
+
+	// The default still rejects an undefined variable instead of guessing.
+	rawURL = fmt.Sprintf("/files/download?path=%s", url.QueryEscape(literalName))
+	ctrl, rec = newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+	ctrl.DownloadFile()
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}

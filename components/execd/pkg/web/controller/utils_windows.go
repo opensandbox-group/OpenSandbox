@@ -225,13 +225,30 @@ func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error)
 	}, nil
 }
 
-func GetFileInfo(filePath string) (model.FileInfo, error) {
-	absPath, err := pathutil.ExpandAbsPath(filePath)
+// GetFileInfo reads metadata for filePath. With literal set, the path is used
+// exactly as written (no "$VAR" or "~" expansion). With follow set, symlinks
+// resolve to their target the same way the download endpoint opens them, so a
+// dangling link reports as missing instead of present and a path reports the
+// metadata of the file whose content download would serve.
+func GetFileInfo(filePath string, literal, follow bool) (model.FileInfo, error) {
+	var (
+		absPath string
+		err     error
+	)
+	if literal {
+		absPath, err = pathutil.LiteralAbsPath(filePath)
+	} else {
+		absPath, err = pathutil.ExpandAbsPath(filePath)
+	}
 	if err != nil {
 		return model.FileInfo{}, fmt.Errorf("invalid path %s: %w", filePath, err)
 	}
 
-	fileInfo, err := os.Lstat(absPath)
+	statFn := os.Lstat
+	if follow {
+		statFn = os.Stat
+	}
+	fileInfo, err := statFn(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return model.FileInfo{}, fmt.Errorf("file not found: %s: %w", filePath, err)
