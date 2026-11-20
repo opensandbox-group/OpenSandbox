@@ -15,6 +15,7 @@ This guide explains how to use secure container runtimes with OpenSandbox to pro
 - [Docker Mode](#docker-mode)
 - [Kubernetes Mode](#kubernetes-mode)
 - [User Guide](#user-guide)
+- [Running Docker Inside Kata Sandboxes (Docker-in-Docker)](#running-docker-inside-kata-sandboxes-docker-in-docker)
 - [Administrator Guide](#administrator-guide)
 - [Troubleshooting and Best Practices](#troubleshooting-and-best-practices)
 
@@ -832,6 +833,12 @@ kubectl get pod <pod-name> -o jsonpath='{.spec.runtimeClassName}'
 # Expected output for gVisor:
 # gvisor
 ```
+
+---
+
+## Running Docker Inside Kata Sandboxes (Docker-in-Docker)
+
+Workloads that need their own Docker daemon inside the sandbox — building images, `docker compose` stacks, CI jobs that spawn helper containers — are covered in the dedicated [Docker-in-Docker on Kata Sandboxes](/guides/docker-in-docker) guide, including the privileged prerequisite, storage-driver selection, and cgroup delegation.
 
 ---
 
