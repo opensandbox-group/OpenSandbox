@@ -1252,7 +1252,9 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 	}
 	updatedCnt := int32(0)
 	totalCnt := int32(0)
+	listedPods := make(map[string]struct{}, len(pods))
 	for _, pod := range pods {
+		listedPods[pod.Name] = struct{}{}
 		allocated := false
 		if _, ok := podAllocation[pod.Name]; ok {
 			allocated = true
@@ -1269,6 +1271,19 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 			updatedCnt++
 		}
 		totalCnt++
+	}
+	// The reconcile loop drops pods with a DeletionTimestamp before they reach
+	// this function, but the allocator keeps a terminating pod's reservation
+	// until handback, so Status.Allocated still counts it. Account each
+	// allocation entry without a listed pod in Total as well: until the
+	// reservation is released that unit is real, and this keeps
+	// Total >= Allocated so the rebalance scorer's Allocated/Total ratio
+	// cannot exceed 1 through the graceful-termination window. A terminating
+	// pod is on its way out, so it does not count toward Updated.
+	for name := range podAllocation {
+		if _, ok := listedPods[name]; !ok {
+			totalCnt++
+		}
 	}
 	pool.Status.ObservedGeneration = pool.Generation
 	pool.Status.Total = totalCnt

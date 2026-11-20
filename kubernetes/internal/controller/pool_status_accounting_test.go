@@ -20,6 +20,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -90,6 +91,64 @@ func TestUpdatePoolStatusExcludesFinishedIdlePodsButKeepsAllocatedOnes(t *testin
 	}
 	if updated.Status.Available != 1 {
 		t.Fatalf("Status.Available = %d, want 1 (finished and allocated pods are not availability)", updated.Status.Available)
+	}
+	if updated.Status.Allocated != 2 {
+		t.Fatalf("Status.Allocated = %d, want 2", updated.Status.Allocated)
+	}
+	if updated.Status.Total < updated.Status.Allocated {
+		t.Fatalf("Status.Total (%d) < Status.Allocated (%d); allocated/total would exceed 1",
+			updated.Status.Total, updated.Status.Allocated)
+	}
+}
+
+// Graceful termination leaves a pod with a DeletionTimestamp while its phase
+// is still Running, and the reconcile loop pre-filters such pods out of the
+// list handed to updatePoolStatus. The allocator keeps the reservation until
+// handback, so the pod must stay counted in Total (but not Updated) until it
+// is released — otherwise Allocated could exceed Total and push the rebalance
+// scorer's Allocated/Total ratio above 1 through the termination window.
+func TestUpdatePoolStatusKeepsTerminatingAllocatedPodsInTotal(t *testing.T) {
+	now := time.Now()
+
+	live := stabilityTestPod("live-ready", true, now)
+	live.Labels = map[string]string{labelPoolRevision: "rev-1"}
+
+	terminatingAllocated := stabilityTestPod("terminating-allocated", true, now)
+	terminatingAllocated.Labels = map[string]string{labelPoolRevision: "rev-1"}
+	deletionTimestamp := metav1.Now()
+	terminatingAllocated.DeletionTimestamp = &deletionTimestamp
+
+	pool := stabilityTestPool(intstr.FromInt(1))
+	pool.Generation = 7
+	pool.Spec.CapacitySpec.BufferMin = 1
+	pool.Spec.CapacitySpec.BufferMax = 1
+
+	r := stabilityTestReconciler(t, pool.DeepCopy())
+	latest := &sandboxv1alpha1.Pool{}
+	if err := r.Get(context.Background(), client.ObjectKeyFromObject(pool), latest); err != nil {
+		t.Fatal(err)
+	}
+
+	// The reconcile loop drops the terminating pod before calling
+	// updatePoolStatus, so it is absent from the slice here.
+	pods := []*corev1.Pod{live}
+	allocation := map[string]string{
+		live.Name:                 "sandbox-a",
+		terminatingAllocated.Name: "sandbox-b",
+	}
+	if err := r.updatePoolStatus(context.Background(), "rev-1", latest, pods, pods, allocation); err != nil {
+		t.Fatal(err)
+	}
+
+	updated := &sandboxv1alpha1.Pool{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: pool.Name, Namespace: pool.Namespace}, updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.Total != 2 {
+		t.Fatalf("Status.Total = %d, want 2 (live pod plus the terminating pod still allocated)", updated.Status.Total)
+	}
+	if updated.Status.Updated != 1 {
+		t.Fatalf("Status.Updated = %d, want 1 (the terminating pod no longer counts as up-to-date capacity)", updated.Status.Updated)
 	}
 	if updated.Status.Allocated != 2 {
 		t.Fatalf("Status.Allocated = %d, want 2", updated.Status.Allocated)

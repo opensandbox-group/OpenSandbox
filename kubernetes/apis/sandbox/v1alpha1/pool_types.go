@@ -113,8 +113,9 @@ type PoolStatus struct {
 	// Revision is the latest version of pool
 	Revision string `json:"revision"`
 	// Total is the number of nodes the pool accounts for: non-terminated pods
-	// plus terminal pods that are still allocated to a sandbox (they stay owed
-	// until handback). Terminal idle pods are excluded — they can never serve
+	// plus pods that are still allocated to a sandbox (they stay owed until
+	// handback), including terminal-phase pods and pods that are already
+	// terminating. Terminal idle pods are excluded — they can never serve
 	// again and must not make a pool with a dead buffer look healthy. Unreaped
 	// terminal pods still consume the PoolMax budget until the controller
 	// reclaims them.
@@ -124,7 +125,10 @@ type PoolStatus struct {
 	// Available is the number of nodes currently available in the pool.
 	Available int32 `json:"available"`
 	// Updated is the number of nodes the pool accounts for that have been
-	// updated to the latest revision. It covers the same population as Total.
+	// updated to the latest revision. It covers the same population as Total
+	// except pods that terminate while still allocated: those stay counted in
+	// Total until their reservation is handed back, but no longer count as
+	// up-to-date capacity.
 	Updated int32 `json:"updated,omitempty"`
 }
 
