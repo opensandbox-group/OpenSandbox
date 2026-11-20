@@ -1815,7 +1815,14 @@ class PoolStatus(BaseModel):
     """
     Observed runtime state of a pool.
     """
-    total: int = Field(..., description="Total number of nodes in the pool.")
+    total: int = Field(
+        ...,
+        description=(
+            "Number of nodes the pool accounts for: non-terminated pods plus "
+            "terminal pods still allocated to a sandbox. Terminal idle pods are "
+            "excluded."
+        ),
+    )
     allocated: int = Field(..., description="Number of nodes currently allocated to sandboxes.")
     available: int = Field(..., description="Number of nodes currently available in the pool.")
     revision: str = Field(..., description="Latest revision identifier of the pool.")

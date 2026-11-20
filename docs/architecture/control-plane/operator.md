@@ -56,7 +56,7 @@ Status separates sandbox health from task progress: `replicas` / `allocated` / `
 | `updateStrategy` | Same cap for rolling out template changes across existing pods |
 | `recycleStrategy` | What happens when an allocated pod is released back: `Delete` (default), `Restart`, or `Noop` |
 
-Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template.
+Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template. `total` counts the pods the pool accounts for: non-terminated pods plus pods that are still allocated to a sandbox (they stay owed until handback), including terminal-phase pods and pods that are already terminating, so `allocated / total` stays a utilization fraction. Terminal idle pods are excluded from `total` and `updated`; a terminating allocated pod stays in `total` until its reservation is handed back but no longer counts toward `updated`; no terminal pod is ever counted as `available`, because it can never serve again — otherwise a pool with a dead buffer would look healthy. Unreaped terminal pods still hold their slot in the `poolMax` budget until the controller reclaims them.
 
 ### Pool design
 
@@ -65,7 +65,7 @@ The pool maintains a **two-level capacity model**:
 ![Pool capacity model](../../public/images/operator-pool-capacity.svg)
 
 - **Buffer** — warm, unallocated pods that are Running and Ready. This is what allocations draw from, kept between `bufferMin` and `bufferMax`. The controller continuously reconciles toward this band: an allocation that drains the buffer triggers a scale-up; released capacity above `bufferMax` triggers a scale-down.
-- **Total pool** — everything the pool owns, allocated or not, bounded by `poolMin` and `poolMax`. Pods that are still starting count toward the total but are never advertised as available buffer, so the pool never promises capacity it cannot hand out.
+- **Total pool** — everything the pool owns that can still serve or still owes to a sandbox, allocated or not, bounded by `poolMin` and `poolMax`. Pods that are still starting count toward the total but are never advertised as available buffer, so the pool never promises capacity it cannot hand out. Terminal pods (Failed or Succeeded) count only while they are still allocated to a sandbox; terminal idle pods are excluded from the reported total. Unreaped terminal pods keep consuming the `poolMax` budget, so a pool with unreaped terminal pods can report `total` below `poolMax` while it is not creating replacements.
 
 Scaling is deliberately paced: each reconcile creates or deletes at most `maxUnavailable` pods (minus the ones already not-ready), so a burst of allocations produces a measured ramp of new pods, not a thundering herd.
 
