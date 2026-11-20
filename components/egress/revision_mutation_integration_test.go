@@ -818,8 +818,8 @@ func TestRevisionVaultMutationIPCChildOversizedSnapshotKeepsSession(t *testing.T
 	}
 }
 
-// Exercise the sibling sidecar path with a real ProcessSession and receiver.
-func TestRevisionExchangeResolveAdmission(t *testing.T) {
+func revisionExchangeFixture(t *testing.T, resolverRelease <-chan struct{}) (*policyServer, *revisionIPCChild, *fakeResolverServer, credentialvault.ResolveAdmission) {
+	t.Helper()
 	t.Setenv(constants.EnvSandboxID, "sidecar-sandbox")
 	s := revisionIntegrationServer(t)
 	s.credentialVault.SetResolverConfig(credentialvault.ResolverConfig{TimeoutConfigured: true})
@@ -830,7 +830,7 @@ func TestRevisionExchangeResolveAdmission(t *testing.T) {
 	// production session's local Coordinator method as resolveVaultAccess does.
 	m.revisionSession = m.revisionSession.(*revisionObservedSession).revisionProcessSession
 	s.setRevisionMitm(m)
-	resolver := startFakeResolverServer(t, 0)
+	resolver := startFakeResolverServerWithRelease(t, 0, resolverRelease)
 	var body credentialvault.CreateRequest
 	require.NoError(t, json.Unmarshal([]byte(exchangeVaultBody(resolver.endpoint())), &body))
 	_, err := s.mutateRevisionVault(mutationContext(t), m, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
@@ -839,7 +839,12 @@ func TestRevisionExchangeResolveAdmission(t *testing.T) {
 	require.NoError(t, err)
 	report := child.exchange(t, map[string]string{"command": "inspect"})
 	require.NotNil(t, report.Active)
-	admission := credentialvault.ResolveAdmission{Revision: *report.Active}
+	return s, child, resolver, credentialvault.ResolveAdmission{Revision: *report.Active}
+}
+
+// Exercise the sibling sidecar path with a real ProcessSession and receiver.
+func TestRevisionExchangeResolveAdmission(t *testing.T) {
+	s, _, resolver, admission := revisionExchangeFixture(t, nil)
 	raw, err := json.Marshal(admission)
 	require.NoError(t, err)
 	handler := credentialvault.NewResolveHandler(s.resolveVaultAccess)
@@ -857,5 +862,131 @@ func TestRevisionExchangeResolveAdmission(t *testing.T) {
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Empty(t, resolver.requests)
+}
+
+func TestRevisionExchangeResolveCancelDuringVaultCommit(t *testing.T) {
+	for _, stage := range []string{"capture", "recheck"} {
+		t.Run(stage, func(t *testing.T) { measureResolveCancelDuringVaultCommit(t, stage) })
+	}
+}
+
+func holdVaultRotationCommit(t *testing.T, s *policyServer, child *revisionIPCChild) func() {
+	t.Helper()
+	var rotated credentialvault.CreateRequest
+	require.NoError(t, json.Unmarshal([]byte(exchangeVaultBody(deadResolverEndpoint)), &rotated))
+	require.True(t, child.exchange(t, map[string]string{"command": "fault", "mode": "hold-commit"}).Ready)
+	writeCtx, cancelWrite := context.WithTimeout(t.Context(), 5*time.Second)
+	writeDone := make(chan struct{})
+	var writeErr error
+	go func() {
+		defer close(writeDone)
+		_, writeErr = s.mutateRevisionVault(writeCtx, s.mitm, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+			return store.PreparePatch(credentialvault.MutationRequest{
+				Credentials: &credentialvault.CredentialMutationSet{Replace: rotated.Credentials},
+			}, pol)
+		})
+	}()
+	t.Cleanup(func() {
+		cancelWrite()
+		<-writeDone
+	})
+	require.True(t, child.exchange(t, map[string]string{"command": "await-commit"}).Ready)
+	return func() {
+		require.True(t, child.exchange(t, map[string]string{"command": "release"}).Ready)
+		<-writeDone
+		require.NoError(t, writeErr)
+	}
+}
+
+func measureResolveCancelDuringVaultCommit(t *testing.T, stage string) {
+	releaseResolver := make(chan struct{})
+	resumeResolver := sync.OnceFunc(func() { close(releaseResolver) })
+	defer resumeResolver()
+	s, child, resolver, admission := revisionExchangeFixture(t, releaseResolver)
+	raw, err := json.Marshal(admission)
+	require.NoError(t, err)
+	reqCtx, cancelResolve := context.WithCancel(t.Context())
+	defer cancelResolve()
+	req := exchangeResolveRequest(testIP).WithContext(reqCtx)
+	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+	_, accessErr := s.resolveVaultAccess(req)
+	require.Nil(t, accessErr, "the request must match the pre-rotation identity")
+
+	var releaseCommit func()
+	targetCall := 1
+	if stage == "capture" {
+		resumeResolver()
+		releaseCommit = holdVaultRotationCommit(t, s, child)
+	} else {
+		targetCall = 2
+	}
+	entered := make(chan struct{})
+	accessCalls := 0
+	handler := credentialvault.NewResolveHandler(func(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+		accessCalls++
+		if accessCalls == targetCall {
+			close(entered)
+		}
+		return s.resolveVaultAccess(r)
+	})
+	rec := httptest.NewRecorder()
+	handlerDone := make(chan time.Time, 1)
+	var workers sync.WaitGroup
+	t.Cleanup(workers.Wait)
+	workers.Go(func() {
+		handler.ServeHTTP(rec, req)
+		handlerDone <- time.Now()
+	})
+	if stage == "recheck" {
+		select {
+		case received := <-resolver.requests:
+			require.Equal(t, "spi-signer", received.Credential)
+		case <-time.After(time.Second):
+			t.Fatal("old resolver did not receive request")
+		}
+		releaseCommit = holdVaultRotationCommit(t, s, child)
+		// Release the successful resolver decision only after the commit ACK is held.
+		resumeResolver()
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatalf("resolve did not reach %s", stage)
+	}
+	canceled := time.Now()
+	cancelResolve()
+	// Keep the ACK held for an observation window. An implementation that
+	// honors cancellation during access can finish before we release it.
+	var exited time.Time
+	select {
+	case exited = <-handlerDone:
+	case <-time.After(100 * time.Millisecond):
+	}
+	released := time.Now()
+	releaseCommit()
+	if exited.IsZero() {
+		select {
+		case exited = <-handlerDone:
+		case <-time.After(time.Second):
+			t.Fatal("resolve did not exit after the vault commit")
+		}
+	}
+	t.Logf("cancel to handler exit: %v; cancel to ACK release command: %v; release command to exit: %v; status: %d",
+		exited.Sub(canceled), released.Sub(canceled), exited.Sub(released), rec.Code)
+	if exited.Before(released) {
+		require.GreaterOrEqual(t, rec.Code, 400)
+	} else {
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		require.Equal(t, "resolution invalidated\n", rec.Body.String())
+	}
+	response := rec.Result()
+	defer response.Body.Close()
+	require.NotContains(t, rec.Body.String(), "Bearer test-spi-signer")
+	for _, values := range response.Header {
+		for _, value := range values {
+			require.NotContains(t, value, "Bearer test-spi-signer")
+		}
+	}
 	require.Empty(t, resolver.requests)
 }
