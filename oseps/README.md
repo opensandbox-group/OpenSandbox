@@ -36,3 +36,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0028](0028-rootfs-only-create-overrides.md) | CPU and Memory Overrides for Rootfs-Only Sandbox Creation | implementing | 2026-11-18 |
 | [OSEP-0030](0030-egress-upstream-proxy-forward-mode.md)        |      Egress Upstream Proxy Forward Mode                                  |     draft     |  2026-11-19 |
 | [OSEP-0031](0031-in-sandbox-process-qos-and-saturation-diagnostics.md) |      In-Sandbox Process QoS and Saturation Diagnostics            |     draft     |  2026-11-19  |
+| [OSEP-0034](0034-fastpath-caller-authentication.md) | FastPath Caller Authentication | draft | 2026-11-20 |
