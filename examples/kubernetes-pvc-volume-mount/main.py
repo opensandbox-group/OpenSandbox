@@ -103,18 +103,23 @@ async def basic_pvc_mount():
     )
     print(f"  Created new sandbox: {sandbox2.id}")
 
-    # Read the file written by the previous sandbox
-    result = await sandbox2.commands.run("cat /mnt/data/sandbox-test.txt")
-    content = "\n".join(msg.text for msg in result.logs.stdout).strip()
-    print(f"  Read back from new sandbox: {content}")
+    try:
+        result = await sandbox2.commands.run("cat /mnt/data/sandbox-test.txt")
+        if result.error or result.exit_code not in (None, 0):
+            stderr = "".join(msg.text for msg in result.logs.stderr)
+            raise RuntimeError(
+                f"Failed to read /mnt/data/sandbox-test.txt "
+                f"(exit_code={result.exit_code}, error={result.error}, stderr={stderr!r})"
+            )
 
-    if content == "Hello from OpenSandbox!":
+        content = "".join(msg.text for msg in result.logs.stdout)
+        print(f"  Read back from new sandbox: {content}")
+        if content != "Hello from OpenSandbox!":
+            raise RuntimeError(f"Expected 'Hello from OpenSandbox!', got {content!r}")
         print("  Data persistence verified!")
-    else:
-        print(f"  ERROR: Expected 'Hello from OpenSandbox!', got '{content}'")
-
-    await sandbox2.kill()
-    print("  Sandbox killed.")
+    finally:
+        await sandbox2.kill()
+        print("  Sandbox killed.")
 
 
 async def main():
