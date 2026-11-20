@@ -15,9 +15,11 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,4 +114,39 @@ func TestMetricSerialization(t *testing.T) {
 	assert.Equal(t, float64(8192), decoded["mem_total_mib"])
 	assert.Equal(t, float64(4096), decoded["mem_used_mib"])
 	assert.NotEmpty(t, decoded["timestamp"])
+}
+
+// The spec promises an update every second. Sampling CPU usage already takes
+// one second, so the stream must not wait another second on top of it.
+func TestWatchMetricsSendsAnUpdateEverySecond(t *testing.T) {
+	ctrl, w := setupMetricController("GET", "/metrics/watch")
+	reqCtx, cancel := context.WithCancel(context.Background())
+	ctrl.ctx.Request = ctrl.ctx.Request.WithContext(reqCtx)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctrl.WatchMetrics()
+	}()
+
+	time.Sleep(2500 * time.Millisecond)
+	cancel()
+	cancelled := time.Now()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WatchMetrics did not return after the client disconnected")
+	}
+	assert.Less(t, time.Since(cancelled), 2500*time.Millisecond, "a disconnect should end the stream after the sample in progress")
+
+	frames := 0
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var m model.Metrics
+		require.NoError(t, json.Unmarshal([]byte(line), &m), "frame %q", line)
+		frames++
+	}
+	assert.GreaterOrEqual(t, frames, 2, "2.5s of watching should yield an update per second")
 }

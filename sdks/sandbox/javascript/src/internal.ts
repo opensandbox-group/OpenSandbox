@@ -33,6 +33,9 @@ export type { EgressClient } from "./openapi/egressClient.js";
 
 // Data-plane header policy, shared with companion SDKs such as the code interpreter.
 export { createDataPlaneHeaders } from "./factory/defaultAdapterFactory.js";
+// Exit-code inference for foreground runs, shared so the code interpreter
+// reports the same exitCode as commands.run().
+export { inferExecutionExitCode } from "./models/execution.js";
 
 // OpenAPI schema types (NOT stable public API; internal-only).
 export type { paths as LifecyclePaths } from "./api/lifecycle.js";

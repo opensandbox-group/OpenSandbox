@@ -35,6 +35,12 @@ import (
 const subjectLifecycleDeadline = 2 * time.Second
 const subjectLifecycleRetryDelay = 100 * time.Millisecond
 
+// subjectReadyACKWait bounds how long a v1 data-plane-ready Hook waits, outside
+// every lock, for the current subject snapshot ACK before the existing gate
+// answers. The Fastlet retries a failed Hook only on its next probe tick, so a
+// few milliseconds of IPC would otherwise cost a full retry interval.
+const subjectReadyACKWait = 50 * time.Millisecond
+
 // All fields except done and immutable configuration are guarded by s.mu.
 // Only run uses client methods, including Pending: handlers never wait on its
 // mutex. Neither registry callbacks nor the worker acquire an action gate.
@@ -58,6 +64,8 @@ type fastSandboxSubjectDrain struct {
 	registrations        map[subject.Subject]uint64                      // current registration instance, even when the fence is reused
 	authorityGenerations map[subject.Subject]uint64                      // suspend fence within each registration, guarded by s.mu
 	nextRegistration     uint64                                          // drain-wide monotonic sequence; never reset on Unload or child replacement
+	ackWaiters           map[subject.Subject]chan struct{}               // closed when the subject gains an ACK or retires; waiters re-check
+	readyWait            time.Duration                                   // data-plane-ready pre-gate wait bound; immutable after start
 
 	// Optional test observer, called under s.mu after acknowledged Unload.
 	epochCountForTest func(int)
@@ -146,7 +154,7 @@ func (s *fastSandboxPolicyServer) subjectSnapshotAcknowledgedLocked(subj subject
 func (s *fastSandboxPolicyServer) startSubjectDrain() {
 	ctx, cancel := context.WithCancel(s.ctx)
 	s.mu.Lock()
-	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, deadline: subjectLifecycleDeadline, fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool), registrations: make(map[subject.Subject]uint64), authorityGenerations: make(map[subject.Subject]uint64)}
+	d := &fastSandboxSubjectDrain{wake: make(chan struct{}, 1), done: make(chan struct{}), cancel: cancel, deadline: subjectLifecycleDeadline, readyWait: subjectReadyACKWait, ackWaiters: make(map[subject.Subject]chan struct{}), fences: make(map[subject.Subject]subject.Fencing), snapshots: make(map[subject.Subject]*fastSandboxSubjectSnapshot), degraded: make(map[string]bool), registrations: make(map[subject.Subject]uint64), authorityGenerations: make(map[subject.Subject]uint64)}
 	for subj, fence := range s.subjFence {
 		d.fences[subj] = fence
 		d.nextRegistration++
@@ -155,6 +163,53 @@ func (s *fastSandboxPolicyServer) startSubjectDrain() {
 	s.subjectDrain = d
 	s.mu.Unlock()
 	go d.run(ctx, s)
+}
+
+// wakeACKWaitersLocked releases every waiter for subj. Call under s.mu. A
+// waiter never trusts the wake: it re-runs the full ACK check.
+func (d *fastSandboxSubjectDrain) wakeACKWaitersLocked(subj subject.Subject) {
+	if ch, ok := d.ackWaiters[subj]; ok {
+		close(ch)
+		delete(d.ackWaiters, subj)
+	}
+}
+
+// awaitSubjectReadyACK waits up to the drain's bound for the subject snapshot
+// ACK that the data-plane-ready gate requires. It holds no lock while waiting
+// and decides nothing: the Hook then runs the unchanged fence and ACK checks
+// under the action gate, so a timeout, rebind or removal keeps its existing
+// 503/409 answer. Without a subject drain (interception mode all) it returns
+// immediately. Only states an in-flight install can resolve are waited for.
+func (s *fastSandboxPolicyServer) awaitSubjectReadyACK(ctx context.Context, subj subject.Subject, fence subject.Fencing) {
+	var timer *time.Timer
+	for {
+		s.mu.Lock()
+		d := s.subjectDrain
+		if d == nil || d.readyWait <= 0 || !s.fenceMatchesLocked(subj, fence) || s.pendingPolicies[subj] == nil ||
+			!s.subjectVaultAuthoritativeLocked(subj) || d.snapshotFailures[subj] || s.subjectSnapshotAcknowledgedLocked(subj, fence) {
+			s.mu.Unlock()
+			return
+		}
+		ch, ok := d.ackWaiters[subj]
+		if !ok {
+			ch = make(chan struct{})
+			d.ackWaiters[subj] = ch
+		}
+		if timer == nil {
+			timer = time.NewTimer(d.readyWait)
+			defer timer.Stop()
+		}
+		s.mu.Unlock()
+		select {
+		case <-ch:
+		case <-timer.C:
+			return
+		case <-ctx.Done():
+			return
+		case <-s.ctx.Done():
+			return
+		}
+	}
 }
 
 func (d *fastSandboxSubjectDrain) signal() {
@@ -240,6 +295,7 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 			delete(d.unknownVaults, subj)
 			delete(d.snapshotFailures, subj)
 			delete(d.revertPending, subj)
+			d.wakeACKWaitersLocked(subj)
 		}
 	} else {
 		if old, exists := d.fences[subj]; exists && !old.Matches(fence) {
@@ -250,6 +306,7 @@ func (s *fastSandboxPolicyServer) recordSubjectIntentLocked(subj subject.Subject
 			delete(d.unknownVaults, subj)
 			delete(d.snapshotFailures, subj)
 			delete(d.revertPending, subj)
+			d.wakeACKWaitersLocked(subj)
 		}
 		d.fences[subj] = fence
 		d.nextRegistration++
@@ -436,6 +493,10 @@ func (s *fastSandboxPolicyServer) subjectLifecycleDegraded() []string {
 // The vocabulary is closed; never expose targets, socket paths, response bodies
 // or error text. Confirmed failures remain visible until child reconstruction.
 func subjectLifecycleReason(receipt revision.LifecycleReceipt) string {
+	if receipt.LifecycleSequence != 0 && receipt.Result.Unload.UnconfirmedConnections() {
+		// Routing is revoked, but proxied transports were not confirmed closed.
+		return "subject_transport_unconfirmed"
+	}
 	switch receipt.Result.Outcome {
 	case "subject_conflict", "subject_failed", "subject_capacity_exhausted", "subject_generation_mismatch", "invalid_target":
 		return receipt.Result.Outcome
@@ -852,6 +913,7 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 				// A newer mirror may already exist. Stamp only the acknowledged
 				// intent, so that successor remains gated until its own ACK.
 				d.acked[intent.subj] = fastSandboxSubjectACK{fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration, authorityGeneration: intent.authorityGeneration}
+				d.wakeACKWaitersLocked(intent.subj)
 			}
 			if installed || terminal {
 				delete(d.degraded, "subject_ipc_unavailable")

@@ -1042,3 +1042,25 @@ func TestRunOutputScanner_MarkerAtPieceBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestRunInIsolatedSession_NonZeroExitIsExitCodeError(t *testing.T) {
+	runner := newTestRunner(t)
+	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(),
+		WorkspaceMode: "rw",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runner.DeleteIsolatedSession(id) })
+
+	err = runner.RunInIsolatedSession(context.Background(), id, "(exit 13)", nil, nil)
+
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != 13 {
+		t.Fatalf("run error = %v, want ExitCodeError with code 13", err)
+	}
+	if got, want := err.Error(), "command exited with code 13"; got != want {
+		t.Fatalf("message = %q, want %q", got, want)
+	}
+}

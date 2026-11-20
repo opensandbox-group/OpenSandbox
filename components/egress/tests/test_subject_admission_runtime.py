@@ -273,16 +273,23 @@ class SubjectAdmissionRuntimeTest(unittest.TestCase):
         client.initiate_connection()
         client.send_headers(1, [(":method", "GET"), (":scheme", "https"),
                                 (":authority", h.BOUND), (":path", "/v1/check")], end_stream=True)
-        tls.sendall(client.data_to_send())
+        # Unload tears the old connection down before this write, so the
+        # kernel may report the closed peer as EPIPE/ECONNRESET on either the
+        # write or the read instead of a clean EOF. Timeouts and other TLS
+        # errors are not termination evidence and still fail the test.
         terminal = False
-        while not terminal:
-            data = tls.recv(65535)
-            if not data:
-                break
-            for event in client.receive_data(data):
-                self.assertNotIsInstance(event, h2.events.ResponseReceived)
-                self.assertNotIsInstance(event, h2.events.DataReceived)
-                terminal |= isinstance(event, (h2.events.StreamReset, h2.events.ConnectionTerminated))
+        try:
+            tls.sendall(client.data_to_send())
+            while not terminal:
+                data = tls.recv(65535)
+                if not data:
+                    break
+                for event in client.receive_data(data):
+                    self.assertNotIsInstance(event, h2.events.ResponseReceived)
+                    self.assertNotIsInstance(event, h2.events.DataReceived)
+                    terminal |= isinstance(event, (h2.events.StreamReset, h2.events.ConnectionTerminated))
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         self.assertEqual(self.requests, [])
 
 

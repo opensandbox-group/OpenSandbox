@@ -53,7 +53,7 @@ func (t *connectionTracker) setDynamicIPs(ips []ResolvedIP) {
 	for _, ip := range ips {
 		addr := ip.Addr.Unmap()
 		if addr.IsValid() {
-			t.dynamicIPs[addr] = now.Add(clampTTL(ip.TTL))
+			t.dynamicIPs[addr] = now.Add(ClampTTL(ip.TTL))
 		}
 	}
 }

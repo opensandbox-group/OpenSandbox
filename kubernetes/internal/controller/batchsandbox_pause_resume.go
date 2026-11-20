@@ -211,6 +211,25 @@ func (r *BatchSandboxReconciler) dispatchPauseResume(ctx context.Context, bs *sa
 
 	if generation > pauseObservedGen {
 		if pause != nil {
+			// Completed is terminal: pausing would snapshot a dead workload and
+			// resuming would re-run a finished one. Refuse the intent, keep the
+			// sticky phase, and ACK the generation so the request is not retried.
+			if bs.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted {
+				log.Info("Dispatch: refusing pause/resume intent on a Completed sandbox", "generation", generation, "pause", *pause)
+				conditionType := sandboxv1alpha1.BatchSandboxConditionResumeFailed
+				operation := "resume"
+				if *pause {
+					conditionType = sandboxv1alpha1.BatchSandboxConditionPauseFailed
+					operation = "pause"
+				}
+				if err := r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhaseCompleted, ""); err != nil {
+					return ctrl.Result{}, true, err
+				}
+				if err := r.setCondition(ctx, bs, conditionType, sandboxv1alpha1.ConditionTrue, "SandboxCompleted", fmt.Sprintf("Cannot %s: sandbox has completed", operation)); err != nil {
+					return ctrl.Result{}, true, err
+				}
+				return ctrl.Result{}, true, nil
+			}
 			if *pause {
 				if bs.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused {
 					// Already paused: a generation bump (for example a renew-only spec

@@ -2621,8 +2621,9 @@ spec:
                 "pause caused pod loss",
             ),
             ("Pending", [], "being created"),
+            ("Completed", [], "has completed"),
         ],
-        ids=["pausing", "resuming", "paused", "failed", "failed-pause-failed", "pending"],
+        ids=["pausing", "resuming", "paused", "failed", "failed-pause-failed", "pending", "completed"],
     )
     def test_pause_sandbox_rejects_non_pausable_phase(self, mock_k8s_client, phase, conditions, expected_match):
         """Pause is rejected unless the workload phase is Succeed/Running."""
@@ -2684,8 +2685,9 @@ spec:
                 "resume caused pod start failure",
             ),
             ("Pending", [], "being created"),
+            ("Completed", [], "has completed"),
         ],
-        ids=["resuming", "pausing", "running", "failed", "failed-resume-failed", "pending"],
+        ids=["resuming", "pausing", "running", "failed", "failed-resume-failed", "pending", "completed"],
     )
     def test_resume_sandbox_rejects_non_resumable_phase(self, mock_k8s_client, phase, conditions, expected_match):
         """Resume is rejected unless the workload phase is Paused."""
@@ -2735,6 +2737,50 @@ spec:
         assert result["state"] == "Running"
         assert result["reason"] == "RUNNING"
         assert result["message"] == "Sandbox is running"
+
+    def test_get_status_completed_phase_maps_to_terminated_state(self):
+        """A workload whose main container exited 0 is terminal, not running."""
+        provider = BatchSandboxProvider(MagicMock())
+        workload = {
+            "status": {"phase": "Completed"},
+            "metadata": {"creationTimestamp": "2026-11-10T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Terminated"
+        assert result["reason"] == "SANDBOX_COMPLETED"
+        assert result["message"] == "Sandbox workload completed"
+        assert result["last_transition_at"] == "2026-11-10T10:00:00Z"
+
+    def test_get_status_completed_phase_surfaces_exit_detail(self):
+        """The controller's completion condition carries pod/exit-code/finishedAt
+        detail and marks the completion moment."""
+        provider = BatchSandboxProvider(MagicMock())
+        workload = {
+            "status": {
+                "phase": "Completed",
+                "conditions": [
+                    {
+                        "type": "Ready",
+                        "status": "False",
+                        "reason": "Completed",
+                        "message": "Pod sbx-0 container sandbox exited with code 0 at 2026-11-10T10:05:00Z",
+                        "lastTransitionTime": "2026-11-10T10:05:00Z",
+                    }
+                ],
+            },
+            "metadata": {"creationTimestamp": "2026-11-10T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Terminated"
+        assert result["reason"] == "SANDBOX_COMPLETED"
+        assert result["message"] == (
+            "Pod sbx-0 container sandbox exited with code 0 at 2026-11-10T10:05:00Z"
+        )
+        assert result["last_transition_at"] == "2026-11-10T10:05:00Z"
 
     def test_get_status_failed_uses_condition_message(self):
         provider = BatchSandboxProvider(MagicMock())
@@ -3280,3 +3326,38 @@ spec:
                 "subPath": "user1",
             },
         ]
+
+    def test_validate_create_request_pool_api_error_raises_500(self, mock_k8s_client):
+        from fastapi import HTTPException
+        from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.constants import SandboxErrorCodes
+
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.get_custom_object.side_effect = RuntimeError("apiserver down")
+
+        with pytest.raises(HTTPException) as exc_info:
+            provider.validate_create_request(
+                CreateSandboxRequest(extensions={"poolRef": "my-pool"}),
+                "test-ns",
+            )
+
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_POOL_API_ERROR
+
+    def test_pool_spi_hooks_return_batchsandbox_implementations(self, mock_k8s_client):
+        from opensandbox_server.services.k8s.pool_service import PoolService
+
+        provider = BatchSandboxProvider(mock_k8s_client)
+        assert isinstance(provider.create_pool_service("test-ns"), PoolService)
+        workload = {
+            "metadata": {
+                "annotations": {
+                    "sandbox.opensandbox.io/alloc-status": '{"pods":["pod-1"],"poolRef":"pool-a"}'
+                },
+                "finalizers": ["pool.sandbox.opensandbox.io/pool-allocation"],
+            },
+            "spec": {"poolRef": "pool-a"},
+            "status": {"allocated": 1},
+        }
+        assert provider.get_allocation(workload).pool_ref == "pool-a"
+        assert provider.get_allocated_pod_names(workload) == ["pod-1"]

@@ -64,6 +64,12 @@ public static class Constants
     public const int DefaultRequestTimeoutSeconds = 30;
 
     /// <summary>
+    /// Lower bound in seconds for how long an SSE stream may stay silent. execd pings its
+    /// streams every few seconds, so a short request timeout must not end a healthy stream.
+    /// </summary>
+    internal const int SseReadTimeoutFloorSeconds = 30;
+
+    /// <summary>
     /// Default user agent string for SDK HTTP requests.
     /// </summary>
     public const string DefaultUserAgent = "OpenSandbox-CSharp-SDK/1.2.1";

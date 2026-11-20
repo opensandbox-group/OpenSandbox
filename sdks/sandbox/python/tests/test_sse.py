@@ -18,11 +18,16 @@ from __future__ import annotations
 import gzip
 from codecs import BOM_UTF8
 from collections.abc import AsyncIterator, Iterator
+from time import process_time
 
 import httpx
 import pytest
 
-from opensandbox.adapters.sse import aiter_sse_events, iter_sse_events
+from opensandbox.adapters.sse import (
+    _LegacyJsonSseNormalizer,
+    aiter_sse_events,
+    iter_sse_events,
+)
 
 _UNICODE_SEPARATORS = "before\u0085middle\u2028middle\u2029after"
 
@@ -149,3 +154,65 @@ def test_iter_sse_events_removes_only_one_initial_bom() -> None:
     assert [
         event.data for event in iter_sse_events(_response(_OneByteStream(content)))
     ] == ["second"]
+
+
+@pytest.mark.parametrize("legacy", [True, False], ids=["legacy-frame", "leading-whitespace"])
+def test_normalizer_buffering_scales_linearly(legacy: bool) -> None:
+    """An eightfold input increase must not cause quadratic CPU growth."""
+    piece = (b"x" if legacy else b" ") * 1024
+
+    def measure(chunks: int) -> float:
+        normalizer = _LegacyJsonSseNormalizer()
+        prefix = b'{"text":"' if legacy else b""
+        assert normalizer.decode(prefix) == []
+        start = process_time()
+        for _ in range(chunks):
+            assert normalizer.decode(piece) == []
+        elapsed = process_time() - start
+        # Also check that incremental scanning preserves all buffered bytes.
+        suffix = b'"}\n\n' if legacy else b'{"text":"done"}\n\n'
+        assert normalizer.decode(suffix) == [
+            b"data: " + prefix + piece * chunks + suffix
+        ]
+        assert normalizer.flush() == []
+        return elapsed
+
+    small = measure(1024)
+    large = measure(8192)
+
+    # Linear work grows 8x; quadratic rescanning grows about 64x. Allow ample
+    # CPU variation and fixed overhead without using a machine-specific deadline.
+    assert large <= small * 24 + 0.1, (
+        "normalization must scale linearly with buffered bytes"
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 7, 32, 1024])
+def test_normalizer_preserves_frames_across_compaction(chunk_size: int) -> None:
+    frames = [b'{"text":"first"}', b'{"text":"second"}', b'{"text":"tail"}']
+    # Include an empty frame and leave the last event unterminated for flush().
+    content = frames[0] + b"\n\n\n\n" + frames[1] + b"\n\n" + frames[2]
+    normalizer = _LegacyJsonSseNormalizer()
+    output = []
+    for offset in range(0, len(content), chunk_size):
+        output.extend(normalizer.decode(content[offset : offset + chunk_size]))
+    output.extend(normalizer.flush())
+
+    assert output == [
+        b"data: " + frame + b"\n\n" for frame in [frames[0], b"", *frames[1:]]
+    ]
+    assert normalizer.flush() == []
+    assert normalizer.decode(b"{}\n\n") == [b"data: {}\n\n"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_normalizer_detects_format_after_chunked_whitespace(legacy: bool) -> None:
+    normalizer = _LegacyJsonSseNormalizer()
+    whitespace = b" \t\r\n\v\f"
+    for byte in whitespace:
+        assert normalizer.decode(bytes([byte])) == []
+
+    event = b'{}\n\n' if legacy else b'data: hello\n\n'
+    prefix = b"data: " if legacy else b""
+    assert normalizer.decode(event) == [prefix + whitespace + event]
+    assert normalizer.flush() == []

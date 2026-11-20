@@ -140,3 +140,74 @@ class TLSShadowRuntimeTest(unittest.TestCase):
                 self.assertIn("credential proxy: tls-shadow binding_host", output)
                 self.assertNotIn("observer_error", output)
                 self.assertNotIn("never-log-secret", output)
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl is not installed")
+    def test_upstream_certificate_failure_logs_safe_reason(self):
+        system = Path(__file__).resolve().parents[1] / "mitmscripts" / "system.py"
+        with tempfile.TemporaryDirectory(prefix="upstream-tls-") as tmp:
+            root = Path(tmp)
+            vault = _VaultUnixServer(str(root / "vault.sock"), b'{"revision":1,"bindings":[]}')
+            vault.start()
+            self.addCleanup(vault.stop)
+            cert, key = root / "cert.pem", root / "key.pem"
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                 "-days", "1", "-subj", "/CN=untrusted-fixture",
+                 "-addext", "subjectAltName=IP:127.0.0.1",
+                 "-out", str(cert), "-keyout", str(key)],
+                check=True, capture_output=True, timeout=10,
+            )
+            upstream_port, proxy_port = _free_port(), _free_port()
+            with subprocess.Popen(
+                ["openssl", "s_server", "-accept", f"127.0.0.1:{upstream_port}",
+                 "-cert", str(cert), "-key", str(key), "-www", "-quiet"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ) as upstream, (root / "proxy.log").open("w+") as log:
+                try:
+                    with subprocess.Popen(
+                        [MITMDUMP, "--mode", f"reverse:https://127.0.0.1:{upstream_port}",
+                         "--listen-host", "127.0.0.1", "--listen-port", str(proxy_port),
+                         "--set", f"confdir={root / 'proxy-ca'}",
+                         "--set", "ssl_insecure=false", "-s", str(system)],
+                        env={
+                            **os.environ,
+                            "OPENSANDBOX_EGRESS_PROFILE": "sidecar",
+                            "OPENSANDBOX_CREDENTIAL_PROXY_SOCKET": vault.socket_path,
+                        },
+                        stdout=log, stderr=subprocess.STDOUT,
+                    ) as proxy:
+                        try:
+                            deadline = time.monotonic() + 10
+                            for port in (upstream_port, proxy_port):
+                                while time.monotonic() < deadline:
+                                    try:
+                                        with socket.create_connection(("127.0.0.1", port), timeout=.2):
+                                            break
+                                    except OSError:
+                                        time.sleep(.05)
+                                else:
+                                    self.fail("TLS fixture did not become ready")
+                            conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=5)
+                            try:
+                                conn.request("GET", "/")
+                                response = conn.getresponse()
+                                self.assertEqual(502, response.status)
+                                response.read()
+                            finally:
+                                conn.close()
+                        finally:
+                            proxy.terminate()
+                    log.seek(0)
+                    prefix = "credential proxy: upstream-tls-failure "
+                    output = log.read()
+                    events = [json.loads(line.split(prefix, 1)[1])
+                              for line in output.splitlines() if prefix in line]
+                    self.assertEqual(1, len(events), output)
+                    event = events[0]
+                    self.assertRegex(event.pop("connection_id"), r"^[0-9a-f-]{36}$")
+                    self.assertEqual(
+                        {"level": "warn", "component": "egress", "event": "upstream_tls_failure",
+                         "reason": "self_signed"}, event,
+                    )
+                finally:
+                    upstream.terminate()

@@ -9,11 +9,13 @@ The chart deploys:
 - **fast-sandbox-controller** (Deployment + `fast-sandbox-fastpath` Service): one process running the `sandbox.fast.io` reconcilers and the FastPath gRPC API (development topology, no leader election)
 - **firecracker-runtime** (DaemonSet + `dart` headless Service): the node-level firecracker agent (UDS management API used by fastlet Firecracker drivers, node-local DART child for P2P artifact delivery, janitor sidecar sweeping orphaned fastlet resources) running the node readiness loop — host checks, Firecracker asset install, the `sandbox.fast.io/kvm` + `fast-sandbox.io/firecracker-node` scheduling labels and the `FirecrackerReady` condition (the kata-deploy pattern; no manual node labeling)
 
+The controller topology is intentionally single-replica: the chart always passes `--role=all`, which does not use leader election, so `controller.replicaCount` must be `1`. The Deployment uses the `Recreate` strategy to stop the old Pod before starting its replacement, preventing overlapping reconcilers during upgrades at the cost of a brief FastPath interruption.
+
 boxlite, containerd-based runtimes and the upstream central sandbox-proxy are out of scope for this chart (the standalone containerd janitor DaemonSet is therefore not deployed): OpenSandbox deployments reach fastlets through the ingress gateway's direct route resolution (see `manifests/release/build-fast-sandbox.sh`).
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+ (control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
 - The `sandbox.fast.io` CRDs and component RBAC, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here.
 - Install this chart **before the lifecycle server** when the server will serve sandboxes through this runtime: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath` Service) created here.
@@ -82,7 +84,9 @@ The following table lists the configurable parameters of the chart and their def
 | artifactStore.store | string | `"s3://sandbox-images/publish"` | Store URI root for published artifacts (golden images, snapshots) |
 | controller.affinity | object | `{}` | Affinity for the controller pod. |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
-| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.2.1"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastletProxy.resources | object | `{"limits":{"cpu":"250m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Resource requests and limits for the platform-owned Fastlet Proxy sidecar injected into every fastlet Pod. |
+| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.2"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastpathHTTPPort | int | `0` | Port for the optional FastPath gRPC-Web listener (HTTP/1.1, serving the same RPC methods as the gRPC listener for HTTP/1.1 clients such as Java Armeria stubs). 0 (default) disables the listener. When set, the port is also exposed on the fast-sandbox-fastpath Service. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
 | controller.image.tag | string | `""` | Image tag. Empty uses the release-<appVersion> companion image tag. |
@@ -92,7 +96,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.nodeSelector | object | `{}` | Node selector for the controller pod. |
 | controller.podAnnotations | object | `{}` | Extra annotations merged into the controller pod template annotations. |
 | controller.podLabels | object | `{}` | Extra labels merged into the controller pod template labels. |
-| controller.replicaCount | int | `1` | Number of controller replicas (no leader election; keep 1) |
+| controller.replicaCount | int | `1` | Controller replica count. Only 1 is supported because the all-in-one controller does not use leader election. |
 | controller.resources | object | `{"limits":{"cpu":"1","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource requests and limits for the controller |
 | controller.sandboxtemplateBuilderImage | string | `""` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh). Empty uses the release-<appVersion> companion image tag. |
 | controller.sandboxtemplateBuilderPodSpec | string | `""` | Raw PodSpec fragment (YAML) merged into every SandboxTemplate build Pod by the controller: whitelisted scheduling fields only (tolerations appended; affinity and topologySpreadConstraints replaced). Rendered as the fast-sandbox-builder-pod-template ConfigMap; editing the live ConfigMap applies to the next build without a rollout. |

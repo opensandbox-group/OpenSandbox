@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- **Go 1.25+** — match `go.mod`
+- **Go 1.26+** — match `go.mod`
 - **Make** — build automation
 - **C compiler and static libc (Linux only)** — build the fail-closed isolated-session workload gate
 - **Docker/Podman** — containerized testing (optional)

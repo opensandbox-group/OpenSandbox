@@ -60,6 +60,11 @@ func (s *defaultTaskSchedulingStrategy) getTaskSpec(idx int) (*api.Task, error) 
 	task := &api.Task{
 		Name: fmt.Sprintf("%s-%d", s.Name, idx),
 	}
+	// Cleanup recovers and stops tasks by name. A malformed launch patch
+	// must not prevent deletion of a sandbox that was already admitted.
+	if s.DeletionTimestamp != nil {
+		return task, nil
+	}
 	if len(s.Spec.ShardTaskPatches) > 0 && idx < len(s.Spec.ShardTaskPatches) {
 		taskTemplate := s.Spec.TaskTemplate.DeepCopy()
 		cloneBytes, _ := json.Marshal(taskTemplate)

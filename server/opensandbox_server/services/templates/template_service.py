@@ -23,7 +23,6 @@ without a background task.
 from __future__ import annotations
 
 import logging
-import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -642,13 +641,8 @@ def template_to_response(record: FastSandboxTemplateRecord) -> FsbTemplate:
     )
 
 
-def total_pages(total_items: int, page_size: int) -> int:
-    return math.ceil(total_items / page_size) if page_size > 0 else 0
-
-
 __all__ = [
     "FastSandboxTemplateService",
     "effective_machine",
     "template_to_response",
-    "total_pages",
 ]

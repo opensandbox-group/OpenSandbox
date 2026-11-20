@@ -1,7 +1,7 @@
 # Development Guide (Quick)
 
 ## Prerequisites
-- Go 1.25+
+- Go 1.26+
 - Docker (optional, for image build)
 - Access to a Kubernetes cluster with BatchSandbox CRD installed.
 

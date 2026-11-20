@@ -1,4 +1,4 @@
-FROM golang:1.25
+FROM golang:1.26.11
 
 # Install Delve (debugger) and Reflex (file watcher)
 RUN go install github.com/go-delve/delve/cmd/dlv@latest && \

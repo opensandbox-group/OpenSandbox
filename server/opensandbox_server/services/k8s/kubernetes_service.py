@@ -51,7 +51,7 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.helpers import format_ingress_endpoint
+from opensandbox_server.services.helpers import build_list_sandboxes_response, format_ingress_endpoint
 from opensandbox_server.services.k8s.create_helpers import _build_create_workload_context
 from opensandbox_server.services.k8s.error_helpers import (
     _build_k8s_api_error,
@@ -64,10 +64,7 @@ from opensandbox_server.services.k8s.k8s_diagnostics import (
     K8sStartupDiagnosticsMixin,
 )
 from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
-from opensandbox_server.services.k8s.list_helpers import (
-    _build_list_sandboxes_response,
-    build_sandbox_label_selector,
-)
+from opensandbox_server.services.k8s.list_helpers import build_sandbox_label_selector
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
     _is_quota_exhausted_status,
@@ -101,13 +98,7 @@ from opensandbox_server.services.validators import (
     ensure_timeout_within_limit,
     ensure_volumes_valid,
 )
-from opensandbox_server.services.k8s.client import (
-    K8sClient,
-    OPENSANDBOX_API_GROUP,
-    OPENSANDBOX_API_VERSION,
-    POOL_AUTO_ASSIGN_REF,
-    POOL_PLURAL,
-)
+from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.provider_factory import create_workload_provider
 from opensandbox_server.services.snapshot_restore import resolve_sandbox_image_from_request
 from opensandbox_server.tenants.context import (
@@ -650,39 +641,6 @@ class KubernetesSandboxService(
         )
         ensure_egress_runtime_compatible(request.network_policy, self.app_config.secure_runtime)
 
-    def _ensure_pool_mode_compatible(
-        self,
-        request: CreateSandboxRequest,
-        has_pool_ref: bool,
-    ) -> None:
-        """Reject request fields that pooled pods cannot honor."""
-        if not has_pool_ref:
-            return
-        if request.network_policy is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": SandboxErrorCodes.INVALID_PARAMETER,
-                    "message": (
-                        "networkPolicy cannot be used together with extensions.poolRef "
-                        "because pooled pods are pre-created. Remove 'networkPolicy' "
-                        "from the request or use template mode."
-                    ),
-                },
-            )
-        if request.credential_proxy and request.credential_proxy.enabled:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": SandboxErrorCodes.INVALID_PARAMETER,
-                    "message": (
-                        "credentialProxy.enabled cannot be used together with "
-                        "extensions.poolRef because pooled pods are pre-created. "
-                        "Disable credential proxy or use template mode."
-                    ),
-                },
-            )
-
     def _ensure_image_auth_support(self, request: CreateSandboxRequest) -> None:
         """
         Validate image auth support for the current workload provider.
@@ -732,35 +690,6 @@ class KubernetesSandboxService(
                         "lifecycle.idlePolicy is only supported by the fast-sandbox "
                         "backend; pod sandboxes are never auto-paused or auto-woken."
                     ),
-                },
-            )
-
-    def _ensure_pool_ref_exists(self, pool_ref: str) -> None:
-        """Validate that the referenced Pool exists before creating a BatchSandbox."""
-        try:
-            pool = self.k8s_client.get_custom_object(
-                group=OPENSANDBOX_API_GROUP,
-                version=OPENSANDBOX_API_VERSION,
-                namespace=self._resolve_namespace(),
-                plural=POOL_PLURAL,
-                name=pool_ref,
-            )
-        except Exception as e:
-            logger.exception(f"Failed to validate poolRef {pool_ref}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "code": SandboxErrorCodes.K8S_POOL_API_ERROR,
-                    "message": f"Failed to validate pool '{pool_ref}': {str(e)}",
-                },
-            ) from e
-
-        if pool is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
-                    "message": f"Pool '{pool_ref}' not found.",
                 },
             )
 
@@ -1079,9 +1008,7 @@ class KubernetesSandboxService(
         Create a new sandbox workload via the workload provider and wait for
         it to report Running (or pool-Allocated) before returning.
         """
-        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
-        has_pool_ref = bool(pool_ref)
-        self._ensure_pool_mode_compatible(request, has_pool_ref)
+        has_pool_ref = bool((request.extensions or {}).get("poolRef", "").strip())
 
         if not has_pool_ref:
             request = await resolve_sandbox_image_from_request(request)
@@ -1093,7 +1020,6 @@ class KubernetesSandboxService(
             self.app_config.server.max_sandbox_timeout_seconds,
         )
         self._ensure_secure_access_support(request)
-        self._ensure_network_policy_support(request)
         self._ensure_image_auth_support(request)
         self._ensure_idle_policy_support(request)
 
@@ -1113,6 +1039,19 @@ class KubernetesSandboxService(
         workload_left_alive = False
         created_managed_pvcs: list[str] = []
         try:
+            ensure_volumes_valid(
+                request.volumes,
+                self.app_config.storage.allowed_host_paths,
+            )
+            # Delegate provider/pool preflight checks (e.g. poolRef existence and
+            # pool-mode field compatibility) before any PVC or CR side effects.
+            await asyncio.to_thread(
+                self.workload_provider.validate_create_request,
+                request,
+                self._resolve_namespace(),
+            )
+            self._ensure_network_policy_support(request)
+
             context = _build_create_workload_context(
                 app_config=self.app_config,
                 request=request,
@@ -1128,33 +1067,6 @@ class KubernetesSandboxService(
                 context.annotations, request.extensions, lifecycle=request.lifecycle
             )
             apply_extensions_to_mapping(context.annotations, request.extensions)
-
-            ensure_volumes_valid(
-                request.volumes,
-                self.app_config.storage.allowed_host_paths,
-            )
-
-            # Reject poolRef + volumes here, before _ensure_pvc_volumes runs.
-            # The provider also rejects this combination but raises
-            # ``ValueError`` from create_workload after PVCs have been
-            # auto-created and labeled — combined with the pessimistic
-            # ``workload_left_alive`` flag the finally would then skip
-            # cleanup, orphaning the labeled PVCs. Validating up-front means
-            # no side effects happen before the 400 is raised.
-            if request.volumes and has_pool_ref:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": SandboxErrorCodes.INVALID_PARAMETER,
-                        "message": (
-                            "Pool mode (extensions.poolRef) does not support volumes. "
-                            "Remove 'volumes' from the request or use template mode."
-                        ),
-                    },
-                )
-
-            if has_pool_ref and pool_ref != POOL_AUTO_ASSIGN_REF:
-                await asyncio.to_thread(self._ensure_pool_ref_exists, pool_ref)
 
             if request.volumes:
                 managed_pvcs_may_exist = True
@@ -1414,7 +1326,7 @@ class KubernetesSandboxService(
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
         try:
             metadata = request.filter.metadata if request.filter else None
-            return _build_list_sandboxes_response(
+            return build_list_sandboxes_response(
                 self.list_sandbox_objects(metadata=metadata),
                 request,
             )

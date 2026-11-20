@@ -370,6 +370,9 @@ def _try_decode_base64(s: str) -> bytes | None:
 class SecureAccessKey(BaseModel):
     """A signing key entry for OSEP-0011 signed route verification."""
 
+    # ``key`` is secret signing material: never echo it in validation errors.
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     key_id: str = Field(
         ...,
         min_length=1,
@@ -396,7 +399,7 @@ class SecureAccessKey(BaseModel):
     def validate_key_is_base64(cls, v: str) -> str:
         decoded = _try_decode_base64(v)
         if decoded is None:
-            raise ValueError(f"key is not valid base64: {v!r}")
+            raise ValueError("key is not valid base64")
         if not decoded:
             raise ValueError("key must decode to at least 1 byte")
         return v
@@ -1405,8 +1408,11 @@ class DockerConfig(BaseModel):
     )
     pids_limit: Optional[int] = Field(
         default=4096,
-        ge=1,
-        description="Maximum number of processes allowed per sandbox container. Set to null to disable the limit.",
+        ge=0,
+        description=(
+            "Maximum number of processes allowed per sandbox container. "
+            "Set to 0 to disable the limit (TOML cannot express null)."
+        ),
     )
     sandbox_env: dict[str, str] = Field(
         default_factory=dict,
@@ -1425,6 +1431,13 @@ class DockerConfig(BaseModel):
             "volumes. Useful for mounting a private CA certificate into all sandboxes."
         ),
     )
+
+    @field_validator("pids_limit", mode="after")
+    @classmethod
+    def _zero_disables_pids_limit(cls, value: Optional[int]) -> Optional[int]:
+        # TOML has no null literal, so 0 is the only way to disable the limit
+        # from the config file; None leaves pids_limit unset on the container.
+        return None if value == 0 else value
 
     @field_validator("publish_host")
     @classmethod
@@ -1738,12 +1751,13 @@ def _apply_secure_access_env_overrides(config: AppConfig) -> None:
             f"'{INGRESS_MODE_GATEWAY}' in the config file."
         )
     keys: list[SecureAccessKey] = []
-    for pair in keys_env.split(","):
+    for index, pair in enumerate(keys_env.split(",")):
         key_id, sep, b64 = pair.partition("=")
         if not sep or not key_id:
+            # Do not echo the entry: it may carry the key material.
             raise ValueError(
                 f"{SECURE_ACCESS_KEYS_ENV_VAR} entries must be in "
-                f"key_id=base64 form, got {pair!r}"
+                f"key_id=base64 form (entry {index} is not)"
             )
         keys.append(SecureAccessKey(key_id=key_id, key=b64))
     config.ingress.secure_access = SecureAccessConfig(

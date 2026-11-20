@@ -29,6 +29,7 @@ from ...types import Response
 def _get_kwargs(
     sandbox_id: str,
 ) -> dict[str, Any]:
+
     _kwargs: dict[str, Any] = {
         "method": "delete",
         "url": "/sandboxes/{sandbox_id}/credential-vault".format(

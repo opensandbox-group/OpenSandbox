@@ -922,6 +922,16 @@ def test_routes_list_filters_on_empty_metadata_value(client, service):
     assert [item["templateId"] for item in payload["items"]] == [empty.template_id]
 
 
+def test_routes_list_rejects_malformed_metadata_filter(client, service):
+    service.create_template(_create_request(metadata={"env": "prod"}))
+
+    listing = client.get("/v1/templates", params={"metadata": "env=prod&broken"})
+    assert listing.status_code == 400, listing.text
+    detail = listing.json()["detail"]
+    assert detail["code"] == "INVALID_METADATA_FORMAT"
+    assert "bad query field" in detail["message"]
+
+
 def test_routes_reject_extra_fields(client):
     response = client.post(
         "/v1/templates",

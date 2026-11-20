@@ -16,6 +16,7 @@ package nftables
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -440,7 +441,7 @@ func TestDomainRefresh_SkipsFreshLeasesAndBacksOffFailures(t *testing.T) {
 	})
 	require.Zero(t, lookups, "a domain whose lease is not near expiry must not be queried")
 
-	now = now.Add(clampTTL(ips[0].TTL) - domainRefreshLead)
+	now = now.Add(ClampTTL(ips[0].TTL) - domainRefreshLead)
 	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
 		lookups++
 		return nil, fmt.Errorf("upstream unavailable")
@@ -470,7 +471,7 @@ func TestDomainRefresh_SkipsFreshLeasesAndBacksOffFailures(t *testing.T) {
 
 	// Little lease left: the retry delay must be clamped so one retry stays
 	// possible before the earliest lease expires (less one lookup timeout).
-	now = now.Add(clampTTL(ips[0].TTL) - 30*time.Second)
+	now = now.Add(ClampTTL(ips[0].TTL) - 30*time.Second)
 	manager.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
 		lookups++
 		return nil, fmt.Errorf("upstream unavailable")
@@ -863,4 +864,23 @@ func TestApplyStatic_NoMitmRedirectExemptionWhenDisabled(t *testing.T) {
 	})
 	require.NoError(t, m.ApplyStatic(context.Background(), policy.DefaultDenyPolicy()))
 	require.NotContains(t, rendered, "dport 18081", "no exemption without transparent MITM")
+}
+
+func TestIsMissingTableErrorMatchesOnlyThatTablesDelete(t *testing.T) {
+	missing := func(line string) error {
+		return errors.New("nft apply failed: exit status 1 (output: Error: Could not process rule: No such file or directory\n" + line + ")")
+	}
+	require.True(t, IsMissingTableError(missing("delete table inet other"), "other"))
+	require.True(t, IsMissingTableError(missing("delete table inet Other"), "Other"), "the message is compared case-insensitively")
+	require.False(t, IsMissingTableError(missing("delete table inet other"), tableName), "another table's delete")
+	require.False(t, IsMissingTableError(missing("add rule inet other forward jump gone"), "other"), "a different missing object")
+	require.False(t, IsMissingTableError(errors.New("delete table inet other: permission denied"), "other"), "a different failure")
+	require.False(t, IsMissingTableError(nil, "other"))
+	require.False(t, IsMissingTableError(missing("delete table inet other-longer"), "other"), "a table whose name only starts with it")
+}
+
+func TestRemoveDeleteTableLineDropsOnlyThatTablesDelete(t *testing.T) {
+	script := "delete table inet other\ndelete table inet other-longer\ndelete table inet keep\n\nadd table inet other\n"
+
+	require.Equal(t, "delete table inet other-longer\ndelete table inet keep\nadd table inet other", RemoveDeleteTableLine(script, "other"))
 }

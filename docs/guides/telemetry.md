@@ -172,6 +172,10 @@ Meter: `opensandbox/execd` · Service name: `opensandbox-execd-<version>` (fixed
 | `execd.system.memory.usage_bytes` | Observable Gauge | `By` | - | Sandbox memory used bytes: sandbox cgroup when resource limits are configured, host `/proc` otherwise (e.g. microVM guests). |
 | `execd.system.network.io.bytes` | Observable Counter | `By` | `direction` (`in`/`out`) | Cumulative network I/O bytes. |
 | `execd.system.network.connections.active` | Observable Gauge | - | `protocol` (`tcp`/`udp`) | Current active network connections. |
+| `execd.system.disk.usage_bytes` | Observable Gauge | `By` | `mountpoint`, `fstype`, `source` | Per-mount filesystem used bytes (real mounts only, see below). |
+| `execd.system.disk.total_bytes` | Observable Gauge | `By` | `mountpoint`, `fstype`, `source` | Per-mount filesystem total capacity (see below). |
+| `execd.system.disk.io.bytes` | Observable Counter | `By` | `direction` (`read`/`write`) | Cumulative disk I/O bytes (see below). |
+| `execd.system.disk.io.operations` | Observable Counter | `{operation}` | `direction` (`read`/`write`) | Cumulative completed disk I/O operations (see below). |
 | `execd.system.oom.kills` | Counter | `{kill}` | `level` (`local`/`descendant`, cgroup v2 only) | OOM kills detected in the sandbox cgroup (see below). |
 | `execd.isolation.run.duration` | Histogram | `ms` | `result` | Isolated session run duration. |
 | `execd.isolation.session.count` | Observable Gauge | - | - | Current number of active isolated sessions. |
@@ -183,6 +187,14 @@ collection's `execd.isolation.upper.usage_bytes` observation instead of
 reporting an incorrect zero. A successfully measured empty upper still reports
 zero, and the active-session count continues to be reported. Treat a missing
 usage observation as **unknown**, not as zero usage.
+
+### Disk usage and IO observation
+
+The disk usage gauges cover every mount a sandbox process can see, read from `/proc/self/mountinfo` and measured with `statfs`. Kernel plumbing is excluded: pseudo trees under `/proc`, `/sys`, `/dev` (except `/dev/shm`) and `/run`, plus kernel filesystem types (proc, sysfs, devtmpfs, devpts, mqueue, cgroup, cgroup2, securityfs, debugfs, tracefs, configfs, pstore, bpf, autofs, hugetlbfs, ramfs, binfmt_misc, fusectl, nsfs, rpc_pipefs). tmpfs is kept at data locations such as `/dev/shm` and `/tmp` as well as mounts outside the plumbing directories (for example the `/etc/hosts` bind file). A mount point hidden by an overmount is reported once, as the top (visible) mount. Each `statfs` is bounded by a 2-second timeout so a stale network mount cannot stall the metrics pipeline; the affected mount is omitted for that collection — treat a missing mount observation as **unknown**, not as zero usage.
+
+The reported values are as computed by the filesystem itself: FUSE object stores (e.g. ossfs2) typically report a synthetic capacity (a fixed huge total, near-zero used); NFS reports the server-side export capacity, not a per-sandbox quota; tmpfs reflects real RAM-backed usage.
+
+Disk I/O is reported as cumulative counters and aggregated over the sandbox (no per-mount or per-device attribution): the sandbox cgroup's IO accounting is preferred (cgroup v2 `io.stat`, then cgroup v1 `blkio.throttle.io_service_bytes`/`blkio.throttle.io_serviced`), falling back to `/proc/diskstats` through gopsutil with pseudo devices and partition names excluded (the kernel charges partition I/O to the whole device too, so summing both layers would double-count). Inside a microVM guest `/proc/diskstats` describes the sandbox machine itself; in a plain container it is host-wide — the same caveat as the CPU/memory host fallback. Counters are cumulative since the current binding and are rebased at warm-rebind handoffs (`POST /internal/init`): the sample that crosses a handoff restarts from zero, so totals accumulated under a previous sandbox identity are never attributed to the new one — the same policy as the OOM kill counter. Per-mount IOPS/BPS are not available from inside the sandbox: virtiofs traffic executes on the host side and FUSE object stores have no per-mount kernel counters, so derive rates from the aggregate counters on the backend side.
 
 ### OOM kill observation
 

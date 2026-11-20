@@ -20,17 +20,18 @@ import (
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
 
-// +kubebuilder:validation:Enum=Pending;Succeed;Pausing;Paused;Resuming;Failed
+// +kubebuilder:validation:Enum=Pending;Succeed;Pausing;Paused;Resuming;Failed;Completed
 // BatchSandboxPhase defines the overall phase of a BatchSandbox.
 type BatchSandboxPhase string
 
 const (
-	BatchSandboxPhasePending  BatchSandboxPhase = "Pending"
-	BatchSandboxPhaseSucceed  BatchSandboxPhase = "Succeed"
-	BatchSandboxPhasePausing  BatchSandboxPhase = "Pausing"
-	BatchSandboxPhasePaused   BatchSandboxPhase = "Paused"
-	BatchSandboxPhaseResuming BatchSandboxPhase = "Resuming"
-	BatchSandboxPhaseFailed   BatchSandboxPhase = "Failed"
+	BatchSandboxPhasePending   BatchSandboxPhase = "Pending"
+	BatchSandboxPhaseSucceed   BatchSandboxPhase = "Succeed"
+	BatchSandboxPhasePausing   BatchSandboxPhase = "Pausing"
+	BatchSandboxPhasePaused    BatchSandboxPhase = "Paused"
+	BatchSandboxPhaseResuming  BatchSandboxPhase = "Resuming"
+	BatchSandboxPhaseFailed    BatchSandboxPhase = "Failed"
+	BatchSandboxPhaseCompleted BatchSandboxPhase = "Completed"
 )
 
 // ConditionStatus represents the status of a condition

@@ -25,8 +25,11 @@ from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxApiException,
+    SandboxException,
     SandboxRateLimitException,
 )
+from opensandbox.models.execd import ExecutionHandlers
+from opensandbox.models.execd_sync import ExecutionHandlersSync
 from opensandbox.models.sandboxes import SandboxEndpoint
 
 from code_interpreter.adapters.code_adapter import CodesAdapter
@@ -284,3 +287,133 @@ async def test_run_code_non_200_keeps_structured_error_and_rate_limit() -> None:
     assert ei.value.error.message == "slow down"
     assert ei.value.retry_after == timedelta(seconds=3)
     assert ei.value.response_body is not None
+
+
+class _HandlerAbort(RuntimeError):
+    pass
+
+
+def _stdout_stream_response(request: httpx.Request) -> httpx.Response:
+    return _fragment_response(request, "stdout", ["first\n", "second\n"])
+
+
+@pytest.mark.asyncio
+async def test_run_code_propagates_handler_exception() -> None:
+    seen: list[str] = []
+
+    async def on_stdout(message: object) -> None:
+        seen.append(message.text)  # type: ignore[attr-defined]
+        raise _HandlerAbort("stop")
+
+    cfg = ConnectionConfig(protocol="http", transport=httpx.MockTransport(_stdout_stream_response))
+    adapter = CodesAdapter(SandboxEndpoint(endpoint="localhost:44772"), cfg)
+
+    with pytest.raises(SandboxException) as exc:
+        await adapter.run("print(1)", handlers=ExecutionHandlers(on_stdout=on_stdout))
+
+    assert isinstance(exc.value.__cause__, _HandlerAbort)
+    assert seen == ["first\n"]
+
+
+def test_sync_run_code_propagates_handler_exception() -> None:
+    seen: list[str] = []
+
+    def on_stdout(message: object) -> None:
+        seen.append(message.text)  # type: ignore[attr-defined]
+        raise _HandlerAbort("stop")
+
+    cfg = ConnectionConfigSync(protocol="http", transport=httpx.MockTransport(_stdout_stream_response))
+    adapter = CodesAdapterSync(SandboxEndpoint(endpoint="localhost:44772"), cfg)
+
+    with pytest.raises(SandboxException) as exc:
+        adapter.run("print(1)", handlers=ExecutionHandlersSync(on_stdout=on_stdout))
+
+    assert isinstance(exc.value.__cause__, _HandlerAbort)
+    assert seen == ["first\n"]
+
+
+@pytest.mark.asyncio
+async def test_run_code_skips_undecodable_events() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=(
+                b'data: {"type":"init","text":"exec-1","timestamp":1}\n\n'
+                b"data: not-json\n\n"
+                b'data: {"type":"stdout","text":"ok\\n","timestamp":2}\n\n'
+                b'data: {"type":"execution_complete","timestamp":3}\n\n'
+            ),
+            request=request,
+        )
+
+    cfg = ConnectionConfig(protocol="http", transport=httpx.MockTransport(respond))
+    adapter = CodesAdapter(SandboxEndpoint(endpoint="localhost:44772"), cfg)
+
+    execution = await adapter.run("print(1)")
+
+    assert [m.text for m in execution.logs.stdout] == ["ok\n"]
+
+
+def _terminal_event_response(request: httpx.Request, terminal: dict) -> httpx.Response:
+    events = [{"type": "init", "text": "exec-exit", "timestamp": 0}, terminal]
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        content="".join(f"data: {json.dumps(event)}\n\n" for event in events),
+        request=request,
+    )
+
+
+_EXIT_CODE_CASES = [
+    pytest.param(
+        {"type": "execution_complete", "timestamp": 1, "execution_time": 1}, 0, id="completed"
+    ),
+    pytest.param(
+        {
+            "type": "error",
+            "timestamp": 1,
+            # execd reports a kernel error without exit_code; the code comes from evalue.
+            "error": {"ename": "SystemExit", "evalue": "3", "traceback": []},
+        },
+        3,
+        id="system-exit",
+    ),
+    pytest.param(
+        {
+            "type": "error",
+            "timestamp": 1,
+            "error": {"ename": "ZeroDivisionError", "evalue": "division by zero", "traceback": []},
+        },
+        None,
+        id="error-without-code",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("terminal", "expected"), _EXIT_CODE_CASES)
+async def test_run_code_infers_exit_code(terminal: dict, expected: int | None) -> None:
+    """Same inference as commands.run, and as the Kotlin, C# and Go code interpreters."""
+    transport = httpx.MockTransport(lambda request: _terminal_event_response(request, terminal))
+    adapter = CodesAdapter(
+        SandboxEndpoint(endpoint="localhost:44772"),
+        ConnectionConfig(protocol="http", transport=transport),
+    )
+
+    execution = await adapter.run("raise SystemExit(3)")
+
+    assert execution.exit_code == expected
+
+
+@pytest.mark.parametrize(("terminal", "expected"), _EXIT_CODE_CASES)
+def test_sync_run_code_infers_exit_code(terminal: dict, expected: int | None) -> None:
+    transport = httpx.MockTransport(lambda request: _terminal_event_response(request, terminal))
+    adapter = CodesAdapterSync(
+        SandboxEndpoint(endpoint="localhost:44772"),
+        ConnectionConfigSync(protocol="http", transport=transport),
+    )
+
+    execution = adapter.run("raise SystemExit(3)")
+
+    assert execution.exit_code == expected

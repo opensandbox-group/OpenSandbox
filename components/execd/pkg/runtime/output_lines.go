@@ -24,11 +24,6 @@ import (
 	"unicode/utf8"
 )
 
-// maxScanLineBytes bounds the size of one piece of an output line. A longer
-// line is delivered in pieces instead of failing the read, so the pipe keeps
-// draining and the markers that follow are still seen.
-const maxScanLineBytes = 16 * 1024 * 1024
-
 // scanOutputLines calls onLine for each line read from r, without the line
 // terminator, as bufio.ScanLines does. A line longer than maxScanLineBytes is
 // passed in pieces with complete=false for all but the last piece; pieces
@@ -90,18 +85,4 @@ func holdBackMarkerPrefix(piece, marker string) (send, held string) {
 		cut--
 	}
 	return piece[:cut], piece[cut:]
-}
-
-// lastRuneBoundary returns the largest n such that b[:n] does not end inside
-// a UTF-8 sequence.
-func lastRuneBoundary(b []byte) int {
-	for i := len(b) - 1; i >= 0 && i >= len(b)-utf8.UTFMax; i-- {
-		if utf8.RuneStart(b[i]) {
-			if utf8.FullRune(b[i:]) {
-				return len(b)
-			}
-			return i
-		}
-	}
-	return len(b)
 }

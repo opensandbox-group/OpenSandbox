@@ -270,4 +270,121 @@ subjects:
 - kind: ServiceAccount
   name: fast-sandbox-fastpath
   namespace: {{ .Values.fastSandbox.namespaces.system }}
+---
+# Fastlet control authentication, two grants (mirrors fast-sandbox
+# config/rbac/base.yaml):
+#
+# 1. Token minting is per identity and namespaced: serviceaccounts/token RBAC
+#    is evaluated in the target ServiceAccount's namespace and each Role is
+#    resourceNames-fenced to exactly the ServiceAccount its RoleBinding
+#    binds, so a compromised fastpath cannot mint controller tokens (and
+#    thereby inherit its broader cluster-wide permissions), and a
+#    cluster-scoped rule could not mint for same-named ServiceAccounts in
+#    tenant namespaces.
+# 2. The Fastlet fetches OIDC discovery and JWKS with a credential: its
+#    dedicated fast-sandbox-fastlet ServiceAccount (provisioned per Pool
+#    namespace, projected-token mounted) is covered by Kubernetes' built-in
+#    binding of system:service-account-issuer-discovery to the
+#    system:serviceaccounts group. The ClusterRole and ClusterRoleBinding
+#    below restate that grant for clusters that stripped the bootstrap
+#    bindings. Nothing binds to system:unauthenticated.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fast-sandbox-fastpath-token-minter
+  namespace: {{ .Values.fastSandbox.namespaces.system }}
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  resourceNames:
+  - fast-sandbox-fastpath
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fast-sandbox-fastpath-token-minter
+  namespace: {{ .Values.fastSandbox.namespaces.system }}
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fast-sandbox-fastpath-token-minter
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-fastpath
+  namespace: {{ .Values.fastSandbox.namespaces.system }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: fast-sandbox-controller-token-minter
+  namespace: {{ .Values.fastSandbox.namespaces.system }}
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts/token
+  resourceNames:
+  - fast-sandbox-controller
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fast-sandbox-controller-token-minter
+  namespace: {{ .Values.fastSandbox.namespaces.system }}
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: fast-sandbox-controller-token-minter
+subjects:
+- kind: ServiceAccount
+  name: fast-sandbox-controller
+  namespace: {{ .Values.fastSandbox.namespaces.system }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fast-sandbox-fastlet-issuer-discovery
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+rules:
+- verbs:
+  - get
+  nonResourceURLs:
+  - /.well-known/openid-configuration
+  - /openid/v1/jwks
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fast-sandbox-fastlet-issuer-discovery
+  labels:
+    {{- include "opensandbox-base.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fast-sandbox
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fast-sandbox-fastlet-issuer-discovery
+subjects:
+- kind: Group
+  name: system:serviceaccounts
+  apiGroup: rbac.authorization.k8s.io
 {{- end }}

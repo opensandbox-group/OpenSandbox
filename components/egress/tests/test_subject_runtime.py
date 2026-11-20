@@ -140,6 +140,7 @@ class SubjectRuntimeTest(unittest.TestCase):
             addon.load(None)
         runtime = subject_admission.runtime()
         self.assertIsNotNone(runtime)
+        self.assertIs(addon._owner._teardown, runtime)  # wired before the socket served
         self.assertEqual(len(self.drain_threads()), 1)
         with self.assertRaises(RuntimeError):
             runtime.start()
@@ -157,6 +158,7 @@ class SubjectRuntimeTest(unittest.TestCase):
             addon.load(None)
         self.assertEqual(self.drain_threads(), [])
         self.assertFalse(addon._admission_enabled)
+        self.assertIsNone(addon._owner._teardown)
         addon.done()
 
     def test_admission_startup_failures_leave_no_loop_or_runtime(self):

@@ -194,6 +194,7 @@ class SubjectAdmissionTest(unittest.TestCase):
         self.install()
         runtime = SubjectAdmissionRuntime(self.owner)
         client = types.SimpleNamespace(peername=("192.0.2.1", 1234))
+        runtime.client_connected(client)
         first = runtime.admit_tls(client, "api.example.com", destination_port=443)
         self.assert_reason(first, "decrypt", "binding_host")
         old = self.owner.lookup_source("192.0.2.1").registry
@@ -216,6 +217,7 @@ class SubjectAdmissionTest(unittest.TestCase):
         self.install()
         runtime = SubjectAdmissionRuntime(self.owner)
         client = types.SimpleNamespace(peername=("192.0.2.1", 1234))
+        runtime.client_connected(client)
         token = runtime.admit_tls(client, "api.example.com", destination_port=443).token
         self.addCleanup(runtime.client_disconnected, client)
         return runtime, client, token, self.owner.lookup_source("192.0.2.1").registry
@@ -314,6 +316,7 @@ class SubjectAdmissionTest(unittest.TestCase):
             owner.prepare(f.A, snapshot.revision, snapshot.payload)
             owner.commit(f.A, snapshot.revision)
             client = types.SimpleNamespace(peername=("192.0.2.3", 1234))
+            runtime.client_connected(client)
             self.addCleanup(runtime.client_disconnected, client)
             self.assertEqual(runtime.admit_tls(client, "api.example.com", destination_port=443).action,
                              "decrypt")
@@ -482,6 +485,7 @@ class SubjectDrainTest(unittest.TestCase):
 
     def connect(self, address="192.0.2.1"):
         client = types.SimpleNamespace(peername=(address, 1234), id=object())
+        self.runtime.client_connected(client)
         result = self.runtime.admit_tls(client, "api.example.com", destination_port=443)
         self.assertEqual(result.action, "decrypt")
         self.proxyserver.connections[client.id] = self.handler

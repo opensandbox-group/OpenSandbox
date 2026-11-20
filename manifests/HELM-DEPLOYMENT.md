@@ -6,7 +6,7 @@ This document describes how to deploy OpenSandbox with Helm: the cluster foundat
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+ (matching the charts' `kubeVersion`)
+- Kubernetes 1.22+ (matching the charts' `kubeVersion`)
 - Helm 3.0+
 - kubectl configured and able to access the target cluster
 
@@ -567,6 +567,8 @@ Two key systems apply (do not conflate them):
 - The OpenSandbox f1.* route-scope ring is HMAC-SHA256 and independent: the server signs with `[ingress.secure_access]` (`server.gateway.secureAccess` in charts/server) and the ingress gateway verifies with the same symmetric ring (`gateway.secureAccess` in charts/ingress-gateway). Configure both with matching key material for production.
 
 Point the OpenSandbox server's `[runtime]`/fsb configuration and the ingress gateway's `gateway.providerType=fast-sandbox` / `gateway.fastpathEndpoint` values at the deployed FastPath endpoint to serve sandboxes through this runtime (see [Ingress Gateway](#ingress-gateway) for the complete gateway install command, and `scripts/fast-sandbox-env` for a working reference).
+
+By default FastPath serves native gRPC only (`fast-sandbox-fastpath:9090`). To also serve the same RPC methods to HTTP/1.1 clients over gRPC-Web (for example Java clients using [Armeria](https://armeria.dev/docs/client/grpc/) with their existing generated stubs), set `controller.fastpathHTTPPort` (`fast-sandbox.controller.fastpathHTTPPort` in the umbrella chart) to a non-zero port such as `8090`: the chart passes it to the controller's `--fastpath-http-port` flag and exposes it on the `fast-sandbox-fastpath` Service. The listener is disabled by default. See the upstream [gRPC-Web API reference](https://github.com/opensandbox-group/fast-sandbox/blob/main/docs/reference/api.md#grpc-web-over-http11) for client construction.
 
 ### Bumping the pinned fast-sandbox commit
 
