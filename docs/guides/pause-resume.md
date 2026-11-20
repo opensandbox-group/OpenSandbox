@@ -1,11 +1,11 @@
 ---
 title: Pause & Resume
-description: Pause sandbox state to an OCI image and resume from snapshot on Kubernetes.
+description: Pause and resume Kubernetes sandboxes using root filesystem images or a workspace checkpoint volume.
 ---
 
 # Pause and Resume Guide
 
-This guide explains how to use the pause and resume features for Kubernetes-backed sandboxes in OpenSandbox. Pause commits the sandbox's root filesystem as an OCI image and releases cluster resources. Resume restores the sandbox from that image.
+This guide explains how to use the pause and resume features for Kubernetes-backed sandboxes in OpenSandbox. By default, pause commits the sandbox's root filesystem as an OCI image and releases cluster resources. Resume restores the sandbox from that image.
 
 ## Table of Contents
 
@@ -96,6 +96,34 @@ The image-committer can sometimes read a stopped container directly from contain
 For data that must survive an unexpected termination, store it in a persistent volume or an external service and take explicit root filesystem snapshots for reproducible environment state. Files in mounted volumes follow the persistence and backup behavior of that volume; they are not included in the OCI rootfs snapshot.
 
 ---
+
+## Workspace-only pause on Kubernetes
+
+A single-replica, non-pooled BatchSandbox can save the ordinary `/workspace` directory to an object-storage-backed PVC on pause. Resume uses the original application image and an init container to restore the archive into a fresh volume mounted at `/workspace`. Each pause creates a new archive. Files elsewhere in the container and running processes are discarded when the Pod is released.
+
+Configure the following fields in the BatchSandbox or the server's `batchsandbox_template_file`. This example uses the server's application container name, `sandbox`. Supply a dedicated, writable PVC for each sandbox, backed by a bucket or prefix with access restricted to that sandbox. The CSI driver must support sequential writes, fsync and durable close. The application image must provide Python 3.12 or later.
+
+```yaml
+spec:
+  workspacePause:
+    containerName: sandbox
+    volumeName: checkpoints
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /mnt/opensandbox-checkpoints
+      volumes:
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: my-sandbox-bucket
+```
+
+When the lifecycle server serves multiple sandboxes, configure only `spec.workspacePause` in its template and supply the corresponding volume in each create request. For example, pass `Volume(name="checkpoints", pvc=PVC(claimName=claim_name, createIfNotExists=False, deleteOnSandboxTermination=False), mountPath="/mnt/opensandbox-checkpoints")` in the Python SDK's `volumes` list. Select a dedicated claim for each sandbox.
+
+The archive supports regular files, directories and links confined to the workspace. Stop application writers before requesting pause. Use the existing pause and resume APIs. A failed export leaves the source Pod available for retry. On resume the init container verifies the archive digest before starting the application. Inspect its logs if the volume or archive is unavailable. The bucket owner manages retention, including abandoned uploads. Keep the active archive for the lifetime of the sandbox because Pod replacement may need it again.
 
 ## Architecture
 

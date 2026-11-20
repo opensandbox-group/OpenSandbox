@@ -163,6 +163,8 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 	})
 
 	Context("Pause and Resume", func() {
+		It("restores the workspace from a checkpoint PVC across two pauses", testWorkspacePause)
+
 		DescribeTable("should complete the full pause-resume flow via spec.pause trigger", func(waitForDeletion bool) {
 			const sandboxName = "test-pause-resume"
 

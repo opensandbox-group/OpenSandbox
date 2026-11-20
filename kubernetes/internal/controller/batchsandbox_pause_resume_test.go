@@ -1582,7 +1582,7 @@ func TestCompletePause_PooledModeClearsTaskScheduler(t *testing.T) {
 	r.taskSchedulers = sync.Map{}
 	r.taskSchedulers.Store(key, fmt.Sprintf("scheduler:%s", key))
 
-	err := r.completePause(context.Background(), bs)
+	err := r.completePause(context.Background(), bs, "")
 	require.NoError(t, err)
 
 	updated := &sandboxv1alpha1.BatchSandbox{}
@@ -2894,7 +2894,7 @@ func TestCompletePause(t *testing.T) {
 	}
 	r := newTestReconciler(bs)
 
-	err := r.completePause(context.Background(), bs)
+	err := r.completePause(context.Background(), bs, "")
 	require.NoError(t, err)
 
 	updated := &sandboxv1alpha1.BatchSandbox{}
@@ -2978,7 +2978,7 @@ func TestCompletePause_DeleteFailureLeavesPhasePausing(t *testing.T) {
 		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
-	err := r.completePause(context.Background(), bs)
+	err := r.completePause(context.Background(), bs, "")
 	require.ErrorContains(t, err, "delete failed")
 
 	updated := &sandboxv1alpha1.BatchSandbox{}
@@ -3033,7 +3033,7 @@ func TestCompletePause_PooledSandboxDetachesForPoolGC(t *testing.T) {
 
 	r := newTestReconciler(bs, poolPod)
 
-	err := r.completePause(context.Background(), bs)
+	err := r.completePause(context.Background(), bs, "")
 	require.NoError(t, err)
 
 	updated := &sandboxv1alpha1.BatchSandbox{}
@@ -3107,7 +3107,7 @@ func TestCompletePause_PooledSandboxDoesNotDeleteSourcePod(t *testing.T) {
 		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
-	err := r.completePause(context.Background(), bs)
+	err := r.completePause(context.Background(), bs, "")
 	require.NoError(t, err)
 
 	stillPresent := &corev1.Pod{}
@@ -3180,7 +3180,7 @@ func TestCompletePause_PooledSandboxAcknowledgesSpecPatchGeneration(t *testing.T
 		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
-	require.NoError(t, r.completePause(context.Background(), bs))
+	require.NoError(t, r.completePause(context.Background(), bs, ""))
 
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
@@ -3256,7 +3256,7 @@ func TestCompletePause_DoesNotAcknowledgeQueuedResumeGeneration(t *testing.T) {
 		StatusRVExpectation: expectations.NewResourceVersionExpectation(),
 	}
 
-	require.NoError(t, r.completePause(context.Background(), bs))
+	require.NoError(t, r.completePause(context.Background(), bs, ""))
 
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))

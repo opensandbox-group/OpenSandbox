@@ -334,6 +334,9 @@ func (r *BatchSandboxReconciler) ensureInternalPauseSnapshot(ctx context.Context
 			SandboxName: bs.Name,
 		},
 	}
+	if bs.Spec.WorkspacePause != nil {
+		snapshot.Annotations = map[string]string{workspacePauseAnnotation: "true"}
+	}
 	if err := controllerutil.SetControllerReference(bs, snapshot, r.Scheme); err != nil {
 		return false, err
 	}
@@ -420,7 +423,21 @@ func (r *BatchSandboxReconciler) syncPauseOrClear(ctx context.Context, bs *sandb
 	switch snapshot.Status.Phase {
 	case sandboxv1alpha1.SandboxSnapshotPhaseSucceed:
 		log.Info("SandboxSnapshot Succeed, completing pause")
-		if err := r.completePause(ctx, bs); err != nil {
+		var sourceUID types.UID
+		if snapshot.Status.Format == sandboxv1alpha1.SandboxSnapshotFormatWorkspaceV1 {
+			w := snapshot.Status.Workspace
+			if w == nil || w.SourcePodUID == "" || !validWorkspaceDigest(w.SHA256) || !validArchiveName(w.Archive) {
+				return ctrl.Result{}, r.failPause(ctx, bs, "InvalidWorkspaceCheckpoint", "incomplete workspace checkpoint")
+			}
+			if bs.Spec.PoolRef != "" || bs.Spec.Replicas == nil || *bs.Spec.Replicas != 1 || bs.Spec.WorkspacePause == nil || *bs.Spec.WorkspacePause != w.WorkspacePauseSpec {
+				return ctrl.Result{}, r.failPause(ctx, bs, "WorkspaceConfigChanged", "workspace pause configuration changed during export")
+			}
+			if err := prepareWorkspaceRestore(bs.Spec.Template.DeepCopy(), w); err != nil {
+				return ctrl.Result{}, r.failPause(ctx, bs, "InvalidWorkspaceRestore", err.Error())
+			}
+			sourceUID = w.SourcePodUID
+		}
+		if err := r.completePause(ctx, bs, sourceUID); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: time.Second}, nil
@@ -428,26 +445,25 @@ func (r *BatchSandboxReconciler) syncPauseOrClear(ctx context.Context, bs *sandb
 		msg := snapshotFailureMessage(snapshot)
 		log.Info("SandboxSnapshot Failed", "message", msg)
 
-		phase := sandboxv1alpha1.BatchSandboxPhaseSucceed
-		reason := "SnapshotFailed"
-		if _, podErr := r.findPodForSandbox(ctx, bs); podErr != nil {
-			phase = sandboxv1alpha1.BatchSandboxPhaseFailed
-			reason = "PodNotFound"
-		}
-
-		if err := r.ackPauseWithPhase(ctx, bs, phase, ""); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, reason, msg); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.failPause(ctx, bs, "SnapshotFailed", msg)
 	case sandboxv1alpha1.SandboxSnapshotPhasePending, sandboxv1alpha1.SandboxSnapshotPhaseCommitting:
 		log.Info("SandboxSnapshot in progress", "phase", snapshot.Status.Phase)
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	default:
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
+}
+
+func (r *BatchSandboxReconciler) failPause(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox, reason, msg string) error {
+	phase := sandboxv1alpha1.BatchSandboxPhaseSucceed
+	if _, err := r.findPodForSandbox(ctx, bs); err != nil {
+		phase = sandboxv1alpha1.BatchSandboxPhaseFailed
+		reason = "PodNotFound"
+	}
+	if err := r.ackPauseWithPhase(ctx, bs, phase, ""); err != nil {
+		return err
+	}
+	return r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, reason, msg)
 }
 
 // completePause finalizes the pause operation:
@@ -457,7 +473,7 @@ func (r *BatchSandboxReconciler) syncPauseOrClear(ctx context.Context, bs *sandb
 //  3. Set phase=Paused only after pod deletion/release is accepted.
 //  4. spec.pause remains unchanged; the next external request (or server retry bridge)
 //     is responsible for changing it.
-func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox) error {
+func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv1alpha1.BatchSandbox, sourceUID types.UID) error {
 	log := logf.FromContext(ctx)
 	poolStrategy := strategy.NewPoolStrategy(bs)
 	wasPooled := poolStrategy.IsPooledMode()
@@ -504,7 +520,17 @@ func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv
 
 	if !wasPooled {
 		for _, pod := range pods {
-			if err := r.Delete(ctx, pod); err != nil && !errors.IsNotFound(err) {
+			var options []client.DeleteOption
+			if sourceUID != "" {
+				if pod.UID != sourceUID {
+					if err := r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhaseSucceed, ""); err != nil {
+						return err
+					}
+					return r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, "SourcePodChanged", "source Pod changed during workspace export")
+				}
+				options = append(options, client.Preconditions{UID: &sourceUID})
+			}
+			if err := r.Delete(ctx, pod, options...); err != nil && !errors.IsNotFound(err) {
 				log.Error(err, "Failed to delete pod during pause", "pod", pod.Name)
 				return err
 			}
@@ -576,6 +602,15 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 		return ctrl.Result{}, nil
 	}
 
+	if snapshot.Status.Format == sandboxv1alpha1.SandboxSnapshotFormatWorkspaceV1 {
+		if err := prepareWorkspaceRestore(bs.Spec.Template.DeepCopy(), snapshot.Status.Workspace); err != nil {
+			if ackErr := r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhasePaused, ""); ackErr != nil {
+				return ctrl.Result{}, ackErr
+			}
+			return ctrl.Result{}, r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, "InvalidWorkspaceRestore", err.Error())
+		}
+	}
+
 	imageMap := make(map[string]string)
 	for _, c := range snapshot.Status.Containers {
 		if snapshot.Status.Format == "" && c.ImageDigest == "" {
@@ -622,10 +657,16 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 					latest.Spec.Template.Spec.Containers[i].Image = img
 				}
 			}
-			if err := injectQEMURestore(latest.Spec.Template, snapshot); err != nil {
-				return err
+			if snapshot.Status.Format == sandboxv1alpha1.SandboxSnapshotFormatWorkspaceV1 {
+				if err := prepareWorkspaceRestore(latest.Spec.Template, snapshot.Status.Workspace); err != nil {
+					return err
+				}
+			} else {
+				if err := injectQEMURestore(latest.Spec.Template, snapshot); err != nil {
+					return err
+				}
+				ensureImagePullSecret(latest.Spec.Template, r.ResumePullSecret)
 			}
-			ensureImagePullSecret(latest.Spec.Template, r.ResumePullSecret)
 		}
 
 		if latest.Spec.PoolRef != "" {

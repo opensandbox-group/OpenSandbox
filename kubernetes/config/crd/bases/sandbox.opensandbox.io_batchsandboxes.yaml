@@ -136,6 +136,18 @@ spec:
               template:
                 description: Template describes the pods that will be created.
                 x-kubernetes-preserve-unknown-fields: true
+              workspacePause:
+                description: WorkspacePause opts in to archiving /workspace on a mounted
+                  PVC for pause/resume.
+                properties:
+                  containerName:
+                    type: string
+                  volumeName:
+                    type: string
+                required:
+                - containerName
+                - volumeName
+                type: object
             required:
             - replicas
             type: object

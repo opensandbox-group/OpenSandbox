@@ -66,6 +66,7 @@ const (
 // creates commit Job to commit+push container images, reports status.
 // No business logic (no scaling, no pool, no resume).
 type SandboxSnapshotReconciler struct {
+	exportWorkspace workspaceExport
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
@@ -174,6 +175,11 @@ func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SandboxSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	export, err := newWorkspaceExport(mgr.GetConfig())
+	if err != nil {
+		return err
+	}
+	r.exportWorkspace = export
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
 	}

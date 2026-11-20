@@ -663,6 +663,29 @@ spec:
         assert env_dict["BAZ"] == "qux"
         assert env_dict["EXECD"] == "/opt/opensandbox/execd"
 
+    def test_workspace_pause_template_uses_per_sandbox_claim(self, mock_k8s_client, tmp_path):
+        from opensandbox_server.api.schema import PVC, Volume
+
+        template = tmp_path / "workspace.yaml"
+        template.write_text("spec:\n  workspacePause: {containerName: sandbox, volumeName: checkpoints}\n")
+        provider = BatchSandboxProvider(mock_k8s_client, _app_config_with_template(str(template)))
+        mock_k8s_client.create_custom_object.return_value = {"metadata": {"name": "workspace", "uid": "uid"}}
+        provider.create_workload(
+            sandbox_id="workspace", namespace="test-ns", image_spec=ImageSpec(uri="python:3.12"),
+            entrypoint=["sleep", "3600"], env={}, resource_limits={}, labels={}, expires_at=None,
+            execd_image="execd:latest",
+            volumes=[Volume(name="checkpoints", pvc=PVC(claim_name="dedicated-claim"),
+                            mount_path="/mnt/opensandbox-checkpoints")],
+        )
+        spec = mock_k8s_client.create_custom_object.call_args.kwargs["body"]["spec"]
+        assert spec["workspacePause"] == {"containerName": "sandbox", "volumeName": "checkpoints"}
+        pod = spec["template"]["spec"]
+        claim = next(v for v in pod["volumes"] if v["name"] == "checkpoints")
+        assert claim["persistentVolumeClaim"]["claimName"] == "dedicated-claim"
+        sandbox = next(c for c in pod["containers"] if c["name"] == "sandbox")
+        mount = next(m for m in sandbox["volumeMounts"] if m["name"] == "checkpoints")
+        assert mount["mountPath"] == "/mnt/opensandbox-checkpoints"
+
     def test_create_workload_merges_template_volumes_and_mounts(self, mock_k8s_client, tmp_path):
         template_file = tmp_path / "template.yaml"
         template_file.write_text(
