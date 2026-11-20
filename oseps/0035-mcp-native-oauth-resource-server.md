@@ -111,12 +111,12 @@ flowchart LR
 |---|---|---|
 | Accidental anonymous exposure when operator misconfigures OAuth flags | Critical | Fail closed at startup if `--oauth-mode none` is combined with any `--oauth-*` flag/env var, or if `--oauth-mode jwt` lacks issuer, resource URL, or required scopes. Keep `127.0.0.1` loopback bind default. |
 | Algorithm confusion (`none`, `HS256` with RSA public key) or weak keys | Critical | Pin an asymmetric-only algorithm allowlist (`RS*`, `PS*`, `ES*`, `EdDSA`); reject symmetric/`none` algorithms at both config and verification time; enforce minimum key strengths aligned with `SECURITY.md` (RSA >= 2048 bits, EC >= 224 bits). |
-| Token substitution / confused deputy (ID token or token for another API) | High | Require `aud` to match configured expected audience (defaulting to canonical `resource_url`), enable SDK `validate_token_resource` when audience equals `resource_url`, reject non-access `typ` headers, and reject OIDC ID-token-only claims (`nonce`, `at_hash`, `c_hash`). |
+| Token substitution / confused deputy (ID token or token for another API) | High | Require `aud` to match configured expected audience (defaulting to canonical `resource_url`), enable SDK `validate_token_resource` when audience equals `resource_url`, reject unsupported `typ` headers, and reject OIDC ID-token-only claims (`nonce`, `at_hash`, `c_hash`). |
 | SSRF via JWT headers (`jku`, `x5u`) or malicious OIDC discovery redirects | High | Never read URLs from untrusted tokens; reject `jku`/`x5u`/`jwk` headers; require HTTPS by default; disable redirects (`follow_redirects=False`); require discovered `jwks_uri` to share origin with configured `issuer_url` unless operator explicitly pins `--oauth-jwks-url`. |
 | Duplicate `Authorization` headers or token smuggling via query parameters | High | Wrap the protected MCP route in `StrictBearerMiddleware` that inspects raw ASGI headers to reject duplicate `Authorization` headers, oversized `Authorization` headers (> 16 KiB), and `?access_token=` query parameters with `401`. |
 | Reverse-proxy `Host` / `X-Forwarded-*` spoofing or `421` breakage | High | Never derive metadata or `WWW-Authenticate` URLs from request headers; derive `TransportSecuritySettings.allowed_hosts` and `allowed_origins` explicitly from the configured canonical `resource_url` (plus optional `--oauth-allowed-host`). |
 | JWKS refresh storm / DoS via unknown `kid` flood | Medium | Coalesce concurrent JWKS fetches behind an `asyncio.Lock` and enforce a minimum forced-refresh cooldown (default 30s) while bounding cache TTL (default 300s). |
-| Credential leakage to backend or logs | High | Never pass `AccessToken` to `opensandbox` SDK calls, sandbox env vars, or tool outputs; log only coarse rejection reasons without tokens or headers. |
+| Credential leakage to backend or logs | High | Never pass `AccessToken` to `opensandbox` SDK calls, sandbox env vars, or tool outputs; disable URL access logs in the OAuth CLI and omit query strings and bearer headers from proxy logs. |
 
 ## Design Details
 
@@ -136,7 +136,7 @@ All OAuth settings are opt-in, typed in a frozen `OAuthConfig` dataclass in `ope
 | `--oauth-clock-skew-seconds` | `OPEN_SANDBOX_MCP_OAUTH_CLOCK_SKEW_SECONDS` | `30` | Float in `[0, 300]`. Leeway for `exp` and `nbf`. |
 | `--oauth-http-timeout-seconds` | `OPEN_SANDBOX_MCP_OAUTH_HTTP_TIMEOUT_SECONDS` | `5.0` | Float in `(0, 60]`. Timeout for outbound discovery/JWKS fetches. |
 | `--oauth-jwks-cache-ttl-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_CACHE_TTL_SECONDS` | `300` | Float in `(0, 86400]`. Maximum JWKS cache lifetime; expired cache fails closed if refresh fails. |
-| `--oauth-jwks-refresh-cooldown-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_REFRESH_COOLDOWN_SECONDS` | `30` | Float in `[0, 3600]`. Minimum interval between forced refreshes on unknown `kid`. |
+| `--oauth-jwks-refresh-cooldown-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_REFRESH_COOLDOWN_SECONDS` | `30` | Float in `[0, 3600]`. Minimum interval between forced refreshes on unknown `kid` and between retries after a fetch failure. |
 | `--oauth-allowed-host` | `OPEN_SANDBOX_MCP_OAUTH_ALLOWED_HOSTS` | Derived from `resource_url` | Optional extra `Host` header entries for reverse-proxy / healthcheck topologies. |
 | `--oauth-allow-insecure-http` | `OPEN_SANDBOX_MCP_OAUTH_ALLOW_INSECURE_HTTP` | `false` | Allows `http://` ONLY for loopback hosts (`127.0.0.1`, `localhost`, `[::1]`) during local testing; non-loopback `http://` is always rejected. |
 
@@ -147,7 +147,7 @@ All OAuth settings are opt-in, typed in a frozen `OAuthConfig` dataclass in `ope
 - `AuthSettings.issuer_url` is set to `oauth_config.issuer_url` (preserving empty path without adding a spurious trailing slash).
 - `AuthSettings.resource_server_url` is set to `oauth_config.resource_url`.
 - `AuthSettings.required_scopes` is set to `list(oauth_config.required_scopes)`.
-- `AuthSettings.validate_token_resource` is set to `True` whenever `expected_audience` equals `resource_url` (defense in depth alongside verifier audience checking), and `False` only when an operator explicitly configures a non-URL `expected_audience` (suppressing the SDK deprecation warning while the verifier enforces exact `aud` matching).
+- `AuthSettings.validate_token_resource` is set to `True` whenever `expected_audience` equals `resource_url` (defense in depth alongside verifier audience checking), and `False` only when an operator explicitly configures a different `expected_audience` (suppressing the SDK deprecation warning while the verifier enforces exact `aud` matching).
 - The SDK automatically mounts `/.well-known/oauth-protected-resource<resource-path>` (for example `/.well-known/oauth-protected-resource/mcp`) with CORS enabled and wraps `/mcp` in `AuthenticationMiddleware(BearerAuthBackend)` -> `AuthContextMiddleware` -> `RequireAuthMiddleware`.
 - When `<resource-path>` is non-empty, `create_streamable_http_app` also mounts the same read-only `ProtectedResourceMetadataHandler` at `/.well-known/oauth-protected-resource` for clients that fall back to the root well-known URI.
 
@@ -160,7 +160,7 @@ All OAuth settings are opt-in, typed in a frozen `OAuthConfig` dataclass in `ope
 3. Resolve the verifying key from the bounded `JWKSClient` cache (filtering `use == "sig"` when present, matching `alg` when present, matching `kid` when present, and refusing ambiguous keyless selection across multi-key sets). On an unknown `kid`, trigger at most one lock-serialized forced refresh per cooldown window.
 4. Enforce cryptographic minimum key strength (RSA >= 2048 bits, EC >= 224 bits).
 5. Verify signature and registered claims (`require=["exp", "iss", "aud"]`, exact `iss`, strict `aud` matching `expected_audience`, `exp` and `nbf` with `clock_skew_seconds` leeway) via `pyjwt`.
-6. Reject OIDC ID-token indicators (`nonce`, `at_hash`, `c_hash`) and require a non-empty principal identifier (`sub`, `client_id`, or `azp`).
+6. Reserve the configured audience for access tokens, especially when the provider emits generic or untyped JWTs. Reject an explicit non-access `token_use`, reject OIDC ID-token indicators (`nonce`, `at_hash`, `c_hash`) and require a non-empty principal identifier (`sub`, `client_id`, or `azp`).
 7. Extract scopes from `scope` (space-delimited string) and/or `scp` (string or list of strings), and return `AccessToken(token=token, client_id=..., subject=..., scopes=..., expires_at=..., resource=..., claims={"iss": ...})` so `StreamableHTTPSessionManager` binds stateful sessions to `(client_id, iss, sub)`.
 
 ### Authorization and Scope Model
@@ -212,7 +212,7 @@ Implementation PRs will ship deterministic, offline pytest coverage (using synth
 
 ## Infrastructure Needed
 
-No new CI services, external IdPs, secrets, or runtime dependencies are required. All automated tests run locally and in existing Python SDK CI using in-process Starlette/httpx transports and ephemeral synthetic signing keys.
+No new CI services, external IdPs, secrets, or runtime dependencies are required. Run the MCP package tests locally. The current Python SDK CI matrix omits this package. The tests use in-process Starlette/httpx transports and ephemeral synthetic signing keys.
 
 ## Upgrade & Migration Strategy
 
