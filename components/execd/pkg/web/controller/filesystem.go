@@ -351,7 +351,7 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 				return err
 			}
 
-			entryInfo, err := buildFileInfo(entryPath, info)
+			entryInfo, err := buildFileInfo(entryPath, info, false)
 			if err != nil {
 				return err
 			}
@@ -446,7 +446,8 @@ func (c *FilesystemController) SearchFiles() {
 		if info.IsDir() {
 			return nil
 		}
-		fileInfo, err := buildFileInfo(filePath, info)
+		// Search keeps Lstat semantics: a symlink entry is reported as the link itself.
+		fileInfo, err := buildFileInfo(filePath, info, false)
 		if err != nil {
 			return err
 		}

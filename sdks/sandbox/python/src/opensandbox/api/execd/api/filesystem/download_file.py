@@ -29,6 +29,7 @@ from ...types import UNSET, File, Response, Unset
 def _get_kwargs(
     *,
     path: str,
+    literal: bool | Unset = UNSET,
     offset: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
@@ -40,6 +41,8 @@ def _get_kwargs(
     params: dict[str, Any] = {}
 
     params["path"] = path
+
+    params["literal"] = literal
 
     params["offset"] = offset
 
@@ -121,6 +124,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     path: str,
+    literal: bool | Unset = UNSET,
     offset: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
@@ -137,6 +141,7 @@ def sync_detailed(
 
     Args:
         path (str):
+        literal (bool | Unset):
         offset (int | Unset):
         limit (int | Unset):
         range_ (str | Unset):
@@ -151,6 +156,7 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         path=path,
+        literal=literal,
         offset=offset,
         limit=limit,
         range_=range_,
@@ -167,6 +173,7 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     path: str,
+    literal: bool | Unset = UNSET,
     offset: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
@@ -183,6 +190,7 @@ def sync(
 
     Args:
         path (str):
+        literal (bool | Unset):
         offset (int | Unset):
         limit (int | Unset):
         range_ (str | Unset):
@@ -198,6 +206,7 @@ def sync(
     return sync_detailed(
         client=client,
         path=path,
+        literal=literal,
         offset=offset,
         limit=limit,
         range_=range_,
@@ -208,6 +217,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     path: str,
+    literal: bool | Unset = UNSET,
     offset: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
@@ -224,6 +234,7 @@ async def asyncio_detailed(
 
     Args:
         path (str):
+        literal (bool | Unset):
         offset (int | Unset):
         limit (int | Unset):
         range_ (str | Unset):
@@ -238,6 +249,7 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         path=path,
+        literal=literal,
         offset=offset,
         limit=limit,
         range_=range_,
@@ -252,6 +264,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     path: str,
+    literal: bool | Unset = UNSET,
     offset: int | Unset = UNSET,
     limit: int | Unset = UNSET,
     range_: str | Unset = UNSET,
@@ -268,6 +281,7 @@ async def asyncio(
 
     Args:
         path (str):
+        literal (bool | Unset):
         offset (int | Unset):
         limit (int | Unset):
         range_ (str | Unset):
@@ -284,6 +298,7 @@ async def asyncio(
         await asyncio_detailed(
             client=client,
             path=path,
+            literal=literal,
             offset=offset,
             limit=limit,
             range_=range_,

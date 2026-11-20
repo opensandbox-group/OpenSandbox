@@ -34,7 +34,7 @@ import type {
  */
 export interface SandboxFiles {
   withIdentity?(uid: number, gid: number): SandboxFiles;
-  getFileInfo(paths: string[]): Promise<Record<string, FileInfo>>;
+  getFileInfo(paths: string[], opts?: { literal?: boolean; follow?: boolean }): Promise<Record<string, FileInfo>>;
   search(entry: SearchEntry): Promise<SearchFilesResponse>;
   listDirectory(entry: DirectoryListEntry): Promise<FileInfo[]>;
 
@@ -42,11 +42,11 @@ export interface SandboxFiles {
   deleteDirectories(paths: string[]): Promise<void>;
 
   writeFiles(entries: WriteEntry[]): Promise<void>;
-  readFile(path: string, opts?: { encoding?: string; range?: string; offset?: number; limit?: number }): Promise<string>;
-  readBytes(path: string, opts?: { range?: string; offset?: number; limit?: number }): Promise<Uint8Array>;
-  readBytesDetailed?(path: string, opts?: { range?: string; offset?: number; limit?: number }): Promise<ReadBytesResponse<Uint8Array>>;
-  readBytesStream(path: string, opts?: { range?: string; offset?: number; limit?: number }): AsyncIterable<Uint8Array>;
-  readBytesStreamDetailed?(path: string, opts?: { range?: string; offset?: number; limit?: number }): Promise<ReadBytesResponse<ReadBytesStream>>;
+  readFile(path: string, opts?: { encoding?: string; range?: string; offset?: number; limit?: number; literal?: boolean }): Promise<string>;
+  readBytes(path: string, opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }): Promise<Uint8Array>;
+  readBytesDetailed?(path: string, opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }): Promise<ReadBytesResponse<Uint8Array>>;
+  readBytesStream(path: string, opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }): AsyncIterable<Uint8Array>;
+  readBytesStreamDetailed?(path: string, opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }): Promise<ReadBytesResponse<ReadBytesStream>>;
 
   deleteFiles(paths: string[]): Promise<void>;
   moveFiles(entries: MoveEntry[]): Promise<void>;
