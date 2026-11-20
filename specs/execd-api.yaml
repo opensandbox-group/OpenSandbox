@@ -615,6 +615,26 @@ paths:
             multiple:
               summary: Multiple files
               value: ["/workspace/file1.txt", "/workspace/file2.py"]
+        - name: literal
+          in: query
+          required: false
+          description: >
+            Treat each path exactly as written: skip "$VAR"/"${VAR}" and "~"
+            expansion. Default false (expansion enabled; a path referencing an
+            undefined variable is rejected).
+          schema:
+            type: boolean
+          example: true
+        - name: follow
+          in: query
+          required: false
+          description: >
+            Resolve symlinks to their targets the same way /files/download
+            opens them: the target's metadata is reported and a dangling link
+            returns 404. Default false (the link's own metadata is reported).
+          schema:
+            type: boolean
+          example: true
       responses:
         "200":
           description: Map of file paths to FileInfo objects
@@ -882,6 +902,16 @@ paths:
           schema:
             type: string
           example: /workspace/data.csv
+        - name: literal
+          in: query
+          required: false
+          description: >
+            Treat the path exactly as written: skip "$VAR"/"${VAR}" and "~"
+            expansion. Default false (expansion enabled; a path referencing an
+            undefined variable is rejected).
+          schema:
+            type: boolean
+          example: true
         - name: offset
           in: query
           required: false
@@ -1133,6 +1163,26 @@ paths:
             multiple:
               summary: Multiple files
               value: ["/workspace/file1.txt", "/workspace/file2.py"]
+        - name: literal
+          in: query
+          required: false
+          description: >
+            Treat each path exactly as written: skip "$VAR"/"${VAR}" and "~"
+            expansion. Default false (expansion enabled; a path referencing an
+            undefined variable is rejected).
+          schema:
+            type: boolean
+          example: true
+        - name: follow
+          in: query
+          required: false
+          description: >
+            Resolve symlinks to their targets the same way /files/download
+            opens them: the target's metadata is reported and a dangling link
+            returns 404. Default false (the link's own metadata is reported).
+          schema:
+            type: boolean
+          example: true
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
@@ -1502,6 +1552,16 @@ paths:
           schema:
             type: string
           example: /workspace/data.csv
+        - name: literal
+          in: query
+          required: false
+          description: >
+            Treat the path exactly as written: skip "$VAR"/"${VAR}" and "~"
+            expansion. Default false (expansion enabled; a path referencing an
+            undefined variable is rejected).
+          schema:
+            type: boolean
+          example: true
         - name: offset
           in: query
           required: false

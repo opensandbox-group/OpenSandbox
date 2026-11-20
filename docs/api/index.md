@@ -156,6 +156,10 @@ Defines interfaces for executing code, commands, and file operations within sand
 
 On Linux, `GET /files/info`, `GET /files/search`, and `GET /directories/list` use the entry's birth time for `created_at` when `statx` reports `STATX_BTIME`; symbolic links report the link's own timestamp. If birth time is unavailable or the lookup fails, execd preserves its legacy fallback: inode change time when available, otherwise modification time. These fallback timestamps are not true creation times and can change after metadata or content updates.
 
+`GET /files/info` and `GET /files/download` (and their `/v1/filesystem/{uid}/{gid}` variants) expand `$VAR`, `${VAR}`, and a leading `~` in `path` by default, and reject a path that references an undefined variable. Pass `literal=true` to skip expansion and treat the path exactly as written — a file literally named `report-$VERSION.txt` stays that name.
+
+By default `GET /files/info` reports a symlink's own metadata (`Lstat` semantics). Pass `follow=true` to resolve symlinks the same way `GET /files/download` opens them: the target's metadata is reported, and a dangling link returns `404 FILE_NOT_FOUND` instead of claiming the file exists — so existence checks agree with what a download would serve.
+
 `GET /files/download`, its `/v1/filesystem/{uid}/{gid}/files/download` variant, and `/v1/isolated/session/{sessionId}/files/download` reject an opened directory with `400 INVALID_REQUEST_BODY` and `path is a directory: <path>` before serving whole-file, byte-range, or line-based content. This also covers a symlink to a directory wherever the route's existing path resolution follows it. Use the corresponding `directories/list` route to list entries.
 
 The download routes serve a single satisfiable byte range as `206 Partial Content`. If a `Range` header contains multiple satisfiable byte ranges, the handler ignores the header and uses the whole-file response (`200 OK` for an unconditional request).

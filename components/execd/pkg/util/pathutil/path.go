@@ -124,6 +124,18 @@ func ExpandAbsPath(path string) (string, error) {
 	return filepath.Abs(expanded)
 }
 
+// LiteralAbsPath resolves path against the working directory without
+// expanding environment variables or a leading "~". The path is used exactly
+// as the caller wrote it, so a file literally named e.g. "report-$VERSION.txt"
+// keeps its name instead of resolving the variable away.
+func LiteralAbsPath(path string) (string, error) {
+	// filepath.Abs("") is the working directory, which no caller asked for.
+	if path == "" {
+		return "", errors.New("path is empty")
+	}
+	return filepath.Abs(path)
+}
+
 // EnvKey normalizes environment variable names for the current platform.
 // Windows names are case-insensitive; Unix names are preserved.
 func EnvKey(key string) string {
