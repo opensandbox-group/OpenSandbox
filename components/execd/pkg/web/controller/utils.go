@@ -232,7 +232,7 @@ func fileType(fileInfo os.FileInfo) string {
 	return "other"
 }
 
-func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error) {
+func buildFileInfo(absPath string, fileInfo os.FileInfo, follow bool) (model.FileInfo, error) {
 	stat := fileInfo.Sys().(*syscall.Stat_t)
 
 	owner := strconv.FormatUint(uint64(stat.Uid), 10)
@@ -252,7 +252,7 @@ func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error)
 		Type:       fileType(fileInfo),
 		Size:       fileInfo.Size(),
 		ModifiedAt: fileInfo.ModTime(),
-		CreatedAt:  getFileCreateTime(absPath, fileInfo),
+		CreatedAt:  getFileCreateTime(absPath, fileInfo, follow),
 		Permission: model.Permission{
 			Owner: owner,
 			Group: group,
@@ -292,5 +292,5 @@ func GetFileInfo(filePath string, literal, follow bool) (model.FileInfo, error) 
 		return model.FileInfo{}, fmt.Errorf("error accessing file %s: %w", filePath, err)
 	}
 
-	return buildFileInfo(absPath, fileInfo)
+	return buildFileInfo(absPath, fileInfo, follow)
 }

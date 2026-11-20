@@ -351,7 +351,7 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 				return err
 			}
 
-			entryInfo, err := buildFileInfo(entryPath, info)
+			entryInfo, err := buildFileInfo(entryPath, info, false)
 			if err != nil {
 				return err
 			}
@@ -433,7 +433,7 @@ func (c *FilesystemController) SearchFiles() {
 		}
 
 		if match {
-			fileInfo, err := buildFileInfo(filePath, info)
+			fileInfo, err := buildFileInfo(filePath, info, false)
 			if err != nil {
 				return err
 			}

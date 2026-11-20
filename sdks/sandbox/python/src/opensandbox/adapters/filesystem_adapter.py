@@ -170,9 +170,12 @@ class FilesystemAdapter(Filesystem):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> str:
         """Read file content as string via HTTP API."""
-        content = await self.read_bytes(path, range_header=range_header, offset=offset, limit=limit)
+        content = await self.read_bytes(
+            path, range_header=range_header, offset=offset, limit=limit, literal=literal
+        )
         return content.decode(encoding)
 
     async def read_bytes(
@@ -182,11 +185,12 @@ class FilesystemAdapter(Filesystem):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> bytes:
         """Read file content as bytes."""
         return (
             await self.read_bytes_detailed(
-                path, range_header=range_header, offset=offset, limit=limit
+                path, range_header=range_header, offset=offset, limit=limit, literal=literal
             )
         ).body
 
@@ -197,6 +201,7 @@ class FilesystemAdapter(Filesystem):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> ReadBytesResponse[bytes]:
         """Read file bytes and HTTP response metadata.
 
@@ -218,7 +223,7 @@ class FilesystemAdapter(Filesystem):
         logger.debug(f"Reading file as bytes: {path}")
         try:
             request_data = self._build_download_request(
-                path, range_header, offset=offset, limit=limit
+                path, range_header, offset=offset, limit=limit, literal=literal
             )
             client = await self._get_httpx_client()
 
@@ -245,6 +250,7 @@ class FilesystemAdapter(Filesystem):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> AsyncGenerator[bytes, None]:
         """Stream file content as byte chunks."""
         response = await self.read_bytes_stream_detailed(
@@ -253,6 +259,7 @@ class FilesystemAdapter(Filesystem):
             range_header=range_header,
             offset=offset,
             limit=limit,
+            literal=literal,
         )
 
         async def _iter() -> AsyncGenerator[bytes, None]:
@@ -277,12 +284,13 @@ class FilesystemAdapter(Filesystem):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
+        literal: bool | None = None,
     ) -> ReadBytesResponse[AsyncReadBytesStream]:
         """Stream file content as bytes chunks via HTTP (true streaming)."""
         logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
         try:
             request_data = self._build_download_request(
-                path, range_header, offset=offset, limit=limit
+                path, range_header, offset=offset, limit=limit, literal=literal
             )
             client = await self._get_httpx_client()
 
@@ -712,15 +720,28 @@ class FilesystemAdapter(Filesystem):
             logger.error("Failed to list directory", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
-    async def get_file_info(self, paths: list[str]) -> dict[str, EntryInfo]:
-        """Get file information using auto-generated API."""
+    async def get_file_info(
+        self,
+        paths: list[str],
+        *,
+        literal: bool | None = None,
+        follow: bool | None = None,
+    ) -> dict[str, EntryInfo]:
+        """Get file information using auto-generated API.
+
+        literal: treat each path exactly as written (no ``$VAR``/``~`` expansion).
+        follow: resolve symlinks the same way downloads open them.
+        """
         try:
             from opensandbox.api.execd.api.filesystem import get_files_info
+            from opensandbox.api.execd.types import UNSET
 
             client = await self._get_client()
             response_obj = await get_files_info.asyncio_detailed(
                 client=client,
                 path=paths,
+                literal=literal if literal is not None else UNSET,
+                follow=follow if follow is not None else UNSET,
             )
 
             handle_api_error(response_obj, "Get file info")
@@ -741,6 +762,7 @@ class FilesystemAdapter(Filesystem):
             *,
             offset: int | None = None,
             limit: int | None = None,
+            literal: bool | None = None,
     ) -> _DownloadRequest:
         """Build HTTP request for file download operations.
 
@@ -764,6 +786,8 @@ class FilesystemAdapter(Filesystem):
             params["offset"] = str(offset)
         if limit is not None:
             params["limit"] = str(limit)
+        if literal is not None:
+            params["literal"] = "true" if literal else "false"
 
         return {
             "url": url,

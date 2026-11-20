@@ -201,7 +201,9 @@ func fileType(fileInfo os.FileInfo) string {
 }
 
 func buildFileInfo(absPath string, fileInfo os.FileInfo) (model.FileInfo, error) {
-	createdAt := getFileCreateTime(absPath, fileInfo)
+	// The non-linux birth-time helper is a stub; the Win32 creation time below
+	// comes from fileInfo itself, which already reflects os.Stat vs os.Lstat.
+	createdAt := getFileCreateTime(absPath, fileInfo, false)
 	if data, ok := fileInfo.Sys().(*syscall.Win32FileAttributeData); ok && data != nil {
 		createdAt = time.Unix(0, data.CreationTime.Nanoseconds())
 	}

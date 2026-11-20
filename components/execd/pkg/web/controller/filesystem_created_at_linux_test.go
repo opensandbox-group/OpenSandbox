@@ -130,7 +130,38 @@ func TestGetFileCreateTimeFallsBackForDifferentInode(t *testing.T) {
 	}, 3*time.Second, time.Millisecond)
 	require.NotEqual(t, lookupStat.Ino, info.Sys().(*syscall.Stat_t).Ino)
 
-	got := getFileCreateTime(lookupPath, info)
+	got := getFileCreateTime(lookupPath, info, false)
 	require.True(t, got.Equal(fallback), "created_at must fall back to the supplied inode's ctime")
 	require.False(t, got.Equal(lookupBirthTime), "created_at must not use another inode's birth time")
+}
+
+// follow=true must report the target's birth time: the birth-time lookup
+// follows the link the same way os.Stat did, so the inode check matches the
+// target instead of falling back to the target's mutable change time. A chmod
+// on the target changes its ctime, which exposes any ctime fallback.
+func TestFilesystemControllerGetFilesInfoFollowCreatedAtUsesTargetBirthTime(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	require.NoError(t, os.WriteFile(target, []byte("content"), 0o644))
+	targetStat := statWithBirthTime(t, target)
+	birthTime := time.Unix(targetStat.Btime.Sec, int64(targetStat.Btime.Nsec))
+
+	linkPath := filepath.Join(dir, "link.txt")
+	require.NoError(t, os.Symlink(target, linkPath))
+
+	time.Sleep(20 * time.Millisecond)
+	require.NoError(t, os.Chmod(target, 0o600))
+	afterTargetStat := statWithBirthTime(t, target)
+	require.NotEqual(t, targetStat.Ctime, afterTargetStat.Ctime, "chmod must change ctime to expose a ctime fallback")
+
+	ctrl, rec := newFilesystemController(t, http.MethodGet, "/files/info?follow=true&path="+url.QueryEscape(linkPath), nil)
+	ctrl.GetFilesInfo()
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp map[string]model.FileInfo
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	info, ok := resp[linkPath]
+	require.True(t, ok, "response missing entry for %s", linkPath)
+
+	require.Equal(t, "file", info.Type)
+	require.True(t, info.CreatedAt.Equal(birthTime), "follow=true must report the target's birth time, got %v", info.CreatedAt)
 }

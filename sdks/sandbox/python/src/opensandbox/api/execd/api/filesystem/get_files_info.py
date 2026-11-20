@@ -23,18 +23,24 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
 from ...models.get_files_info_response_200 import GetFilesInfoResponse200
-from ...types import UNSET, Response
+from ...types import UNSET, Response, Unset
 
 
 def _get_kwargs(
     *,
     path: list[str],
+    literal: bool | Unset = UNSET,
+    follow: bool | Unset = UNSET,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {}
 
     json_path = path
 
     params["path"] = json_path
+
+    params["literal"] = literal
+
+    params["follow"] = follow
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -92,6 +98,8 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     path: list[str],
+    literal: bool | Unset = UNSET,
+    follow: bool | Unset = UNSET,
 ) -> Response[ErrorResponse | GetFilesInfoResponse200]:
     """Get file metadata
 
@@ -101,6 +109,8 @@ def sync_detailed(
 
     Args:
         path (list[str]):
+        literal (bool | Unset):
+        follow (bool | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -112,6 +122,8 @@ def sync_detailed(
 
     kwargs = _get_kwargs(
         path=path,
+        literal=literal,
+        follow=follow,
     )
 
     response = client.get_httpx_client().request(
@@ -125,6 +137,8 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     path: list[str],
+    literal: bool | Unset = UNSET,
+    follow: bool | Unset = UNSET,
 ) -> ErrorResponse | GetFilesInfoResponse200 | None:
     """Get file metadata
 
@@ -134,6 +148,8 @@ def sync(
 
     Args:
         path (list[str]):
+        literal (bool | Unset):
+        follow (bool | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -146,6 +162,8 @@ def sync(
     return sync_detailed(
         client=client,
         path=path,
+        literal=literal,
+        follow=follow,
     ).parsed
 
 
@@ -153,6 +171,8 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     path: list[str],
+    literal: bool | Unset = UNSET,
+    follow: bool | Unset = UNSET,
 ) -> Response[ErrorResponse | GetFilesInfoResponse200]:
     """Get file metadata
 
@@ -162,6 +182,8 @@ async def asyncio_detailed(
 
     Args:
         path (list[str]):
+        literal (bool | Unset):
+        follow (bool | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -173,6 +195,8 @@ async def asyncio_detailed(
 
     kwargs = _get_kwargs(
         path=path,
+        literal=literal,
+        follow=follow,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -184,6 +208,8 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     path: list[str],
+    literal: bool | Unset = UNSET,
+    follow: bool | Unset = UNSET,
 ) -> ErrorResponse | GetFilesInfoResponse200 | None:
     """Get file metadata
 
@@ -193,6 +219,8 @@ async def asyncio(
 
     Args:
         path (list[str]):
+        literal (bool | Unset):
+        follow (bool | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -206,5 +234,7 @@ async def asyncio(
         await asyncio_detailed(
             client=client,
             path=path,
+            literal=literal,
+            follow=follow,
         )
     ).parsed
