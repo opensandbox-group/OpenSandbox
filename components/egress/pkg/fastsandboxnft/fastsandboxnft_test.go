@@ -817,7 +817,7 @@ func TestInputChainDoHBlocklist(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 
 	script := runner.last()
-	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip daddr @doh_block_v4 ct original proto-dst 443 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip daddr @doh_block_v4 ct original proto-dst 443 drop")
 }
 
 // TestInputChainPolicySwap: a policy swap rewrites the input-chain verdicts
@@ -871,7 +871,7 @@ func TestUpstreamProxyForwardDrops(t *testing.T) {
 	)
 	// no MITM: no input chain, so no input-path containment either
 	assert.NotContains(t, script, "hook input")
-	assert.NotContains(t, script, "input ct status dnat ct original ip daddr @upstream_proxy_v4")
+	assert.NotContains(t, script, "input ct status dnat meta l4proto tcp ct original ip daddr @upstream_proxy_v4")
 }
 
 // TestUpstreamProxyInputDropsWithMITM: intercepted CONNECTs whose ORIGINAL
@@ -888,10 +888,10 @@ func TestUpstreamProxyInputDropsWithMITM(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 
 	script := runner.last()
-	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip daddr @upstream_proxy_v4 ct original proto-dst 3128 drop")
-	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip6 daddr @upstream_proxy_v6 ct original proto-dst 3128 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip daddr @upstream_proxy_v4 ct original proto-dst 3128 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip6 daddr @upstream_proxy_v6 ct original proto-dst 3128 drop")
 	require.Less(t,
-		strings.Index(script, "input ct status dnat ct original ip daddr @upstream_proxy_v4"),
+		strings.Index(script, "input ct status dnat meta l4proto tcp ct original ip daddr @upstream_proxy_v4"),
 		strings.Index(script, "input ct state established,related accept"),
 		"input drop must precede the input established accept",
 	)
