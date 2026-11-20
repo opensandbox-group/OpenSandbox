@@ -487,12 +487,126 @@ _ca_fingerprint() {
 	return 0
 }
 
-# Persist and check the fingerprint of the last CA installed into this rootfs.
-# Stored on the rootfs (not the shared /opt/opensandbox volume) so a recreated
-# container on the same Pod always reinstalls, while a Firecracker RootfsOnly
-# cold boot with the same baked CA skips redundant trust-store rebuilds.
+# Persist and validate the installed MITM CA trust state on the rootfs (not the
+# shared /opt/opensandbox volume) so a recreated container on the same Pod
+# always reinstalls, while a Firecracker RootfsOnly cold boot skips redundant
+# trust-store rebuilds only when the CA, merged bundle, system trust anchor,
+# NSS store, and every discovered JDK cacerts store all match the last install.
 _mitm_ca_marker_path() {
 	printf '%s\n' "${OPENSANDBOX_MITM_CA_STATE_FILE:-/var/lib/opensandbox/mitm-ca-installed.fp}"
+}
+
+_resolve_jdk_cacerts() {
+	_jh="$1"
+	[ -d "$_jh" ] || return 0
+	_real="$(cd "$_jh" 2>/dev/null && pwd -P)" || return 0
+	[ -x "$_real/bin/keytool" ] || return 0
+	_ks=""
+	if [ -f "$_real/lib/security/cacerts" ]; then
+		_ks="$_real/lib/security/cacerts"
+	elif [ -f "$_real/jre/lib/security/cacerts" ]; then
+		_ks="$_real/jre/lib/security/cacerts"
+	else
+		return 0
+	fi
+	_depth=0
+	while :; do
+		_ks_dir="$(cd "$(dirname "$_ks")" 2>/dev/null && pwd -P)" || return 0
+		_ks="$_ks_dir/$(basename "$_ks")"
+		[ -L "$_ks" ] || break
+		[ "$_depth" -lt 40 ] || break
+		_depth=$((_depth + 1))
+		_target="$(readlink "$_ks" 2>/dev/null)" || break
+		case "$_target" in
+		/*) _ks="$_target" ;;
+		*) _ks="$_ks_dir/$_target" ;;
+		esac
+	done
+	printf '%s\n' "$_ks"
+}
+
+_discover_jdk_cacerts() {
+	{
+		if [ -n "${JAVA_HOME:-}" ]; then
+			_resolve_jdk_cacerts "$JAVA_HOME"
+		fi
+		for _search_dir in /usr/lib/jvm /usr/java /opt/java; do
+			if [ -d "$_search_dir" ]; then
+				for _d in "$_search_dir"/*/; do
+					[ -d "$_d" ] && _resolve_jdk_cacerts "${_d%/}"
+				done
+			fi
+		done
+		for _d in /opt/jdk*; do
+			[ -d "$_d" ] && _resolve_jdk_cacerts "$_d"
+		done
+		if command -v java >/dev/null 2>&1; then
+			_java_bin="$(command -v java)"
+			while [ -L "$_java_bin" ]; do
+				_link_target="$(ls -l "$_java_bin" 2>/dev/null | sed 's/.* -> //')"
+				case "$_link_target" in
+				/*) _java_bin="$_link_target" ;;
+				*) _java_bin="$(dirname "$_java_bin")/$_link_target" ;;
+				esac
+			done
+			_resolve_jdk_cacerts "$(dirname "$(dirname "$_java_bin")")"
+		fi
+	} | sort -u
+}
+
+_mitm_ca_nss_state() {
+	if ! command -v certutil >/dev/null 2>&1; then
+		printf 'none\n'
+		return 0
+	fi
+	if [ -z "${HOME:-}" ] || [ ! -d "$HOME" ]; then
+		printf 'nohome\n'
+		return 0
+	fi
+	_pki="${HOME}/.pki/nssdb"
+	if [ -f "$_pki/cert9.db" ]; then
+		_nssdb="sql:$_pki"
+	elif [ -f "$_pki/cert8.db" ]; then
+		_nssdb="dbm:$_pki"
+	else
+		printf 'missing:%s\n' "$_pki"
+		return 0
+	fi
+	if certutil -L -d "$_nssdb" -n "opensandbox-mitmproxy" >/dev/null 2>&1; then
+		printf 'ok:%s\n' "$_nssdb"
+	else
+		printf 'missing:%s\n' "$_nssdb"
+	fi
+}
+
+_mitm_ca_trust_state() {
+	_ca_fp="$1"
+	_merged_file="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+	_merged_fp=""
+	if [ -f "$_merged_file" ] && [ -s "$_merged_file" ]; then
+		_merged_fp="$(_ca_fingerprint "$_merged_file")"
+	fi
+	_sys_tool="none"
+	_sys_anchor=""
+	if command -v update-ca-certificates >/dev/null 2>&1; then
+		_sys_tool="update-ca-certificates"
+		_sys_anchor="/usr/local/share/ca-certificates/opensandbox-mitmproxy-ca.crt"
+	elif command -v update-ca-trust >/dev/null 2>&1; then
+		_sys_tool="update-ca-trust"
+		_sys_anchor="/etc/pki/ca-trust/source/anchors/opensandbox-mitmproxy-ca.pem"
+	fi
+	_sys_fp="absent"
+	if [ -n "$_sys_anchor" ] && [ -f "$_sys_anchor" ] && [ -s "$_sys_anchor" ]; then
+		_sys_fp="$(_ca_fingerprint "$_sys_anchor")"
+	fi
+	printf 'ca=%s\n' "$_ca_fp"
+	printf 'merged=%s\n' "${_merged_fp:-absent}"
+	printf 'sys=%s:%s\n' "$_sys_tool" "$_sys_fp"
+	printf 'nss=%s\n' "$(_mitm_ca_nss_state)"
+	_discover_jdk_cacerts | while IFS= read -r _ks_path; do
+		[ -n "$_ks_path" ] || continue
+		printf 'jdk=%s:%s\n' "$_ks_path" "$(_ca_fingerprint "$_ks_path")"
+	done
 }
 
 _write_mitm_ca_marker() {
@@ -500,11 +614,12 @@ _write_mitm_ca_marker() {
 	[ -n "$_marker_fp" ] || return 0
 	_marker_file="$(_mitm_ca_marker_path)"
 	_marker_dir="$(dirname "$_marker_file")"
-	if ( mkdir -p "$_marker_dir" && printf '%s\n' "$_marker_fp" > "$_marker_file.tmp.$$" && mv "$_marker_file.tmp.$$" "$_marker_file" ) 2>/dev/null; then
+	_marker_state="$(_mitm_ca_trust_state "$_marker_fp")"
+	if ( mkdir -p "$_marker_dir" && printf '%s\n' "$_marker_state" > "$_marker_file.tmp.$$" && mv "$_marker_file.tmp.$$" "$_marker_file" ) 2>/dev/null; then
 		return 0
 	fi
 	if _sudo mkdir -p "$_marker_dir" 2>/dev/null; then
-		printf '%s\n' "$_marker_fp" | _sudo tee "$_marker_file" >/dev/null 2>&1 || true
+		printf '%s\n' "$_marker_state" | _sudo tee "$_marker_file" >/dev/null 2>&1 || true
 	fi
 	return 0
 }
@@ -516,8 +631,12 @@ _mitm_ca_already_installed() {
 	[ -n "$_expected_fp" ] || return 1
 	[ -f "$_merged_file" ] && [ -s "$_merged_file" ] || return 1
 	[ -r "$_marker_file" ] || return 1
-	_recorded_fp="$(cat "$_marker_file" 2>/dev/null || true)"
-	[ "$_recorded_fp" = "$_expected_fp" ]
+	_current_state="$(_mitm_ca_trust_state "$_expected_fp")"
+	case "$_current_state" in
+	*"nss=missing:"*) return 1 ;;
+	esac
+	_recorded_state="$(cat "$_marker_file" 2>/dev/null || true)"
+	[ "$_recorded_state" = "$_current_state" ]
 }
 
 # Wait until the exported mitm CA is safe to trust. Egress purges and

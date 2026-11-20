@@ -185,6 +185,14 @@ osb_api() {
     esac
 }
 execd_ping_ok() { return 1; }
+wait_for_execd_ping_fast() {
+    if [[ "$2" == "${FAIL_AT:-}" ]]; then
+        if [[ "${FAIL_MODE:-explicit}" == explicit ]]; then
+            fail 'forced verification failure'
+        fi
+        return 23
+    fi
+}
 wait_for() {
     if [[ "$1" == "${FAIL_AT:-}" ]]; then
         if [[ "${FAIL_MODE:-explicit}" == explicit ]]; then
@@ -199,6 +207,7 @@ trap 'on_error test' ERR
             ("native", "", "explicit", "0", 0),
             ("overlaybd", "", "explicit", "0", 0),
             ("overlaybd", "rootfs-only source sandbox Running", "explicit", "0", 1),
+            ("overlaybd", "cold-booted sandbox execd /ping 200 (guest-init restarted execd)", "explicit", "0", 1),
             ("overlaybd", "cold-booted sandbox Running", "explicit", "0", 1),
             ("overlaybd", "cold-booted sandbox Running", "error", "0", 23),
             ("overlaybd", "cold-booted sandbox Running", "explicit", "1", 1),

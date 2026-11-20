@@ -318,7 +318,7 @@ run_p3_boot() {
   _cmd="$2"
   PATH="$SHIM:$PATH" \
   HOME="$HOME_DIR" \
-  JAVA_HOME="$FAKE_JDK" \
+  JAVA_HOME="${P3_JAVA_HOME:-$FAKE_JDK}" \
   PYTHONPATH="$TESTDIR/pymod" \
   FAKE_CERTIFI_PEM="$FAKE_CERTIFI_PEM" \
   OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=1 \
@@ -353,6 +353,19 @@ boot2_trust="$(count_trust_runs)"
 grep -q "^NODE=$MITM_CA3$" "$ENV3_2" || fail "phase 3 boot 2: NODE_EXTRA_CA_CERTS not exported"
 grep -q "^REQ=$MERGED3$" "$ENV3_2" || fail "phase 3 boot 2: REQUESTS_CA_BUNDLE not exported"
 grep -q "^SSL=$MERGED3$" "$ENV3_2" || fail "phase 3 boot 2: SSL_CERT_FILE not exported"
+
+# Boot 2b: a new JDK installed after the initial bootstrap (e.g., before a
+# RootfsOnly snapshot) must invalidate the skip path so its cacerts receives
+# the CA on restore.
+FAKE_JDK2="$TESTDIR/fake-jdk-added"
+mkdir -p "$FAKE_JDK2/bin" "$FAKE_JDK2/lib/security"
+cp "$SHIM/keytool" "$FAKE_JDK2/bin/keytool"
+printf 'new-jdk-cacerts\n' > "$FAKE_JDK2/lib/security/cacerts"
+LOG3_2B="$TESTDIR/bootstrap-p3-2b.log"
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
+P3_JAVA_HOME="$FAKE_JDK2" run_p3_boot "$LOG3_2B" "true" || fail "phase 3 boot 2b failed"
+grep -q 'skipping reinstall' "$LOG3_2B" && fail "phase 3 boot 2b: must reinstall when a new JDK appears" || true
+[ -s "$SHIM/keytool.log" ] || fail "phase 3 boot 2b: keytool must run for the newly installed JDK"
 
 rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
 cp "$CA_ROTATED" "$MITM_CA3"
