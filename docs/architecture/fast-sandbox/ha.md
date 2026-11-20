@@ -16,6 +16,8 @@ The fast-sandbox controller (reconcilers + FastPath) runs as a single replica wi
 
 Availability of the *sandboxes* is therefore independent of availability of the *control plane*: running sandboxes keep running, and traffic keeps flowing, while the control plane restarts.
 
+This describes the current posture. Broadening it — multi-replica Lifecycle Server and HA posture for ingress, node agent, and fast-sandbox components — is planned as the System-wide high availability roadmap item (see `ROADMAP.md`).
+
 ## Converge by observation
 
 Recovery everywhere uses the same pattern — **submit intent, converge by observing the durable record** — instead of leases or leader election:
