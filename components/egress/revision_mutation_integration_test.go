@@ -867,20 +867,90 @@ func TestRevisionExchangeResolveAdmission(t *testing.T) {
 
 func TestRevisionExchangeResolveCancelDuringVaultCommit(t *testing.T) {
 	for _, stage := range []string{"capture", "recheck"} {
-		t.Run(stage, func(t *testing.T) { measureResolveCancelDuringVaultCommit(t, stage) })
+		t.Run(stage, func(t *testing.T) { measureResolveDuringUpdate(t, "vault", "commit", stage, true) })
 	}
 }
 
-func holdVaultRotationCommit(t *testing.T, s *policyServer, child *revisionIPCChild) func() {
+// Each access duration covers the complete resolveVaultAccess call, including
+// lock acquisition, admission parsing and identity validation.
+type revisionResolveMeasurement struct {
+	access []time.Duration
+	total  time.Duration
+}
+
+func (m *revisionResolveMeasurement) serve(s *policyServer, rec *httptest.ResponseRecorder, req *http.Request, onAccess func(int)) {
+	handler := credentialvault.NewResolveHandler(func(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+		if onAccess != nil {
+			onAccess(len(m.access) + 1)
+		}
+		start := time.Now()
+		access, err := s.resolveVaultAccess(r)
+		m.access = append(m.access, time.Since(start))
+		return access, err
+	})
+	start := time.Now()
+	handler.ServeHTTP(rec, req)
+	m.total = time.Since(start)
+}
+
+func (m *revisionResolveMeasurement) log(t *testing.T, status int) {
 	t.Helper()
-	var rotated credentialvault.CreateRequest
-	require.NoError(t, json.Unmarshal([]byte(exchangeVaultBody(deadResolverEndpoint)), &rotated))
-	require.True(t, child.exchange(t, map[string]string{"command": "fault", "mode": "hold-commit"}).Ready)
+	t.Logf("access (capture, then recheck when reached): %v; handler: %v; status: %d", m.access, m.total, status)
+}
+
+func revisionAdmittedRequest(t *testing.T, s *policyServer, admission credentialvault.ResolveAdmission) *http.Request {
+	t.Helper()
+	raw, err := json.Marshal(admission)
+	require.NoError(t, err)
+	req := exchangeResolveRequest(testIP)
+	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+	_, accessErr := s.resolveVaultAccess(req)
+	require.Nil(t, accessErr, "admission must be valid before the measurement")
+	return req
+}
+
+func TestRevisionExchangeResolveContention(t *testing.T) {
+	t.Run("baseline", func(t *testing.T) {
+		s, _, resolver, admission := revisionExchangeFixture(t, nil)
+		var measurement revisionResolveMeasurement
+		rec := httptest.NewRecorder()
+		measurement.serve(s, rec, revisionAdmittedRequest(t, s, admission), nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), "Bearer test-spi-signer")
+		require.Len(t, resolver.requests, 1)
+		require.Len(t, measurement.access, 2)
+		measurement.log(t, rec.Code)
+	})
+	for _, update := range []string{"vault", "policy"} {
+		for _, phase := range []string{"prepare", "commit"} {
+			for _, stage := range []string{"capture", "recheck"} {
+				t.Run(update+"/"+phase+"/"+stage, func(t *testing.T) {
+					measureResolveDuringUpdate(t, update, phase, stage, false)
+				})
+			}
+		}
+	}
+}
+
+func holdRevisionUpdate(t *testing.T, s *policyServer, child *revisionIPCChild, update, phase string, before revision.Identity) func() {
+	t.Helper()
+	require.True(t, child.exchange(t, map[string]string{"command": "fault", "mode": "hold-" + phase}).Ready)
 	writeCtx, cancelWrite := context.WithTimeout(t.Context(), 5*time.Second)
 	writeDone := make(chan struct{})
 	var writeErr error
 	go func() {
 		defer close(writeDone)
+		if update == "policy" {
+			rec := revisionPolicyDoContext(t, writeCtx, s, http.MethodPatch, `[{"action":"allow","target":"spare.example.com"}]`)
+			if rec.Code != http.StatusOK {
+				writeErr = fmt.Errorf("policy PATCH returned %d: %s", rec.Code, rec.Body.String())
+			}
+			return
+		}
+		var rotated credentialvault.CreateRequest
+		if writeErr = json.Unmarshal([]byte(exchangeVaultBody(deadResolverEndpoint)), &rotated); writeErr != nil {
+			return
+		}
 		_, writeErr = s.mutateRevisionVault(writeCtx, s.mitm, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
 			return store.PreparePatch(credentialvault.MutationRequest{
 				Credentials: &credentialvault.CredentialMutationSet{Replace: rotated.Credentials},
@@ -891,51 +961,54 @@ func holdVaultRotationCommit(t *testing.T, s *policyServer, child *revisionIPCCh
 		cancelWrite()
 		<-writeDone
 	})
-	require.True(t, child.exchange(t, map[string]string{"command": "await-commit"}).Ready)
+	require.True(t, child.exchange(t, map[string]string{"command": "await-" + phase}).Ready)
 	return func() {
 		require.True(t, child.exchange(t, map[string]string{"command": "release"}).Ready)
 		<-writeDone
 		require.NoError(t, writeErr)
+		after := child.exchange(t, map[string]string{"command": "inspect"}).Active
+		require.NotNil(t, after)
+		require.Greater(t, after.DecisionEpoch, before.DecisionEpoch)
+		if update == "policy" {
+			require.Equal(t, before.PolicyEpoch+1, after.PolicyEpoch)
+			require.Equal(t, before.VaultRevision, after.VaultRevision)
+			require.Equal(t, policy.ActionAllow, s.proxy.CurrentPolicy().Evaluate("spare.example.com"))
+		} else {
+			require.Equal(t, before.PolicyEpoch, after.PolicyEpoch)
+			require.Equal(t, before.VaultRevision+1, after.VaultRevision)
+		}
 	}
 }
 
-func measureResolveCancelDuringVaultCommit(t *testing.T, stage string) {
+func measureResolveDuringUpdate(t *testing.T, update, phase, stage string, cancelDuringAccess bool) {
 	releaseResolver := make(chan struct{})
 	resumeResolver := sync.OnceFunc(func() { close(releaseResolver) })
 	defer resumeResolver()
 	s, child, resolver, admission := revisionExchangeFixture(t, releaseResolver)
-	raw, err := json.Marshal(admission)
-	require.NoError(t, err)
 	reqCtx, cancelResolve := context.WithCancel(t.Context())
 	defer cancelResolve()
-	req := exchangeResolveRequest(testIP).WithContext(reqCtx)
-	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
-	_, accessErr := s.resolveVaultAccess(req)
-	require.Nil(t, accessErr, "the request must match the pre-rotation identity")
+	req := revisionAdmittedRequest(t, s, admission).WithContext(reqCtx)
 
-	var releaseCommit func()
+	var releaseUpdate func()
 	targetCall := 1
 	if stage == "capture" {
 		resumeResolver()
-		releaseCommit = holdVaultRotationCommit(t, s, child)
+		releaseUpdate = holdRevisionUpdate(t, s, child, update, phase, admission.Revision)
 	} else {
 		targetCall = 2
 	}
 	entered := make(chan struct{})
-	accessCalls := 0
-	handler := credentialvault.NewResolveHandler(func(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
-		accessCalls++
-		if accessCalls == targetCall {
-			close(entered)
-		}
-		return s.resolveVaultAccess(r)
-	})
+	var measurement revisionResolveMeasurement
 	rec := httptest.NewRecorder()
 	handlerDone := make(chan time.Time, 1)
 	var workers sync.WaitGroup
 	t.Cleanup(workers.Wait)
 	workers.Go(func() {
-		handler.ServeHTTP(rec, req)
+		measurement.serve(s, rec, req, func(call int) {
+			if call == targetCall {
+				close(entered)
+			}
+		})
 		handlerDone <- time.Now()
 	})
 	if stage == "recheck" {
@@ -945,8 +1018,8 @@ func measureResolveCancelDuringVaultCommit(t *testing.T, stage string) {
 		case <-time.After(time.Second):
 			t.Fatal("old resolver did not receive request")
 		}
-		releaseCommit = holdVaultRotationCommit(t, s, child)
-		// Release the successful resolver decision only after the commit ACK is held.
+		releaseUpdate = holdRevisionUpdate(t, s, child, update, phase, admission.Revision)
+		// Deliver the resolver decision while the selected IPC reply is held.
 		resumeResolver()
 	}
 	select {
@@ -954,8 +1027,10 @@ func measureResolveCancelDuringVaultCommit(t *testing.T, stage string) {
 	case <-time.After(time.Second):
 		t.Fatalf("resolve did not reach %s", stage)
 	}
-	canceled := time.Now()
-	cancelResolve()
+	windowStart := time.Now()
+	if cancelDuringAccess {
+		cancelResolve()
+	}
 	// Keep the ACK held for an observation window. An implementation that
 	// honors cancellation during access can finish before we release it.
 	var exited time.Time
@@ -964,16 +1039,20 @@ func measureResolveCancelDuringVaultCommit(t *testing.T, stage string) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	released := time.Now()
-	releaseCommit()
+	releaseUpdate()
 	if exited.IsZero() {
 		select {
 		case exited = <-handlerDone:
 		case <-time.After(time.Second):
-			t.Fatal("resolve did not exit after the vault commit")
+			t.Fatal("resolve did not exit after the revision update")
 		}
 	}
-	t.Logf("cancel to handler exit: %v; cancel to ACK release command: %v; release command to exit: %v; status: %d",
-		exited.Sub(canceled), released.Sub(canceled), exited.Sub(released), rec.Code)
+	if cancelDuringAccess {
+		t.Logf("cancel to handler exit: %v", exited.Sub(windowStart))
+	}
+	t.Logf("observation window: %v; release command to exit: %v", released.Sub(windowStart), exited.Sub(released))
+	require.Len(t, measurement.access, targetCall)
+	measurement.log(t, rec.Code)
 	if exited.Before(released) {
 		require.GreaterOrEqual(t, rec.Code, 400)
 	} else {
