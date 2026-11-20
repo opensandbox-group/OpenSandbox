@@ -5,7 +5,7 @@ description: How the Docker runtime exposes every sandbox port through one host 
 
 # Single-Host Network (Docker)
 
-This page describes the **Docker runtime** on a single host. Its counterpart on Kubernetes is the [Ingress gateway](/architecture/network/ingress), which routes sandbox traffic across the cluster.
+This page describes the **Docker runtime** on a single host. Its counterpart on Kubernetes is the [Ingress gateway](/architecture/network/ingress), which routes sandbox traffic across the cluster. The Docker runtime accepts only `[ingress] mode = "direct"`, so the endpoints described here are its data path; the lifecycle server's own proxy route (`/sandboxes/{id}/proxy/{port}`) is deprecated (see [`[proxy]`](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#proxy)).
 
 The Docker runtime exposes every sandbox port through one host port per sandbox: `execd` bundles a reverse proxy, and the runtime maps only that proxy port to the host.
 
@@ -14,6 +14,7 @@ The Docker runtime exposes every sandbox port through one host port per sandbox:
 ## Single-host routing model
 - Every sandbox container starts `execd` listening on container port `44772`. `execd` bundles a lightweight reverse proxy that intercepts requests with the `/proxy/{port}` prefix and forwards them to `127.0.0.1:{port}` inside the same container.
 - The Docker runtime binds only the host side of the execd proxy port (labeled `opensandbox.io/embedding-proxy-port`). Callers use `get_endpoint(..., port=X)` to receive `{public_host}:{host_proxy_port}/proxy/{X}`, and execd transparently routes the request back to the sandbox service on port `X`.
+- `public_host` is `[server].eip` when set. Otherwise a server running in a container whose `host` is a wildcard or loopback address uses `[docker].host_ip` when set; failing that, a wildcard `host` resolves to the server process's own outward-facing IP, which for a server in a container on a bridge network is the container's address rather than the host's, and any other `host` is used as written. The client must be able to resolve and reach that host: the [Compose example](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/docker-compose.example.yaml) sets `host_ip = "host.docker.internal"` and maps that name to the host gateway (`host.docker.internal:host-gateway`) for both the server and its `sdk-client` container.
 - Because the proxy preserves `Upgrade`, `Connection`, and other HTTP headers, HTTP, Server-Sent Events, and WebSocket traffic share the same mapped host port without additional configuration.
 - With this setup, a single host port per sandbox suffices to reach **all** container ports. You can safely run many sandboxes on one machine without worrying about overlapping host port allocations.
 - When the caller can actually route to the sandbox's Docker network, use `get_endpoint(..., resolve_internal=True)` to bypass the host mapping and return the sandbox IP (e.g., `172.17.0.3:5900`) instead. Merely running the lifecycle server in a container is not sufficient: a server attached to a Compose network cannot normally route to sandboxes created on Docker's separate default bridge.
