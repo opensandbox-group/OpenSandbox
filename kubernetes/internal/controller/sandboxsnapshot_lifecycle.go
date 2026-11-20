@@ -47,7 +47,8 @@ func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot 
 
 	if snapshot.Annotations[workspacePauseAnnotation] == "true" {
 		parent := &sandboxv1alpha1.BatchSandbox{}
-		if err := r.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: snapshot.Spec.SandboxName}, parent); err != nil {
+		// The snapshot informer can observe creation before the parent informer sees Pausing.
+		if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: snapshot.Spec.SandboxName}, parent); err != nil {
 			return ctrl.Result{}, err
 		}
 		if parent.Spec.WorkspacePause == nil {

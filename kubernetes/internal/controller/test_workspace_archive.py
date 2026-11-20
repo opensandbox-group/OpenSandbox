@@ -14,6 +14,7 @@
 
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 
@@ -21,6 +22,40 @@ from workspace_archive import capture, restore
 
 
 class WorkspaceArchiveTest(unittest.TestCase):
+    def test_restore_access_permissions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root / "workspace"
+            private = work / "private"
+            private.mkdir(parents=True)
+            marker = private / "marker"
+            marker.write_text("original")
+            work.chmod(0o755)
+            private.chmod(0o750)
+            marker.chmod(0o640)
+            volume = root / "volume"
+            volume.mkdir()
+            archive = root / "checkpoint.tar"
+            restore(volume, archive, capture(work, archive))
+            for source in (work, private, marker):
+                restored = (volume / "data" / source.relative_to(work)).stat()
+                self.assertEqual(stat.S_IMODE(restored.st_mode), stat.S_IMODE(source.stat().st_mode))
+                self.assertEqual((restored.st_uid, restored.st_gid), (source.stat().st_uid, source.stat().st_gid))
+
+    def test_restore_strips_setid_bits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root / "workspace"
+            work.mkdir()
+            script = work / "command"
+            script.touch()
+            script.chmod(0o6755)
+            archive = root / "checkpoint.tar"
+            volume = root / "volume"
+            volume.mkdir()
+            restore(volume, archive, capture(work, archive))
+            self.assertEqual(stat.S_IMODE((volume / "data" / "command").stat().st_mode), 0o755)
+
     def test_two_checkpoints_restore_independently(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

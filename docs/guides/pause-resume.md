@@ -123,7 +123,9 @@ spec:
 
 When the lifecycle server serves multiple sandboxes, configure only `spec.workspacePause` in its template and supply the corresponding volume in each create request. For example, pass `Volume(name="checkpoints", pvc=PVC(claimName=claim_name, createIfNotExists=False, deleteOnSandboxTermination=False), mountPath="/mnt/opensandbox-checkpoints")` in the Python SDK's `volumes` list. Select a dedicated claim for each sandbox.
 
-The archive supports regular files, directories and links confined to the workspace. Stop application writers before requesting pause. Use the existing pause and resume APIs. A failed export leaves the source Pod available for retry. On resume the init container verifies the archive digest before starting the application. Inspect its logs if the volume or archive is unavailable. The bucket owner manages retention, including abandoned uploads. Keep the active archive for the lifetime of the sandbox because Pod replacement may need it again.
+The archive supports regular files, directories and links confined to the workspace. Restore preserves ordinary Unix access bits and clears setuid and setgid bits. A root init container restores numeric owners and groups. With a non-root init container, new files use the ownership assigned by the filesystem.
+
+Stop application writers before requesting pause. Use the existing pause and resume APIs. A failed export leaves the source Pod available for retry. On resume the init container verifies the archive digest before starting the application. Inspect its logs if the volume or archive is unavailable. The bucket owner manages retention, including abandoned uploads. Keep the active archive for the lifetime of the sandbox because Pod replacement may need it again.
 
 ## Architecture
 

@@ -29,7 +29,7 @@ def capture(workspace, archive):
 
     def check(member):
         # Apply the restore policy before a successful pause can release the Pod.
-        tarfile.data_filter(member, workspace)
+        workspace_filter(member, workspace)
         return member
 
     digest = hashlib.sha256()
@@ -49,9 +49,24 @@ def capture(workspace, archive):
     return digest.hexdigest()
 
 
+def workspace_filter(member, destination):
+    filtered = tarfile.data_filter(member, destination)
+    # Keep path, link and file-type checks. Restore ordinary access bits but
+    # never grant setuid/setgid privileges from a checkpoint.
+    mode = filtered.mode
+    if filtered.isdir() or filtered.isreg() or filtered.islnk():
+        mode = member.mode & (0o1777 if filtered.isdir() else 0o777)
+    if not (0 <= member.uid < 2**32 - 1 and 0 <= member.gid < 2**32 - 1):
+        raise ValueError("invalid workspace owner")
+    return filtered.replace(mode=mode, uid=member.uid, gid=member.gid, deep=False)
+
+
 def restore(volume, archive, expected):
     # The init container mounts only a fresh emptyDir and the read-only archive PVC.
-    with tempfile.TemporaryDirectory(dir=volume) as stage, archive.open("rb") as stored:
+    with tempfile.TemporaryDirectory(dir=volume) as temporary, archive.open("rb") as stored:
+        # Keep the parent private even when the workspace itself is shared.
+        stage = Path(temporary) / "data"
+        stage.mkdir()
         digest = hashlib.sha256()
 
         class Reader:
@@ -61,8 +76,8 @@ def restore(volume, archive, expected):
                 return data
 
         reader = Reader()
-        with tarfile.open(fileobj=reader, mode="r|") as bundle:
-            bundle.extractall(stage, filter="data")
+        with tarfile.open(fileobj=reader, mode="r|", errorlevel=2) as bundle:
+            bundle.extractall(stage, filter=workspace_filter, numeric_owner=True)
         while reader.read(1024 * 1024):
             pass
         if digest.hexdigest() != expected:

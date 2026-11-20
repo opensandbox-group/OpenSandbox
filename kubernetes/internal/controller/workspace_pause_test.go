@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	api "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
@@ -71,7 +72,17 @@ func TestWorkspacePauseLifecycle(t *testing.T) {
 			key := client.ObjectKey{Namespace: bs.Namespace, Name: internalPauseSnapshotName(bs.Name)}
 			require.NoError(t, r.Get(ctx, key, snap))
 			digest := strings.Repeat("3", 64)
-			sr := &SandboxSnapshotReconciler{Client: r.Client, APIReader: r.APIReader, exportWorkspace: func(_ context.Context, src *corev1.Pod, container, archive string) (string, error) {
+			// The snapshot informer sees the new snapshot before the parent informer sees Pausing.
+			cached := interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, live client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					err := live.Get(ctx, key, obj, opts...)
+					if parent, ok := obj.(*api.BatchSandbox); ok && err == nil {
+						parent.Status.Phase = api.BatchSandboxPhaseSucceed
+					}
+					return err
+				},
+			})
+			sr := &SandboxSnapshotReconciler{Client: cached, APIReader: r.APIReader, exportWorkspace: func(_ context.Context, src *corev1.Pod, container, archive string) (string, error) {
 				require.Equal(t, pod.UID, src.UID)
 				require.Equal(t, "sandbox", container)
 				require.True(t, validArchiveName(archive))

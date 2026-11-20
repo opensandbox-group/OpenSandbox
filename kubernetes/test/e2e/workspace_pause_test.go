@@ -84,9 +84,16 @@ spec:
 		Eventually(func() (string, error) { return kubectl("get", "batchsandbox", name, "-o", "jsonpath={.status.phase}") }, 3*time.Minute, time.Second).Should(Equal(p))
 	}
 	phase("Succeed")
+	_, err := kubectl("exec", pod, "-c", "sandbox", "--", "sh", "-ec", "mkdir -p /workspace && chown 10001:10002 /workspace && chmod 0750 /workspace")
+	Expect(err).NotTo(HaveOccurred())
+	asWorkspaceUser := func(script string, args ...string) (string, error) {
+		command := []string{"exec", pod, "-c", "sandbox", "--", "python3", "-c",
+			"import os, sys\nfrom pathlib import Path\nos.setgroups([])\nos.setgid(10002)\nos.setuid(10001)\n" + script}
+		return kubectl(append(command, args...)...)
+	}
 	for round := range 2 {
 		marker := fmt.Sprintf("workspace-%d-%d", round, time.Now().UnixNano())
-		_, err := kubectl("exec", pod, "-c", "sandbox", "--", "sh", "-ec", `mkdir -p /workspace; echo "$1" > /workspace/.marker; touch /tmp/outside-workspace`, "sh", marker)
+		_, err := asWorkspaceUser("os.umask(0o077)\nPath('/workspace/.marker').write_text(sys.argv[1] + '\\n')\nPath('/tmp/outside-workspace').touch()", marker)
 		Expect(err).NotTo(HaveOccurred())
 		uid, err := kubectl("get", "pod", pod, "-o", "jsonpath={.metadata.uid}")
 		Expect(err).NotTo(HaveOccurred())
@@ -110,7 +117,7 @@ spec:
 		newUID, err := kubectl("get", "pod", pod, "-o", "jsonpath={.metadata.uid}")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(newUID).NotTo(Equal(uid))
-		value, err := kubectl("exec", pod, "-c", "sandbox", "--", "sh", "-ec", "test ! -e /tmp/outside-workspace && cat /workspace/.marker")
+		value, err := asWorkspaceUser("assert not Path('/tmp/outside-workspace').exists()\nprint(Path('/workspace/.marker').read_text().strip())")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.TrimSpace(value)).To(Equal(marker))
 		fmt.Fprintf(GinkgoWriter, "workspace checkpoint round=%d archive=%s sha256=%s source=%s resumed=%s marker=%s\n",
