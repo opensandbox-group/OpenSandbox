@@ -140,4 +140,26 @@ MITM_CA_STABILIZE_WINDOW=1 MITM_CA_WAIT_TIMEOUT=10 \
 [ "${MITM_CA_WAIT_SECONDS:-}" -ge 0 ] || fail "case 6: MITM_CA_WAIT_SECONDS not set"
 echo "PASS: case 6 MITM_CA_WAIT_SECONDS=${MITM_CA_WAIT_SECONDS}s exported"
 
-echo "PASS: mitm CA race hardening behaves correctly in all 6 scenarios"
+# 7) MITM_CA_STABILIZE_WINDOW=0 trusts a pre-existing CA immediately without
+#    even a single poll sleep (statically baked VM CA fast path).
+target="$TESTDIR/case7.pem"
+cp "$CA_OLD" "$target"
+MITM_CA_POLL_INTERVAL=5 run_wait "$target" 0 15
+elapsed="$WAIT_ELAPSED"
+[ "$WAIT_STATUS" -eq 0 ] || fail "case 7: wait returned $WAIT_STATUS"
+[ "$elapsed" -le 1 ] || fail "case 7: took ${elapsed}s, MITM_CA_STABILIZE_WINDOW=0 must not sleep before trusting"
+echo "PASS: case 7 MITM_CA_STABILIZE_WINDOW=0 trusted pre-existing CA immediately (${elapsed}s)"
+
+# 8) MITM_CA_STABILIZE_WINDOW=0 still waits when the file is absent at start.
+target="$TESTDIR/case8.pem"
+{ sleep 1; cp "$CA_NEW" "$target"; } &
+writer=$!
+run_wait "$target" 0 15
+elapsed="$WAIT_ELAPSED"
+wait "$writer" || true
+[ "$WAIT_STATUS" -eq 0 ] || fail "case 8: wait returned $WAIT_STATUS"
+grep -q 'certificate-generation-new' "$target" || fail "case 8: wrong CA content"
+[ "$elapsed" -le 4 ] || fail "case 8: took ${elapsed}s"
+echo "PASS: case 8 MITM_CA_STABILIZE_WINDOW=0 waits for absent CA then trusts immediately (${elapsed}s)"
+
+echo "PASS: mitm CA race hardening behaves correctly in all 8 scenarios"

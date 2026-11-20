@@ -487,13 +487,48 @@ _ca_fingerprint() {
 	return 0
 }
 
+# Persist and check the fingerprint of the last CA installed into this rootfs.
+# Stored on the rootfs (not the shared /opt/opensandbox volume) so a recreated
+# container on the same Pod always reinstalls, while a Firecracker RootfsOnly
+# cold boot with the same baked CA skips redundant trust-store rebuilds.
+_mitm_ca_marker_path() {
+	printf '%s\n' "${OPENSANDBOX_MITM_CA_STATE_FILE:-/var/lib/opensandbox/mitm-ca-installed.fp}"
+}
+
+_write_mitm_ca_marker() {
+	_marker_fp="$1"
+	[ -n "$_marker_fp" ] || return 0
+	_marker_file="$(_mitm_ca_marker_path)"
+	_marker_dir="$(dirname "$_marker_file")"
+	if ( mkdir -p "$_marker_dir" && printf '%s\n' "$_marker_fp" > "$_marker_file.tmp.$$" && mv "$_marker_file.tmp.$$" "$_marker_file" ) 2>/dev/null; then
+		return 0
+	fi
+	if _sudo mkdir -p "$_marker_dir" 2>/dev/null; then
+		printf '%s\n' "$_marker_fp" | _sudo tee "$_marker_file" >/dev/null 2>&1 || true
+	fi
+	return 0
+}
+
+_mitm_ca_already_installed() {
+	_expected_fp="$1"
+	_merged_file="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+	_marker_file="$(_mitm_ca_marker_path)"
+	[ -n "$_expected_fp" ] || return 1
+	[ -f "$_merged_file" ] && [ -s "$_merged_file" ] || return 1
+	[ -r "$_marker_file" ] || return 1
+	_recorded_fp="$(cat "$_marker_file" 2>/dev/null || true)"
+	[ "$_recorded_fp" = "$_expected_fp" ]
+}
+
 # Wait until the exported mitm CA is safe to trust. Egress purges and
 # re-exports this file on every restart (issue #1370), so a file present when
 # polling starts may be stale from a previous generation: it is trusted only
 # after an observed purge or content change, or after surviving a full
 # unchanged stabilization window. A file seen absent at least once is fresh on
-# (re)appearance and trusted immediately. An egress starting later than the
-# window can still win the race; watch_mitm_ca heals that. Tunables:
+# (re)appearance and trusted immediately. Setting MITM_CA_STABILIZE_WINDOW=0
+# disables the stabilization delay (for statically baked VM CAs that never
+# undergo sidecar purge/re-export). An egress starting later than the window
+# can still win the race; watch_mitm_ca heals that. Tunables:
 # MITM_CA_WAIT_TIMEOUT (300s), MITM_CA_STABILIZE_WINDOW (15s),
 # MITM_CA_POLL_INTERVAL (0.5s). Sets MITM_CA_WAIT_SECONDS; 1 on timeout.
 wait_for_trustworthy_mitm_ca() {
@@ -513,6 +548,10 @@ wait_for_trustworthy_mitm_ca() {
 			return 1
 		fi
 		if [ -f "$ca" ] && [ -s "$ca" ]; then
+			if [ "$_stabilize" -le 0 ] 2>/dev/null; then
+				# stabilization disabled (e.g. statically baked VM CA)
+				break
+			fi
 			_fp="$(_ca_fingerprint "$ca")"
 			[ -n "$_fp" ] || _fp="<unfingerprintable>"
 			if [ -n "$_purge_seen" ]; then
@@ -541,19 +580,23 @@ wait_for_trustworthy_mitm_ca() {
 
 # Self-heal for independent egress restarts: the CA rotates while bootstrap
 # never re-runs. Reinstall system/merged/NSS/JDK trust whenever the exported
-# CA changes (MITM_CA_WATCH_INTERVAL, 30s). The env vars bootstrap exported
-# point at refreshed files, so new processes heal without re-exec; processes
-# with in-memory trust (e.g. JVM cacerts) still need a restart, which the
-# change log line calls out. $2 is the fingerprint of the already-installed
-# generation (empty = nothing installed yet, so the first export installs);
-# a failed install pass is retried on the next poll, up to three attempts
-# per generation — permanent failures (e.g. read-only trust store on a
-# non-root image) stop the churn until the next rotation.
+# CA changes (MITM_CA_WATCH_INTERVAL, 30s; <= 0 disables watching). The env
+# vars bootstrap exported point at refreshed files, so new processes heal
+# without re-exec; processes with in-memory trust (e.g. JVM cacerts) still
+# need a restart, which the change log line calls out. $2 is the fingerprint
+# of the already-installed generation (empty = nothing installed yet, so the
+# first export installs); a failed install pass is retried on the next poll,
+# up to three attempts per generation — permanent failures (e.g. read-only
+# trust store on a non-root image) stop the churn until the next rotation.
 watch_mitm_ca() {
 	ca="$1"
 	# Empty $2 means nothing trusted yet: the first export seen installs it.
 	_prev="${2:-}"
 	_interval="${MITM_CA_WATCH_INTERVAL:-30}"
+	if [ "$_interval" -le 0 ] 2>/dev/null; then
+		echo "mitm CA rotation watcher disabled (MITM_CA_WATCH_INTERVAL=${_interval})" >&2
+		return 0
+	fi
 	_watch_attempts=0
 	echo "watching mitm CA at $ca for rotation (interval ${_interval}s)" >&2
 	while :; do
@@ -573,6 +616,9 @@ watch_mitm_ca() {
 			trust_mitm_ca_nss "$ca" || true
 			trust_mitm_ca_jdk "$ca" || true
 			if [ "$_install_failed" -eq 0 ]; then
+				if command -v _write_mitm_ca_marker >/dev/null 2>&1; then
+					_write_mitm_ca_marker "$_cur"
+				fi
 				_prev="$_cur"
 				_watch_attempts=0
 			elif [ "$_watch_attempts" -ge 3 ]; then
@@ -589,6 +635,7 @@ watch_mitm_ca() {
 MITM_CA="${OPENSANDBOX_MITM_CA:-/opt/opensandbox/mitmproxy-ca-cert.pem}"
 if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	_baseline_fp=""
+	_mitm_already_installed=0
 	if wait_for_trustworthy_mitm_ca "$MITM_CA"; then
 		echo "mitm CA ready at $MITM_CA after ${MITM_CA_WAIT_SECONDS}s"
 		# Baseline for the rotation watcher: what we are about to trust. If
@@ -597,7 +644,11 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 		# baseline empty, so the watcher installs (and retries) on its
 		# first poll.
 		_baseline_fp="$(_ca_fingerprint "$MITM_CA")"
-		if ! trust_mitm_ca "$MITM_CA"; then
+		if _mitm_ca_already_installed "$_baseline_fp"; then
+			OPENSANDBOX_MERGED_CA="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+			_mitm_already_installed=1
+			echo "mitm CA already installed in trust stores; skipping reinstall"
+		elif ! trust_mitm_ca "$MITM_CA"; then
 			echo "warning: failed to install mitm CA into system trust store; TLS interception may not work for system libraries" >&2
 			_baseline_fp=""
 		fi
@@ -608,9 +659,12 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 		_baseline_fp=""
 	fi
 
-	if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
+	if [ "$_mitm_already_installed" -eq 0 ] && [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
 		trust_mitm_ca_nss "$MITM_CA" || true
 		trust_mitm_ca_jdk "$MITM_CA" || true
+		if [ -n "$_baseline_fp" ]; then
+			_write_mitm_ca_marker "$_baseline_fp"
+		fi
 	fi
 
 	# Seed env paths unconditionally: they are stable across rotations, and
@@ -639,7 +693,13 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	# Arm regardless of the export's current presence: it covers a purge or
 	# re-export racing the trust pass above, and a first export after a
 	# wait timeout (empty baseline installs the first thing that shows up).
-	watch_mitm_ca "$MITM_CA" "$_baseline_fp" &
+	# Setting MITM_CA_WATCH_INTERVAL<=0 disables the background watcher (e.g.
+	# for statically baked VM CAs).
+	if [ "${MITM_CA_WATCH_INTERVAL:-30}" -le 0 ] 2>/dev/null; then
+		echo "mitm CA rotation watcher disabled (MITM_CA_WATCH_INTERVAL=${MITM_CA_WATCH_INTERVAL})" >&2
+	else
+		watch_mitm_ca "$MITM_CA" "$_baseline_fp" &
+	fi
 fi
 
 EXECD="${EXECD:=/opt/opensandbox/execd}"

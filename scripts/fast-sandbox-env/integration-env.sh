@@ -4389,6 +4389,8 @@ rootfs_only_verify() {
 	# Cold-boot restore: a fresh sandbox boots the artifact from disk
 	# (seconds-scale readiness, not the millisecond in-place restore).
 	log "verify (rootfs-only): osb sandbox create --snapshot-id $snapshot_id (cold boot)"
+	local t_boot0 t4 route ping_deadline_ms ping_code
+	t_boot0="$(now_ms)"
 	restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
 		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
 		--skip-health-check -o json 2>/dev/null)" \
@@ -4401,8 +4403,34 @@ rootfs_only_verify() {
 	# registry pull of the artifact pair.
 	wait_for "cold-booted sandbox Running" 300 sandbox_running
 	t3="$(now_ms)"
-	log "verify (rootfs-only): cold boot create->Running $(( (t3 - t2) / 1000000 ))ms"
-	wait_for "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 180 execd_ping_ok
+	log "verify (rootfs-only): cold boot create->Running $(( (t3 - t_boot0) / 1000000 ))ms"
+	# Poll execd /ping directly over the signed gateway route at 100ms
+	# resolution instead of spawning `osb` + `sleep 2` on every retry, so
+	# cold-boot latency readings aren't quantized into 2.7s buckets.
+	ping_deadline_ms=$(( t3 / 1000000 + 360000 ))
+	route=""
+	while :; do
+		route="$( { server_api GET "/sandboxes/$restore_id/endpoints/44772" 2>/dev/null || true; } \
+			| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
+		[[ -n "$route" ]] && break
+		if (( $(now_ms) / 1000000 >= ping_deadline_ms )); then
+			fail "cold-booted sandbox gateway route did not publish within 360s"
+		fi
+		sleep 0.1
+	done
+	ping_code=""
+	while :; do
+		ping_code="$(curl -sS --connect-timeout 1 -m 2 -o /dev/null -w '%{http_code}' \
+			-H "OpenSandbox-Ingress-To: $route" "$GATEWAY_URL/ping" 2>/dev/null || true)"
+		[[ "$ping_code" == "200" ]] && break
+		if (( $(now_ms) / 1000000 >= ping_deadline_ms )); then
+			fail "cold-booted sandbox execd /ping 200 (guest-init restarted execd) timed out after 360s (last HTTP ${ping_code:-none})"
+		fi
+		sleep 0.1
+	done
+	t4="$(now_ms)"
+	pass "cold-booted sandbox execd /ping 200 (guest-init restarted execd)"
+	log "verify (rootfs-only): cold boot Running->execd /ping 200 $(( (t4 - t3) / 1000000 ))ms, create->execd /ping 200 $(( (t4 - t_boot0) / 1000000 ))ms"
 	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
 	dump_latency_evidence "$restore_id" "$rootfs_log_label cold boot" || true
 

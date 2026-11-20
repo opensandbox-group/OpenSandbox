@@ -129,6 +129,9 @@ cp "$CA_ROTATED" "$MITM_CA"
 sleep 8
 SCRIPT
 chmod +x "$TESTDIR/fake-egress.sh"
+# Pre-seed the stale export synchronously before starting bootstrap so Phase 1
+# deterministically exercises the stale-CA-present-at-t=0 timeline.
+cp "$CA_STALE" "$MITM_CA"
 bash "$TESTDIR/fake-egress.sh" &
 FAKE_EGRESS_PID=$!
 
@@ -142,6 +145,7 @@ FAKE_CERTIFI_PEM="$FAKE_CERTIFI_PEM" \
 OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=1 \
 OPENSANDBOX_MITM_CA="$MITM_CA" \
 OPENSANDBOX_MERGED_CA_PATH="$MERGED" \
+OPENSANDBOX_MITM_CA_STATE_FILE="$TESTDIR/phase1.fp" \
 MITM_CA_WAIT_TIMEOUT=25 \
 MITM_CA_STABILIZE_WINDOW=6 \
 MITM_CA_POLL_INTERVAL=0.2 \
@@ -237,6 +241,7 @@ FAKE_CERTIFI_PEM="$FAKE_CERTIFI_PEM" \
 OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=1 \
 OPENSANDBOX_MITM_CA="$MITM_CA2" \
 OPENSANDBOX_MERGED_CA_PATH="$MERGED2" \
+OPENSANDBOX_MITM_CA_STATE_FILE="$TESTDIR/phase2.fp" \
 MITM_CA_WAIT_TIMEOUT=2 \
 MITM_CA_STABILIZE_WINDOW=20 \
 MITM_CA_POLL_INTERVAL=0.2 \
@@ -279,4 +284,82 @@ for _ in $(seq 1 20); do
 done
 [ -n "$merged2_seen" ] || fail "phase 2: watcher did not rebuild the merged bundle with the post-timeout CA"
 
-echo "PASS: bootstrap trusted the fresh CA after purge detection (${ready_seconds}s), watcher healed the second rotation (${install_passes} trust installs), timeout path leaves an empty baseline"
+# ---- Phase 3: statically baked CA fast path (Firecracker RootfsOnly cold boot).
+# With MITM_CA_STABILIZE_WINDOW=0 and MITM_CA_WATCH_INTERVAL=0:
+#   - Boot 1 installs once, records the rootfs fingerprint marker, and does not
+#     start the background watcher.
+#   - Boot 2 with the same CA + persisted marker skips redundant system/JDK
+#     reinstalls while still exporting NODE_EXTRA_CA_CERTS, REQUESTS_CA_BUNDLE,
+#     and SSL_CERT_FILE.
+#   - Boot 3 with a rotated CA detects the fingerprint drift and reinstalls.
+VOL3="$TESTDIR/volume3"
+MITM_CA3="$VOL3/mitmproxy-ca-cert.pem"
+MERGED3="$VOL3/merged-ca-certificates.pem"
+STATE3="$TESTDIR/phase3.fp"
+LOG3_1="$TESTDIR/bootstrap-p3-1.log"
+LOG3_2="$TESTDIR/bootstrap-p3-2.log"
+LOG3_3="$TESTDIR/bootstrap-p3-3.log"
+ENV3_2="$TESTDIR/p3-2.env"
+mkdir -p "$VOL3"
+cp "$CA_FRESH" "$MITM_CA3"
+
+count_trust_runs() {
+  _c=0
+  for _f in "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"; do
+    if [ -f "$_f" ]; then
+      _c=$((_c + $(wc -l < "$_f" | tr -d ' ')))
+    fi
+  done
+  echo "$_c"
+}
+
+run_p3_boot() {
+  _out_log="$1"
+  _cmd="$2"
+  PATH="$SHIM:$PATH" \
+  HOME="$HOME_DIR" \
+  JAVA_HOME="$FAKE_JDK" \
+  PYTHONPATH="$TESTDIR/pymod" \
+  FAKE_CERTIFI_PEM="$FAKE_CERTIFI_PEM" \
+  OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=1 \
+  OPENSANDBOX_MITM_CA="$MITM_CA3" \
+  OPENSANDBOX_MERGED_CA_PATH="$MERGED3" \
+  OPENSANDBOX_MITM_CA_STATE_FILE="$STATE3" \
+  MITM_CA_WAIT_TIMEOUT=10 \
+  MITM_CA_STABILIZE_WINDOW=0 \
+  MITM_CA_POLL_INTERVAL=5 \
+  MITM_CA_WATCH_INTERVAL=0 \
+  EXECD="$TESTDIR/stub-execd" \
+  BOOTSTRAP_CMD="$_cmd" \
+  bash "$BOOTSTRAP" > "$_out_log" 2>&1
+}
+
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
+run_p3_boot "$LOG3_1" "true" || fail "phase 3 boot 1 failed"
+[ -s "$STATE3" ] || fail "phase 3 boot 1: installed CA marker not written"
+[ -s "$MERGED3" ] || fail "phase 3 boot 1: merged bundle missing"
+grep -q 'mitm CA ready at .* after 0s' "$LOG3_1" || fail "phase 3 boot 1: did not trust immediately"
+grep -q 'watcher disabled' "$LOG3_1" || fail "phase 3 boot 1: watcher was not disabled"
+boot1_trust="$(count_trust_runs)"
+[ "$boot1_trust" -ge 1 ] || fail "phase 3 boot 1: expected system trust install, got $boot1_trust"
+
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
+run_p3_boot "$LOG3_2" "printf 'NODE=%s\nREQ=%s\nSSL=%s\n' \"\$NODE_EXTRA_CA_CERTS\" \"\$REQUESTS_CA_BUNDLE\" \"\$SSL_CERT_FILE\" > \"$ENV3_2\"" \
+  || fail "phase 3 boot 2 failed"
+grep -q 'skipping reinstall' "$LOG3_2" || fail "phase 3 boot 2: did not take idempotent skip path"
+boot2_trust="$(count_trust_runs)"
+[ "$boot2_trust" -eq 0 ] || fail "phase 3 boot 2: expected 0 system trust installs on cold-boot skip, got $boot2_trust"
+[ ! -s "$SHIM/keytool.log" ] || fail "phase 3 boot 2: keytool should not run on cold-boot skip"
+grep -q "^NODE=$MITM_CA3$" "$ENV3_2" || fail "phase 3 boot 2: NODE_EXTRA_CA_CERTS not exported"
+grep -q "^REQ=$MERGED3$" "$ENV3_2" || fail "phase 3 boot 2: REQUESTS_CA_BUNDLE not exported"
+grep -q "^SSL=$MERGED3$" "$ENV3_2" || fail "phase 3 boot 2: SSL_CERT_FILE not exported"
+
+rm -f "$SHIM/sudo.log" "$SHIM/update-ca.log" "$SHIM/keytool.log"
+cp "$CA_ROTATED" "$MITM_CA3"
+run_p3_boot "$LOG3_3" "true" || fail "phase 3 boot 3 failed"
+grep -q 'skipping reinstall' "$LOG3_3" && fail "phase 3 boot 3: must reinstall when CA changes" || true
+boot3_trust="$(count_trust_runs)"
+[ "$boot3_trust" -ge 1 ] || fail "phase 3 boot 3: expected reinstall on rotated CA, got $boot3_trust"
+grep -q 'certificate-generation-rotated' "$MERGED3" || fail "phase 3 boot 3: merged bundle not updated"
+
+echo "PASS: bootstrap trusted the fresh CA after purge detection (${ready_seconds}s), watcher healed the second rotation (${install_passes} trust installs), timeout path leaves an empty baseline, and baked-CA fast path skips redundant reinstalls"
