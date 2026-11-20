@@ -68,6 +68,7 @@ type fakeResolverServer struct {
 	server   *httptest.Server
 	requests chan resolveServerRequest
 	delay    time.Duration
+	release  <-chan struct{} // optional test barrier after request receipt
 }
 
 type resolveServerRequest struct {
@@ -80,6 +81,11 @@ type resolveServerRequest struct {
 
 func startFakeResolverServer(t *testing.T, delay time.Duration) *fakeResolverServer {
 	t.Helper()
+	return startFakeResolverServerWithRelease(t, delay, nil)
+}
+
+func startFakeResolverServerWithRelease(t *testing.T, delay time.Duration, release <-chan struct{}) *fakeResolverServer {
+	t.Helper()
 	// Short temp dir: AF_UNIX sun_path is capped near 104 bytes and the
 	// default testing temp dirs exceed that on macOS.
 	dir, err := os.MkdirTemp("", "osbr-resolver-*")
@@ -87,7 +93,7 @@ func startFakeResolverServer(t *testing.T, delay time.Duration) *fakeResolverSer
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	listener, err := net.Listen("unix", dir+"/resolver.sock")
 	require.NoError(t, err)
-	fake := &fakeResolverServer{listener: listener, requests: make(chan resolveServerRequest, 64), delay: delay}
+	fake := &fakeResolverServer{listener: listener, requests: make(chan resolveServerRequest, 64), delay: delay, release: release}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/resolve", func(w http.ResponseWriter, r *http.Request) {
 		var document struct {
@@ -113,7 +119,9 @@ func startFakeResolverServer(t *testing.T, delay time.Duration) *fakeResolverSer
 			Authority:  document.Destination.Authority,
 			Path:       document.Request.Path,
 		}
-		if fake.delay > 0 {
+		if fake.release != nil {
+			<-fake.release
+		} else if fake.delay > 0 {
 			time.Sleep(fake.delay)
 		}
 		w.Header().Set("Content-Type", "application/json")

@@ -51,7 +51,8 @@ def main():
     lock = threading.Lock()
     state = {"fault": "none", "dropped": 0, "prepare": 0, "commit": 0, "abort": 0, "readback": 0}
     readback_entered = threading.Event()
-    release_readback = threading.Event()
+    reply_entered = {op: threading.Event() for op in ("prepare", "commit")}
+    release_reply = threading.Event()
     original_reply = ipc._Handler._reply
 
     def reply(handler, status, value):
@@ -68,7 +69,11 @@ def main():
                     state["fault"] = "none"
                     handler.close_connection = True
                     return
-                if operation == "commit" and state["fault"] != "none":
+                if operation in reply_entered and state["fault"] == "hold-" + operation:
+                    state["fault"] = "none"
+                    reply_entered[operation].set()
+                    hold = True
+                elif operation == "commit" and state["fault"] != "none":
                     state["dropped"] += 1
                     handler.close_connection = True
                     return
@@ -77,7 +82,7 @@ def main():
                     hold = True
                     if state["fault"] == "unresolved":
                         status, value = 503, {"error": "unavailable"}
-        if hold and not release_readback.wait(5):
+        if hold and not release_reply.wait(5):
             handler.close_connection = True
             return
         original_reply(handler, status, value)
@@ -102,8 +107,11 @@ def main():
                 emit({"ready": True})
             elif command["command"] == "await-readback":
                 emit({"ready": readback_entered.wait(3)})
+            elif command["command"] in ("await-prepare", "await-commit"):
+                operation = command["command"].split("-", 1)[1]
+                emit({"ready": reply_entered[operation].wait(3)})
             elif command["command"] == "release":
-                release_readback.set()
+                release_reply.set()
                 emit({"ready": True})
             elif command["command"] == "inspect":
                 snapshot = backend.acquire()

@@ -53,6 +53,8 @@ const maxResolveRequestBytes = 64 << 10
 type ResolveAccess struct {
 	SandboxID string
 	Store     *Store
+	// ExpectedRevision fences a live request to its pinned decision snapshot.
+	ExpectedRevision *int64
 }
 
 // ResolveAccessError is a fixed-vocabulary access failure.
@@ -185,6 +187,10 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, http.StatusNotFound, "binding not found")
 		return
 	}
+	if access.ExpectedRevision != nil && capture.Revision != *access.ExpectedRevision {
+		writeResolveError(w, http.StatusConflict, "resolution invalidated")
+		return
+	}
 	event.Credential = capture.Credential
 
 	client, err := h.clientFor(capture.Endpoint)
@@ -233,7 +239,8 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	recheck, err := recheckAccess.Store.CaptureResolve(document.Binding)
-	if err != nil || recheck.Fingerprint != capture.Fingerprint {
+	if err != nil || recheck.Fingerprint != capture.Fingerprint ||
+		access.ExpectedRevision != nil && recheck.Revision != *access.ExpectedRevision {
 		writeResolveError(w, http.StatusConflict, "resolution invalidated")
 		return
 	}
