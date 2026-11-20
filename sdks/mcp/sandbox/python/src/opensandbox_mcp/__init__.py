@@ -15,11 +15,18 @@
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
-from opensandbox_mcp.server import create_server
+from opensandbox_mcp.auth import JWTTokenVerifier, OAuthConfig, OAuthConfigError
+from opensandbox_mcp.server import create_server, create_streamable_http_app
 
 try:
     __version__ = _pkg_version("opensandbox-mcp")
 except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0"
 
-__all__ = ["create_server"]
+__all__ = [
+    "JWTTokenVerifier",
+    "OAuthConfig",
+    "OAuthConfigError",
+    "create_server",
+    "create_streamable_http_app",
+]
