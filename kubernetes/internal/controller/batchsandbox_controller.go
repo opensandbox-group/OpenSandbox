@@ -148,7 +148,15 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		now := time.Now()
 		if expireAt.Time.Before(now) {
 			log.Info("batch sandbox expired, delete", "expireAt", expireAt)
-			err := r.Delete(ctx, batchSbx, client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			// The cached copy may predate a renewal that is already persisted.
+			// Delete only the exact version judged expired so a newer object
+			// always gets a fresh decision.
+			err := r.Delete(ctx, batchSbx,
+				client.Preconditions{UID: &batchSbx.UID, ResourceVersion: &batchSbx.ResourceVersion},
+				client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			if errors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		} else {
 			durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), expireAt.Time.Sub(now))
@@ -219,9 +227,11 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}).Sort)
 	// Normal mode owns pod lifecycle except while a sandbox is fully paused. In Paused, the
 	// snapshot-backed runtime is quiesced and pods must stay absent until resume rewrites the
-	// template images and transitions back through Resuming.
+	// template images and transitions back through Resuming. Completed sandboxes skip scaling
+	// too: a finished workload must not re-run, so a removed pod stays removed until expireTime.
 	if !poolStrategy.IsPooledMode() &&
 		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused &&
+		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseCompleted &&
 		!hasTerminalPodFailureCondition(batchSbx.Status.Conditions) {
 		// Bounded replacement of stuck provisioning pods; scale recreates them.
 		r.recoverStuckPods(ctx, batchSbx, pods)
@@ -249,7 +259,11 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
 	}
 
-	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused
+	// Completed is terminal like Paused: the runtime is gone, so task scheduling
+	// must stop and stale scheduler state must be cleared instead of re-polling
+	// (and possibly dispatching new work to an exited executor) until expireTime.
+	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused ||
+		batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted
 	if skipTaskScheduling {
 		r.deleteTaskScheduler(ctx, batchSbx)
 	}

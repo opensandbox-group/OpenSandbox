@@ -921,7 +921,8 @@ object SnapshotState {
  * snapshots capture the filesystem only and do not restore running processes.
  * [ROOTFS_ONLY] preserves only the writable filesystem, so restoring boots a
  * fresh sandbox and re-runs the entrypoint. It requires the fast-sandbox
- * backend with OCI-backed sandboxes and is rejected by other backends.
+ * backend and is rejected by other backends; an unqualified fast-sandbox node
+ * fails the snapshot instead of silently producing a full artifact.
  *
  * Note: snapshots created before the mode field existed report [FULL].
  */

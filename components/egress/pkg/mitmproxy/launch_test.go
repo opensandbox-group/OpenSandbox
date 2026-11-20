@@ -15,11 +15,17 @@
 package mitmproxy
 
 import (
+	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
+	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -281,6 +287,29 @@ func TestCredentialProxyMessageRejectsNonProxyLines(t *testing.T) {
 	require.False(t, ok)
 	_, ok = credentialProxyMessage("")
 	require.False(t, ok)
+}
+
+func TestForwardMitmdumpOutputKeepsSafeUpstreamTLSFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "egress.log")
+	previous := log.Logger
+	log.Logger = slogger.MustNew(slogger.Config{Level: "warn", OutputPaths: []string{path}})
+	t.Cleanup(func() { log.Logger = previous })
+
+	const event = `{"level":"warn","component":"egress","event":"upstream_tls_failure","reason":"self_signed","connection_id":"97de1c95-1bd9-49bc-bc0f-ec8f9cb3acbd"}`
+	forwardMitmdumpOutput(io.NopCloser(strings.NewReader(
+		"[12:34:56.789] Server TLS handshake failed. raw-peer-detail\n" +
+			"[12:34:56.790] credential proxy: upstream-tls-failure " + event + "\n",
+	)))
+	require.NoError(t, log.Logger.Sync())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var entry struct {
+		Level string `json:"level"`
+		Msg   string `json:"msg"`
+	}
+	require.NoError(t, json.Unmarshal(data, &entry))
+	require.Equal(t, "warn", entry.Level)
+	require.Equal(t, "[mitmproxy] credential proxy: upstream-tls-failure "+event, entry.Msg)
 }
 
 func TestBuildMitmdumpArgsTrustDirAndExtraCABothSet(t *testing.T) {

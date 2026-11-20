@@ -63,13 +63,14 @@ gateway:
   # -- Gateway provider type (e.g. batchsandbox).
   providerType: "batchsandbox"
 
-  # -- Gateway route mode: header or uri. Must match server.gateway.gatewayRouteMode.
+  # -- Routing mode: header (including wildcard hosts) or uri.
   gatewayRouteMode: "header"
 
-  # -- FastPath gRPC endpoint for the fast-sandbox provider
-  # (--fastpath-endpoint). Required when providerType is "fast-sandbox";
-  # ignored otherwise. Example: fast-sandbox-fastpath.opensandbox-system.svc:9090
+  # -- FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise.
   fastpathEndpoint: ""
+
+  # -- Restricts Fast Sandbox to one namespace and enables unsigned Host routing. Empty requires signed scopes; unsigned access needs external protection.
+  fastSandboxNamespace: ""
 
   # OSEP-0024 activity tracking (per-sandbox last-activity in Redis).
   activity:

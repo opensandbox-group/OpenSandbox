@@ -12,7 +12,7 @@ Fast Sandbox traffic flows through two adapters in this repository:
 
 ## Design highlights
 
-- **Authenticated scopes instead of raw routing keys**: a route is a signed `f1.` scope binding tenant namespace, sandbox ID, and port. The ingress verifies before it routes; there is no unauthenticated path to a sandbox.
+- **Explicit routing trust boundary**: header and URI routes use signed `f1.` scopes binding tenant namespace, sandbox ID, and port. Unsigned wildcard-host routing is an explicit opt-in restricted to one statically configured namespace; it requires a trusted network or authentication in front of ingress.
 - **Lazy resolution**: the upstream address resolves only when traffic arrives, so routes stay valid across Fastlet rescheduling without an invalidation protocol.
 - **Fail-closed egress**: every subject denies traffic from registration until its data plane is ready — policy delivery can be late, never early-open.
 - **Policy as data**: egress policy rides the Sandbox CRD's revisioned `actionBindings`; only credentials travel out of band, memory-only.
@@ -22,11 +22,16 @@ Fast Sandbox traffic flows through two adapters in this repository:
 
 ### Route scopes
 
-A Fast Sandbox route is an authenticated scope, not a plain host or path. The server signs the tenant namespace, sandbox ID, and port with the `opensandbox-fsb-route-v1` scheme; the `f1.` prefix identifies the scope format version, and the ingress shares the server's signing key ring.
+In header and URI modes, a Fast Sandbox route is an authenticated scope. The server signs the tenant namespace, sandbox ID, and port with the `opensandbox-fsb-route-v1` scheme; the `f1.` prefix identifies the scope format version, and the ingress shares the server's signing key ring.
 
 - Header mode expresses the scope as an `OpenSandbox-Ingress-To` header; URI mode encodes it in the path.
-- Wildcard-host scopes are deliberately unsupported: namespace, sandbox ID, and MAC do not fit safely in one DNS label.
 - Clients must preserve the returned route and headers verbatim — the scope is the credential.
+- Wildcard mode instead returns `<sandbox-id>-<port>.<gateway-domain>` without a signature or routing header. Ingress accepts these Fast Sandbox Host routes only when `--fast-sandbox-namespace` selects one namespace, and supplies that namespace to FastPath. The `fsb-` sandbox ID prefix distinguishes these routes from legacy Kubernetes routes in a mixed deployment.
+- When configured, the namespace restriction also applies to signed `f1.` routes: a valid signature for another namespace is rejected before resolution. Without this flag, signed routes retain their existing namespace-scoped behavior and unsigned Fast Sandbox routes are rejected.
+
+::: warning Unsigned wildcard routes do not authenticate clients
+The namespace is a routing boundary, not caller authentication. Anyone who can reach the gateway and knows a sandbox ID and port can access that service, including execd. Use network isolation or an authenticating front proxy. Wildcard-only routing needs no signing keys or external route store; internal FastPath/Fastlet credentials remain unchanged.
+:::
 
 The server issues these routes without calling FastPath or waiting for readiness: signing the tenant namespace, sandbox ID, and port is a local operation keyed by the shared ingress key ring. Issuance is therefore decoupled from sandbox state, and endpoint discovery never proves existence — the ingress resolves and verifies when traffic arrives.
 
@@ -111,7 +116,25 @@ With the switch unset, both legacy gates `OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISI
 
 Credential-bound startup requires transparent MITM and `dns+nft`; it rejects nondefault extra interception ports, insecure upstream TLS verification, a chained upstream proxy, and nonempty effective mitmproxy `ignore_hosts` or `allow_hosts`. Go reads the runtime user's `.mitmproxy/config.yaml` followed by `config.yml`, matching mitmdump's load order, before profile dispatch or network setup; unreadable or malformed configuration fails closed. The existing child-side checks remain in place. These restrictions apply to both the new switch and its legacy alias; `all` retains the existing configuration behavior.
 
-This R4 switch only wires existing handshake admission and shared budgets. The current implementation still terminates decrypted HTTP/1.1 and HTTP/2 requests before forwarding or credential lookup; HTTP/1.1 forwarding and opaque-transport teardown remain separate increments. See [egress architecture](/architecture/network/egress#transparent-tls-interception-l7) for current limits and configuration.
+The subject receiver supports HTTP/1.1 requests on admitted decrypted connections. See [egress architecture](/architecture/network/egress#transparent-tls-interception-l7) for current limits and configuration.
+
+#### Defaults, capacity, and compatibility
+
+The switch is read once at egress startup, before profile dispatch or network setup; every credential-bound startup requirement fails closed, for the new switch and its deprecated alias alike. The mode distinguishes absent from explicitly empty by design: with the switch absent and both legacy gates off, startup keeps the pre-switch mitmdump launch arguments and child environment exactly and reads no mitmproxy configuration — the unchanged default — while a present-but-empty value, or any value other than `all` or `credential-bound`, fails startup, so a `value: ""` typo can never silently fall back to intercept-all.
+
+The admission budgets `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` (per subject, default 32) and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` (process-wide, default 131072) are handed to the subject process only when TLS admission is active, accept integers from 1 to 1048576 and fall back to their respective defaults for invalid values, and are caps rather than reserved allocations. These defaults are unmeasured assumptions: no memory or throughput measurements exist for this mode, and release defaults are a separate acceptance item (see [egress architecture](/architecture/network/egress#transparent-tls-interception-l7)).
+
+The operator runbook — the full startup checklist, the commented pool-manifest env example, the integration-environment render switch, and the rollback procedure back to intercept-all — lives in the [credential vault guide](/guides/credential-vault#enabling-and-rolling-back-credential-bound-operators); this page keeps the mode's meaning and design constraints only.
+
+#### Mixed pools and cross-Pod restore
+
+The mode belongs to the egress process, one per Fastlet Pod, so it is effectively a per-pool property: every sandbox on a Pod shares its pool's mode, and one cluster may run some pools in `credential-bound` and others in `all`. A sandbox's interception semantics follow the egress of the Fastlet Pod that hosts it. Restore may land a sandbox on any Pod: the vault bundle transfer itself (`VAULT_EXPORT` / `VAULT_IMPORT`, mode-independent) carries the credentials, but decryption and admission on the restored Pod follow the destination Pod's egress configuration — a vault restored into an `all` pool is injected under intercept-all, and one restored into a `credential-bound` pool decrypts only binding-covered hosts.
+
+#### Visibility of unbound HTTPS
+
+For a known subject with a current decision snapshot, credential-bound forwards unbound TLS/443 traffic opaquely when egress policy permits it. DNS filtering, nft enforcement, and encrypted-DNS handling are unchanged — both modes enforce the same policy — but mitmproxy addons and any audit or request-level inspection see an unbound HTTPS flow only as a tunnel: its destination and the decrypt/passthrough outcome remain observable, while the HTTP method, headers, and body do not. Deployments that rely on decrypting every HTTPS flow for L7 audit or addon-based filtering keep that visibility only in `all` mode; under `credential-bound` they must add a vault binding for each host they need to inspect.
+
+Client-side usage rules — installing a binding before requests, recycling connections after the first binding for a host, and the HTTP/1.1-only boundary on bound hosts — are covered in the [credential vault guide](/guides/credential-vault#fast-sandbox-credential-bound-vault-usage-experimental).
 
 ### Enforcement
 

@@ -1,4 +1,21 @@
 # Keep aligned with the H2 adapter and runtime regression compatibility gates.
+#
+# These pins are intentionally held at mitmproxy 11.0.2 / h2 4.1.0 despite open
+# Dependabot advisories (GHSA-wg33-5h85-7q5p mitmproxy < 11.1.2 high,
+# GHSA-847f-9342-265h / GHSA-6hr6-w5qg-qmwg h2, GHSA-63cx-g855-hvv4 /
+# GHSA-527g-3w9m-29hv mitmproxy <= 12.x). Every alert-clearing release
+# (mitmproxy >= 11.1.2) requires Python >= 3.12, but the credential-bound H2
+# adapter's ownership model only supports CPython 3.10/3.11
+# (dependency_versions_supported() in mitmscripts/credential_bound_h2.py):
+# mitmproxy enables eager tasks on 3.12+, which breaks the ServerConnect hook /
+# transport registration ordering the adapter must prove. Every mitmproxy 12.x
+# also pins h2==4.3.0, so the h2 advisories fixed in 4.4.x cannot be satisfied
+# alongside it. Porting the adapter to the eager-task runtime is required
+# before any of these advisories can be cleared. Risk accepted for now because
+# the egress sidecar runs headless mitmdump (no Mitmweb API for
+# GHSA-wg33-5h85-7q5p) and installs from source via pip (not the official
+# standalone binaries referenced by GHSA-63cx-g855-hvv4). Re-evaluate when
+# mitmproxy ships h2 >= 4.4 support or the adapter is ported to Python >= 3.12.
 mitmproxy==11.0.2
 h2==4.1.0
 hyperframe==6.0.1

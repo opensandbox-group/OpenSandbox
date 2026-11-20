@@ -225,7 +225,13 @@ func collectPoolCapacity(ctx context.Context, reader client.Reader, allocations 
 	}
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if !pod.DeletionTimestamp.IsZero() {
+		if !pod.DeletionTimestamp.IsZero() || isTerminalPhasePod(pod) {
+			// kubelet has already released the node resources of a
+			// terminating or finished pod, so the resource sums exclude it
+			// unconditionally. The status counters deliberately diverge:
+			// Status.Total keeps counting a pod that still owes an allocation
+			// until handback (see updatePoolStatus), so the pod-count and
+			// resource series cover overlapping but not identical populations.
 			continue
 		}
 		requests := resourcehelper.PodRequests(pod, resourcehelper.PodResourcesOptions{})

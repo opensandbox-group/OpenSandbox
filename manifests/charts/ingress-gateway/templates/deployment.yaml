@@ -97,6 +97,9 @@ spec:
             # FastPath gRPC endpoint for the fast-sandbox provider.
             - "--fastpath-endpoint={{ .Values.gateway.fastpathEndpoint }}"
             {{- end }}
+            {{- if .Values.gateway.fastSandboxNamespace }}
+            - {{ printf "--fast-sandbox-namespace=%s" .Values.gateway.fastSandboxNamespace | quote }}
+            {{- end }}
             {{- if .Values.gateway.activity.enabled }}
             # OSEP-0024 activity tracking (same Redis as the server's [automation.idle_pause]).
             - "--activity-enabled=true"

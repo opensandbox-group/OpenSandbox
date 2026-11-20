@@ -267,7 +267,7 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		}
 		return &dnsproxy.QueryPolicy{
 			Policy: eff,
-			OnResolved: func(domain string, ips []nftables.ResolvedIP) {
+			OnResolved: func(domain string, ips []nftables.ResolvedIP) error {
 				addCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 				if err := podNft.AddResolvedIPs(addCtx, s, domain, ips); err != nil {
@@ -275,10 +275,12 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 						// Answer was in flight during a rule change: fail
 						// closed, quietly.
 						log.Infof("[dns] resolved IPs for subject %s domain %q not admitted (policy changed during resolution)", s, domain)
-						return
+						return err
 					}
 					log.Warnf("[dns] add resolved IPs to fast-sandbox nft failed for subject %s domain %q: %v", s, domain, err)
+					return err
 				}
+				return nil
 			},
 		}, ""
 	})

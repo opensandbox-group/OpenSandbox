@@ -184,6 +184,70 @@ test("CodeInterpreter.create throws when execd never answers", async () => {
   assert.equal(commands.calls.length, 0);
 });
 
+test("CodeInterpreter.create times out when a probe never settles", async () => {
+  let probeSignal;
+  const codes = {
+    // Never settles and ignores its signal, like a stalled custom adapter.
+    ping(signal) {
+      probeSignal = signal;
+      return new Promise(() => {});
+    },
+  };
+  const adapterFactory = { createCodes: () => codes };
+  const { sandbox } = fakeSandbox();
+  const started = Date.now();
+  let guard;
+
+  await assert.rejects(
+    Promise.race([
+      CodeInterpreter.create(sandbox, {
+        adapterFactory,
+        readyTimeoutSeconds: 0.2,
+        healthCheckPollingInterval: 10,
+      }),
+      new Promise((_, reject) => {
+        guard = setTimeout(() => reject(new Error("create() outlived readyTimeoutSeconds")), 5000);
+      }),
+    ]),
+    SandboxReadyTimeoutException,
+  );
+  clearTimeout(guard);
+  assert.ok(Date.now() - started < 2000);
+  // The stalled probe's requests are aborted rather than left running.
+  assert.equal(probeSignal?.aborted, true);
+});
+
+test("CodeInterpreter.create stops on a caller abort while a probe never settles", async () => {
+  const codes = {
+    // Never settles and ignores its signal, like a stalled custom adapter.
+    ping() {
+      return new Promise(() => {});
+    },
+  };
+  const adapterFactory = { createCodes: () => codes };
+  const { sandbox } = fakeSandbox();
+  const controller = new AbortController();
+  const reason = new Error("caller gave up");
+  setTimeout(() => controller.abort(reason), 50);
+  let guard;
+
+  await assert.rejects(
+    Promise.race([
+      CodeInterpreter.create(sandbox, {
+        adapterFactory,
+        readyTimeoutSeconds: 30,
+        healthCheckPollingInterval: 10,
+        signal: controller.signal,
+      }),
+      new Promise((_, reject) => {
+        guard = setTimeout(() => reject(new Error("create() ignored the caller's abort")), 5000);
+      }),
+    ]),
+    (err) => err === reason,
+  );
+  clearTimeout(guard);
+});
+
 test("CodeInterpreter.create throws when the runtime port never listens", async () => {
   const codes = {
     async ping() {

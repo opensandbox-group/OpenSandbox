@@ -1245,19 +1245,48 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 		if _, ok := podAllocation[pod.Name]; ok {
 			continue
 		}
-		if !utils.IsPodReady(pod) {
+		if isTerminalPhasePod(pod) || !utils.IsPodReady(pod) {
 			continue
 		}
 		availableCnt++
 	}
 	updatedCnt := int32(0)
+	totalCnt := int32(0)
+	listedPods := make(map[string]struct{}, len(pods))
 	for _, pod := range pods {
+		listedPods[pod.Name] = struct{}{}
+		allocated := false
+		if _, ok := podAllocation[pod.Name]; ok {
+			allocated = true
+		}
+		// A terminal pod can never serve a sandbox again. An idle one holds no
+		// capacity at all, so it must not inflate the reported totals; an
+		// allocated one is still owed to its sandbox until handback, so it
+		// stays counted and the exported allocated/total utilization pair
+		// keeps covering one pod population.
+		if isTerminalPhasePod(pod) && !allocated {
+			continue
+		}
 		if pod.Labels[labelPoolRevision] == updateRevision {
 			updatedCnt++
 		}
+		totalCnt++
+	}
+	// The reconcile loop drops pods with a DeletionTimestamp before they reach
+	// this function, but the allocator keeps a terminating pod's reservation
+	// until handback, so Status.Allocated still counts it. Account each
+	// allocation entry without a listed pod in Total as well: until the
+	// reservation is released that unit is real, and this keeps
+	// Total >= Allocated so the rebalance scorer's Allocated/Total ratio
+	// cannot exceed 1 through the graceful-termination window. A terminating
+	// pod is on its way out, so it does not count toward Updated.
+	for name := range podAllocation {
+		if _, ok := listedPods[name]; !ok {
+			totalCnt++
+		}
 	}
 	pool.Status.ObservedGeneration = pool.Generation
-	pool.Status.Total = int32(len(pods))
+	pool.Status.Total = totalCnt
 	pool.Status.Allocated = int32(len(podAllocation))
 	pool.Status.Available = availableCnt
 	pool.Status.Revision = updateRevision
@@ -1272,6 +1301,12 @@ func (r *PoolReconciler) updatePoolStatus(ctx context.Context, updateRevision st
 		return err
 	}
 	return nil
+}
+
+// isTerminalPhasePod reports whether the pod has reached a terminal phase
+// (Failed or Succeeded) and can no longer serve a sandbox.
+func isTerminalPhasePod(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded
 }
 
 func podsByName(pods []*corev1.Pod) map[string]*corev1.Pod {

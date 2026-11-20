@@ -1,21 +1,21 @@
 dependencies:
 - name: base
   repository: file://../base
-  version: 1.3.0-rc.1
+  version: 1.3.0-rc.2
 - name: opensandbox-controller
   repository: file://../controller
-  version: 1.3.0-rc.1
+  version: 1.3.0-rc.2
 - name: opensandbox-server
   repository: file://../server
-  version: 1.3.0-rc.1
+  version: 1.3.0-rc.2
 - name: ingress-gateway
   repository: file://../ingress-gateway
-  version: 1.3.0-rc.1
+  version: 1.3.0-rc.2
 - name: opensandbox-node-agent
   repository: file://../node-agent
-  version: 1.3.0-rc.1
+  version: 1.3.0-rc.2
 - name: fast-sandbox
   repository: file://../fast-sandbox
-  version: 1.3.0-rc.1
-digest: sha256:39313c722d721b739c84276f63135dd87337c812136cc5602804ce6e8b868e32
-generated: "2026-11-16T11:56:43.436883+08:00"
+  version: 1.3.0-rc.2
+digest: sha256:2e613bc5781fcd08a9647e11e82999a83eccde3111d55123f68f6af3fd0c16e3
+generated: "2026-11-19T16:51:50.023517+08:00"

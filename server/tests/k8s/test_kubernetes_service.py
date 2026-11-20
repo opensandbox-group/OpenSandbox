@@ -871,6 +871,11 @@ class TestKubernetesSandboxServiceCreate:
         self, k8s_service
     ):
         from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        provider = BatchSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        k8s_service.workload_provider = provider
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
@@ -886,13 +891,18 @@ class TestKubernetesSandboxServiceCreate:
             exc_info.value.detail["message"]
         )
         k8s_service.k8s_client.get_custom_object.assert_not_called()
-        k8s_service.workload_provider.create_workload.assert_not_called()
+        provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_pool_mode_rejects_credential_proxy_with_400(
         self, k8s_service
     ):
         from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        provider = BatchSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        k8s_service.workload_provider = provider
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "my-pool"},
@@ -908,13 +918,19 @@ class TestKubernetesSandboxServiceCreate:
             exc_info.value.detail["message"]
         )
         k8s_service.k8s_client.get_custom_object.assert_not_called()
-        k8s_service.workload_provider.create_workload.assert_not_called()
+        provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_pool_mode_missing_pool_fails_fast(
         self, k8s_service
     ):
         from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        provider = BatchSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        provider.delete_workload = MagicMock()
+        k8s_service.workload_provider = provider
 
         pool_request = CreateSandboxRequest(
             extensions={"poolRef": "does-not-exist-pool"},
@@ -936,8 +952,111 @@ class TestKubernetesSandboxServiceCreate:
             plural="pools",
             name="does-not-exist-pool",
         )
-        k8s_service.workload_provider.create_workload.assert_not_called()
-        k8s_service.workload_provider.delete_workload.assert_not_called()
+        provider.create_workload.assert_not_called()
+        provider.delete_workload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_custom_provider_pool_ref_skips_opensandbox_pool_crd(
+        self, k8s_service, mock_workload
+    ):
+        """A custom WorkloadProvider (e.g. SandboxSet-backed) validates its own pool CRD without querying OpenSandbox Pool."""
+        from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.workload_provider import WorkloadProvider
+
+        class _SandboxSetProvider(WorkloadProvider):
+            def __init__(self, k8s_client):
+                self.k8s_client = k8s_client
+                self.validated_pools = []
+
+            def validate_create_request(self, request, namespace):
+                pool_ref = (request.extensions or {}).get("poolRef", "").strip()
+                if pool_ref:
+                    self.validated_pools.append((namespace, pool_ref))
+                    obj = self.k8s_client.get_custom_object(
+                        group="agents.kruise.io",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="sandboxsets",
+                        name=pool_ref,
+                    )
+                    if obj is None:
+                        raise HTTPException(
+                            status_code=404,
+                            detail={
+                                "code": SandboxErrorCodes.K8S_POOL_NOT_FOUND,
+                                "message": f"SandboxSet '{pool_ref}' not found.",
+                            },
+                        )
+
+            def create_workload(self, **kwargs):
+                return {"name": kwargs["sandbox_id"], "uid": "uid-sandboxset"}
+
+            def get_workload(self, sandbox_id, namespace):
+                return mock_workload
+
+            def delete_workload(self, sandbox_id, namespace):
+                return None
+
+            def list_workloads(self, namespace, label_selector):
+                return []
+
+            def update_expiration(self, sandbox_id, namespace, expires_at):
+                return None
+
+            def get_expiration(self, workload):
+                return datetime.now(timezone.utc) + timedelta(hours=1)
+
+            def get_status(self, workload):
+                return {
+                    "state": "Running",
+                    "reason": "",
+                    "message": "Pod is running",
+                    "last_transition_at": datetime.now(timezone.utc),
+                }
+
+            def get_endpoint_info(self, workload, port, sandbox_id):
+                return Endpoint(endpoint=f"10.244.0.9:{port}")
+
+        provider = _SandboxSetProvider(k8s_service.k8s_client)
+        k8s_service.workload_provider = provider
+        k8s_service.k8s_client.get_custom_object.return_value = {
+            "metadata": {"name": "kruise-set-1"}
+        }
+
+        response = await k8s_service.create_sandbox(
+            CreateSandboxRequest(extensions={"poolRef": "kruise-set-1"})
+        )
+
+        assert response.status.state == "Running"
+        assert provider.validated_pools == [(k8s_service.namespace, "kruise-set-1")]
+        k8s_service.k8s_client.get_custom_object.assert_called_once_with(
+            group="agents.kruise.io",
+            version="v1alpha1",
+            namespace=k8s_service.namespace,
+            plural="sandboxsets",
+            name="kruise-set-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_sandbox_agent_sandbox_provider_rejects_pool_ref_with_400(
+        self, k8s_service
+    ):
+        from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+
+        provider = AgentSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        k8s_service.workload_provider = provider
+
+        with pytest.raises(HTTPException) as exc_info:
+            await k8s_service.create_sandbox(
+                CreateSandboxRequest(extensions={"poolRef": "any-pool"})
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.UNSUPPORTED_POOL_REF
+        k8s_service.k8s_client.get_custom_object.assert_not_called()
+        provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_sandbox_pool_mode_auto_assign_skips_pool_lookup(
@@ -2335,11 +2454,8 @@ class TestCreateSandboxPvcFailureCleanup:
     async def test_pool_ref_with_volumes_rejected_before_pvc_creation(
         self, k8s_service
     ):
-        # poolRef + volumes is invalid. The provider also rejects this but
-        # raises after _ensure_pvc_volumes has already auto-created and
-        # labeled PVCs — combined with the pessimistic workload_left_alive
-        # flag, the finally would skip cleanup and leak storage. The outer
-        # service must validate up-front, before any side effects.
+        # BatchSandbox poolRef + volumes is invalid. validate_create_request
+        # must run before _ensure_pvc_volumes so no auto-created PVCs leak.
         from opensandbox_server.api.schema import (
             CreateSandboxRequest,
             ImageSpec,
@@ -2347,6 +2463,11 @@ class TestCreateSandboxPvcFailureCleanup:
             ResourceLimits,
             Volume,
         )
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        provider = BatchSandboxProvider(k8s_service.k8s_client, k8s_service.app_config)
+        provider.create_workload = MagicMock()
+        k8s_service.workload_provider = provider
 
         request = CreateSandboxRequest(
             image=ImageSpec(uri="python:3.11"),
@@ -2371,8 +2492,9 @@ class TestCreateSandboxPvcFailureCleanup:
             await k8s_service.create_sandbox(request)
 
         assert exc_info.value.status_code == 400
+        k8s_service.k8s_client.get_custom_object.assert_not_called()
         k8s_service.k8s_client.create_pvc.assert_not_called()
-        k8s_service.workload_provider.create_workload.assert_not_called()
+        provider.create_workload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_pvc_cleanup_runs_when_wait_for_ready_rollback_reports_not_found(

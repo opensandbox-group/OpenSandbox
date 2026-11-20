@@ -1,3 +1,7 @@
+# Unreleased
+
+- Report upstream TLS failures with a connection ID and a bounded certificate verification reason. Unknown transport failures remain unclassified; request and credential data are not logged by this diagnostic.
+
 # components/egress 1.0.4
 
 ## What's New

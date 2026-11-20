@@ -31,6 +31,13 @@ type proxyOptions struct {
 	webSocketMessageSizeLimit int64
 	activity                  activity.Recorder
 	waker                     *wake.Waker
+	fastSandboxNamespace      string
+}
+
+func WithFastSandboxNamespace(namespace string) Option {
+	return func(options *proxyOptions) {
+		options.fastSandboxNamespace = namespace
+	}
 }
 
 // WithConnectObserver observes HTTP and WebSocket TCP connection attempts.
