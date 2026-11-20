@@ -15,7 +15,9 @@
 package dnsproxy
 
 import (
+	"errors"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -73,7 +75,21 @@ func TestServeDNSInfraDomainBypassesPolicy(t *testing.T) {
 	proxy.SetInfraDomain("proxy.example.com", func(domain string, ips []nftables.ResolvedIP) {
 		infraIPs = ips
 	})
-	proxy.SetOnResolved(func(string, []nftables.ResolvedIP) { sandboxCalled = true })
+	proxy.SetOnResolved(func(string, []nftables.ResolvedIP) error {
+		sandboxCalled = true
+		return errors.New("workload grant installation must not run for infrastructure")
+	})
+	selectedCalled := false
+	proxy.SetQueryPolicySelector(func(netip.Addr) (*QueryPolicy, string) {
+		selectedCalled = true
+		return &QueryPolicy{
+			Policy: policy.DefaultDenyPolicy(),
+			OnResolved: func(string, []nftables.ResolvedIP) error {
+				sandboxCalled = true
+				return errors.New("subject grant installation must not run for infrastructure")
+			},
+		}, ""
+	})
 
 	w := &fakeRespWriter{remote: addrFromIP("10.0.0.9")}
 	q := new(dns.Msg)
@@ -82,9 +98,12 @@ func TestServeDNSInfraDomainBypassesPolicy(t *testing.T) {
 
 	require.Len(t, w.msgs, 1)
 	require.Equal(t, dns.RcodeSuccess, w.msgs[0].Rcode, "infra domain must resolve despite deny-all policy")
+	require.Len(t, w.msgs[0].Answer, 1)
+	require.Equal(t, "10.9.8.7", w.msgs[0].Answer[0].(*dns.A).A.String())
 	require.NotEmpty(t, infraIPs, "infra callback must receive the resolved IPs")
 	require.Equal(t, "10.9.8.7", infraIPs[0].Addr.String())
 	require.False(t, sandboxCalled, "infra answers must not feed the sandbox dyn-allow callback")
+	require.False(t, selectedCalled, "infrastructure resolution must not select a workload policy")
 }
 
 // Domains that are not registered as infra still follow the sandbox policy
@@ -124,7 +143,10 @@ func TestServeDNSInfraDomainWithNilCallbackBypassesPolicy(t *testing.T) {
 	}
 	proxy.SetInfraDomain("proxy.example.com", nil)
 	sandboxCalled := false
-	proxy.SetOnResolved(func(string, []nftables.ResolvedIP) { sandboxCalled = true })
+	proxy.SetOnResolved(func(string, []nftables.ResolvedIP) error {
+		sandboxCalled = true
+		return errors.New("workload grant installation must not run for infrastructure")
+	})
 
 	w := &fakeRespWriter{remote: addrFromIP("10.0.0.9")}
 	q := new(dns.Msg)
