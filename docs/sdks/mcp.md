@@ -127,7 +127,7 @@ CLI flags override `OPEN_SANDBOX_MCP_OAUTH_*` environment variables. Configurati
 | `--oauth-clock-skew-seconds` | `OPEN_SANDBOX_MCP_OAUTH_CLOCK_SKEW_SECONDS` | `30` | Finite number in `[0, 300]` applied as leeway to `exp` and `nbf`. |
 | `--oauth-http-timeout-seconds` | `OPEN_SANDBOX_MCP_OAUTH_HTTP_TIMEOUT_SECONDS` | `5` | Finite number in `(0, 60]` for outbound metadata/JWKS fetches (redirects disabled). |
 | `--oauth-jwks-cache-ttl-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_CACHE_TTL_SECONDS` | `300` | Finite number in `(0, 86400]`. Expired cache fails closed if JWKS is unreachable. |
-| `--oauth-jwks-refresh-cooldown-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_REFRESH_COOLDOWN_SECONDS` | `30` | Finite number in `[0, 3600]`. Minimum interval between forced JWKS refreshes on unknown `kid`. |
+| `--oauth-jwks-refresh-cooldown-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_REFRESH_COOLDOWN_SECONDS` | `30` | Finite number in `[0, 3600]`. Minimum interval between forced JWKS refreshes on unknown `kid` and between retries after a fetch failure. |
 | `--oauth-allowed-host` | `OPEN_SANDBOX_MCP_OAUTH_ALLOWED_HOSTS` | Derived from `resource_url` | Repeatable extra `Host` header entries permitted by DNS-rebinding protection. |
 | `--oauth-allow-insecure-http` | `OPEN_SANDBOX_MCP_OAUTH_ALLOW_INSECURE_HTTP` | `false` | Allows `http://` strictly on loopback hosts (`127.0.0.1`, `localhost`, `[::1]`) for local testing only. |
 
@@ -139,6 +139,10 @@ Before connecting a remote MCP client, verify that your external Authorization S
 - **PKCE `S256`:** Enforces Authorization Code + PKCE with `code_challenge_method=S256`.
 - **Client registration:** Supports the registration mechanism required by your MCP client—Client ID Metadata Documents (CIMD), Dynamic Client Registration (RFC 7591), or pre-registered client credentials.
 - **Audience-bound JWT access tokens:** Issues signed asymmetric JWT **access tokens** (RSA >= 2048 bits, EC >= 224 bits, or EdDSA—not opaque tokens and not ID tokens) whose `aud` matches `--oauth-resource-url` (RFC 8707) or your explicit `--oauth-audience`, and includes your configured `--oauth-required-scope` in `scope` or `scp`.
+
+Use a dedicated access-token audience and configure the IdP to emit the exact audience string, including its path and trailing slash. For providers that emit generic `JWT` or omit `typ`, the audience must be distinct from all OIDC client IDs used for ID tokens. Prefer an explicitly typed `at+jwt` when supported.
+
+The OAuth CLI disables Uvicorn access logging because request URLs can contain credentials even when a request is rejected. Configure reverse proxies and custom ASGI hosts to omit query strings and Authorization headers from their logs.
 
 ### Protocol Verification with `curl`
 
@@ -187,7 +191,7 @@ Automated tests in `sdks/mcp/sandbox/python/tests/test_auth_http.py` validate RF
 
 ### Operations & Troubleshooting
 
-- **Key rotation:** Unknown `kid` headers trigger at most one lock-serialized JWKS refresh per `--oauth-jwks-refresh-cooldown-seconds` window (default 30s). Publish the new public key in your IdP's JWKS before signing tokens with it.
+- **Key rotation:** Unknown `kid` headers trigger at most one lock-serialized JWKS refresh per `--oauth-jwks-refresh-cooldown-seconds` window (default 30s). Metadata and JWKS responses must support uncompressed JSON and fit within 2 MiB each. Publish the new public key in your IdP's JWKS before signing tokens with it.
 - **Reverse proxies & TLS:** `opensandbox-mcp` ignores `X-Forwarded-Host`, `X-Forwarded-Proto`, and `Forwarded` when emitting RFC 9728 metadata and `WWW-Authenticate` headers, and derives DNS-rebinding `allowed_hosts` strictly from `--oauth-resource-url` (plus any explicit `--oauth-allowed-host`).
 - **Safe logging & restarts:** Access tokens and `OPEN_SANDBOX_API_KEY` are never written to logs or error responses. Stateful Streamable HTTP sessions are held in memory; after a restart, clients re-initialize and present a valid access token.
 

@@ -146,12 +146,12 @@ def test_oauth_jwt_wires_hardened_http_app(
         captured["app_oauth_config"] = oauth_config
         return sentinel_app
 
-    def _fake_serve(app, *, host, port, log_level):
-        captured["served"] = (app, host, port, log_level)
+    def _fake_serve(app, *, host, port, log_level, access_log, ws):
+        captured["served"] = (app, host, port, log_level, access_log, ws)
 
     monkeypatch.setattr(__main__, "create_server", _fake_create_server)
     monkeypatch.setattr(__main__, "create_streamable_http_app", _fake_create_app)
-    monkeypatch.setattr(__main__, "_serve_streamable_http_app", _fake_serve)
+    monkeypatch.setattr("uvicorn.run", _fake_serve)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -180,7 +180,14 @@ def test_oauth_jwt_wires_hardened_http_app(
     assert captured["oauth_config"].issuer_url == "https://idp.example.com"
     assert captured["oauth_config"].resource_url == "https://mcp.example.com/mcp"
     assert captured["oauth_config"].required_scopes == ("opensandbox:mcp",)
-    assert captured["served"] == (sentinel_app, "127.0.0.1", 8443, "INFO")
+    assert captured["served"] == (
+        sentinel_app,
+        "127.0.0.1",
+        8443,
+        "info",
+        False,
+        "none",
+    )
 
 
 def test_cli_fails_closed_on_invalid_oauth_config(

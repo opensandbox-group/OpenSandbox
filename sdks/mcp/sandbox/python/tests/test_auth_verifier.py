@@ -128,7 +128,7 @@ async def test_valid_rsa_ec_and_eddsa_tokens() -> None:
     tok_ec = jwt.encode(
         {
             "iss": ISSUER,
-            "aud": ["https://other.example.com", f"{RESOURCE}/"],
+            "aud": ["https://other.example.com", RESOURCE],
             "sub": "user-ec",
             "scp": ["opensandbox:mcp", "extra:scope"],
             "exp": int(time.time()) + 300,
@@ -170,6 +170,12 @@ async def test_valid_rsa_ec_and_eddsa_tokens() -> None:
     assert res_ed.client_id == "azp-client"
     assert res_ed.scopes == ["opensandbox:mcp", "extra:read"]
 
+    exact_ids = await verifier.verify_token(
+        _sign(rsa_key, headers={"kid": "rsa-1"}, sub="user-123 ", client_id=" client")
+    )
+    assert exact_ids is not None
+    assert (exact_ids.subject, exact_ids.client_id) == ("user-123 ", " client")
+
 
 async def test_jwt_integrity_and_claim_rejections() -> None:
     good_key, good_jwk = _gen_rsa_jwk("kid-good")
@@ -188,6 +194,7 @@ async def test_jwt_integrity_and_claim_rejections() -> None:
                     {"kty": "RSA", "kid": "broken"},
                     enc_jwk,
                     no_verify_jwk,
+                    {**good_jwk, "kid": "bad-ops", "key_ops": "verify"},
                     weak_jwk,
                     good_jwk,
                 ]
@@ -265,6 +272,12 @@ async def test_jwt_integrity_and_claim_rejections() -> None:
             aud="https://other-api.example.com/mcp",
         ),
         _sign(good_key, headers={"kid": "kid-good"}, aud=12345),
+        _sign(good_key, aud=f"{RESOURCE}/"),
+        _sign(good_key, headers={"kid": "bad-ops"}),
+        _sign(good_key, nbf=False),
+        _sign(good_key, scope="read\topensandbox:mcp"),
+        _sign(good_key, scp=["read write"]),
+        _sign(good_key, token_use="id"),
         # Expired beyond clock skew & future nbf beyond clock skew
         _sign(good_key, headers={"kid": "kid-good"}, exp=now - 30),
         _sign(good_key, headers={"kid": "kid-good"}, nbf=now + 60),
@@ -381,6 +394,12 @@ async def test_key_rotation_cooldown_cache_expiry_and_jwks_outage() -> None:
     current_time[0] += 120.0
     assert await verifier.verify_token(tok2) is None
     assert jwks_state["fetches"] == 3
+    assert await verifier.verify_token(tok2) is None
+    assert jwks_state["fetches"] == 3
+    current_time[0] += 31.0
+    jwks_state["status"] = 200
+    assert await verifier.verify_token(tok2) is not None
+    assert jwks_state["fetches"] == 4
 
 
 async def test_issuer_discovery_path_handling_and_ssrf_defenses() -> None:
@@ -391,6 +410,7 @@ async def test_issuer_discovery_path_handling_and_ssrf_defenses() -> None:
     tok = _sign(key, headers={"kid": "kid-disc"})
 
     # 1. RFC 8414 path insertion succeeds
+    now = [0.0]
     seen_paths: list[str] = []
 
     def rfc8414_path_handler(req: httpx.Request) -> httpx.Response:
@@ -399,16 +419,23 @@ async def test_issuer_discovery_path_handling_and_ssrf_defenses() -> None:
             return httpx.Response(
                 200, json={"issuer": path_issuer, "jwks_uri": path_jwks}
             )
-        if req.url.path == "/realms/demo/protocol/openid-connect/certs":
+        if str(req.url) == path_jwks:
             return httpx.Response(200, json={"keys": [jwk_dict]})
         return httpx.Response(404)
 
     v_path = JWTTokenVerifier(
         _config(issuer_url=path_issuer, jwks_url=None),
         http_client=_mock_client(rfc8414_path_handler),
+        clock=lambda: now[0],
     )
     assert await v_path.verify_token(tok_path) is not None
     assert seen_paths[0] == "/.well-known/oauth-authorization-server/realms/demo"
+
+    # The issuer may publish a different key endpoint after cache expiry.
+    path_jwks = "https://idp.example.com/realms/demo/new-certs"
+    now[0] += 301
+    assert await v_path.verify_token(tok_path) is not None
+    assert seen_paths[-1] == "/realms/demo/new-certs"
 
     # 2. RFC 8414 returns 404 -> falls back to OIDC discovery
     def oidc_fallback_handler(req: httpx.Request) -> httpx.Response:
@@ -458,6 +485,9 @@ async def test_issuer_discovery_path_handling_and_ssrf_defenses() -> None:
         lambda _r: httpx.Response(302, headers={"Location": "https://evil.example/k"}),
         lambda _r: (_ for _ in ()).throw(httpx.ReadTimeout("timed out")),
         lambda _r: httpx.Response(200, content=b"not-json"),
+        lambda _r: httpx.Response(
+            200, headers={"Content-Encoding": "unexpected"}, json={"keys": [jwk_dict]}
+        ),
         lambda _r: httpx.Response(200, json=["not", "an", "object"]),
         lambda _r: httpx.Response(200, json={"keys": []}),
         lambda _r: httpx.Response(200, content=b"x" * (MAX_JWKS_RESPONSE_BYTES + 1)),
@@ -465,6 +495,28 @@ async def test_issuer_discovery_path_handling_and_ssrf_defenses() -> None:
     for handler in jwks_failures:
         v = JWTTokenVerifier(_config(), http_client=_mock_client(handler))
         assert await v.verify_token(tok) is None
+
+
+async def test_jwks_size_limit_stops_reading(monkeypatch) -> None:
+    monkeypatch.setattr("opensandbox_mcp.auth.MAX_JWKS_RESPONSE_BYTES", 4)
+    closed = False
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"12345"
+            raise AssertionError("read continued past the response limit")
+
+        async def aclose(self):
+            nonlocal closed
+            closed = True
+
+    key, _ = _gen_rsa_jwk("key")
+    verifier = JWTTokenVerifier(
+        _config(),
+        http_client=_mock_client(lambda _: httpx.Response(200, stream=Body())),
+    )
+    assert await verifier.verify_token(_sign(key)) is None
+    assert closed
 
 
 async def test_custom_non_url_audience_keyless_ambiguity_and_aclose() -> None:

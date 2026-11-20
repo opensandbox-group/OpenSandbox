@@ -114,6 +114,7 @@ _ALL_OAUTH_SETTING_ENV_VARS: tuple[str, ...] = (
     ENV_ALLOW_INSECURE_HTTP,
 )
 
+_SCOPE_TOKEN = re.compile(r"[\x21\x23-\x5b\x5d-\x7e]+")
 _WHITESPACE_RE = re.compile(r"\s")
 _TOKEN_DELIMITER_RE = re.compile(r"[\s,]+")
 
@@ -151,7 +152,14 @@ def _validate_http_url(
 ) -> str:
     if not isinstance(url, str) or not url or url != url.strip():
         raise OAuthConfigError(f"{field_name} must be a non-empty URL without padding.")
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        outbound = httpx.URL(url)
+        AnyHttpUrl(url)
+    except (ValueError, httpx.InvalidURL) as exc:
+        raise OAuthConfigError(f"{field_name} is not a valid HTTP(S) URL.") from exc
+    if "\\" in url or any(ord(c) < 33 or ord(c) == 127 for c in url):
+        raise OAuthConfigError(f"{field_name} contains invalid URL characters.")
     scheme = parsed.scheme.lower()
     if scheme not in ("https", "http"):
         raise OAuthConfigError(f"{field_name} must use https:// (or loopback http://).")
@@ -164,42 +172,18 @@ def _validate_http_url(
     if parsed.fragment:
         raise OAuthConfigError(f"{field_name} must not contain a URL fragment.")
     if scheme == "http":
-        if not allow_insecure_http or not _is_loopback_host(parsed.hostname):
+        if not allow_insecure_http or not _is_loopback_host(outbound.host):
             raise OAuthConfigError(
                 f"{field_name} must use https:// "
                 "(http:// is only allowed on loopback hosts with "
                 "--oauth-allow-insecure-http)."
             )
-    try:
-        AnyHttpUrl(url)
-    except Exception as exc:
-        raise OAuthConfigError(f"{field_name} is not a valid HTTP(S) URL.") from exc
     return url
 
 
-def _urls_equal_canonical(a: str, b: str) -> bool:
-    """Compare two HTTP(S) URLs ignoring case/default port and trailing slash."""
-    try:
-        norm_a = str(AnyHttpUrl(a)).removesuffix("/")
-        norm_b = str(AnyHttpUrl(b)).removesuffix("/")
-    except Exception:
-        return False
-    return norm_a == norm_b
-
-
-def _is_http_url(value: str) -> bool:
-    parsed = urlparse(value)
-    return parsed.scheme.lower() in ("http", "https") and bool(parsed.netloc)
-
-
-def _origin_tuple(url: str) -> tuple[str, str, int]:
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
-    host = (parsed.hostname or "").lower()
-    port = (
-        parsed.port if parsed.port is not None else (443 if scheme == "https" else 80)
-    )
-    return scheme, host, port
+def _origin_tuple(url: str) -> tuple[str, str, int | None]:
+    parsed = httpx.URL(url)
+    return parsed.scheme, parsed.host, parsed.port
 
 
 def _split_tokens(values: Sequence[str] | str | None) -> tuple[str, ...]:
@@ -292,9 +276,9 @@ class OAuthConfig:
                 "At least one required scope must be configured when OAuth is enabled."
             )
         for scope in self.required_scopes:
-            if not scope or _WHITESPACE_RE.search(scope):
+            if not _SCOPE_TOKEN.fullmatch(scope):
                 raise OAuthConfigError(
-                    "required_scopes entries must be non-empty tokens without whitespace."
+                    "required_scopes entries must be valid ASCII OAuth scope tokens without whitespace."
                 )
 
         if self.audience is not None:
@@ -358,9 +342,7 @@ class OAuthConfig:
     @property
     def uses_url_resource_audience(self) -> bool:
         """Whether expected audience matches the canonical URL ``resource_url``."""
-        if self.audience is None:
-            return True
-        return _urls_equal_canonical(self.audience, self.resource_url)
+        return self.expected_audience == self.resource_url
 
 
 def load_oauth_config(
@@ -666,7 +648,7 @@ class JWKSClient:
             follow_redirects=False,
         )
         self._lock = asyncio.Lock()
-        self._discovered_jwks_url: str | None = config.jwks_url
+        self._retry_after: float = -math.inf
         self._keys: tuple[_CachedJWK, ...] = ()
         self._expires_at: float = 0.0
         self._last_refresh_at: float = -math.inf
@@ -697,11 +679,19 @@ class JWKSClient:
             ):
                 return self._keys
 
-            jwks_url = await self._resolve_jwks_url()
-            payload = await self._fetch_json(jwks_url, purpose="JWKS")
-            keys = self._parse_jwks(payload)
-            if not keys:
-                raise _JWKSError("JWKS document contained no usable signing keys.")
+            if now < self._retry_after:
+                raise _JWKSError("Waiting to retry a failed JWKS refresh.")
+            try:
+                jwks_url = await self._resolve_jwks_url()
+                payload = await self._fetch_json(jwks_url, purpose="JWKS")
+                keys = self._parse_jwks(payload)
+                if not keys:
+                    raise _JWKSError("JWKS document contained no usable signing keys.")
+            except _JWKSError:
+                self._retry_after = (
+                    self._clock() + self._config.jwks_refresh_cooldown_seconds
+                )
+                raise
 
             refreshed_at = self._clock()
             self._keys = keys
@@ -712,8 +702,6 @@ class JWKSClient:
     async def _resolve_jwks_url(self) -> str:
         if self._config.jwks_url is not None:
             return self._config.jwks_url
-        if self._discovered_jwks_url is not None:
-            return self._discovered_jwks_url
 
         issuer_origin = _origin_tuple(self._config.issuer_url)
         last_error: Exception | None = None
@@ -748,7 +736,6 @@ class JWKSClient:
                     "pin an explicit --oauth-jwks-url if cross-origin JWKS is intended."
                 )
 
-            self._discovered_jwks_url = jwks_uri
             return jwks_uri
 
         raise _JWKSError(
@@ -757,27 +744,35 @@ class JWKSClient:
 
     async def _fetch_json(self, url: str, *, purpose: str) -> dict[str, Any]:
         try:
-            response = await self._client.get(
+            async with self._client.stream(
+                "GET",
                 url,
-                headers={"Accept": "application/json"},
+                headers={"Accept": "application/json", "Accept-Encoding": "identity"},
                 follow_redirects=False,
                 timeout=self._config.http_timeout_seconds,
-            )
+            ) as response:
+                if response.status_code != 200:
+                    raise _JWKSError(
+                        f"Unexpected HTTP status while fetching {purpose}."
+                    )
+                if (
+                    response.headers.get("content-encoding", "identity").lower()
+                    != "identity"
+                ):
+                    raise _JWKSError(f"Unexpected content encoding for {purpose}.")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > MAX_JWKS_RESPONSE_BYTES:
+                        raise _JWKSError(
+                            f"{purpose} response exceeded maximum allowed size."
+                        )
+                    body.extend(chunk)
         except httpx.HTTPError as exc:
             raise _JWKSError(f"Failed to fetch {purpose}: network error.") from exc
 
-        if 300 <= response.status_code < 400:
-            raise _JWKSError(f"Refused HTTP redirect while fetching {purpose}.")
-        if response.status_code != 200:
-            raise _JWKSError(
-                f"Unexpected HTTP status {response.status_code} while fetching {purpose}."
-            )
-        if len(response.content) > MAX_JWKS_RESPONSE_BYTES:
-            raise _JWKSError(f"{purpose} response exceeded maximum allowed size.")
-
         try:
-            data = response.json()
-        except ValueError as exc:
+            data = json.loads(body)
+        except (ValueError, RecursionError) as exc:
             raise _JWKSError(f"{purpose} response was not valid JSON.") from exc
 
         if not isinstance(data, dict):
@@ -800,7 +795,9 @@ class JWKSClient:
             if kty not in ("RSA", "EC", "OKP"):
                 continue
             key_ops = entry.get("key_ops")
-            if isinstance(key_ops, list) and "verify" not in key_ops:
+            if key_ops is not None and (
+                not isinstance(key_ops, list) or "verify" not in key_ops
+            ):
                 continue
             try:
                 jwk_obj = PyJWK.from_dict(entry)
@@ -849,7 +846,7 @@ class JWTTokenVerifier(TokenVerifier):
 
         try:
             header = jwt.get_unverified_header(token)
-        except InvalidTokenError:
+        except (InvalidTokenError, RecursionError):
             return None
 
         if not isinstance(header, dict):
@@ -882,6 +879,7 @@ class JWTTokenVerifier(TokenVerifier):
                 key=signing_key.key,
                 algorithms=[alg],
                 issuer=self.config.issuer_url,
+                audience=self.config.expected_audience,
                 leeway=self.config.clock_skew_seconds,
                 options={
                     "require": ["exp", "iss", "aud"],
@@ -889,7 +887,7 @@ class JWTTokenVerifier(TokenVerifier):
                     "verify_exp": True,
                     "verify_nbf": True,
                     "verify_iss": True,
-                    "verify_aud": False,
+                    "verify_aud": True,
                 },
             )
         except InvalidTokenError:
@@ -953,32 +951,28 @@ class JWTTokenVerifier(TokenVerifier):
     def _build_access_token(
         self, raw_token: str, claims: dict[str, Any]
     ) -> AccessToken | None:
-        if any(claim in claims for claim in ID_TOKEN_ONLY_CLAIMS):
+        if claims.get("token_use", "access") != "access" or any(
+            claim in claims for claim in ID_TOKEN_ONLY_CLAIMS
+        ):
             return None
 
         iss = claims.get("iss")
         if iss != self.config.issuer_url:
             return None
 
-        exp = claims.get("exp")
-        if isinstance(exp, bool) or not isinstance(exp, (int, float)):
-            return None
-        iat = claims.get("iat")
-        if iat is not None and (
-            isinstance(iat, bool) or not isinstance(iat, (int, float))
-        ):
-            return None
-
-        matched_aud = self._match_audience(claims.get("aud"))
-        if matched_aud is None:
-            return None
+        for name in ("exp", "iat", "nbf"):
+            if name in claims:
+                value = claims[name]
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return None
+        exp = claims["exp"]
 
         sub_raw = claims.get("sub")
         if sub_raw is not None and (
             not isinstance(sub_raw, str) or not sub_raw.strip()
         ):
             return None
-        subject = sub_raw.strip() if isinstance(sub_raw, str) else None
+        subject = sub_raw if isinstance(sub_raw, str) else None
 
         client_id = self._extract_client_id(claims, subject)
         if client_id is None:
@@ -988,41 +982,21 @@ class JWTTokenVerifier(TokenVerifier):
         if scopes is None:
             return None
 
-        resource = (
-            self.config.resource_url
-            if self.config.uses_url_resource_audience
-            else matched_aud
-        )
-
-        effective_expires_at = int(math.floor(exp + self.config.clock_skew_seconds))
+        # Preserve integer NumericDates without round-tripping through a float.
+        if isinstance(exp, int):
+            effective_expires_at = exp + math.floor(self.config.clock_skew_seconds)
+        else:
+            effective_expires_at = math.floor(exp + self.config.clock_skew_seconds)
 
         return AccessToken(
             token=raw_token,
             client_id=client_id,
             scopes=scopes,
             expires_at=effective_expires_at,
-            resource=resource,
+            resource=self.config.expected_audience,
             subject=subject,
             claims={"iss": iss},
         )
-
-    def _match_audience(self, raw_aud: Any) -> str | None:
-        expected = self.config.expected_audience
-        expected_is_url = _is_http_url(expected)
-
-        if isinstance(raw_aud, str):
-            candidates = [raw_aud]
-        elif isinstance(raw_aud, list) and all(isinstance(v, str) for v in raw_aud):
-            candidates = raw_aud
-        else:
-            return None
-
-        for candidate in candidates:
-            if candidate == expected:
-                return candidate
-            if expected_is_url and _urls_equal_canonical(candidate, expected):
-                return candidate
-        return None
 
     @staticmethod
     def _extract_client_id(claims: dict[str, Any], subject: str | None) -> str | None:
@@ -1031,37 +1005,27 @@ class JWTTokenVerifier(TokenVerifier):
             if val is not None:
                 if not isinstance(val, str) or not val.strip():
                     return None
-                return val.strip()
+                return val
         return subject
 
     @staticmethod
     def _extract_scopes(claims: dict[str, Any]) -> list[str] | None:
         scopes: list[str] = []
-        seen: set[str] = set()
-
-        raw_scope = claims.get("scope")
-        if raw_scope is not None:
-            if not isinstance(raw_scope, str):
-                return None
-            for part in raw_scope.split():
-                if part and part not in seen:
-                    seen.add(part)
-                    scopes.append(part)
-
-        raw_scp = claims.get("scp")
-        if raw_scp is not None:
-            if isinstance(raw_scp, str):
-                items = raw_scp.split()
-            elif isinstance(raw_scp, list) and all(isinstance(s, str) for s in raw_scp):
-                items = [part for entry in raw_scp for part in entry.split()]
+        for claim in ("scope", "scp"):
+            value = claims.get(claim)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                items = [item for item in value.split(" ") if item]
+            elif claim == "scp" and isinstance(value, list):
+                items = value
             else:
                 return None
-            for part in items:
-                if part and part not in seen:
-                    seen.add(part)
-                    scopes.append(part)
-
-        return scopes
+            for item in items:
+                if not isinstance(item, str) or not _SCOPE_TOKEN.fullmatch(item):
+                    return None
+                scopes.append(item)
+        return list(dict.fromkeys(scopes))
 
 
 class StrictBearerMiddleware:

@@ -161,6 +161,8 @@ def test_env_loading_and_cli_precedence() -> None:
     [
         "http://idp.example.com",
         "http://127.0.0.1:9000",
+        "https://[invalid",
+        "https://idp.example.com/bad\\\\path",
         "ftp://idp.example.com",
         "https://user:pass@idp.example.com",
         "https://idp.example.com?foo=bar",
@@ -281,6 +283,9 @@ def test_required_scopes_and_audience_edge_validation() -> None:
         _valid_config(required_scopes=())
     with pytest.raises(OAuthConfigError, match="without whitespace"):
         _valid_config(required_scopes=("bad scope",))
+    for scope in ('a"b', "réad"):
+        with pytest.raises(OAuthConfigError):
+            _valid_config(required_scopes=(scope,))
     with pytest.raises(OAuthConfigError, match="audience must be a non-empty"):
         _valid_config(audience=" ")
     assert (
@@ -288,7 +293,7 @@ def test_required_scopes_and_audience_edge_validation() -> None:
             resource_url="https://mcp.example.com/mcp",
             audience="https://mcp.example.com/mcp/",
         ).uses_url_resource_audience
-        is True
+        is False
     )
 
 

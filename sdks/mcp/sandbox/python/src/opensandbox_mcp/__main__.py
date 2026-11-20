@@ -27,10 +27,17 @@ from opensandbox_mcp.server import create_server, create_streamable_http_app
 
 def _serve_streamable_http_app(
     app: Starlette, *, host: str, port: int, log_level: str
-) -> None:  # pragma: no cover
+) -> None:
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port, log_level=log_level.lower())
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level.lower(),
+        access_log=False,
+        ws="none",
+    )
 
 
 def main() -> None:
