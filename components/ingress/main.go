@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -45,12 +46,12 @@ import (
 func validateFastPathRouting(endpoint, namespace, mode, keys string) error {
 	if strings.TrimSpace(endpoint) == "" {
 		if namespace != "" {
-			return fmt.Errorf("--fast-sandbox-namespace requires --fastpath-endpoint")
+			return errors.New("--fast-sandbox-namespace requires --fastpath-endpoint")
 		}
 		return nil
 	}
 	if strings.TrimSpace(keys) == "" && (namespace == "" || mode != "header") {
-		return fmt.Errorf("FastPath routing requires --secure-access-keys or --mode header with --fast-sandbox-namespace for unsigned wildcard routes")
+		return errors.New("FastPath routing requires --secure-access-keys or --mode header with --fast-sandbox-namespace for unsigned wildcard routes")
 	}
 	return nil
 }

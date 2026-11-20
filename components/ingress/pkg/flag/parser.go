@@ -15,6 +15,7 @@
 package flag
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"strings"
@@ -63,7 +64,7 @@ func InitFlags() {
 	namespaceSet := false
 	flag.Func("fast-sandbox-namespace", "Restrict Fast Sandbox routes to one namespace and enable unsigned wildcard Host routing in header mode (requires external access control)", func(value string) error {
 		if namespaceSet {
-			return fmt.Errorf("--fast-sandbox-namespace may only be specified once")
+			return errors.New("--fast-sandbox-namespace may only be specified once")
 		}
 		if errs := validation.IsDNS1123Label(value); len(errs) != 0 {
 			return fmt.Errorf("--fast-sandbox-namespace must be one Kubernetes namespace: %s", strings.Join(errs, "; "))

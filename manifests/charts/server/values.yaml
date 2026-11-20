@@ -81,8 +81,7 @@ server:
     enabled: false
     # -- Gateway host/address returned to clients when the gateway is enabled.
     host: opensandbox.example.com
-    # -- Gateway route mode: header or uri. Must match gateway.gatewayRouteMode
-    # in the ingress-gateway chart.
+    # -- Route mode: header, wildcard, or uri. Ingress uses header for header/wildcard, uri otherwise.
     gatewayRouteMode: "header"
     # OSEP-0011 signing keys shared between server and ingress.
     # When keys are provided, the server signs route tokens with the active key
