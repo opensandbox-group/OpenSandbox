@@ -67,12 +67,14 @@ func setupNft(ctx context.Context, nftMgr nftApplier, initialPolicy *policy.Netw
 		log.Fatalf("nftables static apply failed: %v", err)
 	}
 	log.Infof("nftables static policy applied (table inet opensandbox); DNS-resolved IPs will be added to dynamic allow sets")
-	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) {
+	proxy.SetOnResolved(func(domain string, ips []nftables.ResolvedIP) error {
 		addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := nftMgr.AddResolvedDomain(addCtx, domain, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
+		err := nftMgr.AddResolvedDomain(addCtx, domain, ips)
+		if err != nil && !errors.Is(err, nftables.ErrQuiesced) {
 			log.Warnf("[dns] record resolved domain %q failed: %v", domain, err)
 		}
+		return err
 	})
 	nftMgr.StartConnectionRefresh(ctx)
 	nftMgr.StartDomainRefresh(ctx, proxy.ResolveDomain)
