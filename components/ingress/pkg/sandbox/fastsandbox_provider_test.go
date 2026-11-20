@@ -79,9 +79,12 @@ func TestFastSandboxProviderMatchesPythonWireContractOverGRPC(t *testing.T) {
 	t.Cleanup(cancel)
 	provider.now = func() time.Time { return time.Unix(2_000_000_000, 0) }
 	require.NoError(t, provider.Start(ctx))
-	info, err := provider.ResolveEndpoint(ctx, EndpointTarget{Namespace: "tenant-a", SandboxID: "sandbox-123", Port: ExecdPort})
+	// Uses a non-execd port so the request stays a raw port target, exercising
+	// Go/Python wire parity for the port path. Execd remapping is covered by
+	// TestFastSandboxProviderResolvesExecdPortByComponentName.
+	info, err := provider.ResolveEndpoint(ctx, EndpointTarget{Namespace: "tenant-a", SandboxID: "sandbox-123", Port: 8080})
 	require.NoError(t, err)
-	require.Equal(t, "http://fastlet:5780/v1/sandboxes/uid-123/ports/44772", info.UpstreamURL)
+	require.Equal(t, "http://fastlet:5780/v1/sandboxes/uid-123/ports/8080", info.UpstreamURL)
 	require.Equal(t, "issued-credential", info.UpstreamHeaders.Get(FastSandboxCredential))
 	require.Equal(t, time.Unix(2_000_000_060, 0), info.ExpiresAt)
 }
@@ -118,11 +121,31 @@ func TestFastSandboxProviderMapsTargetsAndCachesByNamespace(t *testing.T) {
 
 	require.Len(t, resolver.requests, 2)
 	for _, request := range resolver.requests {
-		require.Equal(t, uint32(ExecdPort), request.GetTarget().GetPort())
-		require.Empty(t, request.GetTarget().GetComponentName())
+		require.Equal(t, ExecdComponentName, request.GetTarget().GetComponentName())
+		require.Zero(t, request.GetTarget().GetPort())
 		require.Equal(t, fastpathv2.EndpointAccessMode_CENTRAL_PROXY, request.GetAccessMode())
 		require.Zero(t, request.GetExpectedGeneration())
 	}
+}
+
+func TestFastSandboxProviderResolvesExecdPortByComponentName(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	resolver := &fakeFastPathResolver{now: now}
+	provider := NewFastSandboxProviderWithResolver(resolver, time.Second, fastpathv2.EndpointAccessMode_CENTRAL_PROXY)
+	provider.now = func() time.Time { return now }
+
+	// The reserved execd port must be resolved by component name, because
+	// FastPath rejects resolving an Infra Component's port by number.
+	_, err := provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: ExecdPort})
+	require.NoError(t, err)
+	require.Equal(t, ExecdComponentName, resolver.requests[0].GetTarget().GetComponentName())
+	require.Zero(t, resolver.requests[0].GetTarget().GetPort())
+
+	// Any other port stays a raw port target.
+	_, err = provider.ResolveEndpoint(context.Background(), EndpointTarget{Namespace: "tenant-a", SandboxID: "sb", Port: 8080})
+	require.NoError(t, err)
+	require.Equal(t, uint32(8080), resolver.requests[1].GetTarget().GetPort())
+	require.Empty(t, resolver.requests[1].GetTarget().GetComponentName())
 }
 
 func TestFastSandboxProviderUsesRawPortAndRefreshesNearExpiry(t *testing.T) {

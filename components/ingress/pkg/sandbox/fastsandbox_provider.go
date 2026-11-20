@@ -38,6 +38,10 @@ const (
 	ExecdPort  = 44772
 	EgressPort = 18080
 
+	// ExecdComponentName is the Infra Component name FastPath expects when execd
+	// is delivered as a runtime component rather than baked into the image.
+	ExecdComponentName = "execd"
+
 	// FastPath proxy response headers.
 	FastSandboxCredential = "X-Fast-Sandbox-Route-Credential"
 	FastSandboxProxyError = "X-Fast-Sandbox-Proxy-Error"
@@ -243,8 +247,17 @@ func (p *FastSandboxProvider) ResolveEndpoint(ctx context.Context, target Endpoi
 		},
 		AccessMode: p.accessMode,
 	}
-	// Execd is part of the workload image/template, not a runtime Infra Component.
-	request.Target = &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: uint32(target.Port)}}
+	// Execd may be delivered either baked into the workload image (firecracker
+	// golden snapshots) or as a runtime Infra Component (gvisor pools, which
+	// cannot host-bake it). When it is an Infra Component, FastPath refuses to
+	// resolve its reserved port by number and requires resolution by component
+	// name, so address the execd port as the "execd" component. All other ports
+	// resolve as raw ports.
+	if target.Port == ExecdPort {
+		request.Target = &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_ComponentName{ComponentName: ExecdComponentName}}
+	} else {
+		request.Target = &fastpathv2.EndpointTarget{Target: &fastpathv2.EndpointTarget_Port{Port: uint32(target.Port)}}
+	}
 
 	rpcCtx, cancel := context.WithTimeout(ctx, p.waitTimeout)
 	defer cancel()
