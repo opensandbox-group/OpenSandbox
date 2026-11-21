@@ -59,6 +59,7 @@ from opensandbox.models.sandboxes import (
     SandboxImageSpec,
     SandboxInfo,
     SandboxStatus,
+    SnapshotFilter,
     Volume,
 )
 from opensandbox.models.sandboxes import (
@@ -215,11 +216,26 @@ def test_sandbox_image_auth_rejects_blank_username_and_password() -> None:
 
 
 def test_sandbox_filter_validations() -> None:
-    SandboxFilter(page=0, page_size=1)
+    SandboxFilter(page=1, page_size=1)
     with pytest.raises(ValueError):
         SandboxFilter(page=-1)
     with pytest.raises(ValueError):
         SandboxFilter(page_size=0)
+
+
+@pytest.mark.parametrize("filter_type", [SandboxFilter, SnapshotFilter])
+@pytest.mark.parametrize("kwargs", [{"page": 0}, {"page": -1}, {"page_size": 0}, {"page_size": 201}])
+def test_list_filters_reject_out_of_range_pagination(filter_type, kwargs) -> None:
+    with pytest.raises(ValueError):
+        filter_type(**kwargs)
+
+
+@pytest.mark.parametrize("filter_type", [SandboxFilter, SnapshotFilter])
+@pytest.mark.parametrize("page,page_size", [(None, None), (1, 1), (2, 200)])
+def test_list_filters_accept_valid_pagination(filter_type, page, page_size) -> None:
+    filter_ = filter_type(page=page, page_size=page_size)
+    assert filter_.page == page
+    assert filter_.page_size == page_size
 
 
 def test_sandbox_status_and_info_alias_dump_is_stable() -> None:
