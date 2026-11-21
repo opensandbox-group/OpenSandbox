@@ -430,6 +430,10 @@ class DockerContainerOpsMixin:
             host_config_kwargs["security_opt"] = security_opts
         if docker_cfg.drop_capabilities:
             host_config_kwargs["cap_drop"] = docker_cfg.drop_capabilities
+        if docker_cfg.add_capabilities:
+            host_config_kwargs["cap_add"] = list(docker_cfg.add_capabilities)
+        if docker_cfg.device_cgroup_rules:
+            host_config_kwargs["device_cgroup_rules"] = list(docker_cfg.device_cgroup_rules)
         if docker_cfg.pids_limit is not None:
             host_config_kwargs["pids_limit"] = docker_cfg.pids_limit
         if mem_limit is not None:
