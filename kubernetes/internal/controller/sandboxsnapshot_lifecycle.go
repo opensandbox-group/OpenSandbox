@@ -45,6 +45,24 @@ import (
 func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if snapshot.Annotations[workspacePauseAnnotation] == "true" {
+		parent := &sandboxv1alpha1.BatchSandbox{}
+		// The snapshot informer can observe creation before the parent informer sees Pausing.
+		if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: snapshot.Spec.SandboxName}, parent); err != nil {
+			return ctrl.Result{}, err
+		}
+		if parent.Spec.WorkspacePause == nil {
+			return ctrl.Result{}, r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "InvalidWorkspacePause", "workspace pause configuration is missing")
+		}
+		if err := r.captureWorkspace(ctx, snapshot, parent); err != nil {
+			if errors.IsConflict(err) {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{}, r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "WorkspaceExportFailed", err.Error())
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// A retry must keep the targets already recorded for an existing commit Job.
 	existingJob := &batchv1.Job{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: r.getJobName(snapshot)}, existingJob); err == nil {
@@ -194,6 +212,11 @@ func findJobCondition(conditions []batchv1.JobCondition, conditionType batchv1.J
 // handleDeletion cleans up the commit job and removes the finalizer.
 func (r *SandboxSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if snapshot.Annotations[workspacePauseAnnotation] == "true" {
+		// PVC data has an independent retention policy. No controller Jobs exist for this format.
+		return ctrl.Result{}, utils.UpdateFinalizer(r.Client, snapshot, utils.RemoveFinalizerOpType, sandboxSnapshotFinalizer)
+	}
 
 	jobName := r.getJobName(snapshot)
 	job := &batchv1.Job{}
