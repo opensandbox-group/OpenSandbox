@@ -33,6 +33,7 @@ Secure container runtimes provide stronger isolation than the standard runc runt
 | **Kata (QEMU)** | Full VM with QEMU hypervisor | ~500ms | ~20-50MB | Maximum compatibility and isolation |
 | **Kata (Firecracker)** | MicroVM with Firecracker hypervisor | ~125ms | ~5MB | High density, minimal footprint |
 | **Kata (CLH)** | Cloud Hypervisor | ~200ms | ~10-20MB | Balanced performance and isolation |
+| **Nitro** (AWS EKS Pod Isolation) | Nitro guest VM per pod (managed by EKS) | managed | ~256MB | Hardware-isolated pods on EKS Auto Mode |
 
 ### Why Use Secure Runtimes?
 
@@ -50,6 +51,7 @@ OpenSandbox supports the following secure runtime types through server-level con
 - `"gvisor"` - gVisor with runsc
 - `"kata"` - Kata Containers with QEMU hypervisor (default)
 - `"firecracker"` - Kata Containers with Firecracker hypervisor
+- `"nitro"` - AWS EKS Pod Isolation (Nitro guest VMs); Kubernetes-only, defaults `k8s_runtime_class` to `isolated-sandbox` (see [`examples/eks-nitro`](/examples/eks-nitro))
 - `""` (empty) - Standard runc (default, no secure runtime)
 
 ### Key Design Principle
@@ -74,7 +76,7 @@ execd_image = "opensandbox/execd:latest"
 # Secure container runtime configuration
 # When enabled, ALL sandboxes on this server use the specified runtime
 [secure_runtime]
-# Runtime type: "", "gvisor", "kata", "firecracker"
+# Runtime type: "", "gvisor", "kata", "firecracker", "nitro"
 type = ""
 
 # Docker mode: OCI runtime name (e.g., "runsc" for gVisor, "kata-runtime" for Kata)

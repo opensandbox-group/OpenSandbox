@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eks-nitro-batchsandbox-template
+  namespace: opensandbox-system
+data:
+  batchsandbox-template.yaml: |
+    metadata:
+      labels:
+        example.opensandbox.io/profile: eks-nitro
+    spec:
+      replicas: 1
+      template:
+        spec:
+          restartPolicy: Never
+          terminationGracePeriodSeconds: 30
+          # NOTE: unlike the aks-kata example, do NOT set nodeSelector or
+          # tolerations here. The isolated-sandbox RuntimeClass (applied via
+          # secure_runtime.type = "nitro") carries
+          # scheduling.nodeSelector = {eks.amazonaws.com/nitro-sandbox: "true"},
+          # and EKS Auto Mode provisions a matching node. runtimeClassName alone
+          # is the entire opt-in.

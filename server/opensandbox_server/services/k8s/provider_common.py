@@ -123,6 +123,7 @@ def _build_execd_init_container(
     execd_init_resources: Any,
     *,
     disable_ipv6_for_egress: bool = False,
+    extra_security_context: Optional[Dict[str, Any]] = None,
 ) -> V1Container:
     script = (
         "cp ./execd /opt/opensandbox/execd && "
@@ -140,10 +141,11 @@ def _build_execd_init_container(
         "/opt/opensandbox/opensandbox-launcher && "
         "chmod 0555 /opt/opensandbox/opensandbox-launcher))"
     )
-    security_context = None
+    sc_dict: Dict[str, Any] = dict(extra_security_context or {})
     if disable_ipv6_for_egress:
-        script, sc_dict = prep_execd_init_for_egress(script)
-        security_context = build_security_context_from_dict(sc_dict)
+        script, egress_sc_dict = prep_execd_init_for_egress(script)
+        sc_dict.update(egress_sc_dict)
+    security_context = build_security_context_from_dict(sc_dict)
 
     resources = None
     if execd_init_resources:
@@ -229,7 +231,16 @@ def _build_main_container(
         name="sandbox",
         image=image_spec.uri,
         image_pull_policy=image_pull_policy,
-        command=["/opt/opensandbox/bootstrap.sh"] + entrypoint,
+        # Some sandbox runtimes (e.g. EKS Pod Isolation) enforce SELinux checks on a
+        # container's OCI entrypoint exec that don't apply to a subsequent subprocess
+        # exec from an already-running process, even with identical SELinux context —
+        # denying "exec: permission denied" specifically when the entrypoint binary was
+        # written by a different container (the execd-installer init container writing
+        # bootstrap.sh here). Making the literal entrypoint /bin/sh (already present in
+        # the sandbox image, not written by the init container) and exec'ing
+        # bootstrap.sh as its subprocess avoids that restriction.
+        command=["/bin/sh", "-c", 'exec "$@"', "sh", "/opt/opensandbox/bootstrap.sh"]
+        + entrypoint,
         env=env_vars if env_vars else None,
         resources=resources,
         volume_mounts=volume_mounts,

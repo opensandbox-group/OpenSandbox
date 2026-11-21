@@ -325,6 +325,7 @@ export default withMermaid(defineConfig({
             { text: "Windows", link: "/examples/windows" },
             { text: "AKS Kata", link: "/examples/aks-kata" },
             { text: "ACK PeerPods", link: "/examples/ack-peerpods" },
+            { text: "EKS Nitro", link: "/examples/eks-nitro" },
             { text: "Harbor Evaluation", link: "/examples/harbor-evaluation" },
           ],
         },

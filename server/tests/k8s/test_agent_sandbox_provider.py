@@ -182,6 +182,33 @@ class TestAgentSandboxProvider:
         else:
             assert spec["shutdownTime"] == expires_at.isoformat()
 
+    def test_create_workload_applies_execd_init_security_context(self, mock_k8s_client):
+        app_config = _app_config()
+        app_config.kubernetes.execd_init_security_context = {
+            "seLinuxOptions": {"level": "s0:c1,c2"}
+        }
+        provider = AgentSandboxProvider(mock_k8s_client, app_config)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={"cpu": "1", "memory": "1Gi"},
+            labels={"opensandbox.io/id": "test-id"},
+            expires_at=None,
+            execd_image="execd:latest",
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        init = body["spec"]["podTemplate"]["spec"]["initContainers"][0]
+        assert init["name"] == "execd-installer"
+        assert init["securityContext"]["seLinuxOptions"] == {"level": "s0:c1,c2"}
+
     def test_create_workload_injects_platform_node_selector(self, mock_k8s_client):
         provider = AgentSandboxProvider(mock_k8s_client, _app_config())
         mock_k8s_client.create_custom_object.return_value = {
