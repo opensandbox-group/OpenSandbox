@@ -273,14 +273,14 @@ Policy **deny** is not represented in this log (use **`egress.policy.denied_tota
   Implement `InitOpenTelemetry(ctx context.Context, opts InitOptions) (shutdown func(), err error)` in main for execd, egress, and ingress (or in a shared `pkg/telemetry`):
   - Create `MeterProvider` and register an OTLP metric exporter (e.g., `go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp` or gRPC).
   - Optionally create `LoggerProvider` and register an OTLP log exporter; otherwise rely on zap and optional **Logs Bridge** (execd/ingress as applicable).
-  - **Egress (reference):** `components/internal/telemetry` initializes **MeterProvider + OTLP HTTP metrics** only; **no** `LoggerProvider`; zap remains the sole log sink.
+  - **Egress (reference):** `components/internal/telemetry` initializes **MeterProvider + OTLP HTTP/protobuf or gRPC metrics** only; **no** `LoggerProvider`; zap remains the sole log sink.
   - Set global `otel.SetMeterProvider` (and logger provider if used), and return a `shutdown` function (Flush + ForceFlush) to call on process exit.
   - **Do not** set `TracerProvider` for production use; omit or use a no-op tracer provider.
 
 - **OTLP exporter**  
-  The current shared exporter supports OTLP HTTP/protobuf. gRPC transport remains unimplemented; setting `OTEL_EXPORTER_OTLP_PROTOCOL=grpc` does not select it. Configure HTTP endpoints via environment variables:
-  - `OTEL_EXPORTER_OTLP_ENDPOINT` (or per-signal `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`).
-  - R5 calls for no export when unconfigured. The current execd/egress/ingress implementation retains a historical `HOST_IP:4318` / `/etc/hostinfo` fallback for compatibility. `OTEL_SDK_DISABLED=true` or `OTEL_METRICS_EXPORTER=none` explicitly disables export, taking precedence over both explicit endpoints and this fallback. Components may opt out of fallback with the shared `DisableEndpointFallback` configuration field.
+  The shared metrics exporter supports OTLP HTTP/protobuf and gRPC. `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` takes precedence over `OTEL_EXPORTER_OTLP_PROTOCOL`; supported values are `http/protobuf` (the default) and `grpc`, case-insensitively. Unknown or unsupported values, including `http/json`, produce a warning and use HTTP/protobuf. This selection does not enable OTLP trace or log export.
+  - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` takes precedence over `OTEL_EXPORTER_OTLP_ENDPOINT`. Use an endpoint URL for either transport. Explicit ports are preserved; the URL's `http` or `https` scheme selects plaintext or TLS rather than the protocol. The upstream exporter handles standard TLS, headers, compression, and timeout environment variables.
+  - R5 calls for no export when unconfigured. The current execd/egress/ingress implementation retains a historical node-IP fallback (`HOST_IP`, then `/etc/hostinfo`) for compatibility: port 4318 for HTTP/protobuf or 4317 for gRPC, plaintext in both cases. `OTEL_SDK_DISABLED=true` or `OTEL_METRICS_EXPORTER=none` explicitly disables export, taking precedence over both explicit endpoints and this fallback. Components may opt out of fallback with the shared `DisableEndpointFallback` configuration field; node-agent does so.
   - `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` accepts `cumulative`, `delta`, and `lowmemory` using the upstream exporter's semantics. When unset, synchronous counters/histograms retain delta temporality and observable counters retain cumulative temporality. Prometheus-style pipelines need cumulative export or Collector `deltatocumulative` conversion.
   - See [telemetry reference](../docs/guides/telemetry.md) for current deployment behavior and process-environment configuration.
 
