@@ -755,22 +755,29 @@ watch_mitm_ca() {
 			trust_mitm_ca "$ca" || _install_failed=1
 			trust_mitm_ca_nss "$ca" || true
 			trust_mitm_ca_jdk "$ca" || true
+			# NSS and JDK imports delete the previous alias first, so a
+			# failed one leaves that store trusting no generation: retry it
+			# like a failed system install.
+			if [ "${_MITM_CA_NSS_FAILED:-0}" -ne 0 ] || [ "${_MITM_CA_JDK_FAILED:-0}" -ne 0 ]; then
+				_install_failed=1
+			fi
 			if [ "$_install_failed" -eq 0 ]; then
-				if [ "${_MITM_CA_NSS_FAILED:-0}" -eq 0 ] && [ "${_MITM_CA_JDK_FAILED:-0}" -eq 0 ]; then
-					if command -v _write_mitm_ca_marker >/dev/null 2>&1; then
-						_write_mitm_ca_marker "$ca" "$_cur"
-					fi
-				elif command -v _clear_mitm_ca_marker >/dev/null 2>&1; then
-					_clear_mitm_ca_marker
+				if command -v _write_mitm_ca_marker >/dev/null 2>&1; then
+					_write_mitm_ca_marker "$ca" "$_cur"
 				fi
 				_prev="$_cur"
 				_watch_attempts=0
-			elif [ "$_watch_attempts" -ge 3 ]; then
-				echo "warning: mitm CA install failed 3 times; giving up until the next rotation" >&2
-				_prev="$_cur"
-				_watch_attempts=0
 			else
-				echo "warning: mitm CA reinstall failed; retrying on the next poll" >&2
+				if command -v _clear_mitm_ca_marker >/dev/null 2>&1; then
+					_clear_mitm_ca_marker
+				fi
+				if [ "$_watch_attempts" -ge 3 ]; then
+					echo "warning: mitm CA install failed 3 times; giving up until the next rotation" >&2
+					_prev="$_cur"
+					_watch_attempts=0
+				else
+					echo "warning: mitm CA reinstall failed; retrying on the next poll" >&2
+				fi
 			fi
 		fi
 	done
@@ -810,6 +817,9 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 			_write_mitm_ca_marker "$MITM_CA" "$_baseline_fp"
 		else
 			_clear_mitm_ca_marker
+			# Let the watcher retry a failed NSS or JDK import on its first
+			# poll, as it does after a failed system install.
+			_baseline_fp=""
 		fi
 	fi
 
