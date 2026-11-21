@@ -156,6 +156,80 @@ func (r *recordingTaskScheduler) AddTasks(_ []*taskexecutor.Task) error {
 
 // ---------- dispatchPauseResume 5-case tests ----------
 
+func TestApplyPodLabelOverridesForRecreatedDedicatedPod(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-bs", Annotations: map[string]string{
+			annoPodLabelOverrides: `{"example.com/phase":"run","network.example.com/old":null}`,
+		},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+		"example.com/phase": "setup", "network.example.com/old": "yes", "unrelated": "keep",
+	}}}
+	require.NoError(t, applyPodLabelOverrides(bs, pod))
+	assert.Equal(t, "run", pod.Labels["example.com/phase"])
+	assert.NotContains(t, pod.Labels, "network.example.com/old")
+	assert.Equal(t, "keep", pod.Labels["unrelated"])
+
+	bs.Annotations[annoPodLabelOverrides] = `{broken`
+	require.ErrorContains(t, applyPodLabelOverrides(bs, pod), "invalid Pod label overrides")
+}
+
+func TestScaleBatchSandboxRestoresMetadataLabelOverrides(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "label-recreation", Namespace: "default", UID: "label-recreation-uid",
+			Annotations: map[string]string{
+				annoPodLabelOverrides: `{"example.com/phase":"run","network.example.com/old":null}`,
+			},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			Template: &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					"example.com/phase": "setup", "network.example.com/old": "yes", "unrelated": "keep",
+				}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img"}}},
+			},
+		},
+	}
+	r := newTestReconciler(bs)
+	require.NoError(t, r.scaleBatchSandbox(context.Background(), bs, bs.Spec.Template, nil))
+	pod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{
+		Namespace: "default", Name: "label-recreation-0",
+	}, pod))
+	assert.Equal(t, "run", pod.Labels["example.com/phase"])
+	assert.NotContains(t, pod.Labels, "network.example.com/old")
+	assert.Equal(t, "keep", pod.Labels["unrelated"])
+}
+
+func TestDispatchPauseResume_MetadataOnlyUpdateAfterFailedPause(t *testing.T) {
+	// The server stores runtime Pod-label overrides in metadata rather than
+	// spec.template, so the generation stays acknowledged after a failed
+	// pause. Reconciliation must not start another pause/snapshot.
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-bs", Namespace: "default", Generation: 9,
+			Annotations: map[string]string{annoPodLabelOverrides: `{"example.com/phase":"run"}`},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause: ptr.To(true), Replicas: ptr.To(int32(1)),
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                   sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			PauseObservedGeneration: 9,
+			Conditions: []sandboxv1alpha1.BatchSandboxCondition{{
+				Type:   sandboxv1alpha1.BatchSandboxConditionPauseFailed,
+				Status: sandboxv1alpha1.ConditionTrue,
+			}},
+		},
+	}
+	r := newTestReconciler(bs)
+	_, handled, err := r.dispatchPauseResume(context.Background(), bs)
+	require.NoError(t, err)
+	assert.False(t, handled)
+}
+
 func TestDispatchPauseResume_Case1_PauseTrue(t *testing.T) {
 	// gen > pauseObservedGen, pause=true → handlePause dispatched
 	bs := &sandboxv1alpha1.BatchSandbox{

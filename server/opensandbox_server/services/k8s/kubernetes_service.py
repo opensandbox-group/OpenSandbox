@@ -1618,6 +1618,9 @@ class KubernetesSandboxService(
                 namespace=self._resolve_namespace(),
                 labels=label_patch,
             )
+            self.workload_provider.sync_pod_metadata_labels(
+                updated, self._resolve_namespace(), patch,
+            )
         except Exception as e:
             logger.error(f"Error patching labels for sandbox {sandbox_id}: {e}")
             raise _build_k8s_api_error("patch sandbox labels", e) from e

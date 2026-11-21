@@ -90,6 +90,21 @@ Creation requests share the existing resource watches. A workload change wakes i
 
 The default fallback interval remains unchanged. Increasing it (for example to `5.0`) reduces repeated checks while nothing changes, but can delay detection when watch notifications are unavailable. Overall and Pool capacity deadlines still apply independently of this interval. Unavailable cache reads continue to fall back to the Kubernetes API.
 
+## Updating Kubernetes Pod labels from metadata
+
+By default, a metadata PATCH updates only workload labels. To let cluster network policies select a running sandbox by its current metadata, opt in to synchronizing all accepted metadata labels:
+
+```toml
+[kubernetes]
+metadata_sync_pods = true
+```
+
+The default is `false`, preserving existing PATCH behavior. When enabled, every accepted metadata key, including a `null` deletion, is synchronized to the dedicated BatchSandbox Pod. The system-managed prefixes `opensandbox.io/` and `batch-sandbox.sandbox.opensandbox.io/` are reserved and cannot be set or deleted through metadata. Pooled Pods, agent-sandbox and fast-sandbox workloads, and Docker keep their existing behavior. Deploy the corresponding OpenSandbox Kubernetes controller update before enabling this setting, so replacement Pods inherit label changes. Treat metadata permissions as network-policy permissions: users who can change these labels may affect operator-managed network policies.
+
+After the workload metadata write, the server stores label overrides in the BatchSandbox metadata annotation `sandbox.opensandbox.io/pod-label-overrides` and patches the dedicated Pod's labels in one merge request. Values set labels, `null` deletes them, and omitted keys remain untouched. When the controller recreates a Pod, it applies these overrides to the original Pod template. Unlike changing `spec.template`, annotation updates do not advance the BatchSandbox generation or re-trigger a previously failed pause request. An empty PATCH performs no additional API calls.
+
+These writes are not atomic across resources. A missing Pod is tolerated because the persisted annotation is applied on creation or recreation. Other annotation or Pod write failures return an error even though workload metadata may already have changed; retry the same PATCH to finish synchronization. Concurrent metadata PATCHes can race when merging the annotation, so serialize updates for the same sandbox if exact recreation consistency is required. A successful response means the live Pod write completed or no Pod currently exists, but CNI policy enforcement may converge asynchronously. OpenSandbox does not create or update NetworkPolicy objects.
+
 ## API Documentation
 
 Once the server is running, interactive API docs are available at:
