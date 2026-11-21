@@ -37,6 +37,9 @@ Kubernetes: `>=1.22.0-0`
 | gateway.fastSandboxNamespace | string | `""` | Restricts Fast Sandbox to one namespace and enables unsigned wildcard routing. Empty requires signed scopes; unsigned access needs external protection. |
 | gateway.fastpathEndpoint | string | `""` | FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise. |
 | gateway.gatewayRouteMode | string | `"header"` | Routing mode: header (including wildcard hosts) or uri. |
+| gateway.httpConnectionPool.idleConnTimeout | string | `"90s"` | Maximum HTTP connection idle time (Go duration). Zero disables idle expiration; must be nonnegative. |
+| gateway.httpConnectionPool.maxIdleConns | int | `100` | Maximum idle HTTP connections across all upstream hosts. Zero means no total limit; must be nonnegative. |
+| gateway.httpConnectionPool.maxIdleConnsPerHost | int | `2` | Maximum idle HTTP connections per upstream host. Zero uses Go's default of 2; must be nonnegative. |
 | gateway.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress","tag":""}` | Gateway image configuration. |
 | gateway.image.pullPolicy | string | `"IfNotPresent"` | Gateway image pull policy. |
 | gateway.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress"` | Gateway image repository. |

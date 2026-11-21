@@ -6,6 +6,7 @@ on:
     paths:
       - 'manifests/charts/**'
       - 'manifests/Makefile'
+      - 'manifests/tests/ingress-http-connection-pool.sh'
       - '.github/workflows/helm-docs.yml'
 
 permissions:
@@ -67,6 +68,9 @@ jobs:
             --fastlet-proxy-limit-memory=256Mi; do
             grep -Fq -- "$argument" <<<"$legacy_rendered"
           done
+
+      - name: Verify ingress HTTP connection pool arguments
+        run: bash manifests/tests/ingress-http-connection-pool.sh
 
       - name: Generate chart documentation
         working-directory: manifests

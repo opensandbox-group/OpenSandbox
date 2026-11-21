@@ -13,6 +13,8 @@
 # limitations under the License.
 
 {{- include "opensandbox-ingress-gateway.secureAccess.validate" . }}
+{{/* 兼容旧 values 缺少此节点，并按键回退以保留显式 0。 */}}
+{{- $httpPool := .Values.gateway.httpConnectionPool | default dict }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -82,6 +84,9 @@ spec:
             - "--provider-type={{ .Values.gateway.providerType }}"
             - "--mode={{ .Values.gateway.gatewayRouteMode }}"
             - "--log-level={{ .Values.gateway.logLevel }}"
+            - "--http-max-idle-conns={{ dig "maxIdleConns" 100 $httpPool }}"
+            - "--http-max-idle-conns-per-host={{ dig "maxIdleConnsPerHost" 2 $httpPool }}"
+            - "--http-idle-conn-timeout={{ dig "idleConnTimeout" "90s" $httpPool }}"
             {{- if .Values.gateway.fastpathEndpoint }}
             # FastPath gRPC endpoint for the fast-sandbox provider.
             - "--fastpath-endpoint={{ .Values.gateway.fastpathEndpoint }}"

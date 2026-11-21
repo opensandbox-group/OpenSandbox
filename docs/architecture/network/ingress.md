@@ -32,6 +32,10 @@ When routing cannot proceed, the failure is precise — clients can branch on st
 
 Once a sandbox is reached, its responses pass through **verbatim**, including redirects and errors. The ingress never follows a redirect itself, so a stale `Location` can never leak credentials to an unrelated endpoint.
 
+## Upstream HTTP connection reuse
+
+Each ingress replica reuses one HTTP transport across requests to different sandbox upstreams. Its idle connection pool can be configured independently of connection observation; WebSocket traffic keeps a separate transport. See [Ingress HTTP connection pool](/guides/ingress-connection-pool) for configuration, zero-value semantics, and resource trade-offs.
+
 ## WebSocket support
 
 WebSocket is a first-class path, not an upgrade hack bolted onto HTTP proxying:

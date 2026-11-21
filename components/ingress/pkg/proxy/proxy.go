@@ -84,7 +84,7 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		secure:                    secure,
 		scope:                     scope,
 		fastSandboxNamespace:      options.fastSandboxNamespace,
-		httpTransport:             newObservedHTTPTransport(options.connectObserver),
+		httpTransport:             newHTTPTransport(options.connectObserver, options.httpConnectionPool),
 		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
 		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,
 	}
