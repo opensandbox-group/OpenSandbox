@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,8 @@ import (
 	metrics "go.opentelemetry.io/proto/otlp/metrics/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/resolver"
+	"google.golang.org/grpc/resolver/manual"
 )
 
 func TestInitGRPCExportsMetrics(t *testing.T) {
@@ -182,6 +185,51 @@ func TestInitGRPCDisabledOrRegistrationFailed(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+func TestInitGRPCPreservesCollectorHostname(t *testing.T) {
+	preserveTelemetryGlobals(t)
+	endpoint, exported := newTestGRPCCollector(t)
+	dns := resolver.Get("dns")
+	testDNS := manual.NewBuilderWithScheme("dns")
+	// Resolve the test hostname locally and inspect the target gRPC parsed.
+	testDNS.InitialState(resolver.State{Addresses: []resolver.Address{{Addr: strings.TrimPrefix(endpoint, "http://")}}})
+	testDNS.BuildCallback = func(target resolver.Target, _ resolver.ClientConn, _ resolver.BuildOptions) {
+		if got := target.Endpoint(); got != "dns:4317" {
+			t.Errorf("gRPC resolver endpoint = %q, want dns:4317", got)
+		}
+	}
+	resolver.Register(testDNS)
+	t.Cleanup(func() { resolver.Register(dns) })
+
+	t.Setenv(envSDKDisabled, "")
+	t.Setenv(envMetricsExporter, "")
+	t.Setenv(envOTLPMetricsProtocol, "grpc")
+	t.Setenv(envOTLPMetricsEndpoint, "http://dns:4317")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	shutdown, err := Init(ctx, Config{ServiceName: "grpc-hostname-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := shutdown(ctx); err != nil {
+			t.Error(err)
+		}
+	}()
+	counter, err := otel.Meter("test").Int64Counter("grpc.hostname.counter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter.Add(ctx, 1)
+	if err := ForceFlush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exported:
+	case <-ctx.Done():
+		t.Fatal("missing gRPC export")
 	}
 }
 

@@ -178,11 +178,18 @@ func newMetricsExporter(ctx context.Context, disableEndpointFallback bool) (sdkm
 	if protocol == otlpGRPCProtocol {
 		var opts []otlpmetricgrpc.Option
 		if endpoint := otlpEndpointFromEnv(); endpoint != "" {
-			// An explicit URL owns its TLS scheme and must not become a gRPC resolver path.
+			// Let the URL scheme select TLS, then resolve its authority as a DNS target.
 			opts = append(opts, otlpmetricgrpc.WithEndpointURL(endpoint))
-			if parsed, err := url.Parse(endpoint); err == nil && parsed.Scheme == "http" {
-				// Certificate env vars must not override an explicitly plaintext URL.
-				opts = append(opts, otlpmetricgrpc.WithTLSCredentials(nil))
+			if parsed, err := url.Parse(endpoint); err == nil {
+				if parsed.Host != "" {
+					// A hostname such as dns:4317 can otherwise look like a resolver scheme.
+					target := url.URL{Scheme: "dns", Path: "/" + parsed.Host}
+					opts = append(opts, otlpmetricgrpc.WithEndpoint(target.String()))
+				}
+				if parsed.Scheme == "http" {
+					// Certificate env vars must not override an explicitly plaintext URL.
+					opts = append(opts, otlpmetricgrpc.WithTLSCredentials(nil))
+				}
 			}
 		} else if !disableEndpointFallback {
 			if host, port, ok := OTLPEndpointFallbackHostPort(); ok {
