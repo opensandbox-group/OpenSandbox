@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
@@ -102,6 +103,18 @@ class CommandsAdapterTest {
             val pool = httpClientProvider.sseClient.connectionPool
             assertEquals(pool.idleConnectionCount(), pool.connectionCount(), "response still holds a connection")
         }
+    }
+
+    @Test
+    fun `foreground rejects EOF without a terminal event`() {
+        mockWebServer.enqueue(MockResponse().setBody("""data: {"type":"stdout","text":"partial","timestamp":1}""" + "\n\n"))
+
+        val error =
+            assertThrows<SandboxException> {
+                commandsAdapter.run(RunCommandRequest.builder().command("echo test").build())
+            }
+
+        assertEquals("COMMAND_STREAM_INCOMPLETE", error.error.code)
     }
 
     @Test
@@ -534,7 +547,7 @@ data: {"type":"execution_complete","execution_time":100,"timestamp":167253120100
         mockWebServer.enqueue(
             MockResponse()
                 .setResponseCode(200)
-                .setBody("""{"type":"init","text":"cmd-123","timestamp":1672531200000}""" + "\n"),
+                .setBody("""{"type":"execution_complete","execution_time":1,"timestamp":1}""" + "\n"),
         )
 
         commandsAdapter.run(

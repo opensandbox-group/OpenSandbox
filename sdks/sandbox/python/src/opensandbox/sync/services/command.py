@@ -67,6 +67,8 @@ class CommandsSync(Protocol):
 
         Raises:
             SandboxException: If the operation fails.
+            SandboxInternalException: If a foreground stream ends normally without a
+                completion or execution error event. Handlers may have received partial output.
         """
         ...
 

@@ -16,15 +16,22 @@ package opensandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
-// RunCommand executes a shell command and returns the structured result.
+// ErrIncompleteCommand indicates that a foreground command stream ended
+// without a completion or execution error event.
+var ErrIncompleteCommand = errors.New("opensandbox: foreground command stream ended without a terminal event")
+
+// RunCommand executes a foreground shell command using [Sandbox.RunCommandWithOpts].
 func (s *Sandbox) RunCommand(ctx context.Context, command string, handlers *ExecutionHandlers) (*Execution, error) {
 	return s.RunCommandWithOpts(ctx, RunCommandRequest{Command: command}, handlers)
 }
 
 // RunCommandWithOpts executes a command with full options.
+// If a foreground stream ends normally without a completion or execution error
+// event, it returns the result collected so far and [ErrIncompleteCommand].
 func (s *Sandbox) RunCommandWithOpts(ctx context.Context, req RunCommandRequest, handlers *ExecutionHandlers) (*Execution, error) {
 	if s.execd == nil {
 		return nil, fmt.Errorf("opensandbox: execd client not initialized")
@@ -37,6 +44,8 @@ func (s *Sandbox) RunCommandWithOpts(ctx context.Context, req RunCommandRequest,
 	if req.Background {
 		// Completion acknowledges startup, not the background process exit.
 		exec.ExitCode = nil
+	} else if err == nil && exec.Complete == nil && exec.Error == nil {
+		err = ErrIncompleteCommand
 	}
 	return exec, err
 }
