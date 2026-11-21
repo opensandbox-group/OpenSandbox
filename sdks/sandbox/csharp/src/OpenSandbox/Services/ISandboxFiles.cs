@@ -32,7 +32,8 @@ public interface ISandboxFiles
     /// <exception cref="SandboxException">Thrown when the execd service request fails.</exception>
     Task<IReadOnlyDictionary<string, SandboxFileInfo>> GetFileInfoAsync(
         IEnumerable<string> paths,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        GetFileInfoOptions? options = null);
 
     /// <summary>
     /// Searches for files matching the specified criteria.

@@ -44,14 +44,21 @@ func (c *FilesystemController) DownloadFile() {
 		)
 		return
 	}
-	resolvedFilePath, err := pathutil.ExpandPath(filePath)
-	if err != nil {
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error resolving file path: %s. %v", filePath, err),
-		)
-		return
+	// literal=true keeps the path exactly as written (no "$VAR" or "~"
+	// expansion), so a file whose name contains e.g. "$VERSION" is opened
+	// literally instead of resolving the variable away.
+	resolvedFilePath := filePath
+	if c.ctx.Query("literal") != "true" {
+		var err error
+		resolvedFilePath, err = pathutil.ExpandPath(filePath)
+		if err != nil {
+			c.RespondError(
+				http.StatusInternalServerError,
+				model.ErrorCodeRuntimeError,
+				fmt.Sprintf("error resolving file path: %s. %v", filePath, err),
+			)
+			return
+		}
 	}
 	if err := rejectStagingPath(resolvedFilePath); err != nil {
 		c.handleFileError(err)

@@ -342,6 +342,31 @@ public class ReadBytesOptions
     /// Mutually exclusive with Range.
     /// </summary>
     public int? Limit { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether the path is treated exactly as
+    /// written, skipping "$VAR"/"${VAR}" and "~" expansion.
+    /// </summary>
+    public bool? Literal { get; set; }
+}
+
+/// <summary>
+/// Options for querying file information.
+/// </summary>
+public class GetFileInfoOptions
+{
+    /// <summary>
+    /// Gets or sets a value indicating whether each path is treated exactly as
+    /// written, skipping "$VAR"/"${VAR}" and "~" expansion.
+    /// </summary>
+    public bool? Literal { get; set; }
+
+    /// <summary>
+    /// Gets or sets a value indicating whether symlinks resolve to their
+    /// targets the same way downloads open them: the target's metadata is
+    /// reported and a dangling link reports as missing.
+    /// </summary>
+    public bool? Follow { get; set; }
 }
 
 /// <summary>

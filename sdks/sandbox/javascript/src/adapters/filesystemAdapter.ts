@@ -327,9 +327,18 @@ export class FilesystemAdapter implements SandboxFiles {
     };
   }
 
-  async getFileInfo(paths: string[]): Promise<Record<string, FileInfo>> {
+  async getFileInfo(
+    paths: string[],
+    opts?: { literal?: boolean; follow?: boolean }
+  ): Promise<Record<string, FileInfo>> {
     const { data, error, response } = await this.client.GET("/files/info", {
-      params: { query: { path: paths } },
+      params: {
+        query: {
+          path: paths,
+          ...(opts?.literal != null ? { literal: opts.literal } : {}),
+          ...(opts?.follow != null ? { follow: opts.follow } : {}),
+        },
+      },
     });
     throwOnOpenApiFetchError({ error, response }, "Get file info failed");
     const raw = data as typeof FilesystemAdapter.Api.FilesInfoOk | undefined;
@@ -578,14 +587,14 @@ export class FilesystemAdapter implements SandboxFiles {
 
   async readBytes(
     path: string,
-    opts?: { range?: string; offset?: number; limit?: number }
+    opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }
   ): Promise<Uint8Array> {
     return (await this.readBytesDetailed(path, opts)).body;
   }
 
   async readBytesDetailed(
     path: string,
-    opts?: { range?: string; offset?: number; limit?: number }
+    opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }
   ): Promise<ReadBytesResponse<Uint8Array>> {
     const res = await this.fetchDownload(path, opts, "Download failed");
     const ab = await res.arrayBuffer();
@@ -598,14 +607,14 @@ export class FilesystemAdapter implements SandboxFiles {
 
   readBytesStream(
     path: string,
-    opts?: { range?: string; offset?: number; limit?: number }
+    opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }
   ): AsyncIterable<Uint8Array> {
     return this.downloadStream(path, opts);
   }
 
   async readBytesStreamDetailed(
     path: string,
-    opts?: { range?: string; offset?: number; limit?: number }
+    opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }
   ): Promise<ReadBytesResponse<ReadBytesStream>> {
     const res = await this.fetchDownload(path, opts, "Download stream failed");
     return createReadBytesResponse(
@@ -617,7 +626,7 @@ export class FilesystemAdapter implements SandboxFiles {
 
   private async fetchDownload(
     path: string,
-    opts: { range?: string; offset?: number; limit?: number } | undefined,
+    opts: { range?: string; offset?: number; limit?: number; literal?: boolean } | undefined,
     errorMessage: string,
   ): Promise<Response> {
     let url =
@@ -625,6 +634,7 @@ export class FilesystemAdapter implements SandboxFiles {
       `?path=${encodeURIComponent(path)}`;
     if (opts?.offset != null) url += `&offset=${opts.offset}`;
     if (opts?.limit != null) url += `&limit=${opts.limit}`;
+    if (opts?.literal != null) url += `&literal=${opts.literal ? "true" : "false"}`;
     const res = await this.fetch(url, {
       method: "GET",
       headers: {
@@ -640,7 +650,7 @@ export class FilesystemAdapter implements SandboxFiles {
 
   private async *downloadStream(
     path: string,
-    opts?: { range?: string; offset?: number; limit?: number }
+    opts?: { range?: string; offset?: number; limit?: number; literal?: boolean }
   ): AsyncIterable<Uint8Array> {
     const response = await this.readBytesStreamDetailed(path, opts);
     yield* response.body;
@@ -648,9 +658,9 @@ export class FilesystemAdapter implements SandboxFiles {
 
   async readFile(
     path: string,
-    opts?: { encoding?: string; range?: string; offset?: number; limit?: number }
+    opts?: { encoding?: string; range?: string; offset?: number; limit?: number; literal?: boolean }
   ): Promise<string> {
-    const bytes = await this.readBytes(path, { range: opts?.range, offset: opts?.offset, limit: opts?.limit });
+    const bytes = await this.readBytes(path, { range: opts?.range, offset: opts?.offset, limit: opts?.limit, literal: opts?.literal });
     const encoding = opts?.encoding ?? "utf-8";
     return new TextDecoder(encoding).decode(bytes);
   }
