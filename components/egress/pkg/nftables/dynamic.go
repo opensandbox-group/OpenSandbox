@@ -172,11 +172,13 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	return nil
 }
 
-// holdsDomainCapacity is called with m.mu held. Keep a pending TCP refresh
-// eligible even if its most recent kernel lease has already expired.
+// holdsDomainCapacity is called with m.mu held. Activity may extend this
+// source's live lease or continue a grace period credited by the last active
+// poll, but cannot revive an unrelated expired owner of the shared IP.
 func (m *Manager) holdsDomainCapacity(addr netip.Addr, lease domainLease, now time.Time) bool {
 	_, active := m.tracker.previousActiveIPs[addr]
-	return active || lease.deadline().After(now)
+	return lease.deadline().After(now) ||
+		(active && !lease.tcpUntil.IsZero() && lease.tcpUntil.Equal(m.tracker.previousActiveGrace))
 }
 
 func (m *Manager) StartDomainRefresh(ctx context.Context, lookup func(context.Context, string) ([]ResolvedIP, error)) {

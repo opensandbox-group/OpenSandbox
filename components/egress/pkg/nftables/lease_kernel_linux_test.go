@@ -81,12 +81,20 @@ func TestNftSharedIPTeardownCountsOnlyDroppedLeases(t *testing.T) {
 	shared := netip.MustParseAddr("192.0.2.1")
 	flow := []byte("ipv4 2 tcp 6 431999 ESTABLISHED src=10.0.0.2 dst=192.0.2.1 sport=12345 dport=443 src=192.0.2.1 dst=10.0.0.2 sport=443 dport=12345 [ASSURED]\n")
 	for _, tc := range []struct {
-		name    string
-		elapsed time.Duration
-		want    int
+		name       string
+		elapsed    time.Duration
+		retired    bool
+		earlyTCP   bool
+		refreshTCP bool
+		clockStep  time.Duration
+		want       int
 	}{
-		{"live retired owner", time.Minute, 0},
-		{"expired retired owner", 121 * time.Second, 1},
+		{name: "live retired owner", elapsed: time.Minute, retired: true, want: 0},
+		{name: "expired retired owner", elapsed: 121 * time.Second, retired: true, want: 1},
+		{name: "expired retired owner with unrelated TCP", elapsed: 121 * time.Second, retired: true, refreshTCP: true, want: 1},
+		{name: "expired renewable owner in DNS backoff", elapsed: 121 * time.Second, want: 1},
+		{name: "previously credited owner after a delayed TCP poll", elapsed: 361 * time.Second, retired: true, earlyTCP: true, refreshTCP: true, want: 0},
+		{name: "lease eligibility is sampled once per replacement", elapsed: 110 * time.Second, retired: true, clockStep: 11 * time.Second, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewManagerWithOptions(Options{})
@@ -94,16 +102,41 @@ func TestNftSharedIPTeardownCountsOnlyDroppedLeases(t *testing.T) {
 			m.tracker.now = func() time.Time { return now }
 			require.NoError(t, m.ApplyStatic(ctx, wide))
 			require.NoError(t, m.AddResolvedDomain(ctx, keep, []ResolvedIP{{Addr: shared, TTL: time.Minute}}))
-			require.NoError(t, m.AddResolvedDomain(ctx, "remove.example.com", []ResolvedIP{{Addr: shared, TTL: 300 * time.Second}}))
-			m.applyDomainRefresh(ctx, keep, m.domains[keep], nil)
-
+			active := []tcpConnection{{remote: shared, state: "ESTABLISHED"}}
+			if tc.retired {
+				m.applyDomainRefresh(ctx, keep, m.domains[keep], nil)
+			}
+			if tc.earlyTCP {
+				require.NoError(t, m.tracker.refreshActiveConnections(ctx, active, m))
+			}
 			now = now.Add(tc.elapsed)
+			if !tc.retired {
+				m.refreshDomains(ctx, func(context.Context, string) ([]ResolvedIP, error) {
+					return nil, errors.New("resolver temporarily unavailable")
+				})
+				require.True(t, m.domains[keep].retryAt.After(now), "expired observation must be in retry backoff")
+			}
+			require.NoError(t, m.AddResolvedDomain(ctx, "remove.example.com", []ResolvedIP{{Addr: shared, TTL: 300 * time.Second}}))
+			if tc.refreshTCP {
+				require.NoError(t, m.tracker.refreshActiveConnections(ctx, active, m))
+			}
+			if tc.clockStep != 0 {
+				m.tracker.now = func() time.Time {
+					snapshotAt := now
+					now = now.Add(tc.clockStep)
+					return snapshotAt
+				}
+			}
 			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, wide, tight)
 			require.NoError(t, err)
+			m.tracker.now = func() time.Time { return now }
 			_, retained := readKernelLeaseExpiry(t, ctx)[shared.String()]
 			require.Equal(t, tc.want == 0, retained, "only a still-live source may keep the shared grant")
 			require.Equal(t, tc.want, countMatchingConntrackFlowsData(flow, m.lastDrops),
 				"the conntrack count must agree with whether the shared grant survives")
+			require.NoError(t, m.ApplyStatic(ctx, tight))
+			require.Equal(t, tc.want, countMatchingConntrackFlowsData(flow, m.lastDrops),
+				"ordinary reload must not turn an expired source into a keep")
 		})
 	}
 }

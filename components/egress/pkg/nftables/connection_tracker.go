@@ -31,6 +31,9 @@ type connectionTracker struct {
 	previousActiveIPs map[netip.Addr]struct{}
 	listConnections   func(context.Context) ([]tcpConnection, error)
 	now               func() time.Time
+
+	// Deadline credited by the last successful poll to previousActiveIPs.
+	previousActiveGrace time.Time
 }
 
 type refreshPlan struct {
@@ -110,7 +113,7 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 		grace := plan.at.Add(dynSetTimeoutS * time.Second)
 		for _, entry := range manager.domains {
 			for address, lease := range entry.addresses {
-				if _, ok := plan.refreshing[address]; ok {
+				if _, ok := plan.refreshing[address]; ok && manager.holdsDomainCapacity(address, lease, plan.at) {
 					lease.tcpUntil = grace
 					entry.addresses[address] = lease
 				}
@@ -127,7 +130,7 @@ func (t *connectionTracker) clearPreviousActiveIPs(manager *Manager) {
 	if manager.quiesced.Load() {
 		return
 	}
-	t.previousActiveIPs = make(map[netip.Addr]struct{})
+	t.clearPreviousActiveIPsLocked()
 }
 
 func (t *connectionTracker) refreshCandidates(connections []tcpConnection) refreshPlan {
@@ -173,14 +176,17 @@ func (t *connectionTracker) refreshCandidates(connections []tcpConnection) refre
 }
 
 func (t *connectionTracker) recordRefresh(plan refreshPlan) {
+	grace := plan.at.Add(dynSetTimeoutS * time.Second)
 	for _, addr := range plan.addresses {
-		t.dynamicIPs[addr] = plan.at.Add(time.Duration(dynSetTimeoutS) * time.Second)
+		t.dynamicIPs[addr] = grace
 	}
 	t.previousActiveIPs = plan.active
+	t.previousActiveGrace = grace
 }
 
 func (t *connectionTracker) clearPreviousActiveIPsLocked() {
 	t.previousActiveIPs = make(map[netip.Addr]struct{})
+	t.previousActiveGrace = time.Time{}
 }
 
 func (t *connectionTracker) clear() {

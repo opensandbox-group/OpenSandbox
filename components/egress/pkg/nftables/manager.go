@@ -131,22 +131,24 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 		p = policy.DefaultDenyPolicy()
 	}
 	var carry EstablishedDrops
+	var leaseAt time.Time
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
-		carry = m.lastDrops.stillRelevant(p, m.learnedAddrsLocked())
+		leaseAt = m.tracker.now()
+		carry = m.lastDrops.stillRelevant(p, m.liveLearnedAddrsLocked(leaseAt))
 	}
-	_, err := m.applyStaticDropEstablishedLocked(ctx, p, carry, 0, m.lastDropsAt)
+	_, err := m.applyStaticDropEstablishedLocked(ctx, p, carry, 0, m.lastDropsAt, leaseAt)
 	return err
 }
 
-// learnedAddrsLocked returns the DNS addresses still eligible for renewal.
-func (m *Manager) learnedAddrsLocked() []netip.Addr {
+// liveLearnedAddrsLocked returns DNS addresses with an unexpired grant.
+func (m *Manager) liveLearnedAddrsLocked(now time.Time) []netip.Addr {
 	var out []netip.Addr
 	for _, entry := range m.domains {
 		if entry == nil {
 			continue
 		}
 		for addr, lease := range entry.addresses {
-			if lease.renewable {
+			if lease.deadline().After(now) {
 				out = append(out, addr)
 			}
 		}
@@ -173,7 +175,7 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.applyStaticDropEstablishedLocked(ctx, p, drops, matched, m.now())
+	return m.applyStaticDropEstablishedLocked(ctx, p, drops, matched, m.now(), time.Time{})
 }
 
 // ApplyStaticComputingEstablishedDrops snapshots DNS leases, computes the
@@ -191,17 +193,22 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 	if newPol == nil {
 		newPol = policy.DefaultDenyPolicy()
 	}
-	prior := m.snapshotResolvedDomainsLocked(m.tracker.now())
-	drops := ComputeEstablishedDrops(oldPol, newPol, prior)
-	matched, countErr := countMatchingConntrackFlows(drops)
-	if countErr != nil {
+	// Read the proc snapshot first so I/O does not separate the lease snapshot
+	// used for teardown from the one used to rebuild the dynamic sets.
+	flows, countErr := readConntrackFlows()
+	leaseAt := m.tracker.now()
+	prior, live := m.snapshotResolvedDomainsLocked(leaseAt)
+	drops := computeEstablishedDrops(oldPol, newPol, prior, live)
+	matched := 0
+	if countErr == nil {
+		matched = countMatchingConntrackFlowsData(flows, drops)
+	} else if !drops.Empty() {
 		log.Warnf("nftables: counting conntrack flows for established drops failed: %v", countErr)
-		matched = 0
 	}
-	return m.applyStaticDropEstablishedLocked(ctx, newPol, drops, matched, m.now())
+	return m.applyStaticDropEstablishedLocked(ctx, newPol, drops, matched, m.now(), leaseAt)
 }
 
-func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, drops EstablishedDrops, matched int, committedAt time.Time) (int, error) {
+func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, drops EstablishedDrops, matched int, committedAt, leaseAt time.Time) (int, error) {
 	if m.quiesced.Load() {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
 	}
@@ -218,13 +225,15 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	if err != nil {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
 	}
-	now := m.tracker.now()
-	domains, leases := m.retainedDomainLeasesLocked(p, now)
+	if leaseAt.IsZero() {
+		leaseAt = m.tracker.now()
+	}
+	domains, leases := m.retainedDomainLeasesLocked(p, leaseAt)
 	if len(leases) != 0 {
 		var b strings.Builder
 		b.WriteString(script)
 		for addr, expiry := range leases {
-			seconds := (expiry.Sub(now) + time.Second - time.Nanosecond) / time.Second
+			seconds := (expiry.Sub(leaseAt) + time.Second - time.Nanosecond) / time.Second
 			fmt.Fprintf(&b, "add element inet %s %s { %s timeout %ds }\n", tableName, resolvedIPSet(addr), addr, seconds)
 		}
 		script = b.String()
