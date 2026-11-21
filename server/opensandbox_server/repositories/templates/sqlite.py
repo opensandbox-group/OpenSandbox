@@ -126,15 +126,17 @@ class SQLiteFastSandboxTemplateRepository:
         phase: FastSandboxTemplatePhase,
         manifest_ref: str | None,
         message: str | None,
+        artifact_mode: str | None = None,
     ) -> bool:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE templates
-                SET phase = ?, manifest_ref = ?, message = ?, updated_at = ?
+                SET spec_json = json_patch(spec_json, json_object('artifactMode', ?)), phase = ?, manifest_ref = ?, message = ?, updated_at = ?
                 WHERE template_id = ? AND namespace = ?
                 """,
                 (
+                    artifact_mode,
                     phase.value,
                     manifest_ref,
                     message,

@@ -527,6 +527,7 @@ class Sandbox internal constructor(
          */
         private fun createFromTemplate(
             templateId: String,
+            resourceLimits: Map<String, String>?,
             timeout: Duration,
             readyTimeout: Duration,
             metadata: Map<String, String>,
@@ -554,6 +555,7 @@ class Sandbox internal constructor(
                         val response =
                             sandboxService.createSandboxFromTemplate(
                                 templateId = templateId,
+                                resourceLimits = resourceLimits,
                                 timeout = timeout,
                                 metadata = metadata,
                                 networkPolicy = networkPolicy,
@@ -1177,6 +1179,9 @@ class Sandbox internal constructor(
             return this
         }
 
+        fun rootfsSnapshot(snapshotId: String, limits: Map<String, String> = emptyMap()): Builder =
+            snapshotId(snapshotId).resource(limits)
+
         fun snapshotId(snapshotId: String): Builder {
             if (snapshotId.isBlank()) {
                 throw InvalidArgumentException(message = "Snapshot ID cannot be blank")
@@ -1796,6 +1801,10 @@ class Sandbox internal constructor(
      * ```
      */
     class TemplateLauncher internal constructor() {
+        private var resourceLimits: Map<String, String>? = null
+
+        fun resource(limits: Map<String, String>): TemplateLauncher = apply { resourceLimits = limits.toMap() }
+
         /**
          * Template ID to create the sandbox from
          */
@@ -2058,6 +2067,7 @@ class Sandbox internal constructor(
 
             return createFromTemplate(
                 templateId = id,
+                resourceLimits = resourceLimits,
                 timeout = sandboxTimeout,
                 readyTimeout = readyTimeout,
                 metadata = metadata,

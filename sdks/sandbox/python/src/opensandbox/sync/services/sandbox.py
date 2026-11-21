@@ -65,7 +65,7 @@ class SandboxesSync(Protocol):
         env: dict[str, str],
         metadata: dict[str, str],
         timeout: timedelta | None,
-        resource: dict[str, str],
+        resource: dict[str, str] | None,
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str],
         volumes: list[Volume] | None,
@@ -110,6 +110,7 @@ class SandboxesSync(Protocol):
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
         idle_policy: IdlePolicy | None = None,
+        resource: dict[str, str] | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a sandbox from a ``Succeeded`` fsb template (blocking).

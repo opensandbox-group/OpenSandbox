@@ -566,6 +566,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         metadata: dict[str, str] | None = None,
         resource: dict[str, str] | None = None,
+        inherit_snapshot_resources: bool = False,
         resource_requests: dict[str, str] | None = None,
         platform: PlatformSpec | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -621,7 +622,10 @@ class Sandbox:
         entrypoint = entrypoint or ["tail", "-f", "/dev/null"]
         env = env or {}
         metadata = metadata or {}
-        resource = resource or {"cpu": "1", "memory": "2Gi"}
+        if inherit_snapshot_resources and not snapshot_id:
+            raise InvalidArgumentException("inherit_snapshot_resources requires a snapshot ID")
+        if not inherit_snapshot_resources:
+            resource = resource or {"cpu": "1", "memory": "2Gi"}
         extensions = extensions or {}
 
         if isinstance(image, str):
@@ -668,6 +672,7 @@ class Sandbox:
         template_id: str,
         *,
         timeout: timedelta,
+        resource: dict[str, str] | None = None,
         ready_timeout: timedelta = timedelta(seconds=30),
         metadata: dict[str, str] | None = None,
         network_policy: NetworkPolicy | None = None,
@@ -736,6 +741,7 @@ class Sandbox:
                 network_policy=network_policy,
                 extensions=extensions,
                 idle_policy=idle_policy,
+                **({"resource": resource} if resource is not None else {}),
             ),
             origin=SandboxOrigin.TEMPLATE,
         )

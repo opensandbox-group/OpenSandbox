@@ -606,3 +606,11 @@ kubectl logs -n opensandbox-system deployment/opensandbox-controller-manager
 ## Measure resume latency
 
 See [Kubernetes Resume Benchmark](/guides/kubernetes-resume-benchmark) for an opt-in rootfs benchmark with raw samples, P50/P95, failure reporting, and explicit cache conditions.
+
+## Create a differently sized RootfsOnly Sandbox
+
+On a qualified FSB ResourceAware pool, set `rootfs_resource_overrides = true` in the server's `[kubernetes]` configuration after upgrading the controller and Fastlets. Use the existing `POST /sandboxes` route with a ready RootfsOnly source. For example, `{"snapshotId":"snap_example","timeout":600,"resourceLimits":{"memory":"4Gi"}}` boots a fresh guest with 4 GiB and the source Sandbox's recorded CPU quota. Missing snapshot limits must be supplied explicitly. For a RootfsOnly catalog template, omitted dimensions inherit the template machine settings. Full checkpoint restore retains its original machine.
+
+To build a RootfsOnly catalog template, send `POST /templates` with `{"image":"alpine:3.19","format":"native","publish":"s3://bucket/publish","mode":"rootfsOnly"}`, using the configured artifact store. Wait for the returned template ID to report `status.phase: Succeeded` and `mode: rootfsOnly` before using it with resource overrides. Omitting the build mode preserves the Full default. The reported mode comes from the finished artifact.
+
+An SDK-transmitted default such as `1 CPU / 2Gi` counts as a request for that size. Use partial limits or omit them when inheritance is intended. FSB requires a timeout. During rollback, disable new overrides before draining instances created with the feature.

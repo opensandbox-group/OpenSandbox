@@ -1107,6 +1107,7 @@ class CreateSandboxRequest(BaseModel):
     # that produced the snapshot (e.g. "fsb"); never serialized on the wire.
     _resolved_snapshot_backend: Optional[str] = PrivateAttr(default=None)
     # The snapshot's recorded source limits, set by restore resolution.
+    _resolved_rootfs_only: bool = PrivateAttr(default=False)
     _resolved_snapshot_limits: Optional[dict] = PrivateAttr(default=None)
 
     image: Optional[ImageSpec] = Field(
@@ -1211,9 +1212,9 @@ class CreateSandboxRequest(BaseModel):
         min_length=1,
         description=(
             "Fsb template to create the sandbox from. Mutually "
-            "exclusive with image and snapshotId; in template mode the workload "
-            "shape is fixed by the template's golden image, so entrypoint, env, "
-            "resourceLimits, resourceRequests, volumes, platform, credentialProxy, "
+            "exclusive with image and snapshotId. Qualified RootfsOnly templates accept "
+            "CPU and memory limits when enabled. Entrypoint, env, "
+            "resourceRequests, volumes, platform, credentialProxy, "
             "secureAccess and lifecycle hooks are rejected. lifecycle.idlePolicy "
             "is allowed (control-plane state, not workload shape). timeout is "
             "required."
@@ -1237,7 +1238,6 @@ class CreateSandboxRequest(BaseModel):
                 "snapshotId": bool((self.snapshot_id or "").strip()),
                 "entrypoint": self.entrypoint is not None,
                 "env": self.env is not None,
-                "resourceLimits": self.resource_limits is not None,
                 "resourceRequests": self.resource_requests is not None,
                 "volumes": self.volumes is not None,
                 "platform": self.platform is not None,
@@ -1295,7 +1295,7 @@ class CreateSandboxRequest(BaseModel):
         if self.snapshot_id is not None and not has_snapshot:
             self.snapshot_id = None
 
-        if self.resource_limits is None:
+        if self.resource_limits is None and not has_snapshot:
             raise ValueError("resourceLimits is required when poolRef is not provided.")
 
         return self
@@ -1949,6 +1949,13 @@ class CreateFsbTemplateRequest(BaseModel):
         "overlaybd",
         description="Storage encoding of the produced snapshot set",
     )
+    mode: Literal["full", "rootfsOnly"] = "full"
+
+    @model_validator(mode="after")
+    def validate_build_mode(self) -> "CreateFsbTemplateRequest":
+        if self.mode == "rootfsOnly" and self.format != "native":
+            raise ValueError("RootfsOnly template builds require native storage")
+        return self
 
     model_config = ConfigDict(
         alias_generator=to_camel,
@@ -2006,6 +2013,7 @@ class FsbTemplate(BaseModel):
         ),
     )
     format: Literal["native", "overlaybd"] = Field(..., description="Snapshot storage encoding")
+    mode: Optional[Literal["full", "rootfsOnly"]] = Field(None, description="Builder-confirmed artifact class, omitted for older builds.")
     status: FsbTemplateStatus = Field(..., description="Build status")
     created_at: datetime = Field(...,  description="Creation timestamp")
     updated_at: datetime = Field(...,  description="Last update timestamp")

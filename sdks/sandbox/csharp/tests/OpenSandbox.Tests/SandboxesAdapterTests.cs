@@ -488,6 +488,7 @@ public class SandboxesAdapterTests
           "publish": "s3://bucket/publish",
           "format": "overlaybd",
           "status": { "phase": "Succeeded", "manifestRef": "s3://bucket/publish/manifest.json" },
+          "mode": "rootfsOnly",
           "createdAt": "2026-03-14T12:00:00Z",
           "updatedAt": "2026-03-14T12:01:00Z"
         }
@@ -503,6 +504,7 @@ public class SandboxesAdapterTests
         handler.PathAndQuery.Should().Be("/v1/templates/tpl-1");
         template.Status.Phase.Should().Be(TemplatePhases.Succeeded);
         template.Status.ManifestRef.Should().Be("s3://bucket/publish/manifest.json");
+        template.Mode.Should().Be("rootfsOnly");
         template.Readiness.Should().BeNull();
         template.Entrypoint.Should().BeNull();
     }

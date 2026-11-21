@@ -1390,6 +1390,15 @@ spec:
                 - Succeeded
                 - Failed
                 type: string
+              resourceLimits:
+                description: ResourceLimits records the admitted limits bundled with
+                  the published artifact.
+                properties:
+                  cpu:
+                    type: string
+                  memory:
+                    type: string
+                type: object
               sandboxUID:
                 description: SandboxUID is the UID of the snapshotted Sandbox incarnation.
                 type: string
@@ -1756,6 +1765,13 @@ spec:
                     - native
                     - overlaybd
                     type: string
+                  mode:
+                    description: Mode selects the published boot artifact. RootfsOnly
+                      requires native storage.
+                    enum:
+                    - Full
+                    - RootfsOnly
+                    type: string
                   prime:
                     description: |-
                       Prime optionally selects seed nodes (by label selector) whose agent
@@ -1893,6 +1909,13 @@ spec:
               manifestRef:
                 description: ManifestRef points at the published manifest in the object
                   store.
+                type: string
+              mode:
+                description: Mode is the artifact class confirmed by the builder.
+                  Empty means unknown.
+                enum:
+                - Full
+                - RootfsOnly
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the generation of the last applied

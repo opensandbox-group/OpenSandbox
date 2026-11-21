@@ -202,6 +202,8 @@ export interface SandboxCreateOptions {
    * This is forwarded to the Lifecycle API as `resourceLimits`.
    */
   resource?: Record<string, string>;
+  /** Preserve omitted dimensions when restoring a RootfsOnly snapshot. */
+  inheritSnapshotResources?: boolean;
   /**
    * Resource requests (guaranteed minimums) for the sandbox container.
    * When set, enables Kubernetes Burstable QoS (requests < limits).
@@ -282,6 +284,7 @@ export interface SandboxConnectOptions {
 }
 
 export interface SandboxCreateFromTemplateOptions {
+  resource?: Record<string, string>;
   /**
    * Connection configuration for calling the OpenSandbox Lifecycle API and the sandbox's execd API.
    */
@@ -600,7 +603,7 @@ export class Sandbox {
       image: opts.image == null ? undefined : toImageSpec(opts.image),
       snapshotId: opts.snapshotId,
       entrypoint: opts.entrypoint ?? DEFAULT_ENTRYPOINT,
-      resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
+      resourceLimits: opts.resource ?? (opts.inheritSnapshotResources && opts.snapshotId ? undefined : DEFAULT_RESOURCE_LIMITS),
       resourceRequests: opts.resourceRequests,
       secureAccess: opts.secureAccess ?? false,
       env: opts.env ?? {},
@@ -798,6 +801,7 @@ export class Sandbox {
 
     const req: CreateSandboxFromTemplateRequest = {
       templateId: opts.templateId,
+      ...(opts.resource !== undefined ? { resourceLimits: opts.resource } : {}),
       timeout: Math.floor(opts.timeoutSeconds),
       metadata: opts.metadata ?? {},
       networkPolicy: opts.networkPolicy

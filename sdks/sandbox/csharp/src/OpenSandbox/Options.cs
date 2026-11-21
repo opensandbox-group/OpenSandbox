@@ -23,6 +23,9 @@ namespace OpenSandbox;
 /// </summary>
 public class SandboxCreateOptions
 {
+    /// <summary>Omit SDK resource defaults for a snapshot restore.</summary>
+    public bool InheritSnapshotResources { get; set; }
+
     /// <summary>
     /// Gets or sets the connection configuration.
     /// </summary>
@@ -159,6 +162,9 @@ public class SandboxCreateOptions
 /// </remarks>
 public class SandboxCreateFromTemplateOptions
 {
+    /// <summary>Optional per-instance limits for a RootfsOnly template.</summary>
+    public IReadOnlyDictionary<string, string>? Resource { get; set; }
+
     /// <summary>
     /// Gets or sets the connection configuration.
     /// </summary>

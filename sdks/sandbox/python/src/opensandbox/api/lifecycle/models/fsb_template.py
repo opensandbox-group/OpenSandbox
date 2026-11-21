@@ -24,6 +24,7 @@ from attrs import define as _attrs_define
 from dateutil.parser import isoparse
 
 from ..models.fsb_template_format import FsbTemplateFormat
+from ..models.fsb_template_mode import FsbTemplateMode
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -67,6 +68,7 @@ class FsbTemplate:
             env (FsbTemplateEnv | Unset): Environment variables baked into the golden image.
             metadata (FsbTemplateMetadata | Unset): Custom metadata from the creation request.
             readiness (FsbTemplateReadiness | Unset): Build-side readiness gate for a fsb template.
+            mode (FsbTemplateMode | Unset): Builder-confirmed artifact class, omitted when unknown.
     """
 
     template_id: str
@@ -81,6 +83,7 @@ class FsbTemplate:
     env: FsbTemplateEnv | Unset = UNSET
     metadata: FsbTemplateMetadata | Unset = UNSET
     readiness: FsbTemplateReadiness | Unset = UNSET
+    mode: FsbTemplateMode | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         template_id = self.template_id
@@ -117,6 +120,10 @@ class FsbTemplate:
         if not isinstance(self.readiness, Unset):
             readiness = self.readiness.to_dict()
 
+        mode: str | Unset = UNSET
+        if not isinstance(self.mode, Unset):
+            mode = self.mode.value
+
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -140,6 +147,8 @@ class FsbTemplate:
             field_dict["metadata"] = metadata
         if readiness is not UNSET:
             field_dict["readiness"] = readiness
+        if mode is not UNSET:
+            field_dict["mode"] = mode
 
         return field_dict
 
@@ -196,6 +205,13 @@ class FsbTemplate:
         else:
             readiness = FsbTemplateReadiness.from_dict(_readiness)
 
+        _mode = d.pop("mode", UNSET)
+        mode: FsbTemplateMode | Unset
+        if isinstance(_mode, Unset):
+            mode = UNSET
+        else:
+            mode = FsbTemplateMode(_mode)
+
         fsb_template = cls(
             template_id=template_id,
             image=image,
@@ -209,6 +225,7 @@ class FsbTemplate:
             env=env,
             metadata=metadata,
             readiness=readiness,
+            mode=mode,
         )
 
         return fsb_template

@@ -51,6 +51,8 @@ func deleteHeaderFold(headers map[string]string, name string) {
 
 // SandboxCreateOptions configures sandbox creation.
 type SandboxCreateOptions struct {
+	// InheritSnapshotResources omits the SDK defaults for snapshot restores.
+	InheritSnapshotResources bool
 	// Image is the container image URI (required).
 	Image string
 	// SnapshotID restores the sandbox from a previously created snapshot.
@@ -171,7 +173,7 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 		entrypoint = DefaultEntrypoint
 	}
 	limits := opts.ResourceLimits
-	if limits == nil {
+	if limits == nil && !(opts.InheritSnapshotResources && opts.SnapshotID != "") {
 		limits = DefaultResourceLimits
 	}
 	var timeout *int
@@ -223,6 +225,7 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 
 // SandboxFromTemplateOptions configures template-based sandbox creation.
 type SandboxFromTemplateOptions struct {
+	ResourceLimits ResourceLimits
 	// TimeoutSeconds is the sandbox TTL. Required: the server rejects
 	// template-based creation without a timeout.
 	TimeoutSeconds int
@@ -279,11 +282,12 @@ func CreateSandboxFromTemplate(ctx context.Context, config ConnectionConfig, tem
 	started := time.Now()
 
 	req := CreateSandboxRequest{
-		TemplateID:    templateID,
-		Timeout:       &opts.TimeoutSeconds,
-		Metadata:      opts.Metadata,
-		NetworkPolicy: opts.NetworkPolicy,
-		Extensions:    opts.Extensions,
+		TemplateID:     templateID,
+		ResourceLimits: opts.ResourceLimits,
+		Timeout:        &opts.TimeoutSeconds,
+		Metadata:       opts.Metadata,
+		NetworkPolicy:  opts.NetworkPolicy,
+		Extensions:     opts.Extensions,
 	}
 	if opts.IdlePolicy != nil {
 		req.Lifecycle = &SandboxLifecycle{IdlePolicy: opts.IdlePolicy}

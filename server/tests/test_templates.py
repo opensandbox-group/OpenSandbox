@@ -179,6 +179,19 @@ def _create_request(**overrides) -> CreateFsbTemplateRequest:
     return CreateFsbTemplateRequest.model_validate(payload)
 
 
+def test_rootfs_build_mode_is_confirmed_by_builder(service, crs):
+    record = service.create_template(_create_request(mode="rootfsOnly"))
+    key = (record.namespace, record.crd_name)
+    assert crs.crs[key]["spec"]["output"]["mode"] == "RootfsOnly"
+    assert "artifactMode" not in service.get_template(record.template_id).spec
+    crs.set_status(*key, {"phase": "Succeeded", "mode": "RootfsOnly", "manifestRef": "s3://bucket/manifest.json"})
+    _converge(service, crs, *key)
+    assert service.get_template(record.template_id).spec["artifactMode"] == "rootfsOnly"
+    assert service.resolve_template_artifact(record.template_id)[0] == record.template_id
+    with pytest.raises(ValueError, match="require native storage"):
+        _create_request(mode="rootfsOnly", format="overlaybd")
+
+
 def test_repository_roundtrip_and_tenant_scoping(repo):
     record = service_record("tpl-1", "ns-1")
     repo.create(record)
@@ -964,10 +977,11 @@ def test_routes_501_for_non_kubernetes_runtime(monkeypatch, tmp_path):
 def test_template_mode_request_validation():
     CreateSandboxRequest.model_validate({"templateId": "tpl-x", "timeout": 3600})
 
+    CreateSandboxRequest.model_validate({"templateId": "tpl-x", "timeout": 3600, "resourceLimits": {"cpu": "1"}})
+
     for field, value in [
         ("entrypoint", ["x"]),
         ("env", {"A": "1"}),
-        ("resourceLimits", {"cpu": "1"}),
         ("snapshotId", "snap-1"),
         ("secureAccess", True),
     ]:
