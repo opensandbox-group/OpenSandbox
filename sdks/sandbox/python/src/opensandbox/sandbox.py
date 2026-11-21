@@ -865,7 +865,7 @@ class Sandbox:
                 raise
             if not isinstance(e, Exception):
                 raise
-            logger.error("Unexpected exception during sandbox creation", exc_info=e)
+            logger.debug("Unexpected exception during sandbox creation", exc_info=e)
             raise SandboxInternalException(
                 f"Internal exception when creating sandbox: {e}"
             ) from e
@@ -955,7 +955,7 @@ class Sandbox:
             await config.close_transport_if_owned()
             if not isinstance(e, Exception) or isinstance(e, SandboxException):
                 raise
-            logger.error("Unexpected exception during sandbox connection", exc_info=e)
+            logger.debug("Unexpected exception during sandbox connection", exc_info=e)
             raise SandboxInternalException(f"Failed to connect to sandbox: {e}") from e
 
     @classmethod
@@ -1042,7 +1042,7 @@ class Sandbox:
             await config.close_transport_if_owned()
             if not isinstance(e, Exception) or isinstance(e, SandboxException):
                 raise
-            logger.error("Unexpected exception during sandbox resume", exc_info=e)
+            logger.debug("Unexpected exception during sandbox resume", exc_info=e)
             raise SandboxInternalException(f"Failed to resume sandbox: {e}") from e
 
     async def __aenter__(self) -> "Sandbox":
