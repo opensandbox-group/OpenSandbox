@@ -44,8 +44,8 @@ class PVC:
                 it does not exist. When false, referencing a non-existent volume
                 fails with an error.
                  Default: True.
-            delete_on_sandbox_termination (bool | Unset): When true, the volume is automatically removed when the sandbox
-                is deleted. Only applies to volumes that were auto-created by the
+            delete_on_sandbox_termination (bool | Unset): When true, the volume is removed when the sandbox
+                is deleted. Only applies to volumes that were created by the
                 server on this request; pre-existing volumes are never removed.
                 For Kubernetes, the resulting PVC delete triggers the bound PV's
                 StorageClass reclaim policy (`Retain`/`Delete`).

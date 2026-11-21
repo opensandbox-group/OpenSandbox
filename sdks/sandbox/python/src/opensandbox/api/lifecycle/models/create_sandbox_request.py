@@ -179,10 +179,10 @@ class CreateSandboxRequest:
             secure_access (bool | Unset): Opts the sandbox into secured access for endpoint access.
                 This is currently supported only for Kubernetes sandboxes exposed
                 through ingress gateway mode. When enabled, the server provisions
-                access credentials and returns the required request headers with
+                the required request headers and returns them with
                 endpoint responses. Clients must include those endpoint headers when
                 calling the sandbox. When omitted or false, endpoints remain
-                accessible without the additional access token for backward
+                accessible without the additional header for backward
                 compatibility.
                  Default: False.
             volumes (list[Volume] | Unset): Storage mounts for the sandbox. Each volume entry specifies a named backend-

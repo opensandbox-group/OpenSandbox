@@ -60,7 +60,7 @@ Ask first:
 
 Never:
 
-- Rename or remove public fields without approval.
+- Rename or remove public fields unless the change has been explicitly approved.
 - Hand-edit derived outputs without updating the source spec.
 - Assume a spec-only edit is isolated from server, SDK, docs, or release impact.
 
