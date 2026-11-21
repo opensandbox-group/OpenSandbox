@@ -138,9 +138,11 @@ func TestIsPartitionDevice(t *testing.T) {
 	}
 }
 
+func countAllDevices(string) bool { return true }
+
 func TestParseV1BlkioFile(t *testing.T) {
 	data := []byte("8:0 Read 1000\n8:0 Write 2000\n8:0 Discard 5\n254:1 read 7\n8:0 Sync 3\n8:0 Total 3005\nbad line\n")
-	read, written := parseV1BlkioFile(data)
+	read, written := parseV1BlkioFile(data, countAllDevices)
 	if read != 1007 || written != 2000 {
 		t.Fatalf("parseV1BlkioFile = (%d, %d), want (1007, 2000)", read, written)
 	}
@@ -148,7 +150,7 @@ func TestParseV1BlkioFile(t *testing.T) {
 
 func TestParseV2IOStat(t *testing.T) {
 	data := []byte("8:0 rbytes=100 wbytes=200 rios=10 wios=20 dios=5\n254:1 rbytes=1000 wbytes=2000 rios=30 wios=40\n")
-	io := parseV2IOStat(data)
+	io := parseV2IOStat(data, countAllDevices)
 
 	if io.ReadBytes != 1100 || io.WrittenBytes != 2200 {
 		t.Fatalf("bytes = (%d, %d), want (1100, 2200)", io.ReadBytes, io.WrittenBytes)

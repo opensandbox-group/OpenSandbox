@@ -30,11 +30,16 @@ func overrideDiskPaths(t *testing.T, cgroup, mountinfo string, v2Dir, v1BlkioDir
 	t.Helper()
 	origCgroup, origMountinfo := procSelfCgroupFile, procSelfMountinfo
 	origV2, origV1Blkio := cgroupV2Dir, cgroupV1BlkioDir
+	origSysDevBlock := sysDevBlockDir
 	procSelfCgroupFile, procSelfMountinfo = cgroup, mountinfo
 	cgroupV2Dir, cgroupV1BlkioDir = v2Dir, v1BlkioDir
+	// No device resolves, so every cgroup IO line counts as it does on a
+	// host without sysfs.
+	sysDevBlockDir = t.TempDir()
 	t.Cleanup(func() {
 		procSelfCgroupFile, procSelfMountinfo = origCgroup, origMountinfo
 		cgroupV2Dir, cgroupV1BlkioDir = origV2, origV1Blkio
+		sysDevBlockDir = origSysDevBlock
 	})
 }
 
@@ -215,4 +220,66 @@ func TestNewDiskIOSourcePrefersV1Blkio(t *testing.T) {
 	if io.ReadBytes != 1000 || io.WrittenBytes != 2000 || io.ReadOps != 10 || io.WriteOps != 20 {
 		t.Fatalf("io = %+v, want v1 blkio throttle values", io)
 	}
+}
+
+// fakeSysDevBlock points sysDevBlockDir at a directory of MAJ:MIN links
+// named like /sys/dev/block, each resolving to a device directory.
+func fakeSysDevBlock(t *testing.T, devices map[string]string) {
+	t.Helper()
+	dir := t.TempDir()
+	for majMin, target := range devices {
+		if err := os.Symlink(target, filepath.Join(dir, majMin)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig := sysDevBlockDir
+	sysDevBlockDir = dir
+	t.Cleanup(func() { sysDevBlockDir = orig })
+}
+
+// The cgroup charges a bio on every block layer it passes through, so a
+// device-mapper (or loop) device and the disk under it both report the
+// same I/O. Like the /proc/diskstats fallback, the cgroup sources count only
+// the bottom layer; a device that cannot be resolved is still counted.
+func TestDiskIOSourcesSkipStackedDevices(t *testing.T) {
+	fakeSysDevBlock(t, map[string]string{
+		"252:0": "../../devices/virtual/block/dm-0",
+		"7:0":   "../../devices/virtual/block/loop0",
+		"259:0": "../../devices/pci0000:00/0000:00:04.0/nvme/nvme0/nvme0n1",
+	})
+
+	t.Run("v2", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "io.stat")
+		writeFile(t, path, "252:0 rbytes=4096 wbytes=33554432 rios=1 wios=32\n"+
+			"259:0 rbytes=4096 wbytes=33554432 rios=1 wios=64\n"+
+			"7:0 rbytes=0 wbytes=1048576 rios=0 wios=8\n"+
+			"8:16 rbytes=100 wbytes=200 rios=10 wios=20\n")
+
+		io, err := v2IOReader(path)()
+		if err != nil {
+			t.Fatalf("v2 reader: %v", err)
+		}
+		want := DiskIO{ReadBytes: 4196, WrittenBytes: 33554632, ReadOps: 11, WriteOps: 84}
+		if io != want {
+			t.Fatalf("io = %+v, want %+v", io, want)
+		}
+	})
+
+	t.Run("v1", func(t *testing.T) {
+		dir := t.TempDir()
+		bytesPath := filepath.Join(dir, "blkio.throttle.io_service_bytes")
+		opsPath := filepath.Join(dir, "blkio.throttle.io_serviced")
+		writeFile(t, bytesPath, "252:0 Read 4096\n252:0 Write 33554432\n259:0 Read 4096\n259:0 Write 33554432\n"+
+			"8:16 Read 100\n8:16 Write 200\nTotal 67109064\n")
+		writeFile(t, opsPath, "252:0 Read 1\n252:0 Write 32\n259:0 Read 1\n259:0 Write 64\n8:16 Read 10\n8:16 Write 20\nTotal 128\n")
+
+		io, err := v1IOReader(bytesPath, opsPath)()
+		if err != nil {
+			t.Fatalf("v1 reader: %v", err)
+		}
+		want := DiskIO{ReadBytes: 4196, WrittenBytes: 33554632, ReadOps: 11, WriteOps: 84}
+		if io != want {
+			t.Fatalf("io = %+v, want %+v", io, want)
+		}
+	})
 }
