@@ -60,9 +60,19 @@ def _ws_scheme(protocol: str) -> str:
     return "wss" if protocol == "https" else "ws"
 
 
-def _execd_base(endpoint: str) -> str:
-    """Normalize an execd endpoint (``host:port`` or ``host/proxy/path``)."""
-    return endpoint.rstrip("/")
+def _execd_bases(endpoint: str, protocol: str) -> tuple[str, str]:
+    """Build the execd HTTP and WebSocket base URLs.
+
+    The endpoint is usually ``host:port`` or ``host/proxy/path``; an explicit
+    ``http://`` or ``https://`` scheme on it takes precedence over ``protocol``.
+    """
+    base = endpoint.strip().rstrip("/")
+    for scheme in ("http", "https"):
+        prefix = f"{scheme}://"
+        if base[: len(prefix)].lower() == prefix:
+            protocol, base = scheme, base[len(prefix):]
+            break
+    return f"{protocol}://{base}", f"{_ws_scheme(protocol)}://{base}"
 
 
 def _create_pty_session(
@@ -341,10 +351,9 @@ def terminal(
         sandbox.close()
 
     headers = endpoint.build_request_headers(obj.connection_config)
-    protocol = obj.connection_config.protocol
-    base = _execd_base(endpoint.endpoint)
-    http_base = f"{protocol}://{base}"
-    ws_url = f"{_ws_scheme(protocol)}://{base}"
+    http_base, ws_url = _execd_bases(
+        endpoint.endpoint, obj.connection_config.protocol
+    )
 
     timeout = timedelta(seconds=obj.resolved_config.get("request_timeout", 30))
     session_id = _create_pty_session(
