@@ -130,3 +130,11 @@ For the opt-in standalone rootfs resume runner, setup, measurement boundaries, c
 ```bash
 uv run pytest tests/test_kubernetes_resume_benchmark.py
 ```
+
+### Density tradeoff benchmark
+
+For the density-versus-cost runner (oversell sweeps, red-line and elastic postures, tighten-ordering and `deflate_on_oom` scenarios, and the read-only live-node sampler), see the [Density Tradeoff Benchmark guide](../../docs/guides/density-tradeoff-benchmark.md). The `sim` backend and the offline runner tests need no hypervisor:
+
+```bash
+uv run pytest tests/test_density_tradeoff_benchmark.py
+```
