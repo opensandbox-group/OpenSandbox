@@ -96,6 +96,9 @@ jobs:
             TestNftDomainAnswerDoesNotShortenSharedLease \
             TestNftPolicyReplacementKeepsOnlySurvivingDomainLeases \
             TestNftSharedIPTeardownCountsOnlyDroppedLeases \
+            TestNftExpiredDomainCannotAcquireUnownedTCPLease \
+            TestNftReloadKeepsTCPFinalGrace \
+            TestNftFallbackReplansDNSLeases \
             TestNftUnknownPolicyApplyFencesDNSUntilVerifiedReplacement \
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \

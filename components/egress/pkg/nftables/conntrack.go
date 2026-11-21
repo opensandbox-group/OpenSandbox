@@ -11,20 +11,6 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 )
 
-// countMatchingConntrackFlows reads /proc/net/nf_conntrack and counts TCP flows
-// whose ORIGINAL destination matches drops. Best-effort: a missing proc file
-// (no nf_conntrack loaded) returns 0, nil so policy changes still succeed.
-func countMatchingConntrackFlows(drops EstablishedDrops) (int, error) {
-	if drops.Empty() {
-		return 0, nil
-	}
-	data, err := readConntrackFlows()
-	if err != nil {
-		return 0, err
-	}
-	return countMatchingConntrackFlowsData(data, drops), nil
-}
-
 func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 	if len(data) == 0 || drops.Empty() {
 		return 0

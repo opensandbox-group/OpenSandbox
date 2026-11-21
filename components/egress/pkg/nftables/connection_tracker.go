@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	"github.com/alibaba/opensandbox/internal/safego"
 )
@@ -32,13 +33,15 @@ type connectionTracker struct {
 	listConnections   func(context.Context) ([]tcpConnection, error)
 	now               func() time.Time
 
+	// Explicit IP grants do not need a DNS owner for TCP renewal.
+	directIPs map[netip.Addr]struct{}
 	// Deadline credited by the last successful poll to previousActiveIPs.
 	previousActiveGrace time.Time
 }
 
 type refreshPlan struct {
 	addresses  []netip.Addr
-	refreshing map[netip.Addr]struct{}
+	refreshing map[netip.Addr]bool // candidates become true after owner admission
 	active     map[netip.Addr]struct{}
 	at         time.Time
 }
@@ -104,6 +107,7 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 		return errStaticStateUncertain
 	}
 	plan := t.refreshCandidates(connections)
+	credits := manager.authorizeDNSRefreshLocked(&plan)
 	if len(plan.addresses) > 0 {
 		script := buildRefreshResolvedIPsScript(tableName, plan.addresses)
 		if _, err := manager.run(ctx, script); err != nil {
@@ -111,17 +115,52 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 		}
 		telemetry.RecordNftablesUpdate()
 		grace := plan.at.Add(dynSetTimeoutS * time.Second)
-		for _, entry := range manager.domains {
-			for address, lease := range entry.addresses {
-				if _, ok := plan.refreshing[address]; ok && manager.holdsDomainCapacity(address, lease, plan.at) {
-					lease.tcpUntil = grace
-					entry.addresses[address] = lease
-				}
-			}
+		for _, credit := range credits {
+			lease := credit.domain.addresses[credit.addr]
+			lease.tcpUntil = grace
+			credit.domain.addresses[credit.addr] = lease
 		}
 	}
 	t.recordRefresh(plan)
 	return nil
+}
+
+type dnsRefreshCredit struct {
+	domain *resolvedDomain
+	addr   netip.Addr
+}
+
+// Stage source credits before the nft write so the batch and the domain
+// ledger describe the same set of grants. The caller holds m.mu.
+func (m *Manager) authorizeDNSRefreshLocked(plan *refreshPlan) []dnsRefreshCredit {
+	if len(plan.addresses) == 0 || m.domainPolicy == nil || m.domainPolicy.DefaultAction != policy.ActionDeny {
+		return nil
+	}
+	var credits []dnsRefreshCredit
+	for _, domain := range m.domains {
+		for addr, lease := range domain.addresses {
+			if _, pending := plan.refreshing[addr]; pending && m.holdsDomainCapacity(addr, lease, plan.at) {
+				plan.refreshing[addr] = true
+				credits = append(credits, dnsRefreshCredit{domain: domain, addr: addr})
+			}
+		}
+	}
+	allowed := plan.addresses[:0]
+	for _, addr := range plan.addresses {
+		_, direct := m.tracker.directIPs[addr]
+		if direct || plan.refreshing[addr] {
+			allowed = append(allowed, addr)
+		} else {
+			delete(plan.active, addr)
+		}
+	}
+	plan.addresses = allowed
+	return credits
+}
+
+func (t *connectionTracker) previouslyCredited(addr netip.Addr, grace time.Time) bool {
+	_, active := t.previousActiveIPs[addr]
+	return active && !grace.IsZero() && grace.Equal(t.previousActiveGrace)
 }
 
 func (t *connectionTracker) clearPreviousActiveIPs(manager *Manager) {
@@ -146,15 +185,16 @@ func (t *connectionTracker) refreshCandidates(connections []tcpConnection) refre
 			}
 			delete(t.dynamicIPs, addr)
 			delete(t.previousActiveIPs, addr)
+			delete(t.directIPs, addr)
 		}
 	}
 
 	current := make(map[netip.Addr]struct{})
-	refresh := make(map[netip.Addr]struct{})
+	refresh := make(map[netip.Addr]bool)
 	for addr := range active {
 		if _, ok := t.dynamicIPs[addr]; ok {
 			current[addr] = struct{}{}
-			refresh[addr] = struct{}{}
+			refresh[addr] = false
 		}
 	}
 	// A final refresh when activity ends makes the existing timeout the
@@ -162,7 +202,7 @@ func (t *connectionTracker) refreshCandidates(connections []tcpConnection) refre
 	for addr := range t.previousActiveIPs {
 		if _, stillActive := current[addr]; !stillActive {
 			if _, known := t.dynamicIPs[addr]; known {
-				refresh[addr] = struct{}{}
+				refresh[addr] = false
 			}
 		}
 	}
@@ -191,6 +231,7 @@ func (t *connectionTracker) clearPreviousActiveIPsLocked() {
 
 func (t *connectionTracker) clear() {
 	t.dynamicIPs = make(map[netip.Addr]time.Time)
+	t.directIPs = nil
 	t.clearPreviousActiveIPsLocked()
 }
 

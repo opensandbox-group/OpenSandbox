@@ -176,9 +176,7 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 // source's live lease or continue a grace period credited by the last active
 // poll, but cannot revive an unrelated expired owner of the shared IP.
 func (m *Manager) holdsDomainCapacity(addr netip.Addr, lease domainLease, now time.Time) bool {
-	_, active := m.tracker.previousActiveIPs[addr]
-	return lease.deadline().After(now) ||
-		(active && !lease.tcpUntil.IsZero() && lease.tcpUntil.Equal(m.tracker.previousActiveGrace))
+	return lease.deadline().After(now) || m.tracker.previouslyCredited(addr, lease.tcpUntil)
 }
 
 func (m *Manager) StartDomainRefresh(ctx context.Context, lookup func(context.Context, string) ([]ResolvedIP, error)) {
