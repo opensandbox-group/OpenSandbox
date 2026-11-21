@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ClientException
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxRateLimitException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
@@ -109,11 +110,11 @@ class CommandsAdapterTest {
         mockWebServer.enqueue(MockResponse().setBody("""data: {"type":"stdout","text":"partial","timestamp":1}""" + "\n\n"))
 
         val error =
-            assertThrows<SandboxInternalException> {
+            assertThrows<SandboxException> {
                 commandsAdapter.run(RunCommandRequest.builder().command("echo test").build())
             }
 
-        assertTrue(error.message.orEmpty().contains("without a terminal event"))
+        assertEquals("COMMAND_STREAM_INCOMPLETE", error.error.code)
     }
 
     @Test

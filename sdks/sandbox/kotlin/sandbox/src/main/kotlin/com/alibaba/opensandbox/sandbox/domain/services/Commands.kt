@@ -16,6 +16,8 @@
 
 package com.alibaba.opensandbox.sandbox.domain.services
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.Execution
@@ -41,8 +43,8 @@ interface Commands {
      * @param request Configuration for the command execution including command text,
      *                working directory, and timeout settings
      * @return An [Execution] handle representing the running command instance
-     * @throws SandboxInternalException if a foreground stream ends normally without a
-     *         completion or execution error event. Handlers may have received partial output.
+     * @throws SandboxException with code [SandboxError.COMMAND_STREAM_INCOMPLETE] if a foreground stream
+     *         ends normally without a completion or execution error event. Handlers may have received partial output.
      */
     fun run(request: RunCommandRequest): Execution
 

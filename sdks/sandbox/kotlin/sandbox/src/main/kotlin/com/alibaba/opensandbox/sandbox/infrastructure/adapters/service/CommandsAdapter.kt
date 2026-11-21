@@ -26,6 +26,8 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Success
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
@@ -135,7 +137,10 @@ internal class CommandsAdapter(
     override fun run(request: RunCommandRequest): Execution {
         val execution = runCommand(request)
         if (!request.background && execution.complete == null && execution.error == null) {
-            throw SandboxInternalException("Foreground command stream ended without a terminal event")
+            throw SandboxException(
+                message = "Foreground command stream ended without a terminal event",
+                error = SandboxError(SandboxError.COMMAND_STREAM_INCOMPLETE),
+            )
         }
         return execution
     }
