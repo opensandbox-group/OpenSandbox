@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { SandboxInternalException } from "../core/exceptions.js";
+import { SandboxError, SandboxException } from "../core/exceptions.js";
 import type { ExecdClient } from "../openapi/execdClient.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 import { parseJsonEventStream } from "./sse.js";
@@ -366,7 +366,10 @@ export class CommandsAdapter implements ExecdCommands {
       background,
     );
     if (!background && execution.complete == null && execution.error == null) {
-      throw new SandboxInternalException({ message: "Foreground command stream ended without a terminal event" });
+      throw new SandboxException({
+        message: "Foreground command stream ended without a terminal event",
+        error: new SandboxError(SandboxError.COMMAND_STREAM_INCOMPLETE),
+      });
     }
     return execution;
   }
