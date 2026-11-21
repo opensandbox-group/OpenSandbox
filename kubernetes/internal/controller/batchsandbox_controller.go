@@ -649,14 +649,22 @@ func (r *BatchSandboxReconciler) getTasksCleanupUnfinished(batchSbx *sandboxv1al
 	return notReleased
 }
 
+// releasePods adds toReleasePods to the release annotation. The patch carries
+// batchSbx's resourceVersion and, once it succeeds, batchSbx takes the patched
+// metadata, so the status patch later in this reconcile, which is guarded by
+// the same resourceVersion, neither conflicts with this write nor overwrites a
+// concurrent one.
 func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, toReleasePods []string) error {
-	releasedSet := make(sets.Set[string])
 	released, err := parseSandboxReleased(batchSbx)
 	if err != nil {
 		return err
 	}
-	releasedSet.Insert(released.Pods...)
-	releasedSet.Insert(toReleasePods...)
+	releasedSet := sets.New(released.Pods...)
+	newlyReleased := sets.List(sets.New(toReleasePods...).Difference(releasedSet))
+	if len(newlyReleased) == 0 {
+		return nil
+	}
+	releasedSet.Insert(newlyReleased...)
 	newRelease := allocationRelease{
 		Pods: sets.List(releasedSet),
 	}
@@ -668,6 +676,7 @@ func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sand
 		MetaData metav1.ObjectMeta `json:"metadata"`
 	}{
 		MetaData: metav1.ObjectMeta{
+			ResourceVersion: batchSbx.ResourceVersion,
 			Annotations: map[string]string{
 				annoAllocReleaseKey: string(raw),
 			},
@@ -683,9 +692,8 @@ func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sand
 		r.Recorder.Eventf(batchSbx, corev1.EventTypeWarning, eventReasonFailedRelease, "Failed to release pods: %v", err)
 		return err
 	}
-	if len(toReleasePods) > 0 {
-		r.Recorder.Eventf(batchSbx, corev1.EventTypeNormal, eventReasonPodReleased, "Released %d pod(s) back to pool: %v", len(toReleasePods), toReleasePods)
-	}
+	batchSbx.ObjectMeta = b.ObjectMeta
+	r.Recorder.Eventf(batchSbx, corev1.EventTypeNormal, eventReasonPodReleased, "Released %d pod(s) back to pool: %v", len(newlyReleased), newlyReleased)
 	return nil
 }
 
