@@ -384,7 +384,30 @@ func (c *FilesystemController) SearchFiles() {
 	}
 
 	files := make([]model.FileInfo, 0, 16)
-	err = filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(path, func(filePath string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("error accessing path %s: %w", filePath, err)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if isAnyStagingName(entry.Name()) {
+			return nil
+		}
+
+		match, err := glob.PathMatch(pattern, entry.Name())
+		if err != nil {
+			return fmt.Errorf("invalid pattern %s: %w", pattern, err)
+		}
+		if !match {
+			return nil
+		}
+
+		// Windows DirEntry.Info caches enumeration metadata; Lstat preserves lookup errors.
+		info, err := os.Lstat(filePath)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
@@ -394,22 +417,11 @@ func (c *FilesystemController) SearchFiles() {
 		if info.IsDir() {
 			return nil
 		}
-		if isAnyStagingName(info.Name()) {
-			return nil
-		}
-
-		match, err := glob.PathMatch(pattern, info.Name())
+		fileInfo, err := buildFileInfo(filePath, info)
 		if err != nil {
-			return fmt.Errorf("invalid pattern %s: %w", pattern, err)
+			return err
 		}
-
-		if match {
-			fileInfo, err := buildFileInfo(filePath, info)
-			if err != nil {
-				return err
-			}
-			files = append(files, fileInfo)
-		}
+		files = append(files, fileInfo)
 
 		return nil
 	})
