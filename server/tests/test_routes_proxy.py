@@ -541,6 +541,7 @@ def test_proxy_forwards_filtered_headers_and_query(
         "X-Forwarded-Host": "attacker.example",
         "X-Forwarded-Proto": "https",
         "X-Real-Ip": "203.0.113.99",
+        "X-EXECD-ACCESS-TOKEN": "execd-token",
     }
 
     response = client.post(
@@ -574,6 +575,7 @@ def test_proxy_forwards_filtered_headers_and_query(
     assert lowered_headers.get("x-forwarded-proto") == "http"
     assert lowered_headers.get("x-forwarded-host") != "attacker.example"
     assert lowered_headers.get("x-forwarded-for") != "203.0.113.99"
+    assert lowered_headers.get("x-execd-access-token") == "execd-token"
     assert fake_client.response.aclose_called is True
 
 

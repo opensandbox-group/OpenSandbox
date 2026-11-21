@@ -3622,3 +3622,23 @@ spec:
         }
         assert provider.get_allocation(workload).pool_ref == "pool-a"
         assert provider.get_allocated_pod_names(workload) == ["pod-1"]
+
+    def test_validate_create_request_rejects_secure_access_with_pool_ref(
+        self, mock_k8s_client
+    ):
+        from fastapi import HTTPException
+        from opensandbox_server.api.schema import CreateSandboxRequest
+        from opensandbox_server.services.constants import SandboxErrorCodes
+
+        provider = BatchSandboxProvider(mock_k8s_client)
+        request = CreateSandboxRequest(
+            secure_access=True,
+            extensions={"poolRef": "pool-a"},
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            provider.validate_create_request(request, "test-ns")
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "pooled pods are pre-created" in exc_info.value.detail["message"]

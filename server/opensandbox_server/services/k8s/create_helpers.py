@@ -22,6 +22,7 @@ from typing import Callable, Dict, Optional
 from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.config import AppConfig
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     OPENSANDBOX_EGRESS_SANDBOX_ID,
     OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE,
@@ -108,6 +109,12 @@ def _build_create_workload_context(
 
     sandbox_env, egress_env = split_egress_env(request.env)
     apply_execd_isolation_config(sandbox_env, app_config.runtime.execd_isolation_config)
+    if secure_access_token:
+        # execd requires this token on every route except /ping and /ready, so
+        # a peer pod that reaches the execd port directly can no longer use the
+        # sandbox. Routed access keeps working: the same value is published as
+        # the X-EXECD-ACCESS-TOKEN endpoint header and forwarded by the proxy.
+        sandbox_env[EXECD_ACCESS_TOKEN_ENV] = secure_access_token
     if request.lifecycle is not None and request.lifecycle.has_hooks:
         # Transport hooks only. idlePolicy/renewalPolicy are control-plane
         # state; an empty payload would still overwrite hooks persisted in

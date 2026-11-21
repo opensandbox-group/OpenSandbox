@@ -142,10 +142,11 @@ Omitting `expires` on `GetEndpoint` is not a `400` — it returns the unsigned r
 
 ## Notes
 
-- Enforcement covers the ingress gateway, for both HTTP and WebSocket.
-- The gateway strips `OpenSandbox-Secure-Access` and any signed URI prefix before forwarding.
+- Enforcement covers the ingress gateway, for both HTTP and WebSocket, and — on Kubernetes — the sandbox's own execd API: the server injects `EXECD_ACCESS_TOKEN` into the sandbox container with the same token, and execd then requires `X-EXECD-ACCESS-TOKEN` on every route except `/ping` and `/ready`. A peer pod that reaches the execd port directly, without the token, gets `401`; peer sandboxes can no longer use each other's execd.
+- `GetEndpoint` publishes the token as `X-EXECD-ACCESS-TOKEN` for the execd port; the SDKs merge endpoint headers into every execd call, so clients need no change.
+- The gateway strips `OpenSandbox-Secure-Access` and any signed URI prefix before forwarding. `X-EXECD-ACCESS-TOKEN` is forwarded unchanged so direct execd calls through the proxy keep working.
 - In URI mode, path segments that resemble `expires_b36/signature` are only interpreted as a signed prefix when the sandbox actually has secure access enabled; otherwise the full path is forwarded unchanged.
-- Secure Access is independent of the execd access token (`X-EXECD-ACCESS-TOKEN`) and Credential Vault; all can be used together.
+- Credential Vault remains independent and can be combined with Secure Access.
 
 ## See Also
 
