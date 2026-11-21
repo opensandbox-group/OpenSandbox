@@ -52,24 +52,38 @@ const (
 )
 
 type resolvedDomain struct {
-	addresses   map[netip.Addr]struct{}
+	addresses   map[netip.Addr]domainLease
 	lastAttempt time.Time
 	failures    int
 	retryAt     time.Time
 }
 
-// nextExpiry returns the earliest dynamic-lease expiry across the entry's
-// observed addresses. An address the tracker no longer carries (expired and
-// inactive) yields the zero time, making the domain immediately due.
-func (e *resolvedDomain) nextExpiry(tracker *connectionTracker) time.Time {
-	var earliest time.Time
-	for address := range e.addresses {
-		expiresAt := tracker.dynamicIPs[address]
-		if earliest.IsZero() || expiresAt.Before(earliest) {
-			earliest = expiresAt
+// A source lease is independent of the effective kernel deadline for a shared
+// IP. An unconfirmed address still holds capacity, but cannot be DNS-renewed.
+type domainLease struct {
+	dnsUntil  time.Time
+	tcpUntil  time.Time
+	renewable bool
+}
+
+func (l domainLease) deadline() time.Time {
+	if l.tcpUntil.After(l.dnsUntil) {
+		return l.tcpUntil
+	}
+	return l.dnsUntil
+}
+
+func (e *resolvedDomain) nextExpiry() (earliest time.Time, renewable bool) {
+	for _, lease := range e.addresses {
+		if lease.renewable {
+			expiry := lease.deadline()
+			if !renewable || expiry.Before(earliest) {
+				earliest = expiry
+			}
+			renewable = true
 		}
 	}
-	return earliest
+	return earliest, renewable
 }
 
 func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []ResolvedIP) error {
@@ -78,6 +92,9 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	defer m.mu.Unlock()
 	if m.quiesced.Load() {
 		return ErrQuiesced
+	}
+	if m.staticStateUncertain {
+		return errStaticStateUncertain
 	}
 	if m.domainPolicy == nil {
 		return fmt.Errorf("no nftables policy applied; dropping resolved domain %q", domain)
@@ -88,43 +105,50 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	if m.domainPolicy.DefaultAction == policy.ActionAllow || len(ips) == 0 {
 		return m.addResolvedIPsLocked(ctx, ips)
 	}
-	entry := &resolvedDomain{addresses: make(map[netip.Addr]struct{}, min(len(ips), maxDomainAddresses))}
-	for _, ip := range ips {
-		if address := ip.Addr.Unmap(); address.IsValid() {
-			entry.addresses[address] = struct{}{}
-			if len(entry.addresses) > maxDomainAddresses {
-				return fmt.Errorf("too many DNS addresses to track for %q (limit %d)", domain, maxDomainAddresses)
-			}
-		}
-	}
-	if len(entry.addresses) == 0 {
+	now := m.tracker.now()
+	deadlines := answerDeadlines(ips, now, maxDomainAddresses)
+	if len(deadlines) == 0 {
 		return nil
 	}
-	now := m.tracker.now()
+	if len(deadlines) > maxDomainAddresses {
+		return fmt.Errorf("too many DNS addresses to track for %q (limit %d)", domain, maxDomainAddresses)
+	}
+	entry := &resolvedDomain{addresses: make(map[netip.Addr]domainLease, len(deadlines))}
+	for addr, expiry := range deadlines {
+		entry.addresses[addr] = domainLease{dnsUntil: expiry, renewable: true}
+	}
 	var victim string
 	if previous := m.domains[domain]; previous != nil {
 		entry.lastAttempt = previous.lastAttempt
-		// Retain live addresses first. Expired observations can use any
-		// remaining tracking slots but must not displace a live lease.
-		for address := range previous.addresses {
-			if m.holdsDomainCapacity(address, now) {
-				entry.addresses[address] = struct{}{}
+		// Prefer live observations; use any remaining slots for expired
+		// addresses still eligible for a background lookup.
+		for address, lease := range previous.addresses {
+			if fresh, observed := entry.addresses[address]; observed {
+				if fresh.dnsUntil.After(lease.dnsUntil) {
+					lease.dnsUntil = fresh.dnsUntil
+				}
+				lease.renewable = true
+				entry.addresses[address] = lease
+			} else if m.holdsDomainCapacity(address, lease, now) {
+				entry.addresses[address] = lease
 				if len(entry.addresses) > maxDomainAddresses {
 					return fmt.Errorf("no expired DNS address slot for %q (limit %d)", domain, maxDomainAddresses)
 				}
 			}
 		}
-		for address := range previous.addresses {
+		for address, lease := range previous.addresses {
 			if len(entry.addresses) == maxDomainAddresses {
 				break
 			}
-			entry.addresses[address] = struct{}{}
+			if _, exists := entry.addresses[address]; !exists && lease.renewable {
+				entry.addresses[address] = lease
+			}
 		}
 	} else if len(m.domains) >= maxResolvedDomains {
 		for candidate, tracked := range m.domains {
 			live := false
-			for address := range tracked.addresses {
-				if m.holdsDomainCapacity(address, now) {
+			for address, lease := range tracked.addresses {
+				if m.holdsDomainCapacity(address, lease, now) {
 					live = true
 					break
 				}
@@ -138,7 +162,7 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 			return fmt.Errorf("no expired DNS domain slot for %q (limit %d)", domain, maxResolvedDomains)
 		}
 	}
-	if err := m.addResolvedIPsLocked(ctx, ips); err != nil {
+	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now); err != nil {
 		return err
 	}
 	if victim != "" {
@@ -150,9 +174,9 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 
 // holdsDomainCapacity is called with m.mu held. Keep a pending TCP refresh
 // eligible even if its most recent kernel lease has already expired.
-func (m *Manager) holdsDomainCapacity(addr netip.Addr, now time.Time) bool {
+func (m *Manager) holdsDomainCapacity(addr netip.Addr, lease domainLease, now time.Time) bool {
 	_, active := m.tracker.previousActiveIPs[addr]
-	return active || m.tracker.dynamicIPs[addr].After(now)
+	return active || lease.deadline().After(now)
 }
 
 func (m *Manager) StartDomainRefresh(ctx context.Context, lookup func(context.Context, string) ([]ResolvedIP, error)) {
@@ -195,7 +219,7 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 		lastAttempt time.Time
 	}
 	m.mu.Lock()
-	if m.quiesced.Load() {
+	if m.quiesced.Load() || m.staticStateUncertain {
 		m.mu.Unlock()
 		return
 	}
@@ -206,7 +230,11 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 		// Only query domains whose earliest observed-address lease expires
 		// within the lead window (or has already lapsed), unless a previous
 		// failure put the domain on backoff.
-		if now.Before(entry.retryAt) || entry.nextExpiry(m.tracker).After(due) {
+		if now.Before(entry.retryAt) {
+			continue
+		}
+		expiry, renewable := entry.nextExpiry()
+		if !renewable || expiry.After(due) {
 			continue
 		}
 		candidates = append(candidates, candidate{domain, entry, entry.lastAttempt})
@@ -270,7 +298,7 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 						// earliest tracked lease expires (less one lookup
 						// timeout); once the lease has lapsed the full backoff
 						// applies.
-						if expiry := item.entry.nextExpiry(m.tracker); expiry.After(now) {
+						if expiry, _ := item.entry.nextExpiry(); expiry.After(now) {
 							if budget := expiry.Sub(now) - domainLookupTimeout; budget < retryIn {
 								retryIn = max(budget, 0)
 							}
@@ -292,34 +320,58 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *resolvedDomain, ips []ResolvedIP) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.quiesced.Load() || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
+	if m.quiesced.Load() || m.staticStateUncertain || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
 		return
+	}
+	now := m.tracker.now()
+	var confirmed, updates map[netip.Addr]time.Time
+	for _, ip := range ips {
+		addr := ip.Addr.Unmap()
+		if !entry.addresses[addr].renewable {
+			continue
+		}
+		expiry := now.Add(ClampTTL(ip.TTL))
+		if confirmed == nil {
+			confirmed = make(map[netip.Addr]time.Time)
+		}
+		if expiry.After(confirmed[addr]) {
+			confirmed[addr] = expiry
+		}
+		if !m.tracker.dynamicIPs[addr].After(expiry) && expiry.After(updates[addr]) {
+			if updates == nil {
+				updates = make(map[netip.Addr]time.Time)
+			}
+			updates[addr] = expiry
+		}
+	}
+	if len(updates) != 0 {
+		updateCtx, cancel := context.WithTimeout(ctx, domainLookupTimeout)
+		err := m.addResolvedDeadlinesLocked(updateCtx, updates, now)
+		cancel()
+		if err != nil {
+			log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)
+			return
+		}
+	}
+	for addr, lease := range entry.addresses {
+		if expiry, stillObserved := confirmed[addr]; stillObserved {
+			if expiry.After(lease.dnsUntil) {
+				lease.dnsUntil = expiry
+			}
+		} else {
+			if !m.holdsDomainCapacity(addr, lease, now) {
+				delete(entry.addresses, addr)
+				continue
+			}
+			lease.renewable = false
+		}
+		entry.addresses[addr] = lease
+	}
+	if len(entry.addresses) == 0 {
+		delete(m.domains, domain)
 	}
 	entry.failures = 0
 	entry.retryAt = time.Time{}
-	var confirmed []ResolvedIP
-	addresses := make(map[netip.Addr]struct{})
-	now := m.tracker.now()
-	for _, ip := range ips {
-		address := ip.Addr.Unmap()
-		if _, observed := entry.addresses[address]; observed {
-			if !m.tracker.dynamicIPs[address].After(now.Add(ClampTTL(ip.TTL))) {
-				confirmed = append(confirmed, ip)
-			}
-			addresses[address] = struct{}{}
-		}
-	}
-	if len(addresses) == 0 {
-		delete(m.domains, domain)
-		return
-	}
-	updateCtx, cancel := context.WithTimeout(ctx, domainLookupTimeout)
-	defer cancel()
-	if err := m.addResolvedIPsLocked(updateCtx, confirmed); err != nil {
-		log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)
-		return
-	}
-	entry.addresses = addresses
 }
 
 const (
@@ -339,17 +391,25 @@ type ResolvedIP struct {
 	TTL  time.Duration
 }
 
-// buildAddResolvedIPsScript returns a nft script fragment that
-// adds resolved IPs to dyn_allow_v4/v6 with timeout.
-func buildAddResolvedIPsScript(table string, ips []ResolvedIP) string {
-	elements := make([]ResolvedIP, 0, len(ips))
-	for _, r := range ips {
-		elements = append(elements, ResolvedIP{
-			Addr: r.Addr,
-			TTL:  ClampTTL(r.TTL),
-		})
+// answerDeadlines keeps the longest deadline per address and stops on the
+// first distinct address beyond the caller's budget.
+func answerDeadlines(ips []ResolvedIP, now time.Time, limit int) map[netip.Addr]time.Time {
+	var deadlines map[netip.Addr]time.Time
+	for _, ip := range ips {
+		if addr := ip.Addr.Unmap(); addr.IsValid() {
+			expiry := now.Add(ClampTTL(ip.TTL))
+			if deadlines == nil {
+				deadlines = make(map[netip.Addr]time.Time, min(len(ips), limit))
+			}
+			if expiry.After(deadlines[addr]) {
+				deadlines[addr] = expiry
+				if len(deadlines) > limit {
+					break
+				}
+			}
+		}
 	}
-	return buildResolvedIPElementsScript(table, elements)
+	return deadlines
 }
 
 // ClampTTL turns a DNS TTL into the lifetime of a DNS-learned set element:

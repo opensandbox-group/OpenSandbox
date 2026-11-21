@@ -34,9 +34,10 @@ type connectionTracker struct {
 }
 
 type refreshPlan struct {
-	addresses []netip.Addr
-	active    map[netip.Addr]struct{}
-	at        time.Time
+	addresses  []netip.Addr
+	refreshing map[netip.Addr]struct{}
+	active     map[netip.Addr]struct{}
+	at         time.Time
 }
 
 func newConnectionTracker() *connectionTracker {
@@ -45,16 +46,6 @@ func newConnectionTracker() *connectionTracker {
 		previousActiveIPs: make(map[netip.Addr]struct{}),
 		listConnections:   listTCPConnections,
 		now:               time.Now,
-	}
-}
-
-func (t *connectionTracker) setDynamicIPs(ips []ResolvedIP) {
-	now := t.now()
-	for _, ip := range ips {
-		addr := ip.Addr.Unmap()
-		if addr.IsValid() {
-			t.dynamicIPs[addr] = now.Add(ClampTTL(ip.TTL))
-		}
 	}
 }
 
@@ -106,6 +97,9 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 	if manager.quiesced.Load() {
 		return ErrQuiesced
 	}
+	if manager.staticStateUncertain {
+		return errStaticStateUncertain
+	}
 	plan := t.refreshCandidates(connections)
 	if len(plan.addresses) > 0 {
 		script := buildRefreshResolvedIPsScript(tableName, plan.addresses)
@@ -113,6 +107,15 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 			return err
 		}
 		telemetry.RecordNftablesUpdate()
+		grace := plan.at.Add(dynSetTimeoutS * time.Second)
+		for _, entry := range manager.domains {
+			for address, lease := range entry.addresses {
+				if _, ok := plan.refreshing[address]; ok {
+					lease.tcpUntil = grace
+					entry.addresses[address] = lease
+				}
+			}
+		}
 	}
 	t.recordRefresh(plan)
 	return nil
@@ -166,7 +169,7 @@ func (t *connectionTracker) refreshCandidates(connections []tcpConnection) refre
 		addresses = append(addresses, addr)
 	}
 	sort.Slice(addresses, func(i, j int) bool { return addresses[i].Compare(addresses[j]) < 0 })
-	return refreshPlan{addresses: addresses, active: current, at: now}
+	return refreshPlan{addresses: addresses, refreshing: refresh, active: current, at: now}
 }
 
 func (t *connectionTracker) recordRefresh(plan refreshPlan) {

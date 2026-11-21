@@ -22,29 +22,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestConnectionTrackerSetDynamicIPs(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	tracker := newConnectionTracker()
-	tracker.now = func() time.Time { return now }
-	tracker.setDynamicIPs([]ResolvedIP{
-		{Addr: netip.MustParseAddr("1.1.1.1"), TTL: 10 * time.Second},
-		{Addr: netip.MustParseAddr("::ffff:192.0.2.1"), TTL: 120 * time.Second},
-	})
-
-	require.Equal(t, map[netip.Addr]time.Time{
-		netip.MustParseAddr("1.1.1.1"):   now.Add(70 * time.Second),
-		netip.MustParseAddr("192.0.2.1"): now.Add(180 * time.Second),
-	}, tracker.dynamicIPs)
-}
-
 func TestConnectionTrackerRefreshCandidates(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	tracker := newConnectionTracker()
 	tracker.now = func() time.Time { return now }
-	tracker.setDynamicIPs([]ResolvedIP{
-		{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute},
-		{Addr: netip.MustParseAddr("2001:db8::1"), TTL: time.Minute},
-	})
+	tracker.dynamicIPs[netip.MustParseAddr("1.1.1.1")] = now.Add(2 * time.Minute)
+	tracker.dynamicIPs[netip.MustParseAddr("2001:db8::1")] = now.Add(2 * time.Minute)
 
 	refresh := tracker.refreshCandidates([]tcpConnection{
 		{remote: netip.MustParseAddr("2001:db8::1"), state: "ESTABLISHED"},
@@ -68,7 +51,7 @@ func TestConnectionTrackerFinalRefreshAfterClose(t *testing.T) {
 	addr := netip.MustParseAddr("1.1.1.1")
 	tracker := newConnectionTracker()
 	tracker.now = func() time.Time { return now }
-	tracker.setDynamicIPs([]ResolvedIP{{Addr: addr, TTL: time.Minute}})
+	tracker.dynamicIPs[addr] = now.Add(2 * time.Minute)
 	tracker.recordRefresh(tracker.refreshCandidates([]tcpConnection{{remote: addr, state: "ESTABLISHED"}}))
 
 	refresh := tracker.refreshCandidates(nil)
@@ -82,7 +65,7 @@ func TestConnectionTrackerForgetsExpiredInactiveIP(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	tracker := newConnectionTracker()
 	tracker.now = func() time.Time { return now }
-	tracker.setDynamicIPs([]ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: 10 * time.Second}})
+	tracker.dynamicIPs[netip.MustParseAddr("1.1.1.1")] = now.Add(70 * time.Second)
 	now = now.Add(71 * time.Second)
 
 	require.Empty(t, tracker.refreshCandidates(nil).addresses)
@@ -91,7 +74,7 @@ func TestConnectionTrackerForgetsExpiredInactiveIP(t *testing.T) {
 
 func TestConnectionTrackerClear(t *testing.T) {
 	tracker := newConnectionTracker()
-	tracker.setDynamicIPs([]ResolvedIP{{Addr: netip.MustParseAddr("1.1.1.1"), TTL: time.Minute}})
+	tracker.dynamicIPs[netip.MustParseAddr("1.1.1.1")] = tracker.now().Add(2 * time.Minute)
 	tracker.previousActiveIPs[netip.MustParseAddr("1.1.1.1")] = struct{}{}
 
 	tracker.clear()

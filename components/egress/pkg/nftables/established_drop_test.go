@@ -248,7 +248,7 @@ func TestApplyStaticComputingEstablishedDrops_AtomicWithDomainMap(t *testing.T) 
 	require.NoError(t, m.ApplyStatic(context.Background(), oldPol))
 	m.mu.Lock()
 	m.domains["deb.debian.org"] = &resolvedDomain{
-		addresses: map[netip.Addr]struct{}{netip.MustParseAddr("203.0.113.10"): {}},
+		addresses: map[netip.Addr]domainLease{netip.MustParseAddr("203.0.113.10"): {renewable: true}},
 	}
 	m.mu.Unlock()
 
@@ -409,7 +409,7 @@ func TestComputeEstablishedDrops_SurvivingDomainLeaseInsideRemovedPrefix(t *test
 	m, scripts := recordingManager()
 	require.NoError(t, m.ApplyStatic(context.Background(), oldPol))
 	m.mu.Lock()
-	m.domains["example.com"] = &resolvedDomain{addresses: map[netip.Addr]struct{}{lease: {}}}
+	m.domains["example.com"] = &resolvedDomain{addresses: map[netip.Addr]domainLease{lease: {renewable: true}}}
 	m.mu.Unlock()
 	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), oldPol, newPol)
 	require.NoError(t, err)
@@ -518,7 +518,7 @@ func TestApplyStatic_ReemitsStillRelevantDrops(t *testing.T) {
 	// Plain reapply (e.g. always-rule reload) with a lease learned meanwhile.
 	lease := netip.MustParseAddr("198.51.100.7")
 	m.mu.Lock()
-	m.domains["example.com"] = &resolvedDomain{addresses: map[netip.Addr]struct{}{lease: {}}}
+	m.domains["example.com"] = &resolvedDomain{addresses: map[netip.Addr]domainLease{lease: {renewable: true}}}
 	m.mu.Unlock()
 	require.NoError(t, m.ApplyStatic(context.Background(), newPol))
 	script := (*scripts)[len(*scripts)-1]

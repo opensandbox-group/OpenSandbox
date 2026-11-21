@@ -73,6 +73,8 @@ type Options struct {
 	MitmRedirectPort int
 }
 
+var errStaticStateUncertain = errors.New("nftables policy state is uncertain; a successful policy apply is required")
+
 type Manager struct {
 	run          runner
 	opts         Options
@@ -81,6 +83,9 @@ type Manager struct {
 	tracker      *connectionTracker
 	domainPolicy *policy.NetworkPolicy
 	domains      map[string]*resolvedDomain
+
+	staticStateUncertain bool // Protected by mu; cleared only by a successful apply.
+
 	// lastDrops is the teardown set currently installed. A plain ApplyStatic
 	// re-emits its still-relevant part, because every full apply starts with
 	// `delete table` and would otherwise reopen flows a dropEstablished commit
@@ -133,15 +138,17 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	return err
 }
 
-// learnedAddrsLocked returns every DNS-learned address currently tracked.
+// learnedAddrsLocked returns the DNS addresses still eligible for renewal.
 func (m *Manager) learnedAddrsLocked() []netip.Addr {
 	var out []netip.Addr
 	for _, entry := range m.domains {
 		if entry == nil {
 			continue
 		}
-		for addr := range entry.addresses {
-			out = append(out, addr)
+		for addr, lease := range entry.addresses {
+			if lease.renewable {
+				out = append(out, addr)
+			}
 		}
 	}
 	return out
@@ -211,17 +218,33 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	if err != nil {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
 	}
+	now := m.tracker.now()
+	domains, leases := m.retainedDomainLeasesLocked(p, now)
+	if len(leases) != 0 {
+		var b strings.Builder
+		b.WriteString(script)
+		for addr, expiry := range leases {
+			seconds := (expiry.Sub(now) + time.Second - time.Nanosecond) / time.Second
+			fmt.Fprintf(&b, "add element inet %s %s { %s timeout %ds }\n", tableName, resolvedIPSet(addr), addr, seconds)
+		}
+		script = b.String()
+	}
+	commit := func() {
+		m.tracker.clearPreviousActiveIPsLocked()
+		m.tracker.dynamicIPs = leases
+		m.domainPolicy = p
+		m.domains = domains
+		m.staticStateUncertain = false
+		m.setLastDropsLocked(drops, committedAt)
+		telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
+		telemetry.RecordNftablesUpdate()
+	}
 	if _, err := m.run(ctx, script); err != nil {
 		if IsMissingTableError(err, tableName) {
 			fallback := RemoveDeleteTableLine(script, tableName)
 			if fallback != script {
 				if _, retryErr := m.run(ctx, fallback); retryErr == nil {
-					m.tracker.clear()
-					m.domainPolicy = p
-					m.domains = make(map[string]*resolvedDomain)
-					m.setLastDropsLocked(drops, committedAt)
-					telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
-					telemetry.RecordNftablesUpdate()
+					commit()
 					return matched, nil
 				} else {
 					effect := ApplyUnknown
@@ -234,20 +257,42 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 		}
 		// Keep the failure and freeze in the same critical section so queued
 		// writers cannot publish old permits before the owner receives it.
-		if m.opts.QuiesceOnApplyFailure && ApplyEffectOf(err) != ApplyUnchanged {
-			m.quiesced.Store(true)
+		if ApplyEffectOf(err) != ApplyUnchanged {
+			m.staticStateUncertain = true
+			if m.opts.QuiesceOnApplyFailure {
+				m.quiesced.Store(true)
+			}
 		}
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
 		return 0, err
 	}
-	m.tracker.clear()
-	m.domainPolicy = p
-	m.domains = make(map[string]*resolvedDomain)
-	m.setLastDropsLocked(drops, committedAt)
-	telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
-	telemetry.RecordNftablesUpdate()
+	commit()
 	log.Infof("nftables: static policy applied successfully (established_drop_flows=%d)", matched)
 	return matched, nil
+}
+
+func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.Time) (map[string]*resolvedDomain, map[netip.Addr]time.Time) {
+	domains := make(map[string]*resolvedDomain, len(m.domains))
+	leases := make(map[netip.Addr]time.Time)
+	if p.DefaultAction != policy.ActionDeny {
+		return domains, leases
+	}
+	for domain, current := range m.domains {
+		if p.Evaluate(domain) != policy.ActionAllow {
+			continue
+		}
+		// Replace the entry identity after acknowledgement so a lookup begun
+		// against the prior policy cannot update the new table.
+		copy := *current
+		domains[domain] = &copy
+		for addr, lease := range current.addresses {
+			expiry := lease.deadline()
+			if expiry.After(now) && expiry.After(leases[addr]) {
+				leases[addr] = expiry
+			}
+		}
+	}
+	return domains, leases
 }
 
 func (m *Manager) setLastDropsLocked(drops EstablishedDrops, committedAt time.Time) {
@@ -265,6 +310,9 @@ func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 	if m.quiesced.Load() {
 		return ErrQuiesced
 	}
+	if m.staticStateUncertain {
+		return errStaticStateUncertain
+	}
 	return m.addResolvedIPsLocked(ctx, ips)
 }
 
@@ -272,11 +320,31 @@ func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
 // m.mu and have checked admission before changing any associated state. Do not
 // recheck here: Quiesce may close admission while that operation is draining.
 func (m *Manager) addResolvedIPsLocked(ctx context.Context, ips []ResolvedIP) error {
-	script := buildAddResolvedIPsScript(tableName, ips)
-	if script == "" {
+	if len(ips) == 0 {
 		return nil
 	}
-	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(ips), script)
+	now := m.tracker.now()
+	return m.addResolvedDeadlinesLocked(ctx, answerDeadlines(ips, now, len(ips)), now)
+}
+
+// addResolvedDeadlinesLocked consumes the caller's batch. The kernel lease
+// must not shorten an independently learned lease or a TCP reconnect grace.
+func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[netip.Addr]time.Time, now time.Time) error {
+	if len(deadlines) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for addr, expiry := range deadlines {
+		if previous := m.tracker.dynamicIPs[addr]; previous.After(expiry) {
+			expiry = previous
+			deadlines[addr] = expiry
+		}
+		set := resolvedIPSet(addr)
+		// nft uses whole seconds; round up rather than shorten the deadline.
+		WriteTimedElement(&b, tableName, set, addr, expiry.Sub(now)+time.Second-time.Nanosecond)
+	}
+	script := b.String()
+	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(deadlines), script)
 	_, err := m.run(ctx, script)
 	if err != nil {
 		// The policy allows these destinations but the kernel does not know it yet, so
@@ -285,9 +353,18 @@ func (m *Manager) addResolvedIPsLocked(ctx context.Context, ips []ResolvedIP) er
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
 		return err
 	}
-	m.tracker.setDynamicIPs(ips)
+	for addr, expiry := range deadlines {
+		m.tracker.dynamicIPs[addr] = expiry
+	}
 	telemetry.RecordNftablesUpdate()
 	return nil
+}
+
+func resolvedIPSet(addr netip.Addr) string {
+	if addr.Is4() {
+		return dynAllowV4Set
+	}
+	return dynAllowV6Set
 }
 
 // StartConnectionRefresh keeps DNS-learned IPs authorized while a TCP

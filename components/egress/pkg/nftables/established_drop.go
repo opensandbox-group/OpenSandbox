@@ -148,10 +148,9 @@ func portDropCoversPort(pd EstablishedPortDrop, dport int) bool {
 	return false
 }
 
-// SnapshotResolvedDomains returns a copy of the DNS-learned address map the
-// manager currently tracks. Not part of the policy server's nftApplier
-// interface: production code snapshots under the manager lock inside
-// ApplyStaticComputingEstablishedDrops.
+// SnapshotResolvedDomains returns DNS addresses still eligible for renewal.
+// Retired leases hold capacity without changing legacy established teardown.
+// Policy replacement takes the snapshot under the manager lock.
 func (m *Manager) SnapshotResolvedDomains() map[string][]netip.Addr {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -164,9 +163,14 @@ func (m *Manager) snapshotResolvedDomainsLocked() map[string][]netip.Addr {
 		if entry == nil || len(entry.addresses) == 0 {
 			continue
 		}
-		addrs := make([]netip.Addr, 0, len(entry.addresses))
-		for addr := range entry.addresses {
-			addrs = append(addrs, addr)
+		var addrs []netip.Addr
+		for addr, lease := range entry.addresses {
+			if lease.renewable {
+				addrs = append(addrs, addr)
+			}
+		}
+		if len(addrs) == 0 {
+			continue
 		}
 		sort.Slice(addrs, func(i, j int) bool { return addrs[i].Compare(addrs[j]) < 0 })
 		out[domain] = addrs
