@@ -716,7 +716,7 @@ var _ = Describe("Pool deletion and recreation", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 
-		It("I-3: isolates allocations when a same-name Pool is recreated with its old Pods still present", func() {
+		DescribeTable("I-3: isolates allocations when a same-name Pool is recreated with its old Pods still present", func(orphan bool) {
 			oldPool := &sandboxv1alpha1.Pool{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, oldPool)).To(Succeed())
 
@@ -755,6 +755,18 @@ var _ = Describe("Pool deletion and recreation", func() {
 			Expect(allocator.GetPoolAllocation(ctx, oldPool)).To(HaveKeyWithValue(oldPod.Name, oldSandbox.Name))
 
 			Expect(k8sClient.Delete(ctx, oldPool)).To(Succeed())
+			if orphan {
+				// envtest runs no garbage collector. Model orphan deletion by removing
+				// the old Pool's owner reference while leaving the allocated Pod alive.
+				before := oldPod.DeepCopy()
+				oldPod.OwnerReferences = nil
+				Expect(k8sClient.Patch(ctx, &oldPod, kclient.MergeFrom(before))).To(Succeed())
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(&oldPod), &oldPod)).To(Succeed())
+					g.Expect(metav1.GetControllerOf(&oldPod)).To(BeNil())
+				}, timeout, interval).Should(Succeed())
+			}
+			wantController := metav1.GetControllerOf(&oldPod)
 			newPool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{
 				Name: oldPool.Name, Namespace: oldPool.Namespace,
 			}, Spec: oldPool.Spec}
@@ -776,7 +788,7 @@ var _ = Describe("Pool deletion and recreation", func() {
 			newSandbox, newPod := allocateOne(newPool)
 			Expect(metav1.IsControlledBy(&newPod, newPool)).To(BeTrue())
 			Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(&oldPod), &oldPod)).To(Succeed())
-			Expect(metav1.IsControlledBy(&oldPod, oldPool)).To(BeTrue())
+			Expect(metav1.GetControllerOf(&oldPod)).To(Equal(wantController))
 			// Recovery sees both sandboxes' annotations. Preserve only the new reservation.
 			Expect(reconcileAllocations(NewDefaultAllocator(k8sClient),
 				[]*sandboxv1alpha1.BatchSandbox{oldSandbox, newSandbox}, []*v1.Pod{&newPod})).
@@ -789,7 +801,10 @@ var _ = Describe("Pool deletion and recreation", func() {
 			}, timeout, interval).Should(BeTrue())
 			Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(&oldPod), &oldPod)).To(Succeed())
 			Expect(oldPod.DeletionTimestamp).To(BeNil())
-		})
+		},
+			Entry("with the old controller reference", false),
+			Entry("with an orphaned Pod", true),
+		)
 
 		It("should clear allocation when recreating a Pool with the same name", func() {
 			By("setting pool pods to running state")

@@ -871,7 +871,7 @@ func (r *PoolReconciler) runRecycleTasks(ctx context.Context, pool *sandboxv1alp
 				} else if err != nil {
 					results[localIdx] = recycleResult{sandboxName: localTask.sandboxName, podName: localTask.podName, err: err}
 					return
-				} else if hasDifferentController(pod, pool) {
+				} else if !metav1.IsControlledBy(pod, pool) {
 					// This Pool has nothing to recycle for a foreign reservation.
 					pod = nil
 				}
@@ -1112,7 +1112,7 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 		if err != nil {
 			return nil, err
 		}
-		if hasDifferentController(pod, pool) {
+		if !metav1.IsControlledBy(pod, pool) {
 			stale = append(stale, name)
 			delete(latestAllocation, name)
 		}
@@ -1129,11 +1129,6 @@ func (r *PoolReconciler) scheduleSandbox(ctx context.Context, pool *sandboxv1alp
 
 	log.Info("Schedule result", "pool", pool.Name, "toDeletePods", toDeletePods, "supplyCnt", allocAction.PodSupplement)
 	return result, nil
-}
-
-func hasDifferentController(pod *corev1.Pod, pool *sandboxv1alpha1.Pool) bool {
-	owner := metav1.GetControllerOfNoCopy(pod)
-	return owner != nil && owner.UID != pool.UID
 }
 
 func (r *PoolReconciler) updatePool(ctx context.Context, pool *sandboxv1alpha1.Pool, pods []*corev1.Pod, idlePods []string) (*updateResult, error) {
