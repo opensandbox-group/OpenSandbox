@@ -14,6 +14,7 @@
 
 import { Tag } from 'antd';
 
+import { statusLabel, useI18n } from '../i18n';
 import { sandboxStateTagColor, tenantTagColor } from '../utils/semanticTheme';
 
 import './SemanticTags.css';
@@ -38,11 +39,12 @@ type SandboxStateTagProps = {
 };
 
 export function SandboxStateTag({ state }: SandboxStateTagProps) {
+  const { t } = useI18n();
   const s = state?.trim();
   if (!s) return <>—</>;
   return (
     <Tag color={sandboxStateTagColor(s)} className="console-semantic-tag">
-      {s}
+      {statusLabel(t, s)}
     </Tag>
   );
 }
