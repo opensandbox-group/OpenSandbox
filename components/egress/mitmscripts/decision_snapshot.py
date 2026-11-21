@@ -177,6 +177,7 @@ def _binding(value: Any, redactions: set[str]) -> tuple[str, set[str]]:
     allowed = {"name", "match", "headers"}
     if type(value) is not dict or not (
         set(value) == allowed or set(value) == allowed | {"substitutions"}
+        or set(value) == allowed | {"substitutions", "exchange"}
     ):
         raise _Invalid
     name = value["name"]
@@ -189,6 +190,17 @@ def _binding(value: Any, redactions: set[str]) -> tuple[str, set[str]]:
     hosts = _strings(match["hosts"], _host)
     _strings(match["methods"], lambda item: bool(item) and item == item.strip().upper())
     _strings(match["paths"], lambda item: item == item.strip() and item.startswith("/"))
+
+    if "exchange" in value:
+        marker = value["exchange"]
+        if (
+            type(marker) is not dict or set(marker) != {"credential"}
+            or type(marker["credential"]) is not str
+            or not marker["credential"]
+            or marker["credential"] != marker["credential"].strip()
+            or value["headers"] != [] or value["substitutions"] != []
+        ):
+            raise _Invalid
 
     headers = value["headers"]
     if type(headers) is not list:
