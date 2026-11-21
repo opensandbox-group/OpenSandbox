@@ -156,4 +156,13 @@ grep -q 'retrying on the next poll' "$TESTDIR/watch-d.log" || fail "case D: retr
 grep -q 'mitm CA changed' "$TESTDIR/watch-d.log" || fail "case D: rotation not logged"
 echo "PASS: case D failed install is retried on the next poll"
 
-echo "PASS: watcher behaves correctly in all 4 scenarios"
+# --- Case E: MITM_CA_WATCH_INTERVAL=0 disables the watcher cleanly (no spin).
+reset_log
+live="$TESTDIR/live-e.pem"
+cp "$CA_A" "$live"
+MITM_CA_WATCH_INTERVAL=0 watch_mitm_ca "$live" "" > "$TESTDIR/watch-e.log" 2>&1
+[ "$(count_calls system)" -eq 0 ] || fail "case E: disabled watcher must not install"
+grep -q 'watcher disabled' "$TESTDIR/watch-e.log" || fail "case E: disable message not logged"
+echo "PASS: case E MITM_CA_WATCH_INTERVAL=0 exits immediately without installing"
+
+echo "PASS: watcher behaves correctly in all 5 scenarios"

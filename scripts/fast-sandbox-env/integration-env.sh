@@ -3286,6 +3286,36 @@ opensandbox_verify() {
 
 # --- stage: pause / resume (opensandbox CLI -> FastPath checkpoint)
 
+# Fast /ping readiness probe over the signed gateway route (100ms cadence).
+# Used where 2s-sleep `wait_for execd_ping_ok` (plus ~0.7s per osb CLI call)
+# would quantize cold-boot latency measurements into ~2.7s buckets.
+wait_for_execd_ping_fast() { # <sandbox-id> <description> [timeout-seconds]
+	local id="$1" description="$2" timeout_s="${3:-360}"
+	local deadline_ms route code
+	deadline_ms=$(( $(now_ms) / 1000000 + timeout_s * 1000 ))
+	route=""
+	while :; do
+		route="$( { server_api GET "/sandboxes/$id/endpoints/44772" 2>/dev/null || true; } \
+			| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
+		[[ -n "$route" ]] && break
+		if (( $(now_ms) / 1000000 >= deadline_ms )); then
+			fail "$description (gateway route did not publish within ${timeout_s}s)"
+		fi
+		sleep 0.1
+	done
+	code=""
+	while :; do
+		code="$(curl -sS --connect-timeout 1 -m 2 -o /dev/null -w '%{http_code}' \
+			-H "OpenSandbox-Ingress-To: $route" "$GATEWAY_URL/ping" 2>/dev/null || true)"
+		[[ "$code" == "200" ]] && break
+		if (( $(now_ms) / 1000000 >= deadline_ms )); then
+			fail "$description (timed out after ${timeout_s}s; last HTTP ${code:-none})"
+		fi
+		sleep 0.1
+	done
+	pass "$description"
+}
+
 # Fresh signed route + one GET: doubles as the "runtime actually serving" probe.
 execd_ping_ok() {
 	local route code
@@ -4389,20 +4419,26 @@ rootfs_only_verify() {
 	# Cold-boot restore: a fresh sandbox boots the artifact from disk
 	# (seconds-scale readiness, not the millisecond in-place restore).
 	log "verify (rootfs-only): osb sandbox create --snapshot-id $snapshot_id (cold boot)"
+	local t_boot0 t_create t_ping
+	t_boot0="$(now_ms)"
 	restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
 		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
 		--skip-health-check -o json 2>/dev/null)" \
 		|| fail "osb sandbox create (snapshotId=$snapshot_id) failed"
+	t_create="$(now_ms)"
 	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
 	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
 	VERIFY_ID="$restore_id"
 	rootfs_log_id="$restore_id"
+	# Poll execd /ping directly over the signed gateway route before checking
+	# the coarse 2s-sleep Running state, so create->execd /ping 200 is not
+	# quantized by `wait_for sandbox_running`.
+	wait_for_execd_ping_fast "$restore_id" "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 360
+	t_ping="$(now_ms)"
+	log "verify (rootfs-only): cold boot create $(( (t_create - t_boot0) / 1000000 ))ms, create->execd /ping 200 $(( (t_ping - t_boot0) / 1000000 ))ms"
 	# Cold boot is seconds-scale; the generous ceiling only covers a slow
 	# registry pull of the artifact pair.
 	wait_for "cold-booted sandbox Running" 300 sandbox_running
-	t3="$(now_ms)"
-	log "verify (rootfs-only): cold boot create->Running $(( (t3 - t2) / 1000000 ))ms"
-	wait_for "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 180 execd_ping_ok
 	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
 	dump_latency_evidence "$restore_id" "$rootfs_log_label cold boot" || true
 
