@@ -29,7 +29,13 @@ assert_pool_args() {
     "--http-max-idle-conns=$max_idle" \
     "--http-max-idle-conns-per-host=$per_host" \
     "--http-idle-conn-timeout=$idle_timeout"; do
-    if ! grep -Fq -- "\"$argument\"" <<<"$rendered"; then
+    # 空期望值表示该参数应省略，保障旧镜像兼容。
+    if [[ "$argument" == *= ]]; then
+      if grep -Fq -- "\"$argument" <<<"$rendered"; then
+        echo "Unexpected ingress argument: $argument" >&2
+        exit 1
+      fi
+    elif ! grep -Fq -- "\"$argument\"" <<<"$rendered"; then
       echo "Missing ingress argument: $argument" >&2
       exit 1
     fi
@@ -49,7 +55,19 @@ for chart in standalone umbrella; do
   fi
 
   rendered="$(helm template pool-test "$chart_path" "${render_args[@]}")"
-  assert_pool_args "$rendered" 100 2 90s
+  assert_pool_args "$rendered" "" "" ""
+
+  rendered="$(helm template pool-test "$chart_path" "${render_args[@]}" \
+    --set "$prefix.maxIdleConns=2048")"
+  assert_pool_args "$rendered" 2048 "" ""
+
+  rendered="$(helm template pool-test "$chart_path" "${render_args[@]}" \
+    --set "$prefix.maxIdleConnsPerHost=4")"
+  assert_pool_args "$rendered" "" 4 ""
+
+  rendered="$(helm template pool-test "$chart_path" "${render_args[@]}" \
+    --set "$prefix.idleConnTimeout=2m")"
+  assert_pool_args "$rendered" "" "" 2m
 
   rendered="$(helm template pool-test "$chart_path" "${render_args[@]}" \
     --set "$prefix.maxIdleConns=2048" \
@@ -64,6 +82,6 @@ for chart in standalone umbrella; do
   assert_pool_args "$rendered" 0 0 0s
 
   rendered="$(helm template pool-test "$chart_path" "${render_args[@]}" --set "$prefix=null")"
-  assert_pool_args "$rendered" 100 2 90s
+  assert_pool_args "$rendered" "" "" ""
   echo "Verified $chart ingress HTTP connection pool arguments"
 done

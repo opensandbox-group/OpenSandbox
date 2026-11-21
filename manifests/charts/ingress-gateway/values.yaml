@@ -39,7 +39,8 @@ gateway:
     # -- Gateway image pull policy.
     pullPolicy: IfNotPresent
     # -- Gateway image tag. Empty uses the release-<appVersion> image tag
-    # published for this chart version.
+    # published for this chart version. Nondefault httpConnectionPool values
+    # require an ingress image that supports the connection-pool flags.
     tag: ""
 
   # -- Number of gateway replicas.
@@ -106,6 +107,7 @@ gateway:
 
   # Upstream HTTP idle connection pool, per gateway replica. Applies to
   # HTTP/SSE; WebSocket connections use their existing separate transport.
+  # Default-valued flags are omitted to preserve compatibility with released images.
   httpConnectionPool:
     # -- Maximum idle HTTP connections across all upstream hosts. Zero means no total limit; must be nonnegative.
     maxIdleConns: 100

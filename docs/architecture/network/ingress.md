@@ -34,7 +34,7 @@ Once a sandbox is reached, its responses pass through **verbatim**, including re
 
 ## Upstream HTTP connection reuse
 
-Each ingress replica reuses one HTTP transport across requests to different sandbox upstreams. Its idle connection pool can be configured independently of connection observation; WebSocket traffic keeps a separate transport. See [Ingress HTTP connection pool](/guides/ingress-connection-pool) for configuration, zero-value semantics, and resource trade-offs.
+Each ingress replica reuses one HTTP transport across requests to different sandbox upstreams. Its idle connection pool can be configured independently of connection observation; WebSocket traffic keeps a separate transport. See [Ingress HTTP connection pool](/guides/ingress-connection-pool) for configuration and zero-value semantics, and the [defaults decision](/architecture/network/ingress-http-pool-defaults) for compatibility and resource trade-offs.
 
 ## WebSocket support
 

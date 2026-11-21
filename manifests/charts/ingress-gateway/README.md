@@ -43,7 +43,7 @@ Kubernetes: `>=1.22.0-0`
 | gateway.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress","tag":""}` | Gateway image configuration. |
 | gateway.image.pullPolicy | string | `"IfNotPresent"` | Gateway image pull policy. |
 | gateway.image.repository | string | `"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress"` | Gateway image repository. |
-| gateway.image.tag | string | `""` | Gateway image tag. Empty uses the release-<appVersion> image tag published for this chart version. |
+| gateway.image.tag | string | `""` | Gateway image tag. Empty uses the release-<appVersion> image tag published for this chart version. Nondefault httpConnectionPool values require an ingress image that supports the connection-pool flags. |
 | gateway.logLevel | string | `"info"` | Gateway log level. |
 | gateway.nodeSelector | object | `{}` | Node selector for the gateway pod. |
 | gateway.podAnnotations | object | `{}` | Extra annotations for the gateway pod. |

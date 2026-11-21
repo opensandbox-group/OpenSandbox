@@ -21,10 +21,14 @@ The ingress binary accepts these nonnegative values:
 
 Negative values are rejected at startup. The timeout uses Go duration syntax, such as `30s`, `2m`, or `0s`.
 
+The chart's default `release-1.3.0-rc.2` image does not support these flags. Default-valued arguments are omitted so existing default installations keep working. To tune the pool, select an ingress image built from a revision that includes the connection-pool flags; replace `YOUR_COMPATIBLE_IMAGE_TAG` below with that image's tag.
+
 For the standalone `ingress-gateway` Helm chart, set:
 
 ```yaml
 gateway:
+  image:
+    tag: YOUR_COMPATIBLE_IMAGE_TAG
   httpConnectionPool:
     maxIdleConns: 2048
     maxIdleConnsPerHost: 4
@@ -37,13 +41,15 @@ For the `opensandbox` umbrella chart, nest the same values under the subchart na
 ingress-gateway:
   enabled: true
   gateway:
+    image:
+      tag: YOUR_COMPATIBLE_IMAGE_TAG
     httpConnectionPool:
       maxIdleConns: 2048
       maxIdleConnsPerHost: 4
       idleConnTimeout: "90s"
 ```
 
-This example targets a many-upstream polling workload; choose capacities for the upstream hosts and request concurrency handled by each replica. Explicit zero values are passed through by both charts. With no overrides, existing default capacities and idle expiration are preserved.
+This example targets a many-upstream polling workload; choose capacities for the upstream hosts and request concurrency handled by each replica. Each argument is emitted only when its value differs from the declared default; explicit zero values are passed through by both charts. With no overrides, existing default capacities and idle expiration are preserved.
 
 ## Scope and resource cost
 
