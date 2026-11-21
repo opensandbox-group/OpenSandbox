@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
@@ -505,7 +506,36 @@ func TestFilesystemControllerListDirectoryRejectsInvalidRequests(t *testing.T) {
 func TestFilesystemControllerReplaceContent(t *testing.T) {
 	tmpDir := t.TempDir()
 	target := filepath.Join(tmpDir, "content.txt")
-	require.NoError(t, os.WriteFile(target, []byte("hello world"), 0o644))
+	require.NoError(t, os.WriteFile(target, []byte("hello world"), 0o640))
+
+	body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
+		target: {
+			Old: "world",
+			New: "universe",
+		},
+	})
+	require.NoError(t, err)
+
+	ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/replace", body)
+
+	ctrl.ReplaceContent()
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	data, err := os.ReadFile(target)
+	require.NoError(t, err)
+	require.Equal(t, "hello universe", string(data))
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(target)
+		require.NoError(t, err)
+		require.Equal(t, os.FileMode(0o640), info.Mode().Perm())
+	}
+}
+
+func TestFilesystemControllerReplaceContentFallsBackWhenRenameFails(t *testing.T) {
+	failUploadRename(t)
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "content.txt")
+	require.NoError(t, os.WriteFile(target, []byte("hello world"), 0o640))
 
 	body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
 		target: {
@@ -614,10 +644,9 @@ func TestFilesystemDirectoryRoutesRejectStagingNames(t *testing.T) {
 	}
 }
 
-// ReplaceContent reads and truncates the target in place, so it must resolve a
-// trailing "/." the same way the filesystem helpers do before checking the
-// reserved staging names. Otherwise it can expose or corrupt an upload another
-// route is still staging.
+// ReplaceContent uses the same path resolution as the filesystem upload helpers
+// before checking the reserved staging names. Otherwise it can expose or corrupt
+// an upload another route is still staging.
 func TestReplaceContentRejectsStagingPath(t *testing.T) {
 	for _, stagingName := range []string{
 		".osb-staging-0123456789abcdef",
