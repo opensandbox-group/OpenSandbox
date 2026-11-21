@@ -132,10 +132,10 @@ type streamExecutionState struct {
 	// The reply deadline uses it to expire on output silence instead of on
 	// absolute wall-clock time, so a slow relay cannot be cut off mid-delivery.
 	outputActivity atomic.Int64
-	// outputSending counts output sends in progress. A send blocked on a full
-	// resultChan is output waiting on a slow consumer, not silence, so the
-	// reply deadline does not expire while one is in flight.
-	outputSending atomic.Int64
+	// outputInFlight counts output sends that have not returned yet. A send
+	// blocked on a full resultChan is output waiting on a slow consumer, not
+	// silence, so the reply deadline does not expire while one is pending.
+	outputInFlight atomic.Int64
 }
 
 func newStreamExecutionState(startTime time.Time) *streamExecutionState {
@@ -171,12 +171,12 @@ func (state *streamExecutionState) trySend(resultChan chan *ExecutionResult, not
 
 // sendOutput forwards one output result and records it for the reply deadline.
 func (state *streamExecutionState) sendOutput(resultChan chan *ExecutionResult, notify *ExecutionResult) {
-	state.outputSending.Add(1)
+	state.outputInFlight.Add(1)
 	state.trySend(resultChan, notify)
-	// Count the delivery before clearing the in-flight mark; with the reverse
-	// read order in finalizeOnReplyDeadline, the deadline sees at least one.
+	// Count the delivery before clearing the in-flight mark; see the matching
+	// read order in finalizeOnReplyDeadline.
 	state.outputActivity.Add(1)
-	state.outputSending.Add(-1)
+	state.outputInFlight.Add(-1)
 }
 
 // closeResultChan waits for in-flight sends, sends an optional terminal result last, and closes
@@ -355,11 +355,11 @@ func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan
 			return
 		case <-timer.C:
 		}
-		// Read the in-flight count first: a send that ends after this read
-		// has already counted its delivery by the time the next load runs.
-		sending := state.outputSending.Load()
+		// Load the in-flight count before the delivery count: a send that
+		// finishes between the two loads has already bumped outputActivity.
+		inFlight := state.outputInFlight.Load()
 		latest := state.outputActivity.Load()
-		if sending == 0 && latest == delivered {
+		if inFlight == 0 && latest == delivered {
 			break
 		}
 		delivered = latest
