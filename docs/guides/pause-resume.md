@@ -125,7 +125,7 @@ When the lifecycle server serves multiple sandboxes, configure only `spec.worksp
 
 The archive supports regular files, directories and links confined to the workspace. Restore preserves ordinary Unix access bits and clears setuid and setgid bits. A root init container restores numeric owners and groups. With a non-root init container, new files use the ownership assigned by the filesystem.
 
-Stop application writers before requesting pause. Use the existing pause and resume APIs. A failed export leaves the source Pod available for retry. On resume the init container verifies the archive digest before starting the application. Inspect its logs if the volume or archive is unavailable. The bucket owner manages retention, including abandoned uploads. Keep the active archive for the lifetime of the sandbox because Pod replacement may need it again.
+Stop application writers before requesting pause. Use the existing pause and resume APIs. A failed export leaves the source Pod available for retry. On resume the init container verifies the archive digest before publishing the workspace. If this step fails, the init container can retry on the same volume. Once published, the workspace keeps subsequent edits if the init container runs again. A replacement Pod with a fresh volume restores from the active archive, so keep that archive for the lifetime of the sandbox. Inspect the init container logs if the volume or archive is unavailable. The bucket owner manages retention, including abandoned uploads.
 
 ## Architecture
 

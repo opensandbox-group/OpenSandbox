@@ -17,7 +17,6 @@
 import hashlib
 import os
 from pathlib import Path
-import shutil
 import sys
 import tarfile
 import tempfile
@@ -62,7 +61,13 @@ def workspace_filter(member, destination):
 
 
 def restore(volume, archive, expected):
-    # The init container mounts only a fresh emptyDir and the read-only archive PVC.
+    # Only this init container publishes data in the Pod's emptyDir. The app
+    # mounts that directory by subPath and can keep editing it after resume.
+    target = volume / "data"
+    if os.path.lexists(target):
+        if target.is_symlink() or not target.is_dir():
+            raise ValueError("invalid workspace restore target")
+        return
     with tempfile.TemporaryDirectory(dir=volume) as temporary, archive.open("rb") as stored:
         # Keep the parent private even when the workspace itself is shared.
         stage = Path(temporary) / "data"
@@ -82,9 +87,7 @@ def restore(volume, archive, expected):
             pass
         if digest.hexdigest() != expected:
             raise ValueError("workspace digest mismatch")
-        target = volume / "data"
-        if target.exists():
-            shutil.rmtree(target)
+        # Publishing by rename makes the verified directory the completion marker.
         os.rename(stage, target)
 
 

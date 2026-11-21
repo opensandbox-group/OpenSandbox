@@ -80,12 +80,51 @@ class WorkspaceArchiveTest(unittest.TestCase):
             (resumed / "new").write_text("second pause")
             second = store / "second.tar"
             digest = capture(resumed, second)
-            restore(volume, second, digest)
-            restore(volume, second, digest)
-            self.assertEqual([p.name for p in resumed.iterdir()], ["new"])
+            next_volume = root / "next-pod"
+            next_volume.mkdir()
+            restore(next_volume, second, digest)
+            restored = next_volume / "data"
+            self.assertEqual([p.name for p in restored.iterdir()], ["new"])
+            self.assertEqual((restored / "new").read_text(), "second pause")
+
+    def test_repeated_init_preserves_live_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root / "workspace"
+            work.mkdir()
+            (work / "notes").write_text("at checkpoint")
+            (work / "obsolete").touch()
+            archive = root / "checkpoint.tar"
+            digest = capture(work, archive)
+            volume = root / "pod-volume"
+            volume.mkdir()
+            restore(volume, archive, digest)
+            live = volume / "data"
+            (live / "notes").write_text("edited after resume")
+            (live / "result.csv").write_text("new result")
+            (live / "obsolete").unlink()
+            restore(volume, archive, digest)
+            self.assertEqual((live / "notes").read_text(), "edited after resume")
+            self.assertEqual((live / "result.csv").read_text(), "new result")
+            self.assertFalse((live / "obsolete").exists())
+            archive.unlink()
+            restore(volume, archive, digest)
+
+    def test_failed_restore_can_retry_on_same_volume(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root / "workspace"
+            work.mkdir()
+            (work / "notes").write_text("checkpoint")
+            archive = root / "checkpoint.tar"
+            digest = capture(work, archive)
+            volume = root / "pod-volume"
+            volume.mkdir()
             with self.assertRaisesRegex(ValueError, "digest mismatch"):
-                restore(volume, second, first_digest)
-            self.assertEqual((resumed / "new").read_text(), "second pause")
+                restore(volume, archive, "0" * 64)
+            self.assertFalse((volume / "data").exists())
+            restore(volume, archive, digest)
+            self.assertEqual((volume / "data" / "notes").read_text(), "checkpoint")
 
     def test_upload_failure_preserves_source(self):
         with tempfile.TemporaryDirectory() as temp:
