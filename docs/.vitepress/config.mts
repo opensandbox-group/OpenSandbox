@@ -218,6 +218,10 @@ export default withMermaid(defineConfig({
               text: "Chained Upstream Proxy",
               link: "/guides/egress-upstream-proxy",
             },
+            {
+              text: "Egress Forward Mode",
+              link: "/guides/egress-forward-mode",
+            },
             { text: "Secure Access", link: "/guides/secure-access" },
             { text: "Secure Container", link: "/guides/secure-container" },
             {

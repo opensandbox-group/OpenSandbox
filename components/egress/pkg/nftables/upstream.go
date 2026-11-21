@@ -33,6 +33,10 @@ import (
 type UpstreamProxyEndpoint struct {
 	Port int
 	UID  uint32
+	// Mark, when non-zero, scopes the accept to sockets carrying this SO_MARK
+	// instead of UID (forward mode, OSEP-0030): the sandbox shares the netns
+	// and could assume a UID, but cannot set a mark without CAP_NET_ADMIN/RAW.
+	Mark uint32
 	// IPs seeds the scoped sets for literal-IP endpoints. Hostname endpoints
 	// start empty and are filled via AddUpstreamProxyIPs as the dnsproxy
 	// resolves the infra domain.
@@ -64,8 +68,12 @@ func buildUpstreamProxyStatic(table string, ep *UpstreamProxyEndpoint) string {
 		// permanent element (no timeout): literal endpoints are not DNS-learned
 		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", table, set, addr)
 	}
-	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s tcp dport %d meta skuid %d accept\n", table, chainName, upstreamProxyV4Set, ep.Port, ep.UID)
-	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s tcp dport %d meta skuid %d accept\n", table, chainName, upstreamProxyV6Set, ep.Port, ep.UID)
+	owner := fmt.Sprintf("meta skuid %d", ep.UID)
+	if ep.Mark != 0 {
+		owner = fmt.Sprintf("meta mark %#x", ep.Mark)
+	}
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s tcp dport %d %s accept\n", table, chainName, upstreamProxyV4Set, ep.Port, owner)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s tcp dport %d %s accept\n", table, chainName, upstreamProxyV6Set, ep.Port, owner)
 	return b.String()
 }
 

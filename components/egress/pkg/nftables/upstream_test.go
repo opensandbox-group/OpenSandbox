@@ -47,6 +47,28 @@ func TestBuildRulesetWithUpstreamProxyScopesAccept(t *testing.T) {
 		"add rule inet opensandbox egress ip6 daddr @upstream_proxy_v6 tcp dport 8443 meta skuid 10042 accept")
 }
 
+// Forward mode (OSEP-0030) scopes the gateway accept to the forwarder socket
+// mark rather than a UID, and exempts the forwarder's redirect target.
+func TestBuildRulesetForwardModeScopesGatewayByMark(t *testing.T) {
+	rendered, err := buildRuleset(policy.DefaultDenyPolicy(), Options{
+		UpstreamProxy: &UpstreamProxyEndpoint{
+			Port: 3000,
+			Mark: 0x4,
+			IPs:  []netip.Addr{netip.MustParseAddr("10.20.30.40")},
+		},
+		ForwardRedirectPort: 18082,
+	}, EstablishedDrops{})
+	require.NoError(t, err)
+
+	expectContains(t, rendered,
+		"add rule inet opensandbox egress ip daddr @upstream_proxy_v4 tcp dport 3000 meta mark 0x4 accept")
+	expectContains(t, rendered,
+		"add rule inet opensandbox egress ip6 daddr @upstream_proxy_v6 tcp dport 3000 meta mark 0x4 accept")
+	expectContains(t, rendered, "add rule inet opensandbox egress ip daddr 127.0.0.1 tcp dport 18082 accept")
+	require.NotContains(t, rendered, "meta skuid")
+	require.Contains(t, rendered, "add chain inet opensandbox egress { type filter hook output priority 0; policy drop; }")
+}
+
 func TestBuildRulesetWithoutUpstreamProxyOmitsScopedSets(t *testing.T) {
 	rendered, err := buildRuleset(policy.DefaultDenyPolicy(), Options{BlockDoT: true}, EstablishedDrops{})
 	require.NoError(t, err)

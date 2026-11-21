@@ -71,6 +71,9 @@ type Options struct {
 	// exempt that rewritten tuple ahead of port-scoped rules or every
 	// intercepted flow is dropped (see the rule below). 0 emits nothing.
 	MitmRedirectPort int
+	// ForwardRedirectPort, when > 0, is the forward-mode forwarder listener
+	// port (OSEP-0030); exempted like MitmRedirectPort for the same reason.
+	ForwardRedirectPort int
 }
 
 type Manager struct {
@@ -408,6 +411,9 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// direct workload dials already pass via oifname "lo"; v6 is covered by ::1.
 	if opts.MitmRedirectPort > 0 {
 		fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport %d accept\n", tableName, chainName, opts.MitmRedirectPort)
+	}
+	if opts.ForwardRedirectPort > 0 {
+		fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport %d accept\n", tableName, chainName, opts.ForwardRedirectPort)
 	}
 	if ep := opts.UpstreamProxy; ep != nil {
 		b.WriteString(buildUpstreamProxyStatic(tableName, ep))
