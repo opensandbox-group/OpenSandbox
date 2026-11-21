@@ -799,6 +799,8 @@ The stream parser accepts LF, CRLF, and CR line endings for both standard SSE an
 
 One leading UTF-8 byte order mark (BOM) is ignored at the start of each response, including when its bytes arrive in separate reads. A BOM inside event data or later in the stream is preserved.
 
+If reading the stream fails, an unfinished SSE event is discarded and the read error is returned. Complete events already received remain delivered. A normal EOF retains the existing behavior of delivering pending event data.
+
 Methods that stream output (`RunCommand`, `ExecuteCode`, `RunInSession`, `WatchMetrics`) accept an `EventHandler` callback:
 
 ```go

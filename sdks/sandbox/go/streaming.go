@@ -66,16 +66,18 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 		}
 
 		if !scanner.Scan() {
-			// Stream ended. Dispatch any pending event.
+			// A failed read does not complete the pending event. In particular,
+			// a terminal callback must not hide the original transport failure.
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("opensandbox: sse read: %w", err)
+			}
+			// Normal EOF retains the legacy pending-event dispatch behavior.
 			if len(dataLines) > 0 {
 				current.Data = strings.Join(dataLines, "\n")
 				if err := handler(current); err != nil {
 					return err
 				}
 				eventCount++
-			}
-			if err := scanner.Err(); err != nil {
-				return fmt.Errorf("opensandbox: sse read: %w", err)
 			}
 			if eventCount == 0 {
 				return fmt.Errorf("opensandbox: empty sse stream")
