@@ -337,6 +337,11 @@ _EARLY_CLOSE_SSE = (
     b'data: {"type":"execution_complete","timestamp":2,"execution_time":3}\n\n'
 )
 
+_EARLY_CLOSE_MODERN_SSE = (
+    b'data: {"type":"init","text":"exec-fg","timestamp":1}\n\n'
+    b'data: {"type":"execution_complete","timestamp":2,"execution_time":3,"exit_code":0}\n\n'
+)
+
 
 def test_sync_run_background_command_breaks_on_complete_before_terminator() -> None:
     """Background commands must not wait for the chunked terminator: once
@@ -357,10 +362,10 @@ def test_sync_run_background_command_breaks_on_complete_before_terminator() -> N
     assert execution.exit_code is None
 
 
-def test_sync_run_foreground_command_still_waits_for_terminator() -> None:
-    """Foreground commands must keep waiting for the stream terminator
-    after ``execution_complete`` — an early close is still surfaced as an
-    error, proving the background early-break did not change this path."""
+def test_sync_run_foreground_command_still_waits_for_terminator_on_legacy_server() -> None:
+    """Foreground commands against legacy execd (without exit_code field)
+    must keep waiting for the stream terminator after ``execution_complete``
+    to drain any trailing output (e.g. execd v1.0.1). An early close surfaces as an error."""
     cfg = ConnectionConfigSync(
         protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_SSE)
     )
@@ -369,6 +374,22 @@ def test_sync_run_foreground_command_still_waits_for_terminator() -> None:
 
     with pytest.raises(SandboxConnectionException):
         adapter.run("sleep 1", opts=RunCommandOpts(background=False))
+
+
+def test_sync_run_foreground_command_breaks_on_modern_complete_before_terminator() -> None:
+    """Foreground commands against modern execd (with authoritative exit_code field)
+    break immediately on ``execution_complete`` without waiting for the stream terminator
+    or graceful-shutdown sleep (#2654). An early close after completion does not raise."""
+    cfg = ConnectionConfigSync(
+        protocol="http", transport=_EarlyCloseTransport(_EARLY_CLOSE_MODERN_SSE)
+    )
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    execution = adapter.run("sleep 1", opts=RunCommandOpts(background=False))
+    assert execution.complete is not None
+    assert execution.complete.execution_time_in_millis == 3
+    assert execution.exit_code == 0
 
 
 @pytest.mark.parametrize("command", [("tool", "arg"), None, 123])
@@ -386,11 +407,11 @@ def test_run_rejects_unsupported_command_types(command) -> None:
 def test_foreground_drains_terminal_response_and_closes_stream(
     failure: bool, late_output: bool
 ) -> None:
-    """Handle immediate EOF from fixed execd and trailing output from older execd."""
+    """Legacy execd streams (without exit_code) drain to EOF so trailing output is preserved."""
     terminal = (
         {"type": "error", "error": {"ename": "CommandExecError", "evalue": "7", "traceback": []}}
-        if failure else
-        {"type": "execution_complete", "execution_time": 5}
+        if failure
+        else {"type": "execution_complete", "execution_time": 5}
     )
     output = [
         {"type": "stdout", "text": "last stdout"},
@@ -431,6 +452,57 @@ def test_foreground_drains_terminal_response_and_closes_stream(
     assert (execution.complete is None) == failure
     assert stream.exhausted
     assert stream.closed
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_sync_foreground_breaks_immediately_on_authoritative_exit_code(
+    failure: bool,
+) -> None:
+    """Modern execd streams (with exit_code) break immediately upon completion (#2654)."""
+    terminal = (
+        {
+            "type": "error",
+            "error": {"ename": "CommandExecError", "evalue": "7", "exit_code": 7, "traceback": []},
+        }
+        if failure
+        else {"type": "execution_complete", "execution_time": 5, "exit_code": 0}
+    )
+    output = [
+        {"type": "stdout", "text": "stdout"},
+    ]
+    trailing = [{"type": "ping"}]
+    events = [*output, terminal, *trailing]
+
+    class Stream(httpx.SyncByteStream):
+        closed = False
+        exhausted = False
+
+        def __iter__(self) -> Iterator[bytes]:
+            for timestamp, event in enumerate(events, start=1):
+                frame = f"data: {json.dumps({'timestamp': timestamp, **event})}\n\n".encode()
+                yield frame
+            self.exhausted = True
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = Stream()
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, headers={"Content-Type": "text/event-stream"}, stream=stream
+        )
+    )
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
+    adapter = CommandsAdapterSync(cfg, endpoint)
+
+    execution = adapter.run("echo test")
+
+    assert [item.text for item in execution.logs.stdout] == ["stdout"]
+    assert execution.exit_code == (7 if failure else 0)
+    assert (execution.complete is None) == failure
+    assert stream.closed
+    assert not stream.exhausted
 
 
 class _ErrorEventTransport(httpx.BaseTransport):
