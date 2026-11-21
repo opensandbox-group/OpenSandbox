@@ -450,7 +450,7 @@ func TestConfigFormattingRedactsSecrets(t *testing.T) {
 		fmt.Sprintf("%+v", cfg),
 		fmt.Sprintf("%#v", cfg),
 		fmt.Sprintf("%v", *cfg),
-		fmt.Sprintf("%q", cfg),
+		fmt.Sprintf("%q", cfg.AdapterAPIKey),
 		fmt.Sprintf("%v", &cfg.AdapterAPIKey),
 		fmt.Sprintf("%#v", &cfg.AdapterAPIKey),
 		fmt.Sprintf("%s %d %x", cfg.AdapterAPIKey, 1, cfg.HMACKey),
