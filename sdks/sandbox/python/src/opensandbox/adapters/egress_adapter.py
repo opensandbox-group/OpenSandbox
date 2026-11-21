@@ -118,7 +118,7 @@ class EgressAdapter(Egress):
             )
             return CredentialVaultState.model_validate(payload)
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to create credential vault via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -133,7 +133,7 @@ class EgressAdapter(Egress):
             )
             return CredentialVaultState.model_validate(payload)
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to get credential vault via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -164,7 +164,7 @@ class EgressAdapter(Egress):
             )
             return CredentialVaultState.model_validate(payload)
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to patch credential vault via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -178,7 +178,7 @@ class EgressAdapter(Egress):
                 operation="Delete credential vault",
             )
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to delete credential vault via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -193,7 +193,7 @@ class EgressAdapter(Egress):
             )
             return CredentialListResponse.model_validate(payload).credentials
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to list credential vault credentials via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -208,7 +208,7 @@ class EgressAdapter(Egress):
             )
             return CredentialMetadata.model_validate(payload)
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to get credential vault credential via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -223,7 +223,7 @@ class EgressAdapter(Egress):
             )
             return CredentialBindingListResponse.model_validate(payload).bindings
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to list credential vault bindings via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -238,7 +238,7 @@ class EgressAdapter(Egress):
             )
             return CredentialBindingMetadata.model_validate(payload)
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to get credential vault binding via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -267,7 +267,7 @@ class EgressAdapter(Egress):
                 raise TypeError(f"Expected NetworkPolicy, got {type(policy).__name__}")
             return NetworkPolicy.model_validate(policy.to_dict())
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to get egress policy from endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -298,7 +298,7 @@ class EgressAdapter(Egress):
             )
             handle_api_error(response_obj, "Patch egress rules")
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to patch egress policy via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
@@ -314,7 +314,7 @@ class EgressAdapter(Egress):
             )
             handle_api_error(response_obj, "Delete egress rules")
         except Exception as e:
-            logger.error(
+            logger.debug(
                 f"Failed to delete egress rules via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
