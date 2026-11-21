@@ -1818,9 +1818,8 @@ class PoolStatus(BaseModel):
     total: int = Field(
         ...,
         description=(
-            "Number of nodes the pool accounts for: non-terminated pods plus "
-            "terminal pods still allocated to a sandbox. Terminal idle pods are "
-            "excluded."
+            "Number of non-terminal, non-terminating pods plus outstanding "
+            "allocations for terminal, terminating, or deleted pods."
         ),
     )
     allocated: int = Field(..., description="Number of nodes currently allocated to sandboxes.")
