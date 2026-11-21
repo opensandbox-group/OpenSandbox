@@ -58,6 +58,170 @@ opensandbox-mcp \
 
 The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when the MCP server must be reached from another container, and use `--port` to select a different listening port. Keep the default loopback host unless the container network or an upstream gateway protects the exposed endpoint.
 
+::: warning Unauthenticated HTTP mode
+Legacy unauthenticated `streamable-http` (`--oauth-mode none`, the default) performs **no** client authentication. Never expose unauthenticated `opensandbox-mcp` directly to the public internet; keep it on loopback (`127.0.0.1`), inside a private network, or enable OAuth 2.1 Resource Server mode behind HTTPS.
+:::
+
+## OAuth 2.1 Resource Server (Streamable HTTP)
+
+`opensandbox-mcp` supports optional, native **OAuth 2.1 Resource Server** mode (`--oauth-mode jwt`) for the `streamable-http` transport. In this mode, `opensandbox-mcp` publishes RFC 9728 Protected Resource Metadata, returns standards-compliant `401`/`403` `WWW-Authenticate` challenges, and validates JWT bearer access tokens against a trusted external Authorization Server / Identity Provider (IdP) before executing any MCP request or tool.
+
+**What OAuth Resource Server mode does NOT do:**
+
+- It does **not** act as an OAuth Authorization Server, render login or consent pages, manage users, or issue access/refresh tokens; you must connect a separate standards-compliant external IdP.
+- It does **not** apply to `stdio` transport (combining `--transport stdio` with `--oauth-mode jwt` fails closed at startup).
+- It does **not** validate opaque tokens via RFC 7662 introspection in this release (JWT/JWKS verification only; keep token TTLs short, e.g. 5–15 minutes).
+- It does **not** replace `OPEN_SANDBOX_API_KEY` or create per-user sandbox multi-tenancy (see [Security Model & Limitations](#security-model-limitations)).
+
+### Architecture
+
+```mermaid
+flowchart LR
+    Client["MCP Client (e.g., ChatGPT)"]
+    AS["External Authorization Server / IdP"]
+    Proxy["TLS Reverse Proxy (Nginx / Caddy / Traefik)"]
+    MCP["opensandbox-mcp (OAuth 2.1 Resource Server)"]
+    API["OpenSandbox Lifecycle API (OPEN_SANDBOX_API_KEY)"]
+
+    Client -->|"1. POST /mcp (unauthenticated) -> 401 + resource_metadata"| Proxy
+    Proxy -->|"HTTP (preserve canonical Host)"| MCP
+    Client -->|"2. GET /.well-known/oauth-protected-resource/mcp"| Proxy
+    Client -->|"3. Auth Code + PKCE (S256) + resource (RFC 8707)"| AS
+    AS -->|"4. Audience-bound JWT Access Token"| Client
+    Client -->|"5. POST /mcp + Authorization: Bearer <JWT>"| Proxy
+    MCP -.->|"6. Cached HTTPS JWKS / RFC 8414 discovery (no redirects)"| AS
+    MCP -->|"7. Backend SDK calls with OPEN_SANDBOX_API_KEY only"| API
+```
+
+### Sample Configuration
+
+The example below binds locally on loopback behind an HTTPS reverse proxy serving `https://mcp.example.com/mcp` and trusts `https://idp.example.com`:
+
+```bash
+export OPEN_SANDBOX_API_KEY="replace-with-backend-api-key"
+export OPEN_SANDBOX_DOMAIN="127.0.0.1:8080"
+
+opensandbox-mcp \
+  --transport streamable-http \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --oauth-mode jwt \
+  --oauth-issuer-url "https://idp.example.com" \
+  --oauth-resource-url "https://mcp.example.com/mcp" \
+  --oauth-required-scope "opensandbox:mcp"
+```
+
+### Configuration Reference
+
+CLI flags override `OPEN_SANDBOX_MCP_OAUTH_*` environment variables. Configuration is **fail-closed**: supplying any `--oauth-*` flag or environment variable while `--oauth-mode` is `none`, omitting a required field, or specifying an insecure/malformed setting causes `opensandbox-mcp` to exit immediately at startup with a non-secret error.
+
+| CLI Flag | Environment Variable | Default | Validation / Behavior |
+| --- | --- | --- | --- |
+| `--oauth-mode` | `OPEN_SANDBOX_MCP_OAUTH_MODE` | `none` | `none` or `jwt`. `jwt` is only accepted with `--transport streamable-http`. |
+| `--oauth-issuer-url` | `OPEN_SANDBOX_MCP_OAUTH_ISSUER_URL` | — | Required when `jwt`. Exact issuer URL (`https://`, no query/fragment/userinfo). |
+| `--oauth-resource-url` | `OPEN_SANDBOX_MCP_OAUTH_RESOURCE_URL` | — | Required when `jwt`. Canonical public MCP endpoint URL (e.g., `https://mcp.example.com/mcp`), independent of local bind host/port. |
+| `--oauth-required-scope` | `OPEN_SANDBOX_MCP_OAUTH_REQUIRED_SCOPES` | — | Required when `jwt`. Repeatable flag or space/comma-separated env var. Enforced on every protected HTTP request (`403 insufficient_scope` if missing). |
+| `--oauth-audience` | `OPEN_SANDBOX_MCP_OAUTH_AUDIENCE` | `resource_url` | Expected JWT `aud` claim. Defaults to canonical `resource_url` per RFC 8707; override only when an IdP cannot emit a URL audience. |
+| `--oauth-jwks-url` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_URL` | Auto-discovered | Explicit trusted JWKS HTTPS URL. When omitted, discovered from `issuer_url` via RFC 8414 / OIDC discovery with same-origin enforcement. |
+| `--oauth-allowed-algs` | `OPEN_SANDBOX_MCP_OAUTH_ALLOWED_ALGS` | `RS256,RS384,RS512,PS256,PS384,PS512,ES256,ES384,ES512,EdDSA` | Comma-separated subset of supported asymmetric JWS algorithms. `none` and `HS*` are always rejected. |
+| `--oauth-clock-skew-seconds` | `OPEN_SANDBOX_MCP_OAUTH_CLOCK_SKEW_SECONDS` | `30` | Finite number in `[0, 300]` applied as leeway to `exp` and `nbf`. |
+| `--oauth-http-timeout-seconds` | `OPEN_SANDBOX_MCP_OAUTH_HTTP_TIMEOUT_SECONDS` | `5` | Finite number in `(0, 60]` for outbound metadata/JWKS fetches (redirects disabled). |
+| `--oauth-jwks-cache-ttl-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_CACHE_TTL_SECONDS` | `300` | Finite number in `(0, 86400]`. Expired cache fails closed if JWKS is unreachable. |
+| `--oauth-jwks-refresh-cooldown-seconds` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_REFRESH_COOLDOWN_SECONDS` | `30` | Finite number in `[0, 3600]`. Minimum interval between forced JWKS refreshes on unknown `kid` and between retries after a fetch failure. |
+| `--oauth-allowed-host` | `OPEN_SANDBOX_MCP_OAUTH_ALLOWED_HOSTS` | Derived from `resource_url` | Repeatable extra `Host` header entries permitted by DNS-rebinding protection. |
+| `--oauth-allow-insecure-http` | `OPEN_SANDBOX_MCP_OAUTH_ALLOW_INSECURE_HTTP` | `false` | Allows `http://` strictly on loopback hosts (`127.0.0.1`, `localhost`, `[::1]`) for local testing only. |
+
+### External Identity Provider Compatibility Checklist
+
+Before connecting a remote MCP client, verify that your external Authorization Server / IdP supports:
+
+- **Discovery metadata:** Publishes RFC 8414 (`/.well-known/oauth-authorization-server`) or OIDC Discovery (`/.well-known/openid-configuration`) with an exact matching `issuer` and HTTPS `jwks_uri`.
+- **PKCE `S256`:** Enforces Authorization Code + PKCE with `code_challenge_method=S256`.
+- **Client registration:** Supports the registration mechanism required by your MCP client—Client ID Metadata Documents (CIMD), Dynamic Client Registration (RFC 7591), or pre-registered client credentials.
+- **Audience-bound JWT access tokens:** Issues signed asymmetric JWT **access tokens** (RSA >= 2048 bits, EC >= 224 bits, or EdDSA—not opaque tokens and not ID tokens) whose `aud` matches `--oauth-resource-url` (RFC 8707) or your explicit `--oauth-audience`, and includes your configured `--oauth-required-scope` in `scope` or `scp`.
+
+Use a dedicated access-token audience and configure the IdP to emit the exact audience string, including its path and trailing slash. For providers that emit generic `JWT` or omit `typ`, the audience must be distinct from all OIDC client IDs used for ID tokens. Prefer an explicitly typed `at+jwt` when supported.
+
+The OAuth CLI disables Uvicorn access logging because request URLs can contain credentials even when a request is rejected. Configure reverse proxies and custom ASGI hosts to omit query strings and Authorization headers from their logs.
+
+### Protocol Verification with `curl`
+
+Replace `https://mcp.example.com` and the synthetic token placeholders with your local or staging endpoints:
+
+```bash
+# 1. Anonymous RFC 9728 Protected Resource Metadata discovery (expect HTTP 200)
+curl -i https://mcp.example.com/.well-known/oauth-protected-resource/mcp
+
+# 2. Missing bearer token (expect HTTP 401 with WWW-Authenticate resource_metadata hint)
+curl -i -X POST https://mcp.example.com/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+
+# 3. Invalid bearer token (expect HTTP 401)
+curl -i -X POST https://mcp.example.com/mcp \
+  -H "Authorization: Bearer invalid.test.token" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# 4. Valid JWT missing the required scope (expect HTTP 403 insufficient_scope)
+curl -i -X POST https://mcp.example.com/mcp \
+  -H "Authorization: Bearer <SYNTHETIC_JWT_WITHOUT_REQUIRED_SCOPE>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# 5. Valid JWT with matching iss, aud, and required scope (expect HTTP 200)
+curl -i -X POST https://mcp.example.com/mcp \
+  -H "Authorization: Bearer <SYNTHETIC_VALID_ACCESS_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
+```
+
+### ChatGPT Connection & Manual Verification Checklist
+
+Automated tests in `sdks/mcp/sandbox/python/tests/test_auth_http.py` validate RFC 9728 discovery, `401`/`403` challenges, JWT verification, session principal binding, and MCP tool round-trips against a synthetic local Authorization Server. Live ChatGPT connector testing depends on your external IdP and public HTTPS domain and must be verified manually in staging before production cutover:
+
+1. Terminate TLS at your reverse proxy (`https://mcp.example.com`) and forward `/mcp`, `/.well-known/oauth-protected-resource/mcp`, and `/.well-known/oauth-protected-resource` to `opensandbox-mcp` while preserving `Host: mcp.example.com` (do not rewrite `Host` to `127.0.0.1` unless added via `--oauth-allowed-host`).
+2. Confirm `GET https://mcp.example.com/.well-known/oauth-protected-resource/mcp` returns `resource: "https://mcp.example.com/mcp"`, your IdP's exact `authorization_servers` entry, and `scopes_supported`.
+3. Confirm your IdP publishes `/.well-known/oauth-authorization-server` or `/.well-known/openid-configuration` with PKCE `S256` and the client registration mode ChatGPT expects, and mints a JWT access token with `aud = https://mcp.example.com/mcp` and your required scope.
+4. Register `https://mcp.example.com/mcp` as an OAuth-protected MCP connector in ChatGPT, complete the browser login flow at your IdP, and confirm `tools/list` and a non-destructive tool call (`sandbox_list`) succeed.
+
+### Operations & Troubleshooting
+
+- **Key rotation:** Unknown `kid` headers trigger at most one lock-serialized JWKS refresh per `--oauth-jwks-refresh-cooldown-seconds` window (default 30s). Metadata and JWKS responses must support uncompressed JSON and fit within 2 MiB each. Publish the new public key in your IdP's JWKS before signing tokens with it.
+- **Reverse proxies & TLS:** `opensandbox-mcp` ignores `X-Forwarded-Host`, `X-Forwarded-Proto`, and `Forwarded` when emitting RFC 9728 metadata and `WWW-Authenticate` headers, and derives DNS-rebinding `allowed_hosts` strictly from `--oauth-resource-url` (plus any explicit `--oauth-allowed-host`).
+- **Safe logging & restarts:** Access tokens and `OPEN_SANDBOX_API_KEY` are never written to logs or error responses. Stateful Streamable HTTP sessions are held in memory; after a restart, clients re-initialize and present a valid access token.
+
+| Symptom | Likely Cause | Resolution |
+| --- | --- | --- |
+| Startup exits with code 2 mentioning `OAuth mode is 'none'` | One or more `--oauth-*` flags/env vars were set without `--oauth-mode jwt`. | Pass `--oauth-mode jwt` (or remove the OAuth flags/env vars). |
+| `421 Invalid Host header` behind Nginx/Caddy | Reverse proxy overwrote `Host` to an upstream name not matching `--oauth-resource-url`. | Configure the proxy to forward `Host: mcp.example.com` (or add the internal host with `--oauth-allowed-host`). |
+| `401` on a valid-looking token | `iss` trailing-slash mismatch, `aud` does not match `--oauth-resource-url`, ID token sent instead of access token, cross-origin `jwks_uri`, or JWKS unreachable after TTL. | Verify JWT `iss`/`aud`/`exp`/`alg`/`typ` claims; pin `--oauth-jwks-url` if your IdP serves JWKS on a different host; verify outbound HTTPS connectivity. |
+| `403 insufficient_scope` | Access token verified cryptographically, but lacks a scope listed in `--oauth-required-scope`. | Ensure the IdP includes the required scope in the token's `scope` or `scp` claim. |
+| `404 Session not found` on an active session | A different OAuth principal (`client_id`, `iss`, or `sub`) attempted to reuse another session's `Mcp-Session-Id`, or the server restarted. | Re-initialize a new MCP session with the current caller's token. |
+
+### Migrating from `mcp-oauth-proxy` (and Rollback)
+
+To migrate from `Client -> Reverse Proxy -> mcp-oauth-proxy -> opensandbox-mcp -> OpenSandbox` to `Client -> Reverse Proxy -> opensandbox-mcp (OAuth Resource Server) -> OpenSandbox`:
+
+1. Configure your external IdP to mint JWT access tokens with `aud = https://mcp.example.com/mcp` and your chosen required scope (for example `opensandbox:mcp`).
+2. Start a staging or side-by-side `opensandbox-mcp` instance with `--transport streamable-http --oauth-mode jwt` and the matching `--oauth-*` flags, keeping `OPEN_SANDBOX_API_KEY` unchanged.
+3. Verify RFC 9728 discovery, `401`/`403` rejections, and an authorized MCP session using the `curl` checks above.
+4. Update the TLS reverse proxy upstream for `/mcp` and `/.well-known/oauth-protected-resource*` to point directly at `opensandbox-mcp`, preserving the canonical `Host` header, and re-test client login and tool execution before decommissioning `mcp-oauth-proxy`.
+5. **Non-destructive rollback:** Point the reverse proxy upstream back to `mcp-oauth-proxy` and restart `opensandbox-mcp` without `--oauth-mode jwt`. Enabling or disabling OAuth mode stores no persistent state and does not modify running sandboxes.
+
+### Security Model & Limitations
+
+::: warning OAuth does not provide per-user sandbox multi-tenancy
+Validating an OAuth 2.1 access token proves that a remote client is authorized to call `opensandbox-mcp` with the configured scope; it does **not** isolate sandboxes between users sharing the same `opensandbox-mcp` instance and `OPEN_SANDBOX_API_KEY`. Any authorized caller can pass an existing `sandbox_id` accessible to that backend API key. If you serve multiple untrusted users, deploy isolated `opensandbox-mcp` instances with separate tenant-scoped backend credentials and network isolation.
+:::
+
+- **Credential separation:** Inbound OAuth bearer tokens are validated only at the HTTP boundary and are never forwarded to `opensandbox-server`, injected into sandbox containers, or returned in tool outputs. Backend calls exclusively use `OPEN_SANDBOX_API_KEY`.
+- **Token transport:** Bearer tokens are accepted only via a single `Authorization: Bearer <token>` header. Duplicate `Authorization` headers, oversized headers, query-parameter tokens (`?access_token=`), and body tokens are rejected with `401` before any tool handler executes.
+
 ## Integrations
 
 ### Claude Code stdio

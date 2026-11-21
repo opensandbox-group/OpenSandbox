@@ -15,12 +15,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import timedelta
+from urllib.parse import urlparse
 
+from mcp.server.auth.handlers.metadata import ProtectedResourceMetadataHandler
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.routes import cors_middleware
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.auth import ProtectedResourceMetadata
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import SandboxException
@@ -50,6 +58,17 @@ from opensandbox.models.sandboxes import (
     SandboxRenewResponse,
 )
 from pydantic import BaseModel, Field
+from starlette.applications import Starlette
+from starlette.routing import Route
+
+from opensandbox_mcp.auth import (
+    JWTTokenVerifier,
+    OAuthConfig,
+    StrictBearerMiddleware,
+    build_auth_settings,
+    build_transport_security,
+    canonical_resource_metadata_url,
+)
 
 
 @dataclass
@@ -871,8 +890,35 @@ def register_tools(
     return state
 
 
-def create_server(connection_config: ConnectionConfig | None = None) -> MCPServer:
-    """Create the MCP server instance for OpenSandbox."""
+def create_server(
+    connection_config: ConnectionConfig | None = None,
+    *,
+    oauth_config: OAuthConfig | None = None,
+    token_verifier: TokenVerifier | None = None,
+) -> MCPServer:
+    """Create the MCP server instance for OpenSandbox.
+
+    Args:
+        connection_config: Optional OpenSandbox backend connection configuration.
+        oauth_config: Optional OAuth 2.1 Resource Server settings for Streamable HTTP.
+        token_verifier: Optional custom ``TokenVerifier`` (requires ``oauth_config``).
+
+    Returns:
+        Configured ``MCPServer`` with all OpenSandbox tools registered.
+
+    Raises:
+        ValueError: If ``token_verifier`` is provided without ``oauth_config``.
+    """
+    if oauth_config is None and token_verifier is not None:
+        raise ValueError("token_verifier requires oauth_config")
+
+    auth_settings = build_auth_settings(oauth_config) if oauth_config else None
+    verifier = (
+        token_verifier
+        if token_verifier is not None
+        else (JWTTokenVerifier(oauth_config) if oauth_config else None)
+    )
+
     mcp = MCPServer(
         "OpenSandbox Sandbox",
         instructions=(
@@ -885,6 +931,87 @@ def create_server(connection_config: ConnectionConfig | None = None) -> MCPServe
             "new output with command_get_logs, passing back the returned cursor; "
             "once the status reports running=false, read the logs one last time."
         ),
+        auth=auth_settings,
+        token_verifier=verifier,
     )
     register_tools(mcp, connection_config=connection_config)
     return mcp
+
+
+def create_streamable_http_app(
+    mcp: MCPServer,
+    *,
+    host: str = "127.0.0.1",
+    streamable_http_path: str = "/mcp",
+    oauth_config: OAuthConfig | None = None,
+    transport_security: TransportSecuritySettings | None = None,
+) -> Starlette:
+    """Build the Starlette ASGI app for Streamable HTTP transport.
+
+    When ``oauth_config`` is supplied, this wires DNS-rebinding protection from
+    the canonical ``resource_url``, exposes the root RFC 9728 fallback route
+    when the resource path is non-empty, and enforces strict bearer-header
+    checks before authentication middleware runs.
+    """
+    if oauth_config is not None and mcp.settings.auth is None:
+        raise ValueError(
+            "oauth_config was passed to create_streamable_http_app, but the MCPServer "
+            "was created without OAuth auth settings."
+        )
+
+    effective_security = transport_security
+    if oauth_config is not None and effective_security is None:
+        effective_security = build_transport_security(oauth_config, bind_host=host)
+
+    app = mcp.streamable_http_app(
+        streamable_http_path=streamable_http_path,
+        host=host,
+        transport_security=effective_security,
+    )
+
+    if oauth_config is None:
+        return app
+
+    metadata_url = canonical_resource_metadata_url(oauth_config)
+    metadata_path = urlparse(metadata_url).path
+    root_metadata_path = "/.well-known/oauth-protected-resource"
+    if metadata_path != root_metadata_path:
+        metadata = ProtectedResourceMetadata.model_validate(
+            {
+                "resource": oauth_config.resource_url,
+                "authorization_servers": [oauth_config.issuer_url],
+                "scopes_supported": list(oauth_config.required_scopes),
+            }
+        )
+        app.router.routes.append(
+            Route(
+                root_metadata_path,
+                endpoint=cors_middleware(
+                    ProtectedResourceMetadataHandler(metadata).handle,
+                    ["GET", "OPTIONS"],
+                ),
+                methods=["GET", "OPTIONS"],
+            )
+        )
+
+    app.add_middleware(
+        StrictBearerMiddleware,
+        protected_path=streamable_http_path,
+        resource_metadata_url=metadata_url,
+    )
+
+    verifier = mcp._token_verifier
+    if isinstance(verifier, JWTTokenVerifier):
+        original_lifespan = app.router.lifespan_context
+
+        @contextlib.asynccontextmanager
+        async def _lifespan(starlette_app: Starlette) -> AsyncIterator[None]:
+            async with original_lifespan(starlette_app):
+                try:
+                    yield
+                finally:
+                    await verifier.aclose()
+
+        app.router.lifespan_context = _lifespan
+
+    return app
