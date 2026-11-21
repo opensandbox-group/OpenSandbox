@@ -324,11 +324,7 @@ internal class CommandsAdapter(
                 val dispatcher = ExecutionEventDispatcher(execution, handlers)
                 for (line in ExecdEventSupport.eventLines(reader)) {
                     val eventNode = decodeEventLine(line) ?: continue
-                    try {
-                        dispatcher.dispatch(eventNode)
-                    } catch (e: Exception) {
-                        logger.error("Failed to dispatch SSE event: {}", eventNode, e)
-                    }
+                    dispatcher.dispatch(eventNode)
                     if (isBackground && eventNode.type == "execution_complete") break
                 }
             }
