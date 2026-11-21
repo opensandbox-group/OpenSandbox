@@ -86,7 +86,7 @@ func (s *Sandbox) SetEnv(ctx context.Context, key, value string) error {
 	}
 
 	exec, err := s.RunCommand(ctx, command, nil)
-	if err != nil && err != errIncompleteCommand {
+	if err != nil && err != ErrIncompleteCommand {
 		return fmt.Errorf("opensandbox: SetEnv %q: %w", key, err)
 	}
 	if err == nil && exec.Error == nil && exec.ExitCode != nil && *exec.ExitCode == 0 {
