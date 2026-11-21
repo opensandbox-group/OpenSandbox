@@ -74,6 +74,45 @@ func TestDiskUsagesSkipsPseudoMounts(t *testing.T) {
 	}
 }
 
+// statfs reports block counts in f_frsize units, which is what df uses. Most
+// filesystems set f_bsize to the same value, but FUSE passes both through
+// from the daemon: GlusterFS, for one, reports a 128 KiB f_bsize over 4 KiB
+// fragments, so sizing by f_bsize would overstate the mount 32 times.
+func TestDiskUsagesSizesBlocksByFragmentSize(t *testing.T) {
+	mountpoint := t.TempDir()
+	mountinfoPath := filepath.Join(t.TempDir(), "mountinfo")
+	writeFile(t, mountinfoPath, "1 0 0:1 / "+mountpoint+" rw - fuse.glusterfs host:/vol rw\n")
+	overrideDiskPaths(t,
+		filepath.Join(t.TempDir(), "cgroup"),
+		mountinfoPath,
+		filepath.Join(t.TempDir(), "v2"),
+		filepath.Join(t.TempDir(), "blkio"),
+	)
+	origSyscall := statfsSyscall
+	statfsSyscall = func(_ string, st *unix.Statfs_t) error {
+		st.Bsize, st.Frsize = 128<<10, 4<<10
+		st.Blocks, st.Bfree, st.Bavail = 1000, 400, 300
+		return nil
+	}
+	t.Cleanup(func() { statfsSyscall = origSyscall })
+
+	usages, err := DiskUsages()
+	if err != nil {
+		t.Fatalf("DiskUsages: %v", err)
+	}
+	want := DiskUsage{
+		Mountpoint: mountpoint,
+		FSType:     "fuse.glusterfs",
+		Source:     "host:/vol",
+		TotalBytes: 1000 * 4096,
+		UsedBytes:  600 * 4096,
+		AvailBytes: 300 * 4096,
+	}
+	if len(usages) != 1 || usages[0] != want {
+		t.Fatalf("usages = %+v, want [%+v]", usages, want)
+	}
+}
+
 func TestNewDiskIOSourceFallsBackToDiskstats(t *testing.T) {
 	root := t.TempDir()
 	// gopsutil resolves /proc/diskstats through the HOST_PROC override.

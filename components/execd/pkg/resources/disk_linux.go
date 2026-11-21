@@ -79,9 +79,11 @@ func diskUsages() ([]DiskUsage, error) {
 		if !ok {
 			continue
 		}
-		total := int64(st.Blocks) * int64(st.Bsize)
-		free := int64(st.Bfree) * int64(st.Bsize)
-		avail := int64(st.Bavail) * int64(st.Bsize)
+		// Block counts are in fragment units, as df reads them. f_bsize is
+		// only the preferred I/O size and can differ, e.g. on FUSE mounts.
+		total := int64(st.Blocks) * int64(st.Frsize)
+		free := int64(st.Bfree) * int64(st.Frsize)
+		avail := int64(st.Bavail) * int64(st.Frsize)
 		usages = append(usages, DiskUsage{
 			Mountpoint: entry.Mountpoint,
 			FSType:     entry.FSType,
