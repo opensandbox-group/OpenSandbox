@@ -34,7 +34,7 @@ Kubernetes: `>=1.22.0-0`
 | gateway.containerSecurityContext | object | `{}` | Container-level security context for the gateway container. |
 | gateway.dataplaneNamespace | string | `"opensandbox"` | Namespace where the gateway dataplane workloads run. |
 | gateway.env | list | `[]` | Additional environment variables for the gateway container (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics). |
-| gateway.fastSandboxNamespace | string | `""` | Restricts Fast Sandbox to one namespace and enables unsigned Host routing. Empty requires signed scopes; unsigned access needs external protection. |
+| gateway.fastSandboxNamespace | string | `""` | Restricts Fast Sandbox to one namespace and enables unsigned wildcard routing. Empty requires signed scopes; unsigned access needs external protection. |
 | gateway.fastpathEndpoint | string | `""` | FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise. |
 | gateway.gatewayRouteMode | string | `"header"` | Routing mode: header (including wildcard hosts) or uri. |
 | gateway.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress","tag":""}` | Gateway image configuration. |
