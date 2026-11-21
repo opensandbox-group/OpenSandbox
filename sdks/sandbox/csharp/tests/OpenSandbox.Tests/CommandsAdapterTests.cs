@@ -85,11 +85,11 @@ public class CommandsAdapterTests
                 Content = new StringContent("data: {\"type\":\"stdout\",\"text\":\"partial\"}\n\n", Encoding.UTF8, "text/event-stream")
             })));
 
-        var error = await Assert.ThrowsAsync<SandboxInternalException>(() => argv
+        var error = await Assert.ThrowsAsync<SandboxException>(() => argv
             ? adapter.RunAsync(new[] { "echo", "test" })
             : adapter.RunAsync("echo test"));
 
-        error.Message.Should().Contain("without a terminal event");
+        error.Error.Code.Should().Be("COMMAND_STREAM_INCOMPLETE");
     }
 
     [Theory]

@@ -442,7 +442,11 @@ internal sealed class CommandsAdapter : IExecdCommands
         if (!isBackground)
         {
             if (requireTerminal && execution.Complete == null && execution.Error == null)
-                throw new SandboxInternalException("Foreground command stream ended without a terminal event");
+            {
+                throw new SandboxException(
+                    "Foreground command stream ended without a terminal event",
+                    error: new SandboxError(SandboxErrorCodes.CommandStreamIncomplete));
+            }
 
             execution.ExitCode = InferForegroundExitCode(execution);
         }
