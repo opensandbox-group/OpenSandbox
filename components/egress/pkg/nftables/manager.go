@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -130,30 +131,34 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
-	var buildDrops func(time.Time) EstablishedDrops
+	var buildDrops staticDropBuilder
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
-		buildDrops = func(at time.Time) EstablishedDrops {
-			return m.lastDrops.stillRelevant(p, m.liveLearnedAddrsLocked(at))
+		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
+			learned, expiry := m.liveLearnedAddrsLocked(at)
+			drops := m.lastDrops.stillRelevant(p, learned)
+			return drops, expiry
 		}
 	}
 	_, err := m.applyStaticDropEstablishedLocked(ctx, p, buildDrops, nil, m.lastDropsAt)
 	return err
 }
 
-// liveLearnedAddrsLocked returns DNS addresses with an unexpired grant.
-func (m *Manager) liveLearnedAddrsLocked(now time.Time) []netip.Addr {
-	var out []netip.Addr
+// liveLearnedAddrsLocked returns live DNS addresses and their earliest expiry.
+func (m *Manager) liveLearnedAddrsLocked(now time.Time) (addrs []netip.Addr, nextExpiry time.Time) {
 	for _, entry := range m.domains {
 		if entry == nil {
 			continue
 		}
 		for addr, lease := range entry.addresses {
-			if lease.deadline().After(now) {
-				out = append(out, addr)
+			if expiry := lease.deadline(); expiry.After(now) {
+				addrs = append(addrs, addr)
+				if nextExpiry.IsZero() || expiry.Before(nextExpiry) {
+					nextExpiry = expiry
+				}
 			}
 		}
 	}
-	return out
+	return addrs, nextExpiry
 }
 
 // applyStaticDropEstablished applies p like ApplyStatic, and when drops is
@@ -174,7 +179,8 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.applyStaticDropEstablishedLocked(ctx, p, func(time.Time) EstablishedDrops { return drops }, flows, m.now())
+	fixedDrops := func(time.Time) (EstablishedDrops, time.Time) { return drops, time.Time{} }
+	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now())
 }
 
 // ApplyStaticComputingEstablishedDrops snapshots DNS leases, computes the
@@ -193,9 +199,9 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 		newPol = policy.DefaultDenyPolicy()
 	}
 	flows := snapshotTeardownFlows()
-	buildDrops := func(at time.Time) EstablishedDrops {
+	buildDrops := func(at time.Time) (EstablishedDrops, time.Time) {
 		prior, live := m.snapshotResolvedDomainsLocked(at)
-		return computeEstablishedDrops(oldPol, newPol, prior, live)
+		return computeEstablishedDrops(oldPol, newPol, prior, live), time.Time{}
 	}
 	return m.applyStaticDropEstablishedLocked(ctx, newPol, buildDrops, flows, m.now())
 }
@@ -218,7 +224,11 @@ type staticApplyPlan struct {
 	nextExpiry     time.Time
 }
 
-func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops func(time.Time) EstablishedDrops, flows []byte, committedAt time.Time) (int, error) {
+// In addition to carried grants, plain reloads may consult live addresses
+// from removed sources to avoid tearing down flows without an explicit opt-in.
+type staticDropBuilder func(time.Time) (EstablishedDrops, time.Time)
+
+func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops staticDropBuilder, flows []byte, committedAt time.Time) (int, error) {
 	if m.quiesced.Load() {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
 	}
@@ -285,7 +295,14 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	return matched, nil
 }
 
-func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops func(time.Time) EstablishedDrops, replace bool) (staticApplyPlan, error) {
+func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops staticDropBuilder, replace bool) (staticApplyPlan, error) {
+	// Reserve space for decimal seconds so we can fill timeouts after all
+	// address formatting and fallback rewriting. Spaces are nft whitespace.
+	const timeoutSlot = "          " // Enough digits for a time.Duration in seconds.
+	type timedElement struct {
+		offset int
+		expiry time.Time
+	}
 	at := m.tracker.now()
 	for {
 		if err := ctx.Err(); err != nil {
@@ -293,36 +310,57 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 		}
 		plan := m.retainedDomainLeasesLocked(p, at, buildDrops != nil)
 		if buildDrops != nil {
-			plan.drops = buildDrops(at)
+			var dropExpiry time.Time
+			plan.drops, dropExpiry = buildDrops(at)
+			if !dropExpiry.IsZero() && (plan.nextExpiry.IsZero() || dropExpiry.Before(plan.nextExpiry)) {
+				plan.nextExpiry = dropExpiry
+			}
 		}
 		script, err := buildRuleset(p, m.opts, plan.drops)
 		if err != nil {
 			return staticApplyPlan{}, err
 		}
-		submitAt := m.tracker.now()
-		if !plan.nextExpiry.IsZero() && !plan.nextExpiry.After(submitAt) {
-			// Membership changed while rendering. Both the grants and their
-			// teardown exemptions must be recalculated from the same time.
-			at = submitAt
+		renderedAt := m.tracker.now()
+		if !plan.nextExpiry.IsZero() && !plan.nextExpiry.After(renderedAt) {
+			at = renderedAt
 			continue
-		}
-		if len(plan.leases) != 0 {
-			var b strings.Builder
-			b.WriteString(script)
-			for addr, expiry := range plan.leases {
-				seconds := (expiry.Sub(submitAt) + time.Second - time.Nanosecond) / time.Second
-				fmt.Fprintf(&b, "add element inet %s %s { %s timeout %ds }\n", tableName, resolvedIPSet(addr), addr, seconds)
-			}
-			script = b.String()
 		}
 		if !replace {
 			script = RemoveDeleteTableLine(script, tableName)
 		}
-		// The timed elements and fallback script are part of preparation too.
+		var b bytes.Buffer
+		elements := make([]timedElement, 0, len(plan.leases))
+		if len(plan.leases) != 0 {
+			if !strings.HasSuffix(script, "\n") {
+				b.WriteByte('\n')
+			}
+			for addr, expiry := range plan.leases {
+				fmt.Fprintf(&b, "add element inet %s %s { %s timeout ", tableName, resolvedIPSet(addr), addr)
+				elements = append(elements, timedElement{offset: b.Len(), expiry: expiry})
+				b.WriteString(timeoutSlot + "s }\n")
+			}
+		}
 		if !plan.nextExpiry.IsZero() {
-			if readyAt := m.tracker.now(); !plan.nextExpiry.After(readyAt) {
+			readyAt := m.tracker.now()
+			if !plan.nextExpiry.After(readyAt) {
+				// Recompute both grants and teardown when membership changes.
 				at = readyAt
 				continue
+			}
+			if len(elements) != 0 {
+				raw := b.Bytes()
+				var digits [len(timeoutSlot)]byte
+				for _, elem := range elements {
+					remaining := elem.expiry.Sub(readyAt)
+					seconds := remaining / time.Second
+					if remaining%time.Second != 0 {
+						seconds++
+					}
+					ttl := strconv.AppendInt(digits[:0], int64(seconds), 10)
+					end := elem.offset + len(timeoutSlot)
+					copy(raw[end-len(ttl):end], ttl)
+				}
+				script += string(raw)
 			}
 		}
 		plan.script = script
@@ -335,14 +373,20 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 		domains: make(map[string]*resolvedDomain, len(m.domains)),
 		leases:  make(map[netip.Addr]time.Time),
 	}
+	keep := p.DefaultAction == policy.ActionDeny
+	if !keep && !trackTeardown {
+		return plan
+	}
 	for name, current := range m.domains {
-		keep := p.DefaultAction == policy.ActionDeny && p.Evaluate(name) == policy.ActionAllow
+		// Revocations use historical addresses. Only sources the replacement
+		// still allows can change the teardown decision when they expire.
+		if p.Evaluate(name) != policy.ActionAllow {
+			continue
+		}
 		if keep {
 			// Fence lookups begun against the old rules after acknowledgement.
 			copy := *current
 			plan.domains[name] = &copy
-		} else if !trackTeardown {
-			continue
 		}
 		for addr, lease := range current.addresses {
 			expiry := lease.deadline()
@@ -462,12 +506,11 @@ func resolvedIPSet(addr netip.Addr) string {
 // connection to them is active; the set timeout remains as the grace period
 // after the connection closes.
 //
-// Renewal is best-effort: a connection that starts and closes between polls
-// is never observed (needs a later DNS lookup), an entry expired before its
-// first observation is restored on the next poll, and nft failures extend the
-// gap. Only TCP is tracked; UDP and QUIC rely on DNS-driven refresh. Existing
-// connections survive these gaps through conntrack, and the final observation
-// after close provides the bounded reconnect grace period.
+// Renewal is best-effort. Default-deny DNS grants can be renewed only while
+// a source lease is live or has credit from the previous active poll. The
+// final poll after close extends existing credit; it does not admit new
+// sources. TCP connections that open and close between polls are not seen.
+// UDP and QUIC rely on DNS-driven refresh.
 func (m *Manager) StartConnectionRefresh(ctx context.Context) {
 	m.tracker.start(ctx, m.opts.ConnectionRefreshInterval, m)
 }
