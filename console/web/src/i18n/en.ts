@@ -165,7 +165,7 @@ export const en = {
   'archivePanel.loadFailed': 'Failed to load archived logs',
   'archivePanel.notEnabled': 'Archived logs are not enabled',
   'archivePanel.enableHint':
-    'Enable node-agent in the cluster and configure read-only OSS credentials in the BFF to use archived logs. The BFF cannot centrally read file sinks. You can still use the Live Logs tab.',
+    'Enable node-agent in the cluster and configure read-only OSS credentials in the BFF to use archived logs. The BFF cannot centrally read file sinks. You can still use the Live (Lifecycle) tab under Runtime Logs.',
   'archivePanel.retry': 'Retry',
   'archivePanel.refresh': 'Refresh Archive',
   'archivePanel.objectKey': 'OSS: {objectKey}',

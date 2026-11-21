@@ -18,10 +18,12 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
-  useState,
+  useSyncExternalStore,
   type ReactNode,
 } from 'react';
+
+import enUS from 'antd/locale/en_US';
+import zhCNLocale from 'antd/locale/zh_CN';
 
 import { en, type Messages, type Translate, type TranslateParams } from './en';
 import { zhCN } from './zh-CN';
@@ -49,6 +51,15 @@ export const SUPPORTED_LOCALES: readonly LocaleOption[] = [
 const messagesByLocale: Record<Locale, Messages> = {
   en,
   'zh-CN': zhCN,
+};
+
+/**
+ * Ant Design locale objects live next to the message dictionaries, so adding a
+ * language is one edit in this module instead of one here and one in `App`.
+ */
+export const antdLocales: Record<Locale, typeof enUS> = {
+  en: enUS,
+  'zh-CN': zhCNLocale,
 };
 
 export function isLocale(value: unknown): value is Locale {
@@ -82,6 +93,46 @@ export function resolveInitialLocale(): Locale {
   return readStoredLocale() ?? detectBrowserLocale();
 }
 
+type LocaleListener = () => void;
+
+let activeLocale: Locale | null = null;
+const localeListeners = new Set<LocaleListener>();
+
+/**
+ * The committed locale lives outside React state so the translator can keep one
+ * identity while still translating with the locale React has rendered. It is
+ * read through `useSyncExternalStore`, so no ref is written during render: an
+ * interrupted or abandoned render cannot leave translators on an uncommitted
+ * locale.
+ */
+function getLocaleSnapshot(): Locale {
+  if (activeLocale === null) activeLocale = resolveInitialLocale();
+  return activeLocale;
+}
+
+function subscribeLocale(listener: LocaleListener): () => void {
+  localeListeners.add(listener);
+  return () => {
+    localeListeners.delete(listener);
+  };
+}
+
+function persistLocale(locale: Locale): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, locale);
+  } catch {
+    // Persisting the preference is best-effort.
+  }
+}
+
+function setActiveLocale(nextLocale: Locale): void {
+  if (getLocaleSnapshot() === nextLocale) return;
+  activeLocale = nextLocale;
+  persistLocale(nextLocale);
+  localeListeners.forEach((listener) => listener());
+}
+
 function interpolate(template: string, params?: TranslateParams): string {
   if (!params) return template;
   return template.replace(/\{(\w+)\}/g, (placeholder, name: string) => {
@@ -99,16 +150,14 @@ interface I18nContextValue {
 const I18nContext = createContext<I18nContextValue | null>(null);
 
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>(resolveInitialLocale);
+  const locale = useSyncExternalStore(
+    subscribeLocale,
+    getLocaleSnapshot,
+    getLocaleSnapshot,
+  );
 
   const setLocale = useCallback((nextLocale: Locale) => {
-    setLocaleState(nextLocale);
-    if (typeof window === 'undefined') return;
-    try {
-      window.localStorage.setItem(LOCALE_STORAGE_KEY, nextLocale);
-    } catch {
-      // Persisting the preference is best-effort.
-    }
+    setActiveLocale(nextLocale);
   }, []);
 
   useEffect(() => {
@@ -117,15 +166,19 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     }
   }, [locale]);
 
-  const localeRef = useRef(locale);
-  localeRef.current = locale;
   // Keep the translator identity stable across locale changes so callbacks and
   // effects that translate a message do not refetch data (archived logs, live
-  // logs, list pages) when the user only switches the interface language.
-  // `t` reads the current locale when it is called, and the context value below
+  // logs, list pages) when the user only switches the interface language. `t`
+  // reads the committed locale when it is called, and the context value below
   // still changes with the locale, so rendered text is translated afresh.
+  //
+  // Because that identity never changes, translated UI content must not be
+  // memoized with `t` in the dependency array (for example
+  // `useMemo(() => buildColumns(t), [t])`): such content would keep the
+  // previous language after a switch. Depend on `locale` from `useI18n()`
+  // instead.
   const t = useCallback<Translate>(
-    (key, params) => interpolate(messagesByLocale[localeRef.current][key], params),
+    (key, params) => interpolate(messagesByLocale[getLocaleSnapshot()][key], params),
     [],
   );
 

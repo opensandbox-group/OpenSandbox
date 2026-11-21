@@ -13,12 +13,10 @@
 // limitations under the License.
 
 import { ConfigProvider } from 'antd';
-import enUS from 'antd/locale/en_US';
-import zhCN from 'antd/locale/zh_CN';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 
 import { AuthProvider, RequireAdmin, RequireAuth } from './auth/AuthContext';
-import { I18nProvider, useI18n } from './i18n';
+import { I18nProvider, antdLocales, useI18n } from './i18n';
 import { AppLayout } from './layout/AppLayout';
 import { AdminSandboxesPage } from './pages/AdminSandboxesPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
@@ -64,7 +62,7 @@ function ConsoleApp() {
   const { locale } = useI18n();
 
   return (
-    <ConfigProvider locale={locale === 'zh-CN' ? zhCN : enUS} theme={consoleTheme}>
+    <ConfigProvider locale={antdLocales[locale]} theme={consoleTheme}>
       <BrowserRouter>
         <AuthProvider>
           <Routes>

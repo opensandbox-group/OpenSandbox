@@ -86,7 +86,7 @@ export function SandboxDetailPage() {
       return;
     }
     void load();
-  }, [load, user?.role, adminTenant]);
+  }, [load, user?.role, adminTenant, t]);
 
   const state = sandbox?.status?.state;
 
@@ -95,6 +95,10 @@ export function SandboxDetailPage() {
     Modal.confirm({
       title: t('sandboxDetail.deleteTitle'),
       content: t('sandboxDetail.deleteContent'),
+      // antd static methods do not read ConfigProvider, so the action labels
+      // are passed explicitly to keep the dialog in one language.
+      okText: t('common.delete'),
+      cancelText: t('common.cancel'),
       okType: 'danger',
       onOk: async () => {
         setDeleteLoading(true);
