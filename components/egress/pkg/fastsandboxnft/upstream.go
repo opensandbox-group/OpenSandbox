@@ -99,9 +99,9 @@ func (a *Applier) writeUpstreamProxyStatic(b *strings.Builder) {
 // the input chain exists and before its first rule.
 func (a *Applier) writeUpstreamProxyInputRules(b *strings.Builder) {
 	ep := a.opts.UpstreamProxy
-	fmt.Fprintf(b, "add rule inet %s %s ct status dnat ct original ip daddr @%s ct original proto-dst %d drop\n",
+	fmt.Fprintf(b, "add rule inet %s %s ct status dnat meta l4proto tcp ct original ip daddr @%s ct original proto-dst %d drop\n",
 		TableName, inputChain, upstreamProxyV4Set, ep.Port)
-	fmt.Fprintf(b, "add rule inet %s %s ct status dnat ct original ip6 daddr @%s ct original proto-dst %d drop\n",
+	fmt.Fprintf(b, "add rule inet %s %s ct status dnat meta l4proto tcp ct original ip6 daddr @%s ct original proto-dst %d drop\n",
 		TableName, inputChain, upstreamProxyV6Set, ep.Port)
 }
 

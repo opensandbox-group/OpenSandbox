@@ -620,7 +620,7 @@ func (a *Applier) writeDoHBlockFragment(b *strings.Builder) error {
 		// strict: drop all 443 when enabled but no blocklist provided
 		fmt.Fprintf(b, "add rule inet %s %s tcp dport 443 drop\n", TableName, dispatchChain)
 		if a.opts.MitmRedirectPort > 0 {
-			fmt.Fprintf(b, "add rule inet %s %s ct status dnat ct original proto-dst 443 drop\n", TableName, inputChain)
+			fmt.Fprintf(b, "add rule inet %s %s ct status dnat meta l4proto tcp ct original proto-dst 443 drop\n", TableName, inputChain)
 		}
 		return nil
 	}
@@ -631,7 +631,7 @@ func (a *Applier) writeDoHBlockFragment(b *strings.Builder) error {
 		}
 		fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s tcp dport 443 drop\n", TableName, dispatchChain, dohBlockV4Set)
 		if a.opts.MitmRedirectPort > 0 {
-			fmt.Fprintf(b, "add rule inet %s %s ct status dnat ct original ip daddr @%s ct original proto-dst 443 drop\n",
+			fmt.Fprintf(b, "add rule inet %s %s ct status dnat meta l4proto tcp ct original ip daddr @%s ct original proto-dst 443 drop\n",
 				TableName, inputChain, dohBlockV4Set)
 		}
 	}
@@ -642,7 +642,7 @@ func (a *Applier) writeDoHBlockFragment(b *strings.Builder) error {
 		}
 		fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s tcp dport 443 drop\n", TableName, dispatchChain, dohBlockV6Set)
 		if a.opts.MitmRedirectPort > 0 {
-			fmt.Fprintf(b, "add rule inet %s %s ct status dnat ct original ip6 daddr @%s ct original proto-dst 443 drop\n",
+			fmt.Fprintf(b, "add rule inet %s %s ct status dnat meta l4proto tcp ct original ip6 daddr @%s ct original proto-dst 443 drop\n",
 				TableName, inputChain, dohBlockV6Set)
 		}
 	}
