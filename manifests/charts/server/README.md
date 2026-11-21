@@ -136,6 +136,7 @@ The following table lists the configurable parameters of the chart and their def
 | server.affinity | object | `{}` | Affinity for the server pod. |
 | server.containerSecurityContext | object | `{}` | Container-level security context for the server container. |
 | server.env | list | `[]` | Additional environment variables for the server container. |
+| server.fastpath.caConfigMap | string | `""` | Public serving CA ConfigMap (ca.crt); mounted at /etc/opensandbox/fastpath-ca/ca.crt. Set kubernetes.fastpath_tls_ca_file in configToml to this path. |
 | server.gateway.enabled | bool | `false` | Whether the server announces an ingress gateway (config [ingress] mode = "gateway"). |
 | server.gateway.gatewayRouteMode | string | `"header"` | Gateway route mode: header or uri. Must match gateway.gatewayRouteMode in the ingress-gateway chart. |
 | server.gateway.host | string | `"opensandbox.example.com"` | Gateway host/address returned to clients when the gateway is enabled. |

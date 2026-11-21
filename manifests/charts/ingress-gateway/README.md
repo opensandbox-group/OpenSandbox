@@ -34,6 +34,10 @@ Kubernetes: `>=1.22.0-0`
 | gateway.containerSecurityContext | object | `{}` | Container-level security context for the gateway container. |
 | gateway.dataplaneNamespace | string | `"opensandbox"` | Namespace where the gateway dataplane workloads run. |
 | gateway.env | list | `[]` | Additional environment variables for the gateway container (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics). |
+| gateway.fastpathAuth.caConfigMap | string | `""` | Public serving CA ConfigMap (ca.crt). Empty uses system trust roots. |
+| gateway.fastpathAuth.namespace | string | `"opensandbox-system"` | Namespace of the authentication-only caller ServiceAccount. |
+| gateway.fastpathAuth.serverName | string | `""` | Expected FastPath certificate DNS name. Empty uses the endpoint hostname. |
+| gateway.fastpathAuth.serviceAccount | string | `"opensandbox-ingress-fastpath-client"` | Target of TokenRequest; distinct from the gateway Pod ServiceAccount. |
 | gateway.fastpathEndpoint | string | `""` | FastPath gRPC endpoint for the fast-sandbox provider (--fastpath-endpoint). Required when providerType is "fast-sandbox"; ignored otherwise. Example: fast-sandbox-fastpath.opensandbox-system.svc:9090 |
 | gateway.gatewayRouteMode | string | `"header"` | Gateway route mode: header or uri. Must match server.gateway.gatewayRouteMode. |
 | gateway.image | object | `{"pullPolicy":"IfNotPresent","repository":"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress","tag":""}` | Gateway image configuration. |

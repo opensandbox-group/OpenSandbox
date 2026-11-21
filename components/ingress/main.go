@@ -82,9 +82,13 @@ func main() {
 	}
 
 	// Parsing Kubernetes config registers global flags and must only happen once.
-	var kubeConfig *rest.Config
-	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled {
-		kubeConfig = injection.ParseAndGetRESTConfigOrDie()
+	kubeConfig := injection.ParseAndGetRESTConfigOrDie()
+	fastPathAuth := sandbox.FastPathAuthConfig{
+		Kubernetes:     kubeConfig,
+		Namespace:      flag.FastPathAuthNamespace,
+		ServiceAccount: flag.FastPathAuthServiceAccount,
+		CAFile:         flag.FastPathTLSCAFile,
+		ServerName:     flag.FastPathTLSServerName,
 	}
 
 	var sandboxProvider sandbox.Provider
@@ -94,6 +98,7 @@ func main() {
 			flag.FastPathEndpoint,
 			time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 			flag.FastPathAccessMode,
+			fastPathAuth,
 		)
 		sandboxProvider = fsbProvider
 	} else {
@@ -107,6 +112,7 @@ func main() {
 				flag.FastPathEndpoint,
 				time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 				flag.FastPathAccessMode,
+				fastPathAuth,
 			)
 			if err == nil {
 				sandboxProvider = sandbox.NewCompositeProvider(sandboxProvider, fsbProvider)

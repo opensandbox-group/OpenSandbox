@@ -31,10 +31,13 @@ backends.
 
 from __future__ import annotations
 
+from pathlib import Path
 from threading import Lock
 from typing import Optional
 
 import grpc
+
+from opensandbox_server.services.fast_sandbox.auth import CredentialInterceptor, TokenSource
 
 from opensandbox_server.services.fast_sandbox.generated import (
     fastpath_pb2 as fastpath_pb2,
@@ -108,7 +111,15 @@ class FastPathClient:
         self,
         endpoint: str = DEFAULT_FASTPATH_ENDPOINT,
         timeout_seconds: float = 30.0,
+        *,
+        token_source: Optional[TokenSource] = None,
+        tls_ca_file: Optional[str] = None,
+        tls_server_name: Optional[str] = None,
     ) -> None:
+        self._token_source = token_source
+        self._tls_ca_file = tls_ca_file
+        self._tls_server_name = tls_server_name
+        self._roots: Optional[bytes] = None
         self._endpoint = endpoint
         self._timeout_seconds = timeout_seconds
         self._channel: Optional[grpc.Channel] = None
@@ -123,13 +134,34 @@ class FastPathClient:
         self.close()
 
     def connect(self) -> None:
-        if self._channel is not None:
-            return
+        if self._token_source is None:
+            raise FastPathUnavailable("credentials-missing", "FastPath caller TokenRequest source is required")
+        try:
+            roots = Path(self._tls_ca_file).read_bytes() if self._tls_ca_file else None
+            if roots is not None and b"-----BEGIN CERTIFICATE-----" not in roots:
+                raise ValueError("invalid CA bundle")
+        except (OSError, ValueError):
+            raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
         with self._connect_lock:
-            if self._channel is None:
-                channel = grpc.insecure_channel(self._endpoint)
+            if self._channel is None or roots != self._roots:
+                try:
+                    self._token_source.token()
+                except Exception:
+                    raise FastPathUnavailable(
+                        "credentials-unavailable",
+                        "FastPath TokenRequest preflight failed; check Kubernetes credentials, API TLS and caller RBAC",
+                    ) from None
+                options = [("grpc.ssl_target_name_override", self._tls_server_name)] if self._tls_server_name else []
+                channel = grpc.intercept_channel(
+                    grpc.secure_channel(self._endpoint, grpc.ssl_channel_credentials(roots), options=options),
+                    CredentialInterceptor(self._token_source),
+                )
+                if self._channel is not None:
+                    # Do not retain connections authenticated by removed trust roots.
+                    self._channel.close()
                 self._stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
                 self._channel = channel
+                self._roots = roots
 
     def close(self) -> None:
         with self._connect_lock:
@@ -452,7 +484,7 @@ class FastPathClient:
         return max(self._timeout_seconds, server_wait_millis / 1000 + 5.0)
 
     def _require_stub(self) -> fastpath_pb2_grpc.FastPathServiceStub:
-        if self._stub is None:
+        if self._stub is None or self._channel is not None:
             self.connect()
         if self._stub is None:  # pragma: no cover - connect() always sets it
             raise FastPathUnavailable("channel-not-open", "FastPath client is not connected")
@@ -483,6 +515,8 @@ def _to_fastpath_error(exc: grpc.RpcError) -> FastPathError:
         grpc.StatusCode.UNAVAILABLE,
         grpc.StatusCode.DEADLINE_EXCEEDED,
         grpc.StatusCode.CANCELLED,
+        grpc.StatusCode.UNAUTHENTICATED,
+        grpc.StatusCode.PERMISSION_DENIED,
     ):
         return FastPathUnavailable(code.name, details)
     return FastPathError(code.name, details)

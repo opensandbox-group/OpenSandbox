@@ -61,6 +61,15 @@ gateway:
   # (--fastpath-endpoint). Required when providerType is "fast-sandbox";
   # ignored otherwise. Example: fast-sandbox-fastpath.opensandbox-system.svc:9090
   fastpathEndpoint: ""
+  fastpathAuth:
+    # -- Namespace of the authentication-only caller ServiceAccount.
+    namespace: opensandbox-system
+    # -- Target of TokenRequest; distinct from the gateway Pod ServiceAccount.
+    serviceAccount: opensandbox-ingress-fastpath-client
+    # -- Public serving CA ConfigMap (ca.crt). Empty uses system trust roots.
+    caConfigMap: ""
+    # -- Expected FastPath certificate DNS name. Empty uses the endpoint hostname.
+    serverName: ""
 
   # OSEP-0024 activity tracking (per-sandbox last-activity in Redis).
   activity:

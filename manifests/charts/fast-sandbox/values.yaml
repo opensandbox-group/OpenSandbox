@@ -52,6 +52,29 @@ resourceNamespace: opensandbox-dataplane
 # -- Image pull secrets for every workload in this chart
 imagePullSecrets: []
 
+fastpath:
+  callerAuth:
+    # -- Identity namespace. Empty uses systemNamespace; must match base.fastSandbox.namespaces.system.
+    namespace: ""
+    # -- Must match the authentication-only identity installed by the base chart.
+    serverServiceAccount: opensandbox-server-fastpath-client
+    # -- Must match the authentication-only gateway identity installed by the base chart.
+    gatewayServiceAccount: opensandbox-ingress-fastpath-client
+    # -- Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access.
+    namespaces: []
+  tls:
+    # -- Serving Secret managed by cert-manager; mounted without subPath for automatic renewal.
+    secretName: fast-sandbox-fastpath-tls
+    issuerRef:
+      # -- Required existing cert-manager Issuer/ClusterIssuer. The chart does not install cert-manager or create a CA.
+      name: fast-sandbox-serving
+      # -- Issuer or ClusterIssuer.
+      kind: ClusterIssuer
+      # -- Issuer API group.
+      group: cert-manager.io
+    # -- Additional serving DNS names for external Server access.
+    dnsNames: []
+
 # All-in-one control plane: one process runs both the reconcilers and the
 # FastPath gRPC API (development topology, no leader election).
 controller:

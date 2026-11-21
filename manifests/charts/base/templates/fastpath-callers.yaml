@@ -1,0 +1,44 @@
+{{- if .Values.fastSandbox.rbac.create }}
+{{- $namespace := .Values.fastSandbox.namespaces.system }}
+{{- range $profile, $caller := .Values.fastSandbox.callerAuth }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ required "callerAuth serviceAccount is required" $caller.serviceAccount }}
+  namespace: {{ $namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $caller.serviceAccount }}-minter
+  namespace: {{ $namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: [{{ $caller.serviceAccount | quote }}]
+    verbs: ["create"]
+{{- if or $caller.bootstrapServiceAccount $caller.subjects }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $caller.serviceAccount }}-minter
+  namespace: {{ $namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $caller.serviceAccount }}-minter
+subjects:
+{{- if $caller.bootstrapServiceAccount }}
+  - kind: ServiceAccount
+    name: {{ $caller.bootstrapServiceAccount }}
+    namespace: {{ $caller.bootstrapNamespace | default $namespace }}
+{{- end }}
+{{- with $caller.subjects }}
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

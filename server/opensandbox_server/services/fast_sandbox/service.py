@@ -139,9 +139,18 @@ class FastSandboxService(SandboxService, ExtensionService):
         # The fsb backend shares the [kubernetes] block: CR reads and the
         # fast-sandbox (FastPath) settings live side by side there.
         self._k8s = config.kubernetes or KubernetesRuntimeConfig()
+        from opensandbox_server.services.fast_sandbox.auth import TokenSource
+
         self._fastpath = fastpath_client or FastPathClient(
             endpoint=self._k8s.fastpath_endpoint,
             timeout_seconds=self._k8s.fastpath_timeout_seconds,
+            token_source=TokenSource(
+                lambda: self._kubernetes_client().get_core_v1_api(),
+                self._k8s.fastpath_auth_namespace,
+                self._k8s.fastpath_auth_service_account,
+            ),
+            tls_ca_file=self._k8s.fastpath_tls_ca_file,
+            tls_server_name=self._k8s.fastpath_tls_server_name,
         )
         self._tenant_provider = None  # type: ignore[assignment]
         self._k8s_client = k8s_client
