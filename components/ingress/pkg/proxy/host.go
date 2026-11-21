@@ -169,7 +169,11 @@ func (p *Proxy) parseRequestedHeaderRoute(r *http.Request) (parsedRoute, int, er
 	if err != nil {
 		return pr, 0, err
 	}
-	if strings.HasPrefix(pr.sandboxID, "fsb-") {
+	// Fast Sandbox IDs are Kubernetes object names, so always lowercase. Only
+	// the Host is folded above; a label a front proxy copied from a
+	// mixed-case Host into the routing header must route the same way.
+	if fastSandboxID := strings.ToLower(pr.sandboxID); strings.HasPrefix(fastSandboxID, "fsb-") {
+		pr.sandboxID = fastSandboxID
 		// The unsigned route label may arrive via the Host or the routing
 		// header: front proxies that own the external wildcard domain often
 		// derive the label from the Host and forward it as the routing header
