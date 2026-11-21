@@ -53,3 +53,16 @@ func TestModeUsesNft(t *testing.T) {
 	require.True(t, ModeUsesNft(PolicyDnsNft))
 	require.True(t, ModeUsesNft("  DNS+nft  "))
 }
+
+func TestIsForwardMode(t *testing.T) {
+	require.True(t, IsForwardMode("forward"))
+	require.True(t, IsForwardMode("  FORWARD "))
+	require.False(t, IsForwardMode(""))
+	require.False(t, IsForwardMode(PolicyDnsNft))
+	require.False(t, IsForwardMode("dns+forward"))
+
+	// The legacy parser never accepts forward, so it cannot be normalized
+	// into a dns-only fallback by callers that use ParseEgressMode.
+	_, err := ParseEgressMode("forward")
+	require.Error(t, err)
+}

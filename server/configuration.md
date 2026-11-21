@@ -211,17 +211,18 @@ Signing keys are not required for this wildcard mode. It provides no client auth
 
 ## `[egress]`
 
-Egress sidecar image and enforcement mode. The sidecar is only attached to sandboxes created **with** a `networkPolicy`.
+Egress sidecar image and enforcement mode. The sidecar is only attached to sandboxes created **with** a `networkPolicy`, except in `mode = "forward"`, where it is attached to every sandbox.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `image` | string \| omitted | `null` | Egress sidecar OCI image. **Required** when clients send `networkPolicy`. |
-| `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available. |
+| `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available; **`forward`** — relay every sandbox TCP connection to `upstream_proxy` via `CONNECT` (Docker only, see below). |
+| `dns_upstreams` | list \| omitted | `null` | `forward` only: policy DNS resolver(s), literal IP with optional `:port`. `REFUSED` is final and there is no fallback resolver. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (esp. Kubernetes); set `false` only deliberately. |
 | `otlp_endpoint` | string \| omitted | `null` | OTLP/**HTTP** endpoint for sidecar metrics (both runtimes). Infrastructure config — not settable per request. |
 | `readiness_timeout_seconds` | float | `30.0` | Docker only: max wait for sidecar health endpoint (> 0). |
 | `requests` / `limits` | map \| omitted | `null` | Kubernetes only: sidecar resources. Omit independently; invalid quantities fail config load. |
-| `upstream_proxy` | table \| omitted | `null` | Chain mitmproxy egress through an upstream HTTP(S) CONNECT proxy. Requires `mode = "dns+nft"`. See below. |
+| `upstream_proxy` | table \| omitted | `null` | Chain mitmproxy egress through an upstream HTTP(S) CONNECT proxy. Requires `mode = "dns+nft"`, or `mode = "forward"` (then `authorization` is required). See below. |
 
 ```toml
 [egress]
@@ -246,6 +247,14 @@ url = "http://proxy.example.com:3128"
 - CA fields are runtime-specific and validated at load (`ca_cert_path`: absolute path on the Docker daemon host; `ca_secret_name`: Secret key `ca.crt`, mounted read-only into the sidecar only). They **augment** the system trust store and apply to all mitmproxy upstream TLS verification. Missing/invalid CA fails closed — traffic is never chained with reduced verification.
 - Config changes affect newly created sandboxes only.
 - Data-plane details: [`components/egress/docs/mitmproxy-transparent.md`](../components/egress/docs/mitmproxy-transparent.md#6-chain-through-an-upstream-proxy-corporateforward-egress); operations: [`docs/guides/egress-upstream-proxy.md`](../docs/guides/egress-upstream-proxy.md).
+
+**`forward` notes (OSEP-0030):**
+
+- Every sandbox gets the egress sidecar; all outbound TCP is tunneled byte-for-byte to `upstream_proxy.url` via `CONNECT <original-ip>:<port>` with `Proxy-Authorization` and `OpenSandbox-Sandbox-Id`. No local TLS interception, no direct-dial fallback; UDP, ICMP, link-local and IPv6 TCP are dropped.
+- Requires `runtime.type = "docker"`, `docker.network_mode = "bridge"`, `egress.image`, `upstream_proxy.url` and `upstream_proxy.authorization`; gVisor is rejected. Kubernetes and Fast Sandbox are not yet supported.
+- The sidecar reports ready only while the gateway is reachable, so creation fails if the gateway is not reachable within `readiness_timeout_seconds`.
+- Creates with `networkPolicy`, `credentialProxy`, or env `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` / `_SSL_INSECURE` return `400`, as do `PUT`/`PATCH /sandboxes/{id}/networkpolicy`.
+- Guide: [`docs/guides/egress-forward-mode.md`](../docs/guides/egress-forward-mode.md).
 
 **Runtime notes:** Docker — `networkPolicy` requires `docker.network_mode = "bridge"`; raise `readiness_timeout_seconds` if the sidecar starts slowly. Kubernetes — set `requests`/`limits` when namespace `LimitRange` defaults are too large. Sidecar behavior: [`components/egress/README.md`](../components/egress/README.md).
 

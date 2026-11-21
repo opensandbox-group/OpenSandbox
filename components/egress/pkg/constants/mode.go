@@ -60,6 +60,11 @@ func normalizeMode(seen map[string]bool) string {
 	return PolicyDnsNft
 }
 
+// IsForwardMode reports whether raw selects forward mode (OSEP-0030).
+func IsForwardMode(raw string) bool {
+	return strings.ToLower(strings.TrimSpace(raw)) == PolicyForward
+}
+
 func ModeUsesNft(mode string) bool {
 	seen, err := parseModeTokens(mode)
 	if err != nil {

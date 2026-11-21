@@ -58,6 +58,16 @@ func main() {
 	// fast-sandbox, without dns+nft enforcement) fails startup instead of
 	// being silently ignored.
 	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
+	// Forward mode (OSEP-0030) is parsed strictly and dispatched before the
+	// legacy mode parsing below, which would fall back to dns-only.
+	if constants.IsForwardMode(os.Getenv(constants.EnvEgressMode)) {
+		fm, err := forwardModeFromEnv(profile)
+		if err != nil {
+			log.Fatalf("invalid forward mode configuration: %v", err)
+		}
+		runForwardSidecar(ctx, fm)
+		return
+	}
 	fsbMode, err := revisionRuntimeStartup(profile)
 	if err != nil {
 		log.Fatalf("invalid live revision runtime configuration: %v", err)
