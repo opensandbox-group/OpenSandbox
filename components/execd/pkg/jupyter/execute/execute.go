@@ -132,6 +132,10 @@ type streamExecutionState struct {
 	// The reply deadline uses it to expire on output silence instead of on
 	// absolute wall-clock time, so a slow relay cannot be cut off mid-delivery.
 	outputActivity atomic.Int64
+	// outputInFlight counts output sends that have not returned yet. A send
+	// blocked on a full resultChan is output waiting on a slow consumer, not
+	// silence, so the reply deadline does not expire while one is pending.
+	outputInFlight atomic.Int64
 }
 
 func newStreamExecutionState(startTime time.Time) *streamExecutionState {
@@ -163,6 +167,16 @@ func (state *streamExecutionState) trySend(resultChan chan *ExecutionResult, not
 	case resultChan <- notify:
 	case <-state.cancelled:
 	}
+}
+
+// sendOutput forwards one output result and records it for the reply deadline.
+func (state *streamExecutionState) sendOutput(resultChan chan *ExecutionResult, notify *ExecutionResult) {
+	state.outputInFlight.Add(1)
+	state.trySend(resultChan, notify)
+	// Count the delivery before clearing the in-flight mark; see the matching
+	// read order in finalizeOnReplyDeadline.
+	state.outputActivity.Add(1)
+	state.outputInFlight.Add(-1)
 }
 
 // closeResultChan waits for in-flight sends, sends an optional terminal result last, and closes
@@ -324,7 +338,9 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState, r
 // The bound expires on output silence, not on absolute wall-clock time: while
 // output keeps arriving, each delivery restarts the grace period, so a slow
 // relay cannot be cut off mid-delivery; the execution is finalized only once
-// the output has gone quiet for a full grace period.
+// the output has gone quiet for a full grace period. Output stuck behind a slow
+// consumer is still output: the grace period does not run out while a send is
+// blocked on resultChan.
 func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan chan *ExecutionResult, timeout time.Duration) {
 	if timeout <= 0 {
 		return
@@ -339,8 +355,11 @@ func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan
 			return
 		case <-timer.C:
 		}
+		// Load the in-flight count before the delivery count: a send that
+		// finishes between the two loads has already bumped outputActivity.
+		inFlight := state.outputInFlight.Load()
 		latest := state.outputActivity.Load()
-		if latest == delivered {
+		if inFlight == 0 && latest == delivered {
 			break
 		}
 		delivered = latest
@@ -374,8 +393,7 @@ func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, 
 		ExecutionCount: execResult.ExecutionCount,
 		ExecutionData:  execResult.Data,
 	}
-	state.trySend(resultChan, notify)
-	state.outputActivity.Add(1)
+	state.sendOutput(resultChan, notify)
 
 	state.resultMutex.Lock()
 	state.result.ExecutionCount = execResult.ExecutionCount
@@ -400,8 +418,7 @@ func (c *Client) handleStreamOutput(msg *Message, state *streamExecutionState, r
 	notify := &ExecutionResult{
 		Stream: []*StreamOutput{&stream},
 	}
-	state.trySend(resultChan, notify)
-	state.outputActivity.Add(1)
+	state.sendOutput(resultChan, notify)
 }
 
 func (c *Client) handleExecutionError(msg *Message, state *streamExecutionState) {
