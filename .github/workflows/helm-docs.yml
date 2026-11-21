@@ -42,6 +42,69 @@ jobs:
         run: |
           make helm-lint
 
+      - name: Verify fast-sandbox RBAC follows the runtime switch
+        working-directory: manifests
+        run: |
+          set -euo pipefail
+
+          # Disabled runtime: no leftover control-plane RBAC (issue #2909).
+          disabled="$(helm template opensandbox charts/opensandbox --set fast-sandbox.enabled=false)"
+          if grep -Eq 'name: fast-sandbox-(controller|fastpath|fastlet-issuer-discovery|controller-token-minter|fastpath-token-minter)' <<<"$disabled"; then
+            echo "::error::fast-sandbox control-plane RBAC rendered while fast-sandbox.enabled=false" >&2
+            exit 1
+          fi
+
+          # Enabled runtime: the same switch renders the full permission set.
+          enabled="$(helm template opensandbox charts/opensandbox --set fast-sandbox.enabled=true)"
+          for resource in \
+            fast-sandbox-controller \
+            fast-sandbox-fastpath \
+            fast-sandbox-fastlet-issuer-discovery \
+            fast-sandbox-controller-token-minter \
+            fast-sandbox-fastpath-token-minter; do
+            grep -Fq "name: $resource" <<<"$enabled" || {
+              echo "::error::missing $resource while fast-sandbox.enabled=true" >&2
+              exit 1
+            }
+          done
+          if grep -Eq '^[[:space:]]+name: system:unauthenticated$' <<<"$enabled"; then
+            echo "::error::anonymous issuer-discovery binding rendered; the fastlet grant must stay credential-based" >&2
+            exit 1
+          fi
+
+          # Exactly one chart owns the render: an explicit create=true must not
+          # double the fixed-name objects, and create=false must stay opt-out.
+          # Workloads share these names, so compare RBAC objects only.
+          rbac_objects() {
+            awk '/^kind: (ClusterRole|ClusterRoleBinding|Role|RoleBinding|ServiceAccount)$/{k=$2}
+                 /^  name: /{if(k!=""){print k" "$2; k=""}}' <<<"$1" \
+              | grep -E '^(ClusterRole|ClusterRoleBinding|Role|RoleBinding|ServiceAccount) fast-sandbox-(controller|fastpath|fastlet-issuer-discovery|controller-token-minter|fastpath-token-minter)$' \
+              | sort -u
+          }
+
+          explicit="$(helm template opensandbox charts/opensandbox \
+            --set fast-sandbox.enabled=true --set base.fastSandbox.rbac.create=true)"
+          if [ "$(rbac_objects "$enabled")" != "$(rbac_objects "$explicit")" ]; then
+            echo "::error::an explicit base.fastSandbox.rbac.create=true changes the control-plane RBAC set rendered by default (duplicate or missing objects)" >&2
+            exit 1
+          fi
+
+          opted_out="$(helm template opensandbox charts/opensandbox \
+            --set fast-sandbox.enabled=true --set base.fastSandbox.rbac.create=false)"
+          if [ -n "$(rbac_objects "$opted_out")" ]; then
+            echo "::error::base.fastSandbox.rbac.create=false no longer opts out of the fast-sandbox control-plane RBAC" >&2
+            exit 1
+          fi
+
+          # Standalone base releases keep rendering the RBAC by default.
+          base_rendered="$(helm template base charts/base)"
+          for resource in fast-sandbox-controller fast-sandbox-fastpath fast-sandbox-fastlet-issuer-discovery; do
+            grep -Fq "name: $resource" <<<"$base_rendered" || {
+              echo "::error::standalone base no longer renders $resource" >&2
+              exit 1
+            }
+          done
+
       - name: Verify Fastlet Proxy resource arguments and legacy values
         run: |
           set -euo pipefail

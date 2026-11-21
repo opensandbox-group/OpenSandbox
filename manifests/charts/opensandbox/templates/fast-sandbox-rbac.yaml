@@ -1,0 +1,25 @@
+{{/*
+fast-sandbox control-plane RBAC follows the fast-sandbox runtime switch.
+
+Helm values are not templated and cannot be derived across sub-charts, so the
+always-installed base sub-chart cannot gate its `fastSandbox.rbac.create`
+switch on the umbrella's `fast-sandbox.enabled` value. The base sub-chart
+therefore hands rendering over (`base.fastSandbox.rbac.managedByParent`) and
+the umbrella renders the shared `opensandbox-base.fastSandboxRBAC` template
+itself. `base.fastSandbox.rbac.create` stays the user's opt-out, so a deployment
+that manages the RBAC outside this release still installs none of it, and one
+that sets it explicitly gets exactly one copy. Standalone base releases are
+unaffected and keep rendering the same objects.
+*/}}
+{{- $fastSandbox := index .Values "fast-sandbox" | default dict }}
+{{- $base := index .Values "base" | default dict }}
+{{- $baseFastSandbox := index $base "fastSandbox" | default dict }}
+{{- $baseRBAC := index $baseFastSandbox "rbac" | default dict }}
+{{- /*
+The shared template is defined by the base sub-chart, so it exists only while
+that dependency is enabled. A split install that disables base relies on the
+standalone base release for this RBAC, as before.
+*/}}
+{{- if and $fastSandbox.enabled (index $base "enabled") (index $baseRBAC "create") }}
+{{ include "opensandbox-base.fastSandboxRBAC" (dict "root" . "systemNamespace" ($fastSandbox.systemNamespace | default "opensandbox-system")) }}
+{{- end }}
