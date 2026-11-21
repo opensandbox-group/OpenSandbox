@@ -46,12 +46,16 @@ func TestNftReloadKeepsTCPFinalGrace(t *testing.T) {
 	wide := mustPolicy(t, `{"egress":[{"action":"allow","target":"*.example.com"}]}`)
 	aliasOnly := mustPolicy(t, `{"egress":[{"action":"allow","target":"alias.example.com"}]}`)
 	addr := netip.MustParseAddr("192.0.2.1")
-	for _, sameSource := range []bool{true, false} {
-		name := "remove the credited owner"
-		if sameSource {
-			name = "keep the credited owner"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		removeBefore bool
+		removeAfter  bool
+	}{
+		{name: "keep the credited owner"},
+		{name: "remove the credited owner before close", removeBefore: true},
+		{name: "remove the credited owner after close", removeAfter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			m := NewManagerWithOptions(Options{})
 			now := time.Unix(1000, 0)
 			m.tracker.now = func() time.Time { return now }
@@ -60,15 +64,24 @@ func TestNftReloadKeepsTCPFinalGrace(t *testing.T) {
 			require.NoError(t, m.tracker.refreshActiveConnections(ctx, []tcpConnection{{remote: addr, state: "ESTABLISHED"}}, m))
 			now = now.Add(30 * time.Second)
 			next := wide
-			if !sameSource {
+			if tc.removeBefore || tc.removeAfter {
 				require.NoError(t, m.AddResolvedDomain(ctx, "alias.example.com", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			}
+			if tc.removeBefore {
 				next = aliasOnly
 			}
-			require.NoError(t, m.ApplyStatic(ctx, next))
+			if !tc.removeAfter {
+				require.NoError(t, m.ApplyStatic(ctx, next))
+			}
 			require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
+			if tc.removeAfter {
+				require.Greater(t, readKernelLeaseExpiry(t, ctx)[addr.String()], 340,
+					"the credited owner still earns reconnect grace")
+				require.NoError(t, m.ApplyStatic(ctx, aliasOnly))
+			}
 			expiry := readKernelLeaseExpiry(t, ctx)[addr.String()]
 			require.Positive(t, expiry)
-			if sameSource {
+			if !tc.removeBefore && !tc.removeAfter {
 				require.Greater(t, expiry, 340, "a close after reload earns one full reconnect grace period")
 			} else {
 				require.LessOrEqual(t, expiry, 120, "a new owner cannot inherit another name's pending close refresh")

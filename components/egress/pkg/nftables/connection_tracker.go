@@ -139,7 +139,12 @@ func (m *Manager) authorizeDNSRefreshLocked(plan *refreshPlan) []dnsRefreshCredi
 	var credits []dnsRefreshCredit
 	for _, domain := range m.domains {
 		for addr, lease := range domain.addresses {
-			if _, pending := plan.refreshing[addr]; pending && m.holdsDomainCapacity(addr, lease, plan.at) {
+			if _, pending := plan.refreshing[addr]; !pending {
+				continue
+			}
+			_, active := plan.active[addr]
+			// A close poll extends existing credit, never credits a new source.
+			if (active && lease.deadline().After(plan.at)) || m.tracker.previouslyCredited(addr, lease.tcpUntil) {
 				plan.refreshing[addr] = true
 				credits = append(credits, dnsRefreshCredit{domain: domain, addr: addr})
 			}
