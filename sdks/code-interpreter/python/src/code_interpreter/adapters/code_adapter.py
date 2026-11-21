@@ -44,7 +44,7 @@ from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.sandboxes import SandboxEndpoint
-from opensandbox.transport import streaming_transport
+from opensandbox.transport import sse_timeout, streaming_transport
 
 from code_interpreter.adapters.converter.code_execution_converter import (
     CodeExecutionConverter,
@@ -139,12 +139,7 @@ class CodesAdapter(Codes):
         )
         self._sse_client = httpx.AsyncClient(
             headers=sse_headers,
-            timeout=httpx.Timeout(
-                connect=timeout_seconds,
-                read=None,
-                write=timeout_seconds,
-                pool=None,
-            ),
+            timeout=sse_timeout(timeout_seconds),
             transport=streaming_transport(sse_transport),
         )
 

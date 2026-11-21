@@ -56,7 +56,7 @@ from opensandbox.services.isolated import (
     IsolationServiceMixin,
     IsolationSession,
 )
-from opensandbox.transport import streaming_transport
+from opensandbox.transport import sse_timeout, streaming_transport
 
 logger = logging.getLogger(__name__)
 
@@ -262,12 +262,7 @@ class IsolatedSessionsAdapter(IsolationServiceMixin, IsolationService):
         # status opt-in would cause duplicate execution on a resent SSE POST.
         self._sse_client = httpx.AsyncClient(
             headers=sse_headers,
-            timeout=httpx.Timeout(
-                connect=timeout_seconds,
-                read=None,
-                write=timeout_seconds,
-                pool=None,
-            ),
+            timeout=sse_timeout(timeout_seconds),
             transport=streaming_transport(self.connection_config.transport),
             **build_async_redirect_client_options(self.connection_config, base_url),
         )
