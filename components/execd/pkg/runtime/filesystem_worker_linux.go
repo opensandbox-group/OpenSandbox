@@ -92,7 +92,7 @@ func StartFilesystemWorker(cmd *exec.Cmd, uid, gid uint32) (func(), error) {
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + home, "TMPDIR=/tmp"}
 	// These are trusted file handlers, not a user command. Their boundary is
 	// Linux DAC, just as for the ordinary file API; no shell is executed.
-	process, err := launchManaged(cmd, withoutHardening())
+	process, err := launchManaged(cmd, withoutHardening(), withoutQoS())
 	if err != nil {
 		return nil, credentialStartHint(err, cred)
 	}
