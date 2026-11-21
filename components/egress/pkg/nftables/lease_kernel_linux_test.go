@@ -95,6 +95,7 @@ func TestNftSharedIPTeardownCountsOnlyDroppedLeases(t *testing.T) {
 		{name: "expired renewable owner in DNS backoff", elapsed: 121 * time.Second, want: 1},
 		{name: "previously credited owner after a delayed TCP poll", elapsed: 361 * time.Second, retired: true, earlyTCP: true, refreshTCP: true, want: 0},
 		{name: "lease expires while rendering replacement", elapsed: 110 * time.Second, retired: true, clockStep: 11 * time.Second, want: 1},
+		{name: "lease expires while assembling timed elements", elapsed: 110 * time.Second, retired: true, clockStep: 6 * time.Second, want: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewManagerWithOptions(Options{})

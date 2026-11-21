@@ -209,12 +209,13 @@ func snapshotTeardownFlows() []byte {
 }
 
 type staticApplyPlan struct {
-	script     string
-	drops      EstablishedDrops
-	domains    map[string]*resolvedDomain
-	leases     map[netip.Addr]time.Time
-	active     map[netip.Addr]struct{}
-	nextExpiry time.Time
+	script         string
+	drops          EstablishedDrops
+	domains        map[string]*resolvedDomain
+	leases         map[netip.Addr]time.Time
+	active         map[netip.Addr]struct{}
+	expiredCredits []dnsRefreshCredit
+	nextExpiry     time.Time
 }
 
 func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops func(time.Time) EstablishedDrops, flows []byte, committedAt time.Time) (int, error) {
@@ -261,6 +262,11 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 		}
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
 		return 0, err
+	}
+	for _, credit := range plan.expiredCredits {
+		lease := credit.domain.addresses[credit.addr]
+		lease.tcpUntil = time.Time{}
+		credit.domain.addresses[credit.addr] = lease
 	}
 	m.tracker.dynamicIPs = plan.leases
 	m.tracker.directIPs = nil
@@ -312,6 +318,13 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 		if !replace {
 			script = RemoveDeleteTableLine(script, tableName)
 		}
+		// The timed elements and fallback script are part of preparation too.
+		if !plan.nextExpiry.IsZero() {
+			if readyAt := m.tracker.now(); !plan.nextExpiry.After(readyAt) {
+				at = readyAt
+				continue
+			}
+		}
 		plan.script = script
 		return plan, nil
 	}
@@ -334,6 +347,11 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 		for addr, lease := range current.addresses {
 			expiry := lease.deadline()
 			if !expiry.After(now) {
+				// Another source may keep this IP active. Do not let that
+				// keep the expired source's old poll credit alive as well.
+				if keep && m.tracker.previouslyCredited(addr, lease.tcpUntil) {
+					plan.expiredCredits = append(plan.expiredCredits, dnsRefreshCredit{domain: plan.domains[name], addr: addr})
+				}
 				continue
 			}
 			if plan.nextExpiry.IsZero() || expiry.Before(plan.nextExpiry) {

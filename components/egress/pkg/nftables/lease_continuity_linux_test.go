@@ -88,6 +88,28 @@ func TestNftReloadKeepsTCPFinalGrace(t *testing.T) {
 			}
 		})
 	}
+	t.Run("reload after only one credited source expired", func(t *testing.T) {
+		m := NewManagerWithOptions(Options{})
+		now := time.Unix(1000, 0)
+		m.tracker.now = func() time.Time { return now }
+		require.NoError(t, m.ApplyStatic(ctx, wide))
+		require.NoError(t, m.AddResolvedDomain(ctx, "alias.example.com", []ResolvedIP{{Addr: addr}}))
+		long := []ResolvedIP{{Addr: addr, TTL: 300 * time.Second}}
+		require.NoError(t, m.AddResolvedDomain(ctx, "primary.example.com", long))
+		require.NoError(t, m.tracker.refreshActiveConnections(ctx, []tcpConnection{{remote: addr, state: "ESTABLISHED"}}, m))
+		now = now.Add(30 * time.Second)
+		require.NoError(t, m.AddResolvedDomain(ctx, "primary.example.com", long))
+		now = now.Add(331 * time.Second)
+		require.NoError(t, m.ApplyStatic(ctx, wide))
+		require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
+		require.Greater(t, readKernelLeaseExpiry(t, ctx)[addr.String()], 340,
+			"the surviving source still earns a full reconnect grace period")
+		_, err := m.ApplyStaticComputingEstablishedDrops(ctx, wide, aliasOnly)
+		require.NoError(t, err)
+		require.NotContains(t, readKernelLeaseExpiry(t, ctx), addr.String(),
+			"reloading must not restore close-refresh eligibility to the expired source")
+		require.True(t, m.lastDrops.MatchesFlow(addr, 443), "the expired source cannot protect a revoked flow")
+	})
 }
 
 func TestNftFallbackReplansDNSLeases(t *testing.T) {
