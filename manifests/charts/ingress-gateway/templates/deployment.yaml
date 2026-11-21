@@ -89,6 +89,16 @@ spec:
             {{- if .Values.gateway.fastSandboxNamespace }}
             - {{ printf "--fast-sandbox-namespace=%s" .Values.gateway.fastSandboxNamespace | quote }}
             {{- end }}
+            {{- if or .Values.gateway.fastpathEndpoint (eq .Values.gateway.providerType "fast-sandbox") }}
+            - "--fastpath-auth-namespace={{ .Values.gateway.fastpathAuth.namespace }}"
+            - "--fastpath-auth-service-account={{ .Values.gateway.fastpathAuth.serviceAccount }}"
+            {{- with .Values.gateway.fastpathAuth.serverName }}
+            - "--fastpath-tls-server-name={{ . }}"
+            {{- end }}
+            {{- if .Values.gateway.fastpathAuth.caConfigMap }}
+            - "--fastpath-tls-ca-file=/etc/opensandbox/fastpath-ca/ca.crt"
+            {{- end }}
+            {{- end }}
             {{- if .Values.gateway.activity.enabled }}
             # OSEP-0024 activity tracking (same Redis as the server's [automation.idle_pause]).
             - "--activity-enabled=true"
@@ -148,3 +158,18 @@ spec:
             timeoutSeconds: 3
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
+          {{- if .Values.gateway.fastpathAuth.caConfigMap }}
+          volumeMounts:
+            - name: fastpath-ca
+              mountPath: /etc/opensandbox/fastpath-ca
+              readOnly: true
+          {{- end }}
+      {{- if .Values.gateway.fastpathAuth.caConfigMap }}
+      volumes:
+        - name: fastpath-ca
+          configMap:
+            name: {{ .Values.gateway.fastpathAuth.caConfigMap }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+      {{- end }}

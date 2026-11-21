@@ -33,6 +33,20 @@ from opensandbox_server.main import app  # noqa: E402
 
 
 @pytest.fixture(scope="session")
+def fastpath_tls(tmp_path_factory):
+    import subprocess
+
+    directory = tmp_path_factory.mktemp("fastpath-tls")
+    ca, key = directory / "ca.pem", directory / "key.pem"
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(key), "-out", str(ca), "-days", "1",
+        "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1",
+    ], check=True, capture_output=True)
+    return ca, key
+
+
+@pytest.fixture(scope="session")
 def test_api_key() -> str:
     return "test-api-key-12345"
 

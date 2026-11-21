@@ -204,9 +204,18 @@ def create_snapshot_runtime(
         # Kubernetes-mode server; their snapshots go through FastPath. Both
         # runtimes share the client (informer keys differ by API group, and
         # stop_informers is idempotent).
+        from opensandbox_server.services.fast_sandbox.auth import TokenSource
+
         fastpath_client = FastPathClient(
             endpoint=kubernetes_config.fastpath_endpoint,
             timeout_seconds=kubernetes_config.fastpath_timeout_seconds,
+            token_source=TokenSource(
+                lambda: k8s_client.get_core_v1_api(),
+                kubernetes_config.fastpath_auth_namespace,
+                kubernetes_config.fastpath_auth_service_account,
+            ),
+            tls_ca_file=kubernetes_config.fastpath_tls_ca_file,
+            tls_server_name=kubernetes_config.fastpath_tls_server_name,
         )
         fsb_runtime: SnapshotRuntime = FastSandboxSnapshotRuntime(
             fastpath_client,

@@ -73,6 +73,10 @@ func InitFlags() {
 		namespaceSet = true
 		return nil
 	})
+	flag.StringVar(&FastPathAuthNamespace, "fastpath-auth-namespace", "opensandbox-system", "FastPath caller ServiceAccount namespace")
+	flag.StringVar(&FastPathAuthServiceAccount, "fastpath-auth-service-account", "opensandbox-ingress-fastpath-client", "FastPath caller ServiceAccount")
+	flag.StringVar(&FastPathTLSCAFile, "fastpath-tls-ca-file", "", "FastPath serving CA bundle; empty uses system roots")
+	flag.StringVar(&FastPathTLSServerName, "fastpath-tls-server-name", "", "Expected FastPath certificate DNS identity")
 	flag.StringVar(&FastPathAccessMode, "fastpath-access-mode", "direct-fastlet-proxy", "FastPath Fast Sandbox data-plane mode: central-proxy or direct-fastlet-proxy")
 	flag.IntVar(&FastPathWaitTimeoutMillis, "fastpath-wait-timeout-millis", 2000, "FastPath ResolveEndpoint RPC timeout for one ingress request")
 

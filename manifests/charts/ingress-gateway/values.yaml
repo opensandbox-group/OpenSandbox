@@ -59,6 +59,15 @@ gateway:
 
   # -- FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise.
   fastpathEndpoint: ""
+  fastpathAuth:
+    # -- Namespace of the authentication-only caller ServiceAccount.
+    namespace: opensandbox-system
+    # -- Target of TokenRequest; distinct from the gateway Pod ServiceAccount.
+    serviceAccount: opensandbox-ingress-fastpath-client
+    # -- Public serving CA ConfigMap (ca.crt). Empty uses system trust roots.
+    caConfigMap: ""
+    # -- Expected FastPath certificate DNS name. Empty uses the endpoint hostname.
+    serverName: ""
 
   # -- Restricts Fast Sandbox to one namespace and enables unsigned wildcard routing. Empty requires signed scopes; unsigned access needs external protection.
   fastSandboxNamespace: ""

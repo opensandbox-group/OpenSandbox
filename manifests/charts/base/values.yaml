@@ -74,6 +74,25 @@ fastSandbox:
     # -- Namespace for fast-sandbox resource objects (pools, templates,
     # sandboxes and the fastlet/builder Pods they spawn)
     resources: opensandbox-dataplane
+  callerAuth:
+    server:
+      # -- Authentication-only FastPath identity; never bind workload permissions to it.
+      serviceAccount: opensandbox-server-fastpath-client
+      # -- Bootstrap Pod ServiceAccount name. Empty disables the in-cluster binding.
+      bootstrapServiceAccount: opensandbox-server
+      # -- Bootstrap Pod namespace. Empty uses fastSandbox.namespaces.system.
+      bootstrapNamespace: ""
+      # -- Additional explicit RBAC subjects (User, Group, or ServiceAccount), including external kubeconfig identities.
+      subjects: []
+    gateway:
+      # -- Authentication-only gateway identity.
+      serviceAccount: opensandbox-ingress-fastpath-client
+      # -- Bootstrap gateway Pod ServiceAccount name.
+      bootstrapServiceAccount: opensandbox-ingress-gateway
+      # -- Bootstrap Pod namespace. Empty uses fastSandbox.namespaces.system.
+      bootstrapNamespace: ""
+      # -- Additional explicit RBAC subjects.
+      subjects: []
   rbac:
     # -- Specifies whether the fast-sandbox control-plane ServiceAccounts,
     # ClusterRoles and ClusterRoleBindings should be installed (the

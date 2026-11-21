@@ -27,7 +27,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	fastpathv2 "github.com/alibaba/opensandbox/ingress/pkg/fastpath/v2"
@@ -82,6 +81,7 @@ type FastSandboxProvider struct {
 	resolver     FastPathResolver
 	lifecycleRPC FastPathLifecycle
 	connection   *grpc.ClientConn
+	tokens       *fastPathTokenSource
 	waitTimeout  time.Duration
 	accessMode   fastpathv2.EndpointAccessMode
 	now          func() time.Time
@@ -90,7 +90,7 @@ type FastSandboxProvider struct {
 	cache map[EndpointTarget]EndpointInfo
 }
 
-func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMode string) (*FastSandboxProvider, error) {
+func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMode string, auth FastPathAuthConfig) (*FastSandboxProvider, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {
 		return nil, errors.New("FastPath endpoint is required")
@@ -102,14 +102,21 @@ func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMo
 	if err != nil {
 		return nil, err
 	}
-	// Phase 1a uses plaintext gRPC inside a NetworkPolicy-isolated cluster.
-	// TLS requires matching server support and is intentionally not implied here.
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	tokens, err := newFastPathTokenSource(auth)
+	if err != nil {
+		return nil, err
+	}
+	transport, err := newFastPathTLS(auth.CAFile, auth.ServerName)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(transport), grpc.WithPerRPCCredentials(tokens))
 	if err != nil {
 		return nil, fmt.Errorf("create FastPath client: %w", err)
 	}
 	provider := NewFastSandboxProviderWithResolver(fastpathv2.NewFastPathServiceClient(conn), waitTimeout, parsedAccessMode)
 	provider.connection = conn
+	provider.tokens = tokens
 	return provider, nil
 }
 
@@ -170,6 +177,10 @@ func (p *FastSandboxProvider) Start(ctx context.Context) error {
 		if err := waitForFastPathReady(connectCtx, p.connection); err != nil {
 			_ = p.connection.Close()
 			return fmt.Errorf("connect to FastPath: %w", err)
+		}
+		if _, err := p.tokens.GetRequestMetadata(connectCtx); err != nil {
+			_ = p.connection.Close()
+			return fmt.Errorf("FastPath caller credential preflight: %w", err)
 		}
 		go func() {
 			<-ctx.Done()

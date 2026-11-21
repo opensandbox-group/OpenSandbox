@@ -148,11 +148,14 @@ def _vault_ack(revision: int = 3) -> bytes:
 
 
 @pytest.fixture
-def vault_fsb(monkeypatch):
+def vault_fsb(monkeypatch, fastpath_tls):
+    ca, key = fastpath_tls
     fake = _FakeFastPathService()
     grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     pb2_grpc.add_FastPathServiceServicer_to_server(fake, grpc_server)
-    port = grpc_server.add_insecure_port("127.0.0.1:0")
+    port = grpc_server.add_secure_port(
+        "127.0.0.1:0", grpc.ssl_server_credentials([(key.read_bytes(), ca.read_bytes())])
+    )
     grpc_server.start()
 
     config = AppConfig(
@@ -167,7 +170,11 @@ def vault_fsb(monkeypatch):
         ),
         kubernetes=KubernetesRuntimeConfig(namespace="ns-1"),
     )
-    fastpath = FastPathClient(endpoint=f"127.0.0.1:{port}")
+    fastpath = FastPathClient(
+        endpoint=f"127.0.0.1:{port}",
+        token_source=Mock(token=lambda: "test-caller"),
+        tls_ca_file=str(ca),
+    )
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
     api = _FakeCustomObjectsApi()
