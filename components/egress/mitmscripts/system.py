@@ -1265,8 +1265,9 @@ def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
 
     The one exception is Cookie on HTTP/2 and HTTP/3, where clients may split
     it into one line per pair (RFC 9113 8.2.3). Those crumbs have a single
-    joined form, "; " in wire order, which the destination rebuilds and
-    mitmproxy sends to an HTTP/1 upstream, so the resolver gets that value.
+    joined form, every line "; "-joined in wire order with empty ones kept,
+    which the destination rebuilds and mitmproxy sends to an HTTP/1 upstream,
+    so the resolver gets that value.
     """
     http_version = (flow.request.http_version or "").upper()
     join_cookie_crumbs = http_version.startswith(("HTTP/2", "HTTP/3"))
@@ -1278,8 +1279,7 @@ def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
         if lowered in RESOLVE_REQUEST_HEADER_DENYLIST:
             continue
         if lowered == "cookie" and join_cookie_crumbs:
-            if value:
-                cookie_crumbs.append(value)
+            cookie_crumbs.append(value)
             continue
         lines[lowered] = lines.get(lowered, 0) + 1
         if not name or not value:
@@ -1287,8 +1287,9 @@ def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
         selected[lowered] = _checked_resolve_header_value(value)
     if any(count > 1 for count in lines.values()):
         raise CredentialResolveError("resolve_ambiguous_header")
-    if cookie_crumbs:
-        selected["cookie"] = _checked_resolve_header_value("; ".join(cookie_crumbs))
+    cookie = "; ".join(cookie_crumbs)
+    if cookie:
+        selected["cookie"] = _checked_resolve_header_value(cookie)
     if len(selected) > MAX_RESOLVE_REQUEST_HEADERS:
         raise CredentialResolveError("resolve_too_many_headers")
     return selected
