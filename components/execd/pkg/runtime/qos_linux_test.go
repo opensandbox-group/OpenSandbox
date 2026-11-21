@@ -191,9 +191,10 @@ func TestQoSIdentityAndUnprivilegedAdjustment(t *testing.T) {
 		t.Run(fmt.Sprint(hardened), func(t *testing.T) {
 			cfg, probe := setupQoSTest(t)
 			baseline := runQoSProbe(t, exec.Command(probe))
-			if baseline.OOM >= 500 {
-				t.Skip("fixture needs inherited OOM adjustment below the target")
+			if baseline.OOM == 1000 {
+				t.Skip("inherited OOM adjustment is already at the kernel maximum")
 			}
+			cfg.QoS.OOMScoreAdj = max(500, baseline.OOM+1)
 			if hardened {
 				cfg.Hardening = &isolation.HardeningConfig{Enabled: true}
 			}
@@ -209,7 +210,7 @@ func TestQoSIdentityAndUnprivilegedAdjustment(t *testing.T) {
 			require.Equal(t, uid, got.UID)
 			require.Equal(t, gid, got.GID)
 			require.Equal(t, 19, got.Nice)
-			require.Equal(t, 500, got.OOM)
+			require.Equal(t, cfg.QoS.OOMScoreAdj, got.OOM)
 			require.Zero(t, got.LowerErrno, "initial unprivileged raise must not install a new minimum")
 			require.Equal(t, baseline.OOM, got.OOMAfter)
 			require.NotZero(t, got.NiceErrno, "unprivileged workload must not raise its priority")
@@ -219,40 +220,55 @@ func TestQoSIdentityAndUnprivilegedAdjustment(t *testing.T) {
 
 func TestQoSInheritedOOMNeverLowered(t *testing.T) {
 	cfg, probe := setupQoSTest(t)
+	baseline := runQoSProbe(t, exec.Command(probe))
+	inherited := max(800, baseline.OOM)
 	require.NoError(t, InitQoS(cfg))
 	cmd := exec.Command(probe)
 	policy, err := hardenCmd(cmd, false, false, nil)
 	require.NoError(t, err)
 	defer policy.Close()
-	cmd.Args = append([]string{probe, "inherit", "800"}, cmd.Args...)
+	cmd.Args = append([]string{probe, "inherit", strconv.Itoa(inherited)}, cmd.Args...)
 	cmd.Path = probe
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", out)
-	require.Equal(t, 800, readQoSSample(t, out).OOM)
+	require.Equal(t, inherited, readQoSSample(t, out).OOM)
 }
 
 func TestQoSUnsupportedOperationsPreserveHardening(t *testing.T) {
-	cfg, probe := setupQoSTest(t)
-	cfg.Hardening = &isolation.HardeningConfig{Enabled: true}
-	require.NoError(t, InitHardening(cfg))
-	require.NoError(t, InitQoS(cfg))
-	cmd := exec.Command(probe)
-	policy, err := hardenCmd(cmd, false, false, nil)
-	require.NoError(t, err)
-	defer policy.Close()
-	cmd.Args = append([]string{probe, "deny-qos"}, cmd.Args...)
-	cmd.Path = probe
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	require.NoError(t, cmd.Run(), "%s", stderr.String())
-	got := readQoSSample(t, stdout.Bytes())
-	require.Equal(t, 1, got.NNP)
-	require.Zero(t, got.Caps)
-	require.Equal(t, 2, got.Seccomp)
-	require.Zero(t, got.Soft)
-	require.Zero(t, got.Hard)
-	for _, operation := range []string{"scheduler", "nice", "write oom_score_adj"} {
-		require.Contains(t, stderr.String(), "qos: "+operation)
+	for _, inheritedFloor := range []int{0, 1000} {
+		t.Run(fmt.Sprintf("inherited-floor=%d", inheritedFloor), func(t *testing.T) {
+			cfg, probe := setupQoSTest(t)
+			baseline := runQoSProbe(t, exec.Command(probe))
+			inherited := max(inheritedFloor, baseline.OOM)
+			cfg.QoS.OOMScoreAdj = 1000
+			cfg.Hardening = &isolation.HardeningConfig{Enabled: true}
+			require.NoError(t, InitHardening(cfg))
+			require.NoError(t, InitQoS(cfg))
+			cmd := exec.Command(probe)
+			policy, err := hardenCmd(cmd, false, false, nil)
+			require.NoError(t, err)
+			defer policy.Close()
+			cmd.Args = append([]string{probe, "inherit", strconv.Itoa(inherited), probe, "deny-qos"}, cmd.Args...)
+			cmd.Path = probe
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			require.NoError(t, cmd.Run(), "%s", stderr.String())
+			got := readQoSSample(t, stdout.Bytes())
+			require.Equal(t, 1, got.NNP)
+			require.Zero(t, got.Caps)
+			require.Equal(t, 2, got.Seccomp)
+			require.Zero(t, got.Soft)
+			require.Zero(t, got.Hard)
+			require.Equal(t, inherited, got.OOM)
+			for _, operation := range []string{"scheduler", "nice"} {
+				require.Contains(t, stderr.String(), "qos: "+operation)
+			}
+			if inherited < cfg.QoS.OOMScoreAdj {
+				require.Contains(t, stderr.String(), "qos: write oom_score_adj")
+			} else {
+				require.NotContains(t, stderr.String(), "qos: write oom_score_adj")
+			}
+		})
 	}
 }
 
