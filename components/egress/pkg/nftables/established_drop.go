@@ -149,15 +149,15 @@ func portDropCoversPort(pd EstablishedPortDrop, dport int) bool {
 }
 
 // SnapshotResolvedDomains returns DNS addresses still eligible for renewal.
-// Retired leases hold capacity without changing legacy established teardown.
-// Policy replacement takes the snapshot under the manager lock.
+// Teardown also needs retired observations whose grants have not expired.
 func (m *Manager) SnapshotResolvedDomains() map[string][]netip.Addr {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.snapshotResolvedDomainsLocked()
+	return m.snapshotResolvedDomainsLocked(time.Time{})
 }
 
-func (m *Manager) snapshotResolvedDomainsLocked() map[string][]netip.Addr {
+// A zero liveAt keeps only addresses eligible for DNS renewal.
+func (m *Manager) snapshotResolvedDomainsLocked(liveAt time.Time) map[string][]netip.Addr {
 	out := make(map[string][]netip.Addr, len(m.domains))
 	for domain, entry := range m.domains {
 		if entry == nil || len(entry.addresses) == 0 {
@@ -165,7 +165,7 @@ func (m *Manager) snapshotResolvedDomainsLocked() map[string][]netip.Addr {
 		}
 		var addrs []netip.Addr
 		for addr, lease := range entry.addresses {
-			if lease.renewable {
+			if lease.renewable || (!liveAt.IsZero() && lease.deadline().After(liveAt)) {
 				addrs = append(addrs, addr)
 			}
 		}

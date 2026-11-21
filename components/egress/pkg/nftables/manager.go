@@ -191,7 +191,7 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 	if newPol == nil {
 		newPol = policy.DefaultDenyPolicy()
 	}
-	prior := m.snapshotResolvedDomainsLocked()
+	prior := m.snapshotResolvedDomainsLocked(m.tracker.now())
 	drops := ComputeEstablishedDrops(oldPol, newPol, prior)
 	matched, countErr := countMatchingConntrackFlows(drops)
 	if countErr != nil {
@@ -494,8 +494,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
-	// (shared CDN IP) is not pinned by a stale drop from a prior apply; the
-	// dyn sets are recreated empty on every full apply.
+	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
 	// Then still-allowed destinations (keeps and the static allow sets), then

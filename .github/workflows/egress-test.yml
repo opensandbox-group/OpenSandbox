@@ -95,6 +95,7 @@ jobs:
             TestDynamicElementRenewal \
             TestNftDomainAnswerDoesNotShortenSharedLease \
             TestNftPolicyReplacementKeepsOnlySurvivingDomainLeases \
+            TestNftSharedIPTeardownCountsOnlyDroppedLeases \
             TestNftUnknownPolicyApplyFencesDNSUntilVerifiedReplacement \
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \

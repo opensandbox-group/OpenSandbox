@@ -69,6 +69,45 @@ func TestNftPolicyReplacementKeepsOnlySurvivingDomainLeases(t *testing.T) {
 	require.LessOrEqual(t, after[shared.String()], 110, "replacement cannot renew or inherit the revoked source's longer lease")
 }
 
+func TestNftSharedIPTeardownCountsOnlyDroppedLeases(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if !isolatedNftTest(t, ctx) {
+		return
+	}
+	const keep = "keep.example.com"
+	wide := mustPolicy(t, `{"egress":[{"action":"allow","target":"*.example.com"}]}`)
+	tight := mustPolicy(t, `{"egress":[{"action":"allow","target":"keep.example.com"}]}`)
+	shared := netip.MustParseAddr("192.0.2.1")
+	flow := []byte("ipv4 2 tcp 6 431999 ESTABLISHED src=10.0.0.2 dst=192.0.2.1 sport=12345 dport=443 src=192.0.2.1 dst=10.0.0.2 sport=443 dport=12345 [ASSURED]\n")
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration
+		want    int
+	}{
+		{"live retired owner", time.Minute, 0},
+		{"expired retired owner", 121 * time.Second, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManagerWithOptions(Options{})
+			now := time.Unix(1000, 0)
+			m.tracker.now = func() time.Time { return now }
+			require.NoError(t, m.ApplyStatic(ctx, wide))
+			require.NoError(t, m.AddResolvedDomain(ctx, keep, []ResolvedIP{{Addr: shared, TTL: time.Minute}}))
+			require.NoError(t, m.AddResolvedDomain(ctx, "remove.example.com", []ResolvedIP{{Addr: shared, TTL: 300 * time.Second}}))
+			m.applyDomainRefresh(ctx, keep, m.domains[keep], nil)
+
+			now = now.Add(tc.elapsed)
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, wide, tight)
+			require.NoError(t, err)
+			_, retained := readKernelLeaseExpiry(t, ctx)[shared.String()]
+			require.Equal(t, tc.want == 0, retained, "only a still-live source may keep the shared grant")
+			require.Equal(t, tc.want, countMatchingConntrackFlowsData(flow, m.lastDrops),
+				"the conntrack count must agree with whether the shared grant survives")
+		})
+	}
+}
+
 func TestNftUnknownPolicyApplyFencesDNSUntilVerifiedReplacement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
