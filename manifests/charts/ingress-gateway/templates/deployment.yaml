@@ -13,6 +13,11 @@
 # limitations under the License.
 
 {{- include "opensandbox-ingress-gateway.secureAccess.validate" . }}
+{{/* 兼容旧 values 缺少此节点，并按键回退以保留显式 0。 */}}
+{{- $httpPool := .Values.gateway.httpConnectionPool | default dict }}
+{{- $maxIdleConns := dig "maxIdleConns" 100 $httpPool }}
+{{- $maxIdleConnsPerHost := dig "maxIdleConnsPerHost" 2 $httpPool }}
+{{- $idleConnTimeout := dig "idleConnTimeout" "90s" $httpPool }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -82,6 +87,16 @@ spec:
             - "--provider-type={{ .Values.gateway.providerType }}"
             - "--mode={{ .Values.gateway.gatewayRouteMode }}"
             - "--log-level={{ .Values.gateway.logLevel }}"
+            {{/* 默认发布镜像尚不支持新参数；仅传入偏离默认值的配置，显式 0 仍保留。 */}}
+            {{- if ne (toString $maxIdleConns) "100" }}
+            - "--http-max-idle-conns={{ $maxIdleConns }}"
+            {{- end }}
+            {{- if ne (toString $maxIdleConnsPerHost) "2" }}
+            - "--http-max-idle-conns-per-host={{ $maxIdleConnsPerHost }}"
+            {{- end }}
+            {{- if ne (toString $idleConnTimeout) "90s" }}
+            - "--http-idle-conn-timeout={{ $idleConnTimeout }}"
+            {{- end }}
             {{- if .Values.gateway.fastpathEndpoint }}
             # FastPath gRPC endpoint for the fast-sandbox provider.
             - "--fastpath-endpoint={{ .Values.gateway.fastpathEndpoint }}"

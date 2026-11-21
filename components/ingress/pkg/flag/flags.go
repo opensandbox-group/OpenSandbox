@@ -31,6 +31,13 @@ var (
 	Mode string
 )
 
+// HTTP upstream connection pooling.
+var (
+	HTTPMaxIdleConns        int
+	HTTPMaxIdleConnsPerHost int
+	HTTPIdleConnTimeout     time.Duration
+)
+
 // Renew-intent publishing: ingress records observed traffic so the lifecycle
 // server can extend soon-to-expire sandboxes.
 var (
