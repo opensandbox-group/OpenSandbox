@@ -30,6 +30,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.logging.HttpLoggingInterceptor
 import org.slf4j.LoggerFactory
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 
 /**
@@ -42,6 +43,7 @@ class HttpClientProvider(
 
     private val defaultMaxIdleConnections = 32
     private val defaultKeepAliveDurationSeconds = 30L
+    private val sseReadTimeoutFloor = Duration.ofSeconds(30)
 
     private val connectionPool =
         config.connectionPool ?: ConnectionPool(defaultMaxIdleConnections, defaultKeepAliveDurationSeconds, TimeUnit.SECONDS)
@@ -141,11 +143,19 @@ class HttpClientProvider(
     // The SSE client deliberately disables all automatic retries: streaming
     // command POSTs are not safely replayable and could start a command twice
     // if the connection fails after the server accepts the request.
+    //
+    // A stream may run for as long as its command does, so there is no call
+    // timeout, but the read timeout bounds the wait for response headers and
+    // every gap between stream bytes. execd pings its SSE streams every few
+    // seconds, so only a stalled stream fails instead of blocking forever.
     private val sseClientLazy =
         lazy {
             baseBuilder
                 .connectTimeout(config.requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
-                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .readTimeout(
+                    maxOf(config.requestTimeout, sseReadTimeoutFloor).toMillis(),
+                    TimeUnit.MILLISECONDS,
+                )
                 .writeTimeout(config.requestTimeout.toMillis(), TimeUnit.MILLISECONDS)
                 .callTimeout(0, TimeUnit.MILLISECONDS)
                 .retryOnConnectionFailure(false)
