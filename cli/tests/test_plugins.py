@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for loading third-party commands from the plugin entry-point group."""
-
 from __future__ import annotations
 
 from collections.abc import Iterator

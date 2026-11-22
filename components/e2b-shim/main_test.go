@@ -118,8 +118,6 @@ func TestRunFlagErrors(t *testing.T) {
 	}
 }
 
-// A configuration failure exits with an error before the process listens and
-// never echoes secret material.
 func TestRunInvalidConfigDoesNotListen(t *testing.T) {
 	env := serveEnv("127.0.0.1:0")
 	delete(env, "E2B_SHIM_HMAC_KEY")
@@ -187,8 +185,6 @@ func TestRunListenErrorDoesNotEchoAddress(t *testing.T) {
 	}
 }
 
-// Both subcommands start for real, answer the health check over HTTP, and
-// stop cleanly when the context is canceled.
 func TestRunServeStartsStopsAndServesHealthz(t *testing.T) {
 	for _, role := range []string{"adapter", "router"} {
 		t.Run(role, func(t *testing.T) {

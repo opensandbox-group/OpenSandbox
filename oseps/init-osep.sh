@@ -96,7 +96,6 @@ validate_status() {
     exit 1
 }
 
-# Parse arguments
 TITLE=""
 STATUS="draft"
 AUTHOR=""
@@ -138,17 +137,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate required arguments
 if [[ -z "$TITLE" ]]; then
     echo "Error: title is required" >&2
     usage >&2
     exit 1
 fi
 
-# Validate status
 validate_status "$STATUS"
 
-# Set defaults
 if [[ -z "$AUTHOR" ]]; then
     AUTHOR=$(default_author)
 fi
@@ -173,13 +169,11 @@ else
     PROPOSAL_ID=$(basename "$DESTINATION" | sed -E 's/^([0-9]+)-.*/\1/')
 fi
 
-# Check if destination exists
 if [[ -f "$DESTINATION" ]]; then
     echo "Refusing to overwrite existing proposal at $DESTINATION" >&2
     exit 1
 fi
 
-# Verify template exists
 if [[ ! -f "$TEMPLATE" ]]; then
     echo "Error: OSEP template not found at $TEMPLATE" >&2
     exit 1

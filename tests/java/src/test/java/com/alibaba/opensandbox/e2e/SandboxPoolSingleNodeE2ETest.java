@@ -1308,16 +1308,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
     @DisplayName("RETRY_NEXT_IDLE skips stale idle candidate and returns healthy warm sandbox")
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
     void testRetryNextIdleSkipsStaleAndReturnsHealthyWarm() throws Exception {
-        // Real-world scenario: the pool's idle queue holds a stale entry ahead of a healthy
-        // warm sandbox — for example a leftover after a control-plane blip that killed the
-        // remote sandbox but left its id in the shared idle queue, or a slow-cold-starting
-        // custom template that fails its first ready-check. The caller wants a warm sandbox
-        // and is willing to skip a bounded number of bad candidates before giving up.
-        //
-        // Setup: an isolated pool with maxIdle=2 and one stale id pre-injected into the
-        // store before start(). FIFO ordering guarantees the stale id sits ahead of the
-        // real idle that reconcile creates. Once IdleCount==2==[stale, real] the reconciler
-        // holds steady (neither shrinking nor rewarming).
+        // Pre-inject stale before start so FIFO acquisition must retry before reaching the healthy idle.
         pool.shutdown(false);
 
         String mixedTag =
@@ -1362,11 +1353,7 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                     Duration.ofSeconds(2),
                     () -> mixedPool.snapshot().getIdleCount() == 2);
 
-            // Assert the stale id is at the HEAD of the FIFO idle queue. If a future
-            // store implementation ever reordered on putIdle, or if the reconciler
-            // somehow reaped the stale before warmup landed, catch it here instead of
-            // silently taking the "healthy first" happy path and mis-calling it RETRY
-            // coverage.
+            // A healthy-first queue would pass without exercising retry.
             List<IdleEntry> entriesBefore = mixedStore.snapshotIdleEntries(mixedPoolName);
             assertEquals(2, entriesBefore.size());
             assertEquals(
@@ -1413,10 +1400,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
             "RETRY_NEXT_IDLE_THEN_CREATE falls through to direct-create when all idle are stale")
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
     void testRetryNextIdleThenCreateFallsThroughWhenAllStale() throws Exception {
-        // Real-world scenario: after a network flap every warm sandbox is unreachable; the
-        // caller cannot afford to wait for reconcile to drain them and still needs a working
-        // sandbox. RETRY_NEXT_IDLE_THEN_CREATE burns through the bounded budget on stales
-        // then falls through to direct-create.
         pool.shutdown(false);
 
         String allStaleTag =
@@ -1482,10 +1465,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
             assertEquals(
                     "kotlin-retry-then-create-ok\n", result.getLogs().getStdout().get(0).getText());
 
-            // Acquire starts before the first fixed reconcile tick. If its retry loop truly
-            // exhausted all 3 stale candidates before falling through to direct-create, all
-            // 3 stale ids must have been removed. If it short-circuited earlier (for example,
-            // after one attempt), this assertion catches the regression.
             List<IdleEntry> remaining = allStaleStore.snapshotIdleEntries(allStalePoolName);
             Set<String> remainingIds =
                     remaining.stream().map(IdleEntry::getSandboxId).collect(Collectors.toSet());
@@ -1558,8 +1537,6 @@ public class SandboxPoolSingleNodeE2ETest extends BaseE2ETest {
                     PoolAcquireFailedException.class,
                     () -> raisePool.acquire(Duration.ofMinutes(1), AcquirePolicy.RETRY_NEXT_IDLE));
 
-            // RETRY_NEXT_IDLE must not fall through to direct-create, so no tagged sandbox
-            // should have been created.
             int taggedCount = countTaggedSandboxes(raiseTag);
             assertEquals(0, taggedCount, "RETRY_NEXT_IDLE must not fall through to direct-create");
         } finally {

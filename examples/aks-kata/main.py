@@ -51,10 +51,6 @@ from opensandbox.models.sandboxes import (
     SandboxState,
 )
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 DEFAULT_DOMAIN = os.getenv("SANDBOX_DOMAIN", "http://127.0.0.1:18080")
 DEFAULT_API_KEY = os.getenv("SANDBOX_API_KEY", "aks-kata-demo-key")
 DEFAULT_IMAGE = os.getenv(
@@ -79,10 +75,6 @@ CONNECTION_CONFIG = ConnectionConfigSync(
 
 HTTP_PORT = int(os.getenv("SANDBOX_HTTP_PORT", "8080"))
 HTTP_ROOT = "/tmp/www"
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _required_env(name: str) -> str:
@@ -177,10 +169,6 @@ def _ingress(sandbox) -> tuple:
     headers = dict(endpoint.headers or {})
     return base_url, headers
 
-
-# ---------------------------------------------------------------------------
-# Steps
-# ---------------------------------------------------------------------------
 
 
 def step_create() -> str:
@@ -298,7 +286,6 @@ def step_llm(sandbox_id: str, question: str | None = None) -> None:
     )
     exec_result = sandbox.commands.run(chat_cmd)
 
-    # Parse and print just the answer if possible
     if exec_result.exit_code == 0 and exec_result.logs.stdout:
         # Command output can be split across multiple log messages, so join
         # them all before parsing the JSON response.
@@ -337,7 +324,6 @@ def step_http(sandbox_id: str, path: str | None = None) -> None:
         print(resp.text)
         return
 
-    # Full demo
     _http_get(base_url, "/", headers)
 
     sandbox.files.write_file(
@@ -376,7 +362,6 @@ def step_exec(sandbox_id: str, command: str | None = None) -> None:
         _print_execution("exec", sandbox.commands.run(command))
         return
 
-    # Full demo
     base_url, headers = _ingress(sandbox)
     if not _wait_http_ready(base_url, headers):
         raise RuntimeError("Sandbox HTTP server did not become reachable.")
@@ -454,10 +439,6 @@ def step_delete(sandbox_id: str) -> None:
     print(f"[lifecycle] sandbox {sandbox_id} deleted.")
 
 
-# ---------------------------------------------------------------------------
-# "all" — original end-to-end flow
-# ---------------------------------------------------------------------------
-
 
 def run_all() -> None:
     """Run every step end to end, then delete the sandbox."""
@@ -481,10 +462,6 @@ def run_all() -> None:
         print("[lifecycle] deleting sandbox...")
         active_sandbox.kill()
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:

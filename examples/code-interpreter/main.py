@@ -44,7 +44,6 @@ async def main() -> None:
     try:
         interpreter = await CodeInterpreter.create(sandbox=sandbox)
 
-        # Python example: show runtime info and return a simple calculation.
         py_exec = await interpreter.codes.run(
             "import platform\n"
             "print('Hello from Python!')\n"
@@ -59,7 +58,6 @@ async def main() -> None:
             for res in py_exec.result:
                 print(f"[Python result] {res.text}")
 
-        # Java example: print to stdout and return the final result line.
         java_exec = await interpreter.codes.run(
             "System.out.println(\"Hello from Java!\");\n"
             "int result = 2 + 3;\n"
@@ -76,7 +74,6 @@ async def main() -> None:
         if java_exec.error:
             print(f"[Java error] {java_exec.error.name}: {java_exec.error.value}")
 
-        # Go example: print logs and demonstrate a main function structure.
         go_exec = await interpreter.codes.run(
             "package main\n"
             "import \"fmt\"\n"
@@ -93,7 +90,6 @@ async def main() -> None:
         if go_exec.error:
             print(f"[Go error] {go_exec.error.name}: {go_exec.error.value}")
 
-        # TypeScript example: use typing and sum an array.
         ts_exec = await interpreter.codes.run(
             "console.log('Hello from TypeScript!');\n"
             "const nums: number[] = [1, 2, 3];\n"

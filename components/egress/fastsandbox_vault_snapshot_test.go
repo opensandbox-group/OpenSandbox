@@ -117,9 +117,7 @@ func (h *vaultPersistHarness) snapshotSubject(t *testing.T) subject.Subject {
 	return s
 }
 
-// ---------------------------------------------------------------------------
 // Export: copy + seal
-// ---------------------------------------------------------------------------
 
 func TestVaultSnapshotExportCopiesAndSeals(t *testing.T) {
 	h := newVaultPersistHarness(t)
@@ -296,9 +294,7 @@ func TestVaultSnapshotExportSealFree(t *testing.T) {
 	assert.Equal(t, before, bundle.data, "the taken bundle is unchanged")
 }
 
-// ---------------------------------------------------------------------------
 // Import: re-stamp + commit protocol
-// ---------------------------------------------------------------------------
 
 func TestVaultSnapshotImportLandsFileBeforeRegistration(t *testing.T) {
 	h := newVaultPersistHarness(t)
@@ -516,9 +512,7 @@ func TestVaultSnapshotImportCommitProtocolOutcomes(t *testing.T) {
 	})
 }
 
-// ---------------------------------------------------------------------------
 // REMOVE_BINDING on a sealed subject
-// ---------------------------------------------------------------------------
 
 func TestVaultSnapshotRemoveBindingPurgesSealed(t *testing.T) {
 	h := newVaultPersistHarness(t)
@@ -541,10 +535,6 @@ func TestVaultSnapshotRemoveBindingPurgesSealed(t *testing.T) {
 	assert.False(t, h.fileFor(snapshotTestUID).exists, "REMOVE_BINDING purges the vault file")
 	assert.True(t, h.fakeForPath(bundlePath).exists, "the bundle copy is untouched by the teardown")
 }
-
-// ---------------------------------------------------------------------------
-// Codex review round 2 regressions
-// ---------------------------------------------------------------------------
 
 func TestVaultSnapshotExportCleansStaleTargetForAbsentVault(t *testing.T) {
 	t.Run("stale target from a previous attempt", func(t *testing.T) {

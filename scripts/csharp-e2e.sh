@@ -67,7 +67,6 @@ uv run python -m opensandbox_server.main > server.log 2>&1 &
 SERVER_PID=$!
 cd ..
 
-# wait for server
 sleep 10
 
 export OPENSANDBOX_TEST_DOMAIN="localhost:8080"

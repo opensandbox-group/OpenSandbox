@@ -131,9 +131,6 @@ func TestSetupDisabledByStandardEnv(t *testing.T) {
 	})
 }
 
-// TestSetupExportsMetrics verifies env-only configuration exports over
-// OTLP/HTTP (generic endpoint is a base URL: /v1/metrics is appended) and
-// flushes on shutdown.
 func TestSetupExportsMetrics(t *testing.T) {
 	captureMeterProvider(t)
 
@@ -186,7 +183,6 @@ func TestSetupExportsMetrics(t *testing.T) {
 	}
 }
 
-// TestSetupKeepsCustomExportPath verifies a per-signal endpoint URL path is used as-is.
 func TestSetupKeepsCustomExportPath(t *testing.T) {
 	captureMeterProvider(t)
 

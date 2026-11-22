@@ -61,7 +61,6 @@ _ID_COLUMNS = {"id", "sandbox_id", "execution_id", "context_id"}
 
 
 def _stdout_can_encode(text: str) -> bool:
-    """Return whether stdout can represent ``text`` without substitution."""
     encoding = getattr(sys.stdout, "encoding", None)
     if encoding is None:
         return True
@@ -73,7 +72,6 @@ def _stdout_can_encode(text: str) -> bool:
 
 
 def _style_value(col: str, value: str) -> Text:
-    """Apply contextual styling to a cell value."""
     lower = value.lower()
 
     if col in _STATUS_COLUMNS:
@@ -122,23 +120,18 @@ class OutputFormatter:
             click.echo(f"{plain}: {msg}", err=stderr)
 
     def success(self, msg: str) -> None:
-        """Print a success message with ✅ icon."""
         self._message("ok", msg, icon="✅", style="green", plain="OK", stderr=False)
 
     def info(self, msg: str) -> None:
-        """Print an info message with ℹ️ icon."""
         self._message("info", msg, icon="ℹ️ ", style="blue", plain="INFO", stderr=False)
 
     def warning(self, msg: str) -> None:
-        """Print a warning message with ⚠️ icon."""
         self._message("warning", msg, icon="⚠️ ", style="yellow", plain="WARN", stderr=True)
 
     def error(self, msg: str) -> None:
-        """Print an error message with ❌ icon."""
         self._message("error", msg, icon="❌", style="red", plain="ERROR", stderr=True)
 
     def error_panel(self, msg: str, title: str = "Error") -> None:
-        """Print an error with a bold header and message."""
         if self.color:
             self._err_console.print()
             self._err_console.print(f"  [bold red]{title}[/]")
@@ -159,7 +152,6 @@ class OutputFormatter:
             yield None  # type: ignore[arg-type]
 
     def panel(self, content: str, *, title: str | None = None, style: str = "cyan") -> None:
-        """Print content inside a styled panel."""
         if self.color:
             self.console.print(Panel(
                 Text(content),
@@ -175,7 +167,6 @@ class OutputFormatter:
             click.echo(content)
 
     def success_panel(self, data: dict[str, Any], *, title: str = "Success") -> None:
-        """Print a success result with a header and indented key-value pairs."""
         if self.fmt != "table":
             if self.fmt == "json":
                 self._print_json(data)
@@ -237,7 +228,6 @@ class OutputFormatter:
             self._print_table(rows, columns, title=title)
 
     def print_dict(self, data: dict[str, Any], title: str | None = None) -> None:
-        """Print a flat dict."""
         if self.fmt == "json":
             self._print_json(data)
         elif self.fmt == "yaml":

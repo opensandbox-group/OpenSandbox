@@ -25,9 +25,7 @@ import (
 type scaleAction string
 
 const (
-	// Create action
 	Create scaleAction = "create"
-	// Delete action
 	Delete scaleAction = "delete"
 )
 

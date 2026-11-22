@@ -29,7 +29,6 @@ public class SandboxReadinessDiagnosticsTests
     [Fact]
     public async Task WaitUntilReadyAsync_WhenTimeoutIsShorterThanPollingInterval_DoesNotOvershoot()
     {
-        // Arrange
         var healthMock = new Mock<IExecdHealth>();
         healthMock
             .Setup(x => x.PingAsync(It.IsAny<CancellationToken>()))
@@ -38,7 +37,6 @@ public class SandboxReadinessDiagnosticsTests
         var sandbox = await CreateSandboxForReadinessTestAsync(healthMock, useServerProxy: true);
         var stopwatch = Stopwatch.StartNew();
 
-        // Act
         try
         {
             Func<Task> action = async () =>
@@ -48,7 +46,6 @@ public class SandboxReadinessDiagnosticsTests
                     PollingIntervalMillis = 5_000
                 });
 
-            // Assert
             await action.Should().ThrowAsync<SandboxReadyTimeoutException>();
             stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(3));
         }
@@ -61,7 +58,6 @@ public class SandboxReadinessDiagnosticsTests
     [Fact]
     public async Task WaitUntilReadyAsync_WhenHealthCheckThrows_OmitsNetworkConfigurationHints()
     {
-        // Arrange
         var healthMock = new Mock<IExecdHealth>();
         healthMock
             .Setup(x => x.PingAsync(It.IsAny<CancellationToken>()))
@@ -69,7 +65,6 @@ public class SandboxReadinessDiagnosticsTests
 
         var sandbox = await CreateSandboxForReadinessTestAsync(healthMock, useServerProxy: false);
 
-        // Act
         Func<Task> action = async () =>
             await sandbox.WaitUntilReadyAsync(new WaitUntilReadyOptions
             {
@@ -77,7 +72,6 @@ public class SandboxReadinessDiagnosticsTests
                 PollingIntervalMillis = 1
             });
 
-        // Assert
         try
         {
             var ex = await action.Should().ThrowAsync<SandboxReadyTimeoutException>();
@@ -99,7 +93,6 @@ public class SandboxReadinessDiagnosticsTests
     [Fact]
     public async Task WaitUntilReadyAsync_WhenHealthCheckReturnsFalse_UsesFalseContinuouslyHint()
     {
-        // Arrange
         var healthMock = new Mock<IExecdHealth>();
         healthMock
             .Setup(x => x.PingAsync(It.IsAny<CancellationToken>()))
@@ -107,7 +100,6 @@ public class SandboxReadinessDiagnosticsTests
 
         var sandbox = await CreateSandboxForReadinessTestAsync(healthMock, useServerProxy: true);
 
-        // Act
         Func<Task> action = async () =>
             await sandbox.WaitUntilReadyAsync(new WaitUntilReadyOptions
             {
@@ -115,7 +107,6 @@ public class SandboxReadinessDiagnosticsTests
                 PollingIntervalMillis = 1
             });
 
-        // Assert
         try
         {
             var ex = await action.Should().ThrowAsync<SandboxReadyTimeoutException>();

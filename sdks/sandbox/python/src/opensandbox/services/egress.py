@@ -97,11 +97,8 @@ class Egress(CredentialVault, Protocol):
         """
         Patch egress rules via the sidecar policy API.
 
-        Merge semantics:
-        - Incoming rules take priority over existing rules with the same target.
-        - Existing rules for other targets remain in place.
-        - Within one patch payload, the first rule for a target wins.
-        - The current defaultAction is preserved.
+        Matching (case-insensitive target, sorted ports) scopes are replaced;
+        the first patch rule wins, and other scopes/defaultAction stay unchanged.
 
         Raises:
             SandboxException: if the operation fails
@@ -112,10 +109,8 @@ class Egress(CredentialVault, Protocol):
         """
         Delete egress rules by target via the sidecar policy API.
 
-        Each entry is a FQDN or wildcard domain. Matching rules are removed
-        from the currently enforced policy. Targets not present in the policy
-        are silently ignored (idempotent). The current defaultAction is
-        preserved.
+        Targets may be domains, wildcards, IPs, CIDRs, or empty for port-only rules;
+        misses are ignored and defaultAction stays unchanged.
 
         Raises:
             SandboxException: if the operation fails

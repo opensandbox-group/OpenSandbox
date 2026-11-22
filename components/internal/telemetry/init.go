@@ -38,12 +38,7 @@ import (
 // when metrics are enabled; nil otherwise.
 var meterProvider atomic.Pointer[sdkmetric.MeterProvider]
 
-// ForceFlush exports whatever the reader is holding, right now.
-//
-// Metrics leave through a PeriodicReader, so a measurement recorded shortly before the
-// process exits is normally lost: the deferred shutdown from Init never runs on a path that
-// calls os.Exit. Any code that records a metric and then terminates the process must flush
-// first. No-op when metrics are disabled.
+// Flush before os.Exit, which skips deferred shutdown; disabled metrics make this a no-op.
 func ForceFlush(ctx context.Context) error {
 	mp := meterProvider.Load()
 	if mp == nil {

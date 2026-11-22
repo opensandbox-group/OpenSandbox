@@ -20,7 +20,6 @@
  * dictionaries and `t()` are typed from it, so a missing key fails the build.
  */
 export const en = {
-  // Shared words.
   'common.language': 'Language',
   'common.refresh': 'Refresh',
   'common.cancel': 'Cancel',
@@ -38,7 +37,6 @@ export const en = {
   'common.resume': 'Resume',
   'common.shell': 'Shell',
 
-  // Application layout.
   'nav.sandboxes': 'Sandboxes',
   'nav.sandboxesAllTenants': 'Sandboxes (All Tenants)',
   'nav.snapshots': 'Snapshots',

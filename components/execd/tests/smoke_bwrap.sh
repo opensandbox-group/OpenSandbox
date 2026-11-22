@@ -40,9 +40,6 @@ echo "========================================="
 echo " Smoke Test: execd + bwrap Docker Image"
 echo "========================================="
 
-# -------------------------------------------------------------------
-# Step 1: Build Docker image
-# -------------------------------------------------------------------
 echo ""
 echo ">> Step 1: Building Docker image '${IMAGE}'..."
 cd "${REPO_ROOT}"
@@ -54,9 +51,6 @@ docker build \
 
 echo ">> Image built."
 
-# -------------------------------------------------------------------
-# Step 2: Extract binaries from image
-# -------------------------------------------------------------------
 echo ""
 echo ">> Step 2: Extracting execd, bwrap, and workload gate from image..."
 mkdir -p "${SMOKE_DIR}"
@@ -78,9 +72,6 @@ ls -lh \
   "${SMOKE_DIR}/session-gate-runtime"
 cmp "${SMOKE_DIR}/session-gate-source" "${SMOKE_DIR}/session-gate-runtime"
 
-# -------------------------------------------------------------------
-# Step 3: Verify bwrap is static
-# -------------------------------------------------------------------
 echo ""
 echo ">> Step 3: Checking bwrap is statically linked..."
 if command -v ldd &>/dev/null; then
@@ -96,9 +87,6 @@ else
   file "${SMOKE_DIR}/bwrap" || true
 fi
 
-# -------------------------------------------------------------------
-# Step 4: Smoke test bwrap
-# -------------------------------------------------------------------
 echo ""
 echo ">> Step 4: bwrap --version..."
 "${SMOKE_DIR}/bwrap" --version 2>&1 || true
@@ -117,9 +105,6 @@ else
   echo ">> This is OK — execd runs as root inside sandbox containers."
 fi
 
-# -------------------------------------------------------------------
-# Step 5: Smoke test execd with isolation probe
-# -------------------------------------------------------------------
 echo ""
 echo ">> Step 5: execd isolation probe..."
 EXECD="${SMOKE_DIR}/execd"
@@ -172,9 +157,7 @@ kill "${EXECD_PID}" 2>/dev/null || true
 wait "${EXECD_PID}" 2>/dev/null || true
 echo ">> execd stopped."
 
-# -------------------------------------------------------------------
 # Summary
-# -------------------------------------------------------------------
 echo ""
 echo "========================================="
 echo " Smoke Test PASSED"

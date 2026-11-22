@@ -706,7 +706,6 @@ func TestPTYWS_TakeoverEvictsHolder(t *testing.T) {
 
 	conn2 := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "takeover=1&since=0")
 
-	// 1. The holder's connection is closed with the takeover close code.
 	var closeErr *websocket.CloseError
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
@@ -718,11 +717,9 @@ func TestPTYWS_TakeoverEvictsHolder(t *testing.T) {
 	require.NotNil(t, closeErr, "holder should be closed with a WS CloseError after takeover")
 	require.Equal(t, model.WSCloseTakenOver, closeErr.Code)
 
-	// 2. The taking-over client replays the prior scrollback...
 	ptyOutputContains(t, conn2, "holder_marker", 8*time.Second)
 	ptyWaitFrame(t, conn2, "connected", 8*time.Second)
 
-	// 3. ...and it is the SAME shell: the var set on conn1 is still readable.
 	ptyWriteStdin(t, conn2, "echo SAMESHELL_$TAKEOVER_VAR\n")
 	ptyOutputContains(t, conn2, "SAMESHELL_alive", 8*time.Second)
 }

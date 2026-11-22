@@ -26,7 +26,6 @@ import (
 )
 
 func TestNewFileStore(t *testing.T) {
-	// Test case 1: Valid directory
 	tmpDir := t.TempDir()
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
@@ -36,7 +35,6 @@ func TestNewFileStore(t *testing.T) {
 		t.Fatal("NewFileStore returned nil store")
 	}
 
-	// Test case 2: Empty directory
 	_, err = NewFileStore("")
 	if err == nil {
 		t.Fatal("NewFileStore should fail with empty dir")
@@ -58,18 +56,15 @@ func TestFileStore_CRUD(t *testing.T) {
 		},
 	}
 
-	// 1. Create
 	if err := store.Create(ctx, task); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Verify file exists
 	taskDir := filepath.Join(tmpDir, task.Name)
 	if _, err := os.Stat(taskDir); os.IsNotExist(err) {
 		t.Error("Task directory was not created")
 	}
 
-	// 2. Get
 	got, err := store.Get(ctx, task.Name)
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
@@ -78,7 +73,6 @@ func TestFileStore_CRUD(t *testing.T) {
 		t.Errorf("Get returned wrong name: got %s, want %s", got.Name, task.Name)
 	}
 
-	// 3. Update
 	now := time.Now()
 	got.DeletionTimestamp = &now
 
@@ -94,7 +88,6 @@ func TestFileStore_CRUD(t *testing.T) {
 		t.Error("Update failed to persist DeletionTimestamp")
 	}
 
-	// 4. List
 	tasks, err := store.List(ctx)
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
@@ -106,12 +99,10 @@ func TestFileStore_CRUD(t *testing.T) {
 		t.Errorf("List returned wrong task: %s", tasks[0].Name)
 	}
 
-	// 5. Delete
 	if err := store.Delete(ctx, task.Name); err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
-	// Verify deletion
 	if _, err := store.Get(ctx, task.Name); err == nil {
 		t.Error("Get should fail after delete")
 	}
@@ -124,7 +115,6 @@ func TestFileStore_CRUD(t *testing.T) {
 		t.Errorf("List returned %d tasks after delete, want 0", len(tasks))
 	}
 
-	// Verify directory gone
 	if _, err := os.Stat(taskDir); !os.IsNotExist(err) {
 		t.Error("Task directory still exists after delete")
 	}
@@ -135,34 +125,28 @@ func TestFileStore_EdgeCases(t *testing.T) {
 	store, _ := NewFileStore(tmpDir)
 	ctx := context.Background()
 
-	// Create with nil task
 	if err := store.Create(ctx, nil); err == nil {
 		t.Error("Create should fail with nil task")
 	}
 
-	// Create with empty name
 	if err := store.Create(ctx, &types.Task{}); err == nil {
 		t.Error("Create should fail with empty name")
 	}
 
-	// Create duplicate
 	task := &types.Task{Name: "dup"}
 	store.Create(ctx, task)
 	if err := store.Create(ctx, task); err == nil {
 		t.Error("Create should fail for duplicate task")
 	}
 
-	// Update non-existent
 	if err := store.Update(ctx, &types.Task{Name: "missing"}); err == nil {
 		t.Error("Update should fail for non-existent task")
 	}
 
-	// Get non-existent
 	if _, err := store.Get(ctx, "missing"); err == nil {
 		t.Error("Get should fail for non-existent task")
 	}
 
-	// Delete non-existent
 	if err := store.Delete(ctx, "missing"); err != nil {
 		t.Errorf("Delete should not fail for non-existent task, got %v", err)
 	}

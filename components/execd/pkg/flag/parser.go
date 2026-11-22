@@ -51,7 +51,6 @@ func InitFlags() {
 	RuntimeInit = false
 	SseLegacyCompat = false
 
-	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
 		if !strings.HasPrefix(jupyterFromEnv, "http://") && !strings.HasPrefix(jupyterFromEnv, "https://") {
 			stdlog.Panic("Invalid JUPYTER_HOST format: must start with http:// or https://")
@@ -67,7 +66,6 @@ func InitFlags() {
 		ServerAccessToken = accessTokenFromEnv
 	}
 
-	// Then define flags with current values as defaults
 	flag.StringVar(&JupyterServerHost, "jupyter-host", JupyterServerHost, "Jupyter server host address (e.g., http://localhost, http://192.168.1.100)")
 	flag.StringVar(&JupyterServerToken, "jupyter-token", JupyterServerToken, "Jupyter server authentication token")
 	flag.IntVar(&ServerPort, "port", ServerPort, "Server listening port (default: 44772)")
@@ -137,7 +135,6 @@ func InitFlags() {
 		SseLegacyCompat = enabled
 	}
 
-	// Parse flags - these will override environment variables if provided
 	flag.Parse()
 	if JupyterIdlePollInterval <= 0 {
 		stdlog.Printf("Invalid --jupyter-idle-poll-interval=%s; fallback to default %s", JupyterIdlePollInterval, 100*time.Millisecond)

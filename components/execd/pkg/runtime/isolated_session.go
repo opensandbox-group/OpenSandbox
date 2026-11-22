@@ -417,10 +417,6 @@ func (s *isolatedSession) prepareStartupIdentity(
 func (s *isolatedSession) requiresNamespacePins(
 	wrapOpts isolation.WrapOptions,
 ) bool {
-	// This phase preserves the legacy share_net default. Every explicitly
-	// private NetNS is pinned, including the legacy setpriv loopback-only
-	// topology. A later network-profile PR will make private+userns the secure
-	// default and reject setpriv for the network backend.
 	return !wrapOpts.ShareNet
 }
 

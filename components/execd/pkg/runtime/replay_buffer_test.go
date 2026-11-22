@@ -93,7 +93,6 @@ func TestReplayBuffer_CircularEviction(t *testing.T) {
 	rb.write([]byte("abcdef"))
 	require.Equal(t, int64(6), rb.Total())
 
-	// Write 4 more bytes: now total=10, oldest=2 (evicted "ab")
 	rb.write([]byte("ghij"))
 	require.Equal(t, int64(10), rb.Total())
 
@@ -111,7 +110,6 @@ func TestReplayBuffer_LargeGap(t *testing.T) {
 		buf:  make([]byte, 4),
 		size: 4,
 	}
-	// Write "ABCDEF" — total=6, oldest=2, retained="CDEF"
 	rb.write([]byte("ABCDEF"))
 
 	data, off := rb.ReadFrom(0)
@@ -172,7 +170,6 @@ func TestReplayBuffer_WriteWrapsCorrectly(t *testing.T) {
 		size: 4,
 	}
 	rb.write([]byte("ABCD"))
-	// Write "EF" — evicts "AB", retained "CDEF"
 	rb.write([]byte("EF"))
 
 	data, off := rb.ReadFrom(0)

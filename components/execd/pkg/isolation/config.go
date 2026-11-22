@@ -123,10 +123,10 @@ func DefaultConfig() Config {
 		UpperMaxBytes:   8 * 1024 * 1024 * 1024, // 8 GiB
 		DiffMaxBytes:    4 * 1024 * 1024 * 1024, // 4 GiB
 		AllowedWritable: []string{"/workspace", "/mnt", "/media", "/data"},
-		Seccomp:         nil, // use built-in denylist
-		Hardening:       nil, // floor off
-		Landlock:        nil, // confinement off
-		Ebpf:            nil, // observation off
+		Seccomp:         nil,
+		Hardening:       nil,
+		Landlock:        nil,
+		Ebpf:            nil,
 	}
 }
 

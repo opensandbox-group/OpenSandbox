@@ -38,8 +38,7 @@ type DiskUsage struct {
 	AvailBytes int64
 }
 
-// DiskIO is a cumulative sandbox disk I/O snapshot. Counters increase
-// monotonically from execd start; consumers derive rates from deltas.
+// DiskIO contains source-lifetime counters, not execd-relative totals; consumers derive rates from deltas.
 type DiskIO struct {
 	// ReadBytes / WrittenBytes are cumulative bytes transferred.
 	ReadBytes    int64

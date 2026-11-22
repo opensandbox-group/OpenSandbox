@@ -67,7 +67,6 @@ type Recorder interface {
 	Record(namespace, sandboxID string)
 }
 
-// Noop is the disabled recorder.
 type Noop struct{}
 
 func (Noop) Record(string, string) {}
@@ -92,7 +91,6 @@ type observation struct {
 	atMillis  int64
 }
 
-// RedisRecorder is the Redis-backed activity writer.
 type RedisRecorder struct {
 	client    *redis.Client
 	cfg       RedisConfig
@@ -196,8 +194,7 @@ func (r *RedisRecorder) drainBatch(ctx context.Context) ([]observation, bool) {
 	}
 }
 
-// Record enqueues one observation, fire-and-forget: a full channel or
-// shutdown drops it, which can only delay a pause, never accelerate one.
+// Best-effort activity writes must not block the proxy path.
 func (r *RedisRecorder) Record(namespace, sandboxID string) {
 	if r.stopped.Load() {
 		return
@@ -213,10 +210,7 @@ func (r *RedisRecorder) Record(namespace, sandboxID string) {
 	}
 }
 
-// shouldRecord applies the per-sandbox min-interval coalescing; drops only
-// make the recorded last-active slightly stale. The compare-and-swap loop
-// keeps the bound exact under concurrency — a plain check-then-act would
-// let every request pass once the window reopens.
+// Compare-and-swap keeps min-interval coalescing exact under concurrent requests.
 func (r *RedisRecorder) shouldRecord(obs observation) bool {
 	if r.cfg.MinInterval <= 0 {
 		return true

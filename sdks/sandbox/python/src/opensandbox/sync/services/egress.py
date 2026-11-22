@@ -87,21 +87,9 @@ class EgressSync(CredentialVaultSync, Protocol):
         ...
 
     def patch_rules(self, rules: list[NetworkRule]) -> None:
-        """Patch egress rules via the sidecar policy API with merge semantics.
-
-        Incoming rules take priority over existing rules with the same target.
-        Existing rules for other targets remain unchanged. Within one patch
-        payload, the first rule for a target wins. The current defaultAction is
-        preserved.
-        """
+        """Replace matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays."""
         ...
 
     def delete_rules(self, targets: list[str]) -> None:
-        """Delete egress rules by target via the sidecar policy API.
-
-        Each entry is a FQDN or wildcard domain. Matching rules are removed
-        from the currently enforced policy. Targets not present in the policy
-        are silently ignored (idempotent). The current defaultAction is
-        preserved.
-        """
+        """Delete by target (domain, wildcard, IP, CIDR, or empty for port-only rules); misses/defaultAction stay unchanged."""
         ...
