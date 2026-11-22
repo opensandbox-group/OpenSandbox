@@ -463,10 +463,16 @@ func needRelease(tNode *taskNode, policy sandboxv1alpha1.TaskResourcePolicy) boo
 // setTasks request asserts it so the receiving executor can refuse task lists
 // addressed to a different Pod: a stale scheduler whose Pod was deleted keeps
 // targeting the old identity, and a replacement Pod at the reused IP rejects
-// the list instead of stopping its own task. When the bound Pod is missing from
-// the current snapshot only the name is asserted; the receiver may still fence
-// by name, and a missing Pod is not a legitimate send target anyway.
+// the list instead of stopping its own task. The UID persisted at bind or
+// recovery time is asserted even when the bound Pod has already disappeared
+// from the snapshot — that is exactly the stale case, and a same-named
+// replacement Pod would pass a name-only comparison. Task nodes bound before
+// UID persistence fall back to resolving the Pod from the current snapshot,
+// and to the name alone when it is gone.
 func (sch *defaultTaskScheduler) taskOwnerFor(tNode *taskNode) api.TaskOwner {
+	if tNode.PodUID != "" {
+		return api.TaskOwner{PodName: tNode.PodName, PodUID: string(tNode.PodUID)}
+	}
 	for _, pod := range sch.allPods {
 		if pod.Name == tNode.PodName && pod.Status.PodIP == tNode.IP {
 			return api.TaskOwner{PodName: pod.Name, PodUID: string(pod.UID)}

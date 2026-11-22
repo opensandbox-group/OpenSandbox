@@ -55,6 +55,9 @@ spec:
           command:
             - /bin/sh
             - -c
+          # NOTE: owner fencing requires a task-executor binary that includes it
+          # (this change); an older image does not enforce the check. Bump the
+          # tag once a release includes it.
           image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/task-executor:v0.1.0
           name: task-executor-installer
           volumeMounts:

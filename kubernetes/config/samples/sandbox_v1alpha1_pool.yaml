@@ -20,6 +20,10 @@ spec:
         - name: sandbox-logs
           emptyDir: { }
       initContainers:
+        # NOTE: owner fencing requires a task-executor binary that includes it
+        # (this change). An older image runs normally but does not enforce the
+        # TASK_EXECUTOR_POD_NAME/TASK_EXECUTOR_POD_UID check, so a foreign task
+        # list is accepted as before. Bump this tag once a release includes it.
         - name: task-executor-installer
           image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/task-executor:v0.1.0
           command: [ "/bin/sh", "-c" ]

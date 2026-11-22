@@ -349,6 +349,22 @@ func Test_taskOwnerFor(t *testing.T) {
 			tNode: &taskNode{IP: "1.1.1.1"},
 			want:  api.TaskOwner{},
 		},
+		{
+			// The stale-scheduler case: the bound Pod is gone from the
+			// snapshot, but the UID persisted at bind time is still asserted,
+			// so a same-named replacement Pod cannot pass a name-only check.
+			name:  "persisted UID survives bound pod deletion",
+			tNode: &taskNode{IP: "1.1.1.1", PodName: "pod-a", PodUID: "uid-old"},
+			want:  api.TaskOwner{PodName: "pod-a", PodUID: "uid-old"},
+		},
+		{
+			// A persisted UID is asserted even when the current snapshot no
+			// longer matches on IP (the old resolution path would have
+			// silently degraded to a name-only assertion here).
+			name:  "persisted UID wins over snapshot resolution",
+			tNode: &taskNode{IP: "1.1.1.9", PodName: "pod-a", PodUID: "uid-old"},
+			want:  api.TaskOwner{PodName: "pod-a", PodUID: "uid-old"},
+		},
 	}
 
 	for _, tt := range tests {
