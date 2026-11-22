@@ -36,8 +36,9 @@ var testDst = netip.MustParseAddrPort("203.0.113.10:443")
 // connectGateway is a CONNECT proxy that records the request, answers with
 // status, then (on 2xx) sends a server-first banner and echoes the tunnel.
 type connectGateway struct {
-	status   int
-	requests chan *http.Request
+	status      int
+	connectResp string
+	requests    chan *http.Request
 }
 
 func (g *connectGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +56,11 @@ func (g *connectGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
-	_, _ = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\nbanner|")
+	resp := g.connectResp
+	if resp == "" {
+		resp = "HTTP/1.1 200 Connection Established\r\n\r\nbanner|"
+	}
+	_, _ = rw.WriteString(resp)
 	_ = rw.Flush()
 	_, _ = io.Copy(conn, rw)
 }
@@ -177,6 +182,58 @@ func TestRelayThroughGateway(t *testing.T) {
 
 			payload := []byte("\x16\x03\x01opaque-tls-bytes")
 			_, err = sandbox.Write(payload)
+			require.NoError(t, err)
+			echo := make([]byte, len(payload))
+			_, err = io.ReadFull(sandbox, echo)
+			require.NoError(t, err)
+			require.Equal(t, payload, echo)
+		})
+	}
+}
+
+func TestRelayIgnoresConnectBodyFramingHeaders(t *testing.T) {
+	cases := []struct {
+		name        string
+		connectResp string
+		banner      string
+	}{
+		{
+			name:        "content-length server-first",
+			connectResp: "HTTP/1.1 200 Connection Established\r\nContent-Length: 5\r\n\r\nHELLO|PAYLOAD",
+			banner:      "HELLO|PAYLOAD",
+		},
+		{
+			name:        "content-length client-first",
+			connectResp: "HTTP/1.1 200 Connection Established\r\nContent-Length: 5\r\n\r\n",
+			banner:      "",
+		},
+		{
+			name:        "chunked server-first",
+			connectResp: "HTTP/1.1 200 Connection Established\r\nTransfer-Encoding: chunked\r\n\r\nHELLO|PAYLOAD",
+			banner:      "HELLO|PAYLOAD",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, gw := newGateway(t, http.StatusOK, false)
+			gw.connectResp = tc.connectResp
+			f := newTestForwarder(t, srv, false, Identity{SandboxID: "sbx-1"})
+			f.handshakeTimeout = 2 * time.Second
+			sandbox, accepted := tcpPair(t)
+			go f.handle(accepted)
+			<-gw.requests
+
+			_ = sandbox.SetDeadline(time.Now().Add(5 * time.Second))
+			if tc.banner != "" {
+				got := make([]byte, len(tc.banner))
+				_, err := io.ReadFull(sandbox, got)
+				require.NoError(t, err)
+				require.Equal(t, tc.banner, string(got))
+			}
+
+			payload := []byte("\x16\x03\x01client-first-hello")
+			_, err := sandbox.Write(payload)
 			require.NoError(t, err)
 			echo := make([]byte, len(payload))
 			_, err = io.ReadFull(sandbox, echo)

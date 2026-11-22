@@ -195,11 +195,13 @@ func (f *Forwarder) openTunnel(ctx context.Context, dst netip.AddrPort) (net.Con
 		_ = upstream.Close()
 		return nil, nil, fmt.Errorf("read CONNECT response: %w", err)
 	}
-	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		_ = upstream.Close()
 		return nil, nil, fmt.Errorf("gateway answered %s", resp.Status)
 	}
+	// RFC 9110 §9.3.6: ignore any Content-Length/Transfer-Encoding framing on a
+	// 2xx CONNECT response. Do not call resp.Body.Close(), which would drain
+	// tunnel bytes (or block on client-first protocols) from br.
 	_ = upstream.SetDeadline(time.Time{})
 	return upstream, br, nil
 }
