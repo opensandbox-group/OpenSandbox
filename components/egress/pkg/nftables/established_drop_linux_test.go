@@ -39,7 +39,9 @@ func TestNftEstablishedDropKernelRuleOrder(t *testing.T) {
 	}
 	m := NewManagerWithOptions(Options{})
 	oldPol := mustPolicy(t, `{"defaultAction":"deny","egress":[
-		{"action":"allow","target":"203.0.113.10"},
+		{"action":"allow","target":"203.0.113.10/32"},
+		{"action":"allow","target":"2001:db8::10/128"},
+		{"action":"allow","target":"2001:db8::11"},
 		{"action":"allow","target":"203.0.113.11"},
 		{"action":"allow","target":"198.51.100.0/24"},
 		{"action":"allow","target":"cdn.example.com"}]}`)
@@ -90,10 +92,7 @@ func TestNftEstablishedDropKernelRuleOrder(t *testing.T) {
 	require.Less(t, staticAccept, removedDrop)
 	require.Less(t, removedDrop, blanket, "teardown must precede the blanket established accept")
 
-	// An acknowledgement can be lost after the real batch took effect.
-	target := netip.MustParseAddr("203.0.113.10")
-	regrant := []ResolvedIP{{Addr: target}}
-	m.run = func(ctx context.Context, script string) ([]byte, error) {
+	loseAck := func(ctx context.Context, script string) ([]byte, error) {
 		m.run = defaultRunner
 		out, err := defaultRunner(ctx, script)
 		if err == nil {
@@ -101,17 +100,52 @@ func TestNftEstablishedDropKernelRuleOrder(t *testing.T) {
 		}
 		return out, err
 	}
-	require.Error(t, m.AddResolvedDomain(ctx, "cdn.example.com", regrant))
-	require.True(t, m.lastDrops.Matches(target), "only a confirmed update can retire local teardown")
-	require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", regrant), "retry must tolerate already-retired teardown")
-	for _, addr := range []string{"203.0.113.10", "203.0.113.11"} {
-		out, err := exec.CommandContext(ctx, "nft", "get", "element", "inet", tableName, removedEstV4, "{", addr, "}").CombinedOutput()
-		if addr == target.String() {
-			require.Error(t, err, "%s", out)
-			require.Contains(t, string(out), "No such file or directory")
-		} else {
-			require.NoError(t, err, "%s", out)
+	t.Run("current deny before reclaim", func(t *testing.T) {
+		blocked := netip.MustParseAddr("203.0.113.11")
+		deny := mustPolicy(t, `{"egress":[{"action":"deny","target":"203.0.113.11/32"},{"action":"allow","target":"cdn.example.com"}]}`)
+		require.NoError(t, m.ApplyStatic(ctx, deny))
+		require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: blocked}}))
+		require.True(t, m.lastDrops.Matches(blocked), "a new policy deny must not retire the previous teardown")
+	})
+	t.Run("lost ack without DNS retry", func(t *testing.T) {
+		target := netip.MustParseAddr("203.0.113.10")
+		target6 := netip.MustParseAddr("2001:db8::10")
+		m.run = loseAck
+		require.Error(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: target}, {Addr: target6}}))
+		require.False(t, m.lastDrops.Matches(target), "reconcile committed teardown retirement without a DNS retry")
+		require.False(t, m.lastDrops.Matches(target6), "the IPv6 host-prefix is retired as well")
+		require.True(t, m.lastDrops.Matches(netip.MustParseAddr("2001:db8::11")), "unrelated IPv6 teardown survives")
+		require.NoError(t, m.ApplyStatic(ctx, newPol))
+		out, err := exec.CommandContext(ctx, "nft", "list", "set", "inet", tableName, removedEstV4).CombinedOutput()
+		require.NoError(t, err, "%s", out)
+		require.NotContains(t, string(out), target.String(), "ordinary rebuild must not revive the retired teardown")
+		require.Contains(t, string(out), "203.0.113.11", "an unrelated teardown must survive readback")
+	})
+	t.Run("idle retry after readback failure", func(t *testing.T) {
+		target := netip.MustParseAddr("203.0.113.11")
+		m = NewManagerWithOptions(Options{})
+		require.NoError(t, m.ApplyStatic(ctx, oldPol))
+		_, err := m.ApplyStaticComputingEstablishedDrops(ctx, oldPol, newPol)
+		require.NoError(t, err)
+		m.readExactDrops = func(context.Context) (map[netip.Addr]struct{}, error) {
+			return nil, errors.New("readback temporarily unavailable")
 		}
-	}
-	require.False(t, m.lastDrops.Matches(target))
+		m.run = loseAck
+		require.Error(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: target}}))
+		require.True(t, m.lastDrops.Matches(target), "a failed readback must not publish unknown state")
+		require.Error(t, m.ApplyStatic(ctx, newPol), "reload cannot recreate stale teardown before reconciliation")
+		m.readExactDrops = readExactDrops
+		m.opts.ConnectionRefreshInterval = 10 * time.Millisecond
+		m.tracker.listConnections = func(context.Context) ([]tcpConnection, error) {
+			return nil, errors.New("TCP snapshot unavailable")
+		}
+		tickCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		m.StartConnectionRefresh(tickCtx)
+		require.Eventually(t, func() bool {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			return !m.lastDrops.Matches(target)
+		}, 3*time.Second, 10*time.Millisecond)
+	})
 }

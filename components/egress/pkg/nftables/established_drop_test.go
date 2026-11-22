@@ -42,6 +42,18 @@ func TestComputeEstablishedDrops_RemovedDomainUsesLearnedIPs(t *testing.T) {
 	require.False(t, drops.CatchAll)
 }
 
+func TestComputeEstablishedDrops_SingleHostPrefixesAreExact(t *testing.T) {
+	for _, target := range []string{"203.0.113.10", "203.0.113.10/32", "2001:db8::10", "2001:db8::10/128"} {
+		t.Run(target, func(t *testing.T) {
+			pol := mustPolicy(t, `{"egress":[{"action":"allow","target":"`+target+`"}]}`)
+			drops := ComputeEstablishedDrops(pol, policy.DefaultDenyPolicy(), nil)
+			addr := netip.MustParseAddr(strings.SplitN(target, "/", 2)[0])
+			require.Equal(t, []netip.Addr{addr}, drops.Addrs)
+			require.Empty(t, drops.Prefixes)
+		})
+	}
+}
+
 func TestComputeEstablishedDrops_KeepsSurvivingDomainLease(t *testing.T) {
 	oldPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"deb.debian.org"},{"action":"allow","target":"pypi.org"}]}`)
 	require.NoError(t, err)

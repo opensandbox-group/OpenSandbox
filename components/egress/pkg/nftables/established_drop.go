@@ -288,8 +288,11 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 				// those ports would need the full complement of newPol's allows.
 				// Leave it to conntrack; callers can tighten with a port deny.
 				continue
-			case looksLikeIP(r):
+			case looksLikeIP(r), parseRulePrefix(r).IsSingleIP():
 				ip := parseRuleIP(r)
+				if !ip.IsValid() {
+					ip = parseRulePrefix(r).Addr().Unmap()
+				}
 				if !ip.IsValid() || newPol.EvaluateIP(ip) == policy.ActionAllow {
 					continue
 				}

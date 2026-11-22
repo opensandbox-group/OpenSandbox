@@ -75,6 +75,7 @@ func (t *connectionTracker) run(ctx context.Context, interval time.Duration, man
 			if manager.isQuiesced() {
 				return
 			}
+			manager.retryExactDrops(ctx)
 			connections, err := t.listConnections(ctx)
 			if manager.isQuiesced() {
 				return

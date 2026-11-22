@@ -17,6 +17,7 @@ package nftables
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -93,6 +94,11 @@ type Manager struct {
 	// `delete table` and would otherwise reopen flows a dropEstablished commit
 	// closed (e.g. ones still retransmitting).
 	lastDrops EstablishedDrops
+
+	// A failed grant may have retired old addresses in the kernel.
+	exactDropsDirty bool
+	readExactDrops  func(context.Context) (map[netip.Addr]struct{}, error)
+
 	// lastDropsAt is when the dropEstablished commit behind lastDrops was
 	// applied. Carries keep the original timestamp and stop once the conntrack
 	// established timeout has passed, so a sandbox that tightens once does not
@@ -118,11 +124,12 @@ func newManager(r runner, opts Options) *Manager {
 		opts.ConnectionRefreshInterval = defaultConnectionRefreshInterval
 	}
 	return &Manager{
-		run:     r,
-		opts:    opts,
-		tracker: newConnectionTracker(),
-		domains: make(map[string]*resolvedDomain),
-		now:     time.Now,
+		run:            r,
+		opts:           opts,
+		tracker:        newConnectionTracker(),
+		domains:        make(map[string]*resolvedDomain),
+		now:            time.Now,
+		readExactDrops: readExactDrops,
 	}
 }
 
@@ -134,6 +141,11 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	}
 	var buildDrops staticDropBuilder
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
+		if !m.quiesced.Load() {
+			if err := m.reconcileExactDropsLocked(ctx); err != nil {
+				return &ApplyError{Effect: ApplyUnchanged, Err: fmt.Errorf("reconcile exact teardown before reload: %w", err)}
+			}
+		}
 		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
 			drops := m.lastDrops.stillRelevant(p, learned)
@@ -421,6 +433,7 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 
 func (m *Manager) setLastDropsLocked(drops EstablishedDrops, committedAt time.Time) {
 	m.lastDrops = drops
+	m.exactDropsDirty = false
 	if drops.Empty() {
 		m.lastDropsAt = time.Time{}
 		return
@@ -481,7 +494,7 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	}
 	reallowed := func(addr netip.Addr) bool {
 		_, granted := deadlines[addr]
-		return granted && !targetsMatch(m.lastDrops.DenyAddrs, m.lastDrops.DenyPrefixes, nil, addr, 0)
+		return granted && !ipExplicitlyDenied(m.domainPolicy, addr)
 	}
 	retire := false
 	for _, addr := range m.lastDrops.Addrs {
@@ -498,10 +511,16 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(deadlines), script)
 	_, err := m.run(ctx, script)
 	if err != nil {
-		// The policy allows these destinations but the kernel does not know it yet, so
-		// the chain's final rule drops them. Indistinguishable from a policy denial
-		// inside the sandbox, hence its own counter.
+		// Do not acknowledge the DNS answer even if the batch may have committed.
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
+		if retire && ApplyEffectOf(err) == ApplyUnknown {
+			m.exactDropsDirty = true
+			readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			defer cancel()
+			if readErr := m.reconcileExactDropsLocked(readCtx); readErr != nil {
+				log.Warnf("nftables: exact teardown readback after unknown DNS grant: %v", readErr)
+			}
+		}
 		return err
 	}
 	if retire {
@@ -528,6 +547,79 @@ func removedIPSet(addr netip.Addr) string {
 		return removedEstV4
 	}
 	return removedEstV6
+}
+
+func (m *Manager) retryExactDrops(ctx context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.exactDropsDirty || m.quiesced.Load() || m.staticStateUncertain {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := m.reconcileExactDropsLocked(ctx); err != nil {
+		log.Warnf("nftables: exact teardown readback: %v", err)
+	}
+}
+
+func (m *Manager) reconcileExactDropsLocked(ctx context.Context) error {
+	if !m.exactDropsDirty {
+		return nil
+	}
+	if m.staticStateUncertain {
+		return errStaticStateUncertain
+	}
+	actual, err := m.readExactDrops(ctx)
+	if err != nil {
+		return err
+	}
+	m.lastDrops.Addrs = slices.DeleteFunc(m.lastDrops.Addrs, func(addr netip.Addr) bool {
+		_, present := actual[addr]
+		return !present
+	})
+	m.exactDropsDirty = false
+	return nil
+}
+
+func readExactDrops(ctx context.Context) (map[netip.Addr]struct{}, error) {
+	actual := make(map[netip.Addr]struct{})
+	for _, name := range []string{removedEstV4, removedEstV6} {
+		out, err := runNftCommand(ctx, exec.CommandContext(ctx, "nft", "-j", "list", "set", "inet", tableName, name))
+		if err != nil {
+			return nil, err
+		}
+		var result struct {
+			Nftables []struct {
+				Set struct {
+					Family, Table, Name string
+					Elem                []string
+				}
+			}
+		}
+		if err := json.Unmarshal(out, &result); err != nil {
+			return nil, err
+		}
+		found := false
+		for _, item := range result.Nftables {
+			set := item.Set
+			if set.Family != "inet" || set.Table != tableName || set.Name != name {
+				continue
+			}
+			found = true
+			for _, value := range set.Elem {
+				addr, err := netip.ParseAddr(value)
+				if err != nil {
+					return nil, err
+				}
+				actual[addr.Unmap()] = struct{}{}
+			}
+			break
+		}
+		if !found {
+			return nil, fmt.Errorf("exact teardown readback missing %s", name)
+		}
+	}
+	return actual, nil
 }
 
 // StartConnectionRefresh keeps DNS-learned IPs authorized while a TCP
