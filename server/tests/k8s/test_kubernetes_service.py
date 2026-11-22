@@ -27,6 +27,8 @@ from kubernetes.client import ApiException
 from pydantic import SecretStr
 
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
+from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPEN_SANDBOX_SECURE_ACCESS_HEADER,
@@ -56,6 +58,7 @@ from opensandbox_server.config import (
     GatewayConfig,
     GatewayRouteModeConfig,
     IngressConfig,
+    RuntimeConfig,
     SecureAccessConfig,
     SecureAccessKey,
 )
@@ -142,6 +145,53 @@ class TestKubernetesSandboxServiceCreate:
         assert response.id is not None
         assert response.status.state == "Running"
         k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["batch", "pool", "agent"])
+    @pytest.mark.parametrize("configured_path", ["/etc/opensandbox/operator.toml", None], ids=["operator", "creator"])
+    async def test_create_sandbox_applies_execd_isolation_config(
+        self, k8s_service, create_sandbox_request, mock_workload, mode, configured_path
+    ):
+        config = k8s_service.app_config
+        config.runtime = RuntimeConfig.model_validate(
+            {**config.runtime.model_dump(), "execd_isolation_config": configured_path}
+        )
+        request_path = "/etc/opensandbox/creator.toml"
+        env = {"EXECD_ISOLATION_CONFIG": request_path, "LOG_LEVEL": "info"}
+        if mode == "pool":
+            request = create_sandbox_request.model_copy(
+                update={"env": env, "extensions": {"poolRef": "test-pool"}, "image": None}
+            )
+        else:
+            request = create_sandbox_request.model_copy(update={"env": env})
+
+        provider_type = AgentSandboxProvider if mode == "agent" else BatchSandboxProvider
+        provider = provider_type(k8s_service.k8s_client, config)
+        k8s_service.k8s_client.create_custom_object.return_value = mock_workload
+        mock_provider = k8s_service.workload_provider
+        mock_provider.validate_create_request.side_effect = provider.validate_create_request
+        mock_provider.create_workload.side_effect = provider.create_workload
+        mock_provider.get_workload.return_value = mock_workload
+        mock_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        await k8s_service.create_sandbox(request)
+
+        spec = k8s_service.k8s_client.create_custom_object.call_args.kwargs["body"]["spec"]
+        if mode == "pool":
+            workload_env = spec["taskTemplate"]["spec"]["process"]["env"]
+        else:
+            template_key = "podTemplate" if mode == "agent" else "template"
+            workload_env = spec[template_key]["spec"]["containers"][0]["env"]
+        assert [item["value"] for item in workload_env if item["name"] == "EXECD_ISOLATION_CONFIG"] == [
+            configured_path or request_path
+        ]
+        assert {"name": "LOG_LEVEL", "value": "info"} in workload_env
+        assert request.env == {"EXECD_ISOLATION_CONFIG": request_path, "LOG_LEVEL": "info"}
 
     @pytest.mark.asyncio
     async def test_create_sandbox_response_restores_extensions_from_workload(
