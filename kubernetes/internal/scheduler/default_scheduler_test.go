@@ -754,6 +754,14 @@ func Test_collectTaskStatus(t *testing.T) {
 				taskStatusCollector: mockCollector,
 				logger:              testLogger,
 			}
+			for _, node := range tt.taskNodes {
+				if node.IP != "" {
+					sch.allPods = append(sch.allPods, &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{Name: node.PodName},
+						Status:     corev1.PodStatus{PodIP: node.IP},
+					})
+				}
+			}
 
 			sch.collectTaskStatus(tt.taskNodes)
 
@@ -844,8 +852,10 @@ func Test_collectTaskStatus_queryFailure(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			mockCollector := NewMocktaskStatusCollector(ctl)
-			mockCollector.EXPECT().Collect(gomock.Any(), []string{"1.1.1.1"}).
-				Return(map[string]*api.Task{}, errors.New("timeout")).Times(1)
+			if tt.wantStatus != nil {
+				mockCollector.EXPECT().Collect(gomock.Any(), []string{"1.1.1.1"}).
+					Return(map[string]*api.Task{}, errors.New("timeout")).Times(1)
+			}
 
 			tNode := &taskNode{
 				ObjectMeta: metav1.ObjectMeta{Name: "task-1"},
@@ -865,8 +875,15 @@ func Test_collectTaskStatus_queryFailure(t *testing.T) {
 			if tNode.Status != tt.wantStatus {
 				t.Errorf("Status = %v, want %v", tNode.Status, tt.wantStatus)
 			}
-			if tNode.tState != RunningTaskState {
-				t.Errorf("tState = %v, want %v", tNode.tState, RunningTaskState)
+			wantState := RunningTaskState
+			if tt.wantStatus == nil {
+				wantState = FailedTaskState
+				if !tNode.IsResourceReleased() {
+					t.Error("missing pod's task must be released without a query")
+				}
+			}
+			if tNode.tState != wantState {
+				t.Errorf("tState = %v, want %v", tNode.tState, wantState)
 			}
 		})
 	}
@@ -1319,6 +1336,15 @@ func Test_scheduleTaskNodes(t *testing.T) {
 				maxConcurrency:    defaultSchConcurrency,
 				taskClientCreator: taskClientCreator,
 				logger:            testLogger,
+			}
+			sch.allPods = append(sch.allPods, tt.freePods...)
+			for _, node := range tt.taskNodes {
+				if node.IP != "" {
+					sch.allPods = append(sch.allPods, &corev1.Pod{
+						ObjectMeta: metav1.ObjectMeta{Name: node.PodName},
+						Status:     corev1.PodStatus{PodIP: node.IP},
+					})
+				}
 			}
 
 			err := sch.scheduleTaskNodes()

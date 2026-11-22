@@ -23,6 +23,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
@@ -51,6 +52,7 @@ type taskNode struct {
 	Status  *api.Task
 	IP      string
 	PodName string
+	PodUID  types.UID
 
 	// collect from endpoints
 	tState              TaskState
@@ -287,7 +289,11 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	ips := []string{}
 	for _, tNode := range taskNodes {
 		// unassigned no need to collect task status
-		if tNode.IP == "" {
+		if tNode.IP == "" || tNode.IsResourceReleased() {
+			continue
+		}
+		if !sch.assignedPodExists(tNode) {
+			sch.releaseMissingPod(tNode)
 			continue
 		}
 		ips = append(ips, tNode.IP)
@@ -298,13 +304,13 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	// Failed queries are logged by the collector and left out of the result.
 	tasks, _ := sch.taskStatusCollector.Collect(context.Background(), ips)
 	for _, tNode := range taskNodes {
+		if tNode.IP == "" || tNode.IsResourceReleased() {
+			continue
+		}
 		task, ok := tasks[tNode.IP]
 		if !ok {
-			// A failed query does not mean the task is gone, so keep the last
-			// known status. Only a missing pod proves the task has stopped.
-			if !sch.assignedPodExists(tNode) {
-				tNode.Status = nil
-			}
+			// The bound pod still exists; a failed query does not prove the
+			// task has stopped, so retain its last known status.
 			continue
 		}
 		tNode.Status = task
@@ -315,15 +321,26 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 }
 
 // assignedPodExists reports whether the pod the task node is bound to still
-// exists with the same IP. A pod recreated under the same name gets a new IP
-// and does not count.
+// exists with the same IP and, when recorded, UID. Name and IP alone can both
+// be reused by a replacement pod.
 func (sch *defaultTaskScheduler) assignedPodExists(tNode *taskNode) bool {
 	for _, pod := range sch.allPods {
-		if pod.Name == tNode.PodName && pod.Status.PodIP == tNode.IP {
+		if pod.Name == tNode.PodName && pod.Status.PodIP == tNode.IP &&
+			(tNode.PodUID == "" || pod.UID == tNode.PodUID) {
 			return true
 		}
 	}
 	return false
+}
+
+func (sch *defaultTaskScheduler) releaseMissingPod(tNode *taskNode) {
+	// Never send the cleanup request to the old IP: it may already belong to
+	// another executor. Keep a completed task's outcome when its pod disappears.
+	if !tNode.isTaskCompleted() {
+		tNode.Status = nil
+		tNode.transTaskState(FailedTaskState, sch.logger)
+	}
+	tNode.transSchState(stateReleased, sch.logger)
 }
 
 func parseTaskState(task *api.Task) TaskState {
@@ -376,6 +393,9 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 				<-semaphore
 				wg.Done()
 			}()
+			if node.IP != "" && !node.IsResourceReleased() && !sch.assignedPodExists(node) {
+				sch.releaseMissingPod(node)
+			}
 			scheduleSingleTaskNode(node, sch.taskClientCreator, sch.resPolicyWhenTaskComplete, sch.logger)
 		}(tNode)
 	}
@@ -412,6 +432,7 @@ func assignTaskNodes(taskNodes []*taskNode, freePods []*corev1.Pod, log logr.Log
 		log.Info("assign Pod to task node", "podName", pod.Name, "podNamespace", pod.Namespace, "podIP", pod.Status.PodIP, "taskName", tNode.Name)
 		tNode.IP = pod.Status.PodIP
 		tNode.PodName = pod.Name
+		tNode.PodUID = pod.UID
 		freePods = freePods[1:]
 	}
 	return freePods
@@ -429,6 +450,9 @@ func needRelease(tNode *taskNode, policy sandboxv1alpha1.TaskResourcePolicy) boo
 
 // scheduleSingleTaskNode handles scheduling for a single task node based on its state
 func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint string) taskClient, resPolicyWhenTaskComplete sandboxv1alpha1.TaskResourcePolicy, log logr.Logger) {
+	if tNode.IsResourceReleased() {
+		return
+	}
 	// pending
 	if tNode.IP == "" {
 		if tNode.DeletionTimestamp != nil {
