@@ -617,30 +617,25 @@ func extractResolvedIPs(resp *dns.Msg) []nftables.ResolvedIP {
 
 	var out []nftables.ResolvedIP
 	for _, rr := range resp.Answer {
-		if ip, ok := resolvedIP(rr); ok {
-			out = append(out, ip)
+		var raw net.IP
+		var ttl uint32
+		// Keep unsupported records on the original cheap type-switch path.
+		switch v := rr.(type) {
+		case *dns.A:
+			raw, ttl = v.A, v.Hdr.Ttl
+		case *dns.AAAA:
+			raw, ttl = v.AAAA, v.Hdr.Ttl
+		default:
+			continue
 		}
+		addr, ok := netip.AddrFromSlice(raw)
+		if !ok {
+			continue
+		}
+		// Match net.IP.String's representation of mapped IPv4.
+		out = append(out, nftables.ResolvedIP{Addr: addr.Unmap(), TTL: time.Duration(ttl) * time.Second})
 	}
 	return out
-}
-
-// resolvedIP avoids converting DNS addresses to text and parsing them back on
-// the reply path. Unmap preserves net.IP.String's handling of mapped IPv4.
-func resolvedIP(rr dns.RR) (nftables.ResolvedIP, bool) {
-	var raw net.IP
-	switch v := rr.(type) {
-	case *dns.A:
-		raw = v.A
-	case *dns.AAAA:
-		raw = v.AAAA
-	default:
-		return nftables.ResolvedIP{}, false
-	}
-	addr, ok := netip.AddrFromSlice(raw)
-	if !ok {
-		return nftables.ResolvedIP{}, false
-	}
-	return nftables.ResolvedIP{Addr: addr.Unmap(), TTL: time.Duration(rr.Header().Ttl) * time.Second}, true
 }
 
 const fallbackUpstream = "8.8.8.8:53"

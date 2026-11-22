@@ -31,12 +31,20 @@ func BenchmarkExtractResolvedIPs(b *testing.B) {
 	}{
 		{"IPv4", &dns.A{A: net.IPv4(192, 0, 2, 1)}},
 		{"IPv6", &dns.AAAA{AAAA: net.ParseIP("2001:db8::1")}},
+		{"CNAME", &dns.CNAME{Target: "answer.example."}},
+		{"TXT", &dns.TXT{Txt: []string{"synthetic"}}},
 	} {
 		for _, answers := range []int{1, 8} {
 			b.Run(fmt.Sprintf("%s/%d", tc.name, answers), func(b *testing.B) {
 				msg := &dns.Msg{Answer: make([]dns.RR, answers)}
 				for i := range answers {
-					msg.Answer[i] = tc.rr
+					msg.Answer[i] = dns.Copy(tc.rr)
+					switch rr := msg.Answer[i].(type) {
+					case *dns.A:
+						rr.A[len(rr.A)-1] = byte(i + 1)
+					case *dns.AAAA:
+						rr.AAAA[len(rr.AAAA)-1] = byte(i + 1)
+					}
 				}
 				var ips []nftables.ResolvedIP
 				b.ReportAllocs()

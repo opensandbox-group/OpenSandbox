@@ -39,11 +39,13 @@ func TestResolvedIPPreservesAddressRepresentation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.rr.Header().Ttl = 17
-			ip, ok := resolvedIP(tc.rr)
-			require.Equal(t, tc.want != "", ok)
-			if ok {
-				require.Equal(t, tc.want, ip.Addr.String())
-				require.Equal(t, 17*time.Second, ip.TTL)
+			ips := extractResolvedIPs(&dns.Msg{Answer: []dns.RR{tc.rr}})
+			if tc.want == "" {
+				require.Nil(t, ips)
+			} else {
+				require.Len(t, ips, 1)
+				require.Equal(t, tc.want, ips[0].Addr.String())
+				require.Equal(t, 17*time.Second, ips[0].TTL)
 			}
 		})
 	}
