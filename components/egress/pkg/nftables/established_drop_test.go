@@ -16,7 +16,9 @@ package nftables
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -499,6 +501,177 @@ func TestComputeEstablishedDrops_PortDenyOnAllowedIP(t *testing.T) {
 	drops = ComputeEstablishedDrops(oldPorts, newPol, nil)
 	require.True(t, drops.MatchesFlow(netip.MustParseAddr("1.2.3.4"), 8080))
 	require.False(t, drops.MatchesFlow(netip.MustParseAddr("1.2.3.4"), 443))
+}
+
+func TestApplyStatic_CarriesExplicitDeniesAcrossPortScopeChanges(t *testing.T) {
+	const open = `{"defaultAction":"allow","egress":[]}`
+	const portDeny = `{"defaultAction":"allow","egress":[{"action":"deny","target":"203.0.113.10","ports":[28443]}]}`
+	const cidrDeny = `{"defaultAction":"allow","egress":[{"action":"deny","target":"203.0.113.0/24"}]}`
+	for _, tt := range []struct {
+		name, applied, reload string
+	}{
+		{"TCP to host", portDeny, `{"defaultAction":"allow","egress":[{"action":"deny","target":"203.0.113.10"}]}`},
+		{"TCP to CIDR", portDeny, cidrDeny},
+		{"CIDR to TCP", cidrDeny, `{"defaultAction":"allow","egress":[{"action":"deny","target":"203.0.0.0/16","ports":[28443]}]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, scripts := recordingManager()
+			_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), mustPolicy(t, open), mustPolicy(t, tt.applied))
+			require.NoError(t, err)
+			require.NoError(t, m.ApplyStatic(context.Background(), mustPolicy(t, tt.reload)))
+
+			dst := netip.MustParseAddr("203.0.113.10")
+			require.True(t, m.lastDrops.MatchesFlow(dst, 28443))
+			require.False(t, m.lastDrops.MatchesFlow(dst, 2443), "plain reload must not tear down a sibling port")
+			require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("203.0.114.10"), 28443), "carry must not widen the address scope")
+			wantTarget := "203.0.113.10"
+			if tt.applied == cidrDeny {
+				wantTarget = "203.0.113.0/24"
+			} else {
+				require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("203.0.113.11"), 28443))
+			}
+			require.Contains(t, (*scripts)[len(*scripts)-1],
+				"ip daddr "+wantTarget+" tcp dport { 28443 } ct state established,related drop\n")
+		})
+	}
+}
+
+func TestApplyStatic_ExplicitDenyCarryPreservesAddressFamily(t *testing.T) {
+	const native = "203.0.113.10"
+	const mapped = "::ffff:203.0.113.10"
+	const port = 28443
+	open := mustPolicy(t, `{"defaultAction":"allow","egress":[]}`)
+	portDeny := func(target string) *policy.NetworkPolicy {
+		return mustPolicy(t, fmt.Sprintf(`{"defaultAction":"allow","egress":[{"action":"deny","target":%q,"ports":[%d]}]}`, target, port))
+	}
+	wholeDeny := func(target string) *policy.NetworkPolicy {
+		return mustPolicy(t, fmt.Sprintf(`{"defaultAction":"allow","egress":[{"action":"deny","target":%q}]}`, target))
+	}
+	for _, tt := range []struct {
+		name           string
+		applied        *policy.NetworkPolicy
+		reload         *policy.NetworkPolicy
+		native, mapped bool
+	}{
+		{"native TCP to mapped host", portDeny(native), wholeDeny(mapped), false, false},
+		{"native TCP to mapped /128", portDeny(native), wholeDeny(mapped + "/128"), false, false},
+		{"mapped TCP to native host", portDeny(mapped), wholeDeny(native), false, false},
+		{"mapped TCP to mapped /128", portDeny(mapped), wholeDeny(mapped + "/128"), false, true},
+		{"mapped /128 TCP to mapped host", portDeny(mapped + "/128"), wholeDeny(mapped), false, true},
+		{"mapped host to native TCP", wholeDeny(mapped), portDeny(native), false, false},
+		{"mapped host to mapped TCP", wholeDeny(mapped), portDeny(mapped), false, true},
+		{"both families to port only", mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","target":"203.0.113.10"},{"action":"deny","target":"::ffff:203.0.113.10"}]}`), portDeny(""), true, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, scripts := recordingManager()
+			_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), open, tt.applied)
+			require.NoError(t, err)
+			require.NoError(t, m.ApplyStatic(context.Background(), tt.reload))
+
+			script := (*scripts)[len(*scripts)-1]
+			require.Equal(t, tt.native, strings.Contains(script, "ip daddr "+native+" tcp dport { 28443 } ct state established,related drop\n"))
+			require.Equal(t, tt.mapped, strings.Contains(script, "ip6 daddr "+mapped+"/128 tcp dport { 28443 } ct state established,related drop\n"))
+			require.Equal(t, tt.native, m.lastDrops.MatchesFlow(netip.MustParseAddr(native), port))
+			require.Equal(t, tt.mapped, m.lastDrops.MatchesFlow(netip.MustParseAddr(mapped), port))
+			require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr(native), port+1))
+			require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr(mapped), port+1))
+		})
+	}
+}
+
+func TestApplyStatic_UnionsExplicitDenyPortsPerDestination(t *testing.T) {
+	const count = 64
+	oldRules := make([]string, 0, count)
+	newRules := make([]string, 0, count+1)
+	ports := make([]int, 0, count)
+	portTokens := make([]string, 0, count)
+	for i := range count {
+		oldRules = append(oldRules, fmt.Sprintf(`{"action":"deny","target":"203.0.113.%d"}`, i+1))
+		port := 10000 + 2*i
+		newRules = append(newRules, fmt.Sprintf(`{"action":"deny","ports":[%d]}`, port))
+		ports = append(ports, port)
+		portTokens = append(portTokens, strconv.Itoa(port))
+	}
+	newRules = append(newRules, `{"action":"deny","ports":[`+strings.Join(portTokens, ",")+`]}`)
+	asPolicy := func(rules []string) *policy.NetworkPolicy {
+		return mustPolicy(t, `{"defaultAction":"allow","egress":[`+strings.Join(rules, ",")+`]}`)
+	}
+	m, scripts := recordingManager()
+	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), asPolicy(nil), asPolicy(oldRules))
+	require.NoError(t, err)
+	reload := asPolicy(newRules)
+	require.NoError(t, m.ApplyStatic(context.Background(), reload))
+
+	script := (*scripts)[len(*scripts)-1]
+	require.Equal(t, count, strings.Count(script, "ct state established,related drop\n"))
+	for i := range count {
+		addr := netip.AddrFrom4([4]byte{203, 0, 113, byte(i + 1)})
+		for _, port := range ports {
+			require.True(t, m.lastDrops.MatchesFlow(addr, port))
+			require.False(t, m.lastDrops.MatchesFlow(addr, port+1))
+		}
+	}
+	require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("203.0.113.65"), ports[0]))
+
+	require.NoError(t, m.ApplyStatic(context.Background(), reload))
+	require.Equal(t, script, (*scripts)[len(*scripts)-1], "carried rules must have stable order on repeated reload")
+}
+
+func TestApplyStatic_IntersectsExplicitDenyPortRanges(t *testing.T) {
+	open := mustPolicy(t, `{"defaultAction":"allow","egress":[]}`)
+	floor := func(spans []policy.PortRange) *policy.NetworkPolicy {
+		return &policy.NetworkPolicy{DefaultAction: policy.ActionAllow, Egress: []policy.EgressRule{policy.NewPortFloorDenyRule(spans)}}
+	}
+	before := floor([]policy.PortRange{{Lo: 1000, Hi: 1010}, {Lo: 1020, Hi: 1030}, {Lo: 1040, Hi: 1050}})
+	after := floor([]policy.PortRange{{Lo: 1005, Hi: 1025}, {Lo: 1030, Hi: 1045}})
+	after.Egress = append(after.Egress, mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","ports":[1002,1005,1032,1046]}]}`).Egress...)
+	m, scripts := recordingManager()
+	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), open, before)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), after))
+
+	script := (*scripts)[len(*scripts)-1]
+	require.Contains(t, script, "tcp dport { 1002, 1030, 1005-1010, 1020-1025, 1040-1046 } ct state established,related drop\n")
+	require.Equal(t, 1, strings.Count(script, "ct state established,related drop\n"))
+	for _, addr := range []netip.Addr{netip.MustParseAddr("203.0.113.10"), netip.MustParseAddr("2001:db8::10")} {
+		for _, port := range []int{1002, 1005, 1010, 1020, 1025, 1030, 1040, 1046} {
+			require.True(t, m.lastDrops.MatchesFlow(addr, port), "port %d", port)
+		}
+		for _, port := range []int{1001, 1003, 1011, 1019, 1026, 1032, 1039, 1047, 1050} {
+			require.False(t, m.lastDrops.MatchesFlow(addr, port), "port %d", port)
+		}
+	}
+}
+
+func TestApplyStatic_PreservesUnchangedGlobalPortFloor(t *testing.T) {
+	open := mustPolicy(t, `{"defaultAction":"allow","egress":[]}`)
+	ranges := make([]policy.PortRange, 4097)
+	for i := range ranges {
+		ranges[i] = policy.PortRange{Lo: 3*i + 1, Hi: 3*i + 2}
+	}
+	applied := &policy.NetworkPolicy{DefaultAction: policy.ActionAllow, Egress: []policy.EgressRule{policy.NewPortFloorDenyRule(ranges)}}
+	reload := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","target":"203.0.113.10","ports":[1]}]}`)
+	reload.Egress = append(reload.Egress, policy.NewPortFloorDenyRule(ranges))
+	m, _ := recordingManager()
+	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), open, applied)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), reload))
+
+	require.Equal(t, []EstablishedPortDrop{{Ranges: ranges}}, m.lastDrops.DenyPortDrops)
+}
+
+func TestApplyStatic_OmitsTCPTeardownCoveredByCarriedWholeDeny(t *testing.T) {
+	m, scripts := recordingManager()
+	old := mustPolicy(t, `{"defaultAction":"allow","egress":[]}`)
+	applied := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","target":"203.0.113.0/24"},{"action":"deny","target":"203.0.113.10","ports":[28443]}]}`)
+	reload := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","target":"203.0.113.0/24"}]}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), old, applied)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), reload))
+
+	script := (*scripts)[len(*scripts)-1]
+	require.Contains(t, script, "ip daddr 203.0.113.0/24 ct state established,related drop\n")
+	require.NotContains(t, script, "tcp dport { 28443 } ct state established,related drop\n")
 }
 
 // A later full ApplyStatic recreates the table; the still-relevant drops must

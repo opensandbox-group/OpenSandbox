@@ -16,6 +16,7 @@ package nftables
 
 import (
 	"net/netip"
+	"slices"
 	"sort"
 	"time"
 
@@ -29,7 +30,8 @@ const defaultEstablishedCarryTTL = 5 * 24 * time.Hour
 
 // EstablishedPortDrop is a destination:port teardown (or keep) target for
 // TCP flows. Exactly one of Addr/Prefix is set for a scoped target; when both
-// are unset the entry covers every destination (port-only rule).
+// are unset the entry covers every destination (port-only rule). An explicit
+// IPv4-mapped IPv6 target uses a /128 Prefix so rendering preserves its family.
 type EstablishedPortDrop struct {
 	Addr   netip.Addr
 	Prefix netip.Prefix
@@ -87,13 +89,15 @@ func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
 	if !addr.IsValid() {
 		return false
 	}
-	addr = addr.Unmap()
-	if addr.IsLoopback() {
+	if addr.Unmap().IsLoopback() {
 		return false
 	}
+	// Only explicit denies use the original nft address family. Keeps and
+	// removed grants retain their existing policy/lease address normalization.
 	if targetsMatch(d.DenyAddrs, d.DenyPrefixes, d.DenyPortDrops, addr, dport) {
 		return true
 	}
+	addr = addr.Unmap()
 	if targetsMatch(d.KeepAddrs, d.KeepPrefixes, d.KeepPorts, addr, dport) {
 		return false
 	}
@@ -311,13 +315,14 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 	denyAddrs := newAddrSet()
 	denyPrefixes := newPrefixSet()
 	for _, r := range newPol.Egress {
-		if r.Action != policy.ActionDeny || len(r.Ports) > 0 || len(r.PortRanges) > 0 {
+		pfx := portlessDenyPrefix(r)
+		if !pfx.IsValid() {
 			continue
 		}
-		if looksLikeIP(r) {
-			denyAddrs.add(parseRuleIP(r))
-		} else if looksLikeCIDR(r) {
-			denyPrefixes.add(parseRulePrefix(r))
+		if looksLikeIP(r) && !pfx.Addr().Is4In6() {
+			denyAddrs.add(pfx.Addr())
+		} else {
+			denyPrefixes.add(pfx)
 		}
 	}
 	portDeny, portAllow := newPol.PortScopedRules()
@@ -390,14 +395,19 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	var out EstablishedDrops
 
 	// Deny bucket: only what p still explicitly denies (it precedes keeps).
+	var curDeny []netip.Prefix
+	for _, r := range p.Egress {
+		if pfx := portlessDenyPrefix(r); pfx.IsValid() {
+			curDeny = append(curDeny, pfx)
+		}
+	}
 	denyAddrs := newAddrSet()
 	for _, a := range d.DenyAddrs {
-		if ipExplicitlyDenied(p, a) {
+		if slices.ContainsFunc(curDeny, func(pfx netip.Prefix) bool { return pfx.Contains(a) }) {
 			denyAddrs.add(a)
 		}
 	}
 	denyPrefixes := newPrefixSet()
-	curDeny := portlessDenyPrefixes(p)
 	for _, old := range d.DenyPrefixes {
 		for _, cur := range curDeny {
 			if !old.Overlaps(cur) {
@@ -411,16 +421,13 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 		}
 	}
 	portDeny, portAllow := p.PortScopedRules()
-	for _, old := range d.DenyPortDrops {
-		for _, r := range portDeny {
-			if cur, ok := portDropFromScoped(r); ok && samePortDrop(old, cur) {
-				out.DenyPortDrops = append(out.DenyPortDrops, old)
-				break
-			}
-		}
-	}
 	out.DenyAddrs = denyAddrs.sorted()
 	out.DenyPrefixes = denyPrefixes.sorted()
+	out.DenyPortDrops = slices.DeleteFunc(carryPortDenies(d, portDeny, curDeny), func(drop EstablishedPortDrop) bool {
+		// Only whole-address teardowns that themselves carried can subsume a
+		// TCP teardown. A new whole-address deny alone cannot replace it.
+		return wholeDenyCoversPortTarget(out.DenyAddrs, out.DenyPrefixes, drop)
+	})
 
 	// Removed bucket: drop entries p fully allows again; partial re-allows
 	// are shielded by the recomputed keeps.
@@ -498,26 +505,278 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	return out
 }
 
-func portDropFromScoped(r policy.PortScopedRule) (EstablishedPortDrop, bool) {
-	pd := EstablishedPortDrop{
-		Ports:  append([]int(nil), r.Ports...),
-		Ranges: append([]policy.PortRange(nil), r.Ranges...),
+// carryPortDenies intersects old and current explicit denies, retaining only
+// TCP teardowns here. Whole-address intersections are carried separately.
+func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule, whole []netip.Prefix) []EstablishedPortDrop {
+	if len(d.DenyAddrs)+len(d.DenyPrefixes)+len(d.DenyPortDrops) == 0 {
+		return nil
 	}
-	if len(pd.Ports) == 0 && len(pd.Ranges) == 0 {
+	// Union each side before intersecting destinations, so overlapping rules
+	// for one destination do not multiply the work or the resulting rules.
+	before := make(portDenyUnion)
+	for _, old := range d.DenyPortDrops {
+		before.add(portDenyTarget(old), old.Ports, old.Ranges)
+	}
+	after := make(portDenyUnion)
+	for _, r := range rules {
+		if cur, ok := parsePortDropTarget(r); ok {
+			after.add(portDenyTarget(cur), r.Ports, r.Ranges)
+		}
+	}
+	before.normalize()
+	after.normalize()
+
+	carried := make(portDenyUnion)
+	for old, ports := range before {
+		for _, pfx := range whole {
+			if target, ok := intersectPortDenyTargets(old, pfx); ok {
+				carried.add(target, nil, ports.spans)
+			}
+		}
+		for cur, denied := range after {
+			if target, ok := intersectPortDenyTargets(old, cur); ok {
+				carried.add(target, nil, intersectPortSpans(ports.spans, denied.spans))
+			}
+		}
+	}
+	for cur, ports := range after {
+		// Previously whole-address teardowns cover every port, but only
+		// inside their original destination.
+		for _, addr := range d.DenyAddrs {
+			if target, ok := intersectPortDenyTargets(netip.PrefixFrom(addr, addr.BitLen()), cur); ok {
+				carried.add(target, nil, ports.spans)
+			}
+		}
+		for _, pfx := range d.DenyPrefixes {
+			if target, ok := intersectPortDenyTargets(pfx, cur); ok {
+				carried.add(target, nil, ports.spans)
+			}
+		}
+	}
+	return carried.drops()
+}
+
+func wholeDenyCoversPortTarget(addrs []netip.Addr, prefixes []netip.Prefix, drop EstablishedPortDrop) bool {
+	target := portDenyTarget(drop)
+	if !target.IsValid() {
+		return false // a port-only rule spans both address families
+	}
+	if target.IsSingleIP() && slices.Contains(addrs, target.Addr()) {
+		return true
+	}
+	return slices.ContainsFunc(prefixes, func(pfx netip.Prefix) bool {
+		return pfx.Bits() <= target.Bits() && pfx.Contains(target.Addr())
+	})
+}
+
+// A host and its full-length prefix share a key; the invalid prefix denotes
+// a port-only rule. Native IPv4 and IPv4-mapped IPv6 have different keys.
+func portDenyTarget(drop EstablishedPortDrop) netip.Prefix {
+	if drop.Addr.IsValid() {
+		addr := drop.Addr.Unmap()
+		return netip.PrefixFrom(addr, addr.BitLen())
+	}
+	return drop.Prefix
+}
+
+func intersectPortDenyTargets(a, b netip.Prefix) (netip.Prefix, bool) {
+	switch {
+	case !a.IsValid():
+		return b, true
+	case !b.IsValid():
+		return a, true
+	case !a.Overlaps(b):
+		return netip.Prefix{}, false
+	case a.Bits() >= b.Bits():
+		return a, true
+	default:
+		return b, true
+	}
+}
+
+type portDenyUnion map[netip.Prefix]struct {
+	spans []policy.PortRange
+	owned bool
+}
+
+func (u portDenyUnion) add(target netip.Prefix, ports []int, ranges []policy.PortRange) {
+	if len(ports)+len(ranges) == 0 {
+		return
+	}
+	group := u[target]
+	switch {
+	case len(group.spans) == 0 && len(ports) == 0:
+		group.spans = ranges
+	case !group.owned:
+		spans := make([]policy.PortRange, 0, len(group.spans)+len(ports)+len(ranges))
+		group.spans = append(append(spans, group.spans...), ranges...)
+		group.owned = true
+	default:
+		group.spans = append(group.spans, ranges...)
+	}
+	for _, port := range ports {
+		group.spans = append(group.spans, policy.PortRange{Lo: port, Hi: port})
+	}
+	u[target] = group
+}
+
+// Ports become singleton intervals, so overlap and coverage use one sorted,
+// disjoint representation. An untouched normalized floor needs no sorting.
+func (u portDenyUnion) normalize() {
+	for target, group := range u {
+		spans := group.spans
+		for i := 1; i < len(spans); i++ {
+			if spans[i].Lo > spans[i-1].Hi+1 {
+				continue
+			}
+			if !group.owned {
+				spans = slices.Clone(spans)
+			}
+			slices.SortFunc(spans, func(a, b policy.PortRange) int { return a.Lo - b.Lo })
+			n := 0
+			for _, span := range spans {
+				if n != 0 && span.Lo <= spans[n-1].Hi+1 {
+					spans[n-1].Hi = max(spans[n-1].Hi, span.Hi)
+				} else {
+					spans[n] = span
+					n++
+				}
+			}
+			group.spans, group.owned = spans[:n], true
+			u[target] = group
+			break
+		}
+	}
+}
+
+func intersectPortSpans(a, b []policy.PortRange) []policy.PortRange {
+	if slices.Equal(a, b) {
+		return a
+	}
+	var out []policy.PortRange
+	for len(a) != 0 && len(b) != 0 {
+		if lo, hi := max(a[0].Lo, b[0].Lo), min(a[0].Hi, b[0].Hi); lo <= hi {
+			out = append(out, policy.PortRange{Lo: lo, Hi: hi})
+		}
+		switch {
+		case a[0].Hi < b[0].Hi:
+			a = a[1:]
+		case a[0].Hi > b[0].Hi:
+			b = b[1:]
+		default:
+			a, b = a[1:], b[1:]
+		}
+	}
+	return out
+}
+
+func portSpansCover(outer, inner []policy.PortRange) bool {
+	for _, span := range inner {
+		for len(outer) != 0 && outer[0].Hi < span.Lo {
+			outer = outer[1:]
+		}
+		if len(outer) == 0 || outer[0].Lo > span.Lo || outer[0].Hi < span.Hi {
+			return false
+		}
+	}
+	return true
+}
+
+func (u portDenyUnion) drops() []EstablishedPortDrop {
+	if len(u) == 0 {
+		return nil
+	}
+	u.normalize()
+	out := make([]EstablishedPortDrop, 0, len(u))
+	for target, group := range u {
+		if target.IsValid() && len(u) > 1 && u.coveredByBroaderTarget(target, group.spans) {
+			continue
+		}
+		drop := EstablishedPortDrop{Prefix: target}
+		if target.IsSingleIP() && !target.Addr().Is4In6() {
+			drop.Addr, drop.Prefix = target.Addr(), netip.Prefix{}
+		}
+		singles := 0
+		for _, span := range group.spans {
+			if span.Lo == span.Hi {
+				singles++
+			}
+		}
+		if singles == 0 {
+			drop.Ranges = group.spans
+			if !group.owned {
+				// A borrowed slice may belong to the incoming policy.
+				drop.Ranges = slices.Clone(drop.Ranges)
+			}
+		} else {
+			drop.Ports = make([]int, 0, singles)
+			if singles < len(group.spans) {
+				drop.Ranges = make([]policy.PortRange, 0, len(group.spans)-singles)
+			}
+			for _, span := range group.spans {
+				if span.Lo == span.Hi {
+					drop.Ports = append(drop.Ports, span.Lo)
+				} else {
+					drop.Ranges = append(drop.Ranges, span)
+				}
+			}
+		}
+		out = append(out, drop)
+	}
+	slices.SortFunc(out, func(a, b EstablishedPortDrop) int {
+		x, y := portDenyTarget(a), portDenyTarget(b)
+		if cmp := x.Addr().Compare(y.Addr()); cmp != 0 {
+			return cmp
+		}
+		return x.Bits() - y.Bits()
+	})
+	return out
+}
+
+func (u portDenyUnion) coveredByBroaderTarget(target netip.Prefix, spans []policy.PortRange) bool {
+	if portSpansCover(u[netip.Prefix{}].spans, spans) {
+		return true
+	}
+	for bits := target.Bits() - 1; bits >= 0; bits-- {
+		pfx := netip.PrefixFrom(target.Addr(), bits).Masked()
+		if portSpansCover(u[pfx].spans, spans) {
+			return true
+		}
+	}
+	return false
+}
+
+func portDropFromScoped(r policy.PortScopedRule) (EstablishedPortDrop, bool) {
+	pd, ok := parsePortDropTarget(r)
+	if !ok {
 		return EstablishedPortDrop{}, false
+	}
+	pd.Ports = slices.Clone(r.Ports)
+	pd.Ranges = slices.Clone(r.Ranges)
+	return pd, true
+}
+
+func parsePortDropTarget(r policy.PortScopedRule) (EstablishedPortDrop, bool) {
+	var pd EstablishedPortDrop
+	if len(r.Ports)+len(r.Ranges) == 0 {
+		return pd, false
 	}
 	if r.Target == "" {
 		return pd, true
 	}
 	if ip, err := netip.ParseAddr(r.Target); err == nil {
-		pd.Addr = ip.Unmap()
+		if r.Action != policy.ActionAllow && ip.Is4In6() {
+			pd.Prefix = netip.PrefixFrom(ip, ip.BitLen())
+		} else {
+			pd.Addr = ip.Unmap()
+		}
 		return pd, true
 	}
 	if pfx, err := netip.ParsePrefix(r.Target); err == nil {
 		pd.Prefix = pfx.Masked()
 		return pd, true
 	}
-	return EstablishedPortDrop{}, false
+	return pd, false
 }
 
 func samePortDrop(a, b EstablishedPortDrop) bool {
@@ -551,7 +810,19 @@ func ipExplicitlyDenied(p *policy.NetworkPolicy, ip netip.Addr) bool {
 	return false
 }
 
-// portlessDenyPrefixes returns newPol's portless IP/CIDR deny rules as prefixes.
+// Preserve the family written by StaticIPSets, including IPv4-mapped IPv6.
+func portlessDenyPrefix(r policy.EgressRule) netip.Prefix {
+	if r.Action != policy.ActionDeny || len(r.Ports)+len(r.PortRanges) != 0 {
+		return netip.Prefix{}
+	}
+	if addr, err := netip.ParseAddr(r.Target); err == nil {
+		return netip.PrefixFrom(addr, addr.BitLen())
+	}
+	return parseRulePrefix(r).Masked()
+}
+
+// portlessDenyPrefixes retains the legacy address normalization for lease and
+// allow calculations. Use portlessDenyPrefix for explicit teardown rules.
 func portlessDenyPrefixes(p *policy.NetworkPolicy) []netip.Prefix {
 	if p == nil {
 		return nil
