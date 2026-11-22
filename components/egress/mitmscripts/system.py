@@ -1262,24 +1262,44 @@ def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
     the payload carries a single value while mitmproxy forwards every line
     upstream, so a repeated (or case-variant) identity would let the resolver
     sign a value the upstream cannot reconstruct. Over-cap fails closed.
+
+    The one exception is Cookie on HTTP/2 and HTTP/3, where clients may split
+    it into one line per pair (RFC 9113 8.2.3). Those crumbs have a single
+    joined form, every line "; "-joined in wire order with empty ones kept,
+    which the destination rebuilds and mitmproxy sends to an HTTP/1 upstream,
+    so the resolver gets that value.
     """
+    http_version = (flow.request.http_version or "").upper()
+    join_cookie_crumbs = http_version.startswith(("HTTP/2", "HTTP/3"))
     selected: dict[str, str] = {}
     lines: dict[str, int] = {}
+    cookie_crumbs: list[str] = []
     for name, value in flow.request.headers.items(multi=True):
         lowered = name.lower()
         if lowered in RESOLVE_REQUEST_HEADER_DENYLIST:
             continue
+        if lowered == "cookie" and join_cookie_crumbs:
+            cookie_crumbs.append(value)
+            continue
         lines[lowered] = lines.get(lowered, 0) + 1
         if not name or not value:
             continue
-        if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
-            raise CredentialResolveError("resolve_header_too_long")
-        selected[lowered] = value
+        selected[lowered] = _checked_resolve_header_value(value)
     if any(count > 1 for count in lines.values()):
         raise CredentialResolveError("resolve_ambiguous_header")
+    cookie = "; ".join(cookie_crumbs)
+    if cookie:
+        selected["cookie"] = _checked_resolve_header_value(cookie)
     if len(selected) > MAX_RESOLVE_REQUEST_HEADERS:
         raise CredentialResolveError("resolve_too_many_headers")
     return selected
+
+
+def _checked_resolve_header_value(value: str) -> str:
+    """Return a forwarded header value, failing closed above the value cap."""
+    if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
+        raise CredentialResolveError("resolve_header_too_long")
+    return value
 
 
 _DOT_SEGMENT_RE = re.compile(r"/\.\.(/|$)")

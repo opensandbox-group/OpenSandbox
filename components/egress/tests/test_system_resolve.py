@@ -130,6 +130,18 @@ class _RepeatedHeaders:
         except KeyError:
             return default
 
+    def __setitem__(self, name: str, value: str) -> None:
+        # Like mitmproxy: setting a field replaces every line of that name.
+        if name in self:
+            del self[name]
+        self._items.append((name, value))
+
+    def __delitem__(self, name: str) -> None:
+        lowered = name.lower()
+        self._items = [
+            (key, value) for key, value in self._items if key.lower() != lowered
+        ]
+
 
 class _Request:
     def __init__(self) -> None:
@@ -445,6 +457,67 @@ class ExchangeResolveTest(TestCase):
 
         self.assertEqual([], calls)
         self.assertEqual(407, flow.response.status_code)
+
+    def test_resolve_request_joins_http2_cookie_crumbs(self) -> None:
+        # HTTP/2 and HTTP/3 clients may split Cookie into one field line per
+        # pair (RFC 9113 8.2.3). The destination joins them with "; ", and so
+        # does mitmproxy when it forwards to an HTTP/1 upstream, empty lines
+        # included, so that joined value is what the resolver can bind to.
+        cases = [
+            (
+                [("cookie", "a=1"), ("x-acs-action", "Run"), ("cookie", "b=2")],
+                "a=1; b=2",
+            ),
+            ([("cookie", "a=1"), ("cookie", "")], "a=1; "),
+        ]
+        for version in ("HTTP/2.0", "HTTP/3"):
+            for lines, cookie in cases:
+                with self.subTest(version=version, cookie=cookie):
+                    self._install_vault()
+                    calls = self._decision_transport()
+                    flow = _Flow()
+                    flow.request.http_version = version
+                    flow.request.headers = _RepeatedHeaders(lines)
+
+                    asyncio.run(self.system.requestheaders(flow))
+
+                    self.assertEqual(1, len(calls))
+                    headers = calls[0][3]["request"]["headers"]
+                    self.assertEqual(cookie, headers["cookie"])
+                    # The request goes on with the resolved credential.
+                    self.assertEqual(SECRET, flow.request.headers["authorization"])
+                    self.assertFalse(flow.killed)
+                    self.assertIsNone(flow.response)
+
+    def test_resolve_request_http1_repeated_cookie_fails_closed(self) -> None:
+        # HTTP/1 allows a single Cookie line (RFC 6265 5.4), and mitmproxy
+        # forwards repeated ones as they are, so there is no one form to sign.
+        self._install_vault()
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        flow = _Flow()
+        flow.request.headers = _RepeatedHeaders([("Cookie", "a=1"), ("cookie", "b=2")])
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        self.assertEqual([], calls)
+        self.assertEqual(407, flow.response.status_code)
+
+    def test_resolve_request_joined_cookie_over_value_budget_fails_closed(self) -> None:
+        self._install_vault()
+        calls = self._install_transport(lambda payload: _parsed_decision())
+        half = self.system.MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES // 2
+        flow = _Flow()
+        flow.request.http_version = "HTTP/2.0"
+        flow.request.headers = _RepeatedHeaders(
+            [("cookie", "a=" + "v" * half), ("cookie", "b=" + "v" * half)]
+        )
+
+        asyncio.run(self.system.requestheaders(flow))
+
+        # Each crumb fits, the joined value does not. An HTTP/2 body may be
+        # streamed, so the denial kills the flow instead of answering 407.
+        self.assertEqual([], calls)
+        self.assertTrue(flow.killed)
 
     def test_resolve_request_header_denylist_duplicates_pass(self) -> None:
         # Structural fields never reach the resolver, so their repetition
