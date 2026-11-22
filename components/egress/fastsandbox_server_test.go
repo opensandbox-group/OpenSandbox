@@ -220,9 +220,7 @@ func doAction(t *testing.T, srv *fastSandboxPolicyServer, body string) *httptest
 	return doRequest(t, srv, http.MethodPost, constants.ActionsDispatchPath, body)
 }
 
-// ---------------------------------------------------------------------------
 // Envelope builders (wire format via the actionhandler types)
-// ---------------------------------------------------------------------------
 
 const (
 	testUID    = "u-1"
@@ -327,9 +325,7 @@ func setBindingAndReady(t *testing.T, srv *fastSandboxPolicyServer, reg *subject
 	return s
 }
 
-// ---------------------------------------------------------------------------
 // Status endpoint
-// ---------------------------------------------------------------------------
 
 func TestActionsStatus(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
@@ -369,9 +365,7 @@ func TestActionsStatusMirrorsMitmGate(t *testing.T) {
 	assert.True(t, status.Ready)
 }
 
-// ---------------------------------------------------------------------------
 // SET_BINDING + LIFECYCLE_HOOK lifecycle
-// ---------------------------------------------------------------------------
 
 func TestActionsSetBindingDenyFirstThenHookActivates(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
@@ -400,11 +394,7 @@ func TestActionsSetBindingDenyFirstThenHookActivates(t *testing.T) {
 	assert.Equal(t, "allow", eff.Evaluate("example.com"))
 }
 
-// TestActionsSetBindingReplayNeverMutatesRecordedPolicy: the binding input
-// only seeds a fresh subject's policy. A same-fence SET_BINDING carrying a
-// different input (the superseded CRD-driven update path, or an at-least-once
-// replay) must never mutate the recorded policy — runtime changes go through
-// the relay surface.
+// Binding replay cannot overwrite relay-owned policy state.
 func TestActionsSetBindingReplayNeverMutatesRecordedPolicy(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
@@ -450,9 +440,6 @@ func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 }
 
-// TestActionsDataPlaneReadyReplayIsIdempotent: hooks are delivered
-// at-least-once, so a data-plane-ready retried after a lost ack must succeed
-// and leave the subject active under the same policy.
 func TestActionsDataPlaneReadyReplayIsIdempotent(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
@@ -547,9 +534,7 @@ func TestActionsInvalidPolicyInputRejected(t *testing.T) {
 	require.Equal(t, subject.StateDenying, mustState(reg.Get(subject.FromSandboxUID(testUID))))
 }
 
-// ---------------------------------------------------------------------------
 // REMOVE_BINDING
-// ---------------------------------------------------------------------------
 
 func TestActionsRemoveBindingCleansUp(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
@@ -591,12 +576,7 @@ func TestActionsHookForUnregisteredSubjectConflict(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rec.Code)
 }
 
-// ---------------------------------------------------------------------------
-// TestHookRemoveConcurrentNoRace (review: subjFence map race): a
-// data-plane-ready hook (holding policyCommitMu, reading subjFence under
-// s.mu) racing terminal cleanup (which deletes subjFence under s.mu without
-// policyCommitMu) must be data-race-free and converge to a consistent
-// outcome. Run under -race in CI.
+// Terminal cleanup does not hold policyCommitMu; subjFence access still needs s.mu.
 func TestHookRemoveConcurrentNoRace(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID(policyTestUID)
@@ -625,11 +605,7 @@ func TestHookRemoveConcurrentNoRace(t *testing.T) {
 }
 
 // Stale-subject takeover on slot reuse (OSEP-0022)
-// ---------------------------------------------------------------------------
 
-// TestActionsSetBindingTakeoverOnSlotReuse: a SET_BINDING claiming a live
-// subject's IP tears the stale subject down and registers the successor
-// deny-first; a late REMOVE_BINDING for the stale subject stays a no-op.
 func TestActionsSetBindingTakeoverOnSlotReuse(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	inst := &fakeMitmInstaller{}
@@ -710,8 +686,6 @@ func TestActionsSetBindingTakeoverOnSlotReuse(t *testing.T) {
 	assert.Equal(t, succ, got)
 }
 
-// TestActionsSetBindingTakeoverDuplicateIdempotent: a duplicate SET_BINDING
-// for the SAME UID on the same IP stays an idempotent no-op (not a takeover).
 func TestActionsSetBindingTakeoverDuplicateIdempotent(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
@@ -730,8 +704,6 @@ func TestActionsSetBindingTakeoverDuplicateIdempotent(t *testing.T) {
 	nft.mu.Unlock()
 }
 
-// TestActionsSetBindingTakeoverNftFailureFailClosed: a failed stale teardown
-// fails the takeover; the retry converges.
 func TestActionsSetBindingTakeoverNftFailureFailClosed(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	staleUID, takeUID := "u-stale", "u-take"
@@ -770,8 +742,6 @@ func TestActionsSetBindingTakeoverNftFailureFailClosed(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestActionsSetBindingTakeoverGatewayRefcountConsistent: gateway refcount
-// and MITM table stay consistent across the swap.
 func TestActionsSetBindingTakeoverGatewayRefcountConsistent(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
@@ -804,9 +774,7 @@ func TestActionsSetBindingTakeoverGatewayRefcountConsistent(t *testing.T) {
 	require.Equal(t, []iptables.MitmRedirectEntry{{SandboxIP: netip.MustParseAddr(testIP), Gateway: netip.MustParseAddr(testGW)}}, inst.snapshot())
 }
 
-// ---------------------------------------------------------------------------
 // Envelope validation
-// ---------------------------------------------------------------------------
 
 func TestActionsInvalidEnvelopesRejected(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
@@ -833,9 +801,7 @@ func TestActionsInvalidEnvelopesRejected(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Superseded proxy-route surfaces (removed per OSEP-0022 revision)
-// ---------------------------------------------------------------------------
 
 // TestFastSandboxServerSupersededRoutesGone: the UID-header-routed /policy and
 // /credential-vault surfaces are removed — policy rides the SET_BINDING
@@ -879,9 +845,7 @@ func TestFastSandboxServerHealthz(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
-// ---------------------------------------------------------------------------
 // MITM interception redirects
-// ---------------------------------------------------------------------------
 
 type fakeMitmInstaller struct {
 	mu      sync.Mutex
@@ -1054,9 +1018,7 @@ func TestFastSandboxServerStatusPinnedCaObservability(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "mitmCa")
 }
 
-// ---------------------------------------------------------------------------
 // Subject-aware active vault API
-// ---------------------------------------------------------------------------
 
 func TestFastSandboxServerActiveVaultClientIPDispatch(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
@@ -1129,10 +1091,6 @@ func TestFastSandboxServerActiveVaultClientIPDispatch(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-// TestActionsCreateThenConfigureEndToEnd exercises the actions-driven
-// create-then-configure spine: SET_BINDING installs deny-first with the
-// binding policy held pending, data-plane-ready activates it, and
-// REMOVE_BINDING tears everything down.
 func TestActionsCreateThenConfigureEndToEnd(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	uid := "e2e-1"
@@ -1159,9 +1117,7 @@ func TestActionsCreateThenConfigureEndToEnd(t *testing.T) {
 	require.Len(t, nft.removed, 1)
 }
 
-// TestFastSandboxServerAlwaysRulesReachNft: allow.always/deny.always must be
-// enforced at the IP layer too, not only in DNS dispatch. The nft swap must
-// receive the always-merged effective policy.
+// DNS-only enforcement would leave direct IP connections outside the always-rule floor.
 func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	alwaysDeny, err := policy.ParseValidatedEgressRule("deny", "203.0.113.0/24")
 	require.NoError(t, err)
@@ -1190,9 +1146,7 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	require.Contains(t, allowV4, "198.51.100.7", "always-allow IP must reach the nft allow set")
 }
 
-// ---------------------------------------------------------------------------
 // Always-rule hot reload (deny.always / allow.always / reachable.ports.cap)
-// ---------------------------------------------------------------------------
 
 // stubAlwaysLoader mirrors policy.AlwaysRuleLoader's contract: the candidate
 // applies once, and an apply error vetoes the publish (stays staged for
@@ -1234,10 +1188,7 @@ func (l *stubAlwaysLoader) RefreshIfDueWithApply(
 	return deny, allow, true, nil
 }
 
-// TestFastSandboxAlwaysRuleReloadMovesKernelAndRegistry: a changed overlay
-// must reach both layers in order — one atomic kernel rebuild (merged
-// policies + port floor), then the registry (DNS dispatch). Deny-first
-// subjects carry no merged policy; a follow-up refresh is a no-op.
+// Publish registry policy only after its matching kernel rules commit.
 func TestFastSandboxAlwaysRuleReloadMovesKernelAndRegistry(t *testing.T) {
 	oldDeny, err := policy.ParseValidatedEgressRule("deny", "old-blocked.example.com")
 	require.NoError(t, err)
@@ -1301,9 +1252,6 @@ func TestFastSandboxAlwaysRuleReloadMovesKernelAndRegistry(t *testing.T) {
 	require.False(t, changed)
 }
 
-// TestFastSandboxAlwaysRuleReloadNftFailureKeepsOverlay: a failed kernel
-// rebuild vetoes the whole reload — the registry keeps the previous overlay
-// and the retry converges.
 func TestFastSandboxAlwaysRuleReloadNftFailureKeepsOverlay(t *testing.T) {
 	oldDeny, err := policy.ParseValidatedEgressRule("deny", "old-blocked.example.com")
 	require.NoError(t, err)
@@ -1348,9 +1296,6 @@ func TestFastSandboxAlwaysRuleReloadNftFailureKeepsOverlay(t *testing.T) {
 	require.Equal(t, "deny", reg.EffectivePolicy(active).Evaluate("new-blocked.example.com"))
 }
 
-// TestFastSandboxServerNftFailureKeepsRegistryState: a failed nft apply must leave
-// the registry (DNS dispatch) on the PREVIOUS policy — nft commits before registry
-// state, and the relay write NACKs with last-good kept on both sides.
 func TestFastSandboxServerNftFailureKeepsRegistryState(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
@@ -1389,8 +1334,6 @@ func TestFastSandboxServerNftFailureKeepsRegistryState(t *testing.T) {
 	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
 }
 
-// TestFastSandboxServerGatewayRedirectRefcounted: the shared prerouting table
-// keeps every active gateway and removes only gateways without owners.
 func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
@@ -1580,14 +1523,7 @@ func mustState(st subject.State, ok bool) subject.State {
 	return st
 }
 
-// ---------------------------------------------------------------------------
-// Review fixes: lifecycle-barrier retry semantics (PR #1678 comments)
-// ---------------------------------------------------------------------------
-
-// TestActionsDataPlaneReadyRetriesAfterNftFailure (review fix): a transient
-// nft failure on data-plane-ready must NOT consume the pending policy — the
-// Fastlet's retry of the same Hook succeeds instead of 409-ing forever with
-// the subject permanently deny-first.
+// Consuming pending policy on a failed apply would make every subsequent hook retry fail.
 func TestActionsDataPlaneReadyRetriesAfterNftFailure(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID("u-1")
@@ -1615,9 +1551,6 @@ func TestActionsDataPlaneReadyRetriesAfterNftFailure(t *testing.T) {
 	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
 }
 
-// TestActionsStaleHookFenceRejected (review fix): a delayed data-plane-ready
-// from a previous instance must not consume the replacement sandbox's pending
-// policy or activate it before its own data plane is ready.
 func TestActionsStaleHookFenceRejected(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	s := subject.FromSandboxUID("u-1")
@@ -1640,10 +1573,7 @@ func TestActionsStaleHookFenceRejected(t *testing.T) {
 	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("new.com"))
 }
 
-// TestActionsRemoveBindingRetriesAfterNftFailure (review fix): a transient
-// nft removal failure must keep the subject registered so the retried
-// REMOVE_BINDING resumes cleanup — otherwise it would succeed with stale
-// rules left for a possibly-reused IP.
+// Retain cleanup ownership after failure so reused IPs cannot inherit stale rules.
 func TestActionsRemoveBindingRetriesAfterNftFailure(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
@@ -1672,9 +1602,6 @@ func TestActionsRemoveBindingRetriesAfterNftFailure(t *testing.T) {
 	require.Len(t, nft.removed, 1, "the retry must re-attempt and complete the nft removal")
 }
 
-// TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent (review fix):
-// at-least-once SET_BINDING delivery must not double-count the gateway — a
-// duplicate registration is a no-op, and one unload fully releases it.
 func TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
@@ -1701,8 +1628,6 @@ func TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent(t *testin
 	assert.Empty(t, dns.snapshot(), "one unload must fully release the gateway")
 }
 
-// TestFastSandboxServerGatewayRedirectRebindMovesGateway: a rebind that moved the
-// subject to a different gateway releases the old gateway's redirect.
 func TestFastSandboxServerGatewayRedirectRebindMovesGateway(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}

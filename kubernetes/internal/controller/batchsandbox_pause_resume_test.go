@@ -257,7 +257,6 @@ func TestDispatchPauseResume_Case1_PauseTrue(t *testing.T) {
 	assert.True(t, handled, "should be handled by handlePause")
 	assert.True(t, result.RequeueAfter > 0, "handlePause should requeue")
 
-	// Verify ACK: phase should be Pausing
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePausing, updated.Status.Phase)
@@ -343,7 +342,6 @@ func TestDispatchPauseResume_Case2_PauseFalse(t *testing.T) {
 	assert.True(t, handled, "should be handled by handleResume")
 	assert.True(t, result.RequeueAfter > 0, "handleResume should requeue")
 
-	// Verify ACK: phase=Resuming
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseResuming, updated.Status.Phase)
@@ -376,7 +374,6 @@ func TestDispatchPauseResume_Case3_PauseNil_ACKOnly(t *testing.T) {
 	assert.False(t, handled, "ACK only should not block normal flow")
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify ACK is NOT written to server by dispatch (deferred to persistRuntimeView).
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, int64(1), updated.Status.PauseObservedGeneration, "server should not be updated by dispatch; ACK is deferred")
@@ -478,17 +475,14 @@ func TestHandlePause_NormalFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify ACK: phase=Pausing, pauseObservedGeneration=2
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePausing, updated.Status.Phase)
 	assert.Equal(t, int64(2), updated.Status.PauseObservedGeneration)
 
-	// Verify SandboxSnapshot was created under the reserved internal name
 	snap := &sandboxv1alpha1.SandboxSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-pause"}, snap))
 	assert.Equal(t, "test-bs", snap.Spec.SandboxName)
-	// Verify OwnerRef
 	assert.Equal(t, "test-bs", snap.OwnerReferences[0].Name)
 }
 
@@ -707,13 +701,11 @@ func TestHandlePause_PoolMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify template was solidified from Pool
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Nil(t, updated.Spec.Template)
 	assert.Equal(t, "test-pool", updated.Spec.PoolRef)
 
-	// Verify SandboxSnapshot was created under the reserved internal name
 	snap := &sandboxv1alpha1.SandboxSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-pause"}, snap))
 	assert.Equal(t, "test-bs", snap.Spec.SandboxName)
@@ -814,7 +806,6 @@ func TestHandlePause_FailedRetry(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify old snapshot was deleted
 	snap := &sandboxv1alpha1.SandboxSnapshot{}
 	err = r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-pause"}, snap)
 	assert.True(t, err == nil || len(snap.UID) == 0 || snap.DeletionTimestamp != nil,
@@ -902,7 +893,6 @@ func TestHandleResume_NormalFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0, "should requeue after ACK")
 
-	// Verify ACK: phase=Resuming
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseResuming, updated.Status.Phase)
@@ -953,16 +943,12 @@ func TestContinueResume_NormalFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify images replaced
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, "registry/test-bs-main@sha256:"+strings.Repeat("a", 64), updated.Spec.Template.Spec.Containers[0].Image)
-	// Verify replicas are preserved.
 	assert.Equal(t, int32(1), *updated.Spec.Replicas)
-	// Verify controller does not clear spec.pause
 	require.NotNil(t, updated.Spec.Pause)
 	assert.False(t, *updated.Spec.Pause)
-	// Verify imagePullSecrets added
 	found := false
 	for _, s := range updated.Spec.Template.Spec.ImagePullSecrets {
 		if s.Name == "my-pull-secret" {
@@ -1044,7 +1030,6 @@ func TestHandleResume_PoolMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify ACK: phase=Resuming
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseResuming, updated.Status.Phase)
@@ -1094,7 +1079,6 @@ func TestContinueResume_PoolMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify poolRef cleared
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, "", updated.Spec.PoolRef)
@@ -1207,7 +1191,6 @@ func TestContinueResume_SnapshotNotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify rollback keeps spec.pause and records retryable failure
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, updated.Status.Phase)
@@ -1307,14 +1290,12 @@ func TestContinueResume_SnapshotNotReady(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify Phase=Paused with ResumeFailed condition (retryable)
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, updated.Status.Phase)
 	require.NotNil(t, updated.Spec.Pause)
 	assert.False(t, *updated.Spec.Pause)
 
-	// Verify ResumeFailed condition is set
 	foundCondition := false
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == sandboxv1alpha1.BatchSandboxConditionResumeFailed {
@@ -1752,7 +1733,6 @@ func TestPersistRuntimeView_PreservesPauseFailedConditionFromLatestStatus(t *tes
 	_, errs := r.persistRuntimeView(context.Background(), freshBS, view)
 	require.Empty(t, errs)
 
-	// Verify PauseFailed is preserved after reconcile with fresh cache.
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 
@@ -3381,7 +3361,6 @@ func TestSyncPauseOrClear_SnapshotReady(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify completePause was called
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, updated.Status.Phase)
@@ -3429,14 +3408,12 @@ func TestSyncPauseOrClear_SnapshotFailed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify retryable PauseFailed handling. In this fake-client setup no source Pod exists,
-	// so the controller escalates the phase to Failed instead of returning to Succeed.
+	// The absent source Pod makes this fixture escalate to Failed rather than Succeed.
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	require.NotNil(t, updated.Spec.Pause)
 	assert.True(t, *updated.Spec.Pause)
 
-	// Verify PauseFailed condition is set
 	foundCondition := false
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == sandboxv1alpha1.BatchSandboxConditionPauseFailed {

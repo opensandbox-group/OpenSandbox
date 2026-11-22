@@ -46,8 +46,6 @@ func TestIsolatedCapabilities_ModeAvailabilityWireFormat(t *testing.T) {
 	}
 }
 
-// TestCreateIsolatedSessionRequest_BindsWireFormat verifies that binds and
-// uid_mode serialize to the expected execd wire format.
 func TestCreateIsolatedSessionRequest_BindsWireFormat(t *testing.T) {
 	req := CreateIsolatedSessionRequest{
 		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace", Mode: "rw"},
@@ -72,8 +70,6 @@ func TestCreateIsolatedSessionRequest_BindsWireFormat(t *testing.T) {
 		"bind with only source should omit dest/readonly: %s", s)
 }
 
-// TestCreateIsolatedSessionRequest_BindsOmittedWhenEmpty verifies binds and
-// uid_mode are omitted when unset (backward compatible with existing callers).
 func TestCreateIsolatedSessionRequest_BindsOmittedWhenEmpty(t *testing.T) {
 	req := CreateIsolatedSessionRequest{
 		Workspace: &IsolatedWorkspaceSpec{Path: "/workspace"},
@@ -85,8 +81,6 @@ func TestCreateIsolatedSessionRequest_BindsOmittedWhenEmpty(t *testing.T) {
 	require.True(t, !strings.Contains(s, "uid_mode"), "uid_mode should be omitted: %s", s)
 }
 
-// TestCreateIsolatedSessionRequest_OverlaysWireFormat verifies overlays
-// serialize to the execd wire format alongside the legacy workspace sugar.
 func TestCreateIsolatedSessionRequest_OverlaysWireFormat(t *testing.T) {
 	ephemeral := false
 	req := CreateIsolatedSessionRequest{
@@ -109,8 +103,6 @@ func TestCreateIsolatedSessionRequest_OverlaysWireFormat(t *testing.T) {
 	assert.Contains(t, s, `{"path":"/ephemeral","mode":"overlay","persist":false}`)
 }
 
-// TestCreateIsolatedSessionRequest_OverlaysOnlyOmitsWorkspace verifies a
-// request carrying only overlays omits the legacy workspace field entirely.
 func TestCreateIsolatedSessionRequest_OverlaysOnlyOmitsWorkspace(t *testing.T) {
 	req := CreateIsolatedSessionRequest{
 		Overlays: []IsolatedOverlaySpec{{Path: "/workspace", Mode: "rw"}},
@@ -322,9 +314,6 @@ func TestIsolationWithSession_CallbackAndCleanup(t *testing.T) {
 	}
 }
 
-// TestIsolationAttach_PopulatesFullInfo verifies that IsolationAttach
-// populates IsolatedSessionInfo with all creation-parameter echoes when
-// the execd server returns them in the SessionState response.
 func TestIsolationAttach_PopulatesFullInfo(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/isolated/session/sess-full" {
@@ -416,11 +405,6 @@ func TestIsolationAttach_PopulatesFullInfo(t *testing.T) {
 	require.NotNil(t, session.Files())
 }
 
-// TestIsolationAttach_ToleratesMissingCreationParams verifies that
-// IsolationAttach still constructs a working handle when the execd server
-// returns a minimal SessionState with no creation-parameter echoes (older
-// execd builds). It also proves that Run/Get/Delete route through the
-// handle correctly using only the sessionID.
 func TestIsolationAttach_ToleratesMissingCreationParams(t *testing.T) {
 	var (
 		getCalled    int32
@@ -496,11 +480,6 @@ func TestIsolationAttach_ToleratesMissingCreationParams(t *testing.T) {
 	}
 }
 
-// TestIsolationAttach_PreservesIdleTimeoutZero verifies that a session
-// created with idle_timeout_seconds=0 (idle GC disabled — the long-window
-// stateless-recovery configuration) round-trips through attach as a
-// non-nil pointer to 0, distinct from nil (which means "older execd
-// omitted the field").
 func TestIsolationAttach_PreservesIdleTimeoutZero(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/isolated/session/sess-zero-idle" {
@@ -533,9 +512,6 @@ func TestIsolationAttach_PreservesIdleTimeoutZero(t *testing.T) {
 	require.Equal(t, 0, *info.IdleTimeoutSeconds)
 }
 
-// TestIsolationAttach_NotFound verifies that a 404 from the server surfaces
-// as an *APIError with StatusCode 404, matching the error type used by
-// IsolationGet for a missing session.
 func TestIsolationAttach_NotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/isolated/session/missing" {
@@ -560,8 +536,6 @@ func TestIsolationAttach_NotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, apiErr.StatusCode)
 }
 
-// TestIsolationAttach_EmptySessionID verifies that IsolationAttach rejects
-// empty session IDs without making an HTTP call.
 func TestIsolationAttach_EmptySessionID(t *testing.T) {
 	execd := NewExecdClient("http://unused.invalid", "test-key")
 	sb := &Sandbox{id: "sbx-test", execd: execd}

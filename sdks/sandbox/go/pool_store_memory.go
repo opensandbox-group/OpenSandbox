@@ -27,7 +27,6 @@ type poolLock struct {
 	expiresAt time.Time
 }
 
-// poolState is the internal state for a single pool.
 type poolState struct {
 	mu sync.Mutex
 
@@ -36,10 +35,8 @@ type poolState struct {
 	// FIFO order of sandbox IDs. May contain stale IDs (lazy cleanup).
 	idleQueue []string
 
-	// primary lock state.
 	lock poolLock
 
-	// configurable per-pool settings.
 	idleTTL time.Duration
 	maxIdle int
 
@@ -58,15 +55,13 @@ type InMemoryPoolStateStore struct {
 	pools map[string]*poolState
 }
 
-// NewInMemoryPoolStateStore creates a new InMemoryPoolStateStore.
 func NewInMemoryPoolStateStore() *InMemoryPoolStateStore {
 	return &InMemoryPoolStateStore{
 		pools: make(map[string]*poolState),
 	}
 }
 
-// getOrCreatePool returns the poolState for the given pool, creating it if needed.
-// Caller must NOT hold s.mu.
+// Caller must not hold s.mu.
 func (s *InMemoryPoolStateStore) getOrCreatePool(poolName string) *poolState {
 	s.mu.RLock()
 	ps, ok := s.pools[poolName]

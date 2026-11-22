@@ -16,7 +16,6 @@ package connectivity
 
 import "time"
 
-// Observation describes one TCP connection attempt as seen by the ingress.
 type Observation struct {
 	At       time.Time
 	Protocol string
@@ -34,7 +33,6 @@ type Observer interface {
 // ObserverFunc adapts a function to Observer.
 type ObserverFunc func(Observation)
 
-// Observe implements Observer.
 func (f ObserverFunc) Observe(observation Observation) {
 	f(observation)
 }

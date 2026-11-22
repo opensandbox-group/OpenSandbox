@@ -136,9 +136,9 @@ func (b *bwrapImpl) Capabilities() Capabilities {
 		UsernsNetAvailable:     b.probe.UsernsNetAvailable,
 		Profiles:               []Profile{ProfileStrict, ProfileBalanced},
 		ShareNetOverridable:    true,
-		CommitSupported:        false, // Phase 2
-		DiffSupported:          false, // Phase 2
-		PersistAvailable:       false, // Phase 2
+		CommitSupported:        false,
+		DiffSupported:          false,
+		PersistAvailable:       false,
 		PersistMaxBytesDefault: 2 * 1024 * 1024 * 1024,
 		PersistMaxBytesLimit:   8 * 1024 * 1024 * 1024,
 		PersistRetainDefault:   3600,

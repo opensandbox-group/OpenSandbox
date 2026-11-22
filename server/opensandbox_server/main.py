@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-FastAPI application entry point for OpenSandbox Lifecycle API.
-
-This module initializes the FastAPI application with middleware, routes,
-and configuration for the sandbox lifecycle management service.
-"""
-
 import logging
 import os
 from contextlib import asynccontextmanager

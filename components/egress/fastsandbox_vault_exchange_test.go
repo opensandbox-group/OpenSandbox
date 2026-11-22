@@ -83,16 +83,9 @@ func activeSnapshotFor(t *testing.T, srv *fastSandboxPolicyServer, ip string) (i
 	return rec.Code, rec.Body.String()
 }
 
-// ---------------------------------------------------------------------------
 // Relay round-trip with an exchange source (headers:[] pin)
-// ---------------------------------------------------------------------------
 
-// TestVaultRelayExchangeRoundTripPinsEmptyHeadersArray: a relay PUT/GET with
-// an exchange source round-trips the endpoint (configuration, not material)
-// and the addon snapshot renders the marker binding with EXPLICIT empty
-// arrays — "headers":[] never "headers":null. A clone that degrades the
-// empty array to null fails the addon parser closed (the T1 review fix).
-// The endpoint has no listener: the write path performs zero network I/O.
+// Null header arrays fail addon parsing; the unserved endpoint verifies writes perform no network I/O.
 func TestVaultRelayExchangeRoundTripPinsEmptyHeadersArray(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	s := vaultReadySubject(t, srv, reg)
@@ -146,16 +139,8 @@ func TestVaultRelayExchangeRoundTripPinsEmptyHeadersArray(t *testing.T) {
 	_ = s
 }
 
-// ---------------------------------------------------------------------------
 // IP reuse / takeover: wire-subject isolation
-// ---------------------------------------------------------------------------
 
-// TestVaultExchangeIPTakeoverIsolatesWireSubjects: the same slot IP handed
-// from one subject to another (a different UID claiming the dispatch key)
-// must never leak the predecessor's vault or wire identity: the old
-// subject's in-flight resolution is invalidated (409), the successor starts
-// with no vault, and once it installs its own, the wire subject is the
-// successor's sandboxId on every resolve.
 func TestVaultExchangeIPTakeoverIsolatesWireSubjects(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	slow := startFakeResolverServer(t, 1200*time.Millisecond)
@@ -244,17 +229,9 @@ func seedExchangeVaultFor(t *testing.T, srv *fastSandboxPolicyServer, s subject.
 	require.NoError(t, err)
 }
 
-// ---------------------------------------------------------------------------
 // Shared-process isolation: one slow resolver must not block others
-// ---------------------------------------------------------------------------
 
-// TestVaultExchangeSlowResolveDoesNotBlockOtherSubjects: a subject whose
-// resolver is slow neither blocks another subject's resolve nor the
-// non-resolve vault surface — no shared lock is held across the resolver
-// call (OSEP-0025 caveat 7). The assertions are RELATIVE (B completes while
-// A is still parked at its resolver), not wall-clock budgets that flake on
-// a loaded CI runner; the 1.5s/0s resolver split makes the ordering
-// unambiguous.
+// Compare completion ordering while the slow resolver is parked; wall-clock budgets flake under CI load.
 func TestVaultExchangeSlowResolveDoesNotBlockOtherSubjects(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	slow := startFakeResolverServer(t, 1500*time.Millisecond)
@@ -312,14 +289,8 @@ func TestVaultExchangeSlowResolveDoesNotBlockOtherSubjects(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Persistence: reload with no resolver listener (R12)
-// ---------------------------------------------------------------------------
 
-// TestVaultPersistExchangeReloadNeedsNoResolver: an egress restart rehydrates
-// a persisted exchange vault with NO resolver listener anywhere — recovery
-// runs factory validation only, never the network. The reloaded slice
-// serves the marker snapshot; the file keeps carrying only the endpoint.
 func TestVaultPersistExchangeReloadNeedsNoResolver(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	h.seedVaultFile(vaultTestUID, testFenceR, testFenceA, 4, exchangeVaultBody(deadResolverEndpoint))
@@ -356,14 +327,8 @@ func TestVaultPersistExchangeReloadNeedsNoResolver(t *testing.T) {
 	assert.Empty(t, body.Bindings[0].Auth.Type, "the persisted binding auth stays typeless")
 }
 
-// ---------------------------------------------------------------------------
 // Restart: the first resolve after the fence is re-established
-// ---------------------------------------------------------------------------
 
-// TestVaultPersistExchangeRestartFirstResolve: after an egress restart the
-// SET_BINDING replay re-maps the subject and rebuilds the sandboxId mirror;
-// the FIRST resolve on the reloaded vault succeeds with the reloaded
-// revision and the current wire subject.
 func TestVaultPersistExchangeRestartFirstResolve(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	fake := startFakeResolverServer(t, 0)
@@ -411,16 +376,9 @@ func TestVaultPersistExchangeRestartFirstResolve(t *testing.T) {
 	assert.Equal(t, int64(3), document.Revision, "the resolve answers from the reloaded revision")
 }
 
-// ---------------------------------------------------------------------------
 // VAULT_EXPORT / VAULT_IMPORT with an exchange source (R12)
-// ---------------------------------------------------------------------------
 
-// TestVaultSnapshotExchangeExportImportCarriesNoMaterial: a pause/resume
-// round-trip carries the exchange vault (endpoint + typeless binding) and
-// NOTHING else: no resolved header values, no redaction values — resolution
-// output never existed outside one request. While sealed the vault fails
-// closed; after the resume-side import + replay the vault resolves again
-// under the restored fence with the new wire sandboxId.
+// Exchange results are request-scoped and must not appear in snapshot carry state.
 func TestVaultSnapshotExchangeExportImportCarriesNoMaterial(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	fake := startFakeResolverServer(t, 0)

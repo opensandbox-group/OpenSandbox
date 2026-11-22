@@ -13,10 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script verifies that required files contain the Apache 2.0 license header.
-# It scans tracked source files and fails with a list of violations if any header
-# is missing.
-
 set -euxo pipefail
 
 TAG=${TAG:-latest}
@@ -73,7 +69,6 @@ uv run python -m opensandbox_server.main > server.log 2>&1 &
 SERVER_PID=$!
 cd ..
 
-# wait for server
 sleep 10
 
 cd sdks/sandbox/python && make generate-api

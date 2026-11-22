@@ -77,7 +77,6 @@ type taskScheduleResult struct {
 	LastErrorMessage                           string
 }
 
-// BatchSandboxReconciler reconciles a BatchSandbox object
 type BatchSandboxReconciler struct {
 	client.Client
 	APIReader           client.Reader
@@ -105,15 +104,6 @@ type BatchSandboxReconciler struct {
 // +kubebuilder:rbac:groups=sandbox.opensandbox.io,resources=batchsandboxes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sandbox.opensandbox.io,resources=batchsandboxes/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// It reconciles the BatchSandbox object against the actual cluster state
-// (pod scaling, pool allocation parsing, task scheduling, expiry cleanup,
-// and pause/resume handoff) and makes the cluster state reflect the desired
-// one.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	log := logf.FromContext(ctx)
 	start := time.Now()
@@ -123,10 +113,7 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
 	batchSbx := &sandboxv1alpha1.BatchSandbox{}
-	// A deleted or replaced BatchSandbox is never reconciled again under its
-	// old UID, so drop its in-memory state here. This runs after any earlier
-	// reconcile of this key that recorded some, since the workqueue never
-	// processes the same key concurrently.
+	// Workqueue key serialization makes removal safe after the previous reconcile's state writes.
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: req.Namespace,
 		Name:      req.Name,

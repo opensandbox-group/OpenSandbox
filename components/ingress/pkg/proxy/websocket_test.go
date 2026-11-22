@@ -225,11 +225,6 @@ func startProxyForBehaviorTest(t *testing.T, backendMux *http.ServeMux, opts ...
 	return "ws://127.0.0.1:" + strconv.Itoa(proxyPort), backendPort
 }
 
-// Test_WebSocketProxy_Subprotocol asserts that the client's Sec-WebSocket-
-// Protocol offer is forwarded to the backend and the backend's selection is
-// echoed back to the client. Gorilla's proxy handled this implicitly; the
-// coder/websocket migration required explicit wiring in DialOptions and
-// AcceptOptions and this test guards the wiring from silent regression.
 func Test_WebSocketProxy_Subprotocol(t *testing.T) {
 	backendMux := http.NewServeMux()
 	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -259,10 +254,7 @@ func Test_WebSocketProxy_Subprotocol(t *testing.T) {
 		"backend selected graphql-ws; proxy must echo it to the client")
 }
 
-// Test_WebSocketProxy_SetCookieForwarded asserts that Set-Cookie headers the
-// backend sets during the WebSocket handshake reach the client. code-server
-// refreshes session cookies at upgrade time and dropping them silently breaks
-// sticky-session logins on some deployments.
+// Backends such as code-server refresh login cookies during the WebSocket handshake.
 func Test_WebSocketProxy_SetCookieForwarded(t *testing.T) {
 	backendMux := http.NewServeMux()
 	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -294,11 +286,6 @@ func Test_WebSocketProxy_SetCookieForwarded(t *testing.T) {
 	assert.True(t, found, "Set-Cookie from backend handshake must reach the client; got %v", resp.Cookies())
 }
 
-// Test_WebSocketProxy_CloseCodePreserved asserts that an application close
-// code from the backend (1008 policy violation in this test) is propagated to
-// the client verbatim rather than being masked as 1000. Gorilla had a subtle
-// bug that occasionally rewrote codes; coder/websocket + our copyMessages
-// implementation should preserve them.
 func Test_WebSocketProxy_CloseCodePreserved(t *testing.T) {
 	backendMux := http.NewServeMux()
 	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -396,11 +383,7 @@ func Test_WebSocketProxy_AbruptClientDisconnectUnblocksBackend(t *testing.T) {
 	}
 }
 
-// Test_WebSocketProxy_LargeMessage asserts that WebSocket messages above
-// coder/websocket's default 32 KiB read limit still traverse the proxy. The
-// gorilla-era proxy carried no such limit, and terminals or Jupyter kernels
-// routinely emit larger single frames. The new bounded default must remain
-// comfortably above coder/websocket's 32 KiB default.
+// Terminal and Jupyter frames can exceed the WebSocket library's default 32 KiB limit.
 func Test_WebSocketProxy_LargeMessage(t *testing.T) {
 	const payloadSize = 128 * 1024
 
@@ -498,14 +481,7 @@ func Test_WebSocketProxy_BackendMessageSizeLimit(t *testing.T) {
 	assert.Equal(t, websocket.StatusMessageTooBig, websocket.CloseStatus(readErr))
 }
 
-// Test_WebSocketProxy_BackendHandshakeRedirectNotFollowed asserts that a
-// backend returning a 3xx during the WebSocket handshake is surfaced to the
-// caller as-is instead of being followed. coder/websocket.Dial's default
-// http.Client follows redirects; gorilla's Dialer never did. Following the
-// redirect at the ingress layer would route WebSocket handshake traffic to
-// a target the sandbox route did not resolve, hiding the real backend
-// response from operators and potentially leaking Authorization headers to
-// an unrelated endpoint.
+// Following a handshake redirect would send traffic and credentials outside the resolved sandbox route.
 func Test_WebSocketProxy_BackendHandshakeRedirectNotFollowed(t *testing.T) {
 	var loginHits int32
 	loginMux := http.NewServeMux()
@@ -555,13 +531,6 @@ func Test_WebSocketProxy_BackendHandshakeRedirectNotFollowed(t *testing.T) {
 		"the redirect target must not be contacted by the ingress")
 }
 
-// Test_WebSocketProxy_BackendHandshake4xxPassthrough asserts that a backend
-// rejecting the WebSocket handshake with 4xx (401 auth required, 403
-// forbidden, 404 missing endpoint, ...) is surfaced to the client verbatim.
-// #1117 review flagged the gorilla-era proxy for occasionally rewriting such
-// responses as 502/503; handleBackendDialError uses copyResponse to preserve
-// the backend response so callers can distinguish auth failures from ingress
-// outages.
 func Test_WebSocketProxy_BackendHandshake4xxPassthrough(t *testing.T) {
 	backendMux := http.NewServeMux()
 	backendMux.HandleFunc("/ws", func(w http.ResponseWriter, _ *http.Request) {

@@ -300,31 +300,12 @@ func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState, r
 	}
 	state.resultMutex.Unlock()
 
-	// The reply means the kernel has finished the cell; everything after it is
-	// output delivery. Finalization still waits for the matching idle, but that
-	// wait must not be unbounded: if the idle is lost or relayed without the
-	// matching parent header, nothing else would ever release this execution --
-	// the results channel never closes, the caller's SSE stream stays open with
-	// keepalive pings, and the session stays locked. Arm a bounded deadline that
-	// finalizes with whatever output has been collected. It coexists with the
-	// idle-triggered finalization in handleExecutionStatus; whoever flips
-	// executeDone first finalizes and the loser exits. The timeout is read here,
-	// on the dispatch path, so the deadline goroutine never touches the flag.
+	// A lost matching idle must not keep a finished cell's stream and session lock open indefinitely.
 	replyDeadline := execdflag.JupyterReplyFinalizeTimeout
 	safego.Go(func() { c.finalizeOnReplyDeadline(state, resultChan, replyDeadline) })
 }
 
-// finalizeOnReplyDeadline releases an execution whose matching idle status
-// never arrived although execute_reply did. The kernel sends the reply after it
-// finished the cell, so the outcome is already known and only the delivery of
-// remaining IOPub output is pending. Finalizing here closes the results channel
-// with the output collected so far; a late idle is a no-op because executeDone
-// is already set.
-//
-// The bound expires on output silence, not on absolute wall-clock time: while
-// output keeps arriving, each delivery restarts the grace period, so a slow
-// relay cannot be cut off mid-delivery; the execution is finalized only once
-// the output has gone quiet for a full grace period.
+// Expire on output silence, not absolute time, so a slow active relay is not truncated; executeDone arbitrates with idle finalization.
 func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan chan *ExecutionResult, timeout time.Duration) {
 	if timeout <= 0 {
 		return
@@ -366,10 +347,7 @@ func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, 
 		return
 	}
 
-	// resultChan send happens outside resultMutex: sending can block indefinitely on a full,
-	// undrained channel, and holding resultMutex across that block would starve any other
-	// goroutine that needs it -- including finalizeExecution's poll loop. trySend separately
-	// makes this send race-free against finalizeExecution closing resultChan.
+	// A blocked send must not hold resultMutex needed by finalization; trySend guards against concurrent close.
 	notify := &ExecutionResult{
 		ExecutionCount: execResult.ExecutionCount,
 		ExecutionData:  execResult.Data,

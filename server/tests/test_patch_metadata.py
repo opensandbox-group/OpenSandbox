@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for patch metadata merge logic and service implementations."""
-
 import pytest
 from fastapi import HTTPException
 from unittest.mock import MagicMock
@@ -22,8 +20,6 @@ from opensandbox_server.services.constants import SandboxErrorCodes
 
 
 class TestIsSystemLabel:
-    """Test system label detection for controller-owned prefixes."""
-
     def test_user_label_not_system(self):
         from opensandbox_server.services.sandbox_service import SandboxService
 
@@ -41,8 +37,6 @@ class TestIsSystemLabel:
 
 
 class TestApplyMetadataPatch:
-    """Test shared _apply_metadata_patch logic."""
-
     @staticmethod
     def _merge(labels: dict, patch: dict) -> dict:
         from opensandbox_server.services.sandbox_service import SandboxService
@@ -121,8 +115,6 @@ class TestApplyMetadataPatch:
 
 
 class TestPatchLabelsMethod:
-    """Test WorkloadProvider.patch_labels."""
-
     @staticmethod
     def _make_provider(**overrides):
         from opensandbox_server.services.k8s.workload_provider import WorkloadProvider

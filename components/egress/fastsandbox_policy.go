@@ -347,10 +347,7 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 	writeJSON(w, putResponseStatus(created), doc)
 }
 
-// policyCommitTarget re-reads the lifecycle state and registration fence at
-// apply time: activation and rebinds run outside the commit serialization,
-// so a stale apply aborts (the protocol rolls the file back) instead of
-// landing on the wrong identity or state. Registry reads only — no s.mu.
+// Revalidate the apply target without nesting s.mu around registry reads.
 func (s *fastSandboxPolicyServer) policyCommitTarget(subj subject.Subject, fence subject.Fencing) (subject.State, error) {
 	regFence, ok := s.reg.Fence(subj)
 	if !ok || regFence != fence {

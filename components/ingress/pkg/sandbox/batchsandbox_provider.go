@@ -78,7 +78,6 @@ func NewBatchSandboxProvider(
 func (p *BatchSandboxProvider) Start(ctx context.Context) error {
 	p.informerFactory.Start(ctx.Done())
 
-	// Wait for cache sync
 	if !cache.WaitForCacheSync(ctx.Done(), p.informerSynced) {
 		return errors.New("failed to sync BatchSandbox informer cache")
 	}
@@ -141,19 +140,16 @@ func (p *BatchSandboxProvider) GetEndpoint(sandboxId string) (*EndpointInfo, err
 		accessToken = strings.TrimSpace(batchSandbox.Annotations[AnnotationAccessToken])
 	}
 
-	// Check if BatchSandbox is ready
 	if batchSandbox.Status.Ready < 1 {
 		return nil, fmt.Errorf("%w: %s/%s (ready: %d/%d)",
 			ErrSandboxNotReady, batchSandbox.Namespace, sandboxId, batchSandbox.Status.Ready, batchSandbox.Status.Replicas)
 	}
 
-	// Get endpoints from BatchSandbox using kubernetes utils
 	endpoints, err := utils.GetEndpoints(batchSandbox)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s/%s: %w", ErrSandboxNotReady, batchSandbox.Namespace, sandboxId, err)
 	}
 
-	// Return the first available endpoint
 	return &EndpointInfo{
 		Endpoint:          endpoints[0],
 		SecureAccessToken: accessToken,

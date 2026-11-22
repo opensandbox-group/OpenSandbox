@@ -30,7 +30,6 @@ import (
 	"time"
 )
 
-// newLifecycleServer creates an httptest.Server and a LifecycleClient pointing at it.
 func newLifecycleServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *LifecycleClient) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -39,7 +38,6 @@ func newLifecycleServer(t *testing.T, handler http.HandlerFunc) (*httptest.Serve
 	return srv, client
 }
 
-// newEgressServer creates an httptest.Server and an EgressClient pointing at it.
 func newEgressServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *EgressClient) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -48,7 +46,6 @@ func newEgressServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, 
 	return srv, client
 }
 
-// newExecdServer creates an httptest.Server and an ExecdClient pointing at it.
 func newExecdServer(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *ExecdClient) {
 	t.Helper()
 	srv := httptest.NewServer(handler)
@@ -495,9 +492,6 @@ func TestSnapshotLifecycle(t *testing.T) {
 	require.NoErrorf(t, err, "DeleteSnapshot")
 }
 
-// TestCreateSnapshotKeepsUnsetModeOffTheWire verifies that an empty
-// CreateSnapshotRequest sends no mode field (legacy-server compatibility) and
-// that a response predating the mode field reads back as full.
 func TestCreateSnapshotKeepsUnsetModeOffTheWire(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 
@@ -907,7 +901,6 @@ func TestGetFileInfo(t *testing.T) {
 }
 
 func TestUploadFile(t *testing.T) {
-	// Create a temp file to upload.
 	tmpFile, err := os.CreateTemp("", "opensandbox-test-*")
 	require.NoError(t, err)
 	defer os.Remove(tmpFile.Name())
@@ -925,7 +918,6 @@ func TestUploadFile(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("expected multipart content type, got %s", r.Header.Get("Content-Type")))
 		}
 
-		// Verify metadata file part exists.
 		r.ParseMultipartForm(1 << 20)
 		metaFile, _, mfErr := r.FormFile("metadata")
 		require.NoErrorf(t, mfErr, "expected metadata file part")
@@ -942,7 +934,6 @@ func TestUploadFile(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("metadata path = %q, want /sandbox/upload.txt", meta.Path))
 		}
 
-		// Verify file part exists.
 		file, _, fErr := r.FormFile("file")
 		if fErr != nil {
 			assert.Fail(t, fmt.Sprintf("expected file part: %v", fErr))
@@ -1249,10 +1240,6 @@ func TestExecdAuthHeader(t *testing.T) {
 	require.NoErrorf(t, err, "Ping")
 }
 
-// TestResolveExecdForwardsAllEndpointHeaders verifies that every header
-// returned by GetEndpoint (auth tokens, routing hints, sticky-session keys,
-// etc.) is forwarded as-is on subsequent execd requests, mirroring the
-// Python SDK behavior.
 func TestResolveExecdForwardsAllEndpointHeaders(t *testing.T) {
 	endpointHeaders := map[string]string{
 		"X-EXECD-ACCESS-TOKEN": "execd-tok",
@@ -1293,8 +1280,6 @@ func TestResolveExecdForwardsAllEndpointHeaders(t *testing.T) {
 	require.NoErrorf(t, sb.execd.Ping(context.Background()), "Ping")
 }
 
-// TestResolveEgressForwardsAllEndpointHeaders verifies the same forwarding
-// behavior for the egress sidecar client.
 func TestResolveEgressForwardsAllEndpointHeaders(t *testing.T) {
 	endpointHeaders := map[string]string{
 		"OPENSANDBOX-EGRESS-AUTH": "egress-tok",
@@ -1350,13 +1335,11 @@ func TestSandboxManager_ListFilter(t *testing.T) {
 		}
 
 		q := r.URL.Query()
-		// Verify state filter
 		states := q["state"]
 		if len(states) != 1 || states[0] != "Running" {
 			assert.Fail(t, fmt.Sprintf("expected state=[Running], got %v", states))
 		}
 
-		// Verify metadata filter
 		meta := q.Get("metadata")
 		if meta == "" {
 			assert.Fail(t, "expected metadata query param")
@@ -1365,7 +1348,6 @@ func TestSandboxManager_ListFilter(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("expected metadata to contain env=prod, got %q", meta))
 		}
 
-		// Verify pagination
 		if q.Get("page") != "1" {
 			assert.Fail(t, fmt.Sprintf("expected page=1, got %s", q.Get("page")))
 		}
@@ -2366,7 +2348,6 @@ func TestGetCommandLogs(t *testing.T) {
 			assert.Fail(t, fmt.Sprintf("expected /command/cmd-logs-1/logs, got %s", r.URL.Path))
 		}
 
-		// Verify Accept header
 		if r.Header.Get("Accept") != "text/plain" {
 			assert.Fail(t, fmt.Sprintf("Accept = %q, want text/plain", r.Header.Get("Accept")))
 		}
@@ -2502,7 +2483,6 @@ func TestWatchMetrics_SSE(t *testing.T) {
 		assert.Fail(t, fmt.Sprintf("event[0].Event = %q, want metrics", events[0].Event))
 	}
 
-	// Verify we can parse the metric data from events
 	var m Metrics
 	if err := json.Unmarshal([]byte(events[0].Data), &m); err != nil {
 		require.NoErrorf(t, err, "unmarshal metric")
@@ -2547,7 +2527,6 @@ func TestWatchMetrics_ContextCancel(t *testing.T) {
 		return nil
 	})
 
-	// Should get context cancelled error
 	if err == nil {
 		assert.Fail(t, "expected error from cancelled context")
 	}
@@ -2590,7 +2569,6 @@ func TestExecution_Text(t *testing.T) {
 }
 
 func TestExecution_ProcessStreamEvents(t *testing.T) {
-	// Test the full Execution aggregation pipeline with all event types
 	exec := &Execution{}
 	events := []StreamEvent{
 		{Event: "init", Data: `{"type":"init","text":"exec-42","timestamp":100}`},

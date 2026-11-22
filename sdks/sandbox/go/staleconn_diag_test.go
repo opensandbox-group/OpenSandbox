@@ -12,18 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// This file contains DIAGNOSTIC tests for the "stale keep-alive connection"
-// hypothesis behind intermittent GetEndpoint timeouts
-// ("context deadline exceeded (Client.Timeout exceeded while awaiting headers)").
-//
-// They do not change any SDK behavior. They:
-//  1. Prove the SDK's default transport reuses idle pooled connections.
-//  2. Reproduce a client deadline timeout on a connection that goes black-hole
-//     (dead but no FIN) after being idle.
-//  3. Show that forcing a fresh connection (DisableKeepAlives, or an
-//     IdleConnTimeout shorter than the idle gap) avoids the hang.
-//  4. Provide an env-gated probe to run against the REAL lifecycle server.
-
 package opensandbox
 
 import (
@@ -94,9 +82,6 @@ func (tt *traceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-// TestDiag_ConnReuseAfterIdle confirms the necessary precondition for the bug:
-// the SDK's default transport keeps an idle connection in the pool and REUSES it
-// on the next request (Reused=true, WasIdle=true) rather than dialing fresh.
 func TestDiag_ConnReuseAfterIdle(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -202,16 +187,7 @@ func blackHoleAfterReuseServer(t *testing.T) (addr string, cleanup func()) {
 	}
 }
 
-// TestDiag_ReusedConnBlackHoleReproducesClientTimeout demonstrates the raw
-// transport-level root cause behind the screenshot error: issuing requests
-// directly on the SDK's default (keep-alive) transport, the second request
-// reuses the idle connection that the "LB" has black-holed, hangs until
-// http.Client.Timeout, and fails with a deadline-exceeded timeout. The exact
-// error text can differ depending on which cancellation path wins.
-//
-// This uses the raw *http.Client (NOT Client.doRequest) so it keeps documenting
-// the underlying transport behavior even after the SDK's doRequest recovery is
-// in place; the SDK-level recovery is covered by staleconn_fix_test.go.
+// Use raw http.Client to isolate stale-connection behavior from SDK recovery.
 func TestDiag_ReusedConnBlackHoleReproducesClientTimeout(t *testing.T) {
 	addr, cleanup := blackHoleAfterReuseServer(t)
 	defer cleanup()
@@ -247,9 +223,6 @@ func TestDiag_ReusedConnBlackHoleReproducesClientTimeout(t *testing.T) {
 	t.Log("=> Raw transport: reused idle connection + black-hole => deadline timeout.")
 }
 
-// TestDiag_FixDisableKeepAlives shows that using a fresh connection per request
-// (DisableKeepAlives) avoids the hang: every request is the FIRST on its
-// connection, so the black-hole server always serves it.
 func TestDiag_FixDisableKeepAlives(t *testing.T) {
 	addr, cleanup := blackHoleAfterReuseServer(t)
 	defer cleanup()
@@ -270,9 +243,6 @@ func TestDiag_FixDisableKeepAlives(t *testing.T) {
 	t.Log("=> DisableKeepAlives: every request dials fresh (no reuse) => no hang.")
 }
 
-// TestDiag_FixShortIdleConnTimeout shows that an IdleConnTimeout shorter than
-// the idle gap makes the SDK evict the pooled connection before it is reused, so
-// the next request dials fresh and the black-hole is avoided.
 func TestDiag_FixShortIdleConnTimeout(t *testing.T) {
 	addr, cleanup := blackHoleAfterReuseServer(t)
 	defer cleanup()
@@ -294,10 +264,6 @@ func TestDiag_FixShortIdleConnTimeout(t *testing.T) {
 	t.Log("=> Short IdleConnTimeout: idle connection evicted before reuse => req2 dials fresh => OK.")
 }
 
-// TestDiag_SDKTransportUsesHTTP1 proves that the SDK's default transport shape
-// (custom DialContext + TLSClientConfig, no ForceAttemptHTTP2) negotiates
-// HTTP/1.1 even against an HTTP/2-capable TLS server, and that HTTP/2 is only
-// used when ForceAttemptHTTP2 is explicitly enabled.
 func TestDiag_SDKTransportUsesHTTP1(t *testing.T) {
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(r.Proto))

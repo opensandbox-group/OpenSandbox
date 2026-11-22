@@ -381,9 +381,6 @@ class K8sClient:
             informer.track_write(obj)
         return obj
 
-    # ------------------------------------------------------------------
-    # PersistentVolumeClaim operations
-    # ------------------------------------------------------------------
 
     def get_pvc(
         self,
@@ -484,9 +481,6 @@ class K8sClient:
             collection_formats={},
         )
 
-    # ------------------------------------------------------------------
-    # Secret operations
-    # ------------------------------------------------------------------
 
     def create_secret(self, namespace: str, body: Any) -> Any:
         """Create a namespaced Secret."""

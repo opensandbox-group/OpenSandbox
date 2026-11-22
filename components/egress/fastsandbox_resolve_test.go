@@ -380,9 +380,7 @@ func TestFastSandboxResolveWireSubjectRefreshesWithFence(t *testing.T) {
 	require.Equal(t, "fsb-second", served.Subject)
 }
 
-// ---------------------------------------------------------------------------
 // Sidecar profile
-// ---------------------------------------------------------------------------
 
 func TestSidecarResolveVaultAccessEnvSubject(t *testing.T) {
 	s := &policyServer{credentialVault: credentialvault.NewStore(nil, nil)}

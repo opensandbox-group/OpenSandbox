@@ -58,21 +58,7 @@ import java.time.Duration
 import java.time.OffsetDateTime
 
 /**
- * Main entrypoint for the Open Sandbox SDK providing secure, isolated execution environments.
- *
- * This class provides a comprehensive interface for interacting with containerized sandbox
- * environments, combining lifecycle management with high-level operations for file system
- * access, command execution, and real-time monitoring.
- *
- * ## Key Features
- *
- * - **Secure Isolation**: Complete Linux OS access in isolated containers
- * - **File System Operations**: Create, read, update, delete files and directories
- * - **Multi-language Execution**: Support for Python, Java, Bash, and other languages
- * - **Real-time Command Execution**: Streaming output with timeout handling
- * - **Resource Management**: CPU, memory, and storage constraints
- * - **Lifecycle Management**: Create, pause, resume, terminate operations
- * - **Health Monitoring**: Automatic readiness detection and status tracking
+ * Sandbox lifecycle, filesystem, command execution, and monitoring.
  *
  * ## Usage Example
  *
@@ -112,13 +98,6 @@ class Sandbox internal constructor(
 ) : AutoCloseable {
     private val logger = LoggerFactory.getLogger(Sandbox::class.java)
 
-    /**
-     * Provides access to file system operations within the sandbox.
-     *
-     * Allows writing, reading, listing, and deleting files and directories.
-     *
-     * @return Service for filesystem manipulation
-     */
     fun files() = fileSystemService
 
     /**
@@ -140,22 +119,8 @@ class Sandbox internal constructor(
         return adapter.withIdentity(uid, gid)
     }
 
-    /**
-     * Provides access to command execution operations.
-     *
-     * Allows running shell commands, capturing output, and managing processes.
-     *
-     * @return Service for command execution
-     */
     fun commands() = commandService
 
-    /**
-     * Provides access to sandbox metrics and monitoring.
-     *
-     * Allows retrieving resource usage statistics (CPU, memory) and other performance metrics.
-     *
-     * @return Service for metrics retrieval
-     */
     fun metrics() = metricsService
 
     /**
@@ -171,20 +136,10 @@ class Sandbox internal constructor(
      */
     fun credentialVault(): CredentialVault = credentialVaultService
 
-    /**
-     * Provides access to sandbox diagnostic log and event descriptors.
-     *
-     * @return Service for sandbox diagnostics retrieval
-     */
     fun diagnostics() = diagnosticsService
 
     fun isolation() = isolatedService
 
-    /**
-     * Provides access to shared httpclient provider
-     *
-     * Allows retrieving underlying http client resources initialized with connection config
-     */
     fun httpClientProvider() = httpClientProvider
 
     companion object {
@@ -781,11 +736,7 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Patches egress rules for this sandbox using sidecar merge semantics.
-     *
-     * Incoming rules take priority over existing rules with the same target.
-     * Existing rules for other targets remain unchanged. Within one patch payload,
-     * the first rule for a target wins. The current defaultAction is preserved.
+     * Replaces matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays.
      *
      * @throws SandboxException if operation fails
      */
@@ -794,11 +745,7 @@ class Sandbox internal constructor(
     }
 
     /**
-     * Deletes egress rules for this sandbox by target.
-     *
-     * Each entry is a FQDN or wildcard domain. Matching rules are removed from
-     * the currently enforced policy. Targets not present in the policy are
-     * silently ignored (idempotent). The current defaultAction is preserved.
+     * Deletes by target (domain, wildcard, IP, CIDR, or empty for port-only rules); misses and defaultAction are unchanged.
      *
      * @throws SandboxException if operation fails
      */
@@ -941,7 +888,6 @@ class Sandbox internal constructor(
          * Sets the sandbox ID to connect to.
          *
          * @param sandboxId ID of the existing sandbox
-         * @return This connector for method chaining
          */
         fun sandboxId(sandboxId: String): Connector {
             this.sandboxId = sandboxId
@@ -1148,7 +1094,6 @@ class Sandbox internal constructor(
          * Sets the sandbox image for the sandbox.
          *
          * @param image Sandbox image reference (e.g., "ubuntu:22.04", "python:3.11")
-         * @return This builder for method chaining
          * @throws InvalidArgumentException if image is blank
          */
         fun image(image: String): Builder {
@@ -1169,7 +1114,6 @@ class Sandbox internal constructor(
          * Sets the sandbox image specification.
          *
          * @param imageSpec Complete image specification including image and optional auth
-         * @return This builder for method chaining
          */
         fun imageSpec(imageSpec: SandboxImageSpec): Builder {
             this.imageSpec = imageSpec
@@ -1190,7 +1134,6 @@ class Sandbox internal constructor(
          * Sets the entrypoint command for the sandbox.
          *
          * @param entrypoint List of command and arguments to use as entrypoint
-         * @return This builder for method chaining
          */
         fun entrypoint(entrypoint: List<String>): Builder {
             this.entrypoint = entrypoint
@@ -1201,7 +1144,6 @@ class Sandbox internal constructor(
          * Sets the entrypoint command for the sandbox.
          *
          * @param entrypoint Vararg command and arguments to use as entrypoint
-         * @return This builder for method chaining
          */
         fun entrypoint(vararg entrypoint: String): Builder {
             this.entrypoint = entrypoint.toList()
@@ -1212,7 +1154,6 @@ class Sandbox internal constructor(
          * Sets resource limits for the sandbox using a fluent configuration block.
          *
          * @param configure Configuration block for resource limits
-         * @return This builder for method chaining
          */
         fun resource(configure: MutableMap<String, String>.() -> Unit): Builder {
             resource.configure()
@@ -1223,7 +1164,6 @@ class Sandbox internal constructor(
          * Sets resource limits for the sandbox.
          *
          * @param resource Resource limits map
-         * @return This builder for method chaining
          */
         fun resource(resource: Map<String, String>): Builder {
             this.resource.clear()
@@ -1235,7 +1175,6 @@ class Sandbox internal constructor(
          * Sets resource requests (guaranteed minimums) for Burstable QoS.
          *
          * @param resourceRequests Resource requests map
-         * @return This builder for method chaining
          */
         fun resourceRequests(resourceRequests: Map<String, String>): Builder {
             this.resourceRequests = resourceRequests.toMutableMap()
@@ -1246,7 +1185,6 @@ class Sandbox internal constructor(
          * Sets resource requests using a fluent configuration block.
          *
          * @param configure Configuration block for resource requests
-         * @return This builder for method chaining
          */
         fun resourceRequests(configure: MutableMap<String, String>.() -> Unit): Builder {
             val requests = this.resourceRequests ?: mutableMapOf()
@@ -1260,7 +1198,6 @@ class Sandbox internal constructor(
          *
          * @param key Environment variable name
          * @param value Environment variable value
-         * @return This builder for method chaining
          */
         fun env(
             key: String,
@@ -1279,7 +1216,6 @@ class Sandbox internal constructor(
          * Adds multiple environment variables.
          *
          * @param env Map of environment variables to add
-         * @return This builder for method chaining
          */
         fun env(env: Map<String, String>): Builder {
             this.env.putAll(env)
@@ -1290,7 +1226,6 @@ class Sandbox internal constructor(
          * Configures environment variables using a fluent configuration block.
          *
          * @param configure Configuration block that receives a mutable map
-         * @return This builder for method chaining
          */
         fun env(configure: MutableMap<String, String>.() -> Unit): Builder {
             env.configure()
@@ -1302,7 +1237,6 @@ class Sandbox internal constructor(
          *
          * @param key Metadata key
          * @param value Metadata value
-         * @return This builder for method chaining
          */
         fun metadata(
             key: String,
@@ -1321,7 +1255,6 @@ class Sandbox internal constructor(
          * Adds multiple metadata entries.
          *
          * @param metadata Map of metadata to add
-         * @return This builder for method chaining
          */
         fun metadata(metadata: Map<String, String>): Builder {
             this.metadata.putAll(metadata)
@@ -1332,7 +1265,6 @@ class Sandbox internal constructor(
          * Configures metadata using a fluent configuration block.
          *
          * @param configure Configuration block that receives a mutable map
-         * @return This builder for method chaining
          */
         fun metadata(configure: MutableMap<String, String>.() -> Unit): Builder {
             metadata.configure()
@@ -1432,7 +1364,6 @@ class Sandbox internal constructor(
          * Adds a single volume mount.
          *
          * @param volume Volume configuration
-         * @return This builder for method chaining
          */
         fun volume(volume: Volume): Builder {
             this.volumes.add(volume)
@@ -1443,7 +1374,6 @@ class Sandbox internal constructor(
          * Adds multiple volume mounts.
          *
          * @param volumes List of volume configurations to add
-         * @return This builder for method chaining
          */
         fun volumes(volumes: List<Volume>): Builder {
             this.volumes.addAll(volumes)
@@ -1454,7 +1384,6 @@ class Sandbox internal constructor(
          * Configures a volume mount using a fluent configuration block.
          *
          * @param configure Configuration block for Volume.Builder
-         * @return This builder for method chaining
          */
         fun volume(configure: Volume.Builder.() -> Unit): Builder {
             val builder = Volume.builder()
@@ -1508,7 +1437,6 @@ class Sandbox internal constructor(
          * Sets the sandbox timeout (automatic termination time).
          *
          * @param timeout Maximum sandbox lifetime. Pass null to require explicit cleanup.
-         * @return This builder for method chaining
          * @throws InvalidArgumentException if timeout is negative or zero
          */
         fun timeout(timeout: Duration?): Builder {
@@ -1535,7 +1463,6 @@ class Sandbox internal constructor(
          * Sets the timeout for waiting for sandbox readiness.
          *
          * @param readyTimeout Maximum time to wait for sandbox to become ready
-         * @return This builder for method chaining
          * @throws InvalidArgumentException if timeout is negative or zero
          */
         fun readyTimeout(readyTimeout: Duration): Builder {
@@ -1552,7 +1479,6 @@ class Sandbox internal constructor(
          * Sets the interval between readiness polling attempts.
          *
          * @param pollingInterval Time between readiness checks
-         * @return This builder for method chaining
          * @throws InvalidArgumentException if interval is negative or zero
          */
         fun healthCheckPollingInterval(pollingInterval: Duration): Builder {
@@ -1704,7 +1630,6 @@ class Sandbox internal constructor(
          * Sets the sandbox ID to resume.
          *
          * @param sandboxId ID of the paused sandbox
-         * @return This resumer for method chaining
          */
         fun sandboxId(sandboxId: String): Resumer {
             this.sandboxId = sandboxId
@@ -1853,7 +1778,6 @@ class Sandbox internal constructor(
          * Sets the fsb golden-image template to create the sandbox from.
          *
          * @param templateId Unique identifier of a `Succeeded` template owned by the requester
-         * @return This launcher for method chaining
          * @throws InvalidArgumentException if templateId is blank
          */
         fun templateId(templateId: String): TemplateLauncher {
@@ -1871,7 +1795,6 @@ class Sandbox internal constructor(
          *
          * @param key Metadata key
          * @param value Metadata value
-         * @return This launcher for method chaining
          */
         fun metadata(
             key: String,
@@ -1981,7 +1904,6 @@ class Sandbox internal constructor(
          * template mode.
          *
          * @param timeout Maximum sandbox lifetime
-         * @return This launcher for method chaining
          * @throws InvalidArgumentException if timeout is negative or zero
          */
         fun timeout(timeout: Duration): TemplateLauncher {

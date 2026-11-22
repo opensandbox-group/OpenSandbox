@@ -100,7 +100,6 @@ func init() {
 	}
 }
 
-// PoolReconciler reconciles a Pool object
 type PoolReconciler struct {
 	client.Client
 	APIReader  client.Reader
@@ -1167,10 +1166,8 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 	toDeletePods := args.toDeletePods
 	bufferCnt := r.countReadyIdlePods(pods, args.idlePods)
 
-	// Calculate desired buffer cnt.
 	desiredBufferCnt := desiredBufferCount(bufferCnt, pool.Spec.CapacitySpec.BufferMin, pool.Spec.CapacitySpec.BufferMax)
 
-	// Calculate desired schedulable cnt.
 	desiredSchedulableCnt := max(allocatedCnt+supplyCnt+desiredBufferCnt, pool.Spec.CapacitySpec.PoolMin)
 	// Enforce PoolMax: limit new pods based on total running pods (including evicting).
 	maxNewPods := max(pool.Spec.CapacitySpec.PoolMax-totalPodCnt, 0)
@@ -1182,7 +1179,6 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 		"desiredSchedulableCnt", desiredSchedulableCnt, "maxNewPods", maxNewPods,
 		"toDeletePods", len(toDeletePods), "idlePods", len(args.idlePods))
 
-	// Scale-up: create new pods if needed and allowed by PoolMax
 	if desiredSchedulableCnt > schedulableCnt && maxNewPods > 0 {
 		createCnt := min(desiredSchedulableCnt-schedulableCnt, maxNewPods)
 		scaleMaxUnavailable := r.getScaleMaxUnavailable(pool, desiredSchedulableCnt)
@@ -1202,7 +1198,6 @@ func (r *PoolReconciler) scalePool(ctx context.Context, pool *sandboxv1alpha1.Po
 		}
 	}
 
-	// Scale-down: delete redundant or excess pods
 	scaleIn := int32(0)
 	if desiredSchedulableCnt < schedulableCnt {
 		scaleIn = schedulableCnt - desiredSchedulableCnt

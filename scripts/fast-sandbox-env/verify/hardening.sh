@@ -189,17 +189,13 @@ hardening_floor_verify() { # [template-id]
 		|| fail "opensandbox-launcher is not present/executable at $LAUNCHER_GUEST_PATH — the hardened source image lacks the bake. The lane builds + pushes it from this checkout (template_up_overlaybd_hardening); for standalone templates, build + publish the golden image per scripts/fast-sandbox-env/Dockerfile.sandbox-test-image first."
 	pass "launcher present at $LAUNCHER_GUEST_PATH"
 
-	# 2. The isolation TOML is staged and hardening-gated.
 	probe="$(guest_value TOML sh -c "grep -q '^\[hardening\]' $ISOLATION_TOML_GUEST_PATH && grep -q '^enabled = true' $ISOLATION_TOML_GUEST_PATH && echo TOML=1 || echo TOML=0")" \
 		|| fail "hardening: isolation TOML probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "1" ]] \
 		|| fail "$ISOLATION_TOML_GUEST_PATH missing or not hardening-gated ([hardening] enabled = true)"
 	pass "isolation TOML staged at $ISOLATION_TOML_GUEST_PATH ([hardening] enabled)"
 
-	# 3. The capabilities report — captured BEFORE the behavioral probes so
-	#    the Landlock tier gates them. cap_drop=active doubles as the proof
-	#    execd actually loaded this TOML (the floor only arms on
-	#    [hardening] enabled) and found the launcher (missing -> degraded).
+	# Capture capability support before selecting behavioral probes; active cap_drop confirms config and launcher availability.
 	local hardening_line capabilities_out
 	capabilities_out="$(guest_out curl -fsS $CAPABILITIES_URL 2>/dev/null)" \
 		|| fail "hardening: capabilities probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
@@ -235,12 +231,7 @@ hardening_floor_verify() { # [template-id]
 	[[ "$(printf '%s' "$hardening_line" | jq -r '.ebpf.state')" == "disabled" ]] \
 		|| fail "hardening.ebpf is not disabled (eBPF observation is not part of the floor): $hardening_line"
 
-	# 4. The /command workload runs through the launcher (it IS the
-	#    launcher-exec'd process — same PID across the launcher's execve, so
-	#    its /proc/<pid> dir is the anchored Landlock grant). CapEff/CapBnd
-	#    zero, seccomp filter mode, no_new_privs, identity not relocated.
-	#    The forked grep reads the anchored pid dir via /proc/$$ — allowed
-	#    by the grant (its own /proc/self would not be).
+	# Read /proc/$$: Landlock grants the launcher's stable PID, not the forked grep's /proc/self.
 	local cmd_fields cmd_uid
 	cmd_fields="$(hardening_status_fields sh -c 'grep -E "^(CapEff|CapBnd|Seccomp|NoNewPrivs|Uid):" /proc/$$/status')" \
 		|| fail "hardening: /command status probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"
@@ -272,8 +263,6 @@ hardening_floor_verify() { # [template-id]
 		|| fail "/command env carries execd config env: STRIP_FAIL=$probe"
 	pass "env strip: execd config env absent from the launcher-wrapped workload"
 
-	# 6. Landlock behavior — only meaningful when the layer reports active;
-	#    an unsupported guest kernel fail-opens honestly (handled above).
 	if [[ "$landlock_state" == "active" ]]; then
 		probe="$(guest_value TMP_WRITABLE sh -c 'if echo ok > /tmp/landlock-probe 2>/dev/null; then echo TMP_WRITABLE=1; else echo TMP_WRITABLE=0; fi')" \
 			|| fail "hardening: /tmp write probe failed: $(head -c 300 "$LOGS_DIR/hardening-cmd.err" 2>/dev/null)"

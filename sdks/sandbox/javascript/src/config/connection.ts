@@ -316,14 +316,7 @@ function createTimedFetch(opts: {
       ? AbortSignal.any([requestSignal, ac.signal])
       : ac.signal;
 
-    // Best-effort: attach the SDK host's own IP so the server can see the
-    // client's self-reported address. Applied per request (never overriding a
-    // caller-supplied value or dropping existing headers) and skipped silently
-    // when the IP is unavailable. Await the one-time detection so even the very
-    // first request carries the header (bounded by the probe timeout).
-    //
-    // Cross-origin redirect hops set SUPPRESS_CLIENT_IP so the SDK host's
-    // intranet address is not delivered to a redirect target.
+    // Cross-origin redirects suppress the client IP to avoid exposing an intranet address.
     const suppressClientIp =
       (init as Record<PropertyKey, unknown> | undefined)?.[SUPPRESS_CLIENT_IP] === true;
 
@@ -341,9 +334,6 @@ function createTimedFetch(opts: {
     };
 
     if (debug) {
-      // Log the headers actually being sent: prefer the merged headers produced
-      // by withClientIp (which include the client-IP header), falling back to
-      // the request input's headers when it is a Request object.
       const outgoing = new Headers(
         effectiveInit?.headers ??
           (typeof Request !== "undefined" && reqInput instanceof Request
@@ -490,16 +480,8 @@ export class ConnectionConfig {
   }
 
   /**
-   * Fetch used for file uploads, which stream a caller-provided request body.
-   *
-   * The request timeout never caps a healthy body send: a large upload can
-   * legitimately take longer than that while the body keeps flowing. On
-   * Node.js a dedicated `undici` dispatcher bounds silence instead: once the
-   * body has been sent it waits at most `requestTimeoutSeconds` (default 30s)
-   * for response headers, and a transfer that stops making progress for that
-   * long is aborted rather than hanging - the same contract as the Go SDK's
-   * `ResponseHeaderTimeout`. Set `requestTimeoutSeconds` to 0 to disable the
-   * deadline.
+   * Streams uploads without a total request deadline. On Node.js, response
+   * headers are bounded by `requestTimeoutSeconds`; 0 disables that deadline.
    */
   get uploadFetch(): typeof fetch {
     return this._uploadFetch ?? fetch;
@@ -542,13 +524,8 @@ export class ConnectionConfig {
       defaultHeaders: this.headers,
       label: "sse",
     });
-    // The wake retry wraps the timed fetches so every attempt gets a fresh
-    // response-header timeout while the wake budget spans attempts. The SSE
-    // transport is wrapped too — commands.run() against a paused sandbox must
-    // wake it like any other request; an established stream is never
-    // re-dispatched because only the marked 503 connect replays. The upload
-    // transport stays unwrapped: upload bodies are streams and cannot be
-    // replayed.
+    // Wake retries reset each attempt's header timeout, not the overall wake budget.
+    // Upload streams are not replayable and remain unwrapped.
     const wrapWake = (f: typeof fetch): typeof fetch =>
       this.wakeRetry.enabled ? createWakeRetryFetch({ baseFetch: f, wakeRetry: this.wakeRetry }) : f;
     this._fetch = wrapWake(timedFetch);

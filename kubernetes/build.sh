@@ -22,7 +22,6 @@ build_arg_if_set() {
     fi
 }
 
-# Default values
 TAG=${TAG:-latest}
 COMPONENT=${COMPONENT:-controller}
 PUSH=${PUSH:-true}
@@ -39,7 +38,6 @@ mkdir -p "$(dirname "${BUILD_METADATA_FILE}")"
 DOCKERHUB_REPO="opensandbox"
 ACR_REPO="sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox"
 
-# Component specific settings
 DOCKERFILE="Dockerfile"
 if [ "$COMPONENT" == "controller" ]; then
     IMAGE_NAME="controller"
@@ -64,7 +62,6 @@ echo "Tag: $TAG"
 echo "Push: $PUSH"
 echo "========================================="
 
-# Build for multiple platforms
 PLATFORMS="linux/amd64,linux/arm64"
 
 if [ "$PUSH" == "true" ]; then
@@ -73,7 +70,6 @@ if [ "$PUSH" == "true" ]; then
         IMAGE_TAGS+=(-t "${GHCR_REPO}/${IMAGE_NAME}:${TAG}")
     fi
 
-    # Build and push to registry
     docker buildx build \
         --platform $PLATFORMS \
         $BUILD_ARG \
@@ -93,7 +89,6 @@ if [ "$PUSH" == "true" ]; then
     fi
     echo "========================================="
 else
-    # Build only (for local testing)
     docker buildx build \
         --platform linux/amd64 \
         $BUILD_ARG \

@@ -92,56 +92,25 @@ class CodeInterpreterSync:
     """
 
     def __init__(self, sandbox: SandboxSync, code_service: CodesSync) -> None:
-        """
-        Initialize CodeInterpreterSync with sandbox and code service.
-
-        Note: This constructor is for internal use. Use :meth:`create` instead.
-
-        Args:
-            sandbox: Underlying sandbox instance
-            code_service: Code execution service implementation (sync)
-        """
+        """Internal constructor; use create()."""
         self._sandbox = sandbox
         self._code_service = code_service
 
     @property
     def sandbox(self) -> SandboxSync:
-        """
-        Provides access to the underlying sandbox instance.
-
-        Returns:
-            The underlying sandbox instance
-        """
         return self._sandbox
 
     @property
     def id(self) -> str:
-        """
-        Gets the unique identifier of this code interpreter (same as underlying sandbox ID).
-
-        Returns:
-            ID of the code interpreter/sandbox
-        """
+        """The underlying sandbox ID."""
         return self._sandbox.id
 
     @property
     def files(self):
-        """
-        Provides access to file system operations within the sandbox.
-
-        Returns:
-            Service for filesystem manipulation
-        """
         return self._sandbox.files
 
     @property
     def commands(self):
-        """
-        Provides access to command execution operations.
-
-        Returns:
-            Service for command execution
-        """
         return self._sandbox.commands
 
     def close(self) -> None:
@@ -164,27 +133,10 @@ class CodeInterpreterSync:
 
     @property
     def metrics(self):
-        """
-        Provides access to sandbox metrics and monitoring.
-
-        Returns:
-            Service for metrics retrieval
-        """
         return self._sandbox.metrics
 
     @property
     def codes(self) -> CodesSync:
-        """
-        Provides access to code execution operations (sync).
-
-        This service enables:
-        - Multi-language code execution (Python, JavaScript, Bash, etc.)
-        - Execution context management with persistent variables
-        - Real-time output streaming and interruption capabilities
-
-        Returns:
-            Service for advanced code execution with session support
-        """
         return self._code_service
 
     def ping(self) -> bool:

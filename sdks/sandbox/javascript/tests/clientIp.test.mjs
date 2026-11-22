@@ -29,7 +29,6 @@ import {
 const HEADER = "OPEN-SANDBOX-CLIENT-IP";
 
 function headersOf(result) {
-  // Normalize to a Headers instance from either the returned init or Request input.
   if (result.input instanceof Request) return new Headers(result.input.headers);
   return new Headers(result.init?.headers);
 }
@@ -146,7 +145,6 @@ test("ensureClientIpReady awaits detection so the first request carries the head
   await ensureClientIpReady();
   const ip = getClientIp();
   if (ip === "") {
-    // Make the skip visible in CI rather than passing silently.
     t.diagnostic("no outbound IP detected (network-less env); skipping header assertion");
     return;
   }
@@ -193,7 +191,6 @@ test("detectOutboundIp returns a valid IP or empty string", async (t) => {
   _resetClientIpCacheForTest();
   const ip = await detectOutboundIp();
   if (ip === "") {
-    // Make the skip visible in CI rather than passing silently.
     t.diagnostic("detectOutboundIp returned empty (network-less env); skipping format assertions");
     return;
   }
