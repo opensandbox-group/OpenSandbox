@@ -26,7 +26,10 @@ import httpx
 
 from opensandbox._httpx import build_async_redirect_client_options
 from opensandbox.config import ConnectionConfig
-from opensandbox.internal.readiness import is_readiness_auth_error
+from opensandbox.internal.readiness import (
+    HEALTH_PING_TIMEOUT,
+    is_readiness_auth_error,
+)
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.services.health import Health
 
@@ -60,7 +63,10 @@ class HealthAdapter(Health):
 
         protocol = self.connection_config.protocol
         base_url = f"{protocol}://{self.execd_endpoint.endpoint}"
-        timeout_seconds = self.connection_config.request_timeout.total_seconds()
+        timeout_seconds = min(
+            self.connection_config.request_timeout.total_seconds(),
+            HEALTH_PING_TIMEOUT.total_seconds(),
+        )
         timeout = httpx.Timeout(timeout_seconds)
 
         headers = self.execd_endpoint.build_request_headers(self.connection_config)
