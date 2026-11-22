@@ -331,6 +331,42 @@ func TestAnchorLedgerDropTableStopsRestoring(t *testing.T) {
 	require.Empty(t, ledger.Enforcement())
 }
 
+func TestAnchorLedgerFailedCaptureInvalidatesPreviousAnchor(t *testing.T) {
+	kernel := &fakeKernel{ruleset: multiRuleJSON(), table: []byte(multiRuleReadback().Text)}
+	ledger := NewAnchorLedger(kernel.run)
+	require.NoError(t, ledger.AnchorTable(context.Background(), "ip", "opensandbox_multi", func(_ context.Context) error {
+		kernel.reapplies++
+		return nil
+	}))
+
+	// A mutation installs the caller's newest desired state (the kernel now
+	// holds a state the old snapshot does not describe), but its re-anchor
+	// capture fails. The superseded anchor must be dropped: retaining it would
+	// make every following reconcile read the correctly installed table,
+	// judge it drifted against the stale snapshot, and burn restore failures
+	// (and eventually escalate) until the next capture succeeds.
+	kernel.ruleset, kernel.table = dropSecondRule(t)
+	kernel.jsonErr = errors.New("nft list failed")
+	require.Error(t, ledger.AnchorTable(context.Background(), "ip", "opensandbox_multi", func(_ context.Context) error {
+		kernel.reapplies++
+		return nil
+	}))
+	kernel.jsonErr = nil
+
+	require.Empty(t, ledger.Enforcement(), "a failed capture must not leave the previous anchor in place")
+	ledger.ReconcileOnce(context.Background())
+	require.Zero(t, kernel.reapplies, "the loop must never restore against a stale anchor")
+
+	// The next successful capture re-arms verification from live state.
+	require.NoError(t, ledger.AnchorTable(context.Background(), "ip", "opensandbox_multi", func(_ context.Context) error {
+		kernel.reapplies++
+		return nil
+	}))
+	records := ledger.Enforcement()
+	require.Len(t, records, 1)
+	require.Equal(t, EnforcementConfirmed, records[0].State)
+}
+
 func minimalTableJSON(family, table string) []byte {
 	return []byte(fmt.Sprintf(`{"nftables":[{"metainfo":{"json_schema_version":1}},{"table":{"family":%q,"name":%q,"handle":1}},{"chain":{"family":%q,"table":%q,"name":"output","handle":2,"type":"nat","hook":"output","prio":-100,"policy":"accept"}}]}`, family, table, family, table))
 }

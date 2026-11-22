@@ -314,12 +314,18 @@ func (l *AnchorLedger) SetUnrestorableHook(hook func(TableEnforcement)) {
 // AnchorTable captures the live state of one owned table and records it as the
 // expected state, bumping the epoch so any in-flight verification of the
 // previous state is discarded. Call it right after a successful install; the
-// capture itself is the install's first verification. An error here leaves any
-// previous anchor in place and only degrades drift detection until the next
-// mutation re-anchors — it must never fail the install that already committed.
+// capture itself is the install's first verification. A failed capture drops
+// any previous anchor for the table instead of retaining it: the reapply
+// closure restores the caller's CURRENT desired state, so once a capture fails
+// the old snapshot no longer describes what a restore produces, and keeping it
+// would make every later reconcile judge correct state as drift and count
+// restore failures against it. It must never fail the install that already
+// committed; the table is simply left unanchored until the next successful
+// capture re-records it.
 func (l *AnchorLedger) AnchorTable(ctx context.Context, family, table string, reapply func(context.Context) error) error {
 	readback, err := SnapshotTable(ctx, l.run, family, table)
 	if err != nil {
+		l.DropTable(family, table)
 		return err
 	}
 	l.mu.Lock()
