@@ -150,6 +150,7 @@ const (
 
 type taskClient interface {
 	Set(ctx context.Context, task *api.Task) (*api.Task, error)
+	SetWithOwner(ctx context.Context, task *api.Task, owner api.TaskOwner) (*api.Task, error)
 	Get(ctx context.Context) (*api.Task, error)
 }
 
@@ -391,9 +392,12 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 	var wg sync.WaitGroup
 	for idx := range sch.taskNodes {
 		tNode := sch.taskNodes[idx]
+		// Resolve the bound Pod identity before fanning out: allPods is owned by
+		// the scheduling goroutine, while the per-node work runs concurrently.
+		owner := sch.taskOwnerFor(tNode)
 		semaphore <- struct{}{}
 		wg.Add(1)
-		go func(node *taskNode) {
+		go func(node *taskNode, owner api.TaskOwner) {
 			defer func() {
 				<-semaphore
 				wg.Done()
@@ -403,8 +407,8 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 			if node.IP != "" && !node.IsResourceReleased() && !sch.hasValidPodBinding(node) {
 				sch.releaseMissingPod(node)
 			}
-			scheduleSingleTaskNode(node, sch.taskClientCreator, sch.resPolicyWhenTaskComplete, sch.logger)
-		}(tNode)
+			scheduleSingleTaskNode(node, sch.taskClientCreator, sch.resPolicyWhenTaskComplete, owner, sch.logger)
+		}(tNode, owner)
 	}
 	wg.Wait()
 	return nil
@@ -455,8 +459,24 @@ func needRelease(tNode *taskNode, policy sandboxv1alpha1.TaskResourcePolicy) boo
 	return false
 }
 
+// taskOwnerFor resolves the identity of the Pod a task node is bound to. Every
+// setTasks request asserts it so the receiving executor can refuse task lists
+// addressed to a different Pod: a stale scheduler whose Pod was deleted keeps
+// targeting the old identity, and a replacement Pod at the reused IP rejects
+// the list instead of stopping its own task. When the bound Pod is missing from
+// the current snapshot only the name is asserted; the receiver may still fence
+// by name, and a missing Pod is not a legitimate send target anyway.
+func (sch *defaultTaskScheduler) taskOwnerFor(tNode *taskNode) api.TaskOwner {
+	for _, pod := range sch.allPods {
+		if pod.Name == tNode.PodName && pod.Status.PodIP == tNode.IP {
+			return api.TaskOwner{PodName: pod.Name, PodUID: string(pod.UID)}
+		}
+	}
+	return api.TaskOwner{PodName: tNode.PodName}
+}
+
 // scheduleSingleTaskNode handles scheduling for a single task node based on its state
-func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint string) taskClient, resPolicyWhenTaskComplete sandboxv1alpha1.TaskResourcePolicy, log logr.Logger) {
+func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint string) taskClient, resPolicyWhenTaskComplete sandboxv1alpha1.TaskResourcePolicy, owner api.TaskOwner, log logr.Logger) {
 	if tNode.IsResourceReleased() {
 		return
 	}
@@ -477,7 +497,7 @@ func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint str
 					Process:         tNode.Spec.Process,
 					PodTemplateSpec: tNode.Spec.PodTemplateSpec,
 				}
-				_, err := setTask(taskClientCreator(tNode.IP), task, log)
+				_, err := setTask(taskClientCreator(tNode.IP), task, owner, log)
 				if err != nil {
 					log.Error(err, "Failed to set task", "taskName", tNode.Name, "endpoint", tNode.IP)
 				}
@@ -488,7 +508,7 @@ func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint str
 		if tNode.isTaskDeleted() {
 			tNode.transSchState(stateReleased, log)
 		} else {
-			_, err := setTask(taskClientCreator(tNode.IP), nil, log)
+			_, err := setTask(taskClientCreator(tNode.IP), nil, owner, log)
 			if err != nil {
 				log.Error(err, "Failed to notify executor about releasing task", "taskName", tNode.Name, "endpoint", tNode.IP)
 			} else {
@@ -498,14 +518,14 @@ func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint str
 	}
 }
 
-func setTask(client taskClient, task *api.Task, log logr.Logger) (*api.Task, error) {
+func setTask(client taskClient, task *api.Task, owner api.TaskOwner, log logr.Logger) (*api.Task, error) {
 	ctx, cancel := contextForSetTask(task)
 	defer cancel()
 	verboseLog := log.V(3)
 	if verboseLog.Enabled() {
-		verboseLog.Info("client set task", "task", utils.DumpJSON(task))
+		verboseLog.Info("client set task", "task", utils.DumpJSON(task), "owner", utils.DumpJSON(owner))
 	}
-	return client.Set(ctx, task)
+	return client.SetWithOwner(ctx, task, owner)
 }
 
 func contextForSetTask(task *api.Task) (context.Context, context.CancelFunc) {

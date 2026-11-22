@@ -34,6 +34,14 @@ spec:
               value: /opt/opensandbox/.env
             - name: EXECD
               value: /opt/opensandbox/execd
+            - name: TASK_EXECUTOR_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TASK_EXECUTOR_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
           image: sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/code-interpreter:v1.1.0
           name: sandbox
           volumeMounts:

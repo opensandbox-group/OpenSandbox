@@ -46,10 +46,16 @@ var testLogger = logr.New(mockLogger{})
 type deadlineRecordingTaskClient struct {
 	hasDeadline bool
 	deadline    time.Time
+	owner       api.TaskOwner
 }
 
 func (c *deadlineRecordingTaskClient) Set(ctx context.Context, task *api.Task) (*api.Task, error) {
+	return c.SetWithOwner(ctx, task, api.TaskOwner{})
+}
+
+func (c *deadlineRecordingTaskClient) SetWithOwner(ctx context.Context, task *api.Task, owner api.TaskOwner) (*api.Task, error) {
 	c.deadline, c.hasDeadline = ctx.Deadline()
+	c.owner = owner
 	return task, nil
 }
 
@@ -74,7 +80,7 @@ func TestSetTaskUsesPreStartHookTimeoutForDeadline(t *testing.T) {
 				},
 			},
 		},
-	}, testLogger)
+	}, api.TaskOwner{}, testLogger)
 
 	if err != nil {
 		t.Fatalf("setTask returned error: %v", err)
@@ -102,7 +108,7 @@ func TestSetTaskUsesFallbackDeadlineWhenPreStartHookHasNoTimeout(t *testing.T) {
 				},
 			},
 		},
-	}, testLogger)
+	}, api.TaskOwner{}, testLogger)
 
 	if err != nil {
 		t.Fatalf("setTask returned error: %v", err)
@@ -112,6 +118,19 @@ func TestSetTaskUsesFallbackDeadlineWhenPreStartHookHasNoTimeout(t *testing.T) {
 	}
 	if remaining := time.Until(client.deadline); remaining < 30*time.Minute-defaultTimeout {
 		t.Fatalf("setTask deadline = %v from now, want the fallback preStart timeout", remaining)
+	}
+}
+
+func TestSetTaskAssertsPodOwner(t *testing.T) {
+	client := &deadlineRecordingTaskClient{}
+	owner := api.TaskOwner{PodName: "pod-a", PodUID: "uid-a"}
+
+	_, err := setTask(client, &api.Task{Name: "task-0"}, owner, testLogger)
+	if err != nil {
+		t.Fatalf("setTask returned error: %v", err)
+	}
+	if client.owner != owner {
+		t.Fatalf("setTask asserted owner %+v, want %+v", client.owner, owner)
 	}
 }
 
@@ -129,6 +148,7 @@ func Test_scheduleSingleTaskNode(t *testing.T) {
 	type args struct {
 		tNode             *taskNode
 		taskClientCreator func(endpoint string) taskClient
+		owner             api.TaskOwner
 	}
 	tests := []struct {
 		name           string
@@ -174,7 +194,7 @@ func Test_scheduleSingleTaskNode(t *testing.T) {
 				},
 				taskClientCreator: func(endpoint string) taskClient {
 					mock := NewMocktaskClient(ctl)
-					mock.EXPECT().Set(gomock.Any(), nil).Return(nil, nil).Times(1)
+					mock.EXPECT().SetWithOwner(gomock.Any(), nil, api.TaskOwner{}).Return(nil, nil).Times(1)
 					return mock
 				},
 			},
@@ -220,12 +240,12 @@ func Test_scheduleSingleTaskNode(t *testing.T) {
 				},
 				taskClientCreator: func(endpoint string) taskClient {
 					mock := NewMocktaskClient(ctl)
-					mock.EXPECT().Set(gomock.Any(), &api.Task{
+					mock.EXPECT().SetWithOwner(gomock.Any(), &api.Task{
 						Name: "test-batch-sandbox-0",
 						Process: &api.Process{
 							Command: []string{"hello"},
 						},
-					}).Return(nil, nil).Times(1)
+					}, api.TaskOwner{}).Return(nil, nil).Times(1)
 					return mock
 				},
 			},
@@ -286,9 +306,55 @@ func Test_scheduleSingleTaskNode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scheduleSingleTaskNode(tt.args.tNode, tt.args.taskClientCreator, "", testLogger)
+			scheduleSingleTaskNode(tt.args.tNode, tt.args.taskClientCreator, "", tt.args.owner, testLogger)
 			if !reflect.DeepEqual(tt.expectTaskNode, tt.args.tNode) {
 				t.Errorf("scheduleSingleTaskNode, want %+v, got %+v", tt.expectTaskNode, tt.args.tNode)
+			}
+		})
+	}
+}
+
+func Test_taskOwnerFor(t *testing.T) {
+	sch := &defaultTaskScheduler{
+		allPods: []*corev1.Pod{
+			{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod-a", UID: "uid-a"},
+				Status:     corev1.PodStatus{PodIP: "1.1.1.1"},
+			},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		tNode *taskNode
+		want  api.TaskOwner
+	}{
+		{
+			name:  "bound pod present with same name and IP",
+			tNode: &taskNode{IP: "1.1.1.1", PodName: "pod-a"},
+			want:  api.TaskOwner{PodName: "pod-a", PodUID: "uid-a"},
+		},
+		{
+			name:  "same pod name but different IP",
+			tNode: &taskNode{IP: "1.1.1.9", PodName: "pod-a"},
+			want:  api.TaskOwner{PodName: "pod-a"},
+		},
+		{
+			name:  "same IP but different pod name",
+			tNode: &taskNode{IP: "1.1.1.1", PodName: "pod-b"},
+			want:  api.TaskOwner{PodName: "pod-b"},
+		},
+		{
+			name:  "no pod name",
+			tNode: &taskNode{IP: "1.1.1.1"},
+			want:  api.TaskOwner{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sch.taskOwnerFor(tt.tNode); got != tt.want {
+				t.Fatalf("taskOwnerFor() = %+v, want %+v", got, tt.want)
 			}
 		})
 	}
@@ -902,7 +968,7 @@ func Test_defaultTaskScheduler_ScheduleKeepsReleasingOnQueryFailure(t *testing.T
 	mockCollector.EXPECT().Collect(gomock.Any(), []string{"1.1.1.1"}).
 		Return(map[string]*api.Task{}, errors.New("timeout")).Times(1)
 	mockClient := NewMocktaskClient(ctl)
-	mockClient.EXPECT().Set(gomock.Any(), nil).Return(nil, nil).Times(1)
+	mockClient.EXPECT().SetWithOwner(gomock.Any(), nil, api.TaskOwner{PodName: "pod-1"}).Return(nil, nil).Times(1)
 
 	tNode := &taskNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -937,6 +1003,43 @@ func Test_defaultTaskScheduler_ScheduleKeepsReleasingOnQueryFailure(t *testing.T
 	}
 	if tNode.sState != stateReleasing {
 		t.Errorf("sState = %q, want %q", tNode.sState, stateReleasing)
+	}
+}
+
+// The scheduler must assert the identity of the Pod its task node is bound to,
+// so a replacement Pod at a reused IP can refuse a task list addressed to the
+// Pod it replaced.
+func Test_defaultTaskScheduler_ScheduleAssertsBoundPodIdentity(t *testing.T) {
+	ctl := gomock.NewController(t)
+	mockClient := NewMocktaskClient(ctl)
+	mockClient.EXPECT().SetWithOwner(gomock.Any(),
+		&api.Task{
+			Name:    "task-1",
+			Process: &api.Process{Command: []string{"echo", "hello"}},
+		},
+		api.TaskOwner{PodName: "pod-1", PodUID: "uid-1"}).Return(nil, nil).Times(1)
+
+	tNode := &taskNode{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-1"},
+		IP:         "1.1.1.1",
+		PodName:    "pod-1",
+		Spec: taskSpec{
+			Process: &api.Process{Command: []string{"echo", "hello"}},
+		},
+	}
+	sch := &defaultTaskScheduler{
+		allPods: []*corev1.Pod{{
+			ObjectMeta: metav1.ObjectMeta{Name: "pod-1", UID: "uid-1"},
+			Status:     corev1.PodStatus{PodIP: "1.1.1.1"},
+		}},
+		taskNodes:         []*taskNode{tNode},
+		maxConcurrency:    1,
+		taskClientCreator: func(string) taskClient { return mockClient },
+		logger:            testLogger,
+	}
+
+	if err := sch.scheduleTaskNodes(); err != nil {
+		t.Fatalf("scheduleTaskNodes() error = %v", err)
 	}
 }
 
@@ -1332,7 +1435,7 @@ func Test_scheduleTaskNodes(t *testing.T) {
 					mockClient = NewMocktaskClient(ctl)
 					mockClients[ip] = mockClient
 				}
-				mockClient.EXPECT().Set(gomock.Any(), expectedTask).Return(expectedTask, nil).Times(1)
+				mockClient.EXPECT().SetWithOwner(gomock.Any(), expectedTask, gomock.Any()).Return(expectedTask, nil).Times(1)
 			}
 
 			sch := &defaultTaskScheduler{

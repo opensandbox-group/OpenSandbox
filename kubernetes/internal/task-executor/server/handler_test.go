@@ -36,8 +36,9 @@ import (
 
 // MockTaskManager implements manager.TaskManager for testing
 type MockTaskManager struct {
-	tasks map[string]*types.Task
-	err   error
+	tasks     map[string]*types.Task
+	err       error
+	syncCalls int
 }
 
 func NewMockTaskManager() *MockTaskManager {
@@ -58,6 +59,7 @@ func (m *MockTaskManager) Sync(ctx context.Context, desired []*types.Task) ([]*t
 	if m.err != nil {
 		return nil, m.err
 	}
+	m.syncCalls++
 	m.tasks = make(map[string]*types.Task)
 	var result []*types.Task
 	for _, t := range desired {

@@ -37,7 +37,11 @@ func (c *identityRecordingClient) Get(context.Context) (*api.Task, error) {
 	return c.task, nil
 }
 
-func (c *identityRecordingClient) Set(_ context.Context, task *api.Task) (*api.Task, error) {
+func (c *identityRecordingClient) Set(ctx context.Context, task *api.Task) (*api.Task, error) {
+	return c.SetWithOwner(ctx, task, api.TaskOwner{})
+}
+
+func (c *identityRecordingClient) SetWithOwner(_ context.Context, task *api.Task, _ api.TaskOwner) (*api.Task, error) {
 	c.sets.Add(1)
 	return task, nil
 }

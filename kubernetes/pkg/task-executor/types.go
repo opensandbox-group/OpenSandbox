@@ -32,6 +32,15 @@ type Task struct {
 	PodStatus     *corev1.PodStatus `json:"podStatus,omitempty"`
 }
 
+// TaskOwner identifies the Pod that a task list is bound to. Senders assert it
+// on setTasks requests so the receiving task-executor can refuse task lists
+// that were addressed to a different Pod, for example a stale scheduler that
+// keeps pushing to a Pod IP the CNI reused for a replacement Pod.
+type TaskOwner struct {
+	PodName string `json:"podName,omitempty"`
+	PodUID  string `json:"podUID,omitempty"`
+}
+
 // ExecMode defines where a process should be executed.
 type ExecMode string
 

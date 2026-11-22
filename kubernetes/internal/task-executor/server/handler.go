@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -105,6 +106,7 @@ func (h *handler) syncTasks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	desired := make([]*types.Task, 0, len(apiTasks))
+	desiredNames := make([]string, 0, len(apiTasks))
 	for i := range apiTasks {
 		if apiTasks[i].Name == "" {
 			continue
@@ -112,7 +114,33 @@ func (h *handler) syncTasks(w http.ResponseWriter, r *http.Request) {
 		task := h.convertAPIToInternalTask(&apiTasks[i])
 		if task != nil {
 			desired = append(desired, task)
+			desiredNames = append(desiredNames, task.Name)
 		}
+	}
+
+	// Owner fencing: refuse a task list that was addressed to a different Pod
+	// instead of applying it. Applying a foreign list would stop the task this
+	// executor is running. Nothing is mutated on rejection, so already
+	// completed tasks keep their outcome and stay readable.
+	local := api.TaskOwner{}
+	claimed := api.TaskOwner{}
+	if h.config != nil {
+		local = api.TaskOwner{PodName: h.config.PodName, PodUID: h.config.PodUID}
+	}
+	claimed.PodName = r.Header.Get(api.HeaderTaskOwnerPodName)
+	claimed.PodUID = r.Header.Get(api.HeaderTaskOwnerPodUID)
+	if ownerMismatch(local, claimed) {
+		err := fmt.Errorf("task owner mismatch: request asserts pod %q (uid %q) but this executor belongs to pod %q (uid %q)",
+			claimed.PodName, claimed.PodUID, local.PodName, local.PodUID)
+		klog.ErrorS(err, "rejected task sync from a different pod owner",
+			"taskNames", strings.Join(desiredNames, ","),
+			"localPodName", local.PodName,
+			"localPodUID", local.PodUID,
+			"claimedPodName", claimed.PodName,
+			"claimedPodUID", claimed.PodUID,
+			"remoteAddr", r.RemoteAddr)
+		writeError(w, http.StatusConflict, err.Error())
+		return
 	}
 
 	current, err := h.manager.Sync(r.Context(), desired)
