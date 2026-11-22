@@ -21,7 +21,7 @@ import (
 
 // Package values are typically overridden at build time via -ldflags.
 var (
-	Version = "dirty"
+	Version   = "dirty"
 	BuildTime = "assigned-at-build-time"
 	GitCommit = "assigned-at-build-time"
 )

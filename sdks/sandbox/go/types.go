@@ -518,12 +518,12 @@ const SandboxOriginHeader = "Open-Sandbox-Origin"
 type TemplatePhase string
 
 const (
-	TemplatePhasePending TemplatePhase = "Pending"
+	TemplatePhasePending  TemplatePhase = "Pending"
 	TemplatePhaseBuilding TemplatePhase = "Building"
 	// TemplatePhaseSucceeded indicates the build finished; the template can
 	// back sandbox creation.
 	TemplatePhaseSucceeded TemplatePhase = "Succeeded"
-	TemplatePhaseFailed TemplatePhase = "Failed"
+	TemplatePhaseFailed    TemplatePhase = "Failed"
 )
 
 // TemplateFormat is the storage encoding of a template's produced snapshot
@@ -579,8 +579,8 @@ type CreateTemplateRequest struct {
 	// as /etc/sandbox-init.env in the guest; literal values only). The source
 	// image's own OCI Config.Env is inherited; an env with the same name
 	// overrides the inherited value. Names must be valid shell variable names.
-	Env map[string]string `json:"env,omitempty"`
-	Metadata map[string]string `json:"metadata,omitempty"`
+	Env       map[string]string  `json:"env,omitempty"`
+	Metadata  map[string]string  `json:"metadata,omitempty"`
 	Readiness *TemplateReadiness `json:"readiness,omitempty"`
 	// Format is the storage encoding of the produced snapshot set. Defaults
 	// to overlaybd.

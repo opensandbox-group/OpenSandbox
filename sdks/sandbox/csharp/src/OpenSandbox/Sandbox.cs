@@ -721,6 +721,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// Patches metadata for this sandbox.
     /// </summary>
     /// <param name="patch">Metadata merge patch. Non-null values add or replace keys; null values delete keys.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The current sandbox information after applying the patch.</returns>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<SandboxInfo> PatchMetadataAsync(
@@ -771,6 +772,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// Resumes this paused sandbox and returns a fresh, connected instance.
     /// </summary>
     /// <param name="options">Optional resume options.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A new sandbox instance with refreshed connections.</returns>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     /// <exception cref="SandboxReadyTimeoutException">Thrown when readiness checks exceed timeout.</exception>
@@ -813,6 +815,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// server timeout limit does not apply.
     /// </summary>
     /// <param name="timeoutSeconds">The new timeout in seconds from now.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The renewal response.</returns>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<RenewSandboxExpirationResponse> RenewAsync(
@@ -830,6 +833,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// Creates a persistent snapshot from this sandbox.
     /// </summary>
     /// <param name="name">Optional snapshot name.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     public Task<SnapshotInfo> CreateSnapshotAsync(
         string? name = null,
         CancellationToken cancellationToken = default)
@@ -849,6 +853,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// default ("full"). <see cref="SnapshotModes.RootfsOnly"/> requires the fast-sandbox backend;
     /// restoring it cold-boots a fresh sandbox.
     /// </param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <remarks>
     /// Deliberately a distinct method (not an overload of <see cref="CreateSnapshotAsync"/>):
     /// a mode parameter inserted next to the published <c>string?</c>/<c>CancellationToken</c>
@@ -879,6 +884,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// Replaces matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays.
     /// </summary>
     /// <param name="rules">Patch egress rules payload.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task PatchEgressRulesAsync(
         IReadOnlyList<NetworkRule> rules,
         CancellationToken cancellationToken = default)
@@ -901,6 +907,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// </summary>
     /// <param name="credentials">Credentials to create.</param>
     /// <param name="bindings">Bindings to create.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Sanitized Credential Vault state.</returns>
     public async Task<CredentialVaultState> CreateCredentialVaultAsync(
         IReadOnlyList<Credential> credentials,
@@ -923,6 +930,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// Atomically patches sandbox-local credentials and bindings.
     /// </summary>
     /// <param name="request">Patch request.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Sanitized Credential Vault state.</returns>
     public async Task<CredentialVaultState> PatchCredentialVaultAsync(
         CredentialVaultPatchRequest request,
@@ -953,6 +961,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// Gets sanitized metadata for one credential.
     /// </summary>
     /// <param name="name">Credential name.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Sanitized credential metadata.</returns>
     public async Task<CredentialMetadata> GetCredentialVaultCredentialAsync(
         string name,
@@ -975,6 +984,7 @@ public sealed class Sandbox : IAsyncDisposable
     /// Gets sanitized metadata for one binding.
     /// </summary>
     /// <param name="name">Binding name.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Sanitized binding metadata.</returns>
     public async Task<CredentialBindingMetadata> GetCredentialVaultBindingAsync(
         string name,
@@ -996,7 +1006,9 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets a signed endpoint for a port with an OSEP-0011 route token.
     /// </summary>
+    /// <param name="port">The port number.</param>
     /// <param name="expires">Unix epoch seconds for the signed route token expiry.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The endpoint information.</returns>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<Endpoint> GetSignedEndpointAsync(int port, long expires, CancellationToken cancellationToken = default)

@@ -43,7 +43,7 @@ var (
 // records per-sandbox last-traffic observations in Redis, and requests that
 // hit a paused fast sandbox park while a resume flight restores it.
 var (
-	ActivityEnabled bool
+	ActivityEnabled  bool
 	ActivityRedisDSN string
 	// ActivityMinInterval coalesces writes per sandbox.
 	ActivityMinInterval time.Duration
