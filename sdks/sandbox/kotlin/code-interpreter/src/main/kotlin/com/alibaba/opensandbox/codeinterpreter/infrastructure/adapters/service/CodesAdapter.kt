@@ -152,11 +152,7 @@ class CodesAdapter(
                                 ExecdEventSupport.decodeEventLine(line) { failingLine, error ->
                                     logger.error("Failed to parse SSE line: {}", failingLine, error)
                                 } ?: return@forEach
-                            try {
-                                dispatcher.dispatch(eventNode)
-                            } catch (e: Exception) {
-                                logger.error("Failed to dispatch SSE event: {}", eventNode, e)
-                            }
+                            dispatcher.dispatch(eventNode)
                         }
                 }
             }

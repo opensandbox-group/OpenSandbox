@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.CreateIsolat
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedCapabilities
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedOverlaySpec
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunOpts
+import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedRunRequest
 import com.alibaba.opensandbox.sandbox.domain.models.execd.isolated.IsolatedWorkspaceSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import kotlinx.serialization.json.Json
@@ -628,6 +629,34 @@ class IsolatedSessionsAdapterTest {
         val request = mockWebServer.takeRequest()
         assertEquals("GET", request.method)
         assertEquals("/v1/isolated/session/missing-sess", request.path)
+    }
+
+    @Test
+    fun `run should skip malformed events and keep valid results`() {
+        mockWebServer.enqueue(MockResponse().setBody("""{"status":"active"}"""))
+        mockWebServer.enqueue(
+            MockResponse().setBody(
+                """
+                : keepalive
+                data: not-json
+                data: {"type":"error","timestamp":1}
+                data: {"type":"result","results":{"text":{"invalid":true}},"timestamp":2}
+                data: {"type":"result","results":{"text":"  value  "},"timestamp":3}
+                data: {"type":"result","results":{"text":null},"timestamp":4}
+                data: {"type":"execution_complete","execution_time":10,"timestamp":5}
+                """.trimIndent(),
+            ),
+        )
+
+        val session = adapter.attach("sess-1")
+        val execution = session.run(IsolatedRunRequest(code = "echo value"))
+
+        assertNull(execution.error)
+        assertEquals(listOf("  value  ", ""), execution.result.map { it.text })
+        assertEquals(10L, execution.complete?.executionTimeInMillis)
+        assertEquals(0, execution.exitCode)
+        assertEquals("/v1/isolated/session/sess-1", mockWebServer.takeRequest().path)
+        assertEquals("/v1/isolated/session/sess-1/run", mockWebServer.takeRequest().path)
     }
 
     @Test
