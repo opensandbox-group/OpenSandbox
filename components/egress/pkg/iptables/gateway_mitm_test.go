@@ -48,6 +48,32 @@ func TestMitmRedirectScriptV6(t *testing.T) {
 	require.Contains(t, script, `ip6 saddr fd00::5 tcp dport {80,443} dnat to fd00::1:18081`)
 }
 
+// TestMitmRedirectScriptDeterministicEntryOrder: multiple subjects arrive
+// through a Go map, and the rebuild's exact textual state is what the anchor
+// ledger verifies. The rendered rules must be independent of iteration order,
+// or a semantically identical rebuild would be reported as drift.
+func TestMitmRedirectScriptDeterministicEntryOrder(t *testing.T) {
+	entries := []MitmRedirectEntry{
+		{SandboxIP: netip.MustParseAddr("fd00::5"), Gateway: netip.MustParseAddr("fd00::1")},
+		{SandboxIP: netip.MustParseAddr("10.0.0.10"), Gateway: netip.MustParseAddr("10.0.0.1")},
+		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
+		{SandboxIP: netip.MustParseAddr("10.0.0.9"), Gateway: netip.MustParseAddr("10.0.0.1")},
+	}
+	want := mitmRedirectScript(entries, 18081, []int{80, 443})
+	for shift := 1; shift < len(entries); shift++ {
+		rotated := append(append([]MitmRedirectEntry(nil), entries[shift:]...), entries[:shift]...)
+		require.Equal(t, want, mitmRedirectScript(rotated, 18081, []int{80, 443}))
+	}
+
+	// Rules are ordered by unmapped sandbox address: numeric IPv4 first, then
+	// IPv6 (netip.Addr.Compare orders IPv4 before IPv6).
+	ruleIndex := func(addr string) int { return strings.Index(want, "saddr "+addr+" tcp") }
+	require.NotEqual(t, -1, ruleIndex("10.0.0.5"))
+	require.Less(t, ruleIndex("10.0.0.5"), ruleIndex("10.0.0.9"))
+	require.Less(t, ruleIndex("10.0.0.9"), ruleIndex("10.0.0.10"))
+	require.Less(t, ruleIndex("10.0.0.10"), ruleIndex("fd00::5"))
+}
+
 func TestMitmRedirectScriptExtraPortsAndEmpty(t *testing.T) {
 	script := mitmRedirectScript([]MitmRedirectEntry{
 		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},

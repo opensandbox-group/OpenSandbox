@@ -47,6 +47,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -62,6 +63,25 @@ type MitmRedirectEntry struct {
 	Gateway   netip.Addr
 }
 
+// sortedMitmRedirectEntries returns a copy of entries in a deterministic
+// order: unmapped sandbox address first, then gateway. The interception table
+// is rebuilt wholesale on every lifecycle change from a Go map, and the anchor
+// ledger verifies the result against an exact textual snapshot where rule order
+// is semantic — an unsorted map iteration would make two semantically identical
+// rebuilds differ textually, so the reconcile loop would flag a correctly
+// installed table as drifted and burn restore failures on it.
+func sortedMitmRedirectEntries(entries []MitmRedirectEntry) []MitmRedirectEntry {
+	sorted := append([]MitmRedirectEntry(nil), entries...)
+	sort.Slice(sorted, func(i, j int) bool {
+		left, right := sorted[i], sorted[j]
+		if cmp := left.SandboxIP.Unmap().Compare(right.SandboxIP.Unmap()); cmp != 0 {
+			return cmp < 0
+		}
+		return left.Gateway.Unmap().Compare(right.Gateway.Unmap()) < 0
+	})
+	return sorted
+}
+
 // mitmRedirectScript builds the wholesale table rebuild for the given entries.
 func mitmRedirectScript(entries []MitmRedirectEntry, port int, dports []int) string {
 	var b strings.Builder
@@ -69,7 +89,7 @@ func mitmRedirectScript(entries []MitmRedirectEntry, port int, dports []int) str
 	fmt.Fprintf(&b, "add table inet %s\n", GatewayMitmNftTable)
 	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", GatewayMitmNftTable)
 	dportList := mitmDportList(dports)
-	for _, e := range entries {
+	for _, e := range sortedMitmRedirectEntries(entries) {
 		key := "ip"
 		addr := e.SandboxIP.Unmap()
 		if addr.Is6() {
