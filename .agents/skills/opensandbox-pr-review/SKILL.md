@@ -1,7 +1,7 @@
 ---
 name: opensandbox-pr-review
 version: 1.0.0
-description: Deep-review a GitHub PR in the OpenSandbox repository (评审 PR / review PR / 给我一份评审报告 / 中文报告 / 中英双语报告). Runs OCR tool review on the PR ref range, independently verifies every factual claim in code and tests (bug reproduction on the base commit, tests on the PR branch inside isolated worktrees), and produces a concise professional report — Markdown in chat, optionally a standalone HTML with Chinese/English toggle — with severity-graded findings and exact file:line references.
+description: Deep-review a GitHub PR in the OpenSandbox repository (评审 PR / review PR / 给我一份评审报告 / 中文报告 / 中英双语报告). Runs OCR tool review (when available) on the PR ref range, independently verifies every factual claim in code and tests (bug reproduction on the base commit, tests on the PR branch inside isolated worktrees), and produces a concise professional report — Markdown in chat plus a standalone HTML with Chinese/English toggle by default — with severity-graded findings and exact file:line references.
 ---
 
 # OpenSandbox PR Review (OCR + Manual Verification)
@@ -32,12 +32,12 @@ Fetch PR metadata with `gh` (structured JSON — no HTML scraping):
 
 ```bash
 gh pr view <number> --repo opensandbox-group/OpenSandbox \
-  --json title,body,author,baseRefName,headRefName,headRepository,headRepositoryOwner,commits,files,labels
+  --json title,body,author,baseRefName,headRefName,headRepository,headRepositoryOwner,commits,files,labels,statusCheckRollup,reviews,comments
 ```
 
 Extract from the output:
 
-- Title, base branch (`baseRefName`), head branch (`headRefName`) plus head repo/owner, author, commit list
+- Title, base branch (`baseRefName`), head branch (`headRefName`) plus head repo/owner, author, commit list, and CI/review status (`statusCheckRollup`, `reviews`, `comments` — helpful for spotting unrun CI jobs or open feedback, still verified independently)
 - The claimed problem: mechanism, reproduction claim, stated fix, stated testing, breaking-change statement
 - Build a **claim checklist** from the body — every concrete assertion to verify in later steps (e.g. "resultChan holds 10 results", "grace period 2s by default", "fails on main with expected 15, actual 11")
 
@@ -69,8 +69,7 @@ Record `$BASE` and `$HEAD` (`<BASE>..<HEAD>`) — this resolved commit range fee
 - `Read` the **full changed files**, not just the diff hunks. Line numbers in the report must reference the PR-head version.
 - For each item in the claim checklist, locate the definition with `grep`/`read` and confirm or refute it (constants, capacities, defaults, call sites).
 - Trace the call chain for bypass paths: if a fix routes behavior through a new helper, verify **all** relevant callers use it.
-- For concurrency changes (atomics, locks, channels), reason the memory-ordering argument explicitly; confirm the guarantee holds under Go's sequentially-consistent atomics.
-- Check liveness: identify what releases blocked paths (cancellation channels, disconnect hooks) and confirm the fix does not change it.
+- For concurrency changes (atomics, locks, channels), reason the memory-ordering argument explicitly (e.g. Go's sequentially-consistent atomics) and check liveness by identifying what releases blocked paths (cancellation channels, disconnect hooks) and confirming the fix does not break it.
 
 ### Step 4: OCR tool review
 
@@ -130,7 +129,7 @@ Concise, professional, human-readable. Verdict first. Structure:
 
 1. **Header** — PR title/branch, size (`commits · files · +x/−y`), review range, method; a one-line verdict banner (e.g. 推荐合入 + reason)
 2. **变更内容 / What changed** — 3–5 bullets, what was done and where (file:line)
-3. **缺陷验证 / Bug verification** — mechanism (verified), reproduction result, concurrency-correctness reasoning, liveness — each one bullet
+3. **缺陷验证 / Bug verification** — mechanism (verified), reproduction result, and edge-case / bypass check (plus concurrency-correctness and liveness reasoning when applicable) — each one bullet
 4. **评估 / Assessment** — verdict-style table: performance / compatibility / tests, one line each with a ✓ verdict
 5. **发现 / Findings** — by severity; each finding: badge + `file:line` + 现象→建议, plus whether it is introduced by this PR or pre-existing (decides blocking vs follow-up)
 6. **验证记录 / Verification log** — table of what ran where, PASS/FAIL, with unrun items marked ⚠️
@@ -140,7 +139,7 @@ Writing rules: short sentences, one line per bullet, no repeated argumentation, 
 
 ### Step 7: HTML report with language toggle (default)
 
-Always close the review by generating the standalone `${TMPDIR:-/tmp}/pr-<N>-review-report.html` right after delivering the in-chat Markdown summary (or another user-specified path; avoid leaving untracked files in the repo working tree). Skip only when the user explicitly asks for Markdown only. Open it with `open <path>` on macOS and hand over the absolute path.
+Always close the review by generating the standalone `${TMPDIR:-/tmp}/pr-<N>-review-report.html` (or another user-specified path; avoid leaving untracked files in the repo working tree) alongside the in-chat Markdown summary, and hand over its absolute path. Skip only when the user explicitly asks for Markdown only. On macOS (when a desktop/GUI session is available), also open it with `open <path>`.
 
 - Toggle mechanism: `html[data-lang]` attribute + CSS `html[data-lang="zh"] .en { display:none !important }` (and vice versa); every translatable element carries `class="zh"` / `class="en"`; choice persisted in `localStorage`; default `zh`.
 - Styling: CSS custom properties + `prefers-color-scheme` for dark mode; severity badges (LOW amber, PASS green); `file:line` as inline code chips; no external dependencies, single file.
