@@ -166,7 +166,7 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		// MITM down: clear any interception table a previous generation
 		// (running with MITM up) may have left — stale rules would keep
 		// DNATing 80/443 to a now-unserved mitmproxy port (blackhole).
-		if err := iptables.RemoveMitmRedirects(); err != nil {
+		if err := iptables.RemoveMitmRedirects(ctx); err != nil {
 			log.Warnf("fast-sandbox mitmproxy: stale redirect table cleanup failed (ignored): %v", err)
 		}
 	} else if mitm != nil {
@@ -188,7 +188,7 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		// MITM disabled: clear any interception table a previous generation
 		// (running with MITM enabled) may have left — stale rules would keep
 		// DNATing 80/443 to a now-unserved mitmproxy port (blackhole).
-		if err := iptables.RemoveMitmRedirects(); err != nil {
+		if err := iptables.RemoveMitmRedirects(ctx); err != nil {
 			log.Warnf("fast-sandbox mitmproxy: stale redirect table cleanup failed (ignored): %v", err)
 		}
 	}

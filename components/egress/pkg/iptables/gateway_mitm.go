@@ -101,19 +101,24 @@ func mitmDportList(dports []int) string {
 }
 
 // InstallMitmRedirects rebuilds the per-sandbox interception table from the
-// authoritative entry list (the fast-sandbox server's in-memory subjects). Failures
-// are transactional: the previous table stays live. A missing table on first
-// install is retried without the delete line.
-func InstallMitmRedirects(entries []MitmRedirectEntry, port int, dports []int) error {
+// authoritative entry list (the fast-sandbox server's in-memory subjects).
+// Failures are transactional: the previous table stays live. A missing table on
+// first install is retried without the delete line. ctx bounds the nft
+// transaction, so a hung nft invocation cannot wedge the reconcile loop's
+// restore path or the caller's shutdown sequence.
+func InstallMitmRedirects(ctx context.Context, entries []MitmRedirectEntry, port int, dports []int) error {
+	return installMitmRedirects(ctx, defaultRedirectRunner(), entries, port, dports)
+}
+
+func installMitmRedirects(ctx context.Context, r redirectRunner, entries []MitmRedirectEntry, port int, dports []int) error {
 	if port <= 0 {
 		return fmt.Errorf("mitm redirect: invalid port %d", port)
 	}
-	r := defaultRedirectRunner()
 	script := mitmRedirectScript(entries, port, dports)
-	out, err := r.runNft(context.Background(), script)
+	out, err := r.runNft(ctx, script)
 	if err != nil {
 		if isMitmMissingTableError(out, err) {
-			if retryOut, retryErr := r.runNft(context.Background(), removeMitmDeleteTableLine(script)); retryErr == nil {
+			if retryOut, retryErr := r.runNft(ctx, removeMitmDeleteTableLine(script)); retryErr == nil {
 				log.Infof("mitm redirect installed after missing-table retry")
 				return nil
 			} else {
@@ -128,9 +133,9 @@ func InstallMitmRedirects(entries []MitmRedirectEntry, port int, dports []int) e
 
 // RemoveMitmRedirects removes the whole interception table (idempotent; a
 // missing table is not an error).
-func RemoveMitmRedirects() error {
+func RemoveMitmRedirects(ctx context.Context) error {
 	r := defaultRedirectRunner()
-	out, err := r.runNft(context.Background(), fmt.Sprintf("delete table inet %s\n", GatewayMitmNftTable))
+	out, err := r.runNft(ctx, fmt.Sprintf("delete table inet %s\n", GatewayMitmNftTable))
 	if err != nil {
 		if isMitmMissingTableError(out, err) {
 			return nil

@@ -120,8 +120,8 @@ type fastSandboxPolicyServer struct {
 	// Rebuild the Pod-netns table from mitmEntries under mitmMu; nil mitmInstall disables interception.
 	mitmMu      sync.Mutex
 	mitmEntries map[subject.Subject]iptables.MitmRedirectEntry
-	mitmInstall func(entries []iptables.MitmRedirectEntry) error
-	mitmRemove  func() error
+	mitmInstall func(ctx context.Context, entries []iptables.MitmRedirectEntry) error
+	mitmRemove  func(ctx context.Context) error
 	mitmGate    *mitmproxy.HealthGate // nil when MITM disabled
 
 	// anchors records the live state of the redirect tables after every
@@ -198,8 +198,8 @@ func (s *fastSandboxPolicyServer) SetMitm(gate *mitmproxy.HealthGate, port int, 
 	if gate == nil || port <= 0 {
 		return
 	}
-	s.mitmInstall = func(entries []iptables.MitmRedirectEntry) error {
-		return iptables.InstallMitmRedirects(entries, port, dports)
+	s.mitmInstall = func(ctx context.Context, entries []iptables.MitmRedirectEntry) error {
+		return iptables.InstallMitmRedirects(ctx, entries, port, dports)
 	}
 	s.mitmRemove = iptables.RemoveMitmRedirects
 }
@@ -207,8 +207,8 @@ func (s *fastSandboxPolicyServer) SetMitm(gate *mitmproxy.HealthGate, port int, 
 // mitmRedirectRebuild installs the interception table from the current entry
 // map and re-records its enforcement anchor. Callers hold mitmMu. A nil
 // installer (MITM disabled) is a no-op.
-func (s *fastSandboxPolicyServer) mitmRedirectRebuild() error {
-	if err := s.mitmInstallEntriesLocked(); err != nil {
+func (s *fastSandboxPolicyServer) mitmRedirectRebuild(ctx context.Context) error {
+	if err := s.mitmInstallEntriesLocked(ctx); err != nil {
 		return err
 	}
 	s.recordMitmRedirectAnchor()
@@ -217,7 +217,9 @@ func (s *fastSandboxPolicyServer) mitmRedirectRebuild() error {
 
 // mitmInstallEntriesLocked installs the interception table from the current
 // entry map. Callers hold mitmMu. A nil installer (MITM disabled) is a no-op.
-func (s *fastSandboxPolicyServer) mitmInstallEntriesLocked() error {
+// ctx bounds the nft transaction: the reconcile loop's restore path runs this
+// with its own step deadline, so a hung nft cannot wedge the loop.
+func (s *fastSandboxPolicyServer) mitmInstallEntriesLocked(ctx context.Context) error {
 	if s.mitmInstall == nil {
 		return nil
 	}
@@ -225,18 +227,18 @@ func (s *fastSandboxPolicyServer) mitmInstallEntriesLocked() error {
 	for _, e := range s.mitmEntries {
 		entries = append(entries, e)
 	}
-	return s.mitmInstall(entries)
+	return s.mitmInstall(ctx, entries)
 }
 
 // mitmRedirectReapply rebuilds the interception table from the current entry
 // list: the anchor's restore path reads the authoritative entries, so a
 // restore racing a concurrent lifecycle change reinstalls the newest desired
 // set, never a captured stale one. The reconcile loop calls it without
-// holding mitmMu.
-func (s *fastSandboxPolicyServer) mitmRedirectReapply(_ context.Context) error {
+// holding mitmMu; ctx carries the loop's step deadline into the install.
+func (s *fastSandboxPolicyServer) mitmRedirectReapply(ctx context.Context) error {
 	s.mitmMu.Lock()
 	defer s.mitmMu.Unlock()
-	return s.mitmInstallEntriesLocked()
+	return s.mitmInstallEntriesLocked(ctx)
 }
 
 // recordMitmRedirectAnchor captures the table the rebuild just committed.
@@ -880,7 +882,7 @@ func (s *fastSandboxPolicyServer) OnRegistered(subj subject.Subject, att actionh
 	}
 	dnsRedirect := time.Since(dnsStarted)
 	mitmStarted := time.Now()
-	if err := s.setMitmRedirect(subj, att, false); err != nil {
+	if err := s.setMitmRedirect(nftCtx, subj, att, false); err != nil {
 		// Fail closed: a sandbox whose HTTP(S) is not intercepted must not
 		// register as usable (it could exfiltrate credentials-bearing
 		// traffic the MITM layer is responsible for). Roll back the gateway
@@ -904,7 +906,7 @@ func (s *fastSandboxPolicyServer) OnRegistered(subj subject.Subject, att actionh
 // gateway must be valid and same-family as the sandbox IP — a cross-family
 // rule is an illegal nft expression that would abort the whole transactional
 // rebuild.
-func (s *fastSandboxPolicyServer) setMitmRedirect(subj subject.Subject, att actionhandler.NetworkAttachment, keepOnError bool) error {
+func (s *fastSandboxPolicyServer) setMitmRedirect(ctx context.Context, subj subject.Subject, att actionhandler.NetworkAttachment, keepOnError bool) error {
 	s.mitmMu.Lock()
 	defer s.mitmMu.Unlock()
 	if s.mitmInstall == nil {
@@ -918,7 +920,7 @@ func (s *fastSandboxPolicyServer) setMitmRedirect(subj subject.Subject, att acti
 		return fmt.Errorf("mitm redirect: subject %s sandbox IP %s and gateway %s are different families", subj, entry.SandboxIP, entry.Gateway)
 	}
 	s.mitmEntries[subj] = entry
-	if err := s.mitmRedirectRebuild(); err != nil {
+	if err := s.mitmRedirectRebuild(ctx); err != nil {
 		if !keepOnError {
 			delete(s.mitmEntries, subj)
 		}
@@ -957,7 +959,7 @@ func (s *fastSandboxPolicyServer) unloadEnforcement(subj subject.Subject) error 
 	if err := s.releaseGatewayDNSRedirect(nftCtx, subj); err != nil {
 		return err
 	}
-	s.removeMitmRedirect(subj)
+	s.removeMitmRedirect(nftCtx, subj)
 	return nil
 }
 
@@ -1091,7 +1093,7 @@ func (s *fastSandboxPolicyServer) revertToDenyFirst(subj subject.Subject, att ac
 // table. Best effort: a leftover rule for a dead sandbox's IP is inert (the
 // IP is gone with the sandbox; a reused IP is re-registered over a fresh
 // rebuild), and a rebuild failure keeps the previous table live.
-func (s *fastSandboxPolicyServer) removeMitmRedirect(subj subject.Subject) {
+func (s *fastSandboxPolicyServer) removeMitmRedirect(ctx context.Context, subj subject.Subject) {
 	s.mitmMu.Lock()
 	defer s.mitmMu.Unlock()
 	if s.mitmInstall == nil {
@@ -1101,7 +1103,7 @@ func (s *fastSandboxPolicyServer) removeMitmRedirect(subj subject.Subject) {
 		return
 	}
 	delete(s.mitmEntries, subj)
-	if err := s.mitmRedirectRebuild(); err != nil {
+	if err := s.mitmRedirectRebuild(ctx); err != nil {
 		log.Warnf("mitm redirect rebuild after subject %s unload failed, ignoring: %v", subj, err)
 	}
 }

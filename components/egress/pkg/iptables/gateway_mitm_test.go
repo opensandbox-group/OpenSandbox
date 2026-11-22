@@ -15,6 +15,7 @@
 package iptables
 
 import (
+	"context"
 	"net/netip"
 	"strings"
 	"testing"
@@ -63,6 +64,29 @@ func TestMitmDportList(t *testing.T) {
 	assert.Equal(t, "{80,443}", mitmDportList([]int{80, 443}))
 	assert.Equal(t, "{80,443,8080}", mitmDportList([]int{80, 443, 8080}))
 	assert.Equal(t, "80,443", mitmDportList(nil), "empty list falls back to the base intercept set")
+}
+
+// TestInstallMitmRedirectsPropagatesContext: the reconcile restore path runs
+// the installer under a step deadline, so the caller's context must reach the
+// nft invocation. Dropping it would let one hung nft wedge the whole serial
+// reconcile pass (and the shutdown that waits on it).
+func TestInstallMitmRedirectsPropagatesContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var seen []context.Context
+	r := redirectRunner{
+		runNft: func(runCtx context.Context, _ string) ([]byte, error) {
+			seen = append(seen, runCtx)
+			return nil, runCtx.Err()
+		},
+	}
+	err := installMitmRedirects(ctx, r, []MitmRedirectEntry{
+		{SandboxIP: netip.MustParseAddr("10.0.0.5"), Gateway: netip.MustParseAddr("10.0.0.1")},
+	}, 18081, []int{80, 443})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Len(t, seen, 1)
+	require.ErrorIs(t, seen[0].Err(), context.Canceled, "the installer must pass the caller's context to nft")
 }
 
 func TestMitmMissingTableDetection(t *testing.T) {

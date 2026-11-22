@@ -854,7 +854,7 @@ type fakeMitmInstaller struct {
 	removed bool
 }
 
-func (f *fakeMitmInstaller) install(entries []iptables.MitmRedirectEntry) error {
+func (f *fakeMitmInstaller) install(_ context.Context, entries []iptables.MitmRedirectEntry) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -864,7 +864,7 @@ func (f *fakeMitmInstaller) install(entries []iptables.MitmRedirectEntry) error 
 	return nil
 }
 
-func (f *fakeMitmInstaller) remove() error {
+func (f *fakeMitmInstaller) remove(context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = true
@@ -910,6 +910,25 @@ func TestFastSandboxServerMitmRedirectInstalledOnRegistration(t *testing.T) {
 	// unload rebuilds without the subject
 	require.NoError(t, srv.OnUnloaded(s, mitmAtt(t, "10.0.0.5", "10.0.0.1")))
 	require.Equal(t, []iptables.MitmRedirectEntry{{SandboxIP: netip.MustParseAddr("10.0.0.6"), Gateway: netip.MustParseAddr("10.0.0.1")}}, inst.snapshot())
+}
+
+// TestFastSandboxServerMitmReapplyHonorsContext: the anchor ledger restores
+// the interception table through mitmRedirectReapply under a step deadline.
+// That deadline must reach the nft transaction: replacing it with
+// context.Background() would let one hung nft wedge the whole serial reconcile
+// pass and the shutdown waiting on it.
+func TestFastSandboxServerMitmReapplyHonorsContext(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	var seen context.Context
+	srv.mitmInstall = func(ctx context.Context, _ []iptables.MitmRedirectEntry) error {
+		seen = ctx
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, srv.mitmRedirectReapply(ctx), context.Canceled)
+	require.NotNil(t, seen)
+	require.ErrorIs(t, seen.Err(), context.Canceled, "the restore path must pass its context to the installer")
 }
 
 func TestFastSandboxServerMitmRedirectFailClosesRegistration(t *testing.T) {
@@ -1476,7 +1495,7 @@ func TestActionsMITMFailureRollbackAndTerminalCleanup(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	dns := newFakeGatewayDNSRedirectApplier()
 	srv.dnsRedirectApply = dns.apply
-	srv.mitmInstall = func([]iptables.MitmRedirectEntry) error { return errors.New("mitm failed") }
+	srv.mitmInstall = func(context.Context, []iptables.MitmRedirectEntry) error { return errors.New("mitm failed") }
 	input := `{"defaultAction":"deny"}`
 
 	rec := doAction(t, srv, bindBody(t, "mitm-dns", testIP, testFenceR, testFenceA, 1, strPtr(input)))
