@@ -317,10 +317,13 @@ OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
 OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
-# Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
-# The value also flows into the Go-based image builds via --build-arg GOPROXY;
-# empty build args keep the Dockerfile defaults (proxy.golang.org).
-FSB_GOPROXY="${FSB_GOPROXY:-direct}"
+# Default to the canonical Go module proxy with direct fallback: pure
+# GOPROXY=direct fails on dead vanity domains in fast-sandbox's dependency
+# tree (e.g. nhooyr.io/websocket), while internal mirrors can return 500 or
+# stale bytes. The value also flows into the Go-based image builds via
+# --build-arg GOPROXY; empty build args keep the Dockerfile defaults
+# (proxy.golang.org).
+FSB_GOPROXY="${FSB_GOPROXY:-https://proxy.golang.org,direct}"
 export GOPROXY="$FSB_GOPROXY"
 
 # FSB_GOSUMDB=off (set by the KVM integration lane): the runner's network
@@ -5239,9 +5242,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
 
 Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
 DOCKER_MIRROR, RUSTFS_*, RC_IMAGE, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
-FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
-when the host cannot reach module VCS hosts directly; also passed into the
-Go-based image builds as --build-arg GOPROXY),
+FSB_GOPROXY (default https://proxy.golang.org,direct; set e.g.
+https://mirrors.aliyun.com/goproxy/,direct when proxy.golang.org is
+unreachable; also passed into the Go-based image builds as --build-arg GOPROXY),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, POOL_MODE=resource-aware (OSEP-0026
 ResourceAware pool fixture), WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1,

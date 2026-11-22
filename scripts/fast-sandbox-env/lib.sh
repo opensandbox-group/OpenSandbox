@@ -169,8 +169,11 @@ OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
 OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
-# Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
-FSB_GOPROXY="${FSB_GOPROXY:-direct}"
+# Default to the canonical Go module proxy with direct fallback: pure
+# GOPROXY=direct fails on dead vanity domains in fast-sandbox's dependency
+# tree (e.g. nhooyr.io/websocket), while internal mirrors can return 500 or
+# stale bytes.
+FSB_GOPROXY="${FSB_GOPROXY:-https://proxy.golang.org,direct}"
 export GOPROXY="$FSB_GOPROXY"
 
 AUTO_CLEAN=0
