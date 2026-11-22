@@ -2,7 +2,7 @@
 
 Every enforcement table the egress installs into the kernel is written once — at startup, or on a policy mutation — and, until now, was never read back while the daemon ran. A table deleted or altered by anything outside the egress process (a host-level `nft flush ruleset`, another nftables user, a cleanup script) left the daemon healthy while sandbox traffic silently bypassed policy. For a security control, silent is the worst failure mode.
 
-Enforcement-state anchors close that window (issue #2718, formalized in [OSEP-0029](../../../oseps/0029-enforcement-state-anchors.md)): at apply time each applier records the exact kernel state it just installed, and a periodic reconcile loop re-reads the live ruleset through the same shared verifier the quarantine fence uses — restoring drifted tables idempotently and surfacing per-table enforcement state instead of conflating daemon health with kernel enforcement.
+Enforcement-state anchors close that window (issue #2718, formalized in [OSEP-0029, pull request #2740](https://github.com/opensandbox-group/OpenSandbox/pull/2740)): at apply time each applier records the exact kernel state it just installed, and a periodic reconcile loop re-reads the live ruleset through the same shared verifier the quarantine fence uses — restoring drifted tables idempotently and surfacing per-table enforcement state instead of conflating daemon health with kernel enforcement.
 
 ## What is anchored
 
