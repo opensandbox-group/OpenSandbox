@@ -314,11 +314,14 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 	// ahead of every keep so an overlapping allow cannot shield them.
 	denyAddrs := newAddrSet()
 	denyPrefixes := newPrefixSet()
+	var denyPfx []netip.Prefix
 	for _, r := range newPol.Egress {
 		pfx := portlessDenyPrefix(r)
 		if !pfx.IsValid() {
 			continue
 		}
+		// Use the same address family when subtracting denies from keeps.
+		denyPfx = append(denyPfx, pfx)
 		if looksLikeIP(r) && !pfx.Addr().Is4In6() {
 			denyAddrs.add(pfx.Addr())
 		} else {
@@ -346,7 +349,6 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 		keepAddrs.add(ip)
 	}
 	keepPrefixes := newPrefixSet()
-	denyPfx := portlessDenyPrefixes(newPol)
 	for _, r := range newPol.Egress {
 		if r.Action != policy.ActionAllow || len(r.Ports) > 0 || len(r.PortRanges) > 0 {
 			continue

@@ -308,6 +308,25 @@ func TestCountMatchingConntrackFlowsDataPreservesAddressFamily(t *testing.T) {
 	}
 }
 
+func TestCountMatchingConntrackFlowsDataKeepsNativeIPv4AgainstMappedDeny(t *testing.T) {
+	data := []byte("ipv4 2 tcp 6 431999 ESTABLISHED src=10.0.0.2 dst=192.0.2.1 sport=12345 dport=443 src=192.0.2.1 dst=10.0.0.2 sport=443 dport=12345 [ASSURED] mark=0 zone=0 use=2\n")
+	old := mustPolicy(t, `{"defaultAction":"allow"}`)
+	for _, tt := range []struct {
+		deny string
+		want int
+	}{
+		{"::ffff:192.0.2.1", 0},
+		{"::ffff:192.0.2.1/128", 0},
+		{"192.0.2.0/24", 1},
+	} {
+		t.Run(tt.deny, func(t *testing.T) {
+			next := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"192.0.2.1"},{"action":"deny","target":"`+tt.deny+`"}]}`)
+			drops := ComputeEstablishedDrops(old, next, nil)
+			require.Equal(t, tt.want, countMatchingConntrackFlowsData(data, drops))
+		})
+	}
+}
+
 func TestPrefixDiff_Basic(t *testing.T) {
 	got := prefixDiff(netip.MustParsePrefix("203.0.113.0/24"), []netip.Prefix{netip.MustParsePrefix("203.0.113.0/25")})
 	require.Equal(t, []netip.Prefix{netip.MustParsePrefix("203.0.113.128/25")}, got)
