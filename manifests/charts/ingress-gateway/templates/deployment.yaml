@@ -18,6 +18,22 @@
 {{- $maxIdleConns := dig "maxIdleConns" 100 $httpPool }}
 {{- $maxIdleConnsPerHost := dig "maxIdleConnsPerHost" 2 $httpPool }}
 {{- $idleConnTimeout := dig "idleConnTimeout" "90s" $httpPool }}
+{{- if kindIs "invalid" $maxIdleConns }}
+{{- $maxIdleConns = 100 }}
+{{- end }}
+{{- if kindIs "invalid" $maxIdleConnsPerHost }}
+{{- $maxIdleConnsPerHost = 2 }}
+{{- end }}
+{{- if kindIs "invalid" $idleConnTimeout }}
+{{- $idleConnTimeout = "90s" }}
+{{- end }}
+{{/* 仅规范整数浮点数以避免科学计数法；非法输入保留给 flag 解析器拒绝。 */}}
+{{- if and (kindIs "float64" $maxIdleConns) (eq $maxIdleConns (floor $maxIdleConns)) }}
+{{- $maxIdleConns = int $maxIdleConns }}
+{{- end }}
+{{- if and (kindIs "float64" $maxIdleConnsPerHost) (eq $maxIdleConnsPerHost (floor $maxIdleConnsPerHost)) }}
+{{- $maxIdleConnsPerHost = int $maxIdleConnsPerHost }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
