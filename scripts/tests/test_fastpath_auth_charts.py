@@ -135,6 +135,7 @@ class FastPathAuthChartsTest(unittest.TestCase):
                 "ingress-gateway",
                 [
                     "gateway.fastpathEndpoint=fastpath:9090",
+                    "gateway.secureAccess.existingSecret=route-signing-keys",
                     "gateway.fastpathAuth.caConfigMap=public-ca",
                 ],
             ),
