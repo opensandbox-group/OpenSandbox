@@ -327,6 +327,57 @@ func TestCountMatchingConntrackFlowsDataKeepsNativeIPv4AgainstMappedDeny(t *test
 	}
 }
 
+func TestApplyStatic_KeepsMappedTargetsInIPv6(t *testing.T) {
+	native := netip.MustParseAddr("192.0.2.1")
+	mapped := netip.MustParseAddr("::ffff:192.0.2.1")
+	old := mustPolicy(t, `{"defaultAction":"allow"}`)
+	for _, tt := range []struct {
+		name, rules   string
+		mappedAllowed bool
+	}{
+		{"host subtraction", `{"action":"allow","target":"::ffff:192.0.2.1"},{"action":"deny","target":"::ffff:192.0.2.1/128"}`, false},
+		{"mapped singleton remainder", `{"action":"allow","target":"::ffff:192.0.2.0/127"},{"action":"deny","target":"::ffff:192.0.2.0"}`, true},
+		{"scoped mapped host", `{"action":"allow","target":"::ffff:192.0.2.1","ports":[443]}`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, scripts := recordingManager()
+			next := mustPolicy(t, `{"defaultAction":"deny","egress":[`+tt.rules+`]}`)
+			_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), old, next)
+			require.NoError(t, err)
+			require.NotContains(t, (*scripts)[len(*scripts)-1], "ip daddr 192.0.2.1 ")
+			require.True(t, m.lastDrops.MatchesFlow(native, 443))
+			require.Equal(t, !tt.mappedAllowed, m.lastDrops.MatchesFlow(mapped, 443))
+		})
+	}
+}
+
+func TestCountMatchingConntrackFlowsDataLiveDNSUsesDenyFamily(t *testing.T) {
+	data := []byte("ipv4 2 tcp 6 431999 ESTABLISHED src=10.0.0.2 dst=192.0.2.1 sport=12345 dport=443\n")
+	old := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.0/24"},{"action":"allow","target":"cdn.example.com"}]}`)
+	leases := map[string][]netip.Addr{"cdn.example.com": {netip.MustParseAddr("192.0.2.1")}}
+	for _, tt := range []struct {
+		deny string
+		want int
+	}{
+		{"::ffff:192.0.2.1", 0},
+		{"::ffff:192.0.2.1/128", 0},
+		{"192.0.2.1", 1},
+	} {
+		t.Run(tt.deny, func(t *testing.T) {
+			next := mustPolicy(t, `{"egress":[{"action":"allow","target":"cdn.example.com"},{"action":"deny","target":"`+tt.deny+`"}]}`)
+			require.Equal(t, tt.want, countMatchingConntrackFlowsData(data, computeEstablishedDrops(old, next, leases, leases)))
+			require.Equal(t, 1, countMatchingConntrackFlowsData(data, computeEstablishedDrops(old, next, leases, nil)))
+		})
+	}
+}
+
+func TestComputeEstablishedDrops_ScopedPrefixCutsUncoveredInterior(t *testing.T) {
+	old := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.0/30","ports":[443]}]}`)
+	next := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.0","ports":[443]},{"action":"allow","target":"192.0.2.3","ports":[443]},{"action":"deny","target":"::ffff:192.0.2.0"}]}`)
+	drops := ComputeEstablishedDrops(old, next, nil)
+	require.True(t, drops.MatchesFlow(netip.MustParseAddr("192.0.2.1"), 443))
+}
+
 func TestPrefixDiff_Basic(t *testing.T) {
 	got := prefixDiff(netip.MustParsePrefix("203.0.113.0/24"), []netip.Prefix{netip.MustParsePrefix("203.0.113.0/25")})
 	require.Equal(t, []netip.Prefix{netip.MustParsePrefix("203.0.113.128/25")}, got)
@@ -696,6 +747,37 @@ func TestApplyStatic_PreservesUnchangedGlobalPortFloor(t *testing.T) {
 	require.NoError(t, m.ApplyStatic(context.Background(), reload))
 
 	require.Equal(t, []EstablishedPortDrop{{Ranges: ranges}}, m.lastDrops.DenyPortDrops)
+}
+
+func TestApplyStatic_OmitsGlobalFloorFromPartiallyCoveredHostRules(t *testing.T) {
+	open := mustPolicy(t, `{"defaultAction":"allow"}`)
+	hosts := make([]string, 64)
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf(`{"action":"deny","target":"203.0.113.%d"}`, i+1)
+	}
+	floor := make([]policy.PortRange, 4097)
+	for i := range floor {
+		floor[i] = policy.PortRange{Lo: 3*i + 1, Hi: 3*i + 2}
+	}
+	before := mustPolicy(t, `{"defaultAction":"allow","egress":[`+strings.Join(hosts, ",")+`]}`)
+	after := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","ports":[3,20000]}]}`)
+	before.Egress = append(before.Egress, policy.NewPortFloorDenyRule(floor))
+	after.Egress = append(after.Egress, policy.NewPortFloorDenyRule(floor))
+	m, scripts := recordingManager()
+	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), open, before)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(context.Background(), after))
+
+	script := (*scripts)[len(*scripts)-1]
+	t.Logf("rendered nft script: %d bytes", len(script))
+	// The global floor is rendered once for established traffic and once for new dials.
+	require.Equal(t, 2, strings.Count(script, "7-8, 10-11, 13-14"))
+	for i := range hosts {
+		require.Contains(t, script, fmt.Sprintf("ip daddr 203.0.113.%d tcp dport { 3, 20000 } ct state established,related drop\n", i+1))
+	}
+	other := netip.MustParseAddr("203.0.113.65")
+	require.True(t, m.lastDrops.MatchesFlow(other, 7), "the original global floor still applies")
+	require.False(t, m.lastDrops.MatchesFlow(other, 3), "the new deny must not tear down previously spared flows")
 }
 
 func BenchmarkCarryUnchangedAddressDeniesAndPortFloor(b *testing.B) {
