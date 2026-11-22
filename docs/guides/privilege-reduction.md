@@ -99,7 +99,7 @@ sandbox_binds = [
 
 ### Mount it from a ConfigMap (Kubernetes runtime)
 
-Add the TOML as a ConfigMap key and mount it read-only in the sandbox container through the pod template. Set `runtime.execd_isolation_config` to that mounted path in the server config. For BatchSandbox pools, provision the file at the same path in the pool's sandbox container before tasks run. The server supplies the path in the container or task environment.
+For BatchSandbox workloads, add the TOML as a ConfigMap key and mount it read-only in the sandbox container through the pod template. Set `runtime.execd_isolation_config` to that mounted path in the server config. For BatchSandbox pools, provision the file at the same path in the pool's sandbox container before tasks run. The server supplies the path in the container or task environment. The `agent-sandbox` workload provider currently replaces the pod template's container and volume lists, so ConfigMap mounts defined there do not reach the sandbox. With that provider, bake the policy file into the sandbox image instead; setting the path alone does not enable hardening.
 
 For creator-managed policies, leave `runtime.execd_isolation_config` unset and supply `EXECD_ISOLATION_CONFIG` through the image or create-request env. The reference e2e uses request env with the `opensandbox-e2e-execd-isolation` ConfigMap in `scripts/common/kubernetes-e2e.sh`.
 
