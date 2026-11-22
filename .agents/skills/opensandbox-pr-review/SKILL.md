@@ -21,7 +21,7 @@ Deep review workflow for a GitHub PR against this repository: tool-assisted OCR 
 1. **Never trust the PR description.** Every factual claim (file:line, constant value, channel capacity, default timeout, enum) is verified at its definition site in code. Claims that cannot be resolved are dropped or marked as unverified — never paraphrased as fact.
 2. **Reproduction first.** For a bug-fix PR, the new regression test must be run against the base commit and shown to fail there. A fix for a bug that cannot be reproduced is a red flag, reported explicitly.
 3. **Isolated verification.** All test runs happen in detached worktrees. Never touch the user's working tree (it may carry uncommitted changes); never check out the PR branch in place.
-4. **Dual-channel review.** OCR tool review and own reading of the diff + full changed files are complementary. Both run; conclusions merge.
+4. **Dual-channel review.** OCR tool review (when available in the agent runtime) and own reading of the diff + full changed files are complementary. Both run when available; conclusions merge. If `ocr_review` is unavailable, mark it skipped in the verification log and rely on manual deep review.
 5. **Report discipline.** Verdict first, exact `file:line` references, findings graded by severity, a verification log table, and explicit annotation for checks not run locally.
 
 ## Workflow
@@ -32,31 +32,37 @@ Fetch PR metadata with `gh` (structured JSON — no HTML scraping):
 
 ```bash
 gh pr view <number> --repo opensandbox-group/OpenSandbox \
-  --json title,body,author,baseRefName,headRefName,headRepositoryOwner,commits,files,labels
+  --json title,body,author,baseRefName,headRefName,headRepository,headRepositoryOwner,commits,files,labels
 ```
 
 Extract from the output:
 
-- Title, base branch, head branch (plus fork owner), author, commit list
+- Title, base branch (`baseRefName`), head branch (`headRefName`) plus head repo/owner, author, commit list
 - The claimed problem: mechanism, reproduction claim, stated fix, stated testing, breaking-change statement
 - Build a **claim checklist** from the body — every concrete assertion to verify in later steps (e.g. "resultChan holds 10 results", "grace period 2s by default", "fails on main with expected 15, actual 11")
 
 ### Step 2: Fetch refs locally
 
-```bash
-# PR author remote (reuse if it already exists — check git remote -v first)
-git remote get-url pr-<author> 2>/dev/null || \
-  git remote add pr-<author> git@github.com:<author>/OpenSandbox.git
-git fetch pr-<author> <head-branch>
-git fetch origin main
+Identify the git remote pointing to `opensandbox-group/OpenSandbox` via `git remote -v` (usually `origin`, or `upstream` when `origin` is a personal fork). Fetch GitHub's numeric `refs/pull/<N>/head` ref and the PR's actual `baseRefName` — never derive a fork URL from `<author>` (which breaks for upstream branches and org-owned forks) and never interpolate an unquoted `<head-branch>` name into shell commands (branch names are untrusted input and may contain shell metacharacters).
 
-BASE=$(git merge-base origin/main pr-<author>/<head-branch>)
-git log --oneline $BASE..pr-<author>/<head-branch>
-git diff --stat $BASE..pr-<author>/<head-branch>
-git diff $BASE..pr-<author>/<head-branch>
+```bash
+PR_NUM=<number>
+REMOTE=origin   # remote for opensandbox-group/OpenSandbox (verify with git remote -v)
+BASE_BRANCH=$(gh pr view "$PR_NUM" --repo opensandbox-group/OpenSandbox --json baseRefName --jq .baseRefName)
+
+git fetch -- "$REMOTE" \
+  "+refs/pull/${PR_NUM}/head:refs/remotes/pr/${PR_NUM}" \
+  "+refs/heads/${BASE_BRANCH}:refs/remotes/${REMOTE}/${BASE_BRANCH}"
+
+BASE=$(git merge-base "refs/remotes/${REMOTE}/${BASE_BRANCH}" "refs/remotes/pr/${PR_NUM}")
+HEAD=$(git rev-parse "refs/remotes/pr/${PR_NUM}")
+
+git log --oneline "$BASE..$HEAD"
+git diff --stat "$BASE..$HEAD"
+git diff "$BASE..$HEAD"
 ```
 
-Record `<base>..<head>` — this range feeds both manual reading and OCR.
+Record `$BASE` and `$HEAD` (`<BASE>..<HEAD>`) — this resolved commit range feeds both manual reading and OCR.
 
 ### Step 3: Manual verification of code
 
@@ -68,12 +74,12 @@ Record `<base>..<head>` — this range feeds both manual reading and OCR.
 
 ### Step 4: OCR tool review
 
-Run inside the `execute` tool, with `from`/`to` set to the Step 2 range:
+When `tools.ocr_review` is available in the agent runtime, run it inside the `execute` tool with `from`/`to` set to the Step 2 commit range (`$BASE` / `$HEAD`):
 
 ```js
 const res = await tools.ocr_review({
-  from: "<merge-base>",
-  to: "pr-<author>/<head-branch>",
+  from: "<BASE>",
+  to: "<HEAD>",
   background: "<PR context: claimed problem + fix summary + numbered review-focus questions>",
   timeoutMinutes: 5,
   concurrency: 2
@@ -81,29 +87,40 @@ const res = await tools.ocr_review({
 return res;
 ```
 
-The `background` should carry: one-paragraph problem statement, what the fix does, and specific questions (is the race real / is the ordering correct / liveness risk / bypass paths / performance / compatibility). The result JSON provides findings with severity, path, line numbers, and suggestions — merge them with Step 3 conclusions; do not copy blindly.
+The `background` should carry: one-paragraph problem statement, what the fix does, and specific questions (is the race real / is the ordering correct / liveness risk / bypass paths / performance / compatibility). The result JSON provides findings with severity, path, line numbers, and suggestions — merge them with Step 3 conclusions; do not copy blindly. If `ocr_review` is unavailable in the current environment, mark it as not run in the verification log and proceed with Step 3's manual review.
 
 ### Step 5: Independent verification in worktrees
 
+Create a dedicated temporary root under `${TMPDIR:-/tmp}` with `mktemp -d` (so unset `TMPDIR` on Linux/containers never falls back to `/`), quote every `"$TMP"` expansion, and run tests from inside each worktree's affected module directory (`git worktree add` does not change directories, and OpenSandbox has no root `go.mod` or `go.work`).
+
 ```bash
-TMP=$TMPDIR  # or the approved session temp dir
-git worktree add --detach $TMP/pr-<N>-review   pr-<author>/<head-branch>
-git worktree add --detach $TMP/pr-<N>-baseline <merge-base>
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/pr-${PR_NUM}.XXXXXX")
+git worktree add --detach "$TMP/review"   "$HEAD"
+git worktree add --detach "$TMP/baseline" "$BASE"
 
-# a) PR branch: new/changed tests, repeated, race-enabled (Go)
-go test -race -run '<NewTestName>' -count=3 ./<pkg>/
-go test -race ./<pkg>/...                      # package-scoped suite
+# a) PR branch: enter the review worktree and affected module directory (Go example; e.g. MODULE=components/execd)
+(
+  cd "$TMP/review/<module>"
+  go test -race -run '<NewTestName>' -count=3 ./<pkg>/
+  go test -race ./<pkg>/...                      # package-scoped suite
+)
 
-# b) Base: copy new test files over, expect FAILURE (bug reproduction)
-cp $TMP/pr-<N>-review/<pkg>/<new_test>.go $TMP/pr-<N>-baseline/<pkg>/
-cd $TMP/pr-<N>-baseline && go test -run '<NewTestName>' -count=2 ./<pkg>/
+# b) Base: transplant a base-compatible regression test; expect COMPILE PASS + expected assertion FAILURE
+cp "$TMP/review/<module>/<pkg>/<new_test>.go" "$TMP/baseline/<module>/<pkg>/"
+(
+  cd "$TMP/baseline/<module>"
+  go test -run '<NewTestName>' -count=2 ./<pkg>/
+)
 
 # c) always clean up
-git worktree remove --force $TMP/pr-<N>-review
-git worktree remove --force $TMP/pr-<N>-baseline
+git worktree remove --force "$TMP/review"
+git worktree remove --force "$TMP/baseline"
+rmdir "$TMP"
 ```
 
+- The snippet above uses Go as an example; for Python (`server/`, `sdks/sandbox/python`, etc.), TypeScript, or other modules, enter `"$TMP/review/<module>"` and `"$TMP/baseline/<module>"` and run that module's native test runner.
 - Prefer package-scoped before full-suite runs (repo working principle).
+- On the base commit, a build/compile failure (for example, when a copied `*_test.go` references a new helper or API introduced by the PR) does **not** count as bug reproduction — require clean compilation followed by the expected assertion/behavior failure, transplanting only a base-compatible reproduction test when needed.
 - If the new test **passes** on the base, the bug claim is unproven — investigate (flaky test? wrong repro?) and say so in the report.
 - Checks not run locally (golint, full `go test ./...`) may cite the author's claims but must be marked as such.
 
@@ -123,11 +140,11 @@ Writing rules: short sentences, one line per bullet, no repeated argumentation, 
 
 ### Step 7 (optional): HTML report with language toggle
 
-When asked for an HTML version (or 双语切换报告), generate a standalone `pr-<N>-review-report.html` at the repo root:
+When asked for an HTML version (or 双语切换报告), generate a standalone `${TMPDIR:-/tmp}/pr-<N>-review-report.html` (or another user-specified path; avoid leaving untracked files in the repo working tree):
 
 - Toggle mechanism: `html[data-lang]` attribute + CSS `html[data-lang="zh"] .en { display:none !important }` (and vice versa); every translatable element carries `class="zh"` / `class="en"`; choice persisted in `localStorage`; default `zh`.
 - Styling: CSS custom properties + `prefers-color-scheme` for dark mode; severity badges (LOW amber, PASS green); `file:line` as inline code chips; no external dependencies, single file.
-- Keep it as lean as the Markdown version — same 6-section structure, verdict banner up top.
+- Keep it as lean as the Markdown version — verdict header banner up top plus the same 6 body sections.
 - Deliver the **absolute path**; open with `open <path>` on macOS when the user asks.
 
 ## Severity definitions
@@ -143,6 +160,6 @@ A finding that pre-exists on the base is reported as non-blocking context ("基�
 ## Guardrails
 
 - The user's working tree may have uncommitted changes — never stash, reset, or check out over them; all verification goes through worktrees.
-- Remove every worktree created for the review; verify with `git worktree list`.
+- Remove every worktree created for the review (and its temp directory); verify with `git worktree list`.
 - Only report facts established by code, tests, or tool output; separate evidence from inference, and list unrun checks.
 - The review produces report files only — never mix unrelated changes into the same output.
