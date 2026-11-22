@@ -23,6 +23,7 @@ import (
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
@@ -51,6 +52,7 @@ type taskNode struct {
 	Status  *api.Task
 	IP      string
 	PodName string
+	PodUID  types.UID
 
 	// collect from endpoints
 	tState              TaskState
@@ -285,26 +287,28 @@ func initTaskNodes(tasks []*api.Task) ([]*taskNode, error) {
 // collectTaskStatus from Pod via endpoint
 func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	ips := []string{}
+	boundTaskNodes := make([]*taskNode, 0, len(taskNodes))
 	for _, tNode := range taskNodes {
 		// unassigned no need to collect task status
 		if tNode.IP == "" {
 			continue
 		}
+		if !sch.assignedPodExists(tNode) {
+			tNode.Status = nil
+			continue
+		}
 		ips = append(ips, tNode.IP)
+		boundTaskNodes = append(boundTaskNodes, tNode)
 	}
 	if len(ips) == 0 {
 		return
 	}
 	// Failed queries are logged by the collector and left out of the result.
 	tasks, _ := sch.taskStatusCollector.Collect(context.Background(), ips)
-	for _, tNode := range taskNodes {
+	for _, tNode := range boundTaskNodes {
 		task, ok := tasks[tNode.IP]
 		if !ok {
-			// A failed query does not mean the task is gone, so keep the last
-			// known status. Only a missing pod proves the task has stopped.
-			if !sch.assignedPodExists(tNode) {
-				tNode.Status = nil
-			}
+			// 查询失败不代表任务已停止；绑定仍有效时保留上次状态。
 			continue
 		}
 		tNode.Status = task
@@ -314,12 +318,10 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	}
 }
 
-// assignedPodExists reports whether the pod the task node is bound to still
-// exists with the same IP. A pod recreated under the same name gets a new IP
-// and does not count.
+// assignedPodExists checks the bound Pod instance, since names and IPs can be reused.
 func (sch *defaultTaskScheduler) assignedPodExists(tNode *taskNode) bool {
 	for _, pod := range sch.allPods {
-		if pod.Name == tNode.PodName && pod.Status.PodIP == tNode.IP {
+		if pod.Name == tNode.PodName && pod.UID == tNode.PodUID && pod.Status.PodIP == tNode.IP {
 			return true
 		}
 	}
@@ -376,7 +378,7 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 				<-semaphore
 				wg.Done()
 			}()
-			scheduleSingleTaskNode(node, sch.taskClientCreator, sch.resPolicyWhenTaskComplete, sch.logger)
+			sch.scheduleSingleTaskNode(node)
 		}(tNode)
 	}
 	wg.Wait()
@@ -412,6 +414,7 @@ func assignTaskNodes(taskNodes []*taskNode, freePods []*corev1.Pod, log logr.Log
 		log.Info("assign Pod to task node", "podName", pod.Name, "podNamespace", pod.Namespace, "podIP", pod.Status.PodIP, "taskName", tNode.Name)
 		tNode.IP = pod.Status.PodIP
 		tNode.PodName = pod.Name
+		tNode.PodUID = pod.UID
 		freePods = freePods[1:]
 	}
 	return freePods
@@ -428,7 +431,16 @@ func needRelease(tNode *taskNode, policy sandboxv1alpha1.TaskResourcePolicy) boo
 }
 
 // scheduleSingleTaskNode handles scheduling for a single task node based on its state
-func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint string) taskClient, resPolicyWhenTaskComplete sandboxv1alpha1.TaskResourcePolicy, log logr.Logger) {
+func (sch *defaultTaskScheduler) scheduleSingleTaskNode(tNode *taskNode) {
+	log := sch.logger
+	if tNode.IP != "" && !sch.assignedPodExists(tNode) {
+		// 保留绑定以免自动重跑；失效 endpoint 也不能接收释放请求。
+		tNode.Status = nil
+		if needRelease(tNode, sch.resPolicyWhenTaskComplete) || tNode.sState == stateReleasing {
+			tNode.transSchState(stateReleased, log)
+		}
+		return
+	}
 	// pending
 	if tNode.IP == "" {
 		if tNode.DeletionTimestamp != nil {
@@ -436,7 +448,7 @@ func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint str
 		}
 	} else {
 		// assigned
-		if needRelease(tNode, resPolicyWhenTaskComplete) {
+		if needRelease(tNode, sch.resPolicyWhenTaskComplete) {
 			tNode.transSchState(stateReleasing, log)
 		} else {
 			// no need to setTask if task is completed to avoid unnecessary network overhead
@@ -446,7 +458,7 @@ func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint str
 					Process:         tNode.Spec.Process,
 					PodTemplateSpec: tNode.Spec.PodTemplateSpec,
 				}
-				_, err := setTask(taskClientCreator(tNode.IP), task, log)
+				_, err := setTask(sch.taskClientCreator(tNode.IP), task, log)
 				if err != nil {
 					log.Error(err, "Failed to set task", "taskName", tNode.Name, "endpoint", tNode.IP)
 				}
@@ -457,7 +469,7 @@ func scheduleSingleTaskNode(tNode *taskNode, taskClientCreator func(endpoint str
 		if tNode.isTaskDeleted() {
 			tNode.transSchState(stateReleased, log)
 		} else {
-			_, err := setTask(taskClientCreator(tNode.IP), nil, log)
+			_, err := setTask(sch.taskClientCreator(tNode.IP), nil, log)
 			if err != nil {
 				log.Error(err, "Failed to notify executor about releasing task", "taskName", tNode.Name, "endpoint", tNode.IP)
 			} else {

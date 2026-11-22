@@ -85,6 +85,7 @@ func Test_recoverOneTaskNode(t *testing.T) {
 				Status:              testTask,
 				IP:                  "1.2.3.4",
 				PodName:             "foo-bar",
+				PodUID:              "bound-pod-uid",
 				tState:              RunningTaskState,
 				tStateLastTransTime: &mockTimeNow,
 			},
@@ -101,6 +102,7 @@ func Test_recoverOneTaskNode(t *testing.T) {
 				Status:              testReleasingTask,
 				IP:                  "1.2.3.4",
 				PodName:             "foo-bar",
+				PodUID:              "bound-pod-uid",
 				sState:              stateReleasing,
 				sStateLastTransTime: &mockTimeNow,
 				tState:              RunningTaskState,
@@ -110,7 +112,11 @@ func Test_recoverOneTaskNode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			recoverOneTaskNode(tt.args.tNode, tt.args.currentTask, tt.args.ip, tt.args.podName, testLogger)
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: tt.args.podName, UID: "bound-pod-uid"},
+				Status:     corev1.PodStatus{PodIP: tt.args.ip},
+			}
+			recoverOneTaskNode(tt.args.tNode, tt.args.currentTask, pod, testLogger)
 			if tt.expectTaskNode != nil {
 				if !reflect.DeepEqual(tt.expectTaskNode, tt.args.tNode) {
 					t.Errorf("recoverOneTaskNode, want %+v, got %+v", tt.expectTaskNode, tt.args.tNode)
@@ -162,6 +168,7 @@ func Test_defaultTaskScheduler_recoverTaskNodesStatus(t *testing.T) {
 		},
 		Status:              testTask,
 		PodName:             "test-0",
+		PodUID:              "test-pod-uid",
 		IP:                  "1.2.3.4",
 		tState:              RunningTaskState,
 		tStateLastTransTime: &mockTimeNow,
@@ -241,6 +248,7 @@ func Test_defaultTaskScheduler_recoverTaskNodesStatus(t *testing.T) {
 				allPods: []*corev1.Pod{{
 					ObjectMeta: v1.ObjectMeta{
 						Name: "test-0",
+						UID:  "test-pod-uid",
 					},
 					Status: corev1.PodStatus{
 						PodIP: "1.2.3.4",
