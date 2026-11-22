@@ -16,6 +16,7 @@ package nftables
 
 import (
 	"net/netip"
+	"slices"
 	"sort"
 	"time"
 
@@ -186,6 +187,21 @@ func (m *Manager) snapshotResolvedDomainsLocked(liveAt time.Time) (history, live
 		}
 		history[domain] = addrs
 	}
+	if teardown && len(m.recoveredDNS) != 0 {
+		now := m.now()
+		for domain, addrs := range m.recoveredDNS {
+			for addr, until := range addrs {
+				if until.After(now) {
+					history[domain] = append(history[domain], addr)
+				}
+			}
+		}
+	}
+	if pending := m.pendingGrant; teardown && pending != nil && pending.source.entry != nil {
+		for addr := range pending.deadlines {
+			history[pending.source.domain] = append(history[pending.source.domain], addr)
+		}
+	}
 	return history, live
 }
 
@@ -256,6 +272,12 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 				continue
 			}
 			hasPorts := len(r.Ports) > 0 || len(r.PortRanges) > 0
+			prefix := parseRulePrefix(r)
+			if !hasPorts && !prefix.IsValid() {
+				if ip, err := netip.ParseAddr(r.Target); err == nil && ip.Is4In6() {
+					prefix = netip.PrefixFrom(ip, ip.BitLen())
+				}
+			}
 			switch {
 			case hasPorts && looksLikeIP(r):
 				ip := parseRuleIP(r)
@@ -288,10 +310,10 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 				// those ports would need the full complement of newPol's allows.
 				// Leave it to conntrack; callers can tighten with a port deny.
 				continue
-			case looksLikeIP(r), parseRulePrefix(r).IsSingleIP():
+			case !prefix.Addr().Is4In6() && (looksLikeIP(r) || prefix.IsSingleIP()):
 				ip := parseRuleIP(r)
 				if !ip.IsValid() {
-					ip = parseRulePrefix(r).Addr().Unmap()
+					ip = prefix.Addr()
 				}
 				if !ip.IsValid() || newPol.EvaluateIP(ip) == policy.ActionAllow {
 					continue
@@ -300,8 +322,8 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 					continue
 				}
 				removedAddrs.add(ip)
-			case looksLikeCIDR(r):
-				for _, removed := range removedPrefixParts(newPol, parseRulePrefix(r)) {
+			case prefix.IsValid():
+				for _, removed := range removedPrefixParts(newPol, prefix) {
 					removedPrefixes.add(removed)
 				}
 			}
@@ -414,14 +436,7 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 		}
 	}
 	portDeny, portAllow := p.PortScopedRules()
-	for _, old := range d.DenyPortDrops {
-		for _, r := range portDeny {
-			if cur, ok := portDropFromScoped(r); ok && samePortDrop(old, cur) {
-				out.DenyPortDrops = append(out.DenyPortDrops, old)
-				break
-			}
-		}
-	}
+	out.DenyPortDrops = carryPortDenies(d, portDeny)
 	out.DenyAddrs = denyAddrs.sorted()
 	out.DenyPrefixes = denyPrefixes.sorted()
 
@@ -501,6 +516,159 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	return out
 }
 
+// An exact address previously torn down stays blocked on the ports the
+// replacement explicitly denies, even when DNS later retires its broad drop.
+func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule) []EstablishedPortDrop {
+	var out []EstablishedPortDrop
+	keep := func(drop EstablishedPortDrop) {
+		if !slices.ContainsFunc(out, func(existing EstablishedPortDrop) bool { return samePortDrop(existing, drop) }) {
+			out = append(out, drop)
+		}
+	}
+	var current []EstablishedPortDrop
+	for _, r := range rules {
+		cur, ok := portDropFromScoped(r)
+		if !ok {
+			continue
+		}
+		current = append(current, cur)
+		if slices.ContainsFunc(d.DenyPortDrops, func(old EstablishedPortDrop) bool { return samePortDrop(old, cur) }) {
+			keep(cur)
+		}
+	}
+	unchanged := out
+	for _, cur := range current {
+		if slices.ContainsFunc(unchanged, func(held EstablishedPortDrop) bool { return portDenyCovers(held, cur) }) {
+			continue
+		}
+		for _, old := range d.DenyPortDrops {
+			if overlap, ok := intersectPortDenyTargets(old, cur); ok {
+				for _, port := range old.Ports {
+					if portDropCoversPort(cur, port) {
+						overlap.Ports = append(overlap.Ports, port)
+					}
+				}
+				for _, before := range old.Ranges {
+					for _, port := range cur.Ports {
+						if before.Contains(port) {
+							overlap.Ports = append(overlap.Ports, port)
+						}
+					}
+					for _, after := range cur.Ranges {
+						if lo, hi := max(before.Lo, after.Lo), min(before.Hi, after.Hi); lo <= hi {
+							overlap.Ranges = append(overlap.Ranges, policy.PortRange{Lo: lo, Hi: hi})
+						}
+					}
+				}
+				if len(overlap.Ports)+len(overlap.Ranges) != 0 &&
+					!slices.ContainsFunc(unchanged, func(held EstablishedPortDrop) bool { return portDenyCovers(held, overlap) }) {
+					keep(overlap)
+				}
+			}
+		}
+	}
+	carried := out
+	for _, cur := range current {
+		for _, addr := range d.Addrs {
+			if !portDropCoversAddr(cur, addr) {
+				continue
+			}
+			keeps := d.KeepPorts
+			if targetsMatch(d.DenyAddrs, d.DenyPrefixes, nil, addr, 0) {
+				keeps = nil
+			} else if targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, addr, 0) {
+				continue
+			}
+			part := exactPortDenyOutsideKeeps(addr, cur, keeps)
+			// The first pass already covers these address/port pairs.
+			part = exactPortDenyOutsideKeeps(addr, part, carried)
+			if len(part.Ports)+len(part.Ranges) != 0 {
+				keep(part)
+			}
+		}
+	}
+	return out
+}
+
+func portDenyCovers(outer, inner EstablishedPortDrop) bool {
+	target, ok := intersectPortDenyTargets(outer, inner)
+	if !ok || target.Addr != inner.Addr || target.Prefix != inner.Prefix {
+		return false
+	}
+	for _, port := range inner.Ports {
+		if !portDropCoversPort(outer, port) {
+			return false
+		}
+	}
+	for _, span := range inner.Ranges {
+		if !slices.ContainsFunc(outer.Ranges, func(r policy.PortRange) bool { return r.Lo <= span.Lo && r.Hi >= span.Hi }) {
+			return false
+		}
+	}
+	return true
+}
+
+func intersectPortDenyTargets(a, b EstablishedPortDrop) (EstablishedPortDrop, bool) {
+	switch {
+	case a.Addr.IsValid():
+		return EstablishedPortDrop{Addr: a.Addr}, portDropCoversAddr(b, a.Addr)
+	case b.Addr.IsValid():
+		return EstablishedPortDrop{Addr: b.Addr}, portDropCoversAddr(a, b.Addr)
+	case !a.Prefix.IsValid():
+		return EstablishedPortDrop{Prefix: b.Prefix}, true
+	case !b.Prefix.IsValid():
+		return EstablishedPortDrop{Prefix: a.Prefix}, true
+	case !a.Prefix.Overlaps(b.Prefix):
+		return EstablishedPortDrop{}, false
+	case a.Prefix.Bits() >= b.Prefix.Bits():
+		return EstablishedPortDrop{Prefix: a.Prefix}, true
+	default:
+		return EstablishedPortDrop{Prefix: b.Prefix}, true
+	}
+}
+
+func exactPortDenyOutsideKeeps(addr netip.Addr, deny EstablishedPortDrop, keeps []EstablishedPortDrop) EstablishedPortDrop {
+	// Previously explicit port denies already took precedence over keeps.
+	// Here we are considering only the old removed-address drop.
+	out := EstablishedPortDrop{Addr: addr, Ports: deny.Ports, Ranges: deny.Ranges}
+	for _, keep := range keeps {
+		if !portDropCoversAddr(keep, addr) {
+			continue
+		}
+		ports := make([]int, 0, len(out.Ports))
+		for _, port := range out.Ports {
+			if !portDropCoversPort(keep, port) {
+				ports = append(ports, port)
+			}
+		}
+		out.Ports = ports
+		for _, port := range keep.Ports {
+			out.Ranges = subtractPortRange(out.Ranges, policy.PortRange{Lo: port, Hi: port})
+		}
+		for _, r := range keep.Ranges {
+			out.Ranges = subtractPortRange(out.Ranges, r)
+		}
+	}
+	return out
+}
+
+func subtractPortRange(ranges []policy.PortRange, keep policy.PortRange) []policy.PortRange {
+	var out []policy.PortRange
+	for _, r := range ranges {
+		if r.Hi < keep.Lo || r.Lo > keep.Hi {
+			out = append(out, r)
+			continue
+		}
+		if r.Lo < keep.Lo {
+			out = append(out, policy.PortRange{Lo: r.Lo, Hi: keep.Lo - 1})
+		}
+		if r.Hi > keep.Hi {
+			out = append(out, policy.PortRange{Lo: keep.Hi + 1, Hi: r.Hi})
+		}
+	}
+	return out
+}
+
 func portDropFromScoped(r policy.PortScopedRule) (EstablishedPortDrop, bool) {
 	pd := EstablishedPortDrop{
 		Ports:  append([]int(nil), r.Ports...),
@@ -513,7 +681,11 @@ func portDropFromScoped(r policy.PortScopedRule) (EstablishedPortDrop, bool) {
 		return pd, true
 	}
 	if ip, err := netip.ParseAddr(r.Target); err == nil {
-		pd.Addr = ip.Unmap()
+		if ip.Is4In6() {
+			pd.Prefix = netip.PrefixFrom(ip, ip.BitLen())
+		} else {
+			pd.Addr = ip
+		}
 		return pd, true
 	}
 	if pfx, err := netip.ParsePrefix(r.Target); err == nil {

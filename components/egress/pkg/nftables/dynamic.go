@@ -17,6 +17,7 @@ package nftables
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"net/netip"
 	"sort"
@@ -162,14 +163,7 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 			return fmt.Errorf("no expired DNS domain slot for %q (limit %d)", domain, maxResolvedDomains)
 		}
 	}
-	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now); err != nil {
-		return err
-	}
-	if victim != "" {
-		delete(m.domains, victim)
-	}
-	m.domains[domain] = entry
-	return nil
+	return m.addResolvedDeadlinesLocked(ctx, deadlines, now, dnsGrantSource{entry: entry, domain: domain, victim: victim})
 }
 
 // holdsDomainCapacity is called with m.mu held. Activity may extend this
@@ -320,7 +314,7 @@ func (m *Manager) refreshDomains(ctx context.Context, lookup func(context.Contex
 func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *resolvedDomain, ips []ResolvedIP) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.quiesced.Load() || m.staticStateUncertain || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
+	if m.quiesced.Load() || m.staticStateUncertain || m.pendingGrant != nil || ctx.Err() != nil || m.domains[domain] != entry || m.domainPolicy == nil || m.domainPolicy.Evaluate(domain) != policy.ActionAllow {
 		return
 	}
 	now := m.tracker.now()
@@ -344,14 +338,11 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 			updates[addr] = expiry
 		}
 	}
+	next := entry
 	if len(updates) != 0 {
-		updateCtx, cancel := context.WithTimeout(ctx, domainLookupTimeout)
-		err := m.addResolvedDeadlinesLocked(updateCtx, updates, now)
-		cancel()
-		if err != nil {
-			log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)
-			return
-		}
+		staged := *entry
+		staged.addresses = maps.Clone(entry.addresses)
+		next = &staged
 	}
 	for addr, lease := range entry.addresses {
 		if expiry, stillObserved := confirmed[addr]; stillObserved {
@@ -360,18 +351,25 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 			}
 		} else {
 			if !m.holdsDomainCapacity(addr, lease, now) {
-				delete(entry.addresses, addr)
+				delete(next.addresses, addr)
 				continue
 			}
 			lease.renewable = false
 		}
-		entry.addresses[addr] = lease
+		next.addresses[addr] = lease
 	}
-	if len(entry.addresses) == 0 {
+	next.failures = 0
+	next.retryAt = time.Time{}
+	if len(updates) != 0 {
+		updateCtx, cancel := context.WithTimeout(ctx, domainLookupTimeout)
+		err := m.addResolvedDeadlinesLocked(updateCtx, updates, now, dnsGrantSource{entry: next, domain: domain})
+		cancel()
+		if err != nil {
+			log.Warnf("[dns] domain revalidation nft update failed for %q: %v", domain, err)
+		}
+	} else if len(next.addresses) == 0 {
 		delete(m.domains, domain)
 	}
-	entry.failures = 0
-	entry.retryAt = time.Time{}
 }
 
 const (

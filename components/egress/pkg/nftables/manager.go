@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"os/exec"
 	"regexp"
@@ -95,9 +96,10 @@ type Manager struct {
 	// closed (e.g. ones still retransmitting).
 	lastDrops EstablishedDrops
 
-	// A failed grant may have retired old addresses in the kernel.
-	exactDropsDirty bool
-	readExactDrops  func(context.Context) (map[netip.Addr]struct{}, error)
+	// At most one unacknowledged grant that may have retired exact drops.
+	pendingGrant   *pendingDNSGrant
+	readExactDrops func(context.Context) (map[netip.Addr]struct{}, error)
+	recoveredDNS   map[string]map[netip.Addr]time.Time // revocation only; never grants a lease
 
 	// lastDropsAt is when the dropEstablished commit behind lastDrops was
 	// applied. Carries keep the original timestamp and stop once the conntrack
@@ -139,20 +141,21 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
-	var buildDrops staticDropBuilder
-	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
-		if !m.quiesced.Load() {
-			if err := m.reconcileExactDropsLocked(ctx); err != nil {
-				return &ApplyError{Effect: ApplyUnchanged, Err: fmt.Errorf("reconcile exact teardown before reload: %w", err)}
-			}
+	carry := !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL()
+	if !m.quiesced.Load() && !m.staticStateUncertain {
+		if err := m.reconcileExactDropsLocked(ctx); err != nil && carry && !errors.Is(err, errExactTeardownTableMissing) {
+			return &ApplyError{Effect: ApplyUnchanged, Err: fmt.Errorf("reconcile exact teardown before reload: %w", err)}
 		}
+	}
+	var buildDrops staticDropBuilder
+	if carry && !m.lastDrops.Empty() {
 		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
 			drops := m.lastDrops.stillRelevant(p, learned)
 			return drops, expiry
 		}
 	}
-	_, err := m.applyStaticDropEstablishedLocked(ctx, p, buildDrops, nil, m.lastDropsAt)
+	_, err := m.applyStaticDropEstablishedLocked(ctx, p, buildDrops, nil, m.lastDropsAt, false)
 	return err
 }
 
@@ -193,7 +196,7 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	fixedDrops := func(time.Time) (EstablishedDrops, time.Time) { return drops, time.Time{} }
-	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now())
+	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now(), true)
 }
 
 // ApplyStaticComputingEstablishedDrops snapshots DNS leases, computes the
@@ -216,7 +219,7 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 		prior, live := m.snapshotResolvedDomainsLocked(at)
 		return computeEstablishedDrops(oldPol, newPol, prior, live), time.Time{}
 	}
-	return m.applyStaticDropEstablishedLocked(ctx, newPol, buildDrops, flows, m.now())
+	return m.applyStaticDropEstablishedLocked(ctx, newPol, buildDrops, flows, m.now(), true)
 }
 
 func snapshotTeardownFlows() []byte {
@@ -241,7 +244,7 @@ type staticApplyPlan struct {
 // from removed sources to avoid tearing down flows without an explicit opt-in.
 type staticDropBuilder func(time.Time) (EstablishedDrops, time.Time)
 
-func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops staticDropBuilder, flows []byte, committedAt time.Time) (int, error) {
+func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops staticDropBuilder, flows []byte, committedAt time.Time, explicit bool) (int, error) {
 	if m.quiesced.Load() {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
 	}
@@ -298,6 +301,10 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 		m.tracker.previousActiveGrace = time.Time{}
 	}
 	m.domainPolicy = p
+	m.recordRecoveredDNSLocked()
+	if explicit {
+		m.consumeRecoveredDNSLocked(p, plan)
+	}
 	m.domains = plan.domains
 	m.staticStateUncertain = false
 	m.setLastDropsLocked(plan.drops, committedAt)
@@ -433,7 +440,7 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 
 func (m *Manager) setLastDropsLocked(drops EstablishedDrops, committedAt time.Time) {
 	m.lastDrops = drops
-	m.exactDropsDirty = false
+	m.pendingGrant = nil
 	if drops.Empty() {
 		m.lastDropsAt = time.Time{}
 		return
@@ -462,7 +469,7 @@ func (m *Manager) addResolvedIPsLocked(ctx context.Context, ips []ResolvedIP) er
 	}
 	now := m.tracker.now()
 	deadlines := answerDeadlines(ips, now, len(ips))
-	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now); err != nil {
+	if err := m.addResolvedDeadlinesLocked(ctx, deadlines, now, dnsGrantSource{}); err != nil {
 		return err
 	}
 	if len(deadlines) != 0 && m.domainPolicy != nil && m.domainPolicy.DefaultAction == policy.ActionDeny {
@@ -478,9 +485,12 @@ func (m *Manager) addResolvedIPsLocked(ctx context.Context, ips []ResolvedIP) er
 
 // addResolvedDeadlinesLocked consumes the caller's batch. The kernel lease
 // must not shorten an independently learned lease or a TCP reconnect grace.
-func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[netip.Addr]time.Time, now time.Time) error {
+func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[netip.Addr]time.Time, now time.Time, source dnsGrantSource) error {
 	if len(deadlines) == 0 {
 		return nil
+	}
+	if m.pendingGrant != nil {
+		return errExactTeardownPending
 	}
 	var b strings.Builder
 	for addr, expiry := range deadlines {
@@ -496,16 +506,22 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		_, granted := deadlines[addr]
 		return granted && !ipExplicitlyDenied(m.domainPolicy, addr)
 	}
-	retire := false
+	var retired map[netip.Addr]struct{}
 	for _, addr := range m.lastDrops.Addrs {
 		if !reallowed(addr) {
 			continue
 		}
-		retire = true
-		// The add makes deletion safe to retry after a lost acknowledgement.
+		if retired == nil {
+			retired = make(map[netip.Addr]struct{})
+		}
+		retired[addr] = struct{}{}
+		// The old removal may already be gone (for example, after a reset).
 		set := removedIPSet(addr)
 		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", tableName, set, addr)
 		fmt.Fprintf(&b, "delete element inet %s %s { %s }\n", tableName, set, addr)
+	}
+	if len(retired) != 0 && source.entry != nil && !m.canRecordRecoveredDNSLocked(source.domain, deadlines) {
+		return errors.New("DNS teardown recovery history is at capacity")
 	}
 	script := b.String()
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(deadlines), script)
@@ -513,8 +529,8 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	if err != nil {
 		// Do not acknowledge the DNS answer even if the batch may have committed.
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
-		if retire && ApplyEffectOf(err) == ApplyUnknown {
-			m.exactDropsDirty = true
+		if len(retired) != 0 && ApplyEffectOf(err) == ApplyUnknown {
+			m.pendingGrant = &pendingDNSGrant{source: source, deadlines: deadlines, retired: retired}
 			readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 			defer cancel()
 			if readErr := m.reconcileExactDropsLocked(readCtx); readErr != nil {
@@ -523,14 +539,37 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		}
 		return err
 	}
-	if retire {
-		m.lastDrops.Addrs = slices.DeleteFunc(m.lastDrops.Addrs, reallowed)
+	m.commitDNSGrantLocked(source, deadlines, retired)
+	return nil
+}
+
+type dnsGrantSource struct {
+	entry          *resolvedDomain
+	domain, victim string
+}
+
+type pendingDNSGrant struct {
+	source    dnsGrantSource
+	deadlines map[netip.Addr]time.Time
+	retired   map[netip.Addr]struct{}
+}
+
+var errExactTeardownPending = errors.New("unacknowledged DNS grant requires teardown reconciliation")
+var errExactTeardownTableMissing = errors.New("exact teardown table is missing")
+
+func (m *Manager) commitDNSGrantLocked(source dnsGrantSource, deadlines map[netip.Addr]time.Time, retired map[netip.Addr]struct{}) {
+	if len(retired) != 0 {
+		m.lastDrops.Addrs = slices.DeleteFunc(m.lastDrops.Addrs, func(addr netip.Addr) bool {
+			_, found := retired[addr]
+			return found
+		})
 	}
-	for addr, expiry := range deadlines {
-		m.tracker.dynamicIPs[addr] = expiry
+	maps.Copy(m.tracker.dynamicIPs, deadlines)
+	if source.entry != nil {
+		delete(m.domains, source.victim)
+		m.domains[source.domain] = source.entry
 	}
 	telemetry.RecordNftablesUpdate()
-	return nil
 }
 
 func resolvedIPSet(addr netip.Addr) string {
@@ -552,7 +591,7 @@ func removedIPSet(addr netip.Addr) string {
 func (m *Manager) retryExactDrops(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.exactDropsDirty || m.quiesced.Load() || m.staticStateUncertain {
+	if m.pendingGrant == nil || m.quiesced.Load() || m.staticStateUncertain {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
@@ -563,7 +602,8 @@ func (m *Manager) retryExactDrops(ctx context.Context) {
 }
 
 func (m *Manager) reconcileExactDropsLocked(ctx context.Context) error {
-	if !m.exactDropsDirty {
+	pending := m.pendingGrant
+	if pending == nil {
 		return nil
 	}
 	if m.staticStateUncertain {
@@ -573,11 +613,21 @@ func (m *Manager) reconcileExactDropsLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	m.lastDrops.Addrs = slices.DeleteFunc(m.lastDrops.Addrs, func(addr netip.Addr) bool {
-		_, present := actual[addr]
-		return !present
-	})
-	m.exactDropsDirty = false
+	var retained int
+	for addr := range pending.retired {
+		if _, present := actual[addr]; present {
+			retained++
+		}
+	}
+	switch retained {
+	case 0:
+		m.commitDNSGrantLocked(pending.source, pending.deadlines, pending.retired)
+	case len(pending.retired):
+		// The nft batch was atomic: all the old drops survived.
+	default:
+		return errors.New("inconsistent exact teardown readback")
+	}
+	m.pendingGrant = nil
 	return nil
 }
 
@@ -586,6 +636,11 @@ func readExactDrops(ctx context.Context) (map[netip.Addr]struct{}, error) {
 	for _, name := range []string{removedEstV4, removedEstV6} {
 		out, err := runNftCommand(ctx, exec.CommandContext(ctx, "nft", "-j", "list", "set", "inet", tableName, name))
 		if err != nil {
+			// A missing set in an existing table is not proof that the table
+			// was reset. Only a successful table inventory can establish that.
+			if missing, checkErr := exactTeardownTableMissing(ctx); checkErr == nil && missing {
+				return nil, errExactTeardownTableMissing
+			}
 			return nil, err
 		}
 		var result struct {
@@ -622,6 +677,30 @@ func readExactDrops(ctx context.Context) (map[netip.Addr]struct{}, error) {
 	return actual, nil
 }
 
+func exactTeardownTableMissing(ctx context.Context) (bool, error) {
+	out, err := runNftCommand(ctx, exec.CommandContext(ctx, "nft", "-j", "list", "tables"))
+	if err != nil {
+		return false, err
+	}
+	var result struct {
+		Nftables []struct {
+			Table struct{ Family, Name string }
+		}
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return false, err
+	}
+	if result.Nftables == nil {
+		return false, errors.New("missing nftables table inventory")
+	}
+	for _, item := range result.Nftables {
+		if item.Table.Family == "inet" && item.Table.Name == tableName {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // StartConnectionRefresh keeps DNS-learned IPs authorized while a TCP
 // connection to them is active; the set timeout remains as the grace period
 // after the connection closes.
@@ -655,6 +734,7 @@ func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 	m.tracker.clear()
 	m.domainPolicy = nil
 	m.domains = make(map[string]*resolvedDomain)
+	clear(m.recoveredDNS)
 	m.setLastDropsLocked(EstablishedDrops{}, time.Time{})
 	return nil
 }

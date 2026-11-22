@@ -107,6 +107,9 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 	if manager.staticStateUncertain {
 		return errStaticStateUncertain
 	}
+	if manager.pendingGrant != nil {
+		return errExactTeardownPending
+	}
 	plan := t.refreshCandidates(connections)
 	credits := manager.authorizeDNSRefreshLocked(&plan)
 	if len(plan.addresses) > 0 {

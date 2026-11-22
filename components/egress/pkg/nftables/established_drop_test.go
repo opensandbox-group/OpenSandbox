@@ -52,6 +52,14 @@ func TestComputeEstablishedDrops_SingleHostPrefixesAreExact(t *testing.T) {
 			require.Empty(t, drops.Prefixes)
 		})
 	}
+	for _, target := range []string{"::ffff:203.0.113.10", "::ffff:203.0.113.10/128"} {
+		t.Run(target+" retains its IPv6 family", func(t *testing.T) {
+			pol := mustPolicy(t, `{"egress":[{"action":"allow","target":"`+target+`"}]}`)
+			drops := ComputeEstablishedDrops(pol, policy.DefaultDenyPolicy(), nil)
+			require.Equal(t, []netip.Prefix{netip.MustParsePrefix("::ffff:203.0.113.10/128")}, drops.Prefixes)
+			require.False(t, drops.Matches(netip.MustParseAddr("203.0.113.10")))
+		})
+	}
 }
 
 func TestComputeEstablishedDrops_KeepsSurvivingDomainLease(t *testing.T) {
