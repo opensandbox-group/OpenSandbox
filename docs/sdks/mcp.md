@@ -119,7 +119,7 @@ The MCP server exposes the tool set below, not the complete Python SDK. It does 
 - `sandbox_kill`: terminate a sandbox by ID
 - `sandbox_get_info`: fetch sandbox info by ID
 - `sandbox_list`: list sandboxes with optional `filter` object
-- `sandbox_renew`: extend sandbox expiration
+- `sandbox_renew`: set sandbox expiration to now + `timeout_seconds` (replaces, does not add to, the current expiration)
 - `sandbox_healthcheck`: check if sandbox is healthy
 - `sandbox_get_metrics`: get resource metrics
 - `sandbox_get_endpoint`: get network endpoint for a port

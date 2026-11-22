@@ -416,11 +416,16 @@ def register_tools(
         *,
         timeout_seconds: float,
     ) -> SandboxRenewResponse:
-        """Renew sandbox expiration time.
+        """Set the sandbox to expire timeout_seconds from now.
+
+        This replaces the current expiration time instead of adding to it, so a
+        value smaller than the remaining lifetime shortens the sandbox's life.
+        Call sandbox_get_info first and compare expires_at if you only want to
+        extend it.
 
         Parameters:
             sandbox_id: Target sandbox identifier.
-            timeout_seconds: Additional lifetime in seconds.
+            timeout_seconds: Seconds from now until the sandbox expires.
 
         Returns:
             Renew response dict including new expiration time.
