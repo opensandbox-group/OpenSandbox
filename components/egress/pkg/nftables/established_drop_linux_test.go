@@ -214,6 +214,32 @@ func TestNftEstablishedDropKernelRuleOrder(t *testing.T) {
 		require.Greater(t, dnsAccept, portDeny, "the retained port deny must take precedence over the regrant")
 		require.True(t, m.lastDrops.MatchesFlow(target, 443), "keep only the overlapping previous teardown")
 		require.False(t, m.lastDrops.MatchesFlow(target, 80), "plain reload must not newly tear down another port")
+		for _, deny := range []string{"203.0.113.10", "203.0.113.0/24"} {
+			p = mustPolicy(t, `{"egress":[{"action":"allow","target":"cdn.example.com"},{"action":"deny","target":"`+deny+`"}]}`)
+			require.NoError(t, m.ApplyStatic(ctx, p))
+			out, err = exec.CommandContext(ctx, "nft", "list", "chain", "inet", tableName, chainName).CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			portDeny = strings.Index(string(out), "ip daddr 203.0.113.10 tcp dport 443 ct state established,related drop")
+			dnsAccept = strings.Index(string(out), "ip daddr @dyn_allow_v4 ct state established,related accept")
+			require.GreaterOrEqual(t, portDeny, 0)
+			require.Greater(t, dnsAccept, portDeny, "a portless deny must retain the old port drop before accepts")
+			require.False(t, m.lastDrops.MatchesFlow(target, 80), "a portless deny is not an opt-in teardown on sibling ports")
+		}
+	})
+	t.Run("mapped deny leaves native DNS retirement intact", func(t *testing.T) {
+		target := netip.MustParseAddr("203.0.113.10")
+		for _, spelling := range []string{"::ffff:203.0.113.10", "::ffff:203.0.113.10/128"} {
+			m = NewManagerWithOptions(Options{})
+			require.NoError(t, m.ApplyStatic(ctx, oldPol))
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, oldPol, newPol)
+			require.NoError(t, err)
+			p := mustPolicy(t, `{"egress":[{"action":"allow","target":"cdn.example.com"},{"action":"deny","target":"`+spelling+`"}]}`)
+			require.NoError(t, m.ApplyStatic(ctx, p))
+			require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: target}}))
+			inKernel, err := readExactDrops(ctx)
+			require.NoError(t, err)
+			require.NotContains(t, inKernel, target, spelling)
+		}
 	})
 	t.Run("unknown write at domain quota cannot evict confirmed history", func(t *testing.T) {
 		m = NewManagerWithOptions(Options{})

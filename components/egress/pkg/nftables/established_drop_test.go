@@ -58,8 +58,22 @@ func TestComputeEstablishedDrops_SingleHostPrefixesAreExact(t *testing.T) {
 			drops := ComputeEstablishedDrops(pol, policy.DefaultDenyPolicy(), nil)
 			require.Equal(t, []netip.Prefix{netip.MustParsePrefix("::ffff:203.0.113.10/128")}, drops.Prefixes)
 			require.False(t, drops.Matches(netip.MustParseAddr("203.0.113.10")))
+			deny := mustPolicy(t, `{"egress":[{"action":"deny","target":"`+target+`"}]}`)
+			drops = ComputeEstablishedDrops(nil, deny, nil)
+			require.Equal(t, []netip.Prefix{netip.MustParsePrefix("::ffff:203.0.113.10/128")}, drops.DenyPrefixes)
+			require.False(t, drops.Matches(netip.MustParseAddr("203.0.113.10")))
 		})
 	}
+}
+
+func TestEstablishedDropsCarriesIntersectionWhenDenyNarrowsToAPort(t *testing.T) {
+	old := mustPolicy(t, `{"egress":[{"action":"deny","target":"203.0.113.0/24"}]}`)
+	narrow := mustPolicy(t, `{"egress":[{"action":"deny","target":"203.0.113.10","ports":[443]}]}`)
+	drops := ComputeEstablishedDrops(nil, old, nil).stillRelevant(narrow, nil)
+	target := netip.MustParseAddr("203.0.113.10")
+	require.True(t, drops.MatchesFlow(target, 443))
+	require.False(t, drops.MatchesFlow(target, 80))
+	require.False(t, drops.MatchesFlow(netip.MustParseAddr("203.0.113.11"), 443))
 }
 
 func TestComputeEstablishedDrops_KeepsSurvivingDomainLease(t *testing.T) {
