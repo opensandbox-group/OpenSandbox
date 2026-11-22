@@ -399,9 +399,6 @@ func RecordParkShed() {
 	parkShed.Add(context.Background(), 1)
 }
 
-// RecordActivityWriteDropped counts activity observations that never reached
-// Redis (buffer full, Redis error, or shutdown). Dropped writes can only
-// delay a pause, never accelerate one.
 func RecordActivityWriteDropped(count int64) {
 	if activityWritesDropped == nil {
 		return

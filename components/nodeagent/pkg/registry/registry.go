@@ -93,7 +93,6 @@ func RegisterSink(name string, targetID sinkTargetID, factory sinkFactory) {
 	sinks[name] = sinkRegistration{targetID: targetID, factory: factory}
 }
 
-// BuildSource constructs the registered Source under name.
 func BuildSource(name string, dependencies SourceDependencies) (api.Source, error) {
 	if dependencies.State == nil || dependencies.Logger == nil || name != api.SourceNameVMConsole && dependencies.Store == nil {
 		return nil, errors.New("source dependencies require private State, Store, and Logger")
@@ -115,7 +114,6 @@ func TargetID(name string, cfg config.Config) (string, error) {
 	return registration.targetID(cfg)
 }
 
-// BuildSink constructs the registered Sink under name.
 func BuildSink(name string, dependencies SinkDependencies) (api.Sink, error) {
 	if dependencies.State == nil {
 		return nil, errors.New("sink dependencies require State")

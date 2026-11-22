@@ -473,7 +473,7 @@ Transfer timeouts:
 | `apiKey`         | API Key for authentication                 | Required                     | `OPEN_SANDBOX_API_KEY` |
 | `domain`         | The endpoint domain of the sandbox service | Required (or localhost:8080) | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`       | HTTP protocol (http/https)                 | `http`                       | -                      |
-| `requestTimeout` | Timeout for API requests                   | 30 seconds                   | -                      |
+| `requestTimeout` | Timeout for API requests; command, code and isolated-session streams (SSE) wait at most `max(requestTimeout, 30s)` for the response and between stream bytes, with no cap on the whole stream | 30 seconds                   | -                      |
 | `debug`          | Enable debug logging for HTTP requests     | `false`                      | -                      |
 | `headers`        | Custom HTTP headers                        | Empty                        | -                      |
 | `connectionPool` | Shared OKHttp ConnectionPool               | SDK-created per instance     | -                      |

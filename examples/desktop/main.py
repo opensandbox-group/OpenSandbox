@@ -88,15 +88,12 @@ async def main() -> None:
     )
 
     async with sandbox:
-        # Desktop and VNC components are pre-installed in the image, just start them
-        # Start virtual display, window manager, and VNC server (in background)
         xvfb_exec = await sandbox.commands.run(
             "Xvfb :0 -screen 0 1280x800x24",
             opts=RunCommandOpts(background=True),
         )
         await _print_logs("xvfb", xvfb_exec)
 
-        # Start XFCE session (provides panel, file manager, terminal)
         xfce_exec = await sandbox.commands.run(
             "DISPLAY=:0 dbus-launch startxfce4",
             opts=RunCommandOpts(background=True),
@@ -109,7 +106,6 @@ async def main() -> None:
         )
         await _print_logs("x11vnc", vnc_exec)
 
-        # Start noVNC/websockify to expose VNC over WebSocket/HTTP
         novnc_exec = await sandbox.commands.run(
             "/usr/bin/websockify --web=/usr/share/novnc 6080 localhost:5900",
             opts=RunCommandOpts(background=True),

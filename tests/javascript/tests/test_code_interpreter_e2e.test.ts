@@ -131,9 +131,6 @@ async function withRetry<T>(
   throw new Error("unreachable");
 }
 
-// ---------------------------------------------------------------------------
-// Setup / teardown
-// ---------------------------------------------------------------------------
 
 beforeAll(async () => {
   await recreateSandbox();

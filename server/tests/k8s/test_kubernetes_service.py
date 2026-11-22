@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import json
 import threading
 import time
 import pytest
@@ -3307,6 +3308,193 @@ class TestPatchSandboxMetadata:
         assert sandbox.metadata == {"env": "stage"}
         # Pre-patch read only; no second get_workload after patch_labels.
         assert k8s_service.workload_provider.get_workload.call_count == 1
+
+
+class TestMetadataPodLabelSync:
+    @pytest.fixture
+    def metadata_runtime(self, k8s_service):
+        from kubernetes.client import ApiClient, CoreV1Api
+        from opensandbox_server.config import AppConfig
+        from opensandbox_server.services.k8s.client import K8sClient
+        from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+        # Exercise config parsing and real provider/client adapters up to the API boundary.
+        config = AppConfig.model_validate(
+            {
+                "runtime": {"type": "kubernetes", "execd_image": "execd:test"},
+                "kubernetes": {
+                    "namespace": "test-namespace",
+                    "metadata_sync_pods": True,
+                },
+            }
+        )
+        with patch("kubernetes.config.load_incluster_config"):
+            client = K8sClient(config.kubernetes)
+        api_client = ApiClient()
+        client._core_v1_api = CoreV1Api(api_client)
+        client._custom_objects_api = MagicMock()
+        workload = TestPatchSandboxMetadata._workload(
+            {
+                "opensandbox.io/id": "sbx-001",
+                "example.com/phase": "setup",
+                "network.example.com/old": "yes",
+                "unrelated": "keep",
+            }
+        )
+        workload["spec"]["template"] = {"metadata": {"labels": {"example.com/phase": "setup"}}}
+        client._custom_objects_api.get_namespaced_custom_object.return_value = workload
+        client._custom_objects_api.patch_namespaced_custom_object.return_value = workload
+        k8s_service.workload_provider = BatchSandboxProvider(client, config)
+        k8s_service.k8s_client = client
+        with patch.object(api_client, "call_api") as pod_request:
+            yield k8s_service, client._custom_objects_api, pod_request, workload
+        api_client.close()
+
+    def test_metadata_patch_syncs_all_pod_labels(
+        self, metadata_runtime, client, auth_headers, monkeypatch
+    ):
+        from opensandbox_server.api import lifecycle
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, pod_request, _ = metadata_runtime
+        monkeypatch.setattr(lifecycle, "sandbox_service", service)
+        response = client.patch(
+            "/v1/sandboxes/sbx-001/metadata",
+            json={
+                "example.com/phase": "run",
+                "network.example.com/new": "yes",
+                "network.example.com/old": None,
+                "unrelated": "changed",
+            },
+            headers=auth_headers,
+        )
+        assert response.status_code == 200
+        pod_request.assert_called_once()
+        args, kwargs = pod_request.call_args
+        assert args == ("/api/v1/namespaces/{namespace}/pods/{name}", "PATCH")
+        assert kwargs["path_params"] == {
+            "namespace": "test-namespace",
+            "name": "sandbox-sbx-001-0",
+        }
+        assert kwargs["header_params"]["Content-Type"] == "application/merge-patch+json"
+        selected = {
+            "example.com/phase": "run",
+            "network.example.com/new": "yes",
+            "network.example.com/old": None,
+            "unrelated": "changed",
+        }
+        assert kwargs["body"] == {"metadata": {"labels": selected}}
+        # Recreated Pods inherit this metadata-only overlay (without a spec
+        # generation bump that could restart a failed pause).
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        assert custom_api.patch_namespaced_custom_object.call_args.kwargs["body"] == {
+            "metadata": {"annotations": {
+                POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(selected, sort_keys=True),
+            }},
+        }
+
+    def test_metadata_patch_after_failed_pause_never_mutates_spec(self, metadata_runtime):
+        service, custom_api, pod_request, workload = metadata_runtime
+        workload["metadata"]["generation"] = 9
+        workload["spec"]["pause"] = True
+        workload["status"] = {"phase": "Succeed", "pauseObservedGeneration": 9}
+
+        service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        for call in custom_api.patch_namespaced_custom_object.call_args_list:
+            assert "spec" not in call.kwargs["body"]
+        assert workload["metadata"]["generation"] == 9
+        pod_request.assert_called_once()
+
+    def test_metadata_patch_merges_existing_recreation_overrides(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, _, workload = metadata_runtime
+        workload["metadata"]["annotations"] = {
+            POD_LABEL_OVERRIDES_ANNOTATION: json.dumps({
+                "example.com/phase": "setup",
+                "network.example.com/old": "yes",
+            }),
+        }
+
+        service.patch_sandbox_metadata("sbx-001", {
+            "example.com/phase": "run", "network.example.com/old": None,
+        })
+
+        body = custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
+        assert json.loads(body["metadata"]["annotations"][POD_LABEL_OVERRIDES_ANNOTATION]) == {
+            "example.com/phase": "run",
+            "network.example.com/old": None,
+        }
+
+    @pytest.mark.parametrize("mode", ["disabled", "empty", "pool"])
+    def test_metadata_patch_skips_pod_sync(self, metadata_runtime, mode):
+        service, custom_api, pod_request, workload = metadata_runtime
+        if mode == "disabled":
+            from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig
+            from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
+
+            config = AppConfig(
+                runtime=service.app_config.runtime, kubernetes=KubernetesRuntimeConfig()
+            )
+            service.workload_provider = BatchSandboxProvider(service.k8s_client, config)
+        if mode == "pool":
+            workload["spec"]["poolRef"] = "shared-pool"
+        patch_body = {} if mode == "empty" else {"example.com/phase": "run"}
+        service.patch_sandbox_metadata("sbx-001", patch_body)
+        pod_request.assert_not_called()
+        assert custom_api.patch_namespaced_custom_object.call_count == 1
+
+    def test_metadata_patch_surfaces_pod_write_failure(self, metadata_runtime):
+        service, _, pod_request, _ = metadata_runtime
+        pod_request.side_effect = ApiException(status=403, reason="Forbidden")
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+        assert exc.value.status_code == 500
+        assert exc.value.detail["code"] == SandboxErrorCodes.K8S_API_ERROR
+
+    def test_metadata_patch_tolerates_pod_not_found(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, pod_request, _ = metadata_runtime
+        pod_request.side_effect = ApiException(status=404, reason="Not Found")
+
+        result = service.patch_sandbox_metadata(
+            "sbx-001", {"example.com/phase": "run", "unrelated": "changed"}
+        )
+
+        assert result.id == "sbx-001"
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        body = custom_api.patch_namespaced_custom_object.call_args.kwargs["body"]
+        assert json.loads(body["metadata"]["annotations"][POD_LABEL_OVERRIDES_ANNOTATION]) == {
+            "example.com/phase": "run", "unrelated": "changed",
+        }
+        pod_request.assert_called_once()
+
+    def test_metadata_patch_stops_on_override_annotation_write_failure(self, metadata_runtime):
+        service, custom_api, pod_request, workload = metadata_runtime
+        custom_api.patch_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=403, reason="Forbidden"),
+        ]
+        with pytest.raises(HTTPException):
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+        pod_request.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "reserved_key", ["opensandbox.io/id", "batch-sandbox.sandbox.opensandbox.io/name"]
+    )
+    @pytest.mark.parametrize("value", ["other", None])
+    def test_metadata_patch_rejects_reserved_labels_before_any_write(
+        self, metadata_runtime, reserved_key, value
+    ):
+        service, custom_api, pod_request, _ = metadata_runtime
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {reserved_key: value})
+        assert exc.value.status_code == 400
+        custom_api.patch_namespaced_custom_object.assert_not_called()
+        pod_request.assert_not_called()
 
 
 class TestSharedNamespaceTenantIsolation:

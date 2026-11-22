@@ -106,9 +106,7 @@ class FileReadResponse(BaseModel):
 
 
 def _borrowed_config(state: ServerState) -> ConnectionConfig:
-    """Clone the shared config for one Sandbox/Manager call without ownership
-    of the server-wide transport, so per-call close() never tears down
-    connections still used by other registered sandboxes."""
+    """Borrow the shared transport so per-call cleanup cannot close other sandboxes' connections."""
     config = state.connection_config.model_copy()
     config._owns_transport = False
     return config

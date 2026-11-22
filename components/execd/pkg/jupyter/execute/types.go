@@ -94,7 +94,6 @@ type Header struct {
 	Version string `json:"version"`
 }
 
-// Message defines the basic structure of Jupyter messages
 type Message struct {
 	Header Header `json:"header"`
 

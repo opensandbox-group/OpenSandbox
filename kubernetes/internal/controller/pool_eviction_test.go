@@ -266,7 +266,7 @@ func TestHandleEvictionRecoversAllocationsFirst(t *testing.T) {
 		Client:    c,
 		Scheme:    scheme,
 		Recorder:  record.NewFakeRecorder(10),
-		Allocator: NewDefaultAllocator(c),
+		Allocator: NewDefaultAllocator(c, c),
 	}
 
 	got, err := r.handleEviction(context.Background(), pool, []*corev1.Pod{pod})

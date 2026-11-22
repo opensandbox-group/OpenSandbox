@@ -130,7 +130,12 @@ done
 case "\$mode" in
   -N) : > "\$db/cert9.db" ;;
   -D) rm -f "\$db/\$nick.pem" ;;
-  -A) echo "certutil -A \$nick" >> "$SHIM/certutil.log"; cat "\$cert" > "\$db/\$nick.pem" ;;
+  -A)
+    if [ -n "\${FAIL_CERTUTIL_ADD_ONCE:-}" ] && [ -f "\$FAIL_CERTUTIL_ADD_ONCE" ]; then
+      rm -f "\$FAIL_CERTUTIL_ADD_ONCE"
+      exit 1
+    fi
+    echo "certutil -A \$nick" >> "$SHIM/certutil.log"; cat "\$cert" > "\$db/\$nick.pem" ;;
   -L) [ -f "\$db/\$nick.pem" ] || exit 1; cat "\$db/\$nick.pem" ;;
 esac
 exit 0
@@ -436,4 +441,44 @@ boot3_trust="$(count_trust_runs)"
 [ "$boot3_trust" -ge 1 ] || fail "phase 3 boot 3: expected reinstall on rotated CA, got $boot3_trust"
 grep -q 'certificate-generation-rotated' "$MERGED3" || fail "phase 3 boot 3: merged bundle not updated"
 
-echo "PASS: bootstrap trusted the fresh CA after purge detection (${ready_seconds}s), watcher healed the second rotation (${install_passes} trust installs), timeout path leaves an empty baseline, and baked-CA fast path skips redundant reinstalls"
+# ---- Phase 4: a failed NSS import at bootstrap must be retried by the
+# watcher. certutil -D has already dropped the previous alias, so without a
+# retry the NSS store trusts no MITM CA for the rest of the sandbox lifetime.
+VOL4="$TESTDIR/volume4"
+MITM_CA4="$VOL4/mitmproxy-ca-cert.pem"
+LOG4="$TESTDIR/bootstrap-nss-retry.log"
+NSS_CERT="$HOME_DIR/.pki/nssdb/opensandbox-mitmproxy.pem"
+mkdir -p "$VOL4"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' 'certificate-nss-retry' '-----END CERTIFICATE-----' > "$MITM_CA4"
+: > "$TESTDIR/certutil-fail-once"
+
+FAIL_CERTUTIL_ADD_ONCE="$TESTDIR/certutil-fail-once" \
+PATH="$SHIM:$PATH" \
+HOME="$HOME_DIR" \
+JAVA_HOME="$FAKE_JDK" \
+PYTHONPATH="$TESTDIR/pymod" \
+FAKE_CERTIFI_PEM="$FAKE_CERTIFI_PEM" \
+OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=1 \
+OPENSANDBOX_MITM_CA="$MITM_CA4" \
+OPENSANDBOX_MERGED_CA_PATH="$VOL4/merged-ca-certificates.pem" \
+OPENSANDBOX_MITM_CA_STATE_FILE="$TESTDIR/phase4.fp" \
+MITM_CA_WAIT_TIMEOUT=10 \
+MITM_CA_STABILIZE_WINDOW=0 \
+MITM_CA_POLL_INTERVAL=0.2 \
+MITM_CA_WATCH_INTERVAL=0.5 \
+EXECD="$TESTDIR/stub-execd" \
+BOOTSTRAP_CMD="true" \
+bash "$BOOTSTRAP" > "$LOG4" 2>&1 || fail "phase 4: bootstrap failed"
+
+grep -q 'failed to import mitm CA into NSS' "$LOG4" || fail "phase 4: the bootstrap NSS import did not fail as intended"
+nss_retried=""
+for _ in $(seq 1 20); do
+  if grep -q 'certificate-nss-retry' "$NSS_CERT" 2>/dev/null; then
+    nss_retried=1
+    break
+  fi
+  sleep 0.3
+done
+[ -n "$nss_retried" ] || fail "phase 4: watcher did not retry the NSS import that failed at bootstrap"
+
+echo "PASS: bootstrap trusted the fresh CA after purge detection (${ready_seconds}s), watcher healed the second rotation (${install_passes} trust installs), timeout path leaves an empty baseline, baked-CA fast path skips redundant reinstalls, and a failed NSS import is retried"

@@ -622,7 +622,6 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(typesResult);
         assertNotNull(typesResult.getId());
 
-        // 3. TypeScript error test: use deterministic runtime error.
         RunCodeRequest errorRequest =
                 RunCodeRequest.builder()
                         .code("throw new Error('ts-runtime-error');")

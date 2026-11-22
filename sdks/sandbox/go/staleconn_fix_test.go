@@ -35,20 +35,7 @@ import (
 	"time"
 )
 
-// TestStaleConn_GetEndpointRecoversFromBlackHoledConn is the deterministic,
-// millisecond-scale regression test.
-//
-// Setup: the black-hole server serves the FIRST request on any connection and
-// silently hangs on a SECOND request over the SAME connection (modeling an LB
-// that dropped the idle connection without sending FIN). The idle gap between
-// the two calls (50ms) is far below IdleConnTimeout, so the SDK keeps and
-// REUSES the (now black-holed) connection for the second call.
-//
-//   - Before the fix: the second GetEndpoint reuses the dead connection, stalls,
-//     and fails at RequestTimeout with "Client.Timeout exceeded while awaiting
-//     headers".
-//   - After the fix (B): doRequest detects the connection-level stall, purges
-//     idle connections, and retries once on a fresh connection -> success.
+// The fixture serves only the first request on each connection; reuse stalls without a FIN.
 func TestStaleConn_GetEndpointRecoversFromBlackHoledConn(t *testing.T) {
 	addr, cleanup := blackHoleAfterReuseServer(t)
 	defer cleanup()
@@ -74,11 +61,6 @@ func TestStaleConn_GetEndpointRecoversFromBlackHoledConn(t *testing.T) {
 	require.NoError(t, err, "GetEndpoint must recover from a black-holed reused connection")
 }
 
-// TestStaleConn_IdleConnEvictedBeforeLBDrops verifies the "A" lever: when a
-// connection stays idle longer than IdleConnTimeout, the SDK evicts it, so the
-// next request dials a FRESH connection instead of reusing a possibly-dead one.
-// Uses a short IdleConnTimeout via a custom transport so the test is fast and
-// deterministic.
 func TestStaleConn_IdleConnEvictedBeforeLBDrops(t *testing.T) {
 	addr, cleanup := blackHoleAfterReuseServer(t)
 	defer cleanup()
@@ -107,9 +89,7 @@ func TestStaleConn_IdleConnEvictedBeforeLBDrops(t *testing.T) {
 	require.NoError(t, err, "GetEndpoint should dial a fresh connection after IdleConnTimeout eviction")
 }
 
-// TestStaleConn_NonIdempotentNotRetried verifies the fresh-connection retry is
-// restricted to idempotent methods: a POST that hits a black-holed reused
-// connection is NOT retried (to avoid the risk of double execution) and fails.
+// Retrying a POST can execute the workload twice.
 func TestStaleConn_NonIdempotentNotRetried(t *testing.T) {
 	addr, cleanup := blackHoleAfterReuseServer(t)
 	defer cleanup()
@@ -129,11 +109,6 @@ func TestStaleConn_NonIdempotentNotRetried(t *testing.T) {
 	assert.Contains(t, err.Error(), "Client.Timeout exceeded while awaiting headers")
 }
 
-// TestStaleConn_FreshConnTimeoutNotRetried verifies the fresh-connection retry
-// is gated on connection REUSE: a GET whose FIRST (brand-new) connection simply
-// times out against a slow server must NOT be retried, otherwise a slow server
-// would be hit twice and the effective timeout would roughly double. This is
-// the guard requested in PR review: only reused pooled connections are retried.
 func TestStaleConn_FreshConnTimeoutNotRetried(t *testing.T) {
 	var hits int32
 	// Every request blocks past the client timeout (never sends headers), so a

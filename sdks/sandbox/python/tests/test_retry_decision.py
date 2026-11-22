@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Unit tests for the pure retry decision function and backoff helpers."""
-
 from __future__ import annotations
 
 import random

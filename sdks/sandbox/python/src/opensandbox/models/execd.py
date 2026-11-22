@@ -111,11 +111,9 @@ class ExecutionLogs(BaseModel):
     )
 
     def add_stdout(self, message: OutputMessage) -> None:
-        """Add a message to standard output log."""
         self.stdout.append(message)
 
     def add_stderr(self, message: OutputMessage) -> None:
-        """Add a message to standard error log."""
         self.stderr.append(message)
 
 
@@ -206,7 +204,6 @@ class Execution(BaseModel):
     )
 
     def add_result(self, result: ExecutionResult) -> None:
-        """Add a new execution result."""
         self.result.append(result)
 
     @property

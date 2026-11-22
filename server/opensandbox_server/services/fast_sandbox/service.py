@@ -804,7 +804,7 @@ class FastSandboxService(SandboxService, ExtensionService):
     # -- endpoints ---------------------------------------------------------
 
     def get_network_policy(self, sandbox_id: str) -> dict:
-        """The recorded policy reflects exactly what the egress enforces."""
+        """Read recorded user policy; egress applies operator overlays separately."""
         return policy_relay.relay_get(self, sandbox_id)
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:

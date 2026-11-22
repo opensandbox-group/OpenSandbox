@@ -169,9 +169,18 @@ func (p *Proxy) parseRequestedHeaderRoute(r *http.Request) (parsedRoute, int, er
 	if err != nil {
 		return pr, 0, err
 	}
-	if strings.HasPrefix(pr.sandboxID, "fsb-") {
-		if p.fastSandboxNamespace == "" || pr.signature != "" || r.Header.Get(SandboxIngress) != "" || r.Header.Get(DeprecatedSandboxIngress) != "" {
-			return parsedRoute{}, 0, fmt.Errorf("%w: unsigned Fast Sandbox routes require Host routing and --fast-sandbox-namespace", routescope.ErrUnauthorized)
+	// Fast Sandbox IDs are Kubernetes object names, so always lowercase. Only
+	// the Host is folded above; a label a front proxy copied from a
+	// mixed-case Host into the routing header must route the same way.
+	if fastSandboxID := strings.ToLower(pr.sandboxID); strings.HasPrefix(fastSandboxID, "fsb-") {
+		pr.sandboxID = fastSandboxID
+		// The unsigned route label may arrive via the Host or the routing
+		// header: front proxies that own the external wildcard domain often
+		// derive the label from the Host and forward it as the routing header
+		// after stripping their own prefix. Only a signed label keeps the
+		// signed path mandatory; --fast-sandbox-namespace stays the boundary.
+		if p.fastSandboxNamespace == "" || pr.signature != "" {
+			return parsedRoute{}, 0, fmt.Errorf("%w: unsigned Fast Sandbox routes require --fast-sandbox-namespace and an unsigned route label", routescope.ErrUnauthorized)
 		}
 		pr.routeKind = sandbox.RouteKindFastSandbox
 		pr.namespace = p.fastSandboxNamespace

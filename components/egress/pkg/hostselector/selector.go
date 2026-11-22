@@ -13,7 +13,6 @@
 // limitations under the License.
 
 // Package hostselector provides the exact/wildcard host algebra for OSEP-0023.
-// It is not wired into the legacy Credential Vault or TLS path yet.
 package hostselector
 
 import (

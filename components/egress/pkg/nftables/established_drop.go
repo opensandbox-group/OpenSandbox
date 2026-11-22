@@ -148,30 +148,45 @@ func portDropCoversPort(pd EstablishedPortDrop, dport int) bool {
 	return false
 }
 
-// SnapshotResolvedDomains returns a copy of the DNS-learned address map the
-// manager currently tracks. Not part of the policy server's nftApplier
-// interface: production code snapshots under the manager lock inside
-// ApplyStaticComputingEstablishedDrops.
+// SnapshotResolvedDomains returns DNS addresses still eligible for renewal.
 func (m *Manager) SnapshotResolvedDomains() map[string][]netip.Addr {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.snapshotResolvedDomainsLocked()
+	renewable, _ := m.snapshotResolvedDomainsLocked(time.Time{})
+	return renewable
 }
 
-func (m *Manager) snapshotResolvedDomainsLocked() map[string][]netip.Addr {
-	out := make(map[string][]netip.Addr, len(m.domains))
+// A teardown snapshot uses all tracked history to identify revoked grants,
+// but only live leases can keep a connection. A zero liveAt returns only
+// the renewal view.
+func (m *Manager) snapshotResolvedDomainsLocked(liveAt time.Time) (history, live map[string][]netip.Addr) {
+	history = make(map[string][]netip.Addr, len(m.domains))
+	teardown := !liveAt.IsZero()
+	if teardown {
+		live = make(map[string][]netip.Addr, len(m.domains))
+	}
 	for domain, entry := range m.domains {
 		if entry == nil || len(entry.addresses) == 0 {
 			continue
 		}
-		addrs := make([]netip.Addr, 0, len(entry.addresses))
-		for addr := range entry.addresses {
-			addrs = append(addrs, addr)
+		var addrs []netip.Addr
+		for addr, lease := range entry.addresses {
+			if teardown || lease.renewable {
+				addrs = append(addrs, addr)
+			}
+			if teardown && lease.deadline().After(liveAt) {
+				live[domain] = append(live[domain], addr)
+			}
 		}
-		sort.Slice(addrs, func(i, j int) bool { return addrs[i].Compare(addrs[j]) < 0 })
-		out[domain] = addrs
+		if len(addrs) == 0 {
+			continue
+		}
+		if !teardown {
+			sort.Slice(addrs, func(i, j int) bool { return addrs[i].Compare(addrs[j]) < 0 })
+		}
+		history[domain] = addrs
 	}
-	return out
+	return history, live
 }
 
 // ComputeEstablishedDrops derives the teardown set for oldPol → newPol.
@@ -184,13 +199,17 @@ func (m *Manager) snapshotResolvedDomainsLocked() map[string][]netip.Addr {
 // denies, surviving domain-lease IPs, and port-scoped allows (including
 // port-only ones) — so a removed prefix can never cut a flow newPol permits.
 func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains map[string][]netip.Addr) EstablishedDrops {
+	return computeEstablishedDrops(oldPol, newPol, priorDomains, priorDomains)
+}
+
+func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains, liveDomains map[string][]netip.Addr) EstablishedDrops {
 	if newPol == nil {
 		newPol = policy.DefaultDenyPolicy()
 	}
 
 	// IPs still covered by a surviving domain lease (and not explicitly denied).
 	survivingDomainIPs := make(map[netip.Addr]struct{})
-	for domain, ips := range priorDomains {
+	for domain, ips := range liveDomains {
 		if newPol.Evaluate(domain) != policy.ActionAllow {
 			continue
 		}

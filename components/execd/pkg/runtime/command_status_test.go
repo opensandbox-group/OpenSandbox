@@ -49,7 +49,6 @@ func TestGetCommandStatus_Running(t *testing.T) {
 	require.NoError(t, c.runBackgroundCommand(ctx, cancel, req))
 	require.NotEmpty(t, session, "session should be set by OnExecuteInit")
 
-	// Poll until status is registered (runBackgroundCommand stores kernel asynchronously).
 	deadline := time.Now().Add(5 * time.Second)
 	var (
 		status *CommandStatus
@@ -108,9 +107,6 @@ func TestSeekBackgroundCommandOutput_Completed(t *testing.T) {
 	require.Equal(t, stdoutContent, string(output))
 }
 
-// TestSeekBackgroundCommandOutput_ClampsCursorPastEOF verifies a cursor beyond
-// the current end of the log returns empty output with the real end offset, so
-// later writes are still delivered on the next poll (#1010).
 func TestSeekBackgroundCommandOutput_ClampsCursorPastEOF(t *testing.T) {
 	c := NewController("", "")
 
@@ -139,9 +135,6 @@ func TestSeekBackgroundCommandOutput_ClampsCursorPastEOF(t *testing.T) {
 	require.Equal(t, int64(11), cursor)
 }
 
-// TestSeekBackgroundCommandOutput_RejectsNegativeCursor verifies the cursor is
-// validated before seeking (the spec declares minimum: 0), instead of
-// surfacing a platform-specific seek error.
 func TestSeekBackgroundCommandOutput_RejectsNegativeCursor(t *testing.T) {
 	c := NewController("", "")
 

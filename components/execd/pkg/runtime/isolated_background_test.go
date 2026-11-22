@@ -312,9 +312,6 @@ func TestRunInIsolatedSessionBackground_StdinDetached(t *testing.T) {
 	}
 }
 
-// TestRunInIsolatedSessionBackground_FallbackWhenRunDirBlocked verifies that a
-// blocked background run dir (a lower-layer .execd entry) falls back to the
-// workspace root so the run still completes and its output is still readable.
 func TestRunInIsolatedSessionBackground_FallbackWhenRunDirBlocked(t *testing.T) {
 	runner := newTestRunner(t)
 	ws := filepath.Join(t.TempDir(), "ws")
@@ -351,9 +348,6 @@ func TestRunInIsolatedSessionBackground_FallbackWhenRunDirBlocked(t *testing.T) 
 	}
 }
 
-// TestSeekIsolatedBackgroundOutput_CapsReadSize verifies a single read returns
-// at most maxBackgroundLogReadBytes, with the cursor advancing so the client
-// can page through the remainder.
 func TestSeekIsolatedBackgroundOutput_CapsReadSize(t *testing.T) {
 	runner := newTestRunner(t)
 	dir := t.TempDir()
@@ -398,9 +392,6 @@ func TestSeekIsolatedBackgroundOutput_CapsReadSize(t *testing.T) {
 	}
 }
 
-// TestDeleteSessionRemovesRWRunArtifacts verifies that run log/exit files in
-// an rw workspace (and the execd-managed run directory) are removed when the
-// session is deleted, so they do not accumulate in the user's workspace.
 func TestDeleteSessionRemovesRWRunArtifacts(t *testing.T) {
 	runner := newTestRunner(t)
 	ws := filepath.Join(t.TempDir(), "ws")
@@ -438,8 +429,6 @@ func TestDeleteSessionRemovesRWRunArtifacts(t *testing.T) {
 	}
 }
 
-// TestDeleteSessionRemovesRunningRunScript verifies that a run cut short by
-// DeleteIsolatedSession does not leave its script file in an rw workspace.
 func TestDeleteSessionRemovesRunningRunScript(t *testing.T) {
 	runner := newTestRunner(t)
 	ws := filepath.Join(t.TempDir(), "ws")
@@ -469,10 +458,6 @@ func TestDeleteSessionRemovesRunningRunScript(t *testing.T) {
 	}
 }
 
-// TestRunInIsolatedSessionBackground_RejectsUnwritableWorkspace verifies that
-// a session whose workspace root is not writable by its own uid gets a clean
-// rejection instead of an accepted run that can never write its exit code
-// (a ghost run).
 func TestRunInIsolatedSessionBackground_RejectsUnwritableWorkspace(t *testing.T) {
 	runner := newTestRunner(t)
 	ws := filepath.Join(t.TempDir(), "ws")
@@ -498,9 +483,6 @@ func TestRunInIsolatedSessionBackground_RejectsUnwritableWorkspace(t *testing.T)
 	}
 }
 
-// TestSessionDeathPreservesRunRecordUntilDelete verifies that a run whose
-// session dies mid-flight keeps its record (reported as "session terminated")
-// until the session is deleted, instead of disappearing immediately.
 func TestSessionDeathPreservesRunRecordUntilDelete(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -543,8 +525,6 @@ func TestSessionDeathPreservesRunRecordUntilDelete(t *testing.T) {
 	}
 }
 
-// TestDeleteKeepsUserExecdFile verifies that the cleanup of the run directory
-// never removes a user-owned .execd file (the fallback blocker case).
 func TestDeleteKeepsUserExecdFile(t *testing.T) {
 	runner := newTestRunner(t)
 	ws := filepath.Join(t.TempDir(), "ws")
@@ -584,9 +564,6 @@ func TestDeleteKeepsUserExecdFile(t *testing.T) {
 	}
 }
 
-// TestRunInIsolatedSessionBackground_NilStdinNoPanic verifies the submission
-// handles a session whose pipes were closed/nil'd by a concurrent Delete
-// without dereferencing a nil writer.
 func TestRunInIsolatedSessionBackground_NilStdinNoPanic(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -603,8 +580,6 @@ func TestRunInIsolatedSessionBackground_NilStdinNoPanic(t *testing.T) {
 	}
 }
 
-// TestBackgroundRunLogCappedOnDisk verifies that a run's log file is truncated
-// to maxBackgroundLogReadBytes when the run completes, bounding disk usage.
 func TestBackgroundRunLogCappedOnDisk(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -630,9 +605,6 @@ func TestBackgroundRunLogCappedOnDisk(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond, "completed run log should be capped")
 }
 
-// TestSeekIsolatedBackgroundOutput_ClampsCursorPastEOF verifies a cursor beyond
-// the current end of the log returns empty output with the real end offset, so
-// later writes are still delivered on the next poll (#1010).
 func TestSeekIsolatedBackgroundOutput_ClampsCursorPastEOF(t *testing.T) {
 	runner := newTestRunner(t)
 	dir := t.TempDir()
@@ -679,8 +651,6 @@ func TestSeekIsolatedBackgroundOutput_ClampsCursorPastEOF(t *testing.T) {
 	}
 }
 
-// TestSeekIsolatedBackgroundOutput_RejectsNegativeCursor verifies the cursor
-// is validated before seeking (the spec declares minimum: 0).
 func TestSeekIsolatedBackgroundOutput_RejectsNegativeCursor(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -698,8 +668,6 @@ func TestSeekIsolatedBackgroundOutput_RejectsNegativeCursor(t *testing.T) {
 	}
 }
 
-// TestRunInIsolatedSessionBackground_ReturnsStartedAt verifies the submitted
-// handle and run_status report the same start time.
 func TestRunInIsolatedSessionBackground_ReturnsStartedAt(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -761,9 +729,6 @@ func TestReadIsolatedRunExitCode(t *testing.T) {
 	}
 }
 
-// TestBackgroundRunCompletesDespiteShellSyntaxError verifies that user code
-// with a shell syntax error cannot break the control wrapper: the run must
-// finish (non-zero exit) and the session must stay alive.
 func TestBackgroundRunCompletesDespiteShellSyntaxError(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -796,9 +761,6 @@ func TestBackgroundRunCompletesDespiteShellSyntaxError(t *testing.T) {
 	}
 }
 
-// TestRunInIsolatedSessionBackground_LargeCode verifies that code larger than
-// the 128 KiB limit on a single exec argument runs like any other code, and
-// leaves no script file behind.
 func TestRunInIsolatedSessionBackground_LargeCode(t *testing.T) {
 	runner := newTestRunner(t)
 	ws := filepath.Join(t.TempDir(), "ws")
@@ -833,9 +795,6 @@ func TestRunInIsolatedSessionBackground_LargeCode(t *testing.T) {
 	}
 }
 
-// TestRunInIsolatedSessionBackground_RunsCodeVerbatim verifies that the code
-// reaches the shell byte for byte and that the wrapper does not change the
-// caller's environment.
 func TestRunInIsolatedSessionBackground_RunsCodeVerbatim(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -864,9 +823,6 @@ func TestRunInIsolatedSessionBackground_RunsCodeVerbatim(t *testing.T) {
 	}
 }
 
-// TestRunInIsolatedSessionBackground_ScriptWriteFailure verifies that a
-// script file that cannot be written completely is not run: the run fails
-// with exit code 126 instead of running a truncated prefix of the code.
 func TestRunInIsolatedSessionBackground_ScriptWriteFailure(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -898,10 +854,6 @@ func TestRunInIsolatedSessionBackground_ScriptWriteFailure(t *testing.T) {
 	}
 }
 
-// TestBackgroundRunCompletesAfterRunDirDeleted verifies that a background
-// command deleting its own .execd/background-runs directory cannot strand the
-// run: the exit-code marker falls back to the workspace root and the watcher
-// still reports completion.
 func TestBackgroundRunCompletesAfterRunDirDeleted(t *testing.T) {
 	runner := newTestRunner(t)
 	ws := filepath.Join(t.TempDir(), "ws")
@@ -937,9 +889,6 @@ func TestBackgroundRunCompletesAfterRunDirDeleted(t *testing.T) {
 	}
 }
 
-// TestSeekIsolatedBackgroundOutput_RefusesSymlinkedLog verifies that a
-// background command replacing its log file with a symlink cannot make
-// host-side execd read an arbitrary host file through the /logs endpoint.
 func TestSeekIsolatedBackgroundOutput_RefusesSymlinkedLog(t *testing.T) {
 	runner := newTestRunner(t)
 	ws := filepath.Join(t.TempDir(), "ws")
@@ -980,8 +929,6 @@ func TestSeekIsolatedBackgroundOutput_RefusesSymlinkedLog(t *testing.T) {
 	}
 }
 
-// TestCapIsolatedRunLog_RefusesSymlinkTarget verifies that the completion-time
-// log cap cannot truncate an arbitrary host file through a symlink.
 func TestCapIsolatedRunLog_RefusesSymlinkTarget(t *testing.T) {
 	dir := t.TempDir()
 	root, err := os.OpenRoot(dir)

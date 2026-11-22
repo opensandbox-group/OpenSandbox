@@ -1027,11 +1027,7 @@ class KubernetesSandboxService(
 
         created_at = datetime.now(timezone.utc)
 
-        # Tracks whether we have side effects (auto-created PVCs) that must
-        # be swept by the finally clause if the request fails before returning.
-        # Set eagerly *before* the call so a partial failure inside
-        # _ensure_pvc_volumes (some PVCs created, others not) still triggers
-        # cleanup of the ones we managed to label.
+        # Mark PVC side effects before _ensure_pvc_volumes so partial creation failures still trigger cleanup.
         managed_pvcs_may_exist = False
         # Keep PVCs if workload creation succeeds or rollback deletion fails.
         # Accepted deletion allows cleanup; PVC protection retains in-use claims
@@ -1074,18 +1070,7 @@ class KubernetesSandboxService(
                     self._ensure_pvc_volumes, request.volumes, sandbox_id
                 )
 
-            # Create the workload CR. Three failure modes drive PVC cleanup:
-            #   1. ``ValueError`` — provider preflight rejection (poolRef+volumes,
-            #      windows platform, etc.). By convention no CR has been
-            #      touched, so the PVCs we just labeled are orphans we must
-            #      sweep. Flag stays False; outer handler converts to 400.
-            #   2. Other exception after partial CR creation — try rollback
-            #      ``delete_workload``: on accepted deletion, sweep PVCs;
-            #      on failure the CR may still be alive with pods needing the
-            #      PVCs, so flip the flag to skip the sweep.
-            #   3. Success — flag becomes True so a subsequent
-            #      ``_wait_for_sandbox_ready`` failure must rollback before
-            #      sweeping (the existing inner try/except handles that).
+            # ValueError means preflight rejected without creating a CR; other failures need rollback before PVC cleanup.
             try:
                 workload_info = await asyncio.to_thread(
                     self.workload_provider.create_workload,
@@ -1114,12 +1099,7 @@ class KubernetesSandboxService(
                 # clean 4xx (not the generic 500 API_ERROR) — classify it up
                 # front, roll back as below, then raise the mapped error.
                 quota_error_message = _quota_rejection_message(create_ex)
-                # CR may exist with partial state. Attempt rollback so the
-                # ``finally`` can sweep PVCs cleanly. A 404 from the rollback
-                # means the CR is already gone (e.g. the provider's own
-                # internal rollback already deleted it before re-raising),
-                # which is the same safe state as a successful delete —
-                # treat it as success so PVCs are still swept.
+                # A rollback 404 is equivalent to successful deletion for PVC cleanup.
                 try:
                     await asyncio.to_thread(
                         self.workload_provider.delete_workload,
@@ -1137,10 +1117,7 @@ class KubernetesSandboxService(
                             f"(already gone); treating as deleted. create_ex={create_ex}"
                         )
                     else:
-                        # Rollback failed; CR might still be alive. Be defensive:
-                        # skip PVC sweep so we don't yank storage from a live
-                        # workload. The user's eventual ``delete_sandbox`` will
-                        # 404 or succeed, and *that* path will sweep PVCs.
+                        # Retain PVCs when rollback fails: the workload may still use them.
                         workload_left_alive = True
                         logger.error(
                             f"sandbox={sandbox_id} | create_workload raised and rollback "
@@ -1617,6 +1594,9 @@ class KubernetesSandboxService(
                 name=name,
                 namespace=self._resolve_namespace(),
                 labels=label_patch,
+            )
+            self.workload_provider.sync_pod_metadata_labels(
+                updated, self._resolve_namespace(), patch,
             )
         except Exception as e:
             logger.error(f"Error patching labels for sandbox {sandbox_id}: {e}")

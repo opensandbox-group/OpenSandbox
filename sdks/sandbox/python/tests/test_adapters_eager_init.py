@@ -48,7 +48,6 @@ async def test_execd_service_adapters_eager_init_and_urls() -> None:
     assert cmd._get_execd_url("/ping").endswith("/ping")
     assert fs._get_execd_url("/files/download").endswith("/files/download")
 
-    # Ensure openapi clients are available without lazy init
     assert await cmd._get_client() is not None
     assert await fs._get_client() is not None
     assert await health._get_client() is not None

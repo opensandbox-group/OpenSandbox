@@ -25,7 +25,7 @@ import (
 
 // Update installs a post-bootstrap decision snapshot on this session's
 // receiver. It is an internal transaction primitive and does not publish any
-// public Vault state. A future caller must keep its candidate unpublished while
+// public Vault state. The caller must keep its candidate unpublished while
 // holding the shared mutation barrier. A successful return confirms this exact
 // identity and permits finalization. If Update returns ErrIndeterminate with a
 // non-zero attempt, only ReconcileUpdate of that exact recorded attempt can

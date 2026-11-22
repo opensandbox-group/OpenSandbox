@@ -23,9 +23,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The policy relay and snapshot surfaces arrived on main after the original
-// transition fix. They must obey the same unfinished-registration guard as
-// Vault, including a failed registration that has not published subjFence.
 func TestTransitionPolicySurfacesRejectPendingRebind(t *testing.T) {
 	for _, phase := range []string{"old-network-removal", "new-registration"} {
 		t.Run(phase, func(t *testing.T) {

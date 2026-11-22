@@ -12,27 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fast Sandbox-profile assembly: a single egress control plane serving N
-// sandboxes sharing one host/network domain. Activated by
-// OPENSANDBOX_EGRESS_PROFILE=fast-sandbox; the sidecar profile is unchanged.
-//
-// Control flow:
-//
-//	fastlet action protocol --(SET_BINDING / LIFECYCLE_HOOK / REMOVE_BINDING /
-//	                         VAULT_EXPORT / VAULT_IMPORT /
-//	                         POLICY_EXPORT / POLICY_IMPORT)-->
-//	  fastSandboxPolicyServer:18080 (loopback): subject lifecycle + deny-first nft,
-//	  policy activation on sandbox.data-plane-ready. The binding input seeds the
-//	  policy at create; runtime mutations go through the handler-relay surfaces
-//	  (/policy/{uid} for the recorded policy, /vault/{uid} for the credential
-//	  vault, both egress-held per OSEP-0022) and the persisted files supersede
-//	  replayed binding inputs after a restart.
-//	DNS: one shared proxy, per-query policy via source IP dispatch
-//
-// Subject lifecycle is driven entirely by the Fastlet (Sandbox Actions
-// Handler protocol); there is no local observation source. On egress restart
-// the Fastlet detects the new handler instanceId and replays every live
-// binding (SET_BINDING + reached Hooks) — no rescan needed.
+// Fastlet owns subject lifecycle and replays bindings after egress restarts; no local rescan is needed.
+// Persisted relay state supersedes binding input. Shared DNS dispatches policy by source IP.
 package main
 
 import (
@@ -88,11 +69,7 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		}()
 	}
 
-	// Startup load goes THROUGH the loader so its file-state snapshot matches
-	// disk from the first tick: a rule file deleted before the first poll is
-	// then recognized as a removal, and startup rules can never outlive their
-	// files. Loader gate (30s) sits under the one-minute reload ticker so
-	// every tick re-stats the files.
+	// Seed the loader's file snapshot so the first reload detects files deleted after startup.
 	loader := policy.NewAlwaysRuleLoader(30 * time.Second)
 	alwaysDeny, alwaysAllow, _, err := loader.RefreshIfDue(time.Now())
 	if err != nil {
@@ -118,10 +95,7 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 			}
 		}
 	}
-	// Recovery: wipe stale rules from a previous egress generation BEFORE
-	// serving action requests, so no dead subject's policy survives into a
-	// new sandbox. The Fastlet then detects the new handler instanceId and
-	// replays every live binding through the same registration path.
+	// Reset stale enforcement before serving; the Fastlet replays live bindings for this incarnation.
 	if err := podNft.ApplyReset(ctx); err != nil {
 		log.Fatalf("fast-sandbox nftables reset failed: %v", err)
 	}
@@ -144,20 +118,12 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	}
 	registerStateDirName(vaultDir)
 	registerStateDirName(policyDir)
-	// The two state directories are siblings holding same-named per-subject
-	// files (<uid>.json) and seal markers: aliasing them would make each
-	// persister clobber the other's state (a restart-time rehydrate of one
-	// kind quarantines the other kind's file). Reject before any state is
-	// written.
+	// Both persisters use <uid>.json and seal markers; aliased directories would corrupt each other's state.
 	if vaultDir != "" && policyDir != "" && sameStateDir(vaultDir, policyDir) {
 		log.Fatalf("fast-sandbox policy persistence: OPENSANDBOX_EGRESS_POLICY_DIR must differ from OPENSANDBOX_EGRESS_VAULT_DIR (both resolve to %s)", policyDir)
 	}
 
-	// Vault persistence (OSEP-0022 stage 2): per-subject vault files under
-	// OPENSANDBOX_EGRESS_VAULT_DIR so an egress restart recovers locally at
-	// SET_BINDING replay. Empty/unset keeps the vault memory-only. Fail fast
-	// on an unusable directory: silently serving memory-only would break the
-	// acked ⇒ durable contract.
+	// A configured but unusable vault directory must fail startup rather than silently break acknowledged durability.
 	if vaultDir != "" {
 		vp, err := newVaultPersistence(vaultDir)
 		if err != nil {
@@ -316,7 +282,6 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	podNft.StartConnectionRefresh(ctx, nil)
 	log.Infof("fast-sandbox connection refresh started (bucketed per subject, every 30s)")
 
-	// Block until shutdown.
 	<-ctx.Done()
 	log.Infof("received shutdown signal; shutting down fast-sandbox profile")
 

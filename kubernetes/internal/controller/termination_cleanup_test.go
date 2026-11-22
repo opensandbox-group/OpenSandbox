@@ -275,7 +275,7 @@ func TestUnavailablePoolWaitsForAllocatedPodDeletion(t *testing.T) {
 					return c.Get(ctx, key, obj, opts...)
 				},
 			})
-			r := &PoolReconciler{Client: c, APIReader: apiReader, Allocator: NewDefaultAllocator(c)}
+			r := &PoolReconciler{Client: c, APIReader: apiReader, Allocator: NewDefaultAllocator(c, apiReader)}
 			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
 			if _, err := r.Reconcile(ctx, req); err == nil {
 				t.Fatal("pod query failure was treated as completed cleanup")
@@ -447,7 +447,7 @@ func TestCleanupTerminatingSandboxesForUnavailablePool(t *testing.T) {
 		WithIndex(&sandboxv1alpha1.BatchSandbox{}, fieldindex.IndexNameForPoolRef, fieldindex.PoolRefIndexFunc).
 		WithObjects(stranded, released, pod, active, otherPool).
 		Build()
-	r := &PoolReconciler{Client: fakeClient, APIReader: fakeClient, Allocator: NewDefaultAllocator(fakeClient)}
+	r := &PoolReconciler{Client: fakeClient, APIReader: fakeClient, Allocator: NewDefaultAllocator(fakeClient, fakeClient)}
 
 	cleanupComplete, err := r.cleanupTerminatingSandboxesForUnavailablePool(context.Background(), "default", "missing-pool", "")
 	if err != nil {
@@ -635,7 +635,7 @@ func TestPooledTaskDeletionHandoff(t *testing.T) {
 			}}
 			r.taskSchedulers.Store(key.String(), scheduler)
 			poolReconciler := &PoolReconciler{Client: r.Client, APIReader: r.APIReader,
-				Allocator: NewDefaultAllocator(r.Client), Recorder: record.NewFakeRecorder(100)}
+				Allocator: NewDefaultAllocator(r.Client, r.APIReader), Recorder: record.NewFakeRecorder(100)}
 			schedule := func(pods []*corev1.Pod) *scheduleResult {
 				t.Helper()
 				require.NoError(t, r.Get(ctx, key, sandbox))

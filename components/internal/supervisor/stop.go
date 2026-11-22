@@ -20,13 +20,7 @@ import (
 	"time"
 )
 
-// gracefulStop sends SIGTERM, then either waits for the worker to exit
-// (signalled via done) or escalates to SIGKILL after grace. cmd.Wait in the
-// caller is what actually reaps the process; this only signals.
-//
-// Wall-clock time is used deliberately (rather than the injected Clock):
-// the worker is a real OS process, so the grace timeout must elapse in
-// real time regardless of how tests fast-forward Spec.Clock.
+// Use wall-clock grace for the real child process; the caller's Wait handles reaping.
 func gracefulStop(p *os.Process, grace time.Duration, done <-chan struct{}) {
 	if p == nil {
 		return
@@ -36,6 +30,5 @@ func gracefulStop(p *os.Process, grace time.Duration, done <-chan struct{}) {
 	case <-time.After(grace):
 		_ = p.Kill()
 	case <-done:
-		// Worker exited within grace; no kill needed.
 	}
 }
