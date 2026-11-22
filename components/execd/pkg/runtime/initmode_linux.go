@@ -27,11 +27,14 @@
 package runtime
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -371,25 +374,64 @@ func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption
 		o(mp)
 	}
 	noQoS := mp.noQoS || (mp.entrypoint && qos.config.Entrypoint == "high")
+	originalPath := cmd.Path
+	var execErrorRead, execErrorWrite *os.File
+	if !noQoS && qos.enabled.Load() && (mp.noHardening || !hardening.enabled.Load()) {
+		var err error
+		execErrorRead, execErrorWrite, err = os.Pipe()
+		if err != nil {
+			log.Warn("qos: exec error pipe unavailable, skipping QoS: %v", err)
+			noQoS = true
+		} else {
+			defer execErrorRead.Close()
+			defer execErrorWrite.Close()
+		}
+	}
 	policyFile, err := hardenCmd(cmd, mp.noHardening, noQoS, mp.stripEnv)
 	if err != nil {
 		return nil, err
 	}
 	if policyFile != nil {
 		defer policyFile.Close()
-	}
-	if initReaper == nil {
-		if err := startFn(); err != nil {
-			return nil, err
+		if execErrorWrite != nil {
+			cmd.Args[2] = strconv.Itoa(3 + len(cmd.ExtraFiles))
+			cmd.ExtraFiles = append(cmd.ExtraFiles, execErrorWrite)
 		}
-		return mp, nil
 	}
-	initReaper.mu.Lock()
-	defer initReaper.mu.Unlock()
-	if err := startFn(); err != nil {
+	if initReaper != nil {
+		initReaper.mu.Lock()
+	}
+	err = startFn()
+	if initReaper != nil {
+		if err == nil {
+			initReaper.owned[cmd.Process.Pid] = mp
+		}
+		initReaper.mu.Unlock()
+	}
+	if err != nil {
 		return nil, err
 	}
-	initReaper.owned[cmd.Process.Pid] = mp
+	if policyFile != nil && execErrorWrite != nil {
+		_ = execErrorWrite.Close()
+		var value [4]byte
+		n, readErr := io.ReadFull(execErrorRead, value[:])
+		if n == 0 && errors.Is(readErr, io.EOF) {
+			return mp, nil
+		}
+		if readErr == nil {
+			readErr = syscall.Errno(binary.NativeEndian.Uint32(value[:]))
+		}
+		// The registered child must be reaped before reporting a synchronous start failure.
+		_ = mp.Wait()
+		if initReaper != nil {
+			// Release the reaped process so Cmd.Wait only drains and closes its pipes.
+			_ = cmd.Process.Release()
+			_ = cmd.Wait()
+		}
+		cmd.Process = nil
+		cmd.ProcessState = nil
+		return nil, &os.PathError{Op: "fork/exec", Path: originalPath, Err: readErr}
+	}
 	return mp, nil
 }
 

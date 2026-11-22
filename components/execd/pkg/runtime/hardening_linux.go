@@ -594,7 +594,7 @@ func hardenCmd(cmd *exec.Cmd, noHardening, noQoS bool, stripEnv []string) (*os.F
 		originalArgs = []string{originalPath}
 	}
 	cmd.Path = path
-	cmd.Args = append([]string{path, childFd, "--", originalPath}, originalArgs...)
+	cmd.Args = append([]string{path, childFd, "-1", "--", originalPath}, originalArgs...)
 	return file, nil
 }
 

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
+	"github.com/alibaba/opensandbox/execd/pkg/jupyter/execute"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -425,6 +426,205 @@ func TestQoSWithInitReaper(t *testing.T) {
 	require.Equal(t, 19, readQoSSample(t, data).Nice)
 }
 
+func TestQoSExecutableStartFailures(t *testing.T) {
+	cfg, _ := setupQoSTest(t)
+	dir := t.TempDir()
+	for _, withInit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("init=%v", withInit), func(t *testing.T) {
+			if withInit {
+				startReaperForTest(t)
+			}
+			for _, tc := range []struct {
+				name    string
+				content string
+				mode    os.FileMode
+				errno   syscall.Errno
+			}{
+				{name: "missing", errno: syscall.ENOENT},
+				{name: "not-executable", content: "#!/bin/sh\nexit 0\n", mode: 0o644, errno: syscall.EACCES},
+				{name: "missing-interpreter", content: "#!" + filepath.Join(dir, "missing") + "\n", mode: 0o755, errno: syscall.ENOENT},
+				{name: "invalid-format", content: "not an executable\n", mode: 0o755, errno: syscall.ENOEXEC},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					path := filepath.Join(dir, tc.name)
+					if tc.content != "" {
+						require.NoError(t, os.WriteFile(path, []byte(tc.content), tc.mode))
+					}
+					for _, enabled := range []bool{false, true} {
+						cfg.QoS.Enabled = enabled
+						require.NoError(t, InitQoS(cfg))
+						before, err := os.ReadDir("/proc/self/fd")
+						require.NoError(t, err)
+						cmd := exec.Command(path)
+						stdout, err := cmd.StdoutPipe()
+						require.NoError(t, err)
+						stderr, err := cmd.StderrPipe()
+						require.NoError(t, err)
+						var pid int
+						mp, err := launchManagedWith(cmd, func() error {
+							err := cmd.Start()
+							if err == nil {
+								pid = cmd.Process.Pid
+							}
+							return err
+						})
+						require.ErrorIs(t, err, tc.errno)
+						var pathErr *os.PathError
+						require.ErrorAs(t, err, &pathErr)
+						require.Equal(t, "fork/exec", pathErr.Op)
+						require.Equal(t, path, pathErr.Path)
+						require.Nil(t, mp)
+						require.Nil(t, cmd.Process)
+						var buf [1]byte
+						_, err = stdout.Read(buf[:])
+						require.ErrorIs(t, err, os.ErrClosed)
+						_, err = stderr.Read(buf[:])
+						require.ErrorIs(t, err, os.ErrClosed)
+						if pid != 0 {
+							_, err = syscall.Wait4(pid, nil, syscall.WNOHANG, nil)
+							require.ErrorIs(t, err, syscall.ECHILD)
+						}
+						if withInit {
+							initReaper.mu.Lock()
+							remaining := len(initReaper.owned)
+							initReaper.mu.Unlock()
+							require.Zero(t, remaining)
+						}
+						after, err := os.ReadDir("/proc/self/fd")
+						require.NoError(t, err)
+						require.LessOrEqual(t, len(after), len(before), "failed launch must not leak descriptors")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestQoSExecHandshakeClosesBeforeWorkloadExit(t *testing.T) {
+	cfg, _ := setupQoSTest(t)
+	require.NoError(t, InitQoS(cfg))
+	for _, withInit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("init=%v", withInit), func(t *testing.T) {
+			if withInit {
+				startReaperForTest(t)
+			}
+			input, writer, err := os.Pipe()
+			require.NoError(t, err)
+			defer input.Close()
+			defer writer.Close()
+			cmd := exec.Command("/bin/sh", "-c", "test -e /proc/self/fd/3 || exit 98; test ! -e /proc/self/fd/5 || exit 99; read -r line; exit 126")
+			cmd.Stdin = input
+			cmd.ExtraFiles = []*os.File{input}
+			type result struct {
+				process *managedProcess
+				err     error
+			}
+			started := make(chan result, 1)
+			go func() {
+				mp, err := launchManaged(cmd)
+				started <- result{mp, err}
+			}()
+			var got result
+			select {
+			case got = <-started:
+			case <-time.After(5 * time.Second):
+				_ = writer.Close()
+				got = <-started
+				if got.process != nil {
+					_ = got.process.Wait()
+				}
+				t.Fatal("startup waited for the workload instead of exec")
+			}
+			require.NoError(t, got.err)
+			require.NotNil(t, got.process)
+			_, err = writer.WriteString("exit\n")
+			require.NoError(t, err)
+			require.Error(t, got.process.Wait())
+			require.Equal(t, 126, got.process.ExitCode())
+		})
+	}
+}
+
+func TestQoSExecutableStartFailureRouting(t *testing.T) {
+	cfg, _ := setupQoSTest(t)
+	require.NoError(t, InitQoS(cfg))
+	path := filepath.Join(t.TempDir(), "missing")
+	for _, withInit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("init=%v", withInit), func(t *testing.T) {
+			if withInit {
+				startReaperForTest(t)
+			}
+			t.Run("entrypoint", func(t *testing.T) {
+				mp, err := launchEntrypoint([]string{path})
+				require.ErrorIs(t, err, syscall.ENOENT)
+				require.Nil(t, mp)
+			})
+			t.Run("lifecycle", func(t *testing.T) {
+				code, err := RunManagedCommand(context.Background(), exec.Command(path), func() {
+					t.Error("failed startup must not invoke cancellation")
+				})
+				require.ErrorIs(t, err, syscall.ENOENT)
+				require.Equal(t, -1, code)
+			})
+			t.Run("command", func(t *testing.T) {
+				t.Setenv("TMPDIR", t.TempDir())
+				var executionError *execute.ErrorOutput
+				var completed bool
+				req := &ExecuteCodeRequest{
+					Argv: []string{path},
+					Hooks: ExecuteResultHook{
+						OnExecuteError:    func(e *execute.ErrorOutput) { executionError = e },
+						OnExecuteComplete: func(time.Duration) { completed = true },
+					},
+				}
+				req.SetDefaultHooks()
+				require.NoError(t, NewController("", "").runCommand(context.Background(), req))
+				require.NotNil(t, executionError)
+				require.Equal(t, "CommandExecError", executionError.EName)
+				require.Contains(t, executionError.EValue, path)
+				require.Contains(t, executionError.EValue, syscall.ENOENT.Error())
+				require.False(t, completed)
+			})
+		})
+	}
+}
+
+func TestQoSExecFailureClosesPTY(t *testing.T) {
+	cfg, _ := setupQoSTest(t)
+	require.NoError(t, InitQoS(cfg))
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bash"), []byte("#!"+filepath.Join(dir, "missing")+"\n"), 0o755))
+	t.Setenv("PATH", dir)
+	resetShellCacheForTest()
+	t.Cleanup(resetShellCacheForTest)
+	for _, withInit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("init=%v", withInit), func(t *testing.T) {
+			if withInit {
+				startReaperForTest(t)
+			}
+			for _, mode := range []string{"pty", "pipe"} {
+				t.Run(mode, func(t *testing.T) {
+					before, err := os.ReadDir("/proc/self/fd")
+					require.NoError(t, err)
+					for range 3 {
+						s := newPTYSession(uuidString(), "", "")
+						if mode == "pty" {
+							err = s.StartPTY()
+						} else {
+							err = s.StartPipe()
+						}
+						require.ErrorIs(t, err, syscall.ENOENT)
+						require.Nil(t, s.proc)
+					}
+					after, err := os.ReadDir("/proc/self/fd")
+					require.NoError(t, err)
+					require.LessOrEqual(t, len(after), len(before), "failed session must not leak descriptors")
+				})
+			}
+		})
+	}
+}
+
 func TestQoSPolicyEncodingAndCredentialPreservation(t *testing.T) {
 	cfg, probe := setupQoSTest(t)
 	cfg.QoS.Scheduler = "idle"
@@ -548,7 +748,7 @@ func TestQoSSeccompImpliesNoNewPrivs(t *testing.T) {
 	require.NoError(t, err)
 	file := os.NewFile(uintptr(fd), "seccomp-policy")
 	defer file.Close()
-	cmd := exec.Command(launcherSearchPaths[0], "3", "--", probe, probe)
+	cmd := exec.Command(launcherSearchPaths[0], "3", "-1", "--", probe, probe)
 	cmd.ExtraFiles = []*os.File{file}
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "%s", out)
@@ -569,7 +769,7 @@ func TestQoSInvalidPolicyRejected(t *testing.T) {
 			require.NoError(t, err)
 			file := os.NewFile(uintptr(fd), "invalid-policy")
 			defer file.Close()
-			cmd := exec.Command(launcherSearchPaths[0], "3", "--", probe, probe)
+			cmd := exec.Command(launcherSearchPaths[0], "3", "-1", "--", probe, probe)
 			cmd.ExtraFiles = []*os.File{file}
 			out, err := cmd.CombinedOutput()
 			require.Error(t, err)

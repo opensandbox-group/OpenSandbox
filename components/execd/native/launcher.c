@@ -371,6 +371,7 @@ out:
 int main(int argc, char **argv)
 {
     int policy_fd;
+    int exec_error_fd;
     int oom_fd = -1;
     struct policy_header hdr;
     uint32_t keepcaps[MAX_CAPS];
@@ -383,8 +384,8 @@ int main(int argc, char **argv)
     struct ll_rule *ll_rules = NULL;
     size_t n_ll_rules = 0;
 
-    if (argc < 5 || strcmp(argv[2], "--") != 0)
-        fail(-1, "usage: opensandbox-launcher <policy-fd> -- <executable> <argv...>");
+    if (argc < 6 || strcmp(argv[3], "--") != 0)
+        fail(-1, "usage: opensandbox-launcher <policy-fd> <exec-error-fd> -- <executable> <argv...>");
 
     {
         char *end = NULL;
@@ -396,6 +397,16 @@ int main(int argc, char **argv)
             parsed < 3 || parsed > INT32_MAX)
             fail(-1, "invalid policy descriptor");
         policy_fd = (int)parsed;
+
+        errno = 0;
+        parsed = strtol(argv[2], &end, 10);
+        if (errno != 0 || end == argv[2] || *end != '\0' ||
+            parsed < -1 || parsed > INT32_MAX ||
+            (parsed != -1 && (parsed < 3 || parsed == policy_fd)))
+            fail(policy_fd, "invalid exec error descriptor");
+        exec_error_fd = (int)parsed;
+        if (exec_error_fd >= 0 && fcntl(exec_error_fd, F_SETFD, FD_CLOEXEC) < 0)
+            fail(policy_fd, "cannot set close-on-exec on exec error descriptor");
     }
 
     if (fcntl(policy_fd, F_GETFD) < 0)
@@ -611,7 +622,16 @@ int main(int argc, char **argv)
     }
 
     /* 8. Exec the real workload. */
-    execv(argv[3], &argv[4]);
-    fprintf(stderr, "opensandbox-launcher: exec %s: %s\n", argv[3], strerror(errno));
+    execv(argv[4], &argv[5]);
+    int exec_errno = errno;
+    if (exec_error_fd >= 0) {
+        uint32_t value = (uint32_t)exec_errno;
+        ssize_t written;
+        do {
+            written = write(exec_error_fd, &value, sizeof(value));
+        } while (written < 0 && errno == EINTR);
+    } else {
+        fprintf(stderr, "opensandbox-launcher: exec %s: %s\n", argv[4], strerror(exec_errno));
+    }
     _exit(EXEC_FAILURE);
 }
