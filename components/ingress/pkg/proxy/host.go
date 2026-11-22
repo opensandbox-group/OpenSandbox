@@ -65,6 +65,14 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 		}
 		return nil, ingressRouteErrHTTPStatus(err), fmt.Errorf("invalid ingress route: %w", err)
 	}
+	if pr.routeKind == sandbox.RouteKindLegacy && strings.HasPrefix(pr.sandboxID, "fsb-") {
+		err = fmt.Errorf("%w: Fast Sandbox routes require a signed scope or configured wildcard Host routing", routescope.ErrUnauthorized)
+		return nil, ingressRouteErrHTTPStatus(err), err
+	}
+	if pr.routeKind == sandbox.RouteKindFastSandbox && p.fastSandboxNamespace != "" && pr.namespace != p.fastSandboxNamespace {
+		err = fmt.Errorf("%w: Fast Sandbox namespace is not allowed", routescope.ErrUnauthorized)
+		return nil, ingressRouteErrHTTPStatus(err), err
+	}
 	if _, required := p.sandboxProvider.(sandbox.AuthenticatedRouteProvider); required && pr.namespace == "" {
 		err = fmt.Errorf("%w: Fast Sandbox provider requires an authenticated route scope", routescope.ErrUnauthorized)
 		return nil, ingressRouteErrHTTPStatus(err), err
@@ -154,8 +162,30 @@ func (p *Proxy) parseRequestedHeaderRoute(r *http.Request) (parsedRoute, int, er
 		pr, err := p.parseFastSandboxScope(targetHost, "")
 		return pr, 0, err
 	}
+	if r.Header.Get(SandboxIngress) == "" && r.Header.Get(DeprecatedSandboxIngress) == "" {
+		targetHost = strings.ToLower(targetHost)
+	}
 	pr, err := parseHostRoute(targetHost)
-	return pr, 0, err
+	if err != nil {
+		return pr, 0, err
+	}
+	// Fast Sandbox IDs are Kubernetes object names, so always lowercase. Only
+	// the Host is folded above; a label a front proxy copied from a
+	// mixed-case Host into the routing header must route the same way.
+	if fastSandboxID := strings.ToLower(pr.sandboxID); strings.HasPrefix(fastSandboxID, "fsb-") {
+		pr.sandboxID = fastSandboxID
+		// The unsigned route label may arrive via the Host or the routing
+		// header: front proxies that own the external wildcard domain often
+		// derive the label from the Host and forward it as the routing header
+		// after stripping their own prefix. Only a signed label keeps the
+		// signed path mandatory; --fast-sandbox-namespace stays the boundary.
+		if p.fastSandboxNamespace == "" || pr.signature != "" {
+			return parsedRoute{}, 0, fmt.Errorf("%w: unsigned Fast Sandbox routes require --fast-sandbox-namespace and an unsigned route label", routescope.ErrUnauthorized)
+		}
+		pr.routeKind = sandbox.RouteKindFastSandbox
+		pr.namespace = p.fastSandboxNamespace
+	}
+	return pr, 0, nil
 }
 
 func (p *Proxy) parseRequestedURIRoute(r *http.Request) (parsedRoute, int, error) {

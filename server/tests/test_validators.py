@@ -67,6 +67,13 @@ def test_ensure_metadata_labels_allows_none_or_empty():
     assert ensure_metadata_labels({}) is None
 
 
+def test_ensure_metadata_labels_rejects_controller_owned_prefix():
+    with pytest.raises(HTTPException) as exc_info:
+        ensure_metadata_labels({"batch-sandbox.sandbox.opensandbox.io/name": "replacement"})
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
+
+
 @pytest.mark.parametrize("whitespace", ["\n", "\r\n", "\r", "\t", " "])
 @pytest.mark.parametrize(
     "key,value",

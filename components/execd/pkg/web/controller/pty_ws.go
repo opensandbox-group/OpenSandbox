@@ -53,22 +53,6 @@ const (
 )
 
 // PTYSessionWebSocket handles GET /pty/:sessionId/ws.
-//
-//  1. Look up session → 404 before upgrade if missing
-//  2. Acquire WS lock without eviction → 409 if held and not a ?takeover=1 request
-//  3. Upgrade HTTP → WebSocket
-//     3b. Takeover (if requested): evict the holder and acquire — only now that the
-//     handshake is accepted, so a failed upgrade never evicts anyone
-//  4. Start the shell if not already running
-//     5+6. AtomicAttachOutputWithSnapshot (snapshot + attach under outMu — no loss window)
-//  7. defer: detach → pumpWg.Wait → drainWg.Wait → UnlockWS → ClearEvictHandler (hook live through cleanup)
-//     Register close-only eviction hook (before initial writes, so a stalled replay can
-//     be interrupted without a connMu race)
-//  8. Send replay frame if snapshot non-empty
-//  9. Send connected frame, then upgrade hook to full evictClose+cancelOnce
-//     (initial writes done; all subsequent writes serialized by connMu)
-//  10. Start RFC 6455 ping, streamPump(s), output drainer, exitWatcher goroutines
-//  11. Read loop: dispatch client frames
 func PTYSessionWebSocket(ctx *gin.Context) {
 	id := ctx.Param("sessionId")
 	if id == "" {
@@ -94,11 +78,7 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		return
 	}
 
-	// 2. Decide how to acquire the exclusive WS lock. Try without evicting first; a
-	//    plain "already connected" with no takeover is refused with HTTP 409 *before*
-	//    the upgrade. A ?takeover=1 request (on a real WS handshake) instead evicts the
-	//    current holder — but only AFTER the handshake is fully accepted (step 3b), so a
-	//    request that announces an upgrade yet fails the handshake never evicts anyone.
+	// Refuse lock conflicts before upgrade; takeover must not evict until the handshake succeeds.
 	locked := session.LockWS()
 	wantsTakeover := !locked && ctx.Query("takeover") == "1" && websocket.IsWebSocketUpgrade(ctx.Request)
 	if !locked && !wantsTakeover {
@@ -109,8 +89,6 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		return
 	}
 
-	// 3. Upgrade HTTP connection to WebSocket. For a takeover this happens BEFORE
-	//    evicting, so a bad or incomplete handshake cannot kill the current holder.
 	conn, err := wsUpgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 	if err != nil {
 		log.Warn("pty ws: upgrade session=%s: %v", id, err)
@@ -120,8 +98,6 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		return
 	}
 
-	// 3b. Takeover: the handshake succeeded, so now evict the current holder and
-	//     acquire the lock. The shell keeps running; this client reattaches with replay.
 	if !locked {
 		if !session.TakeoverWS(wsTakeoverTimeout) {
 			writeErrFrame(conn, model.WSErrCodeAlreadyConnected,
@@ -136,7 +112,6 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 	pipeMode := ctx.Query("pty") == "0"
 	since := queryInt64(ctx.Query("since"), 0)
 
-	// 4. Start the shell if not already running.
 	if !session.IsRunning() {
 		var startErr error
 		if pipeMode {

@@ -15,6 +15,7 @@
 package dnsproxy
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"testing"
@@ -55,7 +56,7 @@ func addrFromIP(ip string) net.Addr {
 	return a
 }
 
-// startUpstream runs a local DNS server that answers A records.
+// startUpstream runs a local DNS server that answers A and AAAA records.
 func startUpstream(t *testing.T) string {
 	t.Helper()
 	t.Setenv(constants.EnvNameserverExempt, "127.0.0.1")
@@ -68,8 +69,15 @@ func startUpstream(t *testing.T) string {
 		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 			resp := new(dns.Msg)
 			resp.SetReply(r)
-			resp.Answer = []dns.RR{
-				&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("1.2.3.4")},
+			switch r.Question[0].Qtype {
+			case dns.TypeAAAA:
+				resp.Answer = []dns.RR{
+					&dns.AAAA{Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60}, AAAA: net.ParseIP("2001:db8::1234")},
+				}
+			default:
+				resp.Answer = []dns.RR{
+					&dns.A{Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("1.2.3.4")},
+				}
 			}
 			_ = w.WriteMsg(resp)
 		}),
@@ -133,33 +141,56 @@ func TestQueryPolicySelectorPerQueryOnResolved(t *testing.T) {
 	allowPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
 	require.NoError(t, err)
 
-	resolved := make(chan struct {
-		domain string
-		ips    []nftables.ResolvedIP
-	}, 1)
+	installed := make(map[string][]nftables.ResolvedIP)
+	fallbackCalls := 0
+	proxy.SetOnResolved(func(string, []nftables.ResolvedIP) error {
+		fallbackCalls++
+		return errors.New("proxy-wide installation failed")
+	})
 	proxy.SetQueryPolicySelector(func(remote netip.Addr) (*QueryPolicy, string) {
+		subject := remote.String()
+		if subject == "10.0.0.7" {
+			return &QueryPolicy{Policy: allowPol}, ""
+		}
 		return &QueryPolicy{
 			Policy: allowPol,
-			OnResolved: func(domain string, ips []nftables.ResolvedIP) {
-				resolved <- struct {
-					domain string
-					ips    []nftables.ResolvedIP
-				}{domain, ips}
+			OnResolved: func(domain string, ips []nftables.ResolvedIP) error {
+				require.Equal(t, "example.com.", domain)
+				require.Len(t, ips, 1)
+				require.Equal(t, "1.2.3.4", ips[0].Addr.String())
+				if subject == "10.0.0.6" {
+					return errors.New("subject installation failed")
+				}
+				installed[subject] = append(installed[subject], ips...)
+				return nil
 			},
 		}, ""
 	})
 
-	w := &fakeRespWriter{remote: addrFromIP("10.0.0.5")}
-	q := new(dns.Msg)
-	q.SetQuestion("example.com.", dns.TypeA)
-	proxy.serveDNS(w, q)
-
-	select {
-	case got := <-resolved:
-		require.Equal(t, "example.com.", got.domain)
-		require.Len(t, got.ips, 1)
-		require.Equal(t, "1.2.3.4", got.ips[0].Addr.String())
-	case <-time.After(2 * time.Second):
-		require.FailNow(t, "per-query onResolved was not invoked")
+	for _, tc := range []struct {
+		subject string
+		rcode   int
+	}{
+		{"10.0.0.5", dns.RcodeSuccess},
+		{"10.0.0.6", dns.RcodeServerFailure},
+		{"10.0.0.5", dns.RcodeSuccess},
+		{"10.0.0.7", dns.RcodeServerFailure},
+	} {
+		w := &fakeRespWriter{remote: addrFromIP(tc.subject)}
+		q := new(dns.Msg)
+		q.SetQuestion("example.com.", dns.TypeA)
+		proxy.serveDNS(w, q)
+		require.Len(t, w.msgs, 1)
+		require.Equal(t, tc.rcode, w.msgs[0].Rcode, "subject %s", tc.subject)
+		if tc.rcode == dns.RcodeSuccess {
+			require.Len(t, w.msgs[0].Answer, 1)
+			require.Equal(t, "1.2.3.4", w.msgs[0].Answer[0].(*dns.A).A.String())
+		} else {
+			require.Empty(t, w.msgs[0].Answer)
+		}
 	}
+	require.Len(t, installed["10.0.0.5"], 2)
+	require.Empty(t, installed["10.0.0.6"], "failed subject must not inherit another subject's grants")
+	require.Empty(t, installed["10.0.0.7"])
+	require.Equal(t, 1, fallbackCalls, "selected callbacks must not fall back to proxy-wide installation")
 }

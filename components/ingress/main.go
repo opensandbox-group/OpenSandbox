@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -41,6 +42,19 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
+
+func validateFastPathRouting(endpoint, namespace, mode, keys string) error {
+	if strings.TrimSpace(endpoint) == "" {
+		if namespace != "" {
+			return errors.New("--fast-sandbox-namespace requires --fastpath-endpoint")
+		}
+		return nil
+	}
+	if strings.TrimSpace(keys) == "" && (namespace == "" || mode != "header") {
+		return errors.New("FastPath routing requires --secure-access-keys or --mode header with --fast-sandbox-namespace for unsigned wildcard routes")
+	}
+	return nil
+}
 
 func main() {
 	version.EchoVersion("OpenSandbox Ingress")
@@ -77,8 +91,8 @@ func main() {
 			scopeVerifier = &routescope.Verifier{Keys: keys}
 		}
 	}
-	if fastPathEnabled && scopeVerifier == nil {
-		log.Panic("FastPath routing requires --secure-access-keys for authenticated route scopes")
+	if err := validateFastPathRouting(flag.FastPathEndpoint, flag.FastSandboxNamespace, flag.Mode, flag.SecureAccessKeys); err != nil {
+		log.Panic(err)
 	}
 
 	// Parsing Kubernetes config registers global flags and must only happen once.
@@ -144,7 +158,7 @@ func main() {
 		MinDistinctSignalTargets: flag.NetworkReadinessShadowMinSignalTargets,
 		DegradedFailureRatio:     flag.NetworkReadinessShadowDegradedFailureRatio,
 	})
-	proxyOptions := make([]proxy.Option, 0, 3)
+	proxyOptions := []proxy.Option{proxy.WithFastSandboxNamespace(flag.FastSandboxNamespace)}
 	if err != nil {
 		log.Printf("network readiness shadow assessment disabled (invalid configuration): %v", err)
 	} else {
@@ -159,7 +173,6 @@ func main() {
 			"enable activity recording for a stable wake loop")
 	}
 
-	// Create reverse proxy with sandbox provider.
 	reverseProxy := proxy.NewProxy(
 		ctx,
 		sandboxProvider,

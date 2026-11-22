@@ -285,7 +285,6 @@ test("01b sandbox create with host volume mount (read-write)", async () => {
   try {
     expect(await volumeSandbox.isHealthy()).toBe(true);
 
-    // Step 1: Verify the host marker file is visible inside the sandbox
     // Retry: bind mount propagation can sometimes lag on first access
     let readMarker = await volumeSandbox.commands.run(
       `cat ${containerMountPath}/marker.txt`
@@ -301,13 +300,11 @@ test("01b sandbox create with host volume mount (read-write)", async () => {
     expect(readMarker.logs.stdout).toHaveLength(1);
     expect(readMarker.logs.stdout[0]?.text).toBe("opensandbox-e2e-marker\n");
 
-    // Step 2: Write a file from inside the sandbox to the mounted path
     const writeResult = await volumeSandbox.commands.run(
       `echo 'written-from-sandbox' > ${containerMountPath}/sandbox-output.txt`
     );
     expect(writeResult.error).toBeUndefined();
 
-    // Step 3: Verify the written file is readable
     // Retry: written data may not be immediately visible through bind mount
     let readBack = await volumeSandbox.commands.run(
       `cat ${containerMountPath}/sandbox-output.txt`
@@ -323,7 +320,6 @@ test("01b sandbox create with host volume mount (read-write)", async () => {
     expect(readBack.logs.stdout).toHaveLength(1);
     expect(readBack.logs.stdout[0]?.text).toBe("written-from-sandbox\n");
 
-    // Step 4: Verify the mount path is a proper directory
     let dirCheck = await volumeSandbox.commands.run(
       `test -d ${containerMountPath} && echo OK`
     );
@@ -368,7 +364,6 @@ test("01c sandbox create with host volume mount (read-only)", async () => {
   try {
     expect(await roSandbox.isHealthy()).toBe(true);
 
-    // Step 1: Verify the host marker file is readable
     // Retry: bind mount propagation can sometimes lag on first access
     let readMarker = await roSandbox.commands.run(
       `cat ${containerMountPath}/marker.txt`
@@ -384,7 +379,6 @@ test("01c sandbox create with host volume mount (read-only)", async () => {
     expect(readMarker.logs.stdout).toHaveLength(1);
     expect(readMarker.logs.stdout[0]?.text).toBe("opensandbox-e2e-marker\n");
 
-    // Step 2: Verify writing is denied on read-only mount
     const writeResult = await roSandbox.commands.run(
       `touch ${containerMountPath}/should-fail.txt`
     );
@@ -427,7 +421,6 @@ test("01d sandbox create with PVC named volume mount (read-write)", async () => 
   try {
     expect(await pvcSandbox.isHealthy()).toBe(true);
 
-    // Step 1: Verify the marker file seeded into the named volume is readable
     // Retry: bind mount propagation can sometimes lag on first access
     let readMarker = await pvcSandbox.commands.run(
       `cat ${containerMountPath}/marker.txt`
@@ -443,13 +436,11 @@ test("01d sandbox create with PVC named volume mount (read-write)", async () => 
     expect(readMarker.logs.stdout).toHaveLength(1);
     expect(readMarker.logs.stdout[0]?.text).toBe("pvc-marker-data\n");
 
-    // Step 2: Write a file from inside the sandbox to the named volume
     const writeResult = await pvcSandbox.commands.run(
       `echo 'written-to-pvc' > ${containerMountPath}/pvc-output.txt`
     );
     expect(writeResult.error).toBeUndefined();
 
-    // Step 3: Verify the written file is readable
     // Retry: written data may not be immediately visible through bind mount
     let readBack = await pvcSandbox.commands.run(
       `cat ${containerMountPath}/pvc-output.txt`
@@ -465,7 +456,6 @@ test("01d sandbox create with PVC named volume mount (read-write)", async () => 
     expect(readBack.logs.stdout).toHaveLength(1);
     expect(readBack.logs.stdout[0]?.text).toBe("written-to-pvc\n");
 
-    // Step 4: Verify the mount path is a proper directory
     let dirCheck = await pvcSandbox.commands.run(
       `test -d ${containerMountPath} && echo OK`
     );
@@ -510,7 +500,6 @@ test("01e sandbox create with PVC named volume mount (read-only)", async () => {
   try {
     expect(await roSandbox.isHealthy()).toBe(true);
 
-    // Step 1: Verify the marker file is readable
     // Retry: bind mount propagation can sometimes lag on first access
     let readMarker = await roSandbox.commands.run(
       `cat ${containerMountPath}/marker.txt`
@@ -526,7 +515,6 @@ test("01e sandbox create with PVC named volume mount (read-only)", async () => {
     expect(readMarker.logs.stdout).toHaveLength(1);
     expect(readMarker.logs.stdout[0]?.text).toBe("pvc-marker-data\n");
 
-    // Step 2: Verify writing is denied on read-only mount
     const writeResult = await roSandbox.commands.run(
       `touch ${containerMountPath}/should-fail.txt`
     );
@@ -570,7 +558,6 @@ test("01f sandbox create with PVC named volume subPath mount", async () => {
   try {
     expect(await subpathSandbox.isHealthy()).toBe(true);
 
-    // Step 1: Verify the subpath marker file is readable
     // Retry: bind mount propagation can sometimes lag on first access
     let readMarker = await subpathSandbox.commands.run(
       `cat ${containerMountPath}/marker.txt`
@@ -586,7 +573,6 @@ test("01f sandbox create with PVC named volume subPath mount", async () => {
     expect(readMarker.logs.stdout).toHaveLength(1);
     expect(readMarker.logs.stdout[0]?.text).toBe("pvc-subpath-marker\n");
 
-    // Step 2: Verify only subPath contents are visible (not the full volume)
     const lsResult = await subpathSandbox.commands.run(
       `ls ${containerMountPath}/`
     );
@@ -595,7 +581,7 @@ test("01f sandbox create with PVC named volume subPath mount", async () => {
     expect(lsOutput).toContain("marker.txt");
     expect(lsOutput).not.toContain("datasets");
 
-    // Step 3: Write a file and verify (retry read-back for transient SSE drops)
+    // Retry read-back for transient SSE drops.
     const writeResult = await subpathSandbox.commands.run(
       `echo 'subpath-write-test' > ${containerMountPath}/output.txt`
     );

@@ -304,14 +304,12 @@ func TestTaskManager_CreateDuplicate(t *testing.T) {
 		},
 	}
 
-	// First create should succeed
 	_, err := mgr.Create(ctx, task)
 	if err != nil {
 		t.Fatalf("First Create() failed: %v", err)
 	}
 	defer cleanupTask(t, mgr, task.Name)
 
-	// Second create should fail
 	_, err = mgr.Create(ctx, task)
 	if err == nil {
 		t.Error("Create() should fail for duplicate task")
@@ -332,7 +330,6 @@ func TestTaskManager_CreateMaxConcurrentTasks(t *testing.T) {
 		},
 	}
 
-	// Create first task
 	_, err := mgr.Create(ctx, task1)
 	if err != nil {
 		t.Fatalf("First Create() failed: %v", err)
@@ -368,14 +365,12 @@ func TestTaskManager_Get(t *testing.T) {
 		},
 	}
 
-	// Create task
 	_, err := mgr.Create(ctx, task)
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
 	defer cleanupTask(t, mgr, task.Name)
 
-	// Get task
 	got, err := mgr.Get(ctx, task.Name)
 	if err != nil {
 		t.Fatalf("Get() failed: %v", err)
@@ -414,7 +409,6 @@ func TestTaskManager_List(t *testing.T) {
 	mgr.Start(ctx)
 	defer mgr.Stop()
 
-	// Initially empty
 	tasks, err := mgr.List(ctx)
 	if err != nil {
 		t.Fatalf("List() failed: %v", err)
@@ -423,7 +417,6 @@ func TestTaskManager_List(t *testing.T) {
 		t.Errorf("List() initial count = %d, want 0", len(tasks))
 	}
 
-	// Create a task
 	task := &types.Task{
 		Name: "list-task",
 		Process: &api.Process{
@@ -437,7 +430,6 @@ func TestTaskManager_List(t *testing.T) {
 	}
 	defer cleanupTask(t, mgr, task.Name)
 
-	// List should return 1 task
 	tasks, err = mgr.List(ctx)
 	if err != nil {
 		t.Fatalf("List() failed: %v", err)
@@ -452,7 +444,6 @@ func TestTaskManager_List(t *testing.T) {
 
 func TestTaskManager_Delete(t *testing.T) {
 	mgr, _ := setupTestManager(t)
-	// Start the manager to enable the reconcile loop
 	mgr.Start(context.Background())
 	defer mgr.Stop()
 
@@ -465,7 +456,6 @@ func TestTaskManager_Delete(t *testing.T) {
 		},
 	}
 
-	// Create task
 	_, err := mgr.Create(ctx, task)
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
@@ -477,7 +467,6 @@ func TestTaskManager_Delete(t *testing.T) {
 		t.Errorf("Delete() failed: %v", err)
 	}
 
-	// Verify task is marked for deletion but still exists
 	got, err := mgr.Get(ctx, task.Name)
 	if err != nil {
 		t.Fatalf("Get() should succeed after Delete() (soft delete): %v", err)
@@ -486,13 +475,11 @@ func TestTaskManager_Delete(t *testing.T) {
 		t.Error("DeletionTimestamp should be set after Delete()")
 	}
 
-	// Wait for task to be finalized
 	timeout := 5 * time.Second
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		_, err := mgr.Get(ctx, task.Name)
 		if err != nil {
-			// Task is gone, success
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -1167,13 +1154,11 @@ func TestTaskManager_ReconcilePreservesPostStopFailureStatus(t *testing.T) {
 
 func TestTaskManager_Sync(t *testing.T) {
 	mgr, _ := setupTestManager(t)
-	// Start the manager to enable the reconcile loop
 	mgr.Start(context.Background())
 	defer mgr.Stop()
 
 	ctx := context.Background()
 
-	// Create initial task
 	task1 := &types.Task{
 		Name: "sync-task-1",
 		Process: &api.Process{
@@ -1201,7 +1186,6 @@ func TestTaskManager_Sync(t *testing.T) {
 	}
 	defer mgr.Delete(ctx, task2.Name)
 
-	// Verify task1 is marked for deletion in the returned list
 	var task1Found bool
 	for _, t1 := range current {
 		if t1.Name == task1.Name {
@@ -1216,7 +1200,6 @@ func TestTaskManager_Sync(t *testing.T) {
 		t.Log("task1 not found in Sync result (maybe already deleted?)")
 	}
 
-	// Verify task2 is created
 	var task2Found bool
 	for _, t2 := range current {
 		if t2.Name == task2.Name {
@@ -1233,7 +1216,6 @@ func TestTaskManager_Sync(t *testing.T) {
 	for time.Now().Before(deadline) {
 		_, err := mgr.Get(ctx, task1.Name)
 		if err != nil {
-			// Task is gone, success
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -1267,17 +1249,14 @@ func TestTaskManager_AsyncStopOnDelete(t *testing.T) {
 		},
 	}
 
-	// Create task
 	created, err := mgr.Create(ctx, task)
 	if err != nil {
 		t.Fatalf("Create() failed: %v", err)
 	}
 	defer cleanupTask(t, mgr, task.Name)
 
-	// Verify task is running
 	assert.Equal(t, types.TaskStateRunning, created.Status.State)
 
-	// Record the time before delete
 	beforeDelete := time.Now()
 
 	// Delete task (should trigger async stop)
@@ -1286,7 +1265,6 @@ func TestTaskManager_AsyncStopOnDelete(t *testing.T) {
 		t.Fatalf("Delete() failed: %v", err)
 	}
 
-	// Verify DeletionTimestamp is set immediately (soft delete)
 	got, err := mgr.Get(ctx, task.Name)
 	if err != nil {
 		t.Fatalf("Get() after Delete failed: %v", err)
@@ -1295,18 +1273,15 @@ func TestTaskManager_AsyncStopOnDelete(t *testing.T) {
 		t.Error("DeletionTimestamp should be set immediately after Delete()")
 	}
 
-	// Verify Delete returned quickly (not blocked by Stop)
 	deleteDuration := time.Since(beforeDelete)
 	if deleteDuration > 500*time.Millisecond {
 		t.Errorf("Delete() took too long (%v), should be fast (async stop)", deleteDuration)
 	}
 
-	// Wait for task to be finalized
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		_, err := mgr.Get(ctx, task.Name)
 		if err != nil {
-			// Task is gone, success
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -1323,7 +1298,6 @@ func TestTaskManager_TimeoutHandling(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Create task with short timeout
 	timeoutSec := int64(2)
 	task := &types.Task{
 		Name: "timeout-task",
@@ -1342,18 +1316,15 @@ func TestTaskManager_TimeoutHandling(t *testing.T) {
 	// Wait for timeout to be detected and async stop triggered
 	time.Sleep(3 * time.Second)
 
-	// Check task status - should be Timeout or Failed (after stop)
 	got, err := mgr.Get(ctx, task.Name)
 	if err != nil {
 		t.Fatalf("Get() failed: %v", err)
 	}
 
-	// State should be Timeout (during stop) or Failed (after stop completes)
 	if got.Status.State != types.TaskStateTimeout && got.Status.State != types.TaskStateFailed {
 		t.Errorf("Expected Timeout or Failed state, got: %s", got.Status.State)
 	}
 
-	// If in Timeout state, verify reason
 	if got.Status.State == types.TaskStateTimeout {
 		assert.NotEmpty(t, got.Status.SubStatuses)
 		assert.Equal(t, "TaskTimeout", got.Status.SubStatuses[0].Reason)
@@ -1381,13 +1352,11 @@ func TestTaskManager_CountActiveTasks(t *testing.T) {
 	defer mgr.Stop()
 	ctx := context.Background()
 
-	// Initially empty
 	activeCount := activeTaskCount(mgr.(*taskManager))
 	if activeCount != 0 {
 		t.Errorf("Initial active count = %d, want 0", activeCount)
 	}
 
-	// Create a short-lived task that will complete quickly
 	task1 := &types.Task{
 		Name: "quick-task-1",
 		Process: &api.Process{
@@ -1400,16 +1369,11 @@ func TestTaskManager_CountActiveTasks(t *testing.T) {
 	}
 	defer mgr.Delete(ctx, task1.Name)
 
-	// Wait for task1 to reach a terminal state. The reconcile loop observes the
-	// exited process asynchronously (once per ReconcileInterval), so poll for the
-	// expected count instead of sleeping a fixed duration: under CI load a
-	// hardcoded 500ms can elapse before the transition lands, spuriously leaving
-	// task1 active and failing both this and the following assertion.
+	// Reconciliation observes process exit asynchronously; fixed sleeps race under CI load.
 	require.Eventually(t, func() bool {
 		return activeTaskCount(mgr.(*taskManager)) == 0
 	}, 5*time.Second, 10*time.Millisecond, "task1 should become inactive once it completes")
 
-	// Create a running task
 	task2 := &types.Task{
 		Name: "active-task-2",
 		Process: &api.Process{
@@ -1422,7 +1386,6 @@ func TestTaskManager_CountActiveTasks(t *testing.T) {
 	}
 	defer mgr.Delete(ctx, task2.Name)
 
-	// Should have 1 active task
 	activeCount = activeTaskCount(mgr.(*taskManager))
 	if activeCount != 1 {
 		t.Errorf("Active count after create = %d, want 1", activeCount)

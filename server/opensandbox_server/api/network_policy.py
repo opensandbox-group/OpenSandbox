@@ -48,12 +48,7 @@ async def replace_network_policy(request: Request, sandbox_id: str, policy: Netw
 
 @router.patch("/sandboxes/{sandbox_id}/networkpolicy")
 async def patch_network_policy(request: Request, sandbox_id: str, rules: list[NetworkRule]):
-    """Merge rules into the persisted policy (sidecar PATCH semantics).
-
-    Incoming rules replace existing rules with the same target in place;
-    the first rule per target in the payload wins; the current
-    defaultAction is preserved.
-    """
+    """Replace matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays."""
     if sandbox_id.startswith("fsb-"):
         return await asyncio.to_thread(_fsb_service().patch_network_policy, sandbox_id, rules)
     return await _proxy_http_request(request, sandbox_id, 18080, "policy", internal=True)

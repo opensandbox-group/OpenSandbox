@@ -1376,6 +1376,27 @@ spec:
         assert result["state"] == "Running"
         assert result["reason"] == "RUNNING"
 
+    def test_get_status_failed_carries_oom_detail_from_pod_failed_condition(self):
+        provider = BatchSandboxProvider(MagicMock())
+        message = (
+            "1/1 observed pods failed; primary reason=ContainerFailed; sample pod=sbx-0; "
+            "sample detail=Pod sbx-0 container sandbox exited with code 137 (OOMKilled)"
+        )
+        workload = {
+            "status": {
+                "phase": "Failed",
+                "conditions": [
+                    {"type": "PodFailed", "status": "True", "reason": "ContainerFailed", "message": message},
+                ],
+            },
+            "metadata": {"creationTimestamp": "2025-12-24T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Failed"
+        assert result["message"] == message
+
     def test_get_status_returns_failed_when_pod_unschedulable(self):
         mock_k8s_client = MagicMock()
         provider = BatchSandboxProvider(mock_k8s_client)

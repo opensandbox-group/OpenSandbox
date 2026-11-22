@@ -200,7 +200,7 @@ class CommandsAdapterSync(CommandsSync):
             )
 
         except Exception as e:
-            logger.error("Failed to run command", exc_info=e)
+            logger.debug("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def set_env(self, key: str, value: str) -> None:
@@ -209,7 +209,7 @@ class CommandsAdapterSync(CommandsSync):
         try:
             execution = self.run(command)
         except Exception as e:
-            logger.error("Failed to run command", exc_info=e)
+            logger.debug("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
         raise_for_set_env_failure(key, execution)
 
@@ -228,7 +228,7 @@ class CommandsAdapterSync(CommandsSync):
             )
             handle_api_error(response_obj, "Interrupt command")
         except Exception as e:
-            logger.error("Failed to interrupt command", exc_info=e)
+            logger.debug("Failed to interrupt command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_command_status(self, execution_id: str) -> CommandStatus:
@@ -251,7 +251,7 @@ class CommandsAdapterSync(CommandsSync):
             )
             return to_command_status(parsed)
         except Exception as e:
-            logger.error("Failed to get command status", exc_info=e)
+            logger.debug("Failed to get command status", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_background_command_logs(
@@ -279,7 +279,7 @@ class CommandsAdapterSync(CommandsSync):
                     next_cursor = None
             return CommandLogs(content=content, cursor=next_cursor)
         except Exception as e:
-            logger.error("Failed to get command logs", exc_info=e)
+            logger.debug("Failed to get command logs", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def create_session(self, *, working_directory: str | None = None) -> str:

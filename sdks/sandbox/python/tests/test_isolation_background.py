@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Tests for isolated session background runs (async and sync adapters)."""
-
 from __future__ import annotations
 
 from datetime import datetime
@@ -102,8 +100,6 @@ def sync_adapter():
     endpoint = SandboxEndpoint(endpoint="localhost:8080", headers={})
     return IsolatedSessionsAdapterSync(config, endpoint)
 
-
-# -------- async --------
 
 
 @pytest.mark.asyncio
@@ -212,8 +208,6 @@ async def test_background_validation(async_adapter):
         await handle.run_logs("run-1", cursor=-1)
 
 
-# -------- generated client --------
-
 
 def test_generated_run_endpoint_parses_background_202_handle():
     """The generated run endpoint must parse the 202 JSON handle (not SSE)."""
@@ -239,8 +233,6 @@ def test_generated_run_endpoint_parses_background_202_handle():
     assert isinstance(parsed, IsolatedBackgroundRunResponse)
     assert str(parsed.run_id) == "87654321-4321-4321-4321-210987654321"
 
-
-# -------- sync --------
 
 
 def test_sync_run_background_posts_background_flag_without_timeout(sync_adapter):

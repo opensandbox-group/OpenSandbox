@@ -75,7 +75,7 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 ## `[proxy]`
 
 ::: warning Deprecated — maintenance mode
-The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no new features, security and bug fixes only. Route data-plane traffic through the ingress gateway instead.
+The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no new features, security and bug fixes only. Route data-plane traffic through the ingress gateway instead. With `runtime.type = "docker"` the server accepts only `mode = "direct"` in [`[ingress]`](#ingress), so on Docker the data path off the server proxy is the direct endpoint the server returns for each sandbox; see [Single-Host Network (Docker)](../docs/architecture/network/single-host-network.md).
 :::
 
 | Key | Type | Default | Description |
@@ -136,6 +136,7 @@ Missing table → defaults from `KubernetesRuntimeConfig`.
 | `insecure_skip_tls_verify` | boolean | `false` | Skip apiserver TLS verification (temporary workaround only). |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
 | `workload_provider` | string \| omitted | `null` | **`batchsandbox`** (default) or **`agent-sandbox`**. |
+| `metadata_sync_pods` | boolean | `false` | When enabled, synchronize all accepted metadata label changes to dedicated BatchSandbox Pods and persist recreation overrides. Pooled Pods and other providers are excluded. See [Pod label updates](../docs/getting-started/configuration.md#updating-kubernetes-pod-labels-from-metadata). |
 | `batchsandbox_template_file` | string \| omitted | `null` | BatchSandbox CR YAML template path (batchsandbox only). |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | BatchSandbox main container pull policy (`Always`/`IfNotPresent`/`Never`). |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max wait for a new sandbox to become ready. |
@@ -197,6 +198,14 @@ Ingress exposure for sandbox endpoints. With `runtime.type = "docker"`, only `mo
 | `gateway.address` | string | — | Gateway host, **no URL scheme**. Wildcard domain (e.g. `*.example.com`) required for `route.mode = "wildcard"`; forbidden otherwise. |
 | `gateway.route.mode` | string | — | **`wildcard`** (host-based) / **`uri`** (path-prefix) / **`header`** routing. |
 | `secure_access` | table \| omitted | `null` | OSEP-0011 signing config: signed route tokens + static SecureAccessTokens. Also injectable via `OPENSANDBOX_SECURE_ACCESS_KEYS` / `OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY`. |
+
+### Fast Sandbox unsigned wildcard endpoints
+
+For a single namespace, configure `[ingress.gateway]` with `address = "*.sandbox.example.com"` and `[ingress.gateway.route]` with `mode = "wildcard"`. Start ingress with `--mode header --fastpath-endpoint <host:port> --fast-sandbox-namespace <namespace>` (and `--provider-type fast-sandbox` for a standalone Fast Sandbox gateway). The namespace must match the namespace the server uses for these sandboxes; the option accepts exactly one Kubernetes namespace, not a list or wildcard. `getEndpoint` then returns `<sandbox-id>-<port>.sandbox.example.com` without routing headers. Configure wildcard DNS and TLS at the front proxy, preserving the Host header.
+
+For the ingress-gateway Helm chart, set `gateway.fastSandboxNamespace` to the same namespace and `gateway.fastpathEndpoint` to the FastPath address; keep `gateway.gatewayRouteMode = "header"` for Host routing.
+
+Signing keys are not required for this wildcard mode. It provides no client authentication: protect the gateway with network isolation or an authenticating front proxy, especially for execd access. The namespace restriction also rejects signed `f1.` routes for other namespaces. Header and URI endpoint generation still requires shared signing keys; `expires` remains unsupported for Fast Sandbox endpoints. See [Fast Sandbox networking](../docs/architecture/fast-sandbox/networking.md).
 
 ---
 

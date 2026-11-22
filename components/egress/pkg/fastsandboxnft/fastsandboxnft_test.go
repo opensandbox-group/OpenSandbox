@@ -91,7 +91,6 @@ func TestDenyFirstInstallFailClosedShape(t *testing.T) {
 	require.Contains(t, script, "add chain inet opensandbox-fast-sandbox marking { type filter hook prerouting priority 0; }")
 	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
 	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox dispatch meta mark & 0x2 != 0x2 drop")
-	// dispatch rule binds source IP + host veth (defense in depth)
 	require.Contains(t, script, "ip saddr 10.0.0.5 jump")
 	require.Contains(t, script, `add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.5 jump subj_s_u_1`)
 	// the prerouting mark jump reaches the subject's mark chain
@@ -212,9 +211,6 @@ func TestAddResolvedIPsRecreatesElementsToRenewExpiry(t *testing.T) {
 	}
 }
 
-// TestAddResolvedIPsRejectsDomainRevokedByReload: a DNS answer that was in
-// flight while an always-rule reload tightened the overlay must not
-// re-authorize the revoked domain's cached IP.
 func TestAddResolvedIPsRejectsDomainRevokedByReload(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -248,8 +244,6 @@ func TestAddResolvedIPsRejectsDomainRevokedByReload(t *testing.T) {
 	require.Contains(t, runner.last(), "192.0.2.1")
 }
 
-// TestAddResolvedIPsRejectsDenyFirstSubject: a subject that reverted to
-// deny-first while its DNS answer was in flight must not re-acquire a lease.
 func TestAddResolvedIPsRejectsDenyFirstSubject(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -298,7 +292,6 @@ func TestRemoveRebuildsTable(t *testing.T) {
 	require.Contains(t, script, "add chain inet opensandbox-fast-sandbox dispatch { type filter hook forward priority 0; policy accept; }")
 	assert.NotContains(t, script, "subj_s_u_2", "no subjects may remain after removing the last one")
 
-	// last subject removed: whole table deleted
 	require.NoError(t, a.Remove(ctx, s2))
 	script = runner.last()
 	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
@@ -332,10 +325,7 @@ func TestRemoveKeepsRemainingSubjectsLeases(t *testing.T) {
 	assert.NotContains(t, script, "192.0.2.9", "an expired lease must not be re-added")
 }
 
-// TestRemoveFailureStaysRetryable: a failed nft transaction must not forget
-// the subject from the in-memory map — otherwise the retry short-circuits to
-// success and the stale same-IP dispatch rule stays first-match in the kernel
-// ahead of any successor (takeover/REMOVE_BINDING retry convergence).
+// Retain removal ownership after failure so retries cannot leave stale first-match rules ahead of successors.
 func TestRemoveFailureStaysRetryable(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -374,10 +364,6 @@ func TestRemoveFailureStaysRetryable(t *testing.T) {
 	assert.Equal(t, before, runner.count())
 }
 
-// TestApplyAlwaysRulesReloadRebuildsTable: one transaction swaps the port
-// floor and re-emits every subject (merged policies, deny-first preserved,
-// DNS leases dropped); the applier adopts the reloaded state only after
-// the transaction commits.
 func TestApplyAlwaysRulesReloadRebuildsTable(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -420,9 +406,6 @@ func TestApplyAlwaysRulesReloadRebuildsTable(t *testing.T) {
 	require.Contains(t, runner.last(), "203.0.113.0/24", "rebuilds reuse the reloaded policy")
 }
 
-// TestApplyAlwaysRulesReloadFailureStaysRetryable: a failed reload leaves
-// the in-memory policies and floor untouched, so the retry re-runs the
-// full rebuild.
 func TestApplyAlwaysRulesReloadFailureStaysRetryable(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -466,10 +449,7 @@ func TestApplyAlwaysRulesReloadFailureStaysRetryable(t *testing.T) {
 	a.mu.Unlock()
 }
 
-// TestApplyAlwaysRulesReloadNeverUpgradesDenyFirst: a deny-first transition
-// that raced the reload's snapshot (inst.pol == nil in the applier) must
-// never be resurrected by the rebuild even when the caller's map still
-// carries a policy for the subject — the kernel stays deny-first.
+// A caller's stale policy snapshot cannot override a newer deny-first transition.
 func TestApplyAlwaysRulesReloadNeverUpgradesDenyFirst(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -529,7 +509,6 @@ func TestDenyFirstResetsOnReRegistration(t *testing.T) {
 	assert.NotContains(t, script, "delete table inet opensandbox-fast-sandbox", "reset must not touch other subjects")
 
 	// the applier's in-memory state is deny-first again: removal deletes the
-	// last subject, so the whole table goes
 	require.NoError(t, a.Remove(ctx, s))
 	script = runner.last()
 	require.Contains(t, script, "delete table inet opensandbox-fast-sandbox")
@@ -641,9 +620,6 @@ func TestWriteDispatchRuleV6(t *testing.T) {
 	require.Contains(t, b.String(), `add rule inet opensandbox-fast-sandbox marking ip6 saddr fd00::5 jump mark_s_u_1`)
 }
 
-// TestIifnameBindingInDispatchRule: the host-veth binding lives in the
-// dispatch rule (defense in depth against UDP spoofing) and survives policy
-// swaps (the swap never touches the master chain).
 func TestIifnameBindingInDispatchRule(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -752,8 +728,6 @@ func TestDoHDisabledByDefault(t *testing.T) {
 	assert.NotContains(t, script, "dport 443", "DoH-443 must be off unless enabled")
 }
 
-// TestDoHRulesSurviveRebuild: the DoH rules are part of the table header, so
-// every rebuild (last-subject removal, startup reset) must keep them.
 func TestDoHRulesSurviveRebuild(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run, Options{BlockDoH443: true, DoHBlocklistV4: []string{"10.99.0.2"}})
@@ -766,10 +740,7 @@ func TestDoHRulesSurviveRebuild(t *testing.T) {
 	require.Contains(t, runner.last(), "add rule inet opensandbox-fast-sandbox dispatch ip daddr @doh_block_v4 tcp dport 443 drop", "reset must keep DoH rules")
 }
 
-// TestInputChainInstalledWithMITM: the Pod-netns INPUT enforcement chain is
-// the authoritative layer for intercepted (DNATed) traffic — the forward
-// hook never sees it. Deny-first must install the chain, the per-subject
-// dispatch (ct status dnat on the mitm port) and the ct-original verdicts.
+// DNATed MITM traffic traverses INPUT, not the forward hook.
 func TestInputChainInstalledWithMITM(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run, Options{MitmRedirectPort: 18081})
@@ -791,8 +762,6 @@ func TestInputChainInstalledWithMITM(t *testing.T) {
 	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_u_1_in drop", "deny-first default in the input chain")
 }
 
-// TestInputChainAbsentWithoutMITM: no MITM, no input chain — the forward
-// hook is the only enforcement layer and Pod traffic is untouched.
 func TestInputChainAbsentWithoutMITM(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run)
@@ -803,8 +772,7 @@ func TestInputChainAbsentWithoutMITM(t *testing.T) {
 	assert.NotContains(t, runner.last(), "subj_s_u_1_in", "no MITM: per-subject input chain must not exist")
 }
 
-// TestInputChainDoHBlocklist: DoH-443 blocking on the input chain matches
-// the ORIGINAL port/destination (the DNATed dst is the mitm port).
+// Match the original destination because DNAT replaces the visible port with the MITM port.
 func TestInputChainDoHBlocklist(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run, Options{
@@ -817,11 +785,9 @@ func TestInputChainDoHBlocklist(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 
 	script := runner.last()
-	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip daddr @doh_block_v4 ct original proto-dst 443 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip daddr @doh_block_v4 ct original proto-dst 443 drop")
 }
 
-// TestInputChainPolicySwap: a policy swap rewrites the input-chain verdicts
-// with the new sets (and keeps the dispatch rule untouched).
 func TestInputChainPolicySwap(t *testing.T) {
 	runner := &fakeRunner{}
 	a := NewApplier(runner.Run, Options{MitmRedirectPort: 18081})
@@ -871,7 +837,7 @@ func TestUpstreamProxyForwardDrops(t *testing.T) {
 	)
 	// no MITM: no input chain, so no input-path containment either
 	assert.NotContains(t, script, "hook input")
-	assert.NotContains(t, script, "input ct status dnat ct original ip daddr @upstream_proxy_v4")
+	assert.NotContains(t, script, "input ct status dnat meta l4proto tcp ct original ip daddr @upstream_proxy_v4")
 }
 
 // TestUpstreamProxyInputDropsWithMITM: intercepted CONNECTs whose ORIGINAL
@@ -888,10 +854,10 @@ func TestUpstreamProxyInputDropsWithMITM(t *testing.T) {
 	require.NoError(t, a.ApplyDenyFirst(ctx, s, testSlot("u-1", "10.0.0.5")))
 
 	script := runner.last()
-	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip daddr @upstream_proxy_v4 ct original proto-dst 3128 drop")
-	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat ct original ip6 daddr @upstream_proxy_v6 ct original proto-dst 3128 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip daddr @upstream_proxy_v4 ct original proto-dst 3128 drop")
+	require.Contains(t, script, "add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip6 daddr @upstream_proxy_v6 ct original proto-dst 3128 drop")
 	require.Less(t,
-		strings.Index(script, "input ct status dnat ct original ip daddr @upstream_proxy_v4"),
+		strings.Index(script, "input ct status dnat meta l4proto tcp ct original ip daddr @upstream_proxy_v4"),
 		strings.Index(script, "input ct state established,related accept"),
 		"input drop must precede the input established accept",
 	)
@@ -1063,8 +1029,6 @@ func TestSeedUpstreamProxyIPsBeforeReset(t *testing.T) {
 	assert.NotContains(t, script, "10.9.9.9 timeout", "seeded elements must be permanent")
 }
 
-// TestAddUpstreamProxyIPsFailureKeepsMirror: a failed apply must not commit
-// the mirror (rebuilds stay deterministic against the kernel state).
 func TestAddUpstreamProxyIPsFailureKeepsMirror(t *testing.T) {
 	runner := &fakeRunner{fail: func(script string) error {
 		// fail only the dynamic element update, never the table header

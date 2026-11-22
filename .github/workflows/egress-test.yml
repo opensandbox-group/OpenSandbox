@@ -93,6 +93,13 @@ jobs:
           sudo apt-get install -y nftables iproute2 util-linux
           bash scripts/ci-nft-go-test.sh ./pkg/nftables \
             TestDynamicElementRenewal \
+            TestNftDomainAnswerDoesNotShortenSharedLease \
+            TestNftPolicyReplacementKeepsOnlySurvivingDomainLeases \
+            TestNftSharedIPTeardownCountsOnlyDroppedLeases \
+            TestNftExpiredDomainCannotAcquireUnownedTCPLease \
+            TestNftReloadKeepsTCPFinalGrace \
+            TestNftFallbackReplansDNSLeases \
+            TestNftUnknownPolicyApplyFencesDNSUntilVerifiedReplacement \
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback \

@@ -12,11 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pure idle decision over the activity key and its tombstone.
-
-A missing activity key is *unknown*, never proof of idleness: it may delay
-a pause (tombstone window), never accelerate one. Timestamps are Unix ms.
-"""
+"""Missing activity starts a full tombstone window, not immediate idleness; timestamps are Unix ms."""
 
 from __future__ import annotations
 

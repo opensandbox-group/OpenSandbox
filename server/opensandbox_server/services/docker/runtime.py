@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Runtime preparation mixin for Docker sandboxes.
-
-Provides execd archive distribution and bootstrap launcher installation.
-Mixed into DockerSandboxService.
-"""
-
 from __future__ import annotations
 
 import io
@@ -49,7 +42,6 @@ LAUNCHER_INSTALL_PATH = posixpath.join(OPENSANDBOX_DIR, "opensandbox-launcher")
 
 
 class DockerRuntimeMixin:
-    """Mixin providing execd distribution and bootstrap launcher installation."""
 
 
     def _fetch_execd_archive(self, platform: Optional[PlatformSpec] = None) -> bytes:

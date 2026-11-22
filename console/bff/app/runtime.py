@@ -23,7 +23,6 @@ _TERMINAL_STATES = frozenset({"Terminated", "Failed", "Stopping"})
 def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
-    # Lifecycle API uses ISO-8601; handle Z suffix.
     normalized = value.replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(normalized)

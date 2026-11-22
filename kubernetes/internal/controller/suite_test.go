@@ -105,7 +105,7 @@ var _ = BeforeSuite(func() {
 		Client:     k8sManager.GetClient(),
 		Scheme:     k8sManager.GetScheme(),
 		Recorder:   k8sManager.GetEventRecorderFor("test-pool-controller"),
-		Allocator:  NewDefaultAllocator(k8sManager.GetClient()),
+		Allocator:  NewDefaultAllocator(k8sManager.GetClient(), k8sManager.GetAPIReader()),
 		RestConfig: cfg,
 	}).SetupWithManager(k8sManager, 128)).Should(Succeed())
 

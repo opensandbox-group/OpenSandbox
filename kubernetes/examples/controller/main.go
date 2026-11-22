@@ -329,39 +329,31 @@ func main() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig file")
 	flag.Parse()
 
-	// Build configuration
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		klog.Fatalf("Failed to build config: %v", err)
 	}
 
-	// Create clientset
 	client, err := clientset.NewForConfig(config)
 	if err != nil {
 		klog.Fatalf("Failed to create clientset: %v", err)
 	}
 
-	// Create informer factory
 	informerFactory := informers.NewSharedInformerFactory(client, time.Second*30)
 
-	// Create controller
 	controller := NewController(client, informerFactory)
 
-	// Start informers
 	ctx := context.Background()
 	informerFactory.Start(ctx.Done())
 
-	// Wait for cache sync
 	klog.Info("Waiting for informer cache sync...")
 	if ok := cache.WaitForCacheSync(ctx.Done(), controller.batchSandboxSynced, controller.poolSynced); !ok {
 		klog.Fatal("Failed to sync cache")
 	}
 	klog.Info("Informer cache synced successfully")
 
-	// Demonstrate clientset usage
 	DemonstrateClientsetUsage(ctx, client)
 
-	// Demonstrate lister usage
 	DemonstrateListerUsage(controller.batchSandboxLister, controller.poolLister)
 
 	klog.Info("\n========================================")

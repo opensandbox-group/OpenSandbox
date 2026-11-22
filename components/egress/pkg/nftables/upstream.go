@@ -77,6 +77,9 @@ func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) err
 	if m.quiesced.Load() {
 		return ErrQuiesced
 	}
+	if m.staticStateUncertain {
+		return errStaticStateUncertain
+	}
 	if m.opts.UpstreamProxy == nil {
 		return nil
 	}

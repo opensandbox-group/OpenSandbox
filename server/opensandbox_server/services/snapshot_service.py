@@ -746,16 +746,8 @@ class PersistedSnapshotService(SnapshotService):
                     updated_at=now,
                 )
 
-            # Mode-confirmation fence: the server is the compatibility
-            # boundary across fast-sandbox versions, so a requested
-            # rootfs-only snapshot is only Ready when the runtime EXPLICITLY
-            # confirmed a rootfs-only artifact. An absent (or full)
-            # confirmation means the backend predates the mode field (the
-            # old protobuf silently drops it and captures Full) or the
-            # fastlet produced Full artifacts: never publish that as a
-            # rootfs-only snapshot. Mirrors upstream's SnapshotModeDrift
-            # fence at the OpenSandbox layer. Legacy/full requests keep the
-            # permissive fallback (unconfirmed == full).
+            # Older protobuf backends silently drop mode, so rootfsOnly requires explicit artifact confirmation.
+            # Legacy/full requests may still treat an unconfirmed mode as full.
             if (
                 normalize_snapshot_mode(record.mode) == SNAPSHOT_MODE_ROOTFS_ONLY
                 and normalize_snapshot_mode(runtime_status.mode)

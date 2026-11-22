@@ -15,7 +15,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - description: The number of all nodes in pool.
+    - description: The number of nodes the pool accounts for.
       jsonPath: .status.total
       name: TOTAL
       type: integer
@@ -164,12 +164,23 @@ spec:
                 description: Revision is the latest version of pool
                 type: string
               total:
-                description: Total is the total number of nodes in the pool.
+                description: |-
+                  Total is the number of nodes the pool accounts for: non-terminated pods
+                  plus pods that are still allocated to a sandbox (they stay owed until
+                  handback), including terminal-phase pods and pods that are already
+                  terminating. Terminal idle pods are excluded — they can never serve
+                  again and must not make a pool with a dead buffer look healthy. Unreaped
+                  terminal pods still consume the PoolMax budget until the controller
+                  reclaims them.
                 format: int32
                 type: integer
               updated:
-                description: Updated is the number of nodes that have been updated
-                  to the latest revision.
+                description: |-
+                  Updated is the number of nodes the pool accounts for that have been
+                  updated to the latest revision. It covers the same population as Total
+                  except pods that terminate while still allocated: those stay counted in
+                  Total until their reservation is handed back, but no longer count as
+                  up-to-date capacity.
                 format: int32
                 type: integer
             required:

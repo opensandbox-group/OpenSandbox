@@ -86,7 +86,6 @@ class TemplatesAdapterTest {
 
     @Test
     fun `createTemplate should send correct request and parse response`() {
-        // Mock response
         val responseBody =
             """
             {
@@ -104,7 +103,6 @@ class TemplatesAdapterTest {
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
 
-        // Execute
         val request =
             CreateTemplateRequest
                 .builder()
@@ -121,7 +119,6 @@ class TemplatesAdapterTest {
                 .build()
         val result = sandboxesAdapter.createTemplate(request)
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertEquals("POST", recorded.method)
         assertEquals("/v1/templates", recorded.path)
@@ -139,7 +136,6 @@ class TemplatesAdapterTest {
         // pinned to the spec default instead of an explicit null.
         assertEquals("overlaybd", payload["format"]!!.jsonPrimitive.content)
 
-        // Verify response
         assertEquals("tpl_new", result.templateId)
         assertEquals(TemplateFormat.OVERLAYBD, result.format)
         assertEquals(TemplatePhase.PENDING, result.status.phase)
@@ -151,7 +147,6 @@ class TemplatesAdapterTest {
 
     @Test
     fun `getTemplate should convert succeeded status`() {
-        // Mock response
         val responseBody =
             """
             {
@@ -171,15 +166,12 @@ class TemplatesAdapterTest {
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
 
-        // Execute
         val result = sandboxesAdapter.getTemplate("tpl_1")
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertEquals("GET", recorded.method)
         assertEquals("/v1/templates/tpl_1", recorded.path)
 
-        // Verify response
         assertEquals("tpl_1", result.templateId)
         assertEquals(TemplateFormat.NATIVE, result.format)
         assertEquals(TemplatePhase.SUCCEEDED, result.status.phase)
@@ -190,7 +182,6 @@ class TemplatesAdapterTest {
 
     @Test
     fun `listTemplates should join metadata filters and convert pagination`() {
-        // Mock response
         val responseBody =
             """
             {
@@ -219,7 +210,6 @@ class TemplatesAdapterTest {
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
 
-        // Execute
         val filter =
             TemplateFilter
                 .builder()
@@ -229,14 +219,12 @@ class TemplatesAdapterTest {
                 .build()
         val result = sandboxesAdapter.listTemplates(filter)
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertEquals("GET", recorded.method)
         assertEquals("env=prod", recorded.requestUrl!!.queryParameter("metadata"))
         assertEquals("1", recorded.requestUrl!!.queryParameter("page"))
         assertEquals("20", recorded.requestUrl!!.queryParameter("pageSize"))
 
-        // Verify response
         assertEquals(2, result.templateInfos.size)
         assertEquals("tpl_1", result.templateInfos[0].templateId)
         assertEquals(TemplatePhase.PENDING, result.templateInfos[1].status.phase)
@@ -245,14 +233,12 @@ class TemplatesAdapterTest {
 
     @Test
     fun `listTemplates should percent-encode metadata filters once`() {
-        // Mock response
         mockWebServer.enqueue(
             MockResponse()
                 .setBody("""{"items":[],"pagination":{"page":1,"pageSize":20,"totalItems":0,"totalPages":0,"hasNextPage":false}}""")
                 .setResponseCode(200),
         )
 
-        // Execute
         val filter =
             TemplateFilter
                 .builder()
@@ -274,17 +260,14 @@ class TemplatesAdapterTest {
 
     @Test
     fun `listTemplates should omit unset filters`() {
-        // Mock response
         mockWebServer.enqueue(
             MockResponse()
                 .setBody("""{"items":[],"pagination":{"page":1,"pageSize":20,"totalItems":0,"totalPages":0,"hasNextPage":false}}""")
                 .setResponseCode(200),
         )
 
-        // Execute
         sandboxesAdapter.listTemplates(TemplateFilter.builder().build())
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertNull(recorded.requestUrl!!.queryParameter("metadata"))
         assertNull(recorded.requestUrl!!.queryParameter("page"))
@@ -293,13 +276,10 @@ class TemplatesAdapterTest {
 
     @Test
     fun `deleteTemplate should call the delete endpoint`() {
-        // Mock response
         mockWebServer.enqueue(MockResponse().setResponseCode(204))
 
-        // Execute
         sandboxesAdapter.deleteTemplate("tpl_1")
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertEquals("DELETE", recorded.method)
         assertEquals("/v1/templates/tpl_1", recorded.path)
@@ -307,14 +287,12 @@ class TemplatesAdapterTest {
 
     @Test
     fun `createTemplate should map conflict to sandbox api exception`() {
-        // Mock response
         mockWebServer.enqueue(
             MockResponse()
                 .setBody("""{"code": "TEMPLATE_ALREADY_EXISTS", "message": "template already exists"}""")
                 .setResponseCode(409),
         )
 
-        // Execute
         val request =
             CreateTemplateRequest
                 .builder()
@@ -326,14 +304,12 @@ class TemplatesAdapterTest {
                 sandboxesAdapter.createTemplate(request)
             }
 
-        // Verify response
         assertEquals(409, exception.statusCode)
         assertEquals("TEMPLATE_ALREADY_EXISTS", exception.error.code)
     }
 
     @Test
     fun `createSandboxFromTemplate should send template mode wire body only`() {
-        // Mock response
         val responseBody =
             """
             {
@@ -345,7 +321,6 @@ class TemplatesAdapterTest {
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
 
-        // Execute
         val result =
             sandboxesAdapter.createSandboxFromTemplate(
                 templateId = "tpl_1",
@@ -366,7 +341,6 @@ class TemplatesAdapterTest {
                 extensions = mapOf("storage.id" to "abc123"),
             )
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertEquals("POST", recorded.method)
         assertEquals("/v1/sandboxes", recorded.path)
@@ -400,7 +374,6 @@ class TemplatesAdapterTest {
             )
         }
 
-        // Verify response
         assertEquals("fsb-001", result.id)
     }
 

@@ -57,8 +57,8 @@ type Proxy struct {
 	servers                 []*dns.Server
 	shutdownOnce            sync.Once
 
-	// When set, called synchronously for allowed A/AAAA answers (dns+nft: program nft before client connects).
-	onResolved func(domain string, ips []nftables.ResolvedIP)
+	// When set, called synchronously for allowed A/AAAA answers; an installation error fails the DNS reply.
+	onResolved func(domain string, ips []nftables.ResolvedIP) error
 
 	// infraDomains maps normalized infra FQDNs to their resolved-IP callback.
 	// These names resolve without sandbox policy evaluation and bypass
@@ -235,7 +235,10 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	// infra name stays resolvable even under a deny-all policy; reachability
 	// remains gated by the uid-scoped nft rule, not by DNS secrecy.
 	if cb := p.infraCallback(host); cb != nil {
-		p.forwardAndReply(w, r, domain, host, cb)
+		p.forwardAndReply(w, r, domain, host, func(domain string, ips []nftables.ResolvedIP) error {
+			cb(domain, ips)
+			return nil
+		})
 		return
 	}
 
@@ -281,8 +284,8 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 // forwardAndReply resolves r upstream and answers w; a successful answer feeds
 // notify (infra callback or the policy's resolved-IP callback) before the
-// reply is written, so nft programming lands before the client can dial.
-func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, notify func(string, []nftables.ResolvedIP)) {
+// reply is written. Failed policy installation returns SERVFAIL without addresses.
+func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, notify func(string, []nftables.ResolvedIP) error) {
 	start := time.Now()
 	resp, failure, err := p.forward(r, upstreamNetwork(w))
 	elapsed := time.Since(start).Seconds()
@@ -296,10 +299,18 @@ func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host s
 		return
 	}
 	telemetry.RecordDNSForward(elapsed)
+	if err := p.maybeNotifyResolvedWith(domain, resp, notify); err != nil {
+		// The resolver succeeded: do not classify grant installation as an
+		// upstream failure or retry another resolver.
+		logOutboundDNS(host, nil, "", fmt.Sprintf("policy installation failed: %v", err))
+		fail := new(dns.Msg)
+		fail.SetRcode(r, dns.RcodeServerFailure)
+		p.writeReply(w, r, fail, telemetry.DNSReplyStagePolicyError)
+		return
+	}
 	if !p.shouldSkipOutboundLog(host) {
 		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
 	}
-	p.maybeNotifyResolvedWith(domain, resp, notify)
 	if upstreamNetwork(w) == "udp" && r.IsEdns0() == nil {
 		fitClassicUDPReply(resp)
 	}
@@ -359,11 +370,11 @@ func (p *Proxy) currentPolicy() *policy.NetworkPolicy {
 }
 
 // QueryPolicy carries the per-query policy and the per-subject resolved-IP
-// callback selected by SetQueryPolicySelector. OnResolved may be nil; the
-// proxy then falls back to the proxy-wide callback.
+// callback selected by SetQueryPolicySelector. Installation must succeed before
+// the reply is sent. OnResolved may be nil; the proxy then uses its global callback.
 type QueryPolicy struct {
 	Policy     *policy.NetworkPolicy
-	OnResolved func(domain string, ips []nftables.ResolvedIP)
+	OnResolved func(domain string, ips []nftables.ResolvedIP) error
 }
 
 // SetQueryPolicySelector installs the per-query policy dispatch (fast-sandbox
@@ -390,23 +401,22 @@ func (p *Proxy) shouldSkipOutboundLog(host string) bool {
 	return ds.Match(host)
 }
 
-// maybeNotifyResolvedWith calls the per-query resolved callback (falling back
-// to the proxy-wide one) before w.WriteMsg so dynamic nft allows are installed
-// before the client receives the answer and may open a connection.
-func (p *Proxy) maybeNotifyResolvedWith(domain string, resp *dns.Msg, fn func(string, []nftables.ResolvedIP)) {
+// maybeNotifyResolvedWith invokes the selected resolved-IP callback before the
+// reply is sent, returning any grant installation error to the reply path.
+func (p *Proxy) maybeNotifyResolvedWith(domain string, resp *dns.Msg, fn func(string, []nftables.ResolvedIP) error) error {
 	if fn == nil {
-		return
+		return nil
 	}
 	ips := extractResolvedIPs(resp)
 	if len(ips) == 0 {
-		return
+		return nil
 	}
-	fn(domain, ips)
+	return fn(domain, ips)
 }
 
 // maybeNotifyResolved calls the proxy-wide resolved callback.
-func (p *Proxy) maybeNotifyResolved(domain string, resp *dns.Msg) {
-	p.maybeNotifyResolvedWith(domain, resp, p.onResolved)
+func (p *Proxy) maybeNotifyResolved(domain string, resp *dns.Msg) error {
+	return p.maybeNotifyResolvedWith(domain, resp, p.onResolved)
 }
 
 // forward returns the response, or the bounded failure reason (a telemetry.DNSFailure*
@@ -573,8 +583,9 @@ func (p *Proxy) infraCallback(host string) func(string, []nftables.ResolvedIP) {
 	return p.infraDomains[host]
 }
 
-// SetOnResolved registers the dns+nft path (nil in dns-only). Invoked on the same goroutine as serveDNS, before WriteMsg.
-func (p *Proxy) SetOnResolved(fn func(domain string, ips []nftables.ResolvedIP)) {
+// SetOnResolved registers the dns+nft path (nil in dns-only). Invoked on the same
+// goroutine as serveDNS, before WriteMsg; an error returns SERVFAIL instead of addresses.
+func (p *Proxy) SetOnResolved(fn func(domain string, ips []nftables.ResolvedIP) error) {
 	p.onResolved = fn
 }
 

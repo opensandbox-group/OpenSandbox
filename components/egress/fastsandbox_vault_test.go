@@ -29,9 +29,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
 
-// ---------------------------------------------------------------------------
 // Relay vault surface (OSEP-0022): /vault/{sandboxUid}
-// ---------------------------------------------------------------------------
 
 const (
 	vaultTestUID = "vault-u"
@@ -274,13 +272,8 @@ func TestVaultRelayMethodNotAllowed(t *testing.T) {
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
 
-// ---------------------------------------------------------------------------
 // Fence binding (the vault slice must never outlive its runtime instance)
-// ---------------------------------------------------------------------------
 
-// TestVaultRelayRebindDiscardsPreviousVault: same UID rebinds under a new
-// runtime-instance fence without REMOVE_BINDING — the old vault must be gone
-// from both the relay surface and the addon's client-IP dispatch.
 func TestVaultRelayRebindDiscardsPreviousVault(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	s := vaultReadySubject(t, srv, reg)
@@ -348,9 +341,6 @@ func TestVaultForResetsOrphanMaterializedWhileUnregistered(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "orphan-secret")
 }
 
-// TestVaultRelayDenyingSubjectValidatesAgainstPendingPolicy: a vault op
-// between SET_BINDING and data-plane-ready is accepted (held to the barrier)
-// and validates against the pending binding policy — not against nil.
 func TestVaultRelayDenyingSubjectValidatesAgainstPendingPolicy(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
 
@@ -378,9 +368,7 @@ func TestVaultRelayDenyingSubjectValidatesAgainstPendingPolicy(t *testing.T) {
 	assert.Contains(t, rec2.Body.String(), "Bearer sekret")
 }
 
-// ---------------------------------------------------------------------------
 // GET → PUT round-trip (revision tolerated as the precondition)
-// ---------------------------------------------------------------------------
 
 func TestVaultRelayGetPutRoundTrip(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
@@ -419,9 +407,7 @@ func TestVaultRelayGetPutRoundTrip(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-// ---------------------------------------------------------------------------
 // Path-derived subject ID validation
-// ---------------------------------------------------------------------------
 
 func TestValidVaultSubjectID(t *testing.T) {
 	valid := []string{"u-1", "s-8f14e45f", strings.Repeat("a", 128), "...", "a..b"}

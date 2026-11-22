@@ -217,17 +217,14 @@ class SandboxModelConverter:
         )
         from opensandbox.api.lifecycle.types import UNSET
 
-        # Convert env dict to API model
         api_env = UNSET
         if env:
             api_env = CreateSandboxRequestEnv.from_dict(env)
 
-        # Convert metadata dict to API model
         api_metadata = UNSET
         if metadata:
             api_metadata = CreateSandboxRequestMetadata.from_dict(metadata)
 
-        # Convert resource limits dict to API model
         api_resource_limits = ResourceLimits.from_dict(resource)
 
         api_network_policy = SandboxModelConverter.to_api_network_policy(
@@ -280,7 +277,6 @@ class SandboxModelConverter:
                     lifecycle_payload.pop("periodic", None)
                 api_lifecycle = ApiSandboxLifecycle.from_dict(lifecycle_payload)
 
-        # Convert volumes to API model
         api_volumes = UNSET
         if volumes is not None and len(volumes) > 0:
             api_volumes = [

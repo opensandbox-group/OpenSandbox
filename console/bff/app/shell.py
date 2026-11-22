@@ -175,10 +175,7 @@ async def bridge_pty(browser: WebSocket, execd_ws) -> None:
     execd_reported_error = False
 
     def execd_lost(exc: websockets.ConnectionClosedError) -> None:
-        # execd went away without a normal close: the sandbox was paused or
-        # killed, or the network dropped. Once the shell is open that is a
-        # lost connection; before it, an error execd already sent says more
-        # than anything added here, and without one it is a failed start.
+        # Distinguish lost connections from failed starts without replacing execd's startup error.
         if connected:
             raise ShellError("SHELL_DISCONNECTED", "Lost the connection to the sandbox shell") from exc
         if not execd_reported_error:

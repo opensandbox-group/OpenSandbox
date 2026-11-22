@@ -677,9 +677,6 @@ class CredentialVaultPatchRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
-# ============================================================================
-# Volume Models
-# ============================================================================
 
 # Matches Unix absolute paths (/…) and Windows drive-letter paths (C:\ or C:/).
 # Aligned with server-side pattern in server/opensandbox_server/api/schema.py.

@@ -218,10 +218,6 @@ func TestCleanupFinishedCommandsRetainsRunningAndRecentCommands(t *testing.T) {
 	require.NotNil(t, c.getCommandKernel("running"))
 }
 
-// TestRemoveCommandOutputFilesTruncatesBeforeUnlink verifies that removal
-// releases the data blocks even when a forked child still holds the fd: the
-// unlinked inode survives via the held fd, and its size must be zero after
-// cleanup instead of staying allocated until the holder exits (#2291).
 func TestRemoveCommandOutputFilesTruncatesBeforeUnlink(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("Windows refuses to remove a file held open without FILE_SHARE_DELETE")
@@ -243,9 +239,6 @@ func TestRemoveCommandOutputFilesTruncatesBeforeUnlink(t *testing.T) {
 	require.Zero(t, info.Size(), "data blocks must be released while another fd still holds the file")
 }
 
-// TestRemoveCommandOutputFilesDoesNotFollowSymlink verifies the cleanup-time
-// truncation cannot be redirected at an arbitrary file by swapping the entry
-// for a symlink: the link is unlinked, the target's content is untouched.
 func TestRemoveCommandOutputFilesDoesNotFollowSymlink(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("symlink creation requires additional privileges on Windows")

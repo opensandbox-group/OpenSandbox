@@ -18,10 +18,12 @@ import { useEffect, useState } from 'react';
 import { adminApi, sandboxApi } from '../api/client';
 import type { RuntimeStats } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { useI18n } from '../i18n';
 import { formatDateTime, formatDuration } from '../utils/format';
 
 export function OverviewPage() {
   const { user } = useAuth();
+  const { t } = useI18n();
   const [stats, setStats] = useState<RuntimeStats | null>(null);
   const [tenantSummary, setTenantSummary] = useState<{
     total: number;
@@ -49,27 +51,27 @@ export function OverviewPage() {
           setStats(null);
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to load overview');
+        setError(e instanceof Error ? e.message : t('overview.loadFailed'));
       }
     })();
-  }, [user?.role]);
+  }, [user?.role, t]);
 
   return (
     <div>
-      <Typography.Title level={4}>Overview</Typography.Title>
+      <Typography.Title level={4}>{t('common.overview')}</Typography.Title>
       {error && <Alert type="error" message={error} style={{ marginBottom: 16 }} />}
 
       {user?.role === 'admin' && stats && (
         <Row gutter={[16, 16]}>
           <Col xs={24} sm={12} md={8}>
             <Card>
-              <Statistic title="Running" value={stats.runningCount} />
+              <Statistic title={t('overview.running')} value={stats.runningCount} />
             </Card>
           </Col>
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title="Average Uptime"
+                title={t('overview.averageUptime')}
                 value={formatDuration(stats.avgWallClockSeconds)}
               />
             </Card>
@@ -77,7 +79,7 @@ export function OverviewPage() {
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title="Expires in 30 Minutes"
+                title={t('overview.expiresIn30Minutes')}
                 value={stats.expiringWithin30mCount}
               />
             </Card>
@@ -85,7 +87,7 @@ export function OverviewPage() {
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title="Maximum Uptime"
+                title={t('overview.maximumUptime')}
                 value={formatDuration(stats.maxWallClockSeconds)}
               />
             </Card>
@@ -93,14 +95,14 @@ export function OverviewPage() {
           <Col xs={24} sm={12} md={8}>
             <Card>
               <Statistic
-                title="Total Wall-Clock Time"
+                title={t('overview.totalWallClockTime')}
                 value={formatDuration(stats.totalWallClockSeconds)}
               />
             </Card>
           </Col>
           <Col xs={24} sm={12} md={8}>
             <Card>
-              <Statistic title="Stats Updated At" value={formatDateTime(stats.asOf)} />
+              <Statistic title={t('overview.statsUpdatedAt')} value={formatDateTime(stats.asOf)} />
             </Card>
           </Col>
         </Row>
@@ -110,12 +112,12 @@ export function OverviewPage() {
         <Row gutter={[16, 16]}>
           <Col xs={24} sm={8}>
             <Card>
-              <Statistic title="Total Sandboxes" value={tenantSummary.total} />
+              <Statistic title={t('overview.totalSandboxes')} value={tenantSummary.total} />
             </Card>
           </Col>
           <Col xs={24} sm={8}>
             <Card>
-              <Statistic title="Running" value={tenantSummary.running} />
+              <Statistic title={t('overview.running')} value={tenantSummary.running} />
             </Card>
           </Col>
         </Row>

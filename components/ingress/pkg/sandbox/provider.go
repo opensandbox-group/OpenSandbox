@@ -75,15 +75,12 @@ type Provider interface {
 	// may perform a bounded FastPath RPC and cache the resulting short-lived route.
 	ResolveEndpoint(ctx context.Context, target EndpointTarget) (*EndpointInfo, error)
 
-	// Start initializes and starts the provider's informer cache
-	// Waits for cache sync before returning
+	// Start prepares the provider; informer-backed providers wait for cache sync.
 	// Must be called before using ResolveEndpoint.
 	Start(ctx context.Context) error
 }
 
-// EndpointInvalidator is implemented by providers with expiring or
-// assignment-fenced routes. The proxy calls it after an authenticated upstream
-// reports that a cached route is stale; the current request is not replayed.
+// EndpointInvalidator retires expiring or assignment-fenced routes after authenticated stale-route feedback.
 type EndpointInvalidator interface {
 	Invalidate(target EndpointTarget)
 }

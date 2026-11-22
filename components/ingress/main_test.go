@@ -20,6 +20,29 @@ import (
 	"testing"
 )
 
+func TestValidateFastPathRouting(t *testing.T) {
+	for _, test := range []struct {
+		name, endpoint, namespace, mode, keys string
+		valid                                 bool
+	}{
+		{name: "legacy", mode: "header", valid: true},
+		{name: "wildcard without keys", endpoint: "fastpath:9090", namespace: "tenant-a", mode: "header", valid: true},
+		{name: "signed header", endpoint: "fastpath:9090", mode: "header", keys: "k=c2VjcmV0", valid: true},
+		{name: "signed URI restricted namespace", endpoint: "fastpath:9090", namespace: "tenant-a", mode: "uri", keys: "k=c2VjcmV0", valid: true},
+		{name: "missing FastPath", namespace: "tenant-a", mode: "header"},
+		{name: "missing credentials and namespace", endpoint: "fastpath:9090", mode: "header"},
+		{name: "unsigned URI", endpoint: "fastpath:9090", namespace: "tenant-a", mode: "uri"},
+		{name: "blank keys", endpoint: "fastpath:9090", mode: "header", keys: " "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateFastPathRouting(test.endpoint, test.namespace, test.mode, test.keys)
+			if (err == nil) != test.valid {
+				t.Fatalf("validateFastPathRouting() = %v, valid = %v", err, test.valid)
+			}
+		})
+	}
+}
+
 func pathRecorder(name string, got *string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*got = name + " " + r.Method + " " + r.URL.Path

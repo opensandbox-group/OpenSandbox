@@ -15,6 +15,7 @@
 import { Button, Typography } from 'antd';
 import { Link, useNavigate } from 'react-router-dom';
 
+import { useI18n } from '../i18n';
 import { sandboxShellPath } from '../utils/shellPath';
 
 type Props = {
@@ -26,6 +27,7 @@ type Props = {
 
 export function ShellLink({ sandboxId, state, tenant, variant = 'link' }: Props) {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const running = state === 'Running' && Boolean(sandboxId);
 
   if (variant === 'button') {
@@ -34,13 +36,13 @@ export function ShellLink({ sandboxId, state, tenant, variant = 'link' }: Props)
         disabled={!running}
         onClick={() => navigate(sandboxShellPath(sandboxId, tenant))}
       >
-        Shell
+        {t('common.shell')}
       </Button>
     );
   }
 
   if (!running) {
-    return <Typography.Text type="secondary">Shell</Typography.Text>;
+    return <Typography.Text type="secondary">{t('common.shell')}</Typography.Text>;
   }
-  return <Link to={sandboxShellPath(sandboxId, tenant)}>Shell</Link>;
+  return <Link to={sandboxShellPath(sandboxId, tenant)}>{t('common.shell')}</Link>;
 }

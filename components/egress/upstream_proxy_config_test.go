@@ -243,11 +243,7 @@ func TestUnionResolver(t *testing.T) {
 }
 
 func TestResolveUpstreamProxyHost(t *testing.T) {
-	// The split-authority case from the review: the dnsproxy's forward
-	// upstream errors (e.g. OPENSANDBOX_EGRESS_DNS_UPSTREAM pointing at a
-	// resolver with a different view) while the Pod resolver — mitmdump's
-	// dial authority — still resolves the name. "localhost" resolves locally
-	// on every platform, so no external network is touched.
+	// Keep Pod-resolver answers when the forwarding resolver fails; localhost needs no external network.
 	ips, err := resolveUpstreamProxyHost(context.Background(), "localhost",
 		func(context.Context, string) ([]nftables.ResolvedIP, error) {
 			return nil, context.DeadlineExceeded

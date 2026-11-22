@@ -23,7 +23,6 @@ import (
 	"time"
 )
 
-// SandboxPool is the interface for a client-side sandbox pool.
 type SandboxPool interface {
 	Start(ctx context.Context) error
 	Acquire(ctx context.Context, opts AcquireOptions) (*Sandbox, error)
@@ -36,7 +35,6 @@ type SandboxPool interface {
 
 var _ SandboxPool = (*DefaultSandboxPool)(nil)
 
-// DefaultSandboxPool implements SandboxPool.
 type DefaultSandboxPool struct {
 	config  *PoolConfig
 	manager *SandboxManager
@@ -110,7 +108,6 @@ func (p *DefaultSandboxPool) Start(ctx context.Context) error {
 		}
 	}
 
-	// Initialize state store with pool configuration.
 	if err := p.config.StateStore.SetMaxIdle(ctx, p.config.PoolName, startMaxIdle); err != nil {
 		p.mu.Lock()
 		if p.lifecycleState == PoolLifecycleStarting {
@@ -157,7 +154,6 @@ func (p *DefaultSandboxPool) Start(ctx context.Context) error {
 	p.wg.Add(1)
 	go p.reconcileLoop(reconCtx)
 
-	// Trigger immediate first tick if maxIdle > 0.
 	if p.config.MaxIdle > 0 {
 		p.wg.Add(1)
 		go func() {
@@ -241,7 +237,6 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 		return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: err}
 	}
 
-	// Resolve policy.
 	policy := p.config.EmptyBehavior
 	if opts.Policy != nil {
 		policy = *opts.Policy
@@ -253,7 +248,6 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 		return nil, err
 	}
 
-	// Resolve minTTL.
 	minTTL := p.config.AcquireMinRemainingTTL
 	if opts.MinRemainingTTL > 0 {
 		minTTL = opts.MinRemainingTTL
@@ -307,7 +301,6 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 		lastSandboxID = takeResult.SandboxID
 		attemptedAny = true
 
-		// Try to connect to the idle sandbox (health check is integrated into ready-poll).
 		sb, connectErr := p.connectIdle(ctx, takeResult.SandboxID, opts)
 		if connectErr != nil {
 			// Connect / readiness / health-check failed — the idle candidate itself is unusable.
@@ -327,16 +320,11 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 				"max_attempts", maxAttempts,
 				"error", connectErr)
 
-			// Respect the caller's cancellation between iterations so a long retry loop doesn't
-			// keep paying AcquireReadyTimeout after the context has been cancelled.
 			if err := ctx.Err(); err != nil {
 				go p.killDiscardedAliveSandboxes(pendingKill)
 				return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: err}
 			}
-			// Re-check pool lifecycle between iterations. Shutdown(ctx, true) uses its own ctx
-			// to drive draining and does NOT cancel the caller's acquire ctx, so without this
-			// check the loop could keep paying AcquireReadyTimeout per retry while shutdown
-			// waits on inFlight.
+			// Graceful shutdown waits on inFlight without canceling the acquire context.
 			p.mu.Lock()
 			currentState := p.lifecycleState
 			p.mu.Unlock()
@@ -352,13 +340,7 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 			}
 			continue
 		}
-		// Connect + readiness succeeded. From here on the sandbox is a healthy, borrowable idle:
-		// any failure below (renew rejection, e.g. lifecycle API temporarily failing renew) is
-		// NOT a candidate-specific problem, so we must not treat it as "stale idle" and burn
-		// another retry. But TryTakeIdle already popped this ID out of the store, so if we only
-		// Close() locally the remote sandbox stays alive on the server until its TTL expires and
-		// is no longer tracked anywhere. Kill the remote sandbox best-effort, close local
-		// resources, and surface the raw error.
+		// Renew failures are not candidate-specific; kill the popped sandbox rather than retrying or abandoning an untracked remote instance.
 		if opts.SandboxTimeout > 0 {
 			if _, renewErr := sb.Renew(ctx, opts.SandboxTimeout); renewErr != nil {
 				p.config.Logger.Warn("acquire: renew failed after idle connect; killing remote "+
@@ -403,7 +385,6 @@ func (p *DefaultSandboxPool) Acquire(ctx context.Context, opts AcquireOptions) (
 		return nil, &PoolEmptyError{PoolName: p.config.PoolName, Policy: policy}
 	}
 
-	// DIRECT_CREATE / RETRY_NEXT_IDLE_THEN_CREATE fallthrough.
 	if err := ctx.Err(); err != nil {
 		return nil, &PoolAcquireFailedError{PoolName: p.config.PoolName, Cause: err}
 	}

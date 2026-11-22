@@ -17,6 +17,7 @@
 package runtime
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -61,6 +62,76 @@ func TestFilesystemCredentialResolvesAccountGroups(t *testing.T) {
 	require.Equal(t, uint32(4294967294), cred.Gid)
 	require.ElementsMatch(t, expected, cred.Groups)
 	require.Equal(t, account.HomeDir, home)
+}
+
+func stubFilesystemLookups(
+	t *testing.T,
+	lookupUser func(string) (*user.User, error),
+	lookupGroups func(*user.User) ([]string, error),
+) {
+	t.Helper()
+	prevUser, prevGroups := lookupFilesystemUser, lookupFilesystemGroups
+	t.Cleanup(func() {
+		lookupFilesystemUser, lookupFilesystemGroups = prevUser, prevGroups
+	})
+	lookupFilesystemUser = lookupUser
+	lookupFilesystemGroups = lookupGroups
+}
+
+func TestFilesystemCredentialMissingPasswdFileActsAsUnknownUser(t *testing.T) {
+	stubFilesystemLookups(t,
+		func(string) (*user.User, error) {
+			return nil, &fs.PathError{Op: "open", Path: "/etc/passwd", Err: fs.ErrNotExist}
+		},
+		func(*user.User) ([]string, error) {
+			t.Fatal("groups must not be looked up without an account")
+			return nil, nil
+		},
+	)
+	cred, home, err := filesystemCredential(41500, 41501)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	require.Equal(t, uint32(41500), cred.Uid)
+	require.Equal(t, uint32(41501), cred.Gid)
+	require.Empty(t, cred.Groups)
+	require.Equal(t, "/", home)
+}
+
+func TestFilesystemCredentialMissingGroupFileUsesNoSupplementaryGroups(t *testing.T) {
+	stubFilesystemLookups(t,
+		func(uid string) (*user.User, error) {
+			return &user.User{Uid: uid, Gid: "41500", Username: "agent", HomeDir: "/home/agent"}, nil
+		},
+		func(*user.User) ([]string, error) {
+			return nil, &fs.PathError{Op: "open", Path: "/etc/group", Err: fs.ErrNotExist}
+		},
+	)
+	cred, home, err := filesystemCredential(41500, 41501)
+	require.NoError(t, err)
+	require.NotNil(t, cred)
+	require.Equal(t, uint32(41500), cred.Uid)
+	require.Equal(t, uint32(41501), cred.Gid)
+	require.Empty(t, cred.Groups)
+	require.Equal(t, "/home/agent", home)
+}
+
+func TestFilesystemCredentialRejectsUnreadableAccountFiles(t *testing.T) {
+	permission := &fs.PathError{Op: "open", Path: "/etc/passwd", Err: fs.ErrPermission}
+	stubFilesystemLookups(t,
+		func(string) (*user.User, error) { return nil, permission },
+		func(*user.User) ([]string, error) { return nil, nil },
+	)
+	_, _, err := filesystemCredential(41500, 41501)
+	require.ErrorIs(t, err, fs.ErrPermission)
+
+	stubFilesystemLookups(t,
+		func(uid string) (*user.User, error) {
+			return &user.User{Uid: uid, Gid: "41500", HomeDir: "/home/agent"}, nil
+		},
+		func(*user.User) ([]string, error) { return nil, permission },
+	)
+	_, _, err = filesystemCredential(41500, 41501)
+	require.ErrorIs(t, err, fs.ErrPermission)
 }
 
 func TestFilesystemCredentialRejectsReservedIDs(t *testing.T) {

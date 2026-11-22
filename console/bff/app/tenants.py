@@ -35,7 +35,6 @@ class TenantRecord:
 
 
 def _load_toml(path: Path) -> dict:
-    """Parse TOML file: stdlib tomllib (3.11+) wants str; tomli backport wants bytes."""
     raw = path.read_bytes()
     try:
         return tomllib.loads(raw)

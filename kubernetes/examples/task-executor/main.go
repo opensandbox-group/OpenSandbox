@@ -62,7 +62,6 @@ func main() {
 		state := getTaskState(currentTask)
 		fmt.Printf("Current state: %s\n", state)
 
-		// Check if task is finished
 		if currentTask.ProcessStatus.Terminated != nil {
 			fmt.Printf("Task finished with exit code: %d\n", currentTask.ProcessStatus.Terminated.ExitCode)
 			break

@@ -85,7 +85,6 @@ else
   log "Bumping platform version to ${VERSION}"
 fi
 
-# 1) Chart.yaml top-level versions + appVersion (where present)
 for chart in base controller server ingress-gateway node-agent fast-sandbox opensandbox; do
   f="manifests/charts/${chart}/Chart.yaml"
   [[ -f "$f" ]] || { warn "missing ${f}; skipped"; continue; }
@@ -101,7 +100,6 @@ for chart in base controller server ingress-gateway node-agent fast-sandbox open
 done
 
 if [[ "$DRY_RUN" == true ]]; then
-  # 2) Umbrella appVersion + dependency versions
   f="manifests/charts/opensandbox/Chart.yaml"
   bad_deps="$(sed -n '/^dependencies:/,$p' "$f" | awk -v want="${VERSION}" '
     /^[[:space:]]+- name:/ { name=$NF }
@@ -113,14 +111,12 @@ if [[ "$DRY_RUN" == true ]]; then
     while IFS= read -r line; do log "dry-run ${f}: dependency ${line} (want ${VERSION})"; done <<<"$bad_deps"
   fi
 
-  # 3) Image references in chart values: pinned split tags and full-image strings
   while IFS= read -r -d '' f; do
     bad="$(grep -rohE '(opensandbox|fast-sandbox)/[A-Za-z0-9._/-]+:[^"'"'"'[:space:]]+' "$f" 2>/dev/null \
       | grep -vE ":release-${VERSION}$" | sort -u || true)"
     [[ -n "$bad" ]] && log "dry-run ${f}: image refs -> release-${VERSION}: ${bad//$'\n'/, }"
   done < <(find manifests/charts -name 'values*.yaml' -print0)
 else
-  # 2) Umbrella appVersion + dependency versions
   f="manifests/charts/opensandbox/Chart.yaml"
   awk -v v="$VERSION" '
     /^appVersion:/ { print "appVersion: \"" v "\""; next }
@@ -132,9 +128,6 @@ else
     }
     { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
 
-  # 3) Image references in chart values: pinned split tags and full-image strings.
-  #    Rewrites any previous channel tag (legacy vX.Y.Z, dev, latest, or a
-  #    release-X.Y.Z[-rc.N] left by an earlier umbrella bump) to release-VERSION.
   while IFS= read -r -d '' f; do
     sed -E \
       -e 's,((opensandbox|fast-sandbox)/[A-Za-z0-9._/-]+):(v[0-9][^"[:space:]]*|release-[0-9][^"[:space:]]*|dev|latest),\1:release-'"${VERSION}"',g' \
@@ -144,9 +137,7 @@ else
   done < <(find manifests/charts -name 'values*.yaml' -print0)
 fi
 
-# 4) Umbrella Chart.lock must follow the dependency bumps: packaged sub-charts
-# are not committed, and CI runs `helm dependency build`, which rejects a lock
-# that is out of sync with Chart.yaml.
+# CI's helm dependency build rejects a Chart.lock that drifts from Chart.yaml.
 LOCK_FILE="manifests/charts/opensandbox/Chart.lock"
 stale_lock="$(sed -n '/^dependencies:/,$p' "$LOCK_FILE" | awk -v want="${VERSION}" '
   /^[[:space:]]+- name:/ { name=$NF }
@@ -188,7 +179,6 @@ fi
 if [[ "$VERSION" == *-* ]]; then
   log "channel=rc: SDK/CLI package versions, dependency ranges, and identity constants untouched (they bump at the stable release)"
 else
-# 6) JS SDK package versions (top-level field)
 for f in sdks/sandbox/javascript/package.json sdks/code-interpreter/javascript/package.json; do
   [[ -f "$f" ]] || { warn "missing ${f}; skipped"; continue; }
   if [[ "$DRY_RUN" == true ]]; then
@@ -200,7 +190,6 @@ for f in sdks/sandbox/javascript/package.json sdks/code-interpreter/javascript/p
     { print }' "$f" > "${f}.tmp" && mv "${f}.tmp" "$f"
 done
 
-# 7) Kotlin/JVM project version
 f="sdks/sandbox/kotlin/gradle.properties"
 if [[ "$DRY_RUN" == true ]]; then
   log "dry-run ${f}: $(sed -n 's/^project\.version=//p' "$f" | head -1) -> ${VERSION}"
@@ -208,7 +197,6 @@ elif [[ -f "$f" ]]; then
   sed -i.bak "s/^project\.version=.*/project.version=${VERSION}/" "$f" && rm -f "${f}.bak"
 fi
 
-# 8) .NET package versions + dependency range
 f="sdks/Directory.Build.props"
 if [[ -f "$f" ]]; then
   if [[ "$DRY_RUN" == true ]]; then
@@ -222,7 +210,6 @@ if [[ -f "$f" ]]; then
   fi
 fi
 
-# 9) Python inter-package dependency ranges (cli + sdks)
 for f in cli/pyproject.toml sdks/code-interpreter/python/pyproject.toml sdks/mcp/sandbox/python/pyproject.toml; do
   [[ -f "$f" ]] || continue
   if [[ "$DRY_RUN" == true ]]; then

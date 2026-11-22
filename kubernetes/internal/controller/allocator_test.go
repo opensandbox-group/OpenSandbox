@@ -317,7 +317,7 @@ func newTestSyncer(sandbox *sandboxv1alpha1.BatchSandbox) (*annoAllocationSyncer
 	scheme := runtime.NewScheme()
 	_ = sandboxv1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sandbox).Build()
-	return &annoAllocationSyncer{client: fakeClient}, sandbox
+	return &annoAllocationSyncer{client: fakeClient, apiReader: fakeClient}, sandbox
 }
 
 func TestSetAllocation_AddsFinalizer(t *testing.T) {
@@ -552,7 +552,8 @@ func TestTerminatingTaskAllocationHandoff(t *testing.T) {
 			if tc.cleaning {
 				sandbox.Finalizers = []string{finalizerTaskCleanup}
 			}
-			allocator := NewDefaultAllocator(fake.NewClientBuilder().WithScheme(testscheme).Build()).(*defaultAllocator)
+			c := fake.NewClientBuilder().WithScheme(testscheme).Build()
+			allocator := NewDefaultAllocator(c, c).(*defaultAllocator)
 			request, err := allocator.getSandboxRequest(context.Background(), sandbox)
 			if !assert.NoError(t, err) {
 				return

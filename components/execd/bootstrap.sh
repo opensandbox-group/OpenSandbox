@@ -313,6 +313,7 @@ trust_mitm_ca() {
 # Requires certutil (e.g. Alpine: nss-tools, Debian/Ubuntu: libnss3-tools).
 trust_mitm_ca_nss() {
 	cert="$1"
+	_MITM_CA_NSS_FAILED=0
 	[ -f "$cert" ] || return 0
 	if ! command -v certutil >/dev/null 2>&1; then
 		echo "warning: certutil not found; Chromium/Chrome may not trust the mitm CA in NSS (install nss-tools on Alpine or libnss3-tools on Debian/Ubuntu)" >&2
@@ -321,6 +322,7 @@ trust_mitm_ca_nss() {
 	[ -n "${HOME:-}" ] && [ -d "$HOME" ] || return 0
 	pki="${HOME}/.pki/nssdb"
 	if ! mkdir -p "$pki" 2>/dev/null; then
+		_MITM_CA_NSS_FAILED=1
 		return 0
 	fi
 	if [ -f "$pki/cert9.db" ]; then
@@ -330,13 +332,17 @@ trust_mitm_ca_nss() {
 	else
 		nssdb="sql:$pki"
 		if ! certutil -N -d "$nssdb" --empty-password 2>/dev/null; then
-			[ -f "$pki/cert9.db" ] || return 0
+			if [ ! -f "$pki/cert9.db" ]; then
+				_MITM_CA_NSS_FAILED=1
+				return 0
+			fi
 		fi
 	fi
 	nick="opensandbox-mitmproxy"
 	certutil -D -d "$nssdb" -n "$nick" 2>/dev/null || true
 	if ! certutil -A -d "$nssdb" -n "$nick" -t "C,," -i "$cert"; then
 		echo "warning: failed to import mitm CA into NSS at $pki (Chrome may still distrust); need certutil" >&2
+		_MITM_CA_NSS_FAILED=1
 		return 0
 	fi
 	return 0
@@ -412,6 +418,7 @@ $ks
 "
 	else
 		echo "warning: failed to import mitm CA into $ks" >&2
+		_MITM_CA_JDK_FAILED=1
 	fi
 }
 
@@ -431,6 +438,7 @@ _try_jdk() {
 
 trust_mitm_ca_jdk() {
 	cert="$1"
+	_MITM_CA_JDK_FAILED=0
 	[ -f "$cert" ] || return 0
 	_SEEN_JDKS=""
 	_SEEN_JDK_STORES=""
@@ -487,13 +495,180 @@ _ca_fingerprint() {
 	return 0
 }
 
+# Persist and validate the installed MITM CA trust state on the rootfs (not the
+# shared /opt/opensandbox volume) so a recreated container on the same Pod
+# always reinstalls, while a Firecracker RootfsOnly cold boot skips redundant
+# trust-store rebuilds only when the CA, merged bundle, system trust anchor,
+# NSS store, and every discovered JDK cacerts store all match the last install.
+_mitm_ca_marker_path() {
+	printf '%s\n' "${OPENSANDBOX_MITM_CA_STATE_FILE:-/var/lib/opensandbox/mitm-ca-installed.fp}"
+}
+
+_resolve_jdk_cacerts() {
+	_jh="$1"
+	[ -d "$_jh" ] || return 0
+	_real="$(cd "$_jh" 2>/dev/null && pwd -P)" || return 0
+	[ -x "$_real/bin/keytool" ] || return 0
+	_ks=""
+	if [ -f "$_real/lib/security/cacerts" ]; then
+		_ks="$_real/lib/security/cacerts"
+	elif [ -f "$_real/jre/lib/security/cacerts" ]; then
+		_ks="$_real/jre/lib/security/cacerts"
+	else
+		return 0
+	fi
+	_depth=0
+	while :; do
+		_ks_dir="$(cd "$(dirname "$_ks")" 2>/dev/null && pwd -P)" || return 0
+		_ks="$_ks_dir/$(basename "$_ks")"
+		[ -L "$_ks" ] || break
+		[ "$_depth" -lt 40 ] || break
+		_depth=$((_depth + 1))
+		_target="$(readlink "$_ks" 2>/dev/null)" || break
+		case "$_target" in
+		/*) _ks="$_target" ;;
+		*) _ks="$_ks_dir/$_target" ;;
+		esac
+	done
+	printf '%s\n' "$_ks"
+}
+
+_discover_jdk_cacerts() {
+	{
+		if [ -n "${JAVA_HOME:-}" ]; then
+			_resolve_jdk_cacerts "$JAVA_HOME"
+		fi
+		for _search_dir in /usr/lib/jvm /usr/java /opt/java; do
+			if [ -d "$_search_dir" ]; then
+				for _d in "$_search_dir"/*/; do
+					[ -d "$_d" ] && _resolve_jdk_cacerts "${_d%/}"
+				done
+			fi
+		done
+		for _d in /opt/jdk*; do
+			[ -d "$_d" ] && _resolve_jdk_cacerts "$_d"
+		done
+		if command -v java >/dev/null 2>&1; then
+			_java_bin="$(command -v java)"
+			while [ -L "$_java_bin" ]; do
+				_link_target="$(ls -l "$_java_bin" 2>/dev/null | sed 's/.* -> //')"
+				case "$_link_target" in
+				/*) _java_bin="$_link_target" ;;
+				*) _java_bin="$(dirname "$_java_bin")/$_link_target" ;;
+				esac
+			done
+			_resolve_jdk_cacerts "$(dirname "$(dirname "$_java_bin")")"
+		fi
+	} | sort -u
+}
+
+_mitm_ca_nss_state() {
+	_cert="$1"
+	if ! command -v certutil >/dev/null 2>&1; then
+		printf 'none\n'
+		return 0
+	fi
+	if [ -z "${HOME:-}" ] || [ ! -d "$HOME" ]; then
+		printf 'nohome\n'
+		return 0
+	fi
+	_pki="${HOME}/.pki/nssdb"
+	if [ -f "$_pki/cert9.db" ]; then
+		_nssdb="sql:$_pki"
+	elif [ -f "$_pki/cert8.db" ]; then
+		_nssdb="dbm:$_pki"
+	else
+		printf 'missing:%s\n' "$_pki"
+		return 0
+	fi
+	_exported="$(certutil -L -d "$_nssdb" -n "opensandbox-mitmproxy" -a 2>/dev/null || true)"
+	_exported_pem="$(printf '%s\n' "$_exported" | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' | tr -d '[:space:]')"
+	_incoming_pem="$(sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$_cert" 2>/dev/null | tr -d '[:space:]')"
+	if [ -n "$_incoming_pem" ] && [ "$_exported_pem" = "$_incoming_pem" ]; then
+		printf 'ok:%s\n' "$_nssdb"
+	else
+		printf 'missing:%s\n' "$_nssdb"
+	fi
+}
+
+_mitm_ca_trust_state() {
+	_cert="$1"
+	_ca_fp="$2"
+	_merged_file="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+	_merged_fp=""
+	if [ -f "$_merged_file" ] && [ -s "$_merged_file" ]; then
+		_merged_fp="$(_ca_fingerprint "$_merged_file")"
+	fi
+	_sys_tool="none"
+	_sys_anchor=""
+	if command -v update-ca-certificates >/dev/null 2>&1; then
+		_sys_tool="update-ca-certificates"
+		_sys_anchor="/usr/local/share/ca-certificates/opensandbox-mitmproxy-ca.crt"
+	elif command -v update-ca-trust >/dev/null 2>&1; then
+		_sys_tool="update-ca-trust"
+		_sys_anchor="/etc/pki/ca-trust/source/anchors/opensandbox-mitmproxy-ca.pem"
+	fi
+	_sys_fp="absent"
+	if [ -n "$_sys_anchor" ] && [ -f "$_sys_anchor" ] && [ -s "$_sys_anchor" ]; then
+		_sys_fp="$(_ca_fingerprint "$_sys_anchor")"
+	fi
+	printf 'ca=%s\n' "$_ca_fp"
+	printf 'merged=%s\n' "${_merged_fp:-absent}"
+	printf 'sys=%s:%s\n' "$_sys_tool" "$_sys_fp"
+	printf 'nss=%s\n' "$(_mitm_ca_nss_state "$_cert")"
+	_discover_jdk_cacerts | while IFS= read -r _ks_path; do
+		[ -n "$_ks_path" ] || continue
+		printf 'jdk=%s:%s\n' "$_ks_path" "$(_ca_fingerprint "$_ks_path")"
+	done
+}
+
+_write_mitm_ca_marker() {
+	_cert="$1"
+	_marker_fp="$2"
+	[ -n "$_marker_fp" ] || return 0
+	_marker_file="$(_mitm_ca_marker_path)"
+	_marker_dir="$(dirname "$_marker_file")"
+	_marker_state="$(_mitm_ca_trust_state "$_cert" "$_marker_fp")"
+	if ( mkdir -p "$_marker_dir" && printf '%s\n' "$_marker_state" > "$_marker_file.tmp.$$" && mv "$_marker_file.tmp.$$" "$_marker_file" ) 2>/dev/null; then
+		return 0
+	fi
+	if _sudo mkdir -p "$_marker_dir" 2>/dev/null; then
+		printf '%s\n' "$_marker_state" | _sudo tee "$_marker_file" >/dev/null 2>&1 || true
+	fi
+	return 0
+}
+
+_clear_mitm_ca_marker() {
+	_marker_file="$(_mitm_ca_marker_path)"
+	rm -f "$_marker_file" 2>/dev/null || _sudo rm -f "$_marker_file" 2>/dev/null || true
+	return 0
+}
+
+_mitm_ca_already_installed() {
+	_cert="$1"
+	_expected_fp="$2"
+	_merged_file="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+	_marker_file="$(_mitm_ca_marker_path)"
+	[ -n "$_expected_fp" ] || return 1
+	[ -f "$_merged_file" ] && [ -s "$_merged_file" ] || return 1
+	[ -r "$_marker_file" ] || return 1
+	_current_state="$(_mitm_ca_trust_state "$_cert" "$_expected_fp")"
+	case "$_current_state" in
+	*"nss=missing:"*) return 1 ;;
+	esac
+	_recorded_state="$(cat "$_marker_file" 2>/dev/null || true)"
+	[ "$_recorded_state" = "$_current_state" ]
+}
+
 # Wait until the exported mitm CA is safe to trust. Egress purges and
 # re-exports this file on every restart (issue #1370), so a file present when
 # polling starts may be stale from a previous generation: it is trusted only
 # after an observed purge or content change, or after surviving a full
 # unchanged stabilization window. A file seen absent at least once is fresh on
-# (re)appearance and trusted immediately. An egress starting later than the
-# window can still win the race; watch_mitm_ca heals that. Tunables:
+# (re)appearance and trusted immediately. Setting MITM_CA_STABILIZE_WINDOW=0
+# disables the stabilization delay (for statically baked VM CAs that never
+# undergo sidecar purge/re-export). An egress starting later than the window
+# can still win the race; watch_mitm_ca heals that. Tunables:
 # MITM_CA_WAIT_TIMEOUT (300s), MITM_CA_STABILIZE_WINDOW (15s),
 # MITM_CA_POLL_INTERVAL (0.5s). Sets MITM_CA_WAIT_SECONDS; 1 on timeout.
 wait_for_trustworthy_mitm_ca() {
@@ -513,6 +688,10 @@ wait_for_trustworthy_mitm_ca() {
 			return 1
 		fi
 		if [ -f "$ca" ] && [ -s "$ca" ]; then
+			if [ "$_stabilize" -le 0 ] 2>/dev/null; then
+				# stabilization disabled (e.g. statically baked VM CA)
+				break
+			fi
 			_fp="$(_ca_fingerprint "$ca")"
 			[ -n "$_fp" ] || _fp="<unfingerprintable>"
 			if [ -n "$_purge_seen" ]; then
@@ -541,19 +720,23 @@ wait_for_trustworthy_mitm_ca() {
 
 # Self-heal for independent egress restarts: the CA rotates while bootstrap
 # never re-runs. Reinstall system/merged/NSS/JDK trust whenever the exported
-# CA changes (MITM_CA_WATCH_INTERVAL, 30s). The env vars bootstrap exported
-# point at refreshed files, so new processes heal without re-exec; processes
-# with in-memory trust (e.g. JVM cacerts) still need a restart, which the
-# change log line calls out. $2 is the fingerprint of the already-installed
-# generation (empty = nothing installed yet, so the first export installs);
-# a failed install pass is retried on the next poll, up to three attempts
-# per generation — permanent failures (e.g. read-only trust store on a
-# non-root image) stop the churn until the next rotation.
+# CA changes (MITM_CA_WATCH_INTERVAL, 30s; <= 0 disables watching). The env
+# vars bootstrap exported point at refreshed files, so new processes heal
+# without re-exec; processes with in-memory trust (e.g. JVM cacerts) still
+# need a restart, which the change log line calls out. $2 is the fingerprint
+# of the already-installed generation (empty = nothing installed yet, so the
+# first export installs); a failed install pass is retried on the next poll,
+# up to three attempts per generation — permanent failures (e.g. read-only
+# trust store on a non-root image) stop the churn until the next rotation.
 watch_mitm_ca() {
 	ca="$1"
 	# Empty $2 means nothing trusted yet: the first export seen installs it.
 	_prev="${2:-}"
 	_interval="${MITM_CA_WATCH_INTERVAL:-30}"
+	if [ "$_interval" -le 0 ] 2>/dev/null; then
+		echo "mitm CA rotation watcher disabled (MITM_CA_WATCH_INTERVAL=${_interval})" >&2
+		return 0
+	fi
 	_watch_attempts=0
 	echo "watching mitm CA at $ca for rotation (interval ${_interval}s)" >&2
 	while :; do
@@ -572,15 +755,29 @@ watch_mitm_ca() {
 			trust_mitm_ca "$ca" || _install_failed=1
 			trust_mitm_ca_nss "$ca" || true
 			trust_mitm_ca_jdk "$ca" || true
+			# NSS and JDK imports delete the previous alias first, so a
+			# failed one leaves that store trusting no generation: retry it
+			# like a failed system install.
+			if [ "${_MITM_CA_NSS_FAILED:-0}" -ne 0 ] || [ "${_MITM_CA_JDK_FAILED:-0}" -ne 0 ]; then
+				_install_failed=1
+			fi
 			if [ "$_install_failed" -eq 0 ]; then
-				_prev="$_cur"
-				_watch_attempts=0
-			elif [ "$_watch_attempts" -ge 3 ]; then
-				echo "warning: mitm CA install failed 3 times; giving up until the next rotation" >&2
+				if command -v _write_mitm_ca_marker >/dev/null 2>&1; then
+					_write_mitm_ca_marker "$ca" "$_cur"
+				fi
 				_prev="$_cur"
 				_watch_attempts=0
 			else
-				echo "warning: mitm CA reinstall failed; retrying on the next poll" >&2
+				if command -v _clear_mitm_ca_marker >/dev/null 2>&1; then
+					_clear_mitm_ca_marker
+				fi
+				if [ "$_watch_attempts" -ge 3 ]; then
+					echo "warning: mitm CA install failed 3 times; giving up until the next rotation" >&2
+					_prev="$_cur"
+					_watch_attempts=0
+				else
+					echo "warning: mitm CA reinstall failed; retrying on the next poll" >&2
+				fi
 			fi
 		fi
 	done
@@ -589,6 +786,7 @@ watch_mitm_ca() {
 MITM_CA="${OPENSANDBOX_MITM_CA:-/opt/opensandbox/mitmproxy-ca-cert.pem}"
 if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	_baseline_fp=""
+	_mitm_already_installed=0
 	if wait_for_trustworthy_mitm_ca "$MITM_CA"; then
 		echo "mitm CA ready at $MITM_CA after ${MITM_CA_WAIT_SECONDS}s"
 		# Baseline for the rotation watcher: what we are about to trust. If
@@ -597,7 +795,11 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 		# baseline empty, so the watcher installs (and retries) on its
 		# first poll.
 		_baseline_fp="$(_ca_fingerprint "$MITM_CA")"
-		if ! trust_mitm_ca "$MITM_CA"; then
+		if _mitm_ca_already_installed "$MITM_CA" "$_baseline_fp"; then
+			OPENSANDBOX_MERGED_CA="${OPENSANDBOX_MERGED_CA_PATH:-/opt/opensandbox/merged-ca-certificates.pem}"
+			_mitm_already_installed=1
+			echo "mitm CA already installed in trust stores; skipping reinstall"
+		elif ! trust_mitm_ca "$MITM_CA"; then
 			echo "warning: failed to install mitm CA into system trust store; TLS interception may not work for system libraries" >&2
 			_baseline_fp=""
 		fi
@@ -608,9 +810,17 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 		_baseline_fp=""
 	fi
 
-	if [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
+	if [ "$_mitm_already_installed" -eq 0 ] && [ -f "$MITM_CA" ] && [ -s "$MITM_CA" ]; then
 		trust_mitm_ca_nss "$MITM_CA" || true
 		trust_mitm_ca_jdk "$MITM_CA" || true
+		if [ -n "$_baseline_fp" ] && [ "${_MITM_CA_NSS_FAILED:-0}" -eq 0 ] && [ "${_MITM_CA_JDK_FAILED:-0}" -eq 0 ]; then
+			_write_mitm_ca_marker "$MITM_CA" "$_baseline_fp"
+		else
+			_clear_mitm_ca_marker
+			# Let the watcher retry a failed NSS or JDK import on its first
+			# poll, as it does after a failed system install.
+			_baseline_fp=""
+		fi
 	fi
 
 	# Seed env paths unconditionally: they are stable across rotations, and
@@ -639,7 +849,13 @@ if is_truthy "${OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT:-}"; then
 	# Arm regardless of the export's current presence: it covers a purge or
 	# re-export racing the trust pass above, and a first export after a
 	# wait timeout (empty baseline installs the first thing that shows up).
-	watch_mitm_ca "$MITM_CA" "$_baseline_fp" &
+	# Setting MITM_CA_WATCH_INTERVAL<=0 disables the background watcher (e.g.
+	# for statically baked VM CAs).
+	if [ "${MITM_CA_WATCH_INTERVAL:-30}" -le 0 ] 2>/dev/null; then
+		echo "mitm CA rotation watcher disabled (MITM_CA_WATCH_INTERVAL=${MITM_CA_WATCH_INTERVAL})" >&2
+	else
+		watch_mitm_ca "$MITM_CA" "$_baseline_fp" &
+	fi
 fi
 
 EXECD="${EXECD:=/opt/opensandbox/execd}"

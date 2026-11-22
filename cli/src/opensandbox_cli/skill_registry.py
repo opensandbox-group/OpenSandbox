@@ -132,7 +132,6 @@ def list_builtin_skills() -> list[SkillSpec]:
 
 
 def get_builtin_skill(slug: str) -> SkillSpec:
-    """Return a bundled skill definition."""
     return BUILTIN_SKILLS[slug]
 
 
@@ -146,7 +145,6 @@ def get_builtin_skill_source(skill: SkillSpec) -> Path:
 
 
 def read_skill_markdown(skill: SkillSpec) -> str:
-    """Load bundled skill markdown."""
     return get_builtin_skill_source(skill).read_text(encoding="utf-8")
 
 

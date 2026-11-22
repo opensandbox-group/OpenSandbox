@@ -53,7 +53,6 @@ async def main() -> None:
         request_timeout=timedelta(seconds=60),
     )
 
-    # Inject Python version into container environment
     env = {"PYTHON_VERSION": python_version}
     sandbox = await Sandbox.create(
         image,
@@ -63,7 +62,6 @@ async def main() -> None:
 
     async with sandbox:
         # code-server is pre-installed in the image
-        # Start code-server with authentication disabled
         start_exec = await sandbox.commands.run(
             f"code-server --bind-addr 0.0.0.0:{code_port} --auth none /workspace",
             opts=RunCommandOpts(background=True),

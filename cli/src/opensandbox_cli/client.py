@@ -71,7 +71,6 @@ class ClientContext:
     def connect_sandbox(
         self, sandbox_id: str, *, skip_health_check: bool = True
     ) -> SandboxSync:
-        """Connect to an existing sandbox by ID."""
         return SandboxSync.connect(
             sandbox_id,
             connection_config=self.connection_config,
@@ -88,7 +87,6 @@ class ClientContext:
         return formatter
 
     def close(self) -> None:
-        """Release resources."""
         if self._manager is not None:
             self._manager.close()
             self._manager = None

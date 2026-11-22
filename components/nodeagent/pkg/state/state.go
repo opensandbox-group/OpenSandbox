@@ -315,7 +315,6 @@ func (d *DB) initialize() error {
 	})
 }
 
-// Close releases the database file.
 func (d *DB) Close() error { return d.db.Close() }
 
 // WriterID returns the stable per-database writer identity used in object
@@ -448,7 +447,6 @@ func (d *DB) ListFileCheckpoints(streamRef string) ([]FileCheckpoint, error) {
 	return out, err
 }
 
-// GetSourceStream returns a stream's Source recovery record.
 func (d *DB) GetSourceStream(streamRef string) (SourceStream, bool, error) {
 	var out SourceStream
 	found, err := d.get(bucketSource, stateKey("stream", streamRef), &out)

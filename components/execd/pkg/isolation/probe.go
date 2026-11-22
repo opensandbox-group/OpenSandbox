@@ -53,9 +53,9 @@ type ProbeResult struct {
 	// with an opaque gate EOF.
 	SetprivNetAvailable bool
 	UsernsNetAvailable  bool
-	CommitSupported     bool // Phase 2
-	DiffSupported       bool // Phase 2
-	PersistAvailable    bool // Phase 2 — requires emptyDir
+	CommitSupported     bool
+	DiffSupported       bool
+	PersistAvailable    bool
 }
 
 // ProbeConfig controls Probe behaviour.
@@ -64,16 +64,6 @@ type ProbeConfig struct {
 	UpperMaxBytes int64
 }
 
-// Probe runs startup detection. Returns a ProbeResult describing what
-// isolation capabilities are available in the current environment.
-//
-// On Linux with working bwrap:
-//
-//	Available=true, Isolator="bwrap", Version="0.10.0"
-//
-// Otherwise:
-//
-//	Available=false
 func Probe(cfg ProbeConfig) ProbeResult {
 	result := ProbeResult{}
 
