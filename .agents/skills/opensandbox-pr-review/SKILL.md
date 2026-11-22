@@ -21,7 +21,7 @@ Deep review workflow for a GitHub PR against this repository: tool-assisted OCR 
 1. **Never trust the PR description.** Every factual claim (file:line, constant value, channel capacity, default timeout, enum) is verified at its definition site in code. Claims that cannot be resolved are dropped or marked as unverified — never paraphrased as fact.
 2. **Reproduction first.** For a bug-fix PR, the new regression test must be run against the base commit and shown to fail there. A fix for a bug that cannot be reproduced is a red flag, reported explicitly.
 3. **Isolated verification.** All test runs happen in detached worktrees. Never touch the user's working tree (it may carry uncommitted changes); never check out the PR branch in place.
-4. **Dual-channel review.** OCR tool review (when available in the agent runtime) and own reading of the diff + full changed files are complementary. Both run when available; conclusions merge. If `ocr_review` is unavailable, mark it skipped in the verification log and rely on manual deep review.
+4. **Dual-channel review.** OCR tool review (via `tools.ocr_review` or the local `ocr` CLI) and own reading of the diff + full changed files are complementary. Both run whenever either OCR interface is available; conclusions merge. Only mark OCR skipped in the verification log when neither `tools.ocr_review` nor a local `ocr` binary is available.
 5. **Report discipline.** Verdict first, exact `file:line` references, findings graded by severity, a verification log table, and explicit annotation for checks not run locally.
 
 ## Workflow
@@ -73,7 +73,9 @@ Record `$BASE` and `$HEAD` (`<BASE>..<HEAD>`) — this resolved commit range fee
 
 ### Step 4: OCR tool review
 
-When `tools.ocr_review` is available in the agent runtime, run it inside the `execute` tool with `from`/`to` set to the Step 2 commit range (`$BASE` / `$HEAD`):
+Run OCR over the Step 2 commit range (`$BASE` / `$HEAD`) using whichever interface is available in the current environment:
+
+1. **Runtime tool** (when `tools.ocr_review` is exposed inside `execute`):
 
 ```js
 const res = await tools.ocr_review({
@@ -86,7 +88,16 @@ const res = await tools.ocr_review({
 return res;
 ```
 
-The `background` should carry: one-paragraph problem statement, what the fix does, and specific questions (is the race real / is the ordering correct / liveness risk / bypass paths / performance / compatibility). The result JSON provides findings with severity, path, line numbers, and suggestions — merge them with Step 3 conclusions; do not copy blindly. If `ocr_review` is unavailable in the current environment, mark it as not run in the verification log and proceed with Step 3's manual review.
+2. **Local `ocr` CLI** (fallback when `tools.ocr_review` is not registered — check with `command -v ocr`):
+
+```bash
+ocr review --from "$BASE" --to "$HEAD" \
+  --format json --audience agent \
+  --background "<PR context: claimed problem + fix summary + numbered review-focus questions>" \
+  --timeout 5 --concurrency 2
+```
+
+The `background` should carry: one-paragraph problem statement, what the fix does, and specific questions (is the race real / is the ordering correct / liveness risk / bypass paths / performance / compatibility). The result JSON provides findings with severity, path, line numbers, and suggestions — merge them with Step 3 conclusions; do not copy blindly. Only when neither `tools.ocr_review` nor the local `ocr` CLI is available (or configured), mark OCR as not run in the verification log and proceed with Step 3's manual review.
 
 ### Step 5: Independent verification in worktrees
 
