@@ -116,6 +116,35 @@ func TestFastSandboxWildcardRoutingViaRoutingHeader(t *testing.T) {
 	require.Equal(t, sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "fsb-123", Port: 44772}, fsb.target)
 }
 
+func TestFastSandboxWildcardRouteLabelIgnoresCase(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		for _, test := range []struct {
+			name, url, header, value string
+		}{
+			{name: "host", url: "http://FSB-123-44772.example.com/"},
+			{name: "routing header", url: "http://ingress/", header: SandboxIngress, value: "FSB-123-44772.example.com"},
+			{name: "legacy routing header", url: "http://ingress/", header: DeprecatedSandboxIngress, value: "Fsb-123-44772"},
+		} {
+			t.Run(fmt.Sprintf("mixed=%v/%s", mixed, test.name), func(t *testing.T) {
+				fsb := &fsbProxyProvider{info: &sandbox.EndpointInfo{UpstreamURL: "http://fastlet/route"}}
+				var provider sandbox.Provider = fsb
+				if mixed {
+					provider = sandbox.NewCompositeProvider(staticEndpointProvider{}, fsb)
+				}
+				p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil, WithFastSandboxNamespace("tenant-a"))
+				request := httptest.NewRequest(http.MethodGet, test.url, nil)
+				if test.header != "" {
+					request.Header.Set(test.header, test.value)
+				}
+				_, status, err := p.doGetSandboxHostDefinition(request)
+				require.Zero(t, status)
+				require.NoError(t, err)
+				require.Equal(t, sandbox.EndpointTarget{RouteKind: sandbox.RouteKindFastSandbox, Namespace: "tenant-a", SandboxID: "fsb-123", Port: 44772}, fsb.target)
+			})
+		}
+	}
+}
+
 func TestFastSandboxNamespaceBoundary(t *testing.T) {
 	for _, mixed := range []bool{false, true} {
 		for _, test := range []struct {

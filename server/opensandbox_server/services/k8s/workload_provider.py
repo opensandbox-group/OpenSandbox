@@ -232,6 +232,12 @@ class WorkloadProvider(ABC):
             body=body,
         )
 
+    def sync_pod_metadata_labels(
+        self, workload: Any, namespace: str, patch: Dict[str, Optional[str]]
+    ) -> None:
+        """Synchronize requested metadata to Pod labels when supported and enabled."""
+        return None
+
     def supports_image_auth(self) -> bool:
         """
         Whether this provider supports per-request image pull authentication.

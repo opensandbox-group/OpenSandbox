@@ -492,6 +492,31 @@ class K8sClient:
         )
 
 
+    def patch_pod_labels(
+        self, namespace: str, name: str, labels: Dict[str, Optional[str]]
+    ) -> Any:
+        """Merge Pod labels, preserving null deletions and unrelated labels."""
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        # Explicitly select merge patch: the generated Pod API defaults to JSON patch.
+        return self.get_core_v1_api().api_client.call_api(
+            "/api/v1/namespaces/{namespace}/pods/{name}",
+            "PATCH",
+            path_params={"namespace": namespace, "name": name},
+            query_params=[],
+            header_params={
+                "Accept": "application/json",
+                "Content-Type": "application/merge-patch+json",
+            },
+            body={"metadata": {"labels": labels}},
+            post_params=[],
+            files={},
+            response_type="V1Pod",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            collection_formats={},
+        )
+
     def list_pods(
         self,
         namespace: str,

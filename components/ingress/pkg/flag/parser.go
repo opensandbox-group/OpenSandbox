@@ -62,7 +62,7 @@ func InitFlags() {
 	flag.StringVar(&FastPathEndpoint, "fastpath-endpoint", "", "FastPath v2 gRPC endpoint; a non-empty value enables Fast Sandbox routing")
 	FastSandboxNamespace = ""
 	namespaceSet := false
-	flag.Func("fast-sandbox-namespace", "Restrict Fast Sandbox routes to one namespace and enable unsigned wildcard Host routing in header mode (requires external access control)", func(value string) error {
+	flag.Func("fast-sandbox-namespace", "Restrict Fast Sandbox routes to one namespace and enable unsigned wildcard routing in header mode (requires external access control)", func(value string) error {
 		if namespaceSet {
 			return errors.New("--fast-sandbox-namespace may only be specified once")
 		}

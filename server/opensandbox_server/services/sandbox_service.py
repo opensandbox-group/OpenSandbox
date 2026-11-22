@@ -31,7 +31,10 @@ from opensandbox_server.api.schema import (
     Sandbox,
 )
 from opensandbox_server.services.diagnostics import DiagnosticContext, DiagnosticResult
-from opensandbox_server.services.validators import ensure_valid_port
+from opensandbox_server.services.validators import (
+    RESERVED_METADATA_LABEL_PREFIXES,
+    ensure_valid_port,
+)
 
 
 class SandboxService(ABC):
@@ -125,7 +128,7 @@ class SandboxService(ABC):
 
     @staticmethod
     def _is_system_label(key: str) -> bool:
-        return key.startswith("opensandbox.io/")
+        return key.startswith(RESERVED_METADATA_LABEL_PREFIXES)
 
     @staticmethod
     def _validate_metadata_patch(patch: dict) -> None:
@@ -143,7 +146,7 @@ class SandboxService(ABC):
                     status_code=400,
                     detail={
                         "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
-                        "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
+                        "message": f"Metadata key '{key}' is reserved (system-managed label prefix).",
                     },
                 )
 

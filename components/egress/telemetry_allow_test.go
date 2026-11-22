@@ -67,6 +67,40 @@ func TestTelemetryAllowRulesFallbackNodeIP(t *testing.T) {
 	require.Empty(t, allowV6)
 }
 
+func TestTelemetryAllowRulesGRPC(t *testing.T) {
+	for _, tc := range []struct {
+		name, endpoint, metricsEndpoint, disabled, target string
+	}{
+		{"metrics endpoint", "http://unused.example:4317", "http://collector.example:4318", "", "collector.example"},
+		{"general endpoint", "https://collector.example:443", "", "", "collector.example"},
+		{"node fallback", "", "", "", "192.0.2.10"},
+		{"invalid endpoint", "http://", "", "", ""},
+		{"disabled", "http://collector.example:4317", "", "true", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "")
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tc.endpoint)
+			t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", tc.metricsEndpoint)
+			t.Setenv("OTEL_SDK_DISABLED", tc.disabled)
+			t.Setenv("OTEL_METRICS_EXPORTER", "")
+			t.Setenv("HOST_IP", "192.0.2.10")
+
+			rules := telemetryAllowRules()
+			if tc.target == "" {
+				require.Empty(t, rules)
+				return
+			}
+			require.Len(t, rules, 1)
+			require.Equal(t, policy.ActionAllow, rules[0].Action)
+			require.Equal(t, tc.target, rules[0].Target)
+			// Selecting a metrics protocol does not change the existing host-wide rule.
+			require.Empty(t, rules[0].Ports)
+			require.Empty(t, rules[0].PortRanges)
+		})
+	}
+}
+
 func TestTelemetryAllowRulesFQDNTrailingDot(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://otel-collector.ns.svc.cluster.local.:4318")
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")

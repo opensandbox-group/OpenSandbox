@@ -304,7 +304,7 @@ type podFailureSummary struct {
 }
 
 func summarizePodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
-	return summarizePodFailuresWith(pods, getPodFailureReasonAndMessage, false)
+	return summarizePodFailuresWith(pods, getPodFailureReasonAndMessage, true)
 }
 
 func summarizeTerminalPodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
