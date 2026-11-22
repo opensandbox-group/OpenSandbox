@@ -289,6 +289,25 @@ ipv4     2 udp      17 30 src=10.0.0.2 dst=203.0.113.10 sport=53 dport=53 [UNREP
 	require.Equal(t, 0, n)
 }
 
+func TestCountMatchingConntrackFlowsDataPreservesAddressFamily(t *testing.T) {
+	data := []byte("ipv6 10 tcp 6 431999 ESTABLISHED src=2001:db8::2 dst=::ffff:203.0.113.10 sport=12345 dport=443 src=::ffff:203.0.113.10 dst=2001:db8::2 sport=443 dport=12345 [ASSURED] mark=0 zone=0 use=2\n")
+	native := netip.MustParseAddr("203.0.113.10")
+	mapped := netip.MustParsePrefix("::ffff:203.0.113.10/128")
+	for _, tt := range []struct {
+		name  string
+		drops EstablishedDrops
+		want  int
+	}{
+		{"mapped explicit deny", EstablishedDrops{DenyPrefixes: []netip.Prefix{mapped}}, 1},
+		{"native explicit deny", EstablishedDrops{DenyAddrs: []netip.Addr{native}}, 0},
+		{"legacy removed address", EstablishedDrops{Addrs: []netip.Addr{native}}, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, countMatchingConntrackFlowsData(data, tt.drops))
+		})
+	}
+}
+
 func TestPrefixDiff_Basic(t *testing.T) {
 	got := prefixDiff(netip.MustParsePrefix("203.0.113.0/24"), []netip.Prefix{netip.MustParsePrefix("203.0.113.0/25")})
 	require.Equal(t, []netip.Prefix{netip.MustParsePrefix("203.0.113.128/25")}, got)
@@ -658,6 +677,35 @@ func TestApplyStatic_PreservesUnchangedGlobalPortFloor(t *testing.T) {
 	require.NoError(t, m.ApplyStatic(context.Background(), reload))
 
 	require.Equal(t, []EstablishedPortDrop{{Ranges: ranges}}, m.lastDrops.DenyPortDrops)
+}
+
+func BenchmarkCarryUnchangedAddressDeniesAndPortFloor(b *testing.B) {
+	for _, tt := range []struct{ hosts, spans int }{{16, 512}, {64, 4097}, {96, 1024}} {
+		b.Run(fmt.Sprintf("%dx%d", tt.hosts, tt.spans), func(b *testing.B) {
+			rules := make([]string, tt.hosts)
+			for i := range rules {
+				rules[i] = fmt.Sprintf(`{"action":"deny","target":"203.0.113.%d"}`, i+1)
+			}
+			p, err := policy.ParsePolicy(`{"defaultAction":"allow","egress":[` + strings.Join(rules, ",") + `]}`)
+			if err != nil {
+				b.Fatal(err)
+			}
+			floor := make([]policy.PortRange, tt.spans)
+			for i := range floor {
+				floor[i] = policy.PortRange{Lo: 3*i + 1, Hi: 3*i + 2}
+			}
+			p.Egress = append(p.Egress, policy.NewPortFloorDenyRule(floor))
+			prior := ComputeEstablishedDrops(nil, p, nil)
+			b.ReportAllocs()
+			var out EstablishedDrops
+			for b.Loop() {
+				out = prior.stillRelevant(p, nil)
+			}
+			if len(out.DenyAddrs) != tt.hosts || len(out.DenyPortDrops) != 1 || len(out.DenyPortDrops[0].Ranges) != tt.spans {
+				b.Fatal("reload did not retain the whole-address denies and one global port floor")
+			}
+		})
+	}
 }
 
 func TestApplyStatic_OmitsTCPTeardownCoveredByCarriedWholeDeny(t *testing.T) {

@@ -35,7 +35,7 @@ func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 			}
 			if v, ok := strings.CutPrefix(tok, "dst="); ok && !dst.IsValid() {
 				if a, err := netip.ParseAddr(v); err == nil {
-					dst = a.Unmap()
+					dst = a
 				}
 				continue
 			}

@@ -423,11 +423,7 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	portDeny, portAllow := p.PortScopedRules()
 	out.DenyAddrs = denyAddrs.sorted()
 	out.DenyPrefixes = denyPrefixes.sorted()
-	out.DenyPortDrops = slices.DeleteFunc(carryPortDenies(d, portDeny, curDeny), func(drop EstablishedPortDrop) bool {
-		// Only whole-address teardowns that themselves carried can subsume a
-		// TCP teardown. A new whole-address deny alone cannot replace it.
-		return wholeDenyCoversPortTarget(out.DenyAddrs, out.DenyPrefixes, drop)
-	})
+	out.DenyPortDrops = carryPortDenies(d, portDeny, curDeny, &out)
 
 	// Removed bucket: drop entries p fully allows again; partial re-allows
 	// are shielded by the recomputed keeps.
@@ -507,7 +503,7 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 
 // carryPortDenies intersects old and current explicit denies, retaining only
 // TCP teardowns here. Whole-address intersections are carried separately.
-func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule, whole []netip.Prefix) []EstablishedPortDrop {
+func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule, whole []netip.Prefix, retained *EstablishedDrops) []EstablishedPortDrop {
 	if len(d.DenyAddrs)+len(d.DenyPrefixes)+len(d.DenyPortDrops) == 0 {
 		return nil
 	}
@@ -529,12 +525,12 @@ func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule, whole []
 	carried := make(portDenyUnion)
 	for old, ports := range before {
 		for _, pfx := range whole {
-			if target, ok := intersectPortDenyTargets(old, pfx); ok {
+			if target, ok := intersectPortDenyTargets(old, pfx); ok && !retained.coversWholeDeny(target) {
 				carried.add(target, nil, ports.spans)
 			}
 		}
 		for cur, denied := range after {
-			if target, ok := intersectPortDenyTargets(old, cur); ok {
+			if target, ok := intersectPortDenyTargets(old, cur); ok && !retained.coversWholeDeny(target) {
 				carried.add(target, nil, intersectPortSpans(ports.spans, denied.spans))
 			}
 		}
@@ -543,12 +539,12 @@ func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule, whole []
 		// Previously whole-address teardowns cover every port, but only
 		// inside their original destination.
 		for _, addr := range d.DenyAddrs {
-			if target, ok := intersectPortDenyTargets(netip.PrefixFrom(addr, addr.BitLen()), cur); ok {
+			if target, ok := intersectPortDenyTargets(netip.PrefixFrom(addr, addr.BitLen()), cur); ok && !retained.coversWholeDeny(target) {
 				carried.add(target, nil, ports.spans)
 			}
 		}
 		for _, pfx := range d.DenyPrefixes {
-			if target, ok := intersectPortDenyTargets(pfx, cur); ok {
+			if target, ok := intersectPortDenyTargets(pfx, cur); ok && !retained.coversWholeDeny(target) {
 				carried.add(target, nil, ports.spans)
 			}
 		}
@@ -556,15 +552,18 @@ func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule, whole []
 	return carried.drops()
 }
 
-func wholeDenyCoversPortTarget(addrs []netip.Addr, prefixes []netip.Prefix, drop EstablishedPortDrop) bool {
-	target := portDenyTarget(drop)
+// Only a whole-address teardown carried from the previous policy can
+// subsume a TCP teardown, not a new address deny.
+func (d *EstablishedDrops) coversWholeDeny(target netip.Prefix) bool {
 	if !target.IsValid() {
 		return false // a port-only rule spans both address families
 	}
-	if target.IsSingleIP() && slices.Contains(addrs, target.Addr()) {
-		return true
+	if target.IsSingleIP() {
+		if _, found := slices.BinarySearchFunc(d.DenyAddrs, target.Addr(), netip.Addr.Compare); found {
+			return true
+		}
 	}
-	return slices.ContainsFunc(prefixes, func(pfx netip.Prefix) bool {
+	return slices.ContainsFunc(d.DenyPrefixes, func(pfx netip.Prefix) bool {
 		return pfx.Bits() <= target.Bits() && pfx.Contains(target.Addr())
 	})
 }
