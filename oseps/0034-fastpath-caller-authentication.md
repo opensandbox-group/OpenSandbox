@@ -165,7 +165,7 @@ FastPath owns a static deployment policy mapping exact SA subjects to an explici
 
 | Profile | Allowed RPCs |
 |---|---|
-| Server | `CreateSandbox`, `GetSandbox`, `DeleteSandbox`, `PauseSandbox`, `ResumeSandbox`, `ListSandboxes`, `UpdateSandbox`, `GetSandboxDiagnostics`, `CreateSandboxSnapshot`, `GetSandboxSnapshot`, `DeleteSandboxSnapshot`, `ResolveEndpoint`, `InvokeHandlerAction`, `GetPool`, `ListPools` |
+| Server | `CreateSandbox`, `CreateRootfsSandbox`, `GetSandbox`, `DeleteSandbox`, `PauseSandbox`, `ResumeSandbox`, `ListSandboxes`, `UpdateSandbox`, `GetSandboxDiagnostics`, `CreateSandboxSnapshot`, `GetSandboxSnapshot`, `DeleteSandboxSnapshot`, `ResolveEndpoint`, `InvokeHandlerAction`, `GetPool`, `ListPools` |
 | Gateway | `ResolveEndpoint`, `GetSandbox`, `ResumeSandbox` |
 
 These lists reflect the current clients, including the gateway's wake-on-access path. There is no wildcard method grant: adding a FastPath RPC requires an explicit policy mapping and a test. In particular, gateway does not receive create, delete, snapshot, update, or handler-invocation authority.
