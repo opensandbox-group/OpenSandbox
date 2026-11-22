@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -478,6 +479,21 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		// nft uses whole seconds; round up rather than shorten the deadline.
 		WriteTimedElement(&b, tableName, set, addr, expiry.Sub(now)+time.Second-time.Nanosecond)
 	}
+	reallowed := func(addr netip.Addr) bool {
+		_, granted := deadlines[addr]
+		return granted && !targetsMatch(m.lastDrops.DenyAddrs, m.lastDrops.DenyPrefixes, nil, addr, 0)
+	}
+	retire := false
+	for _, addr := range m.lastDrops.Addrs {
+		if !reallowed(addr) {
+			continue
+		}
+		retire = true
+		// The add makes deletion safe to retry after a lost acknowledgement.
+		set := removedIPSet(addr)
+		fmt.Fprintf(&b, "add element inet %s %s { %s }\n", tableName, set, addr)
+		fmt.Fprintf(&b, "delete element inet %s %s { %s }\n", tableName, set, addr)
+	}
 	script := b.String()
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(deadlines), script)
 	_, err := m.run(ctx, script)
@@ -487,6 +503,9 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		// inside the sandbox, hence its own counter.
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpDynamicAdd)
 		return err
+	}
+	if retire {
+		m.lastDrops.Addrs = slices.DeleteFunc(m.lastDrops.Addrs, reallowed)
 	}
 	for addr, expiry := range deadlines {
 		m.tracker.dynamicIPs[addr] = expiry
@@ -500,6 +519,15 @@ func resolvedIPSet(addr netip.Addr) string {
 		return dynAllowV4Set
 	}
 	return dynAllowV6Set
+}
+
+const removedEstV4, removedEstV6 = "removed_est_v4", "removed_est_v6"
+
+func removedIPSet(addr netip.Addr) string {
+	if addr.Is4() {
+		return removedEstV4
+	}
+	return removedEstV6
 }
 
 // StartConnectionRefresh keeps DNS-learned IPs authorized while a TCP
@@ -636,7 +664,10 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	writeEstablishedTargets(&b, drops.KeepAddrs, drops.KeepPrefixes, drops.KeepPorts, "accept")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, allowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, allowV6Set)
-	writeEstablishedTargets(&b, drops.Addrs, drops.Prefixes, drops.PortDrops, "drop")
+	if len(drops.Addrs) != 0 {
+		writeRemovedIPDrops(&b, drops.Addrs)
+	}
+	writeEstablishedTargets(&b, nil, drops.Prefixes, drops.PortDrops, "drop")
 	if drops.CatchAll {
 		fmt.Fprintf(&b, "add rule inet %s %s ct state established,related drop\n", tableName, chainName)
 	} else {
@@ -675,6 +706,20 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	}
 
 	return b.String(), nil
+}
+
+// Exact removed addresses can be retired in the DNS install transaction.
+func writeRemovedIPDrops(b *strings.Builder, addrs []netip.Addr) {
+	fmt.Fprintf(b, "add set inet %s %s { type ipv4_addr; }\n", tableName, removedEstV4)
+	fmt.Fprintf(b, "add set inet %s %s { type ipv6_addr; }\n", tableName, removedEstV6)
+	for _, addr := range addrs {
+		if addr.IsValid() {
+			addr = addr.Unmap()
+			fmt.Fprintf(b, "add element inet %s %s { %s }\n", tableName, removedIPSet(addr), addr)
+		}
+	}
+	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s ct state established,related drop\n", tableName, chainName, removedEstV4)
+	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s ct state established,related drop\n", tableName, chainName, removedEstV6)
 }
 
 func writeEstablishedTargets(b *strings.Builder, addrs []netip.Addr, prefixes []netip.Prefix, ports []EstablishedPortDrop, verb string) {

@@ -179,7 +179,8 @@ func TestApplyStaticDropEstablished_EmitsDropsBeforeEstablishedAccept(t *testing
 
 	script := scripts[0]
 	dynAllow := strings.Index(script, "ip daddr @dyn_allow_v4 ct state established,related accept")
-	dropIP := strings.Index(script, "ip daddr 203.0.113.10 ct state established,related drop")
+	dropIP := strings.Index(script, "ip daddr @removed_est_v4 ct state established,related drop")
+	require.Contains(t, script, "add element inet opensandbox removed_est_v4 { 203.0.113.10 }")
 	dropCIDR := strings.Index(script, "ip daddr 198.51.100.0/24 ct state established,related drop")
 	established := strings.Index(script, "ct state established,related accept\n")
 	// Find the blanket accept (last established accept without daddr).
@@ -256,7 +257,7 @@ func TestApplyStaticComputingEstablishedDrops_AtomicWithDomainMap(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, 0, matched)
 	require.GreaterOrEqual(t, len(scripts), 2)
-	require.Contains(t, scripts[len(scripts)-1], "ip daddr 203.0.113.10 ct state established,related drop")
+	require.Contains(t, scripts[len(scripts)-1], "add element inet opensandbox removed_est_v4 { 203.0.113.10 }")
 }
 
 func TestCountMatchingConntrackFlowsData(t *testing.T) {
@@ -507,7 +508,7 @@ func TestApplyStatic_ReemitsStillRelevantDrops(t *testing.T) {
 	m, scripts := recordingManager()
 	oldPol := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"203.0.113.10"},{"action":"allow","target":"example.com"}]}`)
 	newPol := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)
-	dropRule := "add rule inet opensandbox egress ip daddr 203.0.113.10 ct state established,related drop\n"
+	dropRule := "add element inet opensandbox removed_est_v4 { 203.0.113.10 }\n"
 
 	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), oldPol, newPol)
 	require.NoError(t, err)
@@ -574,7 +575,7 @@ func TestApplyStatic_CarryAgesOutAfterConntrackTimeout(t *testing.T) {
 	require.False(t, m.lastDrops.Empty())
 	committed := m.lastDropsAt
 
-	const drop = "ip daddr 203.0.113.10 ct state established,related drop"
+	const drop = "add element inet opensandbox removed_est_v4 { 203.0.113.10 }"
 	now = now.Add(time.Minute)
 	require.NoError(t, m.ApplyStatic(context.Background(), newPol))
 	require.Contains(t, (*scripts)[len(*scripts)-1], drop, "carry is re-emitted inside the window")

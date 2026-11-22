@@ -18,6 +18,7 @@ package nftables
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"os/exec"
 	"strings"
@@ -39,6 +40,7 @@ func TestNftEstablishedDropKernelRuleOrder(t *testing.T) {
 	m := NewManagerWithOptions(Options{})
 	oldPol := mustPolicy(t, `{"defaultAction":"deny","egress":[
 		{"action":"allow","target":"203.0.113.10"},
+		{"action":"allow","target":"203.0.113.11"},
 		{"action":"allow","target":"198.51.100.0/24"},
 		{"action":"allow","target":"cdn.example.com"}]}`)
 	newPol := mustPolicy(t, `{"defaultAction":"deny","egress":[
@@ -76,7 +78,7 @@ func TestNftEstablishedDropKernelRuleOrder(t *testing.T) {
 	}
 
 	denyDrop := index("ip daddr 198.51.100.7 ct state established,related drop")
-	removedDrop := index("ip daddr 203.0.113.10 ct state established,related drop")
+	removedDrop := index("ip daddr @removed_est_v4 ct state established,related drop")
 	dynAccept := index("ip daddr @dyn_allow_v4 ct state established,related accept")
 	staticAccept := index("ip daddr @allow_v4 ct state established,related accept")
 	blanket := index("ct state established,related accept")
@@ -87,4 +89,29 @@ func TestNftEstablishedDropKernelRuleOrder(t *testing.T) {
 	require.Less(t, dynAccept, removedDrop, "DNS-learned accept must be able to unpin a removed-allow drop")
 	require.Less(t, staticAccept, removedDrop)
 	require.Less(t, removedDrop, blanket, "teardown must precede the blanket established accept")
+
+	// An acknowledgement can be lost after the real batch took effect.
+	target := netip.MustParseAddr("203.0.113.10")
+	regrant := []ResolvedIP{{Addr: target}}
+	m.run = func(ctx context.Context, script string) ([]byte, error) {
+		m.run = defaultRunner
+		out, err := defaultRunner(ctx, script)
+		if err == nil {
+			err = &ApplyError{Effect: ApplyUnknown, Err: errors.New("lost lease acknowledgement")}
+		}
+		return out, err
+	}
+	require.Error(t, m.AddResolvedDomain(ctx, "cdn.example.com", regrant))
+	require.True(t, m.lastDrops.Matches(target), "only a confirmed update can retire local teardown")
+	require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", regrant), "retry must tolerate already-retired teardown")
+	for _, addr := range []string{"203.0.113.10", "203.0.113.11"} {
+		out, err := exec.CommandContext(ctx, "nft", "get", "element", "inet", tableName, removedEstV4, "{", addr, "}").CombinedOutput()
+		if addr == target.String() {
+			require.Error(t, err, "%s", out)
+			require.Contains(t, string(out), "No such file or directory")
+		} else {
+			require.NoError(t, err, "%s", out)
+		}
+	}
+	require.False(t, m.lastDrops.Matches(target))
 }
