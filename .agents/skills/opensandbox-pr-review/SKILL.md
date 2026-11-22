@@ -14,7 +14,7 @@ Deep review workflow for a GitHub PR against this repository: tool-assisted OCR 
 |---|---|---|
 | PR URL or number | `https://github.com/opensandbox-group/OpenSandbox/pull/2979` | yes |
 | Review focus / business context | "提出的问题是否成立，性能与兼容性影响" | no (default: full review) |
-| Output requirements | 中文报告 / 中英双语 / HTML 可切换 | no (default: Chinese Markdown) |
+| Output requirements | 中文报告 / 中英双语 / 仅 Markdown | no (default: Chinese Markdown in chat + bilingual HTML file) |
 
 ## Principles
 
@@ -138,14 +138,13 @@ Concise, professional, human-readable. Verdict first. Structure:
 
 Writing rules: short sentences, one line per bullet, no repeated argumentation, every code reference exact. When the user asks for bilingual output, provide Chinese and English versions per section (or a toggleable HTML, below).
 
-### Step 7 (optional): HTML report with language toggle
+### Step 7: HTML report with language toggle (default)
 
-When asked for an HTML version (or 双语切换报告), generate a standalone `${TMPDIR:-/tmp}/pr-<N>-review-report.html` (or another user-specified path; avoid leaving untracked files in the repo working tree):
+Always close the review by generating the standalone `${TMPDIR:-/tmp}/pr-<N>-review-report.html` right after delivering the in-chat Markdown summary (or another user-specified path; avoid leaving untracked files in the repo working tree). Skip only when the user explicitly asks for Markdown only. Open it with `open <path>` on macOS and hand over the absolute path.
 
 - Toggle mechanism: `html[data-lang]` attribute + CSS `html[data-lang="zh"] .en { display:none !important }` (and vice versa); every translatable element carries `class="zh"` / `class="en"`; choice persisted in `localStorage`; default `zh`.
 - Styling: CSS custom properties + `prefers-color-scheme` for dark mode; severity badges (LOW amber, PASS green); `file:line` as inline code chips; no external dependencies, single file.
 - Keep it as lean as the Markdown version — verdict header banner up top plus the same 6 body sections.
-- Deliver the **absolute path**; open with `open <path>` on macOS when the user asks.
 
 ## Severity definitions
 
