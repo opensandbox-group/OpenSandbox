@@ -939,6 +939,77 @@ def test_recover_unfinished_snapshot_reschedules_creating_runtime_status_without
     assert len(executor.submitted) == 1
 
 
+def test_recovery_resubmits_unfinished_snapshots_beyond_first_page(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(snapshot_service_module, "SNAPSHOT_RECOVERY_PAGE_SIZE", 2)
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    snapshot_ids = [f"snap-{index}" for index in range(5)]
+    for snapshot_id in snapshot_ids:
+        repo.create(_snapshot_record(snapshot_id, SnapshotState.CREATING))
+        runtime.inspect_status_by_snapshot_id[snapshot_id] = SnapshotRuntimeStatus(
+            state=SnapshotState.CREATING,
+            reason="snapshot_runtime_in_progress",
+            message="Snapshot is still being committed.",
+        )
+    executor = CapturingExecutor()
+
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=executor,
+    )
+
+    assert service._inflight_snapshot_ids == set(snapshot_ids)
+    assert len(executor.submitted) == len(snapshot_ids)
+
+
+def test_recovery_converges_later_pages_when_first_page_is_stuck(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(snapshot_service_module, "SNAPSHOT_RECOVERY_PAGE_SIZE", 2)
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    runtime = StubSnapshotRuntime()
+    for index in range(6):
+        snapshot_id = f"snap-{index}"
+        repo.create(_snapshot_record(snapshot_id, SnapshotState.CREATING))
+        if index % 2:
+            runtime.inspect_status_by_snapshot_id[snapshot_id] = SnapshotRuntimeStatus(
+                state=SnapshotState.READY,
+                image=f"opensandbox-snapshots:{snapshot_id}",
+                reason="snapshot_recovery_ready",
+                message="Recovered snapshot image after server restart.",
+            )
+        else:
+            runtime.inspect_status_by_snapshot_id[snapshot_id] = SnapshotRuntimeStatus(
+                state=SnapshotState.CREATING,
+                reason="snapshot_runtime_in_progress",
+                message="Snapshot is still being committed.",
+            )
+    executor = CapturingExecutor()
+
+    service = PersistedSnapshotService(
+        repo,
+        StubSandboxService(),
+        snapshot_runtime=runtime,
+        snapshot_executor=executor,
+    )
+
+    states = {f"snap-{index}": repo.get(f"snap-{index}").status.state for index in range(6)}
+    assert states == {
+        "snap-0": SnapshotState.CREATING,
+        "snap-1": SnapshotState.READY,
+        "snap-2": SnapshotState.CREATING,
+        "snap-3": SnapshotState.READY,
+        "snap-4": SnapshotState.CREATING,
+        "snap-5": SnapshotState.READY,
+    }
+    assert service._inflight_snapshot_ids == {"snap-0", "snap-2", "snap-4"}
+    assert len(executor.submitted) == 3
+
+
 def test_snapshot_service_lists_and_deletes_records(tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     runtime = StubSnapshotRuntime()
