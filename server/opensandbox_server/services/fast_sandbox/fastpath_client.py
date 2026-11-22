@@ -108,6 +108,7 @@ class FastPathClient:
         self._tls_ca_file = tls_ca_file
         self._tls_server_name = tls_server_name
         self._roots: Optional[bytes] = None
+        self._ca_stat: Optional[tuple[Optional[str], int, int, int]] = None
         self._endpoint = endpoint
         self._timeout_seconds = timeout_seconds
         self._channel: Optional[grpc.Channel] = None
@@ -121,16 +122,34 @@ class FastPathClient:
     def __exit__(self, *exc_info) -> None:
         self.close()
 
+    def _load_tls_roots(self) -> tuple[Optional[bytes], Optional[tuple[Optional[str], int, int, int]]]:
+        if not self._tls_ca_file:
+            return None, None
+        path = Path(self._tls_ca_file)
+        st = path.stat()
+        stat_key = (self._tls_ca_file, st.st_mtime_ns, st.st_size, st.st_ino)
+        if self._channel is not None and stat_key == self._ca_stat:
+            return self._roots, stat_key
+        roots = path.read_bytes()
+        if b"-----BEGIN CERTIFICATE-----" not in roots:
+            raise ValueError("invalid CA bundle")
+        return roots, stat_key
+
     def connect(self) -> None:
         if self._token_source is None:
             raise FastPathUnavailable("credentials-missing", "FastPath caller TokenRequest source is required")
         try:
-            roots = Path(self._tls_ca_file).read_bytes() if self._tls_ca_file else None
-            if roots is not None and b"-----BEGIN CERTIFICATE-----" not in roots:
-                raise ValueError("invalid CA bundle")
+            roots, stat_key = self._load_tls_roots()
         except (OSError, ValueError):
             raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
+        if self._stub is not None and self._channel is not None and roots == self._roots:
+            self._ca_stat = stat_key
+            return
         with self._connect_lock:
+            try:
+                roots, stat_key = self._load_tls_roots()
+            except (OSError, ValueError):
+                raise FastPathUnavailable("tls-trust-unavailable", "FastPath TLS CA bundle cannot be loaded") from None
             if self._channel is None or roots != self._roots:
                 try:
                     self._token_source.token()
@@ -150,6 +169,9 @@ class FastPathClient:
                 self._stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
                 self._channel = channel
                 self._roots = roots
+                self._ca_stat = stat_key
+            else:
+                self._ca_stat = stat_key
 
     def close(self) -> None:
         with self._connect_lock:
@@ -157,6 +179,8 @@ class FastPathClient:
                 self._channel.close()
                 self._channel = None
                 self._stub = None
+                self._roots = None
+                self._ca_stat = None
 
     # -- lifecycle ---------------------------------------------------------
 

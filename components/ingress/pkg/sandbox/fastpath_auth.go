@@ -28,9 +28,11 @@ import (
 
 	"google.golang.org/grpc/credentials"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 )
 
 const fastPathAudience = "fast-sandbox-fastpath"
@@ -115,6 +117,7 @@ func (s *fastPathTokenSource) mint(done chan struct{}) {
 	} else {
 		s.backoff = min(30*time.Second, max(time.Second, s.backoff*2))
 		s.retry = now.Add(s.backoff)
+		klog.Warningf("FastPath TokenRequest refresh failed (reason=%s, backoff=%s)", apierrors.ReasonForError(err), s.backoff)
 	}
 	s.flight = nil
 	close(done)
@@ -124,7 +127,10 @@ func (*fastPathTokenSource) RequireTransportSecurity() bool { return true }
 
 type fastPathTLS struct {
 	credentials.TransportCredentials
+	mu                 sync.RWMutex
 	caFile, serverName string
+	modTime            time.Time
+	size               int64
 }
 
 func newFastPathTLS(caFile, serverName string) (*fastPathTLS, error) {
@@ -138,18 +144,33 @@ func newFastPathTLS(caFile, serverName string) (*fastPathTLS, error) {
 }
 
 func (c *fastPathTLS) load() (credentials.TransportCredentials, error) {
-	var roots *x509.CertPool
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.caFile != "" {
+		info, err := os.Stat(c.caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read FastPath serving CA: %w", err)
+		}
+		if c.TransportCredentials != nil && info.ModTime().Equal(c.modTime) && info.Size() == c.size {
+			return c.TransportCredentials, nil
+		}
 		pem, err := os.ReadFile(c.caFile)
 		if err != nil {
 			return nil, fmt.Errorf("read FastPath serving CA: %w", err)
 		}
-		roots = x509.NewCertPool()
+		roots := x509.NewCertPool()
 		if !roots.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("FastPath serving CA contains no certificates")
 		}
+		c.modTime, c.size = info.ModTime(), info.Size()
+		c.TransportCredentials = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: c.serverName})
+		return c.TransportCredentials, nil
 	}
-	return credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: c.serverName}), nil
+	if c.TransportCredentials != nil {
+		return c.TransportCredentials, nil
+	}
+	c.TransportCredentials = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: c.serverName})
+	return c.TransportCredentials, nil
 }
 
 func (c *fastPathTLS) ClientHandshake(ctx context.Context, authority string, conn net.Conn) (net.Conn, credentials.AuthInfo, error) {
@@ -160,11 +181,25 @@ func (c *fastPathTLS) ClientHandshake(ctx context.Context, authority string, con
 	return transport.ClientHandshake(ctx, authority, conn)
 }
 
+func (c *fastPathTLS) Info() credentials.ProtocolInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.TransportCredentials.Info()
+}
+
 func (c *fastPathTLS) Clone() credentials.TransportCredentials {
-	return &fastPathTLS{TransportCredentials: c.TransportCredentials.Clone(), caFile: c.caFile, serverName: c.serverName}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var cloned credentials.TransportCredentials
+	if c.TransportCredentials != nil {
+		cloned = c.TransportCredentials.Clone()
+	}
+	return &fastPathTLS{TransportCredentials: cloned, caFile: c.caFile, serverName: c.serverName, modTime: c.modTime, size: c.size}
 }
 
 func (c *fastPathTLS) OverrideServerName(name string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.serverName = name
 	return c.TransportCredentials.OverrideServerName(name)
 }

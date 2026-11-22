@@ -190,7 +190,7 @@ def test_tls_rejects_invalid_trust(client_and_server, invalid_trust):
     assert service.last_get is None
 
 
-def test_ca_bundle_change_replaces_channel(client_and_server, tmp_path, fastpath_tls):
+def test_ca_bundle_change_replaces_channel(client_and_server, tmp_path, fastpath_tls, monkeypatch):
     client, _ = client_and_server
     ca, _ = fastpath_tls
     bundle = tmp_path / "ca.pem"
@@ -198,11 +198,22 @@ def test_ca_bundle_change_replaces_channel(client_and_server, tmp_path, fastpath
     client._tls_ca_file = str(bundle)
     client.get_sandbox("ns-1", "sbx-1")
     old_channel = client._channel
+    read_bytes = Path.read_bytes
+    reads = 0
+
+    def counted_read_bytes(self):
+        nonlocal reads
+        reads += 1
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
     client.get_sandbox("ns-1", "sbx-1")
     assert client._channel is old_channel
+    assert reads == 0
     bundle.write_bytes(ca.read_bytes() + b"\n")
     client.get_sandbox("ns-1", "sbx-1")
     assert client._channel is not old_channel
+    assert reads >= 1
     bundle.write_bytes(b"invalid PEM")
     with pytest.raises(FastPathUnavailable, match="CA bundle"):
         client.get_sandbox("ns-1", "sbx-1")

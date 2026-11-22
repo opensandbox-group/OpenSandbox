@@ -178,7 +178,9 @@ func (p *FastSandboxProvider) Start(ctx context.Context) error {
 			_ = p.connection.Close()
 			return fmt.Errorf("connect to FastPath: %w", err)
 		}
-		if _, err := p.tokens.GetRequestMetadata(connectCtx); err != nil {
+		preflightCtx, preflightCancel := context.WithTimeout(ctx, fastPathConnectTimeout)
+		defer preflightCancel()
+		if _, err := p.tokens.GetRequestMetadata(preflightCtx); err != nil {
 			_ = p.connection.Close()
 			return fmt.Errorf("FastPath caller credential preflight: %w", err)
 		}

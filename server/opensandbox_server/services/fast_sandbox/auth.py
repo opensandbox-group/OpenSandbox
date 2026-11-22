@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import random
 import time
 from collections import namedtuple
@@ -24,6 +25,8 @@ import grpc
 from kubernetes.client import AuthenticationV1TokenRequest, V1TokenRequestSpec
 
 AUDIENCE = "fast-sandbox-fastpath"
+
+logger = logging.getLogger(__name__)
 
 
 class TokenSource:
@@ -79,9 +82,17 @@ class TokenSource:
                 self._retry = 0
                 self._backoff = 1
                 return self._token
-            except Exception:
+            except Exception as exc:
                 self._retry = self._now() + self._backoff
                 self._backoff = min(30, self._backoff * 2)
+                status = getattr(exc, "status", None)
+                logger.warning(
+                    "FastPath TokenRequest refresh failed: namespace=%s service_account=%s error_type=%s status=%s",
+                    self._namespace,
+                    self._service_account,
+                    type(exc).__name__,
+                    status,
+                )
                 if self._token and self._now() < self._expires - 5:
                     return self._token
                 # Kubernetes error bodies can contain credentials; do not propagate them.
@@ -110,7 +121,7 @@ class CredentialInterceptor(grpc.UnaryUnaryClientInterceptor):
             token = self._source.token()
         except Exception:
             raise FastPathUnavailable(
-                "UNAVAILABLE", "FastPath caller credential unavailable"
+                "credentials-unavailable", "FastPath caller credential unavailable"
             ) from None
         metadata = [(k, v) for k, v in (details.metadata or ()) if k.lower() != "authorization"]
         metadata.append(("authorization", f"Bearer {token}"))
