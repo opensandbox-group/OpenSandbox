@@ -751,7 +751,7 @@ var _ = Describe("Pool deletion and recreation", func() {
 			oldSandbox, oldPod := allocateOne(oldPool)
 			// This allocator observes both UIDs but never reconciles the intermediate
 			// NotFound, as when the work queue coalesces deletion and recreation.
-			allocator := NewDefaultAllocator(k8sClient)
+			allocator := NewDefaultAllocator(k8sClient, k8sManager.GetAPIReader())
 			Expect(allocator.GetPoolAllocation(ctx, oldPool)).To(HaveKeyWithValue(oldPod.Name, oldSandbox.Name))
 
 			Expect(k8sClient.Delete(ctx, oldPool)).To(Succeed())
@@ -790,7 +790,7 @@ var _ = Describe("Pool deletion and recreation", func() {
 			Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(&oldPod), &oldPod)).To(Succeed())
 			Expect(metav1.GetControllerOf(&oldPod)).To(Equal(wantController))
 			// Recovery sees both sandboxes' annotations. Preserve only the new reservation.
-			Expect(reconcileAllocations(NewDefaultAllocator(k8sClient),
+			Expect(reconcileAllocations(NewDefaultAllocator(k8sClient, k8sManager.GetAPIReader()),
 				[]*sandboxv1alpha1.BatchSandbox{oldSandbox, newSandbox}, []*v1.Pod{&newPod})).
 				To(Equal(map[string]string{newPod.Name: newSandbox.Name}))
 
