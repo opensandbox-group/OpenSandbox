@@ -68,6 +68,7 @@ from opensandbox_server.services.diagnostics import (
     unsupported_scope_error,
 )
 from opensandbox_server.services.extension_service import ExtensionService
+from opensandbox_server.services.helpers import is_egress_forward_mode
 from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
@@ -397,6 +398,16 @@ class FastSandboxService(SandboxService, ExtensionService):
         return await asyncio.to_thread(self._create_sandbox_sync, request)
 
     def _create_sandbox_sync(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+        if is_egress_forward_mode(self._app_config.egress):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        'egress.mode = "forward" is not yet supported for fast sandboxes.'
+                    ),
+                },
+            )
         if request.network_policy is not None:
             self._reject_network_policy_with_upstream_proxy()
         # Validate the opt-in before any side effect.

@@ -52,9 +52,13 @@ fail() {
 }
 
 BAD_EGRESS="${PREFIX}-bad-config"
+K8S_PAUSE="${PREFIX}-k8s-pause"
+K8S_SANDBOX="${PREFIX}-k8s-sandbox"
+K8S_EGRESS="${PREFIX}-k8s-egress"
 
 cleanup() {
-  docker rm -f "${SANDBOX}" "${EGRESS}" "${GATEWAY}" "${ORIGIN}" "${BAD_EGRESS}" >/dev/null 2>&1 || true
+  docker rm -f "${SANDBOX}" "${EGRESS}" "${GATEWAY}" "${ORIGIN}" "${BAD_EGRESS}" \
+    "${K8S_SANDBOX}" "${K8S_EGRESS}" "${K8S_PAUSE}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 cleanup
@@ -199,6 +203,73 @@ info "Test: policy API is disabled"
 code="$(curl -s -o /dev/null -w '%{http_code}' -XPOST "http://${EGRESS_API}/policy" -d '{"defaultAction":"allow"}')"
 [ "${code}" = "409" ] || fail "POST /policy: want 409, got ${code}"
 pass "policy API returns 409"
+
+info "Test: K8s bootstrap default-deny fence blocks workload before egress starts, then atomic takeover relays with namespace + tenant headers"
+docker run -d --name "${K8S_PAUSE}" \
+  --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=1 \
+  -p 127.0.0.1::18080 \
+  "${PEER_IMG}" sleep infinity >/dev/null
+docker run --rm --network "container:${K8S_PAUSE}" --cap-add=NET_ADMIN --entrypoint /bin/sh "${IMG}" -c '
+set -eu
+nft -f - <<EOF
+table inet opensandbox
+delete table inet opensandbox
+table inet opensandbox {
+  chain egress {
+    type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+  }
+}
+EOF
+'
+docker run -d --name "${K8S_SANDBOX}" \
+  --network "container:${K8S_PAUSE}" \
+  --cap-drop NET_ADMIN --cap-drop NET_RAW \
+  -v "${FIXTURE}:/forward_smoke.py:ro" \
+  "${PEER_IMG}" sleep infinity >/dev/null
+
+before_fence="$(origin_log | grep -c -E '"event": "(tcp|udp)"' || true)"
+if docker exec "${K8S_SANDBOX}" python /forward_smoke.py client tcp "${ORIGIN_IP}" 80 >/dev/null 2>&1; then
+  fail "TCP succeeded under bootstrap default-deny fence before egress started"
+fi
+if docker exec "${K8S_SANDBOX}" python /forward_smoke.py client udp "${ORIGIN_IP}" 9999 >/dev/null 2>&1; then
+  fail "UDP succeeded under bootstrap default-deny fence before egress started"
+fi
+after_fence="$(origin_log | grep -c -E '"event": "(tcp|udp)"' || true)"
+[ "${before_fence}" = "${after_fence}" ] || fail "traffic reached origin before egress started"
+pass "bootstrap fence blocks TCP/UDP while egress is not yet started"
+
+docker run -d --name "${K8S_EGRESS}" \
+  --network "container:${K8S_PAUSE}" \
+  --cap-add=NET_ADMIN \
+  -e OPENSANDBOX_EGRESS_MODE=forward \
+  -e OPENSANDBOX_EGRESS_UPSTREAM_PROXY="http://${GATEWAY_IP}:3128" \
+  -e OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH="${AUTH}" \
+  -e OPENSANDBOX_EGRESS_SANDBOX_ID="sbx-k8s-smoke" \
+  -e OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE="team-a" \
+  -e OPENSANDBOX_EGRESS_TENANT_NAME="acme" \
+  "${IMG}" >/dev/null
+K8S_API="$(docker port "${K8S_PAUSE}" 18080/tcp | head -n1)"
+k8s_code=""
+for _ in $(seq 1 60); do
+  k8s_code="$(curl -s -o /dev/null -w '%{http_code}' "http://${K8S_API}/healthz" || true)"
+  [ "${k8s_code}" = "200" ] && break
+  sleep 0.5
+done
+[ "${k8s_code}" = "200" ] || fail "k8s egress /healthz after bootstrap fence: want 200, last ${k8s_code}"
+k8s_body="$(docker exec "${K8S_SANDBOX}" python /forward_smoke.py client tcp "${ORIGIN_IP}" 80)" \
+  || fail "TCP 80 should succeed after egress atomically replaces bootstrap fence"
+[ "${k8s_body}" = "origin-80" ] || fail "unexpected k8s body: ${k8s_body}"
+gateway_log | grep -F "\"target\": \"${ORIGIN_IP}:80\"" \
+  | grep -F '"sandbox_id": "sbx-k8s-smoke"' \
+  | grep -F '"namespace": "team-a"' \
+  | grep -F '"tenant": "acme"' \
+  | grep -F '"auth": true' \
+  | grep -qF '"status": 200' \
+  || fail "gateway did not log CONNECT with sandbox_id, namespace, and tenant"
+docker rm -f "${K8S_SANDBOX}" "${K8S_EGRESS}" "${K8S_PAUSE}" >/dev/null
+pass "bootstrap fence atomically replaced; namespace + tenant identity headers delivered"
 
 info "Test: gateway outage turns /healthz unhealthy and never falls back"
 docker stop -t 1 "${GATEWAY}" >/dev/null

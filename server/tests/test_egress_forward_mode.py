@@ -125,14 +125,32 @@ def test_dns_upstreams_requires_forward_mode():
             {
                 "runtime": RuntimeConfig(type="kubernetes", execd_image="execd:latest"),
                 "kubernetes": KubernetesRuntimeConfig(),
+                "secure_runtime": SecureRuntimeConfig(type="gvisor", k8s_runtime_class="gvisor"),
             },
-            "not yet supported",
+            "gvisor",
         ),
     ],
 )
 def test_forward_mode_rejects_unsupported_runtimes(overrides, message):
     with pytest.raises(ValidationError, match=message):
         _docker_app_config(**overrides)
+
+
+def test_forward_mode_config_accepts_kubernetes():
+    cfg = AppConfig(
+        server=ServerConfig(),
+        runtime=RuntimeConfig(type="kubernetes", execd_image="execd:latest"),
+        kubernetes=KubernetesRuntimeConfig(),
+        egress=_forward_egress(
+            upstream_proxy=EgressUpstreamProxyConfig(
+                url="https://gateway.example.com:3000",
+                authorization=SecretStr("Bearer gw-token"),
+                ca_secret_name="gateway-ca",
+            ),
+            dns_upstreams=["10.96.0.53:53"],
+        ),
+    )
+    assert cfg.egress is not None and cfg.egress.mode == EGRESS_MODE_FORWARD
 
 
 @pytest.mark.parametrize("drop_caps", [[], ["NET_ADMIN"], ["NET_RAW"]])

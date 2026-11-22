@@ -51,7 +51,11 @@ from opensandbox_server.services.constants import (
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
 from opensandbox_server.services.extension_service import ExtensionService
-from opensandbox_server.services.helpers import build_list_sandboxes_response, format_ingress_endpoint
+from opensandbox_server.services.helpers import (
+    build_list_sandboxes_response,
+    format_ingress_endpoint,
+    is_egress_forward_mode,
+)
 from opensandbox_server.services.k8s.create_helpers import _build_create_workload_context
 from opensandbox_server.services.k8s.error_helpers import (
     _build_k8s_api_error,
@@ -639,7 +643,11 @@ class KubernetesSandboxService(
         ensure_credential_proxy_configured(
             request.credential_proxy, request.network_policy, self.app_config.egress
         )
-        ensure_egress_runtime_compatible(request.network_policy, self.app_config.secure_runtime)
+        ensure_egress_runtime_compatible(
+            request.network_policy,
+            self.app_config.secure_runtime,
+            egress_required=is_egress_forward_mode(self.app_config.egress),
+        )
 
     def _ensure_image_auth_support(self, request: CreateSandboxRequest) -> None:
         """
@@ -1009,6 +1017,17 @@ class KubernetesSandboxService(
         it to report Running (or pool-Allocated) before returning.
         """
         has_pool_ref = bool((request.extensions or {}).get("poolRef", "").strip())
+        if has_pool_ref and is_egress_forward_mode(self.app_config.egress):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        'Pool mode (extensions.poolRef) is not supported when egress.mode = "forward" '
+                        "because pooled pods are pre-created without per-sandbox egress attachment."
+                    ),
+                },
+            )
 
         if not has_pool_ref:
             request = await resolve_sandbox_image_from_request(request)
@@ -1048,6 +1067,7 @@ class KubernetesSandboxService(
             )
             self._ensure_network_policy_support(request)
 
+            tenant = get_current_tenant()
             context = _build_create_workload_context(
                 app_config=self.app_config,
                 request=request,
@@ -1055,8 +1075,9 @@ class KubernetesSandboxService(
                 created_at=created_at,
                 egress_token_factory=generate_egress_token,
                 secure_access_token_factory=generate_secure_access_token,
+                sandbox_namespace=self._resolve_namespace(),
+                tenant_name=tenant.name if tenant is not None else None,
             )
-            tenant = get_current_tenant()
             if tenant is not None:
                 context.labels[SANDBOX_TENANT_LABEL] = tenant.name
             apply_access_renew_extend_seconds_to_mapping(

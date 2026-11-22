@@ -573,11 +573,13 @@ def ensure_egress_runtime_compatible(
     network_policy: Optional["NetworkPolicy"],
     secure_runtime: Optional["SecureRuntimeConfig"] = None,
     effective_runtime_class: Optional[str] = None,
+    *,
+    egress_required: bool = False,
 ) -> None:
     """
-    Reject network_policy when the secure runtime cannot run the egress sidecar.
+    Reject egress attachment when the secure runtime cannot run the egress sidecar.
     """
-    if not network_policy:
+    if not network_policy and not egress_required:
         return
     runtime_type = None
     if secure_runtime is not None and secure_runtime.type:
@@ -587,15 +589,23 @@ def ensure_egress_runtime_compatible(
     if not runtime_type:
         return
     if runtime_type in _GVISOR_NAT_INCOMPATIBLE_RUNTIMES:
+        if egress_required and not network_policy:
+            message = (
+                f"egress forward mode is not compatible with runtime '{runtime_type}': "
+                "gVisor does not support the nftables rules required by the egress sidecar. "
+                "Use a compatible runtime (e.g. kata)."
+            )
+        else:
+            message = (
+                f"networkPolicy is not compatible with runtime '{runtime_type}': "
+                f"gVisor does not support the nftables rules required by the egress sidecar. "
+                f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": (
-                    f"networkPolicy is not compatible with runtime '{runtime_type}': "
-                    f"gVisor does not support the nftables rules required by the egress sidecar. "
-                    f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
-                ),
+                "message": message,
             },
         )
 

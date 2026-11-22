@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 class EgressWorkloadSettings:
     """All server- and request-derived settings needed to build an egress sidecar."""
 
-    network_policy: NetworkPolicy
+    network_policy: Optional[NetworkPolicy]
     image: str
     mode: str
     auth_token: Optional[str]
@@ -54,6 +54,9 @@ class EgressWorkloadSettings:
     resource_limits: Optional[Dict[str, str]]
     otlp_endpoint: Optional[str] = None
     upstream_proxy: Optional[EgressUpstreamProxyConfig] = None
+    dns_upstreams: Optional[List[str]] = None
+    sandbox_namespace: Optional[str] = None
+    tenant_name: Optional[str] = None
 
 
 class WorkloadProvider(ABC):

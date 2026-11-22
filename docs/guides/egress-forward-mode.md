@@ -8,7 +8,7 @@ description: Relay every sandbox TCP connection to a centralized egress gateway 
 Forward mode ([OSEP-0030](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0030-egress-upstream-proxy-forward-mode.md)) hands egress policy to a centralized gateway such as [agentgateway](https://github.com/agentgateway/agentgateway). OpenSandbox only guarantees that sandbox traffic reaches the gateway and cannot bypass it. The gateway decides, per connection, whether to pass TLS through, terminate and inspect it, inject credentials, or deny.
 
 ::: warning
-This release supports the Docker runtime only. Kubernetes and Fast Sandbox configurations are rejected at server startup.
+This release supports the Docker bridge runtime and Kubernetes non-pooled workloads (`BatchSandbox` template mode and `AgentSandbox`). Kubernetes pool mode (`extensions.poolRef`) and Fast Sandbox are rejected until follow-up phases.
 :::
 
 ## How it works
@@ -20,18 +20,22 @@ sandbox: connect(203.0.113.10:443)
 egress forwarder ── CONNECT 203.0.113.10:443
                     Proxy-Authorization: <configured>
                     OpenSandbox-Sandbox-Id: <sandbox id>
+                    OpenSandbox-Sandbox-Namespace: <k8s namespace>   # Kubernetes (single & multi-tenant)
+                    OpenSandbox-Tenant-Name: <tenant name>           # Kubernetes multi-tenant only
    ▼
 gateway ── reads SNI / Host, applies policy ──► origin
 ```
 
-- Every sandbox gets the egress sidecar, with or without `networkPolicy`. The workload container starts only after the sidecar is ready, which requires the gateway to be reachable: if it is not reachable within `[egress] readiness_timeout_seconds`, creation fails and the sidecar is removed.
+- Every sandbox gets the egress sidecar, with or without `networkPolicy`. On Docker, the workload container starts only after the sidecar is ready (which requires the gateway to be reachable). On Kubernetes, an `egress-init` initContainer installs a bootstrap default-deny nftables fence (`oifname "lo" accept`, default `drop`) before any container in `spec.containers` starts, and the egress sidecar atomically replaces it once initialized; the Pod stays NotReady while the gateway is unreachable.
 - All outbound IPv4 TCP is tunneled byte-for-byte to the original `IP:port`. The forwarder never decrypts or parses the stream.
 - There is no direct-dial fallback: if the gateway is unreachable or answers non-2xx, the sandbox connection is reset.
 - UDP (including QUIC), ICMP, link-local (`169.254.0.0/16`) and IPv6 TCP are dropped. DNS goes to the egress DNS proxy, which applies no local policy.
-- Only the forwarder's sockets (identified by a socket mark the workload cannot set) can reach the gateway endpoint. The workload container runs without `NET_ADMIN` and `NET_RAW`.
+- Only the forwarder's sockets (identified by a socket mark the workload cannot set) can reach the gateway endpoint. The workload container runs without `NET_ADMIN` and `NET_RAW`; Kubernetes pod templates enabling `shareProcessNamespace`, `hostNetwork`, `privileged`, or adding back `NET_ADMIN`/`NET_RAW` are rejected.
 - If the sidecar stops, capture and drop rules stay installed: egress fails closed.
 
 ## Configuration
+
+### Docker
 
 ```toml
 [runtime]
@@ -52,7 +56,29 @@ authorization = "Bearer <token>"
 # ca_cert_path = "/etc/ssl/private-ca/gateway-ca.pem"   # trust for an https:// gateway listener
 ```
 
-Server validation requires `egress.image`, `upstream_proxy.url` and `upstream_proxy.authorization`, `docker.network_mode = "bridge"`, and rejects gVisor. Field reference: [Server Configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#egress).
+### Kubernetes (non-pooled)
+
+```toml
+[runtime]
+type = "kubernetes"
+execd_image = "opensandbox/execd:<version>"
+
+[kubernetes]
+namespace = "opensandbox"
+workload_provider = "batchsandbox"   # or "agent-sandbox"
+
+[egress]
+image = "opensandbox/egress:<version>"
+mode = "forward"
+# dns_upstreams = ["10.96.0.53:53"]
+
+[egress.upstream_proxy]
+url = "https://gateway.example.com:3000"
+authorization = "Bearer <token>"
+# ca_secret_name = "gateway-ca"      # Secret key `ca.crt`, mounted only into the egress sidecar
+```
+
+Server validation requires `egress.image`, `upstream_proxy.url`, and `upstream_proxy.authorization`, rejects gVisor, requires `docker.network_mode = "bridge"` and dropping `NET_ADMIN`/`NET_RAW` on Docker, and rejects `extensions.poolRef` and Fast Sandbox on Kubernetes. Field reference: [Server Configuration](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md#egress).
 
 ## API behavior
 
@@ -60,8 +86,9 @@ Server validation requires `egress.image`, `upstream_proxy.url` and `upstream_pr
 |---|---|
 | Create without `networkPolicy` | Egress attached, traffic relayed |
 | Create with `networkPolicy` or `credentialProxy` | `400` |
+| Create with `extensions.poolRef` (Kubernetes) or `templateId` (Fast Sandbox) | `400` |
 | Create with env `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` / `_SSL_INSECURE` | `400` |
-| Create with env `OPENSANDBOX_EGRESS_SANDBOX_ID` | `400` (server-reserved) |
+| Create with env `OPENSANDBOX_EGRESS_SANDBOX_ID` / `OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE` / `OPENSANDBOX_EGRESS_TENANT_NAME` | `400` (server-reserved) |
 | `PUT` / `PATCH /sandboxes/{id}/networkpolicy` | `400` |
 
 ## Gateway requirements
@@ -69,7 +96,7 @@ Server validation requires `egress.image`, `upstream_proxy.url` and `upstream_pr
 The gateway must:
 
 1. Accept HTTP/1.1 `CONNECT` to an `IP:port` target and treat the tunnel as an opaque byte stream.
-2. Reject unauthenticated tunnels, and trust `OpenSandbox-Sandbox-Id` only on authenticated tunnels.
+2. Reject unauthenticated tunnels, and trust `OpenSandbox-Sandbox-Id`, `OpenSandbox-Sandbox-Namespace`, and `OpenSandbox-Tenant-Name` only on authenticated tunnels.
 3. When authorizing by hostname (SNI or Host), connect to the authorized hostname, never to the CONNECT IP.
 4. Deny connections without a usable hostname (no SNI, ECH, opaque TCP) unless an explicit `IP:port` rule admits them.
 5. Prevent its own egress from reaching private and link-local ranges.
