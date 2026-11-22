@@ -457,7 +457,7 @@ requires-dist = [
     { name = "opentelemetry-api", specifier = ">=1.20,<2.0" },
     { name = "pydantic", specifier = ">=2.4.2,<3.0" },
     { name = "pyjwt", marker = "extra == 'pool-redis'", specifier = ">=2.14.0" },
-    { name = "python-dateutil", specifier = ">=2.8.2,<3.0" },
+    { name = "python-dateutil", specifier = ">=2.8.2,<5.0" },
     { name = "redis", marker = "extra == 'pool-redis'", specifier = ">=5.0,<6.0" },
 ]
 provides-extras = ["pool-redis"]
