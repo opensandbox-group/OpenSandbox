@@ -25,6 +25,7 @@ Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgr
 ./scripts/fast-sandbox-env/integration-env.sh verify-native   # native boot-path + egress-rules + rootfs-only snapshot verify (needs up)
 ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + full scenario matrix (needs up)
 POOL_MODE=resource-aware ./scripts/fast-sandbox-env/integration-env.sh verify-resourceaware  # OSEP-0026 matrix (needs a resource-aware up)
+EGRESS_INTERCEPTION_MODE=credential-bound ./scripts/fast-sandbox-env/integration-env.sh verify-credential-bound  # OSEP-0023 delta: switches Pool in-place and runs egress-sensitive stages on existing templates
 EGRESS_INTERCEPTION_MODE=credential-bound ./scripts/fast-sandbox-env/integration-env.sh up  # OSEP-0023 credential-bound egress (same variable for the verify actions)
 ./scripts/fast-sandbox-env/integration-env.sh status          # component / pool / DART / OpenSandbox health
 ./scripts/fast-sandbox-env/integration-env.sh pool            # re-apply the pool only

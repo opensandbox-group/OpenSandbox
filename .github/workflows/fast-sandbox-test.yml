@@ -80,13 +80,16 @@ jobs:
       - name: Run verifier regression tests
         run: python -m unittest discover -v -s scripts/fast-sandbox-env/tests -p 'test_*.py'
 
-  # Emits the integration matrix: PRs keep both OSEP-0023 legs; dispatch runs
-  # default to the default leg and opt into more via egress_modes.
+  # Emits the integration matrix: PRs exercise both default and OSEP-0023
+  # credential-bound in a single KVM run (reusing the cluster and built
+  # templates via an in-place SandboxPool switch); standalone
+  # egress_modes=credential-bound dispatches keep a dedicated full leg.
   egress-modes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.modes.outputs.matrix }}
+      run_credential_bound_delta: ${{ steps.modes.outputs.run_credential_bound_delta }}
     steps:
       - id: modes
         env:
@@ -113,8 +116,18 @@ jobs:
                   modes.append(values[part])
           if not modes:
               modes = [""]
+          # When both default and credential-bound are requested, run a single
+          # KVM leg and switch the SandboxPool in-place for the OSEP-0023
+          # egress-sensitive delta instead of rebuilding the whole stack twice.
+          if "" in modes and "credential-bound" in modes:
+              matrix = [""]
+              run_cb_delta = "true"
+          else:
+              matrix = modes
+              run_cb_delta = "false"
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
-              out.write(f"matrix={json.dumps(modes)}\n")
+              out.write(f"matrix={json.dumps(matrix)}\n")
+              out.write(f"run_credential_bound_delta={run_cb_delta}\n")
           PY
 
   integration:
@@ -225,6 +238,14 @@ jobs:
       - name: Run idle-pause SDK e2e
         timeout-minutes: 45
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
+
+      # OSEP-0023 delta on the live stack: switches SandboxPool to
+      # credential-bound after active sandboxes drain and reuses the already
+      # built native + overlaybd templates to run all egress-sensitive stages.
+      - name: Run credential-bound egress verify (OSEP-0023)
+        if: needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''
+        timeout-minutes: 60
+        run: sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound" ./scripts/fast-sandbox-env/integration-env.sh verify-credential-bound
 
       # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
       # nodes/pods, controller / firecracker-runtime / fastlet / builder /

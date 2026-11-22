@@ -72,6 +72,12 @@ kubeadmConfigPatches:
   apiServer:
     extraArgs:
       service-account-jwks-uri: https://kubernetes.default.svc.cluster.local/openid/v1/jwks
+- |
+  apiVersion: kubelet.config.k8s.io/v1beta1
+  kind: KubeletConfiguration
+  # Speed up ConfigMap volume propagation (default 60s) so hot-reload tests
+  # such as verify/network-security-rules.sh converge in seconds.
+  syncFrequency: 5s
 nodes:
 - role: control-plane
   extraMounts:

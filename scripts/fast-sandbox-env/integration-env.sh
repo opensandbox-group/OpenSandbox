@@ -1701,9 +1701,11 @@ template_up() {
 	if [[ "$OCI_STACK" == 1 ]]; then
 		bake_registry_ca "$IMG_BUILDER"
 		verify_image_ca_bake "$IMG_BUILDER"
-		probe_registry_tls
 	fi
 	kind load docker-image "$IMG_BUILDER" --name "$KIND_CLUSTER" >/dev/null
+	if [[ "$OCI_STACK" == 1 ]]; then
+		probe_registry_tls
+	fi
 	local created
 	local -a tmpl_args=(
 		template create
@@ -2152,9 +2154,9 @@ YAML
 probe_registry_tls() {
 	local out
 	out="$(kubectl run registry-tls-probe -n "$RESOURCE_NS" \
-		--image="$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")" \
+		--image="$IMG_BUILDER" \
 		--restart=Never --rm -i -q \
-		--overrides="{\"spec\":{\"containers\":[{\"name\":\"probe\",\"image\":\"$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")\",\"command\":[\"/bin/sh\",\"-ec\",\"openssl s_client -connect $OCI_REGISTRY_HOST:443 -servername $OCI_REGISTRY_HOST </dev/null 2>/dev/null > /tmp/served.pem; openssl x509 -in /tmp/served.pem -noout -issuer -subject -dates -fingerprint -sha256; echo verify: \$(openssl verify -CAfile /usr/local/share/ca-certificates/fast-sandbox-env-registry.crt /tmp/served.pem 2>&1); echo curl: \$(curl -sS -o /dev/null -w '%{http_code}' https://$OCI_REGISTRY_HOST/v2/ -u $OCI_REGISTRY_USER:$OCI_REGISTRY_PASSWORD 2>&1 | tail -c 300); wc -c < /etc/ssl/certs/ca-certificates.crt\"],\"securityContext\":{\"privileged\":true}}],\"restartPolicy\":\"Never\"}}" 2>&1 | tail -10)" \
+		--overrides="{\"spec\":{\"containers\":[{\"name\":\"probe\",\"image\":\"$IMG_BUILDER\",\"imagePullPolicy\":\"Never\",\"command\":[\"/bin/sh\",\"-ec\",\"openssl s_client -connect $OCI_REGISTRY_HOST:443 -servername $OCI_REGISTRY_HOST </dev/null 2>/dev/null > /tmp/served.pem; openssl x509 -in /tmp/served.pem -noout -issuer -subject -dates -fingerprint -sha256; echo verify: \$(openssl verify -CAfile /usr/local/share/ca-certificates/fast-sandbox-env-registry.crt /tmp/served.pem 2>&1); echo curl: \$(curl -sS -o /dev/null -w '%{http_code}' https://$OCI_REGISTRY_HOST/v2/ -u $OCI_REGISTRY_USER:$OCI_REGISTRY_PASSWORD 2>&1 | tail -c 300); wc -c < /etc/ssl/certs/ca-certificates.crt\"],\"securityContext\":{\"privileged\":true}}],\"restartPolicy\":\"Never\"}}" 2>&1 | tail -10)" \
 		|| log "registry TLS probe pod failed: $out"
 	log "registry TLS probe (in-pod view):"
 	printf '%s\n' "$out" | sed 's/^/  | /'
@@ -4034,6 +4036,21 @@ idle_pause_verify() {
 
 	wait_for "pre-idle execd /ping 200 through the gateway (records activity)" 100 execd_ping_ok
 
+	# Start the wakeOnAccess=false sandbox now so its 30s idle window ticks in
+	# parallel with the wakeOnAccess=true auto-pause round below.
+	local main_id="$VERIFY_ID" created2 id2
+	created2="$(server_api POST /sandboxes "$(jq -n \
+		--arg template "$template_id" --argjson timeout 3600 --argjson x "$x" \
+		'{templateId: $template, timeout: $timeout,
+		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
+		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
+		|| fail "wakeOnAccess=false create failed"
+	id2="$(printf '%s' "$created2" | jq -r '.id')"
+	[[ -n "$id2" && "$id2" != "null" ]] || fail "wakeOnAccess=false create carried no id"
+	VERIFY_ID="$id2"
+	wait_for "wakeOnAccess=false target Running" 300 sandbox_running
+	VERIFY_ID="$main_id"
+
 	local -a pause_ms=() wake_ms=() attempts=()
 	for ((i = 1; i <= rounds; i++)); do
 		t0="$(now_ms)"
@@ -4055,18 +4072,8 @@ idle_pause_verify() {
 	printf -v joined_att '%s/' "${attempts[@]}"
 	pass "idle-pause ${rounds} rounds: pause=${joined_pause%?} wake=${joined_wake%?} placement.attempt=${joined_att%?}"
 
-	local main_id="$VERIFY_ID" created2 id2 payload
 	log "verify (idle-pause): scenario wakeOnAccess=false"
-	created2="$(server_api POST /sandboxes "$(jq -n \
-		--arg template "$template_id" --argjson timeout 3600 --argjson x "$x" \
-		'{templateId: $template, timeout: $timeout,
-		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
-		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
-		|| fail "wakeOnAccess=false create failed"
-	id2="$(printf '%s' "$created2" | jq -r '.id')"
-	[[ -n "$id2" && "$id2" != "null" ]] || fail "wakeOnAccess=false create carried no id"
 	VERIFY_ID="$id2"
-	wait_for "wakeOnAccess=false target Running" 300 sandbox_running
 	wait_for "wakeOnAccess=false auto-paused" 240 sandbox_paused
 	code="$(idle_ping_code "$id2")"
 	[[ "$code" == "200" || "$code" == "wake-503" ]] \
@@ -4847,13 +4854,14 @@ ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read
 
 _ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
 
-ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
-	local cpu="$1" memory="$2" created phase attempts=0
+ra_template_start() { # <cpu> <memory> -> starts build if not already active/succeeded, records id in $WORK
+	local cpu="$1" memory="$2" created phase id
 	local cache="$WORK/ra-template-$cpu-$memory.id"
 	if [[ -s "$cache" ]]; then
-		RA_TEMPLATE_ID="$(<"$cache")"
-		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
-			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+		id="$(<"$cache")"
+		RA_TEMPLATE_ID="$id"
+		phase="$(_ra_template_phase)"
+		if [[ -n "$phase" && "$phase" != "Failed" ]]; then
 			return 0
 		fi
 	fi
@@ -4866,9 +4874,23 @@ ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $W
 		--metadata "origin=osep-0026-resourceaware" \
 		-o json 2>/dev/null)" \
 		|| fail "template create ($cpu/$memory) failed: $(osb_api template get 2>&1 | head -c 200)"
-	RA_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
-	[[ -n "$RA_TEMPLATE_ID" && "$RA_TEMPLATE_ID" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
-	printf '%s' "$RA_TEMPLATE_ID" > "$cache"
+	id="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$id" && "$id" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
+	printf '%s' "$id" > "$cache"
+	RA_TEMPLATE_ID="$id"
+}
+
+ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
+	local cpu="$1" memory="$2" phase attempts=0
+	local cache="$WORK/ra-template-$cpu-$memory.id"
+	if [[ -s "$cache" ]]; then
+		RA_TEMPLATE_ID="$(<"$cache")"
+		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
+			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+			return 0
+		fi
+	fi
+	ra_template_start "$cpu" "$memory"
 	while (( attempts++ < 300 )); do
 		phase="$(_ra_template_phase)"
 		[[ "$phase" == "Succeeded" ]] && { pass "SandboxTemplate build ($cpu/$memory): $RA_TEMPLATE_ID"; return 0; }
@@ -5011,11 +5033,81 @@ verify_resourceaware() {
 	require_live_stack
 	[[ "$POOL_MODE" == "resource-aware" ]] \
 		|| die "verify-resourceaware requires POOL_MODE=resource-aware (stack was brought up with: $POOL_MODE)"
+	# Kick off the oversized (8/1Gi) native template build concurrently so it
+	# converges while the 2/1Gi template build and forward-verify stage run.
+	ra_template_start 8 1Gi
 	run_stage "SandboxTemplate build (2 vCPU / 1Gi, distinctly shaped)" ra_template_up 2 1Gi
 	run_stage "per-sandbox limit forwarding + cgroup enforcement" ra_forward_verify
 	run_stage "oversized template -> 400" ra_oversized_verify
 	run_stage "template -> snapshot -> restore round-trip" ra_snapshot_verify
 	run_stage "capacity saturation -> 429" ra_capacity_verify
+}
+
+# --- OSEP-0023: in-place SandboxPool switch + credential-bound verify delta
+
+no_active_sandboxes() {
+	local live
+	live="$(kubectl -n "$RESOURCE_NS" get sandboxes -o name 2>/dev/null || true)"
+	[[ -z "$live" ]]
+}
+
+pool_fastlet_pods_gone() {
+	local pods
+	pods="$(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o name 2>/dev/null || true)"
+	[[ -z "$pods" ]]
+}
+
+egress_interception_mode_applied() {
+	local pods pod val
+	pods="$(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" \
+		-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+	[[ -n "$pods" ]] || return 1
+	for pod in $pods; do
+		val="$(kubectl -n "$RESOURCE_NS" get pod "$pod" \
+			-o jsonpath='{.spec.containers[?(@.name=="egress")].env[?(@.name=="OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")].value}' 2>/dev/null || true)"
+		[[ "$val" == "$EGRESS_INTERCEPTION_MODE" ]] || return 1
+	done
+	return 0
+}
+
+switch_pool_egress_mode() {
+	require_live_stack
+	# Never switch the pool under live sandboxes: drain any terminating CRs first.
+	wait_for "no active sandboxes before switching SandboxPool egress mode" 120 no_active_sandboxes
+	if kubectl get sandboxpool "$POOL_NAME" >/dev/null 2>&1; then
+		log "recreating SandboxPool $POOL_NAME for EGRESS_INTERCEPTION_MODE=${EGRESS_INTERCEPTION_MODE:-default}"
+		kubectl delete sandboxpool "$POOL_NAME" --wait --timeout=300s >/dev/null
+		wait_for "old fastlet pods terminated" 180 pool_fastlet_pods_gone
+	fi
+	pool_up
+	wait_for "egress container mode converged (${EGRESS_INTERCEPTION_MODE:-default})" 60 egress_interception_mode_applied
+	pass "SandboxPool $POOL_NAME switched to EGRESS_INTERCEPTION_MODE=${EGRESS_INTERCEPTION_MODE:-default}"
+}
+
+# Reuses the live cluster and already-built native + overlaybd templates to
+# exercise every egress-mode-sensitive stage under credential-bound without
+# duplicating cluster setup or egress-orthogonal storage/lifecycle stages.
+verify_credential_bound() {
+	require_live_stack
+	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] \
+		|| die "verify-credential-bound requires EGRESS_INTERCEPTION_MODE=credential-bound (got: ${EGRESS_INTERCEPTION_MODE:-empty})"
+	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
+	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
+	run_stage "SandboxPool $POOL_NAME switch (egress interception=credential-bound)" switch_pool_egress_mode
+	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
+	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
+	if [[ "$OCI_STACK" == 1 ]]; then
+		OCI_TEMPLATE_ID="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
+		if [[ -z "$OCI_TEMPLATE_ID" ]]; then
+			run_stage "SandboxTemplate build (overlaybd, oci:// publication)" template_up_overlaybd
+		fi
+		run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
+		run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
+		exchange_stage "exchange resolver verify (overlaybd template, OSEP-0025)" "$OCI_TEMPLATE_ID"
+		credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)" "$OCI_TEMPLATE_ID"
+	fi
 }
 
 # --- status / summary
@@ -5190,7 +5282,7 @@ down() {
 
 usage() {
 	cat <<'EOF'
-usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|verify-resourceaware|down|status|pool|sdk-e2e|idle-e2e}
+usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|verify-resourceaware|verify-credential-bound|down|status|pool|sdk-e2e|idle-e2e}
 
   up       initialize the environment: fast-sandbox@pinned-commit images,
            two-node kind cluster (KVM), RustFS, control plane, firecracker
@@ -5215,6 +5307,13 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
                    -> 400, snapshot round-trip with recorded-limit replay,
                    capacity saturation -> 429; requires `up` with
                    POOL_MODE=resource-aware
+  verify-credential-bound
+                   OSEP-0023 delta on a live stack: recreates SandboxPool with
+                   EGRESS_INTERCEPTION_MODE=credential-bound and runs all
+                   egress-mode-sensitive stages (network-security-rules,
+                   credential-bound on native + overlaybd, vault, MITM CA,
+                   exchange BLOCKED I1) reusing existing templates; requires
+                   `up` and EGRESS_INTERCEPTION_MODE=credential-bound
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
   status   nodes / pods / pool / DART P2P counters / RustFS / OpenSandbox health
   sdk-e2e  run the Python SDK e2e suite (tests/python/tests/test_fsb_e2e.py)
@@ -5253,7 +5352,7 @@ EOF
 for arg in "$@"; do
 	case "$arg" in
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd|verify-resourceaware) ACTION="$arg" ;;
+		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd|verify-resourceaware|verify-credential-bound) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
@@ -5364,6 +5463,14 @@ case "$ACTION" in
 		log "=== fast-sandbox-env verify-overlaybd ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-overlaybd' ERR
 		verify_overlaybd
+		trap - ERR
+		stage_summary
+		;;
+	verify-credential-bound)
+		exec > >(tee -a "$WORK/run.log") 2>&1
+		log "=== fast-sandbox-env verify-credential-bound ($(date -u +%FT%TZ)) ==="
+		trap 'on_error verify-credential-bound' ERR
+		verify_credential_bound
 		trap - ERR
 		stage_summary
 		;;

@@ -125,6 +125,21 @@ idle_pause_verify() {
 
 	wait_for "pre-idle execd /ping 200 through the gateway (records activity)" 100 execd_ping_ok
 
+	# Start the wakeOnAccess=false sandbox now so its 30s idle window ticks in
+	# parallel with the wakeOnAccess=true auto-pause round below.
+	local main_id="$VERIFY_ID" created2 id2
+	created2="$(server_api POST /sandboxes "$(jq -n \
+		--arg template "$TEMPLATE_ID" --argjson timeout 3600 --argjson x "$x" \
+		'{templateId: $template, timeout: $timeout,
+		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
+		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
+		|| fail "wakeOnAccess=false create failed"
+	id2="$(printf '%s' "$created2" | jq -r '.id')"
+	[[ -n "$id2" && "$id2" != "null" ]] || fail "wakeOnAccess=false create carried no id"
+	VERIFY_ID="$id2"
+	wait_for "wakeOnAccess=false target Running" 300 sandbox_running
+	VERIFY_ID="$main_id"
+
 	local -a pause_ms=() wake_ms=() attempts=()
 	for ((i = 1; i <= rounds; i++)); do
 		t0="$(now_ms)"
@@ -146,18 +161,8 @@ idle_pause_verify() {
 	printf -v joined_att '%s/' "${attempts[@]}"
 	pass "idle-pause ${rounds} rounds: pause=${joined_pause%?} wake=${joined_wake%?} placement.attempt=${joined_att%?}"
 
-	local main_id="$VERIFY_ID" created2 id2 payload
 	log "verify (idle-pause): scenario wakeOnAccess=false"
-	created2="$(server_api POST /sandboxes "$(jq -n \
-		--arg template "$TEMPLATE_ID" --argjson timeout 3600 --argjson x "$x" \
-		'{templateId: $template, timeout: $timeout,
-		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
-		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
-		|| fail "wakeOnAccess=false create failed"
-	id2="$(printf '%s' "$created2" | jq -r '.id')"
-	[[ -n "$id2" && "$id2" != "null" ]] || fail "wakeOnAccess=false create carried no id"
 	VERIFY_ID="$id2"
-	wait_for "wakeOnAccess=false target Running" 300 sandbox_running
 	wait_for "wakeOnAccess=false auto-paused" 240 sandbox_paused
 	code="$(idle_ping_code "$id2")"
 	[[ "$code" == "200" || "$code" == "wake-503" ]] \

@@ -311,6 +311,39 @@ class StageGateTest(ShellCase):
         kept = [l for l in cb if l.startswith("RUN|") and "credential_bound_verify" not in l]
         self.assertEqual(kept, [l for l in off if l.startswith("RUN|") and "exchange_resolver_verify" not in l])
 
+    def test_verify_credential_bound_delta_requires_mode_and_covers_egress_stages(self):
+        delta_body = r'''
+require_live_stack() { :; }
+printf '%s' tpl-native > "$WORK/template-id"
+printf '%s' tpl-oci > "$WORK/overlaybd-template-id"
+run_stage() { printf 'RUN|%s|%s|%s\n' "$1" "$2" "${3:-}"; }
+stage_begin() { printf 'BEGIN|%s\n' "$1"; }
+stage_end() { :; }
+source() { printf 'SOURCE|%s\n' "$1"; }
+verify_credential_bound
+printf 'UNVERIFIED|%s\n' "${STAGE_UNVERIFIED[*]:-}"
+'''
+        wrong = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="", check=False)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertIn("EGRESS_INTERCEPTION_MODE=credential-bound", wrong.stderr)
+
+        out = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="credential-bound", OCI_STACK="1").stdout
+        script_dir = os.path.dirname(os.path.abspath(ENV_SH))
+        lines = [l.replace(script_dir, "<SCRIPT_DIR>") for l in out.splitlines()
+                 if l.startswith(("RUN|", "BEGIN|", "UNVERIFIED|", "SOURCE|"))]
+        self.assertEqual(lines, [
+            "RUN|SandboxPool firecracker-egress-pool switch (egress interception=credential-bound)|switch_pool_egress_mode|",
+            "RUN|egress network-security-rules verify (configmap -> kernel -> live traffic)|<SCRIPT_DIR>/verify/network-security-rules.sh|",
+            "SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh",
+            "RUN|credential-bound interception verify (native template, OSEP-0023)|credential_bound_verify|tpl-native",
+            "RUN|vault lifecycle verify (overlaybd template)|vault_lifecycle_verify|tpl-oci",
+            "RUN|MITM CA chain verify (overlaybd template)|mitm_ca_chain_verify|tpl-oci",
+            "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
+            "SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh",
+            "RUN|credential-bound interception verify (overlaybd template, OSEP-0023)|credential_bound_verify|tpl-oci",
+            "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
+        ])
+
 
 GATE = r'''
 exchange_resolver_verify() { echo "EXCHANGE-RAN tpl=$1"; }
