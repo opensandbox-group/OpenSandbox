@@ -170,3 +170,38 @@ def test_validate_windows_resource_limits_accepts_exact_mebibyte_minimums():
     )
 
 
+def test_validate_windows_resource_limits_accepts_byte_values():
+    # ResourceLimits documents a bare number as bytes; the Linux path already
+    # parses "8589934592" as 8 GiB, so the Windows minimum check must agree.
+    validate_windows_resource_limits(
+        {
+            "cpu": "2",
+            "memory": str(8 * 1024**3),
+            "disk": str(64 * 1024**3),
+        }
+    )
+
+
+def test_validate_windows_resource_limits_rejects_bytes_below_the_minimum():
+    with pytest.raises(HTTPException) as exc_info:
+        validate_windows_resource_limits({"memory": str(4 * 1024**3 - 1)})
+    assert exc_info.value.status_code == 400
+    assert "resourceLimits.memory >= 4G" in exc_info.value.detail["message"]
+
+
+def test_inject_windows_resource_limits_env_renders_byte_values_as_gigabytes():
+    updated = inject_windows_resource_limits_env(
+        ["VERSION=11"],
+        {"memory": str(8 * 1024**3), "disk": str(65 * 1024**3)},
+    )
+    assert "RAM_SIZE=8G" in updated
+    # A partial gigabyte keeps rounding up for the dockur env value.
+    assert "DISK_SIZE=65G" in updated
+
+    partial = inject_windows_resource_limits_env(
+        ["VERSION=11"],
+        {"memory": str(4 * 1024**3 + 1)},
+    )
+    assert "RAM_SIZE=5G" in partial
+
+

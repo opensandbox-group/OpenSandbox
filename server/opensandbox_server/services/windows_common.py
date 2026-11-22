@@ -35,6 +35,21 @@ WINDOWS_RAM_SIZE_ENV = "RAM_SIZE"
 WINDOWS_CPU_CORES_ENV = "CPU_CORES"
 WINDOWS_DISK_SIZE_ENV = "DISK_SIZE"
 _WINDOWS_SIZE_PATTERN = re.compile(r"^\s*(\d+)\s*([a-zA-Z]*)\s*$")
+# Size units the Windows profile understands. Gigabyte-class units are read as
+# 1024-based, matching the dockur CPU_CORES/RAM_SIZE/DISK_SIZE values they are
+# converted into. A bare number is bytes, which ResourceLimits documents as a
+# valid memory/disk form.
+_WINDOWS_SIZE_UNIT_BYTES = {
+    "g": 1024**3,
+    "gi": 1024**3,
+    "gb": 1024**3,
+    "m": 1024**2,
+    "mi": 1024**2,
+    "mb": 1024**2,
+    "t": 1024**4,
+    "ti": 1024**4,
+    "tb": 1024**4,
+}
 WINDOWS_MIN_CPU_NANO_CPUS = 2_000_000_000
 WINDOWS_MIN_MEMORY_GB = 4
 WINDOWS_MIN_DISK_GB = 64
@@ -84,7 +99,8 @@ def inject_windows_user_ports(environment: list[str], exposed_ports: Optional[li
     return env_items
 
 
-def _normalize_windows_size_env(limit_value: Optional[str]) -> Optional[str]:
+def _windows_size_bytes(limit_value: Optional[str]) -> Optional[int]:
+    """Parse a resourceLimits size into bytes; ``None`` when unrecognized."""
     if not limit_value:
         return None
     match = _WINDOWS_SIZE_PATTERN.match(limit_value)
@@ -95,33 +111,28 @@ def _normalize_windows_size_env(limit_value: Optional[str]) -> Optional[str]:
     unit = (match.group(2) or "").lower()
     if amount <= 0:
         return None
-    if unit in {"g", "gi", "gb"}:
-        return f"{amount}G"
-    if unit in {"m", "mi", "mb"}:
-        return f"{max(1, math.ceil(amount / 1024))}G"
-    if unit in {"t", "ti", "tb"}:
-        return f"{amount * 1024}G"
-    return None
+    if unit == "":
+        return amount
+    multiplier = _WINDOWS_SIZE_UNIT_BYTES.get(unit)
+    if multiplier is None:
+        return None
+    return amount * multiplier
+
+
+def _normalize_windows_size_env(limit_value: Optional[str]) -> Optional[str]:
+    """Render a size as the dockur gigabyte env value, rounding up to whole GiB."""
+    size_bytes = _windows_size_bytes(limit_value)
+    if size_bytes is None:
+        return None
+    return f"{max(1, math.ceil(size_bytes / 1024**3))}G"
 
 
 def _windows_size_meets_minimum(limit_value: Optional[str], minimum_gb: int) -> bool:
     """Compare the requested size, not the ceil'd dockur gigabyte env value."""
-    if not limit_value:
+    size_bytes = _windows_size_bytes(limit_value)
+    if size_bytes is None:
         return False
-    match = _WINDOWS_SIZE_PATTERN.match(limit_value)
-    if not match:
-        return False
-    amount = int(match.group(1))
-    unit = (match.group(2) or "").lower()
-    if amount <= 0:
-        return False
-    if unit in {"g", "gi", "gb"}:
-        return amount >= minimum_gb
-    if unit in {"m", "mi", "mb"}:
-        return amount >= minimum_gb * 1024
-    if unit in {"t", "ti", "tb"}:
-        return amount * 1024 >= minimum_gb
-    return False
+    return size_bytes >= minimum_gb * 1024**3
 
 
 def inject_windows_resource_limits_env(
