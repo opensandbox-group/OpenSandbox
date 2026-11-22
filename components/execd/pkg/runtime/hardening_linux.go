@@ -51,13 +51,12 @@ const (
 
 	layerStateDisabled = "disabled"
 
-	policyMagic     = 0x4f534258 // "OSBX"
-	policyVersion   = 2
-	flagUIDDrop     = 0x1
-	flagCapDrop     = 0x2
-	flagQoS         = 0x4
-	flagNoNewPrivs  = 0x8
-	flagNoSetGroups = 0x10
+	policyMagic    = 0x4f534258 // "OSBX"
+	policyVersion  = 2
+	flagUIDDrop    = 0x1
+	flagCapDrop    = 0x2
+	flagQoS        = 0x4
+	flagNoNewPrivs = 0x8
 
 	// capSetpcap is the capability number required to trim bounding sets.
 	capSetpcap = 8
@@ -543,12 +542,7 @@ func parseKeepCapabilities(names []string) ([]uint32, error) {
 	return caps, nil
 }
 
-// hardenCmd rewrites cmd to exec the launcher with the floor policy (unless
-// the launch opted out). The returned file is the parent-side policy memfd;
-// the caller must close it after the child has started (MFD_CLOEXEC keeps it
-// out of any later exec). A per-request identity (SysProcAttr.Credential) is
-// folded into the policy and cleared: os/exec would otherwise drop the
-// launcher to that uid/gid before exec, breaking the privileged prelude.
+// hardenCmd applies independent hardening/QoS policies; the caller must close the returned memfd after start.
 func hardenCmd(cmd *exec.Cmd, noHardening, noQoS bool, stripEnv []string) (*os.File, error) {
 	applyHardening := !noHardening && hardening.enabled.Load()
 	applyQoS := !noQoS && qos.enabled.Load()
@@ -568,15 +562,13 @@ func hardenCmd(cmd *exec.Cmd, noHardening, noQoS bool, stripEnv []string) (*os.F
 		pol.flags |= flagQoS
 		pol.qos = qos.config
 	}
-	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
+	// Only hardening needs a privileged prelude; QoS keeps Go's identity and start-error semantics.
+	if applyHardening && cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
 		cred := cmd.SysProcAttr.Credential
 		pol.uid = cred.Uid
 		pol.gid = cred.Gid
 		pol.groups = append([]uint32(nil), cred.Groups...)
 		pol.flags |= flagUIDDrop
-		if !applyHardening && cred.NoSetGroups {
-			pol.flags |= flagNoSetGroups
-		}
 	}
 	policy, err := encodePolicy(&pol)
 	if err != nil {
@@ -590,16 +582,19 @@ func hardenCmd(cmd *exec.Cmd, noHardening, noQoS bool, stripEnv []string) (*os.F
 		}
 		return nil, fmt.Errorf("hardening: policy memfd: %w", err)
 	}
-	if cmd.SysProcAttr != nil {
+	if applyHardening && cmd.SysProcAttr != nil {
 		cmd.SysProcAttr.Credential = nil
 	}
 	file := os.NewFile(uintptr(fd), "launcher-policy")
 	childFd := strconv.Itoa(3 + len(cmd.ExtraFiles))
 	cmd.ExtraFiles = append(cmd.ExtraFiles, file)
 
-	originalArgs := cmd.Args
+	originalPath, originalArgs := cmd.Path, cmd.Args
+	if len(originalArgs) == 0 {
+		originalArgs = []string{originalPath}
+	}
 	cmd.Path = path
-	cmd.Args = append([]string{path, childFd, "--"}, originalArgs...)
+	cmd.Args = append([]string{path, childFd, "--", originalPath}, originalArgs...)
 	return file, nil
 }
 

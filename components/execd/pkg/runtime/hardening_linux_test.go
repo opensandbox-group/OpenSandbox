@@ -49,6 +49,10 @@ func buildLauncher(t *testing.T) string {
 			launcherErr = err
 			return
 		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			launcherErr = err
+			return
+		}
 		launcherBuilt = filepath.Join(dir, "opensandbox-launcher")
 		src := filepath.Join("..", "..", "native", "launcher.c")
 		cmd := exec.Command(cc, "-O2", "-Wall", "-Wextra", "-Werror",

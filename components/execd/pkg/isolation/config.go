@@ -90,6 +90,7 @@ type HardeningConfig struct {
 	KeepCapabilities []string `toml:"keep_capabilities"`
 }
 
+// QoSConfig controls opt-in process priorities independently of hardening; high applies only to the managed ENTRYPOINT.
 type QoSConfig struct {
 	Enabled     bool   `toml:"enabled"`
 	Entrypoint  string `toml:"entrypoint"`

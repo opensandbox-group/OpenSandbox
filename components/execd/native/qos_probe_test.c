@@ -40,13 +40,32 @@ static int write_oom(const char *value)
     int result;
     if (fd < 0)
         return errno;
-    result = write(fd, value, strlen(value)) == (ssize_t)strlen(value) ? 0 : errno;
+    errno = 0;
+    result = write(fd, value, strlen(value)) == (ssize_t)strlen(value) ? 0 : (errno != 0 ? errno : EIO);
     close(fd);
     return result;
 }
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "argv0") == 0) {
+        puts(argv[0]);
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "groups") == 0) {
+        int count = getgroups(0, NULL);
+        if (count < 0)
+            return 2;
+        gid_t *groups = calloc((size_t)count + 1, sizeof(gid_t));
+        if (!groups || getgroups(count, groups) != count)
+            return 2;
+        printf("[");
+        for (int i = 0; i < count; i++)
+            printf("%s%u", i == 0 ? "" : ",", (unsigned int)groups[i]);
+        puts("]");
+        free(groups);
+        return 0;
+    }
     if (argc > 3 && strcmp(argv[1], "inherit") == 0) {
         if (write_oom(argv[2]) != 0)
             return 2;
@@ -73,7 +92,10 @@ int main(int argc, char **argv)
     int oom = read_oom();
     int lower_errno = -1;
     int nice_errno = -1;
-    int nice = getpriority(PRIO_PROCESS, 0);
+    errno = 0;
+    int nice_value = getpriority(PRIO_PROCESS, 0);
+    if (nice_value == -1 && errno != 0)
+        return 2;
     unsigned long long caps = 0;
     int seccomp = 0;
     char line[256];
@@ -92,12 +114,12 @@ int main(int argc, char **argv)
     if (argc == 3 && strcmp(argv[1], "lower") == 0) {
         lower_errno = write_oom(argv[2]);
         errno = 0;
-        nice_errno = setpriority(PRIO_PROCESS, 0, nice - 1) == 0 ? 0 : errno;
+        nice_errno = setpriority(PRIO_PROCESS, 0, nice_value - 1) == 0 ? 0 : errno;
     }
     printf("{\"nice\":%d,\"scheduler\":%d,\"oom\":%d,\"oom_after\":%d,"
            "\"soft\":%llu,\"hard\":%llu,\"nnp\":%d,\"uid\":%d,\"gid\":%d,"
            "\"lower_errno\":%d,\"nice_errno\":%d,\"caps\":%llu,\"seccomp\":%d}\n",
-           nice, sched_getscheduler(0), oom, read_oom(),
+           nice_value, sched_getscheduler(0), oom, read_oom(),
            (unsigned long long)limit.rlim_cur, (unsigned long long)limit.rlim_max,
            prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), getuid(), getgid(), lower_errno, nice_errno, caps, seccomp);
     return 0;

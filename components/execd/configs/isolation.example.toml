@@ -105,7 +105,7 @@ allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 # never fatal.
 
 # Best-effort Linux process QoS, independent of [hardening].
-# Missing section or enabled leaves QoS off; invalid values fail startup.
+# QoS stays off unless enabled = true is set; invalid values fail startup.
 # Only an execd-managed ENTRYPOINT can retain baseline treatment with high.
 # Commands, sessions, PTYs, hooks and isolated workloads stay standard.
 # Without EXECD_INIT, the bootstrap ENTRYPOINT is outside QoS coverage.

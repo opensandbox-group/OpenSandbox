@@ -393,11 +393,17 @@ func TestQoSIdentityFailureStillAborts(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr
 			mp, err := launchManaged(cmd)
-			require.NoError(t, err)
-			require.Error(t, mp.Wait())
-			require.Equal(t, 125, cmd.ProcessState.ExitCode())
+			if hardened {
+				require.NoError(t, err)
+				require.Error(t, mp.Wait())
+				require.Equal(t, 125, cmd.ProcessState.ExitCode())
+				require.Contains(t, stderr.String(), "cannot")
+			} else {
+				require.Error(t, err)
+				require.Nil(t, mp)
+				require.Nil(t, cmd.Process)
+			}
 			require.Empty(t, stdout.String(), "workload must not run with the wrong identity")
-			require.Contains(t, stderr.String(), "cannot")
 		})
 	}
 }
@@ -424,23 +430,131 @@ func TestQoSPolicyEncodingAndCredentialPreservation(t *testing.T) {
 	cfg.QoS.Scheduler = "idle"
 	require.NoError(t, InitQoS(cfg))
 	cmd := exec.Command(probe)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 123, Gid: 456, NoSetGroups: true}}
+	cred := &syscall.Credential{Uid: 123, Gid: 456, Groups: []uint32{789}, NoSetGroups: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 	policy, err := hardenCmd(cmd, true, false, nil)
 	require.NoError(t, err)
 	defer policy.Close()
 	var hdr policyHeader
 	require.NoError(t, binary.Read(policy, binary.LittleEndian, &hdr))
 	require.EqualValues(t, policyVersion, hdr.Version)
-	require.EqualValues(t, flagQoS|flagUIDDrop|flagNoSetGroups, hdr.Flags)
+	require.EqualValues(t, flagQoS, hdr.Flags)
 	require.EqualValues(t, unix.SCHED_IDLE, hdr.QoSScheduler)
 	require.EqualValues(t, 19, hdr.QoSNice)
 	require.EqualValues(t, 500, hdr.QoSOOMScoreAdj)
-	require.EqualValues(t, 123, hdr.UID)
-	require.EqualValues(t, 456, hdr.GID)
+	require.Zero(t, hdr.UID)
+	require.Zero(t, hdr.GID)
+	require.Zero(t, hdr.NGroups)
 	require.Zero(t, hdr.SeccompLen)
 	require.Zero(t, hdr.LandlockLen)
 	require.Zero(t, hdr.NEnv, "QoS alone must not change credential/environment policy")
-	require.Nil(t, cmd.SysProcAttr.Credential)
+	require.Same(t, cred, cmd.SysProcAttr.Credential)
+}
+
+func TestQoSResolvedExecutableAndArgv(t *testing.T) {
+	for _, hardened := range []bool{false, true} {
+		t.Run(fmt.Sprint(hardened), func(t *testing.T) {
+			cfg, probe := setupQoSTest(t)
+			if hardened {
+				cfg.Hardening = &isolation.HardeningConfig{Enabled: true}
+			}
+			require.NoError(t, InitHardening(cfg))
+			require.NoError(t, InitQoS(cfg))
+			t.Setenv("PATH", filepath.Dir(probe))
+			for _, argv0 := range []string{"probe", "custom-argv0"} {
+				cmd := exec.Command("probe", "argv0")
+				cmd.Args[0] = argv0
+				cmd.Env = []string{"PATH=/nonexistent"}
+				var output bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &output, &output
+				mp, err := launchManaged(cmd)
+				require.NoError(t, err)
+				require.NoError(t, mp.Wait(), "%s", output.String())
+				require.Equal(t, argv0+"\n", output.String())
+			}
+			cmd := &exec.Cmd{Path: probe}
+			require.Equal(t, 19, runQoSProbe(t, cmd).Nice)
+
+			entrypoint := filepath.Join(filepath.Dir(probe), "entrypoint")
+			require.NoError(t, os.WriteFile(entrypoint, []byte("#!/bin/sh\nprintf '%s' \"$0\" > \"$1\"\n"), 0o755))
+			envFile := filepath.Join(t.TempDir(), "env")
+			require.NoError(t, os.WriteFile(envFile, []byte("PATH=/nonexistent\n"), 0o600))
+			t.Setenv("EXECD_ENVS", envFile)
+			outputFile := filepath.Join(t.TempDir(), "entrypoint-output")
+			mp, err := launchEntrypoint([]string{"entrypoint", outputFile})
+			require.NoError(t, err)
+			require.NoError(t, mp.Wait())
+			out, err := os.ReadFile(outputFile)
+			require.NoError(t, err)
+			require.Equal(t, entrypoint, string(out))
+		})
+	}
+}
+
+func TestQoSSupplementaryGroups(t *testing.T) {
+	cfg, probe := setupQoSTest(t)
+	groups := make([]uint32, 128)
+	for i := range groups {
+		groups[i] = uint32(i + 2000)
+	}
+	for _, noSetGroups := range []bool{false, true} {
+		t.Run(fmt.Sprintf("no-setgroups=%v", noSetGroups), func(t *testing.T) {
+			var baseline []uint32
+			for _, enabled := range []bool{false, true} {
+				cfg.QoS.Enabled = enabled
+				require.NoError(t, InitQoS(cfg))
+				cred := &syscall.Credential{
+					Uid: uint32(os.Getuid()), Gid: uint32(os.Getgid()),
+					Groups: groups, NoSetGroups: noSetGroups,
+				}
+				cmd := exec.Command(probe, "groups")
+				cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
+				var output bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &output, &output
+				mp, err := launchManaged(cmd)
+				if !noSetGroups && !effectiveCapsHave(unix.CAP_SETGID) {
+					require.ErrorIs(t, err, os.ErrPermission)
+					require.Nil(t, mp)
+					require.Nil(t, cmd.Process)
+					require.ErrorContains(t, credentialStartHint(err, cred), "requires CAP_SETUID/CAP_SETGID")
+					continue
+				}
+				require.NoError(t, err)
+				require.NoError(t, mp.Wait(), "%s", output.String())
+				var got []uint32
+				require.NoError(t, json.Unmarshal(output.Bytes(), &got))
+				if !noSetGroups {
+					require.Equal(t, groups, got)
+				}
+				if enabled {
+					require.Equal(t, baseline, got)
+				} else {
+					baseline = got
+				}
+			}
+		})
+	}
+}
+
+func TestQoSSeccompImpliesNoNewPrivs(t *testing.T) {
+	_, probe := setupQoSTest(t)
+	var filter bytes.Buffer
+	require.NoError(t, binary.Write(&filter, binary.LittleEndian, unix.SockFilter{
+		Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW,
+	}))
+	data, err := encodePolicy(&hardeningPolicy{seccomp: filter.Bytes()})
+	require.NoError(t, err)
+	fd, err := createPolicyMemfd(data)
+	require.NoError(t, err)
+	file := os.NewFile(uintptr(fd), "seccomp-policy")
+	defer file.Close()
+	cmd := exec.Command(launcherSearchPaths[0], "3", "--", probe, probe)
+	cmd.ExtraFiles = []*os.File{file}
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	got := readQoSSample(t, out)
+	require.Equal(t, 1, got.NNP)
+	require.Equal(t, 2, got.Seccomp)
 }
 
 func TestQoSInvalidPolicyRejected(t *testing.T) {
@@ -455,7 +569,7 @@ func TestQoSInvalidPolicyRejected(t *testing.T) {
 			require.NoError(t, err)
 			file := os.NewFile(uintptr(fd), "invalid-policy")
 			defer file.Close()
-			cmd := exec.Command(launcherSearchPaths[0], "3", "--", probe)
+			cmd := exec.Command(launcherSearchPaths[0], "3", "--", probe, probe)
 			cmd.ExtraFiles = []*os.File{file}
 			out, err := cmd.CombinedOutput()
 			require.Error(t, err)

@@ -60,7 +60,6 @@
 #define FLAG_CAP_DROP 0x2u
 #define FLAG_QOS 0x4u
 #define FLAG_NO_NEW_PRIVS 0x8u
-#define FLAG_NO_SETGROUPS 0x10u
 
 #define LAUNCH_FAILURE 125
 #define EXEC_FAILURE 126
@@ -384,8 +383,8 @@ int main(int argc, char **argv)
     struct ll_rule *ll_rules = NULL;
     size_t n_ll_rules = 0;
 
-    if (argc < 4 || strcmp(argv[2], "--") != 0)
-        fail(-1, "usage: opensandbox-launcher <policy-fd> -- <argv...>");
+    if (argc < 5 || strcmp(argv[2], "--") != 0)
+        fail(-1, "usage: opensandbox-launcher <policy-fd> -- <executable> <argv...>");
 
     {
         char *end = NULL;
@@ -540,14 +539,14 @@ int main(int argc, char **argv)
     }
 
     /* 4. No new privileges: nothing below can regain what the launcher drops. */
-    if ((hdr.flags & FLAG_NO_NEW_PRIVS) &&
+    if (((hdr.flags & FLAG_NO_NEW_PRIVS) || filter != NULL || n_ll_rules > 0) &&
         prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
         log_err("PR_SET_NO_NEW_PRIVS", errno);
 
     if (hdr.flags & FLAG_UID_DROP) {
         /* 5. Identity change: a foreign target that cannot be applied must
          * abort the launch rather than silently run as the wrong user. */
-        if (!(hdr.flags & FLAG_NO_SETGROUPS) && hdr.n_groups > 0) {
+        if (hdr.n_groups > 0) {
             gid_t *gids = (gid_t *)malloc(hdr.n_groups * sizeof(gid_t));
 
             if (gids == NULL)
@@ -557,7 +556,7 @@ int main(int argc, char **argv)
             if (setgroups(hdr.n_groups, gids) != 0)
                 fail(-1, "setgroups: cannot apply requested supplementary groups");
             free(gids);
-        } else if (!(hdr.flags & FLAG_NO_SETGROUPS) && setgroups(0, NULL) != 0) {
+        } else if (setgroups(0, NULL) != 0) {
             fail(-1, "setgroups: cannot clear supplementary groups");
         }
         if (setgid((gid_t)hdr.gid) != 0)
@@ -612,7 +611,7 @@ int main(int argc, char **argv)
     }
 
     /* 8. Exec the real workload. */
-    execvp(argv[3], &argv[3]);
+    execv(argv[3], &argv[4]);
     fprintf(stderr, "opensandbox-launcher: exec %s: %s\n", argv[3], strerror(errno));
     _exit(EXEC_FAILURE);
 }

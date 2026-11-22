@@ -364,10 +364,7 @@ var bootstrapStripEnv = []string{
 	"EXECD_RUNTIME_INIT",
 }
 
-// launchManagedWith starts the command and registers it with the reaper.
-// startFn is called under the reaper lock so the child cannot be observed
-// (and misclassified as an orphan) before registration. When the hardening
-// floor is active, cmd is first rewritten to exec through the launcher.
+// launchManagedWith applies eligible hardening/QoS policies and holds the reaper lock across start and registration.
 func launchManagedWith(cmd *exec.Cmd, startFn func() error, opts ...launchOption) (*managedProcess, error) {
 	mp := newManagedProcess(cmd)
 	for _, o := range opts {
