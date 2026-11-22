@@ -39,6 +39,9 @@ func TestScheduleDoesNotContactReusedPodIP(t *testing.T) {
 	differentPod.Name = "replacement-pod"
 	changedIPPod := originalPod.DeepCopy()
 	changedIPPod.Status.PodIP = "192.0.2.2"
+	terminatingPod := originalPod.DeepCopy()
+	deletingSince := metav1.Now()
+	terminatingPod.DeletionTimestamp = &deletingSince
 
 	for _, binding := range []struct {
 		name string
@@ -48,6 +51,7 @@ func TestScheduleDoesNotContactReusedPodIP(t *testing.T) {
 		{name: "different pod reuses IP", pods: []*corev1.Pod{differentPod}},
 		{name: "same name and IP with different UID", pods: []*corev1.Pod{replacedPod}},
 		{name: "bound pod IP changed", pods: []*corev1.Pod{changedIPPod}},
+		{name: "terminating Pod still reports original IP", pods: []*corev1.Pod{terminatingPod}},
 	} {
 		for _, lifecycle := range []string{"running", "deleting", "already releasing"} {
 			t.Run(binding.name+"/"+lifecycle, func(t *testing.T) {

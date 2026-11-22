@@ -243,7 +243,7 @@ func Test_defaultTaskScheduler_recoverTaskNodesStatus(t *testing.T) {
 			},
 		},
 		{
-			name: "recover successfully, client return running task via endpoint",
+			name: "recover running task without querying terminating Pod",
 			fields: fields{
 				allPods: []*corev1.Pod{{
 					ObjectMeta: v1.ObjectMeta{
@@ -253,6 +253,9 @@ func Test_defaultTaskScheduler_recoverTaskNodesStatus(t *testing.T) {
 					Status: corev1.PodStatus{
 						PodIP: "1.2.3.4",
 					},
+				}, {
+					ObjectMeta: v1.ObjectMeta{Name: "terminating-pod", DeletionTimestamp: &testNow},
+					Status:     corev1.PodStatus{PodIP: "1.2.3.5"},
 				}},
 				taskNodes: []*taskNode{testTaskNode},
 				taskNodeByNameIndex: map[string]*taskNode{

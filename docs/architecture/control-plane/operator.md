@@ -97,7 +97,7 @@ A process task can run **Local** (inside the task-executor container, the defaul
 
 API deletion and TTL expiration finish task cleanup, including `postStop`, before deleting or recycling pods. Direct foreground deletion of the BatchSandbox, or deletion of its Pool or pods, can bypass this ordering.
 
-The task scheduler binds each task to a Pod instance by name, UID, and IP. Once the observed Pod list no longer contains that binding, it stops querying and sending tasks to the old endpoint, including stop requests. An active task keeps its existing execution state and is not automatically retried or failed; a task already being released can finish cleanup locally. This sender-side check depends on the controller's observed Pod list and does not fence requests already in flight.
+The task scheduler binds each task to a Pod instance by name, UID, and IP. Once the controller observes that the bound Pod is terminating, missing, or has a different identity or IP, the scheduler stops querying and sending tasks to that endpoint, including stop requests. It also skips terminating Pods during task assignment and recovery. An active task keeps its existing execution state, and a task already being released can finish cleanup locally. Requests already in flight can still reach the endpoint.
 
 ## SandboxSnapshot
 

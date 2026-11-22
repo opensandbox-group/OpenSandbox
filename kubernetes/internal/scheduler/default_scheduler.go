@@ -293,7 +293,7 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 		if tNode.IP == "" {
 			continue
 		}
-		if !sch.assignedPodExists(tNode) {
+		if !sch.hasValidPodBinding(tNode) {
 			tNode.Status = nil
 			continue
 		}
@@ -318,10 +318,14 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	}
 }
 
-// assignedPodExists checks the bound Pod instance, since names and IPs can be reused.
-func (sch *defaultTaskScheduler) assignedPodExists(tNode *taskNode) bool {
+// A terminating Pod can still report its IP after its network has been torn down.
+func hasTaskEndpoint(pod *corev1.Pod) bool {
+	return pod.DeletionTimestamp == nil && pod.Status.PodIP != ""
+}
+
+func (sch *defaultTaskScheduler) hasValidPodBinding(tNode *taskNode) bool {
 	for _, pod := range sch.allPods {
-		if pod.Name == tNode.PodName && pod.UID == tNode.PodUID && pod.Status.PodIP == tNode.IP {
+		if pod.Name == tNode.PodName && pod.UID == tNode.PodUID && pod.Status.PodIP == tNode.IP && hasTaskEndpoint(pod) {
 			return true
 		}
 	}
@@ -395,7 +399,7 @@ func (sch *defaultTaskScheduler) refreshFreePods() {
 	sch.freePods = make([]*corev1.Pod, 0, len(sch.allPods)/2)
 	for _, pod := range sch.allPods {
 		// Assignment is not retried, so exclude explicitly unready pods; missing PodReady remains eligible.
-		if !assignedPods[pod.Name] && pod.Status.PodIP != "" && !utils.IsPodExplicitlyNotReady(pod.Status) {
+		if !assignedPods[pod.Name] && hasTaskEndpoint(pod) && !utils.IsPodExplicitlyNotReady(pod.Status) {
 			sch.freePods = append(sch.freePods, pod)
 		}
 	}
@@ -433,7 +437,7 @@ func needRelease(tNode *taskNode, policy sandboxv1alpha1.TaskResourcePolicy) boo
 // scheduleSingleTaskNode handles scheduling for a single task node based on its state
 func (sch *defaultTaskScheduler) scheduleSingleTaskNode(tNode *taskNode) {
 	log := sch.logger
-	if tNode.IP != "" && !sch.assignedPodExists(tNode) {
+	if tNode.IP != "" && !sch.hasValidPodBinding(tNode) {
 		// 保留绑定以免自动重跑；失效 endpoint 也不能接收释放请求。
 		tNode.Status = nil
 		if needRelease(tNode, sch.resPolicyWhenTaskComplete) || tNode.sState == stateReleasing {

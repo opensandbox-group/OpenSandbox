@@ -397,6 +397,7 @@ func Test_assignTaskNodes(t *testing.T) {
 }
 
 func Test_refreshFreePods(t *testing.T) {
+	deletingSince := metav1.Now()
 	tests := []struct {
 		name          string
 		allPods       []*corev1.Pod
@@ -478,7 +479,7 @@ func Test_refreshFreePods(t *testing.T) {
 			expectedNames: []string{},
 		},
 		{
-			name: "pods without IP addresses",
+			name: "pods without IP addresses or marked for deletion are not free",
 			allPods: []*corev1.Pod{
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "pod-1"},
@@ -487,6 +488,10 @@ func Test_refreshFreePods(t *testing.T) {
 				{
 					ObjectMeta: metav1.ObjectMeta{Name: "pod-2"},
 					Status:     corev1.PodStatus{PodIP: ""},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{Name: "pod-3", DeletionTimestamp: &deletingSince},
+					Status:     corev1.PodStatus{PodIP: "1.1.1.3"},
 				},
 			},
 			taskNodes: []*taskNode{

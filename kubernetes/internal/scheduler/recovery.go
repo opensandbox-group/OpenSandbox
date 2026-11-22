@@ -39,7 +39,7 @@ func (sch *defaultTaskScheduler) recoverTaskNodesStatus() error {
 	pods := make([]*v1.Pod, 0, len(sch.allPods)/2)
 	for i := range sch.allPods {
 		pod := sch.allPods[i]
-		if pod.Status.PodIP == "" {
+		if !hasTaskEndpoint(pod) {
 			continue
 		}
 		ips = append(ips, pod.Status.PodIP)
