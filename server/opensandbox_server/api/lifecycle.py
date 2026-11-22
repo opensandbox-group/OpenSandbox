@@ -461,7 +461,17 @@ def get_sandbox_endpoint(
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
     response: Response = None,  # type: ignore[assignment]
 ) -> Endpoint:
-    """Return a route, not a health check; invalid or unsupported signed-route expirations are rejected."""
+    """
+    Get the public access endpoint URL for accessing a service running on a specific port
+    within the sandbox. The service must be listening on the specified port inside
+    the sandbox for the endpoint to be available.
+
+    When ``expires`` is provided, the endpoint uses a signed route token (OSEP-0011).
+    This requires an ingress gateway configured with secure_access signing keys.
+    Invalid or unsupported signed-route expirations are rejected rather than returning
+    an unsigned route. Omit ``expires`` for the unsigned/legacy response shape.
+    Endpoint resolution does not perform a service health check.
+    """
     if use_server_proxy and expires is not None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
