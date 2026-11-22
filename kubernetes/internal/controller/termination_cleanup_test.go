@@ -617,7 +617,7 @@ func TestPooledTaskDeletionHandoff(t *testing.T) {
 		t.Run(string(recycleType), func(t *testing.T) {
 			ctx := context.Background()
 			now := metav1.Now()
-			pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+			pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "pool-uid"},
 				Spec: sandboxv1alpha1.PoolSpec{RecycleStrategy: &sandboxv1alpha1.RecycleStrategy{Type: recycleType}}}
 			sandbox := terminatingPoolSandbox("task-sandbox", pool.Name, &now)
 			sandbox.Finalizers = append(sandbox.Finalizers, finalizerTaskCleanup)
@@ -625,7 +625,10 @@ func TestPooledTaskDeletionHandoff(t *testing.T) {
 			sandbox.Spec.TaskTemplate = &sandboxv1alpha1.TaskTemplateSpec{Spec: sandboxv1alpha1.TaskSpec{
 				Process: &sandboxv1alpha1.ProcessTask{Command: []string{"sleep", "3600"}},
 			}}
-			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "task-pod", Namespace: "default", Finalizers: []string{"test/keep"}}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "task-pod", Namespace: "default", Finalizers: []string{"test/keep"},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pool, sandboxv1alpha1.GroupVersion.WithKind("Pool"))},
+			}}
 			setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{pod.Name}})
 			r := newTestReconciler(pool, sandbox, pod)
 			key := client.ObjectKeyFromObject(sandbox)
