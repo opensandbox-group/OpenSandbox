@@ -16,6 +16,7 @@
 import json
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,16 +37,16 @@ from opensandbox.transport import RetryPolicy
 
 
 @contextmanager
-def sandbox_server(*, creation_delay=0):
+def sandbox_server(*, creation_delay: float = 0) -> Iterator[SimpleNamespace]:
     release = threading.Event()
     state = SimpleNamespace(pings=0)
     lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *_args):
+        def log_message(self, *_args: object) -> None:
             pass
 
-        def respond(self, status, payload):
+        def respond(self, status: int, payload: dict[str, object]) -> None:
             body = json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -53,7 +54,7 @@ def sandbox_server(*, creation_delay=0):
             self.end_headers()
             self.wfile.write(body)
 
-        def do_POST(self):
+        def do_POST(self) -> None:
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
             time.sleep(creation_delay)
             self.respond(
@@ -66,7 +67,7 @@ def sandbox_server(*, creation_delay=0):
                 },
             )
 
-        def do_GET(self):
+        def do_GET(self) -> None:
             if self.path == "/ping":
                 with lock:
                     state.pings += 1
@@ -79,7 +80,7 @@ def sandbox_server(*, creation_delay=0):
             else:
                 self.respond(200, {"endpoint": f"127.0.0.1:{self.server.server_port}"})
 
-        def do_DELETE(self):
+        def do_DELETE(self) -> None:
             self.send_response(204)
             self.end_headers()
 
@@ -99,7 +100,14 @@ def sandbox_server(*, creation_delay=0):
         assert not server_thread.is_alive()
 
 
-async def open_sandbox(sync, operation, server, *, timeout, retry_policy):
+async def open_sandbox(
+    sync: bool,
+    operation: str,
+    server: SimpleNamespace,
+    *,
+    timeout: timedelta,
+    retry_policy: RetryPolicy,
+) -> Sandbox | SandboxSync:
     config_type = ConnectionConfigSync if sync else ConnectionConfig
     config = config_type(
         domain=server.domain,
@@ -120,7 +128,7 @@ async def open_sandbox(sync, operation, server, *, timeout, retry_policy):
 
 
 @pytest.fixture
-def short_health_timeout(monkeypatch):
+def short_health_timeout(monkeypatch: pytest.MonkeyPatch) -> timedelta:
     timeout = timedelta(milliseconds=100)
     for module in (health_adapter, health_adapter_sync):
         monkeypatch.setattr(module, "HEALTH_PING_TIMEOUT", timeout, raising=False)
@@ -131,11 +139,11 @@ def short_health_timeout(monkeypatch):
 @pytest.mark.parametrize("request_seconds,expected_seconds", [(30, 5), (1, 1)])
 @pytest.mark.asyncio
 async def test_health_timeout_caps_default_without_expanding_short_requests(
-    sync, request_seconds, expected_seconds
-):
+    sync: bool, request_seconds: int, expected_seconds: int
+) -> None:
     requests = []
 
-    def respond(request):
+    def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         return httpx.Response(200)
 
@@ -168,8 +176,8 @@ async def test_health_timeout_caps_default_without_expanding_short_requests(
 )
 @pytest.mark.asyncio
 async def test_readiness_recovers_after_first_health_connection_stalls(
-    sync, operation, retry, short_health_timeout
-):
+    sync: bool, operation: str, retry: bool, short_health_timeout: timedelta
+) -> None:
     retry_policy = (
         RetryPolicy(initial_backoff=timedelta(0), max_backoff=timedelta(0))
         if retry
@@ -196,7 +204,7 @@ async def test_readiness_recovers_after_first_health_connection_stalls(
 
 @pytest.mark.parametrize("sync", [False, True], ids=["async", "sync"])
 @pytest.mark.asyncio
-async def test_readiness_budget_shorter_than_ping_cap_still_expires(sync):
+async def test_readiness_budget_shorter_than_ping_cap_still_expires(sync: bool) -> None:
     with sandbox_server() as server:
         started = time.monotonic()
         with pytest.raises(SandboxReadyTimeoutException):
