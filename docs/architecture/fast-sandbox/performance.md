@@ -141,12 +141,15 @@ This section answers two questions about the experimental Fast Sandbox `credenti
 | Measurement | CI | Bare metal, set A | Bare metal, set B |
 |---|---:|---:|---:|
 | M3 bytes per held bound connection, `anon` / `memory.current` | 158,100 / 158,847 | 158,582 / 165,483 | 158,231 / 165,012 |
+| M4 egress CPU per request, `all` → `credential-bound` | 9.92 → 4.28 ms (−57%) | 18.34 → 8.39 ms (−54%) | 18.01 → 8.22 ms (−54%) |
 
 What the data supports:
 
+- **CPU.** Under a load where 95% of the new short HTTPS connections go to unbound hosts, `credential-bound` used 54–57% less egress CPU per request than `all` in all three runs. Absolute CPU per request was 1.8–2.0 times as high on the bare-metal host, so only the relative saving carries over between environments. The saving depends on the share of unbound traffic; see M4 below.
 - **Memory.** An idle bound connection costs 158–166 KB of egress memory. The `anon` slope agreed within 0.3% across two hosts, two kernels and up to 4,000 connections; `memory.current`, the value the container limit enforces, was about 4% higher on the bare-metal host. The budgets below use the higher value.
 - **Total memory.** `all` mode costs about 165 KB of `memory.current` per held connection whether or not the host is bound; a `credential-bound` passthrough connection costs about 35 KB. With 5% of connections bound, `credential-bound` needs about 25% of the per-connection memory of `all` (see M3x).
-- **Not measured.** Active transfers in M3/M3x.
+- **Throughput.** At the default 500m egress CPU limit with keep-alive connections and 5% bound traffic, egress CPU saturated at about 110–115 requests per second in `all` mode and about 1,030–1,060 in `credential-bound` mode (see M5).
+- **Not measured.** Active transfers in M3/M3x and the `credential-bound` throughput ceiling at the 2-CPU limit.
 
 ### Method
 
@@ -235,6 +238,25 @@ Every run reached every step with all targeted connections held, no egress conta
 
 Each held connection is a decrypted client connection plus its upstream TLS connection inside mitmproxy, idle after one small request. Active transfers add buffer memory that this measurement does not include. Opaque passthrough connections are not charged to either budget and are not measured here, and the default leg does not run M3.
 
+#### M4 egress CPU
+
+Passthrough-dominated load, 95% of requests to an unbound host:
+
+| Run | Leg | Requests succeeded | Load CPU (cores) | Idle-corrected CPU per request | Throttled time (periods) |
+|---|---|---:|---:|---:|---:|
+| CI | default (`all`) | 2000/2000 | 0.109 | 9.92 ms | 163.8 ms (3) |
+| CI | `credential-bound` | 2000/2000 | 0.051 | 4.28 ms | 217.1 ms (2) |
+| Bare metal, set A | default (`all`) | 2000/2000 | 0.108 | 18.34 ms | 313.7 ms (7) |
+| Bare metal, set A | `credential-bound` | 2000/2000 | 0.054 | 8.39 ms | 165.8 ms (9) |
+| Bare metal, set B | default (`all`) | 5000/5000 | 0.108 | 18.01 ms | 813.0 ms (18) |
+| Bare metal, set B | `credential-bound` | 5000/5000 | 0.054 | 8.22 ms | 1,930.1 ms (28) |
+
+`credential-bound` used 57% (CI), 54.3% (set A) and 54.4% (set B) less egress CPU per request than `all`, because unbound connections are passed through instead of being decrypted and re-encrypted. Every request's leaf and credential evidence matched its path. Per-request CPU within one environment changed by about 2% between sets A and B. Each set has one load window per leg, so the page reports no confidence interval.
+
+Average load stayed at or below 0.11 cores, below the 500m limit, but CFS throttling occurred in short bursts in every run. The values are CPU time, not request latency, and the load windows do not measure maximum throughput.
+
+The saving depends on the traffic mix. Assuming that a bound request costs the same CPU in both modes, these numbers imply that a passthrough request costs 40–43% of a decrypted request in both environments. A workload whose unbound share is `u` would then save about `u × 57–60%`. This is derived from the 95/5 mix, not measured separately.
+
 ### Recommended budgets
 
 The per-subject default `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` is 32. The process default `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` is 131072, and a separate change proposes lowering it to 32768. At 158–166 KB per held connection, 131072 connections need 20.7–21.7 GB of connection memory, far above the 256Mi, 2Gi and 8Gi egress memory limits considered on this page. The budgets follow from the M3 fits as below.
@@ -291,6 +313,19 @@ The `credential-bound` bound slope matches the 158–166 KB measured in M3. Deri
 | 50% | 164,820 | 99,764 | 61% |
 
 An earlier attempt measured the bound paths in the same egress process right after the unbound paths. Its K = 0 baseline already held the previous path's 4,000 connections' worth of memory, so the slope was underestimated. That attempt is not used.
+
+#### M5 throughput and latency
+
+Closed-loop load from 4 guests: concurrency 1, 16, 64 and 256 in total, a 10-second warmup and a 60-second steady window, 3 repeats per point. The full grid has 288 points: both connection shapes (new connection per request and keep-alive), 0-byte and 64 KiB responses, 5% and 100% bound traffic, and egress CPU limits of 500m and 2 CPUs. The table shows 500m, keep-alive, 0-byte responses and 5% bound traffic, as mean RPS and the mean of p50 and p99 in milliseconds over the 3 repeats:
+
+| Total concurrency | `all` RPS | `all` p50 / p99 | `credential-bound` RPS | `credential-bound` p50 / p99 |
+|---:|---:|---:|---:|---:|
+| 1 | 22.1 | 46.0 / 47.2 | 23.9 | 42.8 / 46.2 |
+| 16 | 115.1 | 119.1 / 213.9 | 368.1 | 42.5 / 90.0 |
+| 64 | 110.3 | 523.7 / 3,338.6 | 1,061.9 | 54.4 / 108.1 |
+| 256 | 77.4 (1,025 errors) | 710.1 / 19,304.8 | 1,028.4 (73 errors) | 189.9 / 406.2 |
+
+In both modes the egress container used its full 0.5 core from concurrency 16 (`all`) or 64 (`credential-bound`) onward, with CFS throttling in almost every period. Over the same windows the client and the origin each used at most about 0.45 core while egress stayed pinned at its limit, so the egress CPU limit is the likely bottleneck. The plateau is about 110–115 RPS for `all` and 1,030–1,060 RPS for `credential-bound`, about nine times as high. At the 2-CPU limit, `all` levelled off at about 230 RPS. `credential-bound` reached about 1,980 RPS at concurrency 256 with no errors and no plateau, so its 2-CPU ceiling was not established. Single-connection latency was 43–46 ms at p50 in both modes; this floor was not investigated.
 
 ## Reproducing
 
