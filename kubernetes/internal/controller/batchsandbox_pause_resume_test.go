@@ -43,6 +43,12 @@ import (
 	taskexecutor "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
+type allocationCheckFunc func(context.Context, *sandboxv1alpha1.BatchSandbox, []string) error
+
+func (f allocationCheckFunc) CheckSandboxAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, pods []string) error {
+	return f(ctx, sandbox, pods)
+}
+
 // newTestReconciler creates a BatchSandboxReconciler with a fake client for testing.
 func newTestReconciler(objs ...client.Object) *BatchSandboxReconciler {
 	fakeClient := fake.NewClientBuilder().
@@ -55,6 +61,7 @@ func newTestReconciler(objs ...client.Object) *BatchSandboxReconciler {
 		WithObjects(objs...).
 		Build()
 	return &BatchSandboxReconciler{
+		AllocationReader:    allocationCheckFunc(func(context.Context, *sandboxv1alpha1.BatchSandbox, []string) error { return nil }),
 		Client:              fakeClient,
 		APIReader:           fakeClient,
 		Scheme:              testscheme,

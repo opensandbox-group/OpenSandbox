@@ -18,11 +18,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
@@ -33,18 +38,20 @@ import (
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	algorithm "github.com/alibaba/OpenSandbox/sandbox-k8s/internal/controller/algorithm"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
+	taskapi "github.com/alibaba/OpenSandbox/sandbox-k8s/pkg/task-executor"
 )
 
 type allocationStore interface {
 	GetAllocation(ctx context.Context, pool *sandboxv1alpha1.Pool) (*poolAllocation, error)
 	SetAllocation(ctx context.Context, pool *sandboxv1alpha1.Pool, allocation *poolAllocation) error
 	ClearAllocation(ctx context.Context, ns string, poolName string) error
-	ReleaseAllocation(ctx context.Context, ns string, poolName string, pods []string)
+	ReleaseAllocation(ctx context.Context, ns string, poolName string, sandboxName string, pods []string)
 	UpdateAllocation(ctx context.Context, ns string, poolName string, sandboxName string, pods []string)
 	// ReleaseSandboxAllocation releases all pods allocated to the given sandbox name.
 	// This is used when a BatchSandbox is deleted and its allocation needs to be cleaned up.
 	ReleaseSandboxAllocation(ctx context.Context, ns string, poolName string, sandboxName string)
 	Recover(ctx context.Context, c client.Client) error
+	OwnsPods(ns, poolName, sandboxName string, pods []string) bool
 }
 
 // poolEntry represents a single pool's allocation data with its own lock for fine-grained concurrency control
@@ -80,6 +87,11 @@ func (store *inMemoryAllocationStore) Recover(ctx context.Context, c client.Clie
 
 	// Build new pools map first without holding the lock
 	newPools := make(map[string]*poolEntry)
+	// Conflicting annotations must recover the same owner regardless of list order.
+	sort.Slice(batchSandboxList.Items, func(i, j int) bool {
+		a, b := batchSandboxList.Items[i], batchSandboxList.Items[j]
+		return a.Namespace+"/"+a.Name < b.Namespace+"/"+b.Name
+	})
 
 	for _, sbx := range batchSandboxList.Items {
 		poolRef := sbx.Spec.PoolRef
@@ -100,9 +112,6 @@ func (store *inMemoryAllocationStore) Recover(ctx context.Context, c client.Clie
 			newPools[key] = entry
 		}
 
-		for _, podName := range allocation.Pods {
-			entry.data[podName] = sbx.Name
-		}
 		// Filter pods that have already been released (alloc-released records completed recycle).
 		// alloc-release (in-progress) pods must NOT be filtered: the recycle handler is still
 		// processing them and they are still "in use" from the pool's perspective.
@@ -111,9 +120,10 @@ func (store *inMemoryAllocationStore) Recover(ctx context.Context, c client.Clie
 			log.Error(err, "Failed to unmarshal sandbox released during recovery", "sandbox", sbx.Name)
 			return err
 		}
-		for _, podName := range allocReleased.Pods {
-			if entry.data[podName] == sbx.Name {
-				delete(entry.data, podName)
+		releasedSet := sets.New(allocReleased.Pods...)
+		for _, podName := range allocation.Pods {
+			if !releasedSet.Has(podName) {
+				entry.data[podName] = sbx.Name
 			}
 		}
 
@@ -160,6 +170,23 @@ func (store *inMemoryAllocationStore) GetAllocation(ctx context.Context, pool *s
 	return alloc, nil
 }
 
+func (store *inMemoryAllocationStore) OwnsPods(ns, poolName, sandboxName string, pods []string) bool {
+	store.poolsMu.RLock()
+	entry := store.pools[store.poolKey(ns, poolName)]
+	store.poolsMu.RUnlock()
+	if entry == nil {
+		return false
+	}
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
+	for _, pod := range pods {
+		if owner, found := entry.data[pod]; !found || owner != sandboxName {
+			return false
+		}
+	}
+	return true
+}
+
 func (store *inMemoryAllocationStore) SetAllocation(ctx context.Context, pool *sandboxv1alpha1.Pool, alloc *poolAllocation) error {
 	entry := store.getOrCreatePool(pool.Namespace, pool.Name)
 
@@ -174,14 +201,16 @@ func (store *inMemoryAllocationStore) SetAllocation(ctx context.Context, pool *s
 	return nil
 }
 
-func (store *inMemoryAllocationStore) ReleaseAllocation(ctx context.Context, ns string, poolName string, pods []string) {
+func (store *inMemoryAllocationStore) ReleaseAllocation(ctx context.Context, ns string, poolName string, sandboxName string, pods []string) {
 	entry := store.getOrCreatePool(ns, poolName)
 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
 	for _, podName := range pods {
-		delete(entry.data, podName)
+		if sandboxName == "" || entry.data[podName] == sandboxName {
+			delete(entry.data, podName)
+		}
 	}
 }
 
@@ -198,7 +227,10 @@ func (store *inMemoryAllocationStore) UpdateAllocation(ctx context.Context, ns s
 	}
 
 	for _, podName := range pods {
-		entry.data[podName] = sandboxName
+		// Stale annotations and rollback must not take a Pod from another sandbox.
+		if _, reserved := entry.data[podName]; !reserved {
+			entry.data[podName] = sandboxName
+		}
 	}
 }
 
@@ -257,7 +289,7 @@ type allocationSyncer interface {
 	SetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, allocation *sandboxAllocation) error
 	GetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (*sandboxAllocation, error)
 	GetRelease(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (*allocationRelease, error)
-	SetReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, released *allocationReleased) error
+	SetReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, released *allocationReleased) (bool, error)
 	GetReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (*allocationReleased, error)
 }
 
@@ -361,19 +393,20 @@ func (syncer *annoAllocationSyncer) GetReleased(ctx context.Context, sandbox *sa
 	return released, nil
 }
 
-func (syncer *annoAllocationSyncer) SetReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, released *allocationReleased) error {
+func (syncer *annoAllocationSyncer) SetReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, released *allocationReleased) (bool, error) {
 	if syncer.apiReader == nil {
-		return fmt.Errorf("uncached API reader is not configured")
+		return false, fmt.Errorf("uncached API reader is not configured")
 	}
 	js, err := json.Marshal(released)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Finalizers are shared with other cleanup controllers. Recompute from the
 	// latest object on every optimistic-lock retry so a stale array cannot
 	// restore a finalizer another controller has already removed. Bypass the
 	// informer cache so every retry can observe the conflicting API write.
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	applied := false
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		latest := &sandboxv1alpha1.BatchSandbox{}
 		if err := syncer.apiReader.Get(ctx, client.ObjectKeyFromObject(sandbox), latest); err != nil {
 			return client.IgnoreNotFound(err)
@@ -400,8 +433,10 @@ func (syncer *annoAllocationSyncer) SetReleased(ctx context.Context, sandbox *sa
 			return client.IgnoreNotFound(err)
 		}
 		latest.DeepCopyInto(sandbox)
+		applied = true
 		return nil
 	})
+	return applied, err
 }
 
 type allocSpec struct {
@@ -410,6 +445,12 @@ type allocSpec struct {
 	Pool      *sandboxv1alpha1.Pool
 	// Pods contains all candidate pods owned by the pool.
 	Pods []*corev1.Pod
+}
+
+type taskAllocationState struct {
+	mu        sync.RWMutex
+	ready     bool
+	sandboxes map[string]types.UID
 }
 
 type Allocator interface {
@@ -426,24 +467,99 @@ type Allocator interface {
 }
 
 type defaultAllocator struct {
-	store       allocationStore
-	syncer      allocationSyncer
-	client      client.Client
-	algorithm   algorithm.Algorithm
-	recoverOnce sync.Once
+	store           allocationStore
+	syncer          allocationSyncer
+	client          client.Client
+	apiReader       client.Reader
+	algorithm       algorithm.Algorithm
+	recoverOnce     sync.Once
+	taskClient      func(*corev1.Pod) *taskapi.Client
+	taskAllocations sync.Map
 }
 
 // NewDefaultAllocator requires an uncached reader for release/finalizer retries.
-func NewDefaultAllocator(c client.Client, apiReader client.Reader) Allocator {
+func NewDefaultAllocator(c client.Client, apiReader client.Reader) *defaultAllocator {
 	return &defaultAllocator{
 		store:     newInMemoryAllocationStore(),
 		syncer:    newAnnoAllocationSyncer(c, apiReader),
 		client:    c,
+		apiReader: apiReader,
 		algorithm: &algorithm.PackedSchedule{},
+		taskClient: func(pod *corev1.Pod) *taskapi.Client {
+			return taskapi.NewClient("http://" + net.JoinHostPort(pod.Status.PodIP, "5758"))
+		},
 	}
 }
 
+func (allocator *defaultAllocator) taskAllocationState(namespace, poolName string) *taskAllocationState {
+	key := namespace + "/" + poolName
+	if state, found := allocator.taskAllocations.Load(key); found {
+		return state.(*taskAllocationState)
+	}
+	state, _ := allocator.taskAllocations.LoadOrStore(key, &taskAllocationState{})
+	return state.(*taskAllocationState)
+}
+
+func (allocator *defaultAllocator) CheckSandboxAllocation(_ context.Context, sandbox *sandboxv1alpha1.BatchSandbox, pods []string) error {
+	state := allocator.taskAllocationState(sandbox.Namespace, sandbox.Spec.PoolRef)
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	if !state.ready {
+		return fmt.Errorf("pool %s allocation is not confirmed yet", sandbox.Spec.PoolRef)
+	}
+	if uid, found := state.sandboxes[sandbox.Name]; !found || uid != sandbox.UID {
+		return fmt.Errorf("sandbox %s allocation identity is not confirmed", sandbox.Name)
+	}
+	if !allocator.store.OwnsPods(sandbox.Namespace, sandbox.Spec.PoolRef, sandbox.Name, pods) {
+		return fmt.Errorf("sandbox %s no longer owns its task pods", sandbox.Name)
+	}
+	return nil
+}
+
+// Confirm the cached recovery input once before authorizing task access.
+// A partially observed set of claims must not select an owner during startup.
+func (allocator *defaultAllocator) confirmRecoveredSandboxes(ctx context.Context, spec *allocSpec) error {
+	sandboxes := &sandboxv1alpha1.BatchSandboxList{}
+	if err := allocator.apiReader.List(ctx, sandboxes, client.InNamespace(spec.Pool.Namespace)); err != nil {
+		return err
+	}
+	cached := make(map[string]*sandboxv1alpha1.BatchSandbox, len(spec.Sandboxes))
+	for _, sandbox := range spec.Sandboxes {
+		cached[sandbox.Name] = sandbox
+	}
+	seen := 0
+	for i := range sandboxes.Items {
+		latest := &sandboxes.Items[i]
+		if latest.Spec.PoolRef != spec.Pool.Name || latest.Spec.Template != nil {
+			continue
+		}
+		observed := cached[latest.Name]
+		if observed == nil || observed.UID != latest.UID || observed.Generation != latest.Generation {
+			return fmt.Errorf("pool %s allocation recovery is waiting for the sandbox cache", spec.Pool.Name)
+		}
+		for _, key := range []string{annoAllocStatusKey, annoAllocReleaseKey, annoAllocReleasedKey} {
+			if observed.Annotations[key] != latest.Annotations[key] {
+				return fmt.Errorf("pool %s allocation recovery is waiting for the sandbox cache", spec.Pool.Name)
+			}
+		}
+		seen++
+	}
+	if seen != len(cached) {
+		return fmt.Errorf("pool %s allocation recovery is waiting for the sandbox cache", spec.Pool.Name)
+	}
+	return nil
+}
+
 func (allocator *defaultAllocator) Schedule(ctx context.Context, spec *allocSpec) (*algorithm.AllocAction, error) {
+	state := allocator.taskAllocationState(spec.Pool.Namespace, spec.Pool.Name)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.sandboxes == nil {
+		if err := allocator.confirmRecoveredSandboxes(ctx, spec); err != nil {
+			return nil, err
+		}
+	}
+
 	log := logf.FromContext(ctx)
 	log.Info("Schedule started", "pool", spec.Pool.Name, "totalPods", len(spec.Pods), "sandboxes", len(spec.Sandboxes))
 	if err := allocator.checkRecovery(ctx); err != nil {
@@ -455,6 +571,48 @@ func (allocator *defaultAllocator) Schedule(ctx context.Context, spec *allocSpec
 	podAllocation, err := allocator.GetPoolAllocation(ctx, spec.Pool)
 	if err != nil {
 		return nil, err
+	}
+
+	claims, err := allocationClaims(ctx, spec.Sandboxes)
+	if err != nil {
+		return nil, err
+	}
+	if state.sandboxes == nil {
+		existing := sets.New[string]()
+		for _, sandbox := range spec.Sandboxes {
+			existing.Insert(sandbox.Name)
+		}
+		recovered := make(map[string]string)
+		for pod, owner := range podAllocation {
+			if !existing.Has(owner) && len(claims[pod]) == 0 {
+				recovered[pod] = owner
+			} // retain orphan cleanup
+		}
+		for pod, claimants := range claims {
+			recovered[pod] = preferredAllocationOwner(claimants, podAllocation[pod])
+		}
+		podAllocation = recovered
+	}
+	// A failed repair must suspend the conflicting claimants without preventing
+	// unrelated, confirmed sandboxes from running or cleaning up their tasks.
+	for _, claimants := range claims {
+		if len(claimants) > 1 {
+			for _, sandbox := range claimants {
+				delete(state.sandboxes, sandbox.Name)
+			}
+		}
+	}
+	if err := allocator.resolveTaskAllocationConflicts(ctx, spec.Pool, claims, podAllocation); err != nil {
+		return nil, err
+	}
+	if err := allocator.store.SetAllocation(ctx, spec.Pool, &poolAllocation{PodAllocation: podAllocation}); err != nil {
+		return nil, err
+	}
+
+	for _, sandbox := range spec.Sandboxes {
+		if err := allocator.repairSandboxAllocation(ctx, sandbox, podAllocation); err != nil {
+			return nil, err
+		}
 	}
 
 	// GC + per-sandbox allocation requests: build SandboxRequests for all existing sandboxes and
@@ -476,7 +634,11 @@ func (allocator *defaultAllocator) Schedule(ctx context.Context, spec *allocSpec
 
 	// Run the allocation algorithm.
 	action := allocator.algorithm.Schedule(availablePods, allRequest)
-
+	state.sandboxes = make(map[string]types.UID, len(spec.Sandboxes))
+	for _, sandbox := range spec.Sandboxes {
+		state.sandboxes[sandbox.Name] = sandbox.UID
+	}
+	state.ready = true
 	return action, nil
 }
 
@@ -490,7 +652,7 @@ func (allocator *defaultAllocator) getAllRequest(ctx context.Context, sandboxes 
 	allRequest := make([]*algorithm.SandboxRequest, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		existingSandboxes[sandbox.Name] = struct{}{}
-		request, err := allocator.getSandboxRequest(ctx, sandbox)
+		request, err := allocator.getSandboxRequest(ctx, sandbox, podAllocation)
 		if err != nil {
 			return nil, err
 		}
@@ -513,7 +675,141 @@ func (allocator *defaultAllocator) getAllRequest(ctx context.Context, sandboxes 
 	return allRequest, nil
 }
 
-func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox) (*algorithm.SandboxRequest, error) {
+// allocationClaims excludes completed handbacks but retains pods still being cleaned up.
+func allocationClaims(ctx context.Context, sandboxes []*sandboxv1alpha1.BatchSandbox) (map[string][]*sandboxv1alpha1.BatchSandbox, error) {
+	claims := make(map[string][]*sandboxv1alpha1.BatchSandbox)
+	syncer := &annoAllocationSyncer{}
+	for _, sandbox := range sandboxes {
+		allocated, err := syncer.GetAllocation(ctx, sandbox)
+		if err != nil {
+			return nil, err
+		}
+		released, err := syncer.GetReleased(ctx, sandbox)
+		if err != nil {
+			return nil, err
+		}
+		for pod := range sets.New(allocated.Pods...).Difference(sets.New(released.Pods...)) {
+			claims[pod] = append(claims[pod], sandbox)
+		}
+	}
+	return claims, nil
+}
+
+func preferredAllocationOwner(claimants []*sandboxv1alpha1.BatchSandbox, current string) string {
+	owner := claimants[0].Name
+	for _, sandbox := range claimants {
+		if sandbox.Name == current {
+			return current
+		}
+		if sandbox.Name > owner {
+			owner = sandbox.Name
+		}
+	}
+	return owner
+}
+
+func (allocator *defaultAllocator) resolveTaskAllocationConflicts(ctx context.Context, pool *sandboxv1alpha1.Pool, claims map[string][]*sandboxv1alpha1.BatchSandbox, owners map[string]string) error {
+	resolved := make(map[string]string)
+	for podName, claimants := range claims {
+		if _, reserved := owners[podName]; !reserved {
+			// Persisted claims can arrive after the one-time store recovery.
+			resolved[podName] = preferredAllocationOwner(claimants, "")
+		}
+		if len(claimants) < 2 {
+			continue
+		}
+		hasTasks := false
+		for _, sandbox := range claimants {
+			hasTasks = hasTasks || sandbox.Spec.TaskTemplate != nil || controllerutil.ContainsFinalizer(sandbox, finalizerTaskCleanup)
+		}
+		if !hasTasks {
+			continue
+		}
+		pod := &corev1.Pod{}
+		if err := allocator.apiReader.Get(ctx, client.ObjectKey{Namespace: pool.Namespace, Name: podName}, pod); err != nil {
+			if client.IgnoreNotFound(err) == nil {
+				continue
+			}
+			return err
+		}
+		if pod.Status.PodIP == "" {
+			return fmt.Errorf("cannot determine task owner for conflicting pod %s: no IP", podName)
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		tasks, err := allocator.taskClient(pod).List(probeCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("read tasks for conflicting pod %s: %w", podName, err)
+		}
+		owner := ""
+		for _, task := range tasks {
+			taskOwner := ""
+			for _, sandbox := range claimants {
+				suffix, ok := strings.CutPrefix(task.Name, sandbox.Name+"-")
+				index, err := strconv.Atoi(suffix)
+				if ok && err == nil && index >= 0 && strconv.Itoa(index) == suffix {
+					taskOwner = sandbox.Name
+					break
+				}
+			}
+			if taskOwner == "" || (owner != "" && owner != taskOwner) {
+				return fmt.Errorf("cannot determine task owner for conflicting pod %s", podName)
+			}
+			owner = taskOwner
+		}
+		if owner != "" {
+			resolved[podName] = owner
+		}
+	}
+	for pod, owner := range resolved {
+		owners[pod] = owner
+	}
+	return nil
+}
+
+func (allocator *defaultAllocator) repairSandboxAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, podAllocation map[string]string) error {
+	allocated, err := allocator.GetSandboxAllocation(ctx, sandbox)
+	if err != nil {
+		return err
+	}
+	conflicting := sets.New[string]()
+	for _, pod := range allocated {
+		if owner, reserved := podAllocation[pod]; reserved && owner != sandbox.Name {
+			conflicting.Insert(pod)
+		}
+	}
+	if conflicting.Len() == 0 {
+		return nil
+	}
+	released, err := allocator.GetSandboxReleased(ctx, sandbox)
+	if err != nil {
+		return err
+	}
+	conflicting = conflicting.Difference(sets.New(released...))
+	if conflicting.Len() == 0 {
+		return nil
+	}
+	retained := make([]string, 0, len(allocated))
+	for _, pod := range allocated {
+		if !conflicting.Has(pod) {
+			retained = append(retained, pod)
+		}
+	}
+	// Repair the reference without recycling the other sandbox's Pod.
+	updated := sandbox.DeepCopy()
+	raw, err := json.Marshal(sandboxAllocation{Pods: retained, PoolRef: sandbox.Spec.PoolRef, Generation: sandbox.Generation})
+	if err != nil {
+		return err
+	}
+	updated.Annotations[annoAllocStatusKey] = string(raw)
+	if err := allocator.client.Patch(ctx, updated, client.MergeFromWithOptions(sandbox, client.MergeFromWithOptimisticLock{})); err != nil {
+		return err
+	}
+	updated.DeepCopyInto(sandbox)
+	return nil
+}
+
+func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, podAllocation map[string]string) (*algorithm.SandboxRequest, error) {
 	allocated, err := allocator.GetSandboxAllocation(ctx, sandbox)
 	if err != nil {
 		return nil, err
@@ -522,7 +818,6 @@ func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbo
 	if err != nil {
 		return nil, err
 	}
-
 	deleting := !sandbox.DeletionTimestamp.IsZero()
 	var release []string
 	if deleting && !controllerutil.ContainsFinalizer(sandbox, finalizerTaskCleanup) {
@@ -538,12 +833,15 @@ func (allocator *defaultAllocator) getSandboxRequest(ctx context.Context, sandbo
 	}
 	releasedSet := sets.New(released...)
 	toRelease := make([]string, 0, len(release))
+	allocatedSet := sets.New(allocated...)
 	for _, pod := range release {
+		if podAllocation[pod] != sandbox.Name || !allocatedSet.Has(pod) {
+			continue
+		}
 		if !releasedSet.Has(pod) {
 			toRelease = append(toRelease, pod)
 		}
 	}
-
 	var supplement int32
 	if !deleting && sandbox.Spec.Replicas != nil {
 		supplement = max(*sandbox.Spec.Replicas-int32(len(allocated)), 0)
@@ -597,16 +895,30 @@ func (allocator *defaultAllocator) GetPoolAllocation(ctx context.Context, pool *
 }
 
 func (allocator *defaultAllocator) ClearPoolAllocation(ctx context.Context, ns string, poolName string) error {
+	state := allocator.taskAllocationState(ns, poolName)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.ready = false
+	state.sandboxes = nil
+
 	return allocator.store.ClearAllocation(ctx, ns, poolName)
 }
 
 func (allocator *defaultAllocator) ReleasePodsAllocation(ctx context.Context, ns string, poolName string, pods []string) {
-	allocator.store.ReleaseAllocation(ctx, ns, poolName, pods)
+	state := allocator.taskAllocationState(ns, poolName)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	allocator.store.ReleaseAllocation(ctx, ns, poolName, "", pods)
 }
 
 // SyncSandboxAllocation updates the in-memory allocation store and then persists to the sandbox annotation.
 // If annotation sync fails, the in-memory store is rolled back to the previous state to maintain consistency.
 func (allocator *defaultAllocator) SyncSandboxAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, pods []string) error {
+	state := allocator.taskAllocationState(sandbox.Namespace, sandbox.Spec.PoolRef)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
 	log := logf.FromContext(ctx)
 	log.Info("Syncing sandbox allocation", "sandbox", sandbox.Name, "pods", pods)
 	poolRef := sandbox.Spec.PoolRef
@@ -616,17 +928,25 @@ func (allocator *defaultAllocator) SyncSandboxAllocation(ctx context.Context, sa
 	if err != nil {
 		return fmt.Errorf("failed to get current sandbox allocation: %w", err)
 	}
+	released, err := allocator.syncer.GetReleased(ctx, sandbox)
+	if err != nil {
+		return fmt.Errorf("failed to get sandbox released pods: %w", err)
+	}
+	releasedSet := sets.New(released.Pods...)
 
 	// Phase 1: update in-memory store optimistically.
-	allocator.store.UpdateAllocation(ctx, sandbox.Namespace, poolRef, sandbox.Name, pods)
+	allocator.store.UpdateAllocation(ctx, sandbox.Namespace, poolRef, sandbox.Name, sets.List(sets.New(pods...).Difference(releasedSet)))
 
 	// Phase 2: persist to sandbox annotation.
 	allocation := &sandboxAllocation{Pods: pods}
 	if err := allocator.syncer.SetAllocation(ctx, sandbox, allocation); err != nil {
 		// Rollback in-memory store to the previous state.
 		log.Error(err, "Rollback sandbox allocation", "sandbox", sandbox.Name, "pods", oldState.Pods)
-		allocator.store.UpdateAllocation(ctx, sandbox.Namespace, poolRef, sandbox.Name, oldState.Pods)
+		allocator.store.UpdateAllocation(ctx, sandbox.Namespace, poolRef, sandbox.Name, sets.List(sets.New(oldState.Pods...).Difference(releasedSet)))
 		return err
+	}
+	if state.sandboxes != nil {
+		state.sandboxes[sandbox.Name] = sandbox.UID
 	}
 	return nil
 }
@@ -635,19 +955,47 @@ func (allocator *defaultAllocator) SyncSandboxAllocation(ctx context.Context, sa
 // Annotation must succeed before the pods are removed from the in-memory store to prevent pods from being
 // re-allocated before the release is durably committed.
 func (allocator *defaultAllocator) SyncSandboxReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, pods []string) error {
+	state := allocator.taskAllocationState(sandbox.Namespace, sandbox.Spec.PoolRef)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
 	log := logf.FromContext(ctx)
 	log.Info("Syncing sandbox released", "sandbox", sandbox.Name, "pods", pods)
 	poolRef := sandbox.Spec.PoolRef
 
 	// Phase 1: persist to sandbox annotation.
 	released := &allocationReleased{Pods: pods}
-	if err := allocator.syncer.SetReleased(ctx, sandbox, released); err != nil {
+	applied, err := allocator.syncer.SetReleased(ctx, sandbox, released)
+	if err != nil {
 		log.Error(err, "Failed to sync sandbox released", "sandbox", sandbox.Name, "pods", pods)
 		return err
 	}
+	if !applied {
+		// A replacement may already own some of these Pods under the same name.
+		latest := &sandboxv1alpha1.BatchSandbox{}
+		if err := allocator.apiReader.Get(ctx, client.ObjectKeyFromObject(sandbox), latest); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
+		} else if latest.Spec.PoolRef == poolRef {
+			allocation, err := allocator.syncer.GetAllocation(ctx, latest)
+			if err != nil {
+				return err
+			}
+			released, err := allocator.syncer.GetReleased(ctx, latest)
+			if err != nil {
+				return err
+			}
+			active := sets.New(allocation.Pods...).Difference(sets.New(released.Pods...))
+			pods = sets.List(sets.New(pods...).Difference(active))
+		}
+		if state.sandboxes[sandbox.Name] == sandbox.UID {
+			delete(state.sandboxes, sandbox.Name)
+		}
+	}
 
-	// Phase 2: release from in-memory store only after the annotation is durably committed.
-	allocator.store.ReleaseAllocation(ctx, sandbox.Namespace, poolRef, pods)
+	// Phase 2: release remaining reservations from the in-memory store.
+	allocator.store.ReleaseAllocation(ctx, sandbox.Namespace, poolRef, sandbox.Name, pods)
 	return nil
 }
 

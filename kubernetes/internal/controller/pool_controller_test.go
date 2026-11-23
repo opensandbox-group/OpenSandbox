@@ -500,6 +500,64 @@ var _ = Describe("Pool allocate", func() {
 			Expect(k8sClient.Delete(ctx, batchSandbox)).To(Succeed())
 		})
 
+		It("I-2: repairs an annotation-only duplicate through the Pool watch", func() {
+			pool := &sandboxv1alpha1.Pool{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, pool)).To(Succeed())
+			basePool := pool.DeepCopy()
+			pool.Spec.CapacitySpec = sandboxv1alpha1.CapacitySpec{PoolMin: 1, PoolMax: 1}
+			Expect(k8sClient.Patch(ctx, pool, kclient.MergeFrom(basePool))).To(Succeed())
+			owner := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "watch-owner-", Namespace: pool.Namespace},
+				Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name, Replicas: ptr.To(int32(1))},
+			}
+			loser := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "watch-contender-", Namespace: pool.Namespace},
+				Spec:       sandboxv1alpha1.BatchSandboxSpec{PoolRef: pool.Name, Replicas: ptr.To(int32(0))},
+			}
+			for _, sandbox := range []*sandboxv1alpha1.BatchSandbox{owner, loser} {
+				Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+				DeferCleanup(func() { Expect(kclient.IgnoreNotFound(k8sClient.Delete(ctx, sandbox))).To(Succeed()) })
+			}
+			var podName string
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(owner), owner)).To(Succeed())
+				allocation, err := getSandboxAllocation(owner)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(allocation.Pods).To(HaveLen(1))
+				podName = allocation.Pods[0]
+				g.Expect(owner.Status.Ready).To(Equal(int32(1)))
+				g.Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(loser), loser)).To(Succeed())
+				g.Expect(loser.Status.ObservedGeneration).To(Equal(loser.Generation))
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, pool)).To(Succeed())
+				g.Expect(pool.Status.ObservedGeneration).To(Equal(pool.Generation))
+				g.Expect(pool.Status.Total).To(Equal(int32(1)))
+				g.Expect(pool.Status.Allocated).To(Equal(int32(1)))
+			}, timeout, 100*time.Millisecond).Should(Succeed())
+			// Let any earlier scale retry drain before injecting an annotation-only update.
+			version := pool.ResourceVersion
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, pool)).To(Succeed())
+				g.Expect(pool.ResourceVersion).To(Equal(version))
+			}, defaultRetryTime+time.Second, 100*time.Millisecond).Should(Succeed())
+			Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(loser), loser)).To(Succeed())
+			before := loser.DeepCopy()
+			setSandboxAllocation(loser, sandboxAllocation{Pods: []string{podName}})
+			Expect(k8sClient.Patch(ctx, loser, kclient.MergeFrom(before))).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(loser), loser)).To(Succeed())
+				allocation, err := getSandboxAllocation(loser)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(allocation.Pods).To(BeEmpty())
+			}, timeout, 100*time.Millisecond).Should(Succeed())
+			pod := &v1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: pool.Namespace, Name: podName}, pod)).To(Succeed())
+			Expect(pod.DeletionTimestamp.IsZero()).To(BeTrue())
+			Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(owner), owner)).To(Succeed())
+			allocation, err := getSandboxAllocation(owner)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(allocation.Pods).To(Equal([]string{podName}))
+		})
+
 		It("should keep the idle buffer within BufferMax after an allocated pod is deleted", func() {
 			batchSandbox := &sandboxv1alpha1.BatchSandbox{
 				ObjectMeta: metav1.ObjectMeta{

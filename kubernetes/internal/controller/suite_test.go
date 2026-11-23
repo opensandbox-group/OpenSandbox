@@ -95,7 +95,9 @@ var _ = BeforeSuite(func() {
 	Expect(fieldindex.RegisterFieldIndexes(k8sManager.GetCache())).Should(Succeed(), "failed to register fieldindex")
 
 	By("setup reconciler")
+	poolAllocator := NewDefaultAllocator(k8sManager.GetClient(), k8sManager.GetAPIReader())
 	Expect((&BatchSandboxReconciler{
+		AllocationReader:    poolAllocator,
 		Client:              k8sManager.GetClient(),
 		Scheme:              k8sManager.GetScheme(),
 		Recorder:            k8sManager.GetEventRecorderFor("test-batch-sandbox-controller"),
@@ -105,7 +107,7 @@ var _ = BeforeSuite(func() {
 		Client:     k8sManager.GetClient(),
 		Scheme:     k8sManager.GetScheme(),
 		Recorder:   k8sManager.GetEventRecorderFor("test-pool-controller"),
-		Allocator:  NewDefaultAllocator(k8sManager.GetClient(), k8sManager.GetAPIReader()),
+		Allocator:  poolAllocator,
 		RestConfig: cfg,
 	}).SetupWithManager(k8sManager, 128)).Should(Succeed())
 
