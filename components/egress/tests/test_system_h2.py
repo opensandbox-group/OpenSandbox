@@ -43,7 +43,7 @@ HOST = "bound.example.com"
 SECRET = "synthetic-h2-old-value"
 
 
-def install(receiver, epoch=1, secret=SECRET, removed=False):
+def install(receiver, epoch=1, secret=SECRET, removed=False, exchange=False):
     bindings = (
         []
         if removed
@@ -60,6 +60,8 @@ def install(receiver, epoch=1, secret=SECRET, removed=False):
             }
         ]
     )
+    if exchange:
+        bindings[0].update(headers=[], substitutions=[], exchange={"credential": "spi-signer"})
     payload = json.dumps(
         {
             "version": 1,
@@ -69,7 +71,7 @@ def install(receiver, epoch=1, secret=SECRET, removed=False):
             "state": "active-empty" if removed else "active",
             "tlsBindingHostSelectors": [] if removed else [HOST],
             "fullRenderedBindings": bindings,
-            "redactions": [] if removed else [secret],
+            "redactions": [] if removed or exchange else [secret],
         },
         separators=(",", ":"),
     ).encode()
@@ -204,6 +206,24 @@ class SystemH2Hooks(unittest.TestCase):
         flow.request.data.host = "203.0.113.42"
         self.adapter.observe(flow, sid, headers)
         return flow
+
+    def test_exchange_awaits_resolve_on_admitted_h2_stream(self):
+        revision = install(self.receiver, epoch=2, exchange=True)
+        flow = self.flow()
+        def resolve(socket, timeout, path, payload):
+            self.assertIn("admission=", path)
+            self.assertNotIn("clientIp", path)
+            self.assertEqual(payload["request"]["host"], HOST)
+            return dict(revision=2, binding="synthetic",
+                        headers=[dict(name="Authorization", value="h2-resolved")],
+                        redactions=["h2-resolved"], suppressHeaders=["authorization"])
+        with patch.object(system, "_resolve_exchange_http", side_effect=resolve) as rpc:
+            system.requestheaders(flow)
+        rpc.assert_called_once()
+        self.assertEqual(flow.request.headers["authorization"], "h2-resolved")
+        self.assertEqual(flow.metadata[system.FLOW_REQUEST_HANDLE_KEY].revision, revision)
+        system.response(flow)
+        self.assertEqual(self.adapter.done, [flow])
 
     def test_single_admission_pins_snapshot_and_response_redaction(self):
         flow = self.flow()

@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -814,4 +816,46 @@ func TestRevisionVaultMutationIPCChildOversizedSnapshotKeepsSession(t *testing.T
 			}
 		})
 	}
+}
+
+// Exercise the sibling sidecar path with a real ProcessSession and receiver.
+func TestRevisionExchangeResolveAdmission(t *testing.T) {
+	t.Setenv(constants.EnvSandboxID, "sidecar-sandbox")
+	s := revisionIntegrationServer(t)
+	s.credentialVault.SetResolverConfig(credentialvault.ResolverConfig{TimeoutConfigured: true})
+	m, child, _ := revisionIntegrationLaunchConfig(t, s, func(cfg *revisionruntime.ProcessSessionConfig) {
+		cfg.LiveAdmission, cfg.TLSCapacity, cfg.RequestCapacity, cfg.DrainTimeoutSeconds = true, 64, 256, 1
+	})
+	// Remove the close-observation wrapper so this test uses the concrete
+	// production session's local Coordinator method as resolveVaultAccess does.
+	m.revisionSession = m.revisionSession.(*revisionObservedSession).revisionProcessSession
+	s.setRevisionMitm(m)
+	resolver := startFakeResolverServer(t, 0)
+	var body credentialvault.CreateRequest
+	require.NoError(t, json.Unmarshal([]byte(exchangeVaultBody(resolver.endpoint())), &body))
+	_, err := s.mutateRevisionVault(mutationContext(t), m, func(store *credentialvault.Store, pol *policy.NetworkPolicy) (*credentialvault.MutationCandidate, error) {
+		return store.PrepareCreate(body, pol)
+	})
+	require.NoError(t, err)
+	report := child.exchange(t, map[string]string{"command": "inspect"})
+	require.NotNil(t, report.Active)
+	admission := credentialvault.ResolveAdmission{Revision: *report.Active}
+	raw, err := json.Marshal(admission)
+	require.NoError(t, err)
+	handler := credentialvault.NewResolveHandler(s.resolveVaultAccess)
+	req := exchangeResolveRequest(testIP)
+	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "sidecar-sandbox", (<-resolver.requests).Subject)
+	admission.Revision.ControlGeneration = "retired-child"
+	raw, err = json.Marshal(admission)
+	require.NoError(t, err)
+	req = exchangeResolveRequest(testIP)
+	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusConflict, rec.Code)
+	require.Empty(t, resolver.requests)
 }

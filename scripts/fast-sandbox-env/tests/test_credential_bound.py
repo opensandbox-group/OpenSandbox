@@ -289,7 +289,7 @@ class StageGateTest(ShellCase):
         self.assertFalse(any("rootfs_only_verify" in l for l in off))
         self.assertFalse(any("rootfs-only snapshot verify (native template" in l for l in off))
 
-    def test_credential_bound_registers_both_lanes_and_blocks_exchange(self):
+    def test_credential_bound_registers_both_lanes_and_runs_exchange(self):
         off = self.lanes("")
         cb = self.lanes("credential-bound")
         cb_runs = [l for l in cb if "credential_bound_verify" in l]
@@ -300,16 +300,12 @@ class StageGateTest(ShellCase):
         # the one real implementation is sourced for each lane; no placeholder
         self.assertEqual([l for l in cb if l.startswith("SOURCE|")],
                          ["SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh"] * 2)
-        # every other blocked/announced line belongs to the exchange gate.
-        others = [l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))]
-        self.assertEqual(others, [
-            "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
-            "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
-        ])
-        self.assertFalse(any("exchange_resolver_verify" in l or "NOT_RUN" in l for l in cb))
+        self.assertEqual([l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))], ["UNVERIFIED|"])
+        self.assertTrue(any("exchange_resolver_verify" in l for l in cb))
+        self.assertFalse(any("NOT_RUN" in l for l in cb))
         # every other off-mode stage is still registered, in order
         kept = [l for l in cb if l.startswith("RUN|") and "credential_bound_verify" not in l]
-        self.assertEqual(kept, [l for l in off if l.startswith("RUN|") and "exchange_resolver_verify" not in l])
+        self.assertEqual(kept, [l for l in off if l.startswith("RUN|")])
 
 
 GATE = r'''
@@ -365,15 +361,13 @@ class StageSummaryTest(ShellCase):
             self.assertNotIn("not verified", out)
             self.assertNotIn("BLOCKED", out)
 
-    def test_credential_bound_blocks_without_ok(self):
+    def test_credential_bound_runs_exchange(self):
         for script in (ENV_SH, LIB_SH):
             out, err = self.gate("credential-bound", script)
-            self.assertNotIn("EXCHANGE-RAN", out)
-            self.assertIn("BLOCKED: exchange under credential-bound (see I1)", err)
-            head, _, tail = out.partition("== not verified (excluded from the stages above) ==")
-            self.assertIn("BLOCKED: exchange under credential-bound (see I1)", tail)
-            self.assertNotIn("ORDER|exchange", out)
-            self.assertEqual(out.count("OK in"), 1)  # only "other stage"
+            self.assertIn("EXCHANGE-RAN tpl=tpl-oci", out)
+            self.assertNotIn("BLOCKED", out + err)
+            self.assertIn("ORDER|exchange", out)
+            self.assertEqual(out.count("OK in"), 2)
 
     def test_credential_bound_item_is_a_real_stage(self):
         # Only the verifier body is replaced (after the real file is sourced);
@@ -405,9 +399,55 @@ class StageSummaryTest(ShellCase):
         off = self.sourced(body, script=VAULT_SH, EGRESS_INTERCEPTION_MODE="")
         self.assertIn("EXCHANGE-RAN", off.stdout)
         cb = self.sourced(body, script=VAULT_SH, EGRESS_INTERCEPTION_MODE="credential-bound")
-        self.assertNotIn("EXCHANGE-RAN", cb.stdout)
-        self.assertNotIn("OK in", cb.stdout)
-        self.assertIn("BLOCKED: exchange under credential-bound (see I1)", cb.stderr)
+        self.assertIn("EXCHANGE-RAN", cb.stdout)
+        self.assertIn("OK in", cb.stdout)
+        self.assertNotIn("BLOCKED", cb.stdout + cb.stderr)
+
+class ExchangeOutageTest(ShellCase):
+    def test_exchange_probe_preserves_command_stderr(self):
+        stub = os.path.join(self.tmp, "curl")
+        with open(stub, "w") as handle:
+            handle.write('#!/bin/sh\nprintf "000"\nexit 28\n')
+        os.chmod(stub, 0o755)
+        body = r'''
+VERIFY_ID=subject
+osb_api() { echo 'osb diagnostic marker' >&2; shift 4; "$@"; }
+exchange_vault_fails_closed || :
+'''
+        for script in (VAULT_SH, ENV_SH):
+            with self.subTest(script=script):
+                self.sourced(body, script=script, EGRESS_INTERCEPTION_MODE="credential-bound",
+                             PATH=self.tmp + os.pathsep + os.environ["PATH"])
+                with open(os.path.join(self.work, "logs", "exchange-guest-curl.err")) as log:
+                    self.assertIn("osb diagnostic marker", log.read())
+
+    def test_only_reply_or_reset_counts_as_subject_outage(self):
+        stub = os.path.join(self.tmp, "curl")
+        with open(stub, "w") as handle:
+            handle.write('#!/bin/sh\nprintf "%s" "$MOCK_STATUS"\nexit "$MOCK_RC"\n')
+        os.chmod(stub, 0o755)
+        body = r'''
+VERIFY_ID=subject
+osb_api() { shift 4; "$@"; }
+if exchange_vault_fails_closed; then echo DENIED; else echo NOT_DENIED; fi
+'''
+        for script in (VAULT_SH, ENV_SH):
+            for mode, cases in (
+                ("credential-bound", (("000", "52", "DENIED"), ("000", "56", "DENIED"),
+                                      ("000", "28", "NOT_DENIED"), ("000", "7", "NOT_DENIED"),
+                                      ("200", "0", "NOT_DENIED"), ("407", "0", "NOT_DENIED"))),
+                ("all", (("407", "0", "DENIED"), ("000", "52", "NOT_DENIED"))),
+            ):
+                for status, rc, expected in cases:
+                    with self.subTest(script=script, mode=mode, status=status, rc=rc):
+                        result = self.sourced(body, script=script, EGRESS_INTERCEPTION_MODE=mode,
+                                              PATH=self.tmp + os.pathsep + os.environ["PATH"],
+                                              MOCK_STATUS=status, MOCK_RC=rc)
+                        self.assertEqual(result.stdout.strip(), expected)
+                        if mode == "credential-bound" and expected == "NOT_DENIED":
+                            with open(os.path.join(self.work, "logs", "exchange-guest-curl.err")) as log:
+                                self.assertIn("http_code=%s curl_rc=%s" % (status, rc), log.read())
+
 
 class ReportingTest(ShellCase):
     def test_mode_in_summary_and_failure_dump(self):
