@@ -6,11 +6,93 @@ package nftables
 import (
 	"context"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
 )
+
+func TestApplyStatic_NamedHostFollowsItsEffectiveTCPVerdict(t *testing.T) {
+	const whole = `{"action":"allow","target":"192.0.2.10"}`
+	const scoped = `{"action":"allow","target":"192.0.2.10/32","ports":[8443]}`
+	const deny443 = `{"action":"deny","target":"192.0.2.0/24","ports":[443]}`
+	const denyCIDR = `{"action":"deny","target":"192.0.2.0/24"}`
+	const allow8443 = `{"action":"allow","ports":[8443]}`
+	addr := netip.MustParseAddr("192.0.2.10")
+	ctx := context.Background()
+	for _, named := range []struct{ name, rule string }{{"whole", whole}, {"scoped", scoped}} {
+		for _, stage := range []string{"old", "opt-in", "plain"} {
+			for _, block := range []struct{ name, action, rule string }{
+				{"scoped-deny", "allow", deny443}, {"whole-deny", "allow", denyCIDR}, {"catch-all", "deny", allow8443},
+			} {
+				t.Run(named.name+"/"+stage+"/"+block.name, func(t *testing.T) {
+					makePolicy := func(action, when string, rules ...string) *policy.NetworkPolicy {
+						if when == stage {
+							rules = append(rules, named.rule)
+						}
+						return mustPolicy(t, `{"defaultAction":"`+action+`","egress":[`+strings.Join(rules, ",")+`]}`)
+					}
+					m, _ := recordingManager()
+					_, err := m.ApplyStaticComputingEstablishedDrops(ctx, makePolicy("allow", "old"), makePolicy(block.action, "opt-in", block.rule))
+					require.NoError(t, err)
+					// Only a whole-address allow present at opt-in can spare 443 from the catch-all.
+					blocked := !(block.name == "catch-all" && stage == "opt-in" && named.rule == whole)
+					require.Equal(t, blocked, m.lastDrops.MatchesFlow(addr, 443))
+					require.Equal(t, block.name == "whole-deny", m.lastDrops.MatchesFlow(addr, 8443))
+
+					// Remove the original source of teardown, then the replacement rule too.
+					// The first reload permits 8443; the second permits no new connections.
+					for _, next := range []*policy.NetworkPolicy{makePolicy("allow", "plain", deny443), policy.DefaultDenyPolicy()} {
+						require.NoError(t, m.ApplyStatic(ctx, next))
+						require.Equal(t, blocked, m.lastDrops.MatchesFlow(addr, 443), "retain only the previously blocked port")
+						require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "plain reload must not cut an admitted port")
+					}
+					require.NoError(t, m.ApplyStatic(ctx, makePolicy("allow", "")))
+					require.NoError(t, m.ApplyStatic(ctx, policy.DefaultDenyPolicy()))
+					require.False(t, m.lastDrops.MatchesFlow(addr, 443), "a genuine reallow retires the old block")
+				})
+			}
+		}
+	}
+}
+
+func TestApplyStatic_LaterHostAllowsSpareOnlyTheirUnion(t *testing.T) {
+	ctx := context.Background()
+	addr := netip.MustParseAddr("192.0.2.10")
+	m, _ := recordingManager()
+	old := mustPolicy(t, `{"defaultAction":"allow"}`)
+	first := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","ports":[80,81,82,83,84]}]}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
+	require.NoError(t, err)
+	partial := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.10","ports":[82,84]},{"action":"allow","target":"192.0.2.10/32","ports":[80,82]}]}`)
+	for _, p := range []*policy.NetworkPolicy{partial, policy.DefaultDenyPolicy()} {
+		require.NoError(t, m.ApplyStatic(ctx, p))
+		for port := 80; port <= 84; port++ {
+			require.Equal(t, port == 81 || port == 83, m.lastDrops.MatchesFlow(addr, port), "port %d", port)
+		}
+	}
+}
+
+func BenchmarkCaptureExactTCPRemovedDNS(b *testing.B) {
+	p := policy.DefaultDenyPolicy()
+	for _, count := range []int{1024, 4096, 8192} {
+		b.Run(strconv.Itoa(count), func(b *testing.B) {
+			ips := make([]netip.Addr, count)
+			for i := range ips {
+				ips[i] = netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
+			}
+			history := map[string][]netip.Addr{"removed.example": ips}
+			base := ComputeEstablishedDrops(nil, p, history)
+			b.ReportAllocs()
+			for b.Loop() {
+				d := base
+				d.captureExactTCP(nil, p, nil)
+			}
+		})
+	}
+}
 
 func TestApplyStatic_KeepsExactWithdrawalsAcrossBroadCoverage(t *testing.T) {
 	const host = `{"action":"allow","target":"192.0.2.10"}`
