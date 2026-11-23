@@ -28,6 +28,8 @@ limitations under the License.
   .verdict.v-fail (red).
   Verdict & severity badges: b-pass ✓, b-part △, b-fail ✗, b-crit, b-high, b-med,
   b-low, b-warn, b-info — set the class and glyph to match each row.
+  Key emphasis: use <strong> for key conclusions/metrics and <strong class="hl-red">
+  for breaking changes, failures, blocking risks, or merge conditions (sparingly).
   Escape untrusted values (PR title, author, branch names, commit subjects, quoted
   body text, command output) before substitution; <pre> escapes nothing by itself.
   Length limits: a card row is at most 2 lines, a finding at most 2 lines, and the
@@ -202,6 +204,10 @@ limitations under the License.
   .b-med { color: var(--med); background: var(--med-bg); border-color: var(--med-bd); }
   .b-fail, .b-high, .b-crit { color: var(--fail); background: var(--fail-bg); border-color: var(--fail-bd); }
   .b-info { color: var(--info); background: var(--info-bg); border-color: var(--info-bd); }
+
+  /* Key information emphasis */
+  strong { color: var(--fg); font-weight: 650; }
+  .hl-red { color: var(--fail); font-weight: 650; }
 
   /* Value Card: structured label/value grid for low visual density */
   .card {

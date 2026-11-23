@@ -155,7 +155,7 @@ Concise, professional, human-readable. Verdict first, value second. Structure:
 4. **验证记录 / Verification log** — table of what ran where, PASS/FAIL, with unrun items marked ⚠️
 5. **证据 / Evidence** (optional; collapsed in HTML) — base-reproduction output, mechanism traces, edge-case / bypass / concurrency reasoning, kept only when a card row or a finding depends on it
 
-Writing rules: short sentences, one line per bullet, every code reference exact. A card row is at most 2 lines and a finding at most 2 lines. Edge cases that pass are counted in one verification-log row ("边界 / 并发推理 6 项已核对") — only failures and surprises are written out. Nothing repeats what the card says. When the user asks for bilingual output, provide Chinese and English versions per section (or a toggleable HTML, below).
+Writing rules: short sentences, one line per bullet, every code reference exact. A card row is at most 2 lines and a finding at most 2 lines. Edge cases that pass are counted in one verification-log row ("边界 / 并发推理 6 项已核对") — only failures and surprises are written out. Nothing repeats what the card says. Emphasize key information so a reader scanning the report catches it immediately: **bold** key conclusions, decisive evidence, and measured numbers (`**...**` in Markdown, `<strong>` in HTML), and highlight breaking changes, failures, blocking risks, or merge conditions in **red** (`<strong class="hl-red">` in HTML; bold with an explicit marker like `**⚠️ ...**` / `**❌ ...**` in Markdown) — use emphasis sparingly so it stays scannable. When the user asks for bilingual output, provide Chinese and English versions per section (or a toggleable HTML, below).
 
 ### Step 7: HTML report with language toggle (default)
 
@@ -164,7 +164,7 @@ Always close the review by generating the standalone `${TMPDIR:-/tmp}/pr-<N>-rev
 - Start from `templates/report.html` in this skill's directory: it carries the toggle, the styling, the value card (one block per PR type, each ending in `测试覆盖`) and the collapsed evidence block. Keep sections 1–3 in order and the evidence section only when needed, delete the card blocks and rows that do not apply, and fill the placeholders under the Step 6 length limits — the default-language view must fit in about two screens before the verification log.
 - Escaping: the PR title, author, branch names, commit subjects, quoted body text, findings and command output are untrusted — HTML-escape `<`, `>`, `&`, `"`, `'` in every substitution (inside `<pre>` blocks too, which escape nothing by themselves); never paste markup from the PR into the report.
 - Toggle mechanism: `html[data-lang]` attribute + CSS `html[data-lang="zh"] .en { display:none !important }` (and vice versa); every translatable element carries `class="zh"` / `class="en"`; choice persisted in `localStorage`; default `zh`.
-- Styling: CSS custom properties + `prefers-color-scheme` for dark mode; severity badges (LOW amber, PASS green); `file:line` as inline code chips; the value card as a highlighted grid right under the banner; no external dependencies, single file.
+- Styling: CSS custom properties + `prefers-color-scheme` for dark mode; severity badges (LOW amber, PASS green); `file:line` as inline code chips; `<strong>` for key facts/metrics and `<strong class="hl-red">` for breaking changes, failures, or blocking risks; the value card as a highlighted grid right under the banner; no external dependencies, single file.
 
 ## Severity definitions
 
