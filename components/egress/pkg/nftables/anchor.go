@@ -166,6 +166,19 @@ func SnapshotTable(ctx context.Context, run ReadbackRunner, family, table string
 	if !present {
 		return TableReadback{}, fmt.Errorf("captured table %s %s vanished before it was anchored", family, table)
 	}
+	// The two reads above are separate nft invocations: a privileged writer
+	// that rewrites the table between them would leave readback pairing JSON
+	// from one version with text from another — an impossible state no later
+	// restore could ever confirm. Verify the assembled snapshot through the
+	// full shared verifier (a fresh JSON listing plus fresh text) and reject
+	// a capture whose two views no longer agree.
+	present, err = VerifyTable(ctx, run, readback)
+	if err != nil {
+		return TableReadback{}, fmt.Errorf("captured table %s %s changed while it was captured: %w", family, table, err)
+	}
+	if !present {
+		return TableReadback{}, fmt.Errorf("captured table %s %s vanished before it was anchored", family, table)
+	}
 	return readback, nil
 }
 
@@ -279,6 +292,7 @@ type AnchorLedger struct {
 	now            func() time.Time
 	maxFailures    int
 	onUnrestorable func(TableEnforcement)
+	recordDrift    func(family, table string)
 }
 
 // NewAnchorLedger returns an empty ledger verifying through run.
@@ -288,6 +302,7 @@ func NewAnchorLedger(run ReadbackRunner) *AnchorLedger {
 		anchors:     map[anchorKey]*anchorState{},
 		now:         time.Now,
 		maxFailures: defaultEnforcementMaxRestoreFailures,
+		recordDrift: telemetry.RecordEnforcementDrift,
 	}
 }
 
@@ -467,8 +482,17 @@ func (l *AnchorLedger) reconcileTable(ctx context.Context, key anchorKey) {
 	if err != nil {
 		var mismatch *ReadbackMismatch
 		if errors.As(err, &mismatch) {
+			// A normal lifecycle change (a subject registering or
+			// unregistering re-anchored the table mid-read) legitimately
+			// invalidates this observation; that churn is not drift and must
+			// not surface as a security alert. The re-check happens here, as
+			// close to the signal as possible; restore re-checks again before
+			// acting.
+			if !l.epochCurrent(key, epoch) {
+				return
+			}
 			log.Warnf("egress enforcement: table %s %s drifted: %v", key.family, key.table, err)
-			telemetry.RecordEnforcementDrift(key.family, key.table)
+			l.recordDrift(key.family, key.table)
 			l.restore(ctx, key, epoch, anchor, err)
 			return
 		}
@@ -478,8 +502,13 @@ func (l *AnchorLedger) reconcileTable(ctx context.Context, key anchorKey) {
 		return
 	}
 	if !present {
+		// Same epoch guard as the mismatch case: a table deliberately
+		// unregistered (anchor dropped) mid-read is churn, not drift.
+		if !l.epochCurrent(key, epoch) {
+			return
+		}
 		log.Warnf("egress enforcement: table %s %s is absent; restoring", key.family, key.table)
-		telemetry.RecordEnforcementDrift(key.family, key.table)
+		l.recordDrift(key.family, key.table)
 		l.restore(ctx, key, epoch, anchor, errors.New("table is absent"))
 		return
 	}

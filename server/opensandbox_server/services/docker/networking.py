@@ -51,6 +51,7 @@ from opensandbox_server.services.endpoint_auth import (
     merge_endpoint_headers,
 )
 from opensandbox_server.services.helpers import (
+    enforcement_egress_env,
     forward_mode_egress_env,
     upstream_proxy_egress_env,
 )
@@ -533,6 +534,11 @@ class DockerNetworkingMixin:
         ).items():
             sidecar_env.append(f"{key}={value}")
         for key, value in forward_mode_egress_env(self.app_config.egress).items():
+            sidecar_env.append(f"{key}={value}")
+        for key, value in enforcement_egress_env(
+            self.app_config.egress.enforcement,
+            self.app_config.egress.redirect_backend,
+        ).items():
             sidecar_env.append(f"{key}={value}")
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")

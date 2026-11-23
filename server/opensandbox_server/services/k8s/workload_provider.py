@@ -32,7 +32,10 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
     Volume,
 )
-from opensandbox_server.config import EgressUpstreamProxyConfig
+from opensandbox_server.config import (
+    EgressEnforcementConfig,
+    EgressUpstreamProxyConfig,
+)
 from opensandbox_server.services.constants import SandboxErrorCodes
 
 if TYPE_CHECKING:
@@ -57,6 +60,8 @@ class EgressWorkloadSettings:
     dns_upstreams: Optional[List[str]] = None
     sandbox_namespace: Optional[str] = None
     tenant_name: Optional[str] = None
+    redirect_backend: Optional[str] = None
+    enforcement: Optional[EgressEnforcementConfig] = None
 
 
 class WorkloadProvider(ABC):

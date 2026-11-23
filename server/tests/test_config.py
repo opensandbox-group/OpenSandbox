@@ -26,6 +26,7 @@ from opensandbox_server.config import (
     EGRESS_MODE_DNS,
     EGRESS_MODE_DNS_NFT,
     EgressConfig,
+    EgressEnforcementConfig,
     EgressUpstreamProxyConfig,
     ExecdInitResources,
     GatewayConfig,
@@ -1472,6 +1473,96 @@ def test_egress_upstream_proxy_authorization_is_secret():
     )
     assert "s3cr3t-value" not in repr(cfg)
     assert "s3cr3t-value" not in str(cfg)
+
+
+def test_egress_enforcement_defaults_and_bounds():
+    cfg = EgressConfig(image="opensandbox/egress:v1")
+    assert cfg.redirect_backend is None
+    assert cfg.enforcement is None
+
+    configured = EgressConfig(
+        image="opensandbox/egress:v1",
+        redirect_backend="nft",
+        enforcement=EgressEnforcementConfig(),
+    )
+    assert configured.redirect_backend == "nft"
+    assert configured.enforcement is not None
+    assert configured.enforcement.reconcile is False
+    assert configured.enforcement.reconcile_interval_seconds == 60
+    assert configured.enforcement.max_restore_failures == 3
+
+    with pytest.raises(ValidationError):
+        EgressConfig(image="opensandbox/egress:v1", redirect_backend="iptables6")
+    with pytest.raises(ValidationError):
+        EgressEnforcementConfig(reconcile_interval_seconds=0)
+    with pytest.raises(ValidationError):
+        EgressEnforcementConfig(reconcile_interval_seconds=3601)
+    with pytest.raises(ValidationError):
+        EgressEnforcementConfig(max_restore_failures=0)
+    with pytest.raises(ValidationError):
+        EgressEnforcementConfig(max_restore_failures=101)
+
+
+def test_load_config_parses_egress_enforcement(tmp_path, monkeypatch):
+    _reset_config(monkeypatch)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            [runtime]
+            type = "docker"
+            execd_image = "opensandbox/execd:test"
+
+            [egress]
+            image = "opensandbox/egress:test"
+            mode = "dns+nft"
+            redirect_backend = "nft"
+
+            [egress.enforcement]
+            reconcile = true
+            reconcile_interval_seconds = 30
+            max_restore_failures = 4
+            """
+        )
+    )
+
+    loaded = config_module.load_config(config_path)
+    assert loaded.egress is not None
+    assert loaded.egress.redirect_backend == "nft"
+    assert loaded.egress.enforcement is not None
+    assert loaded.egress.enforcement.reconcile is True
+    assert loaded.egress.enforcement.reconcile_interval_seconds == 30
+    assert loaded.egress.enforcement.max_restore_failures == 4
+
+
+def test_enforcement_egress_env_injects_only_configured_controls():
+    from opensandbox_server.services.helpers import enforcement_egress_env
+
+    assert enforcement_egress_env(None, None) == {}
+
+    env = enforcement_egress_env(
+        EgressEnforcementConfig(
+            reconcile=True,
+            reconcile_interval_seconds=120,
+            max_restore_failures=5,
+        ),
+        "nft",
+    )
+    assert env == {
+        "OPENSANDBOX_EGRESS_REDIRECT_BACKEND": "nft",
+        "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE": "true",
+        "OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC": "120",
+        "OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES": "5",
+    }
+
+    assert enforcement_egress_env(None, "iptables") == {
+        "OPENSANDBOX_EGRESS_REDIRECT_BACKEND": "iptables"
+    }
+
+    disabled = enforcement_egress_env(EgressEnforcementConfig(), None)
+    assert disabled["OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE"] == "false"
+    assert disabled["OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC"] == "60"
+    assert disabled["OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES"] == "3"
 
 
 def test_egress_upstream_proxy_defaults_to_none():

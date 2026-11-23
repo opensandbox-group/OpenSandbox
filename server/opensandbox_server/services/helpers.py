@@ -41,9 +41,13 @@ from opensandbox_server.services.constants import (
     EGRESS_ENV_PREFIX,
     EGRESS_UPSTREAM_EXTRA_CA_PATH,
     OPENSANDBOX_EGRESS_DNS_UPSTREAM,
+    OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES,
+    OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE,
+    OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC,
     OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA,
+    OPENSANDBOX_EGRESS_REDIRECT_BACKEND,
     OPENSANDBOX_EGRESS_UPSTREAM_PROXY,
     OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH,
     OPEN_SANDBOX_INGRESS_HEADER,
@@ -55,6 +59,7 @@ from opensandbox_server.config import (
     GATEWAY_ROUTE_MODE_WILDCARD,
     INGRESS_MODE_GATEWAY,
     EgressConfig,
+    EgressEnforcementConfig,
     EgressUpstreamProxyConfig,
     IngressConfig,
 )
@@ -395,6 +400,34 @@ def validate_forward_identity_value(name: str, value: Optional[str]) -> Optional
     return value
 
 
+def enforcement_egress_env(
+    enforcement: Optional[EgressEnforcementConfig],
+    redirect_backend: Optional[str],
+) -> Dict[str, str]:
+    """Env entries injected into the egress sidecar for the configured
+    [egress.enforcement] / [egress.redirect_backend]. Empty when neither is
+    configured.
+
+    Server-side only, like upstream_proxy_egress_env: the same names in
+    request env are rejected, because they toggle a security control and the
+    kernel enforcement backend.
+    """
+    env: Dict[str, str] = {}
+    if redirect_backend:
+        env[OPENSANDBOX_EGRESS_REDIRECT_BACKEND] = redirect_backend
+    if enforcement is not None:
+        env[OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE] = (
+            "true" if enforcement.reconcile else "false"
+        )
+        env[OPENSANDBOX_EGRESS_ENFORCEMENT_RECONCILE_INTERVAL_SEC] = str(
+            enforcement.reconcile_interval_seconds
+        )
+        env[OPENSANDBOX_EGRESS_ENFORCEMENT_MAX_RESTORE_FAILURES] = str(
+            enforcement.max_restore_failures
+        )
+    return env
+
+
 def validate_upstream_proxy_request(
     egress_config: Optional[EgressConfig],
     *,
@@ -468,5 +501,6 @@ __all__ = [
     "is_egress_forward_mode",
     "forward_mode_egress_env",
     "validate_forward_identity_value",
+    "enforcement_egress_env",
     "validate_upstream_proxy_request",
 ]

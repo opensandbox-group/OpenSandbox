@@ -148,6 +148,10 @@ export default withMermaid(defineConfig({
             { text: "Ingress", link: "/architecture/network/ingress" },
             { text: "Egress", link: "/architecture/network/egress" },
             {
+              text: "Egress Enforcement Anchors",
+              link: "/architecture/network/egress-enforcement-anchors",
+            },
+            {
               text: "Experimental HTTP/2",
               link: "/architecture/network/osep-0023-h2-integration",
             },
@@ -221,6 +225,10 @@ export default withMermaid(defineConfig({
             {
               text: "Egress Forward Mode",
               link: "/guides/egress-forward-mode",
+            },
+            {
+              text: "Egress Enforcement Anchors",
+              link: "/guides/egress-enforcement-anchors",
             },
             { text: "Secure Access", link: "/guides/secure-access" },
             {

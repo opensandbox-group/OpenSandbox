@@ -130,6 +130,33 @@ func TestSnapshotTableRejectsUnverifiableShape(t *testing.T) {
 	require.Contains(t, err.Error(), "not verifiable")
 }
 
+func TestSnapshotTableRejectsTableChangedBetweenReads(t *testing.T) {
+	// A privileged writer rewrites the table between the capture's JSON
+	// listing and its textual read: the assembled snapshot would pair JSON
+	// from the old version with text from the new one — an impossible state
+	// no later restore could ever confirm. The capture must reject it
+	// instead of anchoring it.
+	jsonA := multiRuleJSON()
+	jsonB, textB := dropSecondRule(t)
+	calls := 0
+	run := func(_ context.Context, _ ...string) ([]byte, error) {
+		calls++
+		switch calls {
+		case 1:
+			return jsonA, nil // capture's JSON listing: old version
+		case 2:
+			return textB, nil // capture's text read: the writer's new version
+		case 3:
+			return jsonB, nil // fresh verification JSON: new version
+		default:
+			return textB, nil // fresh verification text: new version
+		}
+	}
+	_, err := SnapshotTable(context.Background(), run, "ip", "opensandbox_multi")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "changed while it was captured")
+}
+
 func TestSnapshotTableDecodeFailureIsAnError(t *testing.T) {
 	kernel := &fakeKernel{ruleset: []byte(`{"nftables":`), table: []byte("")}
 	_, err := SnapshotTable(context.Background(), kernel.run, "ip", "opensandbox_multi")
@@ -139,6 +166,8 @@ func TestSnapshotTableDecodeFailureIsAnError(t *testing.T) {
 func TestAnchorLedgerConfirmAndRestoreOneDriftedRule(t *testing.T) {
 	kernel := &fakeKernel{ruleset: multiRuleJSON(), table: []byte(multiRuleReadback().Text)}
 	ledger := NewAnchorLedger(kernel.run)
+	driftSignals := 0
+	ledger.recordDrift = func(_, _ string) { driftSignals++ }
 	require.NoError(t, ledger.AnchorTable(context.Background(), "ip", "opensandbox_multi", func(_ context.Context) error {
 		kernel.reapplies++
 		kernel.ruleset = multiRuleJSON()
@@ -164,6 +193,7 @@ func TestAnchorLedgerConfirmAndRestoreOneDriftedRule(t *testing.T) {
 	// An already-correct table is a no-op restore.
 	ledger.ReconcileOnce(context.Background())
 	require.Equal(t, 1, kernel.reapplies, "an idempotent reconcile must not re-apply a matching table")
+	require.Equal(t, 1, driftSignals, "real drift is signalled once; a confirmed pass signals nothing")
 }
 
 func TestAnchorLedgerAbsentTableIsDriftAndIsRestored(t *testing.T) {
@@ -272,6 +302,8 @@ func TestAnchorLedgerAnchorWithoutRestorePathCountsFailures(t *testing.T) {
 func TestAnchorLedgerStaleEpochIsDiscarded(t *testing.T) {
 	kernel := &fakeKernel{ruleset: multiRuleJSON(), table: []byte(multiRuleReadback().Text)}
 	ledger := NewAnchorLedger(kernel.run)
+	driftSignals := 0
+	ledger.recordDrift = func(_, _ string) { driftSignals++ }
 	require.NoError(t, ledger.AnchorTable(context.Background(), "ip", "opensandbox_multi", func(_ context.Context) error {
 		kernel.reapplies++
 		return nil
@@ -312,6 +344,7 @@ func TestAnchorLedgerStaleEpochIsDiscarded(t *testing.T) {
 	require.Equal(t, uint64(3), records[0].Epoch)
 	require.Equal(t, EnforcementConfirmed, records[0].State)
 	require.Zero(t, kernel.reapplies, "drift against a superseded anchor must not be restored")
+	require.Zero(t, driftSignals, "ordinary lifecycle churn must not surface as drift")
 }
 
 func TestAnchorLedgerDropTableStopsRestoring(t *testing.T) {
