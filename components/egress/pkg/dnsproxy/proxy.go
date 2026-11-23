@@ -617,26 +617,23 @@ func extractResolvedIPs(resp *dns.Msg) []nftables.ResolvedIP {
 
 	var out []nftables.ResolvedIP
 	for _, rr := range resp.Answer {
+		var raw net.IP
+		var ttl uint32
+		// Keep unsupported records on the original cheap type-switch path.
 		switch v := rr.(type) {
 		case *dns.A:
-			if v.A == nil {
-				continue
-			}
-			addr, err := netip.ParseAddr(v.A.String())
-			if err != nil {
-				continue
-			}
-			out = append(out, nftables.ResolvedIP{Addr: addr, TTL: time.Duration(v.Hdr.Ttl) * time.Second})
+			raw, ttl = v.A, v.Hdr.Ttl
 		case *dns.AAAA:
-			if v.AAAA == nil {
-				continue
-			}
-			addr, err := netip.ParseAddr(v.AAAA.String())
-			if err != nil {
-				continue
-			}
-			out = append(out, nftables.ResolvedIP{Addr: addr, TTL: time.Duration(v.Hdr.Ttl) * time.Second})
+			raw, ttl = v.AAAA, v.Hdr.Ttl
+		default:
+			continue
 		}
+		addr, ok := netip.AddrFromSlice(raw)
+		if !ok {
+			continue
+		}
+		// Match net.IP.String's representation of mapped IPv4.
+		out = append(out, nftables.ResolvedIP{Addr: addr.Unmap(), TTL: time.Duration(ttl) * time.Second})
 	}
 	return out
 }
