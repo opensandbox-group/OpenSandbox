@@ -241,11 +241,20 @@ jobs:
 
       # OSEP-0023 delta on the live stack: switches SandboxPool to
       # credential-bound after active sandboxes drain and reuses the already
-      # built native + overlaybd templates to run all egress-sensitive stages.
+      # built native + overlaybd templates to run all egress-sensitive stages
+      # plus the egress/network-policy SDK slice.
       - name: Run credential-bound egress verify (OSEP-0023)
         if: needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''
         timeout-minutes: 60
         run: sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound" ./scripts/fast-sandbox-env/integration-env.sh verify-credential-bound
+
+      - name: Run credential-bound SDK egress e2e (OSEP-0023)
+        if: needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''
+        timeout-minutes: 30
+        run: >-
+          sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound"
+          "PYTEST_ADDOPTS=-k 'test_02_sandbox_surface_and_egress_methods or test_02b_network_policy_port_scoped_contract or test_02c_network_policy_port_scoped_enforcement'"
+          ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
       # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
       # nodes/pods, controller / firecracker-runtime / fastlet / builder /

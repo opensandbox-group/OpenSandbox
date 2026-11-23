@@ -5080,9 +5080,9 @@ switch_pool_egress_mode() {
 	require_live_stack
 	# Never switch the pool under live sandboxes: drain any terminating CRs first.
 	wait_for "no active sandboxes before switching SandboxPool egress mode" 120 no_active_sandboxes
-	if kubectl get sandboxpool "$POOL_NAME" >/dev/null 2>&1; then
+	if kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" >/dev/null 2>&1; then
 		log "recreating SandboxPool $POOL_NAME for EGRESS_INTERCEPTION_MODE=${EGRESS_INTERCEPTION_MODE:-default}"
-		kubectl delete sandboxpool "$POOL_NAME" --wait --timeout=300s >/dev/null
+		kubectl -n "$RESOURCE_NS" delete sandboxpool "$POOL_NAME" --wait --timeout=300s >/dev/null
 		wait_for "old fastlet pods terminated" 180 pool_fastlet_pods_gone
 	fi
 	pool_up
