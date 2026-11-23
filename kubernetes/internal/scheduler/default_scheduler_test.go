@@ -1039,6 +1039,9 @@ func Test_defaultTaskScheduler_ScheduleAssertsBoundPodIdentity(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "task-1"},
 		IP:         "1.1.1.1",
 		PodName:    "pod-1",
+		// Persisted at bind time; the snapshot is present too, so this also
+		// proves the persisted UID is preferred over re-resolving the Pod.
+		PodUID: "uid-1",
 		Spec: taskSpec{
 			Process: &api.Process{Command: []string{"echo", "hello"}},
 		},
