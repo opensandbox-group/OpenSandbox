@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Any, Optional
 from fastapi import HTTPException, status
 
 from kubernetes.client import ApiException
+from urllib3.exceptions import HTTPError
 
 from opensandbox_server.config import (
     AppConfig,
@@ -69,6 +70,11 @@ from opensandbox_server.services.k8s.workload_mapper import (
     extract_confirmed_pool_allocation_from_workload,
 )
 from opensandbox_server.services.validators import ensure_egress_runtime_compatible
+from opensandbox_server.services.k8s.runtime_class import (
+    RuntimeClassLookupError,
+    is_gvisor_handler,
+    source_pod_runtime,
+)
 from opensandbox_server.services.k8s.provider_common import (
     DEFAULT_ENTRYPOINT,
     _build_execd_init_container,
@@ -1038,6 +1044,10 @@ class BatchSandboxProvider(WorkloadProvider):
         - Failed: not allowed (sandbox unavailable)
         - Failed + PauseFailed=True: not allowed (sandbox unavailable)
         - Completed: not allowed (workload finished, terminal)
+
+        A pause commits the rootfs with the same committer as public snapshots,
+        so it is refused for a gVisor runtime, and when the runtime cannot be
+        verified, before anything is patched.
         """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -1069,12 +1079,40 @@ class BatchSandboxProvider(WorkloadProvider):
         else:
             raise ValueError(f"Cannot pause sandbox in phase {phase}")
 
+        self._reject_unsupported_pause_runtime(batchsandbox, sandbox_id, namespace)
+
         if pause_failed:
             self._patch_pause_with_retry_bridge(sandbox_id, namespace, True)
             logger.info(f"Patched BatchSandbox {sandbox_id} retry bridge spec.pause=nil->true")
         else:
             self.patch_workload(sandbox_id, namespace, {"spec": {"pause": True}})
             logger.info(f"Patched BatchSandbox {sandbox_id} spec.pause=true")
+
+    def _reject_unsupported_pause_runtime(
+        self, batchsandbox: Dict[str, Any], sandbox_id: str, namespace: str
+    ) -> None:
+        try:
+            runtime = source_pod_runtime(
+                self.k8s_client,
+                batchsandbox,
+                sandbox_id=batchsandbox["metadata"]["name"],
+                namespace=namespace,
+            )
+        except RuntimeClassLookupError as exc:
+            raise ValueError(
+                f"Cannot pause: cannot verify the runtime of sandbox {sandbox_id}: {exc}"
+            ) from exc
+        except (ApiException, HTTPError) as exc:
+            raise ValueError(
+                f"Cannot pause: cannot verify the runtime of sandbox {sandbox_id}: "
+                "the Kubernetes API read failed."
+            ) from exc
+        if runtime is not None and is_gvisor_handler(runtime.handler):
+            raise ValueError(
+                f"Cannot pause: gVisor RuntimeClass {runtime.runtime_class_name!r} "
+                f"(handler {runtime.handler!r}) does not support the built-in rootfs "
+                "snapshot committer."
+            )
 
     def resume_sandbox(self, sandbox_id: str, namespace: str) -> None:
         """Resume a BatchSandbox by patching spec.pause=false.
