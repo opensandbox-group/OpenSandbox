@@ -15,6 +15,7 @@
 package dnsproxy
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -255,7 +256,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 				denyReason = "unknown source"
 			}
 			telemetry.RecordDNSDenied()
-			deniedDNSLogger(host, "no_applicable_policy").Warnf("[dns] denied query (remote=%s question=%q reason=%s)",
+			deniedDNSLogger(cmp.Or(host, domain), "no_applicable_policy").Warnf("[dns] denied query (remote=%s question=%q reason=%s)",
 				requestRemoteAddr(w), host, denyReason)
 			resp := new(dns.Msg)
 			resp.SetRcode(r, dns.RcodeNameError)
@@ -271,7 +272,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if policyToEval != nil && policyToEval.Evaluate(domain) == policy.ActionDeny {
 		telemetry.RecordDNSDenied()
 		p.publishBlocked(domain)
-		deniedDNSLogger(host, telemetry.DNSReplyStageDeny).Warnf("[dns] denied by policy (remote=%s question=%q)",
+		deniedDNSLogger(cmp.Or(host, domain), telemetry.DNSReplyStageDeny).Warnf("[dns] denied by policy (remote=%s question=%q)",
 			requestRemoteAddr(w), host)
 		resp := new(dns.Msg)
 		resp.SetRcode(r, dns.RcodeNameError)
@@ -289,12 +290,14 @@ func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host s
 	start := time.Now()
 	resp, failure, err := p.forward(r, upstreamNetwork(w))
 	elapsed := time.Since(start).Seconds()
+	// The root's policy key is empty, but its name in a log record is ".".
+	logHost := cmp.Or(host, domain)
 	if err != nil {
 		telemetry.RecordDNSForward(elapsed)
 		telemetry.RecordDNSQueryFailed(failure)
 		fail := new(dns.Msg)
 		fail.SetRcode(r, dns.RcodeServerFailure)
-		logOutboundDNS(host, fail, policyEvaluated, telemetry.DNSReplyStageUpstreamError, err.Error())
+		logOutboundDNS(logHost, fail, policyEvaluated, telemetry.DNSReplyStageUpstreamError, err.Error())
 		p.writeReply(w, r, fail, telemetry.DNSReplyStageUpstreamError)
 		return
 	}
@@ -304,12 +307,12 @@ func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host s
 		// upstream failure or retry another resolver.
 		fail := new(dns.Msg)
 		fail.SetRcode(r, dns.RcodeServerFailure)
-		logOutboundDNS(host, fail, policyEvaluated, telemetry.DNSReplyStagePolicyError, fmt.Sprintf("policy installation failed: %v", err))
+		logOutboundDNS(logHost, fail, policyEvaluated, telemetry.DNSReplyStagePolicyError, fmt.Sprintf("policy installation failed: %v", err))
 		p.writeReply(w, r, fail, telemetry.DNSReplyStagePolicyError)
 		return
 	}
 	if !p.shouldSkipOutboundLog(host) {
-		logOutboundDNS(host, resp, policyEvaluated, telemetry.DNSReplyStageAnswer, "")
+		logOutboundDNS(logHost, resp, policyEvaluated, telemetry.DNSReplyStageAnswer, "")
 	}
 	if upstreamNetwork(w) == "udp" && r.IsEdns0() == nil {
 		fitClassicUDPReply(resp)

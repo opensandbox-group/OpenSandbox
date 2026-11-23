@@ -21,6 +21,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,22 +40,25 @@ func TestServeDNSDecisionLogs(t *testing.T) {
 	require.NoError(t, err)
 	for _, tc := range []struct {
 		name     string
+		host     string
 		setup    func(*Proxy)
 		decision string
 		stage    string
 		rcode    int
 	}{
-		{"allowed", nil, "allow", "answer", dns.RcodeSuccess},
-		{"denied", func(p *Proxy) { p.UpdatePolicy(policy.DefaultDenyPolicy()) }, "deny", "deny", dns.RcodeNameError},
-		{"no applicable policy", func(p *Proxy) {
+		{"allowed", "example.com", nil, "allow", "answer", dns.RcodeSuccess},
+		{"denied", "example.com", func(p *Proxy) { p.UpdatePolicy(policy.DefaultDenyPolicy()) }, "deny", "deny", dns.RcodeNameError},
+		{"root allowed", ".", nil, "allow", "answer", dns.RcodeSuccess},
+		{"root denied", ".", func(p *Proxy) { p.UpdatePolicy(policy.DefaultDenyPolicy()) }, "deny", "deny", dns.RcodeNameError},
+		{"no applicable policy", "example.com", func(p *Proxy) {
 			p.SetQueryPolicySelector(func(netip.Addr) (*QueryPolicy, string) { return nil, "subject has no effective policy" })
 		}, "deny", "no_applicable_policy", dns.RcodeNameError},
-		{"upstream failure", func(p *Proxy) { p.upstreams = nil }, "allow", "upstream_error", dns.RcodeServerFailure},
-		{"installation failure on log-skipped host", func(p *Proxy) {
+		{"upstream failure", "example.com", func(p *Proxy) { p.upstreams = nil }, "allow", "upstream_error", dns.RcodeServerFailure},
+		{"installation failure on log-skipped host", "example.com", func(p *Proxy) {
 			p.SetLogSkip([]string{"example.com"})
 			p.SetOnResolved(func(string, []nftables.ResolvedIP) error { return errors.New("cannot install") })
 		}, "allow", "policy_error", dns.RcodeServerFailure},
-		{"infrastructure bypass", func(p *Proxy) {
+		{"infrastructure bypass", "example.com", func(p *Proxy) {
 			p.UpdatePolicy(policy.DefaultDenyPolicy())
 			p.SetInfraDomain("example.com", nil)
 		}, "", "", dns.RcodeSuccess},
@@ -72,7 +76,7 @@ func TestServeDNSDecisionLogs(t *testing.T) {
 			t.Cleanup(func() { log.Logger = previous })
 
 			w := &fakeRespWriter{remote: addrFromIP("192.0.2.1")}
-			p.serveDNS(w, new(dns.Msg).SetQuestion("Example.COM.", dns.TypeA))
+			p.serveDNS(w, new(dns.Msg).SetQuestion(dns.Fqdn(strings.ToUpper(tc.host)), dns.TypeA))
 			require.Len(t, w.msgs, 1)
 			require.Equal(t, tc.rcode, w.msgs[0].Rcode)
 			data, err := os.ReadFile(path)
@@ -88,7 +92,7 @@ func TestServeDNSDecisionLogs(t *testing.T) {
 			}
 			require.Len(t, records, 1, "there must not be a second decision record")
 			record := records[0]
-			require.Equal(t, "example.com", record["target.host"])
+			require.Equal(t, tc.host, record["target.host"])
 			if tc.decision == "deny" {
 				require.Equal(t, "warn", record["level"])
 				require.NotContains(t, record, "opensandbox.event")
