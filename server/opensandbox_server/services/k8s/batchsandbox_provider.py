@@ -371,6 +371,25 @@ class BatchSandboxProvider(WorkloadProvider):
         entrypoint = entrypoint or []
 
         extra_volumes, extra_mounts, extra_security_context = self._extract_template_pod_extras()
+        isolation_enabled = extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable"
+        if isolation_enabled and extra_security_context:
+            capabilities = extra_security_context.get("capabilities")
+            drops = capabilities.get("drop") if isinstance(capabilities, dict) else None
+            if isinstance(drops, list) and any(
+                isinstance(capability, str)
+                and capability.upper().removeprefix("CAP_") == "SYS_ADMIN"
+                for capability in drops
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": (
+                            "execd isolation requires SYS_ADMIN, which the BatchSandbox "
+                            "template explicitly drops. Disable execd isolation for this sandbox."
+                        ),
+                    },
+                )
 
         if windows_profile:
             validate_windows_profile_resource_limits(resource_limits)
@@ -398,7 +417,7 @@ class BatchSandboxProvider(WorkloadProvider):
             env=main_env,
             resource_limits=resource_limits,
             has_network_policy=has_egress,
-            isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
+            isolation_enabled=isolation_enabled,
             image_pull_policy=self.image_pull_policy,
             resource_requests=resource_requests or None,
         )

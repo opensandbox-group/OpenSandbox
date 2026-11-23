@@ -1115,6 +1115,49 @@ spec:
         }
         mock_k8s_client.create_custom_object.assert_called_once()
 
+    @pytest.mark.parametrize("with_network_policy", [False, True])
+    def test_create_workload_rejects_execd_isolation_when_template_drops_sys_admin(
+        self, mock_k8s_client, tmp_path, with_network_policy
+    ):
+        template_file = tmp_path / "template.yaml"
+        template_file.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          securityContext:
+            capabilities:
+              drop: [SYS_ADMIN]
+"""
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _app_config_with_template(str(template_file))
+        )
+        with pytest.raises(HTTPException) as error:
+            provider.create_workload(
+                sandbox_id="test-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["/bin/bash"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=None,
+                execd_image="execd:latest",
+                extensions={"bootstrap.execd.isolation": "enable"},
+                egress_settings=(
+                    _egress_settings(NetworkPolicy(default_action="deny", egress=[]))
+                    if with_network_policy
+                    else None
+                ),
+            )
+
+        assert error.value.status_code == 400
+        assert "execd isolation requires SYS_ADMIN" in error.value.detail["message"]
+        mock_k8s_client.create_custom_object.assert_not_called()
+
     def test_create_workload_sets_resource_limits_and_requests(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
         mock_k8s_client.create_custom_object.return_value = {
