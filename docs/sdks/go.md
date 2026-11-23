@@ -150,7 +150,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 ### Background commands
 
-Reuse the `exec` client from the streaming example to poll status and incremental logs. Command timeout is in milliseconds and is separate from sandbox TTL.
+Reuse the `exec` client from the streaming example to poll status and incremental logs. Command timeout is in milliseconds and is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```go
 execution, err := sandbox.RunCommandWithOpts(ctx, opensandbox.RunCommandRequest{
@@ -177,12 +177,17 @@ for {
     if err != nil {
         return err
     }
-    logs, err := exec.GetCommandLogs(ctx, execution.ID, &cursor)
-    if err != nil {
-        return err
+    for {
+        logs, err := exec.GetCommandLogs(ctx, execution.ID, &cursor)
+        if err != nil {
+            return err
+        }
+        fmt.Print(logs.Output)
+        if logs.Output == "" || logs.Cursor == cursor {
+            break
+        }
+        cursor = logs.Cursor
     }
-    fmt.Print(logs.Output)
-    cursor = logs.Cursor
     if !status.Running {
         if status.ExitCode == nil || *status.ExitCode != 0 {
             return fmt.Errorf("command failed: %s", status.Error)

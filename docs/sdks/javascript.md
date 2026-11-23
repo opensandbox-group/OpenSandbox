@@ -261,7 +261,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Poll status and incremental logs. The command timeout is separate from sandbox TTL.
+Poll status and incremental logs. The command timeout is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```ts
 const execution = await sandbox.commands.run(
@@ -277,9 +277,13 @@ while (true) {
     throw new Error("Command did not finish");
   }
   const status = await sandbox.commands.getCommandStatus(execution.id);
-  const logs = await sandbox.commands.getBackgroundCommandLogs(execution.id, cursor);
-  process.stdout.write(logs.content);
-  cursor = logs.cursor ?? cursor;
+  while (true) {
+    const logs = await sandbox.commands.getBackgroundCommandLogs(execution.id, cursor);
+    process.stdout.write(logs.content);
+    const nextCursor = logs.cursor ?? cursor;
+    if (!logs.content || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
   if (status.running === false) {
     if (status.exitCode !== 0) throw new Error(`Command failed: ${status.exitCode}, ${status.error}`);
     break;

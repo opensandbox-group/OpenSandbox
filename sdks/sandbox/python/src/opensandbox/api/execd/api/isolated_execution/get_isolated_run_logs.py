@@ -107,7 +107,7 @@ def sync_detailed(
      Returns the combined stdout/stderr of a background run as plain text.
     Supports incremental reads similar to a file seek: pass a byte offset
     via the `cursor` query parameter to fetch output after that position
-    and receive the latest tail cursor via the
+    and receive the offset after the returned bytes via the
     `EXECD-ISOLATED-TAIL-CURSOR` response header for the next poll.
     When no cursor is provided, the log is returned from the start. At
     most 16 MiB are returned per request; use the returned cursor to
@@ -155,7 +155,7 @@ def sync(
      Returns the combined stdout/stderr of a background run as plain text.
     Supports incremental reads similar to a file seek: pass a byte offset
     via the `cursor` query parameter to fetch output after that position
-    and receive the latest tail cursor via the
+    and receive the offset after the returned bytes via the
     `EXECD-ISOLATED-TAIL-CURSOR` response header for the next poll.
     When no cursor is provided, the log is returned from the start. At
     most 16 MiB are returned per request; use the returned cursor to
@@ -198,7 +198,7 @@ async def asyncio_detailed(
      Returns the combined stdout/stderr of a background run as plain text.
     Supports incremental reads similar to a file seek: pass a byte offset
     via the `cursor` query parameter to fetch output after that position
-    and receive the latest tail cursor via the
+    and receive the offset after the returned bytes via the
     `EXECD-ISOLATED-TAIL-CURSOR` response header for the next poll.
     When no cursor is provided, the log is returned from the start. At
     most 16 MiB are returned per request; use the returned cursor to
@@ -244,7 +244,7 @@ async def asyncio(
      Returns the combined stdout/stderr of a background run as plain text.
     Supports incremental reads similar to a file seek: pass a byte offset
     via the `cursor` query parameter to fetch output after that position
-    and receive the latest tail cursor via the
+    and receive the offset after the returned bytes via the
     `EXECD-ISOLATED-TAIL-CURSOR` response header for the next poll.
     When no cursor is provided, the log is returned from the start. At
     most 16 MiB are returned per request; use the returned cursor to
