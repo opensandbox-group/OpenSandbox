@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -233,7 +234,7 @@ func (f *Forwarder) ProbeGateway(ctx context.Context) error {
 }
 
 func (f *Forwarder) dialGatewayConn(ctx context.Context) (net.Conn, error) {
-	d := &net.Dialer{Timeout: f.dialTimeout, Control: markControl(f.cfg.Mark)}
+	d := &net.Dialer{Timeout: f.dialTimeout, Control: MarkControl(f.cfg.Mark)}
 	conn, err := d.DialContext(ctx, "tcp", f.gatewayAddr)
 	if err != nil {
 		return nil, err
@@ -259,14 +260,26 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
-// relay copies bytes in both directions, propagating half-closes, and closes
-// both connections once both directions are done.
+// relay copies bytes in both directions, preserving half-closes on clean EOF
+// and aborting both connections if either copy fails.
 func relay(client, upstream net.Conn, upstreamReader io.Reader) {
-	var wg sync.WaitGroup
+	var (
+		wg      sync.WaitGroup
+		aborted atomic.Bool
+	)
+	abort := func() {
+		if aborted.CompareAndSwap(false, true) {
+			reset(client)
+			reset(upstream)
+		}
+	}
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(upstream, client)
+		if _, err := io.Copy(upstream, client); err != nil {
+			abort()
+			return
+		}
 		if cw, ok := upstream.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		} else {
@@ -275,7 +288,10 @@ func relay(client, upstream net.Conn, upstreamReader io.Reader) {
 	}()
 	go func() {
 		defer wg.Done()
-		_, _ = io.Copy(client, upstreamReader)
+		if _, err := io.Copy(client, upstreamReader); err != nil {
+			abort()
+			return
+		}
 		if cw, ok := client.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		} else {

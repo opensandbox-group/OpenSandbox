@@ -582,6 +582,14 @@ func (p *Proxy) SetInfraDomain(domain string, onResolved func(domain string, ips
 	if onResolved == nil {
 		onResolved = func(string, []nftables.ResolvedIP) {}
 	}
+	if prev, exists := p.infraDomains[host]; exists {
+		next := onResolved
+		p.infraDomains[host] = func(d string, ips []nftables.ResolvedIP) {
+			prev(d, ips)
+			next(d, ips)
+		}
+		return
+	}
 	p.infraDomains[host] = onResolved
 }
 

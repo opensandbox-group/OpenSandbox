@@ -28,6 +28,7 @@ func TestForwardRedirectNftScript(t *testing.T) {
 		"add rule ip opensandbox_forward_redirect output ip daddr 127.0.0.0/8 return",
 		"add rule ip opensandbox_forward_redirect output meta mark 0x1 return",
 		"add rule ip opensandbox_forward_redirect output meta mark 0x4 return",
+		"add rule ip opensandbox_forward_redirect output meta mark 0x8 return",
 		"add rule ip opensandbox_forward_redirect output ip daddr 169.254.0.0/16 return",
 		"add rule ip opensandbox_forward_redirect output tcp dport 53 return",
 		"add rule ip opensandbox_forward_redirect output meta l4proto tcp redirect to :18082",

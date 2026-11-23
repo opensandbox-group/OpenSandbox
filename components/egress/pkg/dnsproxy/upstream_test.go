@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 )
 
 func TestUpstreamProbeIntervalFromEnv(t *testing.T) {
@@ -209,4 +210,19 @@ func TestForwardRefusedFinalDoesNotEscapeToNextUpstream(t *testing.T) {
 	require.Equal(t, dns.RcodeRefused, resp.Rcode)
 	require.Equal(t, int32(1), policyHits.Load())
 	require.Zero(t, openHits.Load())
+}
+
+func TestSetInfraDomainChainsCallbacks(t *testing.T) {
+	p := &Proxy{}
+	var order []string
+	p.SetInfraDomain("infra.example.com", func(domain string, _ []nftables.ResolvedIP) {
+		order = append(order, "gateway:"+domain)
+	})
+	p.SetInfraDomain("INFRA.EXAMPLE.COM.", func(domain string, _ []nftables.ResolvedIP) {
+		order = append(order, "telemetry:"+domain)
+	})
+	cb := p.infraCallback("infra.example.com")
+	require.NotNil(t, cb)
+	cb("infra.example.com", nil)
+	require.Equal(t, []string{"gateway:infra.example.com", "telemetry:infra.example.com"}, order)
 }

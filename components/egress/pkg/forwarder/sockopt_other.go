@@ -27,7 +27,8 @@ func originalDst(net.Conn) (netip.AddrPort, error) {
 	return netip.AddrPort{}, errors.New("SO_ORIGINAL_DST is only supported on linux")
 }
 
-func markControl(mark int) func(network, address string, c syscall.RawConn) error {
+// MarkControl sets SO_MARK on the dialed socket on Linux.
+func MarkControl(mark int) func(network, address string, c syscall.RawConn) error {
 	if mark == 0 {
 		return nil
 	}

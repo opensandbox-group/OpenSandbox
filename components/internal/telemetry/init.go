@@ -17,13 +17,20 @@ package telemetry
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -35,6 +42,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+	"google.golang.org/grpc"
 )
 
 // meterProvider holds the provider Init installed, so ForceFlush can reach it. Set only
@@ -59,22 +67,31 @@ type Config struct {
 	// metrics export when no standard OTLP endpoint is configured. Components
 	// keep the historical fallback behavior unless they opt in to this flag.
 	DisableEndpointFallback bool
+	// DialControl, when non-nil, is applied to net.Dialer.Control for OTLP
+	// exporter connections (e.g. setting SO_MARK in egress forward mode so
+	// sidecar telemetry bypasses sandbox capture while staying endpoint-scoped).
+	DialControl func(network, address string, c syscall.RawConn) error
 }
 
 const (
-	envOTLPMetricsEndpoint = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
-	envOTLPEndpoint        = "OTEL_EXPORTER_OTLP_ENDPOINT"
-	envOTLPMetricsProtocol = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
-	envOTLPProtocol        = "OTEL_EXPORTER_OTLP_PROTOCOL"
-	envHostIP              = "HOST_IP"
-	envSDKDisabled         = "OTEL_SDK_DISABLED"
-	envMetricsExporter     = "OTEL_METRICS_EXPORTER"
-	envTemporality         = "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"
-	otlpHTTPPort           = "4318"
-	otlpGRPCPort           = "4317"
-	otlpHTTPProtocol       = "http/protobuf"
-	otlpGRPCProtocol       = "grpc"
-	hostInfoPath           = "/etc/hostinfo"
+	envOTLPMetricsEndpoint    = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
+	envOTLPEndpoint           = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	envOTLPMetricsProtocol    = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
+	envOTLPProtocol           = "OTEL_EXPORTER_OTLP_PROTOCOL"
+	envOTLPMetricsCertificate = "OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE"
+	envOTLPCertificate        = "OTEL_EXPORTER_OTLP_CERTIFICATE"
+	envOTLPMetricsTimeout     = "OTEL_EXPORTER_OTLP_METRICS_TIMEOUT"
+	envOTLPTimeout            = "OTEL_EXPORTER_OTLP_TIMEOUT"
+	envHostIP                 = "HOST_IP"
+	envSDKDisabled            = "OTEL_SDK_DISABLED"
+	envMetricsExporter        = "OTEL_METRICS_EXPORTER"
+	envTemporality            = "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"
+	otlpHTTPPort              = "4318"
+	otlpGRPCPort              = "4317"
+	otlpHTTPProtocol          = "http/protobuf"
+	otlpGRPCProtocol          = "grpc"
+	defaultOTLPHTTPTimeout    = 10 * time.Second
+	hostInfoPath              = "/etc/hostinfo"
 )
 
 // Init sets a noop TracerProvider, optionally MeterProvider with an OTLP exporter.
@@ -97,7 +114,7 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	)
 
 	if metricsEnabled(cfg.DisableEndpointFallback) {
-		mexp, err := newMetricsExporter(ctx, cfg.DisableEndpointFallback)
+		mexp, err := newMetricsExporter(ctx, cfg.DisableEndpointFallback, cfg.DialControl)
 		if err != nil {
 			return nil, err
 		}
@@ -168,7 +185,7 @@ func MetricsDisabled() bool {
 }
 
 // newMetricsExporter keeps protocol selection separate from provider ownership.
-func newMetricsExporter(ctx context.Context, disableEndpointFallback bool) (sdkmetric.Exporter, error) {
+func newMetricsExporter(ctx context.Context, disableEndpointFallback bool, dialControl func(network, address string, c syscall.RawConn) error) (sdkmetric.Exporter, error) {
 	protocol := otlpMetricsProtocol()
 	if protocol == otlpGRPCProtocol {
 		var opts []otlpmetricgrpc.Option
@@ -191,6 +208,16 @@ func newMetricsExporter(ctx context.Context, disableEndpointFallback bool) (sdkm
 				opts = append(opts, otlpmetricgrpc.WithEndpoint(net.JoinHostPort(host, port)), otlpmetricgrpc.WithInsecure(), otlpmetricgrpc.WithTLSCredentials(nil))
 			}
 		}
+		if dialControl != nil {
+			dialer := &net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+				Control:   dialControl,
+			}
+			opts = append(opts, otlpmetricgrpc.WithDialOption(grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "tcp", addr)
+			})))
+		}
 		if strings.TrimSpace(os.Getenv(envTemporality)) == "" {
 			opts = append(opts, otlpmetricgrpc.WithTemporalitySelector(deltaTemporalitySelector))
 		}
@@ -200,12 +227,55 @@ func newMetricsExporter(ctx context.Context, disableEndpointFallback bool) (sdkm
 		slog.Warn("telemetry: unsupported OTLP metrics protocol; using http/protobuf", "protocol", protocol)
 	}
 	opts := metricsClientOptions(disableEndpointFallback)
+	if dialControl != nil {
+		httpClient, err := controlledOTLPHTTPClient(dialControl)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, otlpmetrichttp.WithHTTPClient(httpClient))
+	}
 	// Preserve historical aggregation only when no preference is supplied.
 	// Otherwise let the exporter parse the standard environment variable.
 	if strings.TrimSpace(os.Getenv(envTemporality)) == "" {
 		opts = append(opts, otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector))
 	}
 	return otlpmetrichttp.New(ctx, opts...)
+}
+
+// controlledOTLPHTTPClient builds an HTTP client with a custom net.Dialer.Control
+// while preserving standard OTLP TLS certificate and timeout env vars (which
+// otlpmetrichttp.WithHTTPClient otherwise supersedes).
+func controlledOTLPHTTPClient(dialControl func(network, address string, c syscall.RawConn) error) (*http.Client, error) {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   dialControl,
+	}).DialContext
+
+	if endpoint := otlpEndpointFromEnv(); endpoint != "" {
+		if parsed, err := url.Parse(endpoint); err == nil && strings.EqualFold(parsed.Scheme, "https") {
+			if certPath := firstEndpoint(os.Getenv(envOTLPMetricsCertificate), os.Getenv(envOTLPCertificate)); certPath != "" {
+				pemBytes, err := os.ReadFile(certPath)
+				if err != nil {
+					return nil, fmt.Errorf("telemetry: read OTLP certificate %q: %w", certPath, err)
+				}
+				pool := x509.NewCertPool()
+				if !pool.AppendCertsFromPEM(pemBytes) {
+					return nil, fmt.Errorf("telemetry: OTLP certificate %q contains no valid PEM certificates", certPath)
+				}
+				tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+			}
+		}
+	}
+
+	timeout := defaultOTLPHTTPTimeout
+	if rawTimeout := firstEndpoint(os.Getenv(envOTLPMetricsTimeout), os.Getenv(envOTLPTimeout)); rawTimeout != "" {
+		if ms, err := strconv.Atoi(rawTimeout); err == nil && ms > 0 {
+			timeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+	return &http.Client{Transport: tr, Timeout: timeout}, nil
 }
 
 func metricsClientOptions(disableEndpointFallback bool) []otlpmetrichttp.Option {

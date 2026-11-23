@@ -46,22 +46,32 @@ type UpstreamProxyEndpoint struct {
 const (
 	upstreamProxyV4Set = "upstream_proxy_v4"
 	upstreamProxyV6Set = "upstream_proxy_v6"
+	telemetryV4Set     = "telemetry_v4"
+	telemetryV6Set     = "telemetry_v6"
 )
 
 // buildUpstreamProxyStatic renders the scoped sets, literal-IP seed elements,
-// and the uid+dport-scoped accept rules. The rules sit before the DoT/DoH
+// and the uid/mark+dport-scoped accept rules. The rules sit before the DoT/DoH
 // drops so infra reachability is unaffected by blocklist or deny sets.
 func buildUpstreamProxyStatic(table string, ep *UpstreamProxyEndpoint) string {
+	return buildScopedEndpointStatic(table, upstreamProxyV4Set, upstreamProxyV6Set, ep)
+}
+
+func buildTelemetryStatic(table string, ep *UpstreamProxyEndpoint) string {
+	return buildScopedEndpointStatic(table, telemetryV4Set, telemetryV6Set, ep)
+}
+
+func buildScopedEndpointStatic(table, v4Set, v6Set string, ep *UpstreamProxyEndpoint) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr; flags timeout; }\n", table, upstreamProxyV4Set)
-	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr; flags timeout; }\n", table, upstreamProxyV6Set)
+	fmt.Fprintf(&b, "add set inet %s %s { type ipv4_addr; flags timeout; }\n", table, v4Set)
+	fmt.Fprintf(&b, "add set inet %s %s { type ipv6_addr; flags timeout; }\n", table, v6Set)
 	for _, ip := range ep.IPs {
 		addr := ip.Unmap()
 		var set string
 		if addr.Is4() {
-			set = upstreamProxyV4Set
+			set = v4Set
 		} else if addr.Is6() {
-			set = upstreamProxyV6Set
+			set = v6Set
 		} else {
 			continue
 		}
@@ -72,14 +82,24 @@ func buildUpstreamProxyStatic(table string, ep *UpstreamProxyEndpoint) string {
 	if ep.Mark != 0 {
 		owner = fmt.Sprintf("meta mark %#x", ep.Mark)
 	}
-	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s tcp dport %d %s accept\n", table, chainName, upstreamProxyV4Set, ep.Port, owner)
-	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s tcp dport %d %s accept\n", table, chainName, upstreamProxyV6Set, ep.Port, owner)
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s tcp dport %d %s accept\n", table, chainName, v4Set, ep.Port, owner)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s tcp dport %d %s accept\n", table, chainName, v6Set, ep.Port, owner)
 	return b.String()
 }
 
 // AddUpstreamProxyIPs feeds DNS-learned proxy addresses into the scoped sets.
 // Elements carry the (clamped) answer TTL, like the sandbox dynamic sets.
 func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) error {
+	return m.addScopedEndpointIPs(ctx, m.opts.UpstreamProxy, upstreamProxyV4Set, upstreamProxyV6Set, telemetry.NftOpUpstreamProxyAdd, ips)
+}
+
+// AddTelemetryIPs feeds DNS-learned OTLP collector addresses into the
+// mark-scoped telemetry sets (forward mode, OSEP-0030).
+func (m *Manager) AddTelemetryIPs(ctx context.Context, ips []ResolvedIP) error {
+	return m.addScopedEndpointIPs(ctx, m.opts.Telemetry, telemetryV4Set, telemetryV6Set, telemetry.NftOpTelemetryAdd, ips)
+}
+
+func (m *Manager) addScopedEndpointIPs(ctx context.Context, ep *UpstreamProxyEndpoint, v4Set, v6Set, metricOp string, ips []ResolvedIP) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.quiesced.Load() {
@@ -88,7 +108,7 @@ func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) err
 	if m.staticStateUncertain {
 		return errStaticStateUncertain
 	}
-	if m.opts.UpstreamProxy == nil {
+	if ep == nil {
 		return nil
 	}
 	var script strings.Builder
@@ -96,9 +116,9 @@ func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) err
 		addr := r.Addr.Unmap()
 		var set string
 		if addr.Is4() {
-			set = upstreamProxyV4Set
+			set = v4Set
 		} else if addr.Is6() {
-			set = upstreamProxyV6Set
+			set = v6Set
 		} else {
 			continue
 		}
@@ -110,7 +130,7 @@ func (m *Manager) AddUpstreamProxyIPs(ctx context.Context, ips []ResolvedIP) err
 		return nil
 	}
 	if _, err := m.run(ctx, script.String()); err != nil {
-		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpUpstreamProxyAdd)
+		telemetry.RecordNftablesUpdateFailed(metricOp)
 		return err
 	}
 	telemetry.RecordNftablesUpdate()

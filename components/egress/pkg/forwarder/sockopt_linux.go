@@ -53,9 +53,10 @@ func originalDst(c net.Conn) (netip.AddrPort, error) {
 	return netip.AddrPortFrom(addr, port), nil
 }
 
-// markControl sets SO_MARK on the dialed socket so nft can scope gateway
-// reachability to forwarder traffic. mark 0 leaves the socket unmarked.
-func markControl(mark int) func(network, address string, c syscall.RawConn) error {
+// MarkControl sets SO_MARK on the dialed socket so nft can scope trusted
+// sidecar traffic (forwarder gateway or OTLP telemetry). mark 0 leaves the
+// socket unmarked.
+func MarkControl(mark int) func(network, address string, c syscall.RawConn) error {
 	if mark == 0 {
 		return nil
 	}

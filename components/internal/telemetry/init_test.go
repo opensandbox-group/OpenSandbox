@@ -20,6 +20,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -285,6 +287,80 @@ func TestInitRegistrationFailureClearsProvider(t *testing.T) {
 	}
 	if err := ForceFlush(context.Background()); err != nil {
 		t.Fatalf("ForceFlush after failed Init: %v", err)
+	}
+}
+
+func TestInitAppliesDialControl(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		protocol string
+	}{
+		{name: "http", protocol: otlpHTTPProtocol},
+		{name: "grpc", protocol: otlpGRPCProtocol},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			preserveTelemetryGlobals(t)
+			t.Setenv(envSDKDisabled, "")
+			t.Setenv(envMetricsExporter, "")
+			t.Setenv(envOTLPMetricsEndpoint, "")
+			t.Setenv(envOTLPProtocol, "")
+			t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+
+			var waitExported func()
+			if tc.protocol == otlpGRPCProtocol {
+				endpoint, exported := newTestGRPCCollector(t)
+				t.Setenv(envOTLPMetricsProtocol, otlpGRPCProtocol)
+				t.Setenv(envOTLPEndpoint, endpoint)
+				waitExported = func() {
+					select {
+					case <-exported:
+					case <-time.After(3 * time.Second):
+						t.Fatal("timed out waiting for OTLP gRPC export")
+					}
+				}
+			} else {
+				endpoint, exported := newTestCollector(t)
+				t.Setenv(envOTLPMetricsProtocol, otlpHTTPProtocol)
+				t.Setenv(envOTLPEndpoint, endpoint)
+				waitExported = func() {
+					select {
+					case <-exported:
+					case <-time.After(3 * time.Second):
+						t.Fatal("timed out waiting for OTLP HTTP export")
+					}
+				}
+			}
+
+			var dialed atomic.Int32
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			shutdown, err := Init(ctx, Config{
+				ServiceName: "dial-control-test",
+				DialControl: func(network, address string, c syscall.RawConn) error {
+					dialed.Add(1)
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = shutdown(context.Background())
+			}()
+
+			counter, err := otel.Meter("test").Int64Counter("dial.control.count")
+			if err != nil {
+				t.Fatal(err)
+			}
+			counter.Add(ctx, 1)
+			if err := ForceFlush(ctx); err != nil {
+				t.Fatalf("ForceFlush: %v", err)
+			}
+			waitExported()
+			if dialed.Load() == 0 {
+				t.Fatal("expected DialControl to be invoked on OTLP dial")
+			}
+		})
 	}
 }
 

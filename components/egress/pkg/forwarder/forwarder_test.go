@@ -243,6 +243,96 @@ func TestRelayIgnoresConnectBodyFramingHeaders(t *testing.T) {
 	}
 }
 
+func TestRelayUpstreamResetAbortsBothDirections(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		_, _ = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\npartial")
+		_ = rw.Flush()
+		// Wait until the sandbox has received the initial bytes, then RST.
+		buf := make([]byte, 4)
+		_, _ = io.ReadFull(rw, buf)
+		if tc, ok := conn.(*net.TCPConn); ok {
+			_ = tc.SetLinger(0)
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newTestForwarder(t, srv, false, Identity{SandboxID: "sbx-1"})
+	sandbox, accepted := tcpPair(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.handle(accepted)
+	}()
+
+	_ = sandbox.SetDeadline(time.Now().Add(5 * time.Second))
+	got := make([]byte, len("partial"))
+	_, err := io.ReadFull(sandbox, got)
+	require.NoError(t, err)
+	require.Equal(t, "partial", string(got))
+
+	// Trigger the gateway RST while keeping the sandbox connection open.
+	_, err = sandbox.Write([]byte("ping"))
+	require.NoError(t, err)
+
+	// relay must terminate without waiting for the sandbox to close.
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay blocked after upstream reset while sandbox stayed open")
+	}
+
+	// Sandbox must observe a connection error (RST), not a clean EOF.
+	_, err = sandbox.Read(make([]byte, 1))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, io.EOF)
+}
+
+func TestRelayPreservesHalfClose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = rw.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		_ = rw.Flush()
+		req, err := io.ReadAll(rw)
+		if err != nil {
+			return
+		}
+		_, _ = conn.Write(append([]byte("reply:"), req...))
+	}))
+	t.Cleanup(srv.Close)
+
+	f := newTestForwarder(t, srv, false, Identity{SandboxID: "sbx-1"})
+	sandbox, accepted := tcpPair(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.handle(accepted)
+	}()
+
+	_ = sandbox.SetDeadline(time.Now().Add(5 * time.Second))
+	_, err := sandbox.Write([]byte("hello"))
+	require.NoError(t, err)
+	require.NoError(t, sandbox.(*net.TCPConn).CloseWrite())
+
+	reply, err := io.ReadAll(sandbox)
+	require.NoError(t, err)
+	require.Equal(t, "reply:hello", string(reply))
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay did not finish after clean half-close")
+	}
+}
+
 func requireClosed(t *testing.T, c net.Conn) {
 	t.Helper()
 	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))

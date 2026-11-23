@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/startup"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	"github.com/alibaba/opensandbox/internal/safego"
+	inttelemetry "github.com/alibaba/opensandbox/internal/telemetry"
 )
 
 // forwardMode is the validated OSEP-0030 forward-mode configuration.
@@ -120,6 +122,38 @@ func gatewayRootCAs(extraCA string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
+// forwardTelemetryEndpoint resolves the OTLP collector destination (using the
+// same env precedence as telemetryAllowRules) into a mark-scoped nftables
+// endpoint and, for hostname endpoints, the domain to register as an infra
+// DNS exemption. Returns (nil, "") when metrics are disabled or unconfigured.
+func forwardTelemetryEndpoint() (*nftables.UpstreamProxyEndpoint, string) {
+	if inttelemetry.MetricsDisabled() {
+		return nil, ""
+	}
+	host, portStr, ok := inttelemetry.OTLPEndpointHostPort()
+	if !ok {
+		if inttelemetry.OTLPEndpointEnvSet() {
+			log.Warnf("forward mode: configured OTLP endpoint is not a valid URL; skipping telemetry nft allow")
+			return nil, ""
+		}
+		host, portStr, ok = inttelemetry.OTLPEndpointFallbackHostPort()
+	}
+	if !ok {
+		return nil, ""
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		log.Warnf("forward mode: invalid OTLP endpoint port %q for host %q; skipping telemetry nft allow", portStr, host)
+		return nil, ""
+	}
+	ep := &nftables.UpstreamProxyEndpoint{Port: port, Mark: constants.TelemetryMarkValue}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		ep.IPs = []netip.Addr{ip.Unmap()}
+		return ep, ""
+	}
+	return ep, host
+}
+
 // runForwardSidecar installs the forward-mode data plane in order: default
 // deny filter, DNS proxy and redirect, forwarder, TCP capture, and only then
 // /healthz, so the server never starts the workload before capture is active
@@ -128,10 +162,13 @@ func gatewayRootCAs(extraCA string) (*x509.CertPool, error) {
 func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 	log.Infof("enforcement mode: %s (gateway %s://%s:%d)", constants.PolicyForward, fm.gateway.Scheme, fm.gateway.Host, fm.gateway.Port)
 
-	otelShutdown, err := telemetry.Init(ctx)
+	telemetryEP, telemetryHost := forwardTelemetryEndpoint()
+	otelShutdown, err := telemetry.InitWithDialControl(ctx, forwarder.MarkControl(constants.TelemetryMarkValue))
 	if err != nil {
 		log.Warnf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
 		otelShutdown = nil
+		telemetryEP = nil
+		telemetryHost = ""
 	}
 	if otelShutdown != nil {
 		defer func() {
@@ -147,6 +184,7 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 	}
 	nftMgr := nftables.NewManagerWithOptions(nftables.Options{
 		UpstreamProxy:       ep,
+		Telemetry:           telemetryEP,
 		ForwardRedirectPort: constants.DefaultForwarderPort,
 	})
 	if err := nftMgr.ApplyStatic(ctx, policy.DefaultDenyPolicy()); err != nil {
@@ -170,6 +208,15 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 			defer cancel()
 			if err := nftMgr.AddUpstreamProxyIPs(addCtx, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
 				log.Warnf("forward mode: gateway nft update for %q failed: %v", domain, err)
+			}
+		})
+	}
+	if telemetryEP != nil && len(telemetryEP.IPs) == 0 && telemetryHost != "" {
+		proxy.SetInfraDomain(telemetryHost, func(domain string, ips []nftables.ResolvedIP) {
+			addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := nftMgr.AddTelemetryIPs(addCtx, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
+				log.Warnf("forward mode: telemetry nft update for %q failed: %v", domain, err)
 			}
 		})
 	}

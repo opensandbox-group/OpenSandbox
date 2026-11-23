@@ -31,7 +31,8 @@ const forwardRedirectNftTable = "opensandbox_forward_redirect"
 
 // forwardRedirectNftScript redirects every new outbound IPv4 TCP connection to
 // the forwarder, except loopback, the DNS proxy's own upstream traffic (mark
-// 0x1, including DNS over TCP), the forwarder's gateway sockets, link-local
+// 0x1, including DNS over TCP), the forwarder's gateway sockets (mark 0x4),
+// the sidecar's trusted OTLP telemetry sockets (mark 0x8), link-local
 // destinations (left for the filter table to drop) and port 53 (handled by
 // the DNS redirect). Marks are trusted because setting one requires
 // CAP_NET_ADMIN or CAP_NET_RAW, which forward mode denies the sandbox.
@@ -44,6 +45,7 @@ func forwardRedirectNftScript(port int) string {
 	fmt.Fprintf(&b, "add rule ip %s output ip daddr 127.0.0.0/8 return\n", t)
 	fmt.Fprintf(&b, "add rule ip %s output meta mark %s return\n", t, constants.MarkHex)
 	fmt.Fprintf(&b, "add rule ip %s output meta mark %s return\n", t, constants.ForwarderMarkHex)
+	fmt.Fprintf(&b, "add rule ip %s output meta mark %s return\n", t, constants.TelemetryMarkHex)
 	fmt.Fprintf(&b, "add rule ip %s output ip daddr 169.254.0.0/16 return\n", t)
 	fmt.Fprintf(&b, "add rule ip %s output tcp dport 53 return\n", t)
 	fmt.Fprintf(&b, "add rule ip %s output meta l4proto tcp redirect to :%d\n", t, port)

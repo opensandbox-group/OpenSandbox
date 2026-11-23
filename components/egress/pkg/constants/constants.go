@@ -28,6 +28,14 @@ const (
 	ForwarderMarkHex   = "0x4"
 )
 
+// TelemetryMarkValue is the SO_MARK set on the egress sidecar's own OTLP
+// collector sockets in forward mode (OSEP-0030) so trusted metrics bypass
+// forward-mode capture and reach only the configured collector endpoint.
+const (
+	TelemetryMarkValue = 0x8
+	TelemetryMarkHex   = "0x8"
+)
+
 const (
 	EgressAuthTokenHeader = "OPENSANDBOX-EGRESS-AUTH"
 )

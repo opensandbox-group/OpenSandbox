@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -139,4 +140,71 @@ func TestGatewayHealthStartsUnhealthyAndTracksProbe(t *testing.T) {
 	require.Eventually(t, func() bool { return h.err() != nil && h.err() != errGatewayNotProbed }, time.Second, 10*time.Millisecond)
 	<-probed // second probe after the unhealthy period
 	require.Eventually(t, func() bool { return h.err() == nil }, 3*time.Second, 10*time.Millisecond)
+}
+
+func TestForwardTelemetryEndpoint(t *testing.T) {
+	clearOTLPEnv := func(t *testing.T) {
+		t.Helper()
+		for _, k := range []string{
+			"OTEL_SDK_DISABLED",
+			"OTEL_METRICS_EXPORTER",
+			"OTEL_EXPORTER_OTLP_ENDPOINT",
+			"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+			"OTEL_EXPORTER_OTLP_PROTOCOL",
+			"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+			"HOST_IP",
+		} {
+			t.Setenv(k, "")
+		}
+	}
+
+	t.Run("literal ip endpoint", func(t *testing.T) {
+		clearOTLPEnv(t)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://172.17.0.1:4318")
+		ep, host := forwardTelemetryEndpoint()
+		require.NotNil(t, ep)
+		require.Empty(t, host)
+		require.Equal(t, 4318, ep.Port)
+		require.Equal(t, uint32(constants.TelemetryMarkValue), ep.Mark)
+		require.Equal(t, []netip.Addr{netip.MustParseAddr("172.17.0.1")}, ep.IPs)
+	})
+
+	t.Run("hostname endpoint", func(t *testing.T) {
+		clearOTLPEnv(t)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otel.monitoring.svc:4318/v1/metrics")
+		ep, host := forwardTelemetryEndpoint()
+		require.NotNil(t, ep)
+		require.Equal(t, "otel.monitoring.svc", host)
+		require.Equal(t, 4318, ep.Port)
+		require.Equal(t, uint32(constants.TelemetryMarkValue), ep.Mark)
+		require.Empty(t, ep.IPs)
+	})
+
+	t.Run("host ip fallback", func(t *testing.T) {
+		clearOTLPEnv(t)
+		t.Setenv("HOST_IP", "10.0.0.5")
+		ep, host := forwardTelemetryEndpoint()
+		require.NotNil(t, ep)
+		require.Empty(t, host)
+		require.Equal(t, 4318, ep.Port)
+		require.Equal(t, []netip.Addr{netip.MustParseAddr("10.0.0.5")}, ep.IPs)
+	})
+
+	t.Run("disabled metrics skips allow", func(t *testing.T) {
+		clearOTLPEnv(t)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://172.17.0.1:4318")
+		t.Setenv("OTEL_SDK_DISABLED", "true")
+		ep, host := forwardTelemetryEndpoint()
+		require.Nil(t, ep)
+		require.Empty(t, host)
+	})
+
+	t.Run("invalid endpoint does not fall back to host ip", func(t *testing.T) {
+		clearOTLPEnv(t)
+		t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "172.17.0.1:4318")
+		t.Setenv("HOST_IP", "10.0.0.5")
+		ep, host := forwardTelemetryEndpoint()
+		require.Nil(t, ep)
+		require.Empty(t, host)
+	})
 }

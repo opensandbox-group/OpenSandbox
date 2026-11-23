@@ -62,11 +62,11 @@ type Options struct {
 	// default is half the minimum 60-second DNS lease.
 	ConnectionRefreshInterval time.Duration
 	// UpstreamProxy, when set, adds an infrastructure-only accept scoped to the
-	// mitmproxy UID and the configured proxy endpoint (IP + TCP port). The
-	// proxy dial must not depend on the sandbox allow sets: those sets are
-	// IP-only and unscoped by UID, so putting the proxy there would let
-	// sandbox workloads CONNECT it directly and bounce to denied destinations.
+	// mitmproxy UID (or forwarder mark) and the configured proxy endpoint.
 	UpstreamProxy *UpstreamProxyEndpoint
+	// Telemetry, when set, adds a capability-gated (SO_MARK) and endpoint-scoped
+	// accept for the sidecar's own OTLP collector in forward mode (OSEP-0030).
+	Telemetry *UpstreamProxyEndpoint
 	// MitmRedirectPort, when > 0, is the transparent-MITM listener port the
 	// nat OUTPUT REDIRECT rewrites intercepted dports to; the chain must
 	// exempt that rewritten tuple ahead of port-scoped rules or every
@@ -628,6 +628,9 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	}
 	if ep := opts.UpstreamProxy; ep != nil {
 		b.WriteString(buildUpstreamProxyStatic(tableName, ep))
+	}
+	if ep := opts.Telemetry; ep != nil {
+		b.WriteString(buildTelemetryStatic(tableName, ep))
 	}
 	// Explicit denies come before the DNS-learned accepts, mirroring the
 	// new-connection path: an allowed domain that re-resolves to an explicitly

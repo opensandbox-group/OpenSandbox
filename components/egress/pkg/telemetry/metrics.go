@@ -79,6 +79,7 @@ const (
 	NftOpRemove            = "remove"
 	NftOpUpstreamProxyAdd  = "upstream_proxy_add"
 	NftOpUpstreamProxySync = "upstream_proxy_sync"
+	NftOpTelemetryAdd      = "telemetry_add"
 	// Fast Sandbox-profile operations (OSEP-0022).
 	NftOpReset     = "reset"
 	NftOpDenyFirst = "deny_first"
