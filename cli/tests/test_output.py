@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for opensandbox_cli.output — table, JSON, YAML rendering."""
-
 from __future__ import annotations
 
 import json

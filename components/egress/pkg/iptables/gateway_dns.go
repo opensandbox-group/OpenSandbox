@@ -12,12 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Gateway DNS redirect (fast-sandbox profile): the shared DNS proxy binds loopback
-// (127.0.0.1:15353) so it never collides with a host DNS service on :53,
-// while sandboxes resolve against slot.Gateway:53 (resolv.conf rewrite).
-// A prerouting REDIRECT per gateway forwards that traffic to the loopback
-// proxy. REDIRECT rewrites only the destination — the source IP is
-// preserved, so per-subject DNS dispatch keeps working.
+// Redirect gateway DNS to the shared listener, preserving source IP for per-subject policy dispatch.
 package iptables
 
 import (

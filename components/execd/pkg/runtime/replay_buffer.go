@@ -38,8 +38,6 @@ func newReplayBuffer() *replayBuffer {
 	}
 }
 
-// write appends p to the buffer, evicting the oldest bytes when the buffer is full.
-// The invariant head == total % size is preserved on every call.
 func (r *replayBuffer) write(p []byte) {
 	if len(p) == 0 {
 		return
@@ -54,7 +52,6 @@ func (r *replayBuffer) write(p []byte) {
 		r.total += int64(skip)
 		r.head = (r.head + skip) % r.size
 		p = p[skip:]
-		// len(p) == r.size now
 	}
 
 	// len(p) <= r.size — split into at most two contiguous copies.
@@ -121,7 +118,6 @@ func (r *replayBuffer) readFromLocked(offset int64) ([]byte, int64) {
 		return nil, r.total
 	}
 
-	// Oldest retained absolute offset.
 	oldest := r.total - int64(r.size)
 	if oldest < 0 {
 		oldest = 0
@@ -135,8 +131,6 @@ func (r *replayBuffer) readFromLocked(offset int64) ([]byte, int64) {
 		return nil, r.total
 	}
 
-	// Thanks to the invariant head == total % size, the byte at absolute offset o
-	// is stored at buf[o % size].  This holds whether or not the buffer has wrapped.
 	start := int(offset % int64(r.size))
 	end := start + count
 

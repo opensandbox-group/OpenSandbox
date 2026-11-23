@@ -59,7 +59,6 @@ func newMockLifecycleServer(t *testing.T, execdURL string) *httptest.Server {
 
 		switch {
 		case r.Method == http.MethodPost && path == "/v1/sandboxes":
-			// Create sandbox
 			jsonResponse(w, http.StatusCreated, SandboxInfo{
 				ID:         fmt.Sprintf("sbx-pool-%d", time.Now().UnixNano()),
 				Status:     SandboxStatus{State: StateRunning},
@@ -68,14 +67,12 @@ func newMockLifecycleServer(t *testing.T, execdURL string) *httptest.Server {
 			})
 
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "/v1/sandboxes/") && strings.Contains(path, "/endpoints/"):
-			// Get endpoint - return the execd mock URL
 			jsonResponse(w, http.StatusOK, Endpoint{
 				Endpoint: execdURL,
 				Headers:  map[string]string{"X-EXECD-ACCESS-TOKEN": "test-token"},
 			})
 
 		case r.Method == http.MethodGet && strings.HasPrefix(path, "/v1/sandboxes/"):
-			// Get sandbox info
 			parts := strings.Split(path, "/")
 			sandboxID := parts[len(parts)-1]
 			jsonResponse(w, http.StatusOK, SandboxInfo{
@@ -86,11 +83,9 @@ func newMockLifecycleServer(t *testing.T, execdURL string) *httptest.Server {
 			})
 
 		case r.Method == http.MethodDelete && strings.HasPrefix(path, "/v1/sandboxes/"):
-			// Delete sandbox
 			w.WriteHeader(http.StatusNoContent)
 
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/renew-expiration"):
-			// Renew expiration
 			expiresAt := time.Now().Add(1 * time.Hour).UTC()
 			jsonResponse(w, http.StatusOK, RenewExpirationResponse{
 				ExpiresAt: expiresAt,
@@ -108,7 +103,6 @@ func newMockLifecycleServer(t *testing.T, execdURL string) *httptest.Server {
 func newTestPool(t *testing.T, serverURL string, opts ...func(*SandboxPoolBuilder)) *DefaultSandboxPool {
 	t.Helper()
 
-	// Strip scheme from URL to get domain.
 	domain := serverURL
 
 	builder := NewSandboxPoolBuilder().
@@ -133,8 +127,6 @@ func newTestPool(t *testing.T, serverURL string, opts ...func(*SandboxPoolBuilde
 	}
 	return pool
 }
-
-// ---------- Builder Tests ----------
 
 func TestPoolBuilder_MissingPoolName(t *testing.T) {
 	_, err := NewSandboxPoolBuilder().
@@ -262,8 +254,6 @@ func TestPoolBuilder_DefaultPollingIntervals(t *testing.T) {
 	}
 }
 
-// ---------- Lifecycle Tests ----------
-
 func TestPool_Start_Success(t *testing.T) {
 	execdSrv := newMockExecdServer(t)
 	lifecycleSrv := newMockLifecycleServer(t, execdSrv.URL)
@@ -299,7 +289,6 @@ func TestPool_Start_AlreadyStarted(t *testing.T) {
 	}
 	defer pool.Shutdown(ctx, false)
 
-	// Second start should be idempotent (return nil).
 	err = pool.Start(ctx)
 	if err != nil {
 		t.Errorf("second Start should return nil, got %v", err)
@@ -353,8 +342,6 @@ func TestPool_Shutdown_NotStarted(t *testing.T) {
 		t.Errorf("lifecycleState = %v, want STOPPED", state)
 	}
 }
-
-// ---------- Acquire Tests ----------
 
 func TestPool_Create_MetricsDisabledForWarmupOnly(t *testing.T) {
 	execdSrv := newMockExecdServer(t)
@@ -714,8 +701,6 @@ func TestPool_Acquire_WithTimeout(t *testing.T) {
 	}
 }
 
-// ---------- Other Tests ----------
-
 func TestPool_Resize(t *testing.T) {
 	execdSrv := newMockExecdServer(t)
 	lifecycleSrv := newMockLifecycleServer(t, execdSrv.URL)
@@ -728,7 +713,6 @@ func TestPool_Resize(t *testing.T) {
 		t.Fatalf("Resize failed: %v", err)
 	}
 
-	// Verify both store and local config are updated.
 	storeMaxIdle, err := pool.config.StateStore.GetMaxIdle(ctx, pool.config.PoolName)
 	if err != nil {
 		t.Fatalf("GetMaxIdle failed: %v", err)
@@ -862,8 +846,6 @@ func TestPool_Concurrent_Acquire(t *testing.T) {
 	}
 }
 
-// ---------- Shutdown Behavior Tests ----------
-
 func TestPool_Shutdown_DoesNotReleaseIdle(t *testing.T) {
 	execdSrv := newMockExecdServer(t)
 	lifecycleSrv := newMockLifecycleServer(t, execdSrv.URL)
@@ -892,7 +874,6 @@ func TestPool_Shutdown_DoesNotReleaseIdle(t *testing.T) {
 		t.Fatalf("Shutdown failed: %v", err)
 	}
 
-	// Verify idle entries are still in the store.
 	counters, err := pool.config.StateStore.SnapshotCounters(ctx, "test-pool")
 	if err != nil {
 		t.Fatalf("SnapshotCounters failed: %v", err)
@@ -1099,7 +1080,6 @@ func TestPool_Shutdown_NonGraceful_DoesNotReleaseIdle(t *testing.T) {
 		t.Fatalf("Shutdown failed: %v", err)
 	}
 
-	// Verify idle entry is still in the store.
 	counters, err := pool.config.StateStore.SnapshotCounters(ctx, "test-pool")
 	if err != nil {
 		t.Fatalf("SnapshotCounters failed: %v", err)
@@ -1108,8 +1088,6 @@ func TestPool_Shutdown_NonGraceful_DoesNotReleaseIdle(t *testing.T) {
 		t.Errorf("idle count after non-graceful shutdown = %d, want 1", counters.IdleCount)
 	}
 }
-
-// ---------- Restart Tests ----------
 
 func TestPool_Start_AfterShutdown(t *testing.T) {
 	execdSrv := newMockExecdServer(t)
@@ -1159,8 +1137,6 @@ func TestPool_Start_AfterShutdown(t *testing.T) {
 		t.Fatal("expected non-nil sandbox after restart")
 	}
 }
-
-// ---------- Direct Create Close Tests ----------
 
 func TestPool_DirectCreate_RenewFailure_ClosesCalled(t *testing.T) {
 	execdSrv := newMockExecdServer(t)

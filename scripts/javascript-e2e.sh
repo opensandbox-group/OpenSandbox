@@ -66,7 +66,6 @@ uv run python -m opensandbox_server.main > server.log 2>&1 &
 SERVER_PID=$!
 cd ..
 
-# wait for server
 sleep 10
 
 cd tests/javascript
@@ -77,11 +76,8 @@ corepack prepare pnpm@9.15.0 --activate
 
 pnpm install
 
-# Ensure SDK workspace deps exist before running build steps (CI does not have prebuilt node_modules).
 pnpm -C ../../sdks install --frozen-lockfile
 
-# Align with other E2E jobs: local server does not require API key by default.
-# Ensure tests do not send an auth header.
 export OPENSANDBOX_TEST_API_KEY=""
 export OPENSANDBOX_SANDBOX_DEFAULT_IMAGE="opensandbox/code-interpreter:${TAG}"
 

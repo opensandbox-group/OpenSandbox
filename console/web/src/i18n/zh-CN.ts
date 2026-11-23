@@ -16,7 +16,6 @@ import type { Messages } from './en';
 
 /** Simplified Chinese messages. Technical names (BFF, Lifecycle, OSS, K8s, IDs) stay as-is. */
 export const zhCN: Messages = {
-  // Shared words.
   'common.language': '语言',
   'common.refresh': '刷新',
   'common.cancel': '取消',
@@ -34,7 +33,6 @@ export const zhCN: Messages = {
   'common.resume': '恢复',
   'common.shell': '终端',
 
-  // Application layout.
   'nav.sandboxes': '沙箱',
   'nav.sandboxesAllTenants': '沙箱（所有租户）',
   'nav.snapshots': '快照',

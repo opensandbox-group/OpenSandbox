@@ -60,7 +60,7 @@ gateway:
   # -- FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise.
   fastpathEndpoint: ""
 
-  # -- Restricts Fast Sandbox to one namespace and enables unsigned Host routing. Empty requires signed scopes; unsigned access needs external protection.
+  # -- Restricts Fast Sandbox to one namespace and enables unsigned wildcard routing. Empty requires signed scopes; unsigned access needs external protection.
   fastSandboxNamespace: ""
 
   # OSEP-0024 activity tracking (per-sandbox last-activity in Redis).

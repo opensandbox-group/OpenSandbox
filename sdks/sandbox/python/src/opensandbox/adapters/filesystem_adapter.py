@@ -234,7 +234,7 @@ class FilesystemAdapter(Filesystem):
                 line_based=offset is not None or limit is not None,
             )
         except Exception as e:
-            logger.error(f"Failed to read file {path}", exc_info=e)
+            logger.debug(f"Failed to read file {path}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def read_bytes_stream(
@@ -318,7 +318,7 @@ class FilesystemAdapter(Filesystem):
                 await response.aclose()
                 raise
         except Exception as e:
-            logger.error(f"Failed to stream file {path}", exc_info=e)
+            logger.debug(f"Failed to stream file {path}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def write_files(self, entries: list[WriteEntry]) -> None:
@@ -346,7 +346,7 @@ class FilesystemAdapter(Filesystem):
 
             response.raise_for_status()
         except Exception as e:
-            logger.error(f"Failed to write {len(entries)} files", exc_info=e)
+            logger.debug(f"Failed to write {len(entries)} files", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def _write_files_with_content_length(
@@ -536,7 +536,7 @@ class FilesystemAdapter(Filesystem):
             handle_api_error(response_obj, "Create directories")
 
         except Exception as e:
-            logger.error("Failed to create directories", exc_info=e)
+            logger.debug("Failed to create directories", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def delete_files(self, paths: list[str]) -> None:
@@ -553,7 +553,7 @@ class FilesystemAdapter(Filesystem):
             handle_api_error(response_obj, "Delete files")
 
         except Exception as e:
-            logger.error(f"Failed to delete {len(paths)} files", exc_info=e)
+            logger.debug(f"Failed to delete {len(paths)} files", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def delete_directories(self, paths: list[str]) -> None:
@@ -570,7 +570,7 @@ class FilesystemAdapter(Filesystem):
             handle_api_error(response_obj, "Delete directories")
 
         except Exception as e:
-            logger.error(f"Failed to delete {len(paths)} directories", exc_info=e)
+            logger.debug(f"Failed to delete {len(paths)} directories", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def move_files(self, entries: list[MoveEntry]) -> None:
@@ -595,7 +595,7 @@ class FilesystemAdapter(Filesystem):
             handle_api_error(response_obj, "Move files")
 
         except Exception as e:
-            logger.error("Failed to move files", exc_info=e)
+            logger.debug("Failed to move files", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def set_permissions(self, entries: list[SetPermissionEntry]) -> None:
@@ -612,7 +612,7 @@ class FilesystemAdapter(Filesystem):
             handle_api_error(response_obj, "Set permissions")
 
         except Exception as e:
-            logger.error("Failed to set permissions", exc_info=e)
+            logger.debug("Failed to set permissions", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def replace_contents(self, entries: list[ContentReplaceEntry]) -> None:
@@ -628,7 +628,7 @@ class FilesystemAdapter(Filesystem):
             handle_api_error(response_obj, "Replace contents")
 
         except Exception as e:
-            logger.error("Failed to replace contents", exc_info=e)
+            logger.debug("Failed to replace contents", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def replace_contents_detailed(self, entries: list[ContentReplaceEntry]) -> list[ContentReplaceResult]:
@@ -648,7 +648,7 @@ class FilesystemAdapter(Filesystem):
             return FilesystemModelConverter.to_replace_results(response_obj.parsed)
 
         except Exception as e:
-            logger.error("Failed to replace contents", exc_info=e)
+            logger.debug("Failed to replace contents", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def search(self, entry: SearchEntry) -> list[EntryInfo]:
@@ -678,7 +678,7 @@ class FilesystemAdapter(Filesystem):
             )
 
         except Exception as e:
-            logger.error("Failed to search files", exc_info=e)
+            logger.debug("Failed to search files", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def list_directory(self, entry: DirectoryListEntry) -> list[EntryInfo]:
@@ -709,7 +709,7 @@ class FilesystemAdapter(Filesystem):
             )
 
         except Exception as e:
-            logger.error("Failed to list directory", exc_info=e)
+            logger.debug("Failed to list directory", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_file_info(self, paths: list[str]) -> dict[str, EntryInfo]:
@@ -731,7 +731,7 @@ class FilesystemAdapter(Filesystem):
             return FilesystemModelConverter.to_entry_info_map(response_obj.parsed)
 
         except Exception as e:
-            logger.error(f"Failed to get file info for {len(paths)} paths", exc_info=e)
+            logger.debug(f"Failed to get file info for {len(paths)} paths", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def _build_download_request(

@@ -16,6 +16,7 @@ package telemetry
 
 import (
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -23,9 +24,9 @@ import (
 // endpoint. Endpoint precedence matches the exporters:
 // OTEL_EXPORTER_OTLP_METRICS_ENDPOINT, then OTEL_EXPORTER_OTLP_ENDPOINT.
 // The value must be a URL (scheme://host[:port][/path]), matching the
-// otlpmetrichttp env-var form; bare host:port or host values are invalid
+// OTLP exporter env-var form; bare host:port or host values are invalid
 // because the exporter parses them as opaque URLs with an empty host.
-// A missing port falls back to the scheme default (https->443, http->80).
+// Without a port, gRPC uses its resolver default (443); HTTP uses the scheme default.
 // Domain hosts are returned without the trailing dot, matching DNS policy
 // normalization. ok is false when no endpoint is configured or it cannot
 // be parsed.
@@ -34,7 +35,14 @@ func OTLPEndpointHostPort() (host, port string, ok bool) {
 	if raw == "" {
 		return "", "", false
 	}
-	return parseOTLPEndpoint(raw)
+	host, port, ok = parseOTLPEndpoint(raw)
+	if ok && otlpMetricsProtocol() == otlpGRPCProtocol {
+		u, _ := url.Parse(strings.TrimSpace(raw))
+		if u.Port() == "" {
+			port = "443" // Match the gRPC DNS resolver, including plaintext URLs.
+		}
+	}
+	return host, port, ok
 }
 
 // OTLPEndpointEnvSet reports whether any OTEL endpoint env var is non-blank,
@@ -48,14 +56,31 @@ func OTLPEndpointEnvSet() bool {
 
 // OTLPEndpointFallbackHostPort returns the exporter fallback destination used
 // only when no OTEL endpoint env var is set: the resolved node IP
-// (HOST_IP, then /etc/hostinfo) on the default OTLP/HTTP port 4318. ok is
+// (HOST_IP, then /etc/hostinfo) on port 4317 for gRPC or 4318 for HTTP. ok is
 // false when no node IP can be resolved.
 func OTLPEndpointFallbackHostPort() (host, port string, ok bool) {
 	ip, ok := resolveNodeIP()
 	if !ok {
 		return "", "", false
 	}
-	return ip, otlpHTTPPort, true
+	port = otlpHTTPPort
+	if otlpMetricsProtocol() == otlpGRPCProtocol {
+		port = otlpGRPCPort
+	}
+	return ip, port, true
+}
+
+// otlpMetricsProtocol applies signal-specific precedence before normalization.
+// Unsupported values are reported once by Init and use the HTTP fallback.
+func otlpMetricsProtocol() string {
+	protocol := strings.TrimSpace(os.Getenv(envOTLPMetricsProtocol))
+	if protocol == "" {
+		protocol = strings.TrimSpace(os.Getenv(envOTLPProtocol))
+	}
+	if protocol == "" {
+		return otlpHTTPProtocol
+	}
+	return strings.ToLower(protocol)
 }
 
 func parseOTLPEndpoint(raw string) (host, port string, ok bool) {

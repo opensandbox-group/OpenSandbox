@@ -204,13 +204,7 @@ func getTerminalPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, boo
 	return "", "", false
 }
 
-// terminatedMainContainerFailure reports whether the sandbox's main container
-// terminated with a non-zero exit code under a restart policy that will not
-// restart it (Never). RestartPolicyAlways and RestartPolicyOnFailure pods are
-// excluded because the kubelet restarts the container instead. Pods that are
-// already terminating are excluded too: deletion, eviction, or node drain may
-// signal-kill the main container, and the resulting non-zero exit must not turn
-// into a sticky terminal failure that blocks replacement of the deleted pod.
+// Ignore restarts and deletion-induced exits so they cannot latch a terminal failure.
 func terminatedMainContainerFailure(pod *corev1.Pod) (string, string, bool) {
 	if pod.DeletionTimestamp != nil ||
 		pod.Spec.RestartPolicy != corev1.RestartPolicyNever ||
@@ -250,19 +244,8 @@ func terminatedContainerFailure(pod *corev1.Pod, status *corev1.ContainerStatus,
 	return reason, message, true
 }
 
-// terminatedMainContainerCompletion reports whether the sandbox's main container
-// terminated successfully (exit code 0) under a restart policy that will not
-// bring it back, mirroring terminatedMainContainerFailure for the clean exit.
-// This is the exit-0 counterpart of the #1741 failure path: without it a
-// finished workload never converges to a terminal phase — the pod's Ready count
-// drops to zero once the main container is gone (sidecars keep the pod Running),
-// and the phase would regress from Succeed back to Pending until expireTime.
-// RestartPolicyNever never restarts; RestartPolicyOnFailure restarts only
-// non-zero exits, so a zero exit is final there too. RestartPolicyAlways pods
-// are excluded: the kubelet restarts the container regardless of exit code, so
-// no termination is final. Pods that are already terminating are excluded too —
-// deletion may signal-kill the main container, and that must not be reported as
-// a successful completion.
+// Sidecars can keep a completed Pod Running; use the main container's final exit to avoid regressing to Pending.
+// RestartPolicyAlways and deletion-induced exits are not final completions.
 func terminatedMainContainerCompletion(pod *corev1.Pod) (string, bool) {
 	if pod.DeletionTimestamp != nil ||
 		(pod.Spec.RestartPolicy != corev1.RestartPolicyNever &&
@@ -321,7 +304,7 @@ type podFailureSummary struct {
 }
 
 func summarizePodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {
-	return summarizePodFailuresWith(pods, getPodFailureReasonAndMessage, false)
+	return summarizePodFailuresWith(pods, getPodFailureReasonAndMessage, true)
 }
 
 func summarizeTerminalPodFailures(pods []*corev1.Pod) (podFailureSummary, bool) {

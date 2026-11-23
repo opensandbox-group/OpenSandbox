@@ -60,19 +60,11 @@ export interface CredentialVault {
 export interface Egress {
   getPolicy(): Promise<NetworkPolicy>;
   /**
-   * Patch egress rules with sidecar merge semantics.
-   *
-   * Incoming rules take priority over existing rules with the same target.
-   * Existing rules for other targets remain unchanged. Within one patch payload,
-   * the first rule for a target wins. The current defaultAction is preserved.
+   * Replace matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays.
    */
   patchRules(rules: NetworkRule[]): Promise<void>;
   /**
-   * Delete egress rules by target.
-   *
-   * Each entry is a FQDN or wildcard domain. Matching rules are removed from
-   * the currently enforced policy. Targets not present in the policy are
-   * silently ignored (idempotent). The current defaultAction is preserved.
+   * Delete by target (domain, wildcard, IP, CIDR, or empty for port-only rules); misses and defaultAction are unchanged.
    */
   deleteRules(targets: string[]): Promise<void>;
 }

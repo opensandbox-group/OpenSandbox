@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Docker-based implementation of SandboxService.
-
-This module provides a Docker implementation of the sandbox service interface,
-using Docker containers for sandbox lifecycle management.
-"""
-
 from __future__ import annotations
 
 import asyncio

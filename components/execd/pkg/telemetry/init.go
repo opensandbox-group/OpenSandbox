@@ -316,8 +316,6 @@ func bindingDynamicAttrs(b *binding.RuntimeBinding) []attribute.KeyValue {
 	return attrs
 }
 
-// diskUsageAttrs returns the attribute set for a per-mount disk usage
-// observation: the shared sandbox attrs plus mount identity.
 func diskUsageAttrs(base []attribute.KeyValue, usage resources.DiskUsage) []attribute.KeyValue {
 	attrs := make([]attribute.KeyValue, 0, len(base)+3)
 	attrs = append(attrs, base...)
@@ -329,10 +327,7 @@ func diskUsageAttrs(base []attribute.KeyValue, usage resources.DiskUsage) []attr
 	return attrs
 }
 
-// execdSharedAttrs returns the attribute set stamped onto every metric:
-// static env-derived attrs plus, once a RuntimeBinding is applied, the
-// dynamic sandbox attrs captured at record time (binding wins on key
-// conflicts).
+// RuntimeBinding attributes override static environment attributes at record time.
 func sharedAttrs() []attribute.KeyValue {
 	staticAttrs := execdSharedAttrs()
 	b := binding.Current()

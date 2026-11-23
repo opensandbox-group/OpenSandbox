@@ -40,6 +40,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -202,6 +203,53 @@ class CommandsAdapterTest {
         assertEquals("debug", envs?.get("LOG_LEVEL")?.jsonPrimitive?.content)
         // Builder defaults background to false; request body always includes it
         assertEquals(false, requestBodyJson["background"]?.jsonPrimitive?.booleanOrNull)
+    }
+
+    @Test
+    fun `run should surface a handler failure`() {
+        val stdout = """data: {"type":"stdout","text":"first","timestamp":1}"""
+        val complete = """data: {"type":"execution_complete","execution_time":10,"timestamp":2}"""
+        mockWebServer.enqueue(MockResponse().setBody("$stdout\n\n$complete\n\n"))
+
+        val failure = IllegalStateException("stdout handler failed")
+        val receivedOutput = mutableListOf<String>()
+        var completed = false
+        val handlers =
+            ExecutionHandlers.builder()
+                .onStdout {
+                    receivedOutput.add(it.text)
+                    throw failure
+                }
+                .onExecutionComplete { completed = true }
+                .build()
+        val request = RunCommandRequest.builder().command("echo first").handlers(handlers).build()
+
+        val exception = assertThrows<SandboxInternalException> { commandsAdapter.run(request) }
+
+        assertSame(failure, exception.cause)
+        assertEquals(listOf("first"), receivedOutput)
+        assertEquals(false, completed)
+    }
+
+    @Test
+    fun `runInSession should surface a handler failure`() {
+        val complete = """data: {"type":"execution_complete","execution_time":10,"timestamp":1}"""
+        val stdout = """data: {"type":"stdout","text":"late","timestamp":2}"""
+        mockWebServer.enqueue(MockResponse().setBody("$complete\n\n$stdout\n\n"))
+
+        val failure = IllegalStateException("completion handler failed")
+        val receivedOutput = mutableListOf<String>()
+        val handlers =
+            ExecutionHandlers.builder()
+                .onExecutionComplete { throw failure }
+                .onStdout { receivedOutput.add(it.text) }
+                .build()
+        val request = RunInSessionRequest.builder().command("echo late").handlers(handlers).build()
+
+        val exception = assertThrows<SandboxInternalException> { commandsAdapter.runInSession("sess-123", request) }
+
+        assertSame(failure, exception.cause)
+        assertTrue(receivedOutput.isEmpty())
     }
 
     @Test

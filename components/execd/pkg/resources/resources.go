@@ -34,7 +34,7 @@ import (
 
 // MemoryUsage is a sandbox memory snapshot.
 type MemoryUsage struct {
-	// UsedBytes is the memory currently charged to the sandbox.
+	// Cgroup readings subtract reclaimable file cache when available; the host fallback reports system used memory.
 	UsedBytes int64
 	// TotalBytes is the sandbox memory capacity: the cgroup limit when one
 	// is configured, otherwise the host (or VM) total.
@@ -53,17 +53,12 @@ type backend interface {
 
 var defaultBackend = sync.OnceValue(newBackend)
 
-// CPUPercent returns the sandbox CPU utilization in percent, relative to the
-// capacity reported by CPUCount. With interval > 0 the call blocks and
-// samples usage at both ends of the window; with interval <= 0 it returns
-// the usage accumulated since the previous call (the first call reports 0).
+// CPUPercent is relative to CPUCount; positive intervals block, otherwise the backend measures since its previous sample.
 func CPUPercent(interval time.Duration) (float64, error) {
 	return defaultBackend().cpuPercent(interval)
 }
 
-// CPUCount returns the sandbox's effective CPU capacity in cores: the cgroup
-// quota rounded up when a quota is configured, otherwise the number of cores
-// visible to the process.
+// CPUCount returns the rounded-up cgroup CPU quota when configured, otherwise runtime.GOMAXPROCS.
 func CPUCount() float64 {
 	return defaultBackend().cpuCount()
 }

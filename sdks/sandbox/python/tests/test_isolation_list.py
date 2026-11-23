@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Tests for IsolationService.list (async and sync)."""
-
 from __future__ import annotations
 
 from datetime import datetime

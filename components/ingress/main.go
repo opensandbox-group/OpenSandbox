@@ -173,7 +173,6 @@ func main() {
 			"enable activity recording for a stable wake loop")
 	}
 
-	// Create reverse proxy with sandbox provider.
 	reverseProxy := proxy.NewProxy(
 		ctx,
 		sandboxProvider,

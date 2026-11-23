@@ -120,7 +120,6 @@ func TestServeLifecycle(t *testing.T) {
 		t.Errorf("health body = %q", resp)
 	}
 
-	// A listener failure surfaces as an error from Serve.
 	cancel()
 	select {
 	case err := <-done:
@@ -140,7 +139,6 @@ func TestServeReturnsListenerError(t *testing.T) {
 	if err := ln.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Closing the listener makes Serve return a non-nil error.
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- service.Serve(context.Background(), ln, service.NewHandler(), service.ShutdownTimeout)
@@ -159,7 +157,6 @@ func httpGet(addr string) (string, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get("http://" + addr + "/healthz")
 	if err != nil {
-		// A connection refused means the server is not accepting yet.
 		return "", err
 	}
 	defer resp.Body.Close()

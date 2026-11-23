@@ -317,10 +317,13 @@ OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
 OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
-# Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
-# The value also flows into the Go-based image builds via --build-arg GOPROXY;
-# empty build args keep the Dockerfile defaults (proxy.golang.org).
-FSB_GOPROXY="${FSB_GOPROXY:-direct}"
+# Default to the canonical Go module proxy with direct fallback: pure
+# GOPROXY=direct fails on dead vanity domains in fast-sandbox's dependency
+# tree (e.g. nhooyr.io/websocket), while internal mirrors can return 500 or
+# stale bytes. The value also flows into the Go-based image builds via
+# --build-arg GOPROXY; empty build args keep the Dockerfile defaults
+# (proxy.golang.org).
+FSB_GOPROXY="${FSB_GOPROXY:-https://proxy.golang.org,direct}"
 export GOPROXY="$FSB_GOPROXY"
 
 # FSB_GOSUMDB=off (set by the KVM integration lane): the runner's network
@@ -3445,7 +3448,6 @@ init_mode_verify() { # [template-id]
 		| tee "$LOGS_DIR/init-mode-processes.txt" >&2 \
 		|| log "verify (init-mode): process table dump failed (continuing; the probes below carry the diagnostics)"
 
-	# 1. PID 1 is the guest init.
 	probe="$(guest_value PID1 sh -c 'echo "PID1=$(tr "\0" " " < /proc/1/cmdline)"')" \
 		|| fail "init-mode: /proc/1/cmdline probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	case "$probe" in
@@ -3453,7 +3455,6 @@ init_mode_verify() { # [template-id]
 		*) fail "guest PID 1 is not the guest init: /proc/1/cmdline = $probe" ;;
 	esac
 
-	# 2. execd armed with --init.
 	execd_pid="$(guest_value EXECD_PID sh -c 'echo "EXECD_PID=$(pgrep -x execd | head -1)"')" \
 		|| fail "init-mode: execd pgrep probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	case "$execd_pid" in
@@ -3465,23 +3466,19 @@ init_mode_verify() { # [template-id]
 		|| fail "execd (pid $execd_pid) does not carry --init (cmdline probe output: $probe)"
 	pass "execd runs with --init (pid $execd_pid)"
 
-	# 3. execd is PID 1's child (bootstrap exec'd away).
 	probe="$(guest_value EXECD_PPID sh -c "echo \"EXECD_PPID=\$(grep '^PPid:' /proc/$execd_pid/status | grep -o '[0-9]*')\"")" \
 		|| fail "init-mode: execd PPid probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "1" ]] \
 		|| fail "execd (pid $execd_pid) is not a child of PID 1: PPid=$probe"
 	pass "execd is a direct child of the guest init (PPid=1)"
 
-	# 4. The entrypoint is execd's child. Exact name + argv selection: a
-	# fuzzy pgrep -f would match the probe's own sh -c shell (the search
-	# text sits in its cmdline) and pass vacuously on its execd PPid.
+	# Exact argv matching avoids counting the probe's own shell as the entrypoint.
 	probe="$(guest_value TAIL_PPID sh -c "$init_mode_entrypoint_probe")" \
 		|| fail "init-mode: entrypoint probe failed (no tail -f /dev/null workload in the guest?): $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "$execd_pid" ]] \
 		|| fail "the entrypoint is not a child of execd (pid $execd_pid): entrypoint PPid=$probe"
 	pass "the baked entrypoint is supervised by execd (entrypoint PPid=$execd_pid)"
 
-	# 5. The orphan reparents to execd (subreaper); left to exit for #6.
 	guest_out sh -c 'sleep 6 >/dev/null 2>&1 & echo $! > /tmp/osb-init-mode-orphan.pid' >/dev/null \
 		|| fail "init-mode: orphan spawn failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	probe="$(guest_value ORPHAN_PPID sh -c 'p=$(cat /tmp/osb-init-mode-orphan.pid); echo "ORPHAN_PPID=$(grep "^PPid:" /proc/$p/status | grep -o "[0-9]*")"')" \
@@ -3490,22 +3487,19 @@ init_mode_verify() { # [template-id]
 		|| fail "the orphan did not reparent to execd (pid $execd_pid): orphan PPid=$probe"
 	pass "orphaned processes reparent to execd (subreaper; orphan PPid=$execd_pid)"
 
-	# 6. execd reaps the exited orphan (else it stays a Z child forever).
 	init_mode_orphan_reaped() {
 		[[ "$(guest_value REAPED sh -c 'p=$(cat /tmp/osb-init-mode-orphan.pid 2>/dev/null); if [ -n "$p" ] && [ ! -e "/proc/$p" ]; then echo "REAPED=1"; else echo "REAPED=0"; fi')" == "1" ]]
 	}
 	wait_for "execd reaps the exited orphan (pid gone from /proc)" 20 init_mode_orphan_reaped
 	guest_out sh -c 'rm -f /tmp/osb-init-mode-orphan.pid' >/dev/null 2>&1 || true
 
-	# 7. No zombies left.
 	probe="$(guest_value ZOMBIES sh -c 'echo "ZOMBIES=$(ps -eo stat | grep -c "^Z" || true)"')" \
 		|| fail "init-mode: zombie count probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "0" ]] \
 		|| fail "the guest process table carries zombies: $probe in Z state"
 	pass "guest process table is zombie-free after the orphan round trip"
 
-	# 8. Report: subreaper tier, no signal shield. Capture the full response
-	# and check the producer status before scanning for .hardening.
+	# Check the command result before parsing the capabilities payload.
 	local hardening_line capabilities_out
 	capabilities_out="$(guest_out curl -fsS http://127.0.0.1:44772/v1/isolated/capabilities 2>/dev/null)" \
 		|| fail "init-mode: capabilities probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
@@ -5239,9 +5233,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
 
 Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
 DOCKER_MIRROR, RUSTFS_*, RC_IMAGE, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
-FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
-when the host cannot reach module VCS hosts directly; also passed into the
-Go-based image builds as --build-arg GOPROXY),
+FSB_GOPROXY (default https://proxy.golang.org,direct; set e.g.
+https://mirrors.aliyun.com/goproxy/,direct when proxy.golang.org is
+unreachable; also passed into the Go-based image builds as --build-arg GOPROXY),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, POOL_MODE=resource-aware (OSEP-0026
 ResourceAware pool fixture), WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1,

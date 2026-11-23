@@ -247,9 +247,6 @@ def build_list_sandboxes_response(
     )
 
 
-# ============================================================================
-# Ingress helpers
-# ============================================================================
 def format_ingress_endpoint(
     ingress_config: Optional[IngressConfig],
     sandbox_id: str,

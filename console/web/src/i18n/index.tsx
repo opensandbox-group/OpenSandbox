@@ -166,17 +166,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     }
   }, [locale]);
 
-  // Keep the translator identity stable across locale changes so callbacks and
-  // effects that translate a message do not refetch data (archived logs, live
-  // logs, list pages) when the user only switches the interface language. `t`
-  // reads the committed locale when it is called, and the context value below
-  // still changes with the locale, so rendered text is translated afresh.
-  //
-  // Because that identity never changes, translated UI content must not be
-  // memoized with `t` in the dependency array (for example
-  // `useMemo(() => buildColumns(t), [t])`): such content would keep the
-  // previous language after a switch. Depend on `locale` from `useI18n()`
-  // instead.
+  // Stable t prevents locale changes from refetching data; memoized translations must depend on locale, not t.
   const t = useCallback<Translate>(
     (key, params) => interpolate(messagesByLocale[getLocaleSnapshot()][key], params),
     [],

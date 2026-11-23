@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package revision provides the in-memory Go coordinator for OSEP-0023.
-// It has no live Vault, TLS, or IPC wiring. Callers must build and validate the
-// complete policy/Vault snapshot under their mutation barrier, gate reads on
-// Confirmed, and finalize their public store under that same barrier. The
-// unused revisionruntime ProcessSession adapter owns transport authentication, a fresh
-// receiver directory/generation, readiness, and local cleanup. Live launch,
-// restart recovery, and remote connection teardown remain integration work.
-// New is for a fresh generation pair, not recovery of an existing receiver.
+// Package revision coordinates OSEP-0023 snapshot transactions for a fresh generation pair, not receiver recovery.
+// Callers must prepare, validate and finalize policy/Vault state under one mutation barrier, gating reads on Confirmed.
 package revision
 
 import (

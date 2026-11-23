@@ -34,9 +34,7 @@ func TestMitmRedirectScriptV4(t *testing.T) {
 
 	// management-plane exception: sandbox -> gateway must NOT be intercepted
 	require.Contains(t, script, `ip saddr 10.0.0.5 ip daddr 10.0.0.1 tcp dport {80,443} return`)
-	// the interception DNAT targets the gateway veth address, not loopback,
-	// and is bound to the sandbox's veth (a spoofed source IP from another
-	// sandbox's veth is not DNATed and hits the forward master drop instead)
+	// DNAT targets the gateway address, not loopback.
 	require.Contains(t, script, `ip saddr 10.0.0.5 tcp dport {80,443} dnat to 10.0.0.1:18081`)
 }
 

@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FastSandboxTemplateService: fsb template management.
-
-The server store is the source of truth for the public catalog; the
-fast-sandbox ``SandboxTemplate`` CRD is the execution projection. Reads
-lazily sync the CRD build status into the row, so the catalog converges
-without a background task.
-"""
+"""The catalog owns build intent; the watch reactor, not reads, converges SandboxTemplate status."""
 
 from __future__ import annotations
 

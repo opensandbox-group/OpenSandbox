@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+RESERVED_METADATA_LABEL_PREFIXES = (
+    RESERVED_LABEL_PREFIX,
+    "batch-sandbox.sandbox.opensandbox.io/",
+)
+
 
 def ensure_entrypoint(entrypoint: Sequence[str]) -> None:
     if not entrypoint:
@@ -100,13 +105,17 @@ def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
     if not metadata:
         return
     for key, value in metadata.items():
-        if key.startswith(RESERVED_LABEL_PREFIX):
+        reserved_prefix = next(
+            (prefix for prefix in RESERVED_METADATA_LABEL_PREFIXES if key.startswith(prefix)),
+            None,
+        )
+        if reserved_prefix is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
                     "message": (
-                        f"Metadata key '{key}' uses the reserved prefix '{RESERVED_LABEL_PREFIX}'. "
+                        f"Metadata key '{key}' uses the reserved prefix '{reserved_prefix}'. "
                         "Keys under this prefix are managed by the system and cannot be set via metadata."
                     ),
                 },

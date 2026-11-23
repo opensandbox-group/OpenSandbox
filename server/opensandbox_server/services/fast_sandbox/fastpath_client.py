@@ -15,19 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FastPath gRPC client for the fast-sandbox Fast-Path Server (FastPath v2).
-
-Wraps the generated `fastpath.v2.FastPathService` stubs with typed helpers and
-normalized error handling. OpenSandbox must not infer NotFound from error
-strings: only gRPC `codes.NotFound` maps to the public HTTP 404 contract.
-
-The client is deliberately **synchronous**: the lifecycle service methods are
-called from FastAPI thread-pool handlers and background renew workers
-(`asyncio.to_thread`), where an aio channel bound to another event loop would
-be unsafe. This matches the sync-call pattern of the Docker and Kubernetes
-backends.
-
-"""
+"""Synchronous FastPath v2 client avoids cross-loop aio channels; typed gRPC statuses, not text, classify errors."""
 
 from __future__ import annotations
 
@@ -75,7 +63,7 @@ class FastPathConflict(FastPathError):
 
 
 class FastPathResourceExhausted(FastPathError):
-    """The FastPath pool has insufficient capacity for the request."""
+    """gRPC RESOURCE_EXHAUSTED may indicate runtime admission failure, not only pool capacity."""
 
 
 class FastPathFailedPrecondition(FastPathError):

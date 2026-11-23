@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -261,13 +262,12 @@ type allocationSyncer interface {
 }
 
 type annoAllocationSyncer struct {
-	client client.Client
+	client    client.Client
+	apiReader client.Reader
 }
 
-func newAnnoAllocationSyncer(client client.Client) allocationSyncer {
-	return &annoAllocationSyncer{
-		client: client,
-	}
+func newAnnoAllocationSyncer(c client.Client, apiReader client.Reader) allocationSyncer {
+	return &annoAllocationSyncer{client: c, apiReader: apiReader}
 }
 
 func (syncer *annoAllocationSyncer) SetAllocation(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, allocation *sandboxAllocation) error {
@@ -362,64 +362,46 @@ func (syncer *annoAllocationSyncer) GetReleased(ctx context.Context, sandbox *sa
 }
 
 func (syncer *annoAllocationSyncer) SetReleased(ctx context.Context, sandbox *sandboxv1alpha1.BatchSandbox, released *allocationReleased) error {
+	if syncer.apiReader == nil {
+		return fmt.Errorf("uncached API reader is not configured")
+	}
 	js, err := json.Marshal(released)
 	if err != nil {
 		return err
 	}
-	anno := sandbox.GetAnnotations()
-	if anno == nil {
-		anno = make(map[string]string)
-	}
-	anno[annoAllocReleasedKey] = string(js)
-	sandbox.SetAnnotations(anno)
-
-	needRemoveFinalizer := false
-	// If the sandbox is being deleted and all allocated pods have been released,
-	// remove the finalizer so the sandbox can be garbage collected.
-	if !sandbox.DeletionTimestamp.IsZero() {
-		allocation, err := syncer.GetAllocation(ctx, sandbox)
-		if err != nil {
-			return err
+	// Finalizers are shared with other cleanup controllers. Recompute from the
+	// latest object on every optimistic-lock retry so a stale array cannot
+	// restore a finalizer another controller has already removed. Bypass the
+	// informer cache so every retry can observe the conflicting API write.
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		latest := &sandboxv1alpha1.BatchSandbox{}
+		if err := syncer.apiReader.Get(ctx, client.ObjectKeyFromObject(sandbox), latest); err != nil {
+			return client.IgnoreNotFound(err)
 		}
-		releasedSet := make(map[string]struct{}, len(released.Pods))
-		for _, p := range released.Pods {
-			releasedSet[p] = struct{}{}
+		if sandbox.UID != "" && sandbox.UID != latest.UID {
+			return nil // The original sandbox has already been deleted.
 		}
-		allReleased := true
-		for _, p := range allocation.Pods {
-			if _, ok := releasedSet[p]; !ok {
-				allReleased = false
-				break
+		base := latest.DeepCopy()
+		if latest.Annotations == nil {
+			latest.Annotations = make(map[string]string)
+		}
+		latest.Annotations[annoAllocReleasedKey] = string(js)
+		if !latest.DeletionTimestamp.IsZero() {
+			allocation, err := syncer.GetAllocation(ctx, latest)
+			if err != nil {
+				return err
+			}
+			releasedSet := sets.New(released.Pods...)
+			if releasedSet.HasAll(allocation.Pods...) {
+				controllerutil.RemoveFinalizer(latest, finalizerPoolAllocation)
 			}
 		}
-		if allReleased && controllerutil.ContainsFinalizer(sandbox, finalizerPoolAllocation) {
-			needRemoveFinalizer = true
-			filtered := make([]string, 0, len(sandbox.GetFinalizers()))
-			for _, f := range sandbox.GetFinalizers() {
-				if f != finalizerPoolAllocation {
-					filtered = append(filtered, f)
-				}
-			}
-			sandbox.SetFinalizers(filtered)
+		if err := syncer.client.Patch(ctx, latest, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+			return client.IgnoreNotFound(err)
 		}
-	}
-
-	meta := map[string]any{
-		"annotations": map[string]string{
-			annoAllocReleasedKey: string(js),
-		},
-	}
-	if needRemoveFinalizer {
-		meta["finalizers"] = sandbox.GetFinalizers()
-	}
-	patchData, err := json.Marshal(map[string]any{"metadata": meta})
-	if err != nil {
-		return err
-	}
-	obj := &sandboxv1alpha1.BatchSandbox{}
-	obj.Name = sandbox.Name
-	obj.Namespace = sandbox.Namespace
-	return syncer.client.Patch(ctx, obj, client.RawPatch(types.MergePatchType, patchData))
+		latest.DeepCopyInto(sandbox)
+		return nil
+	})
 }
 
 type allocSpec struct {
@@ -451,11 +433,12 @@ type defaultAllocator struct {
 	recoverOnce sync.Once
 }
 
-func NewDefaultAllocator(client client.Client) Allocator {
+// NewDefaultAllocator requires an uncached reader for release/finalizer retries.
+func NewDefaultAllocator(c client.Client, apiReader client.Reader) Allocator {
 	return &defaultAllocator{
 		store:     newInMemoryAllocationStore(),
-		syncer:    newAnnoAllocationSyncer(client),
-		client:    client,
+		syncer:    newAnnoAllocationSyncer(c, apiReader),
+		client:    c,
 		algorithm: &algorithm.PackedSchedule{},
 	}
 }

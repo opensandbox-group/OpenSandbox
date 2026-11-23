@@ -100,24 +100,10 @@ async def _gather_fail_fast(*awaitables: Awaitable[_T]) -> list[_T]:
 
 class Sandbox:
     """
-    Main entrypoint for the Open Sandbox SDK providing secure, isolated execution environments.
-
-    This class provides a comprehensive interface for interacting with containerized sandbox
-    environments, combining lifecycle management with high-level operations for file system
-    access, command execution, and real-time monitoring.
+    Sandbox lifecycle, filesystem, command execution, and monitoring.
 
     Custom health checks and transports must not block the event loop. Readiness
     timeout requests cancellation, but custom code that suppresses it may continue.
-
-    Key Features:
-
-    - **Secure Isolation**: Complete Linux OS access in isolated containers
-    - **File System Operations**: Create, read, update, delete files and directories
-    - **Multi-language Execution**: Support for Python, Java, Bash, and other languages
-    - **Real-time Command Execution**: Streaming output with timeout handling
-    - **Resource Management**: CPU, memory, and storage constraints
-    - **Lifecycle Management**: Create, pause, resume, terminate operations
-    - **Health Monitoring**: Automatic readiness detection and status tracking
 
     Usage Example:
 
@@ -210,11 +196,6 @@ class Sandbox:
 
     @property
     def files(self) -> Filesystem:
-        """
-        Provides access to file system operations within the sandbox.
-
-        Allows writing, reading, listing, and deleting files and directories.
-        """
         return self._filesystem_service
 
     def files_with_identity(self, uid: int, gid: int) -> Filesystem:
@@ -233,20 +214,10 @@ class Sandbox:
 
     @property
     def commands(self) -> Commands:
-        """
-        Provides access to command execution operations.
-
-        Allows running shell commands, capturing output, and managing processes.
-        """
         return self._command_service
 
     @property
     def metrics(self) -> Metrics:
-        """
-        Provides access to sandbox metrics and monitoring.
-
-        Allows retrieving resource usage statistics (CPU, memory) and other performance metrics.
-        """
         return self._metrics_service
 
     @property
@@ -265,9 +236,6 @@ class Sandbox:
 
     @property
     def diagnostics(self) -> Diagnostics:
-        """
-        Provides access to sandbox diagnostic log and event descriptors.
-        """
         return self._diagnostics_service
 
     @property
@@ -413,27 +381,11 @@ class Sandbox:
         return await self._egress_service.get_policy()
 
     async def patch_egress_rules(self, rules: list[NetworkRule]) -> None:
-        """
-        Patch egress rules for this sandbox using sidecar merge semantics.
-
-        Rules in this patch payload take priority over existing rules with the
-        same target. Existing rules for other targets remain unchanged. Within a
-        single patch payload, the first rule for a target wins.
-
-        This operation does not replace the entire policy and does not change
-        the current defaultAction.
-        """
+        """Replace matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays."""
         await self._egress_service.patch_rules(rules)
 
     async def delete_egress_rules(self, targets: list[str]) -> None:
-        """
-        Delete egress rules for this sandbox by target.
-
-        Each entry is a FQDN or wildcard domain. Matching rules are removed
-        from the currently enforced policy. Targets not present in the policy
-        are silently ignored (idempotent). The current defaultAction is
-        preserved.
-        """
+        """Delete by target (domain, wildcard, IP, CIDR, or empty for port-only rules); misses/defaultAction stay unchanged."""
         await self._egress_service.delete_rules(targets)
 
     async def pause(self) -> None:
@@ -865,7 +817,7 @@ class Sandbox:
                 raise
             if not isinstance(e, Exception):
                 raise
-            logger.error("Unexpected exception during sandbox creation", exc_info=e)
+            logger.debug("Unexpected exception during sandbox creation", exc_info=e)
             raise SandboxInternalException(
                 f"Internal exception when creating sandbox: {e}"
             ) from e
@@ -955,7 +907,7 @@ class Sandbox:
             await config.close_transport_if_owned()
             if not isinstance(e, Exception) or isinstance(e, SandboxException):
                 raise
-            logger.error("Unexpected exception during sandbox connection", exc_info=e)
+            logger.debug("Unexpected exception during sandbox connection", exc_info=e)
             raise SandboxInternalException(f"Failed to connect to sandbox: {e}") from e
 
     @classmethod
@@ -1042,7 +994,7 @@ class Sandbox:
             await config.close_transport_if_owned()
             if not isinstance(e, Exception) or isinstance(e, SandboxException):
                 raise
-            logger.error("Unexpected exception during sandbox resume", exc_info=e)
+            logger.debug("Unexpected exception during sandbox resume", exc_info=e)
             raise SandboxInternalException(f"Failed to resume sandbox: {e}") from e
 
     async def __aenter__(self) -> "Sandbox":
