@@ -39,6 +39,8 @@ level = "INFO"
 [runtime]
 type = "docker"
 execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:v1.1.0"
+# 指定沙箱内挂载的 TOML 路径，防止创建请求覆盖 EXECD_ISOLATION_CONFIG。
+# execd_isolation_config = "/etc/opensandbox/isolation.toml"
 
 [storage]
 allowed_host_paths = []

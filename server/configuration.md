@@ -104,6 +104,7 @@ The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no 
 | `type` | string | — | **`docker`** or **`kubernetes`**. |
 | `execd_image` | string | — | OCI image containing the **execd** binary (in-sandbox bootstrap). |
 | `execd_run_as_init` | boolean | `true` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 owning child reaping, signal forwarding, and the container lifecycle. This switch only injects `EXECD_INIT=1`; the hardening floor (cap-drop/seccomp/no-new-privileges) is **not** included by default — it stays off unless an execd isolation config enables it (`[hardening] enabled = true`, staged via `EXECD_ISOLATION_CONFIG`). Set `false` for the classic background-and-wait topology. fsb template builds bake `EXECD_INIT=1` into the golden image instead: execd runs as a subreaper under the fsb guest init, so reaping and signal forwarding still apply but the PID 1 signal shield does not. |
+| `execd_isolation_config` | string | unset | Path to the operator's isolation TOML inside Docker and Kubernetes pod-based sandboxes (not `templateId`/fsb fast-sandbox sandboxes). When set for supported sandbox types, the server injects this path as `EXECD_ISOLATION_CONFIG` and ignores request values for that key. The file must be provisioned at that path. Omit this setting to allow creator-managed paths. |
 
 ---
 
@@ -119,7 +120,7 @@ The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no 
 | `no_new_privileges` | boolean | `true` | Block privilege escalation. |
 | `seccomp_profile` | string \| omitted | `null` | Seccomp profile name or absolute path; empty uses Docker default. Also applied to the execd cache container (e.g. set `unconfined` on hosts whose default profile blocks execd). |
 | `pids_limit` | integer | `4096` | Max PIDs per sandbox container; `0` disables. |
-| `sandbox_env` | table | `{}` | Env vars injected into every sandbox; create-request keys override same-named ones. |
+| `sandbox_env` | table | `{}` | Env vars injected into every sandbox. Create-request keys override these defaults. When configured, `runtime.execd_isolation_config` supplies `EXECD_ISOLATION_CONFIG` regardless of either value. |
 | `sandbox_binds` | string[] | `[]` | Bind mounts for every sandbox (`host:container[:mode]`); prepended to request-derived binds. |
 | `port_range_min` / `port_range_max` | integer | `40000` / `60000` | Host port range for bridge-mode allocation. Range must span ≥ 100 ports; each sandbox needs 2–3 ports (3 with egress). |
 | `publish_host` | string | `"0.0.0.0"` | Address Docker publishes sandbox ports on. Use `127.0.0.1` (server on host) or the bridge gateway IP (server in container) to keep ports off public interfaces; the server then reaches sandbox ports at that address. Must be an IPv4 address. |

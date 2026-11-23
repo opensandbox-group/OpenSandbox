@@ -1275,6 +1275,15 @@ class RuntimeConfig(BaseModel):
             "background-and-wait topology."
         ),
     )
+    execd_isolation_config: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Path to the operator's isolation TOML inside Docker and Kubernetes pod-based sandboxes; "
+            "templateId/fsb fast-sandbox sandboxes are excluded. When set, the server supplies "
+            "EXECD_ISOLATION_CONFIG and ignores request values for that key."
+        ),
+    )
 
 
 class SecureRuntimeConfig(BaseModel):
@@ -1425,9 +1434,10 @@ class DockerConfig(BaseModel):
         default_factory=dict,
         description=(
             "Environment variables injected into every sandbox container. Keys from a sandbox "
-            "creation request override same-named keys. Docker-runtime counterpart of the "
-            "Kubernetes pod template: useful for fleet-wide settings such as trusting a private "
-            "CA (e.g. NODE_EXTRA_CA_CERTS) together with sandbox_binds."
+            "creation request override same-named keys. When set, runtime.execd_isolation_config "
+            "takes precedence over both sources for EXECD_ISOLATION_CONFIG. Docker-runtime "
+            "counterpart of the Kubernetes pod template: useful for fleet-wide settings such as "
+            "trusting a private CA (e.g. NODE_EXTRA_CA_CERTS) together with sandbox_binds."
         ),
     )
     sandbox_binds: list[str] = Field(

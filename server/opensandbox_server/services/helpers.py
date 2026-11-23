@@ -59,6 +59,8 @@ from opensandbox_server.config import (
 
 logger = logging.getLogger(__name__)
 
+EXECD_ISOLATION_CONFIG_ENV = "EXECD_ISOLATION_CONFIG"
+
 MEMORY_PATTERN = re.compile(r"^\s*(\d+)([kmgti]i?|[kmgti]?b)?\s*$", re.IGNORECASE)
 MEMORY_MULTIPLIERS: Dict[str, int] = {
     "": 1,
@@ -322,6 +324,20 @@ def split_egress_env(
     return sandbox_env, egress_env
 
 
+def apply_execd_isolation_config(
+    env: dict[str, Optional[str]], config_path: Optional[str]
+) -> None:
+    """Apply an operator-configured path to the sandbox's environment."""
+    if config_path is None:
+        return
+    # Docker serializes the map as KEY=VALUE, so remove any alternate spelling
+    # that would become the same env key at that boundary.
+    for key in list(env):
+        if key.startswith(f"{EXECD_ISOLATION_CONFIG_ENV}="):
+            del env[key]
+    env[EXECD_ISOLATION_CONFIG_ENV] = config_path
+
+
 def _is_truthy(value: Optional[str]) -> bool:
     """Mirror the egress component's constants.IsTruthy."""
     return bool(value) and value.strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -395,6 +411,7 @@ __all__ = [
     "format_ingress_endpoint",
     "matches_filter",
     "split_egress_env",
+    "apply_execd_isolation_config",
     "upstream_proxy_egress_env",
     "validate_upstream_proxy_request",
 ]
