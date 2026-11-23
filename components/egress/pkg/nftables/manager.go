@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -135,7 +136,33 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
 		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
-			drops := m.lastDrops.stillRelevant(p, learned)
+			var previousAllows []netip.Prefix
+			parsedPrevious := false
+			wasAccepted := func(addr netip.Addr, includeStatic bool) bool {
+				// The installed TTL map also includes grants made without a
+				// domain ledger entry, e.g. under default allow.
+				if until := m.tracker.dynamicIPs[addr]; until.After(at) {
+					if expiry.IsZero() || until.Before(expiry) {
+						expiry = until
+					}
+					return true
+				}
+				if !includeStatic || m.domainPolicy == nil {
+					return false
+				}
+				if !parsedPrevious {
+					parsedPrevious = true
+					for _, rule := range m.domainPolicy.Egress {
+						if rule.Action == policy.ActionAllow {
+							if pfx := portlessTargetPrefix(rule); pfx.IsValid() {
+								previousAllows = append(previousAllows, pfx)
+							}
+						}
+					}
+				}
+				return slices.ContainsFunc(previousAllows, func(pfx netip.Prefix) bool { return pfx.Contains(addr) })
+			}
+			drops := m.lastDrops.stillRelevant(p, learned, wasAccepted)
 			return drops, expiry
 		}
 	}
@@ -627,10 +654,12 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// new-connection path: an allowed domain that re-resolves to an explicitly
 	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
+	writeEstablishedTargets(&b, nil, nil, drops.withdrawnHostDenyRules(), "drop")
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
+	writeEstablishedTargets(&b, nil, nil, drops.withdrawnHostPorts.drops(nil), "drop")
 	// Then still-allowed destinations (keeps and the static allow sets), then
 	// removed allows, then the blanket verdict.
 	writeEstablishedTargets(&b, drops.KeepAddrs, drops.KeepPrefixes, drops.KeepPorts, "accept")
