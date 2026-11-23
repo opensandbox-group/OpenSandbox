@@ -4432,6 +4432,13 @@ rootfs_only_verify() {
 	local template_id="${1:-$TEMPLATE_ID}"
 	local lane artifact_scheme
 	read -r lane artifact_scheme <<< "$(rootfs_only_lane "$template_id")"
+	local restore_profile=original
+	if [[ "$lane" == native && "$POOL_MODE" == resource-aware ]]; then
+		# Use a non-default CPU shape so defaulting cannot pass as inheritance.
+		ra_template_up 2 1Gi
+		template_id="$RA_TEMPLATE_ID"
+		restore_profile=memory-only
+	fi
 	log "verify (rootfs-only): lane=$lane templateId=$template_id"
 	local rootfs_log_id="" rootfs_log_label="rootfs-only $lane"
 	if [[ "$lane" == "native" ]]; then
@@ -4459,6 +4466,10 @@ rootfs_only_verify() {
 	rootfs_log_id="$source_id"
 	wait_for "rootfs-only source sandbox Running" 300 sandbox_running
 	wait_for "pre-snapshot execd /ping 200 through the gateway" 100 execd_ping_ok
+	if [[ "$restore_profile" == memory-only ]]; then
+		[[ "$(ra_leaf_read "$source_id" cpu.max)" == "200000 100000" ]] || fail "expected a 2 CPU source"
+		guest_out sh -c 'printf "%s\n" "$1" > /var/tmp/rootfs-override-marker' sh "$source_id" >/dev/null || fail "write source marker"
+	fi
 	t1="$(now_ms)"
 	log "verify (rootfs-only): source $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
 
@@ -4507,10 +4518,17 @@ rootfs_only_verify() {
 	log "verify (rootfs-only): osb sandbox create --snapshot-id $snapshot_id (cold boot)"
 	local t_boot0 t_create t_ping
 	t_boot0="$(now_ms)"
-	restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
-		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
-		--skip-health-check -o json 2>/dev/null)" \
-		|| fail "osb sandbox create (snapshotId=$snapshot_id) failed"
+	local restored
+	if [[ "$restore_profile" == memory-only ]]; then
+		local body
+		body="$(jq -nc --arg snapshot "$snapshot_id" '{snapshotId:$snapshot,timeout:3600,resourceLimits:{memory:"768Mi"}}')"
+		restored="$(server_api POST /sandboxes "$body")" || fail "memory-only restore of $snapshot_id failed"
+	else
+		restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
+			--resource cpu=1 --resource memory=512Mi --resource pids=128 \
+			--skip-health-check -o json 2>/dev/null)" \
+			|| fail "osb sandbox create (snapshotId=$snapshot_id) failed"
+	fi
 	t_create="$(now_ms)"
 	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
 	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
@@ -4525,6 +4543,20 @@ rootfs_only_verify() {
 	# Cold boot is seconds-scale; the generous ceiling only covers a slow
 	# registry pull of the artifact pair.
 	wait_for "cold-booted sandbox Running" 300 sandbox_running
+	if [[ "$restore_profile" == memory-only ]]; then
+		local quota memory guest_kib marker
+		quota="$(ra_leaf_read "$restore_id" cpu.max)"
+		memory="$(kubectl_get "sandbox/$restore_id" '{.spec.resources.limits.memory}')"
+		[[ "$quota" == "200000 100000" && "$memory" == 768Mi ]] || fail "restored cpu.max='$quota', memory='$memory' (want 2 CPU / 768Mi)"
+		marker="$(guest_value MARKER sh -c 'echo "MARKER=$(cat /var/tmp/rootfs-override-marker)"')"
+		[[ "$marker" == "$source_id" ]] || fail "restored guest is missing the source marker"
+		guest_kib="$(guest_value KIB awk '/^MemTotal:/ {print "KIB=" $2}' /proc/meminfo)"
+		# Linux excludes reserved memory from MemTotal; this interval excludes
+		# both the source's 1 GiB and the pool's 512 MiB default.
+		[[ "$guest_kib" =~ ^[0-9]+$ ]] && (( guest_kib > 640 * 1024 && guest_kib <= 768 * 1024 )) \
+			|| fail "unexpected guest MemTotal: '$guest_kib' KiB for a 768Mi restore"
+		pass "memory-only restore retained source marker and 2 CPU quota; guest MemTotal=${guest_kib} KiB"
+	fi
 	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
 	dump_latency_evidence "$restore_id" "$rootfs_log_label cold boot" || true
 
