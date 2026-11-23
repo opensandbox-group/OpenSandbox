@@ -101,7 +101,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.sandboxtemplateBuilderImage | string | `""` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh). Empty uses the release-<appVersion> companion image tag. |
 | controller.sandboxtemplateBuilderPodSpec | string | `""` | Raw PodSpec fragment (YAML) merged into every SandboxTemplate build Pod by the controller: whitelisted scheduling fields only (tolerations appended; affinity and topologySpreadConstraints replaced). Rendered as the fast-sandbox-builder-pod-template ConfigMap; editing the live ConfigMap applies to the next build without a rollout. |
 | controller.tolerations | list | `[]` | Tolerations for the controller pod |
-| fastpath.callerAuth.enabled | bool | `true` | Enable FastPath caller authentication and TLS (default true; set false for legacy plaintext upgrade transition). |
+| fastpath.callerAuth.enabled | bool | `false` | Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS). |
 | fastpath.callerAuth.gatewayServiceAccount | string | `"opensandbox-ingress-fastpath-client"` | Must match the authentication-only gateway identity installed by the base chart. |
 | fastpath.callerAuth.namespace | string | `""` | Identity namespace. Empty uses systemNamespace; must match base.fastSandbox.namespaces.system. |
 | fastpath.callerAuth.namespaces | list | `[]` | Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access. |

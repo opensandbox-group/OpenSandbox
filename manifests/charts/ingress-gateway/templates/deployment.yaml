@@ -91,6 +91,7 @@ spec:
             {{- end }}
             {{- if or .Values.gateway.fastpathEndpoint (eq .Values.gateway.providerType "fast-sandbox") }}
             {{- if .Values.gateway.fastpathAuth.enabled }}
+            - "--fastpath-auth-enabled=true"
             - "--fastpath-auth-namespace={{ .Values.gateway.fastpathAuth.namespace }}"
             - "--fastpath-auth-service-account={{ .Values.gateway.fastpathAuth.serviceAccount }}"
             {{- with .Values.gateway.fastpathAuth.serverName }}
@@ -99,8 +100,6 @@ spec:
             {{- if .Values.gateway.fastpathAuth.caConfigMap }}
             - "--fastpath-tls-ca-file=/etc/opensandbox/fastpath-ca/ca.crt"
             {{- end }}
-            {{- else }}
-            - "--fastpath-auth-enabled=false"
             {{- end }}
             {{- end }}
             {{- if .Values.gateway.activity.enabled }}

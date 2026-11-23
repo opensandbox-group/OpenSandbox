@@ -60,8 +60,8 @@ gateway:
   # -- FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise.
   fastpathEndpoint: ""
   fastpathAuth:
-    # -- Enable FastPath caller authentication and TLS (default true; set false for legacy plaintext upgrade transition).
-    enabled: true
+    # -- Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).
+    enabled: false
     # -- Namespace of the authentication-only caller ServiceAccount.
     namespace: opensandbox-system
     # -- Target of TokenRequest; distinct from the gateway Pod ServiceAccount.

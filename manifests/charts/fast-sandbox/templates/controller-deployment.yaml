@@ -57,11 +57,10 @@ spec:
         - --health-probe-bind-address=:5758
         - --fastpath-bind-address=:9090
         {{- if .Values.fastpath.callerAuth.enabled }}
+        - --fastpath-auth-enabled=true
         - --fastpath-auth-policy-file=/etc/fast-sandbox/callers/callers.json
         - --fastpath-tls-cert-file=/etc/fast-sandbox/tls/tls.crt
         - --fastpath-tls-key-file=/etc/fast-sandbox/tls/tls.key
-        {{- else }}
-        - --fastpath-auth-enabled=false
         {{- end }}
         {{- if gt (.Values.controller.fastpathHTTPPort | int) 0 }}
         # Optional gRPC-Web listener (HTTP/1.1 clients); the value above keeps

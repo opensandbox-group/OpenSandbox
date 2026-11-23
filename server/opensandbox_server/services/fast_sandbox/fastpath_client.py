@@ -100,11 +100,13 @@ class FastPathClient:
         endpoint: str = DEFAULT_FASTPATH_ENDPOINT,
         timeout_seconds: float = 30.0,
         *,
-        auth_enabled: bool = True,
+        auth_enabled: Optional[bool] = None,
         token_source: Optional[TokenSource] = None,
         tls_ca_file: Optional[str] = None,
         tls_server_name: Optional[str] = None,
     ) -> None:
+        if auth_enabled is None:
+            auth_enabled = token_source is not None or tls_ca_file is not None or tls_server_name is not None
         self._auth_enabled = auth_enabled
         self._token_source = token_source
         self._tls_ca_file = tls_ca_file

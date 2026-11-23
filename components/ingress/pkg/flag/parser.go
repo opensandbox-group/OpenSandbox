@@ -73,7 +73,7 @@ func InitFlags() {
 		namespaceSet = true
 		return nil
 	})
-	flag.BoolVar(&FastPathAuthEnabled, "fastpath-auth-enabled", true, "Enable FastPath caller authentication and TLS (default true; set false for legacy plaintext upgrade transition)")
+	flag.BoolVar(&FastPathAuthEnabled, "fastpath-auth-enabled", false, "Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS)")
 	flag.StringVar(&FastPathAuthNamespace, "fastpath-auth-namespace", "opensandbox-system", "FastPath caller ServiceAccount namespace")
 	flag.StringVar(&FastPathAuthServiceAccount, "fastpath-auth-service-account", "opensandbox-ingress-fastpath-client", "FastPath caller ServiceAccount")
 	flag.StringVar(&FastPathTLSCAFile, "fastpath-tls-ca-file", "", "FastPath serving CA bundle; empty uses system roots")

@@ -37,6 +37,7 @@ class FastPathAuthChartsTest(unittest.TestCase):
     def test_named_minter_roles_and_external_identity(self):
         resources = self.render(
             "base",
+            "fastSandbox.callerAuth.enabled=true",
             "fastSandbox.namespaces.system=identities",
             "fastSandbox.callerAuth.server.subjects[0].kind=User",
             "fastSandbox.callerAuth.server.subjects[0].apiGroup=rbac.authorization.k8s.io",
@@ -87,6 +88,7 @@ class FastPathAuthChartsTest(unittest.TestCase):
     def test_policy_tls_and_both_listeners(self):
         resources = self.render(
             "fast-sandbox",
+            "fastpath.callerAuth.enabled=true",
             "systemNamespace=control",
             "resourceNamespace=tenant-a",
             "fastpath.tls.issuerRef.name=platform-issuer",
@@ -116,6 +118,7 @@ class FastPathAuthChartsTest(unittest.TestCase):
         pod = deployment["spec"]["template"]["spec"]
         args = pod["containers"][0]["args"]
         self.assertIn("--fastpath-http-port=8090", args)
+        self.assertIn("--fastpath-auth-enabled=true", args)
         self.assertIn("--fastpath-tls-key-file=/etc/fast-sandbox/tls/tls.key", args)
         self.assertIn(
             "--fastpath-auth-policy-file=/etc/fast-sandbox/callers/callers.json", args
@@ -136,6 +139,7 @@ class FastPathAuthChartsTest(unittest.TestCase):
                 [
                     "gateway.fastpathEndpoint=fastpath:9090",
                     "gateway.secureAccess.existingSecret=route-signing-keys",
+                    "gateway.fastpathAuth.enabled=true",
                     "gateway.fastpathAuth.caConfigMap=public-ca",
                 ],
             ),
@@ -159,6 +163,8 @@ class FastPathAuthChartsTest(unittest.TestCase):
                 "test",
                 str(ROOT / "manifests/charts/fast-sandbox"),
                 "--set",
+                "fastpath.callerAuth.enabled=true",
+                "--set",
                 "fastpath.tls.issuerRef.name=",
             ],
             capture_output=True,
@@ -167,8 +173,8 @@ class FastPathAuthChartsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("existing cert-manager issuer", result.stderr)
 
-    def test_caller_auth_can_be_explicitly_disabled_for_upgrade(self):
-        base_resources = self.render("base", "fastSandbox.callerAuth.enabled=false")
+    def test_caller_auth_is_disabled_by_default(self):
+        base_resources = self.render("base")
         self.assertFalse(
             any(
                 x["kind"] == "ServiceAccount"
@@ -178,7 +184,6 @@ class FastPathAuthChartsTest(unittest.TestCase):
         )
         fsb_resources = self.render(
             "fast-sandbox",
-            "fastpath.callerAuth.enabled=false",
             "fastpath.tls.issuerRef.name=",
         )
         self.assertFalse(any(x["kind"] == "Certificate" for x in fsb_resources))
@@ -191,20 +196,18 @@ class FastPathAuthChartsTest(unittest.TestCase):
         )
         fsb_deployment = next(x for x in fsb_resources if x["kind"] == "Deployment")
         fsb_args = fsb_deployment["spec"]["template"]["spec"]["containers"][0]["args"]
-        self.assertIn("--fastpath-auth-enabled=false", fsb_args)
-        self.assertFalse(any("--fastpath-tls-key-file" in a for a in fsb_args))
+        self.assertFalse(any("--fastpath-auth-" in a or "--fastpath-tls-" in a for a in fsb_args))
 
         gw_resources = self.render(
             "ingress-gateway",
             "gateway.fastpathEndpoint=fastpath:9090",
             "gateway.secureAccess.existingSecret=route-signing-keys",
-            "gateway.fastpathAuth.enabled=false",
             "gateway.fastpathAuth.caConfigMap=public-ca",
         )
         gw_deployment = next(x for x in gw_resources if x["kind"] == "Deployment")
         gw_pod = gw_deployment["spec"]["template"]["spec"]
         gw_args = gw_pod["containers"][0]["args"]
-        self.assertIn("--fastpath-auth-enabled=false", gw_args)
+        self.assertFalse(any("--fastpath-auth-" in a or "--fastpath-tls-" in a for a in gw_args))
         self.assertFalse(any("fastpath-ca" == v["name"] for v in gw_pod.get("volumes", [])))
 
 
