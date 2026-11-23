@@ -60,6 +60,7 @@
 #define FLAG_CAP_DROP 0x2u
 #define FLAG_QOS 0x4u
 #define FLAG_NO_NEW_PRIVS 0x8u
+#define FLAG_EXEC_PATH 0x10u
 
 #define LAUNCH_FAILURE 125
 #define EXEC_FAILURE 126
@@ -613,7 +614,10 @@ int main(int argc, char **argv)
         free(filter);
     }
 
-    execv(argv[4], &argv[5]);
+    if (hdr.flags & FLAG_EXEC_PATH)
+        execv(argv[4], &argv[5]);
+    else
+        execvp(argv[4], &argv[5]);
     int exec_errno = errno;
     if (exec_error_fd >= 0) {
         uint32_t value = (uint32_t)exec_errno;

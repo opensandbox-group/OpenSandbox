@@ -33,6 +33,7 @@ package runtime
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -57,6 +58,7 @@ const (
 	flagCapDrop    = 0x2
 	flagQoS        = 0x4
 	flagNoNewPrivs = 0x8
+	flagExecPath   = 0x10
 
 	// capSetpcap is the capability number required to trim bounding sets.
 	capSetpcap = 8
@@ -325,9 +327,9 @@ func InitQoS(cfg isolation.Config) error {
 	if err := cfg.QoS.Validate(); err != nil {
 		return err
 	}
-	path := findLauncher()
+	path, reason := findLauncher()
 	if path == "" {
-		log.Warn("qos: opensandbox-launcher not found; process QoS skipped")
+		log.Warn("qos: %s; process QoS skipped", reason)
 		return nil
 	}
 	qos.config = cfg.QoS
@@ -394,13 +396,12 @@ func InitHardening(cfg isolation.Config) error {
 		return err
 	}
 
-	path := findLauncher()
+	path, reason := findLauncher()
 	if path == "" {
-		msg := "opensandbox-launcher not found (searched: /opt/opensandbox/opensandbox-launcher, $PATH)"
-		log.Warn("hardening: %s", msg)
-		setLayer(&hardening.capDrop, degraded(msg))
-		setLayer(&hardening.seccomp, degraded(msg))
-		setLayer(&hardening.landlock, degraded(msg))
+		log.Warn("hardening: %s", reason)
+		setLayer(&hardening.capDrop, degraded(reason))
+		setLayer(&hardening.seccomp, degraded(reason))
+		setLayer(&hardening.landlock, degraded(reason))
 		return nil
 	}
 
@@ -480,19 +481,40 @@ func InitHardening(cfg isolation.Config) error {
 
 var launcherSearchPaths = []string{launcherRuntimePath}
 
-func findLauncher() string {
+func checkExecutableFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file (mode %s)", info.Mode())
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("not executable (mode %04o)", info.Mode().Perm())
+	}
+	return unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS)
+}
+
+func findLauncher() (string, string) {
 	// Trusted runtime path first: a user-controlled image must not be able
 	// to substitute its own launcher on PATH and bypass the floor. PATH is
 	// only a fallback for developer/source builds.
 	for _, p := range launcherSearchPaths {
-		if _, err := os.Stat(p); err == nil {
-			return p
+		err := checkExecutableFile(p)
+		if err == nil {
+			return p, ""
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Sprintf("opensandbox-launcher at %s is not usable: %v", p, err)
 		}
 	}
 	if path, err := exec.LookPath("opensandbox-launcher"); err == nil {
-		return path
+		if err := checkExecutableFile(path); err != nil {
+			return "", fmt.Sprintf("opensandbox-launcher at %s is not usable: %v", path, err)
+		}
+		return path, ""
 	}
-	return ""
+	return "", "opensandbox-launcher not found (searched: /opt/opensandbox/opensandbox-launcher, $PATH)"
 }
 
 func effectiveCapsHave(capNum uint32) bool {
@@ -562,6 +584,9 @@ func hardenCmd(cmd *exec.Cmd, noHardening, noQoS bool, stripEnv []string) (*os.F
 		pol.flags |= flagQoS
 		pol.qos = qos.config
 	}
+	if !applyHardening {
+		pol.flags |= flagExecPath
+	}
 	// Only hardening needs a privileged prelude; QoS keeps Go's identity and start-error semantics.
 	if applyHardening && cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
 		cred := cmd.SysProcAttr.Credential
@@ -593,8 +618,12 @@ func hardenCmd(cmd *exec.Cmd, noHardening, noQoS bool, stripEnv []string) (*os.F
 	if len(originalArgs) == 0 {
 		originalArgs = []string{originalPath}
 	}
+	execTarget := originalArgs[0]
+	if !applyHardening {
+		execTarget = originalPath
+	}
 	cmd.Path = path
-	cmd.Args = append([]string{path, childFd, "-1", "--", originalPath}, originalArgs...)
+	cmd.Args = append([]string{path, childFd, "-1", "--", execTarget}, originalArgs...)
 	return file, nil
 }
 

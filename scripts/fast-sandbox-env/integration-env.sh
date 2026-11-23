@@ -1843,12 +1843,14 @@ hardened_sbx_inputs_fingerprint() {
 	# differently and would force a needless hardened template rebuild.
 	if [[ "$HARDENED_SBX_PUSH" != 1 ]]; then
 		# The published image is an opaque input; hash its reference.
-		openssl dgst -sha256 <(printf '%s' "$SBX_IMAGE") | awk '{print $NF}'
+		openssl dgst -sha256 <(printf '%s\n%s' "$SBX_IMAGE" "$EXECD") | awk '{print $NF}'
 		return 0
 	fi
+	local execd_id=""
+	execd_id="$(docker image inspect --format '{{.Id}}' "$EXECD" 2>/dev/null || true)"
 	openssl dgst -sha256 \
-		< <(cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
-			"$OSB_ROOT/components/execd/native/launcher.c" \
+		< <(printf '%s\n%s\n' "$EXECD" "$execd_id"
+			cat "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
 			"$OSB_ROOT/components/execd/configs/isolation.hardened.toml" \
 			"$OSB_ROOT"/scripts/fast-sandbox-env/sandbox-test-image/* 2>/dev/null) \
 		| awk '{print $NF}'
@@ -1894,11 +1896,13 @@ template_up_overlaybd_hardening() {
 		# push name (the port-forward endpoint; docker treats host:port/repo
 		# as a distinct image name, so the push needs its own tag).
 		local push_ref="127.0.0.1:$HARDENED_SBX_PUSH_PORT/${HARDENED_SBX_REF#*/}"
-		log "building the hardened golden image from this checkout ($HARDENED_SBX_REF)"
+		log "building the hardened golden image from this checkout ($HARDENED_SBX_REF, execd=$EXECD)"
 		docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+			--build-arg "EXECD_IMAGE=$EXECD" \
 			-f "$OSB_ROOT/scripts/fast-sandbox-env/Dockerfile.sandbox-test-image" \
 			-t "$HARDENED_SBX_REF" -t "$push_ref" "$OSB_ROOT" >/dev/null \
 			|| die "hardened golden image build failed"
+		inputs_fp="$(hardened_sbx_inputs_fingerprint)"
 		log "pushing through the in-cluster registry (port-forward 127.0.0.1:$HARDENED_SBX_PUSH_PORT)"
 		# The serving cert carries IP:127.0.0.1 (registry_ca_up), so the
 		# runner-side docker trusts the env CA for this endpoint — dockerd

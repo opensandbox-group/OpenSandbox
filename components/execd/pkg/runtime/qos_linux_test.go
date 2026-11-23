@@ -378,6 +378,40 @@ func TestQoSMissingLauncherAndInvalidConfiguration(t *testing.T) {
 	require.ErrorContains(t, InitQoS(cfg), "nice")
 }
 
+func TestQoSNonExecutableLauncherFallsBackToDirectLaunch(t *testing.T) {
+	cfg, probe := setupQoSTest(t)
+	validLauncher := launcherSearchPaths[0]
+	baseline := runQoSProbe(t, exec.Command(probe))
+
+	t.Run("mode-0644-file", func(t *testing.T) {
+		nonExec := filepath.Join(t.TempDir(), "opensandbox-launcher")
+		data, err := os.ReadFile(validLauncher)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(nonExec, data, 0o644))
+		// Keep a valid launcher on PATH to ensure a non-executable fixed-path
+		// binary degrades instead of falling back to PATH.
+		t.Setenv("PATH", filepath.Dir(validLauncher))
+		launcherSearchPaths = []string{nonExec}
+
+		require.NoError(t, InitQoS(cfg))
+		require.False(t, qos.enabled.Load())
+		require.Equal(t, baseline, runQoSProbe(t, exec.Command(probe)))
+
+		mp, err := launchEntrypoint([]string{"/bin/echo", "ok"})
+		require.NoError(t, err)
+		require.NoError(t, mp.Wait())
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		launcherSearchPaths = []string{t.TempDir()}
+		t.Setenv("PATH", filepath.Dir(validLauncher))
+
+		require.NoError(t, InitQoS(cfg))
+		require.False(t, qos.enabled.Load())
+		require.Equal(t, baseline, runQoSProbe(t, exec.Command(probe)))
+	})
+}
+
 func TestQoSIdentityFailureStillAborts(t *testing.T) {
 	for _, hardened := range []bool{false, true} {
 		t.Run(fmt.Sprint(hardened), func(t *testing.T) {
@@ -638,7 +672,7 @@ func TestQoSPolicyEncodingAndCredentialPreservation(t *testing.T) {
 	var hdr policyHeader
 	require.NoError(t, binary.Read(policy, binary.LittleEndian, &hdr))
 	require.EqualValues(t, policyVersion, hdr.Version)
-	require.EqualValues(t, flagQoS, hdr.Flags)
+	require.EqualValues(t, flagQoS|flagExecPath, hdr.Flags)
 	require.EqualValues(t, unix.SCHED_IDLE, hdr.QoSScheduler)
 	require.EqualValues(t, 19, hdr.QoSNice)
 	require.EqualValues(t, 500, hdr.QoSOOMScoreAdj)
@@ -652,41 +686,77 @@ func TestQoSPolicyEncodingAndCredentialPreservation(t *testing.T) {
 }
 
 func TestQoSResolvedExecutableAndArgv(t *testing.T) {
-	for _, hardened := range []bool{false, true} {
-		t.Run(fmt.Sprint(hardened), func(t *testing.T) {
-			cfg, probe := setupQoSTest(t)
-			if hardened {
-				cfg.Hardening = &isolation.HardeningConfig{Enabled: true}
-			}
+	cfg, probe := setupQoSTest(t)
+	require.NoError(t, InitHardening(cfg))
+	require.NoError(t, InitQoS(cfg))
+	t.Setenv("PATH", filepath.Dir(probe))
+	for _, argv0 := range []string{"probe", "custom-argv0"} {
+		cmd := exec.Command("probe", "argv0")
+		cmd.Args[0] = argv0
+		cmd.Env = []string{"PATH=/nonexistent"}
+		var output bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &output, &output
+		mp, err := launchManaged(cmd)
+		require.NoError(t, err)
+		require.NoError(t, mp.Wait(), "%s", output.String())
+		require.Equal(t, argv0+"\n", output.String())
+	}
+	cmd := &exec.Cmd{Path: probe}
+	require.Equal(t, 19, runQoSProbe(t, cmd).Nice)
+
+	daemonDir := filepath.Dir(probe)
+	overlayDir := t.TempDir()
+	daemonEntrypoint := filepath.Join(daemonDir, "entrypoint")
+	overlayEntrypoint := filepath.Join(overlayDir, "entrypoint")
+	require.NoError(t, os.WriteFile(daemonEntrypoint, []byte("#!/bin/sh\nprintf '%s' \"$0\" > \"$1\"\n"), 0o755))
+	require.NoError(t, os.WriteFile(overlayEntrypoint, []byte("#!/bin/sh\nprintf '%s' \"$0\" > \"$1\"\n"), 0o755))
+
+	for _, overlayPATH := range []string{"/nonexistent", overlayDir} {
+		envFile := filepath.Join(t.TempDir(), "env")
+		require.NoError(t, os.WriteFile(envFile, []byte("PATH="+overlayPATH+"\n"), 0o600))
+		t.Setenv("EXECD_ENVS", envFile)
+		outputFile := filepath.Join(t.TempDir(), "entrypoint-output")
+		mp, err := launchEntrypoint([]string{"entrypoint", outputFile})
+		require.NoError(t, err)
+		require.NoError(t, mp.Wait())
+		out, err := os.ReadFile(outputFile)
+		require.NoError(t, err)
+		require.Equal(t, daemonEntrypoint, string(out))
+	}
+}
+
+func TestHardeningEntrypointPreservesOverlayPATHLookup(t *testing.T) {
+	for _, qosEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("qos=%v", qosEnabled), func(t *testing.T) {
+			cfg, _ := setupQoSTest(t)
+			cfg.Hardening = &isolation.HardeningConfig{Enabled: true}
+			cfg.QoS.Enabled = qosEnabled
 			require.NoError(t, InitHardening(cfg))
 			require.NoError(t, InitQoS(cfg))
-			t.Setenv("PATH", filepath.Dir(probe))
-			for _, argv0 := range []string{"probe", "custom-argv0"} {
-				cmd := exec.Command("probe", "argv0")
-				cmd.Args[0] = argv0
-				cmd.Env = []string{"PATH=/nonexistent"}
-				var output bytes.Buffer
-				cmd.Stdout, cmd.Stderr = &output, &output
-				mp, err := launchManaged(cmd)
-				require.NoError(t, err)
-				require.NoError(t, mp.Wait(), "%s", output.String())
-				require.Equal(t, argv0+"\n", output.String())
-			}
-			cmd := &exec.Cmd{Path: probe}
-			require.Equal(t, 19, runQoSProbe(t, cmd).Nice)
 
-			entrypoint := filepath.Join(filepath.Dir(probe), "entrypoint")
-			require.NoError(t, os.WriteFile(entrypoint, []byte("#!/bin/sh\nprintf '%s' \"$0\" > \"$1\"\n"), 0o755))
+			daemonDir := t.TempDir()
+			overlayDir := t.TempDir()
+			require.NoError(t, os.Chmod(daemonDir, 0o755))
+			require.NoError(t, os.Chmod(overlayDir, 0o755))
+			daemonCmd := filepath.Join(daemonDir, "same-cmd")
+			overlayCmd := filepath.Join(overlayDir, "same-cmd")
+			require.NoError(t, os.WriteFile(daemonCmd, []byte("#!/bin/sh\nprintf '%s' \"$0\" > \"$1\"\n"), 0o755))
+			require.NoError(t, os.WriteFile(overlayCmd, []byte("#!/bin/sh\nprintf '%s' \"$0\" > \"$1\"\n"), 0o755))
+
+			t.Setenv("PATH", daemonDir)
 			envFile := filepath.Join(t.TempDir(), "env")
-			require.NoError(t, os.WriteFile(envFile, []byte("PATH=/nonexistent\n"), 0o600))
+			require.NoError(t, os.WriteFile(envFile, []byte("PATH="+overlayDir+"\n"), 0o600))
 			t.Setenv("EXECD_ENVS", envFile)
-			outputFile := filepath.Join(t.TempDir(), "entrypoint-output")
-			mp, err := launchEntrypoint([]string{"entrypoint", outputFile})
+
+			outputDir := t.TempDir()
+			require.NoError(t, os.Chmod(outputDir, 0o777))
+			outputFile := filepath.Join(outputDir, "out")
+			mp, err := launchEntrypoint([]string{"same-cmd", outputFile})
 			require.NoError(t, err)
 			require.NoError(t, mp.Wait())
 			out, err := os.ReadFile(outputFile)
 			require.NoError(t, err)
-			require.Equal(t, entrypoint, string(out))
+			require.Equal(t, overlayCmd, string(out))
 		})
 	}
 }
