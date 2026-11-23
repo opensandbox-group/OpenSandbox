@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +49,10 @@ func buildLauncher(t *testing.T) string {
 			launcherErr = err
 			return
 		}
+		if err := os.Chmod(dir, 0o755); err != nil {
+			launcherErr = err
+			return
+		}
 		launcherBuilt = filepath.Join(dir, "opensandbox-launcher")
 		src := filepath.Join("..", "..", "native", "launcher.c")
 		cmd := exec.Command(cc, "-O2", "-Wall", "-Wextra", "-Werror",
@@ -57,8 +62,11 @@ func buildLauncher(t *testing.T) string {
 			t.Logf("launcher build output: %s", out)
 		}
 	})
+	if errors.Is(launcherErr, exec.ErrNotFound) {
+		t.Skipf("C compiler unavailable: %v", launcherErr)
+	}
 	if launcherErr != nil {
-		t.Skipf("cannot build opensandbox-launcher: %v", launcherErr)
+		t.Fatalf("cannot build opensandbox-launcher: %v", launcherErr)
 	}
 	return launcherBuilt
 }

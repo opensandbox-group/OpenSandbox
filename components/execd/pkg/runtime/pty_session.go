@@ -290,6 +290,9 @@ func (s *ptySession) StartPTY() error {
 		return perr
 	})
 	if err != nil {
+		if ptmx != nil {
+			_ = ptmx.Close()
+		}
 		return fmt.Errorf("pty.StartWithSize: %w", err)
 	}
 
