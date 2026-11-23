@@ -207,13 +207,36 @@ func compiledTCP(ports []EstablishedPortDrop) tcpTargets {
 	return out
 }
 
+// An address can be known from either the installed table or the domain
+// ledger. The latter can outlive a timed element; it is not a permit.
+type knownDNS struct {
+	installed map[netip.Addr]time.Time
+	domains   map[string]*resolvedDomain
+	epoch     uint64
+}
+
+func (s knownDNS) visit(f func(netip.Addr)) {
+	for a := range s.installed {
+		f(a)
+	}
+	for _, entry := range s.domains {
+		if entry != nil {
+			for a := range entry.addresses {
+				if _, found := s.installed[a]; !found {
+					f(a)
+				}
+			}
+		}
+	}
+}
+
 // Capture the verdict of the opt-in rules actually installed, including scoped
 // denies in front of a whole-address allow or of a live DNS grant.
-func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, history map[string][]netip.Addr, leases map[netip.Addr]time.Time) {
+func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, dns knownDNS, leases map[netip.Addr]time.Time) {
 	if d.Empty() {
 		return
 	}
-	subjects := d.exactSubjects(old, p, history, leases)
+	subjects := d.exactSubjects(old, p, dns, leases)
 	if len(subjects) == 0 {
 		return
 	}
@@ -221,7 +244,7 @@ func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, history
 	hosts := make(exactTCP, len(d.Addrs))
 	for a := range subjects {
 		_, admitted := leases[a]
-		if w, affected := snapshot(a, admitted); affected {
+		if w, lateDrop := snapshot(a, admitted); lateDrop || len(w.explicit) != 0 {
 			hosts[a] = w
 		}
 	}
@@ -231,17 +254,11 @@ func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, history
 // Discover subjects, not verdicts. A named host can be denied by any bucket
 // (including CatchAll). Keep derived singleton targets and DNS addresses;
 // never expand a multi-address prefix to discover hosts.
-func (d EstablishedDrops) exactSubjects(old, next *policy.NetworkPolicy, history map[string][]netip.Addr, leases map[netip.Addr]time.Time) map[netip.Addr]struct{} {
+func (d EstablishedDrops) exactSubjects(old, next *policy.NetworkPolicy, dns knownDNS, leases map[netip.Addr]time.Time) map[netip.Addr]struct{} {
 	hosts := make(map[netip.Addr]struct{}, len(d.Addrs))
 	// A CIDR verdict can filter a DNS address out of both KeepAddrs and
 	// Addrs. DNS evidence identifies a subject, not an established permit.
-	for _, ips := range history {
-		for _, ip := range ips {
-			if ip.IsValid() {
-				hosts[ip.Unmap()] = struct{}{}
-			}
-		}
-	}
+	dns.visit(func(a netip.Addr) { hosts[a] = struct{}{} })
 	for a := range leases {
 		hosts[a] = struct{}{}
 	}
@@ -365,31 +382,54 @@ func (d EstablishedDrops) snapshotTCP(p *policy.NetworkPolicy) func(netip.Addr, 
 	if d.CatchAll || len(d.Addrs)+len(d.Prefixes)+len(d.PortDrops) != 0 {
 		keep = indexSnapshotTargets(d.KeepAddrs, d.KeepPorts, d.KeepPrefixes, compilePortlessIPPolicy(p).allow)
 	}
+	var dnsDenies snapshotTargets
+	if d.guardDNS {
+		_, current := tcpPolicy(p)
+		dnsDenies = current.indexed()
+	}
 	return func(a netip.Addr, admitted bool) (tcpWithdrawal, bool) {
 		early := deny.at(a)
 		late := allTCP
 		if !d.CatchAll {
 			late = removed.at(a)
 			if len(late) == 0 {
-				return tcpWithdrawal{explicit: early}, len(early) != 0
+				return tcpWithdrawal{explicit: early}, false
 			}
 		}
-		if admitted {
+		if admitted && !d.guardDNS {
 			late = nil
 		} else {
 			late = late.subtract(keep.at(a)).subtract(early)
+			if admitted {
+				late = late.intersect(dnsDenies.at(a))
+			}
 		}
 		return tcpWithdrawal{early, late}, true
 	}
 }
 
-func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow, deny tcpTargets, priorDNS, leases map[netip.Addr]time.Time) exactTCP {
+func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow, deny tcpTargets, priorDNS knownDNS, leases map[netip.Addr]time.Time) exactTCP {
 	// Nothing in the new TCP policy can carry a block. In particular,
 	// do not walk old CIDR denies for every previously learned DNS address.
 	if p.DefaultAction == policy.ActionAllow && len(deny) == 0 {
 		return nil
 	}
 	allows, denies := allow.indexed(), deny.indexed()
+	// A poll may have pruned an expired timed entry after an ACK in this
+	// policy. Replay that prior verdict, but never grant from history.
+	var pruned map[netip.Addr]bool
+	for _, entry := range priorDNS.domains {
+		if entry != nil {
+			for a, lease := range entry.addresses {
+				if _, installed := priorDNS.installed[a]; !installed {
+					if pruned == nil {
+						pruned = make(map[netip.Addr]bool)
+					}
+					pruned[a] = pruned[a] || (priorDNS.epoch != 0 && lease.grantEpoch == priorDNS.epoch)
+				}
+			}
+		}
+	}
 	reclassify := func(a netip.Addr, prev tcpWithdrawal) tcpWithdrawal {
 		blocked := prev.explicit.union(prev.implicit)
 		early := blocked.intersect(denies.at(a))
@@ -413,11 +453,13 @@ func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow
 		if snapshot == nil {
 			snapshot = d.snapshotTCP(previous)
 		}
-		_, admitted := priorDNS[a]
-		prev, affected := snapshot(a, admitted)
-		if affected {
+		_, admitted := priorDNS.installed[a]
+		prev, lateDrop := snapshot(a, admitted || pruned[a])
+		if lateDrop || len(prev.explicit) != 0 {
 			next := reclassify(a, prev)
-			if len(next.explicit)+len(next.implicit) != 0 {
+			// Even when all cuts retire, do not let a later catch-all
+			// override an established port that the old chain admitted.
+			if lateDrop || len(next.explicit)+len(next.implicit) != 0 {
 				out[a] = next
 			}
 		}
@@ -429,11 +471,14 @@ func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow
 	}
 	// DNS can first identify an address between policy updates. Use the
 	// installed verdict to distinguish an actual reallow from a masked grant.
-	for a := range priorDNS {
+	for a := range priorDNS.installed {
+		consider(a)
+	}
+	for a := range pruned {
 		consider(a)
 	}
 	for a := range leases {
-		if _, known := priorDNS[a]; !known {
+		if _, known := priorDNS.installed[a]; !known {
 			consider(a)
 		}
 	}
@@ -548,11 +593,17 @@ func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool, cover
 		spans := host.implicit
 		if explicit {
 			spans = host.explicit
+			if len(spans) == 0 {
+				continue
+			}
 			// Suppress only rules already emitted at this priority. The
 			// saved per-host withdrawal must outlive their coverage.
 			for _, rule := range covered {
 				if !rule.prefix.IsValid() || rule.prefix.Contains(a) {
 					spans = spans.subtract(rule.spans)
+					if len(spans) == 0 {
+						break
+					}
 				}
 			}
 		} else if (d.CatchAll || removed.matches(a)) && !keep.matches(a) {

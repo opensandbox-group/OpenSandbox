@@ -87,6 +87,7 @@ type Manager struct {
 	tracker      *connectionTracker
 	domainPolicy *policy.NetworkPolicy
 	domains      map[string]*resolvedDomain
+	grantEpoch   uint64 // Advanced only on a successful static transaction.
 
 	staticStateUncertain bool // Protected by mu; cleared only by a successful apply.
 
@@ -138,12 +139,16 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
 		buildDrops = func(at time.Time, leases map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
-			drops := m.lastDrops.stillRelevant(m.domainPolicy, p, learned, m.tracker.dynamicIPs, leases)
+			drops := m.lastDrops.stillRelevant(m.domainPolicy, p, learned, m.knownDNSLocked(), leases)
 			return drops, expiry
 		}
 	}
 	_, err := m.applyStaticDropEstablishedLocked(ctx, p, buildDrops, nil, m.lastDropsAt)
 	return err
+}
+
+func (m *Manager) knownDNSLocked() knownDNS {
+	return knownDNS{installed: m.tracker.dynamicIPs, domains: m.domains, epoch: m.grantEpoch}
 }
 
 // liveLearnedAddrsLocked returns live DNS addresses and their earliest expiry.
@@ -184,7 +189,7 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 	defer m.mu.Unlock()
 	fixedDrops := func(_ time.Time, leases map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 		result := drops
-		result.captureExactTCP(nil, p, nil, leases)
+		result.captureExactTCP(nil, p, m.knownDNSLocked(), leases)
 		return result, time.Time{}
 	}
 	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now())
@@ -209,7 +214,7 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 	buildDrops := func(at time.Time, leases map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 		prior, live := m.snapshotResolvedDomainsLocked(at)
 		drops := computeEstablishedDrops(oldPol, newPol, prior, live)
-		drops.captureExactTCP(oldPol, newPol, prior, leases)
+		drops.captureExactTCP(oldPol, newPol, m.knownDNSLocked(), leases)
 		return drops, time.Time{}
 	}
 	return m.applyStaticDropEstablishedLocked(ctx, newPol, buildDrops, flows, m.now())
@@ -293,6 +298,7 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	if len(plan.active) == 0 {
 		m.tracker.previousActiveGrace = time.Time{}
 	}
+	m.grantEpoch++
 	m.domainPolicy = p
 	m.domains = plan.domains
 	m.staticStateUncertain = false
@@ -658,10 +664,23 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 		}
 		drops.writeExactTCP(&b, true, covered)
 	}
-	// DNS-learned allows bypass the removed-allow teardown so a later resolve
-	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
-	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
-	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
+	portDeny, portAllow := p.PortScopedRules()
+	dnsVerdict := "accept"
+	if drops.guardDNS {
+		const gate, denied = "policy_deny_check", "policy_denied"
+		fmt.Fprintf(&b, "add chain inet %s %s\nadd chain inet %s %s\n", tableName, gate, tableName, denied)
+		// A denied DNS-matched TCP packet must fall back to its established
+		// verdict, not be newly torn down. 'goto' returns to the caller of
+		// gate, skipping its accept. Fresh denied packets still drop.
+		fmt.Fprintf(&b, "add rule inet %s %s ct state established,related return\n", tableName, denied)
+		fmt.Fprintf(&b, "add rule inet %s %s drop\n", tableName, denied)
+		fmt.Fprintf(&b, "add rule inet %s %s meta l4proto != tcp ct state established,related accept\n", tableName, gate)
+		writePolicyDenies(&b, gate, portDeny, "goto "+denied)
+		fmt.Fprintf(&b, "add rule inet %s %s ct state established,related accept\n", tableName, gate)
+		dnsVerdict = "jump " + gate
+	}
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related %s\n", tableName, chainName, dynAllowV4Set, dnsVerdict)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related %s\n", tableName, chainName, dynAllowV6Set, dnsVerdict)
 	if drops.exactCarried {
 		drops.writeExactTCP(&b, false, nil)
 	}
@@ -693,13 +712,16 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 			}
 		}
 	}
-	portDeny, portAllow := p.PortScopedRules()
 	// Port-scoped deny before every allow; port-scoped allow after the
 	// plain deny set, before the dynamic/plain allow sets.
-	writePortScopedRules(&b, portDeny, "drop")
-	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s drop\n", tableName, chainName, denyV4Set)
-	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s drop\n", tableName, chainName, denyV6Set)
-	writePortScopedRules(&b, portAllow, "accept")
+	if drops.guardDNS {
+		// Use the same deny rules for new connections rather than emitting
+		// the operator's entire port floor a second time.
+		fmt.Fprintf(&b, "add rule inet %s %s %s\n", tableName, chainName, dnsVerdict)
+	} else {
+		writePolicyDenies(&b, chainName, portDeny, "drop")
+	}
+	writePortScopedRules(&b, chainName, portAllow, "accept")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, dynAllowV6Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
@@ -789,11 +811,17 @@ func writeElements(b *strings.Builder, setName string, elems []string) {
 	fmt.Fprintf(b, "add element inet %s %s { %s }\n", tableName, setName, strings.Join(elems, ", "))
 }
 
+func writePolicyDenies(b *strings.Builder, chain string, portDeny []policy.PortScopedRule, verdict string) {
+	writePortScopedRules(b, chain, portDeny, verdict)
+	fmt.Fprintf(b, "add rule inet %s %s ip daddr @%s %s\n", tableName, chain, denyV4Set, verdict)
+	fmt.Fprintf(b, "add rule inet %s %s ip6 daddr @%s %s\n", tableName, chain, denyV6Set, verdict)
+}
+
 // writePortScopedRules emits one "add rule" line per rule, preserving
 // declaration order. A rule with no Target applies to all destinations
 // (bare "tcp dport { ... }" covers both address families); the dport set
 // mixes ports and lo-hi intervals. TCP only.
-func writePortScopedRules(b *strings.Builder, rules []policy.PortScopedRule, verb string) {
+func writePortScopedRules(b *strings.Builder, chain string, rules []policy.PortScopedRule, verb string) {
 	for _, r := range rules {
 		members := make([]string, 0, len(r.Ports)+len(r.Ranges))
 		for _, port := range r.Ports {
@@ -804,14 +832,14 @@ func writePortScopedRules(b *strings.Builder, rules []policy.PortScopedRule, ver
 		}
 		portsClause := strings.Join(members, ", ")
 		if r.Target == "" {
-			fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } %s\n", tableName, chainName, portsClause, verb)
+			fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } %s\n", tableName, chain, portsClause, verb)
 			continue
 		}
 		daddr := "ip daddr"
 		if r.IsV6 {
 			daddr = "ip6 daddr"
 		}
-		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } %s\n", tableName, chainName, daddr, r.Target, portsClause, verb)
+		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } %s\n", tableName, chain, daddr, r.Target, portsClause, verb)
 	}
 }
 

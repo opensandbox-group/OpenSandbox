@@ -118,6 +118,7 @@ func (t *connectionTracker) refreshActiveConnections(ctx context.Context, connec
 		for _, credit := range credits {
 			lease := credit.domain.addresses[credit.addr]
 			lease.tcpUntil = grace
+			lease.grantEpoch = manager.grantEpoch
 			credit.domain.addresses[credit.addr] = lease
 		}
 	}

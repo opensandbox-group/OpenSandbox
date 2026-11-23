@@ -124,6 +124,88 @@ func TestApplyStatic_DNSOnlyHostKeepsEffectiveTeardown(t *testing.T) {
 	}
 }
 
+func TestApplyStatic_PreviousDNSSubjectIsNotANewGrant(t *testing.T) {
+	const domain = `{"action":"allow","target":"cdn.example"}`
+	addr := netip.MustParseAddr("192.0.2.10")
+	for _, action := range []string{"allow", "deny"} {
+		t.Run(action, func(t *testing.T) {
+			m, _ := recordingManager()
+			ctx := context.Background()
+			old := mustPolicy(t, `{"defaultAction":"`+action+`","egress":[`+domain+`]}`)
+			require.NoError(t, m.ApplyStatic(ctx, old))
+			require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			first := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","target":"192.0.2.0/24"}]}`)
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
+			require.NoError(t, err)
+			require.True(t, m.lastDrops.MatchesFlow(addr, 443))
+			require.NoError(t, m.ApplyStatic(ctx, policy.DefaultDenyPolicy()))
+			require.True(t, m.lastDrops.MatchesFlow(addr, 443), "old dynamic address identifies the withdrawn host")
+			require.Empty(t, m.tracker.dynamicIPs, "old dynamic address is not a live permit")
+		})
+	}
+}
+
+func TestApplyStatic_DNSCleanupDoesNotForgetMaskedGrant(t *testing.T) {
+	const domain = `{"action":"allow","target":"cdn.example"}`
+	addr := netip.MustParseAddr("192.0.2.10")
+	for _, poll := range []bool{false, true} {
+		t.Run(strconv.FormatBool(poll), func(t *testing.T) {
+			m, _ := recordingManager()
+			now := time.Now()
+			m.tracker.now = func() time.Time { return now }
+			ctx := context.Background()
+			old := mustPolicy(t, `{"egress":[`+domain+`,{"action":"allow","ports":[443,8443]}]}`)
+			first := mustPolicy(t, `{"egress":[`+domain+`,{"action":"deny","target":"192.0.2.0/24","ports":[443]}]}`)
+			require.NoError(t, m.ApplyStatic(ctx, old))
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
+			require.NoError(t, err)
+			require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			now = now.Add(2 * time.Minute)
+			if poll {
+				require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
+			}
+			for range 2 {
+				require.NoError(t, m.ApplyStatic(ctx, policy.DefaultDenyPolicy()))
+				require.True(t, m.lastDrops.MatchesFlow(addr, 443), "poll must not retire TCP history")
+				require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "sibling was previously admitted")
+			}
+		})
+	}
+}
+
+func TestApplyStatic_PollCannotTurnPastDNSAdmissionIntoTeardown(t *testing.T) {
+	const domain = `{"action":"allow","target":"cdn.example"}`
+	addr := netip.MustParseAddr("192.0.2.10")
+	ctx := context.Background()
+	for _, tt := range []struct {
+		name         string
+		poll, reopen bool
+	}{{"before poll", false, false}, {"after poll", true, false}, {"last cut cleared after poll", true, true}} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := recordingManager()
+			now := time.Now()
+			m.tracker.now = func() time.Time { return now }
+			old := mustPolicy(t, `{"defaultAction":"allow"}`)
+			first := mustPolicy(t, `{"egress":[`+domain+`]}`)
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
+			require.NoError(t, err)
+			require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[`+domain+`,{"action":"deny","ports":[443]}]}`)))
+			require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			now = now.Add(2 * time.Minute)
+			if tt.poll {
+				require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
+			}
+			next := policy.DefaultDenyPolicy()
+			if tt.reopen {
+				next = mustPolicy(t, `{"egress":[{"action":"allow","ports":[443]}]}`)
+			}
+			require.NoError(t, m.ApplyStatic(ctx, next))
+			require.Equal(t, !tt.reopen, m.lastDrops.MatchesFlow(addr, 443))
+			require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "the same confirmed grant actually admitted this port")
+		})
+	}
+}
+
 // Measure the full ruleset built on the next plain reload, not the preceding
 // opt-in snapshot. The address history is prepared outside the timed loop.
 func BenchmarkBuildRulesetRemovedDNS(b *testing.B) {
@@ -131,7 +213,7 @@ func BenchmarkBuildRulesetRemovedDNS(b *testing.B) {
 		b.Run(strconv.Itoa(count), func(b *testing.B) {
 			p, history, base := removedDNSBenchmarkPlan(count)
 			base.captureExactTCP(nil, p, history, nil)
-			carried := base.stillRelevant(p, p, nil, nil, nil)
+			carried := base.stillRelevant(p, p, nil, knownDNS{}, nil)
 			var size int
 			b.ReportAllocs()
 			for b.Loop() {
@@ -146,14 +228,18 @@ func BenchmarkBuildRulesetRemovedDNS(b *testing.B) {
 	}
 }
 
-func removedDNSBenchmarkPlan(count int) (*policy.NetworkPolicy, map[string][]netip.Addr, EstablishedDrops) {
+func removedDNSBenchmarkPlan(count int) (*policy.NetworkPolicy, knownDNS, EstablishedDrops) {
 	p := policy.DefaultDenyPolicy()
 	ips := make([]netip.Addr, count)
 	for i := range ips {
 		ips[i] = netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
 	}
 	history := map[string][]netip.Addr{"removed.example": ips}
-	return p, history, ComputeEstablishedDrops(nil, p, history)
+	ledger := &resolvedDomain{addresses: make(map[netip.Addr]domainLease, count)}
+	for _, ip := range ips {
+		ledger.addresses[ip] = domainLease{}
+	}
+	return p, knownDNS{domains: map[string]*resolvedDomain{"removed.example": ledger}}, ComputeEstablishedDrops(nil, p, history)
 }
 
 func BenchmarkCaptureExactTCPRemovedDNS(b *testing.B) {

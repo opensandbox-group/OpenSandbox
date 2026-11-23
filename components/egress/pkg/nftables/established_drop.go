@@ -66,6 +66,7 @@ type EstablishedDrops struct {
 
 	exact        exactTCP
 	exactCarried bool // Opt-in uses the original rules; plain reloads use the saved TCP verdicts.
+	guardDNS     bool // A late DNS grant must also respect still-denied broad TCP withdrawals.
 }
 
 // Empty reports whether there is nothing to drop. Keep entries alone never
@@ -374,7 +375,7 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 // (p's allows plus the currently learned domain IPs) so a destination that was
 // allowed at any point after the commit is never torn down by a later plain
 // apply the caller did not opt in to.
-func (d EstablishedDrops) stillRelevant(previous, p *policy.NetworkPolicy, learned []netip.Addr, priorDNS, leases map[netip.Addr]time.Time) EstablishedDrops {
+func (d EstablishedDrops) stillRelevant(previous, p *policy.NetworkPolicy, learned []netip.Addr, priorDNS knownDNS, leases map[netip.Addr]time.Time) EstablishedDrops {
 	if d.Empty() {
 		return EstablishedDrops{}
 	}
@@ -453,6 +454,14 @@ func (d EstablishedDrops) stillRelevant(previous, p *policy.NetworkPolicy, learn
 	out.Addrs = removedAddrs.sorted()
 	out.Prefixes = removedPrefixes.sorted()
 	out.CatchAll = d.CatchAll && p.DefaultAction != policy.ActionAllow
+	uncovered := func(p netip.Prefix) bool {
+		_, tracked := out.exact[p.Addr()]
+		return !p.IsSingleIP() || !tracked
+	}
+	out.guardDNS = slices.ContainsFunc(denyTCP, func(t tcpTarget) bool { return !t.prefix.IsSingleIP() }) &&
+		(out.CatchAll || slices.ContainsFunc(out.Prefixes, uncovered) ||
+			slices.ContainsFunc(out.Addrs, func(a netip.Addr) bool { return uncovered(hostPrefix(a)) }) ||
+			slices.ContainsFunc(out.PortDrops, func(d EstablishedPortDrop) bool { return uncovered(dropTCPPrefix(d)) }))
 
 	if out.Empty() {
 		return EstablishedDrops{}
