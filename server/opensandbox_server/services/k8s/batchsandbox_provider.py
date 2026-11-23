@@ -716,15 +716,24 @@ class BatchSandboxProvider(WorkloadProvider):
             return
         main_container = containers[0]
         if extra_security_context and isinstance(main_container, dict):
-            # The template's container securityContext is a base default: merge it
-            # into the runtime container's own securityContext (runtime leaves win,
-            # nested dicts merge so template members like capabilities.add survive),
-            # and fill the whole context when the runtime sets none.
+            # Runtime leaves win and nested dicts merge, except capability drops:
+            # preserve administrator restrictions alongside runtime requirements.
+            # Fill the whole context when the runtime sets none.
             runtime_security_context = main_container.get("securityContext")
             if isinstance(runtime_security_context, dict):
-                main_container["securityContext"] = _merge_security_context(
+                merged_security_context = _merge_security_context(
                     extra_security_context, runtime_security_context
                 )
+                template_capabilities = extra_security_context.get("capabilities")
+                runtime_capabilities = runtime_security_context.get("capabilities")
+                if isinstance(template_capabilities, dict) and isinstance(runtime_capabilities, dict):
+                    template_drop = template_capabilities.get("drop")
+                    runtime_drop = runtime_capabilities.get("drop")
+                    if isinstance(template_drop, list) and isinstance(runtime_drop, list):
+                        merged_security_context["capabilities"]["drop"] = list(
+                            dict.fromkeys(template_drop + runtime_drop)
+                        )
+                main_container["securityContext"] = merged_security_context
             else:
                 main_container["securityContext"] = extra_security_context
         mounts = main_container.get("volumeMounts", []) or []
