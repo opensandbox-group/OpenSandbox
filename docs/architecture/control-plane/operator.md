@@ -97,6 +97,8 @@ A process task can run **Local** (inside the task-executor container, the defaul
 
 API deletion and TTL expiration finish task cleanup, including `postStop`, before deleting or recycling pods. Direct foreground deletion of the BatchSandbox, or deletion of its Pool or pods, can bypass this ordering.
 
+The task scheduler binds each task to a Pod instance by name, UID, and IP. Once the controller observes that the bound Pod is terminating, missing, or has a different identity or IP, the scheduler stops querying and sending tasks to that endpoint, including stop requests. It also skips terminating Pods during task assignment and recovery. A task whose binding is gone is marked failed and released locally, and a completed task keeps its recorded outcome. Requests already in flight can still reach the endpoint.
+
 ## SandboxSnapshot
 
 `SandboxSnapshot` is the checkpoint record behind pause/resume. Its spec is a single field — the target `BatchSandbox` name (same namespace); the controller resolves the pod and node. Registry, push credentials, and snapshot type come from controller startup flags, not the spec. Status carries the outcome: a `Pending → Committing → Succeed / Failed` phase, a `format` of `rootfs-v1` (default) or `qemu-v1`, per-container committed image URIs with immutable config digests, the source pod and node, and — for the QEMU contract — a separate VM-state image with payload digests and a restore-compatibility summary. See [QEMU VMState Snapshots](/guides/qemu-vmstate-snapshots).
