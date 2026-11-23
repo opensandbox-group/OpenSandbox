@@ -17,20 +17,18 @@ package main
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 )
 
 func setForwardEnv(t *testing.T) {
@@ -238,60 +236,45 @@ func TestBuildForwardEndpointSeedsHostsFileIPs(t *testing.T) {
 	require.Empty(t, epDNSOnly.IPs)
 }
 
-func TestNewForwardHostResolverUsesStaticSnapshotAndDNSOrder(t *testing.T) {
-	// Static snapshot IPs are returned directly without issuing any DNS query.
+func TestNewForwardHostResolverUsesStaticSnapshotAndInProcessDNS(t *testing.T) {
+	// Static snapshot IPs are returned directly without invoking DNS resolution.
 	staticResolve := newForwardHostResolver(
 		[]netip.Addr{netip.MustParseAddr("10.20.30.40")},
-		"127.0.0.1:1",
 		[]string{"gateway.private"},
+		func(context.Context, string) ([]nftables.ResolvedIP, error) {
+			t.Fatal("DNS resolver must not run when static snapshot IPs exist")
+			return nil, nil
+		},
+		nil,
 	)
 	ips, err := staticResolve(context.Background(), "gateway.private")
 	require.NoError(t, err)
 	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.20.30.40")}, ips)
 
-	// Without static IPs, queries go directly to the local dnsproxy in search order.
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = conn.Close() })
-	var (
-		mu      sync.Mutex
-		queried []string
-	)
-	srv := &dns.Server{
-		PacketConn: conn,
-		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-			resp := new(dns.Msg)
-			resp.SetReply(r)
-			q := r.Question[0]
-			mu.Lock()
-			queried = append(queried, q.Name)
-			mu.Unlock()
-			if q.Qtype == dns.TypeA && q.Name == "gateway.team-a.svc.cluster.local." {
-				resp.Answer = append(resp.Answer, &dns.A{
-					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
-					A:   net.ParseIP("10.96.50.10"),
-				})
-			} else if q.Qtype == dns.TypeAAAA && q.Name == "gateway.team-a.svc.cluster.local." {
-				resp.Answer = append(resp.Answer, &dns.AAAA{
-					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
-					AAAA: net.ParseIP("fd00::50"),
-				})
-			} else {
-				resp.Rcode = dns.RcodeNameError
-			}
-			_ = w.WriteMsg(resp)
-		}),
-	}
-	ready := make(chan struct{})
-	srv.NotifyStartedFunc = func() { close(ready) }
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
-	<-ready
-
+	// Without static IPs, resolves in-process in search order, filters out
+	// loopback/unspecified addresses, and populates the scoped nft set directly.
+	var queried []string
+	var installedDomain string
+	var installed []nftables.ResolvedIP
 	dnsResolve := newForwardHostResolver(
 		nil,
-		conn.LocalAddr().String(),
 		[]string{"gateway.team-a.svc.cluster.local", "gateway"},
+		func(_ context.Context, name string) ([]nftables.ResolvedIP, error) {
+			queried = append(queried, name)
+			if name == "gateway.team-a.svc.cluster.local" {
+				return []nftables.ResolvedIP{
+					{Addr: netip.MustParseAddr("127.0.0.1"), TTL: 30 * time.Second},
+					{Addr: netip.MustParseAddr("10.96.50.10"), TTL: 30 * time.Second},
+					{Addr: netip.MustParseAddr("fd00::50"), TTL: 30 * time.Second},
+				}, nil
+			}
+			return nil, nil
+		},
+		func(_ context.Context, domain string, resolved []nftables.ResolvedIP) error {
+			installedDomain = domain
+			installed = resolved
+			return nil
+		},
 	)
 	ips, err = dnsResolve(context.Background(), "gateway")
 	require.NoError(t, err)
@@ -299,11 +282,7 @@ func TestNewForwardHostResolverUsesStaticSnapshotAndDNSOrder(t *testing.T) {
 		netip.MustParseAddr("10.96.50.10"),
 		netip.MustParseAddr("fd00::50"),
 	}, ips)
-	mu.Lock()
-	gotQueried := append([]string(nil), queried...)
-	mu.Unlock()
-	require.Equal(t, []string{
-		"gateway.team-a.svc.cluster.local.",
-		"gateway.team-a.svc.cluster.local.",
-	}, gotQueried)
+	require.Equal(t, []string{"gateway.team-a.svc.cluster.local"}, queried)
+	require.Equal(t, "gateway.team-a.svc.cluster.local", installedDomain)
+	require.Len(t, installed, 2)
 }

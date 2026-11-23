@@ -123,11 +123,6 @@ func NewWithResolvPath(p *policy.NetworkPolicy, listenAddr string, alwaysDeny, a
 	return proxy, nil
 }
 
-// ListenAddr returns the configured UDP/TCP listen address (e.g. 127.0.0.1:15353).
-func (p *Proxy) ListenAddr() string {
-	return p.listenAddr
-}
-
 func (p *Proxy) refreshEffectivePolicy() {
 	p.effectivePolicy = policy.MergeAlwaysOverlay(p.userPolicy, p.alwaysDeny, p.alwaysAllow)
 }
@@ -482,6 +477,63 @@ func (p *Proxy) ResolveDomain(ctx context.Context, domain string) ([]nftables.Re
 		return nil, nil
 	}
 	return ips, nil
+}
+
+// ResolveInfra resolves domain directly against the proxy's configured
+// upstreams in-process (bypassing the workload-shared loopback listener) for
+// both A and AAAA concurrently. Honors both ctx and the proxy's upstream
+// exchange timeout (OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT), retries
+// truncated UDP replies over TCP, and returns IPv4 addresses before IPv6.
+func (p *Proxy) ResolveInfra(ctx context.Context, domain string) ([]nftables.ResolvedIP, error) {
+	queryOne := func(qtype uint16) ([]nftables.ResolvedIP, error) {
+		query := new(dns.Msg)
+		query.SetQuestion(dns.Fqdn(domain), qtype)
+		query.RecursionDesired = true
+		resp, _, err := p.forwardContext(ctx, query, "udp")
+		if err != nil {
+			return nil, err
+		}
+		if resp.Truncated {
+			resp, _, err = p.forwardContext(ctx, query, "tcp")
+			if err != nil {
+				return nil, err
+			}
+		}
+		if resp.Rcode == dns.RcodeNameError {
+			return nil, nil
+		}
+		if resp.Rcode != dns.RcodeSuccess {
+			return nil, fmt.Errorf("DNS %s for %q", dns.RcodeToString[resp.Rcode], domain)
+		}
+		return extractResolvedIPs(resp), nil
+	}
+
+	var (
+		ips4, ips6 []nftables.ResolvedIP
+		err4, err6 error
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ips4, err4 = queryOne(dns.TypeA)
+	}()
+	go func() {
+		defer wg.Done()
+		ips6, err6 = queryOne(dns.TypeAAAA)
+	}()
+	wg.Wait()
+
+	if len(ips4) > 0 || len(ips6) > 0 {
+		out := make([]nftables.ResolvedIP, 0, len(ips4)+len(ips6))
+		out = append(out, ips4...)
+		out = append(out, ips6...)
+		return out, nil
+	}
+	if err4 != nil {
+		return nil, err4
+	}
+	return nil, err6
 }
 
 func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg, network string) (*dns.Msg, string, error) {

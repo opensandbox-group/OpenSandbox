@@ -28,8 +28,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
-
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/dnsproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/forwarder"
@@ -201,12 +199,18 @@ func registerForwardInfraDomain(proxy *dnsproxy.Proxy, host, resolvPath string, 
 }
 
 // newForwardHostResolver returns a host resolver for forwarder.SetResolveHost
-// that never reads /etc/hosts or /etc/resolv.conf at runtime. Static snapshot
-// IPs (from Kubernetes hostAliases) are returned directly from memory;
-// otherwise each pre-expanded candidate name is queried against the local
-// dnsproxy (127.0.0.1:15353), which forwards to the immutable snapshot
-// nameservers and updates the mark-scoped nft sets before replying.
-func newForwardHostResolver(staticIPs []netip.Addr, dnsAddr string, queryNames []string) func(context.Context, string) ([]netip.Addr, error) {
+// that never reads workload-writable /etc/hosts or /etc/resolv.conf and never
+// trusts the workload-shared loopback UDP DNS socket. Static snapshot IPs
+// (from Kubernetes hostAliases) are returned directly from memory; otherwise
+// each pre-expanded candidate name is resolved in-process via resolveDomain
+// (proxy.ResolveInfra) and installed into the mark-scoped nft sets via
+// onResolved before returning literal IPs to dial.
+func newForwardHostResolver(
+	staticIPs []netip.Addr,
+	queryNames []string,
+	resolveDomain func(ctx context.Context, name string) ([]nftables.ResolvedIP, error),
+	onResolved func(ctx context.Context, domain string, ips []nftables.ResolvedIP) error,
+) func(context.Context, string) ([]netip.Addr, error) {
 	if len(staticIPs) > 0 {
 		pinned := append([]netip.Addr(nil), staticIPs...)
 		return func(context.Context, string) ([]netip.Addr, error) {
@@ -217,87 +221,45 @@ func newForwardHostResolver(staticIPs []netip.Addr, dnsAddr string, queryNames [
 	return func(ctx context.Context, host string) ([]netip.Addr, error) {
 		var lastErr error
 		for _, name := range candidates {
-			ips, err := queryDNSBothFamilies(ctx, dnsAddr, name)
+			resolved, err := resolveDomain(ctx, name)
 			if err != nil {
 				lastErr = err
 			}
-			if len(ips) > 0 {
-				return ips, nil
+			// Never allow a DNS answer to redirect the gateway onto the
+			// workload-shared Pod loopback or unspecified address.
+			filtered := make([]nftables.ResolvedIP, 0, len(resolved))
+			addrs := make([]netip.Addr, 0, len(resolved))
+			seen := make(map[netip.Addr]struct{}, len(resolved))
+			for _, r := range resolved {
+				addr := r.Addr.Unmap()
+				if !addr.IsValid() || addr.IsLoopback() || addr.IsUnspecified() {
+					continue
+				}
+				if _, ok := seen[addr]; ok {
+					continue
+				}
+				seen[addr] = struct{}{}
+				r.Addr = addr
+				filtered = append(filtered, r)
+				addrs = append(addrs, addr)
+			}
+			if len(filtered) > 0 {
+				if onResolved != nil {
+					if err := onResolved(ctx, name, filtered); err != nil {
+						return nil, err
+					}
+				}
+				return addrs, nil
 			}
 			if ctx.Err() != nil {
 				break
 			}
 		}
 		if lastErr != nil {
-			return nil, fmt.Errorf("resolve %q via %s: %w", host, dnsAddr, lastErr)
+			return nil, fmt.Errorf("resolve %q: %w", host, lastErr)
 		}
-		return nil, fmt.Errorf("resolve %q via %s: no addresses found", host, dnsAddr)
+		return nil, fmt.Errorf("resolve %q: no addresses found", host)
 	}
-}
-
-func queryDNSBothFamilies(ctx context.Context, dnsAddr, name string) ([]netip.Addr, error) {
-	qCtx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-
-	var (
-		ips4, ips6 []netip.Addr
-		err4, err6 error
-		wg         sync.WaitGroup
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		ips4, err4 = queryDNSAddr(qCtx, dnsAddr, name, dns.TypeA)
-	}()
-	go func() {
-		defer wg.Done()
-		ips6, err6 = queryDNSAddr(qCtx, dnsAddr, name, dns.TypeAAAA)
-	}()
-	wg.Wait()
-
-	if len(ips4) > 0 || len(ips6) > 0 {
-		out := make([]netip.Addr, 0, len(ips4)+len(ips6))
-		out = append(out, ips4...)
-		out = append(out, ips6...)
-		return out, nil
-	}
-	if err4 != nil {
-		return nil, err4
-	}
-	return nil, err6
-}
-
-func queryDNSAddr(ctx context.Context, dnsAddr, name string, qtype uint16) ([]netip.Addr, error) {
-	msg := new(dns.Msg)
-	msg.SetQuestion(dns.Fqdn(name), qtype)
-	msg.RecursionDesired = true
-
-	udpClient := &dns.Client{Net: "udp", Timeout: time.Second}
-	resp, _, err := udpClient.ExchangeContext(ctx, msg, dnsAddr)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Truncated {
-		tcpClient := &dns.Client{Net: "tcp", Timeout: time.Second}
-		resp, _, err = tcpClient.ExchangeContext(ctx, msg, dnsAddr)
-		if err != nil {
-			return nil, err
-		}
-	}
-	var out []netip.Addr
-	for _, rr := range resp.Answer {
-		switch a := rr.(type) {
-		case *dns.A:
-			if ip, ok := netip.AddrFromSlice(a.A); ok {
-				out = append(out, ip.Unmap())
-			}
-		case *dns.AAAA:
-			if ip, ok := netip.AddrFromSlice(a.AAAA); ok {
-				out = append(out, ip.Unmap())
-			}
-		}
-	}
-	return out, nil
 }
 
 // runForwardSidecar installs the forward-mode data plane in order: default
@@ -351,14 +313,19 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 	}
 	proxy.SetRefusedFinal(fm.refusedFinal)
 	if !gatewayIsLiteral {
+		addGatewayIPs := func(addCtx context.Context, domain string, ips []nftables.ResolvedIP) error {
+			if err := nftMgr.AddUpstreamProxyIPs(addCtx, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
+				log.Warnf("forward mode: gateway nft update for %q failed: %v", domain, err)
+				return err
+			}
+			return nil
+		}
 		gatewayNames := registerForwardInfraDomain(proxy, fm.gateway.Host, resolvPath, func(domain string, ips []nftables.ResolvedIP) {
 			addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := nftMgr.AddUpstreamProxyIPs(addCtx, ips); err != nil && !errors.Is(err, nftables.ErrQuiesced) {
-				log.Warnf("forward mode: gateway nft update for %q failed: %v", domain, err)
-			}
+			_ = addGatewayIPs(addCtx, domain, ips)
 		})
-		fm.fwd.SetResolveHost(newForwardHostResolver(ep.IPs, proxy.ListenAddr(), gatewayNames))
+		fm.fwd.SetResolveHost(newForwardHostResolver(ep.IPs, gatewayNames, proxy.ResolveInfra, addGatewayIPs))
 	}
 	if telemetryEP != nil && telemetryHost != "" {
 		registerForwardInfraDomain(proxy, telemetryHost, resolvPath, func(domain string, ips []nftables.ResolvedIP) {

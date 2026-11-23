@@ -15,6 +15,7 @@
 package dnsproxy
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/netip"
@@ -316,4 +317,62 @@ func TestHostsFileIPs(t *testing.T) {
 	}, HostsFileIPs("gateway-alias", hostsPath))
 	require.Empty(t, HostsFileIPs("unlisted.private", hostsPath))
 	require.Empty(t, HostsFileIPs("gateway.private", filepath.Join(t.TempDir(), "missing")))
+}
+
+// ResolveInfra resolves directly against configured upstreams in-process,
+// honors upstreamExchangeTimeout (>1s replies succeed within caller budget),
+// and collects both A and AAAA concurrently.
+func TestResolveInfraHonorsProxyTimeoutAndCollectsBothFamilies(t *testing.T) {
+	t.Setenv(constants.EnvNameserverExempt, "127.0.0.1")
+	resetNameserverExemptCache(t)
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	srv := &dns.Server{
+		PacketConn: conn,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			// Delayed >1s reply proves ResolveInfra uses proxy timeout rather
+			// than a hardcoded 1s cap.
+			time.Sleep(1200 * time.Millisecond)
+			resp := new(dns.Msg)
+			resp.SetReply(r)
+			q := r.Question[0]
+			if q.Qtype == dns.TypeA && q.Name == "gateway.team-a.svc.cluster.local." {
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+					A:   net.ParseIP("10.96.50.10"),
+				})
+			} else if q.Qtype == dns.TypeAAAA && q.Name == "gateway.team-a.svc.cluster.local." {
+				resp.Answer = append(resp.Answer, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
+					AAAA: net.ParseIP("fd00::50"),
+				})
+			} else {
+				resp.Rcode = dns.RcodeNameError
+			}
+			_ = w.WriteMsg(resp)
+		}),
+	}
+	ready := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(ready) }
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	<-ready
+
+	proxy := &Proxy{
+		upstreams:               []string{conn.LocalAddr().String()},
+		activeUpstreams:         []string{conn.LocalAddr().String()},
+		upstreamExchangeTimeout: 2 * time.Second,
+		effectivePolicy:         policy.DefaultDenyPolicy(),
+		userPolicy:              policy.DefaultDenyPolicy(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	resolved, err := proxy.ResolveInfra(ctx, "gateway.team-a.svc.cluster.local")
+	require.NoError(t, err)
+	require.Len(t, resolved, 2)
+	require.Equal(t, netip.MustParseAddr("10.96.50.10"), resolved[0].Addr)
+	require.Equal(t, netip.MustParseAddr("fd00::50"), resolved[1].Addr)
 }
