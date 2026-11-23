@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -33,6 +34,9 @@ const (
 	commandOutputDirName       = "opensandbox-execd"
 	commandOutputRetention     = 24 * time.Hour
 	commandOutputSweepInterval = time.Hour
+	// Idle grace period after the leader process exits before abandoning a pipe
+	// still held open by an orphaned descendant.
+	commandPipeDrainGrace = 50 * time.Millisecond
 )
 
 var legacyCommandOutputPattern = regexp.MustCompile(`^[0-9a-f]{32}\.(stdout|stderr|output)$`)
@@ -285,6 +289,98 @@ type commandOutputTail struct {
 	pending bytes.Buffer
 }
 
+func (t *commandOutputTail) writeBytes(chunk []byte, onExecute func(string)) {
+	for _, b := range chunk {
+		t.pending.WriteByte(b)
+		if b == '\n' || b == '\r' {
+			if onExecute != nil {
+				onExecute(t.pending.String())
+			}
+			t.pending.Reset()
+		} else if t.pending.Len() > maxScanLineBytes {
+			// Deliver an overlong line in pieces, as session output does, so a
+			// command that never writes a newline cannot grow this buffer
+			// until execd runs out of memory.
+			pending := t.pending.Bytes()
+			cut := lastRuneBoundary(pending[:maxScanLineBytes])
+			if onExecute != nil {
+				onExecute(string(pending[:cut]))
+			}
+			rest := bytes.Clone(pending[cut:])
+			t.pending.Reset()
+			t.pending.Write(rest)
+		}
+	}
+	t.compact()
+}
+
+func (t *commandOutputTail) flush(onExecute func(string)) {
+	if t.pending.Len() > 0 {
+		if onExecute != nil {
+			onExecute(t.pending.String())
+		}
+		t.pending.Reset()
+	}
+	t.compact()
+}
+
+func (t *commandOutputTail) compact() {
+	// Reuse storage within a poll/read, but release completed long lines between reads.
+	if t.pending.Len() == 0 {
+		t.pending = bytes.Buffer{}
+	} else if t.pending.Cap() > 4096 && t.pending.Len() < t.pending.Cap()/2 {
+		// Keep a short trailing fragment without retaining a completed long line's storage.
+		t.pending = *bytes.NewBuffer(bytes.Clone(t.pending.Bytes()))
+	}
+}
+
+// streamCommandPipe reads a foreground command's stdout/stderr pipe until EOF.
+// Once done closes (the leader process has exited), reads switch to a short
+// idle deadline so an orphaned descendant holding the write end cannot hang
+// command completion while still draining any buffered output.
+func streamCommandPipe(r *os.File, onExecute func(string), done <-chan struct{}) {
+	readerDone := make(chan struct{})
+	watcherDone := make(chan struct{})
+	safego.Go(func() {
+		defer close(watcherDone)
+		select {
+		case <-done:
+			_ = r.SetReadDeadline(time.Now().Add(commandPipeDrainGrace))
+		case <-readerDone:
+		}
+	})
+	defer func() {
+		close(readerDone)
+		<-watcherDone
+	}()
+
+	var tail commandOutputTail
+	buf := make([]byte, 32*1024)
+	postExitRead := false
+	for {
+		select {
+		case <-done:
+			_ = r.SetReadDeadline(time.Now().Add(commandPipeDrainGrace))
+			postExitRead = true
+		default:
+		}
+
+		n, err := r.Read(buf)
+		if n > 0 {
+			tail.writeBytes(buf[:n], onExecute)
+		}
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) && !postExitRead {
+				// The watcher's deadline may have expired while a previous
+				// callback was running; do one bounded read to drain leftovers.
+				continue
+			}
+			tail.flush(onExecute)
+			return
+		}
+	}
+}
+
 func (t *commandOutputTail) read(path string, onExecute func(string), flushIncomplete bool) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -300,16 +396,17 @@ func (t *commandOutputTail) read(path string, onExecute func(string), flushIncom
 	for {
 		b, err := reader.ReadByte()
 		if err != nil {
-			if err == io.EOF && flushIncomplete && t.pending.Len() > 0 {
-				onExecute(t.pending.String())
-				t.pending.Reset()
+			if err == io.EOF && flushIncomplete {
+				t.flush(onExecute)
 			}
 			break
 		}
 		t.offset++
 		t.pending.WriteByte(b)
 		if b == '\n' || b == '\r' {
-			onExecute(t.pending.String())
+			if onExecute != nil {
+				onExecute(t.pending.String())
+			}
 			t.pending.Reset()
 		} else if t.pending.Len() > maxScanLineBytes {
 			// Deliver an overlong line in pieces, as session output does, so a
@@ -317,17 +414,13 @@ func (t *commandOutputTail) read(path string, onExecute func(string), flushIncom
 			// until execd runs out of memory.
 			pending := t.pending.Bytes()
 			cut := lastRuneBoundary(pending[:maxScanLineBytes])
-			onExecute(string(pending[:cut]))
+			if onExecute != nil {
+				onExecute(string(pending[:cut]))
+			}
 			rest := bytes.Clone(pending[cut:])
 			t.pending.Reset()
 			t.pending.Write(rest)
 		}
 	}
-	// Reuse storage within a poll, but release completed long lines between polls.
-	if t.pending.Len() == 0 {
-		t.pending = bytes.Buffer{}
-	} else if t.pending.Cap() > 4096 && t.pending.Len() < t.pending.Cap()/2 {
-		// Keep a short trailing fragment without retaining a completed long line's storage.
-		t.pending = *bytes.NewBuffer(bytes.Clone(t.pending.Bytes()))
-	}
+	t.compact()
 }

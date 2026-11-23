@@ -211,16 +211,24 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	signals, stopSignals := subscribeCommandSignals()
 	defer stopSignals()
 
-	stdout, stderr, err := c.stdLogDescriptor(session)
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		return fmt.Errorf("failed to get stdlog descriptor: %w", err)
+		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
-	stdoutPath := c.stdoutFileName(session)
-	stderrPath := c.stderrFileName(session)
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		return fmt.Errorf("failed to create stderr pipe: %w", err)
+	}
+	closeWriteEnds := sync.OnceFunc(func() {
+		_ = stdoutW.Close()
+		_ = stderrW.Close()
+	})
 	defer func() {
-		_ = stdout.Close()
-		_ = stderr.Close()
-		removeCommandOutputFilesWithID(session, stdoutPath, stderrPath)
+		closeWriteEnds()
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
 	}()
 
 	startAt := time.Now()
@@ -243,25 +251,12 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	// Disable the competing exec.Cmd watcher, which kills only the leader.
 	cmd.Cancel = nil
 
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	done := make(chan struct{}, 1)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	safego.Go(func() {
-		defer wg.Done()
-		c.tailStdPipe(stdoutPath, request.Hooks.OnExecuteStdout, done)
-	})
-	safego.Go(func() {
-		defer wg.Done()
-		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
-	})
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 
 	mp, err := launchManaged(cmd)
+	closeWriteEnds()
 	if err != nil {
-		close(done)
-		wg.Wait()
 		startErr := credentialStartHint(err, cred)
 		request.Hooks.OnExecuteInit(session)
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{
@@ -273,10 +268,20 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		return nil
 	}
 
+	done := make(chan struct{}, 1)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	safego.Go(func() {
+		defer wg.Done()
+		streamCommandPipe(stdoutR, request.Hooks.OnExecuteStdout, done)
+	})
+	safego.Go(func() {
+		defer wg.Done()
+		streamCommandPipe(stderrR, request.Hooks.OnExecuteStderr, done)
+	})
+
 	kernel := &commandKernel{
 		pid:          cmd.Process.Pid,
-		stdoutPath:   stdoutPath,
-		stderrPath:   stderrPath,
 		startedAt:    startAt,
 		running:      true,
 		content:      request.commandContent(),
