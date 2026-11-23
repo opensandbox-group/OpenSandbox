@@ -57,6 +57,7 @@ Options:
   --channel <stable|rc>     Defaults to rc when the version has a suffix, else stable.
                             rc renders umbrella-release-rc.yaml.tmpl (no package sections).
   --release-branch <name>   Branch the BOM commit lands on. Default: current branch.
+  --build-commit <sha>      Source commit recorded in the BOM and used for spec hashes. Default: HEAD.
   --skip-remote-check       Skip reachability check against origin (offline use).
   --skip-consistency        Skip the version-consistency scan. Only allowed with --dry-run.
   --scan-only               Run the version-consistency scan and exit (CI job).
@@ -81,9 +82,17 @@ require_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing required command
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | cut -d' ' -f1
+    sha256sum "$@" | cut -d' ' -f1
   else
-    shasum -a 256 "$1" | cut -d' ' -f1
+    shasum -a 256 "$@" | cut -d' ' -f1
+  fi
+}
+
+release_spec_sha() {
+  if [[ -n "$BUILD_COMMIT" ]]; then
+    git show "$C_BUILD:$1" | sha256_of
+  else
+    sha256_of "$1"
   fi
 }
 
@@ -142,6 +151,7 @@ semver_gt() { [[ "$(semver_compare "$1" "$2")" == "1" ]]; }
 VERSION=""
 CHANNEL=""
 RELEASE_BRANCH=""
+BUILD_COMMIT=""
 SKIP_REMOTE_CHECK=false
 SKIP_CONSISTENCY=false
 SCAN_ONLY=false
@@ -159,6 +169,7 @@ while [[ $# -gt 0 ]]; do
     --bump-only) BUMP_ONLY=true; shift ;;
     --channel) [[ $# -ge 2 ]] || die "--channel requires a value"; CHANNEL="$2"; shift 2 ;;
     --release-branch) [[ $# -ge 2 ]] || die "--release-branch requires a value"; RELEASE_BRANCH="$2"; shift 2 ;;
+    --build-commit) [[ $# -ge 2 && -n "${2:-}" ]] || die "--build-commit requires a value"; BUILD_COMMIT="$2"; shift 2 ;;
     --skip-remote-check) SKIP_REMOTE_CHECK=true; shift ;;
     --skip-consistency) SKIP_CONSISTENCY=true; shift ;;
     --scan-only) SCAN_ONLY=true; shift ;;
@@ -226,7 +237,10 @@ if [[ "$BUMP_ONLY" == true ]]; then
   exec "${RELEASE_DIR}/bump-versions.sh" --version "$VERSION"
 fi
 
-C_BUILD="$(git rev-parse HEAD)"
+C_BUILD="$(git rev-parse --verify --end-of-options "${BUILD_COMMIT:-HEAD}^{commit}")"
+if [[ -n "$BUILD_COMMIT" ]] && ! git merge-base --is-ancestor "$C_BUILD" HEAD; then
+  die "Build commit ${C_BUILD} is not an ancestor of ${RELEASE_BRANCH}."
+fi
 BUILD_DATE="$(date +%F)"
 
 NOTES_FILE="docs/releases/${VERSION}.md"
@@ -420,10 +434,10 @@ NOTES_OUT_FILE="${RELEASES_DIR}/${VERSION}.md"
 TEMPLATE_FILE="${RELEASE_DIR}/umbrella-release.yaml.tmpl"
 [[ "$CHANNEL" == "rc" ]] && TEMPLATE_FILE="${RELEASE_DIR}/umbrella-release-rc.yaml.tmpl"
 [[ -f "$TEMPLATE_FILE" ]] || die "BOM template not found: ${TEMPLATE_FILE}"
-spec_lifecycle_sha="$(sha256_of specs/sandbox-lifecycle.yml)"
-spec_execd_sha="$(sha256_of specs/execd-api.yaml)"
-spec_egress_sha="$(sha256_of specs/egress-api.yaml)"
-spec_diagnostic_sha="$(sha256_of specs/diagnostic-api.yml)"
+spec_lifecycle_sha="$(release_spec_sha specs/sandbox-lifecycle.yml)"
+spec_execd_sha="$(release_spec_sha specs/execd-api.yaml)"
+spec_egress_sha="$(release_spec_sha specs/egress-api.yaml)"
+spec_diagnostic_sha="$(release_spec_sha specs/diagnostic-api.yml)"
 
 BOM_FILE_TMP="$(mktemp -t opensandbox-bom.XXXXXX.yaml)"
 # Placeholder tokens are plain ${VAR} strings; bracket-style regex classes
@@ -523,7 +537,7 @@ cp "$BOM_FILE_TMP" "$BOM_FILE"
 git add "$BOM_FILE" "$NOTES_FILE"
 if git diff --cached --quiet; then
   warn "BOM commit is empty; reusing HEAD as C_bom."
-  C_BOM="$C_BUILD"
+  C_BOM="$(git rev-parse HEAD)"
 else
   git commit -m "release(opensandbox): pin BOM for ${VERSION}"
   C_BOM="$(git rev-parse HEAD)"

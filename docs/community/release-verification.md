@@ -1,23 +1,42 @@
 ---
 title: Release Verification
-description: Check release signing coverage and verify supported legacy OpenSandbox artifacts.
+description: Check signing coverage and verify supported OpenSandbox release artifacts.
 ---
 
 # Release Verification
 
-Signing coverage depends on the release workflow, not just the release date or version. The legacy per-component workflows supported the verification commands below; the current umbrella release process does not provide the same signing coverage.
+Signing coverage depends on the release workflow and the artifact you install.
 
 ## Current Umbrella Release Status
 
-::: warning Signing and provenance gap
-The current [umbrella release workflow](https://github.com/opensandbox-group/OpenSandbox/blob/main/.github/workflows/release-umbrella.yml) and [package release workflow](https://github.com/opensandbox-group/OpenSandbox/blob/main/.github/workflows/release-packages.yml) do not contain Cosign signing or GitHub build-provenance attestation steps. Declaring `attestations: write` permission does not create an attestation. Do not assume that an umbrella release is signed because its version is newer than a signed per-component release.
-:::
+The [umbrella release workflow](https://github.com/opensandbox-group/OpenSandbox/blob/main/.github/workflows/release-umbrella.yml) signs the Docker Hub `opensandbox/execd` image and publishes its GitHub build-provenance attestation for stable releases built with this workflow. Check [Issue #2463](https://github.com/opensandbox-group/OpenSandbox/issues/2463) for coverage of other images, mirrors, packages, and older umbrella releases.
 
 [Issue #2463](https://github.com/opensandbox-group/OpenSandbox/issues/2463) reports missing signatures and provenance for the examined `release-1.1.0`, `release-1.1.1`, and `release-1.2.0` artifacts, including the server 1.2.0 wheel. It tracks restoring coverage and clarifying registry availability. This guide does not promise that those artifacts will be re-signed.
 
 For umbrella images, use the digest recorded in the versioned [release BOM](https://github.com/opensandbox-group/OpenSandbox/tree/main/docs/releases), for example [1.2.0.yaml](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/releases/1.2.0.yaml), when pinning an image. Digest matching checks artifact identity; it is not proof of who built the artifact. The BOM's `metadata.gitCommit` records the build commit, which can differ from the release tag's commit because the release workflow commits the finalized BOM before creating the tag.
 
-If your deployment policy requires a verified signature or provenance, an absent attestation is an unmet requirement, not a successful verification. Do not replace the legacy workflow name in the commands below with `release-umbrella.yml` and treat that as evidence: changing an identity constraint cannot create missing signatures. Check the artifact's actual verification result and the resolution of #2463 before relying on umbrella release provenance.
+## Verify the Umbrella execd Image
+
+Use Cosign 3 and the GitHub CLI. Copy `images.execd.digest` and `metadata.gitCommit` from the stable version's BOM. Set `SOURCE_REF` to the branch used to dispatch the release workflow.
+
+```bash
+DIGEST='sha256:<digest from the BOM>'
+BUILD_COMMIT='<metadata.gitCommit from the BOM>'
+SOURCE_REF='refs/heads/release-X.Y'
+IMAGE_REF="docker.io/opensandbox/execd@${DIGEST}"
+REPO='opensandbox-group/OpenSandbox'
+WORKFLOW="${REPO}/.github/workflows/release-umbrella.yml"
+
+cosign verify "$IMAGE_REF" \
+  --certificate-identity "https://github.com/${WORKFLOW}@${SOURCE_REF}" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+gh attestation verify "oci://${IMAGE_REF}" --bundle-from-oci \
+  --repo "$REPO" --signer-workflow "$WORKFLOW" \
+  --source-ref "$SOURCE_REF" --source-digest "$BUILD_COMMIT"
+```
+
+Both commands must succeed for the image to satisfy a policy requiring a trusted signature and build provenance. The signing identity uses the dispatch branch because the workflow creates the release Git tag later.
 
 ## Legacy Signing Model {#signing-model}
 
@@ -123,7 +142,7 @@ The Generic Release workflow is started with `workflow_dispatch`, so its provena
 
 Install `cosign` and `gh`, then resolve the image digest. Always verify by digest, not by mutable tag alone.
 
-The legacy image workflows targeted the following registry locations with the same component name and digest. Availability and signing coverage for current umbrella releases must be checked separately; see the warning above and #2463.
+The legacy image workflows targeted the following registry locations with the same component name and digest. See [current umbrella release status](#current-umbrella-release-status) for present coverage.
 
 | Registry | Image name pattern |
 | --- | --- |

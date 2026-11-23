@@ -50,12 +50,14 @@ Dispatch `.github/workflows/release-umbrella.yml` on the target branch (`--ref <
 |---|---|
 | preflight | commit reachability + notes presence (`docs/releases/<version>.md`) |
 | scan | version-consistency scan (release-blocking) |
-| build | 14 images built and pushed directly to `release-X.Y.Z` (run-scoped staging tags while the `UMBRELLA_PUBLISH_ENABLED` gate is closed); all packages built and held |
+| build | 14 images built and pushed directly to `release-X.Y.Z` (run-scoped staging tags while the `UMBRELLA_PUBLISH_ENABLED` gate is closed); stable releases verify the Docker Hub execd signature and provenance before recording its digest; all packages built and held |
 | BOM | digests pinned into `docs/releases/<version>.yaml`, pushed to a `release/<version>` branch; the workflow opens a PR to the release branch and merges it (`C_bom`) — stable waits for a code-owner approval (required by the branch ruleset), rc merges immediately |
 | publish | once the BOM PR merges (all images green + code-owner approval), packages publish in parallel per registry (PyPI, npm, NuGet, Maven Central); images are already public at `release-X.Y.Z` from the build stage |
 | tag | `release-X.Y.Z` + `sdks/sandbox/go/vX.Y.Z` minted on `C_bom`, GitHub Release created with the notes and BOM |
 
 A failed release never mints its git tag or GitHub Release, so the release feed never shows a partial release; dispatch a dry run (`dry_run=true`) to keep the fan-out healthy between release windows.
+
+If a stable release has already pushed the execd image, use **Re-run failed jobs** on the original workflow run to retain its source ref and commit. The workflow reuses the digest only after both proofs verify against that build. Missing evidence or incomplete mirror pushes stop the release for maintainer review. See [Release Verification](/community/release-verification#verify-the-umbrella-execd-image) for the verification commands.
 
 ### Dry runs
 
