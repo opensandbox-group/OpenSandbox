@@ -104,7 +104,7 @@ The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no 
 | `type` | string | — | **`docker`** or **`kubernetes`**. |
 | `execd_image` | string | — | OCI image containing the **execd** binary (in-sandbox bootstrap). |
 | `execd_run_as_init` | boolean | `true` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 owning child reaping, signal forwarding, and the container lifecycle. This switch only injects `EXECD_INIT=1`; the hardening floor (cap-drop/seccomp/no-new-privileges) is **not** included by default — it stays off unless an execd isolation config enables it (`[hardening] enabled = true`, staged via `EXECD_ISOLATION_CONFIG`). Set `false` for the classic background-and-wait topology. fsb template builds bake `EXECD_INIT=1` into the golden image instead: execd runs as a subreaper under the fsb guest init, so reaping and signal forwarding still apply but the PID 1 signal shield does not. |
-| `execd_isolation_config` | string | unset | Path to the operator's isolation TOML inside Docker or Kubernetes sandboxes. When set, the server injects this path as `EXECD_ISOLATION_CONFIG` and ignores request values for that key. The file must be provisioned at that path. Omit this setting to allow creator-managed paths. |
+| `execd_isolation_config` | string | unset | Path to the operator's isolation TOML inside Docker and Kubernetes pod-based sandboxes (not `templateId`/fsb fast-sandbox sandboxes). When set for supported sandbox types, the server injects this path as `EXECD_ISOLATION_CONFIG` and ignores request values for that key. The file must be provisioned at that path. Omit this setting to allow creator-managed paths. |
 
 ---
 
