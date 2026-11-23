@@ -7,7 +7,7 @@ description: Step-by-step tutorial to enable verified TLS and Kubernetes TokenRe
 
 Fast Sandbox System Authentication protects the control-plane gRPC link between OpenSandbox (`opensandbox-server` and `opensandbox-ingress-gateway`) and the Fast Sandbox control plane (`fast-sandbox-fastpath`). When enabled, every FastPath business RPC requires:
 
-- **Verified TLS transport** signed by a deployment-managed `cert-manager` Issuer or ClusterIssuer.
+- **Verified TLS transport** signed by a deployment-managed `cert-manager` Issuer/ClusterIssuer or an existing TLS Secret.
 - **Short-lived Kubernetes ServiceAccount tokens** minted via the `TokenRequest` API with the dedicated audience `fast-sandbox-fastpath` (maximum lifetime 3,600 seconds), verified locally via OIDC discovery and JWKS, and authorized against an explicit RPC profile (`server` vs. `gateway`) and workload namespace list.
 
 ::: info Disabled by default for zero-prerequisite compatibility
@@ -17,7 +17,7 @@ Fast Sandbox system authentication is **disabled by default** (`enabled: false`)
 ## Prerequisites
 
 - A Kubernetes cluster with the `TokenRequest` API and ServiceAccount OIDC discovery enabled (Kubernetes 1.22+).
-- [cert-manager](https://cert-manager.io/) installed in the cluster, with an existing `Issuer` or `ClusterIssuer` (for example, `fast-sandbox-serving`) and its **public CA certificate** (`ca.crt`).
+- A TLS serving certificate for `fast-sandbox-fastpath` and its **public CA certificate** (`ca.crt`), provisioned either via [cert-manager](https://cert-manager.io/) (`fastpath.tls.issuerRef`, using an existing `Issuer` or `ClusterIssuer` such as `fast-sandbox-serving`) or as a pre-created TLS Secret (`fastpath.tls.existingSecret`).
 - A compatible `fsb-controller` companion image that includes the `--fastpath-auth-enabled` and `--fastpath-tls-*` flags.
 
 ---
@@ -49,12 +49,12 @@ helm upgrade --install base manifests/charts/base \
 Verify that both ServiceAccounts can mint tokens for themselves:
 
 ```bash
-kubectl auth can-i create serviceaccounts/token \
+kubectl auth can-i create serviceaccounts/opensandbox-server \
   -n opensandbox-system \
   --subresource=token \
   --as=system:serviceaccount:opensandbox-system:opensandbox-server
 
-kubectl auth can-i create serviceaccounts/token \
+kubectl auth can-i create serviceaccounts/opensandbox-ingress-gateway \
   -n opensandbox-system \
   --subresource=token \
   --as=system:serviceaccount:opensandbox-system:opensandbox-ingress-gateway
@@ -64,7 +64,7 @@ Both commands must output `yes`.
 
 ### Step 3: Enable TLS and caller policy on `fast-sandbox`
 
-Upgrade the `fast-sandbox` chart with `fastpath.callerAuth.enabled=true` and point `fastpath.tls.issuerRef.name` to your `cert-manager` issuer:
+Upgrade the `fast-sandbox` chart with `fastpath.callerAuth.enabled=true` and point `fastpath.tls.issuerRef.name` to your `cert-manager` issuer (or set `fastpath.tls.existingSecret` if you pre-created the TLS Secret without `cert-manager`):
 
 ```yaml
 # values-fast-sandbox.yaml
@@ -204,13 +204,13 @@ The server resolves the target ServiceAccount namespace from the `POD_NAMESPACE`
 
 ---
 
-## Rolling Upgrade from Plaintext
+## Upgrading from Plaintext
 
-To upgrade an existing plaintext deployment without downtime or flag mismatches:
+Because authenticated FastPath is strictly fail-closed (no plaintext or anonymous fallback) and both `fast-sandbox-controller` and `opensandbox-server` use `Recreate` deployments, switching an existing deployment from plaintext to authenticated TLS causes a brief control-plane interruption while the three releases roll out. Follow this sequence during a brief maintenance window to avoid flag mismatches:
 
-1. **Upgrade binaries first (default disabled):** Roll out the new `fast-sandbox`, `opensandbox-server`, and `ingress-gateway` releases with `callerAuth.enabled=false` (the default). Traffic continues over plaintext gRPC.
-2. **Provision certificates and RBAC:** Create the `fastpath-serving-ca` ConfigMap and enable `fastSandbox.callerAuth.enabled=true` in the `base` chart.
-3. **Switch to authenticated TLS:** Enable `fastpath.callerAuth.enabled=true` on `fast-sandbox`, `gateway.fastpathAuth.enabled=true` on `ingress-gateway`, and `fastpath_auth_enabled = true` on `opensandbox-server`.
+1. **Upgrade binaries first (default disabled):** Roll out the new `fast-sandbox`, `opensandbox-server`, and `ingress-gateway` releases with `callerAuth.enabled=false` (the default). Traffic continues over plaintext gRPC while images update.
+2. **Provision certificates and RBAC:** Create the `fastpath-serving-ca` ConfigMap (and TLS Secret if using `fastpath.tls.existingSecret`) and enable `fastSandbox.callerAuth.enabled=true` in the `base` chart.
+3. **Switch to authenticated TLS:** Enable `fastpath.callerAuth.enabled=true` on `fast-sandbox`, `gateway.fastpathAuth.enabled=true` on `ingress-gateway`, and `fastpath_auth_enabled = true` on `opensandbox-server`, then wait for all three Deployments to finish rolling out.
 
 ## Configuration Reference
 
@@ -221,7 +221,8 @@ To upgrade an existing plaintext deployment without downtime or flag mismatches:
 | `base` chart | `fastSandbox.callerAuth.externalServerSubjects` | `[]` | Extra RBAC subjects (`User`, `Group`, `ServiceAccount`) allowed to mint tokens for `opensandbox-server` |
 | `fast-sandbox` chart | `fastpath.callerAuth.enabled` | `false` | Enable FastPath TLS and caller authentication policy |
 | `fast-sandbox` chart | `fastpath.callerAuth.namespaces` | `[]` | Allowed workload namespaces (empty defaults to `[resourceNamespace]`; `["*"]` grants all namespaces) |
-| `fast-sandbox` chart | `fastpath.tls.issuerRef.name` | `"fast-sandbox-serving"` | Existing `cert-manager` Issuer or ClusterIssuer name |
+| `fast-sandbox` chart | `fastpath.tls.existingSecret` | `""` | Existing TLS Secret (`tls.crt` / `tls.key`) to mount instead of rendering a `cert-manager` Certificate |
+| `fast-sandbox` chart | `fastpath.tls.issuerRef.name` | `"fast-sandbox-serving"` | Existing `cert-manager` Issuer or ClusterIssuer name (required when `existingSecret` is empty) |
 | `fast-sandbox` chart | `fastpath.tls.issuerRef.kind` | `"ClusterIssuer"` | `Issuer` or `ClusterIssuer` |
 | `fast-sandbox` chart | `fastpath.tls.dnsNames` | `[]` | Extra DNS SANs on the FastPath serving certificate |
 | `ingress-gateway` chart | `gateway.fastpathAuth.enabled` | `false` | Pass `--fastpath-auth-enabled=true` to the gateway |
