@@ -940,9 +940,6 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 		t.Errorf("expected allowlist rejection, got: %v", err)
 	}
 
-	// A symlink whose target stays inside the allowlist is still accepted, and
-	// the source is rewritten to the resolved real path so bwrap mounts the
-	// resolved target (closing the TOCTOU window).
 	innerTarget := filepath.Join(allowed, "real")
 	if err := os.Mkdir(innerTarget, 0o755); err != nil {
 		t.Fatal(err)
@@ -960,9 +957,6 @@ func TestValidateBinds_SymlinkBypass(t *testing.T) {
 		t.Errorf("bind source should be rewritten to resolved path %q, got %q", wantResolved, binds[0].Source)
 	}
 
-	// A non-existent source under the allowlist must be rejected: a missing
-	// leaf could otherwise be swapped to an out-of-allowlist symlink between
-	// validation and bwrap start.
 	missing := filepath.Join(allowed, "does-not-exist-yet")
 	err = r.validateBinds([]isolation.BindMount{{Source: missing}})
 	if err == nil {

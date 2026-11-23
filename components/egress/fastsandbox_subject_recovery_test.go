@@ -12,21 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// R6 restart-recovery evidence (owner-approved option A). These tests pin
-// the CURRENT recovery behavior across mitmdump child generation changes and
-// control-plane rebuilds; they do not change recovery semantics. The v1
-// missing-file and stale-fence empty fallback is a recorded compatibility
-// limitation, deliberately asserted as-is, not as fail-closed.
-//
-// Evidence layers kept distinct here:
-//   - Go control plane + the real Python addon over Unix IPC (no mitmdump, no
-//     TLS; data-plane TLS recovery is covered by the Python runtime tests)
-//   - control-plane rebuild: a new server object sharing only persisted files
-//
-// Tests using mutationPersistence write real atomic files, which the
-// production atomic store supports only on Linux; on other platforms they
-// fail with the same root cause as the clean baseline, and Linux CI runs
-// them for real.
+// v1 missing-file and stale-fence recovery uses an empty fallback, not a fail-closed guarantee.
+// The fixture covers Go/Python Unix IPC, not mitmdump/TLS; real atomic persistence requires Linux.
 
 package main
 

@@ -220,14 +220,8 @@ func (s *fastSandboxPolicyServer) purgePolicyFile(subj subject.Subject) {
 	}
 }
 
-// persistPolicyCandidateLocked runs the commit protocol; the caller
-// serializes per-subject writers on policyCommitMu for the whole operation
-// (relay writes and SET_BINDING commits both take it). persist performs the
-// durable effect and returns its three-state classification; apply commits
-// the memory mutation and must leave the live state untouched on failure (a
-// failed apply only needs the file rolled back). The apply closure must not
-// hold s.mu around enforcement (applyPolicy takes the registry write lock,
-// which serializes against takeover paths that take s.mu).
+// The caller holds policyCommitMu; persist selects durability, and failed apply must leave live state unchanged.
+// Enforcement must run outside s.mu because it acquires the registry lock.
 func (s *fastSandboxPolicyServer) persistPolicyCandidateLocked(
 	subj subject.Subject,
 	persist func(vaultFileStore) (policy.FileMutationState, error),
@@ -244,7 +238,7 @@ func (s *fastSandboxPolicyServer) persistPolicyCandidateLocked(
 	state, err := persist(fs)
 	switch {
 	case err == nil && state == policy.FileCommitted:
-		// Rename + parent-dir fsync done.
+		// Publication completed at the caller-selected durability tier.
 	case err == nil && state == policy.FileUnchanged:
 		// Delete of an already-absent file (SaveRaw never returns this pair).
 	case err == nil:
@@ -267,8 +261,7 @@ func (s *fastSandboxPolicyServer) persistPolicyCandidateLocked(
 		}
 		return err
 	}
-	// Durable. A failed apply rolls the file back — no latch while the
-	// restore is confirmed.
+	// Confirmed rollback after failed apply needs no recovery latch.
 	if applyErr := apply(); applyErr != nil {
 		if restoreErr := restoreVaultFile(fs, before); restoreErr != nil {
 			s.requirePolicyRecoveryLocked("policy file restore after failed apply was inconclusive")

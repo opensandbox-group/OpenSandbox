@@ -75,7 +75,7 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 ## `[proxy]`
 
 ::: warning Deprecated — maintenance mode
-The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no new features, security and bug fixes only. Route data-plane traffic through the ingress gateway instead.
+The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no new features, security and bug fixes only. Route data-plane traffic through the ingress gateway instead. With `runtime.type = "docker"` the server accepts only `mode = "direct"` in [`[ingress]`](#ingress), so on Docker the data path off the server proxy is the direct endpoint the server returns for each sandbox; see [Single-Host Network (Docker)](../docs/architecture/network/single-host-network.md).
 :::
 
 | Key | Type | Default | Description |
@@ -136,6 +136,7 @@ Missing table → defaults from `KubernetesRuntimeConfig`.
 | `insecure_skip_tls_verify` | boolean | `false` | Skip apiserver TLS verification (temporary workaround only). |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
 | `workload_provider` | string \| omitted | `null` | **`batchsandbox`** (default) or **`agent-sandbox`**. |
+| `metadata_sync_pods` | boolean | `false` | When enabled, synchronize all accepted metadata label changes to dedicated BatchSandbox Pods and persist recreation overrides. Pooled Pods and other providers are excluded. See [Pod label updates](../docs/getting-started/configuration.md#updating-kubernetes-pod-labels-from-metadata). |
 | `batchsandbox_template_file` | string \| omitted | `null` | BatchSandbox CR YAML template path (batchsandbox only). |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | BatchSandbox main container pull policy (`Always`/`IfNotPresent`/`Never`). |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max wait for a new sandbox to become ready. |

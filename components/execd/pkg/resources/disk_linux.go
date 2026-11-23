@@ -32,6 +32,9 @@ import (
 // Test-overridable inputs.
 var (
 	cgroupV1BlkioDir = "/sys/fs/cgroup/blkio"
+	// sysDevBlockDir links each block device number (MAJ:MIN) to its
+	// device; a variable so tests can fake it.
+	sysDevBlockDir = "/sys/dev/block"
 	// statfsTimeout bounds each per-mount statfs: a stale network mount
 	// (NFS hard mount, hung FUSE daemon) can otherwise block the caller
 	// for minutes. A variable so tests can shrink it.
@@ -79,9 +82,11 @@ func diskUsages() ([]DiskUsage, error) {
 		if !ok {
 			continue
 		}
-		total := int64(st.Blocks) * int64(st.Bsize)
-		free := int64(st.Bfree) * int64(st.Bsize)
-		avail := int64(st.Bavail) * int64(st.Bsize)
+		// Block counts are in fragment units, as df reads them. f_bsize is
+		// only the preferred I/O size and can differ, e.g. on FUSE mounts.
+		total := int64(st.Blocks) * int64(st.Frsize)
+		free := int64(st.Bfree) * int64(st.Frsize)
+		avail := int64(st.Bavail) * int64(st.Frsize)
 		usages = append(usages, DiskUsage{
 			Mountpoint: entry.Mountpoint,
 			FSType:     entry.FSType,
@@ -205,7 +210,7 @@ func newDiskIOSource() diskIOReader {
 			// Skip pseudo devices and partitions: the kernel charges
 			// partition I/O to the whole device too, and summing both
 			// layers double-counts.
-			if isPseudoDevice(name) || isPartitionDevice(name) {
+			if !countedDevice(name) {
 				continue
 			}
 			totals.ReadOps += int64(counter.ReadCount)
@@ -215,6 +220,18 @@ func newDiskIOSource() diskIOReader {
 		}
 		return totals, nil
 	}
+}
+
+// countedDeviceNumber applies countedDevice to a cgroup IO line's MAJ:MIN.
+// The cgroup charges a bio on every layer it is submitted through, so a
+// device-mapper or loop device and the disk under it both carry the same
+// I/O. A device sysfs cannot name is counted.
+func countedDeviceNumber(majMin string) bool {
+	target, err := os.Readlink(filepath.Join(sysDevBlockDir, majMin))
+	if err != nil {
+		return true
+	}
+	return countedDevice(filepath.Base(target))
 }
 
 // v2IOReader returns a reader over a cgroup v2 io.stat file, or nil when
@@ -228,7 +245,7 @@ func v2IOReader(path string) diskIOReader {
 		if err != nil {
 			return DiskIO{}, err
 		}
-		return parseV2IOStat(data), nil
+		return parseV2IOStat(data, countedDeviceNumber), nil
 	}
 }
 
@@ -247,8 +264,8 @@ func v1IOReader(bytesPath, opsPath string) diskIOReader {
 		if err != nil {
 			return DiskIO{}, err
 		}
-		readBytes, writtenBytes := parseV1BlkioFile(bytesData)
-		readOps, writeOps := parseV1BlkioFile(opsData)
+		readBytes, writtenBytes := parseV1BlkioFile(bytesData, countedDeviceNumber)
+		readOps, writeOps := parseV1BlkioFile(opsData, countedDeviceNumber)
 		return DiskIO{
 			ReadBytes:    readBytes,
 			WrittenBytes: writtenBytes,

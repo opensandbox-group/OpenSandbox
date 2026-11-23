@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-API routes for OpenSandbox Lifecycle API.
-
-This module defines FastAPI routes that map to the OpenAPI specification endpoints.
-All business logic is delegated to the service layer that backs each operation.
-"""
-
 from typing import List, Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, status
@@ -64,9 +57,6 @@ snapshot_service = create_snapshot_service(sandbox_service)
 snapshot_service.start_background_sync()
 
 
-# ============================================================================
-# Sandbox CRUD Operations
-# ============================================================================
 
 @router.post(
     "/sandboxes",
@@ -96,13 +86,7 @@ async def create_sandbox(
     request: CreateSandboxRequest,
     x_request_id: Optional[str] = Header(None, alias="X-Request-ID", description="Unique request identifier for tracing"),
 ) -> CreateSandboxResponse:
-    """
-    Create a sandbox from a container image.
-
-    Creates a new sandbox from a container image with optional resource limits,
-    environment variables, and metadata. Sandboxes are provisioned directly from
-    the specified image without requiring a pre-created template.
-    """
+    """Create a sandbox from an image, snapshot, template, or configured pool."""
     validate_extensions(request.extensions)
     validate_renew_policy_conflict(request.lifecycle, request.extensions)
     normalize_network_policy_actions(request.network_policy)
@@ -252,9 +236,6 @@ def delete_sandbox(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-# ============================================================================
-# Sandbox Lifecycle Operations
-# ============================================================================
 
 @router.post(
     "/sandboxes/{sandbox_id}/pause",
@@ -337,9 +318,6 @@ def renew_sandbox_expiration(
     return sandbox_service.renew_expiration(sandbox_id, request)
 
 
-# ============================================================================
-# Snapshot Operations
-# ============================================================================
 
 @router.post(
     "/sandboxes/{sandbox_id}/snapshots",
@@ -452,9 +430,6 @@ def delete_snapshot(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-# ============================================================================
-# Sandbox Endpoints
-# ============================================================================
 
 @router.get(
     "/sandboxes/{sandbox_id}/endpoints/{port}",
@@ -487,17 +462,15 @@ def get_sandbox_endpoint(
     response: Response = None,  # type: ignore[assignment]
 ) -> Endpoint:
     """
-    Get sandbox access endpoint.
+    Get the public access endpoint URL for accessing a service running on a specific port
+    within the sandbox. The service must be listening on the specified port inside
+    the sandbox for the endpoint to be available.
 
-    Returns the public access endpoint URL for accessing a service running on a specific port
-    within the sandbox. The service must be listening on the specified port inside the sandbox
-    for the endpoint to be available.
-
-    When the ``expires`` query parameter is provided, the endpoint is wrapped in a
-    cryptographically signed route token (OSEP-0011) instead of returning a plain URL.
-    This requires the ingress gateway to be configured with secure_access signing keys.
-    ``expires`` must be a non-negative Unix epoch second value; when omitted or
-    invalid, a plain (unsigned) endpoint is returned.
+    When ``expires`` is provided, the endpoint uses a signed route token (OSEP-0011).
+    This requires an ingress gateway configured with secure_access signing keys.
+    Invalid or unsupported signed-route expirations are rejected rather than returning
+    an unsigned route. Omit ``expires`` for the unsigned/legacy response shape.
+    Endpoint resolution does not perform a service health check.
     """
     if use_server_proxy and expires is not None:
         raise HTTPException(
@@ -520,11 +493,7 @@ def get_sandbox_endpoint(
         if eip:
             base_url = eip
         else:
-            # Reflect how the client reached this API: same host AND same mount
-            # prefix (the API is served both bare and under /v1). Dropping the
-            # prefix pointed proxied traffic at whatever backend owns the root
-            # path on shared hosts (breaking HTTP with redirects and WebSocket
-            # handshakes outright).
+            # Preserve the mount prefix so shared hosts route proxy traffic to this API.
             mount_prefix = request.url.path.split("/sandboxes/", 1)[0]
             base_url = str(request.base_url).rstrip("/") + mount_prefix
         base_url = base_url.replace("https://", "").replace("http://", "")
@@ -536,11 +505,7 @@ def get_sandbox_endpoint(
                 if key.lower() != OPEN_SANDBOX_INGRESS_HEADER.lower()
             } or None
 
-    # Tell clients the origin of this sandbox. fsb sandboxes (id prefix,
-    # mirroring CompositeSandboxService._backend routing) run on golden-image
-    # templates and have no sandbox-side egress sidecar; the value space may
-    # grow (image/snapshot) as server-side origin tracking matures. Clients
-    # treat a missing/unknown value as "not template".
+    # Template origin makes clients route egress operations through the control plane.
     if response is not None and sandbox_id.startswith("fsb-"):
         response.headers[OPEN_SANDBOX_ORIGIN_HEADER] = SANDBOX_ORIGIN_TEMPLATE
 

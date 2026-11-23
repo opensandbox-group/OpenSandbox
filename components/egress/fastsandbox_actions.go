@@ -12,42 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fastlet Sandbox Actions Handler surface (sandbox.fast.io/actions/v1,
-// fast-sandbox docs/concepts/sandbox-actions.md): the Fastlet is the sole
-// lifecycle dispatcher and the egress process is the Handler. It replaces
-// the earlier file-driven slot-store observation: binding synchronization and
-// lifecycle checkpoints arrive over the Pod-loopback HTTP endpoints instead
-// of being polled from /run/fast-sandbox/network/*.json.
-//
-// Operation mapping:
-//
-//	SET_BINDING        register the subject (deny-first) and seed the input
-//	                   policy on a fresh subject (an existing record
-//	                   supersedes the input); activate immediately when the
-//	                   subject is already active. A JSON-null input removes
-//	                   the policy and reverts to deny-first. A key held by
-//	                   a different live subject is a stale-subject
-//	                   takeover (OSEP-0022): the previous owner goes first.
-//	LIFECYCLE_HOOK     sandbox.runtime-ready only confirms the deny-first
-//	                   install (idempotent); sandbox.data-plane-ready applies
-//	                   the pending policy -> active. Unknown Hooks are
-//	                   rejected, never silently ignored.
-//	REMOVE_BINDING     terminal cleanup; a fence mismatch (stale removal for
-//	                   a previous instance of the same UID) is ignored.
-//	VAULT_EXPORT       copy the vault file into the snapshot bundle and seal
-//	                   the subject — pause flow, before teardown.
-//	VAULT_IMPORT       land the bundle re-stamped with the restored fence —
-//	                   resume flow, before data-plane-ready.
-//	POLICY_EXPORT      copy the recorded policy file into the snapshot bundle
-//	                   and seal the subject — pause flow, before teardown.
-//	POLICY_IMPORT      land the policy bundle re-stamped with the restored
-//	                   fence — resume flow, before data-plane-ready.
-//
-// Fail-closed invariants: the subject is deny-first from registration until
-// its data-plane-ready Hook succeeds, so policy delivery can be late but
-// never early-open; enforcement failures return non-200 and are retryable
-// (at-least-once, same invocationId). Cancellation or terminal Delete may
-// stop retries; unfinished cleanup is not guaranteed to run again.
+// Subjects remain deny-first until data-plane-ready succeeds; canceled lifecycle delivery cannot guarantee cleanup retries.
 package main
 
 import (
@@ -77,8 +42,7 @@ import (
 func newHandlerInstanceID() string {
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failure is fatal enough that a deterministic fallback
-		// (pid + start time) still satisfies the incarnation contract.
+		// The incarnation ID is not a secret; PID and time still distinguish restarts.
 		return fmt.Sprintf("egress-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 	return fmt.Sprintf("egress-%d-%s", os.Getpid(), hex.EncodeToString(b[:]))

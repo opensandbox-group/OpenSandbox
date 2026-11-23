@@ -101,9 +101,6 @@ type ConnectionConfig struct {
 	DisableMetrics bool
 }
 
-// RewriteEndpointURL applies EndpointHostRewrite rules to an endpoint URL
-// returned by the server. This handles cases like Docker's
-// "host.docker.internal" being unreachable from the host machine.
 func (c *ConnectionConfig) RewriteEndpointURL(endpointURL string) string {
 	for from, to := range c.EndpointHostRewrite {
 		endpointURL = strings.ReplaceAll(endpointURL, from, to)
@@ -111,7 +108,6 @@ func (c *ConnectionConfig) RewriteEndpointURL(endpointURL string) string {
 	return endpointURL
 }
 
-// GetDomain returns the configured domain, falling back to env var and default.
 func (c *ConnectionConfig) GetDomain() string {
 	if c.Domain != "" {
 		return c.Domain
@@ -122,7 +118,6 @@ func (c *ConnectionConfig) GetDomain() string {
 	return DefaultDomain
 }
 
-// GetProtocol returns the configured protocol, falling back to env var and default.
 func (c *ConnectionConfig) GetProtocol() string {
 	if c.Protocol != "" {
 		return c.Protocol
@@ -133,7 +128,6 @@ func (c *ConnectionConfig) GetProtocol() string {
 	return DefaultProtocol
 }
 
-// GetAPIKey returns the configured API key, falling back to env var.
 func (c *ConnectionConfig) GetAPIKey() string {
 	if c.APIKey != "" {
 		return c.APIKey
@@ -141,14 +135,11 @@ func (c *ConnectionConfig) GetAPIKey() string {
 	return os.Getenv("OPEN_SANDBOX_API_KEY")
 }
 
-// GetBaseURL returns the lifecycle API base URL (e.g. "http://localhost:8080").
-// Note: this does NOT append /v1.
-// lifecycleClient() appends /v1 when creating the lifecycle client.
+// GetBaseURL excludes the API version prefix.
 func (c *ConnectionConfig) GetBaseURL() string {
 	domain := c.GetDomain()
 	protocol := c.GetProtocol()
 
-	// If domain already has a scheme, use it as-is.
 	if strings.HasPrefix(domain, "http://") || strings.HasPrefix(domain, "https://") {
 		return strings.TrimRight(domain, "/")
 	}
@@ -156,7 +147,6 @@ func (c *ConnectionConfig) GetBaseURL() string {
 	return fmt.Sprintf("%s://%s", protocol, domain)
 }
 
-// GetAuthHeader returns the auth header name for lifecycle requests.
 func (c *ConnectionConfig) GetAuthHeader() string {
 	if c.AuthHeader != "" {
 		return c.AuthHeader
@@ -164,7 +154,6 @@ func (c *ConnectionConfig) GetAuthHeader() string {
 	return "OPEN-SANDBOX-API-KEY"
 }
 
-// GetRequestTimeout returns the request timeout, defaulting to DefaultRequestTimeout.
 func (c *ConnectionConfig) GetRequestTimeout() time.Duration {
 	if c.RequestTimeout > 0 {
 		return c.RequestTimeout
@@ -172,15 +161,10 @@ func (c *ConnectionConfig) GetRequestTimeout() time.Duration {
 	return DefaultRequestTimeout
 }
 
-// clientOpts builds the common Option slice from config fields.
 func (c *ConnectionConfig) clientOpts(includeAuthHeader bool) []Option {
 	return c.clientOptsWithHeaders(includeAuthHeader, c.Headers)
 }
 
-// clientOptsWithHeaders builds the common Option slice with an explicit header
-// map. Lifecycle clients pass ConnectionConfig.Headers unchanged; data-plane
-// clients pass the result of dataPlaneHeaders so the tenant credential policy
-// is applied consistently.
 func (c *ConnectionConfig) clientOptsWithHeaders(includeAuthHeader bool, headers map[string]string) []Option {
 	var opts []Option
 	if includeAuthHeader && c.AuthHeader != "" {
@@ -228,9 +212,6 @@ func (c *ConnectionConfig) dataPlaneHeaders(endpointHeaders map[string]string) m
 	return headers
 }
 
-// lifecycleClient creates a LifecycleClient from this config.
-// Appends the API version prefix (/v1) to the base URL, as required by
-// NewLifecycleClient and the OpenSandbox lifecycle API spec.
 func (c *ConnectionConfig) lifecycleClient() *LifecycleClient {
 	var cache *EndpointCache
 	if !c.EndpointCacheDisabled {
@@ -239,17 +220,11 @@ func (c *ConnectionConfig) lifecycleClient() *LifecycleClient {
 	return NewLifecycleClientWithCache(c.GetBaseURL()+"/"+APIVersion, c.GetAPIKey(), cache, c.clientOpts(true)...)
 }
 
-// execdClient creates an ExecdClient for a resolved endpoint. All headers
-// returned by the lifecycle GetEndpoint call (auth tokens, routing hints,
-// sticky-session keys, etc.) are forwarded as-is on every subsequent request.
 func (c *ConnectionConfig) execdClient(endpointURL string, endpointHeaders map[string]string) *ExecdClient {
 	opts := c.clientOptsWithHeaders(true, c.dataPlaneHeaders(endpointHeaders))
 	return NewExecdClient(endpointURL, "", opts...)
 }
 
-// egressClient creates an EgressClient for a resolved endpoint. All headers
-// returned by the lifecycle GetEndpoint call are forwarded as-is on every
-// subsequent request.
 func (c *ConnectionConfig) egressClient(endpointURL string, endpointHeaders map[string]string) *EgressClient {
 	opts := c.clientOptsWithHeaders(false, c.dataPlaneHeaders(endpointHeaders))
 	return NewEgressClient(endpointURL, "", opts...)

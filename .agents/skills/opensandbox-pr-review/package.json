@@ -1,0 +1,5 @@
+{
+  "name": "opensandbox-pr-review",
+  "version": "1.0.0",
+  "description": "Deep-review a GitHub PR in the OpenSandbox repository: OCR tool review (when available) over the PR ref range plus independent manual verification (claim checking at definition sites, bug reproduction on the base, tests on the PR branch in isolated worktrees), producing a concise professional bilingual report (Markdown in chat + standalone HTML with language toggle by default) with severity-graded findings and exact file:line references."
+}

@@ -183,7 +183,6 @@ snapshot_verify() {
 	local t0 t1 t2 t3 t4
 	t0="$(now_ms)"
 
-	# --- Stage A: policy-less source -> deny rule #1 -> snapshot
 	log "verify (snapshot): creating a sandbox WITHOUT a network policy via the opensandbox CLI (templateId=$TEMPLATE_ID)"
 	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
 		--metadata origin=fast-sandbox-env-snapshot --skip-health-check -o json 2>/dev/null)" \
@@ -216,8 +215,6 @@ snapshot_verify() {
 		snapshot_traffic_reachable example.com
 	pass "deny rule #1 live: pypi.org blocked, example.com reachable (default-allow)"
 
-	# 1. Snapshot create returns Creating; the row converges from the
-	# SandboxSnapshot CR via the server watcher.
 	log "verify (snapshot): osb snapshot create $source_id --name env-verify"
 	out="$(osb_api snapshot create "$source_id" --name env-verify -o json 2>/dev/null)" \
 		|| fail "snapshot create failed for $source_id"
@@ -254,13 +251,11 @@ snapshot_verify() {
 	log "verify (snapshot): $SNAPSHOT_ID snapshot create->Ready $(( (t2 - t1) / 1000000 ))ms"
 	pass "snapshot: create -> Creating -> watcher -> Ready"
 
-	# 3. Source survival: Running + /ping again after the terminal phase.
 	wait_for "source sandbox Running again after the snapshot" 120 sandbox_running
 	wait_for "source sandbox execd /ping 200 after the snapshot" 100 execd_ping_ok
 	pass "snapshot: source sandbox survived (Running + /ping 200)"
 
-	# 4. ARTIFACT (dump time): the published set carries the recorded policy
-	# file with EXACTLY the policy at dump time — rule #2 does not exist yet.
+	# Verify the artifact before adding post-dump rules so restore cannot accidentally use live state.
 wait_for "snapshot artifact carries policy.json (defaultAction allow)" 60 \
 	snapshot_bundle_policy_is '.policy.defaultAction == "allow"'
 wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
@@ -279,7 +274,6 @@ wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 		snapshot_traffic_reachable example.com
 	pass "deny rule #2 live post-dump: github.com blocked (source only)"
 
-	# 5b. Listing: sandboxId scoping returns the snapshot as Ready.
 	out="$(osb_api snapshot list --sandbox-id "$source_id" --page-size 50 -o json 2>"$WORK/last-snapshot-list.err")" \
 		|| fail "snapshot list failed for $source_id: $(head -c 400 "$WORK/last-snapshot-list.err" 2>/dev/null)"
 	[[ "$(printf '%s' "$out" | jq -r --arg id "$SNAPSHOT_ID" \
@@ -287,12 +281,10 @@ wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 		|| fail "snapshot list does not contain $SNAPSHOT_ID as Ready: $(printf '%s' "$out" | head -c 400)"
 	pass "snapshot: list scoped by sandboxId contains the snapshot (Ready)"
 
-	# 5c. Delete the source sandbox (the snapshot outlives it).
 	osb_api sandbox kill "$source_id" >/dev/null 2>&1 \
 		|| log "verify cleanup: kill $source_id failed"
 	wait_for "snapshot source sandbox deleted" 120 verify_sandbox_gone
 
-	# --- Stage B: restore from the snapshot
 	local restored
 	log "verify (snapshot): osb sandbox create --snapshot-id $SNAPSHOT_ID (pool profile restated)"
 	restored="$(osb_api sandbox create --snapshot-id "$SNAPSHOT_ID" --timeout 1h \
@@ -316,14 +308,12 @@ wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 	wait_for "restored guest reaches example.com" 120 snapshot_traffic_reachable example.com
 	pass "restore: dump-time policy live (pypi.org blocked, github.com reachable again, example.com fine)"
 
-	# 7. Deny rule #3 on the restored sandbox: github.com denied and blocked.
 	server_api PATCH "/sandboxes/$VERIFY_ID/networkpolicy" "$patch_body" >/dev/null \
 		|| fail "PATCH networkpolicy (deny github.com) failed for the restored sandbox"
 	wait_for "restored sandbox enforcing deny github.com" 120 snapshot_policy_rule_is github.com deny
 	wait_for "restored guest blocked from github.com" 180 snapshot_traffic_blocked github.com
 	pass "deny rule #3 live on the restored sandbox: github.com blocked"
 
-	# 8. Negative: updating rules on a DELETED sandbox must be rejected (404).
 	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
 		|| log "verify cleanup: kill $restore_id failed"
 	wait_for "restored sandbox deleted" 120 verify_sandbox_gone
@@ -334,7 +324,6 @@ wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 		|| fail "networkpolicy update on the deleted sandbox returned $neg_code, expected 404"
 	pass "policy update on the deleted sandbox rejected (404)"
 
-	# 9. Cleanup; the server forwards artifact deletion per snapshot row.
 	for snapshot_id in "$SNAPSHOT_ID" "$SNAPSHOT_EXTRA"; do
 		[[ -n "$snapshot_id" ]] || continue
 		osb_api snapshot delete "$snapshot_id" >/dev/null 2>&1 \

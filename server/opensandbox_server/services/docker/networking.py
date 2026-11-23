@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Network management mixin for Docker sandboxes.
-
-Provides network validation, endpoint resolution, egress sidecar lifecycle,
-and bridge IP extraction. Mixed into DockerSandboxService.
-"""
-
 from __future__ import annotations
 
 import json
@@ -254,7 +247,7 @@ class DockerNetworkingMixin:
         Get sandbox access endpoint.
 
         Args:
-            resolve_internal: If True, return the internal container IP (for proxy), ignoring router config.
+            resolve_internal: If True, select a server-reachable container or host-mapped endpoint.
             expires: Not supported by Docker runtime.
             use_proxy_host: When True and resolve_internal is False, build the
                 host-mapped endpoint from the server-local proxy host

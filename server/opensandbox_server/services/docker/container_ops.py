@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Container operations mixin for Docker sandboxes.
-
-Provides image management, platform resolution, and container creation utilities.
-Mixed into DockerSandboxService.
-"""
-
 from __future__ import annotations
 
 import json
@@ -77,7 +70,6 @@ logger = logging.getLogger(__name__)
 
 
 class DockerContainerOpsMixin:
-    """Mixin providing image management, platform resolution, and container creation."""
 
 
     def _normalize_platform_key(self, platform: Optional[PlatformSpec]) -> str:

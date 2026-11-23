@@ -383,26 +383,16 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 	return nil
 }
 
-// refreshFreePods updates the freePods slice based on allPods and currently assigned pods
-// This ensures that each pod is only assigned to one taskNode
-// Only pods with IP addresses are considered free for assignment
 func (sch *defaultTaskScheduler) refreshFreePods() {
-	// Create a map of assigned pod names for quick lookup
 	assignedPods := make(map[string]bool, len(sch.allPods)/2)
 	for _, tNode := range sch.taskNodes {
 		if tNode.IP != "" && tNode.PodName != "" {
 			assignedPods[tNode.PodName] = true
 		}
 	}
-	// Rebuild freePods list with only unassigned pods that have IP addresses
 	sch.freePods = make([]*corev1.Pod, 0, len(sch.allPods)/2)
 	for _, pod := range sch.allPods {
-		// Only consider pods with IP addresses as free for assignment, and skip
-		// any pod the control plane has explicitly declared not ready (ConditionFalse,
-		// or ConditionUnknown while the node is degraded): the task is bound to the
-		// pod IP immediately and is not retried, so admitting such a pod sends the
-		// task to an endpoint that cannot accept it and consumes a healthy sibling's
-		// free slot. A pod with no PodReady condition at all stays free.
+		// Assignment is not retried, so exclude explicitly unready pods; missing PodReady remains eligible.
 		if !assignedPods[pod.Name] && pod.Status.PodIP != "" && !utils.IsPodExplicitlyNotReady(pod.Status) {
 			sch.freePods = append(sch.freePods, pod)
 		}

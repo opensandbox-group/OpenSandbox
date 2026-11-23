@@ -58,18 +58,7 @@ RUNTIME_PROCESS_CHECK_COMMAND = (
 
 class CodeInterpreter:
     """
-    Code Interpreter SDK providing secure, isolated code execution capabilities.
-
-    This class extends the basic Sandbox functionality with specialized code execution features,
-    including multi-language support, session management, and variable persistence.
-
-    Key Features:
-
-    - Multi-language Code Execution: Python, JavaScript, TypeScript, Go, Bash
-    - Session Management: Persistent execution contexts with variable state
-    - Sandbox Integration: Full access to underlying sandbox file system and command execution
-    - Streaming Execution: Real-time code execution with output streaming
-    - Variable Inspection: Access to execution variables and state
+    Multi-language code execution with persistent contexts on an existing sandbox.
 
     Usage Example:
 
@@ -114,60 +103,25 @@ class CodeInterpreter:
     """
 
     def __init__(self, sandbox: Sandbox, code_service: Codes) -> None:
-        """
-        Initialize CodeInterpreter with sandbox and code service.
-
-        Note: This constructor is for internal use. Use CodeInterpreter.create() instead.
-
-        Args:
-            sandbox: Underlying sandbox instance
-            code_service: Code execution implementation
-        """
+        """Internal constructor; use CodeInterpreter.create()."""
         self._sandbox = sandbox
         self._code_service = code_service
 
     @property
     def sandbox(self) -> Sandbox:
-        """
-        Provides access to the underlying sandbox instance.
-
-        Returns:
-            The underlying sandbox instance
-        """
         return self._sandbox
 
     @property
     def id(self) -> str:
-        """
-        Gets the unique identifier of this code interpreter (same as underlying sandbox ID).
-
-        Returns:
-            ID of the code interpreter/sandbox
-        """
+        """The underlying sandbox ID."""
         return self._sandbox.id
 
     @property
     def files(self):
-        """
-        Provides access to file system operations within the sandbox.
-
-        Allows writing, reading, listing, and deleting files and directories.
-
-        Returns:
-            Service for filesystem manipulation
-        """
         return self._sandbox.files
 
     @property
     def commands(self):
-        """
-        Provides access to command execution operations.
-
-        Allows running shell commands, capturing output, and managing processes.
-
-        Returns:
-            Service for command execution
-        """
         return self._sandbox.commands
 
     async def aclose(self) -> None:
@@ -190,38 +144,14 @@ class CodeInterpreter:
 
     @property
     def metrics(self):
-        """
-        Provides access to sandbox metrics and monitoring.
-
-        Allows retrieving resource usage statistics (CPU, memory) and other performance metrics.
-
-        Returns:
-            Service for metrics retrieval
-        """
         return self._sandbox.metrics
 
     @property
     def codes(self) -> Codes:
-        """
-        Provides access to code execution operations.
-
-        This service enables:
-        - Multi-language code execution (Python, JavaScript, Bash, etc.)
-        - Execution context management with persistent variables
-        - Real-time output streaming and interruption capabilities
-
-        Returns:
-            Service for advanced code execution with session support
-        """
         return self._code_service
 
     async def ping(self) -> bool:
-        """
-        Check if the code execution service (execd) is responsive.
-
-        Returns:
-            True if the code execution service is responsive, False otherwise
-        """
+        """Probe execd, not the Jupyter runtime."""
         return await self._code_service.ping()
 
     async def is_healthy(self) -> bool:
@@ -329,20 +259,12 @@ class CodeInterpreter:
         """
         Creates a CodeInterpreter from an existing Sandbox instance.
 
-        This factory method handles the creation and initialization of CodeInterpreter
-        services, including the code execution service and language configuration.
-
         By default a strict health check runs before the interpreter is returned:
         the code execution service (execd) must answer ``GET /ping`` AND the
         code interpreter runtime (Jupyter kernel gateway) must be serving,
         both within ``ready_timeout``. execd starts serving before the runtime
         launches, so the daemon ping alone is not enough. Set
         ``skip_health_check=True`` to opt out.
-
-        CodeInterpreter must be created by wrapping an existing Sandbox instance with
-        code execution capabilities. This design ensures clear separation of concerns:
-        - Sandbox handles infrastructure (containers, resources, networking)
-        - CodeInterpreter adds code execution capabilities on top
 
         Args:
             sandbox: Existing sandbox instance to wrap with code execution capabilities

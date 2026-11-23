@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package revisionruntime composes the revision transaction foundation with
-// one private mitmdump process session. It is not wired into a live profile.
+// Package revisionruntime binds revision coordination to one private mitmdump process session.
 package revisionruntime
 
 import (
@@ -37,9 +36,7 @@ const (
 	maxProcessSessionSocketPathBytes = 103
 )
 
-// ProcessSessionConfig describes one unused mitmdump receiver session. The
-// parent remains caller-owned; the session creates and owns exactly one child
-// directory beneath it and changes that directory to the target child UID/GID.
+// ProcessSessionConfig leaves the parent caller-owned; the session owns one child directory with the target UID/GID.
 type ProcessSessionConfig struct {
 	// ParentDir must remain at the same path and must not be group/world
 	// writable for the complete child lifetime. Its mode must grant search to
@@ -58,9 +55,7 @@ type ProcessSessionConfig struct {
 	DrainTimeoutSeconds int
 }
 
-// ProcessSession owns the local resources that bind one mitmdump process to
-// one transport and coordinator. It is not connected to a running egress
-// profile; the future launcher owner must stop the child before Close.
+// ProcessSession owns local transport and coordination; its launcher must stop the child before Close.
 type ProcessSession struct {
 	mu             sync.Mutex
 	bootstrapMu    sync.Mutex

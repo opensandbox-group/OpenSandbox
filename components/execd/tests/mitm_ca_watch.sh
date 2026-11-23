@@ -16,7 +16,7 @@
 # Regression tests for the mitm CA rotation watcher: reinstall trust on every
 # content change against the installed-generation baseline, stay silent while
 # unchanged, adopt a first export when nothing was trusted yet, and retry a
-# failed install pass.
+# failed install pass, including a failed NSS or JDK import.
 
 set -euo pipefail
 
@@ -56,8 +56,9 @@ printf '%s\n' 'certificate-generation-c' > "$CA_C"
 export MITM_CA_WATCH_INTERVAL=0.3
 
 # Stub trust helpers, defined before sourcing the watcher so the background
-# job calls the stubs instead of production code. trust_mitm_ca honors an
-# optional fail-once counter to emulate a transient install failure.
+# job calls the stubs instead of production code. Each honors an optional
+# fail-once counter to emulate a transient install failure; the NSS and JDK
+# stubs report it through the same flags as the production helpers.
 TRUST_LOG="$TESTDIR/trust.log"
 : > "$TRUST_LOG"
 FAIL_ONCE=0
@@ -69,11 +70,23 @@ trust_mitm_ca() {
   fi
   return 0
 }
+NSS_FAIL_ONCE=0
 trust_mitm_ca_nss() {
   printf 'nss %s\n' "$1" >> "$TRUST_LOG"
+  _MITM_CA_NSS_FAILED=0
+  if [ "$NSS_FAIL_ONCE" -gt 0 ]; then
+    NSS_FAIL_ONCE=$((NSS_FAIL_ONCE - 1))
+    _MITM_CA_NSS_FAILED=1
+  fi
 }
+JDK_FAIL_ONCE=0
 trust_mitm_ca_jdk() {
   printf 'jdk %s\n' "$1" >> "$TRUST_LOG"
+  _MITM_CA_JDK_FAILED=0
+  if [ "$JDK_FAIL_ONCE" -gt 0 ]; then
+    JDK_FAIL_ONCE=$((JDK_FAIL_ONCE - 1))
+    _MITM_CA_JDK_FAILED=1
+  fi
 }
 
 # shellcheck source=/dev/null
@@ -147,6 +160,7 @@ cp "$CA_A" "$live"
 FAIL_ONCE=1
 watch_mitm_ca "$live" "$(fp "$live")" > "$TESTDIR/watch-d.log" 2>&1 &
 watcher=$!
+FAIL_ONCE=0 # the watcher forked with its own copy of the counter
 sleep 0.7
 cp "$CA_B" "$live" # rotation: first install attempt fails, retry succeeds
 sleep 1.2
@@ -156,4 +170,34 @@ grep -q 'retrying on the next poll' "$TESTDIR/watch-d.log" || fail "case D: retr
 grep -q 'mitm CA changed' "$TESTDIR/watch-d.log" || fail "case D: rotation not logged"
 echo "PASS: case D failed install is retried on the next poll"
 
-echo "PASS: watcher behaves correctly in all 4 scenarios"
+# --- Case E: MITM_CA_WATCH_INTERVAL=0 disables the watcher cleanly (no spin).
+reset_log
+live="$TESTDIR/live-e.pem"
+cp "$CA_A" "$live"
+MITM_CA_WATCH_INTERVAL=0 watch_mitm_ca "$live" "" > "$TESTDIR/watch-e.log" 2>&1
+[ "$(count_calls system)" -eq 0 ] || fail "case E: disabled watcher must not install"
+grep -q 'watcher disabled' "$TESTDIR/watch-e.log" || fail "case E: disable message not logged"
+echo "PASS: case E MITM_CA_WATCH_INTERVAL=0 exits immediately without installing"
+
+# --- Case F: a failed NSS or JDK import is retried like a failed system
+# install. Both helpers delete the old CA before importing the new one, so a
+# dropped retry leaves that store trusting neither generation.
+for store in nss jdk; do
+  reset_log
+  live="$TESTDIR/live-f-$store.pem"
+  cp "$CA_A" "$live"
+  if [ "$store" = nss ]; then NSS_FAIL_ONCE=1; else JDK_FAIL_ONCE=1; fi
+  watch_mitm_ca "$live" "$(fp "$live")" > "$TESTDIR/watch-f-$store.log" 2>&1 &
+  watcher=$!
+  NSS_FAIL_ONCE=0
+  JDK_FAIL_ONCE=0
+  sleep 0.7
+  cp "$CA_B" "$live" # rotation: the $store import fails once, the retry succeeds
+  sleep 1.2
+  stop_watcher "$watcher"
+  [ "$(count_calls "$store")" -eq 2 ] || fail "case F: expected a failed $store import plus a retry, got $(count_calls "$store") $store calls"
+  grep -q 'retrying on the next poll' "$TESTDIR/watch-f-$store.log" || fail "case F: $store retry not logged"
+done
+echo "PASS: case F failed NSS and JDK imports are retried on the next poll"
+
+echo "PASS: watcher behaves correctly in all 6 scenarios"

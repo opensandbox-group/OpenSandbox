@@ -16,9 +16,7 @@ package opensandbox
 
 import "testing"
 
-// TestVersion_MatchesReleasedTag is a regression guard: the Version constant is
-// reported in the User-Agent header and must be bumped together with the
-// released module tag. Update this expectation when releasing.
+// Keep the User-Agent version aligned with the released module tag.
 func TestVersion_MatchesReleasedTag(t *testing.T) {
 	const want = "1.2.1"
 	if Version != want {

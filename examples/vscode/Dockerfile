@@ -14,8 +14,6 @@
 
 FROM debian:12-slim
 
-#----------------------
-# Install all prerequisite packages in one layer
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
@@ -24,21 +22,13 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-#----------------------
-# Install code-server
 RUN curl -fsSL https://code-server.dev/install.sh | sh
 
-#----------------------
-# Create a non-root user
 RUN groupadd -r vscode && useradd -r -g vscode vscode \
     && mkdir -p /home/vscode /workspace && chown -R vscode:vscode /home/vscode /workspace
-
-#----------------------
-# Configure user, etc
 
 WORKDIR /workspace
 
 USER vscode
 
-# Default to bash
 CMD ["bash"]

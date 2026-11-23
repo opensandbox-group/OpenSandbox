@@ -300,6 +300,8 @@ func preserveTelemetryGlobals(t *testing.T) {
 
 func newTestCollector(t *testing.T) (string, <-chan *collector.ExportMetricsServiceRequest) {
 	t.Helper()
+	t.Setenv(envOTLPMetricsProtocol, "")
+	t.Setenv(envOTLPProtocol, "")
 	exported := make(chan *collector.ExportMetricsServiceRequest, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, err := io.ReadAll(r.Body)

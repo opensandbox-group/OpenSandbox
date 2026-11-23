@@ -729,10 +729,10 @@ func (m *MergedView) Search(root, pattern string) ([]string, error) { //nolint:g
 	}
 
 	var results []string
-	// Lower entries that upper hides.
 	hidden := make(map[string]bool)
+	sameRWRoot := m.Mode == WorkspaceRW && m.UpperDir != "" && m.UpperDir == m.LowerDir
+	hasWhiteoutMarkers := false
 
-	// Collect them from upper first.
 	if m.UpperDir != "" {
 		upperRoot := m.resolveUpper(rootRel)
 		_ = filepath.WalkDir(upperRoot, func(p string, d fs.DirEntry, err error) error {
@@ -741,16 +741,25 @@ func (m *MergedView) Search(root, pattern string) ([]string, error) { //nolint:g
 			}
 			rel, _ := filepath.Rel(m.UpperDir, p)
 			if origName, ok := strings.CutPrefix(d.Name(), ".wh."); ok {
+				hasWhiteoutMarkers = true
 				hidden[filepath.Join(filepath.Dir(rel), origName)] = true
 			} else if upperEntryHidesLower(p, d.IsDir()) {
 				hidden[rel] = true
+			}
+			// Entries excluded from results can still hide lower entries.
+			if d.IsDir() || strings.HasPrefix(d.Name(), ".wh.") || isWhiteoutEntry(d) || isStagingName(d.Name()) {
+				return nil
+			}
+			if matched, _ := filepath.Match(pattern, filepath.Base(rel)); matched {
+				results = append(results, rel)
 			}
 			return nil
 		})
 	}
 
-	// Walk lower, unless upper hides root itself.
-	if m.LowerDir != "" && !m.lowerHidden(rootRel) {
+	// The lower scan can expose marker-shaped files in a shared RW root.
+	// Preserve that behavior when markers exist; otherwise upper already covers it.
+	if m.LowerDir != "" && (!sameRWRoot || hasWhiteoutMarkers) && !m.lowerHidden(rootRel) {
 		lowerRoot := m.resolveLower(rootRel)
 		_ = filepath.WalkDir(lowerRoot, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -769,30 +778,6 @@ func (m *MergedView) Search(root, pattern string) ([]string, error) { //nolint:g
 			if isStagingName(d.Name()) {
 				return nil
 			}
-			if matched, _ := filepath.Match(pattern, filepath.Base(rel)); matched {
-				results = append(results, rel)
-			}
-			return nil
-		})
-	}
-
-	// Walk upper.
-	if m.UpperDir != "" {
-		upperRoot := m.resolveUpper(rootRel)
-		_ = filepath.WalkDir(upperRoot, func(p string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil //nolint:nilerr // skip unreadable dirs
-			}
-			if d.IsDir() {
-				return nil
-			}
-			if strings.HasPrefix(d.Name(), ".wh.") || isWhiteoutEntry(d) {
-				return nil
-			}
-			if isStagingName(d.Name()) {
-				return nil
-			}
-			rel, _ := filepath.Rel(m.UpperDir, p)
 			if matched, _ := filepath.Match(pattern, filepath.Base(rel)); matched {
 				results = append(results, rel)
 			}

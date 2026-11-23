@@ -33,25 +33,10 @@ echo "  2. Edit code locally -> Container auto-recompiles (watch the logs)"
 echo "  3. Re-connect Debugger in GoLand"
 echo "---------------------------------------------------------"
 
-# Create docker volumes for cache if they don't exist
 docker volume create sandbox-k8s-gomod > /dev/null
 docker volume create sandbox-k8s-gocache > /dev/null
 
-# Run the container
-# --rm: remove container after exit
-# -v $(pwd):/workspace: Mount local code
-# -v ...: Mount caches for speed
-# reflex command:
-#   -r '\.go$': Watch all .go files recursively
-#   -s: Service mode (kill old process before starting new one)
-#   --: Delimiter
-#   dlv debug: Compile and run ./cmd/task
-#     --headless: No terminal UI
-#     --listen=:2345: Debugger port
-#     --api-version=2: API v2
-#     --accept-multiclient: Allow multiple connections
-#     --continue: Start running immediately (Optional, remove if you want to hit 'Resume' first)
-#     --output /tmp/debug_bin: Put binary in tmp to avoid clutter/loops
+# Keep the debugger binary outside the watched source tree to avoid rebuild loops.
 
 docker run --rm -it \
   --privileged \

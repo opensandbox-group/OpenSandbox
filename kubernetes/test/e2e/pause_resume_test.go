@@ -168,7 +168,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 		DescribeTable("should complete the full pause-resume flow via spec.pause trigger", func(waitForDeletion bool) {
 			const sandboxName = "test-pause-resume"
 
-			// --- Step 1: Create BatchSandbox ---
 			By("creating BatchSandbox with template")
 			bsYAML, err := renderTemplate("testdata/batchsandbox-non-pooled.yaml", map[string]interface{}{
 				"BatchSandboxName": sandboxName,
@@ -196,7 +195,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).To(Equal("Succeed"))
 			}, 2*time.Minute).Should(Succeed())
 
-			// --- Step 2: Write marker file for rootfs verification ---
 			By("getting pod name for marker file")
 			cmd = exec.Command("kubectl", "get", "pods", "-n", pauseResumeNamespace, "-o", "json")
 			podsJSON, err := utils.Run(cmd)
@@ -242,7 +240,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			// --- Step 3: Pause - patch spec.pause=true ---
 			By("triggering pause by patching spec.pause=true")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
 				"-n", pauseResumeNamespace, "--type=merge",
@@ -277,7 +274,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("Succeed"), "Internal pause snapshot should be ready after pause")
 
-			// --- Step 4: Resume - patch spec.pause=false ---
 			By("triggering resume by patching spec.pause=false")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
 				"-n", pauseResumeNamespace, "--type=merge",
@@ -311,7 +307,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			output, err = utils.Run(cmd)
 			Expect(err).To(HaveOccurred(), "Internal pause snapshot should be deleted after successful resume")
 
-			// --- Step 5: Verify rootfs data persistence ---
 			By("getting resumed pod name")
 			cmd = exec.Command("kubectl", "get", "pods", "-n", pauseResumeNamespace, "-o", "json")
 			resumedPodsJSON, err := utils.Run(cmd)
@@ -358,7 +353,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal(markerValue), "Rootfs data should persist across pause/resume")
 
-			// --- Cleanup ---
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "batchsandbox", sandboxName, "-n", pauseResumeNamespace, "--ignore-not-found=true")
 			utils.Run(cmd)
@@ -371,7 +365,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			const poolName = "test-pool-pause"
 			const sandboxName = "test-pool-pause-resume"
 
-			// --- Step 1: Create Pool CR ---
 			By("creating Pool CR")
 			poolYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
 				"PoolName":     poolName,
@@ -403,7 +396,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).NotTo(Equal("0"))
 			}, 2*time.Minute).Should(Succeed())
 
-			// --- Step 2: Create BatchSandbox with poolRef ---
 			By("creating BatchSandbox with poolRef")
 			bsYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
 				"BatchSandboxName": sandboxName,
@@ -431,7 +423,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).To(Equal("Succeed"))
 			}, 2*time.Minute).Should(Succeed())
 
-			// --- Step 3: Get pod name from alloc-status ---
 			By("getting pod name from alloc-status annotation")
 			var podName string
 			Eventually(func(g Gomega) {
@@ -452,7 +443,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			}).Should(Succeed())
 			Expect(podName).NotTo(BeEmpty(), "Should have allocated pod name")
 
-			// --- Step 4: Write marker file ---
 			firstMarkerValue := fmt.Sprintf("pool-pause-test-%d", time.Now().UnixNano())
 			By("writing marker file into container for rootfs verification")
 			cmd = exec.Command("kubectl", "exec", podName, "-n", pauseResumeNamespace,
@@ -460,7 +450,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred())
 
-			// --- Step 5: Pause - patch spec.pause=true ---
 			By("triggering pause by patching spec.pause=true")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
 				"-n", pauseResumeNamespace, "--type=merge",
@@ -477,7 +466,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).To(Equal("Paused"))
 			}, 3*time.Minute).Should(Succeed())
 
-			// Verify template was solidified (no longer nil)
 			By("verifying template was solidified from Pool CR")
 			cmd = exec.Command("kubectl", "get", "batchsandbox", sandboxName,
 				"-n", pauseResumeNamespace, "-o", "jsonpath={.spec.template.spec.containers[0].name}")
@@ -485,7 +473,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal("sandbox-container"), "Template should be solidified from Pool CR")
 
-			// --- Step 6: Resume - patch spec.pause=false ---
 			By("triggering resume by patching spec.pause=false")
 			cmd = exec.Command("kubectl", "patch", "batchsandbox", sandboxName,
 				"-n", pauseResumeNamespace, "--type=merge",
@@ -502,7 +489,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				g.Expect(output).To(Equal("Succeed"))
 			}, 2*time.Minute).Should(Succeed())
 
-			// Verify poolRef was cleared after resume
 			By("verifying poolRef was cleared after resume")
 			cmd = exec.Command("kubectl", "get", "batchsandbox", sandboxName,
 				"-n", pauseResumeNamespace, "-o", "jsonpath={.spec.poolRef}")
@@ -510,7 +496,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(BeEmpty(), "poolRef should be cleared after resume")
 
-			// --- Step 7: Verify rootfs data persistence ---
 			By("getting resumed pod name")
 			cmd = exec.Command("kubectl", "get", "pods", "-n", pauseResumeNamespace, "-o", "json")
 			resumedPodsJSON, err := utils.Run(cmd)
@@ -560,7 +545,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(output).To(Equal(firstMarkerValue), "Rootfs data should persist across pool-based pause/resume")
 
-			// --- Cleanup ---
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "batchsandbox", sandboxName, "-n", pauseResumeNamespace, "--ignore-not-found=true")
 			utils.Run(cmd)
@@ -1001,7 +985,6 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				// Parse phase from JSON
 				var bs struct {
 					Status struct {
 						Phase string `json:"phase"`

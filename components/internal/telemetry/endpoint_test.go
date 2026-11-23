@@ -104,6 +104,8 @@ func TestOTLPEndpointEnvSet(t *testing.T) {
 }
 
 func TestOTLPEndpointFallbackHostPort(t *testing.T) {
+	t.Setenv(envOTLPMetricsProtocol, "")
+	t.Setenv(envOTLPProtocol, "")
 	t.Setenv(envHostIP, "10.0.0.9")
 	host, port, ok := OTLPEndpointFallbackHostPort()
 	if !ok || host != "10.0.0.9" || port != otlpHTTPPort {
@@ -114,5 +116,50 @@ func TestOTLPEndpointFallbackHostPort(t *testing.T) {
 	host, _, ok = OTLPEndpointFallbackHostPort()
 	if ok {
 		t.Fatalf("expected no fallback without a resolvable node IP, got %q", host)
+	}
+}
+
+func TestOTLPProtocolFallbackPort(t *testing.T) {
+	for _, tc := range []struct {
+		name, general, metrics, port string
+	}{
+		{"default HTTP", "", "", "4318"},
+		{"general gRPC", "grpc", "", "4317"},
+		{"metrics gRPC", "http/protobuf", "grpc", "4317"},
+		{"metrics HTTP", "grpc", "http/protobuf", "4318"},
+		{"blank metrics", "grpc", " \t", "4317"},
+		{"case insensitive", "", "GRPC", "4317"},
+		{"unknown protocol", "", "unknown", "4318"},
+		{"unsupported metrics overrides general", "grpc", "http/json", "4318"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envOTLPProtocol, tc.general)
+			t.Setenv(envOTLPMetricsProtocol, tc.metrics)
+			t.Setenv(envHostIP, "2001:db8::1")
+			host, port, ok := OTLPEndpointFallbackHostPort()
+			if !ok || host != "2001:db8::1" || port != tc.port {
+				t.Fatalf("fallback = (%q, %q, %v), want node IP port %s", host, port, ok, tc.port)
+			}
+		})
+	}
+}
+
+func TestOTLPGRPCEndpointPort(t *testing.T) {
+	t.Setenv(envOTLPProtocol, "grpc")
+	t.Setenv(envOTLPMetricsProtocol, "")
+	t.Setenv(envOTLPMetricsEndpoint, "")
+	for _, tc := range []struct{ endpoint, port string }{
+		{"http://collector.example:4318", "4318"},
+		{"https://collector.example:4317", "4317"},
+		{"http://collector.example", "443"},
+		{"https://collector.example", "443"},
+	} {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			t.Setenv(envOTLPEndpoint, tc.endpoint)
+			host, port, ok := OTLPEndpointHostPort()
+			if !ok || host != "collector.example" || port != tc.port {
+				t.Fatalf("gRPC endpoint = (%q, %q, %v), want port %s", host, port, ok, tc.port)
+			}
+		})
 	}
 }

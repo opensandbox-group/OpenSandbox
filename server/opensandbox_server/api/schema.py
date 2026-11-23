@@ -58,9 +58,6 @@ def _is_ip_or_cidr(value: str) -> bool:
     except ValueError:
         return False
 
-# ============================================================================
-# Image Specification
-# ============================================================================
 
 class ImageAuth(BaseModel):
     """
@@ -113,9 +110,6 @@ class PlatformSpec(BaseModel):
     )
 
 
-# ============================================================================
-# Resource Limits
-# ============================================================================
 
 class ResourceLimits(RootModel[Dict[str, str]]):
     """
@@ -285,9 +279,7 @@ class CredentialProxyConfig(BaseModel):
     )
 
 
-# ============================================================================
-# Credential Vault (server-routed; mirrors specs/egress-api.yaml sidecar shapes)
-# ============================================================================
+# Server-routed Credential Vault shapes mirror specs/egress-api.yaml.
 
 
 class InlineCredentialSource(BaseModel):
@@ -844,9 +836,6 @@ class SandboxLifecycle(BaseModel):
     )
 
 
-# ============================================================================
-# Volume Definitions
-# ============================================================================
 
 
 class Host(BaseModel):
@@ -1063,9 +1052,6 @@ class Volume(BaseModel):
         return self
 
 
-# ============================================================================
-# Sandbox Status
-# ============================================================================
 
 class SandboxStatus(BaseModel):
     """
@@ -1094,9 +1080,6 @@ class SandboxStatus(BaseModel):
     )
 
 
-# ============================================================================
-# Sandbox Models
-# ============================================================================
 
 class CreateSandboxRequest(BaseModel):
     """
@@ -1412,9 +1395,6 @@ PatchSandboxMetadataRequest = Dict[str, Optional[str]]
 """Metadata merge-patch body: non-null values add/replace, null values delete, absent keys unchanged."""
 
 
-# ============================================================================
-# Snapshot Models
-# ============================================================================
 
 class SnapshotStatus(BaseModel):
     """
@@ -1556,9 +1536,6 @@ class ListSnapshotsResponse(BaseModel):
     pagination: "PaginationInfo" = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# List Sandboxes
-# ============================================================================
 
 class SandboxFilter(BaseModel):
     """
@@ -1628,9 +1605,6 @@ class ListSandboxesResponse(BaseModel):
     pagination: PaginationInfo = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# Renew Expiration
-# ============================================================================
 
 class RenewSandboxExpirationRequest(BaseModel):
     """
@@ -1667,9 +1641,6 @@ class RenewSandboxExpirationResponse(BaseModel):
     )
 
 
-# ============================================================================
-# Endpoint
-# ============================================================================
 
 class Endpoint(BaseModel):
     """
@@ -1689,9 +1660,6 @@ class Endpoint(BaseModel):
     )
 
 
-# ============================================================================
-# Error Response
-# ============================================================================
 
 class ErrorResponse(BaseModel):
     """
@@ -1709,9 +1677,6 @@ class ErrorResponse(BaseModel):
     )
 
 
-# ============================================================================
-# Pool Models
-# ============================================================================
 
 class PoolCapacitySpec(BaseModel):
     """
@@ -1818,9 +1783,8 @@ class PoolStatus(BaseModel):
     total: int = Field(
         ...,
         description=(
-            "Number of nodes the pool accounts for: non-terminated pods plus "
-            "terminal pods still allocated to a sandbox. Terminal idle pods are "
-            "excluded."
+            "Number of non-terminal, non-terminating pods plus outstanding "
+            "allocations for terminal, terminating, or deleted pods."
         ),
     )
     allocated: int = Field(..., description="Number of nodes currently allocated to sandboxes.")
@@ -1859,9 +1823,6 @@ class ListPoolsResponse(BaseModel):
     items: List[PoolResponse] = Field(..., description="List of pools.")
 
 
-# ============================================================================
-# Fsb Templates
-# ============================================================================
 
 class FsbTemplateReadiness(BaseModel):
     """
@@ -2024,9 +1985,6 @@ class ListFsbTemplatesResponse(BaseModel):
     pagination: PaginationInfo = Field(..., description="Pagination metadata")
 
 
-# ============================================================================
-# Metrics
-# ============================================================================
 
 class MetricsEvent(BaseModel):
     """

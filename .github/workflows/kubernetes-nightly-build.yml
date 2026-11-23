@@ -392,6 +392,10 @@ jobs:
       # lane (fast-sandbox-test.yml) switched to the ResourceAware profile
       # (OSEP-0026); keep this nightly on the legacy pool shape.
       POOL_MODE: "legacy"
+      # Overseas KVM runner (Alibaba Cloud Singapore): proxy.golang.org is
+      # directly reachable and serves dead vanity domains (nhooyr.io/websocket)
+      # from cache while keeping full sumdb verification.
+      FSB_GOPROXY: https://proxy.golang.org,direct
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)

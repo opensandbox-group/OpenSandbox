@@ -45,8 +45,6 @@ func (m *mockLockStore) RenewPrimaryLock(ctx context.Context, poolName string, o
 	return m.InMemoryPoolStateStore.RenewPrimaryLock(ctx, poolName, ownerID, ttl)
 }
 
-// --- Test helpers ---
-
 var testLogger PoolLogger = noopPoolLogger{}
 
 func defaultTestPoolConfig(store PoolStateStore) *PoolConfig {
@@ -197,24 +195,18 @@ func TestReconciler_ExponentialBackoff(t *testing.T) {
 		assert.Fail(t, "expected shouldBackoff() to be true")
 	}
 
-	// Verify backoff formula: first backoff attempt => 30s * 2^0 = 30s
 	state2 := newReconcileState(1)
 	state2.recordFailure(errors.New("single-fail"))
 	state2.mu.Lock()
 	backoffDuration := state2.backoffUntil.Sub(time.Now())
 	state2.mu.Unlock()
-	// Should be approximately 30s (within some tolerance for test execution)
 	if backoffDuration < 29*time.Second || backoffDuration > 31*time.Second {
 		assert.Fail(t, fmt.Sprintf("expected ~30s backoff, got %v", backoffDuration))
 	}
 
-	// Escalation via recordFailures with batch count:
-	// threshold=1, recordFailures(1) => backoffAttempts=1 (30s)
-	// Then recordFailures(1) again => backoffAttempts=2 (60s)
-	// This simulates two consecutive failing ticks (each calling recordFailures once).
 	state3 := newReconcileState(1)
-	state3.recordFailures(1, errors.New("tick-1-fail")) // backoffAttempts=1, backoff=30s
-	state3.recordFailures(1, errors.New("tick-2-fail")) // backoffAttempts=2, backoff=60s
+	state3.recordFailures(1, errors.New("tick-1-fail"))
+	state3.recordFailures(1, errors.New("tick-2-fail"))
 	state3.mu.Lock()
 	backoffDuration2 := state3.backoffUntil.Sub(time.Now())
 	state3.mu.Unlock()
@@ -235,7 +227,6 @@ func TestReconciler_RecoveryAfterSuccess(t *testing.T) {
 		assert.Fail(t, fmt.Sprintf("expected PoolDegraded before recovery, got %v", healthState))
 	}
 
-	// Record success: should recover
 	state.recordSuccess()
 
 	healthState, failureCount, backoffActive, lastError := state.snapshot()
@@ -305,17 +296,10 @@ func TestReconciler_ReapKillsDiscardedAlive(t *testing.T) {
 	cfg.AcquireMinRemainingTTL = 30 * time.Second
 	state := newReconcileState(cfg.DegradedThreshold)
 
-	// Directly manipulate idle entries to insert one below the min TTL threshold.
-	// Use PutIdle first to set up the pool, then override entries for test precision.
 	_ = store.PutIdle(context.Background(), "test-pool", "sbx-healthy")
 
-	// Insert a near-expiry entry by manipulating the internal state.
-	// The InMemoryPoolStateStore's PutIdle uses SetIdleEntryTTL which we set to 1 min.
-	// We need an entry with only 10s remaining which is below the 30s threshold.
-	// We'll use SetIdleEntryTTL to a very short duration for this insertion.
 	_ = store.SetIdleEntryTTL(context.Background(), "test-pool", 10*time.Second)
 	_ = store.PutIdle(context.Background(), "test-pool", "sbx-expiring-soon")
-	// Restore the TTL so future puts are normal.
 	_ = store.SetIdleEntryTTL(context.Background(), "test-pool", 1*time.Minute)
 
 	var deleted []string
@@ -374,12 +358,9 @@ func TestReconciler_ContextCancellation(t *testing.T) {
 	}
 	deleteFn := func(sandboxID string) {}
 
-	// Should not panic even with cancelled context
 	reconcileTick(ctx, cfg, store, state, testLogger, createFn, deleteFn)
 
-	// The tick should handle cancellation gracefully without panicking.
-	// Some sandboxes may or may not have been created depending on goroutine scheduling.
-	// The key assertion is that we reach here without panicking.
+	// Creation count depends on goroutine scheduling after cancellation.
 	healthState, _, _, _ := state.snapshot()
 	if healthState != PoolHealthy && healthState != PoolDegraded {
 		assert.Fail(t, fmt.Sprintf("unexpected health state: %v", healthState))

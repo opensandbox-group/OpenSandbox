@@ -156,12 +156,11 @@ jobs:
       # This runner is OVERSEAS (Alibaba Cloud Singapore, hostname *sg52):
       # github.com and proxy.golang.org are directly reachable, while the
       # China mirrors (goproxy.cn, mirrors.aliyun.com) are cross-border and
-      # the VPC mirror edge serves stale bytes. The one thing that must NOT
-      # stay is the script's GOPROXY=direct default: direct mode resolves
-      # every module's vanity domain, and fast-sandbox's tree includes
-      # nhooyr.io/websocket — a dead domain (runner-verified: "lookup
-      # nhooyr.io: no such host"). proxy.golang.org serves it from cache and
-      # keeps full sumdb verification working.
+      # the VPC mirror edge serves stale bytes. Keep the canonical Go module
+      # proxy pinned (matches integration-env.sh's default): pure
+      # GOPROXY=direct fails on dead vanity domains in fast-sandbox's tree
+      # (nhooyr.io/websocket: "lookup nhooyr.io: no such host"), whereas
+      # proxy.golang.org serves it from cache with full sumdb verification.
       FSB_GOPROXY: https://proxy.golang.org,direct
     steps:
       # actions/checkout always executes as the runner user; the script

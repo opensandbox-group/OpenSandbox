@@ -156,6 +156,80 @@ func (r *recordingTaskScheduler) AddTasks(_ []*taskexecutor.Task) error {
 
 // ---------- dispatchPauseResume 5-case tests ----------
 
+func TestApplyPodLabelOverridesForRecreatedDedicatedPod(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-bs", Annotations: map[string]string{
+			annoPodLabelOverrides: `{"example.com/phase":"run","network.example.com/old":null}`,
+		},
+	}}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+		"example.com/phase": "setup", "network.example.com/old": "yes", "unrelated": "keep",
+	}}}
+	require.NoError(t, applyPodLabelOverrides(bs, pod))
+	assert.Equal(t, "run", pod.Labels["example.com/phase"])
+	assert.NotContains(t, pod.Labels, "network.example.com/old")
+	assert.Equal(t, "keep", pod.Labels["unrelated"])
+
+	bs.Annotations[annoPodLabelOverrides] = `{broken`
+	require.ErrorContains(t, applyPodLabelOverrides(bs, pod), "invalid Pod label overrides")
+}
+
+func TestScaleBatchSandboxRestoresMetadataLabelOverrides(t *testing.T) {
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "label-recreation", Namespace: "default", UID: "label-recreation-uid",
+			Annotations: map[string]string{
+				annoPodLabelOverrides: `{"example.com/phase":"run","network.example.com/old":null}`,
+			},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Replicas: ptr.To(int32(1)),
+			Template: &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					"example.com/phase": "setup", "network.example.com/old": "yes", "unrelated": "keep",
+				}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img"}}},
+			},
+		},
+	}
+	r := newTestReconciler(bs)
+	require.NoError(t, r.scaleBatchSandbox(context.Background(), bs, bs.Spec.Template, nil))
+	pod := &corev1.Pod{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{
+		Namespace: "default", Name: "label-recreation-0",
+	}, pod))
+	assert.Equal(t, "run", pod.Labels["example.com/phase"])
+	assert.NotContains(t, pod.Labels, "network.example.com/old")
+	assert.Equal(t, "keep", pod.Labels["unrelated"])
+}
+
+func TestDispatchPauseResume_MetadataOnlyUpdateAfterFailedPause(t *testing.T) {
+	// The server stores runtime Pod-label overrides in metadata rather than
+	// spec.template, so the generation stays acknowledged after a failed
+	// pause. Reconciliation must not start another pause/snapshot.
+	bs := &sandboxv1alpha1.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-bs", Namespace: "default", Generation: 9,
+			Annotations: map[string]string{annoPodLabelOverrides: `{"example.com/phase":"run"}`},
+		},
+		Spec: sandboxv1alpha1.BatchSandboxSpec{
+			Pause: ptr.To(true), Replicas: ptr.To(int32(1)),
+		},
+		Status: sandboxv1alpha1.BatchSandboxStatus{
+			Phase:                   sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			PauseObservedGeneration: 9,
+			Conditions: []sandboxv1alpha1.BatchSandboxCondition{{
+				Type:   sandboxv1alpha1.BatchSandboxConditionPauseFailed,
+				Status: sandboxv1alpha1.ConditionTrue,
+			}},
+		},
+	}
+	r := newTestReconciler(bs)
+	_, handled, err := r.dispatchPauseResume(context.Background(), bs)
+	require.NoError(t, err)
+	assert.False(t, handled)
+}
+
 func TestDispatchPauseResume_Case1_PauseTrue(t *testing.T) {
 	// gen > pauseObservedGen, pause=true → handlePause dispatched
 	bs := &sandboxv1alpha1.BatchSandbox{
@@ -183,7 +257,6 @@ func TestDispatchPauseResume_Case1_PauseTrue(t *testing.T) {
 	assert.True(t, handled, "should be handled by handlePause")
 	assert.True(t, result.RequeueAfter > 0, "handlePause should requeue")
 
-	// Verify ACK: phase should be Pausing
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePausing, updated.Status.Phase)
@@ -269,7 +342,6 @@ func TestDispatchPauseResume_Case2_PauseFalse(t *testing.T) {
 	assert.True(t, handled, "should be handled by handleResume")
 	assert.True(t, result.RequeueAfter > 0, "handleResume should requeue")
 
-	// Verify ACK: phase=Resuming
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseResuming, updated.Status.Phase)
@@ -302,7 +374,6 @@ func TestDispatchPauseResume_Case3_PauseNil_ACKOnly(t *testing.T) {
 	assert.False(t, handled, "ACK only should not block normal flow")
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify ACK is NOT written to server by dispatch (deferred to persistRuntimeView).
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, int64(1), updated.Status.PauseObservedGeneration, "server should not be updated by dispatch; ACK is deferred")
@@ -404,17 +475,14 @@ func TestHandlePause_NormalFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify ACK: phase=Pausing, pauseObservedGeneration=2
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePausing, updated.Status.Phase)
 	assert.Equal(t, int64(2), updated.Status.PauseObservedGeneration)
 
-	// Verify SandboxSnapshot was created under the reserved internal name
 	snap := &sandboxv1alpha1.SandboxSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-pause"}, snap))
 	assert.Equal(t, "test-bs", snap.Spec.SandboxName)
-	// Verify OwnerRef
 	assert.Equal(t, "test-bs", snap.OwnerReferences[0].Name)
 }
 
@@ -633,13 +701,11 @@ func TestHandlePause_PoolMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify template was solidified from Pool
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Nil(t, updated.Spec.Template)
 	assert.Equal(t, "test-pool", updated.Spec.PoolRef)
 
-	// Verify SandboxSnapshot was created under the reserved internal name
 	snap := &sandboxv1alpha1.SandboxSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-pause"}, snap))
 	assert.Equal(t, "test-bs", snap.Spec.SandboxName)
@@ -740,7 +806,6 @@ func TestHandlePause_FailedRetry(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify old snapshot was deleted
 	snap := &sandboxv1alpha1.SandboxSnapshot{}
 	err = r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs-pause"}, snap)
 	assert.True(t, err == nil || len(snap.UID) == 0 || snap.DeletionTimestamp != nil,
@@ -828,7 +893,6 @@ func TestHandleResume_NormalFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0, "should requeue after ACK")
 
-	// Verify ACK: phase=Resuming
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseResuming, updated.Status.Phase)
@@ -879,16 +943,12 @@ func TestContinueResume_NormalFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify images replaced
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, "registry/test-bs-main@sha256:"+strings.Repeat("a", 64), updated.Spec.Template.Spec.Containers[0].Image)
-	// Verify replicas are preserved.
 	assert.Equal(t, int32(1), *updated.Spec.Replicas)
-	// Verify controller does not clear spec.pause
 	require.NotNil(t, updated.Spec.Pause)
 	assert.False(t, *updated.Spec.Pause)
-	// Verify imagePullSecrets added
 	found := false
 	for _, s := range updated.Spec.Template.Spec.ImagePullSecrets {
 		if s.Name == "my-pull-secret" {
@@ -970,7 +1030,6 @@ func TestHandleResume_PoolMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify ACK: phase=Resuming
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseResuming, updated.Status.Phase)
@@ -1020,7 +1079,6 @@ func TestContinueResume_PoolMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify poolRef cleared
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, "", updated.Spec.PoolRef)
@@ -1133,7 +1191,6 @@ func TestContinueResume_SnapshotNotFound(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify rollback keeps spec.pause and records retryable failure
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, updated.Status.Phase)
@@ -1233,14 +1290,12 @@ func TestContinueResume_SnapshotNotReady(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify Phase=Paused with ResumeFailed condition (retryable)
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, updated.Status.Phase)
 	require.NotNil(t, updated.Spec.Pause)
 	assert.False(t, *updated.Spec.Pause)
 
-	// Verify ResumeFailed condition is set
 	foundCondition := false
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == sandboxv1alpha1.BatchSandboxConditionResumeFailed {
@@ -1678,7 +1733,6 @@ func TestPersistRuntimeView_PreservesPauseFailedConditionFromLatestStatus(t *tes
 	_, errs := r.persistRuntimeView(context.Background(), freshBS, view)
 	require.Empty(t, errs)
 
-	// Verify PauseFailed is preserved after reconcile with fresh cache.
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 
@@ -1898,7 +1952,7 @@ func TestBuildRuntimeView_AggregatesPodFailuresInSteadyState(t *testing.T) {
 	require.NotNil(t, podFailed)
 	assert.Equal(t, sandboxv1alpha1.ConditionTrue, podFailed.Status)
 	assert.Equal(t, "ErrImagePull", podFailed.Reason)
-	assert.Equal(t, "3/4 observed pods failed; primary reason=ErrImagePull; sample pod=err-image-0", podFailed.Message)
+	assert.Equal(t, "3/4 observed pods failed; primary reason=ErrImagePull; sample pod=err-image-0; sample detail=Pod err-image-0: ErrImagePull - image not found", podFailed.Message)
 }
 
 func TestBuildRuntimeView_MarksTerminalInitContainerFailure(t *testing.T) {
@@ -1993,7 +2047,7 @@ func TestBuildRuntimeView_MarksTerminatedMainContainerFailureWhilePodRunning(t *
 		assert.Equal(t, "ContainerFailed", condition.Reason)
 		assert.Equal(
 			t,
-			"1/1 observed pods failed; primary reason=ContainerFailed; sample pod=sbx-0",
+			"1/1 observed pods failed; primary reason=ContainerFailed; sample pod=sbx-0; sample detail=Pod sbx-0 container sandbox exited with code 1 (Error): main process crashed",
 			condition.Message,
 		)
 		return
@@ -2698,9 +2752,9 @@ func TestBuildRuntimeView_AggregatesResumeFailures(t *testing.T) {
 	require.NotNil(t, podFailed)
 	assert.Equal(t, sandboxv1alpha1.ConditionTrue, resumeFailed.Status)
 	assert.Equal(t, "ImagePullBackOff", resumeFailed.Reason)
-	assert.Equal(t, "2/3 observed pods failed during resume; primary reason=ImagePullBackOff; sample pod=imgpull-0", resumeFailed.Message)
+	assert.Equal(t, "2/3 observed pods failed during resume; primary reason=ImagePullBackOff; sample pod=imgpull-0; sample detail=Pod imgpull-0: ImagePullBackOff - pull back off", resumeFailed.Message)
 	assert.Equal(t, "ImagePullBackOff", podFailed.Reason)
-	assert.Equal(t, "2/3 observed pods failed; primary reason=ImagePullBackOff; sample pod=imgpull-0", podFailed.Message)
+	assert.Equal(t, "2/3 observed pods failed; primary reason=ImagePullBackOff; sample pod=imgpull-0; sample detail=Pod imgpull-0: ImagePullBackOff - pull back off", podFailed.Message)
 }
 
 func TestBuildRuntimeView_MarksResumeFailedWhenStaleCacheMissesResumingPhase(t *testing.T) {
@@ -3307,7 +3361,6 @@ func TestSyncPauseOrClear_SnapshotReady(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.RequeueAfter > 0)
 
-	// Verify completePause was called
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	assert.Equal(t, sandboxv1alpha1.BatchSandboxPhasePaused, updated.Status.Phase)
@@ -3355,14 +3408,12 @@ func TestSyncPauseOrClear_SnapshotFailed(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// Verify retryable PauseFailed handling. In this fake-client setup no source Pod exists,
-	// so the controller escalates the phase to Failed instead of returning to Succeed.
+	// The absent source Pod makes this fixture escalate to Failed rather than Succeed.
 	updated := &sandboxv1alpha1.BatchSandbox{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-bs"}, updated))
 	require.NotNil(t, updated.Spec.Pause)
 	assert.True(t, *updated.Spec.Pause)
 
-	// Verify PauseFailed condition is set
 	foundCondition := false
 	for _, cond := range updated.Status.Conditions {
 		if cond.Type == sandboxv1alpha1.BatchSandboxConditionPauseFailed {
@@ -3584,3 +3635,86 @@ func TestInjectQEMURestorePreservesUserInitContainersAndIsIdempotent(t *testing.
 
 // Ensure ctrl.Result type is used
 var _ = ctrl.Result{}
+
+func TestBuildRuntimeView_ReportsOOMKilledMainContainer(t *testing.T) {
+	// A main container killed by the kernel OOM killer terminates with exit 137 and
+	// reason OOMKilled, and carries no termination message. The PodFailed condition
+	// must still name the exit code and reason, so clients can tell an OOM kill from
+	// a crash. Reproduced on a restartPolicy=Never sandbox pod (as the server creates
+	// them) in the three states the failure is observed in.
+	oomMainContainer := corev1.ContainerStatus{
+		Name:  "sandbox",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+	}
+	completedInit := corev1.ContainerStatus{
+		Name:  "execd-installer",
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+	}
+	tests := []struct {
+		name       string
+		priorPhase sandboxv1alpha1.BatchSandboxPhase
+		podPhase   corev1.PodPhase
+		statuses   []corev1.ContainerStatus
+	}{
+		{
+			name:       "sandbox that was running, pod Failed",
+			priorPhase: sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			podPhase:   corev1.PodFailed,
+			statuses:   []corev1.ContainerStatus{oomMainContainer},
+		},
+		{
+			name:       "sandbox that was running, pod kept Running by a live sidecar",
+			priorPhase: sandboxv1alpha1.BatchSandboxPhaseSucceed,
+			podPhase:   corev1.PodRunning,
+			statuses: []corev1.ContainerStatus{
+				oomMainContainer,
+				{Name: "egress", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+		},
+		{
+			name:       "sandbox still Pending when the container is killed",
+			priorPhase: sandboxv1alpha1.BatchSandboxPhasePending,
+			podPhase:   corev1.PodFailed,
+			statuses:   []corev1.ContainerStatus{oomMainContainer},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bs := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-bs", Namespace: "default"},
+				Status:     sandboxv1alpha1.BatchSandboxStatus{Phase: tt.priorPhase},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "oom-0", Namespace: "default"},
+				Spec: corev1.PodSpec{
+					RestartPolicy: corev1.RestartPolicyNever,
+					Containers:    []corev1.Container{{Name: "sandbox"}, {Name: "egress"}},
+				},
+				Status: corev1.PodStatus{
+					Phase:                 tt.podPhase,
+					InitContainerStatuses: []corev1.ContainerStatus{completedInit},
+					ContainerStatuses:     tt.statuses,
+				},
+			}
+
+			view := buildRuntimeView(bs, []*corev1.Pod{pod})
+
+			assert.Equal(t, sandboxv1alpha1.BatchSandboxPhaseFailed, view.status.Phase)
+			for _, condition := range view.status.Conditions {
+				if condition.Type != sandboxv1alpha1.BatchSandboxConditionPodFailed {
+					continue
+				}
+				assert.Equal(t, sandboxv1alpha1.ConditionTrue, condition.Status)
+				assert.Equal(t, "ContainerFailed", condition.Reason)
+				assert.Equal(
+					t,
+					"1/1 observed pods failed; primary reason=ContainerFailed; sample pod=oom-0; "+
+						"sample detail=Pod oom-0 container sandbox exited with code 137 (OOMKilled)",
+					condition.Message,
+				)
+				return
+			}
+			t.Fatal("expected PodFailed condition")
+		})
+	}
+}

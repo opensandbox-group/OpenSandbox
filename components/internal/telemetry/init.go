@@ -18,13 +18,16 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -38,12 +41,7 @@ import (
 // when metrics are enabled; nil otherwise.
 var meterProvider atomic.Pointer[sdkmetric.MeterProvider]
 
-// ForceFlush exports whatever the reader is holding, right now.
-//
-// Metrics leave through a PeriodicReader, so a measurement recorded shortly before the
-// process exits is normally lost: the deferred shutdown from Init never runs on a path that
-// calls os.Exit. Any code that records a metric and then terminates the process must flush
-// first. No-op when metrics are disabled.
+// Flush before os.Exit, which skips deferred shutdown; disabled metrics make this a no-op.
 func ForceFlush(ctx context.Context) error {
 	mp := meterProvider.Load()
 	if mp == nil {
@@ -66,15 +64,20 @@ type Config struct {
 const (
 	envOTLPMetricsEndpoint = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"
 	envOTLPEndpoint        = "OTEL_EXPORTER_OTLP_ENDPOINT"
+	envOTLPMetricsProtocol = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
+	envOTLPProtocol        = "OTEL_EXPORTER_OTLP_PROTOCOL"
 	envHostIP              = "HOST_IP"
 	envSDKDisabled         = "OTEL_SDK_DISABLED"
 	envMetricsExporter     = "OTEL_METRICS_EXPORTER"
 	envTemporality         = "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE"
 	otlpHTTPPort           = "4318"
+	otlpGRPCPort           = "4317"
+	otlpHTTPProtocol       = "http/protobuf"
+	otlpGRPCProtocol       = "grpc"
 	hostInfoPath           = "/etc/hostinfo"
 )
 
-// Init sets a noop TracerProvider, optionally MeterProvider with OTLP HTTP exporter.
+// Init sets a noop TracerProvider, optionally MeterProvider with an OTLP exporter.
 // Shutdown must be called on exit.
 func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error, err error) {
 	if strings.TrimSpace(cfg.ServiceName) == "" {
@@ -94,13 +97,7 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	)
 
 	if metricsEnabled(cfg.DisableEndpointFallback) {
-		opts := metricsClientOptions(cfg.DisableEndpointFallback)
-		// Preserve historical aggregation only when no preference is supplied.
-		// Otherwise let the exporter parse the standard environment variable.
-		if strings.TrimSpace(os.Getenv(envTemporality)) == "" {
-			opts = append(opts, otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector))
-		}
-		mexp, err := otlpmetrichttp.New(ctx, opts...)
+		mexp, err := newMetricsExporter(ctx, cfg.DisableEndpointFallback)
 		if err != nil {
 			return nil, err
 		}
@@ -170,6 +167,47 @@ func MetricsDisabled() bool {
 		strings.EqualFold(os.Getenv(envMetricsExporter), "none")
 }
 
+// newMetricsExporter keeps protocol selection separate from provider ownership.
+func newMetricsExporter(ctx context.Context, disableEndpointFallback bool) (sdkmetric.Exporter, error) {
+	protocol := otlpMetricsProtocol()
+	if protocol == otlpGRPCProtocol {
+		var opts []otlpmetricgrpc.Option
+		if endpoint := otlpEndpointFromEnv(); endpoint != "" {
+			// Let the URL scheme select TLS, then resolve its authority as a DNS target.
+			opts = append(opts, otlpmetricgrpc.WithEndpointURL(endpoint))
+			if parsed, err := url.Parse(endpoint); err == nil {
+				if parsed.Host != "" {
+					// A hostname such as dns:4317 can otherwise look like a resolver scheme.
+					target := url.URL{Scheme: "dns", Path: "/" + parsed.Host}
+					opts = append(opts, otlpmetricgrpc.WithEndpoint(target.String()))
+				}
+				if parsed.Scheme == "http" {
+					// Certificate env vars must not override an explicitly plaintext URL.
+					opts = append(opts, otlpmetricgrpc.WithTLSCredentials(nil))
+				}
+			}
+		} else if !disableEndpointFallback {
+			if host, port, ok := OTLPEndpointFallbackHostPort(); ok {
+				opts = append(opts, otlpmetricgrpc.WithEndpoint(net.JoinHostPort(host, port)), otlpmetricgrpc.WithInsecure(), otlpmetricgrpc.WithTLSCredentials(nil))
+			}
+		}
+		if strings.TrimSpace(os.Getenv(envTemporality)) == "" {
+			opts = append(opts, otlpmetricgrpc.WithTemporalitySelector(deltaTemporalitySelector))
+		}
+		return otlpmetricgrpc.New(ctx, opts...)
+	}
+	if protocol != otlpHTTPProtocol {
+		slog.Warn("telemetry: unsupported OTLP metrics protocol; using http/protobuf", "protocol", protocol)
+	}
+	opts := metricsClientOptions(disableEndpointFallback)
+	// Preserve historical aggregation only when no preference is supplied.
+	// Otherwise let the exporter parse the standard environment variable.
+	if strings.TrimSpace(os.Getenv(envTemporality)) == "" {
+		opts = append(opts, otlpmetrichttp.WithTemporalitySelector(deltaTemporalitySelector))
+	}
+	return otlpmetrichttp.New(ctx, opts...)
+}
+
 func metricsClientOptions(disableEndpointFallback bool) []otlpmetrichttp.Option {
 	if otlpEndpointFromEnv() != "" {
 		return nil
@@ -177,12 +215,12 @@ func metricsClientOptions(disableEndpointFallback bool) []otlpmetrichttp.Option 
 	if disableEndpointFallback {
 		return nil
 	}
-	ip, ok := resolveNodeIP()
+	host, port, ok := OTLPEndpointFallbackHostPort()
 	if !ok {
 		return nil
 	}
 	return []otlpmetrichttp.Option{
-		otlpmetrichttp.WithEndpoint(net.JoinHostPort(ip, otlpHTTPPort)),
+		otlpmetrichttp.WithEndpoint(net.JoinHostPort(host, port)),
 		otlpmetrichttp.WithInsecure(),
 	}
 }

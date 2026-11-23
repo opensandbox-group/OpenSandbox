@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Shared fixtures for Kubernetes runtime tests.
-"""
 from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock
 
@@ -28,7 +25,6 @@ from opensandbox_server.services.k8s.provider_factory import PROVIDER_TYPE_BATCH
 
 @pytest.fixture
 def mock_k8s_client():
-    """Provide mocked K8sClient"""
     client = MagicMock(spec=K8sClient)
     mock_custom_api = MagicMock()
     mock_core_api = MagicMock()
@@ -48,7 +44,6 @@ def mock_k8s_client():
 
 @pytest.fixture
 def k8s_runtime_config():
-    """Provide test Kubernetes configuration"""
     return KubernetesRuntimeConfig(
         kubeconfig_path="/tmp/test-kubeconfig",
         namespace="test-namespace",
@@ -58,7 +53,6 @@ def k8s_runtime_config():
 
 @pytest.fixture
 def agent_sandbox_runtime_config():
-    """Provide agent-sandbox runtime configuration"""
     return KubernetesRuntimeConfig(
         kubeconfig_path="/tmp/test-kubeconfig",
         namespace="test-namespace",
@@ -68,7 +62,6 @@ def agent_sandbox_runtime_config():
 
 @pytest.fixture
 def mock_batchsandbox_response():
-    """Provide mocked BatchSandbox response"""
     return {
         "apiVersion": "sandbox.opensandbox.io/v1alpha1",
         "kind": "BatchSandbox",
@@ -113,7 +106,6 @@ def mock_batchsandbox_response():
 
 @pytest.fixture
 def mock_batchsandbox_list_response(mock_batchsandbox_response):
-    """Provide mocked BatchSandbox list response"""
     return {
         "apiVersion": "sandbox.opensandbox.io/v1alpha1",
         "kind": "BatchSandboxList",
@@ -123,7 +115,6 @@ def mock_batchsandbox_list_response(mock_batchsandbox_response):
 
 @pytest.fixture
 def k8s_app_config(k8s_runtime_config):
-    """Provide complete app configuration (Kubernetes type)"""
     from opensandbox_server.config import AppConfig, RuntimeConfig, ServerConfig
     
     return AppConfig(
@@ -142,7 +133,6 @@ def k8s_app_config(k8s_runtime_config):
 
 @pytest.fixture
 def agent_sandbox_app_config(agent_sandbox_runtime_config):
-    """Provide complete app configuration (kubernetes + agent-sandbox provider)"""
     from opensandbox_server.config import AppConfig, RuntimeConfig, ServerConfig, AgentSandboxRuntimeConfig
 
     return AppConfig(
@@ -166,7 +156,6 @@ def agent_sandbox_app_config(agent_sandbox_runtime_config):
 
 @pytest.fixture
 def app_config_no_k8s():
-    """Provide app configuration without Kubernetes config"""
     from opensandbox_server.config import AppConfig, RuntimeConfig, ServerConfig
     
     return AppConfig(
@@ -185,7 +174,6 @@ def app_config_no_k8s():
 
 @pytest.fixture
 def app_config_docker():
-    """Provide Docker type app configuration"""
     from opensandbox_server.config import AppConfig, RuntimeConfig, ServerConfig
     
     return AppConfig(
@@ -204,7 +192,6 @@ def app_config_docker():
 
 @pytest.fixture
 def k8s_service(k8s_app_config):
-    """Provide mocked KubernetesSandboxService"""
     from unittest.mock import patch, MagicMock
     
     with patch('opensandbox_server.services.k8s.kubernetes_service.K8sClient') as mock_k8s_client_cls, \
@@ -227,7 +214,6 @@ def k8s_service(k8s_app_config):
 
 @pytest.fixture
 def create_sandbox_request():
-    """Provide standard sandbox creation request"""
     from opensandbox_server.api.schema import ResourceLimits
     
     return CreateSandboxRequest(
@@ -242,7 +228,6 @@ def create_sandbox_request():
 
 @pytest.fixture
 def mock_workload():
-    """Provide mocked workload object"""
     return {
         "metadata": {
             "name": "test-sandbox-123",
@@ -267,12 +252,6 @@ def mock_workload():
 
 @pytest.fixture
 def isolated_registry():
-    """
-    Fixture to isolate provider registry for each test.
-
-    Saves the original registry before test and restores it after,
-    preventing global state pollution.
-    """
     from opensandbox_server.services.k8s import provider_factory
 
     original_registry = provider_factory._PROVIDER_REGISTRY.copy()

@@ -65,7 +65,6 @@ func NewFamily(prefix string, directorySegments []string, base, dataExtension st
 	return Family{directory: path.Join(parts...), base: base, dataExtension: dataExtension}, nil
 }
 
-// Directory returns the family's relative directory path.
 func (f Family) Directory() string { return f.directory }
 
 // WithPrefix returns the same family below a Sink-owned relative prefix.
@@ -96,18 +95,14 @@ func (f Family) generationName(generation uint64) string {
 	return f.base + "." + strconv.FormatUint(generation, 10) + f.dataExtension
 }
 
-// DataKey returns the family-relative object key holding generation's data.
 func (f Family) DataKey(generation uint64) string {
 	return path.Join(f.directory, f.generationName(generation))
 }
 
-// MarkerName returns the family-relative marker file name for a revision.
 func (f Family) MarkerName(revision uint64) string {
 	return f.base + markerInfix + strconv.FormatUint(revision, 10) + ".json"
 }
 
-// MarkerKey returns the family-relative object key holding a revision's
-// finalization marker.
 func (f Family) MarkerKey(revision uint64) string {
 	return path.Join(f.directory, f.MarkerName(revision))
 }

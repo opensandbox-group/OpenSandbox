@@ -20,8 +20,6 @@ var sanitizePatterns = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
-	// === URL / header / connection-string patterns ===
-
 	// URL credentials: scheme://user:password@host
 	{
 		regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^/\s:@]+@`),
@@ -38,8 +36,6 @@ var sanitizePatterns = []struct {
 		`${1}****`,
 	},
 
-	// === Long-flag sensitive options: --flag value or --flag=value ===
-	// Flag names listed longest-first so RE2 picks the right match.
 	// Requiring [\s=] after the flag name prevents --password from matching
 	// --password-stdin (the trailing - isn't whitespace or =).
 
@@ -56,8 +52,6 @@ var sanitizePatterns = []struct {
 		),
 		`${1}${2}****`,
 	},
-
-	// === Environment variable assignments with sensitive names ===
 
 	{
 		regexp.MustCompile(
@@ -81,8 +75,6 @@ var sanitizePatterns = []struct {
 		`${1}=****`,
 	},
 
-	// === Bare cloud access key matching (prefix-specific, low false-positive) ===
-
 	// Alibaba Cloud AccessKey ID: LTAI + 16~32 alphanumeric
 	{
 		regexp.MustCompile(`\bLTAI[a-zA-Z0-9]{16,32}\b`),
@@ -100,8 +92,7 @@ var sanitizePatterns = []struct {
 	},
 }
 
-// SanitizeCommand masks sensitive values (passwords, tokens, keys, credentials)
-// in a shell command string so it is safe to log.
+// SanitizeCommand masks recognized credential patterns, not arbitrary secret values.
 func SanitizeCommand(cmd string) string {
 	for _, p := range sanitizePatterns {
 		cmd = p.re.ReplaceAllString(cmd, p.repl)
