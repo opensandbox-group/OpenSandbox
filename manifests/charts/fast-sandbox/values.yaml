@@ -59,8 +59,10 @@ fastpath:
     # -- Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access.
     namespaces: []
   tls:
+    # -- Use an existing TLS Secret (tls.crt / tls.key) instead of rendering a cert-manager Certificate resource.
+    existingSecret: ""
     issuerRef:
-      # -- Required existing cert-manager Issuer/ClusterIssuer. The chart does not install cert-manager or create a CA.
+      # -- Required existing cert-manager Issuer/ClusterIssuer when existingSecret is empty. The chart does not install cert-manager or create a CA.
       name: fast-sandbox-serving
       # -- Issuer or ClusterIssuer.
       kind: ClusterIssuer

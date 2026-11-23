@@ -174,6 +174,19 @@ class FastPathAuthChartsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("existing cert-manager issuer", result.stderr)
 
+    def test_existing_secret_skips_cert_manager_certificate(self):
+        resources = self.render(
+            "fast-sandbox",
+            "fastpath.callerAuth.enabled=true",
+            "fastpath.tls.existingSecret=custom-fastpath-tls",
+            "fastpath.tls.issuerRef.name=",
+        )
+        self.assertFalse(any(x["kind"] == "Certificate" for x in resources))
+        deployment = next(x for x in resources if x["kind"] == "Deployment")
+        pod = deployment["spec"]["template"]["spec"]
+        tls_vol = next(x for x in pod["volumes"] if x["name"] == "fastpath-tls")
+        self.assertEqual(tls_vol["secret"]["secretName"], "custom-fastpath-tls")
+
     def test_caller_auth_is_disabled_by_default(self):
         base_resources = self.render("base")
         self.assertFalse(

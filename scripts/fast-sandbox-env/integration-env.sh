@@ -280,6 +280,9 @@ IMG_NODEAGENT="${NODEAGENT_IMAGE:-opensandbox/nodeagent:env}"
 # the vm-console verify assertions derive the sink tree from it.
 NODEAGENT_CLUSTER_ID="${NODEAGENT_CLUSTER_ID:-fsb-integration}"
 FASTPATH_ENDPOINT="fast-sandbox-fastpath.opensandbox-system.svc:9090"
+FASTPATH_TLS_SECRET="fast-sandbox-fastpath-tls"
+FASTPATH_CA_CONFIGMAP="fastpath-serving-ca"
+FASTPATH_TLS_DIR="$WORK/fastpath-tls"
 SERVER_API_KEY="fast-sandbox-env"
 
 # OSEP-0024 profile: Redis + server [automation.idle_pause] + gateway activity/wake flags.
@@ -1529,15 +1532,72 @@ apply_ns() { # ns -> ensure the namespace exists (idempotent)
 		kubectl apply -f - >/dev/null
 }
 
+# OSEP-0032 FastPath caller authentication: provision a self-signed CA, a
+# serving certificate for the fast-sandbox-fastpath Service (stored in the
+# fast-sandbox-fastpath-tls Secret), and the public CA bundle ConfigMap
+# (fastpath-serving-ca) consumed by opensandbox-server and ingress-gateway.
+fastpath_tls_up() {
+	command -v openssl >/dev/null 2>&1 || die "openssl is required for FastPath TLS certificates"
+	mkdir -p "$FASTPATH_TLS_DIR"
+	rm -f "$FASTPATH_TLS_DIR"/ca.crt "$FASTPATH_TLS_DIR"/ca.key "$FASTPATH_TLS_DIR"/ca.srl \
+		"$FASTPATH_TLS_DIR"/tls.crt "$FASTPATH_TLS_DIR"/tls.key "$FASTPATH_TLS_DIR"/tls.csr \
+		"$FASTPATH_TLS_DIR"/fastpath.cnf
+	cat > "$FASTPATH_TLS_DIR/fastpath.cnf" <<CNF
+[req]
+distinguished_name = dn
+prompt = no
+
+[dn]
+CN = fast-sandbox-fastpath-ca
+
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[v3_server]
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid, issuer
+subjectAltName = DNS:fast-sandbox-fastpath,DNS:fast-sandbox-fastpath.$NS,DNS:fast-sandbox-fastpath.$NS.svc,DNS:fast-sandbox-fastpath.$NS.svc.cluster.local
+CNF
+	openssl req -x509 -new -newkey rsa:2048 -sha256 -nodes -days 30 \
+		-keyout "$FASTPATH_TLS_DIR/ca.key" -out "$FASTPATH_TLS_DIR/ca.crt" \
+		-config "$FASTPATH_TLS_DIR/fastpath.cnf" -extensions v3_ca >/dev/null 2>&1 \
+		|| die "FastPath CA generation failed"
+	openssl req -new -newkey rsa:2048 -sha256 -nodes \
+		-keyout "$FASTPATH_TLS_DIR/tls.key" -out "$FASTPATH_TLS_DIR/tls.csr" \
+		-subj "/CN=fast-sandbox-fastpath.$NS.svc" >/dev/null 2>&1 \
+		|| die "FastPath server CSR generation failed"
+	openssl x509 -req -sha256 -days 30 \
+		-in "$FASTPATH_TLS_DIR/tls.csr" -CA "$FASTPATH_TLS_DIR/ca.crt" -CAkey "$FASTPATH_TLS_DIR/ca.key" \
+		-CAcreateserial -out "$FASTPATH_TLS_DIR/tls.crt" \
+		-extfile "$FASTPATH_TLS_DIR/fastpath.cnf" -extensions v3_server >/dev/null 2>&1 \
+		|| die "FastPath server certificate signing failed"
+	kubectl -n "$NS" create secret tls "$FASTPATH_TLS_SECRET" \
+		--cert="$FASTPATH_TLS_DIR/tls.crt" --key="$FASTPATH_TLS_DIR/tls.key" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	kubectl -n "$NS" create configmap "$FASTPATH_CA_CONFIGMAP" \
+		--from-file=ca.crt="$FASTPATH_TLS_DIR/ca.crt" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
 control_plane_up() {
 	# Charts are the source of truth (CRDs + RBAC + control plane), replacing
 	# the fast-sandbox checkout's kustomize applies and env-owned node manifests.
 	apply_ns "$NS"
-	helm_render fsb-base "$OSB_ROOT/manifests/charts/base" "$NS" "$GEN_DIR/fsb-base.yaml"
+	fastpath_tls_up
+	helm_render fsb-base "$OSB_ROOT/manifests/charts/base" "$NS" "$GEN_DIR/fsb-base.yaml" \
+		--set fastSandbox.callerAuth.enabled=true
 	kubectl apply -f "$GEN_DIR/fsb-base.yaml" >/dev/null
 	# Keep poolSizeGB=2 in sync with the disk=2Gi template builds below.
 	helm_render fast-sandbox "$OSB_ROOT/manifests/charts/fast-sandbox" "$NS" \
 		"$GEN_DIR/fast-sandbox.yaml" \
+		--set fastpath.callerAuth.enabled=true \
+		--set fastpath.tls.existingSecret="$FASTPATH_TLS_SECRET" \
 		--set controller.image.repository="$(image_repo "$IMG_CONTROLLER")" \
 		--set controller.image.tag="$(image_tag "$IMG_CONTROLLER")" \
 		--set controller.sandboxtemplateBuilderImage="$IMG_BUILDER" \
@@ -2772,6 +2832,8 @@ execd_run_as_init = @EXECD_RUN_AS_INIT@
 # namespace (poolRef resolves) and get the execd image injected by the server.
 namespace = "@FSB_NAMESPACE@"
 fastpath_endpoint = "@FASTPATH_ENDPOINT@"
+fastpath_auth_enabled = true
+fastpath_tls_ca_file = "/etc/opensandbox/fastpath-ca/ca.crt"
 fastpath_resource_pool = "@POOL_NAME@"
 fastpath_wait_ready_seconds = 30.0
 template_s3_publish_secret = "sandbox-oss-credentials"
@@ -2816,6 +2878,7 @@ opensandbox_up() {
 		--set server.resources.requests.memory=512Mi \
 		--set server.resources.limits.cpu=1 \
 		--set server.resources.limits.memory=2Gi \
+		--set server.fastpath.caConfigMap="$FASTPATH_CA_CONFIGMAP" \
 		--set-file configToml="$GEN_DIR/osb-server-config.toml" \
 		--set server.gateway.enabled=true \
 		--set server.gateway.host="$GATEWAY_ADDRESS" \
@@ -2844,6 +2907,8 @@ opensandbox_up() {
 		--set gateway.providerType=fast-sandbox \
 		--set gateway.dataplaneNamespace="$NS" \
 		--set gateway.fastpathEndpoint="$FASTPATH_ENDPOINT" \
+		--set gateway.fastpathAuth.enabled=true \
+		--set gateway.fastpathAuth.caConfigMap="$FASTPATH_CA_CONFIGMAP" \
 		--set "gateway.secureAccess.keys[0].key_id=a" \
 		--set "gateway.secureAccess.keys[0].key=$(osb_signing_key)" \
 		--set gateway.service.type=NodePort \
@@ -5245,7 +5310,7 @@ down() {
 	docker rm -f "$MITM_ECHO_CONTAINER" >/dev/null 2>&1 || true
 	[[ -z "$(docker ps -a --filter "name=$MITM_ECHO_CONTAINER" --format '{{.Names}}' || true)" ]] \
 		|| fail "MITM echo container still present"
-	rm -rf "$MITM_CA_DIR"
+	rm -rf "$MITM_CA_DIR" "$FASTPATH_TLS_DIR"
 	# credential-bound origin fixtures (verify/credential-bound.sh) left by an
 	# interrupted run: require both fixture type and this cluster's ownership.
 	docker ps -aq --filter "label=opensandbox.io/fast-sandbox-env-fixture=credential-bound-origin" \
