@@ -28,6 +28,7 @@ import (
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -715,6 +716,7 @@ func TestBatchSandboxReconciler_scheduleTasks(t *testing.T) {
 }
 
 func TestFindBatchSandboxesForPooledPod(t *testing.T) {
+	ctx := context.Background()
 	allocated := &sandboxv1alpha1.BatchSandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "allocated",
@@ -746,10 +748,12 @@ func TestFindBatchSandboxesForPooledPod(t *testing.T) {
 		},
 		Spec: sandboxv1alpha1.BatchSandboxSpec{PoolRef: "shared-pool"},
 	}
+	otherNamespace := allocated.DeepCopy()
+	otherNamespace.Namespace = "other-namespace"
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(testscheme).
-		WithIndex(&sandboxv1alpha1.BatchSandbox{}, fieldindex.IndexNameForPoolRef, fieldindex.PoolRefIndexFunc).
-		WithObjects(allocated, released, other).
+		WithIndex(&sandboxv1alpha1.BatchSandbox{}, allocatedPoolPodIndex, allocatedPoolPodKeys).
+		WithObjects(allocated, released, other, otherNamespace).
 		Build()
 	reconciler := &BatchSandboxReconciler{Client: fakeClient}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
@@ -758,17 +762,35 @@ func TestFindBatchSandboxesForPooledPod(t *testing.T) {
 		Labels:    map[string]string{labelPoolName: "shared-pool"},
 	}}
 
-	requests := reconciler.findBatchSandboxesForPooledPod(context.Background(), pod)
-
-	want := []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: "default", Name: "allocated"}}}
-	if !reflect.DeepEqual(requests, want) {
-		t.Fatalf("findBatchSandboxesForPooledPod() = %v, want %v", requests, want)
+	checkRequests := func(sandboxes ...*sandboxv1alpha1.BatchSandbox) {
+		t.Helper()
+		var expected []reconcile.Request
+		for _, sandbox := range sandboxes {
+			expected = append(expected, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)})
+		}
+		require.ElementsMatch(t, expected, reconciler.findBatchSandboxesForPooledPod(ctx, pod))
 	}
 
+	checkRequests(allocated)
 	pod.Labels[labelPoolName] = "unrelated-pool"
-	if requests := reconciler.findBatchSandboxesForPooledPod(context.Background(), pod); len(requests) != 0 {
-		t.Fatalf("findBatchSandboxesForPooledPod() for unrelated pool = %v, want none", requests)
-	}
+	checkRequests()
+	pod.Labels[labelPoolName] = "shared-pool"
+
+	pod.Name = "idle-pod"
+	checkRequests()
+	pod.Name = "pool-pod"
+
+	allocated.Annotations[annoAllocReleaseKey] = `{"pods":["pool-pod"]}`
+	require.NoError(t, fakeClient.Update(ctx, allocated))
+	checkRequests()
+
+	other.Annotations[annoAllocStatusKey] = `{"pods":["pool-pod","pool-pod"],"poolRef":"shared-pool","generation":42}`
+	require.NoError(t, fakeClient.Update(ctx, other))
+	checkRequests(other)
+
+	delete(allocated.Annotations, annoAllocReleaseKey)
+	require.NoError(t, fakeClient.Update(ctx, allocated))
+	checkRequests(allocated, other)
 }
 
 func Test_parseIndex(t *testing.T) {
