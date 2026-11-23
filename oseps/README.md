@@ -37,3 +37,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0030](0030-egress-upstream-proxy-forward-mode.md)        |      Egress Upstream Proxy Forward Mode                                  |     draft     |  2026-11-19 |
 | [OSEP-0031](0031-in-sandbox-process-qos-and-saturation-diagnostics.md) |      In-Sandbox Process QoS and Saturation Diagnostics            |     draft     |  2026-11-19  |
 | [OSEP-0032](0032-workspace-volume-pause.md) | Workspace-only Kubernetes pause with a bucket-backed volume | draft | 2026-11-21 |
+| [OSEP-0034](0034-fastpath-caller-authentication.md) | FastPath Caller Authentication | draft | 2026-11-21 |
