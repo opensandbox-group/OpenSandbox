@@ -15,6 +15,7 @@
 package dnsproxy
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -239,7 +240,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	// infra name stays resolvable even under a deny-all policy; reachability
 	// remains gated by the uid-scoped nft rule, not by DNS secrecy.
 	if cb := p.infraCallback(host); cb != nil {
-		p.forwardAndReply(w, r, domain, host, func(domain string, ips []nftables.ResolvedIP) error {
+		p.forwardAndReply(w, r, domain, host, false, func(domain string, ips []nftables.ResolvedIP) error {
 			cb(domain, ips)
 			return nil
 		})
@@ -259,7 +260,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 				denyReason = "unknown source"
 			}
 			telemetry.RecordDNSDenied()
-			log.Warnf("[dns] denied query (remote=%s question=%q reason=%s)",
+			deniedDNSLogger(cmp.Or(host, domain), "no_applicable_policy").Warnf("[dns] denied query (remote=%s question=%q reason=%s)",
 				requestRemoteAddr(w), host, denyReason)
 			resp := new(dns.Msg)
 			resp.SetRcode(r, dns.RcodeNameError)
@@ -275,7 +276,7 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if policyToEval != nil && policyToEval.Evaluate(domain) == policy.ActionDeny {
 		telemetry.RecordDNSDenied()
 		p.publishBlocked(domain)
-		log.Warnf("[dns] denied by policy (remote=%s question=%q)",
+		deniedDNSLogger(cmp.Or(host, domain), telemetry.DNSReplyStageDeny).Warnf("[dns] denied by policy (remote=%s question=%q)",
 			requestRemoteAddr(w), host)
 		resp := new(dns.Msg)
 		resp.SetRcode(r, dns.RcodeNameError)
@@ -283,22 +284,24 @@ func (p *Proxy) serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 
-	p.forwardAndReply(w, r, domain, host, notifyResolved)
+	p.forwardAndReply(w, r, domain, host, policyToEval != nil, notifyResolved)
 }
 
 // forwardAndReply resolves r upstream and answers w; a successful answer feeds
 // notify (infra callback or the policy's resolved-IP callback) before the
 // reply is written. Failed policy installation returns SERVFAIL without addresses.
-func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, notify func(string, []nftables.ResolvedIP) error) {
+func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host string, policyEvaluated bool, notify func(string, []nftables.ResolvedIP) error) {
 	start := time.Now()
 	resp, failure, err := p.forward(r, upstreamNetwork(w))
 	elapsed := time.Since(start).Seconds()
+	// The root's policy key is empty, but its name in a log record is ".".
+	logHost := cmp.Or(host, domain)
 	if err != nil {
 		telemetry.RecordDNSForward(elapsed)
 		telemetry.RecordDNSQueryFailed(failure)
-		logOutboundDNS(host, nil, "", err.Error())
 		fail := new(dns.Msg)
 		fail.SetRcode(r, dns.RcodeServerFailure)
+		logOutboundDNS(logHost, fail, policyEvaluated, telemetry.DNSReplyStageUpstreamError, err.Error())
 		p.writeReply(w, r, fail, telemetry.DNSReplyStageUpstreamError)
 		return
 	}
@@ -306,14 +309,14 @@ func (p *Proxy) forwardAndReply(w dns.ResponseWriter, r *dns.Msg, domain, host s
 	if err := p.maybeNotifyResolvedWith(domain, resp, notify); err != nil {
 		// The resolver succeeded: do not classify grant installation as an
 		// upstream failure or retry another resolver.
-		logOutboundDNS(host, nil, "", fmt.Sprintf("policy installation failed: %v", err))
 		fail := new(dns.Msg)
 		fail.SetRcode(r, dns.RcodeServerFailure)
+		logOutboundDNS(logHost, fail, policyEvaluated, telemetry.DNSReplyStagePolicyError, fmt.Sprintf("policy installation failed: %v", err))
 		p.writeReply(w, r, fail, telemetry.DNSReplyStagePolicyError)
 		return
 	}
 	if !p.shouldSkipOutboundLog(host) {
-		logOutboundDNS(host, resolvedIPStrings(resp), "", "")
+		logOutboundDNS(logHost, resp, policyEvaluated, telemetry.DNSReplyStageAnswer, "")
 	}
 	if upstreamNetwork(w) == "udp" && r.IsEdns0() == nil {
 		fitClassicUDPReply(resp)
@@ -827,17 +830,30 @@ func resolvedIPStrings(resp *dns.Msg) []string {
 	return out
 }
 
-func logOutboundDNS(host string, ips []string, peer string, errStr string) {
-	fields := []slogger.Field{
-		{Key: "opensandbox.event", Value: "egress.outbound"},
-	}
+func appendDNSDecision(fields []slogger.Field, decision, stage string, rcode int) []slogger.Field {
+	return append(fields,
+		slogger.Field{Key: "dns.policy.decision", Value: decision},
+		slogger.Field{Key: "dns.stage", Value: stage},
+		slogger.Field{Key: "dns.response_code", Value: rcode},
+	)
+}
+
+func deniedDNSLogger(host, stage string) slogger.Logger {
+	var fields [4]slogger.Field
+	fields[0] = slogger.Field{Key: "target.host", Value: host}
+	return log.Logger.With(appendDNSDecision(fields[:1], "deny", stage, dns.RcodeNameError)...)
+}
+
+func logOutboundDNS(host string, resp *dns.Msg, policyEvaluated bool, stage, errStr string) {
+	fields := make([]slogger.Field, 0, 6)
+	fields = append(fields, slogger.Field{Key: "opensandbox.event", Value: "egress.outbound"})
 	if host != "" {
 		fields = append(fields, slogger.Field{Key: "target.host", Value: host})
 	}
-	if peer != "" {
-		fields = append(fields, slogger.Field{Key: "peer", Value: peer})
+	if policyEvaluated {
+		fields = appendDNSDecision(fields, "allow", stage, resp.Rcode)
 	}
-	if len(ips) > 0 {
+	if ips := resolvedIPStrings(resp); len(ips) > 0 {
 		fields = append(fields, slogger.Field{Key: "target.ips", Value: ips})
 	}
 	if errStr != "" {
