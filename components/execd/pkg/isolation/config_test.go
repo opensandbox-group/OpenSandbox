@@ -126,6 +126,45 @@ deny = []
 	assert.Empty(t, cfg.Seccomp.Deny)
 }
 
+func TestLoadConfigQoS(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    QoSConfig
+	}{
+		{"absent", "", QoSConfig{false, "standard", 19, "other", 500}},
+		{"empty", "[qos]", QoSConfig{false, "standard", 19, "other", 500}},
+		{"enabled", "[qos]\nenabled = true", QoSConfig{true, "standard", 19, "other", 500}},
+		{"disabled", "[qos]\nenabled = false", QoSConfig{false, "standard", 19, "other", 500}},
+		{"no implicit enable", "[qos]\nentrypoint = 'high'", QoSConfig{false, "high", 19, "other", 500}},
+		{"zero disables OOM", "[qos]\nenabled = true\noom_score_adj = 0", QoSConfig{true, "standard", 19, "other", 0}},
+		{"custom", "[qos]\nenabled = true\nentrypoint = 'high'\nnice = 1\nscheduler = 'idle'\noom_score_adj = 1000", QoSConfig{true, "high", 1, "idle", 1000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadConfig(writeTempTOML(t, tc.content))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.QoS)
+			assert.Nil(t, cfg.Hardening)
+		})
+	}
+}
+
+func TestLoadConfigQoSInvalid(t *testing.T) {
+	for _, value := range []string{
+		"entrypoint = 'urgent'", "entrypoint = ''", "entrypoint = 1",
+		"scheduler = 'fifo'", "scheduler = ''", "scheduler = true",
+		"nice = 0", "nice = -1", "nice = 20", "nice = 1.5", "nice = '19'",
+		"oom_score_adj = -1", "oom_score_adj = 1001", "oom_score_adj = '500'",
+		"enabled = 'true'",
+	} {
+		t.Run(value, func(t *testing.T) {
+			_, err := LoadConfig(writeTempTOML(t, "[qos]\n"+value))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "isolation config:")
+		})
+	}
+}
+
 func writeTempTOML(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "isolation.toml")

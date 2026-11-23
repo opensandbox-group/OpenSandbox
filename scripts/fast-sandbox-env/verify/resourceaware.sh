@@ -123,15 +123,20 @@ ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read
 	done
 }
 
-_ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
+_ra_template_phase() {
+	local out
+	out="$(osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null)" || return 0
+	printf '%s' "$out" | jq -r '.status.phase // empty'
+}
 
-ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
-	local cpu="$1" memory="$2" created phase attempts=0
+ra_template_start() { # <cpu> <memory> -> starts build if not already active/succeeded, records id in $WORK
+	local cpu="$1" memory="$2" created phase id
 	local cache="$WORK/ra-template-$cpu-$memory.id"
 	if [[ -s "$cache" ]]; then
-		RA_TEMPLATE_ID="$(<"$cache")"
-		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
-			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+		id="$(<"$cache")"
+		RA_TEMPLATE_ID="$id"
+		phase="$(_ra_template_phase)"
+		if [[ -n "$phase" && "$phase" != "Failed" ]]; then
 			return 0
 		fi
 	fi
@@ -144,9 +149,23 @@ ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $W
 		--metadata "origin=osep-0026-resourceaware" \
 		-o json 2>/dev/null)" \
 		|| fail "template create ($cpu/$memory) failed: $(osb_api template get 2>&1 | head -c 200)"
-	RA_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
-	[[ -n "$RA_TEMPLATE_ID" && "$RA_TEMPLATE_ID" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
-	printf '%s' "$RA_TEMPLATE_ID" > "$cache"
+	id="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$id" && "$id" != "null" ]] || fail "template create ($cpu/$memory) response carried no templateId"
+	printf '%s' "$id" > "$cache"
+	RA_TEMPLATE_ID="$id"
+}
+
+ra_template_up() { # <cpu> <memory> -> RA_TEMPLATE_ID (cached per shape under $WORK)
+	local cpu="$1" memory="$2" phase attempts=0
+	local cache="$WORK/ra-template-$cpu-$memory.id"
+	if [[ -s "$cache" ]]; then
+		RA_TEMPLATE_ID="$(<"$cache")"
+		if [[ "$(_ra_template_phase)" == "Succeeded" ]]; then
+			log "reusing Succeeded template ($cpu/$memory): $RA_TEMPLATE_ID"
+			return 0
+		fi
+	fi
+	ra_template_start "$cpu" "$memory"
 	while (( attempts++ < 300 )); do
 		phase="$(_ra_template_phase)"
 		[[ "$phase" == "Succeeded" ]] && { pass "SandboxTemplate build ($cpu/$memory): $RA_TEMPLATE_ID"; return 0; }
@@ -289,6 +308,9 @@ verify_resourceaware() {
 	require_live_stack
 	[[ "$POOL_MODE" == "resource-aware" ]] \
 		|| die "verify-resourceaware requires POOL_MODE=resource-aware (stack was brought up with: $POOL_MODE)"
+	# Kick off the oversized (8/1Gi) native template build concurrently so it
+	# converges while the 2/1Gi template build and forward-verify stage run.
+	run_stage "SandboxTemplate kickoff (8 vCPU / 1Gi, oversized)" ra_template_start 8 1Gi
 	run_stage "SandboxTemplate build (2 vCPU / 1Gi, distinctly shaped)" ra_template_up 2 1Gi
 	run_stage "per-sandbox limit forwarding + cgroup enforcement" ra_forward_verify
 	run_stage "oversized template -> 400" ra_oversized_verify

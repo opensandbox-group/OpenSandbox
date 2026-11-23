@@ -14,7 +14,11 @@
 
 package flag
 
-import "time"
+import (
+	"time"
+
+	"knative.dev/pkg/environment"
+)
 
 // Core server options.
 var (
@@ -27,6 +31,8 @@ var (
 
 	// Mode specifies the sandbox service discovery mode (header or uri).
 	Mode string
+
+	ClientConfig environment.ClientConfig
 )
 
 // HTTP upstream connection pooling.
@@ -86,7 +92,10 @@ var (
 	SecureAccessKeys string
 
 	// FastPathEndpoint is the FastPath v2 gRPC endpoint; non-empty enables Fast Sandbox routing.
-	FastPathEndpoint string
+	FastPathEndpoint      string
+	FastPathAuthEnabled   bool
+	FastPathTLSCAFile     string
+	FastPathTLSServerName string
 
 	FastSandboxNamespace string
 

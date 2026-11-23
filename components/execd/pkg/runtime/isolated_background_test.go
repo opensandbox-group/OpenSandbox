@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -389,6 +390,61 @@ func TestSeekIsolatedBackgroundOutput_CapsReadSize(t *testing.T) {
 	}
 	if cursor2 != int64(len(payload)) {
 		t.Errorf("cursor2 = %d, want %d", cursor2, len(payload))
+	}
+}
+
+func TestSeekIsolatedBackgroundOutput_KeepsUTF8Boundary(t *testing.T) {
+	runner := newTestRunner(t)
+	dir := t.TempDir()
+	runDir := filepath.Join(dir, isolatedBackgroundRunDir)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(runDir, "run-utf8.log")
+
+	// Place a 3-byte rune so that it straddles the cap: the first byte is
+	// the last byte of the first page, the other two are the first bytes of
+	// the second page.
+	const multibyte = "中"
+	payload := append(bytes.Repeat([]byte("a"), maxBackgroundLogReadBytes-1), []byte(multibyte+"tail")...)
+	if err := os.WriteFile(logPath, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run := &IsolatedBackgroundRun{
+		ID:        "run-utf8",
+		SessionID: "session-utf8",
+		logPath:   logPath,
+		logRoot:   dir,
+	}
+	runner.bgRuns.Store(run.ID, run)
+
+	first, cursor, err := runner.SeekIsolatedBackgroundOutput(run.SessionID, run.ID, 0)
+	if err != nil {
+		t.Fatalf("SeekIsolatedBackgroundOutput: %v", err)
+	}
+	if len(first) != maxBackgroundLogReadBytes-1 {
+		t.Errorf("len(first) = %d, want %d (end before the split rune)", len(first), maxBackgroundLogReadBytes-1)
+	}
+	if cursor != int64(maxBackgroundLogReadBytes-1) {
+		t.Errorf("cursor = %d, want %d (the rune start)", cursor, maxBackgroundLogReadBytes-1)
+	}
+	if !utf8.Valid(first) {
+		t.Error("first page must be valid UTF-8 on its own")
+	}
+
+	second, cursor2, err := runner.SeekIsolatedBackgroundOutput(run.SessionID, run.ID, cursor)
+	if err != nil {
+		t.Fatalf("SeekIsolatedBackgroundOutput (remainder): %v", err)
+	}
+	if string(second) != multibyte+"tail" {
+		t.Errorf("second page = %q, want %q", second, multibyte+"tail")
+	}
+	if cursor2 != int64(len(payload)) {
+		t.Errorf("cursor2 = %d, want %d", cursor2, len(payload))
+	}
+	if string(first)+string(second) != string(payload) {
+		t.Error("pages should reassemble the log")
 	}
 }
 

@@ -184,12 +184,13 @@ To add a custom strategy implementation:
 
 ### Cache Field Indexes
 
-Custom field indexes are registered at startup in `internal/utils/fieldindex/register.go`:
+The shared field indexes are registered at startup in `internal/utils/fieldindex/register.go`. The BatchSandbox reconciler also registers its pooled Pod event index in `SetupWithManager`.
 
 | Index Name | Resource | Purpose |
 |------------|----------|---------|
 | `ownerRefUID` | Pod | List pods by owner UID (used by both reconcilers) |
 | `poolRef` | BatchSandbox | List BatchSandboxes by pool name (used by PoolReconciler) |
+| `allocatedPoolPod` | BatchSandbox | Find allocation candidates by pool and Pod name for a Pod event |
 
 ## Coding Standards
 

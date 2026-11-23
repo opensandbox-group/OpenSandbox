@@ -18,6 +18,7 @@
 """Focused tests for the synchronous FastPath v2 gRPC adapter."""
 
 from concurrent import futures
+from types import SimpleNamespace
 import json
 from pathlib import Path
 from threading import Event, Thread
@@ -151,18 +152,71 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
 
 
 @pytest.fixture
-def client_and_server():
+def client_and_server(fastpath_tls):
+    ca, key = fastpath_tls
+    cert, private = ca.read_bytes(), key.read_bytes()
+
+    class RequireCredential(grpc.ServerInterceptor):
+        def intercept_service(self, continuation, details):
+            assert dict(details.invocation_metadata)["authorization"] == "Bearer test-caller"
+            return continuation(details)
+
     service = _FakeFastPathService()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4),
+                         interceptors=[RequireCredential()])
     pb2_grpc.add_FastPathServiceServicer_to_server(service, server)
-    port = server.add_insecure_port("127.0.0.1:0")
+    port = server.add_secure_port("127.0.0.1:0", grpc.ssl_server_credentials([(private, cert)]))
     server.start()
-    client = FastPathClient(endpoint=f"127.0.0.1:{port}")
+    client = FastPathClient(endpoint=f"127.0.0.1:{port}",
+                           token_source=SimpleNamespace(token=lambda: "test-caller"),
+                           tls_ca_file=str(ca))
     try:
         yield client, service
     finally:
         client.close()
         server.stop(None)
+
+
+@pytest.mark.parametrize("invalid_trust", ["wrong-name", "untrusted-ca"])
+def test_tls_rejects_invalid_trust(client_and_server, invalid_trust):
+    client, service = client_and_server
+    if invalid_trust == "wrong-name":
+        client._tls_server_name = "wrong-host.invalid"
+    else:
+        client._tls_ca_file = None
+    client._timeout_seconds = 1
+    with pytest.raises(FastPathUnavailable):
+        client.get_sandbox("ns-1", "sbx-1")
+    assert service.last_get is None
+
+
+def test_ca_bundle_change_replaces_channel(client_and_server, tmp_path, fastpath_tls, monkeypatch):
+    client, _ = client_and_server
+    ca, _ = fastpath_tls
+    bundle = tmp_path / "ca.pem"
+    bundle.write_bytes(ca.read_bytes())
+    client._tls_ca_file = str(bundle)
+    client.get_sandbox("ns-1", "sbx-1")
+    old_channel = client._channel
+    read_bytes = Path.read_bytes
+    reads = 0
+
+    def counted_read_bytes(self):
+        nonlocal reads
+        reads += 1
+        return read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    client.get_sandbox("ns-1", "sbx-1")
+    assert client._channel is old_channel
+    assert reads == 0
+    bundle.write_bytes(ca.read_bytes() + b"\n")
+    client.get_sandbox("ns-1", "sbx-1")
+    assert client._channel is not old_channel
+    assert reads >= 1
+    bundle.write_bytes(b"invalid PEM")
+    with pytest.raises(FastPathUnavailable, match="CA bundle"):
+        client.get_sandbox("ns-1", "sbx-1")
 
 
 def test_lifecycle_requests_use_new_contract_and_fences(client_and_server):
@@ -328,7 +382,8 @@ def test_concurrent_first_use_waits_for_stub_publication(monkeypatch):
     release_stub = Event()
     errors: list[Exception] = []
 
-    monkeypatch.setattr(grpc, "insecure_channel", lambda _endpoint: channel)
+    monkeypatch.setattr(grpc, "secure_channel", lambda *args, **kwargs: channel)
+    monkeypatch.setattr(grpc, "intercept_channel", lambda value, interceptor: value)
 
     def build_stub(_channel):
         stub_started.set()
@@ -336,7 +391,7 @@ def test_concurrent_first_use_waits_for_stub_publication(monkeypatch):
         return object()
 
     monkeypatch.setattr(fastpath_client.fastpath_pb2_grpc, "FastPathServiceStub", build_stub)
-    client = FastPathClient()
+    client = FastPathClient(token_source=SimpleNamespace(token=lambda: "test-caller"))
 
     first = Thread(target=client.connect)
     second = Thread(target=lambda: _capture_stub_error(client, errors))

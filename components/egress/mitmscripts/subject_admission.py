@@ -248,6 +248,17 @@ class SubjectAdmissionRuntime:
                 return RequestAdmission("deny", "connection_fenced")
             return item[0].acquire_request(token)
 
+    def resolve_subject_key(self, handle):
+        """Return the admitted connection's subject key without address lookup."""
+        with self._lock:
+            item = self._tokens.get(id(handle.connection))
+            if item is None or item[1] is not handle.connection:
+                raise ValueError("invalid admission")
+            member = self._clients.get(id(item[2]))
+            if member is None or member.doomed or member.target is None:
+                raise ValueError("invalid admission")
+            return member.target.subject_key
+
     def finish_request(self, handle):
         if handle is None:
             return

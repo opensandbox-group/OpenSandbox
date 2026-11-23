@@ -18,6 +18,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 )
 
 func TestParseUpstreamProxyValid(t *testing.T) {
@@ -84,5 +86,31 @@ func TestParseUpstreamProxyErrorsDoNotExposeURL(t *testing.T) {
 		require.NotContains(t, err.Error(), raw)
 		require.NotContains(t, err.Error(), "secret")
 		require.NotContains(t, err.Error(), "proxy")
+	}
+}
+
+func TestForwardUpstreamProxyFromEnvAcceptsKubernetesServiceNames(t *testing.T) {
+	for _, tc := range []struct {
+		raw    string
+		scheme string
+		host   string
+		port   int
+	}{
+		{"http://gateway:3000", "http", "gateway", 3000},
+		{"https://gateway", "https", "gateway", 443},
+		{"http://gateway.infra:3000", "http", "gateway.infra", 3000},
+		{"https://gateway.infra.svc:3000", "https", "gateway.infra.svc", 3000},
+		{"https://gateway.infra.svc.cluster.local.:3000", "https", "gateway.infra.svc.cluster.local.", 3000},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Setenv(constants.EnvUpstreamProxy, tc.raw)
+			t.Setenv(constants.EnvUpstreamProxyAuth, "")
+			spec, err := ForwardUpstreamProxyFromEnv()
+			require.NoError(t, err)
+			require.NotNil(t, spec)
+			require.Equal(t, tc.scheme, spec.Scheme)
+			require.Equal(t, tc.host, spec.Host)
+			require.Equal(t, tc.port, spec.Port)
+		})
 	}
 }

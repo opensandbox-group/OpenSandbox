@@ -169,6 +169,9 @@ The kubernetes runtime also serves fsb (`fsb-`) sandboxes side by side; these fi
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `fastpath_endpoint` | string | `"fast-sandbox-fastpath.opensandbox.svc:9090"` | Fast-Path Server gRPC endpoint. |
+| `fastpath_auth_enabled` | boolean | `false` | Enable FastPath caller authentication and TLS; defaults to `false` (plaintext gRPC) for zero-prerequisite compatibility. |
+| `fastpath_tls_ca_file` | string \| omitted | `null` | Trusted FastPath serving CA PEM file, reloaded when changed; omitted uses system roots. |
+| `fastpath_tls_server_name` | string \| omitted | `null` | Explicit expected TLS DNS identity when different from the connection address. Certificate verification remains mandatory. |
 | `fastpath_timeout_seconds` | number | `30.0` | Per-RPC gRPC deadline. |
 | `fastpath_wait_ready_seconds` | number | `30.0` | Bounded readiness wait for DataPlaneReady after Create. |
 | `fastpath_resource_pool` | string | `"default-pool"` | SandboxPool when `extensions.poolRef` is unset. |
@@ -217,7 +220,7 @@ Egress sidecar image and enforcement mode. The sidecar is only attached to sandb
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `image` | string \| omitted | `null` | Egress sidecar OCI image. **Required** when clients send `networkPolicy`. |
-| `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available; **`forward`** — relay every sandbox TCP connection to `upstream_proxy` via `CONNECT` (Docker only, see below). |
+| `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available; **`forward`** — relay every sandbox TCP connection to `upstream_proxy` via `CONNECT` (Docker bridge & Kubernetes non-pooled, see below). |
 | `dns_upstreams` | list \| omitted | `null` | `forward` only: policy DNS resolver(s), literal IP with optional `:port`. `REFUSED` is final and there is no fallback resolver. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (esp. Kubernetes); set `false` only deliberately. |
 | `otlp_endpoint` | string \| omitted | `null` | OTLP/**HTTP** endpoint for sidecar metrics (both runtimes). Infrastructure config — not settable per request. |
@@ -251,9 +254,10 @@ url = "http://proxy.example.com:3128"
 
 **`forward` notes (OSEP-0030):**
 
-- Every sandbox gets the egress sidecar; all outbound TCP is tunneled byte-for-byte to `upstream_proxy.url` via `CONNECT <original-ip>:<port>` with `Proxy-Authorization` and `OpenSandbox-Sandbox-Id`. No local TLS interception, no direct-dial fallback; UDP, ICMP, link-local and IPv6 TCP are dropped.
-- Requires `runtime.type = "docker"`, `docker.network_mode = "bridge"`, `egress.image`, `upstream_proxy.url` and `upstream_proxy.authorization`; gVisor is rejected. Kubernetes and Fast Sandbox are not yet supported.
-- The sidecar reports ready only while the gateway is reachable, so creation fails if the gateway is not reachable within `readiness_timeout_seconds`.
+- Every sandbox gets the egress sidecar; all outbound TCP is tunneled byte-for-byte to `upstream_proxy.url` via `CONNECT <original-ip>:<port>` with `Proxy-Authorization`, `OpenSandbox-Sandbox-Id`, `OpenSandbox-Sandbox-Namespace` (Kubernetes, single- and multi-tenant), and `OpenSandbox-Tenant-Name` (Kubernetes multi-tenant only). No local TLS interception, no direct-dial fallback; UDP, ICMP, link-local and IPv6 TCP are dropped.
+- Supported runtimes: Docker (`docker.network_mode = "bridge"`, `docker.drop_capabilities` dropping `NET_ADMIN` and `NET_RAW`) and Kubernetes non-pooled (`BatchSandbox` template mode and `AgentSandbox`). Requires `egress.image`, `upstream_proxy.url` and `upstream_proxy.authorization`; gVisor, Kubernetes pool mode (`extensions.poolRef`), Windows profile, pod templates enabling `shareProcessNamespace`/`hostPID`/`hostNetwork`/`privileged`/`NET_ADMIN`/`NET_RAW`, and Fast Sandbox are rejected.
+- Pre-workload enforcement: Docker waits for `/healthz` before starting the sandbox container; Kubernetes installs a bootstrap default-deny nftables fence in an `egress-init` initContainer before workload containers start, which the egress sidecar atomically replaces once initialized.
+- The sidecar reports ready only while the gateway is reachable, so creation fails if the gateway is not reachable within `readiness_timeout_seconds` (Docker) or `sandbox_create_timeout_seconds` (Kubernetes).
 - Creates with `networkPolicy`, `credentialProxy`, or env `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` / `_SSL_INSECURE` return `400`, as do `PUT`/`PATCH /sandboxes/{id}/networkpolicy`.
 - Guide: [`docs/guides/egress-forward-mode.md`](../docs/guides/egress-forward-mode.md).
 

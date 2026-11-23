@@ -507,7 +507,19 @@ class TestFsbE2E:
 
             async def _reachable(sandbox: Sandbox, port: int) -> bool:
                 # Fresh curl processes avoid established-connection exemptions after policy updates.
-                args = ["curl", "-fsS", "-m", "8", "--noproxy", "*", "-o", "/dev/null"]
+                # Local echo fixture responds in <200ms; 2s connect / 3s total bounds denied-drop waits.
+                args = [
+                    "curl",
+                    "-fsS",
+                    "--connect-timeout",
+                    "2",
+                    "-m",
+                    "3",
+                    "--noproxy",
+                    "*",
+                    "-o",
+                    "/dev/null",
+                ]
                 if port == 443:
                     args += [
                         "--cacert",
@@ -528,19 +540,23 @@ class TestFsbE2E:
                 sandbox: Sandbox, expected: dict[int, bool], stage: str
             ) -> None:
                 async def _matches() -> bool:
-                    for port, reachable in expected.items():
-                        if await _reachable(sandbox, port) != reachable:
-                            return False
-                    return True
+                    results = await asyncio.gather(
+                        *(_reachable(sandbox, port) for port in expected)
+                    )
+                    return all(
+                        got == want for got, want in zip(results, expected.values())
+                    )
 
                 await _wait_until(_matches, timedelta(minutes=2), stage)
 
             all_allowed = {18082: True, 18083: True, 443: True}
 
             async def _expect_isolated(expected: dict[int, bool], stage: str) -> None:
-                await _expect_traffic(main, expected, f"{stage}: main")
-                await _expect_traffic(
-                    control, all_allowed, f"{stage}: control unchanged"
+                await asyncio.gather(
+                    _expect_traffic(main, expected, f"{stage}: main"),
+                    _expect_traffic(
+                        control, all_allowed, f"{stage}: control unchanged"
+                    ),
                 )
 
             # A healthy control distinguishes policy drops from fixture failures.

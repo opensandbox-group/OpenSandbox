@@ -73,6 +73,10 @@ server:
   # -- Topology spread constraints for the server pod.
   topologySpreadConstraints: []
 
+  fastpath:
+    # -- Public serving CA ConfigMap (ca.crt); mounted at /etc/opensandbox/fastpath-ca/ca.crt. Set kubernetes.fastpath_tls_ca_file in configToml to this path.
+    caConfigMap: ""
+
   # Ingress gateway announcement (components/ingress runs in its own
   # ingress-gateway chart). When enabled, writes config [ingress] mode = "gateway"
   # and wires secure-access env, so the server returns the gateway address to clients.
@@ -120,7 +124,7 @@ configToml: |
 
   [runtime]
   type = "kubernetes"
-  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.2"
+  execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.3"
 
   [kubernetes]
   kubeconfig_path = ""
@@ -131,5 +135,5 @@ configToml: |
   batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
 
   [egress]
-  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.2"
+  image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.3"
   mode = "dns+nft"

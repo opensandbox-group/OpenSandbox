@@ -55,7 +55,7 @@ Direct mode bypasses the central proxy, so the pod network must restrict Fastlet
 
 ### Transport and interoperability
 
-The ingress speaks only the `ResolveEndpoint` subset of FastPath v2 at a pinned wire revision shared with the server's generated client, so the components stay interoperable as fast-sandbox evolves. gRPC transport is plaintext; isolation between ingress, Fastlets, and FastPath is a deployment concern (network policy), with TLS deferred until both sides support it.
+The ingress speaks only the `ResolveEndpoint` subset of FastPath v2 at a pinned wire revision shared with the server's generated client, so the components stay interoperable as fast-sandbox evolves. By default, gRPC transport is plaintext for zero-prerequisite compatibility; deployments can enable verified TLS and Kubernetes `TokenRequest` system authentication (`audience: fast-sandbox-fastpath`) so FastPath authenticates `opensandbox-server` and `opensandbox-ingress-gateway` and enforces per-profile RPC and namespace authorization (see [Fast Sandbox System Authentication](/guides/fast-sandbox-system-auth)).
 
 ## Outbound: one egress control plane, N subjects
 

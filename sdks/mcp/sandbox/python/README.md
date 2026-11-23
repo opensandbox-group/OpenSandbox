@@ -148,7 +148,7 @@ Notes:
 1. `command_run` with `background=true` -> keep the execution `id`.
 2. `command_get_status` until `running` is `false`; check `exit_code` and `error`.
 3. Between status checks, `command_get_logs` with the `cursor` from the previous call to read only new output.
-4. After `running` is `false`, call `command_get_logs` once more to read the remaining output.
+4. After `running` is `false`, keep calling `command_get_logs` with the last cursor until `content` is empty and the cursor stops advancing; each read returns at most 16 MiB, so a long log needs several reads.
 5. `command_interrupt` to stop a command early.
 
 The `cursor` is a server-side position: pass back the returned value instead of computing it from the content length. Empty `content` does not mean the command finished.

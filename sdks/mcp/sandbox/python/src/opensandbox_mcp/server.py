@@ -587,12 +587,14 @@ def register_tools(
         """Read the combined stdout/stderr of a background command.
 
         Pass the returned ``cursor`` back on the next call to read only new
-        output; omit it to read the full log. Treat ``cursor`` as an opaque
-        server-side position and never derive it from the content length.
+        output; omit it to read from the start of the log. Treat ``cursor``
+        as an opaque server-side position and never derive it from the
+        content length.
         Empty ``content`` does not mean the command finished; use
-        command_get_status for that. Once command_get_status reports
-        ``running=False``, call this tool once more with the last cursor to
-        read the remaining output.
+        command_get_status for that. Each read returns at most one page of
+        16 MiB, so once command_get_status reports ``running=False``, keep
+        calling this tool with the last cursor until ``content`` is empty and
+        ``cursor`` stops advancing to drain the remaining output.
 
         Parameters:
             sandbox_id: Target sandbox identifier.

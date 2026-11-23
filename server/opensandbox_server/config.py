@@ -810,6 +810,12 @@ class KubernetesRuntimeConfig(BaseModel):
         default="fast-sandbox-fastpath.opensandbox.svc:9090",
         description="fast-sandbox Fast-Path Server gRPC endpoint.",
     )
+    fastpath_auth_enabled: bool = Field(
+        default=False,
+        description="Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).",
+    )
+    fastpath_tls_ca_file: Optional[str] = Field(default=None)
+    fastpath_tls_server_name: Optional[str] = Field(default=None)
     fastpath_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,
@@ -1758,28 +1764,30 @@ class AppConfig(BaseModel):
 
     def _validate_egress_forward_runtime(self) -> None:
         # Forward mode needs the sidecar nftables capture plane (OSEP-0030).
-        # Kubernetes and Fast Sandbox are follow-ups; reject them explicitly
-        # instead of silently creating unprotected sandboxes.
-        if self.runtime.type != "docker":
+        # Docker bridge and Kubernetes non-pooled runtimes are supported;
+        # gVisor lacks nftables, and Fast Sandbox is rejected per-request until
+        # its shared-egress data plane lands.
+        if self.runtime.type not in ("docker", "kubernetes"):
             raise ValueError(
                 f'egress.mode = "forward" is not yet supported with runtime.type = {self.runtime.type!r}'
-            )
-        if (self.docker.network_mode or "").lower() != "bridge":
-            raise ValueError(
-                'egress.mode = "forward" requires docker.network_mode = "bridge"'
             )
         if self.secure_runtime is not None and self.secure_runtime.type == "gvisor":
             raise ValueError(
                 'egress.mode = "forward" is not compatible with secure_runtime.type = "gvisor"'
             )
-        dropped = {
-            cap.strip().upper().removeprefix("CAP_")
-            for cap in (self.docker.drop_capabilities or [])
-        }
-        if "ALL" not in dropped and not ({"NET_ADMIN", "NET_RAW"} <= dropped):
-            raise ValueError(
-                'egress.mode = "forward" requires docker.drop_capabilities to drop NET_ADMIN and NET_RAW'
-            )
+        if self.runtime.type == "docker":
+            if (self.docker.network_mode or "").lower() != "bridge":
+                raise ValueError(
+                    'egress.mode = "forward" requires docker.network_mode = "bridge"'
+                )
+            dropped = {
+                cap.strip().upper().removeprefix("CAP_")
+                for cap in (self.docker.drop_capabilities or [])
+            }
+            if "ALL" not in dropped and not ({"NET_ADMIN", "NET_RAW"} <= dropped):
+                raise ValueError(
+                    'egress.mode = "forward" requires docker.drop_capabilities to drop NET_ADMIN and NET_RAW'
+                )
 
 
 _config: AppConfig | None = None

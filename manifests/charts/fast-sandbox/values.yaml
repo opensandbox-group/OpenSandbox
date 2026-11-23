@@ -52,6 +52,23 @@ resourceNamespace: opensandbox-dataplane
 # -- Image pull secrets for every workload in this chart
 imagePullSecrets: []
 
+fastpath:
+  callerAuth:
+    # -- Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).
+    enabled: false
+    # -- Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access.
+    namespaces: []
+  tls:
+    # -- Use an existing TLS Secret (tls.crt / tls.key) instead of rendering a cert-manager Certificate resource.
+    existingSecret: ""
+    issuerRef:
+      # -- Required existing cert-manager Issuer/ClusterIssuer when existingSecret is empty. The chart does not install cert-manager or create a CA.
+      name: fast-sandbox-serving
+      # -- Issuer or ClusterIssuer.
+      kind: ClusterIssuer
+    # -- Additional serving DNS names for external Server access.
+    dnsNames: []
+
 # All-in-one control plane: one process runs both the reconcilers and the
 # FastPath gRPC API (development topology, no leader election).
 controller:
@@ -103,7 +120,7 @@ controller:
   # fastlet Pods. Defaults to the released companion image published by the
   # umbrella release (build-fast-sandbox.sh); override for clusters that
   # cannot pull from docker.io.
-  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.2
+  fastletProxyImage: opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.3
   fastletProxy:
     # -- Resource requests and limits for the platform-owned Fastlet Proxy
     # sidecar injected into every fastlet Pod.

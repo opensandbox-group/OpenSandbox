@@ -39,7 +39,7 @@ func (sch *defaultTaskScheduler) recoverTaskNodesStatus() error {
 	pods := make([]*v1.Pod, 0, len(sch.allPods)/2)
 	for i := range sch.allPods {
 		pod := sch.allPods[i]
-		if pod.Status.PodIP == "" {
+		if !hasTaskEndpoint(pod) {
 			continue
 		}
 		ips = append(ips, pod.Status.PodIP)
@@ -69,8 +69,7 @@ func (sch *defaultTaskScheduler) recoverTaskNodesStatus() error {
 			continue
 		}
 		if tNode := sch.taskNodeByNameIndex[task.Name]; tNode != nil {
-			recoverOneTaskNode(tNode, task, pod.Status.PodIP, pod.Name, sch.logger)
-			tNode.PodUID = pod.UID
+			recoverOneTaskNode(tNode, task, pod, sch.logger)
 		} else {
 		}
 		// TODO do we need to stop tasks not belong us? e.g users ScaleIn []*sandboxv1alpha1.Task
@@ -78,11 +77,12 @@ func (sch *defaultTaskScheduler) recoverTaskNodesStatus() error {
 	return nil
 }
 
-func recoverOneTaskNode(tNode *taskNode, currentTask *api.Task, ip string, podName string, log logr.Logger) {
+func recoverOneTaskNode(tNode *taskNode, currentTask *api.Task, pod *v1.Pod, log logr.Logger) {
 	tNode.Status = currentTask
 	tNode.transTaskState(parseTaskState(currentTask), log)
-	tNode.IP = ip
-	tNode.PodName = podName
+	tNode.IP = pod.Status.PodIP
+	tNode.PodName = pod.Name
+	tNode.PodUID = pod.UID
 	if currentTask.DeletionTimestamp != nil {
 		tNode.transSchState(stateReleasing, log)
 	}

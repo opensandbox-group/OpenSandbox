@@ -129,7 +129,7 @@ The following table lists the configurable parameters of the chart and their def
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.2\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.2\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. [kubernetes].namespace below is the sandbox workload namespace: the chart does not create it, so create it before submitting workloads (see README). |
+| configToml | string | `"[server]\nhost = \"0.0.0.0\"\nport = 80\napi_key = \"\"\n\n[log]\nlevel = \"INFO\"\n\n[runtime]\ntype = \"kubernetes\"\nexecd_image = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.3\"\n\n[kubernetes]\nkubeconfig_path = \"\"\nnamespace = \"opensandbox\"\ninformer_resync_seconds = 300\ninformer_watch_timeout_seconds = 60\nworkload_provider = \"batchsandbox\"\nbatchsandbox_template_file = \"/etc/opensandbox/example.batchsandbox-template.yaml\"\n\n[egress]\nimage = \"sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.3\"\nmode = \"dns+nft\"\n"` | Server config (TOML). Mounted at /etc/opensandbox/config.toml. [kubernetes].namespace below is the sandbox workload namespace: the chart does not create it, so create it before submitting workloads (see README). |
 | fullnameOverride | string | `"opensandbox-server"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name |
 | imagePullSecrets | list | `[]` | Image pull secrets for the server deployment. Each entry: {name: <secret-name>}. |
 | nameOverride | string | `""` | Override the name of the chart |
@@ -137,6 +137,7 @@ The following table lists the configurable parameters of the chart and their def
 | server.affinity | object | `{}` | Affinity for the server pod. |
 | server.containerSecurityContext | object | `{}` | Container-level security context for the server container. |
 | server.env | list | `[]` | Additional environment variables for the server container. |
+| server.fastpath.caConfigMap | string | `""` | Public serving CA ConfigMap (ca.crt); mounted at /etc/opensandbox/fastpath-ca/ca.crt. Set kubernetes.fastpath_tls_ca_file in configToml to this path. |
 | server.gateway.enabled | bool | `false` | Whether the server announces an ingress gateway (config [ingress] mode = "gateway"). |
 | server.gateway.gatewayRouteMode | string | `"header"` | Route mode: header, wildcard, or uri. Ingress uses header for header/wildcard, uri otherwise. |
 | server.gateway.host | string | `"opensandbox.example.com"` | Gateway host/address returned to clients when the gateway is enabled. |

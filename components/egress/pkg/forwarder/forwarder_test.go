@@ -407,3 +407,119 @@ func TestProbeGateway(t *testing.T) {
 	srv.Close()
 	require.Error(t, f.ProbeGateway(context.Background()))
 }
+
+func TestDialGatewayUsesCustomResolveHost(t *testing.T) {
+	srv, gw := newGateway(t, http.StatusOK, false)
+	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	var resolvedHost string
+	f, err := New(Config{
+		Scheme:        "http",
+		Host:          "gateway.isolated.invalid",
+		Port:          port,
+		Authorization: "Bearer tok",
+		Identity:      Identity{SandboxID: "sbx-1"},
+	})
+	require.NoError(t, err)
+	f.SetResolveHost(func(_ context.Context, host string) ([]netip.Addr, error) {
+		resolvedHost = host
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	})
+	f.originalDst = func(net.Conn) (netip.AddrPort, error) {
+		return netip.MustParseAddrPort("203.0.113.10:443"), nil
+	}
+
+	require.NoError(t, f.ProbeGateway(context.Background()))
+	require.Equal(t, "gateway.isolated.invalid", resolvedHost)
+
+	sandbox, accepted := tcpPair(t)
+	go f.handle(accepted)
+	req := <-gw.requests
+	require.Equal(t, "Bearer tok", req.Header.Get("Proxy-Authorization"))
+	_ = sandbox.Close()
+}
+
+func TestDialResolvedAddrsSharesDeadlineAcrossAddresses(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() {
+		_ = c1.Close()
+		_ = c2.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	var attempted []string
+	conn, err := dialResolvedAddrs(
+		ctx,
+		5*time.Second,
+		[]netip.Addr{netip.MustParseAddr("198.51.100.1"), netip.MustParseAddr("198.51.100.2")},
+		3128,
+		func(attemptCtx context.Context, addr string) (net.Conn, error) {
+			attempted = append(attempted, addr)
+			if addr == "198.51.100.1:3128" {
+				// Simulate silent SYN drop blocking until this attempt's share expires.
+				<-attemptCtx.Done()
+				return nil, attemptCtx.Err()
+			}
+			return c1, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, c1, conn)
+	require.Equal(t, []string{"198.51.100.1:3128", "198.51.100.2:3128"}, attempted)
+
+	// When all addresses silently drop SYNs, the final attempt must also be
+	// bounded by dialTimeout rather than inheriting a longer parent context.
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer parentCancel()
+	start := time.Now()
+	_, err = dialResolvedAddrs(
+		parentCtx,
+		120*time.Millisecond,
+		[]netip.Addr{netip.MustParseAddr("198.51.100.1"), netip.MustParseAddr("198.51.100.2")},
+		3128,
+		func(attemptCtx context.Context, _ string) (net.Conn, error) {
+			<-attemptCtx.Done()
+			return nil, attemptCtx.Err()
+		},
+	)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), time.Second, "all attempts must stay within dialTimeout")
+}
+
+func TestDialGatewayIncludesResolutionInDialTimeout(t *testing.T) {
+	f, err := New(Config{
+		Scheme:        "http",
+		Host:          "slow-gateway.invalid",
+		Port:          3128,
+		Authorization: "Bearer tok",
+		Identity:      Identity{SandboxID: "sbx-1"},
+	})
+	require.NoError(t, err)
+	f.dialTimeout = 120 * time.Millisecond
+
+	var resolveDeadline time.Time
+	f.SetResolveHost(func(ctx context.Context, _ string) ([]netip.Addr, error) {
+		var ok bool
+		resolveDeadline, ok = ctx.Deadline()
+		require.True(t, ok, "resolveHost must inherit dialTimeout deadline")
+		select {
+		case <-time.After(80 * time.Millisecond):
+			return []netip.Addr{netip.MustParseAddr("198.51.100.1")}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer parentCancel()
+	start := time.Now()
+	_, err = f.dialGatewayConn(parentCtx)
+	require.Error(t, err)
+	require.Less(t, resolveDeadline.Sub(start), 500*time.Millisecond, "resolveHost must be bounded by dialTimeout, not parentCtx")
+	require.Less(t, time.Since(start), time.Second, "resolution + dial must stay within dialTimeout")
+}

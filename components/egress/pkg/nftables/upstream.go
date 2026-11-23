@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,9 +38,9 @@ type UpstreamProxyEndpoint struct {
 	// instead of UID (forward mode, OSEP-0030): the sandbox shares the netns
 	// and could assume a UID, but cannot set a mark without CAP_NET_ADMIN/RAW.
 	Mark uint32
-	// IPs seeds the scoped sets for literal-IP endpoints. Hostname endpoints
-	// start empty and are filled via AddUpstreamProxyIPs as the dnsproxy
-	// resolves the infra domain.
+	// IPs seeds the scoped sets with permanent addresses (literal-IP endpoints
+	// and static /etc/hosts entries such as Kubernetes hostAliases). Hostname
+	// endpoints also receive DNS-learned addresses via AddUpstreamProxyIPs.
 	IPs []netip.Addr
 }
 
@@ -114,6 +115,9 @@ func (m *Manager) addScopedEndpointIPs(ctx context.Context, ep *UpstreamProxyEnd
 	var script strings.Builder
 	for _, r := range ips {
 		addr := r.Addr.Unmap()
+		if slices.ContainsFunc(ep.IPs, func(s netip.Addr) bool { return s.Unmap() == addr }) {
+			continue
+		}
 		var set string
 		if addr.Is4() {
 			set = v4Set

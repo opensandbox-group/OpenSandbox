@@ -667,3 +667,9 @@ kubectl logs -n opensandbox-system deployment/opensandbox-controller-manager
 ## Measure resume latency
 
 See [Kubernetes Resume Benchmark](/guides/kubernetes-resume-benchmark) for an opt-in rootfs benchmark with raw samples, P50/P95, failure reporting, and explicit cache conditions.
+
+## Create a differently sized RootfsOnly Sandbox
+
+Upgrade FSB first, then OpenSandbox. On a ResourceAware Firecracker pool, send `POST /sandboxes` with a ready RootfsOnly snapshot, for example `{"snapshotId":"snap_example","timeout":600,"resourceLimits":{"memory":"4Gi"}}`. Only memory changes. Omitting both limits inherits the captured CPU and memory. Supply any dimensions missing from older snapshots. Full restores retain their recorded shape.
+
+The Python, Go, JavaScript, Kotlin and C# SDKs ordinarily send their default CPU and memory. Use the SDK's snapshot resource inheritance option (or Kotlin's `rootfsSnapshot`) to omit defaults. An older FastPath that lacks the RootfsOnly create RPC returns HTTP 503 through OpenSandbox. Upgrade fast-sandbox before retrying.

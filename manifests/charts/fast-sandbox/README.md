@@ -85,7 +85,7 @@ The following table lists the configurable parameters of the chart and their def
 | controller.affinity | object | `{}` | Affinity for the controller pod. |
 | controller.enabled | bool | `true` | Whether the control plane Deployment + FastPath Service are installed |
 | controller.fastletProxy.resources | object | `{"limits":{"cpu":"250m","memory":"256Mi"},"requests":{"cpu":"50m","memory":"64Mi"}}` | Resource requests and limits for the platform-owned Fastlet Proxy sidecar injected into every fastlet Pod. |
-| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.2"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
+| controller.fastletProxyImage | string | `"opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.3"` | Image injected as the platform-owned Fastlet Proxy sidecar into fastlet Pods. Defaults to the released companion image published by the umbrella release (build-fast-sandbox.sh); override for clusters that cannot pull from docker.io. |
 | controller.fastpathHTTPPort | int | `0` | Port for the optional FastPath gRPC-Web listener (HTTP/1.1, serving the same RPC methods as the gRPC listener for HTTP/1.1 clients such as Java Armeria stubs). 0 (default) disables the listener. When set, the port is also exposed on the fast-sandbox-fastpath Service. |
 | controller.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
 | controller.image.repository | string | `"opensandbox/fsb-controller"` | Controller image repository (built by manifests/release/build-fast-sandbox.sh) |
@@ -101,6 +101,12 @@ The following table lists the configurable parameters of the chart and their def
 | controller.sandboxtemplateBuilderImage | string | `""` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh). Empty uses the release-<appVersion> companion image tag. |
 | controller.sandboxtemplateBuilderPodSpec | string | `""` | Raw PodSpec fragment (YAML) merged into every SandboxTemplate build Pod by the controller: whitelisted scheduling fields only (tolerations appended; affinity and topologySpreadConstraints replaced). Rendered as the fast-sandbox-builder-pod-template ConfigMap; editing the live ConfigMap applies to the next build without a rollout. |
 | controller.tolerations | list | `[]` | Tolerations for the controller pod |
+| fastpath.callerAuth.enabled | bool | `false` | Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS). |
+| fastpath.callerAuth.namespaces | list | `[]` | Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access. |
+| fastpath.tls.dnsNames | list | `[]` | Additional serving DNS names for external Server access. |
+| fastpath.tls.existingSecret | string | `""` | Use an existing TLS Secret (tls.crt / tls.key) instead of rendering a cert-manager Certificate resource. |
+| fastpath.tls.issuerRef.kind | string | `"ClusterIssuer"` | Issuer or ClusterIssuer. |
+| fastpath.tls.issuerRef.name | string | `"fast-sandbox-serving"` | Required existing cert-manager Issuer/ClusterIssuer when existingSecret is empty. The chart does not install cert-manager or create a CA. |
 | fullnameOverride | string | `""` | Override the full name of the chart |
 | imagePullSecrets | list | `[]` | Image pull secrets for every workload in this chart |
 | janitor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |

@@ -202,6 +202,8 @@ export interface SandboxCreateOptions {
    * This is forwarded to the Lifecycle API as `resourceLimits`.
    */
   resource?: Record<string, string>;
+  /** Preserve omitted dimensions when restoring a RootfsOnly snapshot. */
+  inheritSnapshotResources?: boolean;
   /**
    * Resource requests (guaranteed minimums) for the sandbox container.
    * When set, enables Kubernetes Burstable QoS (requests < limits).
@@ -527,6 +529,9 @@ export class Sandbox {
   }
 
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
+    if (opts.inheritSnapshotResources && !opts.snapshotId) {
+      throw new Error("inheritSnapshotResources requires a snapshot ID");
+    }
     if ((opts.image == null) === (opts.snapshotId == null)) {
       throw new Error("Exactly one of image or snapshotId must be provided");
     }
@@ -600,7 +605,7 @@ export class Sandbox {
       image: opts.image == null ? undefined : toImageSpec(opts.image),
       snapshotId: opts.snapshotId,
       entrypoint: opts.entrypoint ?? DEFAULT_ENTRYPOINT,
-      resourceLimits: opts.resource ?? DEFAULT_RESOURCE_LIMITS,
+      resourceLimits: opts.resource ?? (opts.inheritSnapshotResources && opts.snapshotId ? undefined : DEFAULT_RESOURCE_LIMITS),
       resourceRequests: opts.resourceRequests,
       secureAccess: opts.secureAccess ?? false,
       env: opts.env ?? {},

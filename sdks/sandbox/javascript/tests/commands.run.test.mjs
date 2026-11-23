@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { CommandsAdapter, createExecdClient } from "../dist/internal.js";
-import { SandboxApiException } from "../dist/index.js";
+import { SandboxApiException, SandboxException } from "../dist/index.js";
 
 function createAdapter(responseBody, opts = {}) {
   const fetchImpl = async () =>
@@ -54,6 +54,16 @@ for (const explicitExitCode of [false, true]) {
     assert.equal(execution.exitCode, 0);
   });
 }
+
+test("CommandsAdapter.run rejects foreground EOF without a terminal event", async () => {
+  const adapter = createAdapter('data: {"type":"stdout","text":"partial"}\n\n');
+
+  await assert.rejects(adapter.run("echo test"), (error) => {
+    assert.ok(error instanceof SandboxException);
+    assert.equal(error.error.code, "COMMAND_STREAM_INCOMPLETE");
+    return true;
+  });
+});
 
 test("CommandsAdapter.run infers non-zero exitCode from final error state", async () => {
   const adapter = createAdapter(

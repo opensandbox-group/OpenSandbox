@@ -36,6 +36,12 @@ base → opensandbox-controller → fast-sandbox* → ingress-gateway → opensa
 
 If you use the umbrella chart, this order is handled for you in a single release.
 
+## Fast Sandbox system authentication
+
+FastPath business RPCs support optional Kubernetes-issued caller tokens (`audience: fast-sandbox-fastpath`) over verified TLS. System authentication and TLS are disabled by default (`callerAuth.enabled: false` / `fastpath_auth_enabled = false`) for zero-prerequisite compatibility; when enabled, `opensandbox-server` and `opensandbox-ingress-gateway` automatically mint and refresh short-lived ServiceAccount tokens and FastPath authorizes each call by component profile (`server` vs. `gateway`) and workload namespace.
+
+For step-by-step setup (in-cluster, external Server with `kubeconfig`, and rolling upgrades), see the [Fast Sandbox System Authentication guide](/guides/fast-sandbox-system-auth).
+
 ## Install
 
 Check out the version you want to deploy:

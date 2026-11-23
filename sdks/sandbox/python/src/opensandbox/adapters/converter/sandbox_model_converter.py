@@ -180,7 +180,7 @@ class SandboxModelConverter:
         env: dict[str, str],
         metadata: dict[str, str],
         timeout: timedelta | None,
-        resource: dict[str, str],
+        resource: dict[str, str] | None,
         platform: PlatformSpec | None,
         network_policy: NetworkPolicy | None,
         extensions: dict[str, str],
@@ -225,7 +225,7 @@ class SandboxModelConverter:
         if metadata:
             api_metadata = CreateSandboxRequestMetadata.from_dict(metadata)
 
-        api_resource_limits = ResourceLimits.from_dict(resource)
+        api_resource_limits = ResourceLimits.from_dict(resource) if resource is not None else UNSET
 
         api_network_policy = SandboxModelConverter.to_api_network_policy(
             network_policy

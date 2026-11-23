@@ -65,6 +65,7 @@ const (
 	batchSandboxFirstPodIndex = 0
 	poolAllocationRetryTime   = 5 * time.Second
 	poolAutoAssignRef         = "*"
+	allocatedPoolPodIndex     = "allocatedPoolPod"
 	// Metadata-only Pod label changes must not advance BatchSandbox spec.generation:
 	// the pause/resume controller uses that generation to detect new intent.
 	annoPodLabelOverrides = "sandbox.opensandbox.io/pod-label-overrides"
@@ -639,14 +640,22 @@ func (r *BatchSandboxReconciler) getTasksCleanupUnfinished(batchSbx *sandboxv1al
 	return notReleased
 }
 
+// releasePods adds toReleasePods to the release annotation. The patch carries
+// batchSbx's resourceVersion and, once it succeeds, batchSbx takes the patched
+// metadata, so the status patch later in this reconcile, which is guarded by
+// the same resourceVersion, neither conflicts with this write nor overwrites a
+// concurrent one.
 func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, toReleasePods []string) error {
-	releasedSet := make(sets.Set[string])
 	released, err := parseSandboxReleased(batchSbx)
 	if err != nil {
 		return err
 	}
-	releasedSet.Insert(released.Pods...)
-	releasedSet.Insert(toReleasePods...)
+	releasedSet := sets.New(released.Pods...)
+	newlyReleased := sets.List(sets.New(toReleasePods...).Difference(releasedSet))
+	if len(newlyReleased) == 0 {
+		return nil
+	}
+	releasedSet.Insert(newlyReleased...)
 	newRelease := allocationRelease{
 		Pods: sets.List(releasedSet),
 	}
@@ -658,6 +667,7 @@ func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sand
 		MetaData metav1.ObjectMeta `json:"metadata"`
 	}{
 		MetaData: metav1.ObjectMeta{
+			ResourceVersion: batchSbx.ResourceVersion,
 			Annotations: map[string]string{
 				annoAllocReleaseKey: string(raw),
 			},
@@ -673,9 +683,8 @@ func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sand
 		r.Recorder.Eventf(batchSbx, corev1.EventTypeWarning, eventReasonFailedRelease, "Failed to release pods: %v", err)
 		return err
 	}
-	if len(toReleasePods) > 0 {
-		r.Recorder.Eventf(batchSbx, corev1.EventTypeNormal, eventReasonPodReleased, "Released %d pod(s) back to pool: %v", len(toReleasePods), toReleasePods)
-	}
+	batchSbx.ObjectMeta = b.ObjectMeta
+	r.Recorder.Eventf(batchSbx, corev1.EventTypeNormal, eventReasonPodReleased, "Released %d pod(s) back to pool: %v", len(newlyReleased), newlyReleased)
 	return nil
 }
 
@@ -835,6 +844,9 @@ func (r *BatchSandboxReconciler) assignPool(ctx context.Context, batchSbx *sandb
 // SetupWithManager sets up the controller with the Manager.
 func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
 	r.APIReader = mgr.GetAPIReader()
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1alpha1.BatchSandbox{}, allocatedPoolPodIndex, allocatedPoolPodKeys); err != nil {
+		return fmt.Errorf("index BatchSandboxes by allocated pool Pod: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.BatchSandbox{}).
 		Named("batchsandbox").
@@ -845,6 +857,27 @@ func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurren
 		Complete(r)
 }
 
+func allocatedPoolPodKeys(obj client.Object) []string {
+	batchSandbox := obj.(*sandboxv1alpha1.BatchSandbox)
+	if batchSandbox.Spec.PoolRef == "" {
+		return nil
+	}
+	allocation, err := parseSandboxAllocation(batchSandbox)
+	if err != nil {
+		// Reconcile reports parse errors outside the cache write lock.
+		return nil
+	}
+	keys := make([]string, 0, len(allocation.Pods))
+	for _, podName := range allocation.Pods {
+		keys = append(keys, allocatedPoolPodKey(batchSandbox.Spec.PoolRef, podName))
+	}
+	return keys
+}
+
+func allocatedPoolPodKey(poolName, podName string) string {
+	return poolName + "/" + podName
+}
+
 func (r *BatchSandboxReconciler) findBatchSandboxesForPooledPod(ctx context.Context, obj client.Object) []reconcile.Request {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok || pod.Labels[labelPoolName] == "" {
@@ -852,9 +885,8 @@ func (r *BatchSandboxReconciler) findBatchSandboxesForPooledPod(ctx context.Cont
 	}
 
 	batchSandboxes := &sandboxv1alpha1.BatchSandboxList{}
-	if err := r.List(ctx, batchSandboxes, &client.ListOptions{
-		Namespace:     pod.Namespace,
-		FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForPoolRef: pod.Labels[labelPoolName]}),
+	if err := r.List(ctx, batchSandboxes, client.InNamespace(pod.Namespace), client.MatchingFields{
+		allocatedPoolPodIndex: allocatedPoolPodKey(pod.Labels[labelPoolName], pod.Name),
 	}); err != nil {
 		logf.FromContext(ctx).Error(err, "Failed to find BatchSandbox for pooled Pod", "pod", pod.Name)
 		return nil
@@ -863,14 +895,7 @@ func (r *BatchSandboxReconciler) findBatchSandboxesForPooledPod(ctx context.Cont
 	requests := make([]reconcile.Request, 0, 1)
 	for i := range batchSandboxes.Items {
 		batchSandbox := &batchSandboxes.Items[i]
-		allocation, err := parseSandboxAllocation(batchSandbox)
-		if err != nil {
-			logf.FromContext(ctx).Error(err, "Failed to parse BatchSandbox allocation", "batchSandbox", batchSandbox.Name)
-			continue
-		}
-		if !slices.Contains(allocation.Pods, pod.Name) {
-			continue
-		}
+		// A release request stops event routing before the pool completes recycling.
 		released, err := parseSandboxReleased(batchSandbox)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "Failed to parse BatchSandbox release", "batchSandbox", batchSandbox.Name)
