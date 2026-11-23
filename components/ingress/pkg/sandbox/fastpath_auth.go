@@ -113,7 +113,7 @@ func (s *fastPathTokenSource) mint(done chan struct{}) {
 	if err == nil && issued != nil && issued.Status.Token != "" && issued.Status.ExpirationTimestamp.Time.After(now.Add(5*time.Second)) {
 		s.token, s.expires = issued.Status.Token, issued.Status.ExpirationTimestamp.Time
 		margin := min(20*time.Minute, s.expires.Sub(now)/2)
-		s.refresh = s.expires.Add(-time.Duration(float64(margin) * (0.9 + rand.Float64()*0.1)))
+		s.refresh = s.expires.Add(-time.Duration(float64(margin) * (0.9 + rand.Float64()*0.1))) //nolint:gosec // G404: refresh jitter only, not security-sensitive
 		s.retry, s.backoff = time.Time{}, 0
 	} else {
 		s.backoff = min(30*time.Second, max(time.Second, s.backoff*2))
