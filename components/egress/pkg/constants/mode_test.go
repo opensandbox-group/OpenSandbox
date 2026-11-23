@@ -66,3 +66,16 @@ func TestIsForwardMode(t *testing.T) {
 	_, err := ParseEgressMode("forward")
 	require.Error(t, err)
 }
+
+func TestContainsForwardToken(t *testing.T) {
+	require.True(t, ContainsForwardToken("forward"))
+	require.True(t, ContainsForwardToken("forward+nft"))
+	require.True(t, ContainsForwardToken("dns+forward"))
+	require.True(t, ContainsForwardToken("  DNS + FORWARD  "))
+	require.True(t, ContainsForwardToken("forward+"))
+	require.True(t, ContainsForwardToken("+forward"))
+	require.False(t, ContainsForwardToken(""))
+	require.False(t, ContainsForwardToken(PolicyDnsOnly))
+	require.False(t, ContainsForwardToken(PolicyDnsNft))
+	require.False(t, ContainsForwardToken("forwarded"))
+}

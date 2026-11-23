@@ -60,13 +60,17 @@ func main() {
 	profile := strings.TrimSpace(os.Getenv(constants.EnvEgressProfile))
 	// Forward mode (OSEP-0030) is parsed strictly and dispatched before the
 	// legacy mode parsing below, which would fall back to dns-only.
-	if constants.IsForwardMode(os.Getenv(constants.EnvEgressMode)) {
+	rawMode := os.Getenv(constants.EnvEgressMode)
+	if constants.IsForwardMode(rawMode) {
 		fm, err := forwardModeFromEnv(profile)
 		if err != nil {
 			log.Fatalf("invalid forward mode configuration: %v", err)
 		}
 		runForwardSidecar(ctx, fm)
 		return
+	}
+	if constants.ContainsForwardToken(rawMode) {
+		log.Fatalf("invalid %s=%q: forward cannot be combined with other mode tokens", constants.EnvEgressMode, rawMode)
 	}
 	fsbMode, err := revisionRuntimeStartup(profile)
 	if err != nil {
