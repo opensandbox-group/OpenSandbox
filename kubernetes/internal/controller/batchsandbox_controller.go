@@ -856,7 +856,7 @@ func allocatedPoolPodKeys(obj client.Object) []string {
 	}
 	allocation, err := parseSandboxAllocation(batchSandbox)
 	if err != nil {
-		logf.Log.Error(err, "Failed to parse BatchSandbox allocation", "batchSandbox", client.ObjectKeyFromObject(batchSandbox))
+		// Reconcile reports parse errors outside the cache write lock.
 		return nil
 	}
 	keys := make([]string, 0, len(allocation.Pods))

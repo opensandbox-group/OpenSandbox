@@ -379,6 +379,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 	// Pooling Mode
 	Context("When create new batch sandbox, get pod from pool", func() {
 		const resourceBaseName = "test-batch-sandbox-pooling-mode"
+		const poolName = "test-pool"
 		var replicas int32 = 3
 		ctx := context.Background()
 
@@ -396,7 +397,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 				},
 				Spec: sandboxv1alpha1.BatchSandboxSpec{
 					Replicas: ptr.To(replicas),
-					PoolRef:  "test-pool",
+					PoolRef:  poolName,
 				},
 			}
 			Expect(k8sClient.Create(ctx, resource)).Should(Succeed())
@@ -417,7 +418,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 
-		It("should successfully update batch sandbox status, sbx endpoints info when get pod from pool alloc", func() {
+		It("should publish endpoints after pool allocation and refresh them when a pooled Pod changes", func() {
 			// mock pool allocation
 			mockPods := []string{}
 			for i := range replicas {
@@ -425,6 +426,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: typeNamespacedName.Namespace,
 						Name:      fmt.Sprintf("test-pod-%d", i),
+						Labels:    map[string]string{labelPoolName: poolName},
 					},
 					Spec: v1.PodSpec{
 						Containers: []v1.Container{
@@ -454,9 +456,7 @@ var _ = Describe("BatchSandbox Controller", func() {
 
 			Eventually(func(g Gomega) {
 				bs := &sandboxv1alpha1.BatchSandbox{}
-				if err := k8sClient.Get(ctx, typeNamespacedName, bs); err != nil {
-					return
-				}
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, bs)).To(Succeed())
 				g.Expect(bs.Status.ObservedGeneration).To(Equal(bs.Generation))
 				g.Expect(bs.Status.Replicas).To(Equal(*bs.Spec.Replicas))
 
@@ -479,6 +479,22 @@ var _ = Describe("BatchSandbox Controller", func() {
 					}
 				}
 				g.Expect(gotIPs).To(Equal(expectedIPs), "endpoints should be ordered by pool allocation order, unassigned pods should have empty string")
+			}, timeout, interval).Should(Succeed())
+
+			By("refreshing the sandbox endpoint after updating only the pooled Pod status")
+			podKey := types.NamespacedName{Namespace: typeNamespacedName.Namespace, Name: mockPods[0]}
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				pod := &corev1.Pod{}
+				if err := k8sManager.GetAPIReader().Get(ctx, podKey, pod); err != nil {
+					return err
+				}
+				pod.Status.PodIP = "1.2.3.10"
+				return k8sClient.Status().Update(ctx, pod)
+			})).To(Succeed())
+			Eventually(func(g Gomega) {
+				bs := &sandboxv1alpha1.BatchSandbox{}
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, bs)).To(Succeed())
+				g.Expect(bs.Annotations[annotationSandboxEndpoints]).To(MatchJSON(`["1.2.3.10","","1.2.3.3"]`))
 			}, timeout, interval).Should(Succeed())
 		})
 	})
