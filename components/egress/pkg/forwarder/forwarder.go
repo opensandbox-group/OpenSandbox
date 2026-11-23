@@ -251,16 +251,20 @@ func (f *Forwarder) dialGatewayConn(ctx context.Context) (net.Conn, error) {
 		err  error
 	)
 	if f.resolveHost != nil {
-		ips, resolveErr := f.resolveHost(ctx, f.cfg.Host)
+		dialCtx, cancel := context.WithTimeout(ctx, f.dialTimeout)
+		ips, resolveErr := f.resolveHost(dialCtx, f.cfg.Host)
 		if resolveErr != nil {
+			cancel()
 			return nil, resolveErr
 		}
 		if len(ips) == 0 {
+			cancel()
 			return nil, fmt.Errorf("resolve %q: no addresses found", f.cfg.Host)
 		}
-		conn, err = dialResolvedAddrs(ctx, f.dialTimeout, ips, f.cfg.Port, func(attemptCtx context.Context, addr string) (net.Conn, error) {
+		conn, err = dialResolvedAddrs(dialCtx, f.dialTimeout, ips, f.cfg.Port, func(attemptCtx context.Context, addr string) (net.Conn, error) {
 			return d.DialContext(attemptCtx, "tcp", addr)
 		})
+		cancel()
 	} else {
 		conn, err = d.DialContext(ctx, "tcp", f.gatewayAddr)
 	}

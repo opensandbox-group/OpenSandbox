@@ -490,3 +490,36 @@ func TestDialResolvedAddrsSharesDeadlineAcrossAddresses(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.Less(t, time.Since(start), time.Second, "all attempts must stay within dialTimeout")
 }
+
+func TestDialGatewayIncludesResolutionInDialTimeout(t *testing.T) {
+	f, err := New(Config{
+		Scheme:        "http",
+		Host:          "slow-gateway.invalid",
+		Port:          3128,
+		Authorization: "Bearer tok",
+		Identity:      Identity{SandboxID: "sbx-1"},
+	})
+	require.NoError(t, err)
+	f.dialTimeout = 120 * time.Millisecond
+
+	var resolveDeadline time.Time
+	f.SetResolveHost(func(ctx context.Context, _ string) ([]netip.Addr, error) {
+		var ok bool
+		resolveDeadline, ok = ctx.Deadline()
+		require.True(t, ok, "resolveHost must inherit dialTimeout deadline")
+		select {
+		case <-time.After(80 * time.Millisecond):
+			return []netip.Addr{netip.MustParseAddr("198.51.100.1")}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer parentCancel()
+	start := time.Now()
+	_, err = f.dialGatewayConn(parentCtx)
+	require.Error(t, err)
+	require.Less(t, resolveDeadline.Sub(start), 500*time.Millisecond, "resolveHost must be bounded by dialTimeout, not parentCtx")
+	require.Less(t, time.Since(start), time.Second, "resolution + dial must stay within dialTimeout")
+}
