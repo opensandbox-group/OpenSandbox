@@ -5,7 +5,7 @@ authors:
   - "@Pangjiping"
 creation-date: 2026-11-20
 last-updated: 2026-11-23
-status: draft
+status: implementing
 ---
 
 # OSEP-0034: FastPath Caller Authentication
