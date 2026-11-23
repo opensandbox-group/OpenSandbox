@@ -640,43 +640,39 @@ class PersistedSnapshotService(SnapshotService):
             )
 
     def recover_unfinished_snapshots(self) -> None:
-        # Rows that make no progress (still Creating in the runtime, failed
-        # deletes) stay in the result set, so every pass must walk all pages;
-        # stopping at page 1 would starve older rows. Converged rows drop out
-        # of the filter and shift later rows onto earlier pages, so any pass
-        # that made progress is followed by another full pass.
+        # Walk every unfinished row once with a (created_at, id) keyset cursor.
+        # Offset pages are not stable here: recovery itself (inline retries,
+        # completed deletes) and concurrent workers move rows out of the
+        # Creating/Deleting filter mid-scan, which shifts later rows onto
+        # pages that were already read.
+        after: SnapshotRecord | None = None
         while True:
-            progressed = False
-            page = 1
-            while True:
-                result = self._snapshot_repository.list(
-                    SnapshotListQuery(
-                        page=page,
-                        page_size=SNAPSHOT_RECOVERY_PAGE_SIZE,
-                        states=[SnapshotState.CREATING.value, SnapshotState.DELETING.value],
-                    )
+            result = self._snapshot_repository.list(
+                SnapshotListQuery(
+                    page=1,
+                    page_size=SNAPSHOT_RECOVERY_PAGE_SIZE,
+                    states=[SnapshotState.CREATING.value, SnapshotState.DELETING.value],
+                    after_created_at=after.created_at if after is not None else None,
+                    after_id=after.id if after is not None else None,
                 )
-                for record in result.items:
-                    try:
-                        progressed = self._recover_unfinished_snapshot(record) or progressed
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            f"Failed to recover unfinished snapshot {record.id}: {exc}",
-                            exc_info=True,
-                        )
-                        failed_status = SnapshotRuntimeStatus(
-                            state=SnapshotState.FAILED,
-                            reason="snapshot_recovery_failed",
-                            message=f"Failed to recover unfinished snapshot: {exc}",
-                        )
-                        self._complete_snapshot(record, failed_status)
-                        progressed = True
-                if len(result.items) < SNAPSHOT_RECOVERY_PAGE_SIZE:
-                    break
-                page += 1
-
-            if not progressed:
+            )
+            for record in result.items:
+                try:
+                    self._recover_unfinished_snapshot(record)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        f"Failed to recover unfinished snapshot {record.id}: {exc}",
+                        exc_info=True,
+                    )
+                    failed_status = SnapshotRuntimeStatus(
+                        state=SnapshotState.FAILED,
+                        reason="snapshot_recovery_failed",
+                        message=f"Failed to recover unfinished snapshot: {exc}",
+                    )
+                    self._complete_snapshot(record, failed_status)
+            if len(result.items) < SNAPSHOT_RECOVERY_PAGE_SIZE:
                 return
+            after = result.items[-1]
 
     def _recover_unfinished_snapshot(self, record: SnapshotRecord) -> bool:
         if record.status.state == SnapshotState.CREATING:

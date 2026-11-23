@@ -17,6 +17,7 @@ Repository abstraction for persisted snapshot records.
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Protocol
 
 from opensandbox_server.services.snapshot_models import SnapshotRecord, SnapshotState
@@ -34,6 +35,12 @@ class SnapshotListQuery:
     name: str | None = None
     states: list[str] = field(default_factory=list)
     namespace: str | None = None
+    # Keyset cursor: when set, only rows that sort strictly after
+    # (after_created_at, after_id) in the listing order
+    # (created_at DESC, id DESC) are returned. Unlike page offsets, this stays
+    # stable when earlier rows stop matching the filter during a scan.
+    after_created_at: datetime | None = None
+    after_id: str | None = None
 
 
 @dataclass(slots=True)
