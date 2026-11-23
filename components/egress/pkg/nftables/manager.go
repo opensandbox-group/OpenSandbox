@@ -136,9 +136,9 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	}
 	var buildDrops staticDropBuilder
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
-		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
+		buildDrops = func(at time.Time, leases map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
-			drops := m.lastDrops.stillRelevant(p, learned)
+			drops := m.lastDrops.stillRelevant(m.domainPolicy, p, learned, m.tracker.dynamicIPs, leases)
 			return drops, expiry
 		}
 	}
@@ -182,7 +182,11 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	fixedDrops := func(time.Time) (EstablishedDrops, time.Time) { return drops, time.Time{} }
+	fixedDrops := func(_ time.Time, leases map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
+		result := drops
+		result.captureExactTCP(nil, p, leases)
+		return result, time.Time{}
+	}
 	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now())
 }
 
@@ -202,9 +206,11 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 		newPol = policy.DefaultDenyPolicy()
 	}
 	flows := snapshotTeardownFlows()
-	buildDrops := func(at time.Time) (EstablishedDrops, time.Time) {
+	buildDrops := func(at time.Time, leases map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 		prior, live := m.snapshotResolvedDomainsLocked(at)
-		return computeEstablishedDrops(oldPol, newPol, prior, live), time.Time{}
+		drops := computeEstablishedDrops(oldPol, newPol, prior, live)
+		drops.captureExactTCP(oldPol, newPol, leases)
+		return drops, time.Time{}
 	}
 	return m.applyStaticDropEstablishedLocked(ctx, newPol, buildDrops, flows, m.now())
 }
@@ -229,7 +235,7 @@ type staticApplyPlan struct {
 
 // In addition to carried grants, plain reloads may consult live addresses
 // from removed sources to avoid tearing down flows without an explicit opt-in.
-type staticDropBuilder func(time.Time) (EstablishedDrops, time.Time)
+type staticDropBuilder func(time.Time, map[netip.Addr]time.Time) (EstablishedDrops, time.Time)
 
 func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops staticDropBuilder, flows []byte, committedAt time.Time) (int, error) {
 	if m.quiesced.Load() {
@@ -314,7 +320,7 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 		plan := m.retainedDomainLeasesLocked(p, at, buildDrops != nil)
 		if buildDrops != nil {
 			var dropExpiry time.Time
-			plan.drops, dropExpiry = buildDrops(at)
+			plan.drops, dropExpiry = buildDrops(at, plan.leases)
 			if !dropExpiry.IsZero() && (plan.nextExpiry.IsZero() || dropExpiry.Before(plan.nextExpiry)) {
 				plan.nextExpiry = dropExpiry
 			}
@@ -493,6 +499,12 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	}
 	for addr, expiry := range deadlines {
 		m.tracker.dynamicIPs[addr] = expiry
+		// The acknowledged grant has admitted only the implicit TCP ports.
+		// Remember that fact for reloads, regardless of userspace TTL rounding.
+		if w, tracked := m.lastDrops.exact[addr]; tracked && len(w.implicit) != 0 {
+			w.implicit = nil
+			m.lastDrops.exact[addr] = w
+		}
 	}
 	telemetry.RecordNftablesUpdate()
 	return nil
@@ -636,10 +648,16 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// new-connection path: an allowed domain that re-resolves to an explicitly
 	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
+	if drops.exactCarried {
+		writeExactTCP(&b, drops.exact, true)
+	}
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
+	if drops.exactCarried {
+		writeExactTCP(&b, drops.exact, false)
+	}
 	// Then still-allowed destinations (keeps and the static allow sets), then
 	// removed allows, then the blanket verdict.
 	writeEstablishedTargets(&b, drops.KeepAddrs, drops.KeepPrefixes, drops.KeepPorts, "accept")

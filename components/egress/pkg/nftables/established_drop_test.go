@@ -16,6 +16,7 @@ package nftables
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -551,6 +552,109 @@ func TestApplyStatic_ReemitsCatchAllUntilDefaultAllow(t *testing.T) {
 
 	require.NoError(t, m.ApplyStatic(context.Background(), oldPol))
 	require.NotContains(t, (*scripts)[len(*scripts)-1], blanketDrop)
+}
+
+func TestApplyStatic_ExactTCPWithdrawalSurvivesReload(t *testing.T) {
+	const domain = `{"action":"allow","target":"cdn.example.com"}`
+	const host = `{"action":"allow","target":"192.0.2.10"}`
+	const deny = `{"action":"deny","target":"192.0.2.10","ports":[443]}`
+	addr := netip.MustParseAddr("192.0.2.10")
+	for _, tt := range []struct {
+		name, optIn, reload     string
+		grantBefore, grantAfter bool
+	}{
+		{name: "CIDR and port deny to implicit", optIn: `{"action":"allow","target":"192.0.2.10/31"},` + deny},
+		{name: "port deny to whole", optIn: host + `,` + deny, reload: `{"action":"deny","target":"192.0.2.10/31"}`},
+		{name: "live DNS then implicit", optIn: domain + `,` + deny, grantBefore: true},
+		{name: "late DNS under scoped deny", optIn: domain + `,{"action":"allow","ports":[8443]}`, reload: domain + `,` + deny, grantAfter: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, scripts := recordingManager()
+			old := mustPolicy(t, `{"egress":[`+domain+`,`+host+`]}`)
+			require.NoError(t, m.ApplyStatic(ctx, old))
+			grant := func() {
+				require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			}
+			if tt.grantBefore {
+				grant()
+			}
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, mustPolicy(t, `{"egress":[`+tt.optIn+`]}`))
+			require.NoError(t, err)
+			next := mustPolicy(t, `{"egress":[`+tt.reload+`]}`)
+			for i := range 2 {
+				require.NoError(t, m.ApplyStatic(ctx, next))
+				require.True(t, m.lastDrops.MatchesFlow(addr, 443), "old TCP teardown must survive")
+				require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "spared sibling stays open")
+				if i == 0 && tt.grantAfter {
+					script := (*scripts)[len(*scripts)-1]
+					require.Less(t, ruleIndex(t, script, "ip daddr 192.0.2.10 tcp dport { 443 } ct state established,related drop"),
+						ruleIndex(t, script, "ip daddr @dyn_allow_v4 ct state established,related accept"))
+					grant()
+				}
+			}
+			require.NoError(t, m.ApplyStatic(ctx, old))
+			require.False(t, m.lastDrops.MatchesFlow(addr, 443), "actual permit retires the teardown")
+		})
+	}
+}
+
+func TestApplyStatic_GroupsIdenticalWithdrawnPortSets(t *testing.T) {
+	rules := make([]string, 64)
+	for i := range rules {
+		rules[i] = fmt.Sprintf(`{"action":"allow","target":"192.0.2.%d"}`, i+1)
+	}
+	old := mustPolicy(t, `{"egress":[`+strings.Join(rules, ",")+`]}`)
+	spare := mustPolicy(t, `{"egress":[{"action":"allow","ports":[2]}]}`)
+	floor := policy.DefaultDenyPolicy()
+	spans := make([]policy.PortRange, 4097)
+	for i := range spans {
+		spans[i] = policy.PortRange{Lo: 3*i + 1, Hi: 3*i + 2}
+	}
+	floor.Egress = append(floor.Egress, policy.NewPortFloorDenyRule(spans))
+	m, scripts := recordingManager()
+	ctx := context.Background()
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, spare)
+	require.NoError(t, err)
+	require.NoError(t, m.ApplyStatic(ctx, floor))
+	script := (*scripts)[len(*scripts)-1]
+	beforeDNS := script[:ruleIndex(t, script, "ip daddr @dyn_allow_v4 ct state established,related accept")]
+	require.Equal(t, 1, strings.Count(beforeDNS, "tcp dport {"), "same port set must not be rendered per address")
+	t.Logf("64 hosts × 4097 ranges: %d script bytes", len(script))
+	for _, addr := range []string{"192.0.2.1", "192.0.2.64"} {
+		require.True(t, m.lastDrops.MatchesFlow(netip.MustParseAddr(addr), 1))
+		require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr(addr), 2))
+	}
+
+	m, scripts = recordingManager()
+	broad := mustPolicy(t, `{"defaultAction":"allow"}`)
+	broad.Egress = floor.Egress
+	_, err = m.ApplyStaticComputingEstablishedDrops(ctx, old, broad)
+	require.NoError(t, err)
+	for i, rule := range rules {
+		rules[i] = strings.Replace(rule, `"allow"`, `"deny"`, 1)
+	}
+	require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[`+strings.Join(rules, ",")+`]}`)))
+	script = (*scripts)[len(*scripts)-1]
+	beforeDNS = script[:ruleIndex(t, script, "ip daddr @dyn_allow_v4 ct state established,related accept")]
+	require.Equal(t, 1, strings.Count(beforeDNS, "tcp dport {"), "legacy intersections must not duplicate the grouped host rule")
+}
+
+func TestApplyStatic_CarriedCIDRDenyDoesNotAccumulateRedundantHosts(t *testing.T) {
+	const wide = `{"action":"deny","target":"10.0.0.0/8","ports":[443]}`
+	ctx := context.Background()
+	m, scripts := recordingManager()
+	old := mustPolicy(t, `{"defaultAction":"allow"}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, mustPolicy(t, `{"defaultAction":"allow","egress":[`+wide+`]}`))
+	require.NoError(t, err)
+	for i := 1; i <= 8; i++ {
+		host := fmt.Sprintf(`{"action":"deny","target":"10.0.0.%d","ports":[443]}`, i)
+		p := mustPolicy(t, `{"defaultAction":"allow","egress":[`+wide+`,`+host+`]}`)
+		require.NoError(t, m.ApplyStatic(ctx, p))
+		script := (*scripts)[len(*scripts)-1]
+		beforeDNS := script[:ruleIndex(t, script, "ip daddr @dyn_allow_v4 ct state established,related accept")]
+		require.Equal(t, 1, strings.Count(beforeDNS, "tcp dport {"))
+	}
 }
 
 func TestRemovedPrefixParts_DefaultAllowNewPolicyKeepsPermittedRange(t *testing.T) {
