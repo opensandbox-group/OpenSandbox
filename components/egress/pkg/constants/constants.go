@@ -19,6 +19,23 @@ const (
 	MarkHex   = "0x1"
 )
 
+// ForwarderMarkValue is the SO_MARK the forward-mode forwarder sets on its
+// gateway sockets (OSEP-0030). It is distinct from the DNS proxy's 0x1 bypass
+// and the fast-sandbox allow mark 0x2: only sockets carrying it may reach the
+// gateway endpoint, and setting it requires CAP_NET_ADMIN or CAP_NET_RAW.
+const (
+	ForwarderMarkValue = 0x4
+	ForwarderMarkHex   = "0x4"
+)
+
+// TelemetryMarkValue is the SO_MARK set on the egress sidecar's own OTLP
+// collector sockets in forward mode (OSEP-0030) so trusted metrics bypass
+// forward-mode capture and reach only the configured collector endpoint.
+const (
+	TelemetryMarkValue = 0x8
+	TelemetryMarkHex   = "0x8"
+)
+
 const (
 	EgressAuthTokenHeader = "OPENSANDBOX-EGRESS-AUTH"
 )

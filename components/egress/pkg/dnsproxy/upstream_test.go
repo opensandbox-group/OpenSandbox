@@ -16,6 +16,7 @@ package dnsproxy
 
 import (
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/nftables"
 )
 
 func TestUpstreamProbeIntervalFromEnv(t *testing.T) {
@@ -154,4 +156,73 @@ func TestShouldFailoverAfterResponse(t *testing.T) {
 	sf.Rcode = dns.RcodeServerFailure
 	try, _ = p2.shouldFailoverAfterResponse(sf)
 	require.True(t, try)
+}
+
+func TestShouldFailoverAfterRefused(t *testing.T) {
+	refused := new(dns.Msg)
+	refused.Rcode = dns.RcodeRefused
+
+	p := &Proxy{}
+	try, reason := p.shouldFailoverAfterResponse(refused)
+	require.True(t, try, "REFUSED fails over by default (dns / dns+nft unchanged)")
+	require.Equal(t, "REFUSED", reason)
+
+	p.SetRefusedFinal(true)
+	try, _ = p.shouldFailoverAfterResponse(refused)
+	require.False(t, try, "forward mode policy resolver: REFUSED is final")
+}
+
+// With refusedFinal, a policy denial from the first resolver is returned to
+// the client and the second resolver is never asked.
+func TestForwardRefusedFinalDoesNotEscapeToNextUpstream(t *testing.T) {
+	t.Setenv(constants.EnvNameserverExempt, "127.0.0.1")
+	resetNameserverExemptCache(t)
+	t.Cleanup(func() { resetNameserverExemptCache(t) })
+
+	startUpstream := func(rcode int, hits *atomic.Int32) string {
+		conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+		server := &dns.Server{PacketConn: conn, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
+			hits.Add(1)
+			resp := new(dns.Msg)
+			resp.SetRcode(q, rcode)
+			_ = w.WriteMsg(resp)
+		})}
+		ready := make(chan struct{})
+		server.NotifyStartedFunc = func() { close(ready) }
+		go func() { _ = server.ActivateAndServe() }()
+		t.Cleanup(func() { _ = server.Shutdown() })
+		<-ready
+		return conn.LocalAddr().String()
+	}
+
+	var policyHits, openHits atomic.Int32
+	policyDNS := startUpstream(dns.RcodeRefused, &policyHits)
+	openDNS := startUpstream(dns.RcodeSuccess, &openHits)
+
+	p := &Proxy{upstreams: []string{policyDNS, openDNS}, upstreamExchangeTimeout: 2 * time.Second}
+	p.SetRefusedFinal(true)
+	q := new(dns.Msg)
+	q.SetQuestion("blocked.example.", dns.TypeA)
+	resp, _, err := p.forward(q, "udp")
+	require.NoError(t, err)
+	require.Equal(t, dns.RcodeRefused, resp.Rcode)
+	require.Equal(t, int32(1), policyHits.Load())
+	require.Zero(t, openHits.Load())
+}
+
+func TestSetInfraDomainChainsCallbacks(t *testing.T) {
+	p := &Proxy{}
+	var order []string
+	p.SetInfraDomain("infra.example.com", func(domain string, _ []nftables.ResolvedIP) {
+		order = append(order, "gateway:"+domain)
+	})
+	p.SetInfraDomain("INFRA.EXAMPLE.COM.", func(domain string, _ []nftables.ResolvedIP) {
+		order = append(order, "telemetry:"+domain)
+	})
+	cb := p.infraCallback("infra.example.com")
+	require.NotNil(t, cb)
+	cb("infra.example.com", nil)
+	require.Equal(t, []string{"gateway:infra.example.com", "telemetry:infra.example.com"}, order)
 }

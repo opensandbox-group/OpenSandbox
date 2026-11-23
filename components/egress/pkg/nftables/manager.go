@@ -62,16 +62,19 @@ type Options struct {
 	// default is half the minimum 60-second DNS lease.
 	ConnectionRefreshInterval time.Duration
 	// UpstreamProxy, when set, adds an infrastructure-only accept scoped to the
-	// mitmproxy UID and the configured proxy endpoint (IP + TCP port). The
-	// proxy dial must not depend on the sandbox allow sets: those sets are
-	// IP-only and unscoped by UID, so putting the proxy there would let
-	// sandbox workloads CONNECT it directly and bounce to denied destinations.
+	// mitmproxy UID (or forwarder mark) and the configured proxy endpoint.
 	UpstreamProxy *UpstreamProxyEndpoint
+	// Telemetry, when set, adds a capability-gated (SO_MARK) and endpoint-scoped
+	// accept for the sidecar's own OTLP collector in forward mode (OSEP-0030).
+	Telemetry *UpstreamProxyEndpoint
 	// MitmRedirectPort, when > 0, is the transparent-MITM listener port the
 	// nat OUTPUT REDIRECT rewrites intercepted dports to; the chain must
 	// exempt that rewritten tuple ahead of port-scoped rules or every
 	// intercepted flow is dropped (see the rule below). 0 emits nothing.
 	MitmRedirectPort int
+	// ForwardRedirectPort, when > 0, is the forward-mode forwarder listener
+	// port (OSEP-0030); exempted like MitmRedirectPort for the same reason.
+	ForwardRedirectPort int
 }
 
 var errStaticStateUncertain = errors.New("nftables policy state is uncertain; a successful policy apply is required")
@@ -620,8 +623,14 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	if opts.MitmRedirectPort > 0 {
 		fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport %d accept\n", tableName, chainName, opts.MitmRedirectPort)
 	}
+	if opts.ForwardRedirectPort > 0 {
+		fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport %d accept\n", tableName, chainName, opts.ForwardRedirectPort)
+	}
 	if ep := opts.UpstreamProxy; ep != nil {
 		b.WriteString(buildUpstreamProxyStatic(tableName, ep))
+	}
+	if ep := opts.Telemetry; ep != nil {
+		b.WriteString(buildTelemetryStatic(tableName, ep))
 	}
 	// Explicit denies come before the DNS-learned accepts, mirroring the
 	// new-connection path: an allowed domain that re-resolves to an explicitly

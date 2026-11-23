@@ -337,6 +337,12 @@ jobs:
           chmod +x tests/smoke-dynamic-ip.sh
           ./tests/smoke-dynamic-ip.sh
 
+      - name: Run forward mode test
+        working-directory: components/egress
+        run: |
+          chmod +x tests/smoke-forward.sh
+          ./tests/smoke-forward.sh
+
       - name: Run dns upstream probe test
         working-directory: components/egress
         run: |
