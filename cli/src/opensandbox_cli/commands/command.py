@@ -20,6 +20,7 @@ import shlex
 import sys
 from collections.abc import Callable
 from datetime import timedelta
+from functools import partial
 
 import click
 from opensandbox.models.execd import Execution, OutputMessage, RunCommandOpts
@@ -221,16 +222,27 @@ def command_status(
 
 
 def _drain_background_logs(
-    sandbox: SandboxSync, execution_id: str, cursor: int | None
+    sandbox: SandboxSync,
+    execution_id: str,
+    cursor: int | None,
+    emit: Callable[[str], None] | None = None,
 ) -> tuple[str, int | None]:
-    """Read log pages until the returned cursor stops advancing.
+    """Read log pages, following the cursor only once the command finished.
 
     Each response carries at most 16 MiB, so a finished command with a
     longer log needs several reads; follow the cursor so no tail page is
-    left behind.
+    left behind. A command that is still running can produce output at or
+    above the read rate, which would make the drain loop follow it forever,
+    so a running command returns a single page and the caller polls with
+    the cursor instead.
+
+    When ``emit`` is given, every page is passed to it as it arrives and
+    the returned content is empty, so raw output never has to be buffered.
     """
+    drain = sandbox.commands.get_command_status(execution_id).running is False
     pages: list[str] = []
     requested = cursor
+    next_cursor = cursor
     while True:
         logs = sandbox.commands.get_background_command_logs(
             execution_id, cursor=requested
@@ -241,8 +253,11 @@ def _drain_background_logs(
             # duplicating the content of the last read.
             break
         if logs.content:
-            pages.append(logs.content)
-        if not logs.content or logs.cursor is None:
+            if emit is not None:
+                emit(logs.content)
+            else:
+                pages.append(logs.content)
+        if not logs.content or logs.cursor is None or not drain:
             break
         requested = next_cursor
     return "".join(pages), next_cursor
@@ -275,10 +290,18 @@ def command_logs(
             )
             obj.output.print_model(logs, title="Command Logs")
             return
-        content, next_cursor = _drain_background_logs(sandbox, execution_id, cursor)
         if obj.output.fmt == "raw":
-            click.echo(content)
+            # Echo each page as it arrives so a long log is never buffered
+            # twice (page list plus joined copy).
+            _drain_background_logs(
+                sandbox,
+                execution_id,
+                cursor,
+                emit=partial(click.echo, nl=False),
+            )
+            click.echo()
         else:
+            content, next_cursor = _drain_background_logs(sandbox, execution_id, cursor)
             # The next cursor is the only way to continue an incremental read.
             obj.output.print_dict({"cursor": next_cursor}, title="Command Logs")
             obj.output.panel(content, title="Content")

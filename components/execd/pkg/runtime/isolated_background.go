@@ -465,11 +465,17 @@ func (r *IsolatedRunner) SeekIsolatedBackgroundOutput(
 	if err != nil {
 		return nil, -1, fmt.Errorf("read background run log: %w", err)
 	}
-	newCursor, err := file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, -1, fmt.Errorf("read background run log position: %w", err)
+
+	// The response is served as text/plain; charset=utf-8 and clients decode
+	// each page on its own, so a read that filled the cap must not end inside
+	// a UTF-8 sequence; step back to the sequence start and leave those bytes
+	// for the next page. Reads below the cap stopped at EOF, not at a
+	// boundary of ours, so they are returned as-is.
+	if len(data) == maxBackgroundLogReadBytes {
+		data = data[:lastRuneBoundary(data)]
 	}
-	return data, newCursor, nil
+
+	return data, cursor + int64(len(data)), nil
 }
 
 // removeIsolatedRunFiles best-effort deletes the log, exit-code and script

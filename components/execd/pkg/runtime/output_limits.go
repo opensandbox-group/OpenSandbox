@@ -21,9 +21,9 @@ import "unicode/utf8"
 // draining and the markers that follow are still seen.
 const maxScanLineBytes = 16 * 1024 * 1024
 
-// maxBackgroundLogReadBytes caps how much of a background command's log a
-// single polling read loads into memory. Clients page through the rest with
-// the cursor returned by the same response.
+// maxBackgroundLogReadBytes caps how much of a background command's log or
+// an isolated run's log a single polling read loads into memory. Clients
+// page through the rest with the cursor returned by the same response.
 const maxBackgroundLogReadBytes = 16 << 20 // 16 MiB
 
 // lastRuneBoundary returns the largest n such that b[:n] does not end inside

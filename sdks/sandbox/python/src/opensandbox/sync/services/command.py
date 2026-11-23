@@ -134,7 +134,8 @@ class CommandsSync(Protocol):
             cursor: Optional byte offset into the combined output for incremental reads
 
         Returns:
-            CommandLogs containing raw output and latest cursor
+            CommandLogs containing the raw output page and the cursor just
+            past the returned bytes
 
         Raises:
             SandboxException: If the operation fails.

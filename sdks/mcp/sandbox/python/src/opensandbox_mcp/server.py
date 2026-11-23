@@ -587,8 +587,9 @@ def register_tools(
         """Read the combined stdout/stderr of a background command.
 
         Pass the returned ``cursor`` back on the next call to read only new
-        output; omit it to read the full log. Treat ``cursor`` as an opaque
-        server-side position and never derive it from the content length.
+        output; omit it to read from the start of the log. Treat ``cursor``
+        as an opaque server-side position and never derive it from the
+        content length.
         Empty ``content`` does not mean the command finished; use
         command_get_status for that. Each read returns at most one page of
         16 MiB, so once command_get_status reports ``running=False``, keep

@@ -180,9 +180,10 @@ func (e *ExecdClient) GetCommandStatus(ctx context.Context, commandID string) (*
 }
 
 // GetCommandLogs returns stdout/stderr for a background command. Pass a nil
-// cursor or cursor=0 for the full log. The cursor is a byte offset into the
-// combined output; each response returns at most 16 MiB and carries the next
-// cursor in CommandLogsResponse.Cursor for incremental polling.
+// cursor or cursor=0 to read from the start of the log; a longer log spans
+// several pages. The cursor is a byte offset into the combined output; each
+// response returns at most 16 MiB and carries the cursor just past the
+// returned bytes in CommandLogsResponse.Cursor for incremental polling.
 func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, cursor *int64) (*CommandLogsResponse, error) {
 	if cursor != nil && *cursor < 0 {
 		return nil, &InvalidArgumentError{Field: "cursor", Message: "must not be negative"}
