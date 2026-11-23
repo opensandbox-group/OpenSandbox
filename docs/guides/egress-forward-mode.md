@@ -30,7 +30,7 @@ gateway ── reads SNI / Host, applies policy ──► origin
 - All outbound IPv4 TCP is tunneled byte-for-byte to the original `IP:port`. The forwarder never decrypts or parses the stream.
 - There is no direct-dial fallback: if the gateway is unreachable or answers non-2xx, the sandbox connection is reset.
 - UDP (including QUIC), ICMP, link-local (`169.254.0.0/16`) and IPv6 TCP are dropped. DNS goes to the egress DNS proxy, which applies no local policy.
-- Only the forwarder's sockets (identified by a socket mark the workload cannot set) can reach the gateway endpoint. The workload container runs without `NET_ADMIN` and `NET_RAW`; Kubernetes pod templates enabling `shareProcessNamespace`, `hostNetwork`, `privileged`, or adding back `NET_ADMIN`/`NET_RAW` are rejected.
+- Only the forwarder's sockets (identified by a socket mark the workload cannot set) can reach the gateway endpoint. The workload container runs without `NET_ADMIN` and `NET_RAW`; Kubernetes pod templates enabling `shareProcessNamespace`, `hostPID`, `hostNetwork`, `privileged`, adding back `NET_ADMIN`/`NET_RAW`, or setting BatchSandbox `spec.shardPatches` / `spec.poolRef` are rejected.
 - If the sidecar stops, capture and drop rules stay installed: egress fails closed.
 
 ## Configuration

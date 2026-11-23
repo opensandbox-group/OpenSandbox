@@ -368,6 +368,7 @@ class TestBatchSandboxForwardMode:
         "template_pod_spec, expected_exc, match",
         [
             ({"shareProcessNamespace": True}, ValueError, "shareProcessNamespace"),
+            ({"hostPID": True}, ValueError, "hostPID"),
             ({"hostNetwork": True}, ValueError, "hostNetwork"),
             ({"runtimeClassName": "gvisor"}, HTTPException, "gVisor"),
             (
@@ -432,6 +433,64 @@ class TestBatchSandboxForwardMode:
 
         assert match in str(exc.value.detail if isinstance(exc.value, HTTPException) else exc.value)
         mock_k8s_client.create_custom_object.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "template_spec_extra, match",
+        [
+            ({"shardPatches": [{"spec": {"hostNetwork": True}}]}, "shardPatches"),
+            ({"shardPatches": [{}]}, "shardPatches"),
+            ({"poolRef": "warm-pool"}, "poolRef"),
+        ],
+    )
+    def test_rejects_unsafe_batchsandbox_spec_fields_in_forward_mode(
+        self, tmp_path, mock_k8s_client, template_spec_extra, match
+    ):
+        tpl = tmp_path / "template.yaml"
+        tpl.write_text(yaml.safe_dump({"spec": template_spec_extra}))
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _k8s_app_config(template_file=str(tpl))
+        )
+
+        with pytest.raises(ValueError, match=match):
+            provider.create_workload(
+                sandbox_id="sbx-1",
+                namespace="team-ns",
+                image_spec=ImageSpec(uri="python:3.11"),
+                entrypoint=["python"],
+                env={},
+                resource_limits={},
+                labels={},
+                expires_at=None,
+                execd_image="opensandbox/execd:test",
+                egress_settings=_forward_settings(sandbox_namespace="team-ns"),
+            )
+
+        mock_k8s_client.create_custom_object.assert_not_called()
+
+    def test_allows_empty_shard_patches_in_forward_mode(self, tmp_path, mock_k8s_client):
+        tpl = tmp_path / "template.yaml"
+        tpl.write_text(yaml.safe_dump({"spec": {"shardPatches": []}}))
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _k8s_app_config(template_file=str(tpl))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sbx-1", "uid": "uid-1"}
+        }
+
+        provider.create_workload(
+            sandbox_id="sbx-1",
+            namespace="team-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["python"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="opensandbox/execd:test",
+            egress_settings=_forward_settings(sandbox_namespace="team-ns"),
+        )
+
+        mock_k8s_client.create_custom_object.assert_called_once()
 
     def test_rejects_pool_ref_in_forward_mode(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client, _k8s_app_config())

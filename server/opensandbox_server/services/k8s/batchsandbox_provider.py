@@ -531,13 +531,22 @@ class BatchSandboxProvider(WorkloadProvider):
         self._merge_pod_spec_extras(
             batchsandbox, extra_volumes, extra_mounts, extra_security_context
         )
-        merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
+        merged_spec = batchsandbox.get("spec") or {}
+        merged_pod_spec = merged_spec.get("template", {}).get("spec", {})
         ensure_egress_runtime_compatible(
             egress_settings.network_policy if egress_settings is not None else None,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
             egress_required=egress_settings is not None,
         )
         if is_forward:
+            if merged_spec.get("poolRef"):
+                raise ValueError(
+                    'BatchSandbox template cannot set spec.poolRef when egress.mode = "forward"'
+                )
+            if merged_spec.get("shardPatches"):
+                raise ValueError(
+                    'BatchSandbox template cannot set spec.shardPatches when egress.mode = "forward"'
+                )
             validate_forward_mode_pod_spec(merged_pod_spec)
         if platform is not None and not windows_profile:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
