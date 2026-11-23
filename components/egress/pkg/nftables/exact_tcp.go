@@ -240,6 +240,21 @@ func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, leases 
 			}
 		}
 	}
+	if len(d.DenyPortDrops) != 0 {
+		denied := func(addr netip.Addr) bool {
+			return slices.ContainsFunc(d.DenyPortDrops, func(drop EstablishedPortDrop) bool { return portDropCoversAddr(drop, addr) })
+		}
+		for _, addr := range d.KeepAddrs {
+			if denied(addr) {
+				hosts[addr] = tcpWithdrawal{}
+			}
+		}
+		for _, prefix := range d.KeepPrefixes {
+			if prefix.IsSingleIP() && denied(prefix.Addr()) {
+				hosts[prefix.Addr()] = tcpWithdrawal{}
+			}
+		}
+	}
 	if len(hosts) == 0 {
 		return
 	}
@@ -254,6 +269,7 @@ func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, leases 
 func (d EstablishedDrops) snapshotTCP(p *policy.NetworkPolicy) func(netip.Addr, bool) tcpWithdrawal {
 	deny, keep, removed := compiledTCP(d.DenyPortDrops), compiledTCP(d.KeepPorts), compiledTCP(d.PortDrops)
 	static, _ := tcpPolicy(p)
+	static = slices.DeleteFunc(static, func(t tcpTarget) bool { return !t.whole })
 	return func(a netip.Addr, admitted bool) tcpWithdrawal {
 		early := deny.at(a)
 		if targetsMatch(d.DenyAddrs, d.DenyPrefixes, nil, a, 0) {
@@ -272,7 +288,7 @@ func (d EstablishedDrops) snapshotTCP(p *policy.NetworkPolicy) func(netip.Addr, 
 	}
 }
 
-func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow, deny, wide tcpTargets, priorDNS, leases map[netip.Addr]time.Time) exactTCP {
+func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow, deny tcpTargets, priorDNS, leases map[netip.Addr]time.Time) exactTCP {
 	reclassify := func(a netip.Addr, prev tcpWithdrawal) tcpWithdrawal {
 		blocked := prev.explicit.union(prev.implicit)
 		early := blocked.intersect(deny.at(a))
@@ -286,8 +302,8 @@ func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow
 	for a, prev := range d.exact {
 		out[a] = reclassify(a, prev)
 	}
-	// A former broad deny can become an exact withdrawal on this reload.
-	// Snapshot those hosts too, unless an older broad rule still covers them.
+	// Record a newly named exact host even if a broader rule already drops
+	// its ports. That rule may not survive the next ordinary reload.
 	var snapshot func(netip.Addr, bool) tcpWithdrawal
 	for _, cur := range deny {
 		if !cur.prefix.IsSingleIP() {
@@ -302,7 +318,7 @@ func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow
 		}
 		_, admitted := priorDNS[a]
 		next := reclassify(a, snapshot(a, admitted))
-		if len(next.explicit) == 0 || len(next.implicit) == 0 && len(next.explicit.subtract(wide.at(a))) == 0 {
+		if len(next.explicit)+len(next.implicit) == 0 {
 			continue
 		}
 		out[a] = next
@@ -369,8 +385,18 @@ func (d EstablishedDrops) carryExplicitTCP(current tcpTargets, retainedWhole []n
 	return out
 }
 
-func writeExactTCP(b *strings.Builder, d exactTCP, explicit bool) {
-	if len(d) == 0 {
+// A tracked host needs a TCP remainder accept only if a legacy late drop
+// could still catch it. Track the host even when this rule is unnecessary.
+func (d EstablishedDrops) needsTCPRemainder(addr netip.Addr) bool {
+	if targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, addr, 0) {
+		return false
+	}
+	return d.CatchAll || targetsMatch(d.Addrs, d.Prefixes, nil, addr, 0) ||
+		slices.ContainsFunc(d.PortDrops, func(drop EstablishedPortDrop) bool { return portDropCoversAddr(drop, addr) })
+}
+
+func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool, covered tcpTargets) {
+	if len(d.exact) == 0 {
 		return
 	}
 	// Hash normalized content (not the slice identity); verify equality before
@@ -387,14 +413,23 @@ func writeExactTCP(b *strings.Builder, d exactTCP, explicit bool) {
 	var rules []group
 	var tracked [2][]netip.Addr
 	seed := maphash.MakeSeed()
-	for a, host := range d {
+	for a, host := range d.exact {
 		spans := host.implicit
 		if explicit {
 			spans = host.explicit
-		} else if a.Is4() {
-			tracked[0] = append(tracked[0], a)
-		} else {
-			tracked[1] = append(tracked[1], a)
+			// Suppress only rules already emitted at this priority. The
+			// saved per-host withdrawal must outlive their coverage.
+			for _, rule := range covered {
+				if !rule.prefix.IsValid() || rule.prefix.Contains(a) {
+					spans = spans.subtract(rule.spans)
+				}
+			}
+		} else if d.needsTCPRemainder(a) {
+			if a.Is4() {
+				tracked[0] = append(tracked[0], a)
+			} else {
+				tracked[1] = append(tracked[1], a)
+			}
 		}
 		if len(spans) == 0 {
 			continue

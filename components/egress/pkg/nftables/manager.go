@@ -649,14 +649,21 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
 	if drops.exactCarried {
-		writeExactTCP(&b, drops.exact, true)
+		covered := compiledTCP(drops.DenyPortDrops)
+		for _, addr := range drops.DenyAddrs {
+			covered = append(covered, tcpTarget{prefix: hostPrefix(addr), spans: allTCP})
+		}
+		for _, prefix := range drops.DenyPrefixes {
+			covered = append(covered, tcpTarget{prefix: prefix, spans: allTCP})
+		}
+		drops.writeExactTCP(&b, true, covered)
 	}
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
 	if drops.exactCarried {
-		writeExactTCP(&b, drops.exact, false)
+		drops.writeExactTCP(&b, false, nil)
 	}
 	// Then still-allowed destinations (keeps and the static allow sets), then
 	// removed allows, then the blanket verdict.

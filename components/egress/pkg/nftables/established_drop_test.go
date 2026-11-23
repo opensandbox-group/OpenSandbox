@@ -654,6 +654,7 @@ func TestApplyStatic_CarriedCIDRDenyDoesNotAccumulateRedundantHosts(t *testing.T
 		script := (*scripts)[len(*scripts)-1]
 		beforeDNS := script[:ruleIndex(t, script, "ip daddr @dyn_allow_v4 ct state established,related accept")]
 		require.Equal(t, 1, strings.Count(beforeDNS, "tcp dport {"))
+		require.NotContains(t, script, "meta l4proto tcp ct state established,related accept", "no late legacy drop needs a remainder accept")
 	}
 }
 
