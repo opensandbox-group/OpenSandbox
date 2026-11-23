@@ -393,6 +393,8 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 				<-semaphore
 				wg.Done()
 			}()
+			// This sender-side snapshot check can race with Pod replacement; closing
+			// that window requires owner fencing in the task-executor.
 			if node.IP != "" && !node.IsResourceReleased() && !sch.assignedPodExists(node) {
 				sch.releaseMissingPod(node)
 			}
