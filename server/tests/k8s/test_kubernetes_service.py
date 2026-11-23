@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import json
 import threading
 import time
@@ -3260,6 +3261,7 @@ class TestPatchSandboxMetadata:
         return {
             "metadata": {
                 "name": "sandbox-sbx-001",
+                "resourceVersion": "7",
                 "labels": dict(labels),
                 "creationTimestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
             },
@@ -3388,9 +3390,12 @@ class TestMetadataPodLabelSync:
         # generation bump that could restart a failed pause).
         assert custom_api.patch_namespaced_custom_object.call_count == 2
         assert custom_api.patch_namespaced_custom_object.call_args.kwargs["body"] == {
-            "metadata": {"annotations": {
-                POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(selected, sort_keys=True),
-            }},
+            "metadata": {
+                "resourceVersion": "7",
+                "annotations": {
+                    POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(selected, sort_keys=True),
+                },
+            },
         }
 
     def test_metadata_patch_after_failed_pause_never_mutates_spec(self, metadata_runtime):
@@ -3427,6 +3432,76 @@ class TestMetadataPodLabelSync:
             "example.com/phase": "run",
             "network.example.com/old": None,
         }
+
+    def test_metadata_patch_rereads_recreation_overrides_on_conflict(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, pod_request, workload = metadata_runtime
+        # Another PATCH stored its override after this one read the annotation.
+        current = copy.deepcopy(workload)
+        current["metadata"]["resourceVersion"] = "8"
+        current["metadata"]["annotations"] = {
+            POD_LABEL_OVERRIDES_ANNOTATION: json.dumps({"unrelated": "changed"}),
+        }
+        custom_api.patch_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=409, reason="Conflict"),
+            current,
+        ]
+        custom_api.get_namespaced_custom_object.side_effect = [workload, current]
+
+        with patch.object(
+            service.k8s_client, "get_custom_object", wraps=service.k8s_client.get_custom_object
+        ) as get_object:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        stale, fresh = custom_api.patch_namespaced_custom_object.call_args_list[1:]
+        assert stale.kwargs["body"]["metadata"]["resourceVersion"] == "7"
+        body = fresh.kwargs["body"]
+        assert body["metadata"]["resourceVersion"] == "8"
+        assert json.loads(body["metadata"]["annotations"][POD_LABEL_OVERRIDES_ANNOTATION]) == {
+            "example.com/phase": "run", "unrelated": "changed",
+        }
+        # The informer may not have seen the write that caused the conflict.
+        assert get_object.call_args.kwargs["use_cache"] is False
+        pod_request.assert_called_once()
+
+    def test_metadata_patch_stops_after_repeated_override_conflicts(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import (
+            POD_LABEL_OVERRIDES_WRITE_ATTEMPTS,
+        )
+
+        service, custom_api, pod_request, workload = metadata_runtime
+        custom_api.patch_namespaced_custom_object.side_effect = [workload] + [
+            ApiException(status=409, reason="Conflict")
+        ] * POD_LABEL_OVERRIDES_WRITE_ATTEMPTS
+
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        assert exc.value.status_code == 500
+        assert custom_api.patch_namespaced_custom_object.call_count == (
+            1 + POD_LABEL_OVERRIDES_WRITE_ATTEMPTS
+        )
+        pod_request.assert_not_called()
+
+    def test_metadata_patch_stops_when_sandbox_disappears_during_conflict(self, metadata_runtime):
+        service, custom_api, pod_request, workload = metadata_runtime
+        custom_api.patch_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=409, reason="Conflict"),
+        ]
+        custom_api.get_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=404, reason="Not Found"),
+        ]
+
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        assert exc.value.status_code == 500
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        pod_request.assert_not_called()
 
     @pytest.mark.parametrize("mode", ["disabled", "empty", "pool"])
     def test_metadata_patch_skips_pod_sync(self, metadata_runtime, mode):

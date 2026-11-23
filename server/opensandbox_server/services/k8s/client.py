@@ -213,17 +213,20 @@ class K8sClient:
         namespace: str,
         plural: str,
         name: str,
+        *,
+        use_cache: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """Get a namespaced custom resource by name.
 
-        Tries the informer cache first when available and synced.
-        Returns None on 404.
+        Tries the informer cache first when available and synced, unless
+        ``use_cache`` is False. Returns None on 404.
         """
-        informer = self._get_informer(group, version, plural, namespace)
-        if informer:
-            cached = informer.get_if_synced(name)
-            if cached is not None:
-                return cached
+        if use_cache:
+            informer = self._get_informer(group, version, plural, namespace)
+            if informer:
+                cached = informer.get_if_synced(name)
+                if cached is not None:
+                    return cached
 
         if self._read_limiter:
             self._read_limiter.acquire()
