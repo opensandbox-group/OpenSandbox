@@ -1,0 +1,189 @@
+<!--
+Copyright 2026 The OpenSandbox Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<!DOCTYPE html>
+<html lang="zh" data-lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR {{N}} Review · {{title}}</title>
+<!--
+  opensandbox-pr-review report skeleton.
+  Fill every {{placeholder}}. Keep sections 1–3 and their order. Keep ONE value-card
+  block and delete the other two, then delete the rows that do not apply. Keep the
+  collapsed evidence section only when a card row or a finding depends on it.
+  Length limits: a card row is at most 2 lines, a finding at most 2 lines, and the
+  default-language view fits in about two screens before the verification log.
+-->
+<style>
+  :root { --bg:#fff; --fg:#1f2328; --muted:#656d76; --border:#d0d7de; --soft:#f6f8fa; --code:#eff1f3;
+    --accent:#0969da; --pass:#1a7f37; --pass-bg:#dafbe1; --part:#9a6700; --part-bg:#fff8c5;
+    --info:#0550ae; --info-bg:#ddf4ff; --warn:#9a6700; --warn-bg:#fff8c5;
+    --verdict-bg:#dafbe1; --verdict-bd:#2da44e; --hl-bg:#ddf4ff; --hl-bd:#54aeff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8d96a0; --border:#30363d; --soft:#161b22; --code:#21262d;
+    --accent:#58a6ff; --pass:#3fb950; --pass-bg:#12261e; --part:#d29922; --part-bg:#2b2111;
+    --info:#58a6ff; --info-bg:#0c2d6b; --warn:#d29922; --warn-bg:#2b2111;
+    --verdict-bg:#12261e; --verdict-bd:#238636; --hl-bg:#0c2d6b; --hl-bd:#58a6ff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",Helvetica,Arial,sans-serif; }
+  main { max-width:1040px; margin:0 auto; padding:24px 20px 60px; }
+  .top { display:flex; flex-wrap:wrap; gap:12px; justify-content:space-between; align-items:flex-start; }
+  h1 { font-size:22px; margin:0 0 6px; }
+  .meta { color:var(--muted); font-size:13px; }
+  .toggle { display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  .toggle button { background:var(--bg); color:var(--fg); border:0; padding:6px 12px; cursor:pointer; font-size:13px; }
+  .toggle button.on { background:var(--accent); color:#fff; }
+  .verdict { margin:16px 0 22px; padding:12px 16px; border-radius:8px; border:1px solid var(--verdict-bd); background:var(--verdict-bg); }
+  section { margin:26px 0; }
+  h2 { font-size:17px; margin:0 0 10px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+  ul { margin:0; padding-left:22px; }
+  li { margin:4px 0; }
+  code, pre { font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  code { background:var(--code); padding:1px 5px; border-radius:4px; }
+  pre { background:var(--code); padding:10px 12px; border-radius:6px; overflow-x:auto; }
+  pre code { background:none; padding:0; }
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  th, td { border:1px solid var(--border); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  .badge { display:inline-block; font-size:11.5px; font-weight:600; padding:1px 7px; border-radius:10px; margin-right:4px; white-space:nowrap; }
+  .b-pass { color:var(--pass); background:var(--pass-bg); }
+  .b-part { color:var(--part); background:var(--part-bg); }
+  .b-info { color:var(--info); background:var(--info-bg); }
+  .b-warn { color:var(--warn); background:var(--warn-bg); }
+  .card { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:1px; background:var(--hl-bd);
+    border:1px solid var(--hl-bd); border-radius:8px; overflow:hidden; margin:0 0 12px; }
+  .cell { background:var(--hl-bg); padding:10px 14px; }
+  .cell .label { color:var(--muted); font-size:12.5px; font-weight:600; margin-bottom:2px; }
+  details { border:1px solid var(--border); border-radius:8px; padding:8px 14px; }
+  summary { cursor:pointer; font-weight:600; }
+  html[data-lang="zh"] .en, html[data-lang="en"] .zh { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="top">
+    <div>
+      <h1><span class="zh">PR #{{N}} 评审报告</span><span class="en">PR #{{N}} Review</span></h1>
+      <div class="meta">
+        <code>{{title}}</code><br>
+        <span class="zh">{{author}} · <code>{{head branch}}</code> → <code>{{base}}</code> · {{c}} commits · {{f}} files · +{{a}} / −{{d}} · 评审区间 <code>{{base sha}}..{{head sha}}</code> · 方法：{{OCR + 人工核对 + worktree 复跑}}</span>
+        <span class="en">{{author}} · <code>{{head branch}}</code> → <code>{{base}}</code> · {{c}} commits · {{f}} files · +{{a}} / −{{d}} · review range <code>{{base sha}}..{{head sha}}</code> · method: {{OCR + manual verification + worktree runs}}</span>
+      </div>
+    </div>
+    <div class="toggle" role="group" aria-label="language">
+      <button type="button" id="btn-zh" class="on">中文</button><button type="button" id="btn-en">English</button>
+    </div>
+  </div>
+  <div class="verdict">
+    <strong><span class="zh">{{✅ 推荐合入}}</span><span class="en">{{✅ Recommend merging}}</span></strong>
+    <div><span class="zh">{{one-line reason}} · {{merge condition, if any}}</span><span class="en">{{one-line reason}} · {{merge condition, if any}}</span></div>
+  </div>
+</header>
+
+<section>
+  <h2><span class="zh">1. 变更内容（{{bugfix}}）</span><span class="en">1. What changed ({{bugfix}})</span></h2>
+
+  <!-- VALUE CARD: keep ONE of the three blocks below, delete the other two -->
+
+  <!-- bugfix card -->
+  <div class="card">
+    <div class="cell"><div class="label"><span class="zh">修复的问题</span><span class="en">Problem fixed</span></div>
+      <span class="zh">{{≤2 行：什么坏了、对谁、什么现象}}</span><span class="en">{{≤2 lines: what breaks, for whom, how it shows}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">问题是否成立</span><span class="en">Is it real</span></div>
+      <span class="badge b-pass">✓</span><span class="zh">{{决定性证据，如「TestX 在 base 失败：expected 200, actual 206」}}</span><span class="en">{{decisive evidence, e.g. "TestX fails on base: expected 200, actual 206"}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">修复方式</span><span class="en">Fix</span></div>
+      <span class="zh">{{机制 + file:line}}</span><span class="en">{{mechanism + file:line}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">引入的成本</span><span class="en">Cost</span></div>
+      <span class="zh">性能 {{✓/⚠ 一句}} · 兼容 {{✓/⚠ 一句}} · 复杂度 {{✓/⚠ 一句}}</span><span class="en">Performance {{✓/⚠ one clause}} · Compatibility {{✓/⚠ one clause}} · Complexity {{✓/⚠ one clause}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">测试覆盖</span><span class="en">Test coverage</span></div>
+      <span class="badge b-pass">✓</span><span class="zh">{{哪些改动路径被钉住、回归是否在 base 失败、新分支实测覆盖}}</span><span class="en">{{which changed paths are pinned, does the regression fail on base, measured coverage of new branches}}</span></div>
+  </div>
+
+  <!-- feature card -->
+  <div class="card">
+    <div class="cell"><div class="label"><span class="zh">新增或变更的公开面</span><span class="en">Public surface added or changed</span></div>
+      <span class="zh">{{逐项：配置键 / flag / env / Helm value / API 字段 / operationId + 类型 + 默认值}}</span><span class="en">{{one per item: config key / flag / env / Helm value / API field / operationId + type + default}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">默认值与兼容性</span><span class="en">Defaults and compatibility</span></div>
+      <span class="zh">{{additive 还是 breaking；不设置新项时旧行为是否保留}}</span><span class="en">{{additive or breaking; is the old behavior kept when unset?}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">契约同步</span><span class="en">Contract sync</span></div>
+      <span class="zh">spec {{✓/✗}} · docs {{✓/✗}} · SDK {{✓/✗}} · CLI / examples {{✓/✗}}，各带 file ref</span><span class="en">spec {{✓/✗}} · docs {{✓/✗}} · SDK {{✓/✗}} · CLI / examples {{✓/✗}}, each with a file ref</span></div>
+    <div class="cell"><div class="label"><span class="zh">测试覆盖</span><span class="en">Test coverage</span></div>
+      <span class="badge b-pass">✓</span><span class="zh">{{每个新项及其默认值是否有测试；生成物是否校验}}</span><span class="en">{{is each new item and its default tested; is generated output verified}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">迁移</span><span class="en">Migration</span></div>
+      <span class="zh">{{可选：升级路径}}</span><span class="en">{{optional: upgrade path}}</span></div>
+  </div>
+
+  <!-- other card (refactor / perf / docs / test / chore) -->
+  <div class="card">
+    <div class="cell"><div class="label"><span class="zh">目的</span><span class="en">Purpose</span></div>
+      <span class="zh">{{为什么做}}</span><span class="en">{{why}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">影响面</span><span class="en">Impact</span></div>
+      <span class="zh">{{哪些模块 / 行为受影响}}</span><span class="en">{{which modules / behaviors are affected}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">风险</span><span class="en">Risk</span></div>
+      <span class="zh">{{✓/⚠ 一句}}</span><span class="en">{{✓/⚠ one clause}}</span></div>
+    <div class="cell"><div class="label"><span class="zh">测试覆盖</span><span class="en">Test coverage</span></div>
+      <span class="zh">{{行为有变化时填写}}</span><span class="en">{{fill in when behavior changed}}</span></div>
+  </div>
+
+  <ul>
+    <!-- at most 5 bullets: what was done and where -->
+    <li><code>{{path:line}}</code> — <span class="zh">{{做了什么}}</span><span class="en">{{what was done}}</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="zh">2. 发现</span><span class="en">2. Findings</span></h2>
+  <ul>
+    <!-- most severe first; at most 2 lines each; write "无" when there is nothing to report -->
+    <li><span class="badge b-low">LOW</span><code>{{path:line}}</code> <span class="zh">{{现象 → 建议}}（{{本次引入 / 基线已有}}）</span><span class="en">{{issue → suggestion}} ({{introduced by this PR / pre-existing}})</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="zh">3. 验证记录</span><span class="en">3. Verification log</span></h2>
+  <table>
+    <tr><th><span class="zh">检查</span><span class="en">Check</span></th><th><span class="zh">位置</span><span class="en">Where</span></th><th><span class="zh">结果</span><span class="en">Result</span></th></tr>
+    <tr><td><code>{{go test ...}}</code></td><td><span class="zh">{{PR head}}</span><span class="en">{{PR head}}</span></td><td><span class="badge b-pass">PASS</span></td></tr>
+    <!-- one row per check; an unrun item gets <span class="badge b-warn">⚠</span> plus the author's claim -->
+  </table>
+</section>
+
+<section>
+  <details>
+    <summary><span class="zh">4. 证据（按需展开）</span><span class="en">4. Evidence (expand)</span></summary>
+    <ul>
+      <li><span class="zh">{{base 复现输出 / 机制追踪 / 边界与并发推理，仅保留卡片行或发现所依赖的部分}}</span><span class="en">{{base reproduction output / mechanism trace / edge-case and concurrency reasoning — only what a card row or a finding depends on}}</span></li>
+    </ul>
+    <pre><code>{{command output}}</code></pre>
+  </details>
+</section>
+</main>
+<script>
+  (function () {
+    var root = document.documentElement, bz = document.getElementById('btn-zh'), be = document.getElementById('btn-en');
+    function setLang(lang) {
+      root.setAttribute('data-lang', lang); root.setAttribute('lang', lang);
+      bz.classList.toggle('on', lang === 'zh'); be.classList.toggle('on', lang === 'en');
+      try { localStorage.setItem('pr-review-lang', lang); } catch (e) {}
+    }
+    var saved = null; try { saved = localStorage.getItem('pr-review-lang'); } catch (e) {}
+    setLang(saved === 'en' ? 'en' : 'zh');
+    bz.addEventListener('click', function () { setLang('zh'); });
+    be.addEventListener('click', function () { setLang('en'); });
+  })();
+</script>
+</body>
+</html>
