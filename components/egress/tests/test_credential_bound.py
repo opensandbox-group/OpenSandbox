@@ -114,7 +114,7 @@ class _Headers:
             value for key, value in self._values.items() if key.lower() == name.lower()
         ]
 
-    def items(self) -> list[tuple[str, str]]:
+    def items(self, multi: bool = False) -> list[tuple[str, str]]:
         return list(self._values.items())
 
     def __setitem__(self, name: str, value: str) -> None:
@@ -456,6 +456,31 @@ class CredentialBoundRequestTest(unittest.TestCase):
         self.system.tls_clienthello(data)
         self.assertFalse(conn.closed)
         return _Flow(client_conn=conn, host=host)
+
+    def test_exchange_sidecar_awaits_resolve_with_pinned_snapshot(self) -> None:
+        from urllib.parse import parse_qs, urlsplit
+        item = _binding("exchange", "api.example.com", "")
+        item.update(headers=[], substitutions=[], exchange={"credential": "spi-signer"})
+        payload = _decision_payload([item], [], 2)
+        revision = _revision(payload, 2, 2)
+        self.receiver.prepare(revision, payload)
+        self.receiver.commit(revision)
+        flow = self._admitted_flow()
+        calls = []
+        def resolve(socket, timeout, path, payload):
+            calls.append(path)
+            admission = json.loads(parse_qs(urlsplit(path).query)["admission"][0])
+            self.assertEqual(admission["subjectKey"], "")
+            self.assertEqual(admission["revision"]["digest"], revision.digest)
+            return dict(revision=2, binding="exchange", headers=[dict(name="Authorization", value="resolved")],
+                        redactions=["resolved"], suppressHeaders=["authorization"])
+        with mock.patch.object(self.system, "_resolve_exchange_http", side_effect=resolve), \
+                mock.patch.object(self.system, "_flow_client_ip", side_effect=AssertionError("IP lookup")):
+            self.system.requestheaders(flow)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(flow.request.headers.get("Authorization"), "resolved")
+        self.system.response(flow)
+        self.assertEqual(self.runtime.registry.request_count, 0)
 
     def test_authorized_request_receives_credential(self) -> None:
         flow = self._admitted_flow()

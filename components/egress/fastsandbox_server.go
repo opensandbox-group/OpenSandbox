@@ -454,6 +454,20 @@ func (s *fastSandboxPolicyServer) withVaultAccess(
 // never a protocol value). Runs again at recheck; failure there is a scoped
 // invalidation of the in-flight resolution.
 func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	admission, err := credentialvault.ReadResolveAdmission(r)
+	if err != nil {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusBadRequest, Reason: "invalid resolve admission"}
+	}
+	if admission != nil {
+		return s.resolveAdmittedVaultAccess(*admission)
+	}
+	s.mu.Lock()
+	live := s.subjectDrain != nil && s.subjectDrain.current != nil && s.subjectDrain.current.handoff.TLSAdmission
+	s.mu.Unlock()
+	if live {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusBadRequest, Reason: "resolve admission required"}
+	}
+
 	raw := strings.TrimSpace(r.URL.Query().Get("clientIp"))
 	if raw == "" {
 		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
@@ -481,6 +495,29 @@ func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentia
 		}
 	}
 	return credentialvault.ResolveAccess{SandboxID: result.sandboxID, Store: result.store}, nil
+}
+
+// resolveAdmittedVaultAccess never consults source-IP dispatch. Capture and
+// recheck both require the exact acknowledged identity and current authority.
+func (s *fastSandboxPolicyServer) resolveAdmittedVaultAccess(admission credentialvault.ResolveAdmission) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	subj := subject.Subject(admission.SubjectKey)
+	fence, registered := s.reg.Fence(subj)
+	denied := &credentialvault.ResolveAccessError{Status: http.StatusConflict, Reason: "resolution invalidated"}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.subjectDrain
+	if !registered || d == nil || !s.fenceMatchesLocked(subj, fence) || s.subjectRebindingLocked(subj) ||
+		s.vaultSealedLocked(subj) || !s.subjectSnapshotAcknowledgedLocked(subj, fence) ||
+		d.acked[subj].identity != admission.Revision ||
+		mustSubjectTarget(subj, fence).SubjectGeneration != admission.Revision.SubjectGeneration {
+		return credentialvault.ResolveAccess{}, denied
+	}
+	sandboxID := s.subjSandbox[subj]
+	entry := s.vaults[subj]
+	if sandboxID == "" || entry.store == nil {
+		return credentialvault.ResolveAccess{}, denied
+	}
+	return credentialvault.ResolveAccess{SandboxID: sandboxID, Store: entry.store, ExpectedRevision: &admission.Revision.VaultRevision}, nil
 }
 
 // applyPolicy applies a policy to a subject. Ordering: nft FIRST, registry

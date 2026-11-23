@@ -166,13 +166,37 @@ class DecisionSnapshotTest(unittest.TestCase):
             mutate(candidate)
             self.assert_rejected(candidate)
 
-    def test_rejects_exchange_marker_from_newer_egress(self):
-        """Version-skew gate: snapshots carrying OSEP-0025 exchange markers
-        must fail closed on this (unextended) validator."""
+    def test_rejects_exchange_marker_with_rendered_content(self):
+        """Markers and rendered credential content must never coexist."""
         candidate = self.active()
         candidate["fullRenderedBindings"][0]["exchange"] = {
             "credential": "spi-signer"
         }
+        self.assert_rejected(candidate)
+
+    def test_accepts_canonical_exchange_and_derives_tls_hosts(self):
+        candidate = self.active()
+        item = candidate["fullRenderedBindings"][0]
+        item.update(exchange={"credential": "spi-signer"}, headers=[], substitutions=[])
+        candidate["redactions"] = []
+        snapshot = self.snapshot(candidate)
+        self.assertIsNone(decision.validate(snapshot))
+        load("static_passthrough")
+        tls = load("tls_decision")
+        view = tls.compile_view(snapshot)
+        self.assertEqual([selector.text for selector in view.selectors],
+                         ["*.example.com", "api.example.com"])
+        for marker in (None, {}, {"credential": ""}, {"credential": " x"},
+                       {"credential": "x", "endpoint": "secret"}):
+            item["exchange"] = marker
+            self.assert_rejected(candidate)
+        item["exchange"] = {"credential": "spi-signer"}
+        for field, value in (("headers", None), ("substitutions", None),
+                             ("substitutions", [{"placeholder": "p", "value": "", "in": ["header"]}])):
+            item[field] = value
+            self.assert_rejected(candidate)
+            item[field] = []
+        del item["substitutions"]
         self.assert_rejected(candidate)
 
     def test_accepts_empty_substitution_and_legacy_empty_wildcard_language(self):
