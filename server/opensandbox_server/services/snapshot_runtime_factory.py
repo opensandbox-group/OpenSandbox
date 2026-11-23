@@ -211,7 +211,10 @@ def create_snapshot_runtime(
             timeout_seconds=kubernetes_config.fastpath_timeout_seconds,
             auth_enabled=kubernetes_config.fastpath_auth_enabled,
             token_source=(
-                TokenSource(lambda: k8s_client.get_core_v1_api())
+                TokenSource(
+                    lambda: k8s_client.get_core_v1_api(),
+                    in_cluster=not bool(kubernetes_config.kubeconfig_path),
+                )
                 if kubernetes_config.fastpath_auth_enabled
                 else None
             ),

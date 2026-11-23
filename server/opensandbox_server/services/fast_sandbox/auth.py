@@ -34,16 +34,17 @@ _INCLUSTER_NAMESPACE_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/
 logger = logging.getLogger(__name__)
 
 
-def resolve_auth_namespace() -> str:
+def resolve_auth_namespace(*, in_cluster: bool = True) -> str:
     env_ns = os.getenv("POD_NAMESPACE", "").strip()
     if env_ns:
         return env_ns
-    try:
-        file_ns = _INCLUSTER_NAMESPACE_PATH.read_text(encoding="utf-8").strip()
-        if file_ns:
-            return file_ns
-    except OSError:
-        pass
+    if in_cluster:
+        try:
+            file_ns = _INCLUSTER_NAMESPACE_PATH.read_text(encoding="utf-8").strip()
+            if file_ns:
+                return file_ns
+        except OSError:
+            pass
     return DEFAULT_AUTH_NAMESPACE
 
 
@@ -53,9 +54,13 @@ class TokenSource:
         api: Callable,
         namespace: Optional[str] = None,
         service_account: str = DEFAULT_SERVER_CALLER_SA,
+        *,
+        in_cluster: bool = True,
     ):
         resolved_namespace = (
-            resolve_auth_namespace() if namespace is None else namespace.strip()
+            resolve_auth_namespace(in_cluster=in_cluster)
+            if namespace is None
+            else namespace.strip()
         )
         if not resolved_namespace or not service_account:
             raise ValueError("FastPath caller namespace and ServiceAccount are required")

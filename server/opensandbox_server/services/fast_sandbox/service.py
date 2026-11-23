@@ -146,7 +146,10 @@ class FastSandboxService(SandboxService, ExtensionService):
             timeout_seconds=self._k8s.fastpath_timeout_seconds,
             auth_enabled=self._k8s.fastpath_auth_enabled,
             token_source=(
-                TokenSource(lambda: self._kubernetes_client().get_core_v1_api())
+                TokenSource(
+                    lambda: self._kubernetes_client().get_core_v1_api(),
+                    in_cluster=not bool(self._k8s.kubeconfig_path),
+                )
                 if self._k8s.fastpath_auth_enabled
                 else None
             ),
