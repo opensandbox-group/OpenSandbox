@@ -106,8 +106,12 @@ func (s *fastPathTokenSource) GetRequestMetadata(ctx context.Context, _ ...strin
 		s.mu.Lock()
 		now := s.now()
 		valid := s.token != "" && now.Before(s.expires.Add(-5*time.Second))
-		if valid && (now.Before(s.refresh) || now.Before(s.retry)) {
+		if valid {
 			token := s.token
+			if !now.Before(s.refresh) && !now.Before(s.retry) && s.flight == nil {
+				s.flight = make(chan struct{})
+				go s.mint(s.flight)
+			}
 			s.mu.Unlock()
 			return map[string]string{"authorization": "Bearer " + token}, nil
 		}

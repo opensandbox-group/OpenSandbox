@@ -92,7 +92,9 @@ func TestFastPathCredentialSingleFlightAndExpiry(t *testing.T) {
 	fail = true
 	_, err := source.GetRequestMetadata(t.Context())
 	require.NoError(t, err)
-	require.EqualValues(t, 2, count.Load())
+	require.Eventually(t, func() bool {
+		return count.Load() == 2
+	}, time.Second, 5*time.Millisecond)
 	now = source.expires.Add(time.Second)
 	_, err = source.GetRequestMetadata(t.Context())
 	require.ErrorContains(t, err, "TokenRequest unavailable")
@@ -100,6 +102,37 @@ func TestFastPathCredentialSingleFlightAndExpiry(t *testing.T) {
 	_, err = source.GetRequestMetadata(t.Context())
 	require.Error(t, err)
 	require.EqualValues(t, 3, count.Load())
+}
+
+func TestFastPathCredentialServesValidTokenWhileRefreshIsSlow(t *testing.T) {
+	now := time.Now()
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var calls atomic.Int32
+	source := &fastPathTokenSource{now: func() time.Time { return now }, create: func(context.Context) (*authenticationv1.TokenRequest, error) {
+		if calls.Add(1) == 1 {
+			return &authenticationv1.TokenRequest{Status: authenticationv1.TokenRequestStatus{Token: "first", ExpirationTimestamp: metav1.NewTime(now.Add(time.Hour))}}, nil
+		}
+		close(refreshStarted)
+		<-releaseRefresh
+		return &authenticationv1.TokenRequest{Status: authenticationv1.TokenRequestStatus{Token: "second", ExpirationTimestamp: metav1.NewTime(now.Add(2 * time.Hour))}}, nil
+	}}
+	md, err := source.GetRequestMetadata(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "Bearer first", md["authorization"])
+
+	now = source.refresh.Add(time.Second)
+	shortCtx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	md, err = source.GetRequestMetadata(shortCtx)
+	require.NoError(t, err)
+	require.Equal(t, "Bearer first", md["authorization"])
+	<-refreshStarted
+	close(releaseRefresh)
+	require.Eventually(t, func() bool {
+		md, err := source.GetRequestMetadata(t.Context())
+		return err == nil && md["authorization"] == "Bearer second"
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestFastPathTokenSourceRejectsInsecureBootstrap(t *testing.T) {

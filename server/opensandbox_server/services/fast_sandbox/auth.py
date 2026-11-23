@@ -20,7 +20,7 @@ from pathlib import Path
 import random
 import time
 from collections import namedtuple
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Callable, Optional
 
 import grpc
@@ -73,35 +73,60 @@ class TokenSource:
         self._refresh = 0.0
         self._retry = 0.0
         self._backoff = 1.0
+        self._flight: Optional[Event] = None
         self._now = time.time
 
     def token(self) -> str:
+        while True:
+            with self._lock:
+                now = self._now()
+                valid = bool(self._token) and now < self._expires - 5
+                if valid:
+                    token = self._token
+                    if now >= self._refresh and now >= self._retry and self._flight is None:
+                        flight = Event()
+                        self._flight = flight
+                        Thread(target=self._mint, args=(flight,), daemon=True).start()
+                    return token
+                if now < self._retry:
+                    raise RuntimeError(
+                        "FastPath TokenRequest failed; check Kubernetes credentials and token-minting RBAC"
+                    )
+                if self._flight is None:
+                    flight = Event()
+                    self._flight = flight
+                    Thread(target=self._mint, args=(flight,), daemon=True).start()
+                else:
+                    flight = self._flight
+            flight.wait()
+
+    def _mint(self, done: Event) -> None:
+        issued = None
+        exc_caught: Optional[Exception] = None
+        try:
+            api = self._api()
+            configuration = api.api_client.configuration
+            if configuration.verify_ssl is not True or not configuration.host.startswith(
+                "https://"
+            ):
+                raise ValueError("FastPath TokenRequest requires verified Kubernetes API TLS")
+            issued = api.create_namespaced_service_account_token(
+                name=self._service_account,
+                namespace=self._namespace,
+                body=AuthenticationV1TokenRequest(
+                    spec=V1TokenRequestSpec(
+                        audiences=[AUDIENCE],
+                        expiration_seconds=3600,
+                    )
+                ),
+                _request_timeout=(3, 5),
+            )
+        except Exception as exc:
+            exc_caught = exc
         with self._lock:
-            now = self._now()
-            if self._token and now < min(self._refresh, self._expires - 5):
-                return self._token
-            if now < self._retry:
-                if self._token and now < self._expires - 5:
-                    return self._token
-                raise RuntimeError("FastPath TokenRequest retry pending; no usable credential")
             try:
-                api = self._api()
-                configuration = api.api_client.configuration
-                if configuration.verify_ssl is not True or not configuration.host.startswith(
-                    "https://"
-                ):
-                    raise ValueError("FastPath TokenRequest requires verified Kubernetes API TLS")
-                issued = api.create_namespaced_service_account_token(
-                    name=self._service_account,
-                    namespace=self._namespace,
-                    body=AuthenticationV1TokenRequest(
-                        spec=V1TokenRequestSpec(
-                            audiences=[AUDIENCE],
-                            expiration_seconds=3600,
-                        )
-                    ),
-                    _request_timeout=(3, 5),
-                )
+                if exc_caught is not None:
+                    raise exc_caught
                 now = self._now()
                 expires = issued.status.expiration_timestamp.timestamp()
                 if not issued.status.token or expires <= now + 5:
@@ -112,7 +137,6 @@ class TokenSource:
                 self._refresh = expires - margin * random.uniform(0.9, 1.0)
                 self._retry = 0
                 self._backoff = 1
-                return self._token
             except Exception as exc:
                 self._retry = self._now() + self._backoff
                 self._backoff = min(30, self._backoff * 2)
@@ -124,12 +148,9 @@ class TokenSource:
                     type(exc).__name__,
                     status,
                 )
-                if self._token and self._now() < self._expires - 5:
-                    return self._token
-                # Kubernetes error bodies can contain credentials; do not propagate them.
-                raise RuntimeError(
-                    "FastPath TokenRequest failed; check Kubernetes credentials and token-minting RBAC"
-                ) from None
+            finally:
+                self._flight = None
+                done.set()
 
 
 _CallDetails = namedtuple(

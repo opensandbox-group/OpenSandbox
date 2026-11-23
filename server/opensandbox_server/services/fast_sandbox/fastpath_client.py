@@ -117,6 +117,8 @@ class FastPathClient:
         self._timeout_seconds = timeout_seconds
         self._channel: Optional[grpc.Channel] = None
         self._stub: Optional[fastpath_pb2_grpc.FastPathServiceStub] = None
+        self._active_calls: dict[grpc.Channel, int] = {}
+        self._retired_channels: set[grpc.Channel] = set()
         self._connect_lock = Lock()
 
     def __enter__(self) -> "FastPathClient":
@@ -176,24 +178,34 @@ class FastPathClient:
                     grpc.secure_channel(self._endpoint, grpc.ssl_channel_credentials(roots), options=options),
                     CredentialInterceptor(self._token_source),
                 )
-                if self._channel is not None:
-                    # Do not retain connections authenticated by removed trust roots.
-                    self._channel.close()
+                old_channel = self._channel
                 self._stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
                 self._channel = channel
                 self._roots = roots
                 self._ca_stat = stat_key
+                if old_channel is not None and old_channel is not channel:
+                    # Retire connections authenticated by removed trust roots once in-flight RPCs drain.
+                    if self._active_calls.get(old_channel, 0) > 0:
+                        self._retired_channels.add(old_channel)
+                    else:
+                        self._active_calls.pop(old_channel, None)
+                        old_channel.close()
             else:
                 self._ca_stat = stat_key
 
     def close(self) -> None:
         with self._connect_lock:
+            to_close = list(self._retired_channels)
+            self._retired_channels.clear()
+            self._active_calls.clear()
             if self._channel is not None:
-                self._channel.close()
+                to_close.append(self._channel)
                 self._channel = None
                 self._stub = None
                 self._roots = None
                 self._ca_stat = None
+        for channel in to_close:
+            channel.close()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -509,17 +521,35 @@ class FastPathClient:
         return max(self._timeout_seconds, server_wait_millis / 1000 + 5.0)
 
     def _require_stub(self) -> fastpath_pb2_grpc.FastPathServiceStub:
-        if self._stub is None or self._channel is not None:
-            self.connect()
+        self.connect()
         if self._stub is None:  # pragma: no cover - connect() always sets it
             raise FastPathUnavailable("channel-not-open", "FastPath client is not connected")
         return self._stub
 
     def _call(self, call):
+        self.connect()
+        with self._connect_lock:
+            channel = self._channel
+            if channel is not None:
+                self._active_calls[channel] = self._active_calls.get(channel, 0) + 1
         try:
             return call()
         except grpc.RpcError as exc:
             raise _to_fastpath_error(exc) from exc
+        finally:
+            if channel is not None:
+                should_close = False
+                with self._connect_lock:
+                    remaining = self._active_calls.get(channel, 1) - 1
+                    if remaining <= 0:
+                        self._active_calls.pop(channel, None)
+                        if channel in self._retired_channels:
+                            self._retired_channels.discard(channel)
+                            should_close = True
+                    else:
+                        self._active_calls[channel] = remaining
+                if should_close:
+                    channel.close()
 
 
 def _to_fastpath_error(exc: grpc.RpcError) -> FastPathError:
@@ -536,6 +566,9 @@ def _to_fastpath_error(exc: grpc.RpcError) -> FastPathError:
         return FastPathFailedPrecondition(code.name, details)
     if code in (grpc.StatusCode.ALREADY_EXISTS, grpc.StatusCode.ABORTED):
         return FastPathConflict(code.name, details)
+    # Authentication/authorization rejections belong to the platform deployment
+    # identity (not the end-user API caller) and are surfaced as backend dependency
+    # unavailability until token refresh or policy rollout converges.
     if code in (
         grpc.StatusCode.UNAVAILABLE,
         grpc.StatusCode.DEADLINE_EXCEEDED,

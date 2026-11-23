@@ -27,7 +27,6 @@ import (
 	"github.com/alibaba/opensandbox/internal/version"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
-	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/activity"
@@ -95,10 +94,12 @@ func main() {
 		log.Panic(err)
 	}
 
-	// Parsing Kubernetes config registers global flags and must only happen once.
 	var kubeConfig *rest.Config
 	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled || flag.FastPathAuthEnabled {
-		kubeConfig = injection.ParseAndGetRESTConfigOrDie()
+		kubeConfig, err = flag.ClientConfig.GetRESTConfig()
+		if err != nil {
+			log.Panicf("Error loading Kubernetes client config: %v", err)
+		}
 	}
 	fastPathAuth := sandbox.FastPathAuthConfig{
 		Disabled:   !flag.FastPathAuthEnabled,

@@ -104,7 +104,8 @@ spec:
               mountPath: /etc/opensandbox/config.toml
               subPath: config.toml
               readOnly: true
-            {{- if .Values.server.fastpath.caConfigMap }}
+            {{- $serverFastpath := (.Values.server).fastpath | default dict }}
+            {{- if $serverFastpath.caConfigMap }}
             - name: fastpath-ca
               mountPath: /etc/opensandbox/fastpath-ca
               readOnly: true
@@ -132,10 +133,10 @@ spec:
         - name: config
           configMap:
             name: {{ include "opensandbox-server.fullname" . }}-config
-        {{- if .Values.server.fastpath.caConfigMap }}
+        {{- if $serverFastpath.caConfigMap }}
         - name: fastpath-ca
           configMap:
-            name: {{ .Values.server.fastpath.caConfigMap }}
+            name: {{ $serverFastpath.caConfigMap }}
             items:
               - key: ca.crt
                 path: ca.crt

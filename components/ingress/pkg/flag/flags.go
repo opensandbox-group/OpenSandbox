@@ -14,7 +14,11 @@
 
 package flag
 
-import "time"
+import (
+	"time"
+
+	"knative.dev/pkg/environment"
+)
 
 // Core server options.
 var (
@@ -27,6 +31,8 @@ var (
 
 	// Mode specifies the sandbox service discovery mode (header or uri).
 	Mode string
+
+	ClientConfig environment.ClientConfig
 )
 
 // Renew-intent publishing: ingress records observed traffic so the lifecycle

@@ -29,6 +29,8 @@ import (
 var deprecatedNamespace string
 
 func InitFlags() {
+	ClientConfig.InitFlags(flag.CommandLine)
+
 	// Core server options.
 	flag.StringVar(&LogLevel, "log-level", "info", "Server log level")
 	flag.IntVar(&Port, "port", 28888, "Server listening port")

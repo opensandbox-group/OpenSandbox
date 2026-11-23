@@ -1,6 +1,7 @@
-{{- if and .Values.fastSandbox.rbac.create .Values.fastSandbox.callerAuth.enabled }}
+{{- $callerAuth := (.Values.fastSandbox).callerAuth | default dict }}
+{{- if and (.Values.fastSandbox).rbac.create $callerAuth.enabled }}
 {{- $namespace := .Values.fastSandbox.namespaces.system }}
-{{- if .Values.fastSandbox.callerAuth.createServerServiceAccount }}
+{{- if $callerAuth.createServerServiceAccount }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -10,7 +11,7 @@ metadata:
 automountServiceAccountToken: false
 {{- end }}
 {{- $callers := list
-  (dict "serviceAccount" "opensandbox-server" "subjects" .Values.fastSandbox.callerAuth.externalServerSubjects)
+  (dict "serviceAccount" "opensandbox-server" "subjects" $callerAuth.externalServerSubjects)
   (dict "serviceAccount" "opensandbox-ingress-gateway" "subjects" (list))
 }}
 {{- range $caller := $callers }}

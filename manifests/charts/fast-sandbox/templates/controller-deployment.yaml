@@ -37,7 +37,8 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        {{- if .Values.fastpath.callerAuth.enabled }}
+        {{- $callerAuthEnabled := ((.Values.fastpath).callerAuth).enabled }}
+        {{- if $callerAuthEnabled }}
         checksum/fastpath-auth: {{ include (print $.Template.BasePath "/fastpath-auth.yaml") . | sha256sum }}
         {{- end }}
         {{- with .Values.controller.podAnnotations }}
@@ -56,7 +57,7 @@ spec:
         - --metrics-bind-address=:9091
         - --health-probe-bind-address=:5758
         - --fastpath-bind-address=:9090
-        {{- if .Values.fastpath.callerAuth.enabled }}
+        {{- if $callerAuthEnabled }}
         - --fastpath-auth-enabled=true
         - --fastpath-auth-policy-file=/etc/fast-sandbox/callers/callers.json
         - --fastpath-tls-cert-file=/etc/fast-sandbox/tls/tls.crt
@@ -131,7 +132,7 @@ spec:
         resources:
           {{- toYaml .Values.controller.resources | nindent 10 }}
         volumeMounts:
-        {{- if .Values.fastpath.callerAuth.enabled }}
+        {{- if $callerAuthEnabled }}
         - name: fastpath-callers
           mountPath: /etc/fast-sandbox/callers
           readOnly: true
@@ -159,7 +160,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
-      {{- if .Values.fastpath.callerAuth.enabled }}
+      {{- if $callerAuthEnabled }}
       - name: fastpath-callers
         configMap:
           name: fast-sandbox-fastpath-callers

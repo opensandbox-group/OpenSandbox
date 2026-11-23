@@ -1,6 +1,10 @@
-{{- if and .Values.controller.enabled .Values.fastpath.callerAuth.enabled }}
+{{- $fastpath := .Values.fastpath | default dict }}
+{{- $callerAuth := $fastpath.callerAuth | default dict }}
+{{- $tls := $fastpath.tls | default dict }}
+{{- $issuerRef := $tls.issuerRef | default dict }}
+{{- if and .Values.controller.enabled $callerAuth.enabled }}
 {{- $namespace := include "fast-sandbox.namespace" . }}
-{{- $scopes := .Values.fastpath.callerAuth.namespaces | default (list .Values.resourceNamespace) }}
+{{- $scopes := $callerAuth.namespaces | default (list .Values.resourceNamespace) }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -24,15 +28,15 @@ spec:
     rotationPolicy: Always
   usages: ["digital signature", "key encipherment", "server auth"]
   issuerRef:
-    name: {{ required "fastpath.tls.issuerRef.name must reference an existing cert-manager issuer" .Values.fastpath.tls.issuerRef.name }}
-    kind: {{ .Values.fastpath.tls.issuerRef.kind | default "ClusterIssuer" }}
+    name: {{ required "fastpath.tls.issuerRef.name must reference an existing cert-manager issuer" $issuerRef.name }}
+    kind: {{ $issuerRef.kind | default "ClusterIssuer" }}
     group: cert-manager.io
   dnsNames:
     - fast-sandbox-fastpath
     - fast-sandbox-fastpath.{{ $namespace }}
     - fast-sandbox-fastpath.{{ $namespace }}.svc
     - fast-sandbox-fastpath.{{ $namespace }}.svc.cluster.local
-    {{- with .Values.fastpath.tls.dnsNames }}
+    {{- with $tls.dnsNames }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 {{- end }}

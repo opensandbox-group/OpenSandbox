@@ -77,6 +77,8 @@ def test_token_exchange_rejects_insecure_bootstrap(host, verify_ssl):
 
 
 def test_token_refresh_single_flight_and_expiry():
+    import time
+
     api = Mock()
     api.api_client.configuration = SimpleNamespace(verify_ssl=True, host="https://kubernetes.test")
     api.create_namespaced_service_account_token.return_value = issued("first", 4600)
@@ -89,6 +91,9 @@ def test_token_refresh_single_flight_and_expiry():
     now[0] = source._refresh + 1
     api.create_namespaced_service_account_token.side_effect = RuntimeError("secret response")
     assert source.token() == "first"
+    deadline = time.time() + 1.0
+    while api.create_namespaced_service_account_token.call_count < 2 and time.time() < deadline:
+        time.sleep(0.005)
     for _ in range(10):
         assert source.token() == "first"
     assert api.create_namespaced_service_account_token.call_count == 2
@@ -100,6 +105,108 @@ def test_token_refresh_single_flight_and_expiry():
     api.create_namespaced_service_account_token.side_effect = None
     api.create_namespaced_service_account_token.return_value = issued("second", 8200)
     assert source.token() == "second"
+
+
+def test_token_refresh_does_not_block_valid_cached_token():
+    import threading
+    import time
+
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    api = Mock()
+    api.api_client.configuration = SimpleNamespace(verify_ssl=True, host="https://kubernetes.test")
+    calls = [0]
+
+    def mint(**kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            return issued("first", 4600)
+        refresh_started.set()
+        release_refresh.wait(timeout=2.0)
+        return issued("second", 8200)
+
+    api.create_namespaced_service_account_token.side_effect = mint
+    source = TokenSource(lambda: api, "identities", "server-caller")
+    now = [1000]
+    source._now = lambda: now[0]
+    assert source.token() == "first"
+    now[0] = source._refresh + 1
+    assert source.token() == "first"
+    assert refresh_started.wait(timeout=1.0)
+    assert source.token() == "first"
+    release_refresh.set()
+    deadline = time.time() + 1.0
+    while source.token() != "second" and time.time() < deadline:
+        time.sleep(0.005)
+    assert source.token() == "second"
+
+
+def test_ca_rotation_keeps_old_channel_open_until_inflight_call_finishes(tmp_path, monkeypatch, fastpath_tls):
+    import threading
+
+    ca, _ = fastpath_tls
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_bytes(ca.read_bytes())
+    source = Mock()
+    source.token.return_value = "caller-token"
+
+    channels = []
+    rpc_entered = threading.Event()
+    release_rpc = threading.Event()
+
+    def make_secure_channel(endpoint, creds, options=None):
+        ch = Mock(name=f"channel-{len(channels)}")
+        channels.append(ch)
+        return ch
+
+    monkeypatch.setattr("grpc.secure_channel", make_secure_channel)
+    monkeypatch.setattr("grpc.intercept_channel", lambda ch, interceptor: ch)
+
+    class FakeStub:
+        def __init__(self, channel):
+            self.channel = channel
+
+        def GetPool(self, request, timeout=None):
+            if self.channel is channels[0]:
+                rpc_entered.set()
+                release_rpc.wait(timeout=2.0)
+            return SimpleNamespace(name=request.pool_name)
+
+    monkeypatch.setattr(
+        "opensandbox_server.services.fast_sandbox.fastpath_client.fastpath_pb2_grpc.FastPathServiceStub",
+        FakeStub,
+    )
+
+    client = FastPathClient(
+        endpoint="127.0.0.1:9090",
+        auth_enabled=True,
+        token_source=source,
+        tls_ca_file=str(ca_file),
+    )
+
+    errors = []
+
+    def run_inflight_rpc():
+        try:
+            client.get_pool("tenant-a", "pool-1")
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=run_inflight_rpc)
+    worker.start()
+    assert rpc_entered.wait(timeout=1.0)
+
+    # Rotate CA file while worker is in-flight on channels[0].
+    ca_file.write_bytes(ca.read_bytes() + b"\n")
+    client.get_pool("tenant-a", "pool-2")
+    assert len(channels) == 2
+    channels[0].close.assert_not_called()
+
+    release_rpc.set()
+    worker.join(timeout=2.0)
+    assert not errors
+    channels[0].close.assert_called_once()
+    client.close()
 
 
 @pytest.mark.parametrize("external", [False, True])

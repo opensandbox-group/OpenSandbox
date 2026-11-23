@@ -89,13 +89,14 @@ spec:
             {{- if .Values.gateway.fastSandboxNamespace }}
             - {{ printf "--fast-sandbox-namespace=%s" .Values.gateway.fastSandboxNamespace | quote }}
             {{- end }}
+            {{- $fastpathAuth := (.Values.gateway).fastpathAuth | default dict }}
             {{- if or .Values.gateway.fastpathEndpoint (eq .Values.gateway.providerType "fast-sandbox") }}
-            {{- if .Values.gateway.fastpathAuth.enabled }}
+            {{- if $fastpathAuth.enabled }}
             - "--fastpath-auth-enabled=true"
-            {{- with .Values.gateway.fastpathAuth.serverName }}
+            {{- with $fastpathAuth.serverName }}
             - "--fastpath-tls-server-name={{ . }}"
             {{- end }}
-            {{- if .Values.gateway.fastpathAuth.caConfigMap }}
+            {{- if $fastpathAuth.caConfigMap }}
             - "--fastpath-tls-ca-file=/etc/opensandbox/fastpath-ca/ca.crt"
             {{- end }}
             {{- end }}
@@ -159,17 +160,17 @@ spec:
             timeoutSeconds: 3
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
-          {{- if and .Values.gateway.fastpathAuth.enabled .Values.gateway.fastpathAuth.caConfigMap }}
+          {{- if and $fastpathAuth.enabled $fastpathAuth.caConfigMap }}
           volumeMounts:
             - name: fastpath-ca
               mountPath: /etc/opensandbox/fastpath-ca
               readOnly: true
           {{- end }}
-      {{- if and .Values.gateway.fastpathAuth.enabled .Values.gateway.fastpathAuth.caConfigMap }}
+      {{- if and $fastpathAuth.enabled $fastpathAuth.caConfigMap }}
       volumes:
         - name: fastpath-ca
           configMap:
-            name: {{ .Values.gateway.fastpathAuth.caConfigMap }}
+            name: {{ $fastpathAuth.caConfigMap }}
             items:
               - key: ca.crt
                 path: ca.crt

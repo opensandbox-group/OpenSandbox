@@ -38,11 +38,16 @@ def fastpath_tls(tmp_path_factory):
 
     directory = tmp_path_factory.mktemp("fastpath-tls")
     ca, key = directory / "ca.pem", directory / "key.pem"
-    subprocess.run([
+    proc = subprocess.run([
         "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
         "-keyout", str(key), "-out", str(ca), "-days", "1",
         "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1",
-    ], check=True, capture_output=True)
+    ], check=False, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"openssl CA generation failed (exit {proc.returncode}): "
+            f"{proc.stderr.decode(errors='replace').strip()}"
+        )
     return ca, key
 
 

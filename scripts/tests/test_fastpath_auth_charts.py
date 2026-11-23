@@ -211,6 +211,23 @@ class FastPathAuthChartsTest(unittest.TestCase):
         self.assertFalse(any("--fastpath-auth-" in a or "--fastpath-tls-" in a for a in gw_args))
         self.assertFalse(any("fastpath-ca" == v["name"] for v in gw_pod.get("volumes", [])))
 
+    def test_reuse_values_upgrade_without_auth_maps_renders_cleanly(self):
+        for chart, values in (
+            ("base", ["fastSandbox.callerAuth=null"]),
+            ("fast-sandbox", ["fastpath=null"]),
+            ("server", ["server.fastpath=null"]),
+            (
+                "ingress-gateway",
+                [
+                    "gateway.fastpathEndpoint=fastpath:9090",
+                    "gateway.secureAccess.existingSecret=route-signing-keys",
+                    "gateway.fastpathAuth=null",
+                ],
+            ),
+        ):
+            resources = self.render(chart, *values)
+            self.assertTrue(resources)
+
 
 if __name__ == "__main__":
     unittest.main()
