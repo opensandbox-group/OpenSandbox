@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
 from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
@@ -22,6 +24,25 @@ from opensandbox_server.services.constants import (
     OPEN_SANDBOX_INGRESS_HEADER,
     OPEN_SANDBOX_SECURE_ACCESS_HEADER,
 )
+
+
+def test_get_endpoint_openapi_preserves_public_description(client: TestClient) -> None:
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    paths = response.json()["paths"]
+    spec_path = Path(__file__).resolve().parents[2] / "specs" / "sandbox-lifecycle.yml"
+    spec = yaml.safe_load(spec_path.read_text())
+    expected = " ".join(
+        spec["paths"]["/sandboxes/{sandboxId}/endpoints/{port}"]["get"]["description"].split()
+    )
+
+    for prefix in ("", "/v1"):
+        operation = paths[f"{prefix}/sandboxes/{{sandbox_id}}/endpoints/{{port}}"]["get"]
+        description = " ".join(operation["description"].split())
+        assert description.startswith(expected)
+        assert "secure_access signing keys" in description
+        assert "Invalid or unsupported signed-route expirations are rejected" in description
+        assert "rather than returning an unsigned route" in description
 
 
 def test_get_endpoint_returns_service_result(

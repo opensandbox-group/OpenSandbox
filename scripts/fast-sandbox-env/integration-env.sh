@@ -95,7 +95,7 @@
 #                    OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE into the
 #                    pool's egress container only. credential-bound also
 #                    registers the credential-bound verify stage on both
-#                    lanes and reports the exchange stage BLOCKED (I1)
+#                    lanes; overlaybd runs the real exchange verification
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
 #   OSB_PACKAGE / OSB_BIN  opensandbox CLI for the verify stages (latest from PyPI / preinstalled binary)
 #   SKIP_TOOL_INSTALL / SKIP_LEFTOVER_CLEAN / INOTIFY_VALUE
@@ -317,10 +317,13 @@ OSB_PACKAGE="${OSB_PACKAGE:-opensandbox-cli}"
 OSB_BIN="${OSB_BIN:-}"
 OSB_VENV="$WORK/tools/osb-venv"
 
-# Internal goproxy mirrors can 500 on shared hosts; direct VCS just works there.
-# The value also flows into the Go-based image builds via --build-arg GOPROXY;
-# empty build args keep the Dockerfile defaults (proxy.golang.org).
-FSB_GOPROXY="${FSB_GOPROXY:-direct}"
+# Default to the canonical Go module proxy with direct fallback: pure
+# GOPROXY=direct fails on dead vanity domains in fast-sandbox's dependency
+# tree (e.g. nhooyr.io/websocket), while internal mirrors can return 500 or
+# stale bytes. The value also flows into the Go-based image builds via
+# --build-arg GOPROXY; empty build args keep the Dockerfile defaults
+# (proxy.golang.org).
+FSB_GOPROXY="${FSB_GOPROXY:-https://proxy.golang.org,direct}"
 export GOPROXY="$FSB_GOPROXY"
 
 # FSB_GOSUMDB=off (set by the KVM integration lane): the runner's network
@@ -399,13 +402,6 @@ run_stage() {
 stage_unverified() { # <BLOCKED|NOT_RUN> <reason>
 	STAGE_UNVERIFIED+=("$1: $2")
 	printf '\033[1;33m[fast-sandbox-env] %s: %s\033[0m\n' "$1" "$2" | tee -a "$WORK/run.log" >&2
-}
-
-# A registered stage that is known not to work yet: announced, listed in the
-# summary, and never routed through stage_done (no OK line).
-run_blocked_stage() { # <description> <reason>
-	stage_begin "$1"
-	stage_unverified BLOCKED "$2"
 }
 
 stage_summary() {
@@ -3286,6 +3282,36 @@ opensandbox_verify() {
 
 # --- stage: pause / resume (opensandbox CLI -> FastPath checkpoint)
 
+# Fast /ping readiness probe over the signed gateway route (100ms cadence).
+# Used where 2s-sleep `wait_for execd_ping_ok` (plus ~0.7s per osb CLI call)
+# would quantize cold-boot latency measurements into ~2.7s buckets.
+wait_for_execd_ping_fast() { # <sandbox-id> <description> [timeout-seconds]
+	local id="$1" description="$2" timeout_s="${3:-360}"
+	local deadline_ms route code
+	deadline_ms=$(( $(now_ms) / 1000000 + timeout_s * 1000 ))
+	route=""
+	while :; do
+		route="$( { server_api GET "/sandboxes/$id/endpoints/44772" 2>/dev/null || true; } \
+			| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
+		[[ -n "$route" ]] && break
+		if (( $(now_ms) / 1000000 >= deadline_ms )); then
+			fail "$description (gateway route did not publish within ${timeout_s}s)"
+		fi
+		sleep 0.1
+	done
+	code=""
+	while :; do
+		code="$(curl -sS --connect-timeout 1 -m 2 -o /dev/null -w '%{http_code}' \
+			-H "OpenSandbox-Ingress-To: $route" "$GATEWAY_URL/ping" 2>/dev/null || true)"
+		[[ "$code" == "200" ]] && break
+		if (( $(now_ms) / 1000000 >= deadline_ms )); then
+			fail "$description (timed out after ${timeout_s}s; last HTTP ${code:-none})"
+		fi
+		sleep 0.1
+	done
+	pass "$description"
+}
+
 # Fresh signed route + one GET: doubles as the "runtime actually serving" probe.
 execd_ping_ok() {
 	local route code
@@ -3415,7 +3441,6 @@ init_mode_verify() { # [template-id]
 		| tee "$LOGS_DIR/init-mode-processes.txt" >&2 \
 		|| log "verify (init-mode): process table dump failed (continuing; the probes below carry the diagnostics)"
 
-	# 1. PID 1 is the guest init.
 	probe="$(guest_value PID1 sh -c 'echo "PID1=$(tr "\0" " " < /proc/1/cmdline)"')" \
 		|| fail "init-mode: /proc/1/cmdline probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	case "$probe" in
@@ -3423,7 +3448,6 @@ init_mode_verify() { # [template-id]
 		*) fail "guest PID 1 is not the guest init: /proc/1/cmdline = $probe" ;;
 	esac
 
-	# 2. execd armed with --init.
 	execd_pid="$(guest_value EXECD_PID sh -c 'echo "EXECD_PID=$(pgrep -x execd | head -1)"')" \
 		|| fail "init-mode: execd pgrep probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	case "$execd_pid" in
@@ -3435,23 +3459,19 @@ init_mode_verify() { # [template-id]
 		|| fail "execd (pid $execd_pid) does not carry --init (cmdline probe output: $probe)"
 	pass "execd runs with --init (pid $execd_pid)"
 
-	# 3. execd is PID 1's child (bootstrap exec'd away).
 	probe="$(guest_value EXECD_PPID sh -c "echo \"EXECD_PPID=\$(grep '^PPid:' /proc/$execd_pid/status | grep -o '[0-9]*')\"")" \
 		|| fail "init-mode: execd PPid probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "1" ]] \
 		|| fail "execd (pid $execd_pid) is not a child of PID 1: PPid=$probe"
 	pass "execd is a direct child of the guest init (PPid=1)"
 
-	# 4. The entrypoint is execd's child. Exact name + argv selection: a
-	# fuzzy pgrep -f would match the probe's own sh -c shell (the search
-	# text sits in its cmdline) and pass vacuously on its execd PPid.
+	# Exact argv matching avoids counting the probe's own shell as the entrypoint.
 	probe="$(guest_value TAIL_PPID sh -c "$init_mode_entrypoint_probe")" \
 		|| fail "init-mode: entrypoint probe failed (no tail -f /dev/null workload in the guest?): $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "$execd_pid" ]] \
 		|| fail "the entrypoint is not a child of execd (pid $execd_pid): entrypoint PPid=$probe"
 	pass "the baked entrypoint is supervised by execd (entrypoint PPid=$execd_pid)"
 
-	# 5. The orphan reparents to execd (subreaper); left to exit for #6.
 	guest_out sh -c 'sleep 6 >/dev/null 2>&1 & echo $! > /tmp/osb-init-mode-orphan.pid' >/dev/null \
 		|| fail "init-mode: orphan spawn failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	probe="$(guest_value ORPHAN_PPID sh -c 'p=$(cat /tmp/osb-init-mode-orphan.pid); echo "ORPHAN_PPID=$(grep "^PPid:" /proc/$p/status | grep -o "[0-9]*")"')" \
@@ -3460,22 +3480,19 @@ init_mode_verify() { # [template-id]
 		|| fail "the orphan did not reparent to execd (pid $execd_pid): orphan PPid=$probe"
 	pass "orphaned processes reparent to execd (subreaper; orphan PPid=$execd_pid)"
 
-	# 6. execd reaps the exited orphan (else it stays a Z child forever).
 	init_mode_orphan_reaped() {
 		[[ "$(guest_value REAPED sh -c 'p=$(cat /tmp/osb-init-mode-orphan.pid 2>/dev/null); if [ -n "$p" ] && [ ! -e "/proc/$p" ]; then echo "REAPED=1"; else echo "REAPED=0"; fi')" == "1" ]]
 	}
 	wait_for "execd reaps the exited orphan (pid gone from /proc)" 20 init_mode_orphan_reaped
 	guest_out sh -c 'rm -f /tmp/osb-init-mode-orphan.pid' >/dev/null 2>&1 || true
 
-	# 7. No zombies left.
 	probe="$(guest_value ZOMBIES sh -c 'echo "ZOMBIES=$(ps -eo stat | grep -c "^Z" || true)"')" \
 		|| fail "init-mode: zombie count probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
 	[[ "$probe" == "0" ]] \
 		|| fail "the guest process table carries zombies: $probe in Z state"
 	pass "guest process table is zombie-free after the orphan round trip"
 
-	# 8. Report: subreaper tier, no signal shield. Capture the full response
-	# and check the producer status before scanning for .hardening.
+	# Check the command result before parsing the capabilities payload.
 	local hardening_line capabilities_out
 	capabilities_out="$(guest_out curl -fsS http://127.0.0.1:44772/v1/isolated/capabilities 2>/dev/null)" \
 		|| fail "init-mode: capabilities probe failed: $(head -c 300 "$LOGS_DIR/init-mode-cmd.err" 2>/dev/null)"
@@ -3834,7 +3851,24 @@ exchange_guest_status() { # <path>
 		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT$1"
 }
 
-exchange_vault_status_is_407() {
+exchange_vault_fails_closed() {
+	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+		# In subject mode the addon kills the transport instead of returning 407.
+		# A timeout or an unreachable origin is not evidence of a denied resolve.
+		local out
+		out="$(osb_api command run "$VERIFY_ID" -- sh -c '
+			code=$(curl -s --http1.1 -o /dev/null -w "%{http_code}" -m 20 --resolve "$1" "$2")
+			rc=$?
+			if [ "$code" = 000 ] && { [ "$rc" = 52 ] || [ "$rc" = 56 ]; }; then
+				echo EXCHANGE_DENIED
+			else
+				printf "EXCHANGE_PROBE http_code=%s curl_rc=%s\n" "$code" "$rc"
+			fi
+		' sh "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" "https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/vault/echo?x=1" 2>>"$LOGS_DIR/exchange-guest-curl.err")" || return 1
+		case "$out" in EXCHANGE_PROBE\ *) printf '%s\n' "$out" >>"$LOGS_DIR/exchange-guest-curl.err" ;; esac
+		[[ "$out" == "EXCHANGE_DENIED" ]]
+		return
+	fi
 	[[ "$(exchange_guest_status "/vault/echo?x=1")" == "407" ]]
 }
 
@@ -3903,13 +3937,13 @@ exchange_resolver_verify() {
 	fi
 	pass "off-scope path stays static (resolver engaged only on /vault/*)"
 
-	# 4) fail-closed: resolver down in every pod -> 407 on the exchange
-	#    path while the static binding keeps flowing.
+	# 4) fail-closed: resolver down in every pod -> 407 in all-mode or a
+	#    closed subject transport in credential-bound mode; static keeps flowing.
 	exchange_resolver_stop_all
-	wait_for "resolver outage fails closed with 407 on the exchange path" 60 exchange_vault_status_is_407
+	wait_for "resolver outage fails closed on the exchange path" 60 exchange_vault_fails_closed
 	wait_for "static binding unaffected by the resolver outage" 120 \
 		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
-	pass "resolver outage fails closed (407) while the static binding flows"
+	pass "resolver outage fails closed while the static binding flows"
 
 	# 5) recovery: the next resolve is fresh (a failure never poisons the
 	#    following request).
@@ -4389,20 +4423,26 @@ rootfs_only_verify() {
 	# Cold-boot restore: a fresh sandbox boots the artifact from disk
 	# (seconds-scale readiness, not the millisecond in-place restore).
 	log "verify (rootfs-only): osb sandbox create --snapshot-id $snapshot_id (cold boot)"
+	local t_boot0 t_create t_ping
+	t_boot0="$(now_ms)"
 	restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
 		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
 		--skip-health-check -o json 2>/dev/null)" \
 		|| fail "osb sandbox create (snapshotId=$snapshot_id) failed"
+	t_create="$(now_ms)"
 	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
 	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
 	VERIFY_ID="$restore_id"
 	rootfs_log_id="$restore_id"
+	# Poll execd /ping directly over the signed gateway route before checking
+	# the coarse 2s-sleep Running state, so create->execd /ping 200 is not
+	# quantized by `wait_for sandbox_running`.
+	wait_for_execd_ping_fast "$restore_id" "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 360
+	t_ping="$(now_ms)"
+	log "verify (rootfs-only): cold boot create $(( (t_create - t_boot0) / 1000000 ))ms, create->execd /ping 200 $(( (t_ping - t_boot0) / 1000000 ))ms"
 	# Cold boot is seconds-scale; the generous ceiling only covers a slow
 	# registry pull of the artifact pair.
 	wait_for "cold-booted sandbox Running" 300 sandbox_running
-	t3="$(now_ms)"
-	log "verify (rootfs-only): cold boot create->Running $(( (t3 - t2) / 1000000 ))ms"
-	wait_for "cold-booted sandbox execd /ping 200 (guest-init restarted execd)" 180 execd_ping_ok
 	pass "rootfs-only restore: sandbox cold-booted from the artifact (Running + /ping)"
 	dump_latency_evidence "$restore_id" "$rootfs_log_label cold boot" || true
 
@@ -4568,16 +4608,10 @@ require_live_stack() {
 }
 
 # OSEP-0023 lane gates. Off/all: the exchange stage runs exactly as before
-# and no credential-bound stage exists. credential-bound: the exchange
-# stage is reported BLOCKED (decision snapshots reject exchange bindings,
-# issue I1) instead of running, and the credential-bound stage
-# (verify/credential-bound.sh, one implementation sourced into this shell)
-# runs on the lane's template.
+# and no credential-bound stage exists. credential-bound: exchange also
+# runs, followed by the credential-bound stage (verify/credential-bound.sh,
+# one implementation sourced into this shell) on the lane's template.
 exchange_stage() { # <description> <template-id>
-	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
-		run_blocked_stage "$1" "exchange under credential-bound (see I1)"
-		return 0
-	fi
 	run_stage "$1" exchange_resolver_verify "$2"
 }
 
@@ -5203,9 +5237,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
 
 Notable env overrides: WORK, FSB_DIR, KIND_CLUSTER, KIND_SINGLE,
 DOCKER_MIRROR, RUSTFS_*, RC_IMAGE, EGRESS_IMAGE, SERVER_IMAGE, INGRESS_IMAGE,
-FSB_GOPROXY (default direct; set e.g. https://mirrors.aliyun.com/goproxy/,direct
-when the host cannot reach module VCS hosts directly; also passed into the
-Go-based image builds as --build-arg GOPROXY),
+FSB_GOPROXY (default https://proxy.golang.org,direct; set e.g.
+https://mirrors.aliyun.com/goproxy/,direct when proxy.golang.org is
+unreachable; also passed into the Go-based image builds as --build-arg GOPROXY),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, POOL_MODE=resource-aware (OSEP-0026
 ResourceAware pool fixture), WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1,

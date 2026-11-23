@@ -237,9 +237,7 @@ describe("IsolatedSession E2E", () => {
     }
   });
 
-  // ---------------------------------------------------------------------------
   // RW filesystem API tests
-  // ---------------------------------------------------------------------------
 
   it("test_rw_host_visible", async () => {
     const tag = `rw_host_${Date.now()}`;
@@ -408,9 +406,7 @@ describe("IsolatedSession E2E", () => {
     }
   });
 
-  // ---------------------------------------------------------------------------
   // RO mode tests
-  // ---------------------------------------------------------------------------
 
   it("test_ro_can_read_existing_files", async () => {
     const tag = `ro_read_${Date.now()}`;
@@ -501,9 +497,7 @@ describe("IsolatedSession E2E", () => {
     }
   });
 
-  // ---------------------------------------------------------------------------
   // Overlay mode tests (skip if not supported)
-  // ---------------------------------------------------------------------------
 
   it("test_overlay_writes_not_visible_on_host", async () => {
     const caps = await sandbox.isolation.capabilities();
@@ -585,7 +579,6 @@ describe("IsolatedSession E2E", () => {
       await session.files.writeFiles([{ path: filePath, data: content }]);
       const downloaded = await session.files.readFile(filePath, { encoding: "utf-8" });
       expect(downloaded).toContain(content);
-      // Verify not visible on host
       const hostCheck = await sandbox.commands.run(
         `cat ${filePath} 2>&1 || echo NOT_FOUND`
       );

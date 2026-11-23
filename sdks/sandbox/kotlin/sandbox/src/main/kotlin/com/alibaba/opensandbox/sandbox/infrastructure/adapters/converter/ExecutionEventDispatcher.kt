@@ -24,11 +24,16 @@ import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionH
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionInit
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.ExecutionResult
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.OutputMessage
+import org.slf4j.LoggerFactory
 
 class ExecutionEventDispatcher(
     private val execution: Execution,
     private val handlers: ExecutionHandlers? = null,
 ) {
+    private companion object {
+        val logger = LoggerFactory.getLogger(ExecutionEventDispatcher::class.java)
+    }
+
     fun dispatch(eventNode: EventNode) {
         val type = eventNode.type
         val timestamp = eventNode.timestamp
@@ -84,7 +89,13 @@ class ExecutionEventDispatcher(
         eventNode: EventNode,
         timestamp: Long,
     ) {
-        val resultText = eventNode.results?.getText() ?: ""
+        val resultText =
+            try {
+                eventNode.results?.getText().orEmpty()
+            } catch (e: IllegalArgumentException) {
+                logger.error("Failed to decode SSE result text: {}", eventNode, e)
+                return
+            }
         val result =
             ExecutionResult(resultText, timestamp).apply {
                 this.timestamp = timestamp

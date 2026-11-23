@@ -27,7 +27,7 @@ type FileMutationState uint8
 const (
 	// FileUnchanged means no rename or unlink of the authoritative path was attempted.
 	FileUnchanged FileMutationState = iota
-	// FileCommitted means the operation and its parent-directory fsync completed.
+	// FileCommitted means publication completed; durability depends on the selected operation.
 	FileCommitted
 	// FileUnknown means publication was attempted, or its durability/close failed.
 	FileUnknown

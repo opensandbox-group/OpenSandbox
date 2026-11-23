@@ -1,18 +1,10 @@
-# VERSION defines the project version. It feeds the image tags. To build for a
-# specific version, pass it as an arg or export it (e.g export VERSION=0.0.2).
 # Helm chart targets live in manifests/Makefile.
 VERSION ?= 0.1.0
 
-# IMAGE_TAG_BASE defines the registry namespace and part of the image name for remote images.
-# This variable is used to construct full image tags for build and push targets.
 IMAGE_TAG_BASE ?= sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/controller
 
-# Image URL to use all building/pushing image targets
-# CONTROLLER_IMG defines the image for the controller manager.
 CONTROLLER_IMG ?= controller:dev
-# TASK_EXECUTOR_IMG defines the image for the task-executor service.
 TASK_EXECUTOR_IMG ?= task-executor:dev
-# IMAGE_COMMITTER_IMG defines the image for the default image-committer service.
 IMAGE_COMMITTER_IMG ?= image-committer:dev
 # SNAPSHOT_REGISTRY defines the OCI registry used by the controller for snapshot images.
 SNAPSHOT_REGISTRY ?= docker-registry.default.svc.cluster.local:5000
@@ -24,18 +16,13 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
-# CONTAINER_TOOL defines the container tool to be used for building images.
-# Be aware that the target commands are only tested with Docker which is
-# scaffolded by default. However, you might want to replace it to use other
-# tools. (i.e. podman)
+# Image targets are tested with Docker.
 CONTAINER_TOOL ?= docker
 
 # DOCKER_BUILD_ARGS defines additional arguments to pass to docker build.
 # For example, in some environments you may need: DOCKER_BUILD_ARGS=--network=host
 DOCKER_BUILD_ARGS ?=
 
-# Setting SHELL to bash allows bash commands to be executed by recipes.
-# Options are set to exit when a recipe line exits non-zero or a piped command fails.
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
@@ -43,17 +30,6 @@ SHELL = /usr/bin/env bash -o pipefail
 all: build
 
 ##@ General
-
-# The help target prints out all targets with their descriptions organized
-# beneath their categories. The categories are represented by '##@' and the
-# target descriptions by '##'. The awk command is responsible for reading the
-# entire set of makefiles included in this invocation, looking for lines of the
-# file as xyz: ## something, and then pretty-format the target and help. Then,
-# if there's a line with ##@ something, that gets pretty-printed as a category.
-# More info on the usage of ANSI control characters for terminal formatting:
-# https://en.wikipedia.org/wiki/ANSI_escape_code#SGR_parameters
-# More info on the awk command:
-# http://linuxcommand.org/lc3_adv_awk.php
 
 .PHONY: help
 help: ## Display this help.
@@ -244,9 +220,6 @@ task-executor-build: ## Build task-executor binary.
 task-executor-run: ## Run task-executor from your host.
 	go run ./cmd/task-executor
 
-# If you wish to build the manager image targeting other platforms you can use the --platform flag.
-# (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
-# More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: docker-build-controller
 
@@ -288,12 +261,7 @@ docker-stop-task-executor: ## Stop task-executor docker container.
 	-@$(CONTAINER_TOOL) stop task-executor-local || true
 	-@$(CONTAINER_TOOL) rm task-executor-local || true
 
-# PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
-# architectures. (i.e. make docker-buildx CONTROLLER_IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
-# - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
-# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# be able to push the image to your registry (i.e. if you do not set a valid value via CONTROLLER_IMG=<myregistry/image:<tag>> then the export will fail)
-# To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
+# docker-buildx pushes to CONTROLLER_IMG; the target registry must be writable.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support

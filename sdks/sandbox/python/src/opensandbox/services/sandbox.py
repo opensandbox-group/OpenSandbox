@@ -109,7 +109,6 @@ class Sandboxes(Protocol):
         network_policy: NetworkPolicy | None = None,
         extensions: dict[str, str] | None = None,
         idle_policy: IdlePolicy | None = None,
-        resource: dict[str, str] | None = None,
     ) -> SandboxCreateResponse:
         """
         Create a sandbox from a ``Succeeded`` fsb template.

@@ -450,7 +450,7 @@ func TestConfigFormattingRedactsSecrets(t *testing.T) {
 		fmt.Sprintf("%+v", cfg),
 		fmt.Sprintf("%#v", cfg),
 		fmt.Sprintf("%v", *cfg),
-		fmt.Sprintf("%q", cfg),
+		fmt.Sprintf("%q", cfg.AdapterAPIKey),
 		fmt.Sprintf("%v", &cfg.AdapterAPIKey),
 		fmt.Sprintf("%#v", &cfg.AdapterAPIKey),
 		fmt.Sprintf("%s %d %x", cfg.AdapterAPIKey, 1, cfg.HMACKey),
@@ -468,7 +468,6 @@ func TestConfigFormattingRedactsSecrets(t *testing.T) {
 	if !strings.Contains(string(blob), "[REDACTED]") {
 		t.Error("JSON output lacks redaction marker")
 	}
-	// Validation errors also never contain secret material.
 	_, err = config.Load(config.Source{LookupEnv: lookup(map[string]string{})})
 	if err == nil {
 		t.Fatal("Load without secrets succeeded; want error")

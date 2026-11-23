@@ -1604,7 +1604,7 @@ export interface components {
          *     or a pre-configured pool (via `extensions.poolRef`).
          *
          *     **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-         *     and `resourceLimits` is required except for a qualified FSB RootfsOnly restore with resource overrides enabled.
+         *     and `resourceLimits` is required except for an FSB RootfsOnly snapshot restore.
          *
          *     When `image` is provided, `entrypoint` is required. When `snapshotId` is
          *     provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -1636,8 +1636,8 @@ export interface components {
              * @description Fsb (fast-sandbox microVM) template to create the sandbox from; on the
              *     `kubernetes` runtime this routes the create to the fsb catalog.
              *     Mutually exclusive with `image` and `snapshotId`; in template mode
-             *     the workload shape is fixed unless RootfsOnly resource overrides are enabled. Only a verified RootfsOnly template may accept CPU/memory limits.
-             *     `entrypoint`, `env`, `resourceRequests`,
+             *     the workload shape is fixed by the template's golden image, so
+             *     `entrypoint`, `env`, `resourceLimits`, `resourceRequests`,
              *     `volumes`, `platform`, `secureAccess` and
              *     lifecycle hooks are rejected (400), and `timeout` is required.
              *     `credentialProxy` is accepted and ignored: the vault is not
@@ -1669,7 +1669,7 @@ export interface components {
             timeout?: number | null;
             /**
              * @description Runtime resource constraints (hard caps) for the sandbox instance.
-             *     For enabled FSB RootfsOnly creates, supply CPU, memory or both. Omitted dimensions inherit the snapshot's recorded limits or the catalog template's machine defaults. Other standard creates require limits.
+             *     For an FSB RootfsOnly snapshot restore, omitted CPU and memory limits inherit their recorded values. Otherwise required when `extensions.poolRef` is not set.
              *     Optional when using pool mode (resource limits are defined by the Pool CRD template).
              *     SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
              */
@@ -2404,11 +2404,6 @@ export interface components {
              * @enum {string}
              */
             format: "native" | "overlaybd";
-            /**
-             * @description Requested build mode. Defaults to full. rootfsOnly requires native storage.
-             * @enum {string}
-             */
-            mode?: "full" | "rootfsOnly";
         };
         /** @description Status of a fsb template build. */
         FsbTemplateStatus: {
@@ -2453,11 +2448,6 @@ export interface components {
              * @enum {string}
              */
             format: "native" | "overlaybd";
-            /**
-             * @description Builder-confirmed artifact class, omitted when unknown.
-             * @enum {string}
-             */
-            readonly mode?: "full" | "rootfsOnly";
             status: components["schemas"]["FsbTemplateStatus"];
             /**
              * Format: date-time

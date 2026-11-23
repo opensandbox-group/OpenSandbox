@@ -491,7 +491,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	poolAllocator := controller.NewDefaultAllocator(mgr.GetClient())
+	poolAllocator := controller.NewDefaultAllocator(mgr.GetClient(), mgr.GetAPIReader())
 	if err := controller.SetupCapacityMetricsWithManager(mgr, poolAllocator); err != nil {
 		setupLog.Error(err, "unable to register capacity metrics")
 		os.Exit(1)

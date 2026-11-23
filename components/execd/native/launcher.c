@@ -438,18 +438,17 @@ int main(int argc, char **argv)
     if (close(policy_fd) != 0)
         _exit(LAUNCH_FAILURE);
 
-    /* 1. Strip execd's credential/config env from the workload. */
     for (int i = 0; i < n_env; i++) {
         unsetenv(env_names[i]);
         free(env_names[i]);
     }
 
     if (hdr.flags & FLAG_CAP_DROP) {
-        /* 2. Keep caps across the identity change (step 5 clears them). */
+        /* Keep capabilities across setuid until the final capability filter. */
         if (prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0)
             log_err("PR_SET_KEEPCAPS", errno);
 
-        /* 3. Trim the bounding set while CAP_SETPCAP is still held. */
+        /* Trim the bounding set while CAP_SETPCAP is still held. */
         for (int cap = 0; cap <= CAP_LAST_CAP; cap++) {
             int keep = 0;
 
@@ -470,8 +469,7 @@ int main(int argc, char **argv)
         log_err("PR_SET_NO_NEW_PRIVS", errno);
 
     if (hdr.flags & FLAG_UID_DROP) {
-        /* 5. Identity change: a foreign target that cannot be applied must
-         * abort the launch rather than silently run as the wrong user. */
+        /* Abort if the requested identity cannot be applied; never run as the wrong user. */
         if (hdr.n_groups > 0) {
             gid_t *gids = (gid_t *)malloc(hdr.n_groups * sizeof(gid_t));
 
@@ -492,11 +490,7 @@ int main(int argc, char **argv)
     }
 
     if (hdr.flags & FLAG_CAP_DROP) {
-        /* 6. Final cap sets + ambient raise. Keep is per-cap best-effort:
-         * a kept cap outside the current permitted set (ceiling dropped it,
-         * or CAP_SETPCAP is gone) is dropped from the capset request instead
-         * of failing it wholesale — one unusable cap must not leave the
-         * workload with the ceiling's full effective set. */
+        /* Exclude unavailable capabilities so one invalid keep does not preserve the full effective set. */
         uint64_t kept = 0;
         uint64_t permitted = 0;
         uint64_t keepable;
@@ -520,12 +514,10 @@ int main(int argc, char **argv)
         }
     }
 
-    /* 6. Landlock filesystem confinement, before seccomp. */
     apply_landlock(ll_rules, n_ll_rules);
     free(ll_rules);
 
-    /* 7. Seccomp LAST: it must never block the setup above, and execve
-     * (which the Go side reserves from the deny list) is still allowed. */
+    /* Apply seccomp last so it cannot block setup; the policy must allow execve. */
     if (filter != NULL) {
         prog.len = (unsigned short)(hdr.seccomp_len / sizeof(struct sock_filter));
         prog.filter = filter;
@@ -534,7 +526,6 @@ int main(int argc, char **argv)
         free(filter);
     }
 
-    /* 8. Exec the real workload. */
     execvp(argv[3], &argv[3]);
     fprintf(stderr, "opensandbox-launcher: exec %s: %s\n", argv[3], strerror(errno));
     _exit(EXEC_FAILURE);

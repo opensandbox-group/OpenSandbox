@@ -292,8 +292,7 @@ func NewStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *Store {
 	return NewStoreWithRegistry(mitmGate, requireToken, nil)
 }
 
-// NewStoreWithRegistry creates a Store with a custom SourceRegistry. If
-// registry is nil, the default registry (with inline pre-registered) is used.
+// Nil registry selects the built-in inline and exchange source providers.
 func NewStoreWithRegistry(mitmGate *mitmproxy.HealthGate, requireToken func() bool, registry *SourceRegistry) *Store {
 	if registry == nil {
 		registry = NewSourceRegistry()

@@ -17,6 +17,7 @@ package proxy
 import (
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/activity"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
@@ -28,10 +29,29 @@ type Option func(*proxyOptions)
 
 type proxyOptions struct {
 	connectObserver           connectivity.Observer
+	httpConnectionPool        *httpConnectionPoolConfig
 	webSocketMessageSizeLimit int64
 	activity                  activity.Recorder
 	waker                     *wake.Waker
 	fastSandboxNamespace      string
+}
+
+type httpConnectionPoolConfig struct {
+	maxIdleConns        int
+	maxIdleConnsPerHost int
+	idleConnTimeout     time.Duration
+}
+
+// WithHTTPConnectionPool configures the shared HTTP upstream idle pool.
+// Values must be non-negative; zero values follow net/http.Transport semantics.
+func WithHTTPConnectionPool(maxIdleConns, maxIdleConnsPerHost int, idleConnTimeout time.Duration) Option {
+	return func(options *proxyOptions) {
+		options.httpConnectionPool = &httpConnectionPoolConfig{
+			maxIdleConns:        maxIdleConns,
+			maxIdleConnsPerHost: maxIdleConnsPerHost,
+			idleConnTimeout:     idleConnTimeout,
+		}
+	}
 }
 
 func WithFastSandboxNamespace(namespace string) Option {
@@ -58,8 +78,8 @@ func WithWebSocketMessageSizeLimit(limit int64) Option {
 	}
 }
 
-func newObservedHTTPTransport(observer connectivity.Observer) http.RoundTripper {
-	if observer == nil {
+func newHTTPTransport(observer connectivity.Observer, pool *httpConnectionPoolConfig) http.RoundTripper {
+	if observer == nil && pool == nil {
 		return nil
 	}
 
@@ -68,6 +88,15 @@ func newObservedHTTPTransport(observer connectivity.Observer) http.RoundTripper 
 		return nil
 	}
 	transport := baseTransport.Clone()
+	// 先应用连接池配置，保证关闭连接观测时调优仍然生效。
+	if pool != nil {
+		transport.MaxIdleConns = pool.maxIdleConns
+		transport.MaxIdleConnsPerHost = pool.maxIdleConnsPerHost
+		transport.IdleConnTimeout = pool.idleConnTimeout
+	}
+	if observer == nil {
+		return transport
+	}
 	baseDialContext := transport.DialContext
 	if baseDialContext == nil {
 		baseDialer := &net.Dialer{}

@@ -202,7 +202,9 @@ func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, curs
 		for k, v := range e.client.headers {
 			req.Header.Set(k, v)
 		}
-		if e.client.apiKey != "" {
+		// A caller-supplied auth header entry (any casing, including empty)
+		// takes precedence over the configured token.
+		if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 			req.Header.Set(e.client.authHeader, e.client.apiKey)
 		}
 		req.Header.Set("Accept", "text/plain")
@@ -360,7 +362,9 @@ func (e *ExecdClient) UploadFiles(ctx context.Context, entries []UploadFileEntry
 			req.Header.Set(k, v)
 		}
 	}
-	if e.client.apiKey != "" {
+	// A caller-supplied auth header entry (any casing, including empty)
+	// takes precedence over the configured token.
+	if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 		req.Header.Set(e.client.authHeader, e.client.apiKey)
 	}
 
@@ -584,7 +588,9 @@ func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath strin
 		for k, v := range e.client.headers {
 			req.Header.Set(k, v)
 		}
-		if e.client.apiKey != "" {
+		// A caller-supplied auth header entry (any casing, including empty)
+		// takes precedence over the configured token.
+		if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 			req.Header.Set(e.client.authHeader, e.client.apiKey)
 		}
 		if rangeHeader != "" {

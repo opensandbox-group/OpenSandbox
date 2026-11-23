@@ -41,7 +41,7 @@ import (
 	"strings"
 )
 
-// APIVersion is the only accepted protocol version.
+// APIVersion is the default v1 protocol version.
 const APIVersion = "sandbox.fast.io/actions/v1"
 const APIVersionV2 = "sandbox.fast.io/actions/v2"
 
@@ -117,9 +117,7 @@ type OwnerObservation struct {
 	Owner Owner  `json:"owner"`
 }
 
-// NetworkAttachment is the network identity material the egress consumes:
-// the dispatch key (SourceIP), the DNS/MITM targets (Gateway), the UDP
-// spoofing defense (HostVeth iifname), and sibling isolation (PrivateCIDR).
+// NetworkAttachment carries source-IP dispatch, gateway redirect targets, and sibling-isolation CIDR.
 type NetworkAttachment struct {
 	IP          netip.Addr   `json:"ip"`
 	Gateway     netip.Addr   `json:"gateway"`

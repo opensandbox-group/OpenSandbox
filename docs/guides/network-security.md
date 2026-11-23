@@ -25,7 +25,7 @@ The result is that one malicious sandbox — or one compromised dependency insid
 
 Kubernetes NetworkPolicy selects pods by **label** and is a static declaration. That model fits long-lived, operator-labeled workloads — not sandboxes:
 
-- Sandbox pod labels are injected by the platform and are not user-controllable; sandboxes of different tenants and trust levels share the same label set, so a selector cannot express "this sandbox, only".
+- Metadata becomes labels on dedicated BatchSandbox Pods at creation. Operators can opt in to [runtime metadata label updates](/getting-started/configuration#updating-kubernetes-pod-labels-from-metadata), allowing preconfigured cluster policies to select those sandboxes. This requires operator-managed policies and does not cover pooled Pods.
 - Sandboxes are created and destroyed at high frequency; NetworkPolicy cannot track each sandbox's expected isolation relationships, and per-sandbox rules cannot cover future sandboxes.
 - Enforcing isolation requires **both** ingress and egress rules per sandbox (a sandbox must neither be reached nor reach others), which multiplies the rule explosion.
 - NetworkPolicy has no domain (FQDN) dimension, which is the natural way to express "allow `pypi.org`, deny everything else".

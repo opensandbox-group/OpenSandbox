@@ -59,13 +59,6 @@ export function reportSandboxCreateMetric(
     return;
   }
 
-  // Telemetry is best-effort and MUST NOT surface any exception to the
-  // caller. This function is also invoked from Sandbox.create's failure
-  // path; any exception thrown here — payload/URL/headers construction, a
-  // custom `fetch` that throws synchronously on an invalid URL, or
-  // `JSON.stringify` failing on an unserializable value — would otherwise
-  // replace the original create failure. Guard the whole body so every
-  // telemetry failure is swallowed.
   try {
     const payload: SandboxCreateMetricsPayload = {
       eventType: "sandbox.create",
@@ -121,7 +114,6 @@ export function reportSandboxCreateMetric(
         // Metrics must never affect create UX.
       });
   } catch {
-    // Metrics must never affect create UX, including construction failures
-    // such as an invalid base URL or a custom `fetch` that throws synchronously.
+    // Construction failures must not mask the original sandbox creation error.
   }
 }

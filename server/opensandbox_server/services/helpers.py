@@ -40,6 +40,7 @@ from opensandbox_server.services.constants import (
     ALLOWED_EGRESS_ENV_VARS,
     EGRESS_ENV_PREFIX,
     EGRESS_UPSTREAM_EXTRA_CA_PATH,
+    OPENSANDBOX_EGRESS_DNS_UPSTREAM,
     OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_EGRESS_MITMPROXY_UPSTREAM_EXTRA_CA,
@@ -48,6 +49,7 @@ from opensandbox_server.services.constants import (
     OPEN_SANDBOX_INGRESS_HEADER,
 )
 from opensandbox_server.config import (
+    EGRESS_MODE_FORWARD,
     GATEWAY_ROUTE_MODE_HEADER,
     GATEWAY_ROUTE_MODE_URI,
     GATEWAY_ROUTE_MODE_WILDCARD,
@@ -58,6 +60,8 @@ from opensandbox_server.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+EXECD_ISOLATION_CONFIG_ENV = "EXECD_ISOLATION_CONFIG"
 
 MEMORY_PATTERN = re.compile(r"^\s*(\d+)([kmgti]i?|[kmgti]?b)?\s*$", re.IGNORECASE)
 MEMORY_MULTIPLIERS: Dict[str, int] = {
@@ -245,9 +249,6 @@ def build_list_sandboxes_response(
     )
 
 
-# ============================================================================
-# Ingress helpers
-# ============================================================================
 def format_ingress_endpoint(
     ingress_config: Optional[IngressConfig],
     sandbox_id: str,
@@ -325,6 +326,20 @@ def split_egress_env(
     return sandbox_env, egress_env
 
 
+def apply_execd_isolation_config(
+    env: dict[str, Optional[str]], config_path: Optional[str]
+) -> None:
+    """Apply an operator-configured path to the sandbox's environment."""
+    if config_path is None:
+        return
+    # Docker serializes the map as KEY=VALUE, so remove any alternate spelling
+    # that would become the same env key at that boundary.
+    for key in list(env):
+        if key.startswith(f"{EXECD_ISOLATION_CONFIG_ENV}="):
+            del env[key]
+    env[EXECD_ISOLATION_CONFIG_ENV] = config_path
+
+
 def _is_truthy(value: Optional[str]) -> bool:
     """Mirror the egress component's constants.IsTruthy."""
     return bool(value) and value.strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -352,6 +367,18 @@ def upstream_proxy_egress_env(
     return env
 
 
+def is_egress_forward_mode(egress_config: Optional[EgressConfig]) -> bool:
+    """True when [egress] mode = "forward" (OSEP-0030)."""
+    return egress_config is not None and egress_config.mode == EGRESS_MODE_FORWARD
+
+
+def forward_mode_egress_env(egress_config: Optional[EgressConfig]) -> Dict[str, str]:
+    """Extra env for the egress sidecar in forward mode (policy DNS upstreams)."""
+    if egress_config is None or not is_egress_forward_mode(egress_config) or not egress_config.dns_upstreams:
+        return {}
+    return {OPENSANDBOX_EGRESS_DNS_UPSTREAM: ",".join(egress_config.dns_upstreams)}
+
+
 def validate_upstream_proxy_request(
     egress_config: Optional[EgressConfig],
     *,
@@ -365,7 +392,29 @@ def validate_upstream_proxy_request(
     Chaining only exists inside the transparent mitmproxy path, so a sandbox
     with a networkPolicy must enable transparent MITM, and the ssl-insecure
     escape hatch is refused while a trusted upstream proxy chain is configured.
+
+    In forward mode the gateway is the only policy authority, so local
+    networkPolicy, Credential Vault and transparent MITM are rejected.
     """
+    if is_egress_forward_mode(egress_config):
+        if has_network_policy:
+            raise ValueError(
+                'networkPolicy is not supported when egress.mode = "forward"; '
+                "egress policy is enforced by the upstream gateway"
+            )
+        if credential_proxy_enabled:
+            raise ValueError(
+                'credentialProxy is not supported when egress.mode = "forward"'
+            )
+        for key in (
+            OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+            OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
+        ):
+            if key in egress_env:
+                raise ValueError(
+                    f"'{key}' cannot be set when egress.mode = \"forward\""
+                )
+        return
     if (
         egress_config is None
         or egress_config.upstream_proxy is None
@@ -398,6 +447,9 @@ __all__ = [
     "format_ingress_endpoint",
     "matches_filter",
     "split_egress_env",
+    "apply_execd_isolation_config",
     "upstream_proxy_egress_env",
+    "is_egress_forward_mode",
+    "forward_mode_egress_env",
     "validate_upstream_proxy_request",
 ]

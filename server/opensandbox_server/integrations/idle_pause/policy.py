@@ -77,11 +77,7 @@ def validate_idle_policy(
     active_probe: Optional[ActivityProbe] = None,
     activity_ttl_seconds: Optional[int] = None,
 ) -> IdlePolicy:
-    """Validate a create/update-time policy; raises ValueError (API 400).
-
-    ``X <= activity_ttl_seconds`` keeps "activity key missing" always
-    implying "idle for at least X".
-    """
+    """Validate policy (ValueError maps to API 400); normal activity-key expiry must not precede the idle threshold."""
     if idle_timeout_seconds is None:
         if on_idle is not None:
             raise ValueError(

@@ -47,7 +47,7 @@ class CreateSandboxRequest:
     or a pre-configured pool (via `extensions.poolRef`).
 
     **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-    and `resourceLimits` is required except for a qualified FSB RootfsOnly restore with resource overrides enabled.
+    and `resourceLimits` is required except for an FSB RootfsOnly snapshot restore.
 
     When `image` is provided, `entrypoint` is required. When `snapshotId` is
     provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -73,9 +73,8 @@ class CreateSandboxRequest:
             template_id (str | Unset): Fsb (fast-sandbox microVM) template to create the sandbox from; on the
                 `kubernetes` runtime this routes the create to the fsb catalog.
                 Mutually exclusive with `image` and `snapshotId`; in template mode
-                the workload shape is fixed unless RootfsOnly resource overrides are enabled. Only a verified RootfsOnly
-                template may accept CPU/memory limits.
-                `entrypoint`, `env`, `resourceRequests`,
+                the workload shape is fixed by the template's golden image, so
+                `entrypoint`, `env`, `resourceLimits`, `resourceRequests`,
                 `volumes`, `platform`, `secureAccess` and
                 lifecycle hooks are rejected (400), and `timeout` is required.
                 `credentialProxy` is accepted and ignored: the vault is not

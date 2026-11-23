@@ -143,7 +143,6 @@ class CreateTemplateRequest private constructor(
     val metadata: Map<String, String>?,
     val readiness: TemplateReadiness?,
     val format: TemplateFormat?,
-    val mode: String?,
 ) {
     companion object {
         @JvmStatic
@@ -159,7 +158,6 @@ class CreateTemplateRequest private constructor(
         private var metadata: Map<String, String>? = null
         private var readiness: TemplateReadiness? = null
         private var format: TemplateFormat? = null
-        private var mode: String? = null
 
         fun image(image: String): Builder {
             require(image.isNotBlank()) { "Template image cannot be blank" }
@@ -236,11 +234,6 @@ class CreateTemplateRequest private constructor(
             return this
         }
 
-        fun mode(mode: String): Builder = apply {
-            require(mode == SnapshotMode.FULL || mode == SnapshotMode.ROOTFS_ONLY)
-            this.mode = mode
-        }
-
         fun build(): CreateTemplateRequest {
             val imageValue = image ?: throw IllegalArgumentException("Template image must be specified")
             val publishValue = publish ?: throw IllegalArgumentException("Template publish target must be specified")
@@ -253,7 +246,6 @@ class CreateTemplateRequest private constructor(
                 metadata = metadata,
                 readiness = readiness,
                 format = format,
-                mode = mode,
             )
         }
     }
@@ -288,7 +280,6 @@ class TemplateInfo(
     val env: Map<String, String>? = null,
     val metadata: Map<String, String>? = null,
     val readiness: TemplateReadiness? = null,
-    val mode: String? = null,
 )
 
 /**

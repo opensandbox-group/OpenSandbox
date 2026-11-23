@@ -26,7 +26,7 @@ In header and URI modes, a Fast Sandbox route is an authenticated scope. The ser
 
 - Header mode expresses the scope as an `OpenSandbox-Ingress-To` header; URI mode encodes it in the path.
 - Clients must preserve the returned route and headers verbatim — the scope is the credential.
-- Wildcard mode instead returns `<sandbox-id>-<port>.<gateway-domain>` without a signature or routing header. Ingress accepts these Fast Sandbox Host routes only when `--fast-sandbox-namespace` selects one namespace, and supplies that namespace to FastPath. The `fsb-` sandbox ID prefix distinguishes these routes from legacy Kubernetes routes in a mixed deployment.
+- Wildcard mode instead returns `<sandbox-id>-<port>.<gateway-domain>` without a signature or routing header. Ingress accepts these Fast Sandbox routes when `--fast-sandbox-namespace` selects one namespace, and supplies that namespace to FastPath. The route label may arrive via the Host or the routing header — front proxies that own the external wildcard domain often derive the label from the Host and forward it as the routing header after stripping their own prefix — while a signed label still follows the signed path. The `fsb-` sandbox ID prefix distinguishes these routes from legacy Kubernetes routes in a mixed deployment.
 - When configured, the namespace restriction also applies to signed `f1.` routes: a valid signature for another namespace is rejected before resolution. Without this flag, signed routes retain their existing namespace-scoped behavior and unsigned Fast Sandbox routes are rejected.
 
 ::: warning Unsigned wildcard routes do not authenticate clients

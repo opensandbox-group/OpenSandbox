@@ -213,9 +213,12 @@ export class SandboxesAdapter implements Sandboxes {
     req: CreateSandboxFromTemplateRequest,
     signal?: AbortSignal,
   ): Promise<CreateSandboxResponse> {
+    // Template mode fixes the workload shape server-side; only the template id,
+    // timeout, metadata, networkPolicy, extensions and the idle policy are
+    // forwarded. The idle policy is control-plane state (OSEP-0024), so it
+    // rides the lifecycle object while hooks stay template-owned.
     const body: ApiCreateSandboxRequest = {
       templateId: req.templateId,
-      ...(req.resourceLimits === undefined ? {} : { resourceLimits: req.resourceLimits }),
       timeout: req.timeout,
       metadata: req.metadata,
       networkPolicy: req.networkPolicy,

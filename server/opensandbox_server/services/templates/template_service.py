@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FastSandboxTemplateService: fsb template management.
-
-The server store is the source of truth for the public catalog; the
-fast-sandbox ``SandboxTemplate`` CRD is the execution projection. Reads
-lazily sync the CRD build status into the row, so the catalog converges
-without a background task.
-"""
+"""The catalog owns build intent; the watch reactor, not reads, converges SandboxTemplate status."""
 
 from __future__ import annotations
 
@@ -240,15 +234,13 @@ class FastSandboxTemplateService:
             if phase is None:
                 return
             manifest_ref = crd_status.get("manifestRef") or None
-            mode = {"Full": "full", "RootfsOnly": "rootfsOnly"}.get(str(crd_status.get("mode") or ""))
             message = _failure_message(crd_status)
             if (
                 phase is not record.phase
-                or mode != record.spec.get("artifactMode")
                 or manifest_ref != record.manifest_ref
                 or (phase is FastSandboxTemplatePhase.FAILED and message != record.message)
             ):
-                self._update_phase(record, phase, manifest_ref, message, mode)
+                self._update_phase(record, phase, manifest_ref, message)
 
         return handler
 
@@ -352,8 +344,6 @@ class FastSandboxTemplateService:
         }
         # OSEP-0026: pin the machine shape; resourceLimits stays verbatim.
         spec["machine"] = effective_machine(spec)
-        if request.mode == "rootfsOnly":
-            spec["buildMode"] = request.mode
         record = FastSandboxTemplateRecord(
             template_id=template_id,
             namespace=namespace,
@@ -540,8 +530,6 @@ class FastSandboxTemplateService:
                 "publishSecretRef": {"name": self._publish_secret_name(fmt)},
             },
         }
-        if record.spec.get("buildMode") == "rootfsOnly":
-            spec["output"]["mode"] = "RootfsOnly"
         env = record.spec.get("env") or {}
         if self._execd_run_as_init:
             # Copy first: the stored row keeps the client env untouched, and
@@ -593,7 +581,6 @@ class FastSandboxTemplateService:
         phase: FastSandboxTemplatePhase,
         manifest_ref: Optional[str],
         message: Optional[str],
-        mode: Optional[str] = None,
     ) -> None:
         record.phase = phase
         record.manifest_ref = manifest_ref
@@ -604,7 +591,6 @@ class FastSandboxTemplateService:
                 record.template_id,
                 record.namespace,
                 phase=phase,
-                artifact_mode=mode,
                 manifest_ref=manifest_ref,
                 message=message,
             )
@@ -639,7 +625,6 @@ def template_to_response(record: FastSandboxTemplateRecord) -> FsbTemplate:
         readiness=readiness,  # type: ignore[arg-type]
         publish=record.publish,
         format=record.spec.get("format", "overlaybd"),
-        mode=record.spec.get("artifactMode"),
         status=FsbTemplateStatus(
             phase=record.phase.value,
             manifestRef=record.manifest_ref,

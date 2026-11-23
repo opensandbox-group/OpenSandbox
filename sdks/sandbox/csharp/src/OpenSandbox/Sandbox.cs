@@ -37,24 +37,12 @@ public sealed class Sandbox : IAsyncDisposable
 {
     private static readonly Regex HostPathPattern = new("^(/|[A-Za-z]:[\\\\/])", RegexOptions.Compiled);
 
-    /// <summary>
-    /// Gets the sandbox ID.
-    /// </summary>
     public string Id { get; }
 
-    /// <summary>
-    /// Gets the connection configuration.
-    /// </summary>
     public ConnectionConfig ConnectionConfig { get; }
 
-    /// <summary>
-    /// Gets the command execution service.
-    /// </summary>
     public IExecdCommands Commands { get; }
 
-    /// <summary>
-    /// Gets the filesystem service.
-    /// </summary>
     public ISandboxFiles Files { get; }
 
     /// <summary>
@@ -68,14 +56,8 @@ public sealed class Sandbox : IAsyncDisposable
         return adapter.WithIdentity(uid, gid);
     }
 
-    /// <summary>
-    /// Gets the health check service.
-    /// </summary>
     public IExecdHealth Health { get; }
 
-    /// <summary>
-    /// Gets the metrics service.
-    /// </summary>
     public IExecdMetrics Metrics { get; }
 
     public IIsolatedSessions Isolation { get; }
@@ -189,8 +171,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Creates a new sandbox.
     /// </summary>
-    /// <param name="options">The creation options.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The created sandbox.</returns>
     /// <exception cref="InvalidArgumentException">Thrown when request options are invalid.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
@@ -204,6 +184,10 @@ public sealed class Sandbox : IAsyncDisposable
         if (string.IsNullOrWhiteSpace(options.Image) == string.IsNullOrWhiteSpace(options.SnapshotId))
         {
             throw new InvalidArgumentException("Exactly one of Image or SnapshotId must be specified.");
+        }
+        if (options.InheritSnapshotResources && string.IsNullOrWhiteSpace(options.SnapshotId))
+        {
+            throw new InvalidArgumentException("InheritSnapshotResources requires a snapshot ID.");
         }
         if (!string.IsNullOrWhiteSpace(options.SnapshotId) && options.Entrypoint is not null)
         {
@@ -278,8 +262,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// id, and the timeout is required. The created sandbox routes egress
     /// policy operations through the lifecycle control plane.
     /// </remarks>
-    /// <param name="options">The template creation options.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The created sandbox.</returns>
     /// <exception cref="InvalidArgumentException">Thrown when request options are invalid.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
@@ -304,7 +286,6 @@ public sealed class Sandbox : IAsyncDisposable
         var request = new CreateSandboxRequest
         {
             TemplateId = options.TemplateId,
-            ResourceLimits = options.Resource,
             Timeout = options.TimeoutSeconds,
             Metadata = options.Metadata,
             NetworkPolicy = options.NetworkPolicy != null
@@ -541,8 +522,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Connects to an existing sandbox.
     /// </summary>
-    /// <param name="options">The connection options.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The connected sandbox.</returns>
     /// <exception cref="InvalidArgumentException">Thrown when request options are invalid.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
@@ -684,8 +663,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Resumes a paused sandbox by ID.
     /// </summary>
-    /// <param name="options">The connection options.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The resumed sandbox.</returns>
     /// <exception cref="InvalidArgumentException">Thrown when request options are invalid.</exception>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
@@ -725,7 +702,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets information about this sandbox.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The sandbox information.</returns>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<SandboxInfo> GetInfoAsync(CancellationToken cancellationToken = default)
@@ -762,7 +738,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Checks if the sandbox is healthy.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>True if healthy, false otherwise.</returns>
     public async Task<bool> IsHealthyAsync(CancellationToken cancellationToken = default)
     {
@@ -780,7 +755,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets the current resource metrics.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The sandbox metrics.</returns>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<SandboxMetrics> GetMetricsAsync(CancellationToken cancellationToken = default)
@@ -791,7 +765,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Pauses the sandbox.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task PauseAsync(CancellationToken cancellationToken = default)
     {
@@ -833,7 +806,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// Requests irreversible sandbox termination.
     /// Completes when deletion is accepted; runtime cleanup may continue afterward.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task KillAsync(CancellationToken cancellationToken = default)
     {
@@ -906,7 +878,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets current egress policy for this sandbox.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The current egress policy.</returns>
     public async Task<NetworkPolicy> GetEgressPolicyAsync(CancellationToken cancellationToken = default)
     {
@@ -914,11 +885,7 @@ public sealed class Sandbox : IAsyncDisposable
     }
 
     /// <summary>
-    /// Patches egress rules for this sandbox using sidecar merge semantics.
-    ///
-    /// Incoming rules take priority over existing rules with the same target.
-    /// Existing rules for other targets remain unchanged. Within one patch payload,
-    /// the first rule for a target wins. The current defaultAction is preserved.
+    /// Replaces matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays.
     /// </summary>
     /// <param name="rules">Patch egress rules payload.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -930,15 +897,8 @@ public sealed class Sandbox : IAsyncDisposable
     }
 
     /// <summary>
-    /// Deletes egress rules for this sandbox by target.
-    ///
-    /// Each entry is a FQDN or wildcard domain. Matching rules are removed
-    /// from the currently enforced policy. Targets not present in the policy
-    /// are silently ignored (idempotent). The current defaultAction is
-    /// preserved.
+    /// Deletes rules by target (domain, wildcard, IP, CIDR, or empty for port-only rules); misses and defaultAction are unchanged.
     /// </summary>
-    /// <param name="targets">Target FQDNs or wildcard domains to remove.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task DeleteEgressRulesAsync(
         IReadOnlyList<string> targets,
         CancellationToken cancellationToken = default)
@@ -964,7 +924,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets sanitized Credential Vault state.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Sanitized Credential Vault state.</returns>
     public async Task<CredentialVaultState> GetCredentialVaultAsync(CancellationToken cancellationToken = default)
     {
@@ -987,7 +946,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Deletes the sandbox-local Credential Vault.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task DeleteCredentialVaultAsync(CancellationToken cancellationToken = default)
     {
         await CredentialVault.DeleteAsync(cancellationToken).ConfigureAwait(false);
@@ -996,7 +954,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Lists sanitized credential metadata.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Sanitized credential metadata.</returns>
     public async Task<IReadOnlyList<CredentialMetadata>> ListCredentialVaultCredentialsAsync(
         CancellationToken cancellationToken = default)
@@ -1020,7 +977,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Lists sanitized binding metadata.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Sanitized binding metadata.</returns>
     public async Task<IReadOnlyList<CredentialBindingMetadata>> ListCredentialVaultBindingsAsync(
         CancellationToken cancellationToken = default)
@@ -1044,8 +1000,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets the endpoint for a port.
     /// </summary>
-    /// <param name="port">The port number.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The endpoint information.</returns>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public Task<Endpoint> GetEndpointAsync(int port, CancellationToken cancellationToken = default)
@@ -1069,8 +1023,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets the endpoint URL for a port.
     /// </summary>
-    /// <param name="port">The port number.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The endpoint URL.</returns>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>
     public async Task<string> GetEndpointUrlAsync(int port, CancellationToken cancellationToken = default)
@@ -1083,8 +1035,6 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Waits until the sandbox is ready.
     /// </summary>
-    /// <param name="options">The wait options.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="SandboxReadyTimeoutException">Thrown when readiness checks exceed timeout.</exception>
     /// <exception cref="OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is canceled.</exception>
     public async Task WaitUntilReadyAsync(

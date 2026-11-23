@@ -19,6 +19,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -27,25 +28,33 @@ import (
 	"syscall"
 )
 
+// Account lookups used by filesystemCredential; tests replace them.
+var (
+	lookupFilesystemUser   = user.LookupId
+	lookupFilesystemGroups = (*user.User).GroupIds
+)
+
 // filesystemCredential resolves the target account's supplementary groups.
 // Unlike a best-effort lookup, an NSS/group failure must never grant the
-// daemon's groups or silently select a different primary group.
+// daemon's groups or silently select a different primary group. A missing
+// passwd or group file holds no entries, so it resolves like a uid without
+// an entry: the requested gid and no supplementary groups.
 func filesystemCredential(uid, gid uint32) (*syscall.Credential, string, error) {
 	if uid == ^uint32(0) || gid == ^uint32(0) {
 		return nil, "", fmt.Errorf("filesystem uid/gid must be at most 4294967294")
 	}
 	cred := &syscall.Credential{Uid: uid, Gid: gid}
 	home := "/"
-	account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	account, err := lookupFilesystemUser(strconv.FormatUint(uint64(uid), 10))
 	if err != nil {
 		var unknown user.UnknownUserIdError
-		if !errors.As(err, &unknown) {
+		if !errors.As(err, &unknown) && !errors.Is(err, fs.ErrNotExist) {
 			return nil, "", fmt.Errorf("lookup filesystem user: %w", err)
 		}
 	} else {
 		home = account.HomeDir
-		groups, err := account.GroupIds()
-		if err != nil {
+		groups, err := lookupFilesystemGroups(account)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return nil, "", fmt.Errorf("lookup filesystem groups: %w", err)
 		}
 		for _, group := range groups {

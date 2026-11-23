@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Regression tests for the MCP server transport-ownership fix (#1768)."""
-
 from __future__ import annotations
 
 import asyncio
@@ -26,7 +24,6 @@ from opensandbox_mcp.server import ServerState, register_tools
 
 
 class _FakeMCP:
-    """Captures tools registered via the ``@tool()`` decorator."""
 
     def __init__(self) -> None:
         self.tools: dict[str, object] = {}
@@ -102,7 +99,6 @@ def server(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_kill_manager_fallback_keeps_shared_transport_open(server) -> None:
-    """The manager fallback path must not close the server-wide transport."""
     fake, state = server
     spy = _SpyTransport(state.connection_config.transport)
     state.connection_config.transport = spy
@@ -134,7 +130,6 @@ def test_borrowed_config_shares_transport_without_ownership() -> None:
 async def test_concurrent_connect_creates_single_registry_entry(
     server, monkeypatch
 ) -> None:
-    """Two concurrent tool calls for one sandbox must not both run connect."""
     fake, state = server
     connect_calls: list[str] = []
 
@@ -166,11 +161,6 @@ async def test_concurrent_connect_creates_single_registry_entry(
 async def test_slow_connect_does_not_block_unrelated_registry_ops(
     server, monkeypatch
 ) -> None:
-    """A hanging connect for one sandbox id must not stall other ids' tool calls.
-
-    The connect runs outside the registry lock, coalesced per id via an
-    in-flight task.
-    """
     fake, state = server
     release = asyncio.Event()
     entered = asyncio.Event()
@@ -208,7 +198,6 @@ async def test_slow_connect_does_not_block_unrelated_registry_ops(
 
 @pytest.mark.asyncio
 async def test_failed_connect_is_not_sticky(server, monkeypatch) -> None:
-    """After a failed connect, a later call must start a fresh attempt."""
     fake, state = server
     attempts: list[str] = []
 

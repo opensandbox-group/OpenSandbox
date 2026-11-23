@@ -385,17 +385,6 @@ internal class SandboxesAdapter(
         networkPolicy: NetworkPolicy?,
         extensions: Map<String, String>,
         idlePolicy: IdlePolicy?,
-    ): SandboxCreateResponse =
-        createSandboxFromTemplate(templateId, timeout, metadata, networkPolicy, extensions, idlePolicy, null)
-
-    override fun createSandboxFromTemplate(
-        templateId: String,
-        timeout: Duration,
-        metadata: Map<String, String>,
-        networkPolicy: NetworkPolicy?,
-        extensions: Map<String, String>,
-        idlePolicy: IdlePolicy?,
-        resourceLimits: Map<String, String>?,
     ): SandboxCreateResponse {
         logger.info("Creating sandbox from template: {}", templateId)
 
@@ -408,7 +397,6 @@ internal class SandboxesAdapter(
                     networkPolicy = networkPolicy,
                     extensions = extensions,
                     idlePolicy = idlePolicy,
-                    resourceLimits = resourceLimits,
                 )
             val response = api.sandboxesPost(createRequest).toSandboxCreateResponse()
 

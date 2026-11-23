@@ -175,12 +175,7 @@ func (c *LifecycleClient) GetNetworkPolicy(ctx context.Context, sandboxID string
 	return &resp, nil
 }
 
-// PatchNetworkPolicy merges egress rules into the sandbox's policy using the
-// same semantics as the sandbox-side egress service: incoming rules take
-// priority over existing rules with the same target and replace them in
-// place; within one patch payload, the first rule for a target wins;
-// existing rules for other targets and the current defaultAction are
-// preserved.
+// PatchNetworkPolicy replaces matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays.
 func (c *LifecycleClient) PatchNetworkPolicy(ctx context.Context, sandboxID string, rules []NetworkRule) (*PolicyStatusResponse, error) {
 	var resp PolicyStatusResponse
 	if err := c.doRequest(ctx, "PATCH", "/sandboxes/"+url.PathEscape(sandboxID)+"/networkpolicy", rules, &resp); err != nil {
@@ -189,10 +184,7 @@ func (c *LifecycleClient) PatchNetworkPolicy(ctx context.Context, sandboxID stri
 	return &resp, nil
 }
 
-// DeleteNetworkPolicyRules removes the sandbox's egress rules whose target
-// matches one of the given entries. Matching is by exact target string;
-// unknown targets are silently ignored (idempotent). The current
-// defaultAction is preserved.
+// DeleteNetworkPolicyRules matches targets case-insensitively; "" removes port-only rules, misses are ignored, and defaultAction stays.
 func (c *LifecycleClient) DeleteNetworkPolicyRules(ctx context.Context, sandboxID string, targets []string) (*PolicyStatusResponse, error) {
 	var resp PolicyStatusResponse
 	if err := c.doRequest(ctx, "DELETE", "/sandboxes/"+url.PathEscape(sandboxID)+"/networkpolicy", targets, &resp); err != nil {

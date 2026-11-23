@@ -66,15 +66,12 @@ def generate_execd_api_client() -> None:
         print("Please ensure the specs directory is available")
         return
 
-    # Remove existing generated code
     if output_path.exists():
         shutil.rmtree(output_path)
 
-    # Remove temp directory if exists
     if temp_output.exists():
         shutil.rmtree(temp_output)
 
-    # Generate using openapi-python-client
     cmd = [
         "openapi-python-client",
         "generate",
@@ -233,15 +230,12 @@ def generate_sandbox_lifecycle_api() -> None:
         print(f"❌ OpenAPI spec not found at {spec_path}")
         return
 
-    # Remove existing generated code
     if output_path.exists():
         shutil.rmtree(output_path)
 
-    # Remove temp directory if exists
     if temp_output.exists():
         shutil.rmtree(temp_output)
 
-    # Generate using openapi-python-client
     cmd = [
         "openapi-python-client",
         "generate",
@@ -425,7 +419,6 @@ def main() -> None:
     print("Using openapi-python-client for httpx-based async clients")
     print("=" * 50)
 
-    # Check if openapi-python-client is available
     try:
         result = subprocess.run(
             ["openapi-python-client", "--version"], check=True, capture_output=True
@@ -438,10 +431,8 @@ def main() -> None:
         print("Or: uv add --dev openapi-python-client")
         sys.exit(1)
 
-    # Create API directories
     Path("src/opensandbox/api").mkdir(parents=True, exist_ok=True)
 
-    # Generate API clients
     generate_execd_api_client()
     generate_egress_api_client()
     generate_diagnostic_api_client()

@@ -36,6 +36,11 @@ func InitFlags() {
 	flag.StringVar(&ProviderType, "provider-type", "batchsandbox", "The sandbox provider type (batchsandbox, agent-sandbox, fast-sandbox)")
 	flag.StringVar(&Mode, "mode", "header", "The sandbox service discovery mode")
 
+	// HTTP upstream connection pooling.
+	flag.IntVar(&HTTPMaxIdleConns, "http-max-idle-conns", 100, "Maximum idle upstream HTTP connections across all hosts per ingress replica (0 = no limit)")
+	flag.IntVar(&HTTPMaxIdleConnsPerHost, "http-max-idle-conns-per-host", 2, "Maximum idle upstream HTTP connections per host (0 = Go default of 2)")
+	flag.DurationVar(&HTTPIdleConnTimeout, "http-idle-conn-timeout", 90*time.Second, "Maximum time an upstream HTTP connection remains idle (0 = no idle timeout)")
+
 	// Renew-intent publishing.
 	flag.BoolVar(&RenewIntentEnabled, "renew-intent-enabled", false, "Enable publishing renew-intent events to Redis")
 	flag.StringVar(&RenewIntentRedisDSN, "renew-intent-redis-dsn", "redis://127.0.0.1:6379/0", "Redis DSN for renew-intent queue")
@@ -62,7 +67,7 @@ func InitFlags() {
 	flag.StringVar(&FastPathEndpoint, "fastpath-endpoint", "", "FastPath v2 gRPC endpoint; a non-empty value enables Fast Sandbox routing")
 	FastSandboxNamespace = ""
 	namespaceSet := false
-	flag.Func("fast-sandbox-namespace", "Restrict Fast Sandbox routes to one namespace and enable unsigned wildcard Host routing in header mode (requires external access control)", func(value string) error {
+	flag.Func("fast-sandbox-namespace", "Restrict Fast Sandbox routes to one namespace and enable unsigned wildcard routing in header mode (requires external access control)", func(value string) error {
 		if namespaceSet {
 			return errors.New("--fast-sandbox-namespace may only be specified once")
 		}

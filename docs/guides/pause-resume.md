@@ -609,8 +609,6 @@ See [Kubernetes Resume Benchmark](/guides/kubernetes-resume-benchmark) for an op
 
 ## Create a differently sized RootfsOnly Sandbox
 
-On a qualified FSB ResourceAware pool, set `rootfs_resource_overrides = true` in the server's `[kubernetes]` configuration after upgrading the controller and Fastlets. Use the existing `POST /sandboxes` route with a ready RootfsOnly source. For example, `{"snapshotId":"snap_example","timeout":600,"resourceLimits":{"memory":"4Gi"}}` boots a fresh guest with 4 GiB and the source Sandbox's recorded CPU quota. Missing snapshot limits must be supplied explicitly. For a RootfsOnly catalog template, omitted dimensions inherit the template machine settings. Full checkpoint restore retains its original machine.
+Upgrade FSB first, then OpenSandbox. On a ResourceAware Firecracker pool, send `POST /sandboxes` with a ready RootfsOnly snapshot, for example `{"snapshotId":"snap_example","timeout":600,"resourceLimits":{"memory":"4Gi"}}`. Only memory changes. Omitting both limits inherits the captured CPU and memory. Supply any dimensions missing from older snapshots. Full restores retain their recorded shape.
 
-To build a RootfsOnly catalog template, send `POST /templates` with `{"image":"alpine:3.19","format":"native","publish":"s3://bucket/publish","mode":"rootfsOnly"}`, using the configured artifact store. Wait for the returned template ID to report `status.phase: Succeeded` and `mode: rootfsOnly` before using it with resource overrides. Omitting the build mode preserves the Full default. The reported mode comes from the finished artifact.
-
-An SDK-transmitted default such as `1 CPU / 2Gi` counts as a request for that size. Use partial limits or omit them when inheritance is intended. FSB requires a timeout. During rollback, disable new overrides before draining instances created with the feature.
+The Python, Go, JavaScript, Kotlin and C# SDKs ordinarily send their default CPU and memory. Use the SDK's snapshot resource inheritance option (or Kotlin's `rootfsSnapshot`) to omit defaults. An older FastPath that lacks the RootfsOnly create RPC returns HTTP 503 through OpenSandbox. Upgrade fast-sandbox before retrying.

@@ -164,17 +164,15 @@ class PostgreSQLFastSandboxTemplateRepository:
         phase: FastSandboxTemplatePhase,
         manifest_ref: str | None,
         message: str | None,
-        artifact_mode: str | None = None,
     ) -> bool:
         with self._pool.connection() as conn:
             rowcount = conn.execute(
                 """
                 UPDATE templates
-                SET spec_json = (spec_json - 'artifactMode') || jsonb_strip_nulls(jsonb_build_object('artifactMode', %s::text)), phase = %s, manifest_ref = %s, message = %s, updated_at = %s
+                SET phase = %s, manifest_ref = %s, message = %s, updated_at = %s
                 WHERE template_id = %s AND namespace = %s
                 """,
                 (
-                    artifact_mode,
                     phase.value,
                     manifest_ref,
                     message,

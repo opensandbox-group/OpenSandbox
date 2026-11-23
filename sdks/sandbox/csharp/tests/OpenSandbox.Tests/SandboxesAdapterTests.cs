@@ -30,16 +30,13 @@ public class SandboxesAdapterTests
     [Fact]
     public async Task GetSandboxEndpointAsync_ShouldIncludeUseServerProxyQueryParam()
     {
-        // Arrange
         var handler = new CaptureHandler();
         var client = new HttpClient(handler);
         var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
         var adapter = new SandboxesAdapter(wrapper);
 
-        // Act
         _ = await adapter.GetSandboxEndpointAsync("sbx-1", 44772, useServerProxy: true);
 
-        // Assert
         handler.LastRequestUri.Should().NotBeNull();
         handler.LastRequestUri!.PathAndQuery.Should().Contain("/sandboxes/sbx-1/endpoints/44772");
         handler.LastRequestUri!.Query.Should().Contain("use_server_proxy=true");
@@ -48,16 +45,13 @@ public class SandboxesAdapterTests
     [Fact]
     public async Task GetSandboxEndpointAsync_ShouldDefaultUseServerProxyToFalse()
     {
-        // Arrange
         var handler = new CaptureHandler();
         var client = new HttpClient(handler);
         var wrapper = new HttpClientWrapper(client, "http://localhost:8080/v1");
         var adapter = new SandboxesAdapter(wrapper);
 
-        // Act
         _ = await adapter.GetSandboxEndpointAsync("sbx-2", 44772);
 
-        // Assert
         handler.LastRequestUri.Should().NotBeNull();
         handler.LastRequestUri!.Query.Should().Contain("use_server_proxy=false");
     }
@@ -488,7 +482,6 @@ public class SandboxesAdapterTests
           "publish": "s3://bucket/publish",
           "format": "overlaybd",
           "status": { "phase": "Succeeded", "manifestRef": "s3://bucket/publish/manifest.json" },
-          "mode": "rootfsOnly",
           "createdAt": "2026-03-14T12:00:00Z",
           "updatedAt": "2026-03-14T12:01:00Z"
         }
@@ -504,7 +497,6 @@ public class SandboxesAdapterTests
         handler.PathAndQuery.Should().Be("/v1/templates/tpl-1");
         template.Status.Phase.Should().Be(TemplatePhases.Succeeded);
         template.Status.ManifestRef.Should().Be("s3://bucket/publish/manifest.json");
-        template.Mode.Should().Be("rootfsOnly");
         template.Readiness.Should().BeNull();
         template.Entrypoint.Should().BeNull();
     }

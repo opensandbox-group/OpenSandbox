@@ -257,6 +257,73 @@ func TestExecuteCodeStreamReplyDeadlineExtendsWhileOutputKeepsArriving(t *testin
 	require.Equal(t, 1, terminals, "expected exactly one terminal complete result")
 }
 
+// Output waiting on a slow consumer is not silence. The kernel replies and
+// sends more output than resultChan holds, then the idle. The caller stalls
+// for longer than the grace period before it drains, so the receive loop sits
+// in a blocked send the whole time. The deadline must not finalize under it:
+// that would cut the stream short and report the run as complete.
+func TestExecuteCodeStreamReplyDeadlineWaitsForBlockedOutput(t *testing.T) {
+	previous := execdflag.JupyterReplyFinalizeTimeout
+	execdflag.JupyterReplyFinalizeTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { execdflag.JupyterReplyFinalizeTimeout = previous })
+
+	const outputs = 15
+	server := createTestServer(t, func(conn *websocket.Conn) {
+		var executeRequest Message
+		if err := conn.ReadJSON(&executeRequest); err != nil {
+			return
+		}
+
+		sendExecuteReply(conn, 1, executeRequest.Header)
+
+		for i := 0; i < outputs; i++ {
+			streamContent, _ := json.Marshal(StreamOutput{Name: StreamStdout, Text: fmt.Sprintf("line-%d\n", i)})
+			require.NoError(t, conn.WriteJSON(Message{
+				Header:       Header{MessageID: fmt.Sprintf("stream-msg-id-%d", i), MessageType: string(MsgStream)},
+				ParentHeader: executeRequest.Header,
+				Content:      json.RawMessage(streamContent),
+			}))
+		}
+
+		statusContent, _ := json.Marshal(StatusUpdate{ExecutionState: StateIdle})
+		require.NoError(t, conn.WriteJSON(Message{
+			Header:       Header{MessageID: "status-msg-id", MessageType: string(MsgStatus)},
+			ParentHeader: executeRequest.Header,
+			Content:      json.RawMessage(statusContent),
+		}))
+	})
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/test-kernel-id/channels"
+	client := NewClient("", nil)
+	require.NoError(t, client.Connect(wsURL))
+	defer client.Disconnect()
+
+	// Same capacity as the runtime's results channel, smaller than the output.
+	resultChan := make(chan *ExecutionResult, 10)
+	require.NoError(t, client.ExecuteCodeStream("for i in range(15): print(i)", resultChan))
+
+	// A slow SSE client: nothing is read for several grace periods.
+	time.Sleep(4 * execdflag.JupyterReplyFinalizeTimeout)
+
+	stdouts := 0
+	terminals := 0
+	for result := range resultChan {
+		if result == nil {
+			break
+		}
+		if len(result.Stream) == 1 && strings.HasPrefix(result.Stream[0].Text, "line-") {
+			stdouts++
+		}
+		if result.ExecutionTime > 0 && result.Error == nil && len(result.Stream) == 0 {
+			terminals++
+		}
+	}
+
+	require.Equal(t, outputs, stdouts, "output held up by the consumer must still be delivered")
+	require.Equal(t, 1, terminals, "expected exactly one terminal complete result")
+}
+
 // The normal path is unaffected: idle arrives right after the reply and the
 // stream closes long before the reply deadline could fire.
 func TestExecuteCodeStreamIdleBeforeReplyDeadlineFinalizesNormally(t *testing.T) {

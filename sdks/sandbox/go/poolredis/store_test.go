@@ -166,7 +166,6 @@ func TestRedisStore_PutIdle_Idempotent(t *testing.T) {
 	if err := store.PutIdle(ctx, poolName, "sb-1"); err != nil {
 		t.Fatalf("PutIdle error: %v", err)
 	}
-	// Second put of same ID should be a no-op (entry is still alive).
 	if err := store.PutIdle(ctx, poolName, "sb-1"); err != nil {
 		t.Fatalf("PutIdle (duplicate) error: %v", err)
 	}
@@ -179,7 +178,6 @@ func TestRedisStore_PutIdle_Idempotent(t *testing.T) {
 		t.Fatalf("expected idle count 1 after duplicate put, got %d", counters.IdleCount)
 	}
 
-	// Take should yield exactly one entry.
 	id, _ := store.TryTakeIdle(ctx, poolName)
 	if id != "sb-1" {
 		t.Fatalf("expected sb-1, got %q", id)
@@ -200,7 +198,6 @@ func TestRedisStore_RemoveIdle(t *testing.T) {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
 
-	// Remove from non-existent should not error.
 	if err := store.RemoveIdle(ctx, poolName, "sb-nonexistent"); err != nil {
 		t.Fatalf("RemoveIdle on non-existent should not error: %v", err)
 	}
@@ -215,7 +212,6 @@ func TestRedisStore_RemoveIdle(t *testing.T) {
 	if err := store.RemoveIdle(ctx, poolName, "sb-1"); err != nil {
 		t.Fatalf("RemoveIdle error: %v", err)
 	}
-	// Second remove should be no-op.
 	if err := store.RemoveIdle(ctx, poolName, "sb-1"); err != nil {
 		t.Fatalf("RemoveIdle (second call) error: %v", err)
 	}
@@ -324,7 +320,6 @@ func TestRedisStore_ReapExpired(t *testing.T) {
 	poolName := "reap-" + t.Name()
 	t.Cleanup(func() { cleanupPool(t, store, poolName) })
 
-	// Add entries with very short TTL.
 	if err := store.SetIdleEntryTTL(ctx, poolName, 200*time.Millisecond); err != nil {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
@@ -335,7 +330,6 @@ func TestRedisStore_ReapExpired(t *testing.T) {
 		t.Fatalf("PutIdle error: %v", err)
 	}
 
-	// Add one with long TTL.
 	if err := store.SetIdleEntryTTL(ctx, poolName, 24*time.Hour); err != nil {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
@@ -500,8 +494,6 @@ func TestRedisStore_WrapsClientFailures(t *testing.T) {
 		t.Errorf("Operation = %q, want %q", storeErr.Operation, "GetMaxIdle")
 	}
 }
-
-// ---------- Destroy Fence And Tombstone Tests ----------
 
 func TestRedisStore_GetDestroyState_DefaultsToActive(t *testing.T) {
 	store := newRedisTestStore(t)

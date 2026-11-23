@@ -89,11 +89,6 @@ class SandboxManager internal constructor(
 ) : AutoCloseable {
     private val logger = LoggerFactory.getLogger(SandboxManager::class.java)
 
-    /**
-     * Provides access to shared httpclient provider
-     *
-     * Allows retrieving underlying http client resources initialized with connection config
-     */
     fun httpClientProvider() = httpClientProvider
 
     companion object {

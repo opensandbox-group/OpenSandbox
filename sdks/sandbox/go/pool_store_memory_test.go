@@ -86,14 +86,12 @@ func TestInMemoryStore_TryTakeIdle_SkipsExpired(t *testing.T) {
 	ctx := context.Background()
 	pool := "test-pool"
 
-	// Set a very short TTL so the first entry expires quickly.
 	if err := store.SetIdleEntryTTL(ctx, pool, 10*time.Millisecond); err != nil {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
 
 	mustPutIdle(t, store, pool, "sb-expire")
 
-	// Now set a long TTL and add another entry.
 	if err := store.SetIdleEntryTTL(ctx, pool, 24*time.Hour); err != nil {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
@@ -116,13 +114,11 @@ func TestInMemoryStore_TryTakeIdleWithMinTTL(t *testing.T) {
 	ctx := context.Background()
 	pool := "test-pool"
 
-	// Set TTL to 100ms; entries will have ~100ms remaining.
 	if err := store.SetIdleEntryTTL(ctx, pool, 100*time.Millisecond); err != nil {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
 	mustPutIdle(t, store, pool, "sb-near-expiry")
 
-	// Set a long TTL and add another entry.
 	if err := store.SetIdleEntryTTL(ctx, pool, 24*time.Hour); err != nil {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
@@ -157,7 +153,6 @@ func TestInMemoryStore_PutIdle_Idempotent(t *testing.T) {
 		t.Fatalf("expected idle count 1 after duplicate put, got %d", counters.IdleCount)
 	}
 
-	// Take should yield exactly one entry.
 	id, _ := store.TryTakeIdle(ctx, pool)
 	if id != "sb-1" {
 		t.Fatalf("expected sb-1, got %q", id)
@@ -173,7 +168,6 @@ func TestInMemoryStore_RemoveIdle_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	pool := "test-pool"
 
-	// Remove from non-existent pool should not error.
 	if err := store.RemoveIdle(ctx, pool, "sb-nonexistent"); err != nil {
 		t.Fatalf("RemoveIdle on non-existent should not error: %v", err)
 	}
@@ -183,7 +177,6 @@ func TestInMemoryStore_RemoveIdle_Idempotent(t *testing.T) {
 	if err := store.RemoveIdle(ctx, pool, "sb-1"); err != nil {
 		t.Fatalf("RemoveIdle error: %v", err)
 	}
-	// Second remove should be no-op.
 	if err := store.RemoveIdle(ctx, pool, "sb-1"); err != nil {
 		t.Fatalf("RemoveIdle (second call) error: %v", err)
 	}
@@ -207,7 +200,6 @@ func TestInMemoryStore_Lock_AcquireAndRelease(t *testing.T) {
 		t.Fatal("expected to acquire lock")
 	}
 
-	// Another owner should fail.
 	acquired, err = store.TryAcquirePrimaryLock(ctx, pool, "owner-2", 5*time.Second)
 	if err != nil {
 		t.Fatalf("TryAcquirePrimaryLock error: %v", err)
@@ -216,12 +208,10 @@ func TestInMemoryStore_Lock_AcquireAndRelease(t *testing.T) {
 		t.Fatal("expected owner-2 to fail acquiring lock held by owner-1")
 	}
 
-	// Release by owner.
 	if err := store.ReleasePrimaryLock(ctx, pool, "owner-1"); err != nil {
 		t.Fatalf("ReleasePrimaryLock error: %v", err)
 	}
 
-	// Now owner-2 should succeed.
 	acquired, err = store.TryAcquirePrimaryLock(ctx, pool, "owner-2", 5*time.Second)
 	if err != nil {
 		t.Fatalf("TryAcquirePrimaryLock error: %v", err)
@@ -294,14 +284,12 @@ func TestInMemoryStore_ReapExpired(t *testing.T) {
 	ctx := context.Background()
 	pool := "test-pool"
 
-	// Set short TTL and add entries.
 	if err := store.SetIdleEntryTTL(ctx, pool, 50*time.Millisecond); err != nil {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
 	mustPutIdle(t, store, pool, "sb-1")
 	mustPutIdle(t, store, pool, "sb-2")
 
-	// Set long TTL and add another.
 	if err := store.SetIdleEntryTTL(ctx, pool, 24*time.Hour); err != nil {
 		t.Fatalf("SetIdleEntryTTL error: %v", err)
 	}
@@ -378,7 +366,6 @@ func TestInMemoryStore_SnapshotCounters(t *testing.T) {
 		t.Fatalf("expected idle count 3, got %d", counters.IdleCount)
 	}
 
-	// Remove one and verify.
 	_ = store.RemoveIdle(ctx, pool, "sb-2")
 	counters, err = store.SnapshotCounters(ctx, pool)
 	if err != nil {
@@ -445,16 +432,12 @@ func TestInMemoryStore_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			switch idx % 5 {
 			case 0:
-				// Put
 				_ = store.PutIdle(ctx, pool, idForIndex(100+idx))
 			case 1:
-				// Take
 				_, _ = store.TryTakeIdle(ctx, pool)
 			case 2:
-				// Remove
 				_ = store.RemoveIdle(ctx, pool, idForIndex(idx%10))
 			case 3:
-				// Snapshot
 				_, _ = store.SnapshotCounters(ctx, pool)
 			case 4:
 				// Lock operations
@@ -467,8 +450,6 @@ func TestInMemoryStore_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 
-	// If we got here without a race detector panic, concurrency is correct.
-	// Just verify the store is still functional.
 	counters, err := store.SnapshotCounters(ctx, pool)
 	if err != nil {
 		t.Fatalf("SnapshotCounters error after concurrent access: %v", err)

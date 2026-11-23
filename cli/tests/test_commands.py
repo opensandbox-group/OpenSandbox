@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for CLI commands with mocked SDK calls."""
-
 from __future__ import annotations
 
 import asyncio
@@ -1847,21 +1845,21 @@ def _invoke_terminal(
     incoming: list,
     stdin_chunks: list[bytes] | None = None,
     connect_error: Exception | None = None,
+    endpoint: str = "execd.example:44772",
+    protocol: str = "http",
 ):
     """Run `osb terminal` with the execd PTY boundary fully mocked.
 
     Returns (result, fake_ws, create_mock, delete_mock, connect_calls, stdout).
     """
     sandbox = MagicMock()
-    sandbox.get_endpoint.return_value = SandboxEndpoint(
-        endpoint="execd.example:44772"
-    )
+    sandbox.get_endpoint.return_value = SandboxEndpoint(endpoint=endpoint)
     mock_ctx = _build_mock_client_context(sandbox=sandbox)
     connection = mock_ctx.connection_config
     connection.user_agent = "osb-test"
     connection.headers = {}
     connection.use_server_proxy = False
-    connection.protocol = "http"
+    connection.protocol = protocol
     connection.get_api_key.return_value = ""
 
     ws = _FakePTYWebSocket(incoming)
@@ -1948,6 +1946,62 @@ class TestTerminal:
 
         assert result.exit_code == 0
         assert create.call_args.kwargs["workdir"] == "/tmp"
+
+    @pytest.mark.parametrize(
+        ("endpoint", "protocol", "http_base", "ws_base"),
+        [
+            (
+                "https://sandbox.example.com",
+                "https",
+                "https://sandbox.example.com",
+                "wss://sandbox.example.com",
+            ),
+            (
+                "http://sandbox.example.com:8080/",
+                "http",
+                "http://sandbox.example.com:8080",
+                "ws://sandbox.example.com:8080",
+            ),
+            (
+                "sandbox.example.com/sandboxes/sbx-1/port/44772",
+                "https",
+                "https://sandbox.example.com/sandboxes/sbx-1/port/44772",
+                "wss://sandbox.example.com/sandboxes/sbx-1/port/44772",
+            ),
+            (
+                "https://gw.example.com:8443/sandboxes/sbx-1/port/44772/",
+                "http",
+                "https://gw.example.com:8443/sandboxes/sbx-1/port/44772",
+                "wss://gw.example.com:8443/sandboxes/sbx-1/port/44772",
+            ),
+            (
+                "HTTP://sandbox.example.com",
+                "https",
+                "http://sandbox.example.com",
+                "ws://sandbox.example.com",
+            ),
+        ],
+    )
+    def test_endpoint_scheme_is_preserved_or_defaulted(
+        self,
+        runner: CliRunner,
+        endpoint: str,
+        protocol: str,
+        http_base: str,
+        ws_base: str,
+    ) -> None:
+        result, _, create, delete, connect_calls, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=['{"type":"exit","exit_code":0}'],
+            endpoint=endpoint,
+            protocol=protocol,
+        )
+
+        assert result.exit_code == 0
+        assert create.call_args.args[0] == http_base
+        assert connect_calls[0][0] == f"{ws_base}/pty/sess-1/ws"
+        assert delete.call_args.args[0] == http_base
 
 
 class TestStreamPTY:

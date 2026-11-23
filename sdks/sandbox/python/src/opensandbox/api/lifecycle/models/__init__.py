@@ -24,7 +24,6 @@ from .create_fsb_template_request import CreateFsbTemplateRequest
 from .create_fsb_template_request_env import CreateFsbTemplateRequestEnv
 from .create_fsb_template_request_format import CreateFsbTemplateRequestFormat
 from .create_fsb_template_request_metadata import CreateFsbTemplateRequestMetadata
-from .create_fsb_template_request_mode import CreateFsbTemplateRequestMode
 from .create_sandbox_request import CreateSandboxRequest
 from .create_sandbox_request_env import CreateSandboxRequestEnv
 from .create_sandbox_request_extensions import CreateSandboxRequestExtensions
@@ -63,7 +62,6 @@ from .fsb_template import FsbTemplate
 from .fsb_template_env import FsbTemplateEnv
 from .fsb_template_format import FsbTemplateFormat
 from .fsb_template_metadata import FsbTemplateMetadata
-from .fsb_template_mode import FsbTemplateMode
 from .fsb_template_readiness import FsbTemplateReadiness
 from .fsb_template_resource_limits import FsbTemplateResourceLimits
 from .fsb_template_status import FsbTemplateStatus
@@ -117,7 +115,6 @@ __all__ = (
     "CreateFsbTemplateRequestEnv",
     "CreateFsbTemplateRequestFormat",
     "CreateFsbTemplateRequestMetadata",
-    "CreateFsbTemplateRequestMode",
     "CreateSandboxRequest",
     "CreateSandboxRequestEnv",
     "CreateSandboxRequestExtensions",
@@ -156,7 +153,6 @@ __all__ = (
     "FsbTemplateEnv",
     "FsbTemplateFormat",
     "FsbTemplateMetadata",
-    "FsbTemplateMode",
     "FsbTemplateReadiness",
     "FsbTemplateResourceLimits",
     "FsbTemplateStatus",

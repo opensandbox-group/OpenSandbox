@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Tests for IsolationService.run_once and .session context manager."""
-
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch

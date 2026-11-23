@@ -162,9 +162,6 @@ public class SandboxCreateOptions
 /// </remarks>
 public class SandboxCreateFromTemplateOptions
 {
-    /// <summary>Optional per-instance limits for a RootfsOnly template.</summary>
-    public IReadOnlyDictionary<string, string>? Resource { get; set; }
-
     /// <summary>
     /// Gets or sets the connection configuration.
     /// </summary>

@@ -164,6 +164,9 @@ func (s *Sandbox) templateBacked() bool {
 
 // CreateSandbox creates a new sandbox and waits for it to be ready.
 func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCreateOptions) (*Sandbox, error) {
+	if opts.InheritSnapshotResources && opts.SnapshotID == "" {
+		return nil, &InvalidArgumentError{Field: "InheritSnapshotResources", Message: "requires a snapshot ID"}
+	}
 	if (opts.Image == "") == (opts.SnapshotID == "") {
 		return nil, &InvalidArgumentError{Field: "Image/SnapshotID", Message: "exactly one of image or snapshotID is required"}
 	}
@@ -225,7 +228,6 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 
 // SandboxFromTemplateOptions configures template-based sandbox creation.
 type SandboxFromTemplateOptions struct {
-	ResourceLimits ResourceLimits
 	// TimeoutSeconds is the sandbox TTL. Required: the server rejects
 	// template-based creation without a timeout.
 	TimeoutSeconds int
@@ -282,12 +284,11 @@ func CreateSandboxFromTemplate(ctx context.Context, config ConnectionConfig, tem
 	started := time.Now()
 
 	req := CreateSandboxRequest{
-		TemplateID:     templateID,
-		ResourceLimits: opts.ResourceLimits,
-		Timeout:        &opts.TimeoutSeconds,
-		Metadata:       opts.Metadata,
-		NetworkPolicy:  opts.NetworkPolicy,
-		Extensions:     opts.Extensions,
+		TemplateID:    templateID,
+		Timeout:       &opts.TimeoutSeconds,
+		Metadata:      opts.Metadata,
+		NetworkPolicy: opts.NetworkPolicy,
+		Extensions:    opts.Extensions,
 	}
 	if opts.IdlePolicy != nil {
 		req.Lifecycle = &SandboxLifecycle{IdlePolicy: opts.IdlePolicy}

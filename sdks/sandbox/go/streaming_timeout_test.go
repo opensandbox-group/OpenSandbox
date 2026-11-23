@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Regression tests for streaming (SSE) connection handling:
-//  1. A long-running stream must NOT be killed by the client's overall request
-//     timeout (which would kill long commands mid-stream).
-//  2. SSE must use a fresh, non-pooled connection (keep-alive disabled), so a
-//     silently-dropped idle connection can never stall a stream.
-
 package opensandbox
 
 import (
@@ -29,11 +23,6 @@ import (
 	"time"
 )
 
-// TestStreaming_NotKilledByRequestTimeout: an SSE stream whose events span
-// longer than the client's overall RequestTimeout still completes, because
-// streaming uses the dedicated timeout-free client. Pre-fix (SSE shared the
-// httpClient whose Timeout == RequestTimeout) this failed with
-// "Client.Timeout ... while reading body".
 func TestStreaming_NotKilledByRequestTimeout(t *testing.T) {
 	// Stream 5 events, ~120ms apart => ~600ms total, well beyond the 200ms timeout.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,9 +55,6 @@ func TestStreaming_NotKilledByRequestTimeout(t *testing.T) {
 	require.True(t, len(events) >= 3, "should have received the streamed events")
 }
 
-// TestStreaming_UsesNonPooledClient verifies the streaming client disables
-// keep-alive (no connection pooling) and has no overall timeout, so streams are
-// never carried over a stale pooled connection nor capped by RequestTimeout.
 func TestStreaming_UsesNonPooledClient(t *testing.T) {
 	client := NewExecdClient("https://example.com", "tok", WithTimeout(30*time.Second))
 	sc := client.client.streamHTTPClient()
@@ -83,11 +69,6 @@ func TestStreaming_UsesNonPooledClient(t *testing.T) {
 	require.Equal(t, 30*time.Second, client.client.httpClient.Timeout, "non-streaming client keeps its request timeout")
 }
 
-// TestStreaming_HeaderTimeoutBounded verifies that when the server accepts the
-// connection but never sends response headers, the stream fails within a bounded
-// time instead of hanging forever — even for a context.Background() caller that
-// provides no deadline of its own. It also confirms an explicitly-configured
-// ResponseHeaderTimeout is preserved (not overwritten by the default).
 func TestStreaming_HeaderTimeoutBounded(t *testing.T) {
 	// Server accepts the request but blocks without ever writing headers.
 	block := make(chan struct{})
@@ -116,11 +97,6 @@ func TestStreaming_HeaderTimeoutBounded(t *testing.T) {
 	}
 }
 
-// TestStreaming_PreservesCustomClientState verifies the dedicated SSE client is
-// a shallow copy of the caller-provided http.Client, so a CookieJar (and other
-// client-level policy such as CheckRedirect) still applies to streams. Before
-// the fix the SSE client started from an empty http.Client and only copied the
-// transport, silently dropping such settings for /command and /metrics/watch.
 func TestStreaming_PreservesCustomClientState(t *testing.T) {
 	jar, err := cookiejar.New(nil)
 	require.NoError(t, err)

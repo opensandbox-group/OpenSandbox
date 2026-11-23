@@ -55,7 +55,7 @@ class _Headers:
                 return value
         return default
 
-    def items(self) -> list[tuple[str, str]]:
+    def items(self, multi: bool = False) -> list[tuple[str, str]]:
         return list(self._values.items())
 
     def __setitem__(self, name: str, value: str) -> None:

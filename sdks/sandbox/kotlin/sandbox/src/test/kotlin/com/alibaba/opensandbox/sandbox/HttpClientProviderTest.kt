@@ -19,6 +19,7 @@ package com.alibaba.opensandbox.sandbox
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.transport.RetryInterceptor
 import com.alibaba.opensandbox.sandbox.transport.RetryPolicy
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -43,6 +44,23 @@ class HttpClientProviderTest {
             ).use { provider ->
                 assertFalse(provider.sseClient.retryOnConnectionFailure)
                 assertFalse(provider.sseClient.interceptors.any { it is RetryInterceptor })
+            }
+        }
+    }
+
+    @Test
+    fun `SSE client bounds the gap between stream bytes but not the whole stream`() {
+        mapOf(
+            Duration.ofSeconds(5) to 30_000,
+            Duration.ofSeconds(120) to 120_000,
+        ).forEach { (requestTimeout, readTimeoutMillis) ->
+            HttpClientProvider(
+                ConnectionConfig.builder()
+                    .requestTimeout(requestTimeout)
+                    .build(),
+            ).use { provider ->
+                assertEquals(readTimeoutMillis, provider.sseClient.readTimeoutMillis)
+                assertEquals(0, provider.sseClient.callTimeoutMillis)
             }
         }
     }

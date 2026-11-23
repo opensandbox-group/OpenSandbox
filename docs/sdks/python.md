@@ -253,6 +253,10 @@ Endpoint-cache invalidation is scoped to the affected sandbox. An in-flight look
 
 With the built-in health probe, readiness checks during creation, connection, and resume fail immediately when the health endpoint returns HTTP 401 or 403. The SDK raises `SandboxApiException` with the original status, error details, and request ID instead of waiting for `SandboxReadyTimeoutException`. Check the endpoint credentials or permissions before retrying. Transient health failures retain their existing polling behavior; `is_healthy()` still returns `False` for a failed built-in health probe.
 
+Built-in health requests cap their connect, read, write, and connection-pool wait timeouts at `min(request_timeout, 5 seconds)` in both synchronous and asynchronous clients. This also applies to `is_healthy()` and the pool's default warmup checks, so slow probes can fail sooner. Retries can take longer than five seconds in total; creation, connection, and resume still enforce their shared readiness budget. Other API requests and custom health checks retain their timeout behavior.
+
+This cap is currently implemented by the Python SDK; alignment of the JavaScript, Go, Kotlin, and C# SDKs is tracked in [#2945](https://github.com/opensandbox-group/OpenSandbox/issues/2945).
+
 Define custom logic to determine if the sandbox is healthy. This overrides the default ping check. Synchronous checks must set their own timeouts because the SDK cannot interrupt them; asynchronous checks must not block the event loop or suppress cancellation.
 
 ```python
@@ -566,6 +570,8 @@ await sandbox.patch_metadata({"project": "demo", "obsolete-key": None})
 ### 1. Connection Configuration
 
 The `ConnectionConfig` class manages API server connection settings.
+
+The Python SDK logs propagated filesystem, command, metrics, diagnostics, and egress failures at `DEBUG`. Set the `opensandbox` logger to `DEBUG` to see those diagnostics. Applications can handle the raised exceptions and choose when to log them.
 
 Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sandboxes. SDK-owned transports share that configuration's lazily loaded SSL context, avoiding repeated CA certificate loading, while each Sandbox/Manager keeps its own connection pool and closes it independently. TLS verification remains enabled. Create a new configuration to reload the system or environment-configured trust store. For connection pooling across sandboxes, supply a shared `transport` and close it after all users finish.
 

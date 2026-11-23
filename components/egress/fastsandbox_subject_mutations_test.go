@@ -331,6 +331,18 @@ func exerciseMutationHTTP(t *testing.T, s *fastSandboxPolicyServer, strict, file
 			require.NoError(t, err)
 			observe(doActionsV2Relay(t, s, method, vaultStatePrefix+testUID, owner, string(payload)))
 		}
+		if !waitForACK && s.subjectDrain != nil {
+			// Exercise the injected Prepare rejection before authority loss
+			// can discard the pending installation.
+			require.Eventually(t, func() bool {
+				for _, reason := range s.subjectLifecycleDegraded() {
+					if reason == "subject_prepare_rejected" {
+						return true
+					}
+				}
+				return false
+			}, 5*time.Second, 5*time.Millisecond)
+		}
 		var before *fastSandboxSubjectSnapshot
 		if fileMetaMismatch {
 			if s.subjectDrain != nil {

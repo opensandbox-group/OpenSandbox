@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Network management mixin for Docker sandboxes.
-
-Provides network validation, endpoint resolution, egress sidecar lifecycle,
-and bridge IP extraction. Mixed into DockerSandboxService.
-"""
-
 from __future__ import annotations
 
 import json
@@ -57,7 +50,10 @@ from opensandbox_server.services.endpoint_auth import (
     build_egress_auth_headers,
     merge_endpoint_headers,
 )
-from opensandbox_server.services.helpers import upstream_proxy_egress_env
+from opensandbox_server.services.helpers import (
+    forward_mode_egress_env,
+    upstream_proxy_egress_env,
+)
 from opensandbox_server.services.validators import (
     ensure_credential_proxy_configured,
     ensure_egress_configured,
@@ -254,7 +250,7 @@ class DockerNetworkingMixin:
         Get sandbox access endpoint.
 
         Args:
-            resolve_internal: If True, return the internal container IP (for proxy), ignoring router config.
+            resolve_internal: If True, select a server-reachable container or host-mapped endpoint.
             expires: Not supported by Docker runtime.
             use_proxy_host: When True and resolve_internal is False, build the
                 host-mapped endpoint from the server-local proxy host
@@ -495,7 +491,7 @@ class DockerNetworkingMixin:
     def _start_egress_sidecar(
         self,
         sandbox_id: str,
-        network_policy: NetworkPolicy,
+        network_policy: Optional[NetworkPolicy],
         egress_token: str,
         host_execd_port: int,
         host_http_port: int,
@@ -515,17 +511,19 @@ class DockerNetworkingMixin:
             raise ValueError("egress.image must be configured when networkPolicy is provided.")
         self._ensure_image_available(egress_image, None, sandbox_id)
 
-        policy_payload = json.dumps(network_policy.model_dump(by_alias=True, exclude_none=True))
         assert (
             self.app_config.egress is not None
-        )  # validated by ensure_egress_configured with networkPolicy
+        )  # validated by ensure_egress_configured with networkPolicy, or by forward-mode config
         egress_mode = self.app_config.egress.mode
         sidecar_env = [
-            f"{EGRESS_RULES_ENV}={policy_payload}",
             f"{EGRESS_MODE_ENV}={egress_mode}",
             f"{OPENSANDBOX_EGRESS_TOKEN}={egress_token}",
             f"{OPENSANDBOX_EGRESS_SANDBOX_ID}={sandbox_id}",
         ]
+        # Forward mode carries no local policy (OSEP-0030).
+        if network_policy is not None:
+            policy_payload = json.dumps(network_policy.model_dump(by_alias=True, exclude_none=True))
+            sidecar_env.insert(0, f"{EGRESS_RULES_ENV}={policy_payload}")
         if self.app_config.egress.otlp_endpoint:
             sidecar_env.append(
                 f"{OTEL_EXPORTER_OTLP_ENDPOINT}={self.app_config.egress.otlp_endpoint}"
@@ -533,6 +531,8 @@ class DockerNetworkingMixin:
         for key, value in upstream_proxy_egress_env(
             self.app_config.egress.upstream_proxy
         ).items():
+            sidecar_env.append(f"{key}={value}")
+        for key, value in forward_mode_egress_env(self.app_config.egress).items():
             sidecar_env.append(f"{key}={value}")
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")

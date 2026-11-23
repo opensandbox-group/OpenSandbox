@@ -39,7 +39,8 @@ gateway:
     # -- Gateway image pull policy.
     pullPolicy: IfNotPresent
     # -- Gateway image tag. Empty uses the release-<appVersion> image tag
-    # published for this chart version.
+    # published for this chart version. Nondefault httpConnectionPool values
+    # require an ingress image that supports the connection-pool flags.
     tag: ""
 
   # -- Number of gateway replicas.
@@ -60,7 +61,7 @@ gateway:
   # -- FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise.
   fastpathEndpoint: ""
 
-  # -- Restricts Fast Sandbox to one namespace and enables unsigned Host routing. Empty requires signed scopes; unsigned access needs external protection.
+  # -- Restricts Fast Sandbox to one namespace and enables unsigned wildcard routing. Empty requires signed scopes; unsigned access needs external protection.
   fastSandboxNamespace: ""
 
   # OSEP-0024 activity tracking (per-sandbox last-activity in Redis).
@@ -103,6 +104,17 @@ gateway:
 
   # -- Gateway log level.
   logLevel: "info"
+
+  # Upstream HTTP idle connection pool, per gateway replica. Applies to
+  # HTTP/SSE; WebSocket connections use their existing separate transport.
+  # Default-valued flags are omitted to preserve compatibility with released images.
+  httpConnectionPool:
+    # -- Maximum idle HTTP connections across all upstream hosts. Zero means no total limit; must be nonnegative.
+    maxIdleConns: 100
+    # -- Maximum idle HTTP connections per upstream host. Zero uses Go's default of 2; must be nonnegative.
+    maxIdleConnsPerHost: 2
+    # -- Maximum HTTP connection idle time (Go duration). Zero disables idle expiration; must be nonnegative.
+    idleConnTimeout: "90s"
 
   # -- Additional environment variables for the gateway container
   # (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics).

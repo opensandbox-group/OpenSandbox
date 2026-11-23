@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Sandbox state must reflect a failed task, not just pod readiness.
-
-A Pool pod is Ready before any sandbox is dispatched to it -- that is what pre-warming
-means -- so pod readiness carries no information about the dispatched task. Deriving the
-public state from readiness alone reports a healthy "Running" sandbox whose entrypoint
-never ran. `taskFailed` is published by the operator (and asserted in the k8s e2e suite)
-but the server never reads it.
-"""
+"""Pool Pod readiness does not prove that its assigned task succeeded."""
 
 from unittest.mock import MagicMock
 
@@ -32,8 +25,6 @@ _ENDPOINTS = {
 
 
 def test_get_status_reports_failed_when_task_failed_and_phase_unset():
-    # Pool-allocated sandboxes are observed with an empty phase, so the pod-readiness
-    # fallback decides -- and it sees a Ready pool pod regardless of the task outcome.
     provider = BatchSandboxProvider(MagicMock())
     workload = {
         "status": {"replicas": 1, "ready": 1, "allocated": 1, "taskFailed": 1, "taskSucceed": 0},
@@ -47,8 +38,6 @@ def test_get_status_reports_failed_when_task_failed_and_phase_unset():
 
 
 def test_get_status_reports_failed_when_task_failed_under_succeed_phase():
-    # applySteadyRuntimePhase sets Succeed from `Ready > 0` alone, so the phase branch
-    # would otherwise map a failed task to "Running".
     provider = BatchSandboxProvider(MagicMock())
     workload = {
         "status": {"phase": "Succeed", "replicas": 1, "ready": 1, "allocated": 1, "taskFailed": 1},
@@ -62,7 +51,6 @@ def test_get_status_reports_failed_when_task_failed_under_succeed_phase():
 
 
 def test_get_status_task_failure_does_not_override_paused_phase():
-    # Lifecycle phases are owned by an explicit user operation and stay authoritative.
     provider = BatchSandboxProvider(MagicMock())
     workload = {
         "status": {"phase": "Paused", "replicas": 1, "ready": 0, "allocated": 1, "taskFailed": 1},
@@ -75,8 +63,6 @@ def test_get_status_task_failure_does_not_override_paused_phase():
 
 
 def test_get_status_reports_terminated_when_expire_time_has_passed():
-    # TTL is spec.expireTime. Phase Succeed only means the pod is Ready, so an
-    # expired sandbox stays Running and wall-clock billing keeps growing.
     provider = BatchSandboxProvider(MagicMock())
     workload = {
         "spec": {"expireTime": "2020-01-01T00:00:00Z"},

@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from attrs import define as _attrs_define
 
 from ..models.create_fsb_template_request_format import CreateFsbTemplateRequestFormat
-from ..models.create_fsb_template_request_mode import CreateFsbTemplateRequestMode
 from ..types import UNSET, Unset
 
 if TYPE_CHECKING:
@@ -76,8 +75,6 @@ class CreateFsbTemplateRequest:
             readiness (FsbTemplateReadiness | Unset): Build-side readiness gate for a fsb template.
             format_ (CreateFsbTemplateRequestFormat | Unset): Storage encoding of the produced snapshot set. Default:
                 CreateFsbTemplateRequestFormat.OVERLAYBD.
-            mode (CreateFsbTemplateRequestMode | Unset): Requested build mode. Defaults to full. rootfsOnly requires native
-                storage.
     """
 
     image: str
@@ -88,7 +85,6 @@ class CreateFsbTemplateRequest:
     metadata: CreateFsbTemplateRequestMetadata | Unset = UNSET
     readiness: FsbTemplateReadiness | Unset = UNSET
     format_: CreateFsbTemplateRequestFormat | Unset = CreateFsbTemplateRequestFormat.OVERLAYBD
-    mode: CreateFsbTemplateRequestMode | Unset = UNSET
 
     def to_dict(self) -> dict[str, Any]:
         image = self.image
@@ -119,10 +115,6 @@ class CreateFsbTemplateRequest:
         if not isinstance(self.format_, Unset):
             format_ = self.format_.value
 
-        mode: str | Unset = UNSET
-        if not isinstance(self.mode, Unset):
-            mode = self.mode.value
-
         field_dict: dict[str, Any] = {}
 
         field_dict.update(
@@ -143,8 +135,6 @@ class CreateFsbTemplateRequest:
             field_dict["readiness"] = readiness
         if format_ is not UNSET:
             field_dict["format"] = format_
-        if mode is not UNSET:
-            field_dict["mode"] = mode
 
         return field_dict
 
@@ -197,13 +187,6 @@ class CreateFsbTemplateRequest:
         else:
             format_ = CreateFsbTemplateRequestFormat(_format_)
 
-        _mode = d.pop("mode", UNSET)
-        mode: CreateFsbTemplateRequestMode | Unset
-        if isinstance(_mode, Unset):
-            mode = UNSET
-        else:
-            mode = CreateFsbTemplateRequestMode(_mode)
-
         create_fsb_template_request = cls(
             image=image,
             publish=publish,
@@ -213,7 +196,6 @@ class CreateFsbTemplateRequest:
             metadata=metadata,
             readiness=readiness,
             format_=format_,
-            mode=mode,
         )
 
         return create_fsb_template_request

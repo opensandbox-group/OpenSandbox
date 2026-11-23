@@ -39,13 +39,7 @@ const (
 	defaultWebSocketMessageSizeLimit int64 = 64 << 20
 )
 
-// WebSocketProxy reverse-proxies an HTTP/1.1 WebSocket upgrade (RFC 6455) to
-// a backend WebSocket server. It does not natively accept RFC 8441 HTTP/2
-// Extended CONNECT — coder/websocket v1.8.15 rejects any non-GET method in
-// Accept (see coder/websocket#4). Operators terminating h2 at an L7 frontend
-// must configure that frontend to translate h2 into an h1 Upgrade before it
-// reaches the ingress; see docs/components/ingress.md "L7 Frontend
-// Configuration for WebSocket".
+// WebSocketProxy requires RFC 6455 HTTP/1.1 upgrades; an L7 frontend must translate HTTP/2 Extended CONNECT.
 type WebSocketProxy struct {
 	responseObserver func(*http.Response)
 	errorObserver    func(error)

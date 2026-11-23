@@ -25,9 +25,6 @@ namespace OpenSandbox.Models;
 /// </remarks>
 public static class TemplatePhases
 {
-    /// <summary>Builder-confirmed artifact class, when available.</summary>
-    public string? Mode { get; set; }
-
     /// <summary>
     /// Build accepted, not started yet.
     /// </summary>
@@ -158,10 +155,6 @@ public class CreateTemplateRequest
     /// </summary>
     [JsonPropertyName("format")]
     public string? Format { get; set; }
-
-    /// <summary>Requested template build mode. RootfsOnly requires native storage.</summary>
-    [JsonPropertyName("mode")]
-    public string? Mode { get; set; }
 }
 
 /// <summary>

@@ -101,6 +101,7 @@ type fastSandboxSubjectSnapshot struct {
 }
 
 type fastSandboxSubjectACK struct {
+	identity            revision.Identity
 	fence               subject.Fencing
 	controlEpoch        string
 	digest              [sha256.Size]byte
@@ -912,7 +913,11 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 			if installed && s.subjectIntentCurrentLocked(intent) && intent.authorityGeneration == d.authorityGenerations[intent.subj] {
 				// A newer mirror may already exist. Stamp only the acknowledged
 				// intent, so that successor remains gated until its own ACK.
-				d.acked[intent.subj] = fastSandboxSubjectACK{fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration, authorityGeneration: intent.authorityGeneration}
+				// The addon sees the receiver's child-global epoch, not the
+				// coordinator-local one returned by Apply after a rebind.
+				wire := candidate
+				wire.DecisionEpoch += installer.transport.base
+				d.acked[intent.subj] = fastSandboxSubjectACK{identity: wire, fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration, authorityGeneration: intent.authorityGeneration}
 				d.wakeACKWaitersLocked(intent.subj)
 			}
 			if installed || terminal {

@@ -284,7 +284,6 @@ export interface SandboxConnectOptions {
 }
 
 export interface SandboxCreateFromTemplateOptions {
-  resource?: Record<string, string>;
   /**
    * Connection configuration for calling the OpenSandbox Lifecycle API and the sandbox's execd API.
    */
@@ -530,6 +529,9 @@ export class Sandbox {
   }
 
   static async create(opts: SandboxCreateOptions): Promise<Sandbox> {
+    if (opts.inheritSnapshotResources && !opts.snapshotId) {
+      throw new Error("inheritSnapshotResources requires a snapshot ID");
+    }
     if ((opts.image == null) === (opts.snapshotId == null)) {
       throw new Error("Exactly one of image or snapshotId must be provided");
     }
@@ -801,7 +803,6 @@ export class Sandbox {
 
     const req: CreateSandboxFromTemplateRequest = {
       templateId: opts.templateId,
-      ...(opts.resource !== undefined ? { resourceLimits: opts.resource } : {}),
       timeout: Math.floor(opts.timeoutSeconds),
       metadata: opts.metadata ?? {},
       networkPolicy: opts.networkPolicy

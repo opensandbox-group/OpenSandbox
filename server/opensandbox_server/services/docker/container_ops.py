@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Container operations mixin for Docker sandboxes.
-
-Provides image management, platform resolution, and container creation utilities.
-Mixed into DockerSandboxService.
-"""
-
 from __future__ import annotations
 
 import json
@@ -51,6 +44,7 @@ from opensandbox_server.services.constants import (
     SandboxErrorCodes,
 )
 from opensandbox_server.services.helpers import (
+    apply_execd_isolation_config,
     parse_gpu_request,
     parse_memory_limit,
     parse_nano_cpus,
@@ -77,7 +71,6 @@ logger = logging.getLogger(__name__)
 
 
 class DockerContainerOpsMixin:
-    """Mixin providing image management, platform resolution, and container creation."""
 
 
     def _normalize_platform_key(self, platform: Optional[PlatformSpec]) -> str:
@@ -309,13 +302,15 @@ class DockerContainerOpsMixin:
         )
         apply_extensions_to_mapping(labels, request.extensions)
 
-        env_dict = {**(self.app_config.docker.sandbox_env or {}), **(request.env or {})}
+        config = self.app_config
+        env_dict = {**(config.docker.sandbox_env or {}), **(request.env or {})}
+        apply_execd_isolation_config(env_dict, config.runtime.execd_isolation_config)
         environment = []
         for key, value in env_dict.items():
             if value is None:
                 continue
             environment.append(f"{key}={value}")
-        if self.app_config and self.app_config.runtime.execd_run_as_init:
+        if config.runtime.execd_run_as_init:
             environment.append("EXECD_INIT=1")
         environment.append(f"OPENSANDBOX_ID={sandbox_id}")
         return labels, environment

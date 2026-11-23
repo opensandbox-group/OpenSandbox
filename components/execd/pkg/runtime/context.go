@@ -188,7 +188,6 @@ func (c *Controller) waitForJupyterContext(ctx context.Context, req CreateContex
 	return client, session, err
 }
 
-// createJupyterContext performs the actual context creation workflow.
 func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyter.Client, *jupytersession.Session, error) {
 	tokens := c.jupyterTokens()
 	if c.baseURL == "" || len(tokens) == 0 {
@@ -325,7 +324,6 @@ func (c *Controller) listAllContexts() ([]CodeContext, error) {
 		if session == "" {
 			return true
 		}
-		// Skip if already collected from jupyterClientMap to avoid duplicates.
 		if _, exists := seen[session]; exists {
 			return true
 		}
@@ -350,7 +348,6 @@ func (c *Controller) listLanguageContexts(language Language) ([]CodeContext, err
 	})
 
 	if defaultContext := c.getDefaultLanguageSession(language); defaultContext != "" {
-		// Skip if already collected from jupyterClientMap to avoid duplicates.
 		if _, exists := seen[defaultContext]; !exists {
 			contexts = append(contexts, CodeContext{ID: defaultContext, Language: language})
 		}

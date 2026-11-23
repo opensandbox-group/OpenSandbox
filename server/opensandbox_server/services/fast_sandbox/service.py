@@ -402,12 +402,6 @@ class FastSandboxService(SandboxService, ExtensionService):
         # Validate the opt-in before any side effect.
         idle_policy_annotation = self._validated_idle_policy_annotation(request)
         created_at = datetime.now(timezone.utc)
-        if not self._k8s.rootfs_resource_overrides:
-            if request.template_id and request.resource_limits is not None:
-                raise HTTPException(status_code=400, detail={"code": SandboxErrorCodes.INVALID_PARAMETER, "message": "Template resource overrides are disabled"})
-            if request.snapshot_id and request.resource_limits is None:
-                raise HTTPException(status_code=400, detail={"code": SandboxErrorCodes.INVALID_PARAMETER, "message": "resourceLimits required"})
-            request._resolved_rootfs_only = False
         # Template mode: the resolved artifact reference becomes
         # the FastPath image; workload shape comes from the golden image.
         template_entrypoint: Optional[list[str]] = None
@@ -500,11 +494,13 @@ class FastSandboxService(SandboxService, ExtensionService):
                 ) from exc
 
         rootfs_request = None
-        if request._resolved_rootfs_only or (request.template_id and request.resource_limits is not None):
+        if request._resolved_rootfs_only:
             from opensandbox_server.services.k8s.snapshot_runtime import build_public_snapshot_name
 
+            if not request.snapshot_id:
+                raise HTTPException(status_code=400, detail="Missing RootfsOnly snapshot ID")
             limits = request.resource_limits.root if request.resource_limits is not None else None
-            allowed = {"cpu", "memory"} if request.template_id else {"cpu", "memory", "pids"}
+            allowed = {"cpu", "memory", "pids"}
             if limits is not None and (not limits or set(limits) - allowed or any(not v.strip() for v in limits.values())):
                 raise HTTPException(status_code=400, detail={"code": SandboxErrorCodes.INVALID_PARAMETER, "message": "Invalid RootfsOnly resource limits"})
             create_request.ClearField("resources")
@@ -512,15 +508,10 @@ class FastSandboxService(SandboxService, ExtensionService):
                 create_request.resources.limits.cpu = limits.get("cpu", "")
                 create_request.resources.limits.memory = limits.get("memory", "")
             rootfs_request = pb2.CreateRootfsSandboxRequest(create=create_request)
-            if request.template_id:
-                rootfs_request.template_name = request.template_id.strip()
-            elif request.snapshot_id:
-                rootfs_request.snapshot_name = build_public_snapshot_name(request.snapshot_id)
-                defaults = request.resolved_snapshot_limits or {}
-                rootfs_request.source_limits.cpu = defaults.get("cpu", "")
-                rootfs_request.source_limits.memory = defaults.get("memory", "")
-            else:
-                raise HTTPException(status_code=400, detail="Missing RootfsOnly creation source")
+            rootfs_request.snapshot_name = build_public_snapshot_name(request.snapshot_id)
+            defaults = request.resolved_snapshot_limits or {}
+            rootfs_request.source_limits.cpu = defaults.get("cpu", "")
+            rootfs_request.source_limits.memory = defaults.get("memory", "")
 
         namespace = create_request.namespace
         sandbox_id = create_request.request_id
@@ -538,8 +529,13 @@ class FastSandboxService(SandboxService, ExtensionService):
         except (FastPathInvalidArgument, FastPathConflict, FastPathNotFound) as exc:
             raise self._fastpath_http_error(exc) from exc
         except FastPathError as exc:
-            # Post-persistence failure recovery: if durable intent exists for
-            # the same namespaced id, the create was accepted; return it as
+            # An unknown RPC cannot have persisted an intent.
+            if rootfs_request is not None and exc.code == "UNIMPLEMENTED":
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": SandboxErrorCodes.FSB_API_ERROR, "message": "FastPath does not support RootfsOnly creates; upgrade fast-sandbox."},
+                ) from exc
+            # If durable intent exists for the same namespaced id, return it as
             # Pending and let reconciliation continue.
             try:
                 existing = self._fastpath.get_sandbox(namespace, sandbox_id)
@@ -834,7 +830,7 @@ class FastSandboxService(SandboxService, ExtensionService):
     # -- endpoints ---------------------------------------------------------
 
     def get_network_policy(self, sandbox_id: str) -> dict:
-        """The recorded policy reflects exactly what the egress enforces."""
+        """Read recorded user policy; egress applies operator overlays separately."""
         return policy_relay.relay_get(self, sandbox_id)
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:

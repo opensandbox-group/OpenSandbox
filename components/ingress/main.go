@@ -56,10 +56,26 @@ func validateFastPathRouting(endpoint, namespace, mode, keys string) error {
 	return nil
 }
 
+func validateHTTPConnectionPool(maxIdleConns, maxIdleConnsPerHost int, idleConnTimeout time.Duration) error {
+	if maxIdleConns < 0 {
+		return errors.New("--http-max-idle-conns must be non-negative")
+	}
+	if maxIdleConnsPerHost < 0 {
+		return errors.New("--http-max-idle-conns-per-host must be non-negative")
+	}
+	if idleConnTimeout < 0 {
+		return errors.New("--http-idle-conn-timeout must be non-negative")
+	}
+	return nil
+}
+
 func main() {
 	version.EchoVersion("OpenSandbox Ingress")
 
 	flag.InitFlags()
+	if err := validateHTTPConnectionPool(flag.HTTPMaxIdleConns, flag.HTTPMaxIdleConnsPerHost, flag.HTTPIdleConnTimeout); err != nil {
+		log.Fatal(err)
+	}
 
 	ctx := signals.NewContext()
 	ctx = withLogger(ctx, flag.LogLevel)
@@ -158,7 +174,10 @@ func main() {
 		MinDistinctSignalTargets: flag.NetworkReadinessShadowMinSignalTargets,
 		DegradedFailureRatio:     flag.NetworkReadinessShadowDegradedFailureRatio,
 	})
-	proxyOptions := []proxy.Option{proxy.WithFastSandboxNamespace(flag.FastSandboxNamespace)}
+	proxyOptions := []proxy.Option{
+		proxy.WithFastSandboxNamespace(flag.FastSandboxNamespace),
+		proxy.WithHTTPConnectionPool(flag.HTTPMaxIdleConns, flag.HTTPMaxIdleConnsPerHost, flag.HTTPIdleConnTimeout),
+	}
 	if err != nil {
 		log.Printf("network readiness shadow assessment disabled (invalid configuration): %v", err)
 	} else {
@@ -173,7 +192,6 @@ func main() {
 			"enable activity recording for a stable wake loop")
 	}
 
-	// Create reverse proxy with sandbox provider.
 	reverseProxy := proxy.NewProxy(
 		ctx,
 		sandboxProvider,

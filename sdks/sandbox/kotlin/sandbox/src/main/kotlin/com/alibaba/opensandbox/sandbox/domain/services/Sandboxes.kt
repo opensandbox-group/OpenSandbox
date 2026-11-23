@@ -226,19 +226,6 @@ interface Sandboxes {
         networkPolicy: NetworkPolicy?,
         extensions: Map<String, String>,
         idlePolicy: IdlePolicy?,
-        resourceLimits: Map<String, String>?,
-    ): SandboxCreateResponse {
-        if (resourceLimits != null) throw UnsupportedOperationException("RootfsOnly resource overrides are unsupported")
-        return createSandboxFromTemplate(templateId, timeout, metadata, networkPolicy, extensions, idlePolicy)
-    }
-
-    fun createSandboxFromTemplate(
-        templateId: String,
-        timeout: Duration,
-        metadata: Map<String, String>,
-        networkPolicy: NetworkPolicy?,
-        extensions: Map<String, String>,
-        idlePolicy: IdlePolicy?,
     ): SandboxCreateResponse {
         if (idlePolicy == null) {
             return createSandboxFromTemplate(

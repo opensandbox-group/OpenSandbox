@@ -101,6 +101,8 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         )
 
     def CreateRootfsSandbox(self, request, context):
+        if getattr(self, "rootfs_rpc_unavailable", False):
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "unknown method")
         self.rootfs_request = request
         return self.CreateSandbox(request.create, context)
 
@@ -1909,8 +1911,7 @@ def test_rootfs_http_forwards_partial_limits_to_distinct_rpc(http_fsb, monkeypat
         SnapshotRecord, SnapshotRestoreConfig, SnapshotState, SnapshotStatusRecord,
     )
 
-    client, fake, service = http_fsb
-    service._k8s.rootfs_resource_overrides = True
+    client, fake, _ = http_fsb
     record = SnapshotRecord(
         id="snap-size", source_sandbox_id="old", mode="rootfsOnly",
         restore_config=SnapshotRestoreConfig(backend="fsb", image="native-source",
@@ -1927,3 +1928,16 @@ def test_rootfs_http_forwards_partial_limits_to_distinct_rpc(http_fsb, monkeypat
     assert fake.rootfs_request.source_limits.cpu == "500m"
     assert fake.rootfs_request.create.resources.limits.cpu == ""
     assert fake.rootfs_request.create.resources.limits.memory == "2Gi"
+    del data["resourceLimits"]
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 202, response.text
+    assert not fake.rootfs_request.create.HasField("resources")
+
+    fake.rootfs_rpc_unavailable = True
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 503
+    assert "upgrade fast-sandbox" in response.text
+
+    record.mode = "full"
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 422
