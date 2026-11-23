@@ -19,7 +19,15 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
-from kubernetes.client import ApiException
+from kubernetes.client import (
+    ApiException,
+    V1Container,
+    V1ObjectMeta,
+    V1Pod,
+    V1PodSpec,
+    V1PodStatus,
+    V1RuntimeClass,
+)
 from urllib3.exceptions import ProtocolError
 
 from opensandbox_server.services.constants import SandboxErrorCodes
@@ -35,7 +43,7 @@ def _client(
     runtime_classes: dict[str, Any],
     *,
     workload_metadata: dict[str, Any] | None = None,
-    pods: dict[str, dict[str, Any]] | None = None,
+    pods: dict[str, Any] | None = None,
     conditions: list[dict[str, Any]] | None = None,
 ) -> MagicMock:
     client = MagicMock(spec=K8sClient)
@@ -189,6 +197,45 @@ def test_pause_fails_closed_without_running_source_pod() -> None:
         provider.pause_sandbox(SANDBOX_ID, NAMESPACE)
 
     client.patch_custom_object.assert_not_called()
+
+
+def _typed_pod(runtime_class_name: str | None) -> V1Pod:
+    return V1Pod(
+        metadata=V1ObjectMeta(name=f"{SANDBOX_ID}-0", namespace=NAMESPACE),
+        spec=V1PodSpec(
+            containers=[V1Container(name="sandbox")],
+            runtime_class_name=runtime_class_name,
+        ),
+        status=V1PodStatus(phase="Running"),
+    )
+
+
+def test_pause_refuses_gvisor_handler_read_from_kubernetes_client_objects() -> None:
+    client = _client(
+        {},
+        {"sandboxed": V1RuntimeClass(handler="runsc", metadata=V1ObjectMeta(name="sandboxed"))},
+        pods={f"{SANDBOX_ID}-0": _typed_pod("sandboxed")},
+    )
+    provider = BatchSandboxProvider(client)
+
+    with pytest.raises(
+        ValueError,
+        match=r"gVisor RuntimeClass 'sandboxed' \(handler 'runsc'\)",
+    ):
+        provider.pause_sandbox(SANDBOX_ID, NAMESPACE)
+
+    client.patch_custom_object.assert_not_called()
+
+
+def test_pause_of_kubernetes_client_pod_without_runtime_class_patches_pause() -> None:
+    client = _client({}, {}, pods={f"{SANDBOX_ID}-0": _typed_pod(None)})
+    provider = BatchSandboxProvider(client)
+
+    provider.pause_sandbox(SANDBOX_ID, NAMESPACE)
+
+    client.read_runtime_class.assert_not_called()
+    client.patch_custom_object.assert_called_once()
+    assert client.patch_custom_object.call_args.kwargs["body"] == {"spec": {"pause": True}}
 
 
 def test_service_maps_gvisor_pause_refusal_to_409(k8s_service) -> None:
