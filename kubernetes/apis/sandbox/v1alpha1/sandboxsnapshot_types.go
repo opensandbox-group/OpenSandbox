@@ -218,4 +218,8 @@ type WorkspaceCheckpoint struct {
 	ClaimName          string `json:"claimName"`
 	Archive            string `json:"archive"`
 	SHA256             string `json:"sha256"`
+	// SizeBytes is the uncompressed tar size. Older checkpoints omit it.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
 }

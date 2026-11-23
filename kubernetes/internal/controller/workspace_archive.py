@@ -140,11 +140,14 @@ def restore(volume, archive, expected):
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3, 12):
+        sys.exit("workspace pause and resume require Python 3.12 or newer")
     operation, root, path, *args = sys.argv[1:]
     if operation == "save":
         archive = Path(path)
         archive.parent.mkdir(exist_ok=True)
-        print(capture(Path(root), archive))
+        digest = capture(Path(root), archive)
+        print(digest, archive.stat().st_size)
     elif operation == "restore":
         restore(Path(root), Path(path), *args)
     else:

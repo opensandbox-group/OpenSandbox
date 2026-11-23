@@ -10,6 +10,7 @@ This guide explains how to use the pause and resume features for Kubernetes-back
 ## Table of Contents
 
 - [Overview](#overview)
+- [Workspace-only pause on Kubernetes](#workspace-only-pause-on-kubernetes)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Controller Configuration](#controller-configuration)
@@ -101,13 +102,33 @@ For data that must survive an unexpected termination, store it in a persistent v
 
 A single-replica, non-pooled BatchSandbox can save the ordinary `/workspace` directory to an object-storage-backed PVC on pause. Resume uses the original application image and an init container to restore the archive into a fresh volume mounted at `/workspace`. Each pause creates a new archive. Files elsewhere in the container and running processes are discarded when the Pod is released.
 
-Configure the following fields in the BatchSandbox or the server's `batchsandbox_template_file`. This example uses the server's application container name, `sandbox`. Supply a dedicated, writable PVC for each sandbox, backed by a bucket or prefix with access restricted to that sandbox. The CSI driver must support sequential writes, fsync and durable close. The application image must provide Python 3.12 or later.
+The application image must provide Python 3.12 or newer. Use a dedicated, writable PVC backed by a bucket or prefix accessible only to this sandbox. The CSI driver must support sequential writes, fsync and durable close.
+
+**Shared server template.** Put the strategy and logical volume name in `batchsandbox_template_file`. The server uses `sandbox` as the application container name.
 
 ```yaml
 spec:
   workspacePause:
     containerName: sandbox
     volumeName: checkpoints
+```
+
+**Per-sandbox create request.** Select the dedicated PVC for this sandbox and pass the mount in the SDK's `volumes` list. Set `claim_name` to the PVC provisioned for this sandbox.
+
+```python
+volumes = [
+    Volume(
+        name="checkpoints",
+        pvc=PVC(claimName=claim_name, createIfNotExists=False, deleteOnSandboxTermination=False),
+        mountPath="/mnt/opensandbox-checkpoints",
+    )
+]
+```
+
+For a directly managed BatchSandbox, add the strategy above and the following mount to the individual sandbox manifest. Replace `my-sandbox-bucket` with its dedicated claim.
+
+```yaml
+spec:
   template:
     spec:
       containers:
@@ -121,13 +142,17 @@ spec:
             claimName: my-sandbox-bucket
 ```
 
-When the lifecycle server serves multiple sandboxes, configure only `spec.workspacePause` in its template and supply the corresponding volume in each create request. For example, pass `Volume(name="checkpoints", pvc=PVC(claimName=claim_name, createIfNotExists=False, deleteOnSandboxTermination=False), mountPath="/mnt/opensandbox-checkpoints")` in the Python SDK's `volumes` list. Select a dedicated claim for each sandbox.
-
 The archive supports regular files, directories and symbolic links. Absolute links into the workspace are stored as relative links. Links to external paths, such as a virtual environment’s interpreter, keep their link text. Their targets must exist in the resumed image. Restore creates symbolic links after extracting file contents. Sockets, FIFOs and devices fail capture with the entry name. Restore preserves ordinary Unix access bits and clears setuid and setgid bits. A root init container restores numeric owners and groups. With a non-root init container, new files use the ownership assigned by the filesystem.
 
 Stop application writers before requesting pause. Use the existing pause and resume APIs. A failed export leaves the source Pod available for retry. On resume the init container verifies the archive digest before publishing the workspace. If this step fails, the init container can retry on the same volume. Once published, the workspace keeps subsequent edits if the init container runs again. A replacement Pod with a fresh volume restores from the active archive, so keep that archive for the lifetime of the sandbox. Inspect the init container logs if the volume or archive is unavailable. New objects use the prefix `<BatchSandbox UID>/` on the dedicated claim. While paused, inspect the internal snapshot’s `status.workspace`. After resume, the Pod template annotations `sandbox.opensandbox.io/workspace-archive` and `sandbox.opensandbox.io/workspace-claim` identify the checkpoint required by replacement Pods. Preserve both references during transitions. To reclaim all completed and abandoned uploads safely, expire that UID prefix after the sandbox and its Pods have been deleted. Legacy flat archive keys remain readable. Do not apply an age-only expiration rule to a live sandbox.
 
+Temporary API or exec connection errors and a source Pod waiting to run are retried with backoff within the snapshot’s configured commit timeout. Configuration errors and a nonzero exit from the archive helper fail the export and preserve the source Pod.
+
 If `status.workspace.sha256` is missing or is not a 64-character hexadecimal digest, resume leaves the sandbox paused and reports `ResumeFailed` with reason `InvalidWorkspaceRestore`. Uppercase and lowercase hexadecimal digits are accepted.
+
+New checkpoints record the uncompressed tar size in `status.workspace.sizeBytes`. The restore init container requests node-local ephemeral storage for the archive size plus the larger of 25% or 64 MiB of headroom. Its workspace `emptyDir` uses this budget unless the application has a larger storage request or an explicit storage limit. The controller respects an explicit limit and rejects a checkpoint larger than that limit before releasing the source Pod. Allow additional capacity for many small files and for writes after resume. Older checkpoints without size metadata keep their previous storage settings.
+
+During restore, inspect the BatchSandbox’s `Progressing` condition for reason `WorkspaceRestoreRetrying` if the init container fails and Kubernetes retries it. The condition identifies the Pod and init container. The application image supplies the interpreter and the workload can write its PVC. The digest verifies stored bytes under that trust assumption.
 
 Keep the pause strategy fixed once a workspace has been restored. To migrate back to rootfs, copy the live workspace to durable storage and start a new sandbox. If the requested strategy changes during an in-flight pause, the controller reports `WorkspaceConfigChanged` and retains the Pod and snapshot. Restore the original setting to finish the pending pause.
 
@@ -514,6 +539,8 @@ curl http://localhost:8080/v1/sandboxes/{sandbox_id}
 | Field | Type | Description |
 |-------|------|-------------|
 | `phase` | string | `Pending` / `Committing` / `Succeed` / `Failed` |
+| `format` | string | `rootfs-v1` (default), `qemu-v1`, or `workspace-v1` |
+| `workspace` | object | For `workspace-v1`, identifies the source Pod UID, container, volume, PVC, archive key and SHA-256. New checkpoints also include the uncompressed tar size in `sizeBytes`. |
 | `conditions` | list | `Ready` / `Failed` conditions with reason and message |
 | `sourcePodName` | string | Pod name used for commit |
 | `sourceNodeName` | string | Node where commit Job runs |

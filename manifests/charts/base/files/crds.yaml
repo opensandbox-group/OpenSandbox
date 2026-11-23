@@ -719,6 +719,12 @@ spec:
                     type: string
                   sha256:
                     type: string
+                  sizeBytes:
+                    description: SizeBytes is the uncompressed tar size. Older checkpoints
+                      omit it.
+                    format: int64
+                    minimum: 1
+                    type: integer
                   sourcePodUID:
                     description: |-
                       UID is a type that holds unique ID values, including UUIDs.  Because we

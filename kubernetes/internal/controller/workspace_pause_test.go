@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -27,7 +29,9 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeexec "k8s.io/client-go/util/exec"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -103,9 +107,9 @@ func TestWorkspacePauseLifecycle(t *testing.T) {
 					return "", errors.New("wrong workspace export target")
 				}
 				if fail {
-					return "", errors.New("bucket full")
+					return "", kubeexec.CodeExitError{Err: errors.New("bucket full"), Code: 1}
 				}
-				return digest, nil
+				return digest + " 10240", nil
 			}}
 			snap.Generation = 1
 			require.NoError(t, r.Update(ctx, snap))
@@ -152,6 +156,7 @@ func TestWorkspacePauseLifecycle(t *testing.T) {
 			require.True(t, apierrors.IsNotFound(podErr))
 			require.Equal(t, api.BatchSandboxPhasePaused, bs.Status.Phase)
 			require.Equal(t, digest, snap.Status.Workspace.SHA256)
+			require.EqualValues(t, 10240, snap.Status.Workspace.SizeBytes)
 			bs.Spec.Pause = ptr.To(false)
 			require.NoError(t, r.Update(ctx, bs))
 			_, err = r.handleResume(ctx, bs)
@@ -167,6 +172,8 @@ func TestWorkspacePauseLifecycle(t *testing.T) {
 			init := tmpl.Spec.InitContainers[0]
 			require.Equal(t, digest, init.Command[len(init.Command)-1])
 			require.True(t, init.VolumeMounts[0].ReadOnly)
+			require.Equal(t, int64(64<<20)+10240, init.Resources.Requests.StorageEphemeral().Value())
+			require.Equal(t, init.Resources.Requests.StorageEphemeral().Value(), tmpl.Spec.Volumes[1].EmptyDir.SizeLimit.Value())
 			require.Equal(t, "data", tmpl.Spec.Containers[0].VolumeMounts[1].SubPath)
 			require.Equal(t, snap.Status.Workspace.Archive, tmpl.Annotations[workspaceArchiveAnnotation])
 			require.Equal(t, "my-bucket", tmpl.Annotations[workspaceClaimAnnotation])
@@ -272,4 +279,185 @@ func TestWorkspaceArchiveKeys(t *testing.T) {
 	for _, prefix := range []string{"../", "/absolute/", "nested/deeper/"} {
 		require.False(t, validArchiveName(prefix+legacy))
 	}
+}
+
+func TestWorkspaceRestoreStorage(t *testing.T) {
+	tmpl := workspacePauseTestTemplate()
+	app := &tmpl.Spec.Containers[0]
+	app.Resources.Requests = corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("4Gi")}
+	app.Resources.Limits = corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("8Gi")}
+	w := &api.WorkspaceCheckpoint{WorkspacePauseSpec: api.WorkspacePauseSpec{ContainerName: "sandbox", VolumeName: "bucket"},
+		Archive: "da09f148-fb28-4338-8e6f-9b5ec908ae78.tar", SHA256: strings.Repeat("a", 64), ClaimName: "my-bucket"}
+	require.NoError(t, prepareWorkspaceRestore(tmpl, w))
+	require.Nil(t, tmpl.Spec.Volumes[1].EmptyDir.SizeLimit, "legacy checkpoints keep their storage contract")
+	for _, tc := range []struct{ size, wantRequest int64 }{{1 << 30, 4 << 30}, {6 << 30, 7680 << 20}, {8 << 30, 8 << 30}} {
+		w.SizeBytes = tc.size
+		require.NoError(t, prepareWorkspaceRestore(tmpl, w))
+		require.EqualValues(t, 8<<30, tmpl.Spec.Volumes[1].EmptyDir.SizeLimit.Value())
+		require.Equal(t, tc.wantRequest, tmpl.Spec.InitContainers[0].Resources.Requests.StorageEphemeral().Value())
+		require.EqualValues(t, 4<<30, app.Resources.Requests.StorageEphemeral().Value())
+		require.Len(t, tmpl.Spec.InitContainers, 1)
+	}
+	w.SizeBytes++
+	require.ErrorContains(t, prepareWorkspaceRestore(tmpl, w), "exceeds ephemeral-storage limit")
+	w.SizeBytes = math.MaxInt64
+	require.ErrorContains(t, prepareWorkspaceRestore(tmpl, w), "representable")
+}
+
+func workspacePauseObjects() (*api.BatchSandbox, *corev1.Pod, *api.SandboxSnapshot) {
+	cfg := api.WorkspacePauseSpec{ContainerName: "sandbox", VolumeName: "bucket"}
+	bs := &api.BatchSandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: "sandbox-uid"},
+		Spec:       api.BatchSandboxSpec{Pause: ptr.To(true), Replicas: ptr.To(int32(1)), WorkspacePause: &cfg, Template: workspacePauseTestTemplate()},
+		Status:     api.BatchSandboxStatus{Phase: api.BatchSandboxPhasePausing},
+	}
+	owner := []metav1.OwnerReference{*metav1.NewControllerRef(bs, api.GroupVersion.WithKind("BatchSandbox"))}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: bs.Name + "-0", Namespace: bs.Namespace, UID: "pod-uid", OwnerReferences: owner},
+		Spec: *bs.Spec.Template.Spec.DeepCopy(), Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	s := &api.SandboxSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: internalPauseSnapshotName(bs.Name), Namespace: bs.Namespace, UID: "snapshot-uid", OwnerReferences: owner,
+			CreationTimestamp: metav1.Now(), Finalizers: []string{sandboxSnapshotFinalizer}, Annotations: map[string]string{workspacePauseAnnotation: "true"}},
+		Spec: api.SandboxSnapshotSpec{SandboxName: bs.Name}, Status: api.SandboxSnapshotStatus{Phase: api.SandboxSnapshotPhasePending},
+	}
+	return bs, pod, s
+}
+
+func TestWorkspaceExportRetries(t *testing.T) {
+	bs, pod, snapshot := workspacePauseObjects()
+	pod.Status.Phase = corev1.PodPending
+	r := newTestReconciler(bs, pod, snapshot)
+	writes, exports := 0, 0
+	c := interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, name string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			writes++
+			if writes == 1 {
+				return apierrors.NewServiceUnavailable("apiserver restarting")
+			}
+			return c.SubResource(name).Update(ctx, obj, opts...)
+		},
+	})
+	unavailable := true
+	reader := interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*corev1.Pod); ok && unavailable {
+				unavailable = false
+				return apierrors.NewServiceUnavailable("source read unavailable")
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	sr := &SandboxSnapshotReconciler{Client: c, APIReader: reader, exportWorkspace: func(context.Context, *corev1.Pod, string, string) (string, error) {
+		exports++
+		if exports == 1 {
+			return "", io.ErrUnexpectedEOF
+		}
+		return strings.Repeat("a", 64) + " 10240", nil
+	}}
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(snapshot)}
+	_, err := sr.reconcileWorkspaceExport(t.Context(), req)
+	require.True(t, apierrors.IsServiceUnavailable(err))
+	_, err = sr.reconcileWorkspaceExport(t.Context(), req)
+	require.ErrorIs(t, err, errRetryWorkspaceExport)
+	require.Zero(t, exports)
+	pod.Status.Phase = corev1.PodRunning
+	require.NoError(t, r.Status().Update(t.Context(), pod))
+	_, err = sr.reconcileWorkspaceExport(t.Context(), req)
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, snapshot))
+	require.Equal(t, api.SandboxSnapshotPhasePending, snapshot.Status.Phase)
+	_, err = sr.reconcileWorkspaceExport(t.Context(), req)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, snapshot))
+	require.Equal(t, api.SandboxSnapshotPhaseSucceed, snapshot.Status.Phase)
+	require.Equal(t, 2, exports)
+	require.Equal(t, 2, writes)
+}
+
+func TestWorkspaceExportRetryDeadline(t *testing.T) {
+	bs, pod, s := workspacePauseObjects()
+	s.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
+	pod.Status.Phase = corev1.PodPending
+	r := newTestReconciler(bs, pod, s)
+	sr := &SandboxSnapshotReconciler{Client: r.Client, APIReader: r.APIReader}
+	key := client.ObjectKeyFromObject(s)
+	_, err := sr.reconcileWorkspaceExport(t.Context(), ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.NoError(t, r.Get(t.Context(), key, s))
+	require.Equal(t, api.SandboxSnapshotPhaseFailed, s.Status.Phase)
+	require.Contains(t, s.Status.Conditions[0].Message, "waiting to run")
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+}
+
+func TestWorkspacePausePreservesSourceOnFailure(t *testing.T) {
+	for _, reason := range []string{"SourcePodChanged", "InvalidWorkspaceCheckpoint", "WorkspaceConfigChanged", "InvalidWorkspaceRestore"} {
+		t.Run(reason, func(t *testing.T) {
+			bs, pod, s := workspacePauseObjects()
+			s.Status.Phase, s.Status.Format = api.SandboxSnapshotPhaseSucceed, api.SandboxSnapshotFormatWorkspaceV1
+			w := &api.WorkspaceCheckpoint{WorkspacePauseSpec: *bs.Spec.WorkspacePause, ClaimName: "my-bucket", SourcePodUID: pod.UID,
+				Archive: "da09f148-fb28-4338-8e6f-9b5ec908ae78.tar", SHA256: strings.Repeat("c", 64), SizeBytes: 2 << 30}
+			s.Status.Workspace = w
+			switch reason {
+			case "SourcePodChanged":
+				w.SourcePodUID = "previous-pod"
+			case "InvalidWorkspaceCheckpoint":
+				w.SHA256 = ""
+			case "WorkspaceConfigChanged":
+				w.ContainerName = "previous-container"
+			case "InvalidWorkspaceRestore":
+				bs.Spec.Template.Spec.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")}
+			}
+			r := newTestReconciler(bs, pod, s)
+			_, err := r.syncPauseOrClear(t.Context(), bs)
+			require.NoError(t, err)
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(bs), bs))
+			require.Equal(t, api.BatchSandboxPhaseSucceed, bs.Status.Phase)
+			require.True(t, slices.ContainsFunc(bs.Status.Conditions, func(c api.BatchSandboxCondition) bool {
+				return c.Type == api.BatchSandboxConditionPauseFailed && c.Status == api.ConditionTrue && c.Reason == reason
+			}))
+		})
+	}
+}
+
+func TestWorkspaceSnapshotDeletionOnlyRemovesItsFinalizer(t *testing.T) {
+	_, _, s := workspacePauseObjects()
+	s.DeletionTimestamp = ptr.To(metav1.Now())
+	s.Finalizers = append(s.Finalizers, "example.org/other")
+	sr := &SandboxSnapshotReconciler{}
+	require.NoError(t, batchv1.AddToScheme(testscheme))
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: sr.getJobName(s), Namespace: s.Namespace}}
+	claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: "my-bucket", Namespace: s.Namespace}}
+	r := newTestReconciler(s, job, claim)
+	sr.Client = r.Client
+	_, err := sr.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(s)})
+	require.NoError(t, err)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(s), s))
+	require.Equal(t, []string{"example.org/other"}, s.Finalizers)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(job), job))
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(claim), claim))
+}
+
+func TestWorkspaceRestoreFailureIsVisibleAndRecovers(t *testing.T) {
+	bs, pod, _ := workspacePauseObjects()
+	bs.Status.Phase = api.BatchSandboxPhaseResuming
+	pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: restoreName, MountPath: workspaceMount, SubPath: "data"})
+	pod.Status.Phase = corev1.PodPending
+	exit := &corev1.ContainerStateTerminated{ExitCode: 1, Message: "workspace digest mismatch"}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{Name: restoreName,
+		State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		LastTerminationState: corev1.ContainerState{Terminated: exit}}}
+	view := buildRuntimeView(bs, []*corev1.Pod{pod})
+	require.Equal(t, api.BatchSandboxPhaseResuming, view.status.Phase)
+	index := slices.IndexFunc(view.status.Conditions, func(c api.BatchSandboxCondition) bool { return c.Type == api.BatchSandboxConditionProgressing })
+	require.NotEqual(t, -1, index)
+	require.Equal(t, "WorkspaceRestoreRetrying", view.status.Conditions[index].Reason)
+	require.Contains(t, view.status.Conditions[index].Message, exit.Message)
+	bs.Status = *view.status
+	require.Equal(t, bs.Status.Conditions, buildRuntimeView(bs, []*corev1.Pod{pod}).status.Conditions)
+	pod.Status.InitContainerStatuses[0].State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{}}
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	view = buildRuntimeView(bs, []*corev1.Pod{pod})
+	require.True(t, view.resumeCompleted)
+	require.False(t, slices.ContainsFunc(view.status.Conditions, func(c api.BatchSandboxCondition) bool { return c.Reason == "WorkspaceRestoreRetrying" }))
 }

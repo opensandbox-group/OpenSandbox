@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import os
 from pathlib import Path
 import stat
@@ -26,6 +27,27 @@ from workspace_archive import capture, restore
 
 
 class WorkspaceArchiveTest(unittest.TestCase):
+    def test_save_reports_verified_archive_digest_and_size(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            archive = root / "bucket" / "checkpoint.tar"
+            script = Path(__file__).with_name("workspace_archive.py")
+            report = subprocess.check_output([sys.executable, "-I", script, "save", workspace, archive], text=True)
+            data = archive.read_bytes()
+            self.assertEqual(report.split(), [hashlib.sha256(data).hexdigest(), str(len(data))])
+
+    def test_older_python_reports_required_version_before_archive_io(self):
+        script = Path(__file__).with_name("workspace_archive.py")
+        result = subprocess.run(
+            [sys.executable, "-I", "-c",
+             "import runpy, sys; sys.version_info = (3, 11); runpy.run_path(sys.argv[1], run_name='__main__')",
+             script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Python 3.12 or newer", result.stderr)
+
     def test_restore_access_permissions(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

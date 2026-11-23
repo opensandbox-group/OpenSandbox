@@ -18,11 +18,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/test/utils"
 )
@@ -112,6 +114,11 @@ spec:
 		Expect(fields[1]).To(HavePrefix(sandboxUID + "/"))
 		Expect(fields[2]).To(MatchRegexp("^[0-9a-f]{64}$"))
 		Expect(fields[3]).To(Equal(uid))
+		size, err := kubectl("get", "sandboxsnapshot", name+"-pause", "-o", "jsonpath={.status.workspace.sizeBytes}")
+		Expect(err).NotTo(HaveOccurred())
+		archiveBytes, err := strconv.ParseInt(size, 10, 64)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(archiveBytes).To(BeNumerically(">", 0))
 		jobs, err := kubectl("get", "jobs", "-l", "sandbox.opensandbox.io/sandbox-snapshot-name="+name+"-pause", "-o", "name")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(jobs).To(BeEmpty())
@@ -122,6 +129,15 @@ spec:
 		newUID, err := kubectl("get", "pod", pod, "-o", "jsonpath={.metadata.uid}")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(newUID).NotTo(Equal(uid))
+		storage, err := kubectl("get", "pod", pod, "-o", `jsonpath={.spec.volumes[?(@.name=="opensandbox-workspace-restore")].emptyDir.sizeLimit}{" "}{.spec.initContainers[?(@.name=="opensandbox-workspace-restore")].resources.requests.ephemeral-storage}`)
+		Expect(err).NotTo(HaveOccurred())
+		quantities := strings.Fields(storage)
+		Expect(quantities).To(HaveLen(2))
+		for _, value := range quantities {
+			q, err := resource.ParseQuantity(value)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(q.Value()).To(BeNumerically(">=", archiveBytes))
+		}
 		active, err := kubectl("get", "batchsandbox", name, "-o", `go-template={{index .spec.template.metadata.annotations "sandbox.opensandbox.io/workspace-archive"}} {{index .spec.template.metadata.annotations "sandbox.opensandbox.io/workspace-claim"}}`)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(active).To(Equal(fields[1] + " " + claim))
