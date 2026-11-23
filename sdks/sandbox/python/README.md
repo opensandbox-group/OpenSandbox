@@ -413,6 +413,14 @@ async with await SandboxManager.create(connection_config=config) as manager:
 
 A `Sandbox` can also snapshot itself directly: `await sandbox.create_snapshot(name="checkpoint-1")`.
 
+Both forms take an optional `mode`: `"full"` (the default) also captures memory and process state, while `"rootfsOnly"` persists only the writable filesystem — restoring boots a fresh sandbox and re-runs the entrypoint, and requires the fast-sandbox backend (a deployment that cannot produce one fails the request instead of silently saving a full snapshot):
+
+```python
+snapshot = await manager.create_snapshot(
+    sandbox_id, name="clean-baseline", mode="rootfsOnly"
+)
+```
+
 ### 6. Isolated Sessions
 
 Isolated sessions run multi-step code in a hardened, resource-bounded namespace with bind mounts — reachable through `sandbox.isolation`:
