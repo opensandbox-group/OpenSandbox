@@ -17,6 +17,7 @@ Use these guides to add capabilities to a working [sandbox application](/getting
 - [Chained upstream proxy](/guides/egress-upstream-proxy)
 - [Egress forward mode](/guides/egress-forward-mode)
 - [Secure access](/guides/secure-access)
+- [Fast Sandbox system authentication](/guides/fast-sandbox-system-auth)
 - [Secure container runtimes](/guides/secure-container)
 - [Sandbox network security](/guides/network-security)
 - [Multi-tenancy](/guides/multi-tenancy)

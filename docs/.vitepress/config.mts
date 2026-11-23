@@ -223,6 +223,10 @@ export default withMermaid(defineConfig({
               link: "/guides/egress-forward-mode",
             },
             { text: "Secure Access", link: "/guides/secure-access" },
+            {
+              text: "Fast Sandbox System Authentication",
+              link: "/guides/fast-sandbox-system-auth",
+            },
             { text: "Secure Container", link: "/guides/secure-container" },
             {
               text: "Sandbox Network Security",

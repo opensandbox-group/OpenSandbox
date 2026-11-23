@@ -8,7 +8,7 @@ last-updated: 2026-11-23
 status: implementing
 ---
 
-# OSEP-0034: FastPath Caller Authentication
+# OSEP-0032: FastPath Caller Authentication
 
 <!-- toc -->
 - [Summary](#summary)
