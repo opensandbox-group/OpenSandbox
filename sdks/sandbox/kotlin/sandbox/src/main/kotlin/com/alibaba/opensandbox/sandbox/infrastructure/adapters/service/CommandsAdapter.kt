@@ -26,6 +26,8 @@ import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.ServerException
 import com.alibaba.opensandbox.sandbox.api.execd.infrastructure.Success
 import com.alibaba.opensandbox.sandbox.api.models.execd.EventNode
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
+import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandLogs
 import com.alibaba.opensandbox.sandbox.domain.models.execd.executions.CommandStatus
@@ -133,6 +135,17 @@ internal class CommandsAdapter(
         )
 
     override fun run(request: RunCommandRequest): Execution {
+        val execution = runCommand(request)
+        if (!request.background && execution.complete == null && execution.error == null) {
+            throw SandboxException(
+                message = "Foreground command stream ended without a terminal event",
+                error = SandboxError(SandboxError.COMMAND_STREAM_INCOMPLETE),
+            )
+        }
+        return execution
+    }
+
+    private fun runCommand(request: RunCommandRequest): Execution {
         if (request.argv == null && request.command.isEmpty()) {
             throw InvalidArgumentException("Command cannot be empty")
         }
@@ -165,7 +178,7 @@ internal class CommandsAdapter(
         value: String,
     ) {
         val command = buildSetEnvCommand(key, value)
-        val execution = run(RunCommandRequest.builder().command(command).build())
+        val execution = runCommand(RunCommandRequest.builder().command(command).build())
         // A foreground command only reports exitCode 0 after a confirmed
         // execution_complete event; a missing exit code (e.g. a dropped
         // stream) is treated as failure because the append was never confirmed.

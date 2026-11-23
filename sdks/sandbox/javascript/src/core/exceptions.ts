@@ -14,6 +14,7 @@
 
 export type SandboxErrorCode =
   | "INTERNAL_UNKNOWN_ERROR"
+  | "COMMAND_STREAM_INCOMPLETE"
   | "READY_TIMEOUT"
   | "UNHEALTHY"
   | "INVALID_ARGUMENT"
@@ -36,6 +37,7 @@ export type SandboxErrorCode =
  */
 export class SandboxError {
   static readonly INTERNAL_UNKNOWN_ERROR: SandboxErrorCode = "INTERNAL_UNKNOWN_ERROR";
+  static readonly COMMAND_STREAM_INCOMPLETE: SandboxErrorCode = "COMMAND_STREAM_INCOMPLETE";
   static readonly READY_TIMEOUT: SandboxErrorCode = "READY_TIMEOUT";
   static readonly UNHEALTHY: SandboxErrorCode = "UNHEALTHY";
   static readonly INVALID_ARGUMENT: SandboxErrorCode = "INVALID_ARGUMENT";

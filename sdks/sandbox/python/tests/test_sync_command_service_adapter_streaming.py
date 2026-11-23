@@ -23,7 +23,11 @@ import httpx
 import pytest
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.exceptions import InvalidArgumentException, SandboxConnectionException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxConnectionException,
+    SandboxInternalException,
+)
 from opensandbox.models.execd import RunCommandOpts
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.sync.adapters.command_adapter import CommandsAdapterSync
@@ -379,6 +383,21 @@ def test_run_rejects_unsupported_command_types(command) -> None:
 
     with pytest.raises(InvalidArgumentException, match="shell text or an argv list"):
         adapter.run(command)
+
+
+def test_foreground_rejects_eof_without_terminal_event() -> None:
+    transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=b'data: {"type":"stdout","text":"partial","timestamp":1}\n\n',
+        )
+    )
+    cfg = ConnectionConfigSync(protocol="http", transport=transport)
+    adapter = CommandsAdapterSync(cfg, SandboxEndpoint(endpoint="localhost:44772", port=44772))
+
+    with pytest.raises(SandboxInternalException, match="without a terminal event"):
+        adapter.run("echo test")
 
 
 @pytest.mark.parametrize("failure", [False, True])

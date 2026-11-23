@@ -22,6 +22,7 @@ from collections.abc import Callable
 from datetime import timedelta
 
 import click
+from opensandbox.exceptions import SandboxInternalException
 from opensandbox.models.execd import Execution, OutputMessage, RunCommandOpts
 from opensandbox.models.execd_sync import ExecutionHandlersSync
 
@@ -113,7 +114,12 @@ def _run_command(
             return
 
         handlers, flush_newline = _stream_handlers()
-        execution = sandbox.commands.run(payload, opts=opts, handlers=handlers)
+        try:
+            execution = sandbox.commands.run(payload, opts=opts, handlers=handlers)
+        except SandboxInternalException as exc:
+            if exc.error.code != "COMMAND_STREAM_INCOMPLETE":
+                raise
+            execution = None
         flush_newline()
         _handle_execution_error(obj, execution)
     finally:
@@ -121,16 +127,16 @@ def _run_command(
 
 
 def _handle_execution_error(
-    obj: ClientContext, execution: Execution, *, background: bool = False
+    obj: ClientContext, execution: Execution | None, *, background: bool = False
 ) -> None:
     """Exit non-zero on execution errors or missing completion/startup confirmation."""
-    if execution.error:
+    if execution is not None and execution.error:
         obj.output.error_panel(
             f"{execution.error.name}: {execution.error.value}",
             title="Execution Error",
         )
         sys.exit(1)
-    if execution.complete is None:
+    if execution is None or execution.complete is None:
         confirmation = (
             "background command startup was confirmed" if background else "the command finished"
         )
