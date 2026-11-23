@@ -974,6 +974,36 @@ func TestDownloadFileMalformedRangeErrorBody(t *testing.T) {
 	}
 }
 
+// A suffix-length of zero selects no byte of the file, so the handler answers
+// 416 with the real length in Content-Range. Serving it used to answer 206 with
+// Content-Range: bytes 10-9/10 and an empty body.
+func TestDownloadFileZeroSuffixRangeErrorBody(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "data.bin")
+	require.NoError(t, os.WriteFile(target, []byte("0123456789"), 0o644))
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(target))
+
+	ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+	ctx.Request.Header.Set("Range", "bytes=-0")
+	NewFilesystemController(ctx).DownloadFile()
+
+	require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+	require.Equal(t, "bytes */10", rec.Header().Get("Content-Range"))
+	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+
+	var body map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, string(model.ErrorCodeUnknown), body["code"])
+	require.Contains(t, body["message"], "bytes=-0")
+
+	// A range that still selects bytes keeps returning partial content, so a
+	// zero suffix next to it must not fail the request.
+	ctx, rec = newTestContext(http.MethodGet, rawURL, nil)
+	ctx.Request.Header.Set("Range", "bytes=-0,0-1")
+	NewFilesystemController(ctx).DownloadFile()
+	require.Equal(t, http.StatusPartialContent, rec.Code)
+	require.Equal(t, "01", rec.Body.String())
+}
+
 // The controls keep the paths around the directory check as they were: a
 // whole-file read, byte ranges, a range ServeContent answers itself, a symlink
 // to a file and a missing file.
