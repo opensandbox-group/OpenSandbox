@@ -25,6 +25,7 @@ from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.response_handler import handle_api_error
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.internal.readiness import (
+    HEALTH_PING_TIMEOUT,
     constrain_readiness_request,
     is_readiness_auth_error,
 )
@@ -43,7 +44,11 @@ class HealthAdapterSync(HealthSync):
         from opensandbox.api.execd import Client
 
         base_url = f"{self.connection_config.protocol}://{self.execd_endpoint.endpoint}"
-        timeout = httpx.Timeout(self.connection_config.request_timeout.total_seconds())
+        timeout_seconds = min(
+            self.connection_config.request_timeout.total_seconds(),
+            HEALTH_PING_TIMEOUT.total_seconds(),
+        )
+        timeout = httpx.Timeout(timeout_seconds)
         headers = self.execd_endpoint.build_request_headers(self.connection_config)
 
         self._client = Client(
