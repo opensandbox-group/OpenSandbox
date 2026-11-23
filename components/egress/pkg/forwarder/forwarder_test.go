@@ -471,4 +471,22 @@ func TestDialResolvedAddrsSharesDeadlineAcrossAddresses(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, c1, conn)
 	require.Equal(t, []string{"198.51.100.1:3128", "198.51.100.2:3128"}, attempted)
+
+	// When all addresses silently drop SYNs, the final attempt must also be
+	// bounded by dialTimeout rather than inheriting a longer parent context.
+	parentCtx, parentCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer parentCancel()
+	start := time.Now()
+	_, err = dialResolvedAddrs(
+		parentCtx,
+		120*time.Millisecond,
+		[]netip.Addr{netip.MustParseAddr("198.51.100.1"), netip.MustParseAddr("198.51.100.2")},
+		3128,
+		func(attemptCtx context.Context, _ string) (net.Conn, error) {
+			<-attemptCtx.Done()
+			return nil, attemptCtx.Err()
+		},
+	)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), time.Second, "all attempts must stay within dialTimeout")
 }

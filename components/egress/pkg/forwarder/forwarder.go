@@ -301,23 +301,21 @@ func dialResolvedAddrs(
 	portStr := strconv.Itoa(port)
 	var lastErr error
 	for i, ip := range ips {
-		remaining := time.Until(deadline)
+		now := time.Now()
+		remaining := deadline.Sub(now)
 		if remaining <= 0 {
 			if lastErr == nil {
 				lastErr = context.DeadlineExceeded
 			}
 			break
 		}
-		attemptCtx := ctx
-		var cancel context.CancelFunc
+		attemptDeadline := deadline
 		if i < len(ips)-1 {
-			share := remaining / time.Duration(len(ips)-i)
-			attemptCtx, cancel = context.WithDeadline(ctx, time.Now().Add(share))
+			attemptDeadline = now.Add(remaining / time.Duration(len(ips)-i))
 		}
+		attemptCtx, cancel := context.WithDeadline(ctx, attemptDeadline)
 		conn, err := dial(attemptCtx, net.JoinHostPort(ip.Unmap().String(), portStr))
-		if cancel != nil {
-			cancel()
-		}
+		cancel()
 		if err == nil {
 			return conn, nil
 		}
