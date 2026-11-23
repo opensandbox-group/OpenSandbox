@@ -148,6 +148,50 @@ class TestKubernetesSandboxServiceCreate:
         k8s_service.workload_provider.create_workload.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_create_sandbox_rejects_isolation_conflict_before_creating_pvc(
+        self, k8s_service, create_sandbox_request, tmp_path
+    ):
+        template = tmp_path / "template.yaml"
+        template.write_text(
+            """
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox
+          securityContext:
+            capabilities:
+              drop: [SYS_ADMIN]
+"""
+        )
+        config = k8s_service.app_config
+        config.kubernetes.batchsandbox_template_file = str(template)
+        client = k8s_service.k8s_client
+        client.get_pvc.return_value = None
+        provider = BatchSandboxProvider(client, config)
+        mock_provider = k8s_service.workload_provider
+        mock_provider.validate_create_request.side_effect = provider.validate_create_request
+        mock_provider.create_workload.side_effect = provider.create_workload
+        request = type(create_sandbox_request).model_validate({
+            **create_sandbox_request.model_dump(by_alias=True),
+            "extensions": {"bootstrap.execd.isolation": "enable"},
+            "volumes": [{
+                "name": "data",
+                "mountPath": "/data",
+                "pvc": {"claimName": "new-data", "createIfNotExists": True},
+            }],
+        })
+
+        with pytest.raises(HTTPException) as error:
+            await k8s_service.create_sandbox(request)
+
+        assert error.value.status_code == 400
+        assert error.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
+        assert "execd isolation requires SYS_ADMIN" in error.value.detail["message"]
+        client.create_pvc.assert_not_called()
+        client.create_custom_object.assert_not_called()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", ["batch", "pool", "agent"])
     @pytest.mark.parametrize("configured_path", ["/etc/opensandbox/operator.toml", None], ids=["operator", "creator"])
     async def test_create_sandbox_applies_execd_isolation_config(

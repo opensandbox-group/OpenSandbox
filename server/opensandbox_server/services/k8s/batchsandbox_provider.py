@@ -233,11 +233,37 @@ class BatchSandboxProvider(WorkloadProvider):
     def supports_image_auth(self) -> bool:
         return True
 
+    @staticmethod
+    def _validate_execd_isolation_template(
+        security_context: Optional[Dict[str, Any]],
+    ) -> None:
+        capabilities = (security_context or {}).get("capabilities")
+        drops = capabilities.get("drop") if isinstance(capabilities, dict) else None
+        if isinstance(drops, list) and any(
+            isinstance(capability, str)
+            and capability.upper().removeprefix("CAP_") == "SYS_ADMIN"
+            for capability in drops
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "execd isolation requires SYS_ADMIN, which the BatchSandbox "
+                        "template explicitly drops. Disable execd isolation for this sandbox."
+                    ),
+                },
+            )
+
     def validate_create_request(
         self, request: CreateSandboxRequest, namespace: str
     ) -> None:
-        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
+        extensions = request.extensions or {}
+        pool_ref = extensions.get("poolRef", "").strip()
         if not pool_ref:
+            if extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
+                _, _, security_context = self._extract_template_pod_extras()
+                self._validate_execd_isolation_template(security_context)
             return
         if is_egress_forward_mode(self.egress_config):
             raise HTTPException(
@@ -394,6 +420,9 @@ class BatchSandboxProvider(WorkloadProvider):
         entrypoint = entrypoint or []
 
         extra_volumes, extra_mounts, extra_security_context = self._extract_template_pod_extras()
+        isolation_enabled = extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable"
+        if isolation_enabled:
+            self._validate_execd_isolation_template(extra_security_context)
 
         if windows_profile:
             validate_windows_profile_resource_limits(resource_limits)
@@ -428,7 +457,7 @@ class BatchSandboxProvider(WorkloadProvider):
             resource_limits=resource_limits,
             has_network_policy=has_egress,
             drop_net_raw=is_forward,
-            isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
+            isolation_enabled=isolation_enabled,
             image_pull_policy=self.image_pull_policy,
             resource_requests=resource_requests or None,
         )
@@ -759,15 +788,24 @@ class BatchSandboxProvider(WorkloadProvider):
             return
         main_container = containers[0]
         if extra_security_context and isinstance(main_container, dict):
-            # The template's container securityContext is a base default: merge it
-            # into the runtime container's own securityContext (runtime leaves win,
-            # nested dicts merge so template members like capabilities.add survive),
-            # and fill the whole context when the runtime sets none.
+            # Runtime leaves win and nested dicts merge, except capability drops:
+            # preserve administrator restrictions alongside runtime requirements.
+            # Fill the whole context when the runtime sets none.
             runtime_security_context = main_container.get("securityContext")
             if isinstance(runtime_security_context, dict):
-                main_container["securityContext"] = _merge_security_context(
+                merged_security_context = _merge_security_context(
                     extra_security_context, runtime_security_context
                 )
+                template_capabilities = extra_security_context.get("capabilities")
+                runtime_capabilities = runtime_security_context.get("capabilities")
+                if isinstance(template_capabilities, dict) and isinstance(runtime_capabilities, dict):
+                    template_drop = template_capabilities.get("drop")
+                    runtime_drop = runtime_capabilities.get("drop")
+                    if isinstance(template_drop, list) and isinstance(runtime_drop, list):
+                        merged_security_context["capabilities"]["drop"] = list(
+                            dict.fromkeys(template_drop + runtime_drop)
+                        )
+                main_container["securityContext"] = merged_security_context
             else:
                 main_container["securityContext"] = extra_security_context
         mounts = main_container.get("volumeMounts", []) or []
