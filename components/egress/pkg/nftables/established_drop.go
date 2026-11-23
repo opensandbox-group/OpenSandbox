@@ -474,8 +474,8 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 		}
 		return &fresh
 	}
-	// Record exact withdrawals whose raw host drop may be removed or
-	// overshadowed by accepts.
+	// Record exact withdrawals that can be reallowed or need their
+	// still-explicitly-denied ports moved before a future DNS accept.
 	var whole map[netip.Addr]hostWithdrawal
 
 	mayShadowHost := len(portAllow)+len(learned)+len(retained)+len(d.KeepAddrs)+len(d.KeepPrefixes)+len(d.KeepPorts) != 0
@@ -483,7 +483,7 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 		current := policyTargets()
 		keep := !current.permitsHost(addr, 0, defaultAllow)
 		explicitDeny := keep && targetsMatch(current.DenyAddrs, current.DenyPrefixes, nil, addr, 0)
-		if (keep && (mayShadowHost || explicitDeny)) || (!keep && len(portDeny) != 0) {
+		if len(portDeny) != 0 || (keep && (mayShadowHost || explicitDeny)) {
 			if whole == nil {
 				whole = make(map[netip.Addr]hostWithdrawal)
 			}
@@ -750,22 +750,25 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, ne
 		}
 		restore(pending, false)
 	}
+	addBlockedDeniedPorts := func(host netip.Prefix) {
+		for target, deny := range denies {
+			if !target.IsValid() || target.Contains(host.Addr()) {
+				addPreviouslyBlocked(early, host, deny.spans)
+			}
+		}
+	}
 	left := make(portDenyUnion)
 	var carriedKeeps portDenyUnion
 	var allPorts []policy.PortRange
 	for addr, withdrawal := range whole {
 		host := netip.PrefixFrom(addr, addr.BitLen())
 		if !withdrawal.keepRule {
-			for target, deny := range denies {
-				if !target.IsValid() || target.Contains(addr) {
-					addPreviouslyBlocked(early, host, deny.spans)
-				}
-			}
+			addBlockedDeniedPorts(host)
 			continue
 		}
 
-		// The raw host drop covers the ports that no earlier accept can
-		// shadow. Only the shadowed ports need a separate verdict.
+		// The raw host drop covers ports that no earlier accept can
+		// shadow. Explicit denies must also survive a future DNS grant.
 		if next.coversWholeDeny(host) {
 			continue
 		}
@@ -784,6 +787,10 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, ne
 			}
 			addPreviouslyBlocked(left, host, allPorts)
 			continue
+		}
+		if !withdrawal.explicitDeny {
+			// A scoped deny must beat future grants without the whole-host guard.
+			addBlockedDeniedPorts(host)
 		}
 		if carriedKeeps == nil {
 			carriedKeeps = normalizedPortTargets(next.KeepPorts)
@@ -859,26 +866,6 @@ func normalizedPortTargets(rules []EstablishedPortDrop) portDenyUnion {
 		targets[global] = floor
 	}
 	return targets
-}
-
-func (d EstablishedDrops) withdrawnHostDenyRules() []EstablishedPortDrop {
-	if len(d.withdrawnHostDenyPorts) == 0 {
-		return nil
-	}
-	for _, floor := range d.DenyPortDrops {
-		if !portDenyTarget(floor).IsValid() {
-			// Keep provenance even when the carried floor already drops all
-			// these ports. Share its coverage only for this rendering.
-			if len(floor.Ports) == 0 {
-				return d.withdrawnHostDenyPorts.drops(floor.Ranges)
-			}
-			u := make(portDenyUnion, 1)
-			u.add(netip.Prefix{}, floor.Ports, floor.Ranges)
-			u.normalize()
-			return d.withdrawnHostDenyPorts.drops(u[netip.Prefix{}].spans)
-		}
-	}
-	return d.withdrawnHostDenyPorts.drops(nil)
 }
 
 func (u portDenyUnion) matchesHostPort(addr netip.Addr, port int) bool {

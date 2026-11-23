@@ -739,6 +739,38 @@ func TestApplyStatic_RawCIDRAllowCannotMaskHostWithdrawal(t *testing.T) {
 	}
 }
 
+func TestApplyStatic_LateDNSDoesNotReopenExplicitlyDeniedWithdrawnPort(t *testing.T) {
+	const domain = `{"action":"allow","target":"cdn.example.com"}`
+	addr := netip.MustParseAddr("192.0.2.10")
+	for _, tt := range []struct{ name, deny string }{
+		{"host scoped", `{"action":"deny","target":"192.0.2.10","ports":[443]}`},
+		{"global scoped", `{"action":"deny","ports":[443]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, scripts := recordingManager()
+			old := mustPolicy(t, `{"egress":[`+domain+`,{"action":"allow","target":"192.0.2.10"}]}`)
+			domainOnly := mustPolicy(t, `{"egress":[`+domain+`]}`)
+			reload := mustPolicy(t, `{"egress":[`+domain+`,`+tt.deny+`]}`)
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, domainOnly)
+			require.NoError(t, err)
+			require.NoError(t, m.ApplyStatic(ctx, reload))
+			require.True(t, m.lastDrops.MatchesFlow(addr, 443))
+			script := (*scripts)[len(*scripts)-1]
+			drop := ruleIndex(t, script, "ip daddr 192.0.2.10 tcp dport { 443 } ct state established,related drop")
+			dns := ruleIndex(t, script, "ip daddr @dyn_allow_v4 ct state established,related accept")
+			require.Less(t, drop, dns, "deny must take precedence before the lease arrives")
+
+			require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			require.NoError(t, m.ApplyStatic(ctx, reload))
+			require.True(t, m.lastDrops.MatchesFlow(addr, 443), "a DNS grant does not supersede the existing TCP teardown")
+			require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "DNS may reallow the other port")
+			require.NoError(t, m.ApplyStatic(ctx, domainOnly))
+			require.False(t, m.lastDrops.MatchesFlow(addr, 443), "removing the explicit deny lets the active lease reallow this port")
+		})
+	}
+}
+
 func TestApplyStatic_DNSGrantTimingDoesNotLoseWithdrawnHostPorts(t *testing.T) {
 	addr := netip.MustParseAddr("192.0.2.10")
 	const domain = `{"action":"allow","target":"cdn.example.com"}`

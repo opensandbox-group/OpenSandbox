@@ -671,7 +671,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// new-connection path: an allowed domain that re-resolves to an explicitly
 	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
-	writeEstablishedTargets(&b, nil, nil, drops.withdrawnHostDenyRules(), "drop")
+	writeWithdrawnHostDenies(&b, drops)
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
 	// A still-explicitly-denied host withdrawal keeps its TCP drop, even
@@ -757,6 +757,85 @@ func writeEstablishedTargets(b *strings.Builder, addrs []netip.Addr, prefixes []
 	}
 	for _, pd := range ports {
 		writeEstablishedPortRule(b, pd, verb)
+	}
+}
+
+func writeWithdrawnHostDenies(b *strings.Builder, drops EstablishedDrops) {
+	if len(drops.withdrawnHostDenyPorts) == 0 {
+		return
+	}
+	carried := normalizedPortTargets(drops.DenyPortDrops)
+	type portKey struct {
+		first *policy.PortRange
+		count int
+		ipv4  bool
+	}
+	type rule struct {
+		hosts []netip.Addr
+		spans []policy.PortRange
+	}
+	// Share identical span storage within each family, before trimming the global floor.
+	byPorts := make(map[portKey]int)
+	var rules []rule
+	for host, group := range drops.withdrawnHostDenyPorts {
+		addr, spans := host.Addr(), group.spans
+		for scope, cover := range carried {
+			if scope.Contains(addr) {
+				spans, _ = subtractPortSpans(spans, cover.spans)
+			}
+		}
+		if len(spans) == 0 {
+			continue
+		}
+		key := portKey{&spans[0], len(spans), addr.Is4()}
+		i, ok := byPorts[key]
+		if !ok {
+			i = len(rules)
+			byPorts[key] = i
+			rules = append(rules, rule{spans: spans})
+		}
+		rules[i].hosts = append(rules[i].hosts, addr)
+	}
+	for _, r := range rules {
+		slices.SortFunc(r.hosts, netip.Addr.Compare)
+	}
+	slices.SortFunc(rules, func(a, b rule) int { return a.hosts[0].Compare(b.hosts[0]) })
+	for _, r := range rules {
+		r.spans, _ = subtractPortSpans(r.spans, carried[netip.Prefix{}].spans)
+		if len(r.spans) == 0 {
+			continue
+		}
+		family := "ip6"
+		if r.hosts[0].Is4() {
+			family = "ip"
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s daddr ", tableName, chainName, family)
+		if len(r.hosts) == 1 {
+			b.WriteString(r.hosts[0].String())
+			if r.hosts[0].Is4In6() {
+				b.WriteString("/128")
+			}
+		} else {
+			b.WriteString("{ ")
+			for i, host := range r.hosts {
+				if i != 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(host.String())
+			}
+			b.WriteString(" }")
+		}
+		b.WriteString(" tcp dport { ")
+		for i, span := range r.spans {
+			if i != 0 {
+				b.WriteString(", ")
+			}
+			fmt.Fprint(b, span.Lo)
+			if span.Lo != span.Hi {
+				fmt.Fprintf(b, "-%d", span.Hi)
+			}
+		}
+		b.WriteString(" } ct state established,related drop\n")
 	}
 }
 
