@@ -267,7 +267,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Poll status and incremental logs. Command timeout is separate from sandbox TTL.
+Poll status and incremental logs. Command timeout is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```csharp
 var execution = await sandbox.Commands.RunAsync(
@@ -286,9 +286,14 @@ try
     while (true)
     {
         var status = await sandbox.Commands.GetCommandStatusAsync(commandId, budget.Token);
-        var logs = await sandbox.Commands.GetBackgroundCommandLogsAsync(commandId, cursor, budget.Token);
-        Console.Write(logs.Content);
-        cursor = logs.Cursor ?? cursor;
+        while (true)
+        {
+            var page = await sandbox.Commands.GetBackgroundCommandLogsAsync(commandId, cursor, budget.Token);
+            Console.Write(page.Content);
+            var next = page.Cursor ?? cursor;
+            if (page.Content.Length == 0 || next == cursor) break;
+            cursor = next;
+        }
         if (status.Running == false)
         {
             if (status.ExitCode != 0)

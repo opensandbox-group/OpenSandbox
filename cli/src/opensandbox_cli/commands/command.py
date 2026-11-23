@@ -24,6 +24,7 @@ from datetime import timedelta
 import click
 from opensandbox.models.execd import Execution, OutputMessage, RunCommandOpts
 from opensandbox.models.execd_sync import ExecutionHandlersSync
+from opensandbox.sync.sandbox import SandboxSync
 
 from opensandbox_cli.client import ClientContext
 from opensandbox_cli.utils import (
@@ -219,6 +220,34 @@ def command_status(
         sandbox.close()
 
 
+def _drain_background_logs(
+    sandbox: SandboxSync, execution_id: str, cursor: int | None
+) -> tuple[str, int | None]:
+    """Read log pages until the returned cursor stops advancing.
+
+    Each response carries at most 16 MiB, so a finished command with a
+    longer log needs several reads; follow the cursor so no tail page is
+    left behind.
+    """
+    pages: list[str] = []
+    requested = cursor
+    while True:
+        logs = sandbox.commands.get_background_command_logs(
+            execution_id, cursor=requested
+        )
+        next_cursor = logs.cursor if logs.cursor is not None else requested
+        if requested is not None and next_cursor == requested:
+            # No page beyond what was already returned; stop without
+            # duplicating the content of the last read.
+            break
+        if logs.content:
+            pages.append(logs.content)
+        if not logs.content or logs.cursor is None:
+            break
+        requested = next_cursor
+    return "".join(pages), next_cursor
+
+
 @command_group.command("logs")
 @click.argument("sandbox_id")
 @click.argument("execution_id")
@@ -239,15 +268,20 @@ def command_logs(
     )
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
-        logs = sandbox.commands.get_background_command_logs(execution_id, cursor=cursor)
         if obj.output.fmt in ("json", "yaml"):
+            # Keep the single-page model; machines follow logs.cursor.
+            logs = sandbox.commands.get_background_command_logs(
+                execution_id, cursor=cursor
+            )
             obj.output.print_model(logs, title="Command Logs")
-        elif obj.output.fmt == "raw":
-            click.echo(logs.content)
+            return
+        content, next_cursor = _drain_background_logs(sandbox, execution_id, cursor)
+        if obj.output.fmt == "raw":
+            click.echo(content)
         else:
             # The next cursor is the only way to continue an incremental read.
-            obj.output.print_dict({"cursor": logs.cursor}, title="Command Logs")
-            obj.output.panel(logs.content, title="Content")
+            obj.output.print_dict({"cursor": next_cursor}, title="Command Logs")
+            obj.output.panel(content, title="Content")
     finally:
         sandbox.close()
 

@@ -1665,6 +1665,46 @@ class TestCommandLogs:
         assert "hello-from-exec" in result.output
         assert "424242" not in result.output
 
+    def test_raw_drains_pages_until_cursor_stops(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_background_command_logs.side_effect = [
+            CommandLogs(content="page-one", cursor=10),
+            CommandLogs(content="page-two", cursor=18),
+            CommandLogs(content="", cursor=18),
+        ]
+
+        result = _invoke(
+            runner,
+            ["command", "logs", "sb-1", "exec-1", "-o", "raw"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0
+        assert "page-onepage-two" in result.output
+        assert "page-one\npage-two" not in result.output
+        calls = mock_sb.commands.get_background_command_logs.call_args_list
+        assert [call.kwargs["cursor"] for call in calls] == [None, 10, 18]
+
+    def test_table_drains_pages_and_shows_last_cursor(self, runner: CliRunner) -> None:
+        mock_sb = MagicMock()
+        mock_sb.commands.get_background_command_logs.side_effect = [
+            CommandLogs(content="page-one", cursor=10),
+            CommandLogs(content="page-two", cursor=18),
+            CommandLogs(content="", cursor=18),
+        ]
+
+        result = _invoke(
+            runner,
+            ["command", "logs", "sb-1", "exec-1", "--cursor", "0"],
+            sandbox=mock_sb,
+        )
+
+        assert result.exit_code == 0
+        assert "page-onepage-two" in result.output
+        assert "18" in result.output.split()
+        calls = mock_sb.commands.get_background_command_logs.call_args_list
+        assert [call.kwargs["cursor"] for call in calls] == [0, 10, 18]
+
 
 class TestCommandInterrupt:
     def test_interrupt_calls_sdk(self, runner: CliRunner) -> None:

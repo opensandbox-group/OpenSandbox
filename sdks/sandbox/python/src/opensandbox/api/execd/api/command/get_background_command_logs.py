@@ -104,8 +104,8 @@ def sync_detailed(
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
     pass a byte offset via the `cursor` query parameter to fetch output after that position
-    and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
-    for the next poll. When no cursor is provided, the log is returned from the start.
+    and receive the offset after the returned bytes via the `EXECD-COMMANDS-TAIL-CURSOR`
+    response header for the next poll. When no cursor is provided, the log is returned from the start.
     At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
     Response body is plain text so it can be rendered directly in browsers.
     Completed background command output is retained for at least 24 hours and then
@@ -147,8 +147,8 @@ def sync(
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
     pass a byte offset via the `cursor` query parameter to fetch output after that position
-    and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
-    for the next poll. When no cursor is provided, the log is returned from the start.
+    and receive the offset after the returned bytes via the `EXECD-COMMANDS-TAIL-CURSOR`
+    response header for the next poll. When no cursor is provided, the log is returned from the start.
     At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
     Response body is plain text so it can be rendered directly in browsers.
     Completed background command output is retained for at least 24 hours and then
@@ -185,8 +185,8 @@ async def asyncio_detailed(
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
     pass a byte offset via the `cursor` query parameter to fetch output after that position
-    and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
-    for the next poll. When no cursor is provided, the log is returned from the start.
+    and receive the offset after the returned bytes via the `EXECD-COMMANDS-TAIL-CURSOR`
+    response header for the next poll. When no cursor is provided, the log is returned from the start.
     At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
     Response body is plain text so it can be rendered directly in browsers.
     Completed background command output is retained for at least 24 hours and then
@@ -226,8 +226,8 @@ async def asyncio(
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
     pass a byte offset via the `cursor` query parameter to fetch output after that position
-    and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
-    for the next poll. When no cursor is provided, the log is returned from the start.
+    and receive the offset after the returned bytes via the `EXECD-COMMANDS-TAIL-CURSOR`
+    response header for the next poll. When no cursor is provided, the log is returned from the start.
     At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
     Response body is plain text so it can be rendered directly in browsers.
     Completed background command output is retained for at least 24 hours and then
