@@ -70,6 +70,7 @@ func (sch *defaultTaskScheduler) recoverTaskNodesStatus() error {
 		}
 		if tNode := sch.taskNodeByNameIndex[task.Name]; tNode != nil {
 			recoverOneTaskNode(tNode, task, pod.Status.PodIP, pod.Name, sch.logger)
+			tNode.PodUID = pod.UID
 		} else {
 		}
 		// TODO do we need to stop tasks not belong us? e.g users ScaleIn []*sandboxv1alpha1.Task

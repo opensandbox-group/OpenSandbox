@@ -83,11 +83,13 @@ The platform stages execd, `bootstrap.sh`, and the launcher into your container 
 
 ### Inject it from the server (Docker runtime)
 
-For a policy that applies to every sandbox without rebuilding images, bind-mount the file and point execd at it via the server config:
+To give the operator control of the config path without rebuilding images, bind-mount the file and set `runtime.execd_isolation_config` to the path inside the sandbox.
 
 ```toml
+[runtime]
+execd_isolation_config = "/etc/opensandbox/isolation.toml"
+
 [docker]
-sandbox_env = { EXECD_ISOLATION_CONFIG = "/etc/opensandbox/isolation.toml" }
 sandbox_binds = [
   "/etc/opensandbox/isolation.toml:/etc/opensandbox/isolation.toml:ro",
 ]
@@ -97,7 +99,9 @@ sandbox_binds = [
 
 ### Mount it from a ConfigMap (Kubernetes runtime)
 
-Add the TOML as a ConfigMap key, mount it in the BatchSandbox pod template, and set `EXECD_ISOLATION_CONFIG` to the mounted path via the per create-request env. This is how the reference e2e delivers the policy (`opensandbox-e2e-execd-isolation` ConfigMap in `scripts/common/kubernetes-e2e.sh`). Setting it in the *template* env does not work today: the BatchSandbox provider merges only volumes, mounts, and securityContext from the template, not container env — so the request env (or your own template rendering) is the delivery channel.
+For BatchSandbox workloads, add the TOML as a ConfigMap key and mount it read-only in the sandbox container through the pod template. Set `runtime.execd_isolation_config` to that mounted path in the server config. For BatchSandbox pools, provision the file at the same path in the pool's sandbox container before tasks run. The server supplies the path in the container or task environment. The `agent-sandbox` workload provider currently replaces the pod template's container and volume lists, so ConfigMap mounts defined there do not reach the sandbox. With that provider, bake the policy file into the sandbox image instead; setting the path alone does not enable hardening.
+
+For creator-managed policies, leave `runtime.execd_isolation_config` unset and supply `EXECD_ISOLATION_CONFIG` through the image or create-request env. The reference e2e uses request env with the `opensandbox-e2e-execd-isolation` ConfigMap in `scripts/common/kubernetes-e2e.sh`.
 
 ::: tip Config errors are fatal, missing features are not
 A file that does not parse, a misspelled capability name, or a `[seccomp] deny` that lists the reserved `execve` makes execd exit at startup and the sandbox fails to start — fix the file. A missing *runtime* capability (old kernel, missing `CAP_SETPCAP`, absent launcher binary) never blocks startup: the layer is reported as `degraded` or `unsupported` and the rest keeps working.
@@ -246,12 +250,12 @@ The floor subtracts from what the container grants; it cannot grant anything bac
 
 ## Compatibility notes
 
-- **Who controls it** — the sandbox creator, not the platform: the floor runs because your image (or your request env) points at a hardened TOML, and the same channels can point away from it — overriding it per request is your knob, not a bypass. If a platform deployment later wants to *enforce* hardening against its callers, reserving `EXECD_ISOLATION_CONFIG` against request-env overrides is the tracked follow-up (issue #2834).
+- **Who controls the path.** By default, the creator chooses it through the image or request environment. For Docker and Kubernetes pod-based sandboxes, setting `runtime.execd_isolation_config` makes the server supply `EXECD_ISOLATION_CONFIG` and discard any request value for that key. Move an existing Docker `sandbox_env.EXECD_ISOLATION_CONFIG` value to this setting to give it precedence. The operator still needs to supply and protect the file at that path and verify the active layers in the capabilities endpoint. If the file is missing, execd uses its built-in defaults.
 - **Non-Linux platforms** — the floor is Linux-only; configured layers report `unsupported` on Windows.
 - **`execve` is reserved** in a custom `[seccomp] deny` when `[hardening] enabled` is on (config error); `execveat` remains allowed.
 - **Override keys replace, never merge** — `[seccomp] deny` and `allowed_writable` both fully replace their defaults.
 - **Landlock + forked descendants** — see the `/proc/self` warning above; test `ps`-style tooling before enabling Landlock on images whose users rely on it.
-- **Rollback** — set `runtime.execd_run_as_init = false` and remove the TOML (or its `EXECD_ISOLATION_CONFIG` pointer) to return to the classic background-and-wait topology with no floor; no other migration is needed.
+- **Rollback** — unset `runtime.execd_isolation_config` to restore creator control of the path. To disable the floor and return to the classic background-and-wait topology, remove any image or request config pointer and set `runtime.execd_run_as_init = false`.
 
 ## Related
 

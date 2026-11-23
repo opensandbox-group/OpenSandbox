@@ -78,6 +78,10 @@ type Proxy struct {
 	// Hosts whose successful outbound DNS log line should be suppressed (audit
 	// errors are still logged). Loaded once at startup; nil means "log all".
 	logSkip atomic.Pointer[policy.DomainSet]
+
+	// refusedFinal returns an upstream REFUSED to the client instead of
+	// failing over to the next resolver. Set before Start.
+	refusedFinal bool
 }
 
 // New constructs the DNS proxy: discovers upstreams, default listen 127.0.0.1:15353 if listenAddr is "".
@@ -510,7 +514,8 @@ func (p *Proxy) forwardContext(ctx context.Context, r *dns.Msg, network string) 
 }
 
 // shouldFailoverAfterResponse: treat NXDOMAIN and NOERROR as final (no retry). Other rcodes may
-// move to the next upstream (e.g. SERVFAIL).
+// move to the next upstream (e.g. SERVFAIL). With refusedFinal (forward mode with a configured
+// policy resolver, OSEP-0030), REFUSED is an authoritative policy denial and is also final.
 func (p *Proxy) shouldFailoverAfterResponse(resp *dns.Msg) (tryNext bool, reason string) {
 	if resp == nil {
 		return true, "nil response"
@@ -520,6 +525,11 @@ func (p *Proxy) shouldFailoverAfterResponse(resp *dns.Msg) (tryNext bool, reason
 		return false, ""
 	case dns.RcodeSuccess:
 		return false, ""
+	case dns.RcodeRefused:
+		if p.refusedFinal {
+			return false, ""
+		}
+		return true, dns.RcodeToString[resp.Rcode]
 	default:
 		rcStr := dns.RcodeToString[resp.Rcode]
 		if rcStr == "" {
@@ -572,6 +582,14 @@ func (p *Proxy) SetInfraDomain(domain string, onResolved func(domain string, ips
 	if onResolved == nil {
 		onResolved = func(string, []nftables.ResolvedIP) {}
 	}
+	if prev, exists := p.infraDomains[host]; exists {
+		next := onResolved
+		p.infraDomains[host] = func(d string, ips []nftables.ResolvedIP) {
+			prev(d, ips)
+			next(d, ips)
+		}
+		return
+	}
 	p.infraDomains[host] = onResolved
 }
 
@@ -581,6 +599,13 @@ func (p *Proxy) infraCallback(host string) func(string, []nftables.ResolvedIP) {
 		return nil
 	}
 	return p.infraDomains[host]
+}
+
+// SetRefusedFinal makes an upstream REFUSED final (no failover to the next
+// resolver). Forward mode enables it when an operator policy resolver is
+// configured, so a policy denial cannot be retried elsewhere. Register before Start.
+func (p *Proxy) SetRefusedFinal(final bool) {
+	p.refusedFinal = final
 }
 
 // SetOnResolved registers the dns+nft path (nil in dns-only). Invoked on the same
@@ -617,26 +642,23 @@ func extractResolvedIPs(resp *dns.Msg) []nftables.ResolvedIP {
 
 	var out []nftables.ResolvedIP
 	for _, rr := range resp.Answer {
+		var raw net.IP
+		var ttl uint32
+		// Keep unsupported records on the original cheap type-switch path.
 		switch v := rr.(type) {
 		case *dns.A:
-			if v.A == nil {
-				continue
-			}
-			addr, err := netip.ParseAddr(v.A.String())
-			if err != nil {
-				continue
-			}
-			out = append(out, nftables.ResolvedIP{Addr: addr, TTL: time.Duration(v.Hdr.Ttl) * time.Second})
+			raw, ttl = v.A, v.Hdr.Ttl
 		case *dns.AAAA:
-			if v.AAAA == nil {
-				continue
-			}
-			addr, err := netip.ParseAddr(v.AAAA.String())
-			if err != nil {
-				continue
-			}
-			out = append(out, nftables.ResolvedIP{Addr: addr, TTL: time.Duration(v.Hdr.Ttl) * time.Second})
+			raw, ttl = v.AAAA, v.Hdr.Ttl
+		default:
+			continue
 		}
+		addr, ok := netip.AddrFromSlice(raw)
+		if !ok {
+			continue
+		}
+		// Match net.IP.String's representation of mapped IPv4.
+		out = append(out, nftables.ResolvedIP{Addr: addr.Unmap(), TTL: time.Duration(ttl) * time.Second})
 	}
 	return out
 }

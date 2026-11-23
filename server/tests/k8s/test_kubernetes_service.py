@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import json
 import threading
 import time
@@ -27,6 +28,8 @@ from kubernetes.client import ApiException
 from pydantic import SecretStr
 
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
+from opensandbox_server.services.k8s.agent_sandbox_provider import AgentSandboxProvider
+from opensandbox_server.services.k8s.batchsandbox_provider import BatchSandboxProvider
 from opensandbox_server.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     OPEN_SANDBOX_SECURE_ACCESS_HEADER,
@@ -56,6 +59,7 @@ from opensandbox_server.config import (
     GatewayConfig,
     GatewayRouteModeConfig,
     IngressConfig,
+    RuntimeConfig,
     SecureAccessConfig,
     SecureAccessKey,
 )
@@ -142,6 +146,53 @@ class TestKubernetesSandboxServiceCreate:
         assert response.id is not None
         assert response.status.state == "Running"
         k8s_service.workload_provider.create_workload.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["batch", "pool", "agent"])
+    @pytest.mark.parametrize("configured_path", ["/etc/opensandbox/operator.toml", None], ids=["operator", "creator"])
+    async def test_create_sandbox_applies_execd_isolation_config(
+        self, k8s_service, create_sandbox_request, mock_workload, mode, configured_path
+    ):
+        config = k8s_service.app_config
+        config.runtime = RuntimeConfig.model_validate(
+            {**config.runtime.model_dump(), "execd_isolation_config": configured_path}
+        )
+        request_path = "/etc/opensandbox/creator.toml"
+        env = {"EXECD_ISOLATION_CONFIG": request_path, "LOG_LEVEL": "info"}
+        if mode == "pool":
+            request = create_sandbox_request.model_copy(
+                update={"env": env, "extensions": {"poolRef": "test-pool"}, "image": None}
+            )
+        else:
+            request = create_sandbox_request.model_copy(update={"env": env})
+
+        provider_type = AgentSandboxProvider if mode == "agent" else BatchSandboxProvider
+        provider = provider_type(k8s_service.k8s_client, config)
+        k8s_service.k8s_client.create_custom_object.return_value = mock_workload
+        mock_provider = k8s_service.workload_provider
+        mock_provider.validate_create_request.side_effect = provider.validate_create_request
+        mock_provider.create_workload.side_effect = provider.create_workload
+        mock_provider.get_workload.return_value = mock_workload
+        mock_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        await k8s_service.create_sandbox(request)
+
+        spec = k8s_service.k8s_client.create_custom_object.call_args.kwargs["body"]["spec"]
+        if mode == "pool":
+            workload_env = spec["taskTemplate"]["spec"]["process"]["env"]
+        else:
+            template_key = "podTemplate" if mode == "agent" else "template"
+            workload_env = spec[template_key]["spec"]["containers"][0]["env"]
+        assert [item["value"] for item in workload_env if item["name"] == "EXECD_ISOLATION_CONFIG"] == [
+            configured_path or request_path
+        ]
+        assert {"name": "LOG_LEVEL", "value": "info"} in workload_env
+        assert request.env == {"EXECD_ISOLATION_CONFIG": request_path, "LOG_LEVEL": "info"}
 
     @pytest.mark.asyncio
     async def test_create_sandbox_response_restores_extensions_from_workload(
@@ -3260,6 +3311,7 @@ class TestPatchSandboxMetadata:
         return {
             "metadata": {
                 "name": "sandbox-sbx-001",
+                "resourceVersion": "7",
                 "labels": dict(labels),
                 "creationTimestamp": datetime(2026, 1, 1, tzinfo=timezone.utc),
             },
@@ -3388,9 +3440,12 @@ class TestMetadataPodLabelSync:
         # generation bump that could restart a failed pause).
         assert custom_api.patch_namespaced_custom_object.call_count == 2
         assert custom_api.patch_namespaced_custom_object.call_args.kwargs["body"] == {
-            "metadata": {"annotations": {
-                POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(selected, sort_keys=True),
-            }},
+            "metadata": {
+                "resourceVersion": "7",
+                "annotations": {
+                    POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(selected, sort_keys=True),
+                },
+            },
         }
 
     def test_metadata_patch_after_failed_pause_never_mutates_spec(self, metadata_runtime):
@@ -3427,6 +3482,76 @@ class TestMetadataPodLabelSync:
             "example.com/phase": "run",
             "network.example.com/old": None,
         }
+
+    def test_metadata_patch_rereads_recreation_overrides_on_conflict(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import POD_LABEL_OVERRIDES_ANNOTATION
+
+        service, custom_api, pod_request, workload = metadata_runtime
+        # Another PATCH stored its override after this one read the annotation.
+        current = copy.deepcopy(workload)
+        current["metadata"]["resourceVersion"] = "8"
+        current["metadata"]["annotations"] = {
+            POD_LABEL_OVERRIDES_ANNOTATION: json.dumps({"unrelated": "changed"}),
+        }
+        custom_api.patch_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=409, reason="Conflict"),
+            current,
+        ]
+        custom_api.get_namespaced_custom_object.side_effect = [workload, current]
+
+        with patch.object(
+            service.k8s_client, "get_custom_object", wraps=service.k8s_client.get_custom_object
+        ) as get_object:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        stale, fresh = custom_api.patch_namespaced_custom_object.call_args_list[1:]
+        assert stale.kwargs["body"]["metadata"]["resourceVersion"] == "7"
+        body = fresh.kwargs["body"]
+        assert body["metadata"]["resourceVersion"] == "8"
+        assert json.loads(body["metadata"]["annotations"][POD_LABEL_OVERRIDES_ANNOTATION]) == {
+            "example.com/phase": "run", "unrelated": "changed",
+        }
+        # The informer may not have seen the write that caused the conflict.
+        assert get_object.call_args.kwargs["use_cache"] is False
+        pod_request.assert_called_once()
+
+    def test_metadata_patch_stops_after_repeated_override_conflicts(self, metadata_runtime):
+        from opensandbox_server.services.k8s.batchsandbox_provider import (
+            POD_LABEL_OVERRIDES_WRITE_ATTEMPTS,
+        )
+
+        service, custom_api, pod_request, workload = metadata_runtime
+        custom_api.patch_namespaced_custom_object.side_effect = [workload] + [
+            ApiException(status=409, reason="Conflict")
+        ] * POD_LABEL_OVERRIDES_WRITE_ATTEMPTS
+
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        assert exc.value.status_code == 500
+        assert custom_api.patch_namespaced_custom_object.call_count == (
+            1 + POD_LABEL_OVERRIDES_WRITE_ATTEMPTS
+        )
+        pod_request.assert_not_called()
+
+    def test_metadata_patch_stops_when_sandbox_disappears_during_conflict(self, metadata_runtime):
+        service, custom_api, pod_request, workload = metadata_runtime
+        custom_api.patch_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=409, reason="Conflict"),
+        ]
+        custom_api.get_namespaced_custom_object.side_effect = [
+            workload,
+            ApiException(status=404, reason="Not Found"),
+        ]
+
+        with pytest.raises(HTTPException) as exc:
+            service.patch_sandbox_metadata("sbx-001", {"example.com/phase": "run"})
+
+        assert exc.value.status_code == 500
+        assert custom_api.patch_namespaced_custom_object.call_count == 2
+        pod_request.assert_not_called()
 
     @pytest.mark.parametrize("mode", ["disabled", "empty", "pool"])
     def test_metadata_patch_skips_pod_sync(self, metadata_runtime, mode):

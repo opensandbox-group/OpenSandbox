@@ -20,7 +20,45 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestHTTPConnectionPoolFlags(t *testing.T) {
+	originalFlags, originalArgs := flag.CommandLine, os.Args
+	t.Cleanup(func() {
+		flag.CommandLine, os.Args = originalFlags, originalArgs
+	})
+	for _, test := range []struct {
+		name               string
+		args               []string
+		wantMaxIdleConns   int
+		wantMaxIdlePerHost int
+		wantIdleTimeout    time.Duration
+		wantParseError     bool
+	}{
+		{name: "defaults", wantMaxIdleConns: 100, wantMaxIdlePerHost: 2, wantIdleTimeout: 90 * time.Second},
+		{name: "custom", args: []string{"--http-max-idle-conns=1000", "--http-max-idle-conns-per-host=8", "--http-idle-conn-timeout=2m"}, wantMaxIdleConns: 1000, wantMaxIdlePerHost: 8, wantIdleTimeout: 2 * time.Minute},
+		{name: "explicit zero", args: []string{"--http-max-idle-conns=0", "--http-max-idle-conns-per-host=0", "--http-idle-conn-timeout=0s"}},
+		{name: "invalid duration", args: []string{"--http-idle-conn-timeout=invalid"}, wantParseError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			flag.CommandLine = flag.NewFlagSet("ingress", flag.ContinueOnError)
+			flag.CommandLine.SetOutput(io.Discard)
+			os.Args = []string{"ingress"}
+			InitFlags()
+			err := flag.CommandLine.Parse(test.args)
+			if (err != nil) != test.wantParseError {
+				t.Fatalf("Parse() = %v, want error = %v", err, test.wantParseError)
+			}
+			if test.wantParseError {
+				return
+			}
+			if HTTPMaxIdleConns != test.wantMaxIdleConns || HTTPMaxIdleConnsPerHost != test.wantMaxIdlePerHost || HTTPIdleConnTimeout != test.wantIdleTimeout {
+				t.Fatalf("HTTP connection pool = (%d, %d, %s), want (%d, %d, %s)", HTTPMaxIdleConns, HTTPMaxIdleConnsPerHost, HTTPIdleConnTimeout, test.wantMaxIdleConns, test.wantMaxIdlePerHost, test.wantIdleTimeout)
+			}
+		})
+	}
+}
 
 func TestFastSandboxNamespaceFlag(t *testing.T) {
 	originalFlags, originalArgs := flag.CommandLine, os.Args

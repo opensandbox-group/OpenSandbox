@@ -17,6 +17,9 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -179,6 +182,39 @@ func TestNewRouterServesInitRoutes(t *testing.T) {
 	// failed request does not initialize the runtime.
 	w = doRequest(t, r, http.MethodPost, "/internal/init", `{"sandboxId":"s","generation":0}`)
 	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestDownloadFileMultiRange(t *testing.T) {
+	withTestBinding(t, nil)
+	withRuntimeInit(t, false)
+	r := NewRouter("")
+	path := filepath.Join(t.TempDir(), "data.bin")
+	require.NoError(t, os.WriteFile(path, []byte("0123456789"), 0644))
+
+	for _, tt := range []struct {
+		header     string
+		wantStatus int
+		wantBody   string
+		wantRange  string
+		wantLength string
+	}{
+		{header: "bytes=0-1,5-6", wantStatus: http.StatusOK, wantBody: "0123456789", wantLength: "10"},
+		{header: "bytes=0-1,2-3", wantStatus: http.StatusOK, wantBody: "0123456789", wantLength: "10"},
+		{header: "bytes=0-1,50-60", wantStatus: http.StatusPartialContent, wantBody: "01", wantRange: "bytes 0-1/10", wantLength: "2"},
+	} {
+		t.Run(tt.header, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/files/download?path="+url.QueryEscape(path), nil)
+			req.Header.Set("Range", tt.header)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			require.Equal(t, tt.wantStatus, w.Code, "body: %q; Content-Range: %q", w.Body.String(), w.Header().Get("Content-Range"))
+			require.Equal(t, tt.wantBody, w.Body.String())
+			require.Equal(t, tt.wantRange, w.Header().Get("Content-Range"))
+			require.Equal(t, tt.wantLength, w.Header().Get("Content-Length"))
+			require.Equal(t, "application/octet-stream", w.Header().Get("Content-Type"))
+		})
+	}
 }
 
 func mustHash(t *testing.T, raw string) [32]byte {

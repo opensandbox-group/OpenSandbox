@@ -15,6 +15,7 @@ Use these guides to add capabilities to a working [sandbox application](/getting
 - [In-sandbox privilege reduction](/guides/privilege-reduction)
 - [Credential Vault](/guides/credential-vault)
 - [Chained upstream proxy](/guides/egress-upstream-proxy)
+- [Egress forward mode](/guides/egress-forward-mode)
 - [Secure access](/guides/secure-access)
 - [Secure container runtimes](/guides/secure-container)
 - [Sandbox network security](/guides/network-security)

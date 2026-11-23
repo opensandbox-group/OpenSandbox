@@ -38,9 +38,9 @@ func TestObservedHTTPTransportRecordsTCPConnect(t *testing.T) {
 	t.Cleanup(backend.Close)
 
 	observations := make(chan connectivity.Observation, 2)
-	transport := newObservedHTTPTransport(connectivity.ObserverFunc(func(observation connectivity.Observation) {
+	transport := newHTTPTransport(connectivity.ObserverFunc(func(observation connectivity.Observation) {
 		observations <- observation
-	}))
+	}), nil)
 	t.Cleanup(transport.(*http.Transport).CloseIdleConnections)
 	client := &http.Client{Transport: transport}
 	for range 2 {
@@ -106,8 +106,31 @@ func TestObservedHTTPTransportHandlesReplacedDefault(t *testing.T) {
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 
 	observer := connectivity.ObserverFunc(func(connectivity.Observation) {})
-	if transport := newObservedHTTPTransport(observer); transport != nil {
-		t.Fatalf("transport = %T, want nil fallback for non-standard default transport", transport)
+	for _, pool := range []*httpConnectionPoolConfig{nil, {maxIdleConns: 1000}} {
+		if transport := newHTTPTransport(observer, pool); transport != nil {
+			t.Fatalf("transport = %T, want nil fallback for non-standard default transport", transport)
+		}
+	}
+}
+
+func TestHTTPConnectionPoolLeavesOtherTransportsUnchanged(t *testing.T) {
+	base := http.DefaultTransport.(*http.Transport)
+	previous := base.Clone()
+	observer := connectivity.ObserverFunc(func(connectivity.Observation) {})
+	proxy := NewProxy(context.Background(), nil, ModeHeader, nil, nil, nil,
+		WithConnectObserver(observer), WithHTTPConnectionPool(1000, 8, time.Minute))
+	transport := proxy.httpTransport.(*http.Transport)
+	websocketTransport := proxy.websocketClient.Transport.(*http.Transport)
+	t.Cleanup(transport.CloseIdleConnections)
+	t.Cleanup(websocketTransport.CloseIdleConnections)
+
+	if transport == base || transport == websocketTransport {
+		t.Fatal("HTTP pool must own its transport independently of the default and WebSocket transports")
+	}
+	for name, other := range map[string]*http.Transport{"default": base, "websocket": websocketTransport} {
+		if other.MaxIdleConns != previous.MaxIdleConns || other.MaxIdleConnsPerHost != previous.MaxIdleConnsPerHost || other.IdleConnTimeout != previous.IdleConnTimeout {
+			t.Fatalf("%s transport inherited the HTTP pool settings", name)
+		}
 	}
 }
 
@@ -117,7 +140,7 @@ func TestObservedHTTPTransportHandlesNilDefaultDialer(t *testing.T) {
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 
 	observer := connectivity.ObserverFunc(func(connectivity.Observation) {})
-	transport, ok := newObservedHTTPTransport(observer).(*http.Transport)
+	transport, ok := newHTTPTransport(observer, nil).(*http.Transport)
 	if !ok {
 		t.Fatalf("observed transport = %T, want *http.Transport", transport)
 	}
