@@ -24,17 +24,21 @@ limitations under the License.
   Fill every {{placeholder}}. Keep sections 1–3 and their order. Keep ONE value-card
   block and delete the other two, then delete the rows that do not apply. Keep the
   collapsed evidence section only when a card row or a finding depends on it.
+  Verdict badges are placeholders too: b-pass ✓, b-part △, b-fail ✗ — set the class
+  and glyph to match the row's verdict.
+  Escape untrusted values (PR title, author, branch names, commit subjects, quoted
+  body text, command output) before substitution; <pre> escapes nothing by itself.
   Length limits: a card row is at most 2 lines, a finding at most 2 lines, and the
   default-language view fits in about two screens before the verification log.
 -->
 <style>
   :root { --bg:#fff; --fg:#1f2328; --muted:#656d76; --border:#d0d7de; --soft:#f6f8fa; --code:#eff1f3;
     --accent:#0969da; --pass:#1a7f37; --pass-bg:#dafbe1; --part:#9a6700; --part-bg:#fff8c5;
-    --info:#0550ae; --info-bg:#ddf4ff; --warn:#9a6700; --warn-bg:#fff8c5;
+    --info:#0550ae; --info-bg:#ddf4ff; --warn:#9a6700; --warn-bg:#fff8c5; --fail:#cf222e; --fail-bg:#ffebe9;
     --verdict-bg:#dafbe1; --verdict-bd:#2da44e; --hl-bg:#ddf4ff; --hl-bd:#54aeff; }
   @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --muted:#8d96a0; --border:#30363d; --soft:#161b22; --code:#21262d;
     --accent:#58a6ff; --pass:#3fb950; --pass-bg:#12261e; --part:#d29922; --part-bg:#2b2111;
-    --info:#58a6ff; --info-bg:#0c2d6b; --warn:#d29922; --warn-bg:#2b2111;
+    --info:#58a6ff; --info-bg:#0c2d6b; --warn:#d29922; --warn-bg:#2b2111; --fail:#f85149; --fail-bg:#3a1218;
     --verdict-bg:#12261e; --verdict-bd:#238636; --hl-bg:#0c2d6b; --hl-bd:#58a6ff; } }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",Helvetica,Arial,sans-serif; }
@@ -62,6 +66,7 @@ limitations under the License.
   .b-part { color:var(--part); background:var(--part-bg); }
   .b-info { color:var(--info); background:var(--info-bg); }
   .b-warn { color:var(--warn); background:var(--warn-bg); }
+  .b-fail { color:var(--fail); background:var(--fail-bg); }
   .card { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:1px; background:var(--hl-bd);
     border:1px solid var(--hl-bd); border-radius:8px; overflow:hidden; margin:0 0 12px; }
   .cell { background:var(--hl-bg); padding:10px 14px; }
@@ -103,25 +108,25 @@ limitations under the License.
     <div class="cell"><div class="label"><span class="zh">修复的问题</span><span class="en">Problem fixed</span></div>
       <span class="zh">{{≤2 行：什么坏了、对谁、什么现象}}</span><span class="en">{{≤2 lines: what breaks, for whom, how it shows}}</span></div>
     <div class="cell"><div class="label"><span class="zh">问题是否成立</span><span class="en">Is it real</span></div>
-      <span class="badge b-pass">✓</span><span class="zh">{{决定性证据，如「TestX 在 base 失败：expected 200, actual 206」}}</span><span class="en">{{decisive evidence, e.g. "TestX fails on base: expected 200, actual 206"}}</span></div>
+      <span class="badge {{b-pass|b-part|b-fail}}">{{✓|△|✗}}</span><span class="zh">{{决定性证据，如「TestX 在 base 失败：expected 200, actual 206」}}</span><span class="en">{{decisive evidence, e.g. "TestX fails on base: expected 200, actual 206"}}</span></div>
     <div class="cell"><div class="label"><span class="zh">修复方式</span><span class="en">Fix</span></div>
       <span class="zh">{{机制 + file:line}}</span><span class="en">{{mechanism + file:line}}</span></div>
     <div class="cell"><div class="label"><span class="zh">引入的成本</span><span class="en">Cost</span></div>
       <span class="zh">性能 {{✓/⚠ 一句}} · 兼容 {{✓/⚠ 一句}} · 复杂度 {{✓/⚠ 一句}}</span><span class="en">Performance {{✓/⚠ one clause}} · Compatibility {{✓/⚠ one clause}} · Complexity {{✓/⚠ one clause}}</span></div>
     <div class="cell"><div class="label"><span class="zh">测试覆盖</span><span class="en">Test coverage</span></div>
-      <span class="badge b-pass">✓</span><span class="zh">{{哪些改动路径被钉住、回归是否在 base 失败、新分支实测覆盖}}</span><span class="en">{{which changed paths are pinned, does the regression fail on base, measured coverage of new branches}}</span></div>
+      <span class="badge {{b-pass|b-part|b-fail}}">{{✓|△|✗}}</span><span class="zh">{{哪些改动路径被钉住、回归是否在 base 失败、新分支实测覆盖}}</span><span class="en">{{which changed paths are pinned, does the regression fail on base, measured coverage of new branches}}</span></div>
   </div>
 
   <!-- feature card -->
   <div class="card">
     <div class="cell"><div class="label"><span class="zh">新增或变更的公开面</span><span class="en">Public surface added or changed</span></div>
-      <span class="zh">{{逐项：配置键 / flag / env / Helm value / API 字段 / operationId + 类型 + 默认值}}</span><span class="en">{{one per item: config key / flag / env / Helm value / API field / operationId + type + default}}</span></div>
+      <span class="zh">{{逐项：配置键 / flag / env / Helm value / API 字段 / operationId / SDK 方法 + 类型 + 默认值}}</span><span class="en">{{one per item: config key / flag / env / Helm value / API field / operationId / SDK method + type + default}}</span></div>
     <div class="cell"><div class="label"><span class="zh">默认值与兼容性</span><span class="en">Defaults and compatibility</span></div>
       <span class="zh">{{additive 还是 breaking；不设置新项时旧行为是否保留}}</span><span class="en">{{additive or breaking; is the old behavior kept when unset?}}</span></div>
     <div class="cell"><div class="label"><span class="zh">契约同步</span><span class="en">Contract sync</span></div>
       <span class="zh">spec {{✓/✗}} · docs {{✓/✗}} · SDK {{✓/✗}} · CLI / examples {{✓/✗}}，各带 file ref</span><span class="en">spec {{✓/✗}} · docs {{✓/✗}} · SDK {{✓/✗}} · CLI / examples {{✓/✗}}, each with a file ref</span></div>
     <div class="cell"><div class="label"><span class="zh">测试覆盖</span><span class="en">Test coverage</span></div>
-      <span class="badge b-pass">✓</span><span class="zh">{{每个新项及其默认值是否有测试；生成物是否校验}}</span><span class="en">{{is each new item and its default tested; is generated output verified}}</span></div>
+      <span class="badge {{b-pass|b-part|b-fail}}">{{✓|△|✗}}</span><span class="zh">{{每个新项及其默认值是否有测试；生成物是否校验}}</span><span class="en">{{is each new item and its default tested; is generated output verified}}</span></div>
     <div class="cell"><div class="label"><span class="zh">迁移</span><span class="en">Migration</span></div>
       <span class="zh">{{可选：升级路径}}</span><span class="en">{{optional: upgrade path}}</span></div>
   </div>
