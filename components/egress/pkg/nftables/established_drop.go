@@ -407,7 +407,7 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 // (p's allows plus the currently learned domain IPs) so a destination that was
 // allowed at any point after the commit is never torn down by a later plain
 // apply the caller did not opt in to.
-func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip.Addr, wasAccepted func(netip.Addr, bool) bool) EstablishedDrops {
+func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip.Addr, retained map[netip.Addr]time.Time, hadAccept func(netip.Addr, bool) bool) EstablishedDrops {
 	if d.Empty() {
 		return EstablishedDrops{}
 	}
@@ -460,8 +460,7 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 		if !policyTargets().permitsHost(addr, 0, defaultAllow) {
 			return true
 		}
-		if len(portDeny) == 0 || targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, addr, 0) ||
-			wasAccepted != nil && wasAccepted(addr, true) {
+		if len(portDeny) == 0 {
 			return false
 		}
 		if reallowed == nil {
@@ -491,29 +490,22 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 			removedPrefixes.add(part)
 		}
 	}
+	var scopedWithdrawals portDenyUnion
 	for _, pd := range d.PortDrops {
-		addr := pd.Addr
-		if !addr.IsValid() && pd.Prefix.IsSingleIP() {
-			addr = pd.Prefix.Addr()
-		}
-		switch {
-		case addr.IsValid():
-			current := policyTargets()
-			ports, ranges := portsNoLongerAllowed(p, pd.Ports, pd.Ranges, func(port int) bool {
-				return current.permitsHost(addr, port, defaultAllow)
-			})
-			if len(ports) > 0 || len(ranges) > 0 {
-				out.PortDrops = append(out.PortDrops, EstablishedPortDrop{Addr: pd.Addr, Prefix: pd.Prefix, Ports: ports, Ranges: ranges})
+		if target := portDenyTarget(pd); target.IsSingleIP() {
+			if scopedWithdrawals == nil {
+				scopedWithdrawals = make(portDenyUnion)
 			}
-		case pd.Prefix.IsValid():
+			scopedWithdrawals.add(target, pd.Ports, pd.Ranges)
+		} else if pd.Prefix.IsValid() {
 			if !portsFullyAllowedOnPrefix(p, pd.Prefix, pd.Ports, pd.Ranges) {
 				out.PortDrops = append(out.PortDrops, pd)
 			}
 		}
 	}
 	out.DenyPortDrops = carryPortDenies(d, portDeny, curDeny, &out)
-	if len(reallowed)+len(d.withdrawnHostDenyPorts)+len(d.withdrawnHostPorts) != 0 {
-		out.withdrawnHostDenyPorts, out.withdrawnHostPorts = d.carryWithdrawnHostPorts(p, policyTargets(), reallowed, wasAccepted)
+	if len(reallowed)+len(scopedWithdrawals)+len(d.withdrawnHostDenyPorts)+len(d.withdrawnHostPorts) != 0 {
+		out.withdrawnHostDenyPorts, out.withdrawnHostPorts = d.carryWithdrawnHostPorts(defaultAllow, policyTargets(), reallowed, scopedWithdrawals, retained, hadAccept)
 	}
 	out.Addrs = removedAddrs.sorted()
 	out.Prefixes = removedPrefixes.sorted()
@@ -629,50 +621,76 @@ func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule, whole []
 	return carried.drops(nil)
 }
 
-func (d EstablishedDrops) carryWithdrawnHostPorts(p *policy.NetworkPolicy, current *EstablishedDrops, reallowed map[netip.Addr]struct{}, wasAccepted func(netip.Addr, bool) bool) (explicit, implicit portDenyUnion) {
-	denies := make(portDenyUnion)
-	for _, rule := range current.DenyPortDrops {
-		denies.add(portDenyTarget(rule), rule.Ports, rule.Ranges)
-	}
-	denies.normalize()
-	// Remove redundant scoped spans once, before projecting the current
-	// global floor onto individual hosts. Keep that floor as provenance.
-	var globalTarget netip.Prefix
-	if floor := denies[globalTarget]; len(floor.spans) != 0 && len(denies) > 1 {
-		delete(denies, globalTarget)
-		denies.subtractSpans(floor.spans)
-		denies[globalTarget] = floor
-	}
+func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current *EstablishedDrops, reallowed map[netip.Addr]struct{}, scoped portDenyUnion, retained map[netip.Addr]time.Time, hadAccept func(netip.Addr, bool) bool) (explicit, implicit portDenyUnion) {
+	denies := normalizedPortTargets(current.DenyPortDrops)
 	early, late := make(portDenyUnion), make(portDenyUnion)
-	if len(reallowed) != 0 {
-		keeps := make(portDenyUnion)
-		for _, rule := range d.KeepPorts {
-			keeps.add(portDenyTarget(rule), rule.Ports, rule.Ranges)
+	oldKeeps := normalizedPortTargets(d.KeepPorts)
+	var oldDenies portDenyUnion
+	addPreviouslyBlocked := func(out portDenyUnion, host netip.Prefix, candidate []policy.PortRange) {
+		addr := host.Addr()
+		if targetsMatch(d.DenyAddrs, d.DenyPrefixes, nil, addr, 0) {
+			out.add(host, nil, candidate)
+			return
 		}
-		keeps.normalize()
+		spans := candidate
+		exempted := false
+		if targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, addr, 0) || hadAccept != nil && hadAccept(addr, true) {
+			spans, exempted = nil, true
+		} else {
+			for target, keep := range oldKeeps {
+				if !target.IsValid() || target.Contains(addr) {
+					var changed bool
+					spans, changed = subtractPortSpans(spans, keep.spans)
+					exempted = exempted || changed
+				}
+			}
+		}
+		out.add(host, nil, spans)
+		if !exempted {
+			return
+		}
+		// Only the formerly exempted part needs rechecking. A higher-priority
+		// drop made these accepts ineffective in the previous rule chain.
+		masked, _ := subtractPortSpans(candidate, spans)
+		if oldDenies == nil {
+			oldDenies = normalizedPortTargets(d.DenyPortDrops)
+		}
+		restore := func(denied []policy.PortRange) {
+			out.add(host, nil, intersectPortSpans(masked, denied))
+			masked, _ = subtractPortSpans(masked, denied)
+		}
+		for target, deny := range oldDenies {
+			if !target.IsValid() || target.Contains(addr) {
+				restore(deny.spans)
+			}
+		}
+		restore(d.withdrawnHostDenyPorts[host].spans)
+		if len(masked) != 0 && (hadAccept == nil || !hadAccept(addr, false)) {
+			restore(d.withdrawnHostPorts[host].spans)
+		}
+	}
+	if len(reallowed) != 0 {
 		for addr := range reallowed {
 			host := netip.PrefixFrom(addr, addr.BitLen())
 			for target, deny := range denies {
 				if target.IsValid() && !target.Contains(addr) {
 					continue
 				}
-				spans := deny.spans
-				for target, keep := range keeps {
-					if !target.IsValid() || target.Contains(addr) {
-						spans, _ = subtractPortSpans(spans, keep.spans)
-					}
-				}
-				early.add(host, nil, spans)
+				addPreviouslyBlocked(early, host, deny.spans)
 			}
 		}
 	}
 
 	left := make(portDenyUnion)
+	scoped.normalize()
+	for host, group := range scoped {
+		addPreviouslyBlocked(left, host, group.spans)
+	}
 	for i, previous := range [2]portDenyUnion{d.withdrawnHostDenyPorts, d.withdrawnHostPorts} {
 		for host, group := range previous {
 			addr := host.Addr()
 			// Only the dynamic accept preceded a previously implicit drop.
-			if i == 1 && wasAccepted != nil && wasAccepted(addr, false) {
+			if i == 1 && hadAccept != nil && hadAccept(addr, false) {
 				continue
 			}
 			left.add(host, nil, group.spans)
@@ -692,15 +710,13 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(p *policy.NetworkPolicy, curre
 				spans, _ = subtractPortSpans(spans, deny.spans)
 			}
 		}
-		if len(spans) == 0 || current.permitsHost(addr, 0, p.DefaultAction == policy.ActionAllow) {
+		// Explicit denies still win. The lease reallows only the rest in
+		// the new ruleset, so don't retain a drop that could revive at expiry.
+		if _, learned := retained[addr]; learned || len(spans) == 0 || current.permitsHost(addr, 0, defaultAllow) {
 			continue
 		}
 		if currentKeeps == nil {
-			currentKeeps = make(portDenyUnion)
-			for _, rule := range current.KeepPorts {
-				currentKeeps.add(portDenyTarget(rule), rule.Ports, rule.Ranges)
-			}
-			currentKeeps.normalize()
+			currentKeeps = normalizedPortTargets(current.KeepPorts)
 		}
 		for target, keep := range currentKeeps {
 			if !target.IsValid() || target.Contains(addr) {
@@ -713,6 +729,23 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(p *policy.NetworkPolicy, curre
 	early.normalize()
 	late.normalize()
 	return early, late
+}
+
+func normalizedPortTargets(rules []EstablishedPortDrop) portDenyUnion {
+	targets := make(portDenyUnion)
+	for _, rule := range rules {
+		targets.add(portDenyTarget(rule), rule.Ports, rule.Ranges)
+	}
+	targets.normalize()
+	// Factor global coverage out of scoped contributors before expanding
+	// them over matching hosts. Keep the original global contribution.
+	var global netip.Prefix
+	if floor := targets[global]; len(floor.spans) != 0 && len(targets) > 1 {
+		delete(targets, global)
+		targets.subtractSpans(floor.spans)
+		targets[global] = floor
+	}
+	return targets
 }
 
 func (d EstablishedDrops) withdrawnHostDenyRules() []EstablishedPortDrop {

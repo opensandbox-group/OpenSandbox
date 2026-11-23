@@ -500,7 +500,7 @@ func BenchmarkCarryWithdrawnHostsWithOverlappingFloor(b *testing.B) {
 	prior := ComputeEstablishedDrops(reallow, withdrawn, nil)
 	b.ReportAllocs()
 	for b.Loop() {
-		prior.stillRelevant(reallow, nil, nil)
+		prior.stillRelevant(reallow, nil, nil, nil)
 	}
 }
 
@@ -519,6 +519,70 @@ func TestApplyStatic_HostWithdrawalSharesUnchangedGlobalFloor(t *testing.T) {
 	require.True(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("203.0.113.64"), 7), "a previously withdrawn host's port remains blocked by implicit denial")
 	require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("203.0.113.65"), 7), "the old explicit floor is no longer carried for an unrelated host")
 	require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("203.0.113.64"), 9), "ordinary reload must not tear down the previously reallowed port")
+}
+
+func TestApplyStatic_WithdrawnHostUsesEffectivePreviousVerdict(t *testing.T) {
+	for _, host := range []string{"192.0.2.10", "::ffff:192.0.2.10", "::ffff:192.0.2.10/128"} {
+		t.Run(host, func(t *testing.T) {
+			addr, err := netip.ParseAddr(host)
+			if err != nil {
+				addr = netip.MustParsePrefix(host).Addr()
+			}
+			allow := `{"action":"allow","target":"` + host + `"`
+			deny := `{"action":"deny","target":"` + host + `"`
+			scoped := `,"ports":[443]}`
+			for _, tt := range []struct{ name, prior, withdrawal string }{
+				{"port withdrawal", allow + scoped, ""},
+				{"whole deny", allow + `}`, deny + `}`},
+				{"whole deny masks allow", allow + `}`, deny + `},` + allow + `}`},
+				{"port deny", allow + `}`, deny + scoped},
+				{"port deny masks allow", allow + `}`, deny + scoped + `,` + allow + scoped},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					m, _ := recordingManager()
+					ctx := context.Background()
+					_, err := m.ApplyStaticComputingEstablishedDrops(ctx,
+						mustPolicy(t, `{"egress":[`+tt.prior+`]}`), mustPolicy(t, `{"egress":[`+tt.withdrawal+`]}`))
+					require.NoError(t, err)
+					require.True(t, m.lastDrops.MatchesFlow(addr, 443), "port initially blocked")
+					partial := mustPolicy(t, `{"egress":[`+allow+`},`+deny+scoped+`]}`)
+					require.NoError(t, m.ApplyStatic(ctx, partial))
+					require.True(t, m.lastDrops.MatchesFlow(addr, 443), "new host allow must not mask a retained port drop")
+					require.False(t, m.lastDrops.MatchesFlow(addr, 80), "reallowed sibling must resume")
+					require.NoError(t, m.ApplyStatic(ctx, policy.DefaultDenyPolicy()))
+					require.True(t, m.lastDrops.MatchesFlow(addr, 443), "port that never reopened still has withdrawal provenance")
+					require.False(t, m.lastDrops.MatchesFlow(addr, 80), "plain reload must not newly tear down the sibling")
+				})
+			}
+		})
+	}
+}
+
+func TestApplyStatic_RetainedDNSLeaseRetiresOnlyReallowedWithdrawnPorts(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.10")
+	const domain = `{"action":"allow","target":"cdn.example.com"}`
+	const portAllow = `{"action":"allow","target":"192.0.2.10","ports":[443,8443]}`
+	const denyBoth = `{"action":"deny","target":"192.0.2.10","ports":[443,8443]}`
+	const denySibling = `{"action":"deny","target":"192.0.2.10","ports":[8443]}`
+	for _, keepSource := range []bool{false, true} {
+		t.Run(strconv.FormatBool(keepSource), func(t *testing.T) {
+			m, _ := recordingManager()
+			ctx := context.Background()
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx,
+				mustPolicy(t, `{"egress":[`+domain+`,`+portAllow+`]}`),
+				mustPolicy(t, `{"egress":[`+domain+`,`+denyBoth+`]}`))
+			require.NoError(t, err)
+			require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+
+			rules := denySibling
+			if keepSource {
+				rules += `,` + domain
+			}
+			require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[`+rules+`]}`)))
+			require.Equal(t, !keepSource, m.lastDrops.MatchesFlow(addr, 443), "only a lease actually retained in this apply reallows the port")
+			require.True(t, m.lastDrops.MatchesFlow(addr, 8443), "a retained lease must not bypass a still-explicitly denied port")
+		})
+	}
 }
 
 func TestCountMatchingConntrackFlowsDataKeepsNativeIPv4AgainstMappedDeny(t *testing.T) {
@@ -1017,7 +1081,7 @@ func BenchmarkCarryUnchangedAddressDeniesAndPortFloor(b *testing.B) {
 			b.ReportAllocs()
 			var out EstablishedDrops
 			for b.Loop() {
-				out = prior.stillRelevant(p, nil, nil)
+				out = prior.stillRelevant(p, nil, nil, nil)
 			}
 			if len(out.DenyAddrs) != tt.hosts || len(out.DenyPortDrops) != 1 || len(out.DenyPortDrops[0].Ranges) != tt.spans {
 				b.Fatal("reload did not retain the whole-address denies and one global port floor")

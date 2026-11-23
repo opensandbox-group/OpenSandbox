@@ -134,11 +134,13 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 	}
 	var buildDrops staticDropBuilder
 	if !m.lastDrops.Empty() && m.now().Sub(m.lastDropsAt) < establishedCarryTTL() {
-		buildDrops = func(at time.Time) (EstablishedDrops, time.Time) {
+		buildDrops = func(at time.Time, retained map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 			learned, expiry := m.liveLearnedAddrsLocked(at)
 			var previousAllows []netip.Prefix
 			parsedPrevious := false
-			wasAccepted := func(addr netip.Addr, includeStatic bool) bool {
+			// Report the presence of a DNS or static accept. The planner
+			// also checks for higher-priority drops in the installed rules.
+			hadAccept := func(addr netip.Addr, includeStatic bool) bool {
 				// The installed TTL map also includes grants made without a
 				// domain ledger entry, e.g. under default allow.
 				if until := m.tracker.dynamicIPs[addr]; until.After(at) {
@@ -162,7 +164,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 				}
 				return slices.ContainsFunc(previousAllows, func(pfx netip.Prefix) bool { return pfx.Contains(addr) })
 			}
-			drops := m.lastDrops.stillRelevant(p, learned, wasAccepted)
+			drops := m.lastDrops.stillRelevant(p, learned, retained, hadAccept)
 			return drops, expiry
 		}
 	}
@@ -206,7 +208,7 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	fixedDrops := func(time.Time) (EstablishedDrops, time.Time) { return drops, time.Time{} }
+	fixedDrops := func(time.Time, map[netip.Addr]time.Time) (EstablishedDrops, time.Time) { return drops, time.Time{} }
 	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now())
 }
 
@@ -226,7 +228,7 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 		newPol = policy.DefaultDenyPolicy()
 	}
 	flows := snapshotTeardownFlows()
-	buildDrops := func(at time.Time) (EstablishedDrops, time.Time) {
+	buildDrops := func(at time.Time, _ map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 		prior, live := m.snapshotResolvedDomainsLocked(at)
 		return computeEstablishedDrops(oldPol, newPol, prior, live), time.Time{}
 	}
@@ -251,9 +253,9 @@ type staticApplyPlan struct {
 	nextExpiry     time.Time
 }
 
-// In addition to carried grants, plain reloads may consult live addresses
-// from removed sources to avoid tearing down flows without an explicit opt-in.
-type staticDropBuilder func(time.Time) (EstablishedDrops, time.Time)
+// Build teardown against the leases staged in the same transaction. Plain
+// reloads may also consult previous live addresses to avoid opting into drops.
+type staticDropBuilder func(time.Time, map[netip.Addr]time.Time) (EstablishedDrops, time.Time)
 
 func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, buildDrops staticDropBuilder, flows []byte, committedAt time.Time) (int, error) {
 	if m.quiesced.Load() {
@@ -338,7 +340,7 @@ func (m *Manager) prepareStaticApplyLocked(ctx context.Context, p *policy.Networ
 		plan := m.retainedDomainLeasesLocked(p, at, buildDrops != nil)
 		if buildDrops != nil {
 			var dropExpiry time.Time
-			plan.drops, dropExpiry = buildDrops(at)
+			plan.drops, dropExpiry = buildDrops(at, plan.leases)
 			if !dropExpiry.IsZero() && (plan.nextExpiry.IsZero() || dropExpiry.Before(plan.nextExpiry)) {
 				plan.nextExpiry = dropExpiry
 			}
