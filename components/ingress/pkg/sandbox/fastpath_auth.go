@@ -38,6 +38,7 @@ import (
 const fastPathAudience = "fast-sandbox-fastpath"
 
 type FastPathAuthConfig struct {
+	Disabled       bool
 	Kubernetes     *rest.Config
 	Namespace      string
 	ServiceAccount string

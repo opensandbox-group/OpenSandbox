@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	fastpathv2 "github.com/alibaba/opensandbox/ingress/pkg/fastpath/v2"
@@ -102,15 +103,21 @@ func NewFastSandboxProvider(endpoint string, waitTimeout time.Duration, accessMo
 	if err != nil {
 		return nil, err
 	}
-	tokens, err := newFastPathTokenSource(auth)
-	if err != nil {
-		return nil, err
+	var conn *grpc.ClientConn
+	var tokens *fastPathTokenSource
+	if auth.Disabled {
+		conn, err = grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	} else {
+		tokens, err = newFastPathTokenSource(auth)
+		if err != nil {
+			return nil, err
+		}
+		transport, tlsErr := newFastPathTLS(auth.CAFile, auth.ServerName)
+		if tlsErr != nil {
+			return nil, tlsErr
+		}
+		conn, err = grpc.NewClient(endpoint, grpc.WithTransportCredentials(transport), grpc.WithPerRPCCredentials(tokens))
 	}
-	transport, err := newFastPathTLS(auth.CAFile, auth.ServerName)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(transport), grpc.WithPerRPCCredentials(tokens))
 	if err != nil {
 		return nil, fmt.Errorf("create FastPath client: %w", err)
 	}
@@ -178,11 +185,13 @@ func (p *FastSandboxProvider) Start(ctx context.Context) error {
 			_ = p.connection.Close()
 			return fmt.Errorf("connect to FastPath: %w", err)
 		}
-		preflightCtx, preflightCancel := context.WithTimeout(ctx, fastPathConnectTimeout)
-		defer preflightCancel()
-		if _, err := p.tokens.GetRequestMetadata(preflightCtx); err != nil {
-			_ = p.connection.Close()
-			return fmt.Errorf("FastPath caller credential preflight: %w", err)
+		if p.tokens != nil {
+			preflightCtx, preflightCancel := context.WithTimeout(ctx, fastPathConnectTimeout)
+			defer preflightCancel()
+			if _, err := p.tokens.GetRequestMetadata(preflightCtx); err != nil {
+				_ = p.connection.Close()
+				return fmt.Errorf("FastPath caller credential preflight: %w", err)
+			}
 		}
 		go func() {
 			<-ctx.Done()

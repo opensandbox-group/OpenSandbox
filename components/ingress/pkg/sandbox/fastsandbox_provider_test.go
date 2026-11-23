@@ -107,6 +107,19 @@ func TestFastSandboxProviderStartRequiresCallerCredential(t *testing.T) {
 	require.ErrorContains(t, provider.Start(t.Context()), "caller credential preflight")
 }
 
+func TestFastSandboxProviderExplicitAuthDisabledDialsPlaintext(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := grpc.NewServer()
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	provider, err := NewFastSandboxProvider(listener.Addr().String(), time.Second, "direct-fastlet-proxy", FastPathAuthConfig{Disabled: true})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	require.NoError(t, provider.Start(ctx))
+}
+
 func TestFastSandboxProviderMapsUnreadyPreconditionToRetryableError(t *testing.T) {
 	err := mapFastPathError(status.Error(codes.FailedPrecondition, "Sandbox interaction is not Ready"))
 	require.ErrorIs(t, err, ErrSandboxNotReady)

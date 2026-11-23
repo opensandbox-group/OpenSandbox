@@ -218,3 +218,15 @@ def test_missing_credentials_never_opens_anonymous_channel(monkeypatch):
     with pytest.raises(FastPathUnavailable):
         FastPathClient().connect()
     insecure.assert_not_called()
+
+
+def test_explicit_auth_disabled_opens_insecure_channel(monkeypatch):
+    insecure = Mock(return_value=Mock())
+    secure = Mock()
+    monkeypatch.setattr("grpc.insecure_channel", insecure)
+    monkeypatch.setattr("grpc.secure_channel", secure)
+    client = FastPathClient(endpoint="127.0.0.1:9090", auth_enabled=False)
+    client.connect()
+    insecure.assert_called_once_with("127.0.0.1:9090")
+    secure.assert_not_called()
+    client.close()

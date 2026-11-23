@@ -100,10 +100,12 @@ class FastPathClient:
         endpoint: str = DEFAULT_FASTPATH_ENDPOINT,
         timeout_seconds: float = 30.0,
         *,
+        auth_enabled: bool = True,
         token_source: Optional[TokenSource] = None,
         tls_ca_file: Optional[str] = None,
         tls_server_name: Optional[str] = None,
     ) -> None:
+        self._auth_enabled = auth_enabled
         self._token_source = token_source
         self._tls_ca_file = tls_ca_file
         self._tls_server_name = tls_server_name
@@ -136,6 +138,15 @@ class FastPathClient:
         return roots, stat_key
 
     def connect(self) -> None:
+        if not self._auth_enabled:
+            if self._stub is not None and self._channel is not None:
+                return
+            with self._connect_lock:
+                if self._channel is None:
+                    channel = grpc.insecure_channel(self._endpoint)
+                    self._stub = fastpath_pb2_grpc.FastPathServiceStub(channel)
+                    self._channel = channel
+            return
         if self._token_source is None:
             raise FastPathUnavailable("credentials-missing", "FastPath caller TokenRequest source is required")
         try:

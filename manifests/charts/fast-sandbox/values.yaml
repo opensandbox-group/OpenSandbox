@@ -54,6 +54,8 @@ imagePullSecrets: []
 
 fastpath:
   callerAuth:
+    # -- Enable FastPath caller authentication and TLS (default true; set false for legacy plaintext upgrade transition).
+    enabled: true
     # -- Identity namespace. Empty uses systemNamespace; must match base.fastSandbox.namespaces.system.
     namespace: ""
     # -- Must match the authentication-only identity installed by the base chart.

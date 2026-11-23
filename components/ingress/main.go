@@ -96,8 +96,12 @@ func main() {
 	}
 
 	// Parsing Kubernetes config registers global flags and must only happen once.
-	kubeConfig := injection.ParseAndGetRESTConfigOrDie()
+	var kubeConfig *rest.Config
+	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled || flag.FastPathAuthEnabled {
+		kubeConfig = injection.ParseAndGetRESTConfigOrDie()
+	}
 	fastPathAuth := sandbox.FastPathAuthConfig{
+		Disabled:       !flag.FastPathAuthEnabled,
 		Kubernetes:     kubeConfig,
 		Namespace:      flag.FastPathAuthNamespace,
 		ServiceAccount: flag.FastPathAuthServiceAccount,

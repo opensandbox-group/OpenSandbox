@@ -27,6 +27,7 @@ Kubernetes: `>=1.22.0-0`
 | crds.annotations | object | `{}` | Additional annotations to add to CRDs (merged with resource-policy when keep is true) |
 | crds.install | bool | `true` | Specifies whether the OpenSandbox CRDs should be installed |
 | crds.keep | bool | `true` | Keep CRDs on chart uninstall (adds the helm.sh/resource-policy: keep annotation) |
+| fastSandbox.callerAuth.enabled | bool | `true` | Enable FastPath caller authentication identities and token-minting RBAC. |
 | fastSandbox.callerAuth.gateway.bootstrapNamespace | string | `""` | Bootstrap Pod namespace. Empty uses fastSandbox.namespaces.system. |
 | fastSandbox.callerAuth.gateway.bootstrapServiceAccount | string | `"opensandbox-ingress-gateway"` | Bootstrap gateway Pod ServiceAccount name. |
 | fastSandbox.callerAuth.gateway.serviceAccount | string | `"opensandbox-ingress-fastpath-client"` | Authentication-only gateway identity. |

@@ -167,6 +167,46 @@ class FastPathAuthChartsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("existing cert-manager issuer", result.stderr)
 
+    def test_caller_auth_can_be_explicitly_disabled_for_upgrade(self):
+        base_resources = self.render("base", "fastSandbox.callerAuth.enabled=false")
+        self.assertFalse(
+            any(
+                x["kind"] == "ServiceAccount"
+                and x["metadata"]["name"] == "opensandbox-server-fastpath-client"
+                for x in base_resources
+            )
+        )
+        fsb_resources = self.render(
+            "fast-sandbox",
+            "fastpath.callerAuth.enabled=false",
+            "fastpath.tls.issuerRef.name=",
+        )
+        self.assertFalse(any(x["kind"] == "Certificate" for x in fsb_resources))
+        self.assertFalse(
+            any(
+                x["kind"] == "ConfigMap"
+                and x["metadata"]["name"] == "fast-sandbox-fastpath-callers"
+                for x in fsb_resources
+            )
+        )
+        fsb_deployment = next(x for x in fsb_resources if x["kind"] == "Deployment")
+        fsb_args = fsb_deployment["spec"]["template"]["spec"]["containers"][0]["args"]
+        self.assertIn("--fastpath-auth-enabled=false", fsb_args)
+        self.assertFalse(any("--fastpath-tls-key-file" in a for a in fsb_args))
+
+        gw_resources = self.render(
+            "ingress-gateway",
+            "gateway.fastpathEndpoint=fastpath:9090",
+            "gateway.secureAccess.existingSecret=route-signing-keys",
+            "gateway.fastpathAuth.enabled=false",
+            "gateway.fastpathAuth.caConfigMap=public-ca",
+        )
+        gw_deployment = next(x for x in gw_resources if x["kind"] == "Deployment")
+        gw_pod = gw_deployment["spec"]["template"]["spec"]
+        gw_args = gw_pod["containers"][0]["args"]
+        self.assertIn("--fastpath-auth-enabled=false", gw_args)
+        self.assertFalse(any("fastpath-ca" == v["name"] for v in gw_pod.get("volumes", [])))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -209,10 +209,15 @@ def create_snapshot_runtime(
         fastpath_client = FastPathClient(
             endpoint=kubernetes_config.fastpath_endpoint,
             timeout_seconds=kubernetes_config.fastpath_timeout_seconds,
-            token_source=TokenSource(
-                lambda: k8s_client.get_core_v1_api(),
-                kubernetes_config.fastpath_auth_namespace,
-                kubernetes_config.fastpath_auth_service_account,
+            auth_enabled=kubernetes_config.fastpath_auth_enabled,
+            token_source=(
+                TokenSource(
+                    lambda: k8s_client.get_core_v1_api(),
+                    kubernetes_config.fastpath_auth_namespace,
+                    kubernetes_config.fastpath_auth_service_account,
+                )
+                if kubernetes_config.fastpath_auth_enabled
+                else None
             ),
             tls_ca_file=kubernetes_config.fastpath_tls_ca_file,
             tls_server_name=kubernetes_config.fastpath_tls_server_name,

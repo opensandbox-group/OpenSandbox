@@ -1,4 +1,4 @@
-{{- if .Values.controller.enabled }}
+{{- if and .Values.controller.enabled .Values.fastpath.callerAuth.enabled }}
 {{- $namespace := include "fast-sandbox.namespace" . }}
 {{- $identities := .Values.fastpath.callerAuth.namespace | default $namespace }}
 {{- $scopes := .Values.fastpath.callerAuth.namespaces | default (list .Values.resourceNamespace) }}

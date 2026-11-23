@@ -75,6 +75,8 @@ fastSandbox:
     # sandboxes and the fastlet/builder Pods they spawn)
     resources: opensandbox-dataplane
   callerAuth:
+    # -- Enable FastPath caller authentication identities and token-minting RBAC.
+    enabled: true
     server:
       # -- Authentication-only FastPath identity; never bind workload permissions to it.
       serviceAccount: opensandbox-server-fastpath-client

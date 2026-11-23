@@ -36,6 +36,7 @@ Kubernetes: `>=1.22.0-0`
 | gateway.env | list | `[]` | Additional environment variables for the gateway container (e.g. OTEL_EXPORTER_OTLP_ENDPOINT / OTEL_SERVICE_NAME for OTLP metrics). |
 | gateway.fastSandboxNamespace | string | `""` | Restricts Fast Sandbox to one namespace and enables unsigned wildcard routing. Empty requires signed scopes; unsigned access needs external protection. |
 | gateway.fastpathAuth.caConfigMap | string | `""` | Public serving CA ConfigMap (ca.crt). Empty uses system trust roots. |
+| gateway.fastpathAuth.enabled | bool | `true` | Enable FastPath caller authentication and TLS (default true; set false for legacy plaintext upgrade transition). |
 | gateway.fastpathAuth.namespace | string | `"opensandbox-system"` | Namespace of the authentication-only caller ServiceAccount. |
 | gateway.fastpathAuth.serverName | string | `""` | Expected FastPath certificate DNS name. Empty uses the endpoint hostname. |
 | gateway.fastpathAuth.serviceAccount | string | `"opensandbox-ingress-fastpath-client"` | Target of TokenRequest; distinct from the gateway Pod ServiceAccount. |

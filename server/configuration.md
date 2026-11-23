@@ -168,6 +168,7 @@ The kubernetes runtime also serves fsb (`fsb-`) sandboxes side by side; these fi
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `fastpath_endpoint` | string | `"fast-sandbox-fastpath.opensandbox.svc:9090"` | Fast-Path Server gRPC endpoint. |
+| `fastpath_auth_enabled` | boolean | `true` | Enable FastPath caller authentication and TLS; set `false` only for legacy plaintext upgrade transition. |
 | `fastpath_auth_namespace` | string | `"opensandbox-system"` | Namespace of the authentication-only FastPath caller ServiceAccount, for both in-cluster and kubeconfig-based servers. |
 | `fastpath_auth_service_account` | string | `"opensandbox-server-fastpath-client"` | Target SA for audience-bound TokenRequest; the bootstrap identity must be authorized to mint for this SA. |
 | `fastpath_tls_ca_file` | string \| omitted | `null` | Trusted FastPath serving CA PEM file, reloaded when changed; omitted uses system roots. |

@@ -37,7 +37,9 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
+        {{- if .Values.fastpath.callerAuth.enabled }}
         checksum/fastpath-auth: {{ include (print $.Template.BasePath "/fastpath-auth.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.controller.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -54,9 +56,13 @@ spec:
         - --metrics-bind-address=:9091
         - --health-probe-bind-address=:5758
         - --fastpath-bind-address=:9090
+        {{- if .Values.fastpath.callerAuth.enabled }}
         - --fastpath-auth-policy-file=/etc/fast-sandbox/callers/callers.json
         - --fastpath-tls-cert-file=/etc/fast-sandbox/tls/tls.crt
         - --fastpath-tls-key-file=/etc/fast-sandbox/tls/tls.key
+        {{- else }}
+        - --fastpath-auth-enabled=false
+        {{- end }}
         {{- if gt (.Values.controller.fastpathHTTPPort | int) 0 }}
         # Optional gRPC-Web listener (HTTP/1.1 clients); the value above keeps
         # it disabled when 0.
@@ -126,12 +132,14 @@ spec:
         resources:
           {{- toYaml .Values.controller.resources | nindent 10 }}
         volumeMounts:
+        {{- if .Values.fastpath.callerAuth.enabled }}
         - name: fastpath-callers
           mountPath: /etc/fast-sandbox/callers
           readOnly: true
         - name: fastpath-tls
           mountPath: /etc/fast-sandbox/tls
           readOnly: true
+        {{- end }}
         - name: artifact-store
           mountPath: /etc/fast-sandbox/artifact-store
           readOnly: true
@@ -152,12 +160,14 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
+      {{- if .Values.fastpath.callerAuth.enabled }}
       - name: fastpath-callers
         configMap:
           name: fast-sandbox-fastpath-callers
       - name: fastpath-tls
         secret:
           secretName: {{ .Values.fastpath.tls.secretName }}
+      {{- end }}
       - name: artifact-store
         configMap:
           name: fast-sandbox-artifact-store
