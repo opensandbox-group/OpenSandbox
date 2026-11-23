@@ -814,6 +814,51 @@ func ResolvNameserverIPs(resolvPath string) ([]netip.Addr, error) {
 	return out, nil
 }
 
+// ExpandInfraDomainNames returns the normalized query names the Pod stub
+// resolver may emit for host given resolvPath's search list (e.g. Kubernetes
+// ClusterFirst expanding "gateway" or "gateway.infra" to
+// "gateway.<ns>.svc.cluster.local"). Rooted FQDNs (trailing ".") are never
+// expanded. Always includes host itself; an unreadable resolvPath falls back
+// to host alone.
+func ExpandInfraDomainNames(host, resolvPath string) []string {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
+		return nil
+	}
+	norm := normalizeDNSHost(trimmed)
+	if norm == "" {
+		return nil
+	}
+	if strings.HasSuffix(trimmed, ".") {
+		return []string{norm}
+	}
+	cfg, err := dns.ClientConfigFromFile(resolvPath)
+	if err != nil || cfg == nil || len(cfg.Search) == 0 {
+		return []string{norm}
+	}
+	seen := make(map[string]struct{}, len(cfg.Search)+1)
+	out := make([]string, 0, len(cfg.Search)+1)
+	add := func(name string) {
+		n := normalizeDNSHost(name)
+		if n == "" {
+			return
+		}
+		if _, ok := seen[n]; ok {
+			return
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	add(norm)
+	for _, s := range cfg.Search {
+		suffix := strings.Trim(strings.TrimSpace(s), ".")
+		if suffix != "" {
+			add(norm + "." + suffix)
+		}
+	}
+	return out
+}
+
 func normalizeDNSHost(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(domain, "."))
 }

@@ -14,8 +14,9 @@
 
 """Hermetic peers for tests/smoke-forward.sh (OSEP-0030 forward mode).
 
-    forward_smoke.py gateway <port>   CONNECT gateway; logs one JSON line per request
-    forward_smoke.py origin           TCP 80/81/8443 + UDP 9999; logs every peer
+    forward_smoke.py gateway <port>        CONNECT gateway; logs one JSON line per request
+    forward_smoke.py origin                TCP 80/81/8443 + UDP 9999; logs every peer
+    forward_smoke.py dns <fqdn>=<ip> ...   minimal UDP/53 DNS responder for search-domain tests
     forward_smoke.py client tcp|udp <ip> <port>
 
 Stdlib only, so it runs in a stock python:alpine image.
@@ -26,6 +27,7 @@ import json
 import os
 import socket
 import socketserver
+import struct
 import sys
 import threading
 
@@ -142,6 +144,62 @@ def run_origin():
     servers[0].serve_forever()
 
 
+# --- dns -------------------------------------------------------------------
+
+
+def run_dns(mappings):
+    records = {}
+    for item in mappings:
+        name, _, ip = item.partition("=")
+        records[name.strip().rstrip(".").lower()] = ip.strip()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", 53))
+    log(event="listening", dns=records)
+
+    while True:
+        data, addr = sock.recvfrom(4096)
+        if len(data) < 12:
+            continue
+        txid, req_flags = struct.unpack("!HH", data[:4])
+        rd = req_flags & 0x0100
+        labels = []
+        idx = 12
+        while idx < len(data):
+            length = data[idx]
+            idx += 1
+            if length == 0:
+                break
+            labels.append(data[idx : idx + length].decode("latin-1"))
+            idx += length
+        if idx + 4 > len(data):
+            continue
+        qtype, qclass = struct.unpack("!HH", data[idx : idx + 4])
+        qend = idx + 4
+        qname = ".".join(labels).lower()
+        question = data[12:qend]
+
+        ip = records.get(qname)
+        if ip is not None and qtype == 1 and qclass == 1:
+            rcode = 0
+            ancount = 1
+            answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + socket.inet_aton(ip)
+        elif ip is not None:
+            rcode = 0
+            ancount = 0
+            answer = b""
+        else:
+            rcode = 3  # NXDOMAIN
+            ancount = 0
+            answer = b""
+
+        resp_flags = 0x8480 | rd | rcode  # QR=1, AA=1, RA=1
+        header = struct.pack("!HHHHHH", txid, resp_flags, 1, ancount, 0, 0)
+        sock.sendto(header + question + answer, addr)
+        log(event="dns", qname=qname, qtype=qtype, rcode=rcode)
+
+
 # --- client ----------------------------------------------------------------
 
 
@@ -174,6 +232,8 @@ def main(argv):
         asyncio.run(run_gateway(int(argv[1])))
     elif argv[:1] == ["origin"]:
         run_origin()
+    elif argv[:1] == ["dns"] and len(argv) >= 2:
+        run_dns(argv[1:])
     elif argv[:1] == ["client"] and len(argv) == 4:
         return run_client(*argv[1:])
     else:

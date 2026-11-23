@@ -50,6 +50,13 @@ func TestForwardModeFromEnvAccepts(t *testing.T) {
 	fm, err = forwardModeFromEnv("")
 	require.NoError(t, err)
 	require.True(t, fm.refusedFinal, "configured policy resolver makes REFUSED final")
+
+	// In-namespace Kubernetes Service hostnames (dotless) are supported in forward mode.
+	t.Setenv(constants.EnvUpstreamProxy, "http://gateway:3000")
+	fm, err = forwardModeFromEnv("")
+	require.NoError(t, err)
+	require.Equal(t, "gateway", fm.gateway.Host)
+	require.Equal(t, 3000, fm.gateway.Port)
 }
 
 func TestForwardModeFromEnvFailsClosed(t *testing.T) {
