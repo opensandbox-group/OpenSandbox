@@ -1280,8 +1280,8 @@ class RuntimeConfig(BaseModel):
         min_length=1,
         description=(
             "Path to the operator's isolation TOML inside Docker and Kubernetes pod-based sandboxes; "
-            "templateId/fsb fast-sandbox sandboxes are excluded. When set, the server supplies EXECD_ISOLATION_CONFIG and ignores request values "
-            "for that key."
+            "templateId/fsb fast-sandbox sandboxes are excluded. When set, the server supplies "
+            "EXECD_ISOLATION_CONFIG and ignores request values for that key."
         ),
     )
 
