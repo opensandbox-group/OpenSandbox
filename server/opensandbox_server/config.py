@@ -810,6 +810,12 @@ class KubernetesRuntimeConfig(BaseModel):
         default="fast-sandbox-fastpath.opensandbox.svc:9090",
         description="fast-sandbox Fast-Path Server gRPC endpoint.",
     )
+    fastpath_auth_enabled: bool = Field(
+        default=False,
+        description="Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).",
+    )
+    fastpath_tls_ca_file: Optional[str] = Field(default=None)
+    fastpath_tls_server_name: Optional[str] = Field(default=None)
     fastpath_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,

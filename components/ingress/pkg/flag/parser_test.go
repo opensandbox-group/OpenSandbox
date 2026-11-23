@@ -73,6 +73,7 @@ func TestFastSandboxNamespaceFlag(t *testing.T) {
 	}{
 		{name: "unset", valid: true},
 		{name: "single namespace", args: []string{"--fast-sandbox-namespace", "tenant-a"}, want: "tenant-a", valid: true},
+		{name: "single namespace with kubeconfig and auth", args: []string{"--fast-sandbox-namespace", "tenant-a", "--fastpath-auth-enabled=true", "--kubeconfig=/tmp/kc"}, want: "tenant-a", valid: true},
 		{name: "maximum length", args: []string{"--fast-sandbox-namespace=" + strings.Repeat("a", 63)}, want: strings.Repeat("a", 63), valid: true},
 		{name: "empty", args: []string{"--fast-sandbox-namespace="}},
 		{name: "list", args: []string{"--fast-sandbox-namespace=tenant-a,tenant-b"}},

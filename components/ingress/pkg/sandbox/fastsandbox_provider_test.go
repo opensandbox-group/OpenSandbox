@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
@@ -69,11 +70,18 @@ func TestFastSandboxProviderMatchesPythonWireContractOverGRPC(t *testing.T) {
 	require.NoError(t, proto.Unmarshal(responseBytes, response))
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	server := grpc.NewServer()
+	auth, transport := fastPathTestAuth(t)
+	server := grpc.NewServer(grpc.Creds(transport), grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		if got := md.Get("authorization"); len(got) != 1 || got[0] != "Bearer test-caller" {
+			return nil, status.Error(codes.Unauthenticated, "caller required")
+		}
+		return handler(ctx, req)
+	}))
 	fastpathv2.RegisterFastPathServiceServer(server, &wireFastPathService{request: requestBytes, response: response})
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
-	provider, err := NewFastSandboxProvider(listener.Addr().String(), time.Second, "direct-fastlet-proxy")
+	provider, err := NewFastSandboxProvider(listener.Addr().String(), time.Second, "direct-fastlet-proxy", auth)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -84,6 +92,32 @@ func TestFastSandboxProviderMatchesPythonWireContractOverGRPC(t *testing.T) {
 	require.Equal(t, "http://fastlet:5780/v1/sandboxes/uid-123/ports/44772", info.UpstreamURL)
 	require.Equal(t, "issued-credential", info.UpstreamHeaders.Get(FastSandboxCredential))
 	require.Equal(t, time.Unix(2_000_000_060, 0), info.ExpiresAt)
+}
+
+func TestFastSandboxProviderStartRequiresCallerCredential(t *testing.T) {
+	auth, transport := fastPathTestAuth(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := grpc.NewServer(grpc.Creds(transport))
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	provider, err := NewFastSandboxProvider(listener.Addr().String(), time.Second, "direct-fastlet-proxy", auth)
+	require.NoError(t, err)
+	provider.tokens.retry = time.Now().Add(time.Hour)
+	require.ErrorContains(t, provider.Start(t.Context()), "caller credential preflight")
+}
+
+func TestFastSandboxProviderExplicitAuthDisabledDialsPlaintext(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := grpc.NewServer()
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	provider, err := NewFastSandboxProvider(listener.Addr().String(), time.Second, "direct-fastlet-proxy", FastPathAuthConfig{Disabled: true})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	require.NoError(t, provider.Start(ctx))
 }
 
 func TestFastSandboxProviderMapsUnreadyPreconditionToRetryableError(t *testing.T) {
@@ -311,7 +345,7 @@ func TestFastSandboxProviderDoesNotExposeInvalidProxyEndpoint(t *testing.T) {
 }
 
 func TestNewFastSandboxProviderRejectsUnknownAccessMode(t *testing.T) {
-	_, err := NewFastSandboxProvider("fastpath:9090", time.Second, "unknown")
+	_, err := NewFastSandboxProvider("fastpath:9090", time.Second, "unknown", FastPathAuthConfig{})
 	require.EqualError(t, err, `unsupported FastPath access mode "unknown"`)
 }
 

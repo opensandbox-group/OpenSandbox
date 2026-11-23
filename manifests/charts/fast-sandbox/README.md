@@ -101,6 +101,11 @@ The following table lists the configurable parameters of the chart and their def
 | controller.sandboxtemplateBuilderImage | string | `""` | Image that executes SandboxTemplate golden-image builds (builder Pods are created by the controller; build it with manifests/release/build-fast-sandbox.sh). Empty uses the release-<appVersion> companion image tag. |
 | controller.sandboxtemplateBuilderPodSpec | string | `""` | Raw PodSpec fragment (YAML) merged into every SandboxTemplate build Pod by the controller: whitelisted scheduling fields only (tolerations appended; affinity and topologySpreadConstraints replaced). Rendered as the fast-sandbox-builder-pod-template ConfigMap; editing the live ConfigMap applies to the next build without a rollout. |
 | controller.tolerations | list | `[]` | Tolerations for the controller pod |
+| fastpath.callerAuth.enabled | bool | `false` | Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS). |
+| fastpath.callerAuth.namespaces | list | `[]` | Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access. |
+| fastpath.tls.dnsNames | list | `[]` | Additional serving DNS names for external Server access. |
+| fastpath.tls.issuerRef.kind | string | `"ClusterIssuer"` | Issuer or ClusterIssuer. |
+| fastpath.tls.issuerRef.name | string | `"fast-sandbox-serving"` | Required existing cert-manager Issuer/ClusterIssuer. The chart does not install cert-manager or create a CA. |
 | fullnameOverride | string | `""` | Override the full name of the chart |
 | imagePullSecrets | list | `[]` | Image pull secrets for every workload in this chart |
 | janitor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |

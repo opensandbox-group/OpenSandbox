@@ -52,6 +52,21 @@ resourceNamespace: opensandbox-dataplane
 # -- Image pull secrets for every workload in this chart
 imagePullSecrets: []
 
+fastpath:
+  callerAuth:
+    # -- Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).
+    enabled: false
+    # -- Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access.
+    namespaces: []
+  tls:
+    issuerRef:
+      # -- Required existing cert-manager Issuer/ClusterIssuer. The chart does not install cert-manager or create a CA.
+      name: fast-sandbox-serving
+      # -- Issuer or ClusterIssuer.
+      kind: ClusterIssuer
+    # -- Additional serving DNS names for external Server access.
+    dnsNames: []
+
 # All-in-one control plane: one process runs both the reconcilers and the
 # FastPath gRPC API (development topology, no leader election).
 controller:
