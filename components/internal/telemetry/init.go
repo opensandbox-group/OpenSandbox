@@ -80,6 +80,10 @@ const (
 	envOTLPProtocol           = "OTEL_EXPORTER_OTLP_PROTOCOL"
 	envOTLPMetricsCertificate = "OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE"
 	envOTLPCertificate        = "OTEL_EXPORTER_OTLP_CERTIFICATE"
+	envOTLPMetricsClientCert  = "OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE"
+	envOTLPClientCert         = "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE"
+	envOTLPMetricsClientKey   = "OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY"
+	envOTLPClientKey          = "OTEL_EXPORTER_OTLP_CLIENT_KEY"
 	envOTLPMetricsTimeout     = "OTEL_EXPORTER_OTLP_METRICS_TIMEOUT"
 	envOTLPTimeout            = "OTEL_EXPORTER_OTLP_TIMEOUT"
 	envHostIP                 = "HOST_IP"
@@ -255,6 +259,7 @@ func controlledOTLPHTTPClient(dialControl func(network, address string, c syscal
 
 	if endpoint := otlpEndpointFromEnv(); endpoint != "" {
 		if parsed, err := url.Parse(endpoint); err == nil && strings.EqualFold(parsed.Scheme, "https") {
+			var tlsCfg *tls.Config
 			if certPath := firstEndpoint(os.Getenv(envOTLPMetricsCertificate), os.Getenv(envOTLPCertificate)); certPath != "" {
 				pemBytes, err := os.ReadFile(certPath)
 				if err != nil {
@@ -264,7 +269,20 @@ func controlledOTLPHTTPClient(dialControl func(network, address string, c syscal
 				if !pool.AppendCertsFromPEM(pemBytes) {
 					return nil, fmt.Errorf("telemetry: OTLP certificate %q contains no valid PEM certificates", certPath)
 				}
-				tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+				tlsCfg = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+			}
+			if clientCert, clientKey := otlpClientCertPair(); clientCert != "" && clientKey != "" {
+				pair, err := tls.LoadX509KeyPair(clientCert, clientKey)
+				if err != nil {
+					return nil, fmt.Errorf("telemetry: load OTLP client certificate/key: %w", err)
+				}
+				if tlsCfg == nil {
+					tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
+				}
+				tlsCfg.Certificates = []tls.Certificate{pair}
+			}
+			if tlsCfg != nil {
+				tr.TLSClientConfig = tlsCfg
 			}
 		}
 	}
@@ -276,6 +294,16 @@ func controlledOTLPHTTPClient(dialControl func(network, address string, c syscal
 		}
 	}
 	return &http.Client{Transport: tr, Timeout: timeout}, nil
+}
+
+func otlpClientCertPair() (certPath, keyPath string) {
+	if c, k := strings.TrimSpace(os.Getenv(envOTLPMetricsClientCert)), strings.TrimSpace(os.Getenv(envOTLPMetricsClientKey)); c != "" && k != "" {
+		return c, k
+	}
+	if c, k := strings.TrimSpace(os.Getenv(envOTLPClientCert)), strings.TrimSpace(os.Getenv(envOTLPClientKey)); c != "" && k != "" {
+		return c, k
+	}
+	return "", ""
 }
 
 func metricsClientOptions(disableEndpointFallback bool) []otlpmetrichttp.Option {
