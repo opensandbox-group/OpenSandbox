@@ -16,7 +16,7 @@ Fast Sandbox system authentication is **disabled by default** (`enabled: false`)
 
 ## Prerequisites
 
-- A Kubernetes cluster with the `TokenRequest` API and ServiceAccount OIDC discovery enabled (Kubernetes 1.24+).
+- A Kubernetes cluster with the `TokenRequest` API and ServiceAccount OIDC discovery enabled (Kubernetes 1.22+).
 - [cert-manager](https://cert-manager.io/) installed in the cluster, with an existing `Issuer` or `ClusterIssuer` (for example, `fast-sandbox-serving`) and its **public CA certificate** (`ca.crt`).
 - A compatible `fsb-controller` companion image that includes the `--fastpath-auth-enabled` and `--fastpath-tls-*` flags.
 
