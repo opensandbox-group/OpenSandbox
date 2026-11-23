@@ -443,11 +443,16 @@ func TestApplyStatic_PartialReallowDoesNotPromotePreviouslyBypassedWithdrawal(t 
 			require.NoError(t, err)
 			require.True(t, m.lastDrops.MatchesFlow(host, 443))
 			if bypass == "static allow" {
-				overlap := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.10"},{"action":"deny","target":"192.0.2.10"}]}`)
-				require.NoError(t, m.ApplyStatic(ctx, overlap))
+				// Install a real accept above the old withdrawal. An
+				// overlapping deny is no longer a stand-in for reallow.
+				_, err := m.applyStaticDropEstablished(ctx, before, m.lastDrops)
+				require.NoError(t, err)
 			} else {
-				withDomain := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"allow","target":"cdn.example.com"},{"action":"deny","target":"192.0.2.10"}]}`)
-				require.NoError(t, m.ApplyStatic(ctx, withDomain))
+				// Install the prior withdrawal without an explicit address deny
+				// so an actual DNS accept, not the late-DNS bug, wins over it.
+				withDomain := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"allow","target":"cdn.example.com"}]}`)
+				_, err := m.applyStaticDropEstablished(ctx, withDomain, m.lastDrops)
+				require.NoError(t, err)
 				require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: host, TTL: time.Minute}}))
 			}
 			require.NoError(t, m.ApplyStatic(ctx, partial))
@@ -532,6 +537,31 @@ func BenchmarkCarryRetainedHostsWithDNSAndFloor(b *testing.B) {
 				tt.prior.stillRelevant(withdrawn, learned, leases, hadAccept)
 			}
 		})
+	}
+}
+
+func BenchmarkCarryCIDRShadowWithGlobalScopedKeep(b *testing.B) {
+	rules := make([]string, 64)
+	for i := range rules {
+		rules[i] = fmt.Sprintf(`{"action":"allow","target":"203.0.113.%d"}`, i)
+	}
+	ports := make([]string, 256)
+	for i := range ports {
+		ports[i] = strconv.Itoa(2 * (i + 1))
+	}
+	old, err := policy.ParsePolicy(`{"egress":[` + strings.Join(rules, ",") + `]}`)
+	require.NoError(b, err)
+	withdrawn, err := policy.ParsePolicy(`{"egress":[{"action":"allow","ports":[` + strings.Join(ports, ",") + `]}]}`)
+	require.NoError(b, err)
+	next, err := policy.ParsePolicy(`{"egress":[{"action":"allow","target":"203.0.113.0/26"},{"action":"deny","target":"203.0.113.0/26"}]}`)
+	require.NoError(b, err)
+	prior := ComputeEstablishedDrops(old, withdrawn, nil)
+	b.ReportAllocs()
+	for b.Loop() {
+		out := prior.stillRelevant(next, nil, nil, nil)
+		if _, err := buildRuleset(next, Options{}, out); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -669,6 +699,76 @@ func TestApplyStatic_WholeWithdrawalRetainsEffectiveDenial(t *testing.T) {
 			require.NoError(t, m.ApplyStatic(ctx, old))
 			require.False(t, m.lastDrops.MatchesFlow(addr, 443), "actual reallow removes the withdrawal")
 		})
+	}
+}
+
+func TestApplyStatic_RawCIDRAllowCannotMaskHostWithdrawal(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.10")
+	m, scripts := recordingManager()
+	ctx := context.Background()
+	const domain = `{"action":"allow","target":"cdn.example.com"}`
+	old := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.10"}]}`)
+	prior := mustPolicy(t, `{"egress":[`+domain+`,{"action":"allow","target":"192.0.2.10","ports":[8443]}]}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, prior)
+	require.NoError(t, err)
+	reload := mustPolicy(t, `{"egress":[`+domain+`,{"action":"allow","target":"192.0.2.10/31"},{"action":"deny","target":"192.0.2.10"}]}`)
+	for round := range 2 {
+		require.NoError(t, m.ApplyStatic(ctx, reload))
+		require.True(t, m.lastDrops.MatchesFlow(addr, 443))
+		require.False(t, m.lastDrops.MatchesFlow(addr, 8443))
+		script := (*scripts)[len(*scripts)-1]
+		require.Contains(t, script, "add element inet opensandbox established_withdrawn_v4 { 192.0.2.10 }")
+		dynAccept := ruleIndex(t, script, "ip daddr @dyn_allow_v4 ip daddr != @established_withdrawn_v4 ct state established,related accept")
+		drop := ruleIndex(t, script, "ip daddr @established_withdrawn_v4 meta l4proto tcp ct state established,related drop")
+		staticAccept := ruleIndex(t, script, "ip daddr @allow_v4 ct state established,related accept")
+		require.Less(t, dynAccept, drop)
+		require.Less(t, drop, staticAccept)
+		if round == 0 {
+			require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+		}
+	}
+	withoutDomain := mustPolicy(t, `{"egress":[{"action":"deny","target":"192.0.2.10"}]}`)
+	for range 2 {
+		require.NoError(t, m.ApplyStatic(ctx, withoutDomain))
+		require.True(t, m.lastDrops.MatchesFlow(addr, 443), "the learned address never admitted this TCP port")
+		require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "a scoped keep still protects the spared port")
+		script := (*scripts)[len(*scripts)-1]
+		keep := ruleIndex(t, script, "ip daddr 192.0.2.10 meta l4proto != tcp ct state established,related accept")
+		drop := ruleIndex(t, script, "ip daddr 192.0.2.10 ct state established,related drop")
+		require.Less(t, keep, drop, "previously admitted UDP survives loss of the lease")
+	}
+}
+
+func TestApplyStatic_DNSGrantTimingDoesNotLoseWithdrawnHostPorts(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.10")
+	const domain = `{"action":"allow","target":"cdn.example.com"}`
+	const host = `{"action":"allow","target":"192.0.2.10"`
+	const denyPort = `{"action":"deny","target":"192.0.2.10","ports":[443]}`
+	for _, scope := range []string{"", `,"ports":[443,8443]`} {
+		for _, leaseBefore := range []bool{false, true} {
+			t.Run(scope+"/"+strconv.FormatBool(leaseBefore), func(t *testing.T) {
+				ctx := context.Background()
+				m, _ := recordingManager()
+				old := mustPolicy(t, `{"egress":[`+domain+`,`+host+scope+`}]}`)
+				next := mustPolicy(t, `{"egress":[`+domain+`,`+denyPort+`]}`)
+				lease := []ResolvedIP{{Addr: addr, TTL: time.Minute}}
+				if leaseBefore {
+					require.NoError(t, m.ApplyStatic(ctx, old))
+					require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", lease))
+				}
+				_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, next)
+				require.NoError(t, err)
+				if !leaseBefore {
+					require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", lease))
+				}
+				require.True(t, m.lastDrops.MatchesFlow(addr, 443), "explicit deny precedes the DNS exemption")
+				for range 2 {
+					require.NoError(t, m.ApplyStatic(ctx, policy.DefaultDenyPolicy()))
+					require.True(t, m.lastDrops.MatchesFlow(addr, 443), "DNS never reopened the denied port")
+					require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "ordinary reload must preserve the DNS-spared port")
+				}
+			})
+		}
 	}
 }
 

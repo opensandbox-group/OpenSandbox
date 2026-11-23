@@ -45,11 +45,9 @@ type EstablishedPortDrop struct {
 //
 //  1. infrastructure accepts (mark, loopback, DNS redirect, ::1, upstream proxy)
 //  2. explicit denies and withdrawn-host ports still explicitly denied
-//  3. dyn_allow_v4/v6 established accepts; then withdrawn-host TCP ports
-//     denied by default (these no longer have a static policy exemption)
-//  4. Keep*: destinations the new policy still allows (static allows minus
-//     portless denies, surviving domain-lease IPs, port-scoped allows) plus
-//     the static allow sets — accepted
+//  3. DNS accepts (except TCP to guarded withdrawn hosts); then
+//     withdrawn-host TCP ports denied by default
+//  4. Keep*: accepted, then guarded host TCP drops, then raw static accepts
 //  5. Addrs/Prefixes/PortDrops: allows the change removed — dropped
 //  6. CatchAll ? blanket established drop : blanket established accept
 type EstablishedDrops struct {
@@ -60,6 +58,9 @@ type EstablishedDrops struct {
 	// provenance even when an explicit deny turns into an implicit one.
 	withdrawnHostDenyPorts portDenyUnion // Before DNS accepts.
 	withdrawnHostPorts     portDenyUnion // After DNS, before static keeps.
+	// A view of exact Addrs/Prefixes that still have a whole-host deny.
+	// Their TCP withdrawals bypass DNS and raw static accepts, not keeps.
+	guardedWithdrawals []netip.Addr
 
 	Addrs     []netip.Addr
 	Prefixes  []netip.Prefix
@@ -69,6 +70,8 @@ type EstablishedDrops struct {
 	KeepAddrs    []netip.Addr
 	KeepPrefixes []netip.Prefix
 	KeepPorts    []EstablishedPortDrop
+
+	keepNonTCPAddrs []netip.Addr // Historical DNS accepts that never admitted TCP.
 }
 
 // Empty reports whether there is nothing to drop. Keep entries alone never
@@ -77,6 +80,11 @@ func (d EstablishedDrops) Empty() bool {
 	return len(d.DenyAddrs) == 0 && len(d.DenyPrefixes) == 0 && len(d.DenyPortDrops) == 0 &&
 		len(d.withdrawnHostDenyPorts)+len(d.withdrawnHostPorts) == 0 &&
 		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll
+}
+
+func (d EstablishedDrops) guardsWithdrawal(addr netip.Addr) bool {
+	_, ok := slices.BinarySearchFunc(d.guardedWithdrawals, addr, netip.Addr.Compare)
+	return ok
 }
 
 // Matches reports whether addr is covered by this drop set (port-agnostic).
@@ -325,6 +333,9 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 	}
 
 	if oldPol != nil {
+		hasPortDeny := func(ip netip.Addr) bool {
+			return slices.ContainsFunc(out.DenyPortDrops, func(pd EstablishedPortDrop) bool { return portDropCoversAddr(pd, ip) })
+		}
 		for _, r := range oldPol.Egress {
 			if r.Action != policy.ActionAllow {
 				continue
@@ -345,12 +356,13 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 			hasPorts := len(r.Ports) > 0 || len(r.PortRanges) > 0
 			switch {
 			case hasPorts && pfx.IsSingleIP():
-				if _, keep := survivingDomainIPs[ip]; keep {
+				_, lease := survivingDomainIPs[ip]
+				if lease && !hasPortDeny(ip) {
 					continue
 				}
 				// Match the same typed targets we will emit for this host.
 				ports, ranges := portsNoLongerAllowed(newPol, r.Ports, r.PortRanges, func(port int) bool {
-					return out.permitsHost(ip, port, defaultAllow)
+					return out.permitsHost(ip, port, defaultAllow || lease)
 				})
 				if len(ports)+len(ranges) == 0 {
 					continue
@@ -370,7 +382,14 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 					Ranges: slices.Clone(r.PortRanges),
 				})
 			case pfx.IsSingleIP():
-				if _, keep := survivingDomainIPs[ip]; keep || out.permitsHost(ip, 0, defaultAllow) {
+				if _, lease := survivingDomainIPs[ip]; lease {
+					// Keep withdrawal history only if an explicit TCP deny
+					// actually overrides this lease. The keep still shields
+					// the other ports in the installed chain.
+					if !hasPortDeny(ip) {
+						continue
+					}
+				} else if out.permitsHost(ip, 0, defaultAllow) {
 					continue
 				}
 				if addr.IsValid() && !addr.Is4In6() {
@@ -456,16 +475,19 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 		return &fresh
 	}
 	// Record exact withdrawals whose raw host drop may be removed or
-	// overshadowed by accepts. True means the raw host drop is retained.
-	var whole map[netip.Addr]bool
+	// overshadowed by accepts.
+	var whole map[netip.Addr]hostWithdrawal
+
 	mayShadowHost := len(portAllow)+len(learned)+len(retained)+len(d.KeepAddrs)+len(d.KeepPrefixes)+len(d.KeepPorts) != 0
 	retainHost := func(addr netip.Addr) bool {
-		keep := !policyTargets().permitsHost(addr, 0, defaultAllow)
-		if (keep && mayShadowHost) || (!keep && len(portDeny) != 0) {
+		current := policyTargets()
+		keep := !current.permitsHost(addr, 0, defaultAllow)
+		explicitDeny := keep && targetsMatch(current.DenyAddrs, current.DenyPrefixes, nil, addr, 0)
+		if (keep && (mayShadowHost || explicitDeny)) || (!keep && len(portDeny) != 0) {
 			if whole == nil {
-				whole = make(map[netip.Addr]bool)
+				whole = make(map[netip.Addr]hostWithdrawal)
 			}
-			whole[addr] = keep
+			whole[addr] = hostWithdrawal{keepRule: keep, explicitDeny: explicitDeny}
 		}
 		return keep
 	}
@@ -522,8 +544,28 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	for _, a := range fresh.KeepAddrs {
 		keepAddrs.add(a)
 	}
+	out.keepNonTCPAddrs = d.keepNonTCPAddrs
+	var nonTCPKeeps *addrSet
 	for _, a := range learned {
-		keepAddrs.add(a)
+		if !d.guardsWithdrawal(a) {
+			keepAddrs.add(a)
+			continue
+		}
+		// The guarded DNS accept matched only non-TCP packets. Preserve
+		// that exemption without promoting it to a whole-host keep.
+		if _, kept := slices.BinarySearchFunc(d.keepNonTCPAddrs, a, netip.Addr.Compare); kept {
+			continue
+		}
+		if nonTCPKeeps == nil {
+			nonTCPKeeps = newAddrSet()
+			for _, old := range d.keepNonTCPAddrs {
+				nonTCPKeeps.add(old)
+			}
+		}
+		nonTCPKeeps.add(a)
+	}
+	if nonTCPKeeps != nil {
+		out.keepNonTCPAddrs = nonTCPKeeps.sorted()
 	}
 	keepPrefixes := newPrefixSet()
 	for _, pfx := range d.KeepPrefixes {
@@ -625,18 +667,32 @@ func carryPortDenies(d EstablishedDrops, rules []policy.PortScopedRule, whole []
 	return carried.drops(nil)
 }
 
-func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, next *EstablishedDrops, whole map[netip.Addr]bool, scoped portDenyUnion, retained map[netip.Addr]time.Time, hadAccept func(netip.Addr, bool) bool) (explicit, implicit portDenyUnion) {
+type hostWithdrawal struct {
+	keepRule     bool
+	explicitDeny bool
+}
+
+func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, next *EstablishedDrops, whole map[netip.Addr]hostWithdrawal, scoped portDenyUnion, retained map[netip.Addr]time.Time, hadAccept func(netip.Addr, bool) bool) (explicit, implicit portDenyUnion) {
 	denies := normalizedPortTargets(current.DenyPortDrops)
 	early, late := make(portDenyUnion), make(portDenyUnion)
 	oldKeeps := normalizedPortTargets(d.KeepPorts)
 	var oldDenies portDenyUnion
+	rawAccept := func(addr netip.Addr, includeStatic bool) bool {
+		return hadAccept != nil && !d.guardsWithdrawal(addr) && hadAccept(addr, includeStatic)
+	}
+	wasHostKept := func(addr netip.Addr) bool {
+		if targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, addr, 0) {
+			return true
+		}
+		return rawAccept(addr, true)
+	}
 	addPreviouslyBlocked := func(out portDenyUnion, host netip.Prefix, candidate []policy.PortRange) {
 		addr := host.Addr()
 		// These exact-port withdrawals are already inputs to the next
 		// verdict. Do not reconstruct their spans from the raw host drop.
 		knownEarly := d.withdrawnHostDenyPorts[host].spans
 		knownLate := d.withdrawnHostPorts[host].spans
-		if len(knownLate) != 0 && hadAccept != nil && hadAccept(addr, false) {
+		if len(knownLate) != 0 && rawAccept(addr, false) {
 			knownLate = nil
 		}
 		addUncovered := func(spans []policy.PortRange) {
@@ -650,7 +706,7 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, ne
 		}
 		spans := candidate
 		exempted := false
-		if targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, addr, 0) || hadAccept != nil && hadAccept(addr, true) {
+		if wasHostKept(addr) {
 			spans, exempted = nil, true
 		} else {
 			for target, keep := range oldKeeps {
@@ -697,9 +753,9 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, ne
 	left := make(portDenyUnion)
 	var carriedKeeps portDenyUnion
 	var allPorts []policy.PortRange
-	for addr, keep := range whole {
+	for addr, withdrawal := range whole {
 		host := netip.PrefixFrom(addr, addr.BitLen())
-		if !keep {
+		if !withdrawal.keepRule {
 			for target, deny := range denies {
 				if !target.IsValid() || target.Contains(addr) {
 					addPreviouslyBlocked(early, host, deny.spans)
@@ -714,7 +770,15 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, ne
 			continue
 		}
 		_, kept := slices.BinarySearchFunc(next.KeepAddrs, addr, netip.Addr.Compare)
-		if _, live := retained[addr]; live || kept || targetsMatch(nil, next.KeepPrefixes, nil, addr, 0) {
+		_, live := retained[addr]
+		needsProjection := live || kept || withdrawal.explicitDeny || targetsMatch(nil, next.KeepPrefixes, nil, addr, 0)
+		if withdrawal.explicitDeny && !kept && !wasHostKept(addr) {
+			// Keep the scoped exemptions in rule form. Do not expand their
+			// complement for every host, even if DNS currently grants it.
+			next.guardedWithdrawals = append(next.guardedWithdrawals, addr)
+			needsProjection = false
+		}
+		if needsProjection {
 			if allPorts == nil {
 				allPorts = []policy.PortRange{{Lo: 1, Hi: 65535}}
 			}
@@ -738,7 +802,7 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, ne
 		for host, group := range previous {
 			addr := host.Addr()
 			// Only the dynamic accept preceded a previously implicit drop.
-			if i == 1 && hadAccept != nil && hadAccept(addr, false) {
+			if i == 1 && rawAccept(addr, false) {
 				continue
 			}
 			left.add(host, nil, group.spans)
@@ -776,6 +840,7 @@ func (d EstablishedDrops) carryWithdrawnHostPorts(defaultAllow bool, current, ne
 	}
 	early.normalize()
 	late.normalize()
+	slices.SortFunc(next.guardedWithdrawals, netip.Addr.Compare)
 	return early, late
 }
 
@@ -1164,6 +1229,20 @@ func portlessTargetPrefix(r policy.EgressRule) netip.Prefix {
 		return netip.PrefixFrom(addr, addr.BitLen())
 	}
 	return parseRulePrefix(r).Masked()
+}
+
+// portlessAllowPrefixes describes the raw static accepts, before removing
+// the sections covered by denies when computing keep rules.
+func portlessAllowPrefixes(p *policy.NetworkPolicy) []netip.Prefix {
+	var allows []netip.Prefix
+	for _, rule := range p.Egress {
+		if rule.Action == policy.ActionAllow {
+			if pfx := portlessTargetPrefix(rule); pfx.IsValid() {
+				allows = append(allows, pfx)
+			}
+		}
+	}
+	return allows
 }
 
 // portlessDenyPrefixes retains the legacy host normalization used by

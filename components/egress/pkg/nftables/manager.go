@@ -154,13 +154,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 				}
 				if !parsedPrevious {
 					parsedPrevious = true
-					for _, rule := range m.domainPolicy.Egress {
-						if rule.Action == policy.ActionAllow {
-							if pfx := portlessTargetPrefix(rule); pfx.IsValid() {
-								previousAllows = append(previousAllows, pfx)
-							}
-						}
-					}
+					previousAllows = portlessAllowPrefixes(m.domainPolicy)
 				}
 				return slices.ContainsFunc(previousAllows, func(pfx netip.Prefix) bool { return pfx.Contains(addr) })
 			}
@@ -621,6 +615,27 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	writeElements(&b, dohBlockV4Set, dohBlockV4)
 	writeElements(&b, dohBlockV6Set, dohBlockV6)
 
+	guards := [2]struct {
+		family, addrType, name, dynamic string
+		addrs                           []string
+	}{
+		{family: "ip", addrType: "ipv4_addr", name: "established_withdrawn_v4", dynamic: dynAllowV4Set},
+		{family: "ip6", addrType: "ipv6_addr", name: "established_withdrawn_v6", dynamic: dynAllowV6Set},
+	}
+	for _, addr := range drops.guardedWithdrawals {
+		i := 1
+		if addr.Is4() {
+			i = 0
+		}
+		guards[i].addrs = append(guards[i].addrs, addr.String())
+	}
+	for _, guard := range guards {
+		if len(guard.addrs) != 0 {
+			fmt.Fprintf(&b, "add set inet %s %s { type %s; }\n", tableName, guard.name, guard.addrType)
+			writeElements(&b, guard.name, guard.addrs)
+		}
+	}
+
 	chainPolicy := "drop"
 	if p.DefaultAction == policy.ActionAllow {
 		chainPolicy = "accept"
@@ -659,12 +674,37 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	writeEstablishedTargets(&b, nil, nil, drops.withdrawnHostDenyRules(), "drop")
 	// DNS-learned allows bypass the removed-allow teardown so a later resolve
 	// (shared CDN IP) or a carried live lease is not pinned by a stale drop.
-	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
-	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
+	// A still-explicitly-denied host withdrawal keeps its TCP drop, even
+	// if DNS refreshes the address after this transaction.
+	for _, guard := range guards {
+		if len(guard.addrs) == 0 {
+			fmt.Fprintf(&b, "add rule inet %s %s %s daddr @%s ct state established,related accept\n",
+				tableName, chainName, guard.family, guard.dynamic)
+			continue
+		}
+		fmt.Fprintf(&b, "add rule inet %s %s %s daddr @%s meta l4proto != tcp ct state established,related accept\n",
+			tableName, chainName, guard.family, guard.dynamic)
+		fmt.Fprintf(&b, "add rule inet %s %s %s daddr @%s %s daddr != @%s ct state established,related accept\n",
+			tableName, chainName, guard.family, guard.dynamic, guard.family, guard.name)
+	}
 	writeEstablishedTargets(&b, nil, nil, drops.withdrawnHostPorts.drops(nil), "drop")
-	// Then still-allowed destinations (keeps and the static allow sets), then
-	// removed allows, then the blanket verdict.
+	// Historical keeps protect spared ports before the guarded TCP drop.
+	// The raw static accepts must not bypass that drop.
 	writeEstablishedTargets(&b, drops.KeepAddrs, drops.KeepPrefixes, drops.KeepPorts, "accept")
+	for _, addr := range drops.keepNonTCPAddrs {
+		family := "ip6"
+		if addr.Is4() {
+			family = "ip"
+		}
+		fmt.Fprintf(&b, "add rule inet %s %s %s daddr %s meta l4proto != tcp ct state established,related accept\n",
+			tableName, chainName, family, addr)
+	}
+	for _, guard := range guards {
+		if len(guard.addrs) != 0 {
+			fmt.Fprintf(&b, "add rule inet %s %s %s daddr @%s meta l4proto tcp ct state established,related drop\n",
+				tableName, chainName, guard.family, guard.name)
+		}
+	}
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, allowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, allowV6Set)
 	writeEstablishedTargets(&b, drops.Addrs, drops.Prefixes, drops.PortDrops, "drop")
