@@ -88,7 +88,7 @@ This is the same authentication mechanism as the Fastlet hop, with different cre
 |---|---|---|
 | Issuer | Target cluster's ServiceAccount issuer | Target cluster's ServiceAccount issuer |
 | Audience | `fast-sandbox-fastpath` | Existing `fast-sandbox-fastlet` audience |
-| Subjects | Dedicated server and gateway FastPath caller SAs | Existing FastPath/controller SAs |
+| Subjects | Existing `opensandbox-server` and `opensandbox-ingress-gateway` SAs | Existing FastPath/controller SAs |
 | Carrier | gRPC metadata; equivalent header for gRPC-Web | Existing HTTP authorization header |
 | Receiver policy | Explicit RPC profile and resource namespaces | Existing Fastlet control caller allow list |
 | Renewal | TokenRequest, cached and refreshed automatically | Existing TokenRequest source |
@@ -121,21 +121,19 @@ Local JWT verification validates cryptographic identity and time bounds, not the
 
 ### Deployment and identity model
 
-Separate the credential used to call the Kubernetes API from the identity asserted to FastPath. The API server authenticates the former and checks whether it may mint for the latter.
+Separate the credential used to call the Kubernetes API from the audience-bound token asserted to FastPath. The API server authenticates the former and checks whether it may mint for the target ServiceAccount.
 
-Proposed default FastPath caller ServiceAccounts are `opensandbox-server-fastpath-client` and `opensandbox-ingress-fastpath-client`, both in the platform system namespace. These are authentication-only identities, not replacements for the existing server or gateway Pod ServiceAccounts. They receive no workload-resource permissions and do not need legacy ServiceAccount token Secrets or their own token-minting grants.
+FastPath callers reuse the existing component ServiceAccounts in the platform system namespace (`opensandbox-server` and `opensandbox-ingress-gateway`), matching the self-minting model already used by `fast-sandbox-fastpath` and `fast-sandbox-controller`. When the lifecycle server runs outside the cluster without the `opensandbox-server` Helm chart installed, the base chart can optionally create the `opensandbox-server` ServiceAccount in the system namespace as the TokenRequest target.
 
 | Deployment | Kubernetes bootstrap identity | TokenRequest target | FastPath authority |
 |---|---|---|---|
-| In-cluster server | Existing server Pod SA via in-cluster configuration | Server FastPath caller SA | Server RPC profile and configured resource namespace scope |
-| External server | Identity selected by the existing kubeconfig | The same server FastPath caller SA | The same server profile and scope |
-| In-cluster ingress gateway | Existing gateway Pod SA via in-cluster configuration | Gateway FastPath caller SA | Gateway RPC profile and configured resource namespace scope |
+| In-cluster server | Existing `opensandbox-server` Pod SA via in-cluster configuration | `opensandbox-server` SA | Server RPC profile and configured resource namespace scope |
+| External server | Identity selected by the existing kubeconfig | The same `opensandbox-server` SA | The same server profile and scope |
+| In-cluster ingress gateway | Existing `opensandbox-ingress-gateway` Pod SA via in-cluster configuration | `opensandbox-ingress-gateway` SA | Gateway RPC profile and configured resource namespace scope |
 
-The target SA namespace is the platform identity namespace, not a sandbox namespace supplied by an end user. Never select a minting identity from a sandbox request, tenant header, or metadata field.
+The target SA namespace is resolved from `POD_NAMESPACE` (or the in-cluster ServiceAccount namespace file, falling back to `opensandbox-system`), never from a sandbox namespace supplied by an end user. Never select a minting identity from a sandbox request, tenant header, or metadata field.
 
-For each target SA, a Role in its namespace grants `create` on `serviceaccounts/token` with `resourceNames` containing only that target's name. Its RoleBinding lists the corresponding Pod SA; the server binding may additionally list explicitly configured subjects representing the external kubeconfig identity. Do not bind an entire authenticated-users or serviceaccounts group. An administrator configures the external subject once; the application neither derives RBAC subjects from an arbitrary kubeconfig context name nor grants itself permissions.
-
-A dedicated target SA matters because Kubernetes RBAC restricts which SA a caller can mint for, but not the requested audience. Allowing a restricted external identity to mint for a powerful controller SA would also let it request an API-server-audience token carrying that SA's Kubernetes permissions. The authentication-only identities avoid adding that escalation path; existing permissions of the bootstrap identity are otherwise unchanged.
+For each caller SA, a Role in its namespace (`opensandbox-server-token-minter` / `opensandbox-ingress-gateway-token-minter`) grants `create` on `serviceaccounts/token` with `resourceNames` containing only that ServiceAccount's name. Its RoleBinding lists the corresponding Pod SA; the server binding may additionally list explicitly configured subjects representing the external kubeconfig identity. Do not bind an entire authenticated-users or serviceaccounts group. An administrator configures the external subject once; the application neither derives RBAC subjects from an arbitrary kubeconfig context name nor grants itself permissions.
 
 ### Token acquisition and rotation
 
@@ -192,10 +190,10 @@ Configuration has three responsibilities; concrete flag and Helm value names sho
 
 | Owner | Required configuration | Defaulting and lifecycle |
 |---|---|---|
-| Server | `fastpath_auth_enabled` (default `false`); existing Kubernetes connection; optional `fastpath_tls_ca_file` / `fastpath_tls_server_name` | Disabled by default (plaintext gRPC without TokenRequest preflight or bearer metadata). Setting `fastpath_auth_enabled = true` enables verified TLS and per-RPC TokenRequest bearer credentials for the fixed `opensandbox-server-fastpath-client` identity in `POD_NAMESPACE` (or in-cluster SA namespace, fallback `opensandbox-system`). |
-| Gateway | `--fastpath-auth-enabled` (default `false`); optional `--fastpath-tls-ca-file` / `--fastpath-tls-server-name` | Disabled by default (plaintext gRPC without TokenRequest). When enabled (`--fastpath-auth-enabled=true`), requests tokens for the fixed `opensandbox-ingress-fastpath-client` identity in `POD_NAMESPACE` (or in-cluster SA namespace, fallback `opensandbox-system`). |
+| Server | `fastpath_auth_enabled` (default `false`); existing Kubernetes connection; optional `fastpath_tls_ca_file` / `fastpath_tls_server_name` | Disabled by default (plaintext gRPC without TokenRequest preflight or bearer metadata). Setting `fastpath_auth_enabled = true` enables verified TLS and per-RPC TokenRequest bearer credentials for `opensandbox-server` in `POD_NAMESPACE` (or in-cluster SA namespace, fallback `opensandbox-system`). |
+| Gateway | `--fastpath-auth-enabled` (default `false`); optional `--fastpath-tls-ca-file` / `--fastpath-tls-server-name` | Disabled by default (plaintext gRPC without TokenRequest). When enabled (`--fastpath-auth-enabled=true`), requests tokens for `opensandbox-ingress-gateway` in `POD_NAMESPACE` (or in-cluster SA namespace, fallback `opensandbox-system`). |
 | FastPath | `--fastpath-auth-enabled` (default `false`); trusted issuer/key source; subject/profile/namespace policy; TLS serving configuration | Disabled by default (serves plaintext gRPC/gRPC-Web without caller authentication or cert-manager Certificate creation). Setting `--fastpath-auth-enabled=true` enforces fail-closed TLS and caller authentication/authorization. |
-| Base chart | `fastSandbox.callerAuth.enabled` (default `false`); optional `fastSandbox.callerAuth.externalServerSubjects` | Disabled by default; when enabled, installs the fixed authentication-only SAs and token-minter Roles/RoleBindings in the system namespace and binds any configured external Kubernetes subjects without granting cluster-admin. |
+| Base chart | `fastSandbox.callerAuth.enabled` (default `false`); optional `fastSandbox.callerAuth.externalServerSubjects` and `createServerServiceAccount` | Disabled by default; when enabled, installs the `*-token-minter` Roles/RoleBindings for `opensandbox-server` and `opensandbox-ingress-gateway` in the system namespace and binds any configured external Kubernetes subjects without granting cluster-admin. |
 
 The audience and maximum accepted token lifetime of 3,600 seconds are protocol constants for this hop, not user-selected values copied from incoming requests or relaxed to match cluster TokenRequest limits. Refresh values have safe defaults and do not need separate operator tuning in the initial configuration surface. Existing Fastlet audience, token source, and accepted subjects remain unchanged.
 

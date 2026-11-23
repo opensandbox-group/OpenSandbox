@@ -236,4 +236,4 @@ def test_resolve_auth_namespace_prefers_pod_namespace_env(monkeypatch):
     monkeypatch.setenv("POD_NAMESPACE", "custom-system")
     source = TokenSource(Mock())
     assert source._namespace == "custom-system"
-    assert source._service_account == "opensandbox-server-fastpath-client"
+    assert source._service_account == "opensandbox-server"

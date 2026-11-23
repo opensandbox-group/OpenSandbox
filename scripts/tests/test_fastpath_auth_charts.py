@@ -38,26 +38,27 @@ class FastPathAuthChartsTest(unittest.TestCase):
         resources = self.render(
             "base",
             "fastSandbox.callerAuth.enabled=true",
+            "fastSandbox.callerAuth.createServerServiceAccount=true",
             "fastSandbox.namespaces.system=identities",
             "fastSandbox.callerAuth.externalServerSubjects[0].kind=User",
             "fastSandbox.callerAuth.externalServerSubjects[0].apiGroup=rbac.authorization.k8s.io",
             "fastSandbox.callerAuth.externalServerSubjects[0].name=external-server",
         )
+        sa = next(
+            x
+            for x in resources
+            if x["kind"] == "ServiceAccount" and x["metadata"]["name"] == "opensandbox-server"
+        )
+        self.assertFalse(sa["automountServiceAccountToken"])
+        self.assertEqual(sa["metadata"]["namespace"], "identities")
         for name in (
-            "opensandbox-server-fastpath-client",
-            "opensandbox-ingress-fastpath-client",
+            "opensandbox-server",
+            "opensandbox-ingress-gateway",
         ):
-            sa = next(
-                x
-                for x in resources
-                if x["kind"] == "ServiceAccount" and x["metadata"]["name"] == name
-            )
-            self.assertFalse(sa["automountServiceAccountToken"])
-            self.assertEqual(sa["metadata"]["namespace"], "identities")
             role = next(
                 x
                 for x in resources
-                if x["kind"] == "Role" and x["metadata"]["name"] == name + "-minter"
+                if x["kind"] == "Role" and x["metadata"]["name"] == name + "-token-minter"
             )
             self.assertEqual(
                 role["rules"],
@@ -74,7 +75,7 @@ class FastPathAuthChartsTest(unittest.TestCase):
             x
             for x in resources
             if x["kind"] == "RoleBinding"
-            and x["metadata"]["name"] == "opensandbox-server-fastpath-client-minter"
+            and x["metadata"]["name"] == "opensandbox-server-token-minter"
         )
         self.assertIn(
             {
@@ -177,8 +178,8 @@ class FastPathAuthChartsTest(unittest.TestCase):
         base_resources = self.render("base")
         self.assertFalse(
             any(
-                x["kind"] == "ServiceAccount"
-                and x["metadata"]["name"] == "opensandbox-server-fastpath-client"
+                x["kind"] == "Role"
+                and x["metadata"]["name"] == "opensandbox-server-token-minter"
                 for x in base_resources
             )
         )

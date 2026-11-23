@@ -37,10 +37,10 @@ import (
 )
 
 const (
-	fastPathAudience               = "fast-sandbox-fastpath"
-	defaultFastPathAuthNamespace   = "opensandbox-system"
-	defaultGatewayCallerSA         = "opensandbox-ingress-fastpath-client"
-	inClusterServiceAccountNSPath  = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+	fastPathAudience              = "fast-sandbox-fastpath"
+	defaultFastPathAuthNamespace  = "opensandbox-system"
+	defaultGatewayCallerSA        = "opensandbox-ingress-gateway"
+	inClusterServiceAccountNSPath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
 type FastPathAuthConfig struct {

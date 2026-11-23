@@ -28,7 +28,7 @@ from kubernetes.client import AuthenticationV1TokenRequest, V1TokenRequestSpec
 
 AUDIENCE = "fast-sandbox-fastpath"
 DEFAULT_AUTH_NAMESPACE = "opensandbox-system"
-DEFAULT_SERVER_CALLER_SA = "opensandbox-server-fastpath-client"
+DEFAULT_SERVER_CALLER_SA = "opensandbox-server"
 _INCLUSTER_NAMESPACE_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 
 logger = logging.getLogger(__name__)

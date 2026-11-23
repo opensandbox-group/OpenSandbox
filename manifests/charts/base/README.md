@@ -27,8 +27,9 @@ Kubernetes: `>=1.22.0-0`
 | crds.annotations | object | `{}` | Additional annotations to add to CRDs (merged with resource-policy when keep is true) |
 | crds.install | bool | `true` | Specifies whether the OpenSandbox CRDs should be installed |
 | crds.keep | bool | `true` | Keep CRDs on chart uninstall (adds the helm.sh/resource-policy: keep annotation) |
-| fastSandbox.callerAuth.enabled | bool | `false` | Enable FastPath caller authentication identities and token-minting RBAC. |
-| fastSandbox.callerAuth.externalServerSubjects | list | `[]` | Additional explicit RBAC subjects (User, Group, or ServiceAccount) allowed to mint tokens for opensandbox-server-fastpath-client (e.g. external kubeconfig identities). |
+| fastSandbox.callerAuth.createServerServiceAccount | bool | `false` | Create the opensandbox-server ServiceAccount in the system namespace (set true only when running an external Server without the opensandbox-server Helm chart). |
+| fastSandbox.callerAuth.enabled | bool | `false` | Enable FastPath caller token-minting RBAC for opensandbox-server and opensandbox-ingress-gateway. |
+| fastSandbox.callerAuth.externalServerSubjects | list | `[]` | Additional explicit RBAC subjects (User, Group, or ServiceAccount) allowed to mint tokens for opensandbox-server (e.g. external kubeconfig identities). |
 | fastSandbox.crds.annotations | object | `{}` | Additional annotations to add to CRDs (merged with resource-policy when keep is true) |
 | fastSandbox.crds.install | bool | `true` | Specifies whether the fast-sandbox CRDs should be installed |
 | fastSandbox.crds.keep | bool | `true` | Keep CRDs on chart uninstall (adds the helm.sh/resource-policy: keep annotation) |

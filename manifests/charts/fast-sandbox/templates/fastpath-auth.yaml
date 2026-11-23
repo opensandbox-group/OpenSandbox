@@ -9,7 +9,7 @@ metadata:
   namespace: {{ $namespace }}
 data:
   callers.json: |
-    {{- list (dict "subject" (printf "system:serviceaccount:%s:opensandbox-server-fastpath-client" $namespace) "profile" "server" "namespaces" $scopes) (dict "subject" (printf "system:serviceaccount:%s:opensandbox-ingress-fastpath-client" $namespace) "profile" "gateway" "namespaces" $scopes) | toPrettyJson | nindent 4 }}
+    {{- list (dict "subject" (printf "system:serviceaccount:%s:opensandbox-server" $namespace) "profile" "server" "namespaces" $scopes) (dict "subject" (printf "system:serviceaccount:%s:opensandbox-ingress-gateway" $namespace) "profile" "gateway" "namespaces" $scopes) | toPrettyJson | nindent 4 }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
