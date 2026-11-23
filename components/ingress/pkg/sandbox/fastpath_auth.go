@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net"
@@ -58,10 +59,10 @@ type fastPathTokenSource struct {
 
 func newFastPathTokenSource(config FastPathAuthConfig) (*fastPathTokenSource, error) {
 	if config.Kubernetes == nil || config.Namespace == "" || config.ServiceAccount == "" {
-		return nil, fmt.Errorf("FastPath requires Kubernetes credentials and a caller ServiceAccount namespace/name")
+		return nil, errors.New("FastPath requires Kubernetes credentials and a caller ServiceAccount namespace/name")
 	}
 	if config.Kubernetes.Insecure || !strings.HasPrefix(config.Kubernetes.Host, "https://") {
-		return nil, fmt.Errorf("FastPath TokenRequest requires verified Kubernetes API TLS")
+		return nil, errors.New("FastPath TokenRequest requires verified Kubernetes API TLS")
 	}
 	client, err := corev1.NewForConfig(config.Kubernetes)
 	if err != nil {
@@ -87,7 +88,7 @@ func (s *fastPathTokenSource) GetRequestMetadata(ctx context.Context, _ ...strin
 		}
 		if now.Before(s.retry) {
 			s.mu.Unlock()
-			return nil, fmt.Errorf("FastPath TokenRequest unavailable; check Kubernetes credentials and caller RBAC")
+			return nil, errors.New("FastPath TokenRequest unavailable; check Kubernetes credentials and caller RBAC")
 		}
 		if s.flight == nil {
 			s.flight = make(chan struct{})
@@ -161,7 +162,7 @@ func (c *fastPathTLS) load() (credentials.TransportCredentials, error) {
 		}
 		roots := x509.NewCertPool()
 		if !roots.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("FastPath serving CA contains no certificates")
+			return nil, errors.New("FastPath serving CA contains no certificates")
 		}
 		c.modTime, c.size = info.ModTime(), info.Size()
 		c.TransportCredentials = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, ServerName: c.serverName})
