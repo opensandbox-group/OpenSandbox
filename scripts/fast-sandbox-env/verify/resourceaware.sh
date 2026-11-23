@@ -123,7 +123,11 @@ ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read
 	done
 }
 
-_ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
+_ra_template_phase() {
+	local out
+	out="$(osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null)" || return 0
+	printf '%s' "$out" | jq -r '.status.phase // empty'
+}
 
 ra_template_start() { # <cpu> <memory> -> starts build if not already active/succeeded, records id in $WORK
 	local cpu="$1" memory="$2" created phase id

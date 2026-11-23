@@ -4852,7 +4852,11 @@ ra_debug_cgroup() { # <sandbox-id> — dump everything needed to diagnose a read
 	done
 }
 
-_ra_template_phase() { osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
+_ra_template_phase() {
+	local out
+	out="$(osb_api template get "$RA_TEMPLATE_ID" -o json 2>/dev/null)" || return 0
+	printf '%s' "$out" | jq -r '.status.phase // empty'
+}
 
 ra_template_start() { # <cpu> <memory> -> starts build if not already active/succeeded, records id in $WORK
 	local cpu="$1" memory="$2" created phase id
@@ -5237,10 +5241,12 @@ down() {
 	# A stale profile marker would let idle-e2e run against a stack whose
 	# Redis/sweeper are gone.
 	rm -f "$WORK/idle-pause"
-	# Same stale-marker risk: sdk-e2e and idle-e2e read
-	# $WORK/overlaybd-template-id, and their producer (template_up_overlaybd)
-	# only runs in verify-overlaybd.
-	rm -f "$WORK/overlaybd-template-id"
+	# Same stale-marker risk: sdk-e2e, idle-e2e, hardening, and
+	# verify-resourceaware read template ID caches under $WORK that only stay
+	# valid for the cluster that built them.
+	rm -f "$WORK/template-id" "$WORK/overlaybd-template-id" \
+		"$WORK/hardening-template-id" "$WORK/hardening-template-fp" \
+		"$WORK"/ra-template-*.id
 	# RustFS data is owned by UID/GID 10001; leftovers pollute the host and
 	# later docker build contexts.
 	sudo_ rm -rf "$RUSTFS_DATA"
