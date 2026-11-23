@@ -1121,8 +1121,10 @@ class Sandbox internal constructor(
             return this
         }
 
-        fun rootfsSnapshot(snapshotId: String, limits: Map<String, String> = emptyMap()): Builder =
-            snapshotId(snapshotId).resource(limits)
+        fun rootfsSnapshot(
+            snapshotId: String,
+            limits: Map<String, String> = emptyMap(),
+        ): Builder = snapshotId(snapshotId).resource(limits)
 
         fun snapshotId(snapshotId: String): Builder {
             if (snapshotId.isBlank()) {
