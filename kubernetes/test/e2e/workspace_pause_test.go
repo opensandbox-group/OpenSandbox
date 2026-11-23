@@ -84,16 +84,20 @@ spec:
 		Eventually(func() (string, error) { return kubectl("get", "batchsandbox", name, "-o", "jsonpath={.status.phase}") }, 3*time.Minute, time.Second).Should(Equal(p))
 	}
 	phase("Succeed")
-	_, err := kubectl("exec", pod, "-c", "sandbox", "--", "sh", "-ec", "mkdir -p /workspace && chown 10001:10002 /workspace && chmod 0750 /workspace")
+	sandboxUID, err := kubectl("get", "batchsandbox", name, "-o", "jsonpath={.metadata.uid}")
+	Expect(err).NotTo(HaveOccurred())
+	_, err = kubectl("exec", pod, "-c", "sandbox", "--", "sh", "-ec", "mkdir -p /workspace && chown 10001:10002 /workspace && chmod 0750 /workspace")
 	Expect(err).NotTo(HaveOccurred())
 	asWorkspaceUser := func(script string, args ...string) (string, error) {
 		command := []string{"exec", pod, "-c", "sandbox", "--", "python3", "-c",
 			"import os, sys\nfrom pathlib import Path\nos.setgroups([])\nos.setgid(10002)\nos.setuid(10001)\n" + script}
 		return kubectl(append(command, args...)...)
 	}
+	_, err = asWorkspaceUser("import venv\nvenv.EnvBuilder(symlinks=True, with_pip=False).create('/workspace/.venv')")
+	Expect(err).NotTo(HaveOccurred())
 	for round := range 2 {
 		marker := fmt.Sprintf("workspace-%d-%d", round, time.Now().UnixNano())
-		_, err := asWorkspaceUser("os.umask(0o077)\nPath('/workspace/.marker').write_text(sys.argv[1] + '\\n')\nPath('/tmp/outside-workspace').touch()", marker)
+		_, err := asWorkspaceUser("os.umask(0o077)\nPath('/workspace/.marker').write_text(sys.argv[1] + '\\n')\nPath('/tmp/outside-workspace').touch()\nlink = Path('/workspace/current')\nlink.unlink(missing_ok=True)\nlink.symlink_to('/workspace/.marker')", marker)
 		Expect(err).NotTo(HaveOccurred())
 		uid, err := kubectl("get", "pod", pod, "-o", "jsonpath={.metadata.uid}")
 		Expect(err).NotTo(HaveOccurred())
@@ -105,6 +109,7 @@ spec:
 		fields := strings.Fields(checkpoint)
 		Expect(fields).To(HaveLen(4))
 		Expect(fields[0]).To(Equal("workspace-v1"))
+		Expect(fields[1]).To(HavePrefix(sandboxUID + "/"))
 		Expect(fields[2]).To(MatchRegexp("^[0-9a-f]{64}$"))
 		Expect(fields[3]).To(Equal(uid))
 		jobs, err := kubectl("get", "jobs", "-l", "sandbox.opensandbox.io/sandbox-snapshot-name="+name+"-pause", "-o", "name")
@@ -117,9 +122,15 @@ spec:
 		newUID, err := kubectl("get", "pod", pod, "-o", "jsonpath={.metadata.uid}")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(newUID).NotTo(Equal(uid))
-		value, err := asWorkspaceUser("assert not Path('/tmp/outside-workspace').exists()\nprint(Path('/workspace/.marker').read_text().strip())")
+		active, err := kubectl("get", "batchsandbox", name, "-o", `go-template={{index .spec.template.metadata.annotations "sandbox.opensandbox.io/workspace-archive"}} {{index .spec.template.metadata.annotations "sandbox.opensandbox.io/workspace-claim"}}`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(active).To(Equal(fields[1] + " " + claim))
+		value, err := asWorkspaceUser("assert not Path('/tmp/outside-workspace').exists()\nassert not Path('/workspace/current').readlink().is_absolute()\nprint(Path('/workspace/current').read_text().strip())")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(strings.TrimSpace(value)).To(Equal(marker))
+		prefix, err := asWorkspaceUser("import subprocess\nprint(subprocess.check_output(['/workspace/.venv/bin/python', '-c', 'import sys; print(sys.prefix)'], text=True).strip())")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(strings.TrimSpace(prefix)).To(Equal("/workspace/.venv"))
 		fmt.Fprintf(GinkgoWriter, "workspace checkpoint round=%d archive=%s sha256=%s source=%s resumed=%s marker=%s\n",
 			round+1, fields[1], fields[2], uid, newUID, marker)
 	}

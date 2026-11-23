@@ -279,6 +279,10 @@ func (r *BatchSandboxReconciler) handlePause(ctx context.Context, bs *sandboxv1a
 		return ctrl.Result{}, nil
 	}
 
+	if workspaceModeChanged(bs, nil) {
+		return ctrl.Result{}, r.failPause(ctx, bs, "WorkspaceConfigChanged", workspaceModeChangeMessage)
+	}
+
 	snapshot := &sandboxv1alpha1.SandboxSnapshot{}
 	snapshotName := internalPauseSnapshotName(bs.Name)
 	err := r.Get(ctx, types.NamespacedName{Namespace: bs.Namespace, Name: snapshotName}, snapshot)
@@ -420,6 +424,24 @@ func (r *BatchSandboxReconciler) syncPauseOrClear(ctx context.Context, bs *sandb
 		return ctrl.Result{}, err
 	}
 
+	changedMode := workspaceModeChanged(bs, snapshot)
+	for _, condition := range bs.Status.Conditions {
+		if condition.Type == sandboxv1alpha1.BatchSandboxConditionPauseFailed && condition.Reason == "WorkspaceConfigChanged" {
+			if changedMode {
+				return ctrl.Result{}, nil
+			}
+			if err := r.setCondition(ctx, bs, condition.Type, sandboxv1alpha1.ConditionFalse, "", ""); err != nil {
+				return ctrl.Result{}, err
+			}
+			break
+		}
+	}
+	if changedMode {
+		// A rootfs Job may already have frozen the source. Keep Pausing and the
+		// original snapshot so restoring the configuration can finish the same operation.
+		return ctrl.Result{}, r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionPauseFailed, sandboxv1alpha1.ConditionTrue, "WorkspaceConfigChanged", workspaceModeChangeMessage)
+	}
+
 	switch snapshot.Status.Phase {
 	case sandboxv1alpha1.SandboxSnapshotPhaseSucceed:
 		log.Info("SandboxSnapshot Succeed, completing pause")
@@ -520,6 +542,9 @@ func (r *BatchSandboxReconciler) completePause(ctx context.Context, bs *sandboxv
 
 	if !wasPooled {
 		for _, pod := range pods {
+			if sourceUID == "" && hasRestoredWorkspace(&pod.Spec) {
+				return r.failPause(ctx, bs, "WorkspaceConfigChanged", workspaceModeChangeMessage)
+			}
 			var options []client.DeleteOption
 			if sourceUID != "" {
 				if pod.UID != sourceUID {
@@ -602,6 +627,13 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 		return ctrl.Result{}, nil
 	}
 
+	if workspaceModeChanged(bs, snapshot) {
+		if err := r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhasePaused, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, r.setCondition(ctx, bs, sandboxv1alpha1.BatchSandboxConditionResumeFailed, sandboxv1alpha1.ConditionTrue, "WorkspaceConfigChanged", workspaceModeChangeMessage)
+	}
+
 	if snapshot.Status.Format == sandboxv1alpha1.SandboxSnapshotFormatWorkspaceV1 {
 		if err := prepareWorkspaceRestore(bs.Spec.Template.DeepCopy(), snapshot.Status.Workspace); err != nil {
 			if ackErr := r.ackPauseWithPhase(ctx, bs, sandboxv1alpha1.BatchSandboxPhasePaused, ""); ackErr != nil {
@@ -651,6 +683,9 @@ func (r *BatchSandboxReconciler) continueResume(ctx context.Context, bs *sandbox
 		}
 		patch := client.MergeFrom(latest.DeepCopy())
 
+		if workspaceModeChanged(latest, snapshot) {
+			return fmt.Errorf("%s", workspaceModeChangeMessage)
+		}
 		if latest.Spec.Template != nil {
 			for i := range latest.Spec.Template.Spec.Containers {
 				if img, ok := imageMap[latest.Spec.Template.Spec.Containers[i].Name]; ok {

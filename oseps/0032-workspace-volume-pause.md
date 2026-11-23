@@ -15,13 +15,19 @@ status: draft
 
 ## Proposal
 
-An internal pause snapshot records an archive on the selected PVC. The snapshot reconciler verifies controller ownership and executes a bounded export in the running Pod through the Kubernetes API. The application image supplies Python 3.12+. The helper archives files, flushes and closes the object, then reads it back and compares SHA-256. The controller publishes the claim name, archive name, digest, and source Pod UID in one status update. A unique archive per attempt permits retries and prevents an interrupted write from replacing a published checkpoint.
+An internal pause snapshot records an archive on the selected PVC. The snapshot reconciler verifies controller ownership and executes a bounded export in the running Pod through the Kubernetes API. The application image supplies Python 3.12+. The helper archives files, flushes and closes the object, then reads it back and compares SHA-256. The controller publishes the claim name, archive name, digest, and source Pod UID in one status update. A sandbox UID prefix and a unique archive per attempt permits retries and prevents an interrupted write from replacing a published checkpoint.
 
 The BatchSandbox controller releases the source Pod after the snapshot succeeds. A failed export produces a retryable pause failure while the source remains available. On resume the controller keeps the application image and adds an init container with the same image and security context. The init container verifies the digest and extracts the workspace into an emptyDir. The application mounts the restored directory before its entrypoint starts. Subsequent pauses use the same workflow.
 
 ## Operational constraints
 
-A dedicated claim or bucket prefix bounds each sandbox's storage access. The workload has write access to its own checkpoint store. Cluster administrators configure CSI credentials, writability, durable close, retention and cross-node access. Applications must quiesce workspace writers before pause. Running processes, container packages and nested mounts are outside the workspace contract. An export occupies a snapshot reconciliation worker for at most the configured commit timeout. A failed restore keeps the application from starting and leaves the archive available for diagnosis.
+A dedicated claim or bucket prefix bounds each sandbox's storage access. The workload has write access to its own checkpoint store. Cluster administrators configure CSI credentials, writability, durable close, retention and cross-node access. Applications must quiesce workspace writers before pause. Running processes, container packages and nested mounts are outside the workspace contract. A dedicated controller reconciles pending workspace exports with two workers and the configured commit timeout. The snapshot controller continues to process rootfs Jobs and finalizers independently. After a controller restart the informer queues pending snapshots again. A failed restore keeps the application from starting and leaves the archive available for diagnosis.
+
+## Risks and mitigations
+
+Changing the pause strategy after a workspace restore could discard the live emptyDir during a rootfs capture. Reject incompatible strategy changes while preserving the live Pod. Workspace links referring to absolute locations within the tree are normalized. External symbolic links are recreated last without opening their targets. Special files fail capture with an entry name. Workloads must stop concurrent writers for consistent contents; the digest detects storage corruption and assumes a trusted interpreter in the workload image.
+
+Keep the current snapshot’s archive and the active template’s archive available. The template records the claim and object key as annotations when installing the restore init container. The storage administrator can reclaim a terminated sandbox’s UID prefix without identifying individual export attempts. For existing flat-key archives, use the claim and archive recorded in the checkpoint or restore command.
 
 ## Alternatives and compatibility
 

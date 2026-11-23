@@ -25,9 +25,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	sandboxv1alpha1 "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	"github.com/alibaba/OpenSandbox/sandbox-k8s/internal/utils"
@@ -102,6 +106,7 @@ type SandboxSnapshotReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=batch,resources=jobs/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
 
@@ -170,6 +175,15 @@ func (r *SandboxSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.exportWorkspace = export
 	if r.APIReader == nil {
 		r.APIReader = mgr.GetAPIReader()
+	}
+	if err := ctrl.NewControllerManagedBy(mgr).
+		Named("workspace-export").
+		For(&sandboxv1alpha1.SandboxSnapshot{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+			return workspaceExportPending(obj.(*sandboxv1alpha1.SandboxSnapshot))
+		}))).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 2}).
+		Complete(reconcile.Func(r.reconcileWorkspaceExport)); err != nil {
+		return err
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.SandboxSnapshot{}).

@@ -46,20 +46,7 @@ func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot 
 	log := logf.FromContext(ctx)
 
 	if snapshot.Annotations[workspacePauseAnnotation] == "true" {
-		parent := &sandboxv1alpha1.BatchSandbox{}
-		// The snapshot informer can observe creation before the parent informer sees Pausing.
-		if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: snapshot.Spec.SandboxName}, parent); err != nil {
-			return ctrl.Result{}, err
-		}
-		if parent.Spec.WorkspacePause == nil {
-			return ctrl.Result{}, r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "InvalidWorkspacePause", "workspace pause configuration is missing")
-		}
-		if err := r.captureWorkspace(ctx, snapshot, parent); err != nil {
-			if errors.IsConflict(err) {
-				return ctrl.Result{}, err
-			}
-			return ctrl.Result{}, r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "WorkspaceExportFailed", err.Error())
-		}
+		// The separate workspace controller owns exports; keep this queue available for other snapshots and finalizers.
 		return ctrl.Result{}, nil
 	}
 
@@ -90,6 +77,10 @@ func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot 
 		msg := fmt.Sprintf("failed to get BatchSandbox %s: %v", snapshot.Spec.SandboxName, err)
 		_ = r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "BatchSandboxLookupFailed", msg)
 		return ctrl.Result{}, nil
+	}
+
+	if hasBatchSandboxControllerOwner(snapshot) && workspaceModeChanged(bs, snapshot) {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	pod, err := r.findPodForSandbox(ctx, bs, snapshot.Namespace)

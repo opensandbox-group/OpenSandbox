@@ -15,6 +15,10 @@
 import os
 from pathlib import Path
 import stat
+import socket
+import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -125,6 +129,54 @@ class WorkspaceArchiveTest(unittest.TestCase):
             self.assertFalse((volume / "data").exists())
             restore(volume, archive, digest)
             self.assertEqual((volume / "data" / "notes").read_text(), "checkpoint")
+
+    def test_workspace_absolute_link_is_relocated(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root / "workspace"
+            (work / "bin").mkdir(parents=True)
+            (work / "version").write_text("v1")
+            (work / "bin" / "current").symlink_to(work / "version")
+            archive = root / "checkpoint.tar"
+            digest = capture(work, archive)
+            (work / "version").unlink()
+            volume = root / "volume"
+            volume.mkdir()
+            restore(volume, archive, digest)
+            link = volume / "data" / "bin" / "current"
+            self.assertEqual(link.readlink(), Path("../version"))
+            self.assertEqual(link.read_text(), "v1")
+
+    def test_venv_interpreter_link_survives_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root / "workspace"
+            env = work / ".venv"
+            subprocess.run([sys.executable, "-m", "venv", "--symlinks", "--without-pip", env], check=True)
+            interpreter = env / "bin" / "python"
+            self.assertTrue(interpreter.is_symlink())
+            archive = root / "venv.tar"
+            volume = root / "volume"
+            volume.mkdir()
+            restore(volume, archive, capture(work, archive))
+            restored = volume / "data" / ".venv"
+            self.assertEqual((restored / "bin" / "python").readlink(), interpreter.readlink())
+            output = subprocess.check_output([restored / "bin" / "python", "-c", "import sys; print(sys.prefix)"], text=True)
+            self.assertEqual(Path(output.strip()).resolve(), restored.resolve())
+
+    def test_unsupported_entries_report_their_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            work = root / "workspace"
+            work.mkdir()
+            os.mkfifo(work / "events-pipe")
+            with self.assertRaisesRegex(tarfile.SpecialFileError, "events-pipe"):
+                capture(work, root / "fifo.tar")
+            (work / "events-pipe").unlink()
+            with socket.socket(socket.AF_UNIX) as sock:
+                sock.bind(str(work / "local.sock"))
+                with self.assertRaisesRegex(ValueError, "local.sock"):
+                    capture(work, root / "socket.tar")
 
     def test_upload_failure_preserves_source(self):
         with tempfile.TemporaryDirectory() as temp:

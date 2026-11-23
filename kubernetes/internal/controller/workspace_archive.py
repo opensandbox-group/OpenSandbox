@@ -22,14 +22,28 @@ import tarfile
 import tempfile
 
 
+class WorkspaceTar(tarfile.TarFile):
+    def gettarinfo(self, name=None, arcname=None, fileobj=None):
+        member = super().gettarinfo(name, arcname, fileobj)
+        if member is None:
+            # tarfile silently omits sockets by default.
+            raise ValueError(f"unsupported workspace entry: {arcname}")
+        return member
+
+
 def capture(workspace, archive):
     if workspace.is_symlink() or not workspace.is_dir():
         raise ValueError("workspace must be a directory")
 
     def check(member):
         # Apply the restore policy before a successful pause can release the Pod.
-        workspace_filter(member, workspace)
-        return member
+        if member.issym() and os.path.isabs(member.linkname):
+            target = Path(member.linkname)
+            if target.is_relative_to(workspace):
+                member = member.replace(linkname=os.path.relpath(target.relative_to(workspace), Path(member.name).parent), deep=False)
+        checked = workspace_link(member) if member.issym() else workspace_filter(member, workspace)
+        # Tar headers require concrete values even for metadata ignored during extraction.
+        return checked.replace(uname="", gname="", mode=checked.mode if checked.mode is not None else 0o777, deep=False)
 
     digest = hashlib.sha256()
     with archive.open("xb") as output:
@@ -38,7 +52,7 @@ def capture(workspace, archive):
                 digest.update(data)
                 return output.write(data)
 
-        with tarfile.open(fileobj=Writer(), mode="w|") as bundle:
+        with WorkspaceTar.open(fileobj=Writer(), mode="w|") as bundle:
             bundle.add(workspace, arcname=".", filter=check)
         output.flush()
         os.fsync(output.fileno())
@@ -48,16 +62,50 @@ def capture(workspace, archive):
     return digest.hexdigest()
 
 
+def validate_owner(member):
+    if not (0 <= member.uid < 2**32 - 1 and 0 <= member.gid < 2**32 - 1):
+        raise ValueError("invalid workspace owner")
+
+
+def workspace_link(member):
+    validate_owner(member)
+    name = Path(member.name)
+    if name.is_absolute() or not name.parts or ".." in name.parts:
+        raise ValueError(f"invalid workspace symlink name: {member.name!r}")
+    return member.replace(mode=0o777, deep=False)
+
+
 def workspace_filter(member, destination):
+    validate_owner(member)
+    if member.issym():
+        raise ValueError(f"unexpected symbolic link during file extraction: {member.name!r}")
     filtered = tarfile.data_filter(member, destination)
     # Keep path, link and file-type checks. Restore ordinary access bits but
     # never grant setuid/setgid privileges from a checkpoint.
     mode = filtered.mode
     if filtered.isdir() or filtered.isreg() or filtered.islnk():
         mode = member.mode & (0o1777 if filtered.isdir() else 0o777)
-    if not (0 <= member.uid < 2**32 - 1 and 0 <= member.gid < 2**32 - 1):
-        raise ValueError("invalid workspace owner")
     return filtered.replace(mode=mode, uid=member.uid, gid=member.gid, deep=False)
+
+
+def workspace_members(bundle, stage):
+    links = []
+    for member in bundle:
+        if member.issym():
+            links.append(workspace_link(member))
+        else:
+            yield member
+
+    # File contents have been extracted, but final directory permissions have
+    # not yet been applied. Never traverse a link to create another one.
+    root = stage.resolve()
+    for link in links:
+        entry = root / link.name
+        if entry.parent.resolve(strict=True) != entry.parent:
+            raise ValueError(f"invalid symlink parent for {link.name!r}")
+        os.symlink(link.linkname, entry)
+        if os.geteuid() == 0:
+            os.chown(entry, link.uid, link.gid, follow_symlinks=False)
 
 
 def restore(volume, archive, expected):
@@ -82,7 +130,7 @@ def restore(volume, archive, expected):
 
         reader = Reader()
         with tarfile.open(fileobj=reader, mode="r|", errorlevel=2) as bundle:
-            bundle.extractall(stage, filter=workspace_filter, numeric_owner=True)
+            bundle.extractall(stage, members=workspace_members(bundle, stage), filter=workspace_filter, numeric_owner=True)
         while reader.read(1024 * 1024):
             pass
         if digest.hexdigest() != expected:
@@ -94,7 +142,9 @@ def restore(volume, archive, expected):
 if __name__ == "__main__":
     operation, root, path, *args = sys.argv[1:]
     if operation == "save":
-        print(capture(Path(root), Path(path)))
+        archive = Path(path)
+        archive.parent.mkdir(exist_ok=True)
+        print(capture(Path(root), archive))
     elif operation == "restore":
         restore(Path(root), Path(path), *args)
     else:

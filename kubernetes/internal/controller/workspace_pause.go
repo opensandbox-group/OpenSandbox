@@ -19,26 +19,33 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"fmt"
-
 	"path"
 	"strings"
+	"time"
 
-	api "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	api "github.com/alibaba/OpenSandbox/sandbox-k8s/apis/sandbox/v1alpha1"
 )
 
 const (
-	workspacePauseAnnotation = "sandbox.opensandbox.io/workspace-pause"
-	storeMount               = "/mnt/opensandbox-checkpoints"
-	workspaceMount           = "/workspace"
-	restoreName              = "opensandbox-workspace-restore"
+	workspaceArchiveAnnotation = "sandbox.opensandbox.io/workspace-archive"
+	workspaceClaimAnnotation   = "sandbox.opensandbox.io/workspace-claim"
+	workspacePauseAnnotation   = "sandbox.opensandbox.io/workspace-pause"
+	storeMount                 = "/mnt/opensandbox-checkpoints"
+	workspaceMount             = "/workspace"
+	restoreName                = "opensandbox-workspace-restore"
 )
 
 //go:embed workspace_archive.py
@@ -115,9 +122,16 @@ func workspaceTarget(spec *corev1.PodSpec, cfg api.WorkspacePauseSpec) (*corev1.
 	return nil, "", fmt.Errorf("mount checkpoint volume %q at %s in container %q", cfg.VolumeName, storeMount, cfg.ContainerName)
 }
 
-// prepareWorkspaceRestore is also run before export to catch template collisions while the source still exists.
 func prepareWorkspaceRestore(template *corev1.PodTemplateSpec, w *api.WorkspaceCheckpoint) error {
-	if template == nil || w == nil || !validArchiveName(w.Archive) {
+	if w == nil || !validWorkspaceDigest(w.SHA256) {
+		return fmt.Errorf("workspace checkpoint SHA-256 must contain 64 hexadecimal digits")
+	}
+	return configureWorkspaceRestore(template, w)
+}
+
+// Capture also checks the restore configuration on a template copy before the archive has a digest.
+func configureWorkspaceRestore(template *corev1.PodTemplateSpec, w *api.WorkspaceCheckpoint) error {
+	if template == nil || !validArchiveName(w.Archive) {
 		return fmt.Errorf("invalid workspace restore metadata")
 	}
 	app, claim, err := workspaceTarget(&template.Spec, w.WorkspacePauseSpec)
@@ -127,6 +141,11 @@ func prepareWorkspaceRestore(template *corev1.PodTemplateSpec, w *api.WorkspaceC
 	if claim != w.ClaimName {
 		return fmt.Errorf("checkpoint PVC changed since pause")
 	}
+	if template.Annotations == nil {
+		template.Annotations = make(map[string]string)
+	}
+	template.Annotations[workspaceArchiveAnnotation] = w.Archive
+	template.Annotations[workspaceClaimAnnotation] = claim
 	hasVolume := false
 	for _, v := range template.Spec.Volumes {
 		if v.Name == restoreName {
@@ -142,7 +161,7 @@ func prepareWorkspaceRestore(template *corev1.PodTemplateSpec, w *api.WorkspaceC
 		ImagePullPolicy: app.ImagePullPolicy,
 		SecurityContext: app.SecurityContext.DeepCopy(),
 		Resources:       *app.Resources.DeepCopy(),
-		Command:         []string{"python3", "-I", "-c", workspaceScript, "restore", workspaceMount, path.Join(storeMount, w.Archive), w.SHA256},
+		Command:         []string{"python3", "-I", "-c", workspaceScript, "restore", workspaceMount, path.Join(storeMount, w.Archive), strings.ToLower(w.SHA256)},
 		VolumeMounts:    []corev1.VolumeMount{{Name: w.VolumeName, MountPath: storeMount, ReadOnly: true}, {Name: restoreName, MountPath: workspaceMount}},
 	}
 	hasMount := false
@@ -176,11 +195,80 @@ func prepareWorkspaceRestore(template *corev1.PodTemplateSpec, w *api.WorkspaceC
 }
 
 func validArchiveName(name string) bool {
+	// Pre-prefix checkpoints had a single flat key.
+	if prefix, leaf, found := strings.Cut(name, "/"); found {
+		if len(validation.IsDNS1123Label(prefix)) != 0 {
+			return false
+		}
+		name = leaf
+	}
 	return len(name) == 40 && strings.HasSuffix(name, ".tar") && strings.Trim(name[:36], "0123456789abcdef-") == ""
 }
 
+// The injected mount also identifies restored workspaces created before checkpoint annotations existed.
+func hasRestoredWorkspace(spec *corev1.PodSpec) bool {
+	for _, container := range spec.Containers {
+		for _, mount := range container.VolumeMounts {
+			if mount.Name == restoreName && mount.MountPath == workspaceMount && mount.SubPath == "data" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func workspaceModeChanged(bs *api.BatchSandbox, snapshot *api.SandboxSnapshot) bool {
+	workspace := bs.Spec.WorkspacePause != nil
+	return (!workspace && bs.Spec.Template != nil && hasRestoredWorkspace(&bs.Spec.Template.Spec)) ||
+		(snapshot != nil && workspace != (snapshot.Annotations[workspacePauseAnnotation] == "true"))
+}
+
+const workspaceModeChangeMessage = "pause strategy changed; restore the prior workspacePause configuration or migrate the workspace to a new sandbox"
+
+func workspaceExportPending(s *api.SandboxSnapshot) bool {
+	return s.Annotations[workspacePauseAnnotation] == "true" && s.DeletionTimestamp.IsZero() &&
+		controllerutil.ContainsFinalizer(s, sandboxSnapshotFinalizer) &&
+		s.Status.Phase == api.SandboxSnapshotPhasePending && s.Status.ObservedGeneration == s.Generation
+}
+
+// Pending snapshots are replayed by the watch when a new leader starts.
+func (r *SandboxSnapshotReconciler) reconcileWorkspaceExport(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	s := &api.SandboxSnapshot{}
+	if err := r.APIReader.Get(ctx, req.NamespacedName, s); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !workspaceExportPending(s) {
+		return ctrl.Result{}, nil
+	}
+	parent := &api.BatchSandbox{}
+	err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: s.Spec.SandboxName}, parent)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	reason := "BatchSandboxLookupFailed"
+	if err == nil {
+		if metav1.IsControlledBy(s, parent) && parent.Status.Phase == api.BatchSandboxPhasePausing && parent.Spec.WorkspacePause == nil {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		reason = "WorkspaceExportFailed"
+		err = r.captureWorkspace(ctx, s, parent)
+	}
+	if ctx.Err() != nil {
+		return ctrl.Result{}, ctx.Err()
+	}
+	if err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsTooManyRequests(err) {
+			return ctrl.Result{}, err
+		}
+		// Update this exact UID/resourceVersion. A late export must never fail a replacement snapshot.
+		s.Status.Phase = api.SandboxSnapshotPhaseFailed
+		applySnapshotPhaseConditions(&s.Status, reason, err.Error())
+	}
+	return ctrl.Result{}, r.Status().Update(ctx, s)
+}
+
 func (r *SandboxSnapshotReconciler) captureWorkspace(ctx context.Context, s *api.SandboxSnapshot, bs *api.BatchSandbox) error {
-	if bs.UID == "" || !metav1.IsControlledBy(s, bs) || s.Name != internalPauseSnapshotName(bs.Name) || bs.Spec.Pause == nil || !*bs.Spec.Pause || bs.Status.Phase != api.BatchSandboxPhasePausing || bs.Spec.PoolRef != "" || bs.Spec.Template == nil {
+	if bs.Spec.WorkspacePause == nil || bs.Spec.Replicas == nil || *bs.Spec.Replicas != 1 || bs.UID == "" || !metav1.IsControlledBy(s, bs) || s.Name != internalPauseSnapshotName(bs.Name) || bs.Spec.Pause == nil || !*bs.Spec.Pause || bs.Status.Phase != api.BatchSandboxPhasePausing || bs.Spec.PoolRef != "" || bs.Spec.Template == nil {
 		return fmt.Errorf("workspace capture requires an active pause on a dedicated BatchSandbox Pod")
 	}
 	// Read the controller-owned Pod directly, independent of user-supplied allocation annotations.
@@ -196,8 +284,8 @@ func (r *SandboxSnapshotReconciler) captureWorkspace(ctx context.Context, s *api
 	if err != nil {
 		return err
 	}
-	w := &api.WorkspaceCheckpoint{WorkspacePauseSpec: cfg, ClaimName: claim, Archive: string(uuid.NewUUID()) + ".tar", SourcePodUID: pod.UID}
-	if err := prepareWorkspaceRestore(bs.Spec.Template.DeepCopy(), w); err != nil {
+	w := &api.WorkspaceCheckpoint{WorkspacePauseSpec: cfg, ClaimName: claim, Archive: path.Join(string(bs.UID), string(uuid.NewUUID())+".tar"), SourcePodUID: pod.UID}
+	if err := configureWorkspaceRestore(bs.Spec.Template.DeepCopy(), w); err != nil {
 		return err
 	}
 	exportCtx, cancel := context.WithTimeout(ctx, r.getCommitJobTimeout())
@@ -215,5 +303,5 @@ func (r *SandboxSnapshotReconciler) captureWorkspace(ctx context.Context, s *api
 	s.Status.Format = api.SandboxSnapshotFormatWorkspaceV1
 	s.Status.Phase = api.SandboxSnapshotPhaseSucceed
 	applySnapshotPhaseConditions(&s.Status, "", "")
-	return r.Status().Update(ctx, s)
+	return nil
 }

@@ -54,8 +54,14 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+PYTHON ?= python3.12
+
+.PHONY: test-archive
+test-archive: ## Test workspace archive capture and restore (Python 3.12+).
+	cd internal/controller && $(PYTHON) -B -m unittest -v test_workspace_archive
+
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
+test: test-archive manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
