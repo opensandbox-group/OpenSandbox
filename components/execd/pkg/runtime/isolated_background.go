@@ -42,11 +42,6 @@ const isolatedBackgroundRunDir = ".execd/background-runs"
 // exit-code file of a background run.
 const isolatedBackgroundPollInterval = 500 * time.Millisecond
 
-// maxBackgroundLogReadBytes caps how much of a run's log a single read
-// (remaining bytes after the cursor) loads into memory; clients page through
-// the rest with the returned cursor.
-const maxBackgroundLogReadBytes = 16 << 20 // 16 MiB
-
 // isolatedBackgroundProbeTimeout bounds the preflight probe that verifies the
 // run log directory is writable by the session uid before a run is accepted.
 const isolatedBackgroundProbeTimeout = 5 * time.Second

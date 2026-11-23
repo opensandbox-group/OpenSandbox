@@ -54,7 +54,7 @@ Commands can be submitted in two forms:
 Execution modes:
 
 - **Foreground** returns the output as a live Server-Sent-Events stream while the command runs.
-- **Background** returns immediately; you poll status and retrieve incremental logs. Completed background output stays retrievable for 24 hours, and running commands are never cleaned up.
+- **Background** returns immediately; you poll status and retrieve incremental logs. Completed background output stays retrievable for 24 hours, and running commands are never cleaned up. Log polling is paged: the `cursor` is a byte offset into the combined output, and a single read returns at most 16 MiB, so use the cursor returned with each response to fetch the remainder.
 
 Foreground `stdout` and `stderr` event text preserves the command's line endings (`\n`, `\r`, or `\r\n`). Concatenate event text for each stream to reconstruct its output; the last event may be an unterminated fragment. A line longer than 16 MiB is split across several events, and only the last of them ends with the line ending.
 

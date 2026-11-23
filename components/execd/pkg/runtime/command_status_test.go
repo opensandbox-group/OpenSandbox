@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -133,6 +134,35 @@ func TestSeekBackgroundCommandOutput_ClampsCursorPastEOF(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, " world", string(output))
 	require.Equal(t, int64(11), cursor)
+}
+
+func TestSeekBackgroundCommandOutput_CapsReadSize(t *testing.T) {
+	c := NewController("", "")
+
+	tmpDir := t.TempDir()
+	session := "sess-capped"
+	stdoutPath := filepath.Join(tmpDir, session+".stdout")
+
+	payload := bytes.Repeat([]byte("x"), maxBackgroundLogReadBytes+1234)
+	require.NoError(t, os.WriteFile(stdoutPath, payload, 0o644))
+
+	c.storeCommandKernel(session, &commandKernel{
+		pid:          791,
+		stdoutPath:   stdoutPath,
+		isBackground: true,
+		startedAt:    time.Now(),
+		running:      true,
+	})
+
+	output, cursor, err := c.SeekBackgroundCommandOutput(session, 0)
+	require.NoError(t, err)
+	require.Len(t, output, maxBackgroundLogReadBytes, "a single read must not exceed the cap")
+	require.Equal(t, int64(maxBackgroundLogReadBytes), cursor, "cursor should advance to the end of the returned bytes")
+
+	output, cursor, err = c.SeekBackgroundCommandOutput(session, cursor)
+	require.NoError(t, err)
+	require.Len(t, output, 1234, "the remainder should be returned on the next poll")
+	require.Equal(t, int64(len(payload)), cursor)
 }
 
 func TestSeekBackgroundCommandOutput_RejectsNegativeCursor(t *testing.T) {

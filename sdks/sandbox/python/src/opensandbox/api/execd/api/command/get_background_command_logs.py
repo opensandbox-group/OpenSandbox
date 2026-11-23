@@ -103,10 +103,11 @@ def sync_detailed(
      Returns stdout and stderr for a background (detached) command by command ID.
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
-    pass a starting line via query to fetch output after that line and receive the latest
-    tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-    Response body is plain text so it can be rendered directly in browsers; the latest line index
-    is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    pass a byte offset via the `cursor` query parameter to fetch output after that position
+    and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
+    for the next poll. When no cursor is provided, the log is returned from the start.
+    At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
+    Response body is plain text so it can be rendered directly in browsers.
     Completed background command output is retained for at least 24 hours and then
     removed by an hourly cleanup. Running command output is never removed by retention cleanup.
 
@@ -145,10 +146,11 @@ def sync(
      Returns stdout and stderr for a background (detached) command by command ID.
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
-    pass a starting line via query to fetch output after that line and receive the latest
-    tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-    Response body is plain text so it can be rendered directly in browsers; the latest line index
-    is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    pass a byte offset via the `cursor` query parameter to fetch output after that position
+    and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
+    for the next poll. When no cursor is provided, the log is returned from the start.
+    At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
+    Response body is plain text so it can be rendered directly in browsers.
     Completed background command output is retained for at least 24 hours and then
     removed by an hourly cleanup. Running command output is never removed by retention cleanup.
 
@@ -182,10 +184,11 @@ async def asyncio_detailed(
      Returns stdout and stderr for a background (detached) command by command ID.
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
-    pass a starting line via query to fetch output after that line and receive the latest
-    tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-    Response body is plain text so it can be rendered directly in browsers; the latest line index
-    is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    pass a byte offset via the `cursor` query parameter to fetch output after that position
+    and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
+    for the next poll. When no cursor is provided, the log is returned from the start.
+    At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
+    Response body is plain text so it can be rendered directly in browsers.
     Completed background command output is retained for at least 24 hours and then
     removed by an hourly cleanup. Running command output is never removed by retention cleanup.
 
@@ -222,10 +225,11 @@ async def asyncio(
      Returns stdout and stderr for a background (detached) command by command ID.
     Foreground commands should be consumed via SSE; this endpoint is intended for
     polling logs of background commands. Supports incremental reads similar to a file seek:
-    pass a starting line via query to fetch output after that line and receive the latest
-    tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-    Response body is plain text so it can be rendered directly in browsers; the latest line index
-    is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+    pass a byte offset via the `cursor` query parameter to fetch output after that position
+    and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
+    for the next poll. When no cursor is provided, the log is returned from the start.
+    At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
+    Response body is plain text so it can be rendered directly in browsers.
     Completed background command output is retained for at least 24 hours and then
     removed by an hourly cleanup. Running command output is never removed by retention cleanup.
 

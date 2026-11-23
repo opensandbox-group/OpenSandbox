@@ -291,10 +291,11 @@ export interface paths {
          * @description Returns stdout and stderr for a background (detached) command by command ID.
          *     Foreground commands should be consumed via SSE; this endpoint is intended for
          *     polling logs of background commands. Supports incremental reads similar to a file seek:
-         *     pass a starting line via query to fetch output after that line and receive the latest
-         *     tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-         *     Response body is plain text so it can be rendered directly in browsers; the latest line index
-         *     is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+         *     pass a byte offset via the `cursor` query parameter to fetch output after that position
+         *     and receive the latest tail cursor via the `EXECD-COMMANDS-TAIL-CURSOR` response header
+         *     for the next poll. When no cursor is provided, the log is returned from the start.
+         *     At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
+         *     Response body is plain text so it can be rendered directly in browsers.
          *     Completed background command output is retained for at least 24 hours and then
          *     removed by an hourly cleanup. Running command output is never removed by retention cleanup.
          */
@@ -2342,10 +2343,11 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Optional 0-based line cursor (behaves like a file seek). When provided, only
-                 *     stdout/stderr lines after this line are returned. The response includes the
-                 *     latest line index (`cursor`) so the client can request incremental output
-                 *     on subsequent calls. If omitted, the full log is returned.
+                 * @description Optional byte offset into the combined stdout/stderr output (behaves like a
+                 *     file seek). When provided, only bytes after this offset are returned. The
+                 *     response includes the latest offset (`EXECD-COMMANDS-TAIL-CURSOR`) so the
+                 *     client can request incremental output on subsequent calls. At most 16 MiB
+                 *     are returned per request. If omitted, the log is returned from the start.
                  * @example 120
                  */
                 cursor?: number;
@@ -2365,7 +2367,7 @@ export interface operations {
             /** @description Command output (plain text) and status metadata via headers */
             200: {
                 headers: {
-                    /** @description Highest available 0-based line index after applying the request cursor (use as the next cursor for incremental reads) */
+                    /** @description Highest available byte offset after applying the request cursor (use as the next cursor for incremental reads) */
                     "EXECD-COMMANDS-TAIL-CURSOR"?: number;
                     [name: string]: unknown;
                 };

@@ -78,6 +78,10 @@ func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 // the current end of the file is clamped to the file size, so polling at (or
 // past) the tail returns empty output with the real end offset instead of
 // echoing back an offset that later writes would silently skip.
+//
+// At most maxBackgroundLogReadBytes are returned per call; the returned
+// cursor points past the bytes in this response, so clients page through
+// larger output by polling again with that cursor.
 func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) ([]byte, int64, error) {
 	kernel := c.commandSnapshot(session)
 	if kernel == nil {
@@ -111,7 +115,7 @@ func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) (
 		return nil, -1, fmt.Errorf("error seek file: %w", err)
 	}
 
-	data, err := io.ReadAll(file)
+	data, err := io.ReadAll(io.LimitReader(file, maxBackgroundLogReadBytes))
 	if err != nil {
 		return nil, -1, fmt.Errorf("error read file: %w", err)
 	}

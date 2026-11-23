@@ -940,6 +940,8 @@ type CommandStatusResponse struct {
 // incremental log polling.
 type CommandLogsResponse struct {
 	Output string
+	// Cursor is a byte offset into the combined output, pointing past the
+	// bytes returned in Output.
 	Cursor int64
 }
 

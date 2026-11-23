@@ -114,7 +114,7 @@ public interface IExecdCommands
     /// Gets logs for a background command.
     /// </summary>
     /// <param name="executionId">The command execution ID.</param>
-    /// <param name="cursor">Optional line cursor for incremental reads.</param>
+    /// <param name="cursor">Optional byte offset into the combined output for incremental reads.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Background command logs and latest cursor.</returns>
     /// <exception cref="InvalidArgumentException">Thrown when <paramref name="executionId"/> is null or empty.</exception>
