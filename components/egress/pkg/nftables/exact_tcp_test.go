@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
@@ -75,20 +76,94 @@ func TestApplyStatic_LaterHostAllowsSpareOnlyTheirUnion(t *testing.T) {
 	}
 }
 
-func BenchmarkCaptureExactTCPRemovedDNS(b *testing.B) {
-	p := policy.DefaultDenyPolicy()
+func TestApplyStatic_DNSOnlyHostKeepsEffectiveTeardown(t *testing.T) {
+	const domain = `{"action":"allow","target":"cdn.example"}`
+	const allowCIDR = `{"action":"allow","target":"192.0.2.0/24"}`
+	const denyCIDR = `{"action":"deny","target":"192.0.2.0/24"}`
+	const deny443 = `{"action":"deny","ports":[443]}`
+	addr := netip.MustParseAddr("192.0.2.10")
+	for _, tt := range []struct {
+		name, rules string
+		lateDNS     bool
+		cutSibling  bool
+	}{
+		{"retained DNS under CIDR deny", domain + "," + denyCIDR, false, true},
+		{"revoked DNS under CIDR allow", allowCIDR + "," + deny443, false, false},
+		{"DNS learned after opt-in under CIDR deny", domain + "," + denyCIDR, true, true},
+		{"revoked DNS is not a permit", deny443, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, _ := recordingManager()
+			old := mustPolicy(t, `{"egress":[`+domain+`]}`)
+			require.NoError(t, m.ApplyStatic(ctx, old))
+			grant := func() {
+				t.Helper()
+				require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			}
+			if !tt.lateDNS {
+				grant()
+			}
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, mustPolicy(t, `{"egress":[`+tt.rules+`]}`))
+			require.NoError(t, err)
+			if tt.lateDNS {
+				grant()
+			}
+			for i := 0; i < 3; i++ {
+				if i != 0 {
+					require.NoError(t, m.ApplyStatic(ctx, policy.DefaultDenyPolicy()))
+				}
+				require.True(t, m.lastDrops.MatchesFlow(addr, 443), "port never reallowed, stage %d", i)
+				require.Equal(t, tt.cutSibling, m.lastDrops.MatchesFlow(addr, 8443), "sibling, stage %d", i)
+			}
+			require.NoError(t, m.ApplyStatic(ctx, old))
+			grant()
+			require.NoError(t, m.ApplyStatic(ctx, old))
+			require.False(t, m.lastDrops.MatchesFlow(addr, 443), "a fresh live grant reallows the stream")
+		})
+	}
+}
+
+// Measure the full ruleset built on the next plain reload, not the preceding
+// opt-in snapshot. The address history is prepared outside the timed loop.
+func BenchmarkBuildRulesetRemovedDNS(b *testing.B) {
 	for _, count := range []int{1024, 4096, 8192} {
 		b.Run(strconv.Itoa(count), func(b *testing.B) {
-			ips := make([]netip.Addr, count)
-			for i := range ips {
-				ips[i] = netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
+			p, history, base := removedDNSBenchmarkPlan(count)
+			base.captureExactTCP(nil, p, history, nil)
+			carried := base.stillRelevant(p, p, nil, nil, nil)
+			var size int
+			b.ReportAllocs()
+			for b.Loop() {
+				script, err := buildRuleset(p, Options{}, carried)
+				if err != nil {
+					b.Fatal(err)
+				}
+				size = len(script)
 			}
-			history := map[string][]netip.Addr{"removed.example": ips}
-			base := ComputeEstablishedDrops(nil, p, history)
+			b.ReportMetric(float64(size), "script-B")
+		})
+	}
+}
+
+func removedDNSBenchmarkPlan(count int) (*policy.NetworkPolicy, map[string][]netip.Addr, EstablishedDrops) {
+	p := policy.DefaultDenyPolicy()
+	ips := make([]netip.Addr, count)
+	for i := range ips {
+		ips[i] = netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
+	}
+	history := map[string][]netip.Addr{"removed.example": ips}
+	return p, history, ComputeEstablishedDrops(nil, p, history)
+}
+
+func BenchmarkCaptureExactTCPRemovedDNS(b *testing.B) {
+	for _, count := range []int{1024, 4096, 8192} {
+		b.Run(strconv.Itoa(count), func(b *testing.B) {
+			p, history, base := removedDNSBenchmarkPlan(count)
 			b.ReportAllocs()
 			for b.Loop() {
 				d := base
-				d.captureExactTCP(nil, p, nil)
+				d.captureExactTCP(nil, p, history, nil)
 			}
 		})
 	}

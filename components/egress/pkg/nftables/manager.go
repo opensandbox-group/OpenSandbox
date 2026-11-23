@@ -184,7 +184,7 @@ func (m *Manager) applyStaticDropEstablished(ctx context.Context, p *policy.Netw
 	defer m.mu.Unlock()
 	fixedDrops := func(_ time.Time, leases map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 		result := drops
-		result.captureExactTCP(nil, p, leases)
+		result.captureExactTCP(nil, p, nil, leases)
 		return result, time.Time{}
 	}
 	return m.applyStaticDropEstablishedLocked(ctx, p, fixedDrops, flows, m.now())
@@ -209,7 +209,7 @@ func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldP
 	buildDrops := func(at time.Time, leases map[netip.Addr]time.Time) (EstablishedDrops, time.Time) {
 		prior, live := m.snapshotResolvedDomainsLocked(at)
 		drops := computeEstablishedDrops(oldPol, newPol, prior, live)
-		drops.captureExactTCP(oldPol, newPol, leases)
+		drops.captureExactTCP(oldPol, newPol, prior, leases)
 		return drops, time.Time{}
 	}
 	return m.applyStaticDropEstablishedLocked(ctx, newPol, buildDrops, flows, m.now())

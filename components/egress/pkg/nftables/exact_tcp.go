@@ -209,11 +209,11 @@ func compiledTCP(ports []EstablishedPortDrop) tcpTargets {
 
 // Capture the verdict of the opt-in rules actually installed, including scoped
 // denies in front of a whole-address allow or of a live DNS grant.
-func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, leases map[netip.Addr]time.Time) {
+func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, history map[string][]netip.Addr, leases map[netip.Addr]time.Time) {
 	if d.Empty() {
 		return
 	}
-	subjects := d.exactSubjects(old, p)
+	subjects := d.exactSubjects(old, p, history, leases)
 	if len(subjects) == 0 {
 		return
 	}
@@ -231,8 +231,20 @@ func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, leases 
 // Discover subjects, not verdicts. A named host can be denied by any bucket
 // (including CatchAll). Keep derived singleton targets and DNS addresses;
 // never expand a multi-address prefix to discover hosts.
-func (d EstablishedDrops) exactSubjects(old, next *policy.NetworkPolicy) map[netip.Addr]struct{} {
+func (d EstablishedDrops) exactSubjects(old, next *policy.NetworkPolicy, history map[string][]netip.Addr, leases map[netip.Addr]time.Time) map[netip.Addr]struct{} {
 	hosts := make(map[netip.Addr]struct{}, len(d.Addrs))
+	// A CIDR verdict can filter a DNS address out of both KeepAddrs and
+	// Addrs. DNS evidence identifies a subject, not an established permit.
+	for _, ips := range history {
+		for _, ip := range ips {
+			if ip.IsValid() {
+				hosts[ip.Unmap()] = struct{}{}
+			}
+		}
+	}
+	for a := range leases {
+		hosts[a] = struct{}{}
+	}
 	for _, as := range [][]netip.Addr{d.Addrs, d.DenyAddrs, d.KeepAddrs} {
 		for _, a := range as {
 			hosts[a] = struct{}{}
@@ -372,6 +384,11 @@ func (d EstablishedDrops) snapshotTCP(p *policy.NetworkPolicy) func(netip.Addr, 
 }
 
 func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow, deny tcpTargets, priorDNS, leases map[netip.Addr]time.Time) exactTCP {
+	// Nothing in the new TCP policy can carry a block. In particular,
+	// do not walk old CIDR denies for every previously learned DNS address.
+	if p.DefaultAction == policy.ActionAllow && len(deny) == 0 {
+		return nil
+	}
 	allows, denies := allow.indexed(), deny.indexed()
 	reclassify := func(a netip.Addr, prev tcpWithdrawal) tcpWithdrawal {
 		blocked := prev.explicit.union(prev.implicit)
@@ -389,23 +406,35 @@ func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow
 	// A host first named on a plain reload also inherits the prior effective
 	// verdict, even when its new rule is an allow beneath a broader deny.
 	var snapshot func(netip.Addr, bool) (tcpWithdrawal, bool)
-	for _, targets := range [2]snapshotTargets{allows, denies} {
-		for a := range targets.exact {
-			if _, tracked := out[a]; tracked {
-				continue
-			}
-			if snapshot == nil {
-				snapshot = d.snapshotTCP(previous)
-			}
-			_, admitted := priorDNS[a]
-			prev, affected := snapshot(a, admitted)
-			if !affected {
-				continue
-			}
+	consider := func(a netip.Addr) {
+		if _, tracked := out[a]; tracked {
+			return
+		}
+		if snapshot == nil {
+			snapshot = d.snapshotTCP(previous)
+		}
+		_, admitted := priorDNS[a]
+		prev, affected := snapshot(a, admitted)
+		if affected {
 			next := reclassify(a, prev)
 			if len(next.explicit)+len(next.implicit) != 0 {
 				out[a] = next
 			}
+		}
+	}
+	for _, targets := range [2]snapshotTargets{allows, denies} {
+		for a := range targets.exact {
+			consider(a)
+		}
+	}
+	// DNS can first identify an address between policy updates. Use the
+	// installed verdict to distinguish an actual reallow from a masked grant.
+	for a := range priorDNS {
+		consider(a)
+	}
+	for a := range leases {
+		if _, known := priorDNS[a]; !known {
+			consider(a)
 		}
 	}
 	return out
@@ -470,14 +499,24 @@ func (d EstablishedDrops) carryExplicitTCP(current tcpTargets, retainedWhole []n
 	return out
 }
 
-// A tracked host needs a TCP remainder accept only if a legacy late drop
-// could still catch it. Track the host even when this rule is unnecessary.
-func (d EstablishedDrops) needsTCPRemainder(addr netip.Addr) bool {
-	if targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, addr, 0) {
-		return false
+// Reuse the sorted literal address buckets from stillRelevant. Index the
+// remaining rule targets once per render; only their addresses matter here.
+type remainderTargets struct {
+	addrs []netip.Addr
+	other snapshotTargets
+}
+
+func makeRemainderTargets(addrs []netip.Addr, prefixes []netip.Prefix, ports []EstablishedPortDrop) remainderTargets {
+	other := indexSnapshotTargets(nil, nil, prefixes)
+	for _, rule := range ports {
+		other.add(dropTCPPrefix(rule), allTCP)
 	}
-	return d.CatchAll || targetsMatch(d.Addrs, d.Prefixes, nil, addr, 0) ||
-		slices.ContainsFunc(d.PortDrops, func(drop EstablishedPortDrop) bool { return portDropCoversAddr(drop, addr) })
+	return remainderTargets{addrs, other}
+}
+
+func (s remainderTargets) matches(addr netip.Addr) bool {
+	_, found := slices.BinarySearchFunc(s.addrs, addr, netip.Addr.Compare)
+	return found || len(s.other.at(addr)) != 0
 }
 
 func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool, covered tcpTargets) {
@@ -498,6 +537,13 @@ func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool, cover
 	var rules []group
 	var tracked [2][]netip.Addr
 	seed := maphash.MakeSeed()
+	var keep, removed remainderTargets
+	if !explicit && (d.CatchAll || len(d.Addrs)+len(d.Prefixes)+len(d.PortDrops) != 0) {
+		keep = makeRemainderTargets(d.KeepAddrs, d.KeepPrefixes, nil)
+		if !d.CatchAll {
+			removed = makeRemainderTargets(d.Addrs, d.Prefixes, d.PortDrops)
+		}
+	}
 	for a, host := range d.exact {
 		spans := host.implicit
 		if explicit {
@@ -509,7 +555,7 @@ func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool, cover
 					spans = spans.subtract(rule.spans)
 				}
 			}
-		} else if d.needsTCPRemainder(a) {
+		} else if (d.CatchAll || removed.matches(a)) && !keep.matches(a) {
 			if a.Is4() {
 				tracked[0] = append(tracked[0], a)
 			} else {
