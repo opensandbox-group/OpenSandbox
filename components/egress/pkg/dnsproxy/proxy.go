@@ -859,6 +859,49 @@ func ExpandInfraDomainNames(host, resolvPath string) []string {
 	return out
 }
 
+// HostsFileIPs returns the unique IP addresses mapped to host in hostsPath
+// (typically /etc/hosts, populated by Kubernetes spec.hostAliases or Docker
+// --add-host). Go's pure-Go resolver satisfies /etc/hosts matches locally
+// without issuing a DNS query, so forward mode seeds mark-scoped nft sets from
+// these addresses at startup. Missing or unreadable files return nil.
+func HostsFileIPs(host, hostsPath string) []netip.Addr {
+	target := normalizeDNSHost(strings.TrimSpace(host))
+	if target == "" {
+		return nil
+	}
+	data, err := os.ReadFile(hostsPath)
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	seen := make(map[netip.Addr]struct{})
+	for _, line := range strings.Split(string(data), "\n") {
+		if comment := strings.IndexByte(line, '#'); comment >= 0 {
+			line = line[:comment]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		addr, err := netip.ParseAddr(fields[0])
+		if err != nil || addr.Zone() != "" {
+			continue
+		}
+		addr = addr.Unmap()
+		for _, alias := range fields[1:] {
+			if normalizeDNSHost(alias) != target {
+				continue
+			}
+			if _, ok := seen[addr]; !ok {
+				seen[addr] = struct{}{}
+				out = append(out, addr)
+			}
+			break
+		}
+	}
+	return out
+}
+
 func normalizeDNSHost(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(domain, "."))
 }

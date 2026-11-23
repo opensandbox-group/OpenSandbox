@@ -154,6 +154,21 @@ func forwardTelemetryEndpoint() (*nftables.UpstreamProxyEndpoint, string) {
 	return ep, host
 }
 
+// buildForwardEndpoint builds the mark-scoped nftables endpoint for host:port.
+// Literal IPs populate IPs directly (isLiteral=true). Hostnames seed any
+// static /etc/hosts addresses (e.g. Kubernetes spec.hostAliases) because Go's
+// resolver answers those without hitting dnsproxy, while still returning
+// isLiteral=false so dnsproxy registers the hostname for DNS answers too.
+func buildForwardEndpoint(host string, port int, mark uint32, hostsPath string) (*nftables.UpstreamProxyEndpoint, bool) {
+	ep := &nftables.UpstreamProxyEndpoint{Port: port, Mark: mark}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		ep.IPs = []netip.Addr{ip.Unmap()}
+		return ep, true
+	}
+	ep.IPs = dnsproxy.HostsFileIPs(host, hostsPath)
+	return ep, false
+}
+
 // registerForwardInfraDomain registers host and every Pod resolv.conf
 // search-expanded candidate (e.g. Kubernetes ClusterFirst "gateway" →
 // "gateway.<ns>.svc.cluster.local") so dnsproxy populates the mark-scoped nft
@@ -173,6 +188,9 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 	log.Infof("enforcement mode: %s (gateway %s://%s:%d)", constants.PolicyForward, fm.gateway.Scheme, fm.gateway.Host, fm.gateway.Port)
 
 	telemetryEP, telemetryHost := forwardTelemetryEndpoint()
+	if telemetryEP != nil && len(telemetryEP.IPs) == 0 && telemetryHost != "" {
+		telemetryEP.IPs = dnsproxy.HostsFileIPs(telemetryHost, "/etc/hosts")
+	}
 	otelShutdown, err := telemetry.InitWithDialControl(ctx, forwarder.MarkControl(constants.TelemetryMarkValue))
 	if err != nil {
 		log.Warnf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
@@ -188,10 +206,7 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 		}()
 	}
 
-	ep := &nftables.UpstreamProxyEndpoint{Port: fm.gateway.Port, Mark: constants.ForwarderMarkValue}
-	if ip, err := netip.ParseAddr(fm.gateway.Host); err == nil {
-		ep.IPs = []netip.Addr{ip.Unmap()}
-	}
+	ep, gatewayIsLiteral := buildForwardEndpoint(fm.gateway.Host, fm.gateway.Port, constants.ForwarderMarkValue, "/etc/hosts")
 	nftMgr := nftables.NewManagerWithOptions(nftables.Options{
 		UpstreamProxy:       ep,
 		Telemetry:           telemetryEP,
@@ -211,7 +226,7 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 		log.Fatalf("failed to init dns proxy: %v", err)
 	}
 	proxy.SetRefusedFinal(fm.refusedFinal)
-	if len(ep.IPs) == 0 {
+	if !gatewayIsLiteral {
 		registerForwardInfraDomain(proxy, fm.gateway.Host, "/etc/resolv.conf", func(domain string, ips []nftables.ResolvedIP) {
 			addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -220,7 +235,7 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 			}
 		})
 	}
-	if telemetryEP != nil && len(telemetryEP.IPs) == 0 && telemetryHost != "" {
+	if telemetryEP != nil && telemetryHost != "" {
 		registerForwardInfraDomain(proxy, telemetryHost, "/etc/resolv.conf", func(domain string, ips []nftables.ResolvedIP) {
 			addCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

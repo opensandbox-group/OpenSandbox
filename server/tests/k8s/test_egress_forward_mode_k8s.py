@@ -492,6 +492,44 @@ class TestBatchSandboxForwardMode:
 
         mock_k8s_client.create_custom_object.assert_called_once()
 
+    def test_preserves_host_aliases_template_in_forward_mode(self, tmp_path, mock_k8s_client):
+        host_aliases = [{"ip": "10.20.30.40", "hostnames": ["gateway.private"]}]
+        tpl = tmp_path / "template.yaml"
+        tpl.write_text(
+            yaml.safe_dump({"spec": {"template": {"spec": {"hostAliases": host_aliases}}}})
+        )
+        provider = BatchSandboxProvider(
+            mock_k8s_client, _k8s_app_config(template_file=str(tpl))
+        )
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "sbx-1", "uid": "uid-1"}
+        }
+
+        provider.create_workload(
+            sandbox_id="sbx-1",
+            namespace="team-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["python"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=None,
+            execd_image="opensandbox/execd:test",
+            egress_settings=_forward_settings(
+                sandbox_namespace="team-ns",
+                upstream_proxy=EgressUpstreamProxyConfig(
+                    url="http://gateway.private:3128",
+                    authorization="Bearer test-token",
+                ),
+            ),
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pod_spec = body["spec"]["template"]["spec"]
+        assert pod_spec["hostAliases"] == host_aliases
+        egress_env = _env_map(pod_spec["containers"][1])
+        assert egress_env["OPENSANDBOX_EGRESS_UPSTREAM_PROXY"] == "http://gateway.private:3128"
+
     def test_rejects_pool_ref_in_forward_mode(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client, _k8s_app_config())
         req = _create_request(extensions={"poolRef": "warm-pool"})

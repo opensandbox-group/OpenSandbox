@@ -297,6 +297,45 @@ rm -f "${K8S_RESOLV}"
 K8S_RESOLV=""
 pass "bootstrap fence atomically replaced; ClusterFirst Service hostname resolved and namespace + tenant headers delivered"
 
+info "Test: Kubernetes hostAliases (/etc/hosts) gateway hostname resolves without DNS"
+docker run -d --name "${K8S_PAUSE}" \
+  --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=1 \
+  --add-host "gateway.private:${GATEWAY_IP}" \
+  "${PEER_IMG}" sleep infinity >/dev/null
+docker run -d --name "${K8S_EGRESS}" \
+  --network "container:${K8S_PAUSE}" \
+  --cap-add=NET_ADMIN \
+  -e OPENSANDBOX_EGRESS_MODE=forward \
+  -e OPENSANDBOX_EGRESS_UPSTREAM_PROXY="http://gateway.private:3128" \
+  -e OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH="${AUTH}" \
+  -e OPENSANDBOX_EGRESS_SANDBOX_ID="sbx-k8s-hosts-smoke" \
+  -e OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE="team-b" \
+  "${IMG}" >/dev/null
+docker run -d --name "${K8S_SANDBOX}" \
+  --network "container:${K8S_PAUSE}" \
+  --cap-drop NET_ADMIN --cap-drop NET_RAW \
+  -v "${FIXTURE}:/forward_smoke.py:ro" \
+  "${PEER_IMG}" sleep infinity >/dev/null
+K8S_API="$(ip_of "${K8S_PAUSE}"):18080"
+k8s_code=""
+for _ in $(seq 1 60); do
+  k8s_code="$(curl -s -o /dev/null -w '%{http_code}' "http://${K8S_API}/healthz" || true)"
+  [ "${k8s_code}" = "200" ] && break
+  sleep 0.5
+done
+[ "${k8s_code}" = "200" ] || fail "k8s egress /healthz via hostAliases (http://gateway.private:3128): want 200, last ${k8s_code}"
+k8s_hosts_body="$(docker exec "${K8S_SANDBOX}" python /forward_smoke.py client tcp "${ORIGIN_IP}" 80)" \
+  || fail "TCP 80 should succeed via hostAliases gateway"
+[ "${k8s_hosts_body}" = "origin-80" ] || fail "unexpected hostAliases body: ${k8s_hosts_body}"
+gateway_log | grep -F "\"target\": \"${ORIGIN_IP}:80\"" \
+  | grep -F '"sandbox_id": "sbx-k8s-hosts-smoke"' \
+  | grep -F '"namespace": "team-b"' \
+  | grep -qF '"status": 200' \
+  || fail "gateway did not log CONNECT for hostAliases gateway test"
+docker rm -f "${K8S_SANDBOX}" "${K8S_EGRESS}" "${K8S_PAUSE}" >/dev/null
+pass "hostAliases (/etc/hosts) gateway hostname seeded and relayed without DNS"
+
 info "Test: gateway outage turns /healthz unhealthy and never falls back"
 docker stop -t 1 "${GATEWAY}" >/dev/null
 wait_healthz 503 20

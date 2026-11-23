@@ -273,3 +273,31 @@ func TestServeDNSSearchExpandedInfraDomainFiresCallback(t *testing.T) {
 	require.Equal(t, netip.MustParseAddr("10.96.50.10"), gotIPs[0].Addr)
 	require.False(t, sandboxCalled)
 }
+
+func TestHostsFileIPs(t *testing.T) {
+	hostsPath := filepath.Join(t.TempDir(), "hosts")
+	err := os.WriteFile(hostsPath, []byte(
+		"# Kubernetes-managed hosts file.\n"+
+			"127.0.0.1\tlocalhost\n"+
+			"10.20.30.40\tgateway.private gateway-alias # hostAliases entry\n"+
+			"fd00::40\tGATEWAY.PRIVATE.\n"+
+			"10.20.30.40\tgateway.private\n"+ // duplicate
+			"fe80::1%eth0\tgateway.private\n"+ // zoned address ignored
+			"10.20.30.41\tother.private\n",
+	), 0o600)
+	require.NoError(t, err)
+
+	require.Equal(t, []netip.Addr{
+		netip.MustParseAddr("10.20.30.40"),
+		netip.MustParseAddr("fd00::40"),
+	}, HostsFileIPs("gateway.private", hostsPath))
+	require.Equal(t, []netip.Addr{
+		netip.MustParseAddr("10.20.30.40"),
+		netip.MustParseAddr("fd00::40"),
+	}, HostsFileIPs("gateway.private.", hostsPath))
+	require.Equal(t, []netip.Addr{
+		netip.MustParseAddr("10.20.30.40"),
+	}, HostsFileIPs("gateway-alias", hostsPath))
+	require.Empty(t, HostsFileIPs("unlisted.private", hostsPath))
+	require.Empty(t, HostsFileIPs("gateway.private", filepath.Join(t.TempDir(), "missing")))
+}

@@ -215,3 +215,22 @@ func TestForwardTelemetryEndpoint(t *testing.T) {
 		require.Empty(t, host)
 	})
 }
+
+func TestBuildForwardEndpointSeedsHostsFileIPs(t *testing.T) {
+	hostsPath := filepath.Join(t.TempDir(), "hosts")
+	require.NoError(t, os.WriteFile(hostsPath, []byte("10.20.30.40 gateway.private\n"), 0o600))
+
+	ep, isLiteral := buildForwardEndpoint("gateway.private", 3128, constants.ForwarderMarkValue, hostsPath)
+	require.False(t, isLiteral)
+	require.Equal(t, 3128, ep.Port)
+	require.Equal(t, uint32(constants.ForwarderMarkValue), ep.Mark)
+	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.20.30.40")}, ep.IPs)
+
+	epLit, isLiteral := buildForwardEndpoint("10.20.30.40", 3128, constants.ForwarderMarkValue, hostsPath)
+	require.True(t, isLiteral)
+	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.20.30.40")}, epLit.IPs)
+
+	epDNSOnly, isLiteral := buildForwardEndpoint("gateway.svc.cluster.local", 3128, constants.ForwarderMarkValue, hostsPath)
+	require.False(t, isLiteral)
+	require.Empty(t, epDNSOnly.IPs)
+}
