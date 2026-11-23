@@ -28,6 +28,7 @@ from kubernetes.client import ApiException
 
 from opensandbox_server.config import (
     AppConfig,
+    EGRESS_MODE_FORWARD,
     INGRESS_MODE_GATEWAY,
 )
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
@@ -35,7 +36,10 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     SandboxErrorCodes,
 )
-from opensandbox_server.services.helpers import format_ingress_endpoint
+from opensandbox_server.services.helpers import (
+    format_ingress_endpoint,
+    is_egress_forward_mode,
+)
 from opensandbox_server.api.schema import (
     AllocationSummary,
     CreateSandboxRequest,
@@ -56,7 +60,10 @@ from opensandbox_server.services.k8s.client import (
     POOL_AUTO_ASSIGN_REF,
     POOL_PLURAL,
 )
-from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
+from opensandbox_server.services.k8s.egress_helper import (
+    apply_egress_to_spec,
+    validate_forward_mode_pod_spec,
+)
 from opensandbox_server.services.k8s.workload_mapper import (
     allocated_pod_names,
     extract_confirmed_pool_allocation_from_workload,
@@ -145,6 +152,7 @@ class BatchSandboxProvider(WorkloadProvider):
         )
         self.k8s_client = k8s_client
         self.ingress_config = app_config.ingress if app_config else None
+        self.egress_config = app_config.egress if app_config else None
 
         k8s_config = app_config.kubernetes if app_config else None
         template_file_path = k8s_config.batchsandbox_template_file if k8s_config else None
@@ -231,6 +239,17 @@ class BatchSandboxProvider(WorkloadProvider):
         pool_ref = (request.extensions or {}).get("poolRef", "").strip()
         if not pool_ref:
             return
+        if is_egress_forward_mode(self.egress_config):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        'Pool mode (extensions.poolRef) is not supported when egress.mode = "forward" '
+                        "because pooled pods are pre-created without per-sandbox egress attachment."
+                    ),
+                },
+            )
         if request.network_policy is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -351,6 +370,10 @@ class BatchSandboxProvider(WorkloadProvider):
                     "Remove 'volumes' from request or use template mode."
                 )
             if egress_settings is not None:
+                if egress_settings.mode == EGRESS_MODE_FORWARD:
+                    raise ValueError(
+                        'Pool mode (extensions.poolRef) is not supported when egress.mode = "forward".'
+                    )
                 raise ValueError(
                     "Pool mode does not support networkPolicy. "
                     "Remove 'networkPolicy' from request or use template mode."
@@ -376,6 +399,12 @@ class BatchSandboxProvider(WorkloadProvider):
             validate_windows_profile_resource_limits(resource_limits)
 
         has_egress = egress_settings is not None
+        is_forward = egress_settings is not None and egress_settings.mode == EGRESS_MODE_FORWARD
+        if is_forward and windows_profile:
+            raise ValueError(
+                'Windows sandbox profile is not supported when egress.mode = "forward": '
+                "it requires privileged mode, NET_ADMIN, and NET_RAW"
+            )
         disable_ipv6_for_egress = (
             egress_settings.disable_ipv6 if egress_settings is not None else False
         )
@@ -398,6 +427,7 @@ class BatchSandboxProvider(WorkloadProvider):
             env=main_env,
             resource_limits=resource_limits,
             has_network_policy=has_egress,
+            drop_net_raw=is_forward,
             isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
             image_pull_policy=self.image_pull_policy,
             resource_requests=resource_requests or None,
@@ -463,6 +493,7 @@ class BatchSandboxProvider(WorkloadProvider):
             egress_settings=egress_settings,
             sandbox_id=sandbox_id,
             pod_volumes=pod_spec["volumes"],
+            init_containers=pod_spec["initContainers"],
         )
 
         if volumes:
@@ -500,11 +531,23 @@ class BatchSandboxProvider(WorkloadProvider):
         self._merge_pod_spec_extras(
             batchsandbox, extra_volumes, extra_mounts, extra_security_context
         )
-        merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
+        merged_spec = batchsandbox.get("spec") or {}
+        merged_pod_spec = merged_spec.get("template", {}).get("spec", {})
         ensure_egress_runtime_compatible(
             egress_settings.network_policy if egress_settings is not None else None,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
+            egress_required=egress_settings is not None,
         )
+        if is_forward:
+            if merged_spec.get("poolRef"):
+                raise ValueError(
+                    'BatchSandbox template cannot set spec.poolRef when egress.mode = "forward"'
+                )
+            if merged_spec.get("shardPatches"):
+                raise ValueError(
+                    'BatchSandbox template cannot set spec.shardPatches when egress.mode = "forward"'
+                )
+            validate_forward_mode_pod_spec(merged_pod_spec)
         if platform is not None and not windows_profile:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
 

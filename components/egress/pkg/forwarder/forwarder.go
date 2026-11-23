@@ -69,6 +69,9 @@ type Config struct {
 	Identity      Identity
 	// Mark is set as SO_MARK on every gateway socket (Linux only).
 	Mark int
+	// ResolveHost, when set, resolves Host into literal IPs instead of letting
+	// net.Dialer read the Pod's workload-writable /etc/hosts and /etc/resolv.conf.
+	ResolveHost func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
 // Forwarder relays accepted connections to the gateway.
@@ -80,6 +83,7 @@ type Forwarder struct {
 	// Seams for tests; production uses the Linux socket options.
 	originalDst func(net.Conn) (netip.AddrPort, error)
 	dialGateway func(ctx context.Context) (net.Conn, error)
+	resolveHost func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
 // New validates cfg and returns a Forwarder.
@@ -114,9 +118,16 @@ func New(cfg Config) (*Forwarder, error) {
 		dialTimeout:      defaultDialTimeout,
 		handshakeTimeout: defaultHandshakeTimeout,
 		originalDst:      originalDst,
+		resolveHost:      cfg.ResolveHost,
 	}
 	f.dialGateway = f.dialGatewayConn
 	return f, nil
+}
+
+// SetResolveHost configures the host resolver used before dialing the gateway.
+// Must be called before Serve or ProbeGateway.
+func (f *Forwarder) SetResolveHost(fn func(ctx context.Context, host string) ([]netip.Addr, error)) {
+	f.resolveHost = fn
 }
 
 // ValidateIdentityValue accepts empty or printable ASCII without whitespace
@@ -235,7 +246,28 @@ func (f *Forwarder) ProbeGateway(ctx context.Context) error {
 
 func (f *Forwarder) dialGatewayConn(ctx context.Context) (net.Conn, error) {
 	d := &net.Dialer{Timeout: f.dialTimeout, Control: MarkControl(f.cfg.Mark)}
-	conn, err := d.DialContext(ctx, "tcp", f.gatewayAddr)
+	var (
+		conn net.Conn
+		err  error
+	)
+	if f.resolveHost != nil {
+		dialCtx, cancel := context.WithTimeout(ctx, f.dialTimeout)
+		ips, resolveErr := f.resolveHost(dialCtx, f.cfg.Host)
+		if resolveErr != nil {
+			cancel()
+			return nil, resolveErr
+		}
+		if len(ips) == 0 {
+			cancel()
+			return nil, fmt.Errorf("resolve %q: no addresses found", f.cfg.Host)
+		}
+		conn, err = dialResolvedAddrs(dialCtx, f.dialTimeout, ips, f.cfg.Port, func(attemptCtx context.Context, addr string) (net.Conn, error) {
+			return d.DialContext(attemptCtx, "tcp", addr)
+		})
+		cancel()
+	} else {
+		conn, err = d.DialContext(ctx, "tcp", f.gatewayAddr)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +286,49 @@ func (f *Forwarder) dialGatewayConn(ctx context.Context) (net.Conn, error) {
 		return nil, fmt.Errorf("gateway TLS handshake: %w", err)
 	}
 	return tlsConn, nil
+}
+
+// dialResolvedAddrs tries each literal IP in order while apportioning the
+// remaining deadline across attempts so a single blackholed address cannot
+// consume the entire probe/dial budget before later addresses are tried.
+func dialResolvedAddrs(
+	ctx context.Context,
+	dialTimeout time.Duration,
+	ips []netip.Addr,
+	port int,
+	dial func(ctx context.Context, addr string) (net.Conn, error),
+) (net.Conn, error) {
+	deadline := time.Now().Add(dialTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	portStr := strconv.Itoa(port)
+	var lastErr error
+	for i, ip := range ips {
+		now := time.Now()
+		remaining := deadline.Sub(now)
+		if remaining <= 0 {
+			if lastErr == nil {
+				lastErr = context.DeadlineExceeded
+			}
+			break
+		}
+		attemptDeadline := deadline
+		if i < len(ips)-1 {
+			attemptDeadline = now.Add(remaining / time.Duration(len(ips)-i))
+		}
+		attemptCtx, cancel := context.WithDeadline(ctx, attemptDeadline)
+		conn, err := dial(attemptCtx, net.JoinHostPort(ip.Unmap().String(), portStr))
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
 }
 
 type closeWriter interface {

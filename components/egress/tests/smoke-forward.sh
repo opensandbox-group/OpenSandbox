@@ -44,7 +44,7 @@ info() { echo "[$(date +%H:%M:%S)] $*"; }
 pass() { info "PASS: $*"; }
 fail() {
   echo "FAIL: $*" >&2
-  for c in "${EGRESS}" "${GATEWAY}" "${ORIGIN}"; do
+  for c in "${EGRESS}" "${GATEWAY}" "${ORIGIN}" "${K8S_EGRESS}" "${K8S_DNS}"; do
     echo "----- docker logs ${c} -----" >&2
     docker logs "${c}" >&2 2>&1 || true
   done
@@ -52,9 +52,20 @@ fail() {
 }
 
 BAD_EGRESS="${PREFIX}-bad-config"
+K8S_DNS="${PREFIX}-k8s-dns"
+K8S_PAUSE="${PREFIX}-k8s-pause"
+K8S_SANDBOX="${PREFIX}-k8s-sandbox"
+K8S_EGRESS="${PREFIX}-k8s-egress"
+K8S_RESOLV=""
+K8S_HOSTS=""
+K8S_SNAP=""
 
 cleanup() {
-  docker rm -f "${SANDBOX}" "${EGRESS}" "${GATEWAY}" "${ORIGIN}" "${BAD_EGRESS}" >/dev/null 2>&1 || true
+  docker rm -f "${SANDBOX}" "${EGRESS}" "${GATEWAY}" "${ORIGIN}" "${BAD_EGRESS}" \
+    "${K8S_SANDBOX}" "${K8S_EGRESS}" "${K8S_PAUSE}" "${K8S_DNS}" >/dev/null 2>&1 || true
+  [ -n "${K8S_RESOLV}" ] && rm -f "${K8S_RESOLV}" || true
+  [ -n "${K8S_HOSTS}" ] && rm -f "${K8S_HOSTS}" || true
+  [ -n "${K8S_SNAP}" ] && rm -rf "${K8S_SNAP}" || true
 }
 trap cleanup EXIT
 cleanup
@@ -199,6 +210,218 @@ info "Test: policy API is disabled"
 code="$(curl -s -o /dev/null -w '%{http_code}' -XPOST "http://${EGRESS_API}/policy" -d '{"defaultAction":"allow"}')"
 [ "${code}" = "409" ] || fail "POST /policy: want 409, got ${code}"
 pass "policy API returns 409"
+
+info "Test: K8s bootstrap fence + init resolver snapshot resists shared /etc/hosts & /etc/resolv.conf tampering (ClusterFirst DNS)"
+docker run -d --name "${K8S_DNS}" \
+  -v "${FIXTURE}:/forward_smoke.py:ro" \
+  "${PEER_IMG}" python -u /forward_smoke.py dns "gateway.team-a.svc.cluster.local=${GATEWAY_IP}" >/dev/null
+K8S_DNS_IP="$(ip_of "${K8S_DNS}")"
+for _ in $(seq 1 40); do
+  docker logs "${K8S_DNS}" 2>&1 | grep -q '"event": "listening"' && break
+  sleep 0.2
+done
+docker logs "${K8S_DNS}" 2>&1 | grep -q '"event": "listening"' || fail "k8s dns did not start listening"
+K8S_RESOLV="$(mktemp "${SCRIPT_DIR}/.smoke-forward-resolv.XXXXXX")"
+K8S_HOSTS="$(mktemp "${SCRIPT_DIR}/.smoke-forward-hosts.XXXXXX")"
+K8S_SNAP="$(mktemp -d "${SCRIPT_DIR}/.smoke-forward-snap.XXXXXX")"
+chmod 644 "${K8S_RESOLV}" "${K8S_HOSTS}"
+cat > "${K8S_RESOLV}" <<EOF
+nameserver ${K8S_DNS_IP}
+search team-a.svc.cluster.local svc.cluster.local cluster.local
+options ndots:5
+EOF
+cat > "${K8S_HOSTS}" <<EOF
+127.0.0.1 localhost
+EOF
+
+docker run -d --name "${K8S_PAUSE}" \
+  --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=1 \
+  -p 127.0.0.1::18080 \
+  "${PEER_IMG}" sleep infinity >/dev/null
+docker run --rm --network "container:${K8S_PAUSE}" --cap-add=NET_ADMIN \
+  -v "${K8S_HOSTS}:/etc/hosts" \
+  -v "${K8S_RESOLV}:/etc/resolv.conf" \
+  -v "${K8S_SNAP}:/run/opensandbox-egress" \
+  --entrypoint /bin/sh "${IMG}" -c '
+set -eu
+cp /etc/hosts /run/opensandbox-egress/hosts
+cp /etc/resolv.conf /run/opensandbox-egress/resolv.conf
+chmod 0444 /run/opensandbox-egress/hosts /run/opensandbox-egress/resolv.conf
+nft -f - <<EOF
+table inet opensandbox
+delete table inet opensandbox
+table inet opensandbox {
+  chain egress {
+    type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+  }
+}
+EOF
+'
+# Start workload BEFORE egress, sharing writable /etc/hosts and /etc/resolv.conf
+# just like a Kubernetes Pod (snapshot dir is NOT mounted into workload).
+docker run -d --name "${K8S_SANDBOX}" \
+  --network "container:${K8S_PAUSE}" \
+  --cap-drop NET_ADMIN --cap-drop NET_RAW \
+  -v "${K8S_HOSTS}:/etc/hosts" \
+  -v "${K8S_RESOLV}:/etc/resolv.conf" \
+  -v "${FIXTURE}:/forward_smoke.py:ro" \
+  "${PEER_IMG}" python -u /forward_smoke.py sink 3128 >/dev/null
+for _ in $(seq 1 40); do
+  docker logs "${K8S_SANDBOX}" 2>&1 | grep -q '"event": "listening"' && break
+  sleep 0.2
+done
+
+before_fence="$(origin_log | grep -c -E '"event": "(tcp|udp)"' || true)"
+if docker exec "${K8S_SANDBOX}" python /forward_smoke.py client tcp "${ORIGIN_IP}" 80 >/dev/null 2>&1; then
+  fail "TCP succeeded under bootstrap default-deny fence before egress started"
+fi
+if docker exec "${K8S_SANDBOX}" python /forward_smoke.py client udp "${ORIGIN_IP}" 9999 >/dev/null 2>&1; then
+  fail "UDP succeeded under bootstrap default-deny fence before egress started"
+fi
+after_fence="$(origin_log | grep -c -E '"event": "(tcp|udp)"' || true)"
+[ "${before_fence}" = "${after_fence}" ] || fail "traffic reached origin before egress started"
+pass "bootstrap fence blocks TCP/UDP while egress is not yet started"
+
+# Root workload poisons shared /etc/hosts and /etc/resolv.conf BEFORE egress starts.
+docker exec "${K8S_SANDBOX}" sh -c '
+printf "127.0.0.1 localhost gateway\n" > /etc/hosts
+printf "nameserver 127.0.0.1\nsearch evil.invalid\n" > /etc/resolv.conf
+'
+
+docker run -d --name "${K8S_EGRESS}" \
+  --network "container:${K8S_PAUSE}" \
+  --cap-add=NET_ADMIN \
+  -v "${K8S_HOSTS}:/etc/hosts" \
+  -v "${K8S_RESOLV}:/etc/resolv.conf" \
+  -v "${K8S_SNAP}:/run/opensandbox-egress:ro" \
+  -e OPENSANDBOX_EGRESS_MODE=forward \
+  -e OPENSANDBOX_EGRESS_UPSTREAM_PROXY="http://gateway:3128" \
+  -e OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH="${AUTH}" \
+  -e OPENSANDBOX_EGRESS_SANDBOX_ID="sbx-k8s-smoke" \
+  -e OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE="team-a" \
+  -e OPENSANDBOX_EGRESS_TENANT_NAME="acme" \
+  "${IMG}" >/dev/null
+K8S_API="$(docker port "${K8S_PAUSE}" 18080/tcp | head -n1)"
+k8s_code=""
+for _ in $(seq 1 60); do
+  k8s_code="$(curl -s -o /dev/null -w '%{http_code}' "http://${K8S_API}/healthz" || true)"
+  [ "${k8s_code}" = "200" ] && break
+  sleep 0.5
+done
+[ "${k8s_code}" = "200" ] || fail "k8s egress /healthz via http://gateway:3128: want 200, last ${k8s_code}"
+docker logs "${K8S_DNS}" 2>&1 | grep -F '"qname": "gateway.team-a.svc.cluster.local"' | grep -qF '"rcode": 0' \
+  || fail "expected ClusterFirst search-expanded DNS query for gateway.team-a.svc.cluster.local"
+k8s_body="$(docker exec "${K8S_SANDBOX}" python /forward_smoke.py client tcp "${ORIGIN_IP}" 80)" \
+  || fail "TCP 80 should succeed after egress atomically replaces bootstrap fence"
+[ "${k8s_body}" = "origin-80" ] || fail "unexpected k8s body: ${k8s_body}"
+if docker logs "${K8S_SANDBOX}" 2>&1 | grep -q '"event": "sink_hit"'; then
+  fail "rogue loopback listener received forwarder connection after shared /etc/hosts poisoning"
+fi
+gateway_log | grep -F "\"target\": \"${ORIGIN_IP}:80\"" \
+  | grep -F '"sandbox_id": "sbx-k8s-smoke"' \
+  | grep -F '"namespace": "team-a"' \
+  | grep -F '"tenant": "acme"' \
+  | grep -F '"auth": true' \
+  | grep -qF '"status": 200' \
+  || fail "gateway did not log CONNECT with sandbox_id, namespace, and tenant"
+docker rm -f "${K8S_SANDBOX}" "${K8S_EGRESS}" "${K8S_PAUSE}" "${K8S_DNS}" >/dev/null
+rm -f "${K8S_RESOLV}" "${K8S_HOSTS}"
+rm -rf "${K8S_SNAP}"
+K8S_RESOLV=""
+K8S_HOSTS=""
+K8S_SNAP=""
+pass "bootstrap fence atomically replaced; ClusterFirst Service hostname isolated from tampered /etc/hosts & /etc/resolv.conf"
+
+info "Test: Kubernetes hostAliases (/etc/hosts) snapshot resists shared-hosts tampering before egress starts"
+K8S_RESOLV="$(mktemp "${SCRIPT_DIR}/.smoke-forward-resolv.XXXXXX")"
+K8S_HOSTS="$(mktemp "${SCRIPT_DIR}/.smoke-forward-hosts.XXXXXX")"
+K8S_SNAP="$(mktemp -d "${SCRIPT_DIR}/.smoke-forward-snap.XXXXXX")"
+chmod 644 "${K8S_RESOLV}" "${K8S_HOSTS}"
+cat > "${K8S_RESOLV}" <<EOF
+nameserver 127.0.0.1
+EOF
+cat > "${K8S_HOSTS}" <<EOF
+127.0.0.1 localhost
+${GATEWAY_IP} gateway.private
+EOF
+docker run -d --name "${K8S_PAUSE}" \
+  --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+  --sysctl net.ipv6.conf.default.disable_ipv6=1 \
+  -p 127.0.0.1::18080 \
+  "${PEER_IMG}" sleep infinity >/dev/null
+docker run --rm --network "container:${K8S_PAUSE}" --cap-add=NET_ADMIN \
+  -v "${K8S_HOSTS}:/etc/hosts" \
+  -v "${K8S_RESOLV}:/etc/resolv.conf" \
+  -v "${K8S_SNAP}:/run/opensandbox-egress" \
+  --entrypoint /bin/sh "${IMG}" -c '
+set -eu
+cp /etc/hosts /run/opensandbox-egress/hosts
+cp /etc/resolv.conf /run/opensandbox-egress/resolv.conf
+chmod 0444 /run/opensandbox-egress/hosts /run/opensandbox-egress/resolv.conf
+nft -f - <<EOF
+table inet opensandbox
+delete table inet opensandbox
+table inet opensandbox {
+  chain egress {
+    type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+  }
+}
+EOF
+'
+docker run -d --name "${K8S_SANDBOX}" \
+  --network "container:${K8S_PAUSE}" \
+  --cap-drop NET_ADMIN --cap-drop NET_RAW \
+  -v "${K8S_HOSTS}:/etc/hosts" \
+  -v "${K8S_RESOLV}:/etc/resolv.conf" \
+  -v "${FIXTURE}:/forward_smoke.py:ro" \
+  "${PEER_IMG}" python -u /forward_smoke.py sink 3128 >/dev/null
+for _ in $(seq 1 40); do
+  docker logs "${K8S_SANDBOX}" 2>&1 | grep -q '"event": "listening"' && break
+  sleep 0.2
+done
+# Root workload replaces the hostAliases entry with 127.0.0.1 BEFORE egress starts.
+docker exec "${K8S_SANDBOX}" sh -c 'printf "127.0.0.1 localhost gateway.private\n" > /etc/hosts'
+docker run -d --name "${K8S_EGRESS}" \
+  --network "container:${K8S_PAUSE}" \
+  --cap-add=NET_ADMIN \
+  -v "${K8S_HOSTS}:/etc/hosts" \
+  -v "${K8S_RESOLV}:/etc/resolv.conf" \
+  -v "${K8S_SNAP}:/run/opensandbox-egress:ro" \
+  -e OPENSANDBOX_EGRESS_MODE=forward \
+  -e OPENSANDBOX_EGRESS_UPSTREAM_PROXY="http://gateway.private:3128" \
+  -e OPENSANDBOX_EGRESS_UPSTREAM_PROXY_AUTH="${AUTH}" \
+  -e OPENSANDBOX_EGRESS_SANDBOX_ID="sbx-k8s-hosts-smoke" \
+  -e OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE="team-b" \
+  "${IMG}" >/dev/null
+K8S_API="$(docker port "${K8S_PAUSE}" 18080/tcp | head -n1)"
+k8s_code=""
+for _ in $(seq 1 60); do
+  k8s_code="$(curl -s -o /dev/null -w '%{http_code}' "http://${K8S_API}/healthz" || true)"
+  [ "${k8s_code}" = "200" ] && break
+  sleep 0.5
+done
+[ "${k8s_code}" = "200" ] || fail "k8s egress /healthz via hostAliases (http://gateway.private:3128): want 200, last ${k8s_code}"
+k8s_hosts_body="$(docker exec "${K8S_SANDBOX}" python /forward_smoke.py client tcp "${ORIGIN_IP}" 80)" \
+  || fail "TCP 80 should succeed via hostAliases gateway"
+[ "${k8s_hosts_body}" = "origin-80" ] || fail "unexpected hostAliases body: ${k8s_hosts_body}"
+if docker logs "${K8S_SANDBOX}" 2>&1 | grep -q '"event": "sink_hit"'; then
+  fail "rogue loopback listener received forwarder connection after hostAliases /etc/hosts poisoning"
+fi
+gateway_log | grep -F "\"target\": \"${ORIGIN_IP}:80\"" \
+  | grep -F '"sandbox_id": "sbx-k8s-hosts-smoke"' \
+  | grep -F '"namespace": "team-b"' \
+  | grep -qF '"status": 200' \
+  || fail "gateway did not log CONNECT for hostAliases gateway test"
+docker rm -f "${K8S_SANDBOX}" "${K8S_EGRESS}" "${K8S_PAUSE}" >/dev/null
+rm -f "${K8S_RESOLV}" "${K8S_HOSTS}"
+rm -rf "${K8S_SNAP}"
+K8S_RESOLV=""
+K8S_HOSTS=""
+K8S_SNAP=""
+pass "hostAliases (/etc/hosts) snapshot seeded and isolated from workload /etc/hosts tampering"
 
 info "Test: gateway outage turns /healthz unhealthy and never falls back"
 docker stop -t 1 "${GATEWAY}" >/dev/null

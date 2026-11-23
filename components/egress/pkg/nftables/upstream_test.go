@@ -159,3 +159,32 @@ func TestAddUpstreamProxyIPsNoopWhenUnset(t *testing.T) {
 	}))
 	require.False(t, called)
 }
+
+// Permanently seeded IPs (literal or /etc/hosts hostAliases) must not be
+// overwritten with timed elements if a stray DNS query resolves the same IP.
+func TestAddUpstreamProxyIPsPreservesStaticSeededIPs(t *testing.T) {
+	var scripts []string
+	m := NewManagerWithRunnerAndOptions(func(_ context.Context, script string) ([]byte, error) {
+		scripts = append(scripts, script)
+		return nil, nil
+	}, Options{
+		UpstreamProxy: &UpstreamProxyEndpoint{
+			Port: 3128,
+			Mark: 0x4,
+			IPs:  []netip.Addr{netip.MustParseAddr("10.20.30.40")},
+		},
+	})
+
+	require.NoError(t, m.AddUpstreamProxyIPs(context.Background(), []ResolvedIP{
+		{Addr: netip.MustParseAddr("10.20.30.40"), TTL: 30 * time.Second},
+	}))
+	require.Empty(t, scripts, "already-seeded static IP must not trigger timed replacement")
+
+	require.NoError(t, m.AddUpstreamProxyIPs(context.Background(), []ResolvedIP{
+		{Addr: netip.MustParseAddr("10.20.30.40"), TTL: 30 * time.Second},
+		{Addr: netip.MustParseAddr("10.20.30.41"), TTL: 30 * time.Second},
+	}))
+	require.Len(t, scripts, 1)
+	require.NotContains(t, scripts[0], "10.20.30.40")
+	expectContains(t, scripts[0], "add element inet opensandbox upstream_proxy_v4 { 10.20.30.41 timeout 90s }")
+}
