@@ -115,8 +115,8 @@ func newFastSandboxSubjectSession(cfg fastSandboxSubjectSessionConfig) (*fastSan
 	}
 	if cfg.tlsAdmission {
 		s.handoff.TLSAdmission = true
-		s.handoff.TLSCapacity = constants.EnvIntRange(constants.EnvFSBTLSCapacity, 32, 1, 1<<20)
-		s.handoff.ProcessTLSCapacity = constants.EnvIntRange(constants.EnvFSBProcessTLSCapacity, 131072, 1, 1<<20)
+		s.handoff.TLSCapacity = constants.EnvIntRange(constants.EnvFSBTLSCapacity, constants.DefaultFSBTLSCapacity, 1, 1<<20)
+		s.handoff.ProcessTLSCapacity = constants.EnvIntRange(constants.EnvFSBProcessTLSCapacity, constants.DefaultFSBProcessTLSCapacity, 1, 1<<20)
 		// Same operator setting, default and range as the sidecar live bundle.
 		s.handoff.DrainTimeoutSeconds = constants.EnvIntRange(constants.EnvRevisionDrainTimeoutSeconds, constants.DefaultRevisionDrainTimeoutSeconds, 1, 300)
 	}
