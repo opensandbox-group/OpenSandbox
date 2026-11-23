@@ -44,6 +44,8 @@ try {
     connectionConfig: config,
     image: "ubuntu",
     timeoutSeconds: 10 * 60,
+    // Total budget for endpoint publication and health checks (default 30s)
+    readyTimeoutSeconds: 30,
   });
 
   const execution = await sandbox.commands.run("echo 'Hello Sandbox!'");
@@ -205,11 +207,15 @@ const handlers: ExecutionHandlers = {
     console.log("Finished in", c.executionTimeMs, "ms"),
 };
 
-await sandbox.commands.run(
+const execution = await sandbox.commands.run(
   'for i in 1 2 3; do echo "Count $i"; sleep 0.2; done',
   undefined,
   handlers,
 );
+
+// Foreground runs carry exitCode: 0 on success, the command's exit status
+// on failure, -1 when terminated by a signal
+console.log("exitCode:", execution.exitCode);
 ```
 
 ### 4. Comprehensive File Operations

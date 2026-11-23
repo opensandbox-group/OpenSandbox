@@ -64,6 +64,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+Besides the base `SandboxException`, a rate-limited API raises `SandboxRateLimitException` (HTTP 429) carrying the server-supplied `retry_after` as a `timedelta`, so fast-fail callers can back off on schedule.
+
 ### Synchronous Quick Start
 
 If you prefer a synchronous API, use `SandboxSync` / `SandboxManagerSync` and `ConnectionConfigSync`:
@@ -339,6 +341,10 @@ result = await sandbox.commands.run(
     "for i in {1..5}; do echo \"Count $i\"; sleep 0.5; done",
     handlers=handlers
 )
+
+# Foreground runs carry an exit code: 0 on success, the command's exit
+# status on failure, and -1 when terminated by a signal
+print(f"exit_code: {result.exit_code}")
 ```
 
 ### 4. Comprehensive File Operations
