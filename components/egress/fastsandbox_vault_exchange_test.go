@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -446,4 +447,189 @@ func TestVaultSnapshotExchangeExportImportCarriesNoMaterial(t *testing.T) {
 	require.Equal(t, resumedName, served.Subject, "the resumed vault resolves under the restored fence's wire subject")
 
 	_ = s
+}
+
+// The real relay -> snapshot producer -> Unix IPC -> Python validator path
+// must acknowledge exchange bindings just as it acknowledges inline bindings.
+func TestFastSandboxSubjectExchangeReadiness(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	mutationPersistence(t, s)
+	readinessDrain(t, s)
+	readinessReceiver(t, s)
+	bindExchangeSubject(t, s, testUID, "exchange-sandbox", testIP, testFenceR, testFenceA, 1)
+	rec := doVault(t, s, http.MethodPost, testUID, exchangeVaultBody(deadResolverEndpoint), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	waitReadiness(t, s, testUID, testFenceR, testFenceA)
+	require.NotContains(t, s.subjectLifecycleDegraded(), "subject_prepare_rejected")
+}
+
+func TestFastSandboxSubjectExchangeResolveAdmission(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	mutationPersistence(t, s)
+	readinessDrain(t, s)
+	readinessReceiver(t, s)
+	subj := bindExchangeSubject(t, s, testUID, "exchange-sandbox", testIP, testFenceR, testFenceA, 1)
+	resolver := startFakeResolverServer(t, 0)
+	rec := doVault(t, s, http.MethodPost, testUID, exchangeVaultBody(resolver.endpoint()), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.subjectSnapshotAcknowledgedLocked(subj, subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
+	}, 5*time.Second, 5*time.Millisecond)
+	s.mu.Lock()
+	admission := credentialvault.ResolveAdmission{SubjectKey: string(subj), Revision: s.subjectDrain.acked[subj].identity}
+	s.mu.Unlock()
+	handler := resolveHandlerFor(s)
+	resolve := func(value credentialvault.ResolveAdmission, clientIP bool) *httptest.ResponseRecorder {
+		raw, err := json.Marshal(value)
+		require.NoError(t, err)
+		req := exchangeResolveRequest(testIP)
+		req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+		if clientIP {
+			req.URL.RawQuery += "&clientIp=" + testIP
+		}
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, req)
+		return result
+	}
+	// The wire subject comes from SET_BINDING, never the addon query.
+	for i := 0; i < 2; i++ {
+		result := resolve(admission, false)
+		require.Equal(t, http.StatusOK, result.Code, result.Body.String())
+		require.Equal(t, "exchange-sandbox", (<-resolver.requests).Subject)
+	}
+	require.Equal(t, http.StatusBadRequest, resolve(admission, true).Code)
+	for _, mutate := range []func(*credentialvault.ResolveAdmission){
+		func(a *credentialvault.ResolveAdmission) { a.SubjectKey = "s-other" },
+		func(a *credentialvault.ResolveAdmission) { a.Revision.ControlGeneration = "old-child" },
+		func(a *credentialvault.ResolveAdmission) { a.Revision.SubjectGeneration = "old-attachment" },
+		func(a *credentialvault.ResolveAdmission) { a.Revision.DecisionEpoch++ },
+		func(a *credentialvault.ResolveAdmission) { a.Revision.Digest = strings.Repeat("0", 64) },
+		func(a *credentialvault.ResolveAdmission) { a.Revision.VaultRevision++ },
+	} {
+		stale := admission
+		mutate(&stale)
+		require.Equal(t, http.StatusConflict, resolve(stale, false).Code)
+	}
+	// Policy/Vault updates cannot resolve using the retired request snapshot.
+	rec = doVault(t, s, http.MethodPut, testUID, exchangeVaultBody(resolver.endpoint()), "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.subjectSnapshotAcknowledgedLocked(subj, subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA})
+	}, 5*time.Second, 5*time.Millisecond)
+	require.Equal(t, http.StatusConflict, resolve(admission, false).Code)
+	require.Empty(t, resolver.requests)
+}
+
+// Fast-sandbox exchange currently fences the entire acknowledged decision
+// identity at the end of a resolver round trip. Even a policy-only update,
+// which leaves the Vault revision intact, invalidates an in-flight exchange.
+// This pins the documented limitation until exchange admission can retain
+// proven pre-transition authority without crossing a Vault incarnation.
+func TestFastSandboxSubjectExchangePolicyOnlyUpdateInvalidatesInFlight(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	mutationPersistence(t, s)
+	readinessDrain(t, s)
+	readinessReceiver(t, s)
+	subj := bindExchangeSubject(t, s, testUID, "exchange-sandbox", testIP, testFenceR, testFenceA, 1)
+	resolver := startFakeResolverServer(t, 0)
+	release := make(chan struct{})
+	resolver.release = release
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	rec := doVault(t, s, http.MethodPost, testUID, exchangeVaultBody(resolver.endpoint()), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	fence := subject.Fencing{RuntimeInstanceID: testFenceR, AttachmentID: testFenceA}
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.subjectSnapshotAcknowledgedLocked(subj, fence)
+	}, 5*time.Second, 5*time.Millisecond)
+	s.mu.Lock()
+	admission := credentialvault.ResolveAdmission{SubjectKey: string(subj), Revision: s.subjectDrain.acked[subj].identity}
+	s.mu.Unlock()
+	raw, err := json.Marshal(admission)
+	require.NoError(t, err)
+	req := exchangeResolveRequest(testIP)
+	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		result := httptest.NewRecorder()
+		resolveHandlerFor(s).ServeHTTP(result, req)
+		done <- result
+	}()
+	select {
+	case <-resolver.requests: // The resolver has accepted the pre-update request.
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolver was not called")
+	}
+	rec = doPolicy(t, s, http.MethodPut, testUID, policyPutDoc(policyAllow(), 0, false, false), "")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.subjectSnapshotAcknowledgedLocked(subj, fence) &&
+			s.subjectDrain.acked[subj].identity.PolicyEpoch > admission.Revision.PolicyEpoch
+	}, 5*time.Second, 5*time.Millisecond)
+	s.mu.Lock()
+	current := s.subjectDrain.acked[subj].identity
+	s.mu.Unlock()
+	require.Equal(t, admission.Revision.VaultRevision, current.VaultRevision, "a policy-only write preserves the Vault revision")
+	close(release)
+	select {
+	case result := <-done:
+		require.Equal(t, http.StatusConflict, result.Code, result.Body.String())
+		require.Equal(t, "resolution invalidated", strings.TrimSpace(result.Body.String()))
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight resolve did not complete")
+	}
+}
+
+// The addon pins the receiver's wire identity, not the coordinator-local
+// decision epoch. A rebind in the same child advances the transport's epoch
+// base, so an ACK stamped with the local identity denies every valid resolve.
+func TestFastSandboxSubjectExchangeRebindWireAdmission(t *testing.T) {
+	s, _, _ := fastSandboxTestServer(t)
+	mutationPersistence(t, s)
+	readinessDrain(t, s)
+	receiver := readinessReceiver(t, s)
+	resolver := startFakeResolverServer(t, 0)
+	bindExchangeSubject(t, s, testUID, "exchange-sandbox", testIP, testFenceR, testFenceA, 1)
+	rec := doVault(t, s, http.MethodPost, testUID, exchangeVaultBody(resolver.endpoint()), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	first := waitSubjectInstalled(t, receiver, lifecycleTarget(t, testUID, testFenceR, testFenceA), latestSubjectSnapshot(t, s, testUID))
+
+	const newRuntime, newAttachment = "exchange-next-runtime", "exchange-next-attachment"
+	rec = doAction(t, s, bindBodyWithName(t, testUID, "exchange-sandbox", testIP, newRuntime, newAttachment, 2, vaultAllowPolicy()))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doAction(t, s, hookBody(t, testUID, newRuntime, newAttachment, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doVault(t, s, http.MethodPost, testUID, exchangeVaultBody(resolver.endpoint()), "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	wire := waitSubjectInstalled(t, receiver, lifecycleTarget(t, testUID, newRuntime, newAttachment), latestSubjectSnapshot(t, s, testUID))
+	require.Greater(t, wire.DecisionEpoch, first.DecisionEpoch, "rebind must advance the receiver's epoch in the same child")
+	waitReadiness(t, s, testUID, newRuntime, newAttachment)
+
+	subj := subject.FromSandboxUID(testUID)
+	s.mu.Lock()
+	ack := s.subjectDrain.acked[subj].identity
+	s.mu.Unlock()
+	require.Equal(t, wire, ack, "the ACK must retain the wire identity seen by the addon")
+	admission := credentialvault.ResolveAdmission{SubjectKey: string(subj), Revision: wire}
+	raw, err := json.Marshal(admission)
+	require.NoError(t, err)
+	req := exchangeResolveRequest(testIP)
+	req.URL.RawQuery = "admission=" + url.QueryEscape(string(raw))
+	result := httptest.NewRecorder()
+	resolveHandlerFor(s).ServeHTTP(result, req)
+	require.Equal(t, http.StatusOK, result.Code, result.Body.String())
+	require.Equal(t, "exchange-sandbox", (<-resolver.requests).Subject)
 }

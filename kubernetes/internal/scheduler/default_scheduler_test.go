@@ -286,15 +286,7 @@ func Test_scheduleSingleTaskNode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sch := &defaultTaskScheduler{
-				allPods: []*corev1.Pod{{
-					ObjectMeta: metav1.ObjectMeta{Name: tt.args.tNode.PodName, UID: tt.args.tNode.PodUID},
-					Status:     corev1.PodStatus{PodIP: tt.args.tNode.IP},
-				}},
-				taskClientCreator: tt.args.taskClientCreator,
-				logger:            testLogger,
-			}
-			sch.scheduleSingleTaskNode(tt.args.tNode)
+			scheduleSingleTaskNode(tt.args.tNode, tt.args.taskClientCreator, "", testLogger)
 			if !reflect.DeepEqual(tt.expectTaskNode, tt.args.tNode) {
 				t.Errorf("scheduleSingleTaskNode, want %+v, got %+v", tt.expectTaskNode, tt.args.tNode)
 			}
@@ -888,8 +880,15 @@ func Test_collectTaskStatus_queryFailure(t *testing.T) {
 			if tNode.Status != tt.wantStatus {
 				t.Errorf("Status = %v, want %v", tNode.Status, tt.wantStatus)
 			}
-			if tNode.tState != RunningTaskState {
-				t.Errorf("tState = %v, want %v", tNode.tState, RunningTaskState)
+			wantState := RunningTaskState
+			if tt.wantStatus == nil {
+				wantState = FailedTaskState
+				if !tNode.IsResourceReleased() {
+					t.Error("missing pod's task must be released without a query")
+				}
+			}
+			if tNode.tState != wantState {
+				t.Errorf("tState = %v, want %v", tNode.tState, wantState)
 			}
 		})
 	}

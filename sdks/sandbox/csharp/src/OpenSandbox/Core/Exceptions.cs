@@ -25,6 +25,11 @@ public static class SandboxErrorCodes
     public const string InternalUnknownError = "INTERNAL_UNKNOWN_ERROR";
 
     /// <summary>
+    /// The foreground command stream ended without a completion or execution error event.
+    /// </summary>
+    public const string CommandStreamIncomplete = "COMMAND_STREAM_INCOMPLETE";
+
+    /// <summary>
     /// Timeout waiting for sandbox to become ready.
     /// </summary>
     public const string ReadyTimeout = "READY_TIMEOUT";

@@ -423,13 +423,7 @@ internal class IsolatedSessionsAdapter(
                 response.body?.byteStream()?.bufferedReader(Charsets.UTF_8)?.use { reader ->
                     val dispatcher = ExecutionEventDispatcher(execution, null)
                     ExecdEventSupport.eventLines(reader).forEach { line ->
-                        decodeEventLine(line)?.let { eventNode ->
-                            try {
-                                dispatcher.dispatch(eventNode)
-                            } catch (e: Exception) {
-                                logger.error("Failed to dispatch SSE event: {}", eventNode, e)
-                            }
-                        }
+                        decodeEventLine(line)?.let(dispatcher::dispatch)
                     }
                 }
             }

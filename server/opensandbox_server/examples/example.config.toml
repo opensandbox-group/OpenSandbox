@@ -41,6 +41,8 @@ level = "INFO"
 [runtime]
 type = "docker"
 execd_image = "opensandbox/execd:v1.1.0"
+# Set to the mounted TOML path inside sandboxes to reserve EXECD_ISOLATION_CONFIG.
+# execd_isolation_config = "/etc/opensandbox/isolation.toml"
 
 [storage]
 # Allowlist of host path prefixes permitted for bind mounts.

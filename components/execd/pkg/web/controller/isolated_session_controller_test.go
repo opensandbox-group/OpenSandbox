@@ -569,8 +569,11 @@ func TestIsolatedDownloadFile(t *testing.T) {
 		wantStatus  int
 		wantLength  string
 		wantType    string
+		wantBody    string
+		wantRange   string
 	}{
-		{rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantLength: "4", wantType: "application/octet-stream"},
+		{rangeHeader: "bytes=2-5", wantStatus: http.StatusPartialContent, wantLength: "4", wantType: "application/octet-stream", wantBody: "2345", wantRange: "bytes 2-5/10"},
+		{rangeHeader: "bytes=0-1,5-6", wantStatus: http.StatusOK, wantLength: "10", wantType: "application/octet-stream", wantBody: "0123456789"},
 		// A malformed Range gets a JSON 416 without the file's Content-Length.
 		{rangeHeader: "bytes=abc", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
 		{rangeHeader: "2-5", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantLength: "", wantType: "application/json; charset=utf-8"},
@@ -604,8 +607,13 @@ func TestIsolatedDownloadFile(t *testing.T) {
 				if got := rec.Header().Get("Content-Disposition"); got != "" {
 					t.Errorf("Content-Disposition = %q, want empty", got)
 				}
-			} else if got := rec.Body.String(); got != "2345" {
-				t.Errorf("body = %q, want 2345", got)
+			} else {
+				if got := rec.Body.String(); got != tt.wantBody {
+					t.Errorf("body = %q, want %q", got, tt.wantBody)
+				}
+				if got := rec.Header().Get("Content-Range"); got != tt.wantRange {
+					t.Errorf("Content-Range = %q, want %q", got, tt.wantRange)
+				}
 			}
 		})
 	}

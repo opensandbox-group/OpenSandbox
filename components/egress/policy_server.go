@@ -675,7 +675,38 @@ func (s *policyServer) handleCredentialVaultActive(w http.ResponseWriter, r *htt
 // resolveVaultAccess derives the sidecar resolve subject: the pod-injected
 // sandbox identity, never a protocol value. The store is the single vault;
 // the recheck derivation is byte-identical.
-func (s *policyServer) resolveVaultAccess(_ *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+func (s *policyServer) resolveVaultAccess(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	admission, err := credentialvault.ReadResolveAdmission(r)
+	if err != nil {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusBadRequest, Reason: "invalid resolve admission"}
+	}
+	var expected *int64
+	if admission != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		m := s.revisionMitmLocked()
+		valid := false
+		if admission.SubjectKey == "" && m != nil && !s.revisionRecoveryRequired.Load() {
+			m.mu.RLock()
+			if !m.stopping && m.running != nil {
+				if session, ok := m.revisionSession.(interface {
+					Coordinator() (*revision.Coordinator, error)
+				}); ok {
+					coordinator, e := session.Coordinator()
+					if e == nil {
+						confirmed, e := coordinator.Confirmed()
+						valid = e == nil && confirmed != nil && *confirmed == admission.Revision
+					}
+				}
+			}
+			m.mu.RUnlock()
+		}
+		if !valid {
+			return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusConflict, Reason: "resolution invalidated"}
+		}
+		expected = &admission.Revision.VaultRevision
+	}
+
 	sandboxID := strings.TrimSpace(os.Getenv(constants.EnvSandboxID))
 	if sandboxID == "" {
 		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
@@ -683,7 +714,7 @@ func (s *policyServer) resolveVaultAccess(_ *http.Request) (credentialvault.Reso
 			Reason: "sandbox identity unavailable",
 		}
 	}
-	return credentialvault.ResolveAccess{SandboxID: sandboxID, Store: s.credentialVault}, nil
+	return credentialvault.ResolveAccess{SandboxID: sandboxID, Store: s.credentialVault, ExpectedRevision: expected}, nil
 }
 
 func (s *policyServer) handleGet(w http.ResponseWriter) {

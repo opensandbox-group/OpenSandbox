@@ -288,6 +288,8 @@ RunCommandRequest request = RunCommandRequest.builder()
 sandbox.commands().run(request);
 ```
 
+If an execution handler throws an exception during command, command-session, or code execution, the SDK stops processing the stream and reports a `SandboxException` to the caller. A handler that throws a `SandboxException` passes that instance through. For other exceptions, the original exception is available as the cause. Catch recoverable errors inside the handler if execution events should continue to be processed.
+
 To execute a native program without shell parsing, pass an argument list. On Linux, this example prints literal `$HOME` and keeps `hello world` as one argument:
 
 ```java

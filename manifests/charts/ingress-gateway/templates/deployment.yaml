@@ -13,6 +13,27 @@
 # limitations under the License.
 
 {{- include "opensandbox-ingress-gateway.secureAccess.validate" . }}
+{{/* 兼容旧 values 缺少此节点，并按键回退以保留显式 0。 */}}
+{{- $httpPool := .Values.gateway.httpConnectionPool | default dict }}
+{{- $maxIdleConns := dig "maxIdleConns" 100 $httpPool }}
+{{- $maxIdleConnsPerHost := dig "maxIdleConnsPerHost" 2 $httpPool }}
+{{- $idleConnTimeout := dig "idleConnTimeout" "90s" $httpPool }}
+{{- if kindIs "invalid" $maxIdleConns }}
+{{- $maxIdleConns = 100 }}
+{{- end }}
+{{- if kindIs "invalid" $maxIdleConnsPerHost }}
+{{- $maxIdleConnsPerHost = 2 }}
+{{- end }}
+{{- if kindIs "invalid" $idleConnTimeout }}
+{{- $idleConnTimeout = "90s" }}
+{{- end }}
+{{/* 仅规范整数浮点数以避免科学计数法；非法输入保留给 flag 解析器拒绝。 */}}
+{{- if and (kindIs "float64" $maxIdleConns) (eq $maxIdleConns (floor $maxIdleConns)) }}
+{{- $maxIdleConns = int $maxIdleConns }}
+{{- end }}
+{{- if and (kindIs "float64" $maxIdleConnsPerHost) (eq $maxIdleConnsPerHost (floor $maxIdleConnsPerHost)) }}
+{{- $maxIdleConnsPerHost = int $maxIdleConnsPerHost }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -82,6 +103,16 @@ spec:
             - "--provider-type={{ .Values.gateway.providerType }}"
             - "--mode={{ .Values.gateway.gatewayRouteMode }}"
             - "--log-level={{ .Values.gateway.logLevel }}"
+            {{/* 默认发布镜像尚不支持新参数；仅传入偏离默认值的配置，显式 0 仍保留。 */}}
+            {{- if ne (toString $maxIdleConns) "100" }}
+            - "--http-max-idle-conns={{ $maxIdleConns }}"
+            {{- end }}
+            {{- if ne (toString $maxIdleConnsPerHost) "2" }}
+            - "--http-max-idle-conns-per-host={{ $maxIdleConnsPerHost }}"
+            {{- end }}
+            {{- if ne (toString $idleConnTimeout) "90s" }}
+            - "--http-idle-conn-timeout={{ $idleConnTimeout }}"
+            {{- end }}
             {{- if .Values.gateway.fastpathEndpoint }}
             # FastPath gRPC endpoint for the fast-sandbox provider.
             - "--fastpath-endpoint={{ .Values.gateway.fastpathEndpoint }}"

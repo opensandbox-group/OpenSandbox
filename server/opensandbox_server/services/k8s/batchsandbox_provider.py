@@ -95,6 +95,9 @@ logger = logging.getLogger(__name__)
 # the overrides in object metadata avoids incrementing spec.generation, which
 # is also used to acknowledge pause/resume requests.
 POD_LABEL_OVERRIDES_ANNOTATION = "sandbox.opensandbox.io/pod-label-overrides"
+# The overrides annotation is rewritten whole, so each write is fenced by the
+# resourceVersion it was merged from and retried on a conflict.
+POD_LABEL_OVERRIDES_WRITE_ATTEMPTS = 5
 
 
 _PUBLIC_STATE_BY_PHASE = {
@@ -170,20 +173,7 @@ class BatchSandboxProvider(WorkloadProvider):
         if not self.metadata_sync_pods or not patch or workload.get("spec", {}).get("poolRef"):
             return
         name = workload["metadata"]["name"]
-        # Persist the overlay on the BatchSandbox metadata, not spec.template:
-        # a spec generation bump can replay an already-failed pause request.
-        annotations = workload["metadata"].get("annotations") or {}
-        overrides = json.loads(annotations.get(POD_LABEL_OVERRIDES_ANNOTATION, "{}"))
-        if not isinstance(overrides, dict):
-            raise ValueError("invalid Pod label overrides annotation")
-        overrides.update(patch)
-        self.k8s_client.patch_custom_object(
-            group=self.group, version=self.version, namespace=namespace,
-            plural=self.plural, name=name,
-            body={"metadata": {"annotations": {
-                POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(overrides, sort_keys=True),
-            }}},
-        )
+        self._merge_pod_label_overrides(workload, namespace, patch)
         # The lifecycle server creates one replica; the controller names its Pod <name>-0.
         try:
             self.k8s_client.patch_pod_labels(namespace, f"{name}-0", patch)
@@ -193,6 +183,44 @@ class BatchSandboxProvider(WorkloadProvider):
             # The controller will apply the durable overlay when it creates
             # the missing Pod (including during pause/resume or replacement).
             logger.debug("Dedicated Pod %s-0 not present yet; label override persisted", name)
+
+    def _merge_pod_label_overrides(
+        self, workload: Dict[str, Any], namespace: str, patch: Dict[str, Optional[str]]
+    ) -> None:
+        """Merge ``patch`` into the overrides annotation without losing a concurrent write."""
+        # Persist the overlay on the BatchSandbox metadata, not spec.template:
+        # a spec generation bump can replay an already-failed pause request.
+        name = workload["metadata"]["name"]
+        for attempt in range(1, POD_LABEL_OVERRIDES_WRITE_ATTEMPTS + 1):
+            metadata = workload["metadata"]
+            annotations = metadata.get("annotations") or {}
+            overrides = json.loads(annotations.get(POD_LABEL_OVERRIDES_ANNOTATION, "{}"))
+            if not isinstance(overrides, dict):
+                raise ValueError("invalid Pod label overrides annotation")
+            overrides.update(patch)
+            try:
+                self.k8s_client.patch_custom_object(
+                    group=self.group, version=self.version, namespace=namespace,
+                    plural=self.plural, name=name,
+                    body={"metadata": {
+                        "resourceVersion": metadata["resourceVersion"],
+                        "annotations": {
+                            POD_LABEL_OVERRIDES_ANNOTATION: json.dumps(overrides, sort_keys=True),
+                        },
+                    }},
+                )
+                return
+            except ApiException as exc:
+                if exc.status != 409 or attempt == POD_LABEL_OVERRIDES_WRITE_ATTEMPTS:
+                    raise
+            # The informer may not have seen the write that caused the conflict.
+            current = self.k8s_client.get_custom_object(
+                group=self.group, version=self.version, namespace=namespace,
+                plural=self.plural, name=name, use_cache=False,
+            )
+            if current is None:
+                raise ApiException(status=404, reason=f"BatchSandbox {name} not found")
+            workload = current
 
     def supports_image_auth(self) -> bool:
         return True

@@ -1262,24 +1262,44 @@ def _resolve_request_headers(flow: http.HTTPFlow) -> dict[str, str]:
     the payload carries a single value while mitmproxy forwards every line
     upstream, so a repeated (or case-variant) identity would let the resolver
     sign a value the upstream cannot reconstruct. Over-cap fails closed.
+
+    The one exception is Cookie on HTTP/2 and HTTP/3, where clients may split
+    it into one line per pair (RFC 9113 8.2.3). Those crumbs have a single
+    joined form, every line "; "-joined in wire order with empty ones kept,
+    which the destination rebuilds and mitmproxy sends to an HTTP/1 upstream,
+    so the resolver gets that value.
     """
+    http_version = (flow.request.http_version or "").upper()
+    join_cookie_crumbs = http_version.startswith(("HTTP/2", "HTTP/3"))
     selected: dict[str, str] = {}
     lines: dict[str, int] = {}
+    cookie_crumbs: list[str] = []
     for name, value in flow.request.headers.items(multi=True):
         lowered = name.lower()
         if lowered in RESOLVE_REQUEST_HEADER_DENYLIST:
             continue
+        if lowered == "cookie" and join_cookie_crumbs:
+            cookie_crumbs.append(value)
+            continue
         lines[lowered] = lines.get(lowered, 0) + 1
         if not name or not value:
             continue
-        if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
-            raise CredentialResolveError("resolve_header_too_long")
-        selected[lowered] = value
+        selected[lowered] = _checked_resolve_header_value(value)
     if any(count > 1 for count in lines.values()):
         raise CredentialResolveError("resolve_ambiguous_header")
+    cookie = "; ".join(cookie_crumbs)
+    if cookie:
+        selected["cookie"] = _checked_resolve_header_value(cookie)
     if len(selected) > MAX_RESOLVE_REQUEST_HEADERS:
         raise CredentialResolveError("resolve_too_many_headers")
     return selected
+
+
+def _checked_resolve_header_value(value: str) -> str:
+    """Return a forwarded header value, failing closed above the value cap."""
+    if len(value.encode("utf-8")) > MAX_RESOLVE_REQUEST_HEADER_VALUE_BYTES:
+        raise CredentialResolveError("resolve_header_too_long")
+    return value
 
 
 _DOT_SEGMENT_RE = re.compile(r"/\.\.(/|$)")
@@ -1897,7 +1917,7 @@ def _abort_live_h2(live: Any, flow: http.HTTPFlow, adapter: Any = None) -> None:
         flow.kill()
 
 
-def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> None:
+def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | None:
     client = getattr(flow, "client_conn", None)
     adapter = live.h2_for(client)
     token = live.token_for(client)
@@ -1950,7 +1970,7 @@ def _requestheaders_live_h2(live: Any, flow: http.HTTPFlow) -> None:
         return
     _observe_tls_shadow(flow, vault)
     if vault is not None:
-        _apply_vault_binding(flow, vault, live=live)
+        return _apply_vault_binding(flow, vault, live=live)
 
 
 def _finish_live_request(flow: http.HTTPFlow) -> None:
@@ -2028,7 +2048,7 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
 
     The hook is async because mitmproxy awaits it before the request
     continues: exchange bindings defer resolve I/O to the single await
-    below; static and live paths stay inline and never suspend.
+    below; static bindings stay inline and never suspend.
     """
     subject = _subject_admission_runtime()
     if subject is not None:
@@ -2043,7 +2063,9 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
                 flow.kill()
             ctx.log.warn("credential proxy: request denied reason=subject_protocol_unsupported")
             return
-        _requestheaders_live(subject, flow)
+        deferred = _requestheaders_live(subject, flow)
+        if deferred is not None:
+            await deferred
         if _flow_rejected(flow):
             # Subject denials terminate transport, including streamed requests:
             # discard the shared path's 403/503 response (used by sidecar mode).
@@ -2054,14 +2076,16 @@ async def requestheaders(flow: http.HTTPFlow) -> None:
         return
     live = _live_runtime
     if live is not None:
-        _requestheaders_live(live, flow)
+        deferred = _requestheaders_live(live, flow)
+        if deferred is not None:
+            await deferred
         return
     deferred = _requestheaders_pull(flow)
     if deferred is not None:
         await deferred
 
 
-def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
+def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> Awaitable[None] | None:
     """Authorize one request against the admitted revision snapshot.
 
     Only HTTPS carries live admission; plain HTTP receives no injected
@@ -2083,8 +2107,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
                 and live.token_for(client) is None and live.h2_for(client) is None
                 and (flow.request.scheme or "").lower() == "http"):
             return
-        _requestheaders_live_h2(live, flow)
-        return
+        return _requestheaders_live_h2(live, flow)
     if (flow.request.scheme or "").lower() != "https":
         return
     # Per-request defense: insecure upstream verification must never be
@@ -2143,7 +2166,7 @@ def _requestheaders_live(live: Any, flow: http.HTTPFlow) -> None:
     _observe_tls_shadow(flow, vault)
     if vault is None:
         return
-    _apply_vault_binding(flow, vault, live=live)
+    return _apply_vault_binding(flow, vault, live=live)
 
 
 def _live_snapshot_vault(snapshot: Any) -> ActiveVault | None:
@@ -2225,7 +2248,7 @@ def _apply_vault_binding(
 ) -> Awaitable[None] | None:
     """Shared binding selection, ambiguity checks and credential injection.
 
-    Returns an awaitable only for pull-mode exchange bindings (their resolve
+    Returns an awaitable for exchange bindings (their resolve
     I/O must complete before the request continues)."""
     # Requests outside credential binding scope are ordinary egress traffic.
     # Leave them untouched, including paths whose encoding would be ambiguous
@@ -2290,18 +2313,7 @@ def _apply_exchange_binding(
     binding: dict[str, Any],
     live: Any | None,
 ) -> Awaitable[None] | None:
-    """Gate one exchange binding, then defer its resolve I/O.
-
-    Live snapshots never carry exchange (the egress admission gate rejects
-    them); the defensive branch stays fail closed."""
-    if live is not None:
-        _reject_request(flow, b"credential exchange unavailable\n", status_code=503)
-        _binding_log(
-            flow, "warn", "exchange_denied",
-            "credential proxy: exchange binding unsupported binding="
-            f"{binding.get('name')}",
-        )
-        return None
+    """Gate one exchange binding, then resolve against its request admission."""
     if _reject_ambiguous_binding_path(flow, vault):
         return None
     sni = _connection_sni(flow)
@@ -2314,7 +2326,7 @@ def _apply_exchange_binding(
             "credential proxy: exchange binding without connection sni was denied"
         )
         return None
-    return _resolve_exchange_binding(flow, vault, binding, sni)
+    return _resolve_exchange_binding(flow, vault, binding, sni, live)
 
 
 async def _resolve_exchange_binding(
@@ -2322,6 +2334,7 @@ async def _resolve_exchange_binding(
     vault: ActiveVault,
     binding: dict[str, Any],
     sni: str,
+    live: Any | None = None,
 ) -> None:
     """Resolve on the active socket and inject headers.
 
@@ -2330,8 +2343,29 @@ async def _resolve_exchange_binding(
     live only in flow metadata."""
     name = binding.get("name")
     path = CREDENTIAL_RESOLVE_PATH
-    client_ip = _flow_client_ip(flow)
-    if _fast_sandbox_mode_enabled:
+    if live is not None:
+        try:
+            handle = flow.metadata[FLOW_REQUEST_HANDLE_KEY]
+            revision = handle.snapshot.revision
+            admission = {
+                "subjectKey": live.resolve_subject_key(handle)
+                if flow.metadata.get(FLOW_SUBJECT_REQUEST_KEY) else "",
+                "revision": {
+                    "controlGeneration": revision.control_generation,
+                    "subjectGeneration": revision.subject_generation,
+                    "decisionEpoch": revision.decision_epoch,
+                    "vaultRevision": revision.vault_revision,
+                    "policyEpoch": revision.policy_epoch,
+                    "digest": revision.digest,
+                },
+            }
+            path += "?admission=" + quote(json.dumps(admission, separators=(",", ":")), safe="")
+        except Exception:  # noqa: BLE001 - no fallback from missing admission
+            _reject_request(flow, b"credential resolution unavailable\n", status_code=407)
+            ctx.log.warn("credential proxy: exchange resolve denied reason=missing_admission")
+            return
+    elif _fast_sandbox_mode_enabled:
+        client_ip = _flow_client_ip(flow)
         if not client_ip:
             _reject_request(
                 flow, b"credential resolution unavailable\n", status_code=407
@@ -2381,6 +2415,8 @@ async def _resolve_exchange_binding(
                 ),
                 timeout=remaining,
             )
+        if live is not None and decision["revision"] != vault.revision:
+            raise CredentialResolveError("revision_mismatch")
         _install_exchange_headers(flow, vault, binding, decision)
     except CredentialResolveError as error:
         _reject_request(

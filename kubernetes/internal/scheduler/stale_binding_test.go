@@ -82,17 +82,17 @@ func TestScheduleDoesNotContactReusedPodIP(t *testing.T) {
 				if len(endpoint.tasks) != 1 || endpoint.tasks[0].Name != "new-sandbox-task" {
 					t.Errorf("stale scheduler replaced the new sandbox's task: %+v", endpoint.tasks)
 				}
-				if node.IP != originalPod.Status.PodIP || node.PodName != originalPod.Name || node.tState != RunningTaskState {
-					t.Errorf("binding loss changed assignment or task lifecycle: %+v", node)
+				if node.IP != originalPod.Status.PodIP || node.PodName != originalPod.Name {
+					t.Errorf("binding loss changed assignment: %+v", node)
+				}
+				if node.tState != FailedTaskState {
+					t.Errorf("binding loss must mark the stale task failed: %q", node.tState)
 				}
 				if node.Status != nil {
 					t.Errorf("binding loss retained execution status: %+v", node.Status)
 				}
-				if lifecycle != "running" && !node.IsResourceReleased() {
+				if !node.IsResourceReleased() {
 					t.Errorf("task did not finish local release: state=%q", node.sState)
-				}
-				if lifecycle == "running" && node.IsResourceReleased() {
-					t.Error("running task was released after binding loss")
 				}
 			})
 		}
@@ -124,8 +124,8 @@ func TestScheduleDoesNotAssignReusedIPStatusToStaleBinding(t *testing.T) {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	if staleNode.Status != nil || staleNode.tState != RunningTaskState {
-		t.Errorf("replacement task status leaked to stale binding: status=%+v state=%q", staleNode.Status, staleNode.tState)
+	if staleNode.Status != nil || staleNode.tState != FailedTaskState || !staleNode.IsResourceReleased() {
+		t.Errorf("stale binding leaked status or skipped local release: status=%+v state=%q", staleNode.Status, staleNode.tState)
 	}
 	if currentNode.Status == nil || currentNode.Status.Name != "new-sandbox-task" || currentNode.tState != RunningTaskState {
 		t.Errorf("valid binding lost its task status: status=%+v state=%q", currentNode.Status, currentNode.tState)

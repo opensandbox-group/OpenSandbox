@@ -39,6 +39,7 @@ from opensandbox.adapters.converter.command_execution import (
 from opensandbox.adapters.converter.command_execution import (
     infer_foreground_exit_code as _infer_foreground_exit_code,
 )
+from opensandbox.adapters.converter.command_execution import require_command_terminal
 from opensandbox.adapters.converter.command_execution import (
     resolve_run_in_session_timeout as _resolve_run_in_session_timeout,
 )
@@ -215,11 +216,23 @@ class CommandsAdapter(Commands):
         This method uses direct httpx streaming to handle SSE responses
         from the execd service.
         """
+        opts = opts or RunCommandOpts()
+        background = opts.background
+        execution = await self._run_command(command, opts, handlers)
+        if not background:
+            require_command_terminal(execution)
+        return execution
+
+    async def _run_command(
+        self,
+        command: str | list[str],
+        opts: RunCommandOpts,
+        handlers: ExecutionHandlers | None,
+    ) -> Execution:
         if isinstance(command, str) and not command.strip():
             raise InvalidArgumentException("Command cannot be empty")
 
         try:
-            opts = opts or RunCommandOpts()
             json_body = _build_run_command_request_body(command, opts).to_dict()
             url = self._get_execd_url(self.RUN_COMMAND_PATH)
             return await self._execute_streaming_request(
@@ -239,7 +252,7 @@ class CommandsAdapter(Commands):
         """Persist an environment variable for future commands and sessions."""
         command = build_set_env_command(key, value)
         try:
-            execution = await self.run(command)
+            execution = await self._run_command(command, RunCommandOpts(), None)
         except Exception as e:
             logger.debug("Failed to run command", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e

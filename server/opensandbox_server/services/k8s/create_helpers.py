@@ -31,6 +31,7 @@ from opensandbox_server.services.constants import (
     SANDBOX_SNAPSHOT_ID_LABEL,
 )
 from opensandbox_server.services.helpers import (
+    apply_execd_isolation_config,
     split_egress_env,
     validate_upstream_proxy_request,
 )
@@ -95,6 +96,7 @@ def _build_create_workload_context(
         resource_requests = request.resource_requests.root
 
     sandbox_env, egress_env = split_egress_env(request.env)
+    apply_execd_isolation_config(sandbox_env, app_config.runtime.execd_isolation_config)
     if request.lifecycle is not None and request.lifecycle.has_hooks:
         # Transport hooks only. idlePolicy/renewalPolicy are control-plane
         # state; an empty payload would still overwrite hooks persisted in
