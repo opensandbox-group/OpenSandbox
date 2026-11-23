@@ -22,6 +22,8 @@ func TestApplyStatic_KeepsExactWithdrawalsAcrossBroadCoverage(t *testing.T) {
 	for _, tt := range []struct{ name, first, reload string }{
 		{"redundant exact scope", floor, covered + "," + exact},
 		{"host added on opt-in", host + "," + floor, ""},
+		{"scoped host added on opt-in", `{"action":"allow","target":"192.0.2.10","ports":[443,8443]},` + floor, ""},
+		{"scoped singleton CIDR added on opt-in", `{"action":"allow","target":"192.0.2.10/32","ports":[443,8443]},` + floor, ""},
 		{"only implicit withdrawal", floor, exactOther},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -37,6 +39,22 @@ func TestApplyStatic_KeepsExactWithdrawalsAcrossBroadCoverage(t *testing.T) {
 				require.True(t, m.lastDrops.MatchesFlow(addr, 443), "previously denied port is still denied")
 				require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "ordinary reload must not cut a previously admitted port")
 			}
+		})
+	}
+}
+
+func TestCountMatchingConntrackFlowsDataPreservesDestinationFamily(t *testing.T) {
+	native := "ipv4 2 tcp 6 299 ESTABLISHED src=192.0.2.20 dst=192.0.2.10 sport=48000 dport=443\n"
+	mapped := "ipv6 10 tcp 6 299 ESTABLISHED src=2001:db8::20 dst=::ffff:192.0.2.10 sport=48000 dport=443\n"
+	for _, tt := range []struct{ target, matched, spared string }{
+		{"::ffff:192.0.2.10/128", mapped, native},
+		{"192.0.2.10", native, mapped},
+	} {
+		t.Run(tt.target, func(t *testing.T) {
+			p := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","target":"`+tt.target+`","ports":[443]}]}`)
+			drops := ComputeEstablishedDrops(nil, p, nil)
+			require.Equal(t, 1, countMatchingConntrackFlowsData([]byte(tt.matched), drops))
+			require.Zero(t, countMatchingConntrackFlowsData([]byte(tt.spared), drops))
 		})
 	}
 }

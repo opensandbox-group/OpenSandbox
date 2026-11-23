@@ -254,6 +254,11 @@ func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, leases 
 				hosts[prefix.Addr()] = tcpWithdrawal{}
 			}
 		}
+		for _, keep := range d.KeepPorts {
+			if prefix := dropTCPPrefix(keep); prefix.IsSingleIP() && denied(prefix.Addr()) {
+				hosts[prefix.Addr()] = tcpWithdrawal{}
+			}
+		}
 	}
 	if len(hosts) == 0 {
 		return
@@ -268,8 +273,7 @@ func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, leases 
 
 func (d EstablishedDrops) snapshotTCP(p *policy.NetworkPolicy) func(netip.Addr, bool) tcpWithdrawal {
 	deny, keep, removed := compiledTCP(d.DenyPortDrops), compiledTCP(d.KeepPorts), compiledTCP(d.PortDrops)
-	static, _ := tcpPolicy(p)
-	static = slices.DeleteFunc(static, func(t tcpTarget) bool { return !t.whole })
+	static := compilePortlessIPPolicy(p)
 	return func(a netip.Addr, admitted bool) tcpWithdrawal {
 		early := deny.at(a)
 		if targetsMatch(d.DenyAddrs, d.DenyPrefixes, nil, a, 0) {
@@ -279,10 +283,10 @@ func (d EstablishedDrops) snapshotTCP(p *policy.NetworkPolicy) func(netip.Addr, 
 		if d.CatchAll || targetsMatch(d.Addrs, d.Prefixes, nil, a, 0) {
 			late = allTCP
 		}
-		if admitted || targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, a, 0) {
+		if admitted || targetsMatch(d.KeepAddrs, d.KeepPrefixes, nil, a, 0) || targetsMatch(nil, static.allow, nil, a, 0) {
 			late = nil
 		} else {
-			late = late.subtract(keep.at(a)).subtract(static.at(a)).subtract(early)
+			late = late.subtract(keep.at(a)).subtract(early)
 		}
 		return tcpWithdrawal{early, late}
 	}
