@@ -76,7 +76,8 @@ kubeadmConfigPatches:
   apiVersion: kubelet.config.k8s.io/v1beta1
   kind: KubeletConfiguration
   # Speed up ConfigMap volume propagation (default 60s) so hot-reload tests
-  # such as verify/network-security-rules.sh converge in seconds.
+  # such as verify/network-security-rules.sh don't wait an extra minute on
+  # kubelet sync (egress's own reload tick still applies on top).
   syncFrequency: 5s
 nodes:
 - role: control-plane

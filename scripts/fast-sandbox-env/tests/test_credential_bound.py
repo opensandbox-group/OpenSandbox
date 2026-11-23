@@ -339,10 +339,80 @@ printf 'UNVERIFIED|%s\n' "${STAGE_UNVERIFIED[*]:-}"
             "RUN|vault lifecycle verify (overlaybd template)|vault_lifecycle_verify|tpl-oci",
             "RUN|MITM CA chain verify (overlaybd template)|mitm_ca_chain_verify|tpl-oci",
             "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
+            "RUN|snapshot verify (overlaybd template)|snapshot_verify|tpl-oci",
             "SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh",
             "RUN|credential-bound interception verify (overlaybd template, OSEP-0023)|credential_bound_verify|tpl-oci",
             "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
         ])
+
+    def test_verify_credential_bound_fallback_probes_ublk_before_overlaybd_build(self):
+        delta_body = r'''
+require_live_stack() { :; }
+printf '%s' tpl-native > "$WORK/template-id"
+rm -f "$WORK/overlaybd-template-id"
+run_stage() { printf 'RUN|%s|%s|%s\n' "$1" "$2" "${3:-}"; }
+stage_begin() { printf 'BEGIN|%s\n' "$1"; }
+source() { :; }
+verify_credential_bound
+'''
+        out = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="credential-bound", OCI_STACK="1").stdout
+        runs = [l for l in out.splitlines() if l.startswith("RUN|")]
+        probe_idx = runs.index("RUN|ublk add/del probe (node daemon -> kernel path)|ublk_probe_or_heal|")
+        build_idx = runs.index("RUN|SandboxTemplate build (overlaybd, oci:// publication)|template_up_overlaybd|")
+        self.assertLess(probe_idx, build_idx)
+
+    def test_drain_predicates_fail_closed_on_kubectl_error(self):
+        body = r'''
+kubectl() { return 1; }
+no_active_sandboxes && echo "FAIL:no_active_sandboxes_opened" || echo "OK:no_active_sandboxes_closed"
+pool_fastlet_pods_gone && echo "FAIL:pool_fastlet_pods_gone_opened" || echo "OK:pool_fastlet_pods_gone_closed"
+egress_interception_mode_applied && echo "FAIL:mode_opened" || echo "OK:mode_closed"
+kubectl() { echo ""; return 0; }
+no_active_sandboxes && echo "OK:no_active_sandboxes_empty" || echo "FAIL:no_active_sandboxes_empty"
+pool_fastlet_pods_gone && echo "OK:pool_fastlet_pods_gone_empty" || echo "FAIL:pool_fastlet_pods_gone_empty"
+'''
+        out = self.sourced(body, EGRESS_INTERCEPTION_MODE="credential-bound").stdout.splitlines()
+        self.assertIn("OK:no_active_sandboxes_closed", out)
+        self.assertIn("OK:pool_fastlet_pods_gone_closed", out)
+        self.assertIn("OK:mode_closed", out)
+        self.assertIn("OK:no_active_sandboxes_empty", out)
+        self.assertIn("OK:pool_fastlet_pods_gone_empty", out)
+        self.assertFalse(any(l.startswith("FAIL:") for l in out), out)
+
+    def test_switch_pool_egress_mode_scopes_namespace_and_orders_steps(self):
+        body = r'''
+require_live_stack() { :; }
+pool_up() { printf 'pool_up\n' >> "$CALLS"; }
+wait_for() {
+	printf 'wait_for %s\n' "$3" >> "$CALLS"
+	"$3" || return 1
+}
+kubectl() {
+	printf 'kubectl %s\n' "$*" >> "$CALLS"
+	case "$*" in
+		"-n opensandbox-dataplane get sandboxes -o name") echo ""; return 0 ;;
+		"-n opensandbox-dataplane get sandboxpool firecracker-egress-pool") return 0 ;;
+		"-n opensandbox-dataplane delete sandboxpool firecracker-egress-pool --wait --timeout=300s") return 0 ;;
+		"-n opensandbox-dataplane get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o name") echo ""; return 0 ;;
+		*"get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o jsonpath="*) echo "pod-1"; return 0 ;;
+		"-n opensandbox-dataplane get pod pod-1 -o jsonpath="*) echo "credential-bound"; return 0 ;;
+		*) return 1 ;;
+	esac
+}
+switch_pool_egress_mode
+'''
+        self.sourced(body, EGRESS_INTERCEPTION_MODE="credential-bound")
+        calls = self.calls_made().splitlines()
+        self.assertEqual(calls[:7], [
+            "wait_for no_active_sandboxes",
+            "kubectl -n opensandbox-dataplane get sandboxes -o name",
+            "kubectl -n opensandbox-dataplane get sandboxpool firecracker-egress-pool",
+            "kubectl -n opensandbox-dataplane delete sandboxpool firecracker-egress-pool --wait --timeout=300s",
+            "wait_for pool_fastlet_pods_gone",
+            "kubectl -n opensandbox-dataplane get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o name",
+            "pool_up",
+        ])
+        self.assertIn("wait_for egress_interception_mode_applied", calls[7:])
 
 
 GATE = r'''
@@ -498,6 +568,44 @@ class WorkflowBaselineTest(ShellCase):
                               env=dict(os.environ, CBV_GOLDEN_BASE=missing), capture_output=True, text=True)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("::error::golden baseline commit " + missing, proc.stdout)
+
+    def test_egress_modes_collapse_and_delta_gating(self):
+        import yaml
+        with open(os.path.join(REPO, ".github/workflows/fast-sandbox-test.yml")) as handle:
+            wf = yaml.safe_load(handle)
+        resolve = wf["jobs"]["egress-modes"]["steps"][0]["run"]
+        for event_name, requested, want_matrix, want_delta in (
+            ("pull_request", "", '[""]', "true"),
+            ("workflow_dispatch", "default,credential-bound", '[""]', "true"),
+            ("workflow_dispatch", "default", '[""]', "false"),
+            ("workflow_dispatch", "credential-bound", '["credential-bound"]', "false"),
+        ):
+            with self.subTest(event_name=event_name, requested=requested):
+                gh_out = os.path.join(self.tmp, "gh_output")
+                open(gh_out, "w").close()
+                env = dict(os.environ, EVENT_NAME=event_name, REQUESTED=requested, GITHUB_OUTPUT=gh_out)
+                proc = subprocess.run([BASH, "-c", resolve], cwd=REPO, env=env, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                with open(gh_out) as fh:
+                    kv = dict(line.strip().split("=", 1) for line in fh if "=" in line)
+                self.assertEqual(kv["matrix"], want_matrix)
+                self.assertEqual(kv["run_credential_bound_delta"], want_delta)
+
+        steps = wf["jobs"]["integration"]["steps"]
+        delta_steps = [s for s in steps if s.get("name", "").startswith("Run credential-bound ")]
+        self.assertEqual(len(delta_steps), 2)
+        for step in delta_steps:
+            self.assertEqual(
+                step.get("if"),
+                "needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''",
+            )
+        sdk_step = next(s for s in delta_steps if "SDK egress" in s["name"])
+        for test_name in (
+            "test_02_sandbox_surface_and_egress_methods",
+            "test_02b_network_policy_port_scoped_contract",
+            "test_02c_network_policy_port_scoped_enforcement",
+        ):
+            self.assertIn(test_name, sdk_step["run"])
 
 
 class SourcingTest(ShellCase):

@@ -310,7 +310,7 @@ verify_resourceaware() {
 		|| die "verify-resourceaware requires POOL_MODE=resource-aware (stack was brought up with: $POOL_MODE)"
 	# Kick off the oversized (8/1Gi) native template build concurrently so it
 	# converges while the 2/1Gi template build and forward-verify stage run.
-	ra_template_start 8 1Gi
+	run_stage "SandboxTemplate kickoff (8 vCPU / 1Gi, oversized)" ra_template_start 8 1Gi
 	run_stage "SandboxTemplate build (2 vCPU / 1Gi, distinctly shaped)" ra_template_up 2 1Gi
 	run_stage "per-sandbox limit forwarding + cgroup enforcement" ra_forward_verify
 	run_stage "oversized template -> 400" ra_oversized_verify

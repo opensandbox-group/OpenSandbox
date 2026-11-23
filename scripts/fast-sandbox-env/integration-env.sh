@@ -4035,6 +4035,8 @@ idle_pause_verify() {
 	log "verify (idle-pause): $VERIFY_ID create->Running $(( ($(now_ms) - t0) / 1000000 ))ms"
 
 	wait_for "pre-idle execd /ping 200 through the gateway (records activity)" 100 execd_ping_ok
+	local round1_start
+	round1_start="$(now_ms)"
 
 	# Start the wakeOnAccess=false sandbox now so its 30s idle window ticks in
 	# parallel with the wakeOnAccess=true auto-pause round below.
@@ -4053,7 +4055,11 @@ idle_pause_verify() {
 
 	local -a pause_ms=() wake_ms=() attempts=()
 	for ((i = 1; i <= rounds; i++)); do
-		t0="$(now_ms)"
+		if (( i == 1 )); then
+			t0="$round1_start"
+		else
+			t0="$(now_ms)"
+		fi
 		wait_for "round $i/$rounds auto-paused within X + sweep + checkpoint" 240 sandbox_paused
 		pause_ms+=("$(( ($(now_ms) - t0) / 1000000 ))")
 		pass "round $i/$rounds: auto-paused in ${pause_ms[-1]}ms"
@@ -5039,7 +5045,7 @@ verify_resourceaware() {
 		|| die "verify-resourceaware requires POOL_MODE=resource-aware (stack was brought up with: $POOL_MODE)"
 	# Kick off the oversized (8/1Gi) native template build concurrently so it
 	# converges while the 2/1Gi template build and forward-verify stage run.
-	ra_template_start 8 1Gi
+	run_stage "SandboxTemplate kickoff (8 vCPU / 1Gi, oversized)" ra_template_start 8 1Gi
 	run_stage "SandboxTemplate build (2 vCPU / 1Gi, distinctly shaped)" ra_template_up 2 1Gi
 	run_stage "per-sandbox limit forwarding + cgroup enforcement" ra_forward_verify
 	run_stage "oversized template -> 400" ra_oversized_verify
@@ -5051,14 +5057,14 @@ verify_resourceaware() {
 
 no_active_sandboxes() {
 	local live
-	live="$(kubectl -n "$RESOURCE_NS" get sandboxes -o name 2>/dev/null || true)"
+	live="$(kubectl -n "$RESOURCE_NS" get sandboxes -o name 2>/dev/null)" || return 1
 	[[ -z "$live" ]]
 }
 
 pool_fastlet_pods_gone() {
 	local pods
 	pods="$(kubectl -n "$RESOURCE_NS" get pods \
-		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o name 2>/dev/null || true)"
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o name 2>/dev/null)" || return 1
 	[[ -z "$pods" ]]
 }
 
@@ -5066,11 +5072,11 @@ egress_interception_mode_applied() {
 	local pods pod val
 	pods="$(kubectl -n "$RESOURCE_NS" get pods \
 		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" \
-		-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)"
+		-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" || return 1
 	[[ -n "$pods" ]] || return 1
 	for pod in $pods; do
 		val="$(kubectl -n "$RESOURCE_NS" get pod "$pod" \
-			-o jsonpath='{.spec.containers[?(@.name=="egress")].env[?(@.name=="OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")].value}' 2>/dev/null || true)"
+			-o jsonpath='{.spec.containers[?(@.name=="egress")].env[?(@.name=="OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")].value}' 2>/dev/null)" || return 1
 		[[ "$val" == "$EGRESS_INTERCEPTION_MODE" ]] || return 1
 	done
 	return 0
@@ -5091,8 +5097,8 @@ switch_pool_egress_mode() {
 }
 
 # Reuses the live cluster and already-built native + overlaybd templates to
-# exercise every egress-mode-sensitive stage under credential-bound without
-# duplicating cluster setup or egress-orthogonal storage/lifecycle stages.
+# exercise egress-mode-sensitive stages (plus snapshot restore into a new
+# sandbox) under credential-bound without duplicating cluster setup.
 verify_credential_bound() {
 	require_live_stack
 	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] \
@@ -5105,11 +5111,13 @@ verify_credential_bound() {
 	if [[ "$OCI_STACK" == 1 ]]; then
 		OCI_TEMPLATE_ID="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
 		if [[ -z "$OCI_TEMPLATE_ID" ]]; then
+			run_stage "ublk add/del probe (node daemon -> kernel path)" ublk_probe_or_heal
 			run_stage "SandboxTemplate build (overlaybd, oci:// publication)" template_up_overlaybd
 		fi
 		run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
 		run_stage "MITM CA chain verify (overlaybd template)" mitm_ca_chain_verify "$OCI_TEMPLATE_ID"
 		exchange_stage "exchange resolver verify (overlaybd template, OSEP-0025)" "$OCI_TEMPLATE_ID"
+		run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
 		credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)" "$OCI_TEMPLATE_ID"
 	fi
 }
@@ -5160,7 +5168,7 @@ status() {
 	echo
 	log "status: fastlet pods (egress sidecar)"
 	kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet \
-		-o custom-columns='NAME:.metadata.name,NODE:.spec.nodeName,CONTAINERS:.status.containerStatuses[*].name,READY:.status.containerStatuses[*].ready' 2>/dev/null || true
+		-o custom-columns='NAME:.metadata.name,NODE:.spec.nodeName,CONTAINERS:.status.containerStatuses[*].name,READY:.status.containerStatuses[*].ready,EGRESS_MODE:.spec.containers[?(@.name=="egress")].env[?(@.name=="OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")].value' 2>/dev/null || true
 	echo
 	log "status: DART P2P (block_source cache/peer/origin per node)"
 	dart_metrics_summary || true

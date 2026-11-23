@@ -141,11 +141,11 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ok-to-test') &&
       ( github.event.action != 'labeled' ||
       github.event.label.name == 'ok-to-test' ) )
-    # OSEP-0023 (experimental): the default leg ('' = switch unset, Pool
-    # rendered unchanged) plus an opt-in credential-bound leg (see
-    # egress-modes). Strictly serial: each leg owns the runner for a full
-    # up -> verify -> teardown, so the pool is never switched under live
-    # Pods and the legs never share a host.
+    # OSEP-0023 (experimental): when a single mode is requested, one leg owns
+    # the runner for a full up -> verify -> teardown. When both default and
+    # credential-bound are requested (including PRs), egress-modes collapses
+    # the matrix to [''] and runs the credential-bound delta in-place after
+    # active sandboxes drain and the SandboxPool is recreated.
     strategy:
       fail-fast: false
       max-parallel: 1

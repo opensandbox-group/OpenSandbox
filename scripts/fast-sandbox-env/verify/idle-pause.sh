@@ -124,6 +124,8 @@ idle_pause_verify() {
 	log "verify (idle-pause): $VERIFY_ID create->Running $(( ($(now_ms) - t0) / 1000000 ))ms"
 
 	wait_for "pre-idle execd /ping 200 through the gateway (records activity)" 100 execd_ping_ok
+	local round1_start
+	round1_start="$(now_ms)"
 
 	# Start the wakeOnAccess=false sandbox now so its 30s idle window ticks in
 	# parallel with the wakeOnAccess=true auto-pause round below.
@@ -142,7 +144,11 @@ idle_pause_verify() {
 
 	local -a pause_ms=() wake_ms=() attempts=()
 	for ((i = 1; i <= rounds; i++)); do
-		t0="$(now_ms)"
+		if (( i == 1 )); then
+			t0="$round1_start"
+		else
+			t0="$(now_ms)"
+		fi
 		wait_for "round $i/$rounds auto-paused within X + sweep + checkpoint" 240 sandbox_paused
 		pause_ms+=("$(( ($(now_ms) - t0) / 1000000 ))")
 		pass "round $i/$rounds: auto-paused in ${pause_ms[-1]}ms"
