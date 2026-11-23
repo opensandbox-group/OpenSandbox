@@ -225,11 +225,37 @@ class BatchSandboxProvider(WorkloadProvider):
     def supports_image_auth(self) -> bool:
         return True
 
+    @staticmethod
+    def _validate_execd_isolation_template(
+        security_context: Optional[Dict[str, Any]],
+    ) -> None:
+        capabilities = (security_context or {}).get("capabilities")
+        drops = capabilities.get("drop") if isinstance(capabilities, dict) else None
+        if isinstance(drops, list) and any(
+            isinstance(capability, str)
+            and capability.upper().removeprefix("CAP_") == "SYS_ADMIN"
+            for capability in drops
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        "execd isolation requires SYS_ADMIN, which the BatchSandbox "
+                        "template explicitly drops. Disable execd isolation for this sandbox."
+                    ),
+                },
+            )
+
     def validate_create_request(
         self, request: CreateSandboxRequest, namespace: str
     ) -> None:
-        pool_ref = (request.extensions or {}).get("poolRef", "").strip()
+        extensions = request.extensions or {}
+        pool_ref = extensions.get("poolRef", "").strip()
         if not pool_ref:
+            if extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable":
+                _, _, security_context = self._extract_template_pod_extras()
+                self._validate_execd_isolation_template(security_context)
             return
         if request.network_policy is not None:
             raise HTTPException(
@@ -372,24 +398,8 @@ class BatchSandboxProvider(WorkloadProvider):
 
         extra_volumes, extra_mounts, extra_security_context = self._extract_template_pod_extras()
         isolation_enabled = extensions.get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable"
-        if isolation_enabled and extra_security_context:
-            capabilities = extra_security_context.get("capabilities")
-            drops = capabilities.get("drop") if isinstance(capabilities, dict) else None
-            if isinstance(drops, list) and any(
-                isinstance(capability, str)
-                and capability.upper().removeprefix("CAP_") == "SYS_ADMIN"
-                for capability in drops
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "code": SandboxErrorCodes.INVALID_PARAMETER,
-                        "message": (
-                            "execd isolation requires SYS_ADMIN, which the BatchSandbox "
-                            "template explicitly drops. Disable execd isolation for this sandbox."
-                        ),
-                    },
-                )
+        if isolation_enabled:
+            self._validate_execd_isolation_template(extra_security_context)
 
         if windows_profile:
             validate_windows_profile_resource_limits(resource_limits)
