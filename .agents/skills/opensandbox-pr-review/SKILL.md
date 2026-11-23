@@ -33,12 +33,12 @@ Fetch PR metadata with `gh` (structured JSON — no HTML scraping):
 
 ```bash
 gh pr view <number> --repo opensandbox-group/OpenSandbox \
-  --json title,body,author,baseRefName,headRefName,headRepository,headRepositoryOwner,commits,files,labels,statusCheckRollup,reviews,comments
+  --json title,body,author,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,headRepositoryOwner,commits,files,labels,statusCheckRollup,reviews,comments
 ```
 
 Extract from the output:
 
-- Title, base branch (`baseRefName`), head branch (`headRefName`) plus head repo/owner, author, commit list, and CI/review status (`statusCheckRollup`, `reviews`, `comments` — helpful for spotting unrun CI jobs or open feedback, still verified independently)
+- Title, base branch (`baseRefName`), head branch (`headRefName`) plus pinned commit SHAs (`baseRefOid`, `headRefOid`), head repo/owner, author, commit list, and CI/review status (`statusCheckRollup`, `reviews`, `comments` — helpful for spotting unrun CI jobs or open feedback, still verified independently)
 - **PR type**, which sets the review focus and the value card: `bugfix` (`fix(...)` title, "Fixes #N", or a body claiming a defect), `feature` (`feat(...)` title, or changes under `specs/`, public config — flags, env, Helm values, CRDs — or SDK public API), otherwise `other` (refactor / perf / docs / test / chore). A mixed PR takes the type of its main change; the secondary aspect becomes one extra card row.
 - A type-specific **claim checklist** from the body — every concrete assertion to verify in later steps:
   - bugfix: what breaks and for whom (trigger, user-visible impact); the reproduction claim (test or command, expected vs actual); the stated fix (mechanism, files); stated testing; the breaking-change statement (e.g. "resultChan holds 10 results", "fails on main with expected 15, actual 11")
@@ -52,20 +52,22 @@ Identify the git remote pointing to `opensandbox-group/OpenSandbox` via `git rem
 PR_NUM=<number>
 REMOTE=origin   # remote for opensandbox-group/OpenSandbox (verify with git remote -v)
 BASE_BRANCH=$(gh pr view "$PR_NUM" --repo opensandbox-group/OpenSandbox --json baseRefName --jq .baseRefName)
+EXPECTED_HEAD=$(gh pr view "$PR_NUM" --repo opensandbox-group/OpenSandbox --json headRefOid --jq .headRefOid)
 
-git fetch -- "$REMOTE" \
+git -c core.hooksPath=/dev/null fetch --no-tags --no-recurse-submodules -- "$REMOTE" \
   "+refs/pull/${PR_NUM}/head:refs/remotes/pr/${PR_NUM}" \
   "+refs/heads/${BASE_BRANCH}:refs/remotes/${REMOTE}/${BASE_BRANCH}"
 
 BASE=$(git merge-base "refs/remotes/${REMOTE}/${BASE_BRANCH}" "refs/remotes/pr/${PR_NUM}")
 HEAD=$(git rev-parse "refs/remotes/pr/${PR_NUM}")
+test "$HEAD" = "$EXPECTED_HEAD"  # abort or re-snapshot if the PR moved during fetch
 
 git log --oneline "$BASE..$HEAD"
 git diff --stat "$BASE..$HEAD"
 git diff "$BASE..$HEAD"
 ```
 
-Record `$BASE` and `$HEAD` (`<BASE>..<HEAD>`) — this resolved commit range feeds both manual reading and OCR.
+Record `$BASE` and `$HEAD` (`<BASE>..<HEAD>`) — this resolved commit range feeds both manual reading and OCR. If the diff touches `.opencodereview/`, `.agents/`, `.gitattributes`, `.gitmodules`, or `.github/workflows/`, call it out explicitly in the report so reviewers inspect policy/CI changes carefully.
 
 ### Step 3: Manual verification of code
 
@@ -94,16 +96,22 @@ const res = await tools.ocr_review({
 return res;
 ```
 
-2. **Local `ocr` CLI** (fallback when `tools.ocr_review` is not registered — check with `command -v ocr`):
+2. **Local `ocr` CLI** (fallback when `tools.ocr_review` is not registered — write to a file via `--output` to avoid stdout truncation, never pipe through `head`/`tail`):
 
 ```bash
+OCR_OUT="${TMPDIR:-/tmp}/pr-${PR_NUM}-ocr.json"
 ocr review --from "$BASE" --to "$HEAD" \
-  --format json --audience agent \
+  --analysis --format json --audience agent \
+  --output "$OCR_OUT" \
   --background "<PR context: claimed problem + fix summary + numbered review-focus questions>" \
   --timeout 5 --concurrency 2
 ```
 
-The `background` should carry: one-paragraph problem statement, what the fix does, and specific questions (is the race real / is the ordering correct / liveness risk / bypass paths / performance / compatibility). The result JSON provides findings with severity, path, line numbers, and suggestions — merge them with Step 3 conclusions; do not copy blindly. Only when neither `tools.ocr_review` nor the local `ocr` CLI is available (or configured), mark OCR as not run in the verification log and proceed with Step 3's manual review.
+The `background` should carry: one-paragraph problem statement, what the fix does, and specific questions (is the race real / is the ordering correct / liveness risk / bypass paths / performance / compatibility). If a range run is interrupted, resume with `ocr review --resume <id>` instead of restarting from scratch.
+
+- **Coverage check on OCR output**: inspect `review_status` and `manifest.coverage` in the result JSON; if any files were skipped or hit `failed(budget)`, record the gap explicitly in the verification log rather than treating OCR as complete.
+- **Verification discipline**: treat every OCR comment (including low-severity ones) as a claim to verify against code — do not copy blindly, and do not silently drop a claim without specific contradicting evidence (an unrelated passing test or a single unsuccessful attempt does not refute it; report unresolved claims as uncertain with what evidence would settle them). Keep static source observations distinct from reproduced runtime behavior. When a comment has `start_line == 0` and `end_line == 0`, locate the relevant section from context and report at file level if the exact line remains uncertain.
+- Only when neither `tools.ocr_review` nor the local `ocr` CLI is available (or configured), mark OCR as not run in the verification log and proceed with Step 3's manual review.
 
 ### Step 5: Independent verification in worktrees
 
@@ -111,8 +119,8 @@ Create a dedicated temporary root under `${TMPDIR:-/tmp}` with `mktemp -d` (so u
 
 ```bash
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/pr-${PR_NUM}.XXXXXX")
-git worktree add --detach "$TMP/review"   "$HEAD"
-git worktree add --detach "$TMP/baseline" "$BASE"
+git -c core.hooksPath=/dev/null worktree add --detach "$TMP/review"   "$HEAD"
+git -c core.hooksPath=/dev/null worktree add --detach "$TMP/baseline" "$BASE"
 
 # a) PR branch: enter the review worktree and affected module directory (Go example; e.g. MODULE=components/execd)
 (
@@ -146,7 +154,7 @@ rmdir "$TMP"
 
 Concise, professional, human-readable. Verdict first, value second. Structure:
 
-1. **Header + verdict banner** — PR title/branch, size (`commits · files · +x/−y`), review range, method; one banner holding the verdict (e.g. 推荐合入), its reason in one line, and any merge condition (e.g. "CI `action_required`, needs approval"). The banner is the conclusion — no closing section restates it.
+1. **Header + verdict banner** — PR title/branch, size (`commits · files · +x/−y`), review range, method; one banner holding the verdict (e.g. 推荐合入), its reason in one line, and any merge condition (e.g. "CI `action_required`, needs approval"). Before finalizing, re-check `headRefOid` via `gh pr view "$PR_NUM" --repo opensandbox-group/OpenSandbox --json headRefOid --jq .headRefOid` — if the PR head moved during the review, flag the report as `stale` in red so readers know the verdict applies to the pinned SHA. The banner is the conclusion — no closing section restates it.
 2. **变更内容 / What changed** — opens with the highlighted **value card**, then at most 5 bullets of what was done and where (file:line). The card is a two-column table in Markdown (label | content) and a highlighted grid in HTML, titled with the PR type; each row ends with a ✓ / △ / ✗ verdict where one applies:
    - bugfix — `修复的问题` (what breaks and the user-visible impact) · `问题是否成立` (✓ / △ / ✗ plus the decisive evidence, e.g. "`TestX` fails on base: expected 200, actual 206") · `修复方式` (mechanism + file:line) · `引入的成本` (性能 / 兼容 / 复杂度, each ✓ or ⚠ with one clause) · `测试覆盖` (✓ / △ / ✗: which changed paths are pinned, does the regression fail on base, measured coverage of the new branches)
    - feature — `新增或变更的公开面` (each config key / flag / env / Helm value / API field / operationId / SDK method with type and default) · `默认值与兼容性` (additive or breaking; is the old behavior kept when unset?) · `契约同步` (spec / docs / SDK / CLI / examples, each ✓ or ✗ with file refs) · `测试覆盖` (✓ / △ / ✗: each new item and its default tested? generated output verified?) · optional `迁移`
