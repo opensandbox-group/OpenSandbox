@@ -173,6 +173,83 @@ func TestApplyStatic_DNSCleanupDoesNotForgetMaskedGrant(t *testing.T) {
 	}
 }
 
+func TestApplyStatic_TeardownOutlivesBothDNSRecords(t *testing.T) {
+	const domain = "cdn.example"
+	addr := netip.MustParseAddr("192.0.2.10")
+	ctx := context.Background()
+	for _, action := range []string{"allow", "deny"} {
+		t.Run(action, func(t *testing.T) {
+			m, _ := recordingManager()
+			now := time.Now()
+			m.tracker.now = func() time.Time { return now }
+			old := mustPolicy(t, `{"defaultAction":"allow"}`)
+			first := mustPolicy(t, `{"defaultAction":"`+action+`","egress":[{"action":"allow","target":"cdn.example"},{"action":"deny","target":"192.0.2.0/24","ports":[443]}]}`)
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
+			require.NoError(t, err)
+			require.NoError(t, m.AddResolvedDomain(ctx, domain, []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			now = now.Add(2 * time.Minute)
+			require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
+			if entry := m.domains[domain]; entry != nil {
+				m.applyDomainRefresh(ctx, domain, entry, []ResolvedIP{{Addr: addr.Next(), TTL: time.Minute}})
+				require.NotContains(t, entry.addresses, addr)
+			}
+			require.NotContains(t, m.tracker.dynamicIPs, addr)
+			for range 2 {
+				require.NoError(t, m.ApplyStatic(ctx, policy.DefaultDenyPolicy()))
+				require.True(t, m.lastDrops.MatchesFlow(addr, 443), "the removed DNS entry never admitted this port")
+				require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "a removed lease cannot undo the earlier admission")
+			}
+		})
+	}
+}
+
+func TestApplyStatic_OnlyEffectiveBroadAllowsRetireTCP(t *testing.T) {
+	ctx := context.Background()
+	m, _ := recordingManager()
+	old := mustPolicy(t, `{"defaultAction":"allow"}`)
+	first := mustPolicy(t, `{"egress":[{"action":"allow","ports":[8443]}]}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
+	require.NoError(t, err)
+	for _, raw := range []string{
+		`{"egress":[{"action":"allow","target":"192.0.2.0/24"},{"action":"deny","target":"192.0.2.0/25","ports":[443,8443]}]}`,
+		`{"defaultAction":"allow","egress":[{"action":"deny","ports":[443]}]}`,
+		`{"egress":[]}`,
+	} {
+		require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, raw)))
+		for _, addr := range []string{"192.0.2.10", "192.0.2.200", "2001:db8::1"} {
+			ip := netip.MustParseAddr(addr)
+			require.Equal(t, addr != "192.0.2.200", m.lastDrops.MatchesFlow(ip, 443), "443 at %s", addr)
+			require.False(t, m.lastDrops.MatchesFlow(ip, 8443), "originally spared at %s", addr)
+		}
+	}
+}
+
+func TestDNSWithdrawalCapacityAppliesOnlyToAffectedACKs(t *testing.T) {
+	m, scripts := recordingManager()
+	ctx := context.Background()
+	first := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.0/24"}]}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, mustPolicy(t, `{"defaultAction":"allow"}`), first)
+	require.NoError(t, err)
+	input := make([]ResolvedIP, maxResolvedDomains*maxDomainAddresses)
+	for i := range input {
+		input[i] = ResolvedIP{Addr: netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)}), TTL: time.Minute}
+	}
+	run := m.run
+	m.run = func(context.Context, string) ([]byte, error) { return nil, context.Canceled }
+	extra := ResolvedIP{Addr: input[len(input)-1].Addr.Next(), TTL: time.Minute}
+	require.Error(t, m.AddResolvedIPs(ctx, []ResolvedIP{extra}))
+	m.run = run
+	require.NoError(t, m.AddResolvedIPs(ctx, input))
+	alreadyAllowed := ResolvedIP{Addr: netip.MustParseAddr("192.0.2.20"), TTL: time.Minute}
+	require.NoError(t, m.AddResolvedIPs(ctx, []ResolvedIP{alreadyAllowed}))
+	writes := len(*scripts)
+	require.ErrorContains(t, m.AddResolvedIPs(ctx, []ResolvedIP{extra}), "history is at capacity")
+	require.Equal(t, writes, len(*scripts), "must not grant before capacity is available")
+	require.NoError(t, m.AddResolvedIPs(ctx, input[:1]), "renewal needs no additional history")
+	require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"defaultAction":"allow"}`)))
+	require.NoError(t, m.AddResolvedIPs(ctx, []ResolvedIP{extra}), "no history needed after full reallow")
+}
+
 func TestApplyStatic_PollCannotTurnPastDNSAdmissionIntoTeardown(t *testing.T) {
 	const domain = `{"action":"allow","target":"cdn.example"}`
 	addr := netip.MustParseAddr("192.0.2.10")

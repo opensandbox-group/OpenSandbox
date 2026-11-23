@@ -65,15 +65,17 @@ type EstablishedDrops struct {
 	KeepPorts    []EstablishedPortDrop
 
 	exact        exactTCP
-	exactCarried bool // Opt-in uses the original rules; plain reloads use the saved TCP verdicts.
-	guardDNS     bool // A late DNS grant must also respect still-denied broad TCP withdrawals.
+	broad        broadTCP // Effective withdrawn ports for hosts not overridden by exact.
+	dnsSubjects  int      // Additional subjects remembered at DNS ACK during this opt-in.
+	exactCarried bool     // Opt-in uses the original rules; plain reloads use the saved TCP verdicts.
+	guardDNS     bool     // A late DNS grant must also respect still-denied broad TCP withdrawals.
 }
 
 // Empty reports whether there is nothing to drop. Keep entries alone never
 // change the ruleset.
 func (d EstablishedDrops) Empty() bool {
 	return len(d.DenyAddrs) == 0 && len(d.DenyPrefixes) == 0 && len(d.DenyPortDrops) == 0 &&
-		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll && !d.exact.hasDrops()
+		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll && !d.exact.hasDrops() && len(d.broad) == 0
 }
 
 // Matches reports whether addr is covered by this drop set (port-agnostic).
@@ -101,6 +103,9 @@ func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
 		if w, tracked := d.exact[addr]; tracked {
 			return w.explicit.contains(dport) || w.implicit.contains(dport)
 		}
+	}
+	if d.broad != nil && dport > 0 {
+		return d.broad.at(addr).contains(dport)
 	}
 	if targetsMatch(d.KeepAddrs, d.KeepPrefixes, d.KeepPorts, addr, dport) {
 		return false
@@ -412,6 +417,10 @@ func (d EstablishedDrops) stillRelevant(previous, p *policy.NetworkPolicy, learn
 	out.DenyPrefixes = denyPrefixes.sorted()
 	out.DenyPortDrops = d.carryExplicitTCP(denyTCP, out.DenyPrefixes)
 	out.exact = d.carryExactTCP(previous, p, allowTCP, denyTCP, priorDNS, leases)
+	out.broad = d.carryBroadTCP(previous, p, allowTCP, denyTCP, out.exact)
+	if len(out.exact) != 0 {
+		out.dnsSubjects = d.dnsSubjects
+	}
 	out.exactCarried = len(out.exact) != 0
 	out.DenyPortDrops = slices.DeleteFunc(out.DenyPortDrops, func(drop EstablishedPortDrop) bool {
 		prefix := dropTCPPrefix(drop)
@@ -459,7 +468,7 @@ func (d EstablishedDrops) stillRelevant(previous, p *policy.NetworkPolicy, learn
 		return !p.IsSingleIP() || !tracked
 	}
 	out.guardDNS = slices.ContainsFunc(denyTCP, func(t tcpTarget) bool { return !t.prefix.IsSingleIP() }) &&
-		(out.CatchAll || slices.ContainsFunc(out.Prefixes, uncovered) ||
+		(len(out.broad) != 0 || out.CatchAll || slices.ContainsFunc(out.Prefixes, uncovered) ||
 			slices.ContainsFunc(out.Addrs, func(a netip.Addr) bool { return uncovered(hostPrefix(a)) }) ||
 			slices.ContainsFunc(out.PortDrops, func(d EstablishedPortDrop) bool { return uncovered(dropTCPPrefix(d)) }))
 

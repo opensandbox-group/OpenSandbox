@@ -61,10 +61,9 @@ type resolvedDomain struct {
 // A source lease is independent of the effective kernel deadline for a shared
 // IP. An unconfirmed address still holds capacity, but cannot be DNS-renewed.
 type domainLease struct {
-	dnsUntil   time.Time
-	tcpUntil   time.Time
-	grantEpoch uint64 // Last policy under which this DNS address was acknowledged; not a lease.
-	renewable  bool
+	dnsUntil  time.Time
+	tcpUntil  time.Time
+	renewable bool
 }
 
 func (l domainLease) deadline() time.Time {
@@ -116,7 +115,7 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 	}
 	entry := &resolvedDomain{addresses: make(map[netip.Addr]domainLease, len(deadlines))}
 	for addr, expiry := range deadlines {
-		entry.addresses[addr] = domainLease{dnsUntil: expiry, grantEpoch: m.grantEpoch, renewable: true}
+		entry.addresses[addr] = domainLease{dnsUntil: expiry, renewable: true}
 	}
 	var victim string
 	if previous := m.domains[domain]; previous != nil {
@@ -128,7 +127,6 @@ func (m *Manager) AddResolvedDomain(ctx context.Context, domain string, ips []Re
 				if fresh.dnsUntil.After(lease.dnsUntil) {
 					lease.dnsUntil = fresh.dnsUntil
 				}
-				lease.grantEpoch = m.grantEpoch
 				lease.renewable = true
 				entry.addresses[address] = lease
 			} else if m.holdsDomainCapacity(address, lease, now) {
@@ -357,7 +355,6 @@ func (m *Manager) applyDomainRefresh(ctx context.Context, domain string, entry *
 	}
 	for addr, lease := range entry.addresses {
 		if expiry, stillObserved := confirmed[addr]; stillObserved {
-			lease.grantEpoch = m.grantEpoch
 			if expiry.After(lease.dnsUntil) {
 				lease.dnsUntil = expiry
 			}

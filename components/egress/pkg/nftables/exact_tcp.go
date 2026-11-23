@@ -212,7 +212,6 @@ func compiledTCP(ports []EstablishedPortDrop) tcpTargets {
 type knownDNS struct {
 	installed map[netip.Addr]time.Time
 	domains   map[string]*resolvedDomain
-	epoch     uint64
 }
 
 func (s knownDNS) visit(f func(netip.Addr)) {
@@ -306,6 +305,27 @@ type hostSpans struct {
 	merge bool
 }
 
+func (group *hostSpans) add(spans tcpSpans) {
+	switch {
+	case len(group.spans) == 0 || spans.coversBounds(allTCP):
+		// Borrow a single rule; append must allocate before we normalize.
+		*group = hostSpans{spans: slices.Clip(spans)}
+	case !group.merge && group.spans.coversBounds(spans):
+		return
+	default:
+		group.spans = append(group.spans, spans...)
+		group.merge = true
+	}
+}
+
+func (group *hostSpans) normalized() tcpSpans {
+	if group.merge {
+		group.spans = mergeTCP(group.spans)
+		group.merge = false
+	}
+	return group.spans
+}
+
 func (s *snapshotTargets) add(p netip.Prefix, spans tcpSpans) {
 	if !p.IsSingleIP() {
 		s.wide = append(s.wide, tcpTarget{prefix: p, spans: spans})
@@ -316,17 +336,7 @@ func (s *snapshotTargets) add(p netip.Prefix, spans tcpSpans) {
 	}
 	a := p.Addr() // /128 preserves mapped IPv6, unlike an Addr bucket.
 	group := s.exact[a]
-	switch {
-	case len(group.spans) == 0 || spans.coversBounds(allTCP):
-		// Borrow the first rule. Clipping ensures that appending a second
-		// rule produces a private buffer before it is ever normalized.
-		group = hostSpans{spans: slices.Clip(spans)}
-	case !group.merge && group.spans.coversBounds(spans):
-		return
-	default:
-		group.spans = append(group.spans, spans...)
-		group.merge = true
-	}
+	group.add(spans)
 	s.exact[a] = group
 }
 
@@ -362,8 +372,7 @@ func indexSnapshotTargets(addrs []netip.Addr, ports []EstablishedPortDrop, prefi
 func (s snapshotTargets) at(a netip.Addr) tcpSpans {
 	group := s.exact[a]
 	if group.merge {
-		group.spans = mergeTCP(group.spans)
-		group.merge = false
+		group.normalized()
 		s.exact[a] = group
 	}
 	exact := group.spans
@@ -390,6 +399,14 @@ func (d EstablishedDrops) snapshotTCP(p *policy.NetworkPolicy) func(netip.Addr, 
 	return func(a netip.Addr, admitted bool) (tcpWithdrawal, bool) {
 		early := deny.at(a)
 		late := allTCP
+		if d.broad != nil {
+			ports := d.broad.at(a)
+			late := ports.subtract(early)
+			if admitted {
+				late = late.intersect(dnsDenies.at(a))
+			}
+			return tcpWithdrawal{early, late}, len(ports) != 0
+		}
 		if !d.CatchAll {
 			late = removed.at(a)
 			if len(late) == 0 {
@@ -415,21 +432,6 @@ func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow
 		return nil
 	}
 	allows, denies := allow.indexed(), deny.indexed()
-	// A poll may have pruned an expired timed entry after an ACK in this
-	// policy. Replay that prior verdict, but never grant from history.
-	var pruned map[netip.Addr]bool
-	for _, entry := range priorDNS.domains {
-		if entry != nil {
-			for a, lease := range entry.addresses {
-				if _, installed := priorDNS.installed[a]; !installed {
-					if pruned == nil {
-						pruned = make(map[netip.Addr]bool)
-					}
-					pruned[a] = pruned[a] || (priorDNS.epoch != 0 && lease.grantEpoch == priorDNS.epoch)
-				}
-			}
-		}
-	}
 	reclassify := func(a netip.Addr, prev tcpWithdrawal) tcpWithdrawal {
 		blocked := prev.explicit.union(prev.implicit)
 		early := blocked.intersect(denies.at(a))
@@ -454,7 +456,7 @@ func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow
 			snapshot = d.snapshotTCP(previous)
 		}
 		_, admitted := priorDNS.installed[a]
-		prev, lateDrop := snapshot(a, admitted || pruned[a])
+		prev, lateDrop := snapshot(a, admitted)
 		if lateDrop || len(prev.explicit) != 0 {
 			next := reclassify(a, prev)
 			// Even when all cuts retire, do not let a later catch-all
@@ -471,12 +473,7 @@ func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow
 	}
 	// DNS can first identify an address between policy updates. Use the
 	// installed verdict to distinguish an actual reallow from a masked grant.
-	for a := range priorDNS.installed {
-		consider(a)
-	}
-	for a := range pruned {
-		consider(a)
-	}
+	priorDNS.visit(consider)
 	for a := range leases {
 		if _, known := priorDNS.installed[a]; !known {
 			consider(a)
@@ -564,7 +561,7 @@ func (s remainderTargets) matches(addr netip.Addr) bool {
 	return found || len(s.other.at(addr)) != 0
 }
 
-func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool, covered tcpTargets) {
+func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool) {
 	if len(d.exact) == 0 {
 		return
 	}
@@ -582,8 +579,12 @@ func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool, cover
 	var rules []group
 	var tracked [2][]netip.Addr
 	seed := maphash.MakeSeed()
+	var coverage snapshotTargets
+	if explicit {
+		coverage = indexSnapshotTargets(d.DenyAddrs, d.DenyPortDrops, d.DenyPrefixes)
+	}
 	var keep, removed remainderTargets
-	if !explicit && (d.CatchAll || len(d.Addrs)+len(d.Prefixes)+len(d.PortDrops) != 0) {
+	if !explicit && d.broad == nil && (d.CatchAll || len(d.Addrs)+len(d.Prefixes)+len(d.PortDrops) != 0) {
 		keep = makeRemainderTargets(d.KeepAddrs, d.KeepPrefixes, nil)
 		if !d.CatchAll {
 			removed = makeRemainderTargets(d.Addrs, d.Prefixes, d.PortDrops)
@@ -598,15 +599,9 @@ func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool, cover
 			}
 			// Suppress only rules already emitted at this priority. The
 			// saved per-host withdrawal must outlive their coverage.
-			for _, rule := range covered {
-				if !rule.prefix.IsValid() || rule.prefix.Contains(a) {
-					spans = spans.subtract(rule.spans)
-					if len(spans) == 0 {
-						break
-					}
-				}
-			}
-		} else if (d.CatchAll || removed.matches(a)) && !keep.matches(a) {
+			spans = spans.subtract(coverage.at(a))
+		} else if (d.broad != nil && len(d.broad.at(a)) != 0) ||
+			(d.broad == nil && (d.CatchAll || removed.matches(a)) && !keep.matches(a)) {
 			if a.Is4() {
 				tracked[0] = append(tracked[0], a)
 			} else {

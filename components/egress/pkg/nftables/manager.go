@@ -87,7 +87,6 @@ type Manager struct {
 	tracker      *connectionTracker
 	domainPolicy *policy.NetworkPolicy
 	domains      map[string]*resolvedDomain
-	grantEpoch   uint64 // Advanced only on a successful static transaction.
 
 	staticStateUncertain bool // Protected by mu; cleared only by a successful apply.
 
@@ -95,7 +94,8 @@ type Manager struct {
 	// re-emits its still-relevant part, because every full apply starts with
 	// `delete table` and would otherwise reopen flows a dropEstablished commit
 	// closed (e.g. ones still retransmitting).
-	lastDrops EstablishedDrops
+	lastDrops  EstablishedDrops
+	dnsVerdict func(netip.Addr, bool) (tcpWithdrawal, bool)
 	// lastDropsAt is when the dropEstablished commit behind lastDrops was
 	// applied. Carries keep the original timestamp and stop once the conntrack
 	// established timeout has passed, so a sandbox that tightens once does not
@@ -148,7 +148,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 }
 
 func (m *Manager) knownDNSLocked() knownDNS {
-	return knownDNS{installed: m.tracker.dynamicIPs, domains: m.domains, epoch: m.grantEpoch}
+	return knownDNS{installed: m.tracker.dynamicIPs, domains: m.domains}
 }
 
 // liveLearnedAddrsLocked returns live DNS addresses and their earliest expiry.
@@ -298,7 +298,6 @@ func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *polic
 	if len(plan.active) == 0 {
 		m.tracker.previousActiveGrace = time.Time{}
 	}
-	m.grantEpoch++
 	m.domainPolicy = p
 	m.domains = plan.domains
 	m.staticStateUncertain = false
@@ -435,6 +434,7 @@ func (m *Manager) retainedDomainLeasesLocked(p *policy.NetworkPolicy, now time.T
 
 func (m *Manager) setLastDropsLocked(drops EstablishedDrops, committedAt time.Time) {
 	m.lastDrops = drops
+	m.dnsVerdict = nil
 	if drops.Empty() {
 		m.lastDropsAt = time.Time{}
 		return
@@ -484,6 +484,9 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		return nil
 	}
 	var b strings.Builder
+	// Stage new, affected subjects before submitting the grant. Only an ACK
+	// publishes their history. Reuse the installed plan's compiled verdict.
+	var discovered exactTCP
 	for addr, expiry := range deadlines {
 		if previous := m.tracker.dynamicIPs[addr]; previous.After(expiry) {
 			expiry = previous
@@ -492,6 +495,31 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 		set := resolvedIPSet(addr)
 		// nft uses whole seconds; round up rather than shorten the deadline.
 		WriteTimedElement(&b, tableName, set, addr, expiry.Sub(now)+time.Second-time.Nanosecond)
+		if _, known := m.lastDrops.exact[addr]; !known && !m.lastDropsAt.IsZero() {
+			if m.dnsVerdict == nil {
+				m.dnsVerdict = m.lastDrops.snapshotTCP(m.domainPolicy)
+			}
+			w, late := m.dnsVerdict(addr, true)
+			blocked := w.explicit.union(w.implicit)
+			if late && len(blocked) == 0 {
+				// An empty exception is needed only if DNS actually opened
+				// something. A static keep alone must not consume capacity.
+				without, _ := m.dnsVerdict(addr, false)
+				late = len(without.implicit) != 0
+			}
+			if late || len(blocked) != 0 {
+				if m.lastDrops.dnsSubjects+len(discovered) >= maxResolvedDomains*maxDomainAddresses {
+					if m.now().Sub(m.lastDropsAt) >= establishedCarryTTL() {
+						continue // No subsequent plain reload can inherit this plan.
+					}
+					return fmt.Errorf("TCP withdrawal history is at capacity")
+				}
+				if discovered == nil {
+					discovered = make(exactTCP)
+				}
+				discovered[addr] = tcpWithdrawal{explicit: blocked}
+			}
+		}
 	}
 	script := b.String()
 	log.Debugf("nftables: adding %d resolved IP(s) to dynamic allow sets with script statement %s", len(deadlines), script)
@@ -505,6 +533,14 @@ func (m *Manager) addResolvedDeadlinesLocked(ctx context.Context, deadlines map[
 	}
 	for addr, expiry := range deadlines {
 		m.tracker.dynamicIPs[addr] = expiry
+		if w, ok := discovered[addr]; ok {
+			if m.lastDrops.exact == nil {
+				m.lastDrops.exact = make(exactTCP)
+			}
+			m.lastDrops.exact[addr] = w
+			m.lastDrops.dnsSubjects++
+			continue
+		}
 		// The acknowledged grant has admitted only the implicit TCP ports.
 		// Remember that fact for reloads, regardless of userspace TTL rounding.
 		if w, tracked := m.lastDrops.exact[addr]; tracked && len(w.implicit) != 0 {
@@ -655,14 +691,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	// denied IP (shared CDN) must not resurrect a flow the caller asked to kill.
 	writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
 	if drops.exactCarried {
-		covered := compiledTCP(drops.DenyPortDrops)
-		for _, addr := range drops.DenyAddrs {
-			covered = append(covered, tcpTarget{prefix: hostPrefix(addr), spans: allTCP})
-		}
-		for _, prefix := range drops.DenyPrefixes {
-			covered = append(covered, tcpTarget{prefix: prefix, spans: allTCP})
-		}
-		drops.writeExactTCP(&b, true, covered)
+		drops.writeExactTCP(&b, true)
 	}
 	portDeny, portAllow := p.PortScopedRules()
 	dnsVerdict := "accept"
@@ -682,7 +711,10 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related %s\n", tableName, chainName, dynAllowV4Set, dnsVerdict)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related %s\n", tableName, chainName, dynAllowV6Set, dnsVerdict)
 	if drops.exactCarried {
-		drops.writeExactTCP(&b, false, nil)
+		drops.writeExactTCP(&b, false)
+	}
+	if drops.broad != nil {
+		drops.broad.write(&b)
 	}
 	// Then still-allowed destinations (keeps and the static allow sets), then
 	// removed allows, then the blanket verdict.

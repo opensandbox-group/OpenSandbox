@@ -172,9 +172,14 @@ func TestNftFirstDNSGrantAfterPlainReload(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorIs(t, echo(cut, 2), os.ErrDeadlineExceeded)
 	require.NoError(t, echo(spared, 2))
-	next := mustPolicy(t, `{"egress":[`+domain+`,{"action":"deny","target":"198.18.0.0/24","ports":[2443,28443]}]}`)
-	require.NoError(t, m.ApplyStatic(ctx, next))
-	require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example", []ResolvedIP{{Addr: netip.MustParseAddr("198.18.0.2"), TTL: time.Minute}}))
-	require.ErrorIs(t, echo(cut, 3), os.ErrDeadlineExceeded)
-	require.NoError(t, echo(spared, 3))
+	for i, overlap := range []string{`{"action":"allow","target":"198.18.0.0/24"}`, `{"action":"allow","ports":[2443,28443]}`} {
+		next := mustPolicy(t, `{"egress":[`+domain+`,`+overlap+`,{"action":"deny","target":"198.18.0.0/24","ports":[2443,28443]}]}`)
+		require.NoError(t, m.ApplyStatic(ctx, next))
+		before := byte(3 + 2*i)
+		require.ErrorIs(t, echo(cut, before), os.ErrDeadlineExceeded)
+		require.NoError(t, echo(spared, before))
+		require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example", []ResolvedIP{{Addr: netip.MustParseAddr("198.18.0.2"), TTL: time.Minute}}))
+		require.ErrorIs(t, echo(cut, before+1), os.ErrDeadlineExceeded)
+		require.NoError(t, echo(spared, before+1))
+	}
 }
