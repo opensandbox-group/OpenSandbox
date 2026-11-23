@@ -4698,10 +4698,35 @@ exchange_stage() { # <description> <template-id>
 	run_stage "$1" exchange_resolver_verify "$2"
 }
 
+# Read the declared mode and every live Pod before any measurement creates a
+# sandbox: a delta step can switch the Pool without changing the matrix env.
+bench_require_egress_mode() {
+	local expected="${EGRESS_INTERCEPTION_MODE:-all}" pool pods matches
+	matches='
+		def matches:
+			[.containers[]? | select(.name == "egress")] as $c |
+			($c | length) == 1 and
+			([$c[0].env[]? | select(.name == "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")] as $v |
+			 ($v | length) <= 1 and ($v | all(has("valueFrom") | not)) and
+			 (($v[0].value // "all" | if . == "" then "all" else . end) == $expected));'
+	pool="$(kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" -o json)" \
+		|| fail "bench: live SandboxPool mode could not be read"
+	printf '%s' "$pool" | jq -e --arg expected "$expected" \
+		"$matches .spec.fastletTemplate.spec | matches" >/dev/null \
+		|| fail "bench: live SandboxPool mode differs from expected $expected"
+	pods="$(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o json)" \
+		|| fail "bench: live Pod modes could not be read"
+	printf '%s' "$pods" | jq -e --arg expected "$expected" \
+		"$matches (.items | length) > 0 and (.items | all(.spec | matches))" >/dev/null \
+		|| fail "bench: live Pod modes differ from expected $expected (or no Pods found)"
+}
+
 # OSEP-0023 cost measurements (credential-bound-bench.sh): M1/M2 reports
 # under $WORK/bench/<leg>; runs in either interception leg.
 bench_credential_bound() {
 	require_live_stack
+	bench_require_egress_mode
 	# shellcheck source=credential-bound-bench.sh
 	source "$SCRIPT_DIR/credential-bound-bench.sh"
 	credential_bound_bench

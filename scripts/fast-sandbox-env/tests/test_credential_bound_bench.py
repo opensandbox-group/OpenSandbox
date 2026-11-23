@@ -272,7 +272,7 @@ class BenchShellTest(ShellCase):
         self.assertIn("bench-credential-bound", proc.stdout + proc.stderr)
         with open(ENV_SH) as handle:
             text = handle.read()
-        self.assertIn("|verify-resourceaware|bench-credential-bound) ACTION=\"$arg\" ;;", text)
+        self.assertIn("|verify-resourceaware|bench-credential-bound|verify-credential-bound) ACTION=\"$arg\" ;;", text)
         self.assertIn("\tbench-credential-bound)\n", text)
 
 
@@ -297,21 +297,58 @@ class WorkflowBenchGateTest(unittest.TestCase):
         gate = self.job["env"]["FSB_BENCH"]
         self.assertIn("inputs.bench", gate)
         self.assertIn("'fast-sandbox-bench'", gate)
-        bench = self.step("Run credential-bound cost bench (OSEP-0023)")
-        self.assertEqual(bench["id"], "bench")
-        self.assertEqual(bench["if"], "env.FSB_BENCH == 'true'")
-        self.assertIsInstance(bench["timeout-minutes"], int)
-        self.assertIn("integration-env.sh bench-credential-bound", bench["run"])
-        index = self.names.index("Run credential-bound cost bench (OSEP-0023)")
-        self.assertEqual(self.names[index - 1], "Run idle-pause SDK e2e")
-        for name in ("Collect bench reports", "Upload bench reports"):
-            self.assertEqual(self.step(name)["if"], "always() && steps.bench.outcome != 'skipped'")
-            self.assertGreater(self.names.index(name), index)
-            self.assertLess(self.names.index(name), self.names.index("Teardown"))
-        upload = self.step("Upload bench reports")["with"]
-        self.assertIn("fast-sandbox-bench-${{ matrix.egress_interception_mode || 'default' }}", upload["name"])
-        self.assertEqual(upload["path"], "bench-reports/")
+        delta = self.names.index("Run credential-bound egress verify (OSEP-0023)")
+        sdk = self.names.index("Run credential-bound SDK egress e2e (OSEP-0023)")
+        for leg, mode in (("default", ""), ("credential-bound", "credential-bound")):
+            bench = self.step("Run %s cost bench (OSEP-0023)" % leg)
+            index = self.steps.index(bench)
+            self.assertEqual(bench["env"]["EGRESS_INTERCEPTION_MODE"], mode)
+            self.assertIn("env.FSB_BENCH == 'true'", bench["if"])
+            self.assertIn("integration-env.sh bench-credential-bound", bench["run"])
+            self.assertIsInstance(bench["timeout-minutes"], int)
+            if leg == "default":
+                self.assertLess(self.names.index("Run idle-pause SDK e2e"), index)
+                self.assertLess(index, delta)
+            else:
+                self.assertGreater(index, sdk)
+            for action in ("Collect", "Upload"):
+                report = self.step("%s %s bench reports" % (action, leg))
+                self.assertIn("steps.%s.outcome" % bench["id"], report["if"])
+                self.assertGreater(self.steps.index(report), index)
+                self.assertLess(self.steps.index(report), self.names.index("Teardown"))
+            upload = self.step("Upload %s bench reports" % leg)["with"]
+            self.assertIn("fast-sandbox-bench-%s-" % leg, upload["name"])
+            self.assertEqual(upload["path"], "bench-reports/%s/" % leg)
         self.assertEqual(self.job["timeout-minutes"], 240)
+
+    def test_matrix_conditions_select_each_requested_bench_once(self):
+        script = self.doc["jobs"]["egress-modes"]["steps"][0]["run"]
+        code = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        for event, requested, expected in (
+                ("pull_request", "", ["default", "credential-bound"]),
+                ("workflow_dispatch", "default,credential-bound", ["default", "credential-bound"]),
+                ("workflow_dispatch", "credential-bound", ["credential-bound"])):
+            with self.subTest(event=event, requested=requested), tempfile.TemporaryDirectory() as tmp:
+                output = os.path.join(tmp, "output")
+                env = dict(os.environ, EVENT_NAME=event, REQUESTED=requested, GITHUB_OUTPUT=output)
+                proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                with open(output) as handle:
+                    values = dict(line.rstrip().split("=", 1) for line in handle)
+                for enabled in ("false", "true"):
+                    selected = []
+                    for mode in json.loads(values["matrix"]):
+                        for leg in ("default", "credential-bound"):
+                            condition = self.step("Run %s cost bench (OSEP-0023)" % leg)["if"]
+                            for key, value in (("env.FSB_BENCH", enabled),
+                                               ("matrix.egress_interception_mode", mode),
+                                               ("needs.egress-modes.outputs.run_credential_bound_delta",
+                                                values["run_credential_bound_delta"])):
+                                condition = condition.replace(key, repr(value))
+                            if eval(condition.replace("&&", " and ").replace("||", " or "), {"__builtins__": {}}):
+                                selected.append(leg)
+                    self.assertEqual(selected, expected if enabled == "true" else [])
+
 
 
 if __name__ == "__main__":
