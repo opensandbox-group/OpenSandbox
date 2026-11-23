@@ -217,23 +217,15 @@ func newForwardHostResolver(staticIPs []netip.Addr, dnsAddr string, queryNames [
 	return func(ctx context.Context, host string) ([]netip.Addr, error) {
 		var lastErr error
 		for _, name := range candidates {
-			ips, rcode, err := queryDNSAddr(ctx, dnsAddr, name, dns.TypeA)
+			ips, err := queryDNSBothFamilies(ctx, dnsAddr, name)
 			if err != nil {
 				lastErr = err
-				continue
 			}
 			if len(ips) > 0 {
 				return ips, nil
 			}
-			if rcode == dns.RcodeSuccess {
-				ips6, _, err6 := queryDNSAddr(ctx, dnsAddr, name, dns.TypeAAAA)
-				if err6 != nil {
-					lastErr = err6
-					continue
-				}
-				if len(ips6) > 0 {
-					return ips6, nil
-				}
+			if ctx.Err() != nil {
+				break
 			}
 		}
 		if lastErr != nil {
@@ -243,21 +235,53 @@ func newForwardHostResolver(staticIPs []netip.Addr, dnsAddr string, queryNames [
 	}
 }
 
-func queryDNSAddr(ctx context.Context, dnsAddr, name string, qtype uint16) ([]netip.Addr, int, error) {
+func queryDNSBothFamilies(ctx context.Context, dnsAddr, name string) ([]netip.Addr, error) {
+	qCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+
+	var (
+		ips4, ips6 []netip.Addr
+		err4, err6 error
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ips4, err4 = queryDNSAddr(qCtx, dnsAddr, name, dns.TypeA)
+	}()
+	go func() {
+		defer wg.Done()
+		ips6, err6 = queryDNSAddr(qCtx, dnsAddr, name, dns.TypeAAAA)
+	}()
+	wg.Wait()
+
+	if len(ips4) > 0 || len(ips6) > 0 {
+		out := make([]netip.Addr, 0, len(ips4)+len(ips6))
+		out = append(out, ips4...)
+		out = append(out, ips6...)
+		return out, nil
+	}
+	if err4 != nil {
+		return nil, err4
+	}
+	return nil, err6
+}
+
+func queryDNSAddr(ctx context.Context, dnsAddr, name string, qtype uint16) ([]netip.Addr, error) {
 	msg := new(dns.Msg)
 	msg.SetQuestion(dns.Fqdn(name), qtype)
 	msg.RecursionDesired = true
 
-	udpClient := &dns.Client{Net: "udp", Timeout: 3 * time.Second}
+	udpClient := &dns.Client{Net: "udp", Timeout: time.Second}
 	resp, _, err := udpClient.ExchangeContext(ctx, msg, dnsAddr)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	if resp.Truncated {
-		tcpClient := &dns.Client{Net: "tcp", Timeout: 3 * time.Second}
+		tcpClient := &dns.Client{Net: "tcp", Timeout: time.Second}
 		resp, _, err = tcpClient.ExchangeContext(ctx, msg, dnsAddr)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 	}
 	var out []netip.Addr
@@ -273,7 +297,7 @@ func queryDNSAddr(ctx context.Context, dnsAddr, name string, qtype uint16) ([]ne
 			}
 		}
 	}
-	return out, resp.Rcode, nil
+	return out, nil
 }
 
 // runForwardSidecar installs the forward-mode data plane in order: default

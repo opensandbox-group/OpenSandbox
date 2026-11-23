@@ -271,6 +271,11 @@ func TestNewForwardHostResolverUsesStaticSnapshotAndDNSOrder(t *testing.T) {
 					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
 					A:   net.ParseIP("10.96.50.10"),
 				})
+			} else if q.Qtype == dns.TypeAAAA && q.Name == "gateway.team-a.svc.cluster.local." {
+				resp.Answer = append(resp.Answer, &dns.AAAA{
+					Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 30},
+					AAAA: net.ParseIP("fd00::50"),
+				})
 			} else {
 				resp.Rcode = dns.RcodeNameError
 			}
@@ -290,9 +295,15 @@ func TestNewForwardHostResolverUsesStaticSnapshotAndDNSOrder(t *testing.T) {
 	)
 	ips, err = dnsResolve(context.Background(), "gateway")
 	require.NoError(t, err)
-	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.96.50.10")}, ips)
+	require.Equal(t, []netip.Addr{
+		netip.MustParseAddr("10.96.50.10"),
+		netip.MustParseAddr("fd00::50"),
+	}, ips)
 	mu.Lock()
 	gotQueried := append([]string(nil), queried...)
 	mu.Unlock()
-	require.Equal(t, []string{"gateway.team-a.svc.cluster.local."}, gotQueried)
+	require.Equal(t, []string{
+		"gateway.team-a.svc.cluster.local.",
+		"gateway.team-a.svc.cluster.local.",
+	}, gotQueried)
 }

@@ -258,13 +258,9 @@ func (f *Forwarder) dialGatewayConn(ctx context.Context) (net.Conn, error) {
 		if len(ips) == 0 {
 			return nil, fmt.Errorf("resolve %q: no addresses found", f.cfg.Host)
 		}
-		portStr := strconv.Itoa(f.cfg.Port)
-		for _, ip := range ips {
-			conn, err = d.DialContext(ctx, "tcp", net.JoinHostPort(ip.Unmap().String(), portStr))
-			if err == nil {
-				break
-			}
-		}
+		conn, err = dialResolvedAddrs(ctx, f.dialTimeout, ips, f.cfg.Port, func(attemptCtx context.Context, addr string) (net.Conn, error) {
+			return d.DialContext(attemptCtx, "tcp", addr)
+		})
 	} else {
 		conn, err = d.DialContext(ctx, "tcp", f.gatewayAddr)
 	}
@@ -286,6 +282,51 @@ func (f *Forwarder) dialGatewayConn(ctx context.Context) (net.Conn, error) {
 		return nil, fmt.Errorf("gateway TLS handshake: %w", err)
 	}
 	return tlsConn, nil
+}
+
+// dialResolvedAddrs tries each literal IP in order while apportioning the
+// remaining deadline across attempts so a single blackholed address cannot
+// consume the entire probe/dial budget before later addresses are tried.
+func dialResolvedAddrs(
+	ctx context.Context,
+	dialTimeout time.Duration,
+	ips []netip.Addr,
+	port int,
+	dial func(ctx context.Context, addr string) (net.Conn, error),
+) (net.Conn, error) {
+	deadline := time.Now().Add(dialTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	portStr := strconv.Itoa(port)
+	var lastErr error
+	for i, ip := range ips {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if lastErr == nil {
+				lastErr = context.DeadlineExceeded
+			}
+			break
+		}
+		attemptCtx := ctx
+		var cancel context.CancelFunc
+		if i < len(ips)-1 {
+			share := remaining / time.Duration(len(ips)-i)
+			attemptCtx, cancel = context.WithDeadline(ctx, time.Now().Add(share))
+		}
+		conn, err := dial(attemptCtx, net.JoinHostPort(ip.Unmap().String(), portStr))
+		if cancel != nil {
+			cancel()
+		}
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
 }
 
 type closeWriter interface {

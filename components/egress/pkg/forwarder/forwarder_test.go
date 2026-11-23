@@ -441,3 +441,34 @@ func TestDialGatewayUsesCustomResolveHost(t *testing.T) {
 	require.Equal(t, "Bearer tok", req.Header.Get("Proxy-Authorization"))
 	_ = sandbox.Close()
 }
+
+func TestDialResolvedAddrsSharesDeadlineAcrossAddresses(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() {
+		_ = c1.Close()
+		_ = c2.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	var attempted []string
+	conn, err := dialResolvedAddrs(
+		ctx,
+		5*time.Second,
+		[]netip.Addr{netip.MustParseAddr("198.51.100.1"), netip.MustParseAddr("198.51.100.2")},
+		3128,
+		func(attemptCtx context.Context, addr string) (net.Conn, error) {
+			attempted = append(attempted, addr)
+			if addr == "198.51.100.1:3128" {
+				// Simulate silent SYN drop blocking until this attempt's share expires.
+				<-attemptCtx.Done()
+				return nil, attemptCtx.Err()
+			}
+			return c1, nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, c1, conn)
+	require.Equal(t, []string{"198.51.100.1:3128", "198.51.100.2:3128"}, attempted)
+}
