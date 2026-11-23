@@ -434,6 +434,42 @@ def test_create_docker_applies_execd_isolation_config(
     assert "LOG_LEVEL=info" in environment
 
 
+
+def test_create_docker_strips_alternate_execd_isolation_env_keys(
+    client, auth_headers, sample_sandbox_request, docker_policy_runtime, monkeypatch,
+) -> None:
+    service = lifecycle.sandbox_service
+    assert isinstance(service, DockerSandboxService)
+    config = service.app_config
+    operator_path = "/etc/opensandbox/operator.toml"
+    monkeypatch.setattr(
+        config, "runtime",
+        RuntimeConfig.model_validate({
+            **config.runtime.model_dump(), "execd_isolation_config": operator_path,
+        }),
+    )
+    monkeypatch.setitem(config.docker.sandbox_env, "EXECD_ISOLATION_CONFIG=default", "x")
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={
+            **sample_sandbox_request,
+            "metadata": {},
+            "env": {
+                "EXECD_ISOLATION_CONFIG": "/etc/opensandbox/creator.toml",
+                "EXECD_ISOLATION_CONFIG=evil": "x",
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    environment = docker_policy_runtime.api.create_container.call_args.kwargs["environment"]
+    assert [item for item in environment if item.split("=", 1)[0] == "EXECD_ISOLATION_CONFIG"] == [
+        f"EXECD_ISOLATION_CONFIG={operator_path}"
+    ]
+
+
 @pytest.mark.parametrize(
     ("network_policy", "message"),
     [
