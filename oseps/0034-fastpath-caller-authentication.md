@@ -4,7 +4,7 @@ description: Unified Kubernetes-backed authentication for in-cluster and externa
 authors:
   - "@Pangjiping"
 creation-date: 2026-11-20
-last-updated: 2026-11-21
+last-updated: 2026-11-23
 status: draft
 ---
 
@@ -37,7 +37,7 @@ status: draft
 
 ## Summary
 
-Authenticate every FastPath business RPC using a short-lived Kubernetes ServiceAccount token with a dedicated FastPath audience, local JWT verification, and explicit caller authorization. An OpenSandbox server running inside or outside Kubernetes uses the same protocol; only its Kubernetes bootstrap credentials differ, while the ingress gateway always runs inside the cluster. Reuse the mechanism already implemented for FastPath-to-Fastlet authentication without reusing that hop's tokens, identities, or authorization policy, and require protected transport for bearer credentials.
+Authenticate every FastPath business RPC by default using a short-lived Kubernetes ServiceAccount token with a dedicated FastPath audience, local JWT verification, and explicit caller authorization over verified TLS, while allowing operators to explicitly opt out (`enabled = false`) for smooth rolling upgrades or isolated non-TLS environments. An OpenSandbox server running inside or outside Kubernetes uses the same protocol; only its Kubernetes bootstrap credentials differ, while the ingress gateway always runs inside the cluster. Reuse the mechanism already implemented for FastPath-to-Fastlet authentication without reusing that hop's tokens, identities, or authorization policy, and require protected transport whenever bearer credentials are enabled.
 
 ## Motivation
 
@@ -68,12 +68,12 @@ The [server's Kubernetes client](../server/opensandbox_server/services/k8s/clien
 
 | ID | Requirement |
 |---|---|
-| R1 | Every FastPath business RPC requires a valid token and an explicit authorization decision, including reads, route resolution, and the optional gRPC-Web surface. |
+| R1 | When enabled (the default), every FastPath business RPC requires a valid token and an explicit authorization decision, including reads, route resolution, and the optional gRPC-Web surface. |
 | R2 | Both server deployment modes produce the same FastPath identity and token format; FastPath does not branch on caller network location. |
 | R3 | Server and gateway use distinct caller identities, distinct from FastPath/controller identities accepted by Fastlet. |
 | R4 | Token minting is namespaced and restricted to named target ServiceAccounts; normal operation needs neither cluster-admin nor access to signing private keys. |
 | R5 | Token expiry, rotation, process restart, and Kubernetes signing-key rotation require no manual token replacement. |
-| R6 | Authentication or authorization failure never falls back to anonymous traffic; new RPCs are denied until mapped to a policy. |
+| R6 | When enabled, authentication or authorization failure never falls back to anonymous traffic; new RPCs are denied until mapped to a policy. An explicit opt-out switch disables caller authentication and TLS together as a deliberate operator choice for staged migration. |
 | R7 | Warm token acquisition and verification perform no network I/O; cache misses and refresh work are bounded and deduplicated. |
 | R8 | Bearer credentials travel only over authenticated, confidential transport, with no certificate-verification bypass. |
 | R9 | Removing FastPath access must be possible through its caller policy without waiting for Kubernetes token expiry. |
@@ -192,14 +192,14 @@ Configuration has three responsibilities; concrete flag and Helm value names sho
 
 | Owner | Required configuration | Defaulting and lifecycle |
 |---|---|---|
-| Server | Existing Kubernetes connection; FastPath target SA namespace/name; TLS endpoint and trust | Both deployment modes use the same target SA. Helm supplies the in-cluster values; an external server supplies the target identity and TLS connection alongside its existing kubeconfig. |
-| Gateway | FastPath target SA namespace/name; TLS endpoint and trust | Helm derives these from the installation; Kubernetes access uses the existing Pod identity. |
-| FastPath | Trusted issuer/key source; subject/profile/namespace policy; TLS serving or protected proxy configuration | Deployment-owned values, with no anonymous-authentication mode. |
-| Base chart | Two authentication-only SAs, narrowly scoped token-minter Roles/RoleBindings, required authenticated discovery grant | Reuse installation namespace and configured Pod SA names; support explicit external Kubernetes subjects without granting cluster-admin. |
+| Server | `fastpath_auth_enabled` (default `true`); existing Kubernetes connection; FastPath target SA namespace/name; TLS endpoint and trust | Enabled by default. Both deployment modes use the same target SA. Setting `fastpath_auth_enabled = false` switches the client back to plaintext gRPC without TokenRequest preflight or bearer metadata. |
+| Gateway | `--fastpath-auth-enabled` (default `true`); FastPath target SA namespace/name; TLS endpoint and trust | Enabled by default; Helm derives identity and trust settings from the installation. Setting `--fastpath-auth-enabled=false` uses plaintext gRPC without TokenRequest. |
+| FastPath | `--fastpath-auth-enabled` (default `true`); trusted issuer/key source; subject/profile/namespace policy; TLS serving configuration | Enabled by default (fail-closed if policy or TLS files are missing). Setting `--fastpath-auth-enabled=false` serves plaintext gRPC/gRPC-Web without caller authentication or cert-manager Certificate creation. |
+| Base chart | `fastSandbox.callerAuth.enabled` (default `true`); two authentication-only SAs, narrowly scoped token-minter Roles/RoleBindings | Enabled by default; reuse installation namespace and configured Pod SA names; support explicit external Kubernetes subjects without granting cluster-admin. |
 
 The audience and maximum accepted token lifetime of 3,600 seconds are protocol constants for this hop, not user-selected values copied from incoming requests or relaxed to match cluster TokenRequest limits. Refresh values have safe defaults and do not need separate operator tuning in the initial configuration surface. Existing Fastlet audience, token source, and accepted subjects remain unchanged.
 
-Empty caller policy, missing target identity, malformed TLS trust, or missing bootstrap credentials must produce directed startup/preflight errors. Readiness must distinguish “TCP channel connected” from “credentials and verification prerequisites ready.” The gateway checks TLS connectivity and token minting during startup. Because the server constructs the optional FastPath backend even in ordinary Kubernetes deployments, its first FastPath connection performs credential preflight instead of making FastPath a universal startup dependency; the server's general health endpoint does not certify FastPath readiness. Deployment validation includes an authenticated read-only RPC in the intended namespace. Temporary dependency failure does not disable authentication or trigger unbounded startup retry loops.
+When caller authentication is enabled (the default), empty caller policy, missing target identity, malformed TLS trust, or missing bootstrap credentials must produce directed startup/preflight errors. Readiness must distinguish “TCP channel connected” from “credentials and verification prerequisites ready.” The gateway checks TLS connectivity and token minting during startup. Because the server constructs the optional FastPath backend even in ordinary Kubernetes deployments, its first FastPath connection performs credential preflight instead of making FastPath a universal startup dependency; the server's general health endpoint does not certify FastPath readiness. Deployment validation includes an authenticated read-only RPC in the intended namespace. Temporary dependency failure never automatically downgrades an enabled endpoint to plaintext or anonymous access; opting out requires setting the explicit configuration flag on both FastPath and its callers.
 
 ### Errors and observability
 
@@ -264,11 +264,9 @@ Integration coverage needs a cluster, a host-side server with restricted kubecon
 
 ## Upgrade & Migration Strategy
 
-This draft proposes an intentional internal wire-security change: a new enforcing FastPath does not accept old unauthenticated clients. It changes no persisted Sandbox data, public protobuf fields, CRDs, or SDK credentials. Acceptance of the OSEP and release notes must explicitly acknowledge that clients and FastPath need coordinated upgrading; there is no authentication-disable flag or automatic protocol downgrade.
+This proposal enables FastPath caller authentication and TLS by default while providing an explicit opt-out switch (`fastpath_auth_enabled = false` / `--fastpath-auth-enabled=false` / Helm `callerAuth.enabled=false`) so existing deployments can upgrade binaries first and enable transport/caller security in a controlled step. It changes no persisted Sandbox data, public protobuf fields, CRDs, or SDK credentials. There is no automatic runtime downgrade when authentication is enabled: both sides of the connection must agree on whether caller authentication and TLS are enabled.
 
-1. Provision the caller SAs and narrow minting bindings, including any external kubeconfig subject; provision FastPath issuer access, caller policy, and verified TLS transport/trust. Validate TokenRequest under the actual runtime identities, not an administrator's identity, and verify issuer/JWKS access from the actual FastPath environment.
-2. Prepare matching server, gateway, and FastPath versions and configuration. Because both plaintext transport and anonymous access change, use a coordinated maintenance window unless the deployment already has a verified protected endpoint and an explicitly tested client-first transition; do not promise a generic zero-downtime upgrade across incompatible transports.
-3. Switch clients and FastPath to the authenticated, protected connection; close any old bypass listener. Run the identity matrix, lifecycle, route resolution, and gateway wake-on-access checks before reopening normal traffic.
-4. Validate token refresh and TLS renewal without manual token replacement. Keep failures observable and fail closed; missing RBAC, an expired external kubeconfig, or a bad certificate is not a reason to re-enable anonymous access.
-
-Rolling back only the clients against an enforcing FastPath is unsupported. Prefer fixing configuration or rolling forward; a rollback to the old pair requires a coordinated maintenance operation and explicitly restores the previous security gap, so keep the old endpoint isolated rather than leaving an unauthenticated service exposed. Remove obsolete grants only after no running component uses them. This proposal does not require rolling Fastlet Pools or changing their token audience or allow list.
+1. **Zero-prerequisite binary upgrade (optional transitional step):** Deployments that have not yet provisioned cert-manager certificates, CA distribution, or external kubeconfig RBAC can upgrade FastPath, server, and gateway binaries with caller authentication explicitly disabled (`fastpath.callerAuth.enabled=false`, `server` `fastpath_auth_enabled = false`, `gateway.fastpathAuth.enabled=false`). This preserves legacy plaintext gRPC behavior while rolling out the new release.
+2. **Provision identities and TLS prerequisites:** Enable `fastSandbox.callerAuth.enabled=true` in the base chart to provision the caller SAs and narrow minting bindings, including any external kubeconfig subject; provision FastPath issuer access, caller policy, and verified TLS serving certificates/client CA trust. Validate TokenRequest under the actual runtime identities, not an administrator's identity, and verify issuer/JWKS access from the actual FastPath environment.
+3. **Enable authenticated TLS (default):** Switch FastPath, server, and gateway to the default enabled mode (`enabled=true`); close any old bypass listener. Run the identity matrix, lifecycle, route resolution, and gateway wake-on-access checks before reopening normal traffic.
+4. **Steady-state verification:** Validate token refresh and TLS renewal without manual token replacement. Keep failures observable and fail closed while enabled; if an emergency rollback to legacy plaintext is required during migration, explicitly set the opt-out switch on both FastPath and its clients. This proposal does not require rolling Fastlet Pools or changing their token audience or allow list.
