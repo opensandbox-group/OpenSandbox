@@ -434,7 +434,6 @@ def test_create_docker_applies_execd_isolation_config(
     assert "LOG_LEVEL=info" in environment
 
 
-
 def test_create_docker_strips_alternate_execd_isolation_env_keys(
     client, auth_headers, sample_sandbox_request, docker_policy_runtime, monkeypatch,
 ) -> None:
@@ -442,12 +441,8 @@ def test_create_docker_strips_alternate_execd_isolation_env_keys(
     assert isinstance(service, DockerSandboxService)
     config = service.app_config
     operator_path = "/etc/opensandbox/operator.toml"
-    monkeypatch.setattr(
-        config, "runtime",
-        RuntimeConfig.model_validate({
-            **config.runtime.model_dump(), "execd_isolation_config": operator_path,
-        }),
-    )
+    runtime_values = {**config.runtime.model_dump(), "execd_isolation_config": operator_path}
+    monkeypatch.setattr(config, "runtime", RuntimeConfig.model_validate(runtime_values))
     monkeypatch.setitem(config.docker.sandbox_env, "EXECD_ISOLATION_CONFIG=default", "x")
 
     response = client.post(
