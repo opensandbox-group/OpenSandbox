@@ -100,6 +100,12 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
             ready=True,
         )
 
+    def CreateRootfsSandbox(self, request, context):
+        if getattr(self, "rootfs_rpc_unavailable", False):
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "unknown method")
+        self.rootfs_request = request
+        return self.CreateSandbox(request.create, context)
+
     def CreateSandbox(self, request, context):
         self.last_create = request
         if self.reject_create_with is not None:
@@ -1903,3 +1909,40 @@ def test_pool_is_resource_aware_requires_explicit_resource_aware_profile():
             ),
         )
     )
+
+def test_rootfs_http_forwards_partial_limits_to_distinct_rpc(http_fsb, monkeypatch):
+    from opensandbox_server.services.k8s.snapshot_runtime import build_public_snapshot_name
+    from opensandbox_server.services.snapshot_models import (
+        SnapshotRecord, SnapshotRestoreConfig, SnapshotState, SnapshotStatusRecord,
+    )
+
+    client, fake, _ = http_fsb
+    record = SnapshotRecord(
+        id="snap-size", source_sandbox_id="old", mode="rootfsOnly",
+        restore_config=SnapshotRestoreConfig(backend="fsb", image="native-source",
+                                             limits={"cpu": "500m", "memory": "1Gi"}),
+        status=SnapshotStatusRecord(state=SnapshotState.READY),
+    )
+    repo = Mock()
+    repo.get.return_value = record
+    monkeypatch.setattr("opensandbox_server.services.snapshot_restore.get_snapshot_repository", lambda: repo)
+    data = {"snapshotId": record.id, "timeout": 600, "resourceLimits": {"memory": "2Gi"}}
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 202, response.text
+    assert fake.rootfs_request.snapshot_name == build_public_snapshot_name(record.id)
+    assert fake.rootfs_request.source_limits.cpu == "500m"
+    assert fake.rootfs_request.create.resources.limits.cpu == ""
+    assert fake.rootfs_request.create.resources.limits.memory == "2Gi"
+    del data["resourceLimits"]
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 202, response.text
+    assert not fake.rootfs_request.create.HasField("resources")
+
+    fake.rootfs_rpc_unavailable = True
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 503
+    assert "upgrade fast-sandbox" in response.text
+
+    record.mode = "full"
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 422

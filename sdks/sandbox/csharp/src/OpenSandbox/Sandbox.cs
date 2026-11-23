@@ -185,6 +185,10 @@ public sealed class Sandbox : IAsyncDisposable
         {
             throw new InvalidArgumentException("Exactly one of Image or SnapshotId must be specified.");
         }
+        if (options.InheritSnapshotResources && string.IsNullOrWhiteSpace(options.SnapshotId))
+        {
+            throw new InvalidArgumentException("InheritSnapshotResources requires a snapshot ID.");
+        }
         if (!string.IsNullOrWhiteSpace(options.SnapshotId) && options.Entrypoint is not null)
         {
             throw new InvalidArgumentException("Entrypoint must be omitted when SnapshotId is provided.");
@@ -213,7 +217,7 @@ public sealed class Sandbox : IAsyncDisposable
                 ? options.Entrypoint ?? Constants.DefaultEntrypoint
                 : null,
             Timeout = options.ManualCleanup ? null : options.TimeoutSeconds ?? Constants.DefaultTimeoutSeconds,
-            ResourceLimits = options.Resource ?? Constants.DefaultResourceLimits,
+            ResourceLimits = options.Resource ?? (options.InheritSnapshotResources && options.SnapshotId != null ? null : Constants.DefaultResourceLimits),
             ResourceRequests = options.ResourceRequests,
             Env = options.Env,
             SecureAccess = options.SecureAccess,

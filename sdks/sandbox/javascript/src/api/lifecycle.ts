@@ -1604,7 +1604,7 @@ export interface components {
          *     or a pre-configured pool (via `extensions.poolRef`).
          *
          *     **Standard mode**: Exactly one of `image` or `snapshotId` must be provided,
-         *     and `resourceLimits` is required.
+         *     and `resourceLimits` is required except for an FSB RootfsOnly snapshot restore.
          *
          *     When `image` is provided, `entrypoint` is required. When `snapshotId` is
          *     provided, `entrypoint` is optional. If omitted, the server defaults the
@@ -1669,7 +1669,7 @@ export interface components {
             timeout?: number | null;
             /**
              * @description Runtime resource constraints (hard caps) for the sandbox instance.
-             *     Required when `extensions.poolRef` is not set.
+             *     For an FSB RootfsOnly snapshot restore, omitted CPU and memory limits inherit their recorded values. Otherwise required when `extensions.poolRef` is not set.
              *     Optional when using pool mode (resource limits are defined by the Pool CRD template).
              *     SDK clients should provide sensible defaults (e.g., cpu: "500m", memory: "512Mi").
              */

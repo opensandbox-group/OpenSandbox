@@ -23,6 +23,9 @@ namespace OpenSandbox;
 /// </summary>
 public class SandboxCreateOptions
 {
+    /// <summary>Omit SDK resource defaults for a snapshot restore.</summary>
+    public bool InheritSnapshotResources { get; set; }
+
     /// <summary>
     /// Gets or sets the connection configuration.
     /// </summary>
