@@ -300,12 +300,91 @@ func TestCountMatchingConntrackFlowsDataPreservesAddressFamily(t *testing.T) {
 	}{
 		{"mapped explicit deny", EstablishedDrops{DenyPrefixes: []netip.Prefix{mapped}}, 1},
 		{"native explicit deny", EstablishedDrops{DenyAddrs: []netip.Addr{native}}, 0},
-		{"legacy removed address", EstablishedDrops{Addrs: []netip.Addr{native}}, 1},
+		{"native removed address", EstablishedDrops{Addrs: []netip.Addr{native}}, 0},
+		{"mapped removed prefix", EstablishedDrops{Prefixes: []netip.Prefix{mapped}}, 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, countMatchingConntrackFlowsData(data, tt.drops))
 		})
 	}
+}
+
+func TestCountMatchingConntrackFlowsDataUsesRemovedRuleFamily(t *testing.T) {
+	old := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.10"}]}`)
+	next := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.10","ports":[443]}]}`)
+	drops := ComputeEstablishedDrops(old, next, nil)
+	for _, tt := range []struct {
+		family, dst string
+		port, want  int
+	}{
+		{"ipv6 10", "::ffff:192.0.2.10", 80, 0},
+		{"ipv4 2", "192.0.2.10", 80, 1},
+		{"ipv4 2", "192.0.2.10", 443, 0},
+	} {
+		data := fmt.Appendf(nil, "%s tcp 6 431999 ESTABLISHED dst=%s dport=%d\n", tt.family, tt.dst, tt.port)
+		require.Equal(t, tt.want, countMatchingConntrackFlowsData(data, drops), "%s port %d", tt.dst, tt.port)
+	}
+}
+
+func TestComputeEstablishedDrops_RemovedAllowsPreserveFamily(t *testing.T) {
+	native := netip.MustParseAddr("192.0.2.10")
+	mapped := netip.MustParseAddr("::ffff:192.0.2.10")
+	for _, tt := range []struct {
+		name, old, next string
+		mappedDrop      bool
+	}{
+		{"mapped allow to deny", `{"defaultAction":"allow","egress":[{"action":"allow","target":"::ffff:192.0.2.10"}]}`, `{"defaultAction":"allow","egress":[{"action":"deny","target":"::ffff:192.0.2.10"}]}`, true},
+		{"host to equivalent prefix", `{"egress":[{"action":"allow","target":"::ffff:192.0.2.10"}]}`, `{"egress":[{"action":"allow","target":"::ffff:192.0.2.10/128"}]}`, false},
+		{"prefix to equivalent host", `{"egress":[{"action":"allow","target":"::ffff:192.0.2.10/128"}]}`, `{"egress":[{"action":"allow","target":"::ffff:192.0.2.10"}]}`, false},
+		{"mapped scoped host revoked", `{"egress":[{"action":"allow","target":"::ffff:192.0.2.10","ports":[443]}]}`, `{"defaultAction":"deny"}`, true},
+		{"mapped scoped host to equivalent prefix", `{"egress":[{"action":"allow","target":"::ffff:192.0.2.10","ports":[443]}]}`, `{"egress":[{"action":"allow","target":"::ffff:192.0.2.10/128","ports":[443]}]}`, false},
+		{"removed native allow stays covered by default", `{"defaultAction":"allow","egress":[{"action":"allow","target":"192.0.2.10"}]}`, `{"defaultAction":"allow","egress":[{"action":"deny","target":"::ffff:192.0.2.10"}]}`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			old, next := mustPolicy(t, tt.old), mustPolicy(t, tt.next)
+			drops := ComputeEstablishedDrops(old, next, nil)
+			require.False(t, drops.MatchesFlow(native, 443))
+			require.Equal(t, tt.mappedDrop, drops.MatchesFlow(mapped, 443))
+			script, err := buildRuleset(next, Options{}, drops)
+			require.NoError(t, err)
+			require.NotContains(t, script, "ip daddr 192.0.2.10 ")
+		})
+	}
+}
+
+func TestApplyStatic_RetainsMappedHostTeardownAgainstNativeAllow(t *testing.T) {
+	mapped := netip.MustParseAddr("::ffff:192.0.2.10")
+	native := netip.MustParseAddr("192.0.2.10")
+	for _, ports := range []string{"", `,"ports":[443]`} {
+		t.Run(ports, func(t *testing.T) {
+			old := mustPolicy(t, `{"egress":[{"action":"allow","target":"::ffff:192.0.2.10"`+ports+`}]}`)
+			next := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.10"`+ports+`}]}`)
+			m, _ := recordingManager()
+			_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), old, next)
+			require.NoError(t, err)
+			require.True(t, m.lastDrops.MatchesFlow(mapped, 443), "the explicit update withdrew the mapped host")
+			require.NoError(t, m.ApplyStatic(context.Background(), next))
+			require.True(t, m.lastDrops.MatchesFlow(mapped, 443), "plain reload must not treat a native allow as a mapped re-allow")
+			require.False(t, m.lastDrops.MatchesFlow(native, 443))
+		})
+	}
+}
+
+func TestApplyStatic_NativePrefixFragmentNeedsNativeReallow(t *testing.T) {
+	native := netip.MustParseAddr("192.0.2.10")
+	prefix := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.10/31"}]}`)
+	kept := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.11"}]}`)
+	m, _ := recordingManager()
+	_, err := m.ApplyStaticComputingEstablishedDrops(context.Background(), prefix, kept)
+	require.NoError(t, err)
+	require.True(t, m.lastDrops.MatchesFlow(native, 443))
+	for _, target := range []string{"::ffff:192.0.2.10", "::ffff:192.0.2.10/128"} {
+		next := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.11"},{"action":"allow","target":"`+target+`"}]}`)
+		require.NoError(t, m.ApplyStatic(context.Background(), next))
+		require.True(t, m.lastDrops.MatchesFlow(native, 443), "a mapped allow is not a native re-allow")
+	}
+	require.NoError(t, m.ApplyStatic(context.Background(), prefix))
+	require.False(t, m.lastDrops.MatchesFlow(native, 443))
 }
 
 func TestCountMatchingConntrackFlowsDataKeepsNativeIPv4AgainstMappedDeny(t *testing.T) {
@@ -556,7 +635,9 @@ func TestTCPPortAllowed_PortScopedDenyBeatsPortlessAllow(t *testing.T) {
 	require.False(t, tcpPortAllowed(pol, addr, 8080))
 	require.True(t, tcpPortAllowed(pol, addr, 443))
 
-	ports, ranges := portsNoLongerAllowed(pol, addr, []int{443, 8080}, nil)
+	ports, ranges := portsNoLongerAllowed(pol, []int{443, 8080}, nil, func(port int) bool {
+		return tcpPortAllowed(pol, addr, port)
+	})
 	require.Equal(t, []int{8080}, ports)
 	require.Empty(t, ranges)
 
@@ -564,7 +645,9 @@ func TestTCPPortAllowed_PortScopedDenyBeatsPortlessAllow(t *testing.T) {
 	require.False(t, tcpPortAllowed(scoped, addr, 8080))
 
 	ranged := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"1.2.3.4"},{"action":"deny","ports":[5000]}]}`)
-	_, ranges = portsNoLongerAllowed(ranged, addr, nil, []policy.PortRange{{Lo: 1000, Hi: 9000}})
+	_, ranges = portsNoLongerAllowed(ranged, nil, []policy.PortRange{{Lo: 1000, Hi: 9000}}, func(port int) bool {
+		return tcpPortAllowed(ranged, addr, port)
+	})
 	require.Len(t, ranges, 1, "a deny inside a large range must not be missed")
 }
 
