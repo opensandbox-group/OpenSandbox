@@ -176,6 +176,19 @@ def test_url_validation_rejects_insecure_or_malformed_urls(bad_url: str) -> None
         _valid_config(issuer_url=bad_url)
 
 
+@pytest.mark.parametrize(
+    ("url", "error"),
+    [
+        ("HTTPS://mcp.example.com/mcp", "lowercase scheme and host"),
+        ("https://MCP.example.com/mcp", "lowercase scheme and host"),
+        ("https://mcp.example.com/mcp/", "trailing slash"),
+    ],
+)
+def test_resource_url_requires_canonical_spelling(url: str, error: str) -> None:
+    with pytest.raises(OAuthConfigError, match=error):
+        _valid_config(resource_url=url)
+
+
 def test_allow_insecure_http_only_permits_loopback() -> None:
     cfg = _valid_config(
         issuer_url="http://127.0.0.1:9000",

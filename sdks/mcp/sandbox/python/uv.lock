@@ -12,6 +12,7 @@ resolution-markers = [
 [manifest]
 constraints = [
     { name = "cryptography", specifier = ">=50.0.0" },
+    { name = "httpx", specifier = ">=0.27.0,<1.0" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pyjwt", specifier = ">=2.14.0" },
     { name = "python-multipart", specifier = ">=0.0.31" },
@@ -620,6 +621,7 @@ name = "opensandbox-mcp"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
+    { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
     { name = "opensandbox" },
     { name = "pydantic-settings" },
@@ -640,6 +642,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.0" },
+    { name = "httpx", specifier = ">=0.27.0,<1.0" },
     { name = "mcp", extras = ["cli"], specifier = ">=2.3.0,<3" },
     { name = "opensandbox", editable = "../../../sandbox/python" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },

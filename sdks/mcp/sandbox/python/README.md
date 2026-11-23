@@ -55,7 +55,7 @@ The HTTP transport defaults to `127.0.0.1:8000`. Set `--host 0.0.0.0` when the M
 
 ### OAuth 2.1 Resource Server (Streamable HTTP, Opt-In)
 
-For remote HTTPS MCP clients (such as ChatGPT), `opensandbox-mcp` can run as an **OAuth 2.1 Resource Server** (`--oauth-mode jwt`) backed by a separate external Authorization Server / IdP. It advertises RFC 9728 Protected Resource Metadata and validates JWT bearer access tokens via JWKS before any MCP request or tool handler executes. It does **not** issue tokens, host login/consent screens, or enforce per-user sandbox tenancy (`OPEN_SANDBOX_API_KEY` remains strictly separate for backend calls).
+For remote HTTPS MCP clients (such as ChatGPT), `opensandbox-mcp` can run as an **OAuth 2.1 Resource Server** (`--oauth-mode jwt`) backed by an external Authorization Server / IdP. It advertises RFC 9728 Protected Resource Metadata and validates JWT bearer access tokens via JWKS. Every authorized caller shares the permissions of the configured `OPEN_SANDBOX_API_KEY`. Restrict who can obtain tokens for this deployment's audience and required scope in the IdP.
 
 ```bash
 OPEN_SANDBOX_API_KEY="replace-with-backend-api-key" \
@@ -76,7 +76,7 @@ Key OAuth options (CLI flags override `OPEN_SANDBOX_MCP_OAUTH_*` environment var
 | --- | --- | --- | --- |
 | `--oauth-mode` | `OPEN_SANDBOX_MCP_OAUTH_MODE` | `none` | `none` or `jwt` (`streamable-http` only). |
 | `--oauth-issuer-url` | `OPEN_SANDBOX_MCP_OAUTH_ISSUER_URL` | — | Required when `jwt`. Exact trusted issuer URL (HTTPS). |
-| `--oauth-resource-url` | `OPEN_SANDBOX_MCP_OAUTH_RESOURCE_URL` | — | Required when `jwt`. Canonical public MCP URL (RFC 9728/8707). |
+| `--oauth-resource-url` | `OPEN_SANDBOX_MCP_OAUTH_RESOURCE_URL` | — | Required when `jwt`. Match the client-facing MCP URL exactly, with lowercase scheme and host and no trailing slash on a non-root path. |
 | `--oauth-required-scope` | `OPEN_SANDBOX_MCP_OAUTH_REQUIRED_SCOPES` | — | Required when `jwt` (repeatable flag or space/comma-separated env). |
 | `--oauth-audience` | `OPEN_SANDBOX_MCP_OAUTH_AUDIENCE` | `resource_url` | Expected JWT `aud` claim override. |
 | `--oauth-jwks-url` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_URL` | Auto-discovered | Explicit trusted JWKS URL (required for cross-origin JWKS). |

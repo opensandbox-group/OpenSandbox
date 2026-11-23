@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -35,6 +36,7 @@ from opensandbox_mcp.auth import (
     MAX_AUTHORIZATION_HEADER_BYTES,
     JWTTokenVerifier,
     OAuthConfig,
+    OAuthConfigError,
 )
 from opensandbox_mcp.server import create_server, create_streamable_http_app
 
@@ -211,6 +213,57 @@ def oauth_env(monkeypatch: pytest.MonkeyPatch) -> _TestOAuthEnv:
     monkeypatch.setattr("opensandbox_mcp.server.SandboxManager", _FakeManager)
     monkeypatch.setattr("opensandbox_mcp.server.Sandbox", _FakeSandboxModule)
     return _TestOAuthEnv(spy)
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        ("", ""),
+        ("network", "Unable to discover"),
+        ("issuer", "issuer does not match"),
+        ("algorithm", "no signing keys for the allowed algorithms"),
+    ],
+)
+async def test_oauth_startup_checks_discovery_and_signing_keys(
+    oauth_env: _TestOAuthEnv,
+    failure: str,
+    error: str,
+) -> None:
+    requests: list[str] = []
+    discovery_url = f"{ISSUER}/.well-known/oauth-authorization-server"
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        requests.append(url)
+        if failure == "network":
+            raise httpx.ConnectError("mock network error", request=request)
+        if url == discovery_url:
+            issuer = "https://other.example.com" if failure == "issuer" else ISSUER
+            return httpx.Response(200, json={"issuer": issuer, "jwks_uri": JWKS_URL})
+        assert url == JWKS_URL
+        return httpx.Response(200, json={"keys": [oauth_env.jwk]})
+
+    config = replace(
+        oauth_env.config,
+        jwks_url=None,
+        allowed_algorithms=("ES256",) if failure == "algorithm" else ("RS256",),
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(provider)
+    ) as http_client:
+        verifier = JWTTokenVerifier(config, http_client=http_client)
+        mcp = create_server(oauth_config=config, token_verifier=verifier)
+        app = create_streamable_http_app(mcp, oauth_config=config)
+
+        if failure:
+            with pytest.raises(OAuthConfigError, match=error):
+                async with app.router.lifespan_context(app):
+                    pytest.fail("An invalid provider reached readiness")
+        else:
+            async with app.router.lifespan_context(app):
+                assert requests == [discovery_url, JWKS_URL]
+                assert await verifier.verify_token(oauth_env.mint_token()) is not None
+                assert requests == [discovery_url, JWKS_URL]
 
 
 async def _run_raw_asgi(
@@ -568,6 +621,25 @@ async def test_full_mcp_flow_session_binding_mid_session_expiry_and_no_token_lea
             assert alice_token not in kill_resp.text
             assert oauth_env.spy.killed == [("sbx-valid", BACKEND_API_KEY)]
 
+            failed_tool = await client.post(
+                "/mcp",
+                headers=_mcp_headers(alice_token, session_id=session_id),
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "command_run",
+                        "arguments": {
+                            "sandbox_id": "sbx-missing",
+                            "command": "test-command-not-for-audit",
+                        },
+                    },
+                },
+            )
+            assert _parse_mcp_response_body(failed_tool)["result"]["isError"]
+            assert not oauth_env.spy.commands_run
+
             # 4. Mid-session token expiration -> 401 and no backend side effect
             exp_resp = await client.post(
                 "/mcp",
@@ -614,6 +686,29 @@ async def test_full_mcp_flow_session_binding_mid_session_expiry_and_no_token_lea
     assert alice_token not in log_text
     assert bob_token not in log_text
     assert BACKEND_API_KEY not in log_text
+    audit = [
+        json.loads(record.getMessage().removeprefix("mcp_tool_call "))
+        for record in caplog.records
+        if record.name == "opensandbox_mcp.audit"
+    ]
+    assert audit == [
+        {
+            "client_id": "chatgpt",
+            "iss": ISSUER,
+            "sub": "user-alice",
+            "tool": "sandbox_kill",
+            "sandbox_id": "sbx-valid",
+            "outcome": "succeeded",
+        },
+        {
+            "client_id": "chatgpt",
+            "iss": ISSUER,
+            "sub": "user-alice",
+            "tool": "command_run",
+            "sandbox_id": "sbx-missing",
+            "outcome": "failed",
+        },
+    ]
 
 
 async def test_dns_rebinding_host_and_origin_enforcement(

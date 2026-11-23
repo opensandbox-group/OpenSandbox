@@ -17,13 +17,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import urlparse
 
 from mcp.server.auth.handlers.metadata import ProtectedResourceMetadataHandler
-from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.provider import TokenVerifier, principal_components
 from mcp.server.auth.routes import cors_middleware
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -69,6 +72,9 @@ from opensandbox_mcp.auth import (
     build_transport_security,
     canonical_resource_metadata_url,
 )
+
+logger = logging.getLogger(__name__)
+audit_logger = logging.getLogger("opensandbox_mcp.audit")
 
 
 @dataclass
@@ -155,10 +161,36 @@ def register_tools(
             # expected outcomes the client needs to see.
             @functools.wraps(func)
             async def wrapper(*args, **kwargs):
+                token = get_access_token()
+                sandbox_id = kwargs.get("sandbox_id")
+                outcome = "failed"
                 try:
-                    return await func(*args, **kwargs)
+                    result = await func(*args, **kwargs)
+                    if isinstance(result, SandboxInfoResponse):
+                        sandbox_id = result.sandbox_id
+                    outcome = "succeeded"
+                    return result
+                except asyncio.CancelledError:
+                    outcome = "cancelled"
+                    raise
                 except SandboxException as exc:
                     raise ToolError(str(exc)) from exc
+                finally:
+                    if token is not None:
+                        client_id, issuer, subject = principal_components(token)
+                        audit_logger.info(
+                            "mcp_tool_call %s",
+                            json.dumps(
+                                {
+                                    "client_id": client_id,
+                                    "iss": issuer,
+                                    "sub": subject,
+                                    "tool": func.__name__,
+                                    "sandbox_id": sandbox_id,
+                                    "outcome": outcome,
+                                }
+                            ),
+                        )
 
             return mcp.tool()(wrapper)
 
@@ -919,6 +951,21 @@ def create_server(
         else (JWTTokenVerifier(oauth_config) if oauth_config else None)
     )
 
+    @contextlib.asynccontextmanager
+    async def oauth_lifespan(_mcp: MCPServer) -> AsyncIterator[None]:
+        logger.warning(
+            "OAuth callers share the permissions of OPEN_SANDBOX_API_KEY. "
+            "Restrict access to the configured audience and scopes in the identity provider."
+        )
+        if isinstance(verifier, JWTTokenVerifier):
+            try:
+                await verifier.prepare()
+                yield
+            finally:
+                await verifier.aclose()
+        else:
+            yield
+
     mcp = MCPServer(
         "OpenSandbox Sandbox",
         instructions=(
@@ -933,6 +980,7 @@ def create_server(
         ),
         auth=auth_settings,
         token_verifier=verifier,
+        lifespan=oauth_lifespan if oauth_config is not None else None,
     )
     register_tools(mcp, connection_config=connection_config)
     return mcp
@@ -999,19 +1047,5 @@ def create_streamable_http_app(
         protected_path=streamable_http_path,
         resource_metadata_url=metadata_url,
     )
-
-    verifier = mcp._token_verifier
-    if isinstance(verifier, JWTTokenVerifier):
-        original_lifespan = app.router.lifespan_context
-
-        @contextlib.asynccontextmanager
-        async def _lifespan(starlette_app: Starlette) -> AsyncIterator[None]:
-            async with original_lifespan(starlette_app):
-                try:
-                    yield
-                finally:
-                    await verifier.aclose()
-
-        app.router.lifespan_context = _lifespan
 
     return app

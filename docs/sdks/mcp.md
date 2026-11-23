@@ -88,7 +88,7 @@ flowchart LR
     Client -->|"2. GET /.well-known/oauth-protected-resource/mcp"| Proxy
     Client -->|"3. Auth Code + PKCE (S256) + resource (RFC 8707)"| AS
     AS -->|"4. Audience-bound JWT Access Token"| Client
-    Client -->|"5. POST /mcp + Authorization: Bearer <JWT>"| Proxy
+    Client -->|"5. POST /mcp + Authorization: Bearer &lt;JWT&gt;"| Proxy
     MCP -.->|"6. Cached HTTPS JWKS / RFC 8414 discovery (no redirects)"| AS
     MCP -->|"7. Backend SDK calls with OPEN_SANDBOX_API_KEY only"| API
 ```
@@ -119,7 +119,7 @@ CLI flags override `OPEN_SANDBOX_MCP_OAUTH_*` environment variables. Configurati
 | --- | --- | --- | --- |
 | `--oauth-mode` | `OPEN_SANDBOX_MCP_OAUTH_MODE` | `none` | `none` or `jwt`. `jwt` is only accepted with `--transport streamable-http`. |
 | `--oauth-issuer-url` | `OPEN_SANDBOX_MCP_OAUTH_ISSUER_URL` | — | Required when `jwt`. Exact issuer URL (`https://`, no query/fragment/userinfo). |
-| `--oauth-resource-url` | `OPEN_SANDBOX_MCP_OAUTH_RESOURCE_URL` | — | Required when `jwt`. Canonical public MCP endpoint URL (e.g., `https://mcp.example.com/mcp`), independent of local bind host/port. |
+| `--oauth-resource-url` | `OPEN_SANDBOX_MCP_OAUTH_RESOURCE_URL` | — | Required when `jwt`. Use the exact public MCP URL configured in clients (e.g., `https://mcp.example.com/mcp`), with lowercase scheme and host and no trailing slash on a non-root path. |
 | `--oauth-required-scope` | `OPEN_SANDBOX_MCP_OAUTH_REQUIRED_SCOPES` | — | Required when `jwt`. Repeatable flag or space/comma-separated env var. Enforced on every protected HTTP request (`403 insufficient_scope` if missing). |
 | `--oauth-audience` | `OPEN_SANDBOX_MCP_OAUTH_AUDIENCE` | `resource_url` | Expected JWT `aud` claim. Defaults to canonical `resource_url` per RFC 8707; override only when an IdP cannot emit a URL audience. |
 | `--oauth-jwks-url` | `OPEN_SANDBOX_MCP_OAUTH_JWKS_URL` | Auto-discovered | Explicit trusted JWKS HTTPS URL. When omitted, discovered from `issuer_url` via RFC 8414 / OIDC discovery with same-origin enforcement. |
@@ -136,6 +136,7 @@ CLI flags override `OPEN_SANDBOX_MCP_OAUTH_*` environment variables. Configurati
 Before connecting a remote MCP client, verify that your external Authorization Server / IdP supports:
 
 - **Discovery metadata:** Publishes RFC 8414 (`/.well-known/oauth-authorization-server`) or OIDC Discovery (`/.well-known/openid-configuration`) with an exact matching `issuer` and HTTPS `jwks_uri`.
+- **Signing keys:** Startup checks discovery and primes the JWKS cache before serving. If the IdP hosts its signing keys on a different origin, set `--oauth-jwks-url` to the trusted HTTPS JWKS URL. An explicit JWKS URL skips server-side metadata discovery.
 - **PKCE `S256`:** Enforces Authorization Code + PKCE with `code_challenge_method=S256`.
 - **Client registration:** Supports the registration mechanism required by your MCP client—Client ID Metadata Documents (CIMD), Dynamic Client Registration (RFC 7591), or pre-registered client credentials.
 - **Audience-bound JWT access tokens:** Issues signed asymmetric JWT **access tokens** (RSA >= 2048 bits, EC >= 224 bits, or EdDSA—not opaque tokens and not ID tokens) whose `aud` matches `--oauth-resource-url` (RFC 8707) or your explicit `--oauth-audience`, and includes your configured `--oauth-required-scope` in `scope` or `scp`.
@@ -211,14 +212,20 @@ To migrate from `Client -> Reverse Proxy -> mcp-oauth-proxy -> opensandbox-mcp -
 2. Start a staging or side-by-side `opensandbox-mcp` instance with `--transport streamable-http --oauth-mode jwt` and the matching `--oauth-*` flags, keeping `OPEN_SANDBOX_API_KEY` unchanged.
 3. Verify RFC 9728 discovery, `401`/`403` rejections, and an authorized MCP session using the `curl` checks above.
 4. Update the TLS reverse proxy upstream for `/mcp` and `/.well-known/oauth-protected-resource*` to point directly at `opensandbox-mcp`, preserving the canonical `Host` header, and re-test client login and tool execution before decommissioning `mcp-oauth-proxy`.
-5. **Non-destructive rollback:** Point the reverse proxy upstream back to `mcp-oauth-proxy` and restart `opensandbox-mcp` without `--oauth-mode jwt`. Enabling or disabling OAuth mode stores no persistent state and does not modify running sandboxes.
+
+#### Rollback
+
+1. Restore a separate private MCP upstream for `mcp-oauth-proxy`. If reusing the current upstream, disable direct public routes to it before changing its configuration. Remove every `--oauth-*` flag and unset every `OPEN_SANDBOX_MCP_OAUTH_*` variable, including `OPEN_SANDBOX_MCP_OAUTH_MODE`, from the service definition, environment files, and inherited environment. Keep the backend domain and API key in place. Start or restart MCP and verify that the auth proxy can reach its private upstream.
+2. Switch `/mcp` and the corresponding OAuth metadata routes on the TLS reverse proxy back to `mcp-oauth-proxy`. Verify that public requests without a token get a `401` challenge from the proxy, then complete sign-in and make an authenticated MCP call. Clients may need to sign in again and initialize a new session. Running sandboxes persist across this change.
 
 ### Security Model & Limitations
 
-::: warning OAuth does not provide per-user sandbox multi-tenancy
-Validating an OAuth 2.1 access token proves that a remote client is authorized to call `opensandbox-mcp` with the configured scope; it does **not** isolate sandboxes between users sharing the same `opensandbox-mcp` instance and `OPEN_SANDBOX_API_KEY`. Any authorized caller can pass an existing `sandbox_id` accessible to that backend API key. If you serve multiple untrusted users, deploy isolated `opensandbox-mcp` instances with separate tenant-scoped backend credentials and network isolation.
+::: warning All OAuth callers share the backend API key's permissions
+Every authorized caller can list, execute commands in, modify, or terminate any sandbox visible to the configured `OPEN_SANDBOX_API_KEY`. Restrict which users or groups can obtain tokens for this deployment's dedicated audience and required scope in your IdP. CIMD and Dynamic Client Registration register OAuth clients. Access to the audience and scope depends on the IdP's user, group, or organization policy. Verify that an account outside the allowed group cannot obtain a token with both values before exposing the service.
 :::
 
+- **Tenant isolation:** Run one MCP instance per trust domain, with its own OAuth audience and IdP policy. For Kubernetes, give each MCP instance a key scoped to a dedicated [OpenSandbox tenant namespace](/guides/multi-tenancy). For Docker, give each MCP instance a separate lifecycle backend with a dedicated API key and isolated workloads.
+- **Audit logs:** In OAuth mode, `opensandbox_mcp.audit` emits an INFO event for each executed tool with the issuer, subject when present, client ID, tool name, sandbox ID when available, and outcome. Keep INFO logs for this logger in a restricted sink. These records exclude tokens, backend credentials, commands, file contents, and exception messages.
 - **Credential separation:** Inbound OAuth bearer tokens are validated only at the HTTP boundary and are never forwarded to `opensandbox-server`, injected into sandbox containers, or returned in tool outputs. Backend calls exclusively use `OPEN_SANDBOX_API_KEY`.
 - **Token transport:** Bearer tokens are accepted only via a single `Authorization: Bearer <token>` header. Duplicate `Authorization` headers, oversized headers, query-parameter tokens (`?access_token=`), and body tokens are rejected with `401` before any tool handler executes.
 

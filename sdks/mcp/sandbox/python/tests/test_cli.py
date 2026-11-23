@@ -244,3 +244,53 @@ def test_cli_fails_closed_on_partial_oauth_flags_with_mode_none(
 
     assert exc_info.value.code == 2
     assert "OAuth mode is 'none'" in capsys.readouterr().err
+
+
+def test_proxy_rollback_clears_oauth_settings_and_keeps_backend_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fake_server: _FakeServer,
+) -> None:
+    from opensandbox_mcp import __main__
+    from opensandbox_mcp.auth import (
+        ENV_ISSUER_URL,
+        ENV_MODE,
+        ENV_REQUIRED_SCOPES,
+        ENV_RESOURCE_URL,
+    )
+
+    monkeypatch.delenv(ENV_MODE, raising=False)
+    oauth_env = {
+        ENV_ISSUER_URL: "https://idp.example.com",
+        ENV_RESOURCE_URL: "https://mcp.example.com/mcp",
+        ENV_REQUIRED_SCOPES: "opensandbox:mcp",
+    }
+    for name, value in oauth_env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("OPEN_SANDBOX_API_KEY", "test-proxy-backend-key")
+    monkeypatch.setenv("OPEN_SANDBOX_DOMAIN", "sandbox.internal:8080")
+    monkeypatch.setattr(
+        sys, "argv", ["opensandbox-mcp", "--transport", "streamable-http"]
+    )
+    backend_configs = []
+
+    def create_server(connection_config):
+        backend_configs.append(connection_config)
+        return fake_server
+
+    monkeypatch.setattr(__main__, "create_server", create_server)
+    with pytest.raises(SystemExit) as exc_info:
+        __main__.main()
+    assert exc_info.value.code == 2
+    assert "OAuth mode is 'none'" in capsys.readouterr().err
+    assert not backend_configs
+
+    for name in oauth_env:
+        monkeypatch.delenv(name)
+    __main__.main()
+
+    assert fake_server.calls == [
+        ((), {"transport": "streamable-http", "host": "127.0.0.1", "port": 8000})
+    ]
+    assert backend_configs[0].get_api_key() == "test-proxy-backend-key"
+    assert backend_configs[0].get_domain() == "sandbox.internal:8080"

@@ -264,6 +264,15 @@ class OAuthConfig:
             "resource_url",
             allow_insecure_http=self.allow_insecure_http,
         )
+        resource = urlparse(self.resource_url)
+        if not self.resource_url.startswith(f"{resource.scheme}://") or (
+            resource.netloc != resource.netloc.lower()
+        ):
+            raise OAuthConfigError("resource_url must use a lowercase scheme and host.")
+        if resource.path != "/" and resource.path.endswith("/"):
+            raise OAuthConfigError(
+                "resource_url must omit the trailing slash on non-root paths."
+            )
         if self.jwks_url is not None:
             _validate_http_url(
                 self.jwks_url,
@@ -828,6 +837,32 @@ class JWTTokenVerifier(TokenVerifier):
         self._jwks_client = jwks_client or JWKSClient(
             config, http_client=http_client, clock=clock
         )
+
+    async def prepare(self) -> None:
+        """Prime the signing-key cache and reject unusable provider settings at startup."""
+        max_requests = 1 if self.config.jwks_url is not None else 3
+        try:
+            keys = await asyncio.wait_for(
+                self._jwks_client.get_signing_keys(),
+                timeout=max_requests * self.config.http_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            raise OAuthConfigError(
+                "OAuth startup timed out fetching signing keys."
+            ) from None
+        except _JWKSError as exc:
+            raise OAuthConfigError(
+                f"OAuth startup could not load signing keys: {exc}"
+            ) from None
+
+        if not any(
+            self._match_key(keys, expected_kty=_ALG_TO_KTY[alg], alg=alg, kid=key.kid)
+            for alg in self.config.allowed_algorithms
+            for key in keys
+        ):
+            raise OAuthConfigError(
+                "OAuth startup found no signing keys for the allowed algorithms."
+            )
 
     async def aclose(self) -> None:
         """Release underlying HTTP resources."""
