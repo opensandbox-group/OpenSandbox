@@ -404,11 +404,14 @@ func (r *PoolReconciler) reconcilePool(ctx context.Context, pool *sandboxv1alpha
 
 		// 5. Handle pool scale
 		toDeletePods := append(updateResult.ToDeletePods, schedResult.ToDelete...)
+		// Scheduling identifies idle pods from schedulePods before the rolling update.
+		// Its complement counts only allocations with a pod in that same population.
+		allocatedCnt := int32(len(schedulePods) - len(schedResult.IdlePods))
 		args := &scaleArgs{
 			updateRevision: updateResult.UpdateRevision,
 			pods:           schedulePods,
 			totalPodCnt:    totalPodCnt,
-			allocatedCnt:   int32(len(schedResult.LatestAllocation)),
+			allocatedCnt:   allocatedCnt,
 			idlePods:       updateResult.IdlePods,
 			toDeletePods:   toDeletePods,
 			supplyCnt:      schedResult.SupplyCnt + updateResult.SupplyUpdateRevision,

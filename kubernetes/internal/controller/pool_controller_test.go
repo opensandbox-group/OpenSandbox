@@ -500,6 +500,82 @@ var _ = Describe("Pool allocate", func() {
 			Expect(k8sClient.Delete(ctx, batchSandbox)).To(Succeed())
 		})
 
+		It("should keep the idle buffer within BufferMax after an allocated pod is deleted", func() {
+			batchSandbox := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "batch-sandbox-missing-pod-" + rand.String(8),
+					Namespace: typeNamespacedName.Namespace,
+				},
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					PoolRef:  typeNamespacedName.Name,
+				},
+			}
+			Expect(k8sClient.Create(ctx, batchSandbox)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, batchSandbox)).To(Succeed()) })
+
+			var allocatedPodName string
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(batchSandbox), batchSandbox)).To(Succeed())
+				allocation, err := getSandboxAllocation(batchSandbox)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(allocation.Pods).To(HaveLen(1))
+				allocatedPodName = allocation.Pods[0]
+			}, timeout, interval).Should(Succeed())
+
+			pool := &sandboxv1alpha1.Pool{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, pool)).To(Succeed())
+			podListOptions := &kclient.ListOptions{
+				Namespace:     pool.Namespace,
+				FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(pool.UID)}),
+			}
+			pods := &v1.PodList{}
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.List(ctx, pods, podListOptions)).To(Succeed())
+				g.Expect(pods.Items).To(HaveLen(2), "a live allocation and one idle pod")
+			}, timeout, interval).Should(Succeed())
+
+			var allocatedPod, idlePod *v1.Pod
+			for i := range pods.Items {
+				pod := &pods.Items[i]
+				if pod.Name == allocatedPodName {
+					allocatedPod = pod
+				} else {
+					idlePod = pod
+				}
+			}
+			Expect(allocatedPod).NotTo(BeNil())
+			idlePod.Status.Phase = v1.PodRunning
+			idlePod.Status.Conditions = []v1.PodCondition{{Type: v1.PodReady, Status: v1.ConditionTrue}}
+			Expect(k8sClient.Status().Update(ctx, idlePod)).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, pool)).To(Succeed())
+				g.Expect(pool.Status.Allocated).To(Equal(int32(1)))
+				g.Expect(pool.Status.Available).To(Equal(int32(1)))
+				g.Expect(pool.Status.Total).To(Equal(int32(2)))
+				g.Expect(pool.Status.Updated).To(Equal(int32(2)))
+			}, timeout, interval).Should(Succeed())
+
+			Expect(k8sClient.Delete(ctx, allocatedPod, kclient.GracePeriodSeconds(0))).To(Succeed())
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, typeNamespacedName, pool)).To(Succeed())
+				// The reservation still counts in Total after reconciliation observes the deletion.
+				g.Expect(pool.Status.Total - pool.Status.Updated).To(Equal(int32(1)))
+				g.Expect(pool.Status.Allocated).To(Equal(int32(1)))
+			}, timeout, interval).Should(Succeed())
+
+			Expect(k8sClient.List(ctx, pods, podListOptions)).To(Succeed())
+			Expect(pods.Items).To(HaveLen(1), "the pool should contain only the original idle pod")
+			Expect(pods.Items[0].Name).To(Equal(idlePod.Name))
+			Expect(pool.Status.Total).To(Equal(int32(2)))
+			Expect(pool.Status.Available).To(Equal(int32(1)))
+			Expect(k8sClient.Get(ctx, kclient.ObjectKeyFromObject(batchSandbox), batchSandbox)).To(Succeed())
+			Expect(batchSandbox.DeletionTimestamp.IsZero()).To(BeTrue())
+			allocation, err := getSandboxAllocation(batchSandbox)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(allocation.Pods).To(Equal([]string{allocatedPodName}))
+		})
+
 		It("should GC allocation when a pooled BatchSandbox detaches from its pool", func() {
 			pool := &sandboxv1alpha1.Pool{}
 			bsbxNamespaceName := types.NamespacedName{
