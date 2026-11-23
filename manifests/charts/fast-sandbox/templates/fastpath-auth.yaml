@@ -14,6 +14,7 @@ metadata:
 data:
   callers.json: |
     {{- list (dict "subject" (printf "system:serviceaccount:%s:opensandbox-server" $namespace) "profile" "server" "namespaces" $scopes) (dict "subject" (printf "system:serviceaccount:%s:opensandbox-ingress-gateway" $namespace) "profile" "gateway" "namespaces" $scopes) | toPrettyJson | nindent 4 }}
+{{- if not $tls.existingSecret }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -39,4 +40,5 @@ spec:
     {{- with $tls.dnsNames }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+{{- end }}
 {{- end }}

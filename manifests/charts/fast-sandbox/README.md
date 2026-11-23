@@ -104,8 +104,9 @@ The following table lists the configurable parameters of the chart and their def
 | fastpath.callerAuth.enabled | bool | `false` | Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS). |
 | fastpath.callerAuth.namespaces | list | `[]` | Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access. |
 | fastpath.tls.dnsNames | list | `[]` | Additional serving DNS names for external Server access. |
+| fastpath.tls.existingSecret | string | `""` | Use an existing TLS Secret (tls.crt / tls.key) instead of rendering a cert-manager Certificate resource. |
 | fastpath.tls.issuerRef.kind | string | `"ClusterIssuer"` | Issuer or ClusterIssuer. |
-| fastpath.tls.issuerRef.name | string | `"fast-sandbox-serving"` | Required existing cert-manager Issuer/ClusterIssuer. The chart does not install cert-manager or create a CA. |
+| fastpath.tls.issuerRef.name | string | `"fast-sandbox-serving"` | Required existing cert-manager Issuer/ClusterIssuer when existingSecret is empty. The chart does not install cert-manager or create a CA. |
 | fullnameOverride | string | `""` | Override the full name of the chart |
 | imagePullSecrets | list | `[]` | Image pull secrets for every workload in this chart |
 | janitor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |
