@@ -407,3 +407,37 @@ func TestProbeGateway(t *testing.T) {
 	srv.Close()
 	require.Error(t, f.ProbeGateway(context.Background()))
 }
+
+func TestDialGatewayUsesCustomResolveHost(t *testing.T) {
+	srv, gw := newGateway(t, http.StatusOK, false)
+	_, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
+	require.NoError(t, err)
+	port, err := strconv.Atoi(portStr)
+	require.NoError(t, err)
+
+	var resolvedHost string
+	f, err := New(Config{
+		Scheme:        "http",
+		Host:          "gateway.isolated.invalid",
+		Port:          port,
+		Authorization: "Bearer tok",
+		Identity:      Identity{SandboxID: "sbx-1"},
+	})
+	require.NoError(t, err)
+	f.SetResolveHost(func(_ context.Context, host string) ([]netip.Addr, error) {
+		resolvedHost = host
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	})
+	f.originalDst = func(net.Conn) (netip.AddrPort, error) {
+		return netip.MustParseAddrPort("203.0.113.10:443"), nil
+	}
+
+	require.NoError(t, f.ProbeGateway(context.Background()))
+	require.Equal(t, "gateway.isolated.invalid", resolvedHost)
+
+	sandbox, accepted := tcpPair(t)
+	go f.handle(accepted)
+	req := <-gw.requests
+	require.Equal(t, "Bearer tok", req.Header.Get("Proxy-Authorization"))
+	_ = sandbox.Close()
+}

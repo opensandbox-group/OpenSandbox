@@ -88,13 +88,21 @@ type Proxy struct {
 // New constructs the DNS proxy: discovers upstreams, default listen 127.0.0.1:15353 if listenAddr is "".
 // alwaysDeny/alwaysAllow are merged via policy.MergeAlwaysOverlay; they are file/operator rules, not persisted by POST /policy.
 func New(p *policy.NetworkPolicy, listenAddr string, alwaysDeny, alwaysAllow []policy.EgressRule) (*Proxy, error) {
+	return NewWithResolvPath(p, listenAddr, alwaysDeny, alwaysAllow, "/etc/resolv.conf")
+}
+
+// NewWithResolvPath is like New but discovers fallback DNS upstreams from
+// resolvPath instead of /etc/resolv.conf (used in Kubernetes forward mode so
+// the sidecar reads the init-time snapshot rather than the workload-writable
+// Pod /etc/resolv.conf).
+func NewWithResolvPath(p *policy.NetworkPolicy, listenAddr string, alwaysDeny, alwaysAllow []policy.EgressRule, resolvPath string) (*Proxy, error) {
 	if listenAddr == "" {
 		listenAddr = defaultListenAddr
 	}
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
-	upstreams, err := DiscoverUpstreams()
+	upstreams, err := DiscoverUpstreamsFrom(resolvPath)
 	if err != nil {
 		return nil, err
 	}
@@ -113,6 +121,11 @@ func New(p *policy.NetworkPolicy, listenAddr string, alwaysDeny, alwaysAllow []p
 	}
 	proxy.refreshEffectivePolicy()
 	return proxy, nil
+}
+
+// ListenAddr returns the configured UDP/TCP listen address (e.g. 127.0.0.1:15353).
+func (p *Proxy) ListenAddr() string {
+	return p.listenAddr
 }
 
 func (p *Proxy) refreshEffectivePolicy() {
@@ -670,11 +683,16 @@ const fallbackUpstream = "8.8.8.8:53"
 
 // DiscoverUpstreams is env OPENSANDBOX_EGRESS_DNS_UPSTREAM if set, else /etc/resolv.conf (with caps/fallbacks).
 func DiscoverUpstreams() ([]string, error) {
+	return DiscoverUpstreamsFrom("/etc/resolv.conf")
+}
+
+// DiscoverUpstreamsFrom is env OPENSANDBOX_EGRESS_DNS_UPSTREAM if set, else resolvPath (with caps/fallbacks).
+func DiscoverUpstreamsFrom(resolvPath string) ([]string, error) {
 	raw := strings.TrimSpace(os.Getenv(constants.EnvDNSUpstream))
 	if raw != "" {
 		return parseEnvDNSUpstreams(raw)
 	}
-	return discoverUpstreamsFromResolv()
+	return discoverUpstreamsFromResolv(resolvPath)
 }
 
 // parseEnvDNSUpstreams splits OPENSANDBOX_EGRESS_DNS_UPSTREAM (comma-separated); each entry must pass normalizeEnvUpstreamAddr.
@@ -730,8 +748,11 @@ func normalizeEnvUpstreamAddr(s string) (string, error) {
 	return net.JoinHostPort(addr.String(), "53"), nil
 }
 
-func discoverUpstreamsFromResolv() ([]string, error) {
-	cfg, err := dns.ClientConfigFromFile("/etc/resolv.conf")
+func discoverUpstreamsFromResolv(resolvPath string) ([]string, error) {
+	if strings.TrimSpace(resolvPath) == "" {
+		resolvPath = "/etc/resolv.conf"
+	}
+	cfg, err := dns.ClientConfigFromFile(resolvPath)
 	if err != nil || len(cfg.Servers) == 0 {
 		if err != nil {
 			log.Warnf("[dns] fallback upstream resolver due to error: %v", err)
@@ -849,12 +870,18 @@ func ExpandInfraDomainNames(host, resolvPath string) []string {
 		seen[n] = struct{}{}
 		out = append(out, n)
 	}
-	add(norm)
+	rootedFirst := strings.Count(norm, ".") >= cfg.Ndots
+	if rootedFirst {
+		add(norm)
+	}
 	for _, s := range cfg.Search {
 		suffix := strings.Trim(strings.TrimSpace(s), ".")
 		if suffix != "" {
 			add(norm + "." + suffix)
 		}
+	}
+	if !rootedFirst {
+		add(norm)
 	}
 	return out
 }

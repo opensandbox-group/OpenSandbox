@@ -109,6 +109,10 @@ EGRESS_UPSTREAM_EXTRA_CA_PATH = (
 )
 EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME = "opensandbox-egress-upstream-extra-ca"
 EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY = "ca.crt"
+# Egress-only emptyDir populated by egress-init with immutable copies of
+# /etc/hosts and /etc/resolv.conf before any workload container starts.
+EGRESS_RESOLVER_VOLUME_NAME = "opensandbox-egress-resolver"
+EGRESS_RESOLVER_MOUNT_PATH = "/run/opensandbox-egress"
 ALLOWED_EGRESS_ENV_VARS = frozenset({
     "OPENSANDBOX_EGRESS_LOG_LEVEL",
     "OPENSANDBOX_EGRESS_DNS_UPSTREAM_TIMEOUT",
@@ -255,6 +259,8 @@ __all__ = [
     "EGRESS_UPSTREAM_EXTRA_CA_PATH",
     "EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME",
     "EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY",
+    "EGRESS_RESOLVER_VOLUME_NAME",
+    "EGRESS_RESOLVER_MOUNT_PATH",
     "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_TIMEOUT",
     "OPENSANDBOX_EGRESS_CREDENTIAL_RESOLVER_MAX_CONCURRENCY",
     "ALLOWED_EGRESS_ENV_VARS",

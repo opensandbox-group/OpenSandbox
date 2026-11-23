@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional
 from opensandbox_server.config import EGRESS_MODE_FORWARD
 from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
+    EGRESS_RESOLVER_MOUNT_PATH,
+    EGRESS_RESOLVER_VOLUME_NAME,
     EGRESS_RULES_ENV,
     EGRESS_UPSTREAM_EXTRA_CA_PATH,
     EGRESS_UPSTREAM_EXTRA_CA_SECRET_KEY,
@@ -48,11 +50,17 @@ from opensandbox_server.services.k8s.workload_provider import EgressWorkloadSett
 _IPV6_DISABLE_PATH = "/proc/sys/net/ipv6/conf/all/disable_ipv6"
 
 # Installed by the egress-init initContainer before any container in
-# spec.containers starts (OSEP-0030 R1). The egress sidecar atomically replaces
-# `table inet opensandbox` in one nft transaction once initialized; if egress
-# is delayed or fails, outbound networking stays blocked rather than failing open.
+# spec.containers starts (OSEP-0030 R1). First snapshots kubelet's /etc/hosts
+# and /etc/resolv.conf into an egress-only emptyDir (mounted read-only by
+# egress and never mounted by the workload), so a root workload cannot poison
+# gateway resolution through the Pod's shared writable /etc/hosts or
+# /etc/resolv.conf before or after egress starts. Then installs the bootstrap
+# default-deny fence, which the egress sidecar atomically replaces once ready.
 _FORWARD_BOOTSTRAP_FENCE_SCRIPT = (
     "set -eu\n"
+    f"cp /etc/hosts {EGRESS_RESOLVER_MOUNT_PATH}/hosts\n"
+    f"cp /etc/resolv.conf {EGRESS_RESOLVER_MOUNT_PATH}/resolv.conf\n"
+    f"chmod 0444 {EGRESS_RESOLVER_MOUNT_PATH}/hosts {EGRESS_RESOLVER_MOUNT_PATH}/resolv.conf\n"
     "nft -f - <<'EOF'\n"
     "table inet opensandbox\n"
     "delete table inet opensandbox\n"
@@ -66,6 +74,9 @@ _FORWARD_BOOTSTRAP_FENCE_SCRIPT = (
 )
 
 _FORBIDDEN_FORWARD_CAPS = frozenset({"NET_ADMIN", "NET_RAW"})
+_FORBIDDEN_FORWARD_WORKLOAD_VOLUMES = frozenset(
+    {EGRESS_RESOLVER_VOLUME_NAME, EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME}
+)
 
 
 def prep_execd_init_for_egress(exec_install_script: str) -> tuple[str, Dict[str, Any]]:
@@ -106,6 +117,12 @@ def build_egress_bootstrap_init_container(
         "securityContext": {
             "capabilities": {"add": ["NET_ADMIN"]},
         },
+        "volumeMounts": [
+            {
+                "name": EGRESS_RESOLVER_VOLUME_NAME,
+                "mountPath": EGRESS_RESOLVER_MOUNT_PATH,
+            }
+        ],
     }
     resources = {}
     if egress_settings.resource_requests:
@@ -192,6 +209,12 @@ def validate_forward_mode_pod_spec(pod_spec: Dict[str, Any]) -> None:
                 f"Container '{name}' must drop NET_ADMIN and NET_RAW "
                 'when egress.mode = "forward"'
             )
+        for mount in container.get("volumeMounts") or []:
+            if isinstance(mount, dict) and mount.get("name") in _FORBIDDEN_FORWARD_WORKLOAD_VOLUMES:
+                raise ValueError(
+                    f"Container '{name}' cannot mount egress-internal volume "
+                    f"'{mount.get('name')}' when egress.mode = \"forward\""
+                )
 
 
 def apply_egress_to_spec(
@@ -222,6 +245,16 @@ def apply_egress_to_spec(
             raise ValueError(
                 "init_containers is required for egress forward mode bootstrap fence"
             )
+        if pod_volumes is None:
+            raise ValueError(
+                "pod_volumes is required for egress forward mode resolver snapshot"
+            )
+        pod_volumes.append(
+            {
+                "name": EGRESS_RESOLVER_VOLUME_NAME,
+                "emptyDir": {},
+            }
+        )
         init_containers.append(build_egress_bootstrap_init_container(egress_settings))
 
     env: List[Dict[str, str]] = []
@@ -317,6 +350,14 @@ def apply_egress_to_spec(
             "mountPath": OPENSANDBOX_RUNTIME_MOUNT_PATH,
         }
     ]
+    if is_forward:
+        sidecar["volumeMounts"].append(
+            {
+                "name": EGRESS_RESOLVER_VOLUME_NAME,
+                "mountPath": EGRESS_RESOLVER_MOUNT_PATH,
+                "readOnly": True,
+            }
+        )
     if ca_secret_name is not None:
         sidecar["volumeMounts"].append(
             {

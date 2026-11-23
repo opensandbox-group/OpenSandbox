@@ -69,6 +69,9 @@ type Config struct {
 	Identity      Identity
 	// Mark is set as SO_MARK on every gateway socket (Linux only).
 	Mark int
+	// ResolveHost, when set, resolves Host into literal IPs instead of letting
+	// net.Dialer read the Pod's workload-writable /etc/hosts and /etc/resolv.conf.
+	ResolveHost func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
 // Forwarder relays accepted connections to the gateway.
@@ -80,6 +83,7 @@ type Forwarder struct {
 	// Seams for tests; production uses the Linux socket options.
 	originalDst func(net.Conn) (netip.AddrPort, error)
 	dialGateway func(ctx context.Context) (net.Conn, error)
+	resolveHost func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
 // New validates cfg and returns a Forwarder.
@@ -114,9 +118,16 @@ func New(cfg Config) (*Forwarder, error) {
 		dialTimeout:      defaultDialTimeout,
 		handshakeTimeout: defaultHandshakeTimeout,
 		originalDst:      originalDst,
+		resolveHost:      cfg.ResolveHost,
 	}
 	f.dialGateway = f.dialGatewayConn
 	return f, nil
+}
+
+// SetResolveHost configures the host resolver used before dialing the gateway.
+// Must be called before Serve or ProbeGateway.
+func (f *Forwarder) SetResolveHost(fn func(ctx context.Context, host string) ([]netip.Addr, error)) {
+	f.resolveHost = fn
 }
 
 // ValidateIdentityValue accepts empty or printable ASCII without whitespace
@@ -235,7 +246,28 @@ func (f *Forwarder) ProbeGateway(ctx context.Context) error {
 
 func (f *Forwarder) dialGatewayConn(ctx context.Context) (net.Conn, error) {
 	d := &net.Dialer{Timeout: f.dialTimeout, Control: MarkControl(f.cfg.Mark)}
-	conn, err := d.DialContext(ctx, "tcp", f.gatewayAddr)
+	var (
+		conn net.Conn
+		err  error
+	)
+	if f.resolveHost != nil {
+		ips, resolveErr := f.resolveHost(ctx, f.cfg.Host)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("resolve %q: no addresses found", f.cfg.Host)
+		}
+		portStr := strconv.Itoa(f.cfg.Port)
+		for _, ip := range ips {
+			conn, err = d.DialContext(ctx, "tcp", net.JoinHostPort(ip.Unmap().String(), portStr))
+			if err == nil {
+				break
+			}
+		}
+	} else {
+		conn, err = d.DialContext(ctx, "tcp", f.gatewayAddr)
+	}
 	if err != nil {
 		return nil, err
 	}

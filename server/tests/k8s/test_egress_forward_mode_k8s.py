@@ -44,6 +44,8 @@ from opensandbox_server.config import (
 from opensandbox_server.services.composite_service import CompositeSandboxService
 from opensandbox_server.services.constants import (
     EGRESS_MODE_ENV,
+    EGRESS_RESOLVER_MOUNT_PATH,
+    EGRESS_RESOLVER_VOLUME_NAME,
     EGRESS_RULES_ENV,
     EGRESS_UPSTREAM_EXTRA_CA_PATH,
     EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME,
@@ -180,9 +182,15 @@ class TestForwardModeEgressHelper:
             "limits": {"cpu": "250m", "memory": "256Mi"},
         }
         script = egress_init["args"][0]
+        assert f"cp /etc/hosts {EGRESS_RESOLVER_MOUNT_PATH}/hosts" in script
+        assert f"cp /etc/resolv.conf {EGRESS_RESOLVER_MOUNT_PATH}/resolv.conf" in script
         assert "table inet opensandbox" in script
         assert "policy drop;" in script
         assert 'oifname "lo" accept' in script
+        assert {
+            "name": EGRESS_RESOLVER_VOLUME_NAME,
+            "mountPath": EGRESS_RESOLVER_MOUNT_PATH,
+        } in egress_init["volumeMounts"]
 
         assert len(containers) == 1
         sidecar = containers[0]
@@ -197,14 +205,27 @@ class TestForwardModeEgressHelper:
         assert env[OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE] == "team-a-ns"
         assert env[OPENSANDBOX_EGRESS_TENANT_NAME] == "acme"
         assert any(v["name"] == EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME for v in volumes)
+        assert {"name": EGRESS_RESOLVER_VOLUME_NAME, "emptyDir": {}} in volumes
+        assert {
+            "name": EGRESS_RESOLVER_VOLUME_NAME,
+            "mountPath": EGRESS_RESOLVER_MOUNT_PATH,
+            "readOnly": True,
+        } in sidecar["volumeMounts"]
 
-    def test_apply_requires_init_containers_in_forward_mode(self):
+    def test_apply_requires_init_containers_and_volumes_in_forward_mode(self):
         with pytest.raises(ValueError, match="init_containers"):
             apply_egress_to_spec(
                 containers=[],
                 egress_settings=_forward_settings(),
                 sandbox_id="sbx-1",
                 pod_volumes=[],
+            )
+        with pytest.raises(ValueError, match="pod_volumes"):
+            apply_egress_to_spec(
+                containers=[],
+                egress_settings=_forward_settings(),
+                sandbox_id="sbx-1",
+                init_containers=[],
             )
 
     def test_non_forward_never_emits_namespace_or_tenant_or_bootstrap_init(self):
@@ -315,6 +336,20 @@ class TestForwardModeEgressHelper:
                 },
                 "must drop NET_ADMIN and NET_RAW",
             ),
+            (
+                {
+                    "containers": [
+                        {
+                            "name": "sandbox",
+                            "securityContext": {"capabilities": {"drop": ["NET_ADMIN", "NET_RAW"]}},
+                            "volumeMounts": [
+                                {"name": EGRESS_RESOLVER_VOLUME_NAME, "mountPath": "/tamper"}
+                            ],
+                        }
+                    ]
+                },
+                EGRESS_RESOLVER_VOLUME_NAME,
+            ),
         ],
     )
     def test_validate_forward_mode_pod_spec_rejects_violations(self, pod_spec, match):
@@ -354,7 +389,7 @@ class TestBatchSandboxForwardMode:
         assert set(sandbox_c["securityContext"]["capabilities"]["drop"]) == {"NET_ADMIN", "NET_RAW"}
         assert not any(e["name"].startswith("OPENSANDBOX_EGRESS_") for e in sandbox_c.get("env", []))
         assert not any(
-            m["name"] == EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME
+            m["name"] in (EGRESS_UPSTREAM_EXTRA_CA_VOLUME_NAME, EGRESS_RESOLVER_VOLUME_NAME)
             for m in sandbox_c.get("volumeMounts", [])
         )
 

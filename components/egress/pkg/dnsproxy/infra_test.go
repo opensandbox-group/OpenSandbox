@@ -170,25 +170,41 @@ func TestExpandInfraDomainNamesKubernetesClusterFirst(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, []string{
-		"gateway",
 		"gateway.team-a.svc.cluster.local",
 		"gateway.svc.cluster.local",
 		"gateway.cluster.local",
+		"gateway",
 	}, ExpandInfraDomainNames("gateway", resolvPath))
 
 	require.Equal(t, []string{
-		"gateway.infra",
 		"gateway.infra.team-a.svc.cluster.local",
 		"gateway.infra.svc.cluster.local",
 		"gateway.infra.cluster.local",
+		"gateway.infra",
 	}, ExpandInfraDomainNames("gateway.infra", resolvPath))
 
 	require.Equal(t, []string{
-		"gateway.infra.svc",
 		"gateway.infra.svc.team-a.svc.cluster.local",
 		"gateway.infra.svc.svc.cluster.local",
 		"gateway.infra.svc.cluster.local",
+		"gateway.infra.svc",
 	}, ExpandInfraDomainNames("gateway.infra.svc", resolvPath))
+
+	// When dots >= ndots, the unexpanded name comes first before search suffixes.
+	ndots1Path := filepath.Join(t.TempDir(), "resolv-ndots1.conf")
+	require.NoError(t, os.WriteFile(ndots1Path, []byte(
+		"nameserver 10.96.0.10\nsearch corp.internal\noptions ndots:1\n",
+	), 0o600))
+	require.Equal(t, []string{
+		"gateway.example.com",
+		"gateway.example.com.corp.internal",
+	}, ExpandInfraDomainNames("gateway.example.com", ndots1Path))
+
+	// DiscoverUpstreamsFrom honors custom snapshot resolv.conf when env is unset.
+	t.Setenv(constants.EnvDNSUpstream, "")
+	upstreams, err := DiscoverUpstreamsFrom(resolvPath)
+	require.NoError(t, err)
+	require.Equal(t, []string{"10.96.0.10:53"}, upstreams)
 
 	// Rooted FQDNs (trailing dot) are never search-expanded.
 	require.Equal(t, []string{

@@ -17,6 +17,7 @@
     forward_smoke.py gateway <port>        CONNECT gateway; logs one JSON line per request
     forward_smoke.py origin                TCP 80/81/8443 + UDP 9999; logs every peer
     forward_smoke.py dns <fqdn>=<ip> ...   minimal UDP/53 DNS responder for search-domain tests
+    forward_smoke.py sink <port>           rogue loopback listener on 127.0.0.1:<port>
     forward_smoke.py client tcp|udp <ip> <port>
 
 Stdlib only, so it runs in a stock python:alpine image.
@@ -200,6 +201,27 @@ def run_dns(mappings):
         log(event="dns", qname=qname, qtype=qtype, rcode=rcode)
 
 
+# --- sink ------------------------------------------------------------------
+
+
+def run_sink(port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
+    sock.listen(16)
+    log(event="listening", sink=port)
+    while True:
+        conn, peer = sock.accept()
+        try:
+            conn.settimeout(0.5)
+            data = conn.recv(4096).decode("latin-1", "replace")
+            log(event="sink_hit", peer=peer[0], port=port, leaked_auth="Proxy-Authorization" in data)
+        except OSError:
+            log(event="sink_hit", peer=peer[0], port=port, leaked_auth=False)
+        finally:
+            conn.close()
+
+
 # --- client ----------------------------------------------------------------
 
 
@@ -234,6 +256,8 @@ def main(argv):
         run_origin()
     elif argv[:1] == ["dns"] and len(argv) >= 2:
         run_dns(argv[1:])
+    elif argv[:1] == ["sink"] and len(argv) == 2:
+        run_sink(int(argv[1]))
     elif argv[:1] == ["client"] and len(argv) == 4:
         return run_client(*argv[1:])
     else:

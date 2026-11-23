@@ -17,14 +17,17 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
@@ -233,4 +236,63 @@ func TestBuildForwardEndpointSeedsHostsFileIPs(t *testing.T) {
 	epDNSOnly, isLiteral := buildForwardEndpoint("gateway.svc.cluster.local", 3128, constants.ForwarderMarkValue, hostsPath)
 	require.False(t, isLiteral)
 	require.Empty(t, epDNSOnly.IPs)
+}
+
+func TestNewForwardHostResolverUsesStaticSnapshotAndDNSOrder(t *testing.T) {
+	// Static snapshot IPs are returned directly without issuing any DNS query.
+	staticResolve := newForwardHostResolver(
+		[]netip.Addr{netip.MustParseAddr("10.20.30.40")},
+		"127.0.0.1:1",
+		[]string{"gateway.private"},
+	)
+	ips, err := staticResolve(context.Background(), "gateway.private")
+	require.NoError(t, err)
+	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.20.30.40")}, ips)
+
+	// Without static IPs, queries go directly to the local dnsproxy in search order.
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	var (
+		mu      sync.Mutex
+		queried []string
+	)
+	srv := &dns.Server{
+		PacketConn: conn,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			resp := new(dns.Msg)
+			resp.SetReply(r)
+			q := r.Question[0]
+			mu.Lock()
+			queried = append(queried, q.Name)
+			mu.Unlock()
+			if q.Qtype == dns.TypeA && q.Name == "gateway.team-a.svc.cluster.local." {
+				resp.Answer = append(resp.Answer, &dns.A{
+					Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30},
+					A:   net.ParseIP("10.96.50.10"),
+				})
+			} else {
+				resp.Rcode = dns.RcodeNameError
+			}
+			_ = w.WriteMsg(resp)
+		}),
+	}
+	ready := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(ready) }
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	<-ready
+
+	dnsResolve := newForwardHostResolver(
+		nil,
+		conn.LocalAddr().String(),
+		[]string{"gateway.team-a.svc.cluster.local", "gateway"},
+	)
+	ips, err = dnsResolve(context.Background(), "gateway")
+	require.NoError(t, err)
+	require.Equal(t, []netip.Addr{netip.MustParseAddr("10.96.50.10")}, ips)
+	mu.Lock()
+	gotQueried := append([]string(nil), queried...)
+	mu.Unlock()
+	require.Equal(t, []string{"gateway.team-a.svc.cluster.local."}, gotQueried)
 }
