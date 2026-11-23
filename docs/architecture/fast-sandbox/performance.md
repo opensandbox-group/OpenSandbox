@@ -140,6 +140,8 @@ This section answers two questions about the experimental Fast Sandbox `credenti
 
 | Measurement | CI | Bare metal, set A | Bare metal, set B |
 |---|---:|---:|---:|
+| M1 pooled create p50, `all` → `credential-bound` | 595.2 → 617.1 ms (+3.7%) | 696.4 → 713.9 ms (+2.5%) | 709.7 → 723.7 ms (+2.0%) |
+| M2 `credential-bound` leg, passthrough minus decrypt p50 | −0.28 ms | −0.28 ms | −0.43 ms |
 | M3 bytes per held bound connection, `anon` / `memory.current` | 158,100 / 158,847 | 158,582 / 165,483 | 158,231 / 165,012 |
 | M4 egress CPU per request, `all` → `credential-bound` | 9.92 → 4.28 ms (−57%) | 18.34 → 8.39 ms (−54%) | 18.01 → 8.22 ms (−54%) |
 
@@ -147,9 +149,10 @@ What the data supports:
 
 - **CPU.** Under a load where 95% of the new short HTTPS connections go to unbound hosts, `credential-bound` used 54–57% less egress CPU per request than `all` in all three runs. Absolute CPU per request was 1.8–2.0 times as high on the bare-metal host, so only the relative saving carries over between environments. The saving depends on the share of unbound traffic; see M4 below.
 - **Memory.** An idle bound connection costs 158–166 KB of egress memory. The `anon` slope agreed within 0.3% across two hosts, two kernels and up to 4,000 connections; `memory.current`, the value the container limit enforces, was about 4% higher on the bare-metal host. The budgets below use the higher value.
+- **Create latency.** In all three comparisons `credential-bound` was 14–22 ms (2.0–3.7%) higher at pooled p50. Each difference is smaller than the per-round p50 range within either leg, and the legs are separate environment bring-ups run one after the other, so the bench cannot separate a cost of the mode from run-to-run variation. An interleaved rerun in one environment (M10 under [Supplemental measurements](#supplemental-measurements)) found a mean `credential-bound` minus `all` difference of −3.4 ms with a 95% confidence interval of −40.6 to +33.8 ms, so no mode effect was detected there. The interval is wider than the 14–22 ms in question, and the ACK create path (about 100 ms) was not measured.
 - **Total memory.** `all` mode costs about 165 KB of `memory.current` per held connection whether or not the host is bound; a `credential-bound` passthrough connection costs about 35 KB. With 5% of connections bound, `credential-bound` needs about 25% of the per-connection memory of `all` (see M3x).
 - **Throughput.** At the default 500m egress CPU limit with keep-alive connections and 5% bound traffic, egress CPU saturated at about 110–115 requests per second in `all` mode and about 1,030–1,060 in `credential-bound` mode (see M5).
-- **Not measured.** Active transfers in M3/M3x and the `credential-bound` throughput ceiling at the 2-CPU limit.
+- **Not measured.** Active transfers in M3/M3x, the full 4,096-subject scale (registration time grows roughly quadratically with the subject count; see M9), and the `credential-bound` throughput ceiling at the 2-CPU limit.
 
 ### Method
 
@@ -204,6 +207,63 @@ Each leg's `environment.json` records: leg and interception mode, recording time
 The bare-metal run used a wrapper outside the repository for isolation and for an outbound proxy during image builds. The bench code, its parameters and the Pool renders were not modified. During the four measurement windows the bench cgroup recorded no OOM kill and no CPU throttling at the cgroup level, and the host had at least 121 GiB of available memory.
 
 ### Results
+
+#### M1 create latency
+
+CI, per round (milliseconds):
+
+| Leg | Round | Success | p50 | p90 | p99 | Mean |
+|---|---|---:|---:|---:|---:|---:|
+| default (`all`) | 1 | 200/200 | 593.4 | 805.5 | 888.2 | 606.2 |
+| default (`all`) | 2 | 198/200 | 613.1 | 812.4 | 1233.6 | 609.1 |
+| default (`all`) | 3 | 198/200 | 587.4 | 745.3 | 956.5 | 588.4 |
+| default (`all`) | pooled | 596/600 | 595.2 | 801.1 | 933.3 | 601.3 |
+| `credential-bound` | 1 | 200/200 | 631.6 | 816.9 | 907.9 | 624.7 |
+| `credential-bound` | 2 | 198/200 | 597.3 | 779.6 | 1089.9 | 617.5 |
+| `credential-bound` | 3 | 198/200 | 611.6 | 794.1 | 890.6 | 606.0 |
+| `credential-bound` | pooled | 596/600 | 617.1 | 798.6 | 907.9 | 616.1 |
+
+All runs, pooled over successful creates (milliseconds):
+
+| Run | Leg | Success | p50 | p90 | p99 | Mean | Per-round p50 range |
+|---|---|---:|---:|---:|---:|---:|---:|
+| CI | default (`all`) | 596/600 | 595.2 | 801.1 | 933.3 | 601.3 | 587.4–613.1 |
+| CI | `credential-bound` | 596/600 | 617.1 | 798.6 | 907.9 | 616.1 | 597.3–631.6 |
+| Bare metal, set A | default (`all`) | 600/600 | 696.4 | 889.2 | 1049.4 | 906.6 | 688.1–707.8 |
+| Bare metal, set A | `credential-bound` | 600/600 | 713.9 | 922.6 | 1030.4 | 717.4 | 698.8–732.0 |
+| Bare metal, set B | default (`all`) | 2000/2000 | 709.7 | 922.6 | 1069.3 | 714.3 | 696.2–732.3 |
+| Bare metal, set B | `credential-bound` | 2000/2000 | 723.7 | 936.6 | 1056.5 | 738.7 | 696.7–741.5 |
+
+| Run | `credential-bound` minus `all`, pooled p50 | Per-round p50 range, `all` / `credential-bound` |
+|---|---:|---:|
+| CI | +21.9 ms (+3.7%) | 25.7 / 34.3 ms |
+| Bare metal, set A | +17.5 ms (+2.5%) | 19.7 / 33.2 ms |
+| Bare metal, set B | +14.0 ms (+2.0%) | 36.1 / 44.8 ms |
+
+CI reports M1 as `PARTIAL` in both legs. Seven of the eight failures are `SandboxRateLimitException` (HTTP 429, the integration Pool's 16 sandbox slots at concurrency 10 with asynchronous deletion); the eighth, in the third `credential-bound` round, is one `SandboxReadyTimeoutException`. Latencies cover successful attempts only. The bare-metal run had no failed create in 5,200 attempts.
+
+Pooled percentiles hide tails concentrated in one round. In bare-metal set A, the first default round had a p99 of 31,187.8 ms and a maximum of 31,194.0 ms, which raises that leg's pooled mean to 906.6 ms; the other two rounds had a maximum of about 1,050 ms. In set B, the first `credential-bound` round had a p99 of 3,971.7 ms. The cause of these tails was not identified.
+
+The difference between legs is not larger than the per-round p50 range of either leg in any run, and p90 and p99 do not move consistently with it. The bench therefore does not isolate a create-latency cost of the mode; the observed p50 differences of 14–22 ms are the best available estimate of its size in these environments, without a confidence interval. These creates carry a network policy but no Vault.
+
+#### M2 TLS connect latency
+
+Guest TCP + TLS connect latency, p50 (p99), milliseconds:
+
+| Path | CI (200 samples) | Bare metal, set A (200) | Bare metal, set B (1,000) |
+|---|---:|---:|---:|
+| `all_unbound` | 4.29 (6.00) | 8.02 (10.23) | 8.20 (9.60) |
+| `all_bound` | 4.41 (5.78) | 8.01 (9.80) | 8.17 (9.71) |
+| `cb_bound` | 4.86 (6.72) | 9.26 (13.00) | 9.39 (10.93) |
+| `cb_unbound` | 4.58 (6.60) | 8.98 (11.21) | 8.96 (11.27) |
+
+Every sample on every path, 800 in CI and 4,800 on bare metal, matched its path's expected evidence: the `all_*` and `cb_bound` samples presented the MITM leaf, the `cb_unbound` samples presented the origin leaf, and the origin saw the credential exactly on the bound paths. TCP connect took about 0.17 ms at p50 in CI and 0.35–0.39 ms on bare metal, so most of each value is the TLS handshake.
+
+- Within the `credential-bound` leg, passthrough was 0.28, 0.28 and 0.43 ms faster at p50 than decrypt.
+- Within the default leg, bound and unbound paths differed by at most 0.12 ms.
+- Across legs, the `credential-bound` paths were slower at p50 than the matching default-leg paths in every run: 0.29–0.96 ms for unbound and 0.45–1.25 ms for bound, including the passthrough path. This may include a cost of classifying the ClientHello before passthrough, or differences between bring-ups; the bench does not separate the two.
+
+The Vault relay acknowledgements recorded while binding the bench sandboxes took 48–53 ms in CI and 64–94 ms on bare metal.
 
 #### M3 egress memory
 
@@ -279,7 +339,7 @@ The per-subject default `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` is 32. The process
 
 For another Pool, set `P` to the smaller of `S × maxSandboxesPerPod` rounded up to a power of two and about two thirds of `(L − B) / m`.
 
-Passthrough connections are not charged to either budget, but each costs about 35 KB of `memory.current` (M3x). Leave room for them in `L − B` when a Pool expects many concurrent unbound connections. In the supplemental measurements, the egress process kept the memory of 2,048 closed connections for the whole 240-second observation window, so size `L` for the peak number of concurrent connections, not the average.
+Passthrough connections are not charged to either budget, but each costs about 35 KB of `memory.current` (M3x). Leave room for them in `L − B` when a Pool expects many concurrent unbound connections. After connections close, the egress process kept their memory for the whole observation window (240 s after 2,048 connections, M7), so size `L` for the peak number of concurrent connections, not the average.
 
 ### Supplemental measurements
 
@@ -326,6 +386,77 @@ Closed-loop load from 4 guests: concurrency 1, 16, 64 and 256 in total, a 10-sec
 | 256 | 77.4 (1,025 errors) | 710.1 / 19,304.8 | 1,028.4 (73 errors) | 189.9 / 406.2 |
 
 In both modes the egress container used its full 0.5 core from concurrency 16 (`all`) or 64 (`credential-bound`) onward, with CFS throttling in almost every period. Over the same windows the client and the origin each used at most about 0.45 core while egress stayed pinned at its limit, so the egress CPU limit is the likely bottleneck. The plateau is about 110–115 RPS for `all` and 1,030–1,060 RPS for `credential-bound`, about nine times as high. At the 2-CPU limit, `all` levelled off at about 230 RPS. `credential-bound` reached about 1,980 RPS at concurrency 256 with no errors and no plateau, so its 2-CPU ceiling was not established. Single-connection latency was 43–46 ms at p50 in both modes; this floor was not investigated.
+
+#### M6 connection churn
+
+Each mode ran for 1,800 seconds: repeated connect, request and close cycles at concurrency 1, 4 and 16 for 600 seconds each, sampled every 5 seconds. Neither mode had a failed request. Within each concurrency segment, the p50 moved by −5.8% to +0.8% between the first and last minute. Egress file descriptors returned to the baseline after the load. Memory stayed about 33 MB above the baseline 30 seconds after the load stopped; see the retention note under M7.
+
+#### M7 bursts and the per-subject budget
+
+Simultaneous bursts of B = 500, 1000, 2000 and 2049 bound connections were split across 6 sandboxes, with 3 repeats per tier. Each sandbox is a separate subject, so no subject reached its budget in this part.
+
+| Mode | Attempted | Failed | Client-side failure kinds |
+|---|---:|---:|---|
+| `all` | 16,647 | 150 (0.9%) | 139 receive errors, 11 handshake resets |
+| `credential-bound` | 16,647 | 958 (5.8%) | 386 receive timeouts, 521 receive errors, 51 handshake resets |
+
+There was no budget rejection. Passthrough traffic kept working, and resources recovered after every burst. In `credential-bound` mode, 575 of the 958 failures came in the third repeat of a tier. The failure timing is consistent with admission queueing beyond the client timeout during back-to-back bursts; the cause was not isolated, and whether egress has a serial point there was not determined.
+
+To test the per-subject budget itself, one sandbox with 2 GiB of memory filled its subject to the budget of 2048 in batches of 32. Each batch was verified at the client and counted at the origin, so 2,048 connections were confirmed held before one more bound connection was attempted:
+
+| | `all` (no per-subject budget) | `credential-bound` |
+|---|---|---|
+| Connections held / alive at release | 2,048 / 2,048 | 2,048 / 2,048 |
+| Connection 2,049 (bound) | succeeded | rejected at the TLS handshake (reset) |
+| `registry_exhausted` events in the probe window | 0 | 1 |
+| Unbound request from the same sandbox while full | succeeded | succeeded |
+| Credential injection after release | recovered | recovered |
+
+Budget exhaustion therefore rejected only the new bound handshake. Existing connections and passthrough traffic from the same subject were unaffected. 240 seconds after release, file descriptors and conntrack entries had returned to the baseline, but `anon` stayed 299 MiB (`all`) and 303 MiB (`credential-bound`) above it, about the memory of 2,048 connections. These observations are consistent with allocator retention, and M8 showed no continuing growth over two hours of sustained churn. Whether the memory is returned under host memory pressure was not tested.
+
+The `registry_exhausted` log line reached the container log about 34 seconds after the rejection, because egress reads the interception proxy's output through a pipe without forcing a flush. The measurement set `PYTHONUNBUFFERED=1` on this Pool only, so that the log line appears at the time of the rejection.
+
+#### M8 two-hour soak
+
+Each mode ran for 7,200 seconds at concurrency 16 with keep-alive connections, 5% bound traffic and a reconnect every 100 requests, sampled every 10 seconds. The target rates were half of the 500m plateau from M5. Trends use the last 90 minutes:
+
+| | `all` | `credential-bound` |
+|---|---:|---:|
+| Target / achieved RPS | 55 / 53.15 | 514 / 223.37 |
+| Requests succeeded / failed | 382,679 / 0 | 1,608,286 / 0 |
+| p50 / p99 | 6.9 / 86.4 ms | 42.5 / 65.6 ms |
+| p50 change, first to last minute | −2.2% | +0.4% |
+| `anon` / `memory.current` slope | 29 / 78 B/s | −0.9 / 29 B/s |
+| Peak egress `memory.current` | 102 MB | 116 MB |
+| Peak egress file descriptors | 99 | 100 |
+| Restarts / OOM kills | 0 / 0 | 0 / 0 |
+
+The `credential-bound` run did not reach its target. The load generator paces each request with a fixed sleep on top of the request time, which limits 16 workers to about 224 RPS; without pacing, 16 workers at 42.5 ms would still stay below 514. The result shows two hours of stability at 223 RPS, about four times the `all` load, not at 514 RPS. A slope of 78 B/s over 90 minutes is about 0.4 MB, so neither mode showed memory growth.
+
+#### M9 subject scale
+
+The `credential-bound` mode registered synthetic subjects through the action endpoint, driven from outside the egress cgroup, toward targeted totals of 256, 1,024, 2,048, 4,096 and 4,097. At each total, two real sandboxes sent 20 unbound and 20 bound requests. All 120 probe requests at 256, 1,024 and 2,048 subjects succeeded on the expected path.
+
+`SET_BINDING` time grows with the number of subjects already installed. Almost all of it is spent installing the interception redirect for the new subject; policy commit time does not change:
+
+| Installed subjects | `SET_BINDING` p50 | Interception redirect install p50 |
+|---:|---:|---:|
+| 0–300 | 140 ms | 83 ms |
+| 900–1,100 | 3.0 s | 2.7 s |
+| 1,900–2,100 | 12.5 s | 11.8 s |
+| 2,600–2,800 | 22.7 s | 21.7 s |
+
+Over 2,790 registrations, a quadratic fit (r² 0.986) describes the growth better than a linear one (r² 0.917). It extrapolates to about 53–55 seconds per registration at 4,096 subjects and about 14 hours to register subjects 2,792 to 4,097. The installed redirect count reached 2,792, and the largest fully probed tier is 2,048. The run stopped when the bench's 4-hour wait for the 4,096 tier expired, so the 4,096 tier and the capacity response at 4,097 were not observed. Per-tier probe reports were kept as summaries only. Synthetic subjects do not reproduce real sandbox topology. The growth curve is the main result: at a few thousand subjects per egress process, binding a new subject takes seconds to tens of seconds.
+
+#### M10 interleaved create latency
+
+This run used one kind cluster, one image and one template. The interception mode alternated in 8 blocks in the order ABBAABBA, where A is `all` and B is `credential-bound`, with a Pool rebuild at each switch. Each block ran M1 with 3 rounds of 200 creates at concurrency 10. Blocks are the independent unit.
+
+| Adjacent A/B pair | 1 | 2 | 3 | 4 |
+|---|---:|---:|---:|---:|
+| B − A, block p50 | −33.5 ms | −4.3 ms | +0.9 ms | +23.4 ms |
+
+The mean difference is −3.4 ms, with a 95% confidence interval (Student t, 4 pairs) of −40.6 to +33.8 ms. The first round of each block had 6 `SandboxRateLimitException` failures, 48 of 4,800 creates in total; they shift a block p50 by at most 3.8 ms. No mode effect is detected, but the interval is too wide to exclude a difference of 14–22 ms. Settling it on a create path of about 100 ms needs a run on that path.
 
 ## Reproducing
 
@@ -382,4 +513,4 @@ BENCH_CPU_UNBOUND=4750 BENCH_CPU_BOUND=250 \
 
 Run both legs in the same environment and with the same parameters, and save each leg's reports before the next bring-up. To compare modes on a host with background load, repeat the pair of legs more than once rather than relying on one pair. Check the Docker daemon's default open-file limit before M3; see [Method](#method).
 
-The supplemental measurements M3x and M5–M10 are not part of this repository or the CI workflow. Their entry, parameters and report format are described in [`SUPPLEMENTAL.md`](https://github.com/hpliStartAgain/OpenSandbox/blob/6bf7d46e6cf2b76564b12098d6fe1fb65e2841d1/scripts/fast-sandbox-env/SUPPLEMENTAL.md) on the reproduction branch. M8 needs the target rates chosen from an M5 run in the same environment. M9 at 4,096 subjects needs a much longer wait per tier than the default.
+The supplemental measurements M3x and M5–M10 are not part of this repository or the CI workflow. Their entry, parameters and report format are described in [`SUPPLEMENTAL.md`](https://github.com/hpliStartAgain/OpenSandbox/blob/6bf7d46e6cf2b76564b12098d6fe1fb65e2841d1/scripts/fast-sandbox-env/SUPPLEMENTAL.md) on the reproduction branch. M8 needs the target rates chosen from an M5 run in the same environment. M9 at 4,096 subjects needs a much longer wait per tier than the default (see M9).
