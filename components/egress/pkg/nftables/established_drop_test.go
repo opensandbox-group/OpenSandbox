@@ -504,6 +504,37 @@ func BenchmarkCarryWithdrawnHostsWithOverlappingFloor(b *testing.B) {
 	}
 }
 
+func BenchmarkCarryRetainedHostsWithDNSAndFloor(b *testing.B) {
+	old, withdrawn := withdrawnHostFloorPolicies(b)
+	withdrawn.Egress = append(withdrawn.Egress, policy.EgressRule{Action: policy.ActionAllow, Target: "cdn.example.com"})
+	leases := make(map[netip.Addr]time.Time, 64)
+	learned := make([]netip.Addr, 0, 64)
+	expiry := time.Now().Add(time.Minute)
+	for i := 1; i <= 64; i++ {
+		addr := netip.AddrFrom4([4]byte{203, 0, 113, byte(i)})
+		leases[addr] = expiry
+		learned = append(learned, addr)
+	}
+	hadAccept := func(addr netip.Addr, _ bool) bool {
+		_, live := leases[addr]
+		return live
+	}
+	initial := ComputeEstablishedDrops(old, withdrawn, nil)
+	first := initial.stillRelevant(withdrawn, learned, leases, hadAccept)
+	require.Len(b, first.withdrawnHostDenyPorts, len(learned))
+	for _, tt := range []struct {
+		name  string
+		prior EstablishedDrops
+	}{{"first", initial}, {"repeat", first}} {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				tt.prior.stillRelevant(withdrawn, learned, leases, hadAccept)
+			}
+		})
+	}
+}
+
 func TestApplyStatic_HostWithdrawalSharesUnchangedGlobalFloor(t *testing.T) {
 	before, deny := withdrawnHostFloorPolicies(t)
 	m, scripts := recordingManager()
@@ -581,6 +612,62 @@ func TestApplyStatic_RetainedDNSLeaseRetiresOnlyReallowedWithdrawnPorts(t *testi
 			require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[`+rules+`]}`)))
 			require.Equal(t, !keepSource, m.lastDrops.MatchesFlow(addr, 443), "only a lease actually retained in this apply reallows the port")
 			require.True(t, m.lastDrops.MatchesFlow(addr, 8443), "a retained lease must not bypass a still-explicitly denied port")
+		})
+	}
+}
+
+func TestApplyStatic_WholeWithdrawalRetainsEffectiveDenial(t *testing.T) {
+	const domain = `{"action":"allow","target":"cdn.example.com"}`
+	const allow = `{"action":"allow","target":"192.0.2.10"}`
+	const deny = `{"action":"deny","target":"192.0.2.10","ports":[443]}`
+	addr := netip.MustParseAddr("192.0.2.10")
+	for _, tt := range []struct {
+		name           string
+		floor, oldDNS  bool
+		redundantAllow bool
+	}{
+		{name: "user control"},
+		{name: "user overlap", redundantAllow: true},
+		{name: "platform control", floor: true},
+		{name: "platform overlap", floor: true, redundantAllow: true},
+		{name: "revoked DNS masked by prior deny", oldDNS: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, _ := recordingManager()
+			old := mustPolicy(t, `{"egress":[`+allow+`,`+domain+`]}`)
+			withdrawn := policy.DefaultDenyPolicy()
+			if tt.oldDNS {
+				withdrawn = mustPolicy(t, `{"egress":[`+deny+`,`+domain+`]}`)
+			}
+			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, withdrawn)
+			require.NoError(t, err)
+			require.True(t, m.lastDrops.MatchesFlow(addr, 443))
+			reload := policy.DefaultDenyPolicy()
+			if tt.oldDNS {
+				require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example.com", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
+			} else {
+				ports := "8443"
+				if tt.redundantAllow {
+					ports += ",443"
+				}
+				rules := `{"action":"allow","target":"192.0.2.10","ports":[` + ports + `]}`
+				if !tt.floor {
+					rules += "," + deny
+				}
+				reload = mustPolicy(t, `{"egress":[`+rules+`]}`)
+				if tt.floor {
+					reload = policy.MergeAlwaysOverlay(reload,
+						[]policy.EgressRule{policy.NewPortFloorDenyRule([]policy.PortRange{{Lo: 443, Hi: 443}})}, nil)
+				}
+			}
+			for range 2 {
+				require.NoError(t, m.ApplyStatic(ctx, reload))
+				require.True(t, m.lastDrops.MatchesFlow(addr, 443), "an accept must not override the still-denied withdrawal")
+				require.False(t, m.lastDrops.MatchesFlow(addr, 8443), "the allowed or previously spared sibling must survive")
+			}
+			require.NoError(t, m.ApplyStatic(ctx, old))
+			require.False(t, m.lastDrops.MatchesFlow(addr, 443), "actual reallow removes the withdrawal")
 		})
 	}
 }
