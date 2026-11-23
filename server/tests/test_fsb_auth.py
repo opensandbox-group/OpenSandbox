@@ -230,3 +230,10 @@ def test_default_auth_disabled_opens_insecure_channel(monkeypatch):
     insecure.assert_called_once_with("127.0.0.1:9090")
     secure.assert_not_called()
     client.close()
+
+
+def test_resolve_auth_namespace_prefers_pod_namespace_env(monkeypatch):
+    monkeypatch.setenv("POD_NAMESPACE", "custom-system")
+    source = TokenSource(Mock())
+    assert source._namespace == "custom-system"
+    assert source._service_account == "opensandbox-server-fastpath-client"

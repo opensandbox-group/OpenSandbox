@@ -102,15 +102,10 @@ The following table lists the configurable parameters of the chart and their def
 | controller.sandboxtemplateBuilderPodSpec | string | `""` | Raw PodSpec fragment (YAML) merged into every SandboxTemplate build Pod by the controller: whitelisted scheduling fields only (tolerations appended; affinity and topologySpreadConstraints replaced). Rendered as the fast-sandbox-builder-pod-template ConfigMap; editing the live ConfigMap applies to the next build without a rollout. |
 | controller.tolerations | list | `[]` | Tolerations for the controller pod |
 | fastpath.callerAuth.enabled | bool | `false` | Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS). |
-| fastpath.callerAuth.gatewayServiceAccount | string | `"opensandbox-ingress-fastpath-client"` | Must match the authentication-only gateway identity installed by the base chart. |
-| fastpath.callerAuth.namespace | string | `""` | Identity namespace. Empty uses systemNamespace; must match base.fastSandbox.namespaces.system. |
 | fastpath.callerAuth.namespaces | list | `[]` | Authorized workload namespaces. Empty uses resourceNamespace; use ["*"] only for intentionally cluster-wide access. |
-| fastpath.callerAuth.serverServiceAccount | string | `"opensandbox-server-fastpath-client"` | Must match the authentication-only identity installed by the base chart. |
 | fastpath.tls.dnsNames | list | `[]` | Additional serving DNS names for external Server access. |
-| fastpath.tls.issuerRef.group | string | `"cert-manager.io"` | Issuer API group. |
 | fastpath.tls.issuerRef.kind | string | `"ClusterIssuer"` | Issuer or ClusterIssuer. |
 | fastpath.tls.issuerRef.name | string | `"fast-sandbox-serving"` | Required existing cert-manager Issuer/ClusterIssuer. The chart does not install cert-manager or create a CA. |
-| fastpath.tls.secretName | string | `"fast-sandbox-fastpath-tls"` | Serving Secret managed by cert-manager; mounted without subPath for automatic renewal. |
 | fullnameOverride | string | `""` | Override the full name of the chart |
 | imagePullSecrets | list | `[]` | Image pull secrets for every workload in this chart |
 | janitor.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy |

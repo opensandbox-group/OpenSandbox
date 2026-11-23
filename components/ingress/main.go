@@ -101,12 +101,10 @@ func main() {
 		kubeConfig = injection.ParseAndGetRESTConfigOrDie()
 	}
 	fastPathAuth := sandbox.FastPathAuthConfig{
-		Disabled:       !flag.FastPathAuthEnabled,
-		Kubernetes:     kubeConfig,
-		Namespace:      flag.FastPathAuthNamespace,
-		ServiceAccount: flag.FastPathAuthServiceAccount,
-		CAFile:         flag.FastPathTLSCAFile,
-		ServerName:     flag.FastPathTLSServerName,
+		Disabled:   !flag.FastPathAuthEnabled,
+		Kubernetes: kubeConfig,
+		CAFile:     flag.FastPathTLSCAFile,
+		ServerName: flag.FastPathTLSServerName,
 	}
 
 	var sandboxProvider sandbox.Provider

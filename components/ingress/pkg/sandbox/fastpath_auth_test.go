@@ -115,6 +115,8 @@ func TestFastPathTokenSourceRejectsInsecureBootstrap(t *testing.T) {
 func TestFastPathTLSRejectsInvalidTrustAndMissingIdentity(t *testing.T) {
 	_, err := newFastPathTokenSource(FastPathAuthConfig{})
 	require.Error(t, err)
+	t.Setenv("POD_NAMESPACE", "custom-system")
+	require.Equal(t, "custom-system", resolveFastPathAuthNamespace(""))
 	path := filepath.Join(t.TempDir(), "ca.pem")
 	require.NoError(t, os.WriteFile(path, []byte("not a CA"), 0600))
 	_, err = newFastPathTLS(path, "")

@@ -77,24 +77,8 @@ fastSandbox:
   callerAuth:
     # -- Enable FastPath caller authentication identities and token-minting RBAC.
     enabled: false
-    server:
-      # -- Authentication-only FastPath identity; never bind workload permissions to it.
-      serviceAccount: opensandbox-server-fastpath-client
-      # -- Bootstrap Pod ServiceAccount name. Empty disables the in-cluster binding.
-      bootstrapServiceAccount: opensandbox-server
-      # -- Bootstrap Pod namespace. Empty uses fastSandbox.namespaces.system.
-      bootstrapNamespace: ""
-      # -- Additional explicit RBAC subjects (User, Group, or ServiceAccount), including external kubeconfig identities.
-      subjects: []
-    gateway:
-      # -- Authentication-only gateway identity.
-      serviceAccount: opensandbox-ingress-fastpath-client
-      # -- Bootstrap gateway Pod ServiceAccount name.
-      bootstrapServiceAccount: opensandbox-ingress-gateway
-      # -- Bootstrap Pod namespace. Empty uses fastSandbox.namespaces.system.
-      bootstrapNamespace: ""
-      # -- Additional explicit RBAC subjects.
-      subjects: []
+    # -- Additional explicit RBAC subjects (User, Group, or ServiceAccount) allowed to mint tokens for opensandbox-server-fastpath-client (e.g. external kubeconfig identities).
+    externalServerSubjects: []
   rbac:
     # -- Specifies whether the fast-sandbox control-plane ServiceAccounts,
     # ClusterRoles and ClusterRoleBindings should be installed (the

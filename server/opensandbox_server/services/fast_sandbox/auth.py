@@ -15,26 +15,52 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 import random
 import time
 from collections import namedtuple
 from threading import Lock
-from typing import Callable
+from typing import Callable, Optional
 
 import grpc
 from kubernetes.client import AuthenticationV1TokenRequest, V1TokenRequestSpec
 
 AUDIENCE = "fast-sandbox-fastpath"
+DEFAULT_AUTH_NAMESPACE = "opensandbox-system"
+DEFAULT_SERVER_CALLER_SA = "opensandbox-server-fastpath-client"
+_INCLUSTER_NAMESPACE_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 
 logger = logging.getLogger(__name__)
 
 
+def resolve_auth_namespace() -> str:
+    env_ns = os.getenv("POD_NAMESPACE", "").strip()
+    if env_ns:
+        return env_ns
+    try:
+        file_ns = _INCLUSTER_NAMESPACE_PATH.read_text(encoding="utf-8").strip()
+        if file_ns:
+            return file_ns
+    except OSError:
+        pass
+    return DEFAULT_AUTH_NAMESPACE
+
+
 class TokenSource:
-    def __init__(self, api: Callable, namespace: str, service_account: str):
-        if not namespace or not service_account:
+    def __init__(
+        self,
+        api: Callable,
+        namespace: Optional[str] = None,
+        service_account: str = DEFAULT_SERVER_CALLER_SA,
+    ):
+        resolved_namespace = (
+            resolve_auth_namespace() if namespace is None else namespace.strip()
+        )
+        if not resolved_namespace or not service_account:
             raise ValueError("FastPath caller namespace and ServiceAccount are required")
         self._api = api
-        self._namespace = namespace
+        self._namespace = resolved_namespace
         self._service_account = service_account
         self._lock = Lock()
         self._token = ""

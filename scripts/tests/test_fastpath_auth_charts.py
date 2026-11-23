@@ -39,9 +39,9 @@ class FastPathAuthChartsTest(unittest.TestCase):
             "base",
             "fastSandbox.callerAuth.enabled=true",
             "fastSandbox.namespaces.system=identities",
-            "fastSandbox.callerAuth.server.subjects[0].kind=User",
-            "fastSandbox.callerAuth.server.subjects[0].apiGroup=rbac.authorization.k8s.io",
-            "fastSandbox.callerAuth.server.subjects[0].name=external-server",
+            "fastSandbox.callerAuth.externalServerSubjects[0].kind=User",
+            "fastSandbox.callerAuth.externalServerSubjects[0].apiGroup=rbac.authorization.k8s.io",
+            "fastSandbox.callerAuth.externalServerSubjects[0].name=external-server",
         )
         for name in (
             "opensandbox-server-fastpath-client",

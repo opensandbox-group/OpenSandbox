@@ -165,7 +165,7 @@ spec:
           name: fast-sandbox-fastpath-callers
       - name: fastpath-tls
         secret:
-          secretName: {{ .Values.fastpath.tls.secretName }}
+          secretName: fast-sandbox-fastpath-tls
       {{- end }}
       - name: artifact-store
         configMap:

@@ -28,14 +28,7 @@ Kubernetes: `>=1.22.0-0`
 | crds.install | bool | `true` | Specifies whether the OpenSandbox CRDs should be installed |
 | crds.keep | bool | `true` | Keep CRDs on chart uninstall (adds the helm.sh/resource-policy: keep annotation) |
 | fastSandbox.callerAuth.enabled | bool | `false` | Enable FastPath caller authentication identities and token-minting RBAC. |
-| fastSandbox.callerAuth.gateway.bootstrapNamespace | string | `""` | Bootstrap Pod namespace. Empty uses fastSandbox.namespaces.system. |
-| fastSandbox.callerAuth.gateway.bootstrapServiceAccount | string | `"opensandbox-ingress-gateway"` | Bootstrap gateway Pod ServiceAccount name. |
-| fastSandbox.callerAuth.gateway.serviceAccount | string | `"opensandbox-ingress-fastpath-client"` | Authentication-only gateway identity. |
-| fastSandbox.callerAuth.gateway.subjects | list | `[]` | Additional explicit RBAC subjects. |
-| fastSandbox.callerAuth.server.bootstrapNamespace | string | `""` | Bootstrap Pod namespace. Empty uses fastSandbox.namespaces.system. |
-| fastSandbox.callerAuth.server.bootstrapServiceAccount | string | `"opensandbox-server"` | Bootstrap Pod ServiceAccount name. Empty disables the in-cluster binding. |
-| fastSandbox.callerAuth.server.serviceAccount | string | `"opensandbox-server-fastpath-client"` | Authentication-only FastPath identity; never bind workload permissions to it. |
-| fastSandbox.callerAuth.server.subjects | list | `[]` | Additional explicit RBAC subjects (User, Group, or ServiceAccount), including external kubeconfig identities. |
+| fastSandbox.callerAuth.externalServerSubjects | list | `[]` | Additional explicit RBAC subjects (User, Group, or ServiceAccount) allowed to mint tokens for opensandbox-server-fastpath-client (e.g. external kubeconfig identities). |
 | fastSandbox.crds.annotations | object | `{}` | Additional annotations to add to CRDs (merged with resource-policy when keep is true) |
 | fastSandbox.crds.install | bool | `true` | Specifies whether the fast-sandbox CRDs should be installed |
 | fastSandbox.crds.keep | bool | `true` | Keep CRDs on chart uninstall (adds the helm.sh/resource-policy: keep annotation) |

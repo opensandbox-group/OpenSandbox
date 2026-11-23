@@ -36,7 +36,12 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const fastPathAudience = "fast-sandbox-fastpath"
+const (
+	fastPathAudience               = "fast-sandbox-fastpath"
+	defaultFastPathAuthNamespace   = "opensandbox-system"
+	defaultGatewayCallerSA         = "opensandbox-ingress-fastpath-client"
+	inClusterServiceAccountNSPath  = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+)
 
 type FastPathAuthConfig struct {
 	Disabled       bool
@@ -45,6 +50,21 @@ type FastPathAuthConfig struct {
 	ServiceAccount string
 	CAFile         string
 	ServerName     string
+}
+
+func resolveFastPathAuthNamespace(configured string) string {
+	if ns := strings.TrimSpace(configured); ns != "" {
+		return ns
+	}
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if data, err := os.ReadFile(inClusterServiceAccountNSPath); err == nil {
+		if ns := strings.TrimSpace(string(data)); ns != "" {
+			return ns
+		}
+	}
+	return defaultFastPathAuthNamespace
 }
 
 type fastPathTokenSource struct {
@@ -58,7 +78,12 @@ type fastPathTokenSource struct {
 }
 
 func newFastPathTokenSource(config FastPathAuthConfig) (*fastPathTokenSource, error) {
-	if config.Kubernetes == nil || config.Namespace == "" || config.ServiceAccount == "" {
+	namespace := resolveFastPathAuthNamespace(config.Namespace)
+	serviceAccount := strings.TrimSpace(config.ServiceAccount)
+	if serviceAccount == "" {
+		serviceAccount = defaultGatewayCallerSA
+	}
+	if config.Kubernetes == nil || namespace == "" || serviceAccount == "" {
 		return nil, errors.New("FastPath requires Kubernetes credentials and a caller ServiceAccount namespace/name")
 	}
 	if config.Kubernetes.Insecure || !strings.HasPrefix(config.Kubernetes.Host, "https://") {
@@ -70,7 +95,7 @@ func newFastPathTokenSource(config FastPathAuthConfig) (*fastPathTokenSource, er
 	}
 	return &fastPathTokenSource{now: time.Now, create: func(ctx context.Context) (*authenticationv1.TokenRequest, error) {
 		duration := int64(3600)
-		return client.ServiceAccounts(config.Namespace).CreateToken(ctx, config.ServiceAccount, &authenticationv1.TokenRequest{
+		return client.ServiceAccounts(namespace).CreateToken(ctx, serviceAccount, &authenticationv1.TokenRequest{
 			Spec: authenticationv1.TokenRequestSpec{Audiences: []string{fastPathAudience}, ExpirationSeconds: &duration},
 		}, metav1.CreateOptions{})
 	}}, nil

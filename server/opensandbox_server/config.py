@@ -813,8 +813,6 @@ class KubernetesRuntimeConfig(BaseModel):
         default=False,
         description="Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).",
     )
-    fastpath_auth_namespace: str = Field(default="opensandbox-system", min_length=1)
-    fastpath_auth_service_account: str = Field(default="opensandbox-server-fastpath-client", min_length=1)
     fastpath_tls_ca_file: Optional[str] = Field(default=None)
     fastpath_tls_server_name: Optional[str] = Field(default=None)
     fastpath_timeout_seconds: float = Field(

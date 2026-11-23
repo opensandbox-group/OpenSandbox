@@ -40,7 +40,7 @@ If you use the umbrella chart, this order is handled for you in a single release
 
 FastPath business RPCs support Kubernetes-issued caller tokens over verified TLS, including the optional gRPC-Web listener. Caller authentication and TLS are disabled by default (`fastSandbox.callerAuth.enabled=false` in the `base` chart, `fastpath.callerAuth.enabled=false` in the `fast-sandbox` chart, `fastpath_auth_enabled = false` in the server `[kubernetes]` configuration, and `gateway.fastpathAuth.enabled=false` in the `ingress-gateway` chart) so existing deployments and local environments work over plaintext gRPC without cert-manager or TokenRequest prerequisites. When enabled (`enabled=true` / `fastpath_auth_enabled = true`), the lifecycle server and ingress gateway use separate authentication-only ServiceAccounts; tokens are refreshed automatically and never forwarded to Fastlets. FastPath enforces a maximum one-hour token lifetime independently of cluster TokenRequest limits, and never falls back to anonymous traffic while enabled.
 
-An in-cluster server uses its Pod credentials to request a token for `opensandbox-server-fastpath-client`; an external server uses its existing `[kubernetes].kubeconfig_path` to request a token for the same identity. Set `fastpath_auth_namespace` to the system namespace and `fastpath_auth_service_account` if overriding the target name. Grant the actual kubeconfig identity a namespaced Role allowing `create` on `serviceaccounts/token` for that target name only. The external kubeconfig must support unattended renewal; this feature does not renew an expired bootstrap identity. TokenRequest also requires a verified HTTPS connection to the Kubernetes API; plaintext API endpoints and `insecure-skip-tls-verify` are rejected. The gateway always uses its in-cluster identity and the separate `opensandbox-ingress-fastpath-client` target.
+An in-cluster server uses its Pod credentials to request a token for `opensandbox-server-fastpath-client`; an external server uses its existing `[kubernetes].kubeconfig_path` to request a token for the same identity. The target identity namespace is resolved automatically from the `POD_NAMESPACE` environment variable, the in-cluster ServiceAccount namespace file, or `opensandbox-system` by default. Grant the actual kubeconfig identity a namespaced Role allowing `create` on `serviceaccounts/token` for `opensandbox-server-fastpath-client` only. The external kubeconfig must support unattended renewal; this feature does not renew an expired bootstrap identity. TokenRequest also requires a verified HTTPS connection to the Kubernetes API; plaintext API endpoints and `insecure-skip-tls-verify` are rejected. The gateway always uses its in-cluster identity and the separate `opensandbox-ingress-fastpath-client` target.
 
 TLS serving certificates are issued through a deployment-owned cert-manager Issuer or ClusterIssuer. The deployment must provide that issuer and its trusted CA bundle; Kubernetes Service creation does not issue a serving certificate. Configure `fastpath_tls_ca_file` on the server for a private CA (omit for system trust) and use an endpoint whose DNS name is included in the certificate. Clients and the serving endpoint reload updated certificate material without disabling verification. Do not expose a plaintext backend or use a Kubernetes API CA unless it actually signs the serving certificate.
 
@@ -48,11 +48,11 @@ The gateway checks TLS connectivity and token minting before it starts serving. 
 
 ### Helm wiring
 
-Set `fastpath.tls.issuerRef.name` in the fast-sandbox chart to your existing issuer and set `kind` to `Issuer` or `ClusterIssuer`; the default expects a pre-existing `fast-sandbox-serving` ClusterIssuer. Add externally reachable DNS names to `fastpath.tls.dnsNames`. The chart creates a cert-manager `Certificate`, mounts its serving Secret without `subPath`, and installs a subject/profile/namespace policy. Keep `fastpath.callerAuth.namespace` and both ServiceAccount names aligned with the base chart. Its default authorization scope is `resourceNamespace`; explicitly list all tenant namespaces in `fastpath.callerAuth.namespaces` or deliberately use `["*"]`. An empty namespace in an RPC is always rejected, including with wildcard authorization.
+Set `fastpath.tls.issuerRef.name` in the fast-sandbox chart to your existing issuer and set `kind` to `Issuer` or `ClusterIssuer`; the default expects a pre-existing `fast-sandbox-serving` ClusterIssuer. Add externally reachable DNS names to `fastpath.tls.dnsNames`. The chart creates a cert-manager `Certificate`, mounts its serving Secret without `subPath`, and installs a subject/profile/namespace policy for `opensandbox-server-fastpath-client` and `opensandbox-ingress-fastpath-client` in the system namespace. Its default authorization scope is `resourceNamespace`; explicitly list all tenant namespaces in `fastpath.callerAuth.namespaces` or deliberately use `["*"]`. An empty namespace in an RPC is always rejected, including with wildcard authorization.
 
-The base chart creates the authentication-only caller identities and named TokenRequest Roles. The default bootstrap bindings target `opensandbox-server` and `opensandbox-ingress-gateway` in the system namespace. If you override a component's Pod ServiceAccount or namespace, update the corresponding `fastSandbox.callerAuth.server` or `.gateway` bootstrap values. Do not give the authentication-only target ServiceAccounts workload permissions.
+The base chart creates the authentication-only caller identities and named TokenRequest Roles bound to `opensandbox-server` and `opensandbox-ingress-gateway` in the system namespace. Do not give the authentication-only target ServiceAccounts workload permissions.
 
-Distribute the **public serving CA bundle only** as a ConfigMap named, for example, `fastpath-serving-ca`, with key `ca.crt`, in each client Pod namespace. Set `server.fastpath.caConfigMap` and `gateway.fastpathAuth.caConfigMap` to that name; never mount the serving private key into clients. This bundle is managed by your existing trust-distribution process, not by the chart. Set the server's `[kubernetes].fastpath_tls_ca_file` to `/etc/opensandbox/fastpath-ca/ca.crt`. Set `gateway.fastpathAuth.namespace` and `.serviceAccount` when overriding the identity defaults. Publicly trusted serving certificates can use system roots without a CA ConfigMap.
+Distribute the **public serving CA bundle only** as a ConfigMap named, for example, `fastpath-serving-ca`, with key `ca.crt`, in each client Pod namespace. Set `server.fastpath.caConfigMap` and `gateway.fastpathAuth.caConfigMap` to that name; never mount the serving private key into clients. This bundle is managed by your existing trust-distribution process, not by the chart. Set the server's `[kubernetes].fastpath_tls_ca_file` to `/etc/opensandbox/fastpath-ca/ca.crt`. Publicly trusted serving certificates can use system roots without a CA ConfigMap.
 
 Serving leaf certificates reload on TLS handshakes. The gateway rereads its CA file on new handshakes; the server checks its CA file before RPCs and replaces the channel when it changes. CA replacement can interrupt an in-flight server RPC with a retryable backend error. Rotate roots with an overlapping trust bundle, and reconnect clients when immediate revocation of existing TLS sessions is required.
 
@@ -63,14 +63,14 @@ Bind the authenticated identity selected by the kubeconfig, not the kubeconfig u
 ```yaml
 fastSandbox:
   callerAuth:
-    server:
-      subjects:
-        - kind: User
-          apiGroup: rbac.authorization.k8s.io
-          name: external-opensandbox-server
+    enabled: true
+    externalServerSubjects:
+      - kind: User
+        apiGroup: rbac.authorization.k8s.io
+        name: external-opensandbox-server
 ```
 
-Merge these settings into the external server's existing `[kubernetes]` configuration:
+Merge these settings into the external server's existing `[kubernetes]` configuration (set `POD_NAMESPACE` if the control plane is installed in a namespace other than `opensandbox-system`):
 
 ```toml
 [kubernetes]
@@ -78,8 +78,6 @@ kubeconfig_path = "/etc/opensandbox/kubeconfig"
 namespace = "opensandbox-dataplane"
 fastpath_endpoint = "fastpath.example.com:9090"
 fastpath_auth_enabled = true
-fastpath_auth_namespace = "opensandbox-system"
-fastpath_auth_service_account = "opensandbox-server-fastpath-client"
 fastpath_tls_ca_file = "/etc/opensandbox/fastpath-ca/ca.crt"
 ```
 
