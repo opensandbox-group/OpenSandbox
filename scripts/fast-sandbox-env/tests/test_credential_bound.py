@@ -289,7 +289,7 @@ class StageGateTest(ShellCase):
         self.assertFalse(any("rootfs_only_verify" in l for l in off))
         self.assertFalse(any("rootfs-only snapshot verify (native template" in l for l in off))
 
-    def test_credential_bound_registers_both_lanes_and_blocks_exchange(self):
+    def test_credential_bound_registers_both_lanes_and_runs_exchange(self):
         off = self.lanes("")
         cb = self.lanes("credential-bound")
         cb_runs = [l for l in cb if "credential_bound_verify" in l]
@@ -300,16 +300,115 @@ class StageGateTest(ShellCase):
         # the one real implementation is sourced for each lane; no placeholder
         self.assertEqual([l for l in cb if l.startswith("SOURCE|")],
                          ["SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh"] * 2)
-        # every other blocked/announced line belongs to the exchange gate.
-        others = [l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))]
-        self.assertEqual(others, [
-            "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
-            "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
-        ])
-        self.assertFalse(any("exchange_resolver_verify" in l or "NOT_RUN" in l for l in cb))
+        self.assertEqual([l for l in cb if l.startswith(("BEGIN|", "UNVERIFIED|"))], ["UNVERIFIED|"])
+        self.assertTrue(any("exchange_resolver_verify" in l for l in cb))
+        self.assertFalse(any("NOT_RUN" in l for l in cb))
         # every other off-mode stage is still registered, in order
         kept = [l for l in cb if l.startswith("RUN|") and "credential_bound_verify" not in l]
-        self.assertEqual(kept, [l for l in off if l.startswith("RUN|") and "exchange_resolver_verify" not in l])
+        self.assertEqual(kept, [l for l in off if l.startswith("RUN|")])
+
+    def test_verify_credential_bound_delta_requires_mode_and_covers_egress_stages(self):
+        delta_body = r'''
+require_live_stack() { :; }
+printf '%s' tpl-native > "$WORK/template-id"
+printf '%s' tpl-oci > "$WORK/overlaybd-template-id"
+run_stage() { printf 'RUN|%s|%s|%s\n' "$1" "$2" "${3:-}"; }
+stage_begin() { printf 'BEGIN|%s\n' "$1"; }
+stage_end() { :; }
+source() { printf 'SOURCE|%s\n' "$1"; }
+verify_credential_bound
+printf 'UNVERIFIED|%s\n' "${STAGE_UNVERIFIED[*]:-}"
+'''
+        wrong = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="", check=False)
+        self.assertNotEqual(wrong.returncode, 0)
+        self.assertIn("EGRESS_INTERCEPTION_MODE=credential-bound", wrong.stderr)
+
+        out = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="credential-bound", OCI_STACK="1").stdout
+        script_dir = os.path.dirname(os.path.abspath(ENV_SH))
+        lines = [l.replace(script_dir, "<SCRIPT_DIR>") for l in out.splitlines()
+                 if l.startswith(("RUN|", "BEGIN|", "UNVERIFIED|", "SOURCE|"))]
+        self.assertEqual(lines, [
+            "RUN|SandboxPool firecracker-egress-pool switch (egress interception=credential-bound)|switch_pool_egress_mode|",
+            "RUN|egress network-security-rules verify (configmap -> kernel -> live traffic)|<SCRIPT_DIR>/verify/network-security-rules.sh|",
+            "SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh",
+            "RUN|credential-bound interception verify (native template, OSEP-0023)|credential_bound_verify|tpl-native",
+            "RUN|vault lifecycle verify (overlaybd template)|vault_lifecycle_verify|tpl-oci",
+            "RUN|MITM CA chain verify (overlaybd template)|mitm_ca_chain_verify|tpl-oci",
+            "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
+            "RUN|snapshot verify (overlaybd template)|snapshot_verify|tpl-oci",
+            "SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh",
+            "RUN|credential-bound interception verify (overlaybd template, OSEP-0023)|credential_bound_verify|tpl-oci",
+            "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
+        ])
+
+    def test_verify_credential_bound_fallback_probes_ublk_before_overlaybd_build(self):
+        delta_body = r'''
+require_live_stack() { :; }
+printf '%s' tpl-native > "$WORK/template-id"
+rm -f "$WORK/overlaybd-template-id"
+run_stage() { printf 'RUN|%s|%s|%s\n' "$1" "$2" "${3:-}"; }
+stage_begin() { printf 'BEGIN|%s\n' "$1"; }
+source() { :; }
+verify_credential_bound
+'''
+        out = self.sourced(delta_body, EGRESS_INTERCEPTION_MODE="credential-bound", OCI_STACK="1").stdout
+        runs = [l for l in out.splitlines() if l.startswith("RUN|")]
+        probe_idx = runs.index("RUN|ublk add/del probe (node daemon -> kernel path)|ublk_probe_or_heal|")
+        build_idx = runs.index("RUN|SandboxTemplate build (overlaybd, oci:// publication)|template_up_overlaybd|")
+        self.assertLess(probe_idx, build_idx)
+
+    def test_drain_predicates_fail_closed_on_kubectl_error(self):
+        body = r'''
+kubectl() { return 1; }
+no_active_sandboxes && echo "FAIL:no_active_sandboxes_opened" || echo "OK:no_active_sandboxes_closed"
+pool_fastlet_pods_gone && echo "FAIL:pool_fastlet_pods_gone_opened" || echo "OK:pool_fastlet_pods_gone_closed"
+egress_interception_mode_applied && echo "FAIL:mode_opened" || echo "OK:mode_closed"
+kubectl() { echo ""; return 0; }
+no_active_sandboxes && echo "OK:no_active_sandboxes_empty" || echo "FAIL:no_active_sandboxes_empty"
+pool_fastlet_pods_gone && echo "OK:pool_fastlet_pods_gone_empty" || echo "FAIL:pool_fastlet_pods_gone_empty"
+'''
+        out = self.sourced(body, EGRESS_INTERCEPTION_MODE="credential-bound").stdout.splitlines()
+        self.assertIn("OK:no_active_sandboxes_closed", out)
+        self.assertIn("OK:pool_fastlet_pods_gone_closed", out)
+        self.assertIn("OK:mode_closed", out)
+        self.assertIn("OK:no_active_sandboxes_empty", out)
+        self.assertIn("OK:pool_fastlet_pods_gone_empty", out)
+        self.assertFalse(any(l.startswith("FAIL:") for l in out), out)
+
+    def test_switch_pool_egress_mode_scopes_namespace_and_orders_steps(self):
+        body = r'''
+require_live_stack() { :; }
+pool_up() { printf 'pool_up\n' >> "$CALLS"; }
+wait_for() {
+	printf 'wait_for %s\n' "$3" >> "$CALLS"
+	"$3" || return 1
+}
+kubectl() {
+	printf 'kubectl %s\n' "$*" >> "$CALLS"
+	case "$*" in
+		"-n opensandbox-dataplane get sandboxes -o name") echo ""; return 0 ;;
+		"-n opensandbox-dataplane get sandboxpool firecracker-egress-pool") return 0 ;;
+		"-n opensandbox-dataplane delete sandboxpool firecracker-egress-pool --wait --timeout=300s") return 0 ;;
+		"-n opensandbox-dataplane get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o name") echo ""; return 0 ;;
+		*"get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o jsonpath="*) echo "pod-1"; return 0 ;;
+		"-n opensandbox-dataplane get pod pod-1 -o jsonpath="*) echo "credential-bound"; return 0 ;;
+		*) return 1 ;;
+	esac
+}
+switch_pool_egress_mode
+'''
+        self.sourced(body, EGRESS_INTERCEPTION_MODE="credential-bound")
+        calls = self.calls_made().splitlines()
+        self.assertEqual(calls[:7], [
+            "wait_for no_active_sandboxes",
+            "kubectl -n opensandbox-dataplane get sandboxes -o name",
+            "kubectl -n opensandbox-dataplane get sandboxpool firecracker-egress-pool",
+            "kubectl -n opensandbox-dataplane delete sandboxpool firecracker-egress-pool --wait --timeout=300s",
+            "wait_for pool_fastlet_pods_gone",
+            "kubectl -n opensandbox-dataplane get pods -l app=sandbox-fastlet,fast-sandbox.io/pool=firecracker-egress-pool -o name",
+            "pool_up",
+        ])
+        self.assertIn("wait_for egress_interception_mode_applied", calls[7:])
 
 
 GATE = r'''
@@ -365,15 +464,13 @@ class StageSummaryTest(ShellCase):
             self.assertNotIn("not verified", out)
             self.assertNotIn("BLOCKED", out)
 
-    def test_credential_bound_blocks_without_ok(self):
+    def test_credential_bound_runs_exchange(self):
         for script in (ENV_SH, LIB_SH):
             out, err = self.gate("credential-bound", script)
-            self.assertNotIn("EXCHANGE-RAN", out)
-            self.assertIn("BLOCKED: exchange under credential-bound (see I1)", err)
-            head, _, tail = out.partition("== not verified (excluded from the stages above) ==")
-            self.assertIn("BLOCKED: exchange under credential-bound (see I1)", tail)
-            self.assertNotIn("ORDER|exchange", out)
-            self.assertEqual(out.count("OK in"), 1)  # only "other stage"
+            self.assertIn("EXCHANGE-RAN tpl=tpl-oci", out)
+            self.assertNotIn("BLOCKED", out + err)
+            self.assertIn("ORDER|exchange", out)
+            self.assertEqual(out.count("OK in"), 2)
 
     def test_credential_bound_item_is_a_real_stage(self):
         # Only the verifier body is replaced (after the real file is sourced);
@@ -405,9 +502,55 @@ class StageSummaryTest(ShellCase):
         off = self.sourced(body, script=VAULT_SH, EGRESS_INTERCEPTION_MODE="")
         self.assertIn("EXCHANGE-RAN", off.stdout)
         cb = self.sourced(body, script=VAULT_SH, EGRESS_INTERCEPTION_MODE="credential-bound")
-        self.assertNotIn("EXCHANGE-RAN", cb.stdout)
-        self.assertNotIn("OK in", cb.stdout)
-        self.assertIn("BLOCKED: exchange under credential-bound (see I1)", cb.stderr)
+        self.assertIn("EXCHANGE-RAN", cb.stdout)
+        self.assertIn("OK in", cb.stdout)
+        self.assertNotIn("BLOCKED", cb.stdout + cb.stderr)
+
+class ExchangeOutageTest(ShellCase):
+    def test_exchange_probe_preserves_command_stderr(self):
+        stub = os.path.join(self.tmp, "curl")
+        with open(stub, "w") as handle:
+            handle.write('#!/bin/sh\nprintf "000"\nexit 28\n')
+        os.chmod(stub, 0o755)
+        body = r'''
+VERIFY_ID=subject
+osb_api() { echo 'osb diagnostic marker' >&2; shift 4; "$@"; }
+exchange_vault_fails_closed || :
+'''
+        for script in (VAULT_SH, ENV_SH):
+            with self.subTest(script=script):
+                self.sourced(body, script=script, EGRESS_INTERCEPTION_MODE="credential-bound",
+                             PATH=self.tmp + os.pathsep + os.environ["PATH"])
+                with open(os.path.join(self.work, "logs", "exchange-guest-curl.err")) as log:
+                    self.assertIn("osb diagnostic marker", log.read())
+
+    def test_only_reply_or_reset_counts_as_subject_outage(self):
+        stub = os.path.join(self.tmp, "curl")
+        with open(stub, "w") as handle:
+            handle.write('#!/bin/sh\nprintf "%s" "$MOCK_STATUS"\nexit "$MOCK_RC"\n')
+        os.chmod(stub, 0o755)
+        body = r'''
+VERIFY_ID=subject
+osb_api() { shift 4; "$@"; }
+if exchange_vault_fails_closed; then echo DENIED; else echo NOT_DENIED; fi
+'''
+        for script in (VAULT_SH, ENV_SH):
+            for mode, cases in (
+                ("credential-bound", (("000", "52", "DENIED"), ("000", "56", "DENIED"),
+                                      ("000", "28", "NOT_DENIED"), ("000", "7", "NOT_DENIED"),
+                                      ("200", "0", "NOT_DENIED"), ("407", "0", "NOT_DENIED"))),
+                ("all", (("407", "0", "DENIED"), ("000", "52", "NOT_DENIED"))),
+            ):
+                for status, rc, expected in cases:
+                    with self.subTest(script=script, mode=mode, status=status, rc=rc):
+                        result = self.sourced(body, script=script, EGRESS_INTERCEPTION_MODE=mode,
+                                              PATH=self.tmp + os.pathsep + os.environ["PATH"],
+                                              MOCK_STATUS=status, MOCK_RC=rc)
+                        self.assertEqual(result.stdout.strip(), expected)
+                        if mode == "credential-bound" and expected == "NOT_DENIED":
+                            with open(os.path.join(self.work, "logs", "exchange-guest-curl.err")) as log:
+                                self.assertIn("http_code=%s curl_rc=%s" % (status, rc), log.read())
+
 
 class ReportingTest(ShellCase):
     def test_mode_in_summary_and_failure_dump(self):
@@ -465,6 +608,44 @@ class WorkflowBaselineTest(ShellCase):
                               env=dict(os.environ, CBV_GOLDEN_BASE=missing), capture_output=True, text=True)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("::error::golden baseline commit " + missing, proc.stdout)
+
+    def test_egress_modes_collapse_and_delta_gating(self):
+        import yaml
+        with open(os.path.join(REPO, ".github/workflows/fast-sandbox-test.yml")) as handle:
+            wf = yaml.safe_load(handle)
+        resolve = wf["jobs"]["egress-modes"]["steps"][0]["run"]
+        for event_name, requested, want_matrix, want_delta in (
+            ("pull_request", "", '[""]', "true"),
+            ("workflow_dispatch", "default,credential-bound", '[""]', "true"),
+            ("workflow_dispatch", "default", '[""]', "false"),
+            ("workflow_dispatch", "credential-bound", '["credential-bound"]', "false"),
+        ):
+            with self.subTest(event_name=event_name, requested=requested):
+                gh_out = os.path.join(self.tmp, "gh_output")
+                open(gh_out, "w").close()
+                env = dict(os.environ, EVENT_NAME=event_name, REQUESTED=requested, GITHUB_OUTPUT=gh_out)
+                proc = subprocess.run([BASH, "-c", resolve], cwd=REPO, env=env, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                with open(gh_out) as fh:
+                    kv = dict(line.strip().split("=", 1) for line in fh if "=" in line)
+                self.assertEqual(kv["matrix"], want_matrix)
+                self.assertEqual(kv["run_credential_bound_delta"], want_delta)
+
+        steps = wf["jobs"]["integration"]["steps"]
+        delta_steps = [s for s in steps if s.get("name", "").startswith("Run credential-bound ")]
+        self.assertEqual(len(delta_steps), 2)
+        for step in delta_steps:
+            self.assertEqual(
+                step.get("if"),
+                "needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''",
+            )
+        sdk_step = next(s for s in delta_steps if "SDK egress" in s["name"])
+        for test_name in (
+            "test_02_sandbox_surface_and_egress_methods",
+            "test_02b_network_policy_port_scoped_contract",
+            "test_02c_network_policy_port_scoped_enforcement",
+        ):
+            self.assertIn(test_name, sdk_step["run"])
 
 
 class SourcingTest(ShellCase):

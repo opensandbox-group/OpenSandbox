@@ -341,7 +341,7 @@ type CreateSandboxRequest struct {
 	// is required.
 	TemplateID       string                 `json:"templateId,omitempty"`
 	Timeout          *int                   `json:"timeout,omitempty"`
-	ResourceLimits   ResourceLimits         `json:"resourceLimits"`
+	ResourceLimits   ResourceLimits         `json:"resourceLimits,omitempty"`
 	ResourceRequests ResourceLimits         `json:"resourceRequests,omitempty"`
 	Env              map[string]string      `json:"env,omitempty"`
 	SecureAccess     bool                   `json:"secureAccess,omitempty"`
@@ -353,6 +353,19 @@ type CreateSandboxRequest struct {
 	Volumes          []Volume               `json:"volumes,omitempty"`
 	Extensions       map[string]string      `json:"extensions,omitempty"`
 	Platform         *PlatformSpec          `json:"platform,omitempty"`
+}
+
+// MarshalJSON preserves an explicitly empty limits map while omitting nil.
+func (r CreateSandboxRequest) MarshalJSON() ([]byte, error) {
+	type wire CreateSandboxRequest
+	var limits *ResourceLimits
+	if r.ResourceLimits != nil {
+		limits = &r.ResourceLimits
+	}
+	return json.Marshal(struct {
+		wire
+		ResourceLimits *ResourceLimits `json:"resourceLimits,omitempty"`
+	}{wire(r), limits})
 }
 
 type AllocationMode string

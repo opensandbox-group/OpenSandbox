@@ -60,6 +60,13 @@ gateway:
 
   # -- FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise.
   fastpathEndpoint: ""
+  fastpathAuth:
+    # -- Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).
+    enabled: false
+    # -- Public serving CA ConfigMap (ca.crt). Empty uses system trust roots.
+    caConfigMap: ""
+    # -- Expected FastPath certificate DNS name. Empty uses the endpoint hostname.
+    serverName: ""
 
   # -- Restricts Fast Sandbox to one namespace and enables unsigned wildcard routing. Empty requires signed scopes; unsigned access needs external protection.
   fastSandboxNamespace: ""

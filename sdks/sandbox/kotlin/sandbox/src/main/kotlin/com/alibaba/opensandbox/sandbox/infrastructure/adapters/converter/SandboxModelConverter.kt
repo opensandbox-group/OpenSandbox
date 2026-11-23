@@ -300,7 +300,7 @@ internal object SandboxModelConverter {
             env = env,
             metadata = metadata,
             lifecycle = lifecycle?.takeUnless { it.isEmpty }?.toApiSandboxLifecycle(),
-            resourceLimits = resource,
+            resourceLimits = resource.takeUnless { snapshotId != null && it.isEmpty() },
             resourceRequests = resourceRequests,
             platform = platform?.toApiPlatformSpec(),
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),

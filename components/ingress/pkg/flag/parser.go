@@ -29,6 +29,8 @@ import (
 var deprecatedNamespace string
 
 func InitFlags() {
+	ClientConfig.InitFlags(flag.CommandLine)
+
 	// Core server options.
 	flag.StringVar(&LogLevel, "log-level", "info", "Server log level")
 	flag.IntVar(&Port, "port", 28888, "Server listening port")
@@ -78,6 +80,9 @@ func InitFlags() {
 		namespaceSet = true
 		return nil
 	})
+	flag.BoolVar(&FastPathAuthEnabled, "fastpath-auth-enabled", false, "Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS)")
+	flag.StringVar(&FastPathTLSCAFile, "fastpath-tls-ca-file", "", "FastPath serving CA bundle; empty uses system roots")
+	flag.StringVar(&FastPathTLSServerName, "fastpath-tls-server-name", "", "Expected FastPath certificate DNS identity")
 	flag.StringVar(&FastPathAccessMode, "fastpath-access-mode", "direct-fastlet-proxy", "FastPath Fast Sandbox data-plane mode: central-proxy or direct-fastlet-proxy")
 	flag.IntVar(&FastPathWaitTimeoutMillis, "fastpath-wait-timeout-millis", 2000, "FastPath ResolveEndpoint RPC timeout for one ingress request")
 

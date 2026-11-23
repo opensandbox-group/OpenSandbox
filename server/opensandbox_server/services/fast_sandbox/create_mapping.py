@@ -93,7 +93,12 @@ def map_create_request(
     """
     _reject_unsupported_fields(request)
 
-    if snapshot_limits is not None:
+    if request._resolved_rootfs_only:
+        if pool_resources is not None and request.resource_limits is not None and "pids" in request.resource_limits.root:
+            pids = request.resource_limits.root["pids"]
+            if "pids" not in pool_resources or not _quantities_equal(pids, pool_resources["pids"]):
+                raise UnsupportedFieldError("resourceLimits", "pids must match the pool profile")
+    elif snapshot_limits is not None:
         _validate_restore_limits(request, snapshot_limits, pool_resources)
     elif pool_resources is not None:
         _validate_resource_limits(request, pool_resources)
@@ -172,7 +177,7 @@ def map_create_request(
     # get a clear error instead of a confusing gRPC rejection.
     _validate_metadata(create.metadata)
 
-    if snapshot_limits is not None and pool_is_resource_aware:
+    if not request._resolved_rootfs_only and snapshot_limits is not None and pool_is_resource_aware:
         _set_resource_limits(create, snapshot_limits, "snapshotLimits")
 
     return create

@@ -68,6 +68,7 @@ from opensandbox_server.services.diagnostics import (
     unsupported_scope_error,
 )
 from opensandbox_server.services.extension_service import ExtensionService
+from opensandbox_server.services.helpers import is_egress_forward_mode
 from opensandbox_server.services.fast_sandbox.create_mapping import (
     UnsupportedFieldError,
     map_create_request,
@@ -139,9 +140,22 @@ class FastSandboxService(SandboxService, ExtensionService):
         # The fsb backend shares the [kubernetes] block: CR reads and the
         # fast-sandbox (FastPath) settings live side by side there.
         self._k8s = config.kubernetes or KubernetesRuntimeConfig()
+        from opensandbox_server.services.fast_sandbox.auth import TokenSource
+
         self._fastpath = fastpath_client or FastPathClient(
             endpoint=self._k8s.fastpath_endpoint,
             timeout_seconds=self._k8s.fastpath_timeout_seconds,
+            auth_enabled=self._k8s.fastpath_auth_enabled,
+            token_source=(
+                TokenSource(
+                    lambda: self._kubernetes_client().get_core_v1_api(),
+                    in_cluster=not bool(self._k8s.kubeconfig_path),
+                )
+                if self._k8s.fastpath_auth_enabled
+                else None
+            ),
+            tls_ca_file=self._k8s.fastpath_tls_ca_file,
+            tls_server_name=self._k8s.fastpath_tls_server_name,
         )
         self._tenant_provider = None  # type: ignore[assignment]
         self._k8s_client = k8s_client
@@ -397,6 +411,16 @@ class FastSandboxService(SandboxService, ExtensionService):
         return await asyncio.to_thread(self._create_sandbox_sync, request)
 
     def _create_sandbox_sync(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+        if is_egress_forward_mode(self._app_config.egress):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        'egress.mode = "forward" is not yet supported for fast sandboxes.'
+                    ),
+                },
+            )
         if request.network_policy is not None:
             self._reject_network_policy_with_upstream_proxy()
         # Validate the opt-in before any side effect.
@@ -405,7 +429,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         # Template mode: the resolved artifact reference becomes
         # the FastPath image; workload shape comes from the golden image.
         template_entrypoint: Optional[list[str]] = None
-        if (request.template_id or "").strip():
+        if request.template_id and request.template_id.strip():
             image_ref, template_entrypoint, template_machine = (
                 self.resolve_template_service().resolve_template_artifact(
                     request.template_id.strip()
@@ -493,6 +517,26 @@ class FastSandboxService(SandboxService, ExtensionService):
                     },
                 ) from exc
 
+        rootfs_request = None
+        if request._resolved_rootfs_only:
+            from opensandbox_server.services.k8s.snapshot_runtime import build_public_snapshot_name
+
+            if not request.snapshot_id:
+                raise HTTPException(status_code=400, detail="Missing RootfsOnly snapshot ID")
+            limits = request.resource_limits.root if request.resource_limits is not None else None
+            allowed = {"cpu", "memory", "pids"}
+            if limits is not None and (not limits or set(limits) - allowed or any(not v.strip() for v in limits.values())):
+                raise HTTPException(status_code=400, detail={"code": SandboxErrorCodes.INVALID_PARAMETER, "message": "Invalid RootfsOnly resource limits"})
+            create_request.ClearField("resources")
+            if limits:
+                create_request.resources.limits.cpu = limits.get("cpu", "")
+                create_request.resources.limits.memory = limits.get("memory", "")
+            rootfs_request = pb2.CreateRootfsSandboxRequest(create=create_request)
+            rootfs_request.snapshot_name = build_public_snapshot_name(request.snapshot_id)
+            defaults = request.resolved_snapshot_limits or {}
+            rootfs_request.source_limits.cpu = defaults.get("cpu", "")
+            rootfs_request.source_limits.memory = defaults.get("memory", "")
+
         namespace = create_request.namespace
         sandbox_id = create_request.request_id
         sync_started = time.perf_counter()
@@ -500,16 +544,22 @@ class FastSandboxService(SandboxService, ExtensionService):
 
         try:
             rpc_started = time.perf_counter()
-            response = self._fastpath.create_sandbox(
-                create_request,
-                wait_timeout_millis=int(self._k8s.fastpath_wait_ready_seconds * 1000),
-            )
+            timeout_ms = int(self._k8s.fastpath_wait_ready_seconds * 1000)
+            if rootfs_request is not None:
+                response = self._fastpath.create_rootfs_sandbox(rootfs_request, wait_timeout_millis=timeout_ms)
+            else:
+                response = self._fastpath.create_sandbox(create_request, wait_timeout_millis=timeout_ms)
             rpc_ms = int((time.perf_counter() - rpc_started) * 1000)
         except (FastPathInvalidArgument, FastPathConflict, FastPathNotFound) as exc:
             raise self._fastpath_http_error(exc) from exc
         except FastPathError as exc:
-            # Post-persistence failure recovery: if durable intent exists for
-            # the same namespaced id, the create was accepted; return it as
+            # An unknown RPC cannot have persisted an intent.
+            if rootfs_request is not None and exc.code == "UNIMPLEMENTED":
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": SandboxErrorCodes.FSB_API_ERROR, "message": "FastPath does not support RootfsOnly creates; upgrade fast-sandbox."},
+                ) from exc
+            # If durable intent exists for the same namespaced id, return it as
             # Pending and let reconciliation continue.
             try:
                 existing = self._fastpath.get_sandbox(namespace, sandbox_id)

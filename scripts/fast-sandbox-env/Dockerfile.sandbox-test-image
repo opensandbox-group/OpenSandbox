@@ -24,21 +24,17 @@
 #
 # OSEP-0018 hardening floor assets (inert until a template points execd at
 # the TOML via EXECD_ISOLATION_CONFIG): the static opensandbox-launcher
-# prelude (compiled from the OpenSandbox source, mirroring the execd image's
-# flags) and the hardened isolation TOML, both at execd's trusted runtime
-# paths under /opt/opensandbox. The fsb sandboxtemplate-builder stages only
-# execd/bootstrap.sh/prepare.sh/bwrap from the execd image, so the golden
-# image itself must carry these two for the hardening floor to arm. The
-# proper long-term home is builder-side staging in fast-sandbox; this bake
-# keeps the integration env self-contained until then.
+# prelude (staged from the selected execd image so its policy ABI always
+# matches the template's execd) and the hardened isolation TOML, both at
+# execd's trusted runtime paths under /opt/opensandbox. The fsb
+# sandboxtemplate-builder stages only execd/bootstrap.sh/prepare.sh/bwrap
+# from the execd image, so the golden image itself must carry these two for
+# the hardening floor to arm. The proper long-term home is builder-side
+# staging in fast-sandbox; this bake keeps the integration env
+# self-contained until then.
 
-FROM alpine:latest AS launcher-builder
-# linux-headers: launcher.c includes linux/{capability,filter,seccomp}.h
-# (the execd image's builder gets them via libcap-dev's dependency).
-RUN apk add --no-cache gcc musl-dev linux-headers
-COPY components/execd/native/launcher.c /build/launcher.c
-RUN gcc -Os -static -s -Wall -Wextra -Werror \
-    -o /build/opensandbox-launcher /build/launcher.c
+ARG EXECD_IMAGE=opensandbox/execd:latest
+FROM ${EXECD_IMAGE} AS execd-assets
 
 FROM debian:bookworm-slim
 
@@ -120,7 +116,7 @@ RUN find /srv /opt/sandbox-bin /etc/sandbox-test-release /etc/sandbox-test-pytho
 # OSEP-0018 hardening floor assets at execd's trusted runtime paths; the
 # launcher must be root-owned 0755 (execd's findLauncher() stats exactly
 # /opt/opensandbox/opensandbox-launcher before any $PATH fallback).
-COPY --from=launcher-builder --chown=0:0 /build/opensandbox-launcher /opt/opensandbox/opensandbox-launcher
+COPY --from=execd-assets --chown=0:0 /opt/opensandbox/opensandbox-launcher /opt/opensandbox/opensandbox-launcher
 COPY --chown=0:0 components/execd/configs/isolation.hardened.toml /opt/opensandbox/isolation.toml
 RUN chmod 0755 /opt/opensandbox/opensandbox-launcher \
     && chmod 0644 /opt/opensandbox/isolation.toml \

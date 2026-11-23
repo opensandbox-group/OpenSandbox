@@ -27,7 +27,6 @@ import (
 	"github.com/alibaba/opensandbox/internal/version"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
-	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/activity"
@@ -111,10 +110,18 @@ func main() {
 		log.Panic(err)
 	}
 
-	// Parsing Kubernetes config registers global flags and must only happen once.
 	var kubeConfig *rest.Config
-	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled {
-		kubeConfig = injection.ParseAndGetRESTConfigOrDie()
+	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled || flag.FastPathAuthEnabled {
+		kubeConfig, err = flag.ClientConfig.GetRESTConfig()
+		if err != nil {
+			log.Panicf("Error loading Kubernetes client config: %v", err)
+		}
+	}
+	fastPathAuth := sandbox.FastPathAuthConfig{
+		Disabled:   !flag.FastPathAuthEnabled,
+		Kubernetes: kubeConfig,
+		CAFile:     flag.FastPathTLSCAFile,
+		ServerName: flag.FastPathTLSServerName,
 	}
 
 	var sandboxProvider sandbox.Provider
@@ -124,6 +131,7 @@ func main() {
 			flag.FastPathEndpoint,
 			time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 			flag.FastPathAccessMode,
+			fastPathAuth,
 		)
 		sandboxProvider = fsbProvider
 	} else {
@@ -137,6 +145,7 @@ func main() {
 				flag.FastPathEndpoint,
 				time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 				flag.FastPathAccessMode,
+				fastPathAuth,
 			)
 			if err == nil {
 				sandboxProvider = sandbox.NewCompositeProvider(sandboxProvider, fsbProvider)

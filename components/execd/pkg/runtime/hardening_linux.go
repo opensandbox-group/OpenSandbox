@@ -22,7 +22,7 @@
 // config time. Everything is fail-open: a missing prerequisite is reported
 // on the capabilities endpoint and the launch proceeds without that layer.
 //
-// Isolated sessions are exempt from the launcher: their workload is already
+// Isolated sessions are exempt from the hardening floor, but not QoS: their workload is already
 // reduced inside the bwrap namespace (bwrap --seccomp + session-gate), and
 // applying the floor to the bwrap process itself would deny the unshare/
 // setns syscalls and strip the capabilities bwrap needs to build the
@@ -33,6 +33,7 @@ package runtime
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -51,10 +52,13 @@ const (
 
 	layerStateDisabled = "disabled"
 
-	policyMagic   = 0x4f534258 // "OSBX"
-	policyVersion = 1
-	flagUIDDrop   = 0x1
-	flagCapDrop   = 0x2
+	policyMagic    = 0x4f534258 // "OSBX"
+	policyVersion  = 2
+	flagUIDDrop    = 0x1
+	flagCapDrop    = 0x2
+	flagQoS        = 0x4
+	flagNoNewPrivs = 0x8
+	flagExecPath   = 0x10
 
 	// capSetpcap is the capability number required to trim bounding sets.
 	capSetpcap = 8
@@ -290,19 +294,50 @@ type hardeningPolicy struct {
 	stripEnv []string
 	seccomp  []byte
 	landlock []landlockRule
+	qos      isolation.QoSConfig
 }
 
 type policyHeader struct {
-	Magic       uint32
-	Version     uint32
-	Flags       uint32
-	UID         uint32
-	GID         uint32
-	NGroups     uint32
-	NKeepCaps   uint32
-	NEnv        uint32
-	SeccompLen  uint32
-	LandlockLen uint32
+	Magic          uint32
+	Version        uint32
+	Flags          uint32
+	UID            uint32
+	GID            uint32
+	NGroups        uint32
+	NKeepCaps      uint32
+	NEnv           uint32
+	SeccompLen     uint32
+	LandlockLen    uint32
+	QoSNice        uint32
+	QoSScheduler   uint32
+	QoSOOMScoreAdj uint32
+}
+
+var qos struct {
+	enabled      atomic.Bool
+	config       isolation.QoSConfig
+	launcherPath string
+}
+
+func InitQoS(cfg isolation.Config) error {
+	qos.enabled.Store(false)
+	if !cfg.QoS.Enabled {
+		return nil
+	}
+	if err := cfg.QoS.Validate(); err != nil {
+		return err
+	}
+	path, reason := findLauncher()
+	if path == "" {
+		log.Warn("qos: %s; process QoS skipped", reason)
+		return nil
+	}
+	qos.config = cfg.QoS
+	qos.launcherPath = path
+	qos.enabled.Store(true)
+	log.Info("qos: enabled (entrypoint=%s scheduler=%s nice=%d oom_score_adj=%d)",
+		cfg.QoS.Entrypoint, cfg.QoS.Scheduler, cfg.QoS.Nice, cfg.QoS.OOMScoreAdj)
+	return nil
 }
 
 var hardening struct {
@@ -361,13 +396,12 @@ func InitHardening(cfg isolation.Config) error {
 		return err
 	}
 
-	path := findLauncher()
+	path, reason := findLauncher()
 	if path == "" {
-		msg := "opensandbox-launcher not found (searched: /opt/opensandbox/opensandbox-launcher, $PATH)"
-		log.Warn("hardening: %s", msg)
-		setLayer(&hardening.capDrop, degraded(msg))
-		setLayer(&hardening.seccomp, degraded(msg))
-		setLayer(&hardening.landlock, degraded(msg))
+		log.Warn("hardening: %s", reason)
+		setLayer(&hardening.capDrop, degraded(reason))
+		setLayer(&hardening.seccomp, degraded(reason))
+		setLayer(&hardening.landlock, degraded(reason))
 		return nil
 	}
 
@@ -420,7 +454,7 @@ func InitHardening(cfg isolation.Config) error {
 	if os.Geteuid() == 0 {
 		hardening.policy.flags |= flagUIDDrop
 	}
-	hardening.policy.flags |= flagCapDrop
+	hardening.policy.flags |= flagCapDrop | flagNoNewPrivs
 
 	hasSetpcap := effectiveCapsHave(capSetpcap)
 	if hasSetpcap {
@@ -447,19 +481,40 @@ func InitHardening(cfg isolation.Config) error {
 
 var launcherSearchPaths = []string{launcherRuntimePath}
 
-func findLauncher() string {
+func checkExecutableFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file (mode %s)", info.Mode())
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("not executable (mode %04o)", info.Mode().Perm())
+	}
+	return unix.Faccessat(unix.AT_FDCWD, path, unix.X_OK, unix.AT_EACCESS)
+}
+
+func findLauncher() (string, string) {
 	// Trusted runtime path first: a user-controlled image must not be able
 	// to substitute its own launcher on PATH and bypass the floor. PATH is
 	// only a fallback for developer/source builds.
 	for _, p := range launcherSearchPaths {
-		if _, err := os.Stat(p); err == nil {
-			return p
+		err := checkExecutableFile(p)
+		if err == nil {
+			return p, ""
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Sprintf("opensandbox-launcher at %s is not usable: %v", p, err)
 		}
 	}
 	if path, err := exec.LookPath("opensandbox-launcher"); err == nil {
-		return path
+		if err := checkExecutableFile(path); err != nil {
+			return "", fmt.Sprintf("opensandbox-launcher at %s is not usable: %v", path, err)
+		}
+		return path, ""
 	}
-	return ""
+	return "", "opensandbox-launcher not found (searched: /opt/opensandbox/opensandbox-launcher, $PATH)"
 }
 
 func effectiveCapsHave(capNum uint32) bool {
@@ -509,49 +564,66 @@ func parseKeepCapabilities(names []string) ([]uint32, error) {
 	return caps, nil
 }
 
-// hardenCmd rewrites cmd to exec the launcher with the floor policy (unless
-// the launch opted out). The returned file is the parent-side policy memfd;
-// the caller must close it after the child has started (MFD_CLOEXEC keeps it
-// out of any later exec). A per-request identity (SysProcAttr.Credential) is
-// folded into the policy and cleared: os/exec would otherwise drop the
-// launcher to that uid/gid before exec, breaking the privileged prelude.
-func hardenCmd(cmd *exec.Cmd, noHardening bool, stripEnv []string) (*os.File, error) {
-	if noHardening || !hardening.enabled.Load() {
-		return nil, nil //nolint:nilnil // no policy file when not hardening
+// hardenCmd applies independent hardening/QoS policies; the caller must close the returned memfd after start.
+func hardenCmd(cmd *exec.Cmd, noHardening, noQoS bool, stripEnv []string) (*os.File, error) {
+	applyHardening := !noHardening && hardening.enabled.Load()
+	applyQoS := !noQoS && qos.enabled.Load()
+	if !applyHardening && !applyQoS {
+		return nil, nil //nolint:nilnil // no policy file when both policies are off
 	}
-	pol := hardening.policy
-	if stripEnv != nil {
-		cp := *pol
-		cp.stripEnv = stripEnv
-		pol = &cp
+	pol := hardeningPolicy{}
+	path := qos.launcherPath
+	if applyHardening {
+		pol = *hardening.policy
+		path = hardening.launcherPath
+		if stripEnv != nil {
+			pol.stripEnv = stripEnv
+		}
 	}
-	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
+	if applyQoS {
+		pol.flags |= flagQoS
+		pol.qos = qos.config
+	}
+	if !applyHardening {
+		pol.flags |= flagExecPath
+	}
+	// Only hardening needs a privileged prelude; QoS keeps Go's identity and start-error semantics.
+	if applyHardening && cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
 		cred := cmd.SysProcAttr.Credential
-		cp := *pol
-		cp.uid = cred.Uid
-		cp.gid = cred.Gid
-		cp.groups = append([]uint32(nil), cred.Groups...)
-		// The launcher must perform the identity drop even when execd is
-		// not root (the flag is normally only set for root execd).
-		cp.flags |= flagUIDDrop
-		pol = &cp
-		cmd.SysProcAttr.Credential = nil
+		pol.uid = cred.Uid
+		pol.gid = cred.Gid
+		pol.groups = append([]uint32(nil), cred.Groups...)
+		pol.flags |= flagUIDDrop
 	}
-	policy, err := encodePolicy(pol)
+	policy, err := encodePolicy(&pol)
 	if err != nil {
-		return nil, fmt.Errorf("hardening: encode policy: %w", err)
+		return nil, fmt.Errorf("launcher: encode policy: %w", err)
 	}
 	fd, err := createPolicyMemfd(policy)
 	if err != nil {
+		if !applyHardening {
+			log.Warn("qos: policy memfd unavailable; process QoS skipped: %v", err)
+			return nil, nil //nolint:nilnil // preserve the original command on QoS-only failure
+		}
 		return nil, fmt.Errorf("hardening: policy memfd: %w", err)
+	}
+	if applyHardening && cmd.SysProcAttr != nil {
+		cmd.SysProcAttr.Credential = nil
 	}
 	file := os.NewFile(uintptr(fd), "launcher-policy")
 	childFd := strconv.Itoa(3 + len(cmd.ExtraFiles))
 	cmd.ExtraFiles = append(cmd.ExtraFiles, file)
 
-	originalArgs := cmd.Args
-	cmd.Path = hardening.launcherPath
-	cmd.Args = append([]string{hardening.launcherPath, childFd, "--"}, originalArgs...)
+	originalPath, originalArgs := cmd.Path, cmd.Args
+	if len(originalArgs) == 0 {
+		originalArgs = []string{originalPath}
+	}
+	execTarget := originalArgs[0]
+	if !applyHardening {
+		execTarget = originalPath
+	}
+	cmd.Path = path
+	cmd.Args = append([]string{path, childFd, "-1", "--", execTarget}, originalArgs...)
 	return file, nil
 }
 
@@ -593,6 +665,16 @@ func encodePolicy(p *hardeningPolicy) ([]byte, error) {
 		NEnv:        uint32(len(p.stripEnv)),
 		SeccompLen:  uint32(len(p.seccomp)),
 		LandlockLen: uint32(landlockBuf.Len()),
+	}
+	if p.flags&flagQoS != 0 {
+		if err := p.qos.Validate(); err != nil {
+			return nil, err
+		}
+		hdr.QoSNice = uint32(p.qos.Nice)
+		hdr.QoSOOMScoreAdj = uint32(p.qos.OOMScoreAdj)
+		if p.qos.Scheduler == "idle" {
+			hdr.QoSScheduler = unix.SCHED_IDLE
+		}
 	}
 	if err := binary.Write(buf, binary.LittleEndian, &hdr); err != nil {
 		return nil, err

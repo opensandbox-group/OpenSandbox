@@ -86,6 +86,7 @@ GATEWAY_ROUTE_MODE_URI = "uri"
 
 EGRESS_MODE_DNS = "dns"
 EGRESS_MODE_DNS_NFT = "dns+nft"
+EGRESS_MODE_FORWARD = "forward"
 
 # ASCII characters Go's net/url leaves unescaped in the host slot
 # (shouldEscape(c, encodeHost)); the egress component parses
@@ -809,6 +810,12 @@ class KubernetesRuntimeConfig(BaseModel):
         default="fast-sandbox-fastpath.opensandbox.svc:9090",
         description="fast-sandbox Fast-Path Server gRPC endpoint.",
     )
+    fastpath_auth_enabled: bool = Field(
+        default=False,
+        description="Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS).",
+    )
+    fastpath_tls_ca_file: Optional[str] = Field(default=None)
+    fastpath_tls_server_name: Optional[str] = Field(default=None)
     fastpath_timeout_seconds: float = Field(
         default=30.0,
         ge=1.0,
@@ -1134,9 +1141,21 @@ class EgressConfig(BaseModel):
     mode: Literal[
         EGRESS_MODE_DNS,
         EGRESS_MODE_DNS_NFT,
+        EGRESS_MODE_FORWARD,
     ] = Field(
         default=EGRESS_MODE_DNS,
-        description="Egress enforcement passed to the sidecar as OPENSANDBOX_EGRESS_MODE (dns or dns+nft).",
+        description=(
+            "Egress enforcement passed to the sidecar as OPENSANDBOX_EGRESS_MODE (dns, dns+nft or forward). "
+            "forward (OSEP-0030) attaches egress to every sandbox and relays all outbound TCP to "
+            "[egress.upstream_proxy] via CONNECT; networkPolicy and credentialProxy are rejected."
+        ),
+    )
+    dns_upstreams: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            'Forward mode only: policy-enforcing DNS resolver(s), literal IP with optional :port, injected '
+            "as OPENSANDBOX_EGRESS_DNS_UPSTREAM. REFUSED answers are final and there is no fallback resolver."
+        ),
     )
     disable_ipv6: bool = Field(
         default=DEFAULT_EGRESS_DISABLE_IPV6,
@@ -1184,7 +1203,8 @@ class EgressConfig(BaseModel):
             "on every egress sidecar. Sandboxes created with networkPolicy must "
             "enable transparent MITM (credentialProxy.enabled or env "
             "OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT=true) or creation is rejected. "
-            'Requires mode = "dns+nft".'
+            'Requires mode = "dns+nft", or mode = "forward" where it is the '
+            "gateway every sandbox TCP connection is tunneled to (authorization required)."
         ),
     )
 
@@ -1238,14 +1258,63 @@ class EgressConfig(BaseModel):
                 raise ValueError(f"resource request for {resource_name!r} ({request!r}) must not exceed limit ({limit!r})")
         return self
 
+    @field_validator("dns_upstreams")
+    @classmethod
+    def validate_dns_upstreams(cls, upstreams: Optional[list[str]]) -> Optional[list[str]]:
+        if upstreams is None:
+            return None
+        if not upstreams:
+            raise ValueError("egress.dns_upstreams must list at least one resolver")
+        # Mirror the egress normalizeEnvUpstreamAddr: literal IPs only, so the
+        # resolver address never needs DNS (self-recursion via the redirect).
+        for entry in upstreams:
+            if not _is_literal_ip_upstream(entry.strip()):
+                raise ValueError(
+                    "egress.dns_upstreams entries must be literal IPs with optional "
+                    f"port (e.g. 10.96.0.53 or 10.96.0.53:53 or [fd00::53]:53), got {entry!r}"
+                )
+        return [entry.strip() for entry in upstreams]
+
     @model_validator(mode="after")
     def validate_upstream_proxy_requires_dns_nft(self) -> EgressConfig:
+        if self.mode == EGRESS_MODE_FORWARD:
+            # Forward mode tunnels everything to the gateway and every tunnel
+            # must be authenticated (OSEP-0030 R11).
+            if not self.image:
+                raise ValueError('egress.mode = "forward" requires egress.image')
+            if self.upstream_proxy is None or self.upstream_proxy.authorization is None:
+                raise ValueError(
+                    'egress.mode = "forward" requires egress.upstream_proxy.url and '
+                    "egress.upstream_proxy.authorization"
+                )
+            return self
+        if self.dns_upstreams is not None:
+            raise ValueError('egress.dns_upstreams requires egress.mode = "forward"')
         # The egress sidecar refuses the upstream proxy unless
         # OPENSANDBOX_EGRESS_MODE=dns+nft; fail at config load instead of
         # crash-looping every sidecar.
         if self.upstream_proxy is not None and self.mode != EGRESS_MODE_DNS_NFT:
             raise ValueError('egress.upstream_proxy requires egress.mode = "dns+nft"')
         return self
+
+
+def _is_literal_ip_upstream(value: str) -> bool:
+    """Literal IPv4/IPv6 with optional port; IPv6 with a port must be bracketed."""
+    host, port = value, None
+    if value.startswith("["):
+        inner, sep, rest = value[1:].partition("]")
+        if not sep or (rest and not rest.startswith(":")):
+            return False
+        host, port = inner, (rest[1:] if rest else None)
+    elif value.count(":") == 1:
+        host, port = value.split(":")
+    if port is not None and not (port.isdigit() and 0 < int(port) <= 65535):
+        return False
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
 
 
 class RuntimeConfig(BaseModel):
@@ -1689,7 +1758,36 @@ class AppConfig(BaseModel):
                 raise ValueError(
                     "egress.upstream_proxy.ca_cert_path requires runtime.type = 'docker'"
                 )
+        if self.egress is not None and self.egress.mode == EGRESS_MODE_FORWARD:
+            self._validate_egress_forward_runtime()
         return self
+
+    def _validate_egress_forward_runtime(self) -> None:
+        # Forward mode needs the sidecar nftables capture plane (OSEP-0030).
+        # Docker bridge and Kubernetes non-pooled runtimes are supported;
+        # gVisor lacks nftables, and Fast Sandbox is rejected per-request until
+        # its shared-egress data plane lands.
+        if self.runtime.type not in ("docker", "kubernetes"):
+            raise ValueError(
+                f'egress.mode = "forward" is not yet supported with runtime.type = {self.runtime.type!r}'
+            )
+        if self.secure_runtime is not None and self.secure_runtime.type == "gvisor":
+            raise ValueError(
+                'egress.mode = "forward" is not compatible with secure_runtime.type = "gvisor"'
+            )
+        if self.runtime.type == "docker":
+            if (self.docker.network_mode or "").lower() != "bridge":
+                raise ValueError(
+                    'egress.mode = "forward" requires docker.network_mode = "bridge"'
+                )
+            dropped = {
+                cap.strip().upper().removeprefix("CAP_")
+                for cap in (self.docker.drop_capabilities or [])
+            }
+            if "ALL" not in dropped and not ({"NET_ADMIN", "NET_RAW"} <= dropped):
+                raise ValueError(
+                    'egress.mode = "forward" requires docker.drop_capabilities to drop NET_ADMIN and NET_RAW'
+                )
 
 
 _config: AppConfig | None = None
@@ -1843,6 +1941,7 @@ __all__ = [
     "EgressUpstreamProxyConfig",
     "EGRESS_MODE_DNS",
     "EGRESS_MODE_DNS_NFT",
+    "EGRESS_MODE_FORWARD",
     "SecureRuntimeConfig",
     "DEFAULT_CONFIG_PATH",
     "CONFIG_ENV_VAR",

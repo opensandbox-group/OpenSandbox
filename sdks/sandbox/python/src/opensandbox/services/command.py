@@ -63,6 +63,8 @@ class Commands(Protocol):
 
         Raises:
             SandboxException: if the operation fails
+            SandboxInternalException: if a foreground stream ends normally without a
+                completion or execution error event. Handlers may have received partial output.
         """
         ...
 

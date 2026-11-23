@@ -147,6 +147,14 @@ Execd applies defense in depth to everything a sandbox runs:
 
 Each layer reports its state — active, degraded, or unsupported — so clients can verify what is actually enforced rather than assume. One boundary to keep in mind: execd's lifecycle hooks (setup commands the platform configures) run as trusted code inside the sandbox; they are convenience, not a security control.
 
+## Process QoS
+
+Optional process QoS shares the native launcher with hardening but has an independent policy flag. The managed launch path selects `standard` for commands, sessions, PTYs, lifecycle hooks, and isolated workloads; only the managed image ENTRYPOINT can retain baseline treatment through the creator's static `high` selection. Execd and internal file API helpers keep their inherited settings. An ENTRYPOINT launched by the external bootstrap is outside coverage.
+
+The versioned Go/C policy carries the CPU scheduler, nice value, and initial OOM adjustment. Before executing a standard workload, the launcher restricts `RLIMIT_NICE` and applies CPU scheduling; it opens the OOM adjustment descriptor before any launcher-side identity change, then raises the value after identity/capability changes and before Landlock/seccomp. QoS-only launches retain Go's credential setup before the launcher starts, preserving supplementary-group handling and identity failures as synchronous start errors. The launcher executes Go's resolved executable path without repeating a PATH lookup, preserving the original argument vector. For QoS-only launches, a close-on-exec pipe reports the final exec's errno back to the parent before startup returns; missing or non-executable programs remain synchronous start failures, while a workload that successfully starts and exits 126 remains an ordinary process exit. QoS failures are logged without changing existing identity or hardening failure behavior. Wrapping isolated namespace builders applies QoS without enabling their exempted hardening floor, and their workloads inherit the starting settings.
+
+This is a best-effort per-process preference within the existing cgroup, not a resource boundary or a priority boost for execd. It neither sets `no_new_privs` on its own nor requests extra capabilities. See [Optional process QoS](/guides/privilege-reduction#optional-process-qos) for configuration, coverage, and limitations.
+
 ## Supervision and exit codes
 
 Execd can act as the sandbox's init process. It reaps orphaned children, forwards signals to your entrypoint, and propagates its exit code to the runtime — so sandbox states like `Terminated` and `Failed` reflect what your process actually did, and long-running sessions do not accumulate zombie processes.

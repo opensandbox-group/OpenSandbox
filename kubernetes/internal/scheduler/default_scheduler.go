@@ -292,7 +292,7 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 		if tNode.IP == "" || tNode.IsResourceReleased() {
 			continue
 		}
-		if !sch.assignedPodExists(tNode) {
+		if !sch.hasValidPodBinding(tNode) {
 			sch.releaseMissingPod(tNode)
 			continue
 		}
@@ -320,13 +320,17 @@ func (sch *defaultTaskScheduler) collectTaskStatus(taskNodes []*taskNode) {
 	}
 }
 
-// assignedPodExists reports whether the pod the task node is bound to still
-// exists with the same IP and, when recorded, UID. Name and IP alone can both
-// be reused by a replacement pod.
-func (sch *defaultTaskScheduler) assignedPodExists(tNode *taskNode) bool {
+// A terminating Pod can still report its IP after its network has been torn down.
+func hasTaskEndpoint(pod *corev1.Pod) bool {
+	return pod.DeletionTimestamp == nil && pod.Status.PodIP != ""
+}
+
+// hasValidPodBinding reports whether the pod the task node is bound to still
+// exists with the same UID and IP. Name and IP alone can both be reused by a
+// replacement pod, and a terminating Pod can no longer safely serve requests.
+func (sch *defaultTaskScheduler) hasValidPodBinding(tNode *taskNode) bool {
 	for _, pod := range sch.allPods {
-		if pod.Name == tNode.PodName && pod.Status.PodIP == tNode.IP &&
-			(tNode.PodUID == "" || pod.UID == tNode.PodUID) {
+		if pod.Name == tNode.PodName && pod.UID == tNode.PodUID && pod.Status.PodIP == tNode.IP && hasTaskEndpoint(pod) {
 			return true
 		}
 	}
@@ -335,7 +339,8 @@ func (sch *defaultTaskScheduler) assignedPodExists(tNode *taskNode) bool {
 
 func (sch *defaultTaskScheduler) releaseMissingPod(tNode *taskNode) {
 	// Never send the cleanup request to the old IP: it may already belong to
-	// another executor. Keep a completed task's outcome when its pod disappears.
+	// another executor. Keep a completed task's outcome when its pod disappears
+	// or is terminating.
 	if !tNode.isTaskCompleted() {
 		tNode.Status = nil
 		tNode.transTaskState(FailedTaskState, sch.logger)
@@ -395,7 +400,7 @@ func (sch *defaultTaskScheduler) scheduleTaskNodes() error {
 			}()
 			// This sender-side snapshot check can race with Pod replacement; closing
 			// that window requires owner fencing in the task-executor.
-			if node.IP != "" && !node.IsResourceReleased() && !sch.assignedPodExists(node) {
+			if node.IP != "" && !node.IsResourceReleased() && !sch.hasValidPodBinding(node) {
 				sch.releaseMissingPod(node)
 			}
 			scheduleSingleTaskNode(node, sch.taskClientCreator, sch.resPolicyWhenTaskComplete, sch.logger)
@@ -415,7 +420,7 @@ func (sch *defaultTaskScheduler) refreshFreePods() {
 	sch.freePods = make([]*corev1.Pod, 0, len(sch.allPods)/2)
 	for _, pod := range sch.allPods {
 		// Assignment is not retried, so exclude explicitly unready pods; missing PodReady remains eligible.
-		if !assignedPods[pod.Name] && pod.Status.PodIP != "" && !utils.IsPodExplicitlyNotReady(pod.Status) {
+		if !assignedPods[pod.Name] && hasTaskEndpoint(pod) && !utils.IsPodExplicitlyNotReady(pod.Status) {
 			sch.freePods = append(sch.freePods, pod)
 		}
 	}

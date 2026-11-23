@@ -204,7 +204,21 @@ const (
 const (
 	PolicyDnsOnly = "dns"
 	PolicyDnsNft  = "dns+nft"
+	// PolicyForward (OSEP-0030) relays all outbound TCP to the upstream
+	// gateway via CONNECT. Parsed strictly by IsForwardMode, never by
+	// ParseEgressMode, so it cannot fall back to dns-only.
+	PolicyForward = "forward"
 )
+
+// Forward-mode identity env (OSEP-0030), injected only by the server. Sent as
+// OpenSandbox-Sandbox-Namespace / OpenSandbox-Tenant-Name when non-empty.
+const (
+	EnvSandboxNamespace = "OPENSANDBOX_EGRESS_SANDBOX_NAMESPACE"
+	EnvTenantName       = "OPENSANDBOX_EGRESS_TENANT_NAME"
+)
+
+// DefaultForwarderPort is the loopback port the forward-mode forwarder listens on.
+const DefaultForwarderPort = 18082
 
 const (
 	DefaultEgressServerAddr      = ":18080"
