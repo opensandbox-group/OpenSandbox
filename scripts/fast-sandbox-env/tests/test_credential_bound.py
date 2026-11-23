@@ -334,11 +334,11 @@ printf 'UNVERIFIED|%s\n' "${STAGE_UNVERIFIED[*]:-}"
             "RUN|credential-bound interception verify (native template, OSEP-0023)|credential_bound_verify|tpl-native",
             "RUN|vault lifecycle verify (overlaybd template)|vault_lifecycle_verify|tpl-oci",
             "RUN|MITM CA chain verify (overlaybd template)|mitm_ca_chain_verify|tpl-oci",
-            "BEGIN|exchange resolver verify (overlaybd template, OSEP-0025)",
+            "RUN|exchange resolver verify (overlaybd template, OSEP-0025)|exchange_resolver_verify|tpl-oci",
             "RUN|snapshot verify (overlaybd template)|snapshot_verify|tpl-oci",
             "SOURCE|<SCRIPT_DIR>/verify/credential-bound.sh",
             "RUN|credential-bound interception verify (overlaybd template, OSEP-0023)|credential_bound_verify|tpl-oci",
-            "UNVERIFIED|BLOCKED: exchange under credential-bound (see I1)",
+            "UNVERIFIED|",
         ])
 
     def test_verify_credential_bound_fallback_probes_ublk_before_overlaybd_build(self):
