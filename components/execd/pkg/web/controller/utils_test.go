@@ -237,13 +237,12 @@ func TestParseRange(t *testing.T) {
 			want:   []httpRange{{start: 0, length: 2}},
 		},
 		{
-			// The representation has no bytes, so there is nothing to report as
-			// unsatisfiable and the header falls through to the whole-file
-			// path.
-			name:   "empty content ignores a zero suffix",
-			header: "bytes=-0",
-			size:   0,
-			want:   []httpRange{},
+			// No range can select a byte of an empty representation either, and
+			// letting this through produced Content-Range: bytes 0--1/0.
+			name:      "empty content cannot serve a zero suffix",
+			header:    "bytes=-0",
+			size:      0,
+			expectErr: true,
 		},
 		{
 			name:   "start plus end overflows",

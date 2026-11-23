@@ -103,9 +103,10 @@ func ParseRange(s string, size int64) ([]httpRange, error) {
 		result = append(result, r)
 	}
 	// Any satisfiable range in the header still wins, so only a header whose
-	// every spec was dropped is reported. An empty representation has no byte
-	// to report as unsatisfiable, so it is left to the whole-file path.
-	if unsatisfiable && len(result) == 0 && size > 0 {
+	// every spec was dropped is reported. An empty representation counts too:
+	// no range can select a byte of it, and letting it through produced
+	// Content-Range: bytes 0--1/0 from the whole-file fallthrough.
+	if unsatisfiable && len(result) == 0 {
 		return nil, errRangeUnsatisfiable
 	}
 	return result, nil

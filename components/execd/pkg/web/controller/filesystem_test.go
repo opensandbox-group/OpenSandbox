@@ -1002,6 +1002,22 @@ func TestDownloadFileZeroSuffixRangeErrorBody(t *testing.T) {
 	NewFilesystemController(ctx).DownloadFile()
 	require.Equal(t, http.StatusPartialContent, rec.Code)
 	require.Equal(t, "01", rec.Body.String())
+
+	// An empty file cannot satisfy a zero suffix either: the whole-file
+	// fallthrough used to answer 206 with Content-Range: bytes 0--1/0.
+	empty := filepath.Join(t.TempDir(), "empty.bin")
+	require.NoError(t, os.WriteFile(empty, nil, 0o644))
+	ctx, rec = newTestContext(http.MethodGet, fmt.Sprintf("/files/download?path=%s", url.QueryEscape(empty)), nil)
+	ctx.Request.Header.Set("Range", "bytes=-0")
+	NewFilesystemController(ctx).DownloadFile()
+	require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+	require.Equal(t, "bytes */0", rec.Header().Get("Content-Range"))
+	// A plain open-ended range on an empty file keeps answering 200.
+	ctx, rec = newTestContext(http.MethodGet, fmt.Sprintf("/files/download?path=%s", url.QueryEscape(empty)), nil)
+	ctx.Request.Header.Set("Range", "bytes=0-")
+	NewFilesystemController(ctx).DownloadFile()
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, rec.Body.String())
 }
 
 // The controls keep the paths around the directory check as they were: a

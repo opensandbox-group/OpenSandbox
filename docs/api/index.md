@@ -160,7 +160,7 @@ On Linux, `GET /files/info`, `GET /files/search`, and `GET /directories/list` us
 
 The download routes serve a single satisfiable byte range as `206 Partial Content`. If a `Range` header contains multiple satisfiable byte ranges, the handler ignores the header and uses the whole-file response (`200 OK` for an unconditional request).
 
-A `Range` header rejected by the download handler returns `416` with JSON code `UNKNOWN` and message `invalid Range header: <header>`. A well-formed range starting past the end of a file retains the existing plain-text `416` response, but a suffix-length of zero (`bytes=-0`) selects no byte and now returns the JSON `416` with `Content-Range: bytes */<size>` instead of a `206` whose `Content-Range` ran backwards.
+A `Range` header rejected by the download handler returns `416` with JSON code `UNKNOWN` and message `invalid Range header: <header>`. A well-formed range starting past the end of a file retains the existing plain-text `416` response, but a suffix-length of zero (`bytes=-0`) selects no byte and now returns the JSON `416` with `Content-Range: bytes */<size>` instead of a `206` whose `Content-Range` ran backwards; on an empty file that includes `bytes */0`. A plain range on an empty file, such as `bytes=0-`, still answers `200` with an empty body.
 
 **Directory Operations:**
 - `GET /directories/list` - List directory contents with optional depth control
