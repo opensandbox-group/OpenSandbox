@@ -45,7 +45,7 @@ status: draft
 
 ## Summary
 
-This proposal introduces a **standalone Go benchmark tool (`fsb-bench`)** under `benchmark/tools/` — deliberately decoupled from the user-facing `osb` CLI — that provisions a complete OpenSandbox + `fast-sandbox` (OverlayBD) environment from scratch using a privileged `kubeconfig`, cross-compiles and ships its own static Linux binary into an in-cluster Bench Bastion/Runner Pod, executes standardized scheduling, lifecycle, and high-density suites, and archives commit/tag-stamped baseline reports under `benchmark/reports/` (tracking GitHub issue #3048).
+This proposal introduces a **standalone Go benchmark tool (`osb-bench`)** under `benchmark/tools/` — deliberately decoupled from the user-facing `osb` CLI — that provisions a complete OpenSandbox + `fast-sandbox` (OverlayBD) environment from scratch using a privileged `kubeconfig`, cross-compiles and ships its own static Linux binary into an in-cluster Bench Bastion/Runner Pod, executes standardized scheduling, lifecycle, and high-density suites, and archives commit/tag-stamped baseline reports under `benchmark/reports/` (tracking GitHub issue #3048).
 
 Phase 1 scopes exclusively to the **`fast-sandbox` OverlayBD (OCI) path** with **`ResourceAware` (OSEP-0026)** pools. Alongside the benchmark harness, this proposal completes **explicitly opt-in end-to-end OpenTelemetry distributed tracing** across OpenSandbox (`server`, `ingress-gateway`, `execd`) and `fast-sandbox` (`controller/FastPath`, `fastlet`, `fastlet-proxy`, `fsb-vm`, `firecracker-runtime`), backed by an ephemeral in-cluster OTel trace collector/store deployed during benchmark runs. Benchmark runs automatically drill down into slow and failed requests via collected trace trees rather than manual log parsing, and capture high-density resource load across the host node, `fastlet`, `egress`, and `fastlet-proxy`.
 
@@ -62,46 +62,46 @@ Today, validating and protecting this stack before each release has four structu
 
 ### Goals
 
-- Build a **standalone Go CLI (`fsb-bench`) under `benchmark/tools/`**, keeping maintainer/release benchmarking completely out of the user-facing `osb` CLI while allowing a single static Linux binary (`CGO_ENABLED=0`) to be injected directly into an in-cluster runner Pod.
+- Build a **standalone Go CLI (`osb-bench`) under `benchmark/tools/`**, keeping maintainer/release benchmarking completely out of the user-facing `osb` CLI while allowing a single static Linux binary (`CGO_ENABLED=0`) to be injected directly into an in-cluster runner Pod.
 - Support full-stack environment provisioning and teardown from a privileged `kubeconfig`: node preflight checks (KVM, `ublk_drv`, XFS `reflink=1`, spill dir), ephemeral in-cluster infrastructure (self-contained HTTPS `registry:2` with CA bundle injection, optional Redis, in-cluster OTel Collector + Trace Store — no external registry required), official Helm chart deployment (`base`, `fast-sandbox` with `runtime.oci.enabled=true`, `server`, `ingress-gateway`), golden OverlayBD template build, and `ResourceAware` `SandboxPool` setup.
 - Define and collect a canonical Phase 1 OverlayBD metric set covering lifecycle latencies, OverlayBD storage/cache/`ublkd` warm-pool behavior, `ResourceAware` scheduling/overcommit behavior, OSEP-0024 wake-storms, and high-density load across host, `fastlet`, `egress`, and `fastlet-proxy`.
-- Complete end-to-end W3C `traceparent` propagation and span instrumentation across `fsb-bench` -> `server` -> `FastPath` -> `fastlet` -> `fsb-vm` / `firecracker` (control plane, including async CRD reconciliation) and `fsb-bench` -> `ingress-gateway` -> `fastlet-proxy` -> `execd` (data plane), plus Snapshot/Pause/RootfsOnly spans.
-- Provide automated trace-based drill-down and archive commit/tag-stamped JSON/Markdown baseline reports under `benchmark/reports/` with `fsb-bench compare` for pre-release regression gating.
+- Complete end-to-end W3C `traceparent` propagation and span instrumentation across `osb-bench` -> `server` -> `FastPath` -> `fastlet` -> `fsb-vm` / `firecracker` (control plane, including async CRD reconciliation) and `osb-bench` -> `ingress-gateway` -> `fastlet-proxy` -> `execd` (data plane), plus Snapshot/Pause/RootfsOnly spans.
+- Provide automated trace-based drill-down and archive commit/tag-stamped JSON/Markdown baseline reports under `benchmark/reports/` with `osb-bench compare` for pre-release regression gating.
 
 ### Non-Goals
 
-- **User-facing `osb` CLI integration**: `fsb-bench` is a maintainer and release-validation tool under `benchmark/tools/`; it is not shipped as an `osb` subcommand or PyPI user package, so benchmark workloads and flags can evolve freely without public CLI compatibility constraints.
+- **User-facing `osb` CLI integration**: `osb-bench` is a maintainer and release-validation tool under `benchmark/tools/`; it is not shipped as an `osb` subcommand or PyPI user package, so benchmark workloads and flags can evolve freely without public CLI compatibility constraints.
 - **Non-OverlayBD backends and `LegacySlot` pools in Phase 1**: Classic Kubernetes (`BatchSandbox` + `Pool`), Docker runtime, `fast-sandbox` Native S3/DART artifact paths, and `LegacySlot` pools are explicitly out of scope for Phase 1; Phase 1 targets `fast-sandbox` OverlayBD with `ResourceAware` pools (OSEP-0026) only, while keeping profile and report schemas extensible for Phase 2.
-- **Replacing production observability platforms or implicitly enabling traces**: The in-cluster OTel Collector and trace store deployed by `fsb-bench env up` are ephemeral, benchmark-scoped infrastructure. Production deployments keep tracing strictly disabled unless an **explicit trace opt-in** (`OTEL_TRACES_ENABLED=true`, Helm `tracing.enabled=true`, or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set; setting the generic `OTEL_EXPORTER_OTLP_ENDPOINT` for OSEP-0010 metrics alone never turns on tracing.
-- **Automated bare-metal OS provisioning**: `fsb-bench` assumes an existing Kubernetes cluster reachable via `kubeconfig` with Linux KVM nodes; optional host disk formatting/loop-mounting (`--prepare-nodes`) is opt-in, separate from the mandatory container privileges required by the `fast-sandbox` Firecracker/ublk daemonset itself.
+- **Replacing production observability platforms or implicitly enabling traces**: The in-cluster OTel Collector and trace store deployed by `osb-bench env up` are ephemeral, benchmark-scoped infrastructure. Production deployments keep tracing strictly disabled unless an **explicit trace opt-in** (`OTEL_TRACES_ENABLED=true`, Helm `tracing.enabled=true`, or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set; setting the generic `OTEL_EXPORTER_OTLP_ENDPOINT` for OSEP-0010 metrics alone never turns on tracing.
+- **Automated bare-metal OS provisioning**: `osb-bench` assumes an existing Kubernetes cluster reachable via `kubeconfig` with Linux KVM nodes; optional host disk formatting/loop-mounting (`--prepare-nodes`) is opt-in, separate from the mandatory container privileges required by the `fast-sandbox` Firecracker/ublk daemonset itself.
 
 ## Requirements
 
 | ID | Requirement | Priority |
 |---|---|---|
-| R1 | `fsb-bench` is implemented in Go under `benchmark/tools/` as a standalone CLI, capable of cross-compiling a static Linux worker subcommand binary and injecting it into an in-cluster runner Pod without requiring a dedicated published runner image | Must Have |
-| R2 | Given a sufficiently privileged `kubeconfig` and a profile YAML, `fsb-bench env up` deploys the complete OverlayBD stack (charts, ephemeral HTTPS registry, optional Redis, in-cluster OTel trace stack, OverlayBD template, `ResourceAware` SandboxPool) and verifies readiness | Must Have |
+| R1 | `osb-bench` is implemented in Go under `benchmark/tools/` as a standalone CLI, capable of cross-compiling a static Linux worker subcommand binary and injecting it into an in-cluster runner Pod without requiring a dedicated published runner image | Must Have |
+| R2 | Given a sufficiently privileged `kubeconfig` and a profile YAML, `osb-bench env up` deploys the complete OverlayBD stack (charts, ephemeral HTTPS registry, optional Redis, in-cluster OTel trace stack, OverlayBD template, `ResourceAware` SandboxPool) and verifies readiness | Must Have |
 | R3 | Phase 1 benchmark suites cover `schedule-burst`, `steady-churn`, `pause-resume` (Full checkpoint: warm, cache-evicted, cross-node, multi-round layer squash), `rootfs-only-restore` (create/fork from `RootfsOnly` snapshot: warm materialized, cold/cross-node, concurrent fan-out, and OSEP-0028 CPU/memory overrides), `wake-storm` (OSEP-0024), and `high-density-soak` on the `fast-sandbox` OverlayBD path | Must Have |
-| R4 | Local `fsb-bench` requires connectivity **only** to the Kubernetes API Server (via `kubeconfig`); all in-cluster API calls, workload generation, white-box metric/pool scraping, and trace queries execute inside the in-cluster Bench Bastion/Runner Pod via the injected `fsb-bench` binary | Must Have |
-| R5 | End-to-end OTel tracing propagates W3C `traceparent` from `fsb-bench` through `server` / `ingress-gateway` into `fast-sandbox` (`FastPath`, async controller reconcilers, `fastlet`, `fastlet-proxy`, `fsb-vm`) and `execd`, gated behind an explicit trace opt-in switch so existing OSEP-0010 metrics-only `OTEL_EXPORTER_OTLP_ENDPOINT` deployments remain unaffected | Must Have |
-| R6 | `fsb-bench run` records `(trace_id, sampled)` per operation and automatically queries the in-cluster trace backend over sampled operations to attach span-level waterfall breakdowns for top slow (P99) and failed operations in the output bundle | Must Have |
+| R4 | Local `osb-bench` requires connectivity **only** to the Kubernetes API Server (via `kubeconfig`); all in-cluster API calls, workload generation, white-box metric/pool scraping, and trace queries execute inside the in-cluster Bench Bastion/Runner Pod via the injected `osb-bench` binary | Must Have |
+| R5 | End-to-end OTel tracing propagates W3C `traceparent` from `osb-bench` through `server` / `ingress-gateway` into `fast-sandbox` (`FastPath`, async controller reconcilers, `fastlet`, `fastlet-proxy`, `fsb-vm`) and `execd`, gated behind an explicit trace opt-in switch so existing OSEP-0010 metrics-only `OTEL_EXPORTER_OTLP_ENDPOINT` deployments remain unaffected | Must Have |
+| R6 | `osb-bench run` records `(trace_id, sampled)` per operation and automatically queries the in-cluster trace backend over sampled operations to attach span-level waterfall breakdowns for top slow (P99) and failed operations in the output bundle | Must Have |
 | R7 | High-density suites collect time-series load and saturation telemetry for the host node, `fastlet`, `egress`, and `fastlet-proxy` (plus `firecracker-runtime`, `server`, and `ingress-gateway`) alongside sandbox latency and throughput | Must Have |
-| R8 | Every stage/release run emits a self-contained JSON report and Markdown summary explicitly stamped with exact `OpenSandbox` and `fast-sandbox` git `commit` SHAs and `tag`s, archived under `benchmark/reports/`, and `fsb-bench compare` highlights regressions against a baseline JSON | Must Have |
+| R8 | Every stage/release run emits a self-contained JSON report and Markdown summary explicitly stamped with exact `OpenSandbox` and `fast-sandbox` git `commit` SHAs and `tag`s, archived under `benchmark/reports/`, and `osb-bench compare` highlights regressions against a baseline JSON | Must Have |
 | R9 | Tracing adds zero overhead when disabled (no-op provider by default) and bounded overhead when enabled (per-suite head-sampling rate and non-blocking batch export) | Must Have |
-| R10 | `fsb-bench env down` cleanly removes all benchmark-provisioned resources and verifies zero leaked sandboxes or `ublk` devices | Should Have |
+| R10 | `osb-bench env down` cleanly removes all benchmark-provisioned resources and verifies zero leaked sandboxes or `ublk` devices | Should Have |
 
 ## Proposal
 
-We propose a two-pillar architecture: **(1) the standalone Go `fsb-bench` harness (`benchmark/tools/`) with isomorphic binary injection** and **(2) explicitly opt-in end-to-end OTel tracing across the OpenSandbox + `fast-sandbox` OverlayBD stack**.
+We propose a two-pillar architecture: **(1) the standalone Go `osb-bench` harness (`benchmark/tools/`) with isomorphic binary injection** and **(2) explicitly opt-in end-to-end OTel tracing across the OpenSandbox + `fast-sandbox` OverlayBD stack**.
 
 ```mermaid
 flowchart TB
-    CLI["fsb-bench Go CLI (local / CI, K8s-API-only)<br/>preflight | env up | run | trace | compare | env down"]
+    CLI["osb-bench Go CLI (local / CI, K8s-API-only)<br/>preflight | env up | run | trace | compare | env down"]
     K8S["Kubernetes API Server (sole external hop via kubeconfig)"]
-    CLI -->|Helm / client-go / inject static linux fsb-bench & pull tar| K8S
+    CLI -->|Helm / client-go / inject static linux osb-bench & pull tar| K8S
 
     subgraph Cluster["In-Cluster Benchmark Stack (isolated cluster network)"]
-        Runner["In-Cluster Bench Bastion / Runner Pod<br/>(executes injected fsb-bench worker static binary)"]
+        Runner["In-Cluster Bench Bastion / Runner Pod<br/>(executes injected osb-bench worker static binary)"]
         OTel["In-Cluster OTel Collector +<br/>Ephemeral Trace Store (Tempo/Jaeger)"]
         Reg["Ephemeral In-Cluster<br/>OCI Registry (HTTPS registry:2)"]
         Redis["Redis (OSEP-0024 only)"]
@@ -147,12 +147,12 @@ flowchart TB
 
 ### Notes/Constraints/Caveats
 
-- **OverlayBD `poolSizeGB` exact match constraint**: As documented in `manifests/charts/fast-sandbox/values.yaml`, `runtime.oci.poolSizeGB` must exactly equal the built template's `rootfsSizeMiB / 1024` (e.g., `2` for 2 GiB); even a larger pool device causes a silent fallback to cold device creation. `fsb-bench env up` enforces this invariant automatically from the benchmark profile and fails fast on mismatch.
-- **Ephemeral registry TLS trust without rebuilding release images**: Unlike local dev scripts that bake a custom `ca.crt` into rebuilt container images, `fsb-bench` deploys pre-built release images onto remote clusters. Furthermore, `sandboxtemplate-builder` Pods spawned dynamically by `fsb-controller` currently whitelist only scheduling fields (`tolerations`, `affinity`, `topologySpreadConstraints`). Phase 1 therefore adds an explicit `registryCABundleSecret` contract to the `fast-sandbox` chart and controller so the ephemeral registry's CA bundle is mounted into `fsb-fastlet`, `firecracker-runtime` (`overlaybd-ublkd`), and `sandboxtemplate-builder` Pods without rebuilding images.
+- **OverlayBD `poolSizeGB` exact match constraint**: As documented in `manifests/charts/fast-sandbox/values.yaml`, `runtime.oci.poolSizeGB` must exactly equal the built template's `rootfsSizeMiB / 1024` (e.g., `2` for 2 GiB); even a larger pool device causes a silent fallback to cold device creation. `osb-bench env up` enforces this invariant automatically from the benchmark profile and fails fast on mismatch.
+- **Ephemeral registry TLS trust without rebuilding release images**: Unlike local dev scripts that bake a custom `ca.crt` into rebuilt container images, `osb-bench` deploys pre-built release images onto remote clusters. Furthermore, `sandboxtemplate-builder` Pods spawned dynamically by `fsb-controller` currently whitelist only scheduling fields (`tolerations`, `affinity`, `topologySpreadConstraints`). Phase 1 therefore adds an explicit `registryCABundleSecret` contract to the `fast-sandbox` chart and controller so the ephemeral registry's CA bundle is mounted into `fsb-fastlet`, `firecracker-runtime` (`overlaybd-ublkd`), and `sandboxtemplate-builder` Pods without rebuilding images.
 - **Create fallback-to-Pending vs. asynchronous CRD-reconciled Pause/Resume/Snapshot**: On the fast path, `CreateSandbox` synchronously invokes `fastlet`; however, under saturation when a create exceeds the FastPath readiness deadline, `opensandbox-server` (`_create_sandbox_sync` in `services/fast_sandbox/service.py`) catches the timeout, reads the persisted CR, and returns an accepted `Pending` response while controller reconciliation continues asynchronously (and OSEP-0028 similarly notes an accepted create does not guarantee finished boot). Meanwhile, `PauseSandbox`, `ResumeSandbox`, and `CreateSandboxSnapshot` (`sandbox_state.go`, `snapshot.go`) are always compare-and-set CRD intent patches that converge asynchronously. Therefore, client `t_api_ack` is strictly defined as **intent/API response acceptance** (recording whether `Create` returned `Running` or fell back to `Pending`), **`t_first_ping` is the authoritative readiness completion timestamp**, and CRD `traceparent` annotations cover both async `Pause/Resume/Snapshot` and `Pending`-fallback `Create` paths.
 - **Explicit trace opt-in preserving OSEP-0010 compatibility**: Existing deployments may already set `OTEL_EXPORTER_OTLP_ENDPOINT` solely for the OSEP-0010 metrics pipeline (`docs/guides/telemetry.md`). Tracing in `server`, `ingress-gateway`, `execd`, and `fast-sandbox` therefore activates **only** when an explicit trace switch is set (`OTEL_TRACES_ENABLED=true`, Helm `tracing.enabled=true`, or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`), using the generic `OTEL_EXPORTER_OTLP_ENDPOINT` only as a fallback destination once tracing is explicitly enabled.
 - **Two distinct node-side OverlayBD caches**: `runtime.oci.cacheSizeGB` (`OVERLAYBD_CACHE_SIZE_GB`) governs the `overlaybd-ublkd` block cache, whereas `FAST_SANDBOX_OCI_BLOB_CACHE_SIZE_BYTES` governs `fsb-vm`'s local checkpoint blob cache (`oci/blobs/sha256`, capped at 4096 files and 1 GiB free-space floor). Both must be pinned in the profile, audited separately, and cleared together in `cache-evicted` tests.
-- **Client polling bias**: SDK default readiness polling (`200ms`) masks sub-100ms warm create latencies. `fsb-bench`'s Go runner defaults to `10ms` readiness polling (matching `fast-sandbox-ack-2026-10-08.json`) with negligible goroutine overhead and records the exact polling interval in report metadata.
+- **Client polling bias**: SDK default readiness polling (`200ms`) masks sub-100ms warm create latencies. `osb-bench`'s Go runner defaults to `10ms` readiness polling (matching `fast-sandbox-ack-2026-10-08.json`) with negligible goroutine overhead and records the exact polling interval in report metadata.
 
 ### Risks and Mitigations
 
@@ -171,50 +171,50 @@ flowchart TB
 ### 1. Repository Layout, Go Single-Binary Architecture, and Command Surface
 
 Repository layout under a dedicated top-level `benchmark/` directory:
-- `benchmark/tools/`: standalone Go module (`cmd/fsb-bench`) implementing both the local orchestration CLI and the in-cluster worker subcommands (`fsb-bench worker ...`), plus embedded reference profile YAMLs and Helm orchestration helpers (`client-go` + Helm Go SDK / CLI).
+- `benchmark/tools/`: standalone Go module (`cmd/osb-bench`) implementing both the local orchestration CLI and the in-cluster worker subcommands (`osb-bench worker ...`), plus embedded reference profile YAMLs and Helm orchestration helpers (`client-go` + Helm Go SDK / CLI).
 - `benchmark/reports/`: archives milestone and pre-release baseline reports organized with explicit version provenance (e.g., `benchmark/reports/<tag-or-date>-<short-commit>/` containing `report.json`, `summary.md`, and sampled `traces/`), where every report stamps exact `OpenSandbox` and `fast-sandbox` git `commit` SHAs and `tag`s.
 
 **Isomorphic Binary Distribution (Zero Custom Runner Image)**:
-Because `fsb-bench` is written in pure Go (`CGO_ENABLED=0`), `fsb-bench env up` / `run` cross-compiles `GOOS=linux GOARCH=<cluster-arch> go build ./cmd/fsb-bench` locally (or uses a pre-built release binary), launches a minimal base container Pod (`opensandbox-bench-runner`) in the cluster, copies the single static `fsb-bench` binary into `/tmp/fsb-bench` via `pods/exec` tar stream, and invokes `/tmp/fsb-bench worker run ...` inside the cluster. Maintainers iterating on benchmark scenarios locally can modify Go code under `benchmark/tools/` and re-run against a remote cluster in seconds without building or pushing any Docker image.
+Because `osb-bench` is written in pure Go (`CGO_ENABLED=0`), `osb-bench env up` / `run` cross-compiles `GOOS=linux GOARCH=<cluster-arch> go build ./cmd/osb-bench` locally (or uses a pre-built release binary), launches a minimal base container Pod (`opensandbox-bench-runner`) in the cluster, copies the single static `osb-bench` binary into `/tmp/osb-bench` via `pods/exec` tar stream, and invokes `/tmp/osb-bench worker run ...` inside the cluster. Maintainers iterating on benchmark scenarios locally can modify Go code under `benchmark/tools/` and re-run against a remote cluster in seconds without building or pushing any Docker image.
 
 Command surface:
 
 ```bash
-# Build once (or run via `go run ./benchmark/tools/cmd/fsb-bench`)
-go build -o bin/fsb-bench ./benchmark/tools/cmd/fsb-bench
+# Build once (or run via `go run ./benchmark/tools/cmd/osb-bench`)
+go build -o bin/osb-bench ./benchmark/tools/cmd/osb-bench
 
 # 1. Node & cluster preflight (KVM, ublk_drv, XFS reflink, spill dir, CPU homogeneity)
-fsb-bench preflight --kubeconfig <path> --profile <profile.yaml>
+osb-bench preflight --kubeconfig <path> --profile <profile.yaml>
 
 # 2. Provision full OverlayBD stack (ephemeral registry, optional Redis, OTel stack, Helm charts, template, pool)
-fsb-bench env up --kubeconfig <path> --profile <profile.yaml> [--prepare-nodes]
+osb-bench env up --kubeconfig <path> --profile <profile.yaml> [--prepare-nodes]
 
 # 3. Inject static linux worker binary into runner Pod, run suites + white-box scrape + trace drill-down + leak audit
-fsb-bench run --kubeconfig <path> --profile <profile.yaml> \
+osb-bench run --kubeconfig <path> --profile <profile.yaml> \
   --suite <all|schedule-burst|steady-churn|pause-resume|rootfs-only-restore|wake-storm|high-density-soak> \
   --output benchmark/reports/<tag>-<commit>
 
 # 4. Inspect slow/failed operation trace waterfalls offline from a saved run bundle
-fsb-bench trace benchmark/reports/<tag>-<commit> [--trace-id <id> | --top-slow 5]
+osb-bench trace benchmark/reports/<tag>-<commit> [--trace-id <id> | --top-slow 5]
 
 # 5. Compare two benchmark reports offline and emit Markdown diff + exit non-zero on regression thresholds
-fsb-bench compare benchmark/reports/<base>/report.json benchmark/reports/<cand>/report.json [--fail-on-regression]
+osb-bench compare benchmark/reports/<base>/report.json benchmark/reports/<cand>/report.json [--fail-on-regression]
 
 # 6. Tear down benchmark-provisioned resources and run post-teardown leak check
-fsb-bench env down --kubeconfig <path> --profile <profile.yaml>
+osb-bench env down --kubeconfig <path> --profile <profile.yaml>
 ```
 
-For CI and pre-release automation, `fsb-bench run --provision --teardown` chains `preflight -> env up -> run -> env down` atomically while preserving the output bundle on failure.
+For CI and pre-release automation, `osb-bench run --provision --teardown` chains `preflight -> env up -> run -> env down` atomically while preserving the output bundle on failure.
 
 ### 2. Full-Stack Provisioning and Preflight Pipeline (OverlayBD)
 
-`fsb-bench env up` orchestrates four deterministic stages using the supplied `kubeconfig`:
+`osb-bench env up` orchestrates four deterministic stages using the supplied `kubeconfig`:
 
 1. **Preflight Stage**:
    - Launches a short-lived inspection Job/DaemonSet on candidate nodes to probe `/dev/kvm`, cgroup v2, `ublk_drv` kernel module availability, `StateRoot` mount filesystem type and `cp --reflink=always` capability, `FAST_SANDBOX_SNAPSHOT_SPILL_DIR` availability/size, and host CPU identity (`family/model/stepping`).
    - Captures node capacity, kernel version, OS image, containerd version, and Kubernetes version into the environment fingerprint.
 2. **Supporting Infrastructure Stage**:
-   - **Ephemeral In-Cluster OCI Registry**: Always deploys an ephemeral in-cluster HTTPS `registry:2` (with `REGISTRY_STORAGE_DELETE_ENABLED=true`, backed by a fast 200 GiB NVMe `hostPath` or explicit high-IOPS `StorageClass`, and a generated benchmark-scoped CA) in the benchmark namespace. Provisions `fast-sandbox-agent-registry`, `template_oci_publish_secret`, and `registryCABundleSecret` so `fsb-fastlet`, `firecracker-runtime` (`overlaybd-ublkd`), and `sandboxtemplate-builder` Pods trust the ephemeral registry CA without rebuilding release images. An optional `imageRegistryMirror` in `profile.yaml` may mirror read-only upstream component/base images in air-gapped clusters, while 100% of benchmark template and snapshot reads/writes hit the ephemeral in-cluster `registry:2` (with garbage collection/reset between suites and full teardown on `fsb-bench env down`).
+   - **Ephemeral In-Cluster OCI Registry**: Always deploys an ephemeral in-cluster HTTPS `registry:2` (with `REGISTRY_STORAGE_DELETE_ENABLED=true`, backed by a fast 200 GiB NVMe `hostPath` or explicit high-IOPS `StorageClass`, and a generated benchmark-scoped CA) in the benchmark namespace. Provisions `fast-sandbox-agent-registry`, `template_oci_publish_secret`, and `registryCABundleSecret` so `fsb-fastlet`, `firecracker-runtime` (`overlaybd-ublkd`), and `sandboxtemplate-builder` Pods trust the ephemeral registry CA without rebuilding release images. An optional `imageRegistryMirror` in `profile.yaml` may mirror read-only upstream component/base images in air-gapped clusters, while 100% of benchmark template and snapshot reads/writes hit the ephemeral in-cluster `registry:2` (with garbage collection/reset between suites and full teardown on `osb-bench env down`).
    - **In-Cluster OTel Stack**: Deploys an OpenTelemetry Collector (with `memory_limiter` and batching) + ephemeral trace backend (Jaeger v2 or Grafana Tempo single-binary) in the benchmark observability namespace (`opensandbox-bench-obs`), exposing OTLP gRPC (`4317`) and HTTP query APIs inside the cluster.
    - **Redis (conditional)**: Deployed when `wake-storm` is enabled in the profile.
 3. **OpenSandbox + `fast-sandbox` Helm Stage**:
@@ -225,11 +225,11 @@ For CI and pre-release automation, `fsb-bench run --provision --teardown` chains
      - Optional `FAST_SANDBOX_SNAPSHOT_SPILL_DIR` and `FAST_SANDBOX_OCI_BLOB_CACHE_SIZE_BYTES` on pool fastlets
    - Waits until `firecracker-runtime` DaemonSet marks all target nodes `FirecrackerReady=True` and `/v1/pool` on each node reaches `idle >= poolLow`.
 4. **In-Cluster Bench Bastion/Runner, Template, Pool, and Warmup Stage**:
-   - **Network-isolated execution model**: Because the machine running `fsb-bench` is frequently outside the cluster VPC/Pod CIDR and cannot directly reach cluster Services (`opensandbox-server`, `ingress-gateway`, `registry:2`, OTel trace store, or Pod `/metrics` endpoints), `fsb-bench` treats the Kubernetes API Server as its **sole network hop**. It deploys a dedicated **In-Cluster Bench Bastion/Runner Pod** (`opensandbox-bench-runner`, scheduled off runtime nodes with a fixed resource budget such as 4 CPU / 4 GiB and a scoped in-cluster ServiceAccount), streams the compiled static Linux `fsb-bench` binary into the Pod, and executes `fsb-bench worker` over internal ClusterIP/Pod IPs:
+   - **Network-isolated execution model**: Because the machine running `osb-bench` is frequently outside the cluster VPC/Pod CIDR and cannot directly reach cluster Services (`opensandbox-server`, `ingress-gateway`, `registry:2`, OTel trace store, or Pod `/metrics` endpoints), `osb-bench` treats the Kubernetes API Server as its **sole network hop**. It deploys a dedicated **In-Cluster Bench Bastion/Runner Pod** (`opensandbox-bench-runner`, scheduled off runtime nodes with a fixed resource budget such as 4 CPU / 4 GiB and a scoped in-cluster ServiceAccount), streams the compiled static Linux `osb-bench` binary into the Pod, and executes `osb-bench worker` over internal ClusterIP/Pod IPs:
      - Calls `POST /templates` on `opensandbox-server` via ClusterIP to build the OverlayBD golden template (`resourceLimits.disk` strictly matched to `runtime.oci.poolSizeGB`) and verifies `status.manifestRef` uses `oci://`.
      - Applies the profile's `ResourceAware` `SandboxPool` (OSEP-0026, with `overcommitRatio` and `egress` sidecar attached) and waits for all fastlet Pods and egress containers to become `Ready`.
      - Runs warmup cycles (default 2, excluded from statistics), executes all selected benchmark suites using native Go concurrency, scrapes `/metrics` and `/v1/pool`, gathers host/cgroup load samples, queries the in-cluster OTel trace store for Top-K sampled slow/failed `trace_id`s, and packages the complete `run-bundle/` inside the Pod.
-   - Local `fsb-bench run` streams progress from the Runner Pod via the Kubernetes API and pulls the finished `run-bundle/` back to `--output` as a tar stream over `pods/exec`. Subsequent `fsb-bench trace` and `fsb-bench compare` commands run completely offline against local bundles without cluster connectivity.
+   - Local `osb-bench run` streams progress from the Runner Pod via the Kubernetes API and pulls the finished `run-bundle/` back to `--output` as a tar stream over `pods/exec`. Subsequent `osb-bench trace` and `osb-bench compare` commands run completely offline against local bundles without cluster connectivity.
 
 ### 3. Phase 1 Workload Suites (OverlayBD Only)
 
@@ -295,7 +295,7 @@ All latency distributions are reported as **P50, P90, P95, P99, Max, and Mean** 
 
 #### 4.5 High-Density Load and Saturation Metrics (Host, Fastlet, Egress, Fastlet-Proxy)
 
-During `high-density-soak` and high-concurrency `schedule-burst` / `steady-churn`, `fsb-bench` runs a lightweight Go sampler (configurable interval, default `2s`) collecting **Avg / P95 / Max** time-series summaries across four primary load layers:
+During `high-density-soak` and high-concurrency `schedule-burst` / `steady-churn`, `osb-bench` runs a lightweight Go sampler (configurable interval, default `2s`) collecting **Avg / P95 / Max** time-series summaries across four primary load layers:
 
 | Target Layer | Collected Metrics | Bottleneck / Regression Signals |
 |---|---|---|
@@ -318,7 +318,7 @@ Every suite asserts functional correctness and cleanliness; failures mark the ru
 
 | Component | Current State | Gap to Close in This OSEP |
 |---|---|---|
-| `fsb-bench` Go Worker | Not implemented | Start root span per benchmark operation (respecting per-suite head-sampling rate), inject W3C `traceparent` into all HTTP requests (Server and Ingress), record `(trace_id, sampled)` in per-sample results |
+| `osb-bench` Go Worker | Not implemented | Start root span per benchmark operation (respecting per-suite head-sampling rate), inject W3C `traceparent` into all HTTP requests (Server and Ingress), record `(trace_id, sampled)` in per-sample results |
 | `opensandbox-server` (Python) | No `TracerProvider` or gRPC trace propagation | Initialize OTLP tracer **only when explicitly opted in** (`OTEL_TRACES_ENABLED=true` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`), extract `traceparent` on FastAPI ingress, create lifecycle spans (`server.sandbox.create/pause/resume/delete`), inject `traceparent` into `FastPath` gRPC metadata |
 | `ingress-gateway` (Go) | Metrics/Logs only (OSEP-0010 excluded tracing) | Initialize optional OTLP `TracerProvider` gated by explicit trace opt-in (`OTEL_TRACES_ENABLED=true` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`), extract `traceparent`, add spans for route lookup (`ResolveEndpoint`), OSEP-0024 request parking (`ingress.wake.park`, `ingress.wake.resume_rpc` with **OTel Span Links** connecting coalesced parked requests to the active singleflight resume trace), and upstream forwarding (`ingress.proxy.forward`), inject `traceparent` to `FastPath` gRPC and `fastlet-proxy` HTTP |
 | `fast-sandbox` `controller/FastPath` & `fastlet` & `fastlet-proxy` (Go) | `internal/observability/setup.go`, `trace.go`, `grpc.go` exist; sync Create spans exist, but async `Pause`/`Resume`/`Snapshot` (and `Pending`-fallback `Create`) lose trace context across K8s Informer queues | Gate tracing on explicit opt-in via Helm chart (`tracing.enabled=true` -> `OTEL_TRACES_ENABLED=true` + `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`); persist W3C `traceparent` on `Sandbox` / `SandboxSnapshot` CR annotations (`observability.fast-sandbox.io/traceparent`) during `CreateSandbox`, `PauseSandbox`, `ResumeSandbox`, and `CreateSandboxSnapshot` so controller reconcilers extract and continue the caller's trace across async reconciliation into `fastlet`; add missing spans on **Pause / Resume / Snapshot (`Full` & `RootfsOnly`)** and **Delete** |
@@ -330,7 +330,7 @@ Every suite asserts functional correctness and cleanliness; failures mark the ru
 The target end-to-end trace waterfall for a single benchmark operation links every hop under one `trace_id`:
 
 ```text
-[fsb-bench] bench.create (trace_id=abc123)
+[osb-bench] bench.create (trace_id=abc123)
   ├── [opensandbox-server] POST /sandboxes
   │     └── [fsb-controller] fastpath.CreateSandbox
   │           ├── fastpath.create.candidate_selection
@@ -357,7 +357,7 @@ The target end-to-end trace waterfall for a single benchmark operation links eve
   │           │                       ├── fastlet.firecracker.configure (or rootfs_boot_configure + verify_boot_machine)
   │           │                       └── fastlet.firecracker.resume (Full) / fastlet.firecracker.rootfs_boot_start (RootfsOnly)
   │           └── fastpath.create.assignment_projection_wait
-  └── [fsb-bench] bench.first_exec
+  └── [osb-bench] bench.first_exec
         └── [ingress-gateway] ingress.proxy
               ├── ingress.resolve_endpoint (or ingress.wake.park -> ResumeSandbox)
               └── [fsb-fastlet-proxy] fastlet-proxy POST /command
@@ -385,7 +385,7 @@ Standard low-cardinality span attributes attached to OverlayBD spans:
 
 #### 5.3 In-Cluster OTel Trace Stack and Explicit Opt-In Contract
 
-When `tracing.inCluster: true` (default in benchmark profiles), `fsb-bench env up` deploys a self-contained, zero-external-dependency trace stack in `opensandbox-bench-obs`:
+When `tracing.inCluster: true` (default in benchmark profiles), `osb-bench env up` deploys a self-contained, zero-external-dependency trace stack in `opensandbox-bench-obs`:
 - **OpenTelemetry Collector** (`otel/opentelemetry-collector-contrib`): receives OTLP gRPC (`:4317`) and OTLP HTTP (`:4318`) from all cluster components and the benchmark worker, applies batching and memory limiting (`memory_limiter`), and forwards to the trace store.
 - **Ephemeral Trace Store** (Jaeger v2 all-in-one or Grafana Tempo single-binary with local memory/emptyDir storage): provides fast trace lookup by `trace_id` (`GET /api/traces/{trace_id}`) for automated post-run drill-down and optional UI port-forwarding for human inspection.
 - **Explicit Helm & Env Opt-In Contract**: Add an optional `tracing` values block (`enabled: false` by default, `otlpTracesEndpoint`, `sampler`, `samplerArg`) to `manifests/charts/opensandbox`, `fast-sandbox`, `server`, and `ingress-gateway`. Across all components, `TracerProvider` initialization requires **`OTEL_TRACES_ENABLED=true` or a non-empty `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`**; setting `OTEL_EXPORTER_OTLP_ENDPOINT` alone (used by OSEP-0010 metrics) never enables trace export.
@@ -393,14 +393,14 @@ When `tracing.inCluster: true` (default in benchmark profiles), `fsb-bench env u
 #### 5.4 Automated Trace Drill-Down
 
 Instead of forcing engineers to grep pod logs when P99 regresses:
-1. For every benchmark operation, `fsb-bench worker` records `(operation, sandbox_id, trace_id, sampled, latency_ms, status)`.
-2. At the end of each suite, `fsb-bench` filters to the **`sampled == true` pool** (which is 100% of operations on bounded latency suites with `traceSamplerArg: 1.0`, and the uniformly head-sampled subset on `steady-churn` / `high-density-soak`) and selects:
+1. For every benchmark operation, `osb-bench worker` records `(operation, sandbox_id, trace_id, sampled, latency_ms, status)`.
+2. At the end of each suite, `osb-bench` filters to the **`sampled == true` pool** (which is 100% of operations on bounded latency suites with `traceSamplerArg: 1.0`, and the uniformly head-sampled subset on `steady-churn` / `high-density-soak`) and selects:
    - Top-K slowest sampled successful operations (e.g., top 5 around P99/Max),
    - Representative median (P50) sampled operations for comparison,
    - Up to K sampled failed operations per error category.
 3. The worker queries the in-cluster trace store API by `trace_id` (plus linked `flight_trace_id` for coalesced wake requests), reconstructs the full span waterfall tree, computes **per-span self-time and critical-path share (%)**, and saves the trace trees into `<run-bundle>/traces/<trace_id>.json`.
 4. The Markdown summary automatically includes a **"P99 Bottleneck Attribution"** table showing which spans dominated P99 vs. P50 (e.g., `fsb_vm.ublkd_acquire: 18ms -> 410ms (+22x, pool_hit=false)` or `fastlet.firecracker.snapshot.lock_wait: 0ms -> 620ms`).
-5. Maintainers can run `fsb-bench trace <run-bundle> --top-slow 5` offline to render ASCII waterfall trees directly in the terminal.
+5. Maintainers can run `osb-bench trace <run-bundle> --top-slow 5` offline to render ASCII waterfall trees directly in the terminal.
 
 ### 6. Benchmark Profile, Report Schema, and Regression Comparison
 
@@ -417,7 +417,7 @@ environment:
   benchNamespace: opensandbox-bench
   prepareNodes: false
   runner:
-    baseImage: alpine:3.20 # lightweight base pod; static linux fsb-bench binary is injected at runtime
+    baseImage: alpine:3.20 # lightweight base pod; static linux osb-bench binary is injected at runtime
     cpuLimit: "4"
     memoryLimit: "4Gi"
   imageRegistryMirror: "" # optional read-only mirror for base/component images in air-gapped clusters
@@ -494,31 +494,31 @@ Structured JSON report (`schema_version: 2`, archived under `benchmark/reports/<
 - `load_profiles`: time-series summaries (Avg/P95/Max) for `host`, `fastlet`, `egress`, `fastlet_proxy`, `firecracker_runtime`, `opensandbox_server`, and `ingress_gateway`.
 - `leak_audit`: pass/fail assertions and post-run residual counts.
 
-`fsb-bench compare <baseline.json> <candidate.json>` diffs throughput, P50/P95/P99 latencies, OverlayBD pool hit rates, high-density CPU/RSS per sandbox, and trace critical-path shifts, highlighting regressions exceeding configurable thresholds (default: >15% P95/P99 latency increase, >10% throughput drop, >15% per-sandbox overhead increase, or any leak audit failure).
+`osb-bench compare <baseline.json> <candidate.json>` diffs throughput, P50/P95/P99 latencies, OverlayBD pool hit rates, high-density CPU/RSS per sandbox, and trace critical-path shifts, highlighting regressions exceeding configurable thresholds (default: >15% P95/P99 latency increase, >10% throughput drop, >15% per-sandbox overhead increase, or any leak audit failure).
 
 ### 7. Kubeconfig and Host Privilege Model
 
 | Scope | Required Permissions / Privileges | Purpose |
 |---|---|---|
 | Cluster-scoped (`kubeconfig` + Runner SA) | CRDs, ClusterRoles, ClusterRoleBindings (`base` chart & Runner SA); `nodes` (`get`, `list`, `watch`, plus `patch` required by the `fast-sandbox` runtime readiness loop) | Full-stack chart installation, node hardware/CPU preflight, `FirecrackerReady` node self-labeling |
-| Namespace-scoped (`opensandbox-system`, `opensandbox-dataplane`, `opensandbox-bench*`) | Deployments, DaemonSets, Jobs, Services, ConfigMaps, Secrets, `SandboxPool`/`Sandbox`/`SandboxTemplate`/`SandboxSnapshot` CRs; `pods` (`get`, `list`, `create`, `delete`), `pods/exec`, `pods/log` | Stack lifecycle, launching the Bench Runner Pod, injecting static `fsb-bench` binary and pulling `run-bundle/` over `pods/exec` tar stream, isolating source `fastlet` Pods for deterministic cross-node resume, and clearing caches for `cache-evicted` tests |
+| Namespace-scoped (`opensandbox-system`, `opensandbox-dataplane`, `opensandbox-bench*`) | Deployments, DaemonSets, Jobs, Services, ConfigMaps, Secrets, `SandboxPool`/`Sandbox`/`SandboxTemplate`/`SandboxSnapshot` CRs; `pods` (`get`, `list`, `create`, `delete`), `pods/exec`, `pods/log` | Stack lifecycle, launching the Bench Runner Pod, injecting static `osb-bench` binary and pulling `run-bundle/` over `pods/exec` tar stream, isolating source `fastlet` Pods for deterministic cross-node resume, and clearing caches for `cache-evicted` tests |
 | Mandatory `fast-sandbox` Runtime Host Privileges (`env up`) | `firecracker-runtime` DaemonSet (`firecracker-agent` + `overlaybd-ublkd`) runs `privileged: true` with `hostPID`, `/dev/kvm`, `/dev/ublk*`, `StateRoot` `hostPath`, and installs Firecracker assets under `/opt/fast-sandbox/firecracker` while labeling candidate nodes | Inherent requirement of deploying the `fast-sandbox` Firecracker + OverlayBD runtime chart; restricted clusters that forbid privileged DaemonSets cannot host `env up` |
-| Optional Benchmark Host Prep (`--prepare-nodes`, default `false`) | One-shot privileged host-prep Job to allocate/format loop-backed XFS `reflink=1` `StateRoot` or `modprobe ublk_drv` (plus optional read-only `/proc` & disk-stat host sampler) | Disabled by default so `fsb-bench` never formats or mounts host filesystems unless explicitly requested |
+| Optional Benchmark Host Prep (`--prepare-nodes`, default `false`) | One-shot privileged host-prep Job to allocate/format loop-backed XFS `reflink=1` `StateRoot` or `modprobe ublk_drv` (plus optional read-only `/proc` & disk-stat host sampler) | Disabled by default so `osb-bench` never formats or mounts host filesystems unless explicitly requested |
 
 ## Test Plan
 
 Exhaustive unit tests for the benchmark harness itself (`benchmark/tools/`) are intentionally unnecessary; validation focuses on core runtime/tracing behavior and live-cluster end-to-end execution:
 
 1. **Minimal CLI smoke check**:
-   - Verify `go build ./benchmark/tools/cmd/fsb-bench`, static Linux cross-compilation (`GOOS=linux CGO_ENABLED=0`), and profile fail-fast checks (e.g., rejecting `template.diskGiB != runtime.oci.poolSizeGB`).
+   - Verify `go build ./benchmark/tools/cmd/osb-bench`, static Linux cross-compilation (`GOOS=linux CGO_ENABLED=0`), and profile fail-fast checks (e.g., rejecting `template.diskGiB != runtime.oci.poolSizeGB`).
 2. **Tracing integration tests (component level)**:
    - Verify explicit opt-in gating: setting `OTEL_EXPORTER_OTLP_ENDPOINT` alone (OSEP-0010 metrics posture) exports zero trace spans; setting `OTEL_TRACES_ENABLED=true` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` activates tracing.
    - Verify W3C `traceparent` propagation end-to-end across `server -> FastPath -> fastlet -> fsb-vm` (including async CRD annotation carriers on `Pause/Resume/Snapshot` and `Pending`-fallback `Create`) and `ingress -> fastlet-proxy -> execd` against a local OTLP collector, asserting a single connected `trace_id` and expected OverlayBD span attributes.
    - Verify `fsb-vm` bounded flush succeeds normally when the collector is unreachable.
 3. **Live-cluster end-to-end validation and report archiving**:
-   - Run `fsb-bench preflight -> env up -> run --suite all -> compare -> env down` on a 2-node KVM + ublk cluster, verifying static binary injection into the runner Pod.
-   - Confirm `fsb-bench trace` renders complete multi-hop waterfalls for Create, Full Pause/Resume, RootfsOnly Snapshot/Boot, and Wake-on-Access.
-   - Archive the resulting stage/release report (with explicit `commit` and `tag` provenance) under `benchmark/reports/` and verify `fsb-bench compare` against it.
+   - Run `osb-bench preflight -> env up -> run --suite all -> compare -> env down` on a 2-node KVM + ublk cluster, verifying static binary injection into the runner Pod.
+   - Confirm `osb-bench trace` renders complete multi-hop waterfalls for Create, Full Pause/Resume, RootfsOnly Snapshot/Boot, and Wake-on-Access.
+   - Archive the resulting stage/release report (with explicit `commit` and `tag` provenance) under `benchmark/reports/` and verify `osb-bench compare` against it.
 
 ## Drawbacks
 
@@ -535,7 +535,7 @@ Exhaustive unit tests for the benchmark harness itself (`benchmark/tools/`) are 
 ## Infrastructure Needed
 
 - A fixed reference 2+ node bare-metal Kubernetes cluster (Linux KVM, `CONFIG_BLK_DEV_UBLK`, XFS `reflink=1` `StateRoot`, homogeneous CPUs) for pre-release baseline runs prior to each `release-X.Y.Z` GA.
-- Go build/lint integration in CI for `benchmark/tools/` (no PyPI package or custom runner container image publication pipeline needed — the Runner Pod uses a standard base image and receives the compiled static `fsb-bench` binary at runtime).
+- Go build/lint integration in CI for `benchmark/tools/` (no PyPI package or custom runner container image publication pipeline needed — the Runner Pod uses a standard base image and receives the compiled static `osb-bench` binary at runtime).
 - Dedicated `benchmark/reports/` directory in the repository to archive milestone and pre-release baseline reports stamped with explicit `commit` SHAs and `tag`s (referenced from `docs/releases/<version>.md`).
 
 ## Upgrade & Migration Strategy
@@ -545,5 +545,5 @@ Exhaustive unit tests for the benchmark harness itself (`benchmark/tools/`) are 
   - OTel tracing in `server`, `ingress-gateway`, `execd`, and `fast-sandbox` defaults to disabled (no-op) unless `OTEL_TRACES_ENABLED=true`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or Helm `tracing.enabled=true` is explicitly configured; existing OSEP-0010 `OTEL_EXPORTER_OTLP_ENDPOINT` metrics configurations continue to export metrics only.
   - Existing `fast-sandbox` Prometheus metrics and stderr timing logs remain intact during Phase 1 so existing scripts and dashboards continue working while teams transition to trace-based drill-down.
 - **Phased rollout**:
-  - **Phase 1 (this OSEP)**: Standalone Go `fsb-bench` harness under `benchmark/tools/` (preflight, full-stack OverlayBD provisioning with CA-injected ephemeral registry, static worker binary injection, 6 OverlayBD suites, high-density load sampling, automated trace drill-down, `compare`, tagged report archiving in `benchmark/reports/`) + explicitly opt-in end-to-end OTel tracing across OpenSandbox and `fast-sandbox` OverlayBD paths.
+  - **Phase 1 (this OSEP)**: Standalone Go `osb-bench` harness under `benchmark/tools/` (preflight, full-stack OverlayBD provisioning with CA-injected ephemeral registry, static worker binary injection, 6 OverlayBD suites, high-density load sampling, automated trace drill-down, `compare`, tagged report archiving in `benchmark/reports/`) + explicitly opt-in end-to-end OTel tracing across OpenSandbox and `fast-sandbox` OverlayBD paths.
   - **Phase 2 (follow-up)**: Extend `benchmark/tools/` profiles to cover `fast-sandbox` Native S3/DART, classic Kubernetes (`BatchSandbox` + `Pool`), and Docker runtimes.
