@@ -4725,6 +4725,8 @@ bench_require_egress_mode() {
 # OSEP-0023 cost measurements (credential-bound-bench.sh): M1/M2 reports
 # under $WORK/bench/<leg>; runs in either interception leg.
 bench_credential_bound() {
+	# Failed preflights must never leave reports from a previous invocation.
+	rm -rf "${BENCH_REPORT_DIR:-$WORK/bench/${EGRESS_INTERCEPTION_MODE:-default}}"
 	require_live_stack
 	bench_require_egress_mode
 	# shellcheck source=credential-bound-bench.sh

@@ -275,6 +275,10 @@ bench_cleanup() {
 # --- the action
 
 credential_bound_bench() {
+	BENCH_LEG="${EGRESS_INTERCEPTION_MODE:-default}"
+	BENCH_DIR="${BENCH_REPORT_DIR:-$WORK/bench/$BENCH_LEG}"
+	BENCH_RAW="$BENCH_DIR/raw"
+	rm -rf "$BENCH_DIR"
 	[[ "$-" != *x* ]] || fail "credential-bound bench refuses to run under xtrace"
 	bench_validate_knobs
 	load_mitm_ca_fingerprint
@@ -285,10 +289,6 @@ credential_bound_bench() {
 		[[ -s "$MITM_CA_DIR/$f" ]] || die "missing $MITM_CA_DIR/$f (run up first)"
 	done
 	bench_load_template_id
-	BENCH_LEG="${EGRESS_INTERCEPTION_MODE:-default}"
-	BENCH_DIR="${BENCH_REPORT_DIR:-$WORK/bench/$BENCH_LEG}"
-	BENCH_RAW="$BENCH_DIR/raw"
-	rm -rf "$BENCH_DIR"
 	mkdir -p "$BENCH_RAW" "$GEN_DIR"
 	BENCH_BIND_MS=()
 	# Shared with the sourced credential-bound verify and bench cleanup.

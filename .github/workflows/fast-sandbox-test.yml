@@ -253,15 +253,22 @@ jobs:
         timeout-minutes: 120
         env:
           EGRESS_INTERCEPTION_MODE: ""
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
+        run: |
+          report_dir="$(mktemp -d "$RUNNER_TEMP/fast-sandbox-bench-default.XXXXXX")"
+          echo "report_dir=$report_dir" >> "$GITHUB_OUTPUT"
+          sudo -E env "PATH=$PATH" "BENCH_REPORT_DIR=$report_dir" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
 
       - name: Collect default bench reports
         if: always() && (steps.bench_default.outcome == 'success' || steps.bench_default.outcome == 'failure')
+        env:
+          BENCH_REPORT_DIR: ${{ steps.bench_default.outputs.report_dir }}
         run: |
-          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
+          rm -rf bench-reports/default
           mkdir -p bench-reports/default
-          sudo find "$work/bench/default" -maxdepth 1 -name '*.json' \
-            -exec cp {} bench-reports/default/ \; 2>/dev/null || true
+          if [ -n "$BENCH_REPORT_DIR" ]; then
+            sudo find "$BENCH_REPORT_DIR" -maxdepth 1 -name '*.json' \
+              -exec cp {} bench-reports/default/ \; 2>/dev/null || true
+          fi
           sudo chown -R "$(id -u):$(id -g)" bench-reports/default || true
           ls -l bench-reports/default
 
@@ -298,15 +305,22 @@ jobs:
         timeout-minutes: 120
         env:
           EGRESS_INTERCEPTION_MODE: "credential-bound"
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
+        run: |
+          report_dir="$(mktemp -d "$RUNNER_TEMP/fast-sandbox-bench-credential-bound.XXXXXX")"
+          echo "report_dir=$report_dir" >> "$GITHUB_OUTPUT"
+          sudo -E env "PATH=$PATH" "BENCH_REPORT_DIR=$report_dir" ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
 
       - name: Collect credential-bound bench reports
         if: always() && (steps.bench_credential_bound.outcome == 'success' || steps.bench_credential_bound.outcome == 'failure')
+        env:
+          BENCH_REPORT_DIR: ${{ steps.bench_credential_bound.outputs.report_dir }}
         run: |
-          work="/data/fast-sandbox-env"; [ -d "$work" ] || work="$PWD/.fast-sandbox-env"
+          rm -rf bench-reports/credential-bound
           mkdir -p bench-reports/credential-bound
-          sudo find "$work/bench/credential-bound" -maxdepth 1 -name '*.json' \
-            -exec cp {} bench-reports/credential-bound/ \; 2>/dev/null || true
+          if [ -n "$BENCH_REPORT_DIR" ]; then
+            sudo find "$BENCH_REPORT_DIR" -maxdepth 1 -name '*.json' \
+              -exec cp {} bench-reports/credential-bound/ \; 2>/dev/null || true
+          fi
           sudo chown -R "$(id -u):$(id -g)" bench-reports/credential-bound || true
           ls -l bench-reports/credential-bound
 
