@@ -19,8 +19,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"github.com/alibaba/opensandbox/execd/pkg/util/glob"
 )
 
 // Config holds all isolation-related settings, loaded from a TOML file.
@@ -53,6 +56,11 @@ type Config struct {
 	// written as JSONL to a rotating audit file. Requires the execd-ebpf
 	// build variant. Defaults to off.
 	Ebpf *EbpfConfig `toml:"ebpf"`
+
+	// Filesystem configures additional path and glob restrictions for the
+	// /files/* and /directories/* HTTP endpoints on top of the built-in
+	// pseudo-filesystem and platform-path guard.
+	Filesystem *FilesystemConfig `toml:"filesystem"`
 }
 
 // execdConfigEnvBlacklist enumerates execd's own configuration env vars.
@@ -142,6 +150,36 @@ type EbpfConfig struct {
 	AuditFile string `toml:"audit_file"`
 }
 
+// FilesystemConfig controls optional operator-configured restrictions for the
+// /files/* and /directories/* APIs.
+type FilesystemConfig struct {
+	// DenyPaths lists extra paths (and their subtrees) to block with 403.
+	DenyPaths []string `toml:"deny_paths"`
+	// DenyGlobs lists doublestar glob patterns (e.g. "**/.kube/config",
+	// "**/.aws/credentials") to block on /files and /directories APIs.
+	DenyGlobs []string `toml:"deny_globs"`
+}
+
+func (f *FilesystemConfig) Validate() error {
+	if f == nil {
+		return nil
+	}
+	for _, p := range f.DenyPaths {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("filesystem: deny_paths entries must not be empty")
+		}
+	}
+	for _, pattern := range f.DenyGlobs {
+		if strings.TrimSpace(pattern) == "" {
+			return fmt.Errorf("filesystem: deny_globs entries must not be empty")
+		}
+		if !glob.ValidPattern(pattern) {
+			return fmt.Errorf("filesystem: invalid deny_globs pattern %q", pattern)
+		}
+	}
+	return nil
+}
+
 // DefaultConfig returns the built-in defaults used when no config file is
 // provided or when individual fields are missing from the file.
 func DefaultConfig() Config {
@@ -187,6 +225,9 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("isolation config: parse %s: %w", path, err)
 	}
 	if err := cfg.QoS.Validate(); err != nil {
+		return Config{}, fmt.Errorf("isolation config: %s: %w", path, err)
+	}
+	if err := cfg.Filesystem.Validate(); err != nil {
 		return Config{}, fmt.Errorf("isolation config: %s: %w", path, err)
 	}
 

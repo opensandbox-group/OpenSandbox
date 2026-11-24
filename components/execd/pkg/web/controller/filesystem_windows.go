@@ -20,6 +20,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -43,7 +44,13 @@ func NewFilesystemController(ctx *gin.Context) *FilesystemController {
 }
 
 func (c *FilesystemController) handleFileError(err error) {
-	if errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, errForbiddenPath) {
+		c.RespondError(
+			http.StatusForbidden,
+			model.ErrorCodePermissionDenied,
+			err.Error(),
+		)
+	} else if errors.Is(err, fs.ErrNotExist) {
 		c.RespondError(
 			http.StatusNotFound,
 			model.ErrorCodeFileNotFound,
@@ -90,6 +97,10 @@ func (c *FilesystemController) RemoveFiles() {
 	paths := c.ctx.QueryArray("path")
 	for _, filePath := range paths {
 		if err := DeleteFile(filePath); err != nil {
+			if errors.Is(err, errForbiddenPath) {
+				c.handleFileError(err)
+				return
+			}
 			c.RespondError(
 				http.StatusInternalServerError,
 				model.ErrorCodeRuntimeError,
@@ -120,6 +131,10 @@ func (c *FilesystemController) ChmodFiles() {
 	for file, item := range request {
 		err := ChmodFile(file, item)
 		if err != nil {
+			if errors.Is(err, errForbiddenPath) {
+				c.handleFileError(err)
+				return
+			}
 			c.RespondError(
 				http.StatusInternalServerError,
 				model.ErrorCodeRuntimeError,
@@ -207,6 +222,15 @@ func (c *FilesystemController) RemoveDirs() {
 			c.handleFileError(err)
 			return
 		}
+		absDir, err := filepath.Abs(resolvedDir)
+		if err != nil {
+			c.handleFileError(err)
+			return
+		}
+		if err := checkFilesystemPath(absDir); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		if err := os.RemoveAll(resolvedDir); err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,
@@ -256,6 +280,11 @@ func (c *FilesystemController) ListDirectory() {
 			model.ErrorCodeRuntimeError,
 			fmt.Sprintf("error converting path %s to absolute. %v", path, err),
 		)
+		return
+	}
+
+	if err := checkFilesystemPath(path); err != nil {
+		c.handleFileError(err)
 		return
 	}
 
@@ -317,6 +346,9 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 				continue
 			}
 			entryPath := filepath.Join(dir, entry.Name())
+			if isFilesystemPathBlocked(entryPath) {
+				continue
+			}
 			info, err := entry.Info()
 			if err != nil {
 				return err
@@ -364,6 +396,11 @@ func (c *FilesystemController) SearchFiles() {
 		return
 	}
 
+	if err := checkFilesystemPath(path); err != nil {
+		c.handleFileError(err)
+		return
+	}
+
 	_, err = os.Stat(path)
 	if err != nil {
 		c.handleFileError(err)
@@ -385,6 +422,12 @@ func (c *FilesystemController) SearchFiles() {
 
 	files := make([]model.FileInfo, 0, 16)
 	err = filepath.WalkDir(path, func(filePath string, entry fs.DirEntry, err error) error {
+		if isFilesystemPathBlocked(filePath) {
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
@@ -471,19 +514,29 @@ func (c *FilesystemController) ReplaceContent() {
 			c.handleFileError(err)
 			return
 		}
-
-		if _, err = os.Stat(file); err != nil {
+		if err := checkFilesystemPath(file); err != nil {
 			c.handleFileError(err)
 			return
 		}
 
-		content, err := os.ReadFile(file)
+		readFile, err := openGuardedReadFile(file)
 		if err != nil {
 			c.handleFileError(err)
 			return
 		}
-
-		fileInfo, err := os.Stat(file)
+		fileInfo, err := readFile.Stat()
+		if err != nil {
+			_ = readFile.Close()
+			c.handleFileError(err)
+			return
+		}
+		if fileInfo.IsDir() {
+			_ = readFile.Close()
+			c.handleFileError(fmt.Errorf("path is a directory: %s", file))
+			return
+		}
+		content, err := io.ReadAll(readFile)
+		_ = readFile.Close()
 		if err != nil {
 			c.handleFileError(err)
 			return
@@ -498,9 +551,23 @@ func (c *FilesystemController) ReplaceContent() {
 		contentStr := string(content)
 		newContent := strings.ReplaceAll(contentStr, item.Old, item.New)
 
-		err = os.WriteFile(file, []byte(newContent), mode)
+		if err := checkFilesystemPath(file); err != nil {
+			c.handleFileError(err)
+			return
+		}
+		writeFile, err := openGuardedWriteFile(file, os.O_WRONLY|os.O_TRUNC, mode)
 		if err != nil {
 			c.handleFileError(err)
+			return
+		}
+		_, writeErr := writeFile.Write([]byte(newContent))
+		closeErr := writeFile.Close()
+		if writeErr != nil {
+			c.handleFileError(writeErr)
+			return
+		}
+		if closeErr != nil {
+			c.handleFileError(closeErr)
 			return
 		}
 

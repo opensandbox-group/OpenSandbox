@@ -151,3 +151,14 @@ allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 #
 #   # Append-only JSONL audit sink (rotated). Default below.
 #   audit_file = "/var/log/opensandbox/ebpf-audit.jsonl"
+
+# Additional filesystem API restrictions on /files/* and /directories/*.
+# Pseudo-filesystems (/proc, /sys, /dev, /sys/fs/cgroup) and platform internal
+# paths (/var/lib/execd, /etc/execd, /etc/opensandbox, /opt/opensandbox,
+# /var/log/opensandbox, plus configured upper_root/config/audit paths) are
+# ALWAYS blocked unconditionally. Use [filesystem] to deny extra paths or
+# credential globs.
+#
+# [filesystem]
+#   deny_paths = ["/etc/shadow"]
+#   deny_globs = ["**/.kube/config", "**/.aws/credentials", "**/.git-credentials"]

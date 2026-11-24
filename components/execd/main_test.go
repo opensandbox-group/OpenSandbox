@@ -22,9 +22,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
@@ -348,5 +350,42 @@ func TestServeHTTPUntilShutdownServesDuringStartup(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("HTTP server did not stop after startup completed")
+	}
+}
+
+func TestBuildFilesystemGuardPolicy(t *testing.T) {
+	cfg := isolation.Config{
+		UpperRoot: "/srv/execd/upper",
+		Ebpf: &isolation.EbpfConfig{
+			Enabled:   true,
+			AuditFile: "/srv/logs/ebpf.jsonl",
+		},
+		Filesystem: &isolation.FilesystemConfig{
+			DenyPaths: []string{"/etc/shadow"},
+			DenyGlobs: []string{"**/.kube/config", "**/.aws/credentials"},
+		},
+	}
+
+	policy := buildFilesystemGuardPolicy(
+		cfg,
+		"/srv/conf/isolation.toml",
+		"/srv/conf/lifecycle.toml",
+		"/run/execd/startup-status",
+	)
+
+	wantPaths := []string{
+		"/srv/execd/upper",
+		"/srv/conf/isolation.toml",
+		"/srv/conf/lifecycle.toml",
+		"/run/execd/startup-status",
+		"/srv/logs/ebpf.jsonl",
+		"/etc/shadow",
+	}
+	if !slices.Equal(policy.ExtraBlockedPaths, wantPaths) {
+		t.Fatalf("ExtraBlockedPaths = %v, want %v", policy.ExtraBlockedPaths, wantPaths)
+	}
+	wantGlobs := []string{"**/.kube/config", "**/.aws/credentials"}
+	if !slices.Equal(policy.DenyGlobs, wantGlobs) {
+		t.Fatalf("DenyGlobs = %v, want %v", policy.DenyGlobs, wantGlobs)
 	}
 }

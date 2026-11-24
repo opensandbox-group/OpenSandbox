@@ -37,6 +37,9 @@ func DeleteFile(filePath string) error {
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
 	}
+	if err := checkFilesystemPath(absPath); err != nil {
+		return err
+	}
 
 	fileInfo, err := os.Stat(absPath)
 	if err != nil {
@@ -60,6 +63,9 @@ func DeleteFile(filePath string) error {
 func ChmodFile(file string, perms model.Permission) error {
 	abs, err := pathutil.ExpandAbsPath(file)
 	if err != nil {
+		return err
+	}
+	if err := checkFilesystemPath(abs); err != nil {
 		return err
 	}
 
@@ -91,6 +97,12 @@ func RenameFile(item model.RenameFileItem) error {
 	dstPath, err := pathutil.ExpandAbsPath(item.Dest)
 	if err != nil {
 		return fmt.Errorf("invalid destination path: %w", err)
+	}
+	if err := checkFilesystemPath(srcPath); err != nil {
+		return err
+	}
+	if err := checkFilesystemPath(dstPath); err != nil {
+		return err
 	}
 
 	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
@@ -168,6 +180,9 @@ func MakeDir(dir string, perm model.Permission) error {
 	if err := rejectStagingPath(abs); err != nil {
 		return err
 	}
+	if err := checkFilesystemPath(abs); err != nil {
+		return err
+	}
 
 	_, statErr := os.Stat(abs)
 	existed := statErr == nil
@@ -229,6 +244,9 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 	absPath, err := pathutil.ExpandAbsPath(filePath)
 	if err != nil {
 		return model.FileInfo{}, fmt.Errorf("invalid path %s: %w", filePath, err)
+	}
+	if err := checkFilesystemPath(absPath); err != nil {
+		return model.FileInfo{}, err
 	}
 
 	fileInfo, err := os.Lstat(absPath)

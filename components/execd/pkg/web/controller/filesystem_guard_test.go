@@ -1,0 +1,424 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package controller
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
+	"syscall"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/alibaba/opensandbox/execd/pkg/web/model"
+)
+
+func withTestFilesystemGuard(t *testing.T, policy FilesystemGuardPolicy) {
+	t.Helper()
+	prev := activeFilesystemGuard.Load()
+	require.NoError(t, InitFilesystemGuard(policy))
+	t.Cleanup(func() {
+		activeFilesystemGuard.Store(prev)
+	})
+}
+
+func assertForbiddenResponse(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodePermissionDenied, resp.Code)
+}
+
+func buildUploadMultipart(t *testing.T, targetPath string, content []byte) (*bytes.Buffer, string) {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	metaPart, err := writer.CreateFormFile("metadata", "metadata.json")
+	require.NoError(t, err)
+	require.NoError(t, json.NewEncoder(metaPart).Encode(map[string]any{
+		"path": targetPath,
+		"mode": 644,
+	}))
+	filePart, err := writer.CreateFormFile("file", "payload.txt")
+	require.NoError(t, err)
+	_, err = filePart.Write(content)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	return &body, writer.FormDataContentType()
+}
+
+func TestFilesystemGuardBlocksDefaultPseudoAndPlatformPaths(t *testing.T) {
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{})
+
+	blocked := []string{
+		"/proc",
+		"/proc/1/environ",
+		"/proc/self/environ",
+		"/proc/1/root/etc/passwd",
+		"/sys",
+		"/sys/kernel/hostname",
+		"/sys/fs/cgroup",
+		"/sys/fs/cgroup/memory.max",
+		"/dev",
+		"/dev/null",
+		"/dev/pts/0",
+		"/var/lib/execd",
+		"/var/lib/execd/isolation/sess1/upper/secret.txt",
+		"/etc/execd",
+		"/etc/execd/isolation.toml",
+		"/etc/opensandbox",
+		"/etc/opensandbox/seccomp.bpf",
+		"/opt/opensandbox",
+		"/opt/opensandbox/bootstrap.sh",
+		"/var/log/opensandbox",
+		"/var/log/opensandbox/ebpf-audit.jsonl",
+		"/workspace/../proc/1/environ",
+		"/tmp/../../etc/opensandbox/token",
+	}
+	for _, p := range blocked {
+		err := checkFilesystemPath(p)
+		require.Truef(t, errors.Is(err, errForbiddenPath), "expected %q to be blocked, got %v", p, err)
+	}
+
+	allowed := []string{
+		"/workspace/app/main.go",
+		"/tmp/scratch.txt",
+		"/proc_custom/file.txt",
+		"/system/file.txt",
+		"/developer/notes.md",
+		"/etc/execd_other/file.txt",
+		"/opt/opensandbox-user/app.py",
+	}
+	for _, p := range allowed {
+		require.NoErrorf(t, checkFilesystemPath(p), "expected %q to be allowed", p)
+	}
+}
+
+func TestFilesystemGuardSymlinkResolution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink test")
+	}
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{})
+
+	ws := t.TempDir()
+	okFile := filepath.Join(ws, "ok.txt")
+	require.NoError(t, os.WriteFile(okFile, []byte("ok"), 0o644))
+
+	okLink := filepath.Join(ws, "ok_link")
+	require.NoError(t, os.Symlink(okFile, okLink))
+	require.NoError(t, checkFilesystemPath(okLink))
+
+	procLink := filepath.Join(ws, "proc_leak")
+	require.NoError(t, os.Symlink("/proc/1/environ", procLink))
+	require.ErrorIs(t, checkFilesystemPath(procLink), errForbiddenPath)
+
+	danglingBlocked := filepath.Join(ws, "dangling_opt")
+	require.NoError(t, os.Symlink("/opt/opensandbox/nonexistent-token", danglingBlocked))
+	require.ErrorIs(t, checkFilesystemPath(danglingBlocked), errForbiddenPath)
+
+	dirLink := filepath.Join(ws, "etc_link")
+	require.NoError(t, os.Symlink("/etc/opensandbox", dirLink))
+	require.ErrorIs(t, checkFilesystemPath(filepath.Join(dirLink, "sub", "file.toml")), errForbiddenPath)
+
+	// Multi-hop relative symlink chain resolving to a blocked path.
+	sub := filepath.Join(ws, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	hop2 := filepath.Join(ws, "hop2")
+	require.NoError(t, os.Symlink("/var/lib/execd/isolation", hop2))
+	hop1 := filepath.Join(sub, "hop1")
+	require.NoError(t, os.Symlink("../hop2", hop1))
+	require.ErrorIs(t, checkFilesystemPath(filepath.Join(hop1, "session/file")), errForbiddenPath)
+}
+
+func TestFilesystemGuardDynamicPathsAndDenyGlobs(t *testing.T) {
+	tmp := t.TempDir()
+	customUpper := filepath.Join(tmp, "custom-upper")
+	customConfig := filepath.Join(tmp, "custom-isolation.toml")
+	require.NoError(t, os.MkdirAll(customUpper, 0o755))
+	require.NoError(t, os.WriteFile(customConfig, []byte("upper_root = \"/tmp\""), 0o600))
+
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{customUpper, customConfig},
+		DenyGlobs: []string{
+			"**/.kube/config",
+			"**/.aws/credentials",
+			"**/.git-credentials",
+		},
+	})
+
+	require.ErrorIs(t, checkFilesystemPath(customUpper), errForbiddenPath)
+	require.ErrorIs(t, checkFilesystemPath(filepath.Join(customUpper, "sess/file")), errForbiddenPath)
+	require.ErrorIs(t, checkFilesystemPath(customConfig), errForbiddenPath)
+	require.ErrorIs(t, checkFilesystemPath(filepath.Join(tmp, "home/.kube/config")), errForbiddenPath)
+	require.ErrorIs(t, checkFilesystemPath(filepath.Join(tmp, "user/.aws/credentials")), errForbiddenPath)
+	require.ErrorIs(t, checkFilesystemPath(filepath.Join(tmp, ".git-credentials")), errForbiddenPath)
+	require.NoError(t, checkFilesystemPath(filepath.Join(tmp, "home/readme.md")))
+
+	if runtime.GOOS != "windows" {
+		credDir := filepath.Join(tmp, "home", ".aws")
+		require.NoError(t, os.MkdirAll(credDir, 0o755))
+		credFile := filepath.Join(credDir, "credentials")
+		require.NoError(t, os.WriteFile(credFile, []byte("secret"), 0o600))
+		credLink := filepath.Join(tmp, "aws-link")
+		require.NoError(t, os.Symlink(credFile, credLink))
+		require.ErrorIs(t, checkFilesystemPath(credLink), errForbiddenPath)
+	}
+
+	require.Error(t, InitFilesystemGuard(FilesystemGuardPolicy{DenyGlobs: []string{"[invalid"}}))
+}
+
+func TestFilesystemControllerBlockedPathsReturn403(t *testing.T) {
+	tmp := t.TempDir()
+	blockedDir := filepath.Join(tmp, "internal-platform")
+	require.NoError(t, os.MkdirAll(blockedDir, 0o755))
+	blockedFile := filepath.Join(blockedDir, "secret.txt")
+	require.NoError(t, os.WriteFile(blockedFile, []byte("top-secret\nline2\n"), 0o600))
+
+	workspace := filepath.Join(tmp, "workspace")
+	require.NoError(t, os.MkdirAll(workspace, 0o755))
+	normalFile := filepath.Join(workspace, "normal.txt")
+	require.NoError(t, os.WriteFile(normalFile, []byte("hello"), 0o644))
+
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{blockedDir},
+	})
+
+	t.Run("GetFilesInfo", func(t *testing.T) {
+		for _, target := range []string{"/proc/1/environ", blockedFile} {
+			ctrl, rec := newFilesystemController(t, http.MethodGet, "/files/info?path="+url.QueryEscape(target), nil)
+			ctrl.GetFilesInfo()
+			assertForbiddenResponse(t, rec)
+		}
+	})
+
+	t.Run("DownloadFile", func(t *testing.T) {
+		for _, q := range []string{
+			"/files/download?path=" + url.QueryEscape("/proc/1/environ") + "&offset=1",
+			"/files/download?path=" + url.QueryEscape(blockedFile),
+			"/files/download?path=" + url.QueryEscape(blockedFile) + "&offset=1&limit=1",
+		} {
+			ctrl, rec := newFilesystemController(t, http.MethodGet, q, nil)
+			ctrl.DownloadFile()
+			assertForbiddenResponse(t, rec)
+			require.NotContains(t, rec.Body.String(), "top-secret")
+		}
+	})
+
+	t.Run("RemoveFiles", func(t *testing.T) {
+		ctrl, rec := newFilesystemController(t, http.MethodDelete, "/files?path="+url.QueryEscape(blockedFile), nil)
+		ctrl.RemoveFiles()
+		assertForbiddenResponse(t, rec)
+		_, err := os.Stat(blockedFile)
+		require.NoError(t, err, "blocked file must not be deleted")
+	})
+
+	t.Run("ChmodFiles", func(t *testing.T) {
+		body, err := json.Marshal(map[string]model.Permission{blockedFile: {Mode: 777}})
+		require.NoError(t, err)
+		ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/permissions", body)
+		ctrl.ChmodFiles()
+		assertForbiddenResponse(t, rec)
+	})
+
+	t.Run("RenameFiles", func(t *testing.T) {
+		for _, item := range []model.RenameFileItem{
+			{Src: blockedFile, Dest: filepath.Join(workspace, "stolen.txt")},
+			{Src: normalFile, Dest: filepath.Join(blockedDir, "injected.txt")},
+		} {
+			body, err := json.Marshal([]model.RenameFileItem{item})
+			require.NoError(t, err)
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", body)
+			ctrl.RenameFiles()
+			assertForbiddenResponse(t, rec)
+		}
+	})
+
+	t.Run("ReplaceContent", func(t *testing.T) {
+		body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
+			blockedFile: {Old: "top-secret", New: "tampered"},
+		})
+		require.NoError(t, err)
+		ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/replace", body)
+		ctrl.ReplaceContent()
+		assertForbiddenResponse(t, rec)
+		data, err := os.ReadFile(blockedFile)
+		require.NoError(t, err)
+		require.Equal(t, "top-secret\nline2\n", string(data))
+	})
+
+	t.Run("UploadFile direct and via symlink", func(t *testing.T) {
+		targets := []string{filepath.Join(blockedDir, "new.txt")}
+		if runtime.GOOS != "windows" {
+			linkPath := filepath.Join(workspace, "upload-link.txt")
+			require.NoError(t, os.Symlink(blockedFile, linkPath))
+			targets = append(targets, linkPath)
+		}
+		for _, target := range targets {
+			body, contentType := buildUploadMultipart(t, target, []byte("overwritten"))
+			ctx, rec := newTestContext(http.MethodPost, "/files/upload", body.Bytes())
+			ctx.Request.Header.Set("Content-Type", contentType)
+			ctrl := NewFilesystemController(ctx)
+			ctrl.UploadFile()
+			assertForbiddenResponse(t, rec)
+		}
+		data, err := os.ReadFile(blockedFile)
+		require.NoError(t, err)
+		require.Equal(t, "top-secret\nline2\n", string(data))
+		_, err = os.Stat(filepath.Join(blockedDir, "new.txt"))
+		require.True(t, os.IsNotExist(err))
+	})
+
+	t.Run("MakeDirs", func(t *testing.T) {
+		newBlockedDir := filepath.Join(blockedDir, "sub", "dir")
+		body, err := json.Marshal(map[string]model.Permission{newBlockedDir: {Mode: 755}})
+		require.NoError(t, err)
+		ctrl, rec := newFilesystemController(t, http.MethodPost, "/directories", body)
+		ctrl.MakeDirs()
+		assertForbiddenResponse(t, rec)
+		_, err = os.Stat(newBlockedDir)
+		require.True(t, os.IsNotExist(err))
+	})
+
+	t.Run("RemoveDirs", func(t *testing.T) {
+		ctrl, rec := newFilesystemController(t, http.MethodDelete, "/directories?path="+url.QueryEscape(blockedDir), nil)
+		ctrl.RemoveDirs()
+		assertForbiddenResponse(t, rec)
+		_, err := os.Stat(blockedDir)
+		require.NoError(t, err, "blocked dir must not be deleted")
+	})
+
+	t.Run("ListDirectory", func(t *testing.T) {
+		for _, target := range []string{"/proc", blockedDir} {
+			ctrl, rec := newFilesystemController(t, http.MethodGet, "/directories/list?path="+url.QueryEscape(target), nil)
+			ctrl.ListDirectory()
+			assertForbiddenResponse(t, rec)
+		}
+	})
+
+	t.Run("SearchFiles", func(t *testing.T) {
+		for _, target := range []string{"/proc", blockedDir} {
+			ctrl, rec := newFilesystemController(t, http.MethodGet, "/files/search?path="+url.QueryEscape(target), nil)
+			ctrl.SearchFiles()
+			assertForbiddenResponse(t, rec)
+		}
+	})
+}
+
+func TestFilesystemControllerWalkSkipsBlockedSubtrees(t *testing.T) {
+	root := t.TempDir()
+	allowedDir := filepath.Join(root, "workspace")
+	blockedDir := filepath.Join(root, "platform")
+	awsDir := filepath.Join(allowedDir, ".aws")
+	require.NoError(t, os.MkdirAll(awsDir, 0o755))
+	require.NoError(t, os.MkdirAll(blockedDir, 0o755))
+
+	okFile := filepath.Join(allowedDir, "hello.txt")
+	secretFile := filepath.Join(blockedDir, "secret.txt")
+	awsCred := filepath.Join(awsDir, "credentials")
+	require.NoError(t, os.WriteFile(okFile, []byte("hello"), 0o644))
+	require.NoError(t, os.WriteFile(secretFile, []byte("secret"), 0o600))
+	require.NoError(t, os.WriteFile(awsCred, []byte("aws-secret"), 0o600))
+
+	if runtime.GOOS != "windows" {
+		require.NoError(t, os.Symlink(secretFile, filepath.Join(allowedDir, "leak")))
+	}
+
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{blockedDir},
+		DenyGlobs:         []string{"**/.aws/credentials"},
+	})
+
+	t.Run("ListDirectory skips blocked subtrees and files", func(t *testing.T) {
+		ctrl, rec := newFilesystemController(
+			t,
+			http.MethodGet,
+			fmt.Sprintf("/directories/list?path=%s&depth=4", url.QueryEscape(root)),
+			nil,
+		)
+		ctrl.ListDirectory()
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var entries []model.FileInfo
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+		paths := make([]string, 0, len(entries))
+		for _, e := range entries {
+			paths = append(paths, e.Path)
+		}
+		require.Contains(t, paths, okFile)
+		require.NotContains(t, paths, blockedDir)
+		require.NotContains(t, paths, secretFile)
+		require.NotContains(t, paths, awsCred)
+		require.NotContains(t, paths, filepath.Join(allowedDir, "leak"))
+	})
+
+	t.Run("SearchFiles skips blocked subtrees and files", func(t *testing.T) {
+		ctrl, rec := newFilesystemController(
+			t,
+			http.MethodGet,
+			fmt.Sprintf("/files/search?path=%s&pattern=**", url.QueryEscape(root)),
+			nil,
+		)
+		ctrl.SearchFiles()
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var entries []model.FileInfo
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+		paths := make([]string, 0, len(entries))
+		for _, e := range entries {
+			paths = append(paths, e.Path)
+		}
+		require.Equal(t, []string{okFile}, paths)
+	})
+}
+
+func TestFilesystemControllerRejectsFIFO(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("FIFO not supported on Windows")
+	}
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{})
+
+	fifoPath := filepath.Join(t.TempDir(), "hang.fifo")
+	require.NoError(t, syscall.Mkfifo(fifoPath, 0o600))
+
+	// On Linux openGuardedReadFile uses O_NONBLOCK + fstat to reject FIFOs
+	// immediately without blocking. On non-Linux (macOS) os.Open without
+	// O_NONBLOCK would block on a FIFO with no writer, so only run the
+	// non-blocking open test on Linux.
+	if runtime.GOOS != "linux" {
+		t.Skip("non-blocking FIFO rejection via openat2/O_NONBLOCK is Linux-specific")
+	}
+
+	ctrl, rec := newFilesystemController(t, http.MethodGet, "/files/download?path="+url.QueryEscape(fifoPath), nil)
+	ctrl.DownloadFile()
+	assertForbiddenResponse(t, rec)
+
+	body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
+		fifoPath: {Old: "a", New: "b"},
+	})
+	require.NoError(t, err)
+	ctrl2, rec2 := newFilesystemController(t, http.MethodPost, "/files/replace", body)
+	ctrl2.ReplaceContent()
+	assertForbiddenResponse(t, rec2)
+}

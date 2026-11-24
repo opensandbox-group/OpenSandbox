@@ -57,6 +57,15 @@ func (c *FilesystemController) DownloadFile() {
 		c.handleFileError(err)
 		return
 	}
+	absFilePath, err := filepath.Abs(resolvedFilePath)
+	if err != nil {
+		c.handleFileError(err)
+		return
+	}
+	if err := checkFilesystemPath(absFilePath); err != nil {
+		c.handleFileError(err)
+		return
+	}
 
 	rawOffset := c.ctx.Query("offset")
 	rawLimit := c.ctx.Query("limit")
@@ -72,7 +81,7 @@ func (c *FilesystemController) DownloadFile() {
 		return
 	}
 
-	file, err := os.Open(resolvedFilePath)
+	file, err := openGuardedReadFile(absFilePath)
 	if err != nil {
 		c.handleFileError(err)
 		return

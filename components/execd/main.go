@@ -99,6 +99,7 @@ func run() int {
 
 	// Materialize the internal environment transport before the HTTP server
 	// can launch user code, then remove it from execd's process environment.
+	lifecycleConfigPath := os.Getenv(lifecycle.ConfigPathEnv)
 	lifecycleConfig, err := lifecycle.LoadConfig()
 	if err != nil {
 		log.Error("lifecycle: config: %v", err)
@@ -106,6 +107,16 @@ func run() int {
 	}
 	_ = os.Unsetenv(lifecycle.ConfigEnv)
 	_ = os.Unsetenv(lifecycle.ConfigPathEnv)
+
+	if err := controller.InitFilesystemGuard(buildFilesystemGuardPolicy(
+		isoCfg,
+		flag.IsolationConfigPath,
+		lifecycleConfigPath,
+		flag.LifecycleStartupStatusFile,
+	)); err != nil {
+		log.Error("filesystem guard: %v", err)
+		return 1
+	}
 
 	// Start the eBPF observation layer ([ebpf] enabled, OSEP-0018 §5).
 	// The stub build reports disabled; the execd-ebpf variant attaches the
@@ -224,6 +235,39 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+// buildFilesystemGuardPolicy collects dynamic platform paths and optional
+// operator deny rules on top of the controller's built-in blocked roots.
+func buildFilesystemGuardPolicy(
+	isoCfg isolation.Config,
+	isolationConfigPath string,
+	lifecycleConfigPath string,
+	lifecycleStatusFile string,
+) controller.FilesystemGuardPolicy {
+	var extraPaths []string
+	addIfSet := func(p string) {
+		if p != "" {
+			extraPaths = append(extraPaths, p)
+		}
+	}
+	addIfSet(isoCfg.UpperRoot)
+	addIfSet(isolationConfigPath)
+	addIfSet(lifecycleConfigPath)
+	addIfSet(lifecycleStatusFile)
+	if isoCfg.Ebpf != nil {
+		addIfSet(isoCfg.Ebpf.AuditFile)
+	}
+
+	var denyGlobs []string
+	if isoCfg.Filesystem != nil {
+		extraPaths = append(extraPaths, isoCfg.Filesystem.DenyPaths...)
+		denyGlobs = append(denyGlobs, isoCfg.Filesystem.DenyGlobs...)
+	}
+	return controller.FilesystemGuardPolicy{
+		ExtraBlockedPaths: extraPaths,
+		DenyGlobs:         denyGlobs,
+	}
 }
 
 // entryLauncher adapts a nil init-mode launcher (classic mode) into the

@@ -18,8 +18,10 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -32,8 +34,11 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
+	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
+
+const filesystemGuardPolicyFlag = "--guard-policy-fd=4"
 
 func serveFilesystemIdentity(c *gin.Context, uid, gid uint32) {
 	fail := func(err error) {
@@ -58,8 +63,31 @@ func serveFilesystemIdentity(c *gin.Context, uid, gid uint32) {
 	defer conn.Close()
 	// Re-exec the currently running inode, rather than resolving an executable
 	// through a workload-controlled PATH or a replaceable filesystem path.
-	cmd := exec.Command("/proc/self/exe", FilesystemWorkerArg, c.Param("uid"), c.Param("gid"))
-	cmd.ExtraFiles = []*os.File{child}
+	args := []string{FilesystemWorkerArg, c.Param("uid"), c.Param("gid")}
+	extraFiles := []*os.File{child}
+	var policyRead *os.File
+	if policy := controller.CurrentFilesystemGuardPolicy(); !policy.IsZero() {
+		policyBytes, err := json.Marshal(policy)
+		if err != nil {
+			fail(err)
+			return
+		}
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			fail(err)
+			return
+		}
+		policyRead = pr
+		defer policyRead.Close()
+		go func() {
+			_, _ = pw.Write(policyBytes)
+			_ = pw.Close()
+		}()
+		extraFiles = append(extraFiles, policyRead)
+		args = append(args, filesystemGuardPolicyFlag)
+	}
+	cmd := exec.Command("/proc/self/exe", args...)
+	cmd.ExtraFiles = extraFiles
 	cmd.Stderr = os.Stderr
 	stop, err := runtime.StartFilesystemWorker(cmd, uid, gid)
 	if err != nil {
@@ -68,6 +96,9 @@ func serveFilesystemIdentity(c *gin.Context, uid, gid uint32) {
 	}
 	defer stop()
 	_ = child.Close()
+	if policyRead != nil {
+		_ = policyRead.Close()
+	}
 
 	transport := &http.Transport{
 		DisableKeepAlives:  true,
@@ -100,7 +131,7 @@ func serveFilesystemIdentity(c *gin.Context, uid, gid uint32) {
 // RunFilesystemWorker serves one HTTP request over inherited socket fd 3.
 // There is no listening network endpoint and no command/proxy route.
 func RunFilesystemWorker() error {
-	if len(os.Args) != 4 {
+	if len(os.Args) != 4 && (len(os.Args) != 5 || os.Args[4] != filesystemGuardPolicyFlag) {
 		return fmt.Errorf("invalid filesystem worker arguments")
 	}
 	uid, err := parseFilesystemID(os.Args[2])
@@ -128,6 +159,21 @@ func RunFilesystemWorker() error {
 			if capabilities.Effective != 0 || capabilities.Permitted != 0 || capabilities.Inheritable != 0 {
 				return fmt.Errorf("unprivileged filesystem worker inherited capabilities")
 			}
+		}
+	}
+	if len(os.Args) == 5 && os.Args[4] == filesystemGuardPolicyFlag {
+		policyFile := os.NewFile(4, "filesystem-guard-policy")
+		policyData, err := io.ReadAll(policyFile)
+		_ = policyFile.Close()
+		if err != nil {
+			return fmt.Errorf("read filesystem guard policy: %w", err)
+		}
+		var policy controller.FilesystemGuardPolicy
+		if err := json.Unmarshal(policyData, &policy); err != nil {
+			return fmt.Errorf("parse filesystem guard policy: %w", err)
+		}
+		if err := controller.InitFilesystemGuard(policy); err != nil {
+			return fmt.Errorf("init filesystem guard policy: %w", err)
 		}
 	}
 	file := os.NewFile(3, "filesystem-worker")

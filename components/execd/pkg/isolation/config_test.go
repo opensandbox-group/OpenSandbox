@@ -165,6 +165,35 @@ func TestLoadConfigQoSInvalid(t *testing.T) {
 	}
 }
 
+func TestLoadConfigFilesystem(t *testing.T) {
+	cfg, err := LoadConfig(writeTempTOML(t, `
+[filesystem]
+deny_paths = ["/etc/shadow", "/var/secrets"]
+deny_globs = ["**/.kube/config", "**/.aws/credentials"]
+`))
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Filesystem)
+	assert.Equal(t, []string{"/etc/shadow", "/var/secrets"}, cfg.Filesystem.DenyPaths)
+	assert.Equal(t, []string{"**/.kube/config", "**/.aws/credentials"}, cfg.Filesystem.DenyGlobs)
+}
+
+func TestLoadConfigFilesystemInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{name: "empty deny_paths entry", content: "[filesystem]\ndeny_paths = ['']"},
+		{name: "empty deny_globs entry", content: "[filesystem]\ndeny_globs = [' ']"},
+		{name: "invalid glob syntax", content: "[filesystem]\ndeny_globs = ['[unclosed']"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfig(writeTempTOML(t, tc.content))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "isolation config:")
+		})
+	}
+}
+
 func writeTempTOML(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "isolation.toml")

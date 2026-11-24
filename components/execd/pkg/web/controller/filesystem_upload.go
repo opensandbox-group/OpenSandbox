@@ -157,6 +157,17 @@ func resolveUploadTarget(targetPath string, perm model.Permission) (string, *upl
 			fmt.Sprintf("error resolving target path %s. %v", targetPath, err),
 		)
 	}
+	absPath, err := filepath.Abs(resolvedPath)
+	if err != nil {
+		return "", newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error resolving target path %s. %v", targetPath, err),
+		)
+	}
+	if err := checkFilesystemPath(absPath); err != nil {
+		return "", newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
+	}
 	targetDir := filepath.Dir(resolvedPath)
 	if err := MkdirAllWithOwnership(targetDir, os.ModePerm, perm.Owner, perm.Group); err != nil {
 		return "", newUploadError(
@@ -203,6 +214,17 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 	if uerr != nil {
 		return uerr
 	}
+	absTarget, err := filepath.Abs(resolvedTarget)
+	if err != nil {
+		return newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error resolving destination file %s. %v", target, err),
+		)
+	}
+	if err := checkFilesystemPath(absTarget); err != nil {
+		return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
+	}
 
 	existing, statErr := os.Stat(resolvedTarget)
 	switch {
@@ -217,8 +239,11 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 	case statErr == nil:
 		// A rename only needs a writable directory, so probe the file itself to
 		// keep rejecting a read-only destination the way an in-place write did.
-		probe, err := os.OpenFile(resolvedTarget, os.O_WRONLY, 0)
+		probe, err := openGuardedWriteFile(absTarget, os.O_WRONLY, 0)
 		if err != nil {
+			if errors.Is(err, errForbiddenPath) {
+				return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
+			}
 			return newUploadError(
 				http.StatusInternalServerError,
 				model.ErrorCodeRuntimeError,
@@ -315,8 +340,22 @@ func uploadDestinationMode(mode os.FileMode) os.FileMode {
 // not writable but whose file is. Unlike the staged path it truncates first, so
 // a copy that fails partway loses the previous content.
 func writeUploadInPlace(target string, r io.Reader) *uploadError {
-	file, err := os.OpenFile(target, os.O_WRONLY|os.O_TRUNC, 0)
+	absTarget, err := filepath.Abs(target)
 	if err != nil {
+		return newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error resolving destination file %s. %v", target, err),
+		)
+	}
+	if err := checkFilesystemPath(absTarget); err != nil {
+		return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
+	}
+	file, err := openGuardedWriteFile(absTarget, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		if errors.Is(err, errForbiddenPath) {
+			return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
+		}
 		return newUploadError(
 			http.StatusInternalServerError,
 			model.ErrorCodeRuntimeError,
