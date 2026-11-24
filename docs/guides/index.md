@@ -10,6 +10,7 @@ Use these guides to add capabilities to a working [sandbox application](/getting
 ## Lifecycle and security
 
 - [Pause and resume](/guides/pause-resume)
+- [Snapshot modes](/guides/snapshot-modes)
 - [Lifecycle hooks](/guides/lifecycle-hooks)
 - [Isolation sessions](/guides/isolation-sessions)
 - [In-sandbox privilege reduction](/guides/privilege-reduction)
