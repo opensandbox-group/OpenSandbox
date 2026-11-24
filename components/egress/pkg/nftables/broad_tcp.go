@@ -4,18 +4,28 @@
 package nftables
 
 import (
-	"fmt"
 	"net/netip"
 	"slices"
-	"strings"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
 
-// A sparse longest-prefix map for TCP connections whose host was not named.
-// Children override their parent, including with an empty set. The invalid
-// prefix is the common root; /0 rules still belong to their own family.
-type broadTCP map[netip.Prefix]tcpSpans
+// Each prefix stores only ports that change relative to its parent. A
+// single-host exception never copies the entire network's port list.
+type portDelta struct {
+	block, spare tcpSpans
+	netPorts     int // Cardinality change without expanding the inherited list.
+}
+
+func (r portDelta) apply(prior, window tcpSpans) tcpSpans {
+	return prior.subtract(r.spare).union(r.block.intersect(window))
+}
+
+type broadTCP struct {
+	rules  map[netip.Prefix]portDelta
+	depths []int // sorted prefix lengths actually present; -1 is the common root
+}
 
 func parentScope(p netip.Prefix) netip.Prefix {
 	if p.Bits() <= 0 {
@@ -24,33 +34,110 @@ func parentScope(p netip.Prefix) netip.Prefix {
 	return netip.PrefixFrom(p.Addr(), p.Bits()-1).Masked()
 }
 
-func (m broadTCP) lookup(p netip.Prefix) tcpSpans {
-	if len(m) == 0 {
-		return nil
+func scopeAt(a netip.Addr, depth int) netip.Prefix {
+	if depth < 0 {
+		return netip.Prefix{}
 	}
-	for p.IsValid() {
-		if v, ok := m[p]; ok {
-			return v
-		}
-		p = parentScope(p)
-	}
-	return m[netip.Prefix{}]
+	return netip.PrefixFrom(a, depth).Masked()
 }
 
-func (m broadTCP) at(a netip.Addr) tcpSpans { return m.lookup(netip.PrefixFrom(a, a.BitLen())) }
+func (m broadTCP) contains(a netip.Addr, port int) bool {
+	for i := len(m.depths) - 1; i >= 0; i-- {
+		if depth := m.depths[i]; depth <= a.BitLen() {
+			r := m.rules[scopeAt(a, depth)]
+			if r.block.contains(port) {
+				return true
+			}
+			if r.spare.contains(port) {
+				return false
+			}
+		}
+	}
+	return false
+}
 
-// Once newly configured wide allows and denies coincide, the legacy union
-// of keeps no longer expresses what was actually reopened. From then on,
-// carry blocked = priorBlocked ∩ currentlyDenied for unnamed destinations.
-// Exact subjects, dynamic permits and non-TCP verdicts remain independent.
-func (d EstablishedDrops) carryBroadTCP(previous, next *policy.NetworkPolicy, allows, denies tcpTargets, exact exactTCP) broadTCP {
-	if d.broad == nil {
-		wide := func(t tcpTarget) bool { return !t.prefix.IsSingleIP() }
-		if !(d.CatchAll || len(d.Prefixes)+len(d.PortDrops) != 0) || !slices.ContainsFunc(denies, wide) ||
-			!(next.DefaultAction == policy.ActionAllow || slices.ContainsFunc(allows, wide)) {
+func (m *broadTCP) record(p netip.Prefix, ports, parent tcpSpans) {
+	if slices.Equal(ports, parent) {
+		return
+	}
+	if m.rules == nil {
+		m.rules = make(map[netip.Prefix]portDelta)
+	}
+	change := portDelta{block: ports.subtract(parent), spare: parent.subtract(ports)}
+	for _, span := range change.block {
+		change.netPorts += span.Hi - span.Lo + 1
+	}
+	for _, span := range change.spare {
+		change.netPorts -= span.Hi - span.Lo + 1
+	}
+	m.rules[p] = change
+	if i, present := slices.BinarySearch(m.depths, p.Bits()); !present {
+		m.depths = slices.Insert(m.depths, i, p.Bits())
+	}
+}
+
+func (m broadTCP) anyAt(a netip.Addr) bool {
+	n := 0
+	for _, depth := range m.depths {
+		if depth > a.BitLen() {
+			break
+		}
+		n += m.rules[scopeAt(a, depth)].netPorts
+	}
+	return n != 0
+}
+
+func (m broadTCP) at(a netip.Addr) tcpSpans {
+	var ports tcpSpans
+	for _, depth := range m.depths {
+		if depth > a.BitLen() {
+			break
+		}
+		if r, ok := m.rules[scopeAt(a, depth)]; ok {
+			ports = r.apply(ports, allTCP)
+		}
+	}
+	return ports
+}
+
+// The two disjoint port sets are evaluated before and after a DNS grant.
+// Together they are the full static TCP verdict, including exact targets.
+type tcpPlan struct {
+	early, late broadTCP
+}
+
+const maxDNSExceptions = maxResolvedDomains * maxDomainAddresses
+
+// Preserve genuine earlier admissions while the static baseline still cuts
+// those ports. An ACK (or a lease staged in the same static transaction)
+// also admits everything that DNS precedes. Empty means no history or slot.
+func (p tcpPlan) exception(a netip.Addr, previous tcpSpans, live bool) tcpSpans {
+	// A full exemption can be shared. Subsequent plain reloads can only
+	// shrink the baseline, and an explicit opt-in starts a new plan.
+	if full := previous.coversBounds(allTCP); live || full {
+		if early := p.early.anyAt(a); full || !early {
+			if early || p.late.anyAt(a) {
+				return allTCP
+			}
 			return nil
 		}
 	}
+	late := p.late.at(a)
+	if live {
+		if len(previous) == 0 {
+			return late
+		}
+		return late.union(previous.intersect(p.early.at(a)))
+	}
+	if len(previous) == 0 {
+		return nil
+	}
+	return previous.intersect(p.early.at(a).union(late))
+}
+
+// A non-nil previous plan means plain reload. There is deliberately no
+// special case for the presence of a *new* deny: default deny counts too.
+func (d EstablishedDrops) planTCP(p *policy.NetworkPolicy, previous *tcpPlan) tcpPlan {
 	const (
 		early = iota
 		late
@@ -62,11 +149,6 @@ func (d EstablishedDrops) carryBroadTCP(previous, next *policy.NetworkPolicy, al
 	byScope := make(map[netip.Prefix]inputs)
 	root := netip.Prefix{}
 	add := func(k int, p netip.Prefix, spans tcpSpans) {
-		if p.IsSingleIP() {
-			if _, ok := exact[p.Addr()]; ok {
-				return
-			}
-		}
 		s := byScope[p]
 		s[k].add(spans)
 		byScope[p] = s
@@ -76,12 +158,16 @@ func (d EstablishedDrops) carryBroadTCP(previous, next *policy.NetworkPolicy, al
 			add(k, r.prefix, r.spans)
 		}
 	}
-	if d.broad == nil {
-		// Reconstruct the previous installed verdict, not the new allows.
-		// Old singleton address buckets are already owned by the exact plan.
+	if previous == nil {
+		// Match the rules in the opt-in transaction, including raw static accepts.
 		addRules(early, compiledTCP(d.DenyPortDrops))
 		addRules(late, compiledTCP(d.PortDrops))
 		addRules(keep, compiledTCP(d.KeepPorts))
+		for k, addrs := range [3][]netip.Addr{d.DenyAddrs, d.Addrs, d.KeepAddrs} {
+			for _, a := range addrs {
+				add(k, hostPrefix(a), allTCP)
+			}
+		}
 		for _, p := range d.DenyPrefixes {
 			add(early, p, allTCP)
 		}
@@ -91,79 +177,125 @@ func (d EstablishedDrops) carryBroadTCP(previous, next *policy.NetworkPolicy, al
 		for _, p := range d.KeepPrefixes {
 			add(keep, p, allTCP)
 		}
-		for _, p := range compilePortlessIPPolicy(previous).allow {
+		for _, p := range compilePortlessIPPolicy(p).allow {
 			add(keep, p, allTCP)
 		}
 		if d.CatchAll {
 			add(late, root, allTCP)
 		}
 	} else {
-		for p := range d.broad {
+		if len(previous.early.rules)+len(previous.late.rules) == 0 {
+			return tcpPlan{}
+		}
+		allows, denies := tcpPolicy(p)
+		if p != nil && p.DefaultAction == policy.ActionAllow && len(denies) == 0 {
+			return tcpPlan{}
+		}
+		for p := range previous.early.rules {
 			byScope[p] = inputs{}
 		}
+		for p := range previous.late.rules {
+			byScope[p] = inputs{}
+		}
+		addRules(allow, allows)
+		addRules(deny, denies)
 	}
-	addRules(allow, allows)
-	addRules(deny, denies)
 	keys := make([]netip.Prefix, 0, len(byScope))
 	for p := range byScope {
 		keys = append(keys, p)
 	}
-	slices.SortFunc(keys, func(a, b netip.Prefix) int { return a.Bits() - b.Bits() })
-	out := make(broadTCP)
-	for _, p := range keys {
-		s := byScope[p]
-		for i := range s {
-			s[i].normalized()
+	// Address order visits parents before children and keeps each subtree
+	// contiguous. Only ports mentioned at this node can change its verdict.
+	slices.SortFunc(keys, func(a, b netip.Prefix) int {
+		if c := a.Addr().Compare(b.Addr()); c != 0 {
+			return c
 		}
-		if p.IsValid() {
-			for parent := parentScope(p); ; parent = parentScope(parent) {
-				if inherited, ok := byScope[parent]; ok {
-					for i := range s {
-						s[i].spans = inherited[i].spans.union(s[i].spans)
-					}
-					break
-				}
-				if !parent.IsValid() {
-					break
-				}
+		return a.Bits() - b.Bits()
+	})
+	var out tcpPlan
+	var path []netip.Prefix
+	defaultAllow := p != nil && p.DefaultAction == policy.ActionAllow
+	for _, p := range keys {
+		for len(path) > 0 {
+			parent := path[len(path)-1]
+			if !parent.IsValid() || parent.Contains(p.Addr()) {
+				break
+			}
+			path = path[:len(path)-1]
+		}
+		local := byScope[p]
+		var window tcpSpans
+		for i := range local {
+			window = window.union(local[i].normalized())
+		}
+		byScope[p] = local
+		var oldEarly, oldLate portDelta
+		if previous != nil {
+			oldEarly, oldLate = previous.early.rules[p], previous.late.rules[p]
+			for _, r := range [2]portDelta{oldEarly, oldLate} {
+				window = window.union(r.block).union(r.spare)
 			}
 		}
-		byScope[p] = s
-		blocked := d.broad.lookup(p)
-		if d.broad == nil {
-			blocked = s[early].spans.union(s[late].spans.subtract(s[keep].spans))
+		var parentEarly, parentLate, priorEarly, priorLate tcpSpans
+		for _, ancestor := range path {
+			for i, r := range byScope[ancestor] {
+				local[i].spans = local[i].spans.union(r.spans.intersect(window))
+			}
+			parentEarly = out.early.rules[ancestor].apply(parentEarly, window)
+			parentLate = out.late.rules[ancestor].apply(parentLate, window)
+			if previous != nil {
+				priorEarly = previous.early.rules[ancestor].apply(priorEarly, window)
+				priorLate = previous.late.rules[ancestor].apply(priorLate, window)
+			}
 		}
-		left := blocked.intersect(s[deny].spans)
-		if next.DefaultAction != policy.ActionAllow {
-			left = left.union(blocked.subtract(s[allow].spans))
+		var beforeDNS, afterDNS tcpSpans
+		if previous == nil {
+			beforeDNS = local[early].spans
+			afterDNS = local[late].spans.subtract(local[keep].spans).subtract(beforeDNS)
+		} else {
+			blocked := oldEarly.apply(priorEarly, window).union(oldLate.apply(priorLate, window))
+			beforeDNS = blocked.intersect(local[deny].spans)
+			if !defaultAllow {
+				afterDNS = blocked.subtract(local[allow].spans).subtract(beforeDNS)
+			}
 		}
-		if !slices.Equal(left, out.lookup(parentScope(p))) {
-			out[p] = left
+		out.early.record(p, beforeDNS, parentEarly)
+		out.late.record(p, afterDNS, parentLate)
+		if !p.IsSingleIP() {
+			path = append(path, p)
 		}
 	}
 	return out
 }
 
-// Emit only the differences from the containing prefix, most specific first.
-// A shared port floor need not be repeated at every more-specific scope.
-func (m broadTCP) write(b *strings.Builder) {
-	keys := make([]netip.Prefix, 0, len(m))
-	for p := range m {
-		keys = append(keys, p)
+func (d *EstablishedDrops) captureTCP(p *policy.NetworkPolicy, leases map[netip.Addr]time.Time) {
+	if d.Empty() {
+		return
 	}
-	slices.SortFunc(keys, func(a, b netip.Prefix) int {
-		if a.Bits() != b.Bits() {
-			return b.Bits() - a.Bits()
+	plan := d.planTCP(p, nil)
+	d.tcp = &plan
+	d.retainDNS(nil, leases)
+}
+
+func (d *EstablishedDrops) retainDNS(previous map[netip.Addr]tcpSpans, leases map[netip.Addr]time.Time) {
+	store := func(a netip.Addr, ports tcpSpans, live bool) {
+		if keep := d.tcp.exception(a, ports, live); len(keep) != 0 {
+			if d.dnsKeeps == nil {
+				d.dnsKeeps = make(map[netip.Addr]tcpSpans)
+			}
+			d.dnsKeeps[a] = keep
 		}
-		return a.Addr().Compare(b.Addr())
-	})
-	for _, p := range keys {
-		var parent tcpSpans
-		if p.IsValid() {
-			parent = m.lookup(parentScope(p))
-		}
-		writeEstablishedPortRule(b, EstablishedPortDrop{Prefix: p, Ranges: m[p].subtract(parent)}, "drop")
-		writeEstablishedPortRule(b, EstablishedPortDrop{Prefix: p, Ranges: parent.subtract(m[p])}, "accept")
 	}
-	fmt.Fprintf(b, "add rule inet %s %s meta l4proto tcp ct state established,related accept\n", tableName, chainName)
+	for a, ports := range previous {
+		_, live := leases[a]
+		store(a, ports, live)
+	}
+	for a := range leases {
+		if _, processed := previous[a]; !processed {
+			if len(d.dnsKeeps) > maxDNSExceptions {
+				return // The caller rejects this plan before any kernel write.
+			}
+			store(a, nil, true)
+		}
+	}
 }

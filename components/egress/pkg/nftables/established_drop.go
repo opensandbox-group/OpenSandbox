@@ -16,7 +16,6 @@ package nftables
 
 import (
 	"net/netip"
-	"slices"
 	"sort"
 	"time"
 
@@ -38,18 +37,11 @@ type EstablishedPortDrop struct {
 	Ranges []policy.PortRange
 }
 
-// EstablishedDrops lists destinations whose established/related flows a
-// policy change should tear down. The nft chain evaluates the buckets in this
-// order, and MatchesFlow mirrors it:
-//
-//  1. infrastructure accepts (mark, loopback, DNS redirect, ::1, upstream proxy)
-//  2. explicitly denied destinations and carried explicit TCP withdrawals
-//  3. DNS accepts, then carried implicit TCP withdrawals
-//  4. Keep*: destinations the new policy still allows (static allows minus
-//     portless denies, surviving domain-lease IPs, port-scoped allows) plus
-//     the static allow sets — accepted
-//  5. Addrs/Prefixes/PortDrops: allows the change removed — dropped
-//  6. CatchAll ? blanket established drop : blanket established accept
+// EstablishedDrops holds the opt-in kernel buckets: explicit denies, then
+// DNS/static keeps, then removed allows and the catch-all. For TCP, tcp
+// records that effective verdict on opt-in and carries it across reloads in
+// two phases, before and after DNS. dnsKeeps holds only confirmed exceptions
+// to that verdict. The legacy address buckets still govern non-TCP traffic.
 type EstablishedDrops struct {
 	DenyAddrs     []netip.Addr
 	DenyPrefixes  []netip.Prefix
@@ -64,18 +56,16 @@ type EstablishedDrops struct {
 	KeepPrefixes []netip.Prefix
 	KeepPorts    []EstablishedPortDrop
 
-	exact        exactTCP
-	broad        broadTCP // Effective withdrawn ports for hosts not overridden by exact.
-	dnsSubjects  int      // Additional subjects remembered at DNS ACK during this opt-in.
-	exactCarried bool     // Opt-in uses the original rules; plain reloads use the saved TCP verdicts.
-	guardDNS     bool     // A late DNS grant must also respect still-denied broad TCP withdrawals.
+	tcp      *tcpPlan
+	dnsKeeps map[netip.Addr]tcpSpans // Only non-empty DNS exceptions to tcp; len is the quota.
+	carried  bool
 }
 
 // Empty reports whether there is nothing to drop. Keep entries alone never
 // change the ruleset.
 func (d EstablishedDrops) Empty() bool {
 	return len(d.DenyAddrs) == 0 && len(d.DenyPrefixes) == 0 && len(d.DenyPortDrops) == 0 &&
-		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll && !d.exact.hasDrops() && len(d.broad) == 0
+		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll && (d.tcp == nil || len(d.tcp.early.rules)+len(d.tcp.late.rules) == 0)
 }
 
 // Matches reports whether addr is covered by this drop set (port-agnostic).
@@ -96,16 +86,12 @@ func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
 	if addr.Unmap().IsLoopback() {
 		return false
 	}
+	if d.tcp != nil && dport > 0 {
+		return !d.dnsKeeps[addr].contains(dport) &&
+			(d.tcp.early.contains(addr, dport) || d.tcp.late.contains(addr, dport))
+	}
 	if targetsMatch(d.DenyAddrs, d.DenyPrefixes, d.DenyPortDrops, addr, dport) {
 		return true
-	}
-	if d.exactCarried && dport > 0 {
-		if w, tracked := d.exact[addr]; tracked {
-			return w.explicit.contains(dport) || w.implicit.contains(dport)
-		}
-	}
-	if d.broad != nil && dport > 0 {
-		return d.broad.at(addr).contains(dport)
 	}
 	if targetsMatch(d.KeepAddrs, d.KeepPrefixes, d.KeepPorts, addr, dport) {
 		return false
@@ -380,18 +366,19 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 // (p's allows plus the currently learned domain IPs) so a destination that was
 // allowed at any point after the commit is never torn down by a later plain
 // apply the caller did not opt in to.
-func (d EstablishedDrops) stillRelevant(previous, p *policy.NetworkPolicy, learned []netip.Addr, priorDNS knownDNS, leases map[netip.Addr]time.Time) EstablishedDrops {
+func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip.Addr, leases map[netip.Addr]time.Time) EstablishedDrops {
 	if d.Empty() {
 		return EstablishedDrops{}
 	}
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
-	allowTCP, denyTCP := tcpPolicy(p)
 	ipPolicy := compilePortlessIPPolicy(p)
-	var out EstablishedDrops
-
-	// Deny bucket: only what p still explicitly denies (it precedes keeps).
+	out := EstablishedDrops{carried: true}
+	tcp := d.planTCP(p, d.tcp)
+	out.tcp = &tcp
+	out.retainDNS(d.dnsKeeps, leases)
+	// The remaining address buckets carry non-TCP teardown.
 	curDeny := ipPolicy.deny
 	denyAddrs := newAddrSet()
 	for _, a := range d.DenyAddrs {
@@ -412,21 +399,8 @@ func (d EstablishedDrops) stillRelevant(previous, p *policy.NetworkPolicy, learn
 			}
 		}
 	}
-	_, portAllow := p.PortScopedRules()
 	out.DenyAddrs = denyAddrs.sorted()
 	out.DenyPrefixes = denyPrefixes.sorted()
-	out.DenyPortDrops = d.carryExplicitTCP(denyTCP, out.DenyPrefixes)
-	out.exact = d.carryExactTCP(previous, p, allowTCP, denyTCP, priorDNS, leases)
-	out.broad = d.carryBroadTCP(previous, p, allowTCP, denyTCP, out.exact)
-	if len(out.exact) != 0 {
-		out.dnsSubjects = d.dnsSubjects
-	}
-	out.exactCarried = len(out.exact) != 0
-	out.DenyPortDrops = slices.DeleteFunc(out.DenyPortDrops, func(drop EstablishedPortDrop) bool {
-		prefix := dropTCPPrefix(drop)
-		_, tracked := out.exact[prefix.Addr()]
-		return prefix.IsSingleIP() && tracked
-	})
 
 	// Removed bucket: drop entries p fully allows again; partial re-allows
 	// are shielded by the recomputed keeps.
@@ -442,72 +416,40 @@ func (d EstablishedDrops) stillRelevant(previous, p *policy.NetworkPolicy, learn
 			removedPrefixes.add(part)
 		}
 	}
-	for _, pd := range d.PortDrops {
-		if prefix := dropTCPPrefix(pd); prefix.IsSingleIP() {
-			if _, tracked := d.exact[prefix.Addr()]; tracked {
-				continue
-			}
-		}
-		switch {
-		case pd.Addr.IsValid():
-			ports, ranges := portsNoLongerAllowed(p, ipPolicy, pd.Addr, pd.Ports, pd.Ranges)
-			if len(ports) > 0 || len(ranges) > 0 {
-				out.PortDrops = append(out.PortDrops, EstablishedPortDrop{Addr: pd.Addr, Ports: ports, Ranges: ranges})
-			}
-		case pd.Prefix.IsValid():
-			if !portsFullyAllowedOnPrefix(p, ipPolicy, pd.Prefix, pd.Ports, pd.Ranges) {
-				out.PortDrops = append(out.PortDrops, pd)
-			}
-		}
-	}
 	out.Addrs = removedAddrs.sorted()
 	out.Prefixes = removedPrefixes.sorted()
 	out.CatchAll = d.CatchAll && p.DefaultAction != policy.ActionAllow
-	uncovered := func(p netip.Prefix) bool {
-		_, tracked := out.exact[p.Addr()]
-		return !p.IsSingleIP() || !tracked
-	}
-	out.guardDNS = slices.ContainsFunc(denyTCP, func(t tcpTarget) bool { return !t.prefix.IsSingleIP() }) &&
-		(len(out.broad) != 0 || out.CatchAll || slices.ContainsFunc(out.Prefixes, uncovered) ||
-			slices.ContainsFunc(out.Addrs, func(a netip.Addr) bool { return uncovered(hostPrefix(a)) }) ||
-			slices.ContainsFunc(out.PortDrops, func(d EstablishedPortDrop) bool { return uncovered(dropTCPPrefix(d)) }))
 
 	if out.Empty() {
 		return EstablishedDrops{}
 	}
+	if !out.CatchAll && len(out.Addrs)+len(out.Prefixes) == 0 {
+		return out // No late non-TCP teardown needs address exemptions.
+	}
 
 	// Keeps accumulate: previous keeps ∪ p's allows ∪ learned domain IPs.
 	keepAddrs := newAddrSet()
-	for _, a := range d.KeepAddrs {
-		keepAddrs.add(a)
-	}
-	for _, a := range learned {
-		keepAddrs.add(a)
-	}
 	keepPrefixes := newPrefixSet()
 	for _, pfx := range d.KeepPrefixes {
 		keepPrefixes.add(pfx)
 	}
 	ipPolicy.addKeeps(keepAddrs, keepPrefixes)
-	out.KeepAddrs = keepAddrs.sorted()
-	out.KeepPrefixes = keepPrefixes.sorted()
-	out.KeepPorts = append([]EstablishedPortDrop(nil), d.KeepPorts...)
-	for _, r := range portAllow {
-		cur, ok := portDropFromScoped(r)
-		if !ok {
-			continue
-		}
-		dup := false
-		for _, k := range out.KeepPorts {
-			if samePortDrop(k, cur) {
-				dup = true
-				break
+	for _, addresses := range [][]netip.Addr{d.KeepAddrs, learned} {
+		for _, a := range addresses {
+			p := hostPrefix(a)
+			for p.IsValid() {
+				if _, covered := keepPrefixes.seen[p]; covered {
+					break
+				}
+				p = parentScope(p)
+			}
+			if !p.IsValid() {
+				keepAddrs.add(a)
 			}
 		}
-		if !dup {
-			out.KeepPorts = append(out.KeepPorts, cur)
-		}
 	}
+	out.KeepAddrs = keepAddrs.sorted()
+	out.KeepPrefixes = keepPrefixes.sorted()
 	return out
 }
 
@@ -541,23 +483,6 @@ func exactPortDrop(addr netip.Addr, ports []int, ranges []policy.PortRange) Esta
 		drop.Addr = addr
 	}
 	return drop
-}
-
-func samePortDrop(a, b EstablishedPortDrop) bool {
-	if a.Addr != b.Addr || a.Prefix != b.Prefix || len(a.Ports) != len(b.Ports) || len(a.Ranges) != len(b.Ranges) {
-		return false
-	}
-	for i := range a.Ports {
-		if a.Ports[i] != b.Ports[i] {
-			return false
-		}
-	}
-	for i := range a.Ranges {
-		if a.Ranges[i] != b.Ranges[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // Compile the portless address view once, from the same typed IP/CIDR

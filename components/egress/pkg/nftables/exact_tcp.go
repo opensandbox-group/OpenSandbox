@@ -4,23 +4,11 @@
 package nftables
 
 import (
-	"encoding/binary"
-	"fmt"
-	"hash/maphash"
 	"net/netip"
 	"slices"
-	"strings"
-	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
-
-// Each entry owns the effective TCP withdrawal for an exact address. An empty
-// entry still exempts that host from the legacy address/prefix teardown, whose
-// late rules are retained for non-TCP and for destinations outside this plan.
-type exactTCP map[netip.Addr]tcpWithdrawal
-
-type tcpWithdrawal struct{ explicit, implicit tcpSpans }
 
 type tcpSpans []policy.PortRange // sorted, disjoint, immutable once published
 
@@ -77,6 +65,15 @@ func (a tcpSpans) coversBounds(b tcpSpans) bool {
 	return len(a) == 1 && len(b) != 0 && a[0].Lo <= b[0].Lo && a[0].Hi >= b[len(b)-1].Hi
 }
 
+// Skip unrelated ranges when comparing a local exception to a large floor.
+func (s tcpSpans) from(port int) tcpSpans {
+	if len(s) == 0 || s[0].Hi >= port {
+		return s
+	}
+	i, _ := slices.BinarySearchFunc(s, port, func(r policy.PortRange, p int) int { return r.Hi - p })
+	return s[i:]
+}
+
 func (a tcpSpans) intersect(b tcpSpans) tcpSpans {
 	if a.coversBounds(b) {
 		return b
@@ -84,6 +81,14 @@ func (a tcpSpans) intersect(b tcpSpans) tcpSpans {
 	if b.coversBounds(a) || slices.Equal(a, b) {
 		return a
 	}
+	if len(a) == 0 || len(b) == 0 {
+		return nil
+	}
+	b = b.from(a[0].Lo)
+	if len(b) == 0 {
+		return nil
+	}
+	a = a.from(b[0].Lo)
 	var out tcpSpans
 	for i, j := 0, 0; i < len(a) && j < len(b); {
 		x, y := a[i], b[j]
@@ -106,6 +111,7 @@ func (a tcpSpans) subtract(b tcpSpans) tcpSpans {
 	if b.coversBounds(a) || slices.Equal(a, b) {
 		return nil
 	}
+	b = b.from(a[0].Lo)
 	var out tcpSpans
 	j, changed := 0, false
 	for i, r := range a {
@@ -149,20 +155,9 @@ func (a tcpSpans) contains(port int) bool {
 type tcpTarget struct {
 	prefix netip.Prefix // invalid means a port-only rule
 	spans  tcpSpans
-	whole  bool
 }
 
 type tcpTargets []tcpTarget
-
-func (ts tcpTargets) at(addr netip.Addr) tcpSpans {
-	var spans tcpSpans
-	for _, t := range ts {
-		if !t.prefix.IsValid() || t.prefix.Contains(addr) {
-			spans = spans.union(t.spans)
-		}
-	}
-	return spans
-}
 
 func tcpPrefix(target string) netip.Prefix {
 	if a, err := netip.ParseAddr(target); err == nil {
@@ -177,12 +172,15 @@ func tcpPolicy(p *policy.NetworkPolicy) (allow, deny tcpTargets) {
 		return
 	}
 	for _, r := range p.Egress {
+		if p.DefaultAction == policy.ActionAllow && r.Action == policy.ActionAllow {
+			continue // The default already admits this entire scope.
+		}
 		prefix := tcpPrefix(r.Target)
 		whole := len(r.Ports)+len(r.PortRanges) == 0
 		if !prefix.IsValid() && (r.Target != "" || whole) {
 			continue
 		}
-		t := tcpTarget{prefix: prefix, spans: tcpRuleSpans(r.Ports, r.PortRanges), whole: whole}
+		t := tcpTarget{prefix: prefix, spans: tcpRuleSpans(r.Ports, r.PortRanges)}
 		if r.Action == policy.ActionAllow {
 			allow = append(allow, t)
 		} else {
@@ -205,99 +203,6 @@ func compiledTCP(ports []EstablishedPortDrop) tcpTargets {
 		out = append(out, tcpTarget{prefix: dropTCPPrefix(d), spans: tcpRuleSpans(d.Ports, d.Ranges)})
 	}
 	return out
-}
-
-// An address can be known from either the installed table or the domain
-// ledger. The latter can outlive a timed element; it is not a permit.
-type knownDNS struct {
-	installed map[netip.Addr]time.Time
-	domains   map[string]*resolvedDomain
-}
-
-func (s knownDNS) visit(f func(netip.Addr)) {
-	for a := range s.installed {
-		f(a)
-	}
-	for _, entry := range s.domains {
-		if entry != nil {
-			for a := range entry.addresses {
-				if _, found := s.installed[a]; !found {
-					f(a)
-				}
-			}
-		}
-	}
-}
-
-// Capture the verdict of the opt-in rules actually installed, including scoped
-// denies in front of a whole-address allow or of a live DNS grant.
-func (d *EstablishedDrops) captureExactTCP(old, p *policy.NetworkPolicy, dns knownDNS, leases map[netip.Addr]time.Time) {
-	if d.Empty() {
-		return
-	}
-	subjects := d.exactSubjects(old, p, dns, leases)
-	if len(subjects) == 0 {
-		return
-	}
-	snapshot := d.snapshotTCP(p)
-	hosts := make(exactTCP, len(d.Addrs))
-	for a := range subjects {
-		_, admitted := leases[a]
-		if w, lateDrop := snapshot(a, admitted); lateDrop || len(w.explicit) != 0 {
-			hosts[a] = w
-		}
-	}
-	d.exact = hosts
-}
-
-// Discover subjects, not verdicts. A named host can be denied by any bucket
-// (including CatchAll). Keep derived singleton targets and DNS addresses;
-// never expand a multi-address prefix to discover hosts.
-func (d EstablishedDrops) exactSubjects(old, next *policy.NetworkPolicy, dns knownDNS, leases map[netip.Addr]time.Time) map[netip.Addr]struct{} {
-	hosts := make(map[netip.Addr]struct{}, len(d.Addrs))
-	// A CIDR verdict can filter a DNS address out of both KeepAddrs and
-	// Addrs. DNS evidence identifies a subject, not an established permit.
-	dns.visit(func(a netip.Addr) { hosts[a] = struct{}{} })
-	for a := range leases {
-		hosts[a] = struct{}{}
-	}
-	for _, as := range [][]netip.Addr{d.Addrs, d.DenyAddrs, d.KeepAddrs} {
-		for _, a := range as {
-			hosts[a] = struct{}{}
-		}
-	}
-	for _, ps := range [][]netip.Prefix{d.Prefixes, d.DenyPrefixes, d.KeepPrefixes} {
-		for _, pr := range ps {
-			if pr.IsSingleIP() {
-				hosts[pr.Addr()] = struct{}{}
-			}
-		}
-	}
-	for _, ps := range [][]EstablishedPortDrop{d.PortDrops, d.DenyPortDrops, d.KeepPorts} {
-		for _, rule := range ps {
-			if pr := dropTCPPrefix(rule); pr.IsSingleIP() {
-				hosts[pr.Addr()] = struct{}{}
-			}
-		}
-	}
-	for _, p := range []*policy.NetworkPolicy{old, next} {
-		if p == nil {
-			continue
-		}
-		for _, r := range p.Egress {
-			if pr := tcpPrefix(r.Target); pr.IsSingleIP() {
-				hosts[pr.Addr()] = struct{}{}
-			}
-		}
-	}
-	return hosts
-}
-
-// Index exact targets once per plan. Only multi-address and global
-// rules require a containment check for each host.
-type snapshotTargets struct {
-	exact map[netip.Addr]hostSpans
-	wide  tcpTargets
 }
 
 type hostSpans struct {
@@ -324,358 +229,4 @@ func (group *hostSpans) normalized() tcpSpans {
 		group.merge = false
 	}
 	return group.spans
-}
-
-func (s *snapshotTargets) add(p netip.Prefix, spans tcpSpans) {
-	if !p.IsSingleIP() {
-		s.wide = append(s.wide, tcpTarget{prefix: p, spans: spans})
-		return
-	}
-	if s.exact == nil {
-		s.exact = make(map[netip.Addr]hostSpans)
-	}
-	a := p.Addr() // /128 preserves mapped IPv6, unlike an Addr bucket.
-	group := s.exact[a]
-	group.add(spans)
-	s.exact[a] = group
-}
-
-func (ts tcpTargets) indexed() snapshotTargets {
-	var s snapshotTargets
-	for _, t := range ts {
-		s.add(t.prefix, t.spans)
-	}
-	return s
-}
-
-func indexSnapshotTargets(addrs []netip.Addr, ports []EstablishedPortDrop, prefixSets ...[]netip.Prefix) snapshotTargets {
-	var s snapshotTargets
-	if len(addrs) != 0 {
-		s.exact = make(map[netip.Addr]hostSpans, len(addrs))
-		for _, a := range addrs {
-			s.exact[a.Unmap()] = hostSpans{spans: allTCP}
-		}
-	}
-	for _, prefixes := range prefixSets {
-		for _, p := range prefixes {
-			if p.IsValid() {
-				s.add(p, allTCP)
-			}
-		}
-	}
-	for _, rule := range ports {
-		s.add(dropTCPPrefix(rule), tcpRuleSpans(rule.Ports, rule.Ranges))
-	}
-	return s
-}
-
-func (s snapshotTargets) at(a netip.Addr) tcpSpans {
-	group := s.exact[a]
-	if group.merge {
-		group.normalized()
-		s.exact[a] = group
-	}
-	exact := group.spans
-	if len(s.wide) == 0 || exact.coversBounds(allTCP) {
-		return exact
-	}
-	return exact.union(s.wide.at(a))
-}
-
-// The bool distinguishes an unaffected host from a masked legacy drop: the
-// latter may need an empty TCP withdrawal to preserve its exemption later.
-func (d EstablishedDrops) snapshotTCP(p *policy.NetworkPolicy) func(netip.Addr, bool) (tcpWithdrawal, bool) {
-	deny := indexSnapshotTargets(d.DenyAddrs, d.DenyPortDrops, d.DenyPrefixes)
-	removed := indexSnapshotTargets(d.Addrs, d.PortDrops, d.Prefixes)
-	var keep snapshotTargets
-	if d.CatchAll || len(d.Addrs)+len(d.Prefixes)+len(d.PortDrops) != 0 {
-		keep = indexSnapshotTargets(d.KeepAddrs, d.KeepPorts, d.KeepPrefixes, compilePortlessIPPolicy(p).allow)
-	}
-	var dnsDenies snapshotTargets
-	if d.guardDNS {
-		_, current := tcpPolicy(p)
-		dnsDenies = current.indexed()
-	}
-	return func(a netip.Addr, admitted bool) (tcpWithdrawal, bool) {
-		early := deny.at(a)
-		late := allTCP
-		if d.broad != nil {
-			ports := d.broad.at(a)
-			late := ports.subtract(early)
-			if admitted {
-				late = late.intersect(dnsDenies.at(a))
-			}
-			return tcpWithdrawal{early, late}, len(ports) != 0
-		}
-		if !d.CatchAll {
-			late = removed.at(a)
-			if len(late) == 0 {
-				return tcpWithdrawal{explicit: early}, false
-			}
-		}
-		if admitted && !d.guardDNS {
-			late = nil
-		} else {
-			late = late.subtract(keep.at(a)).subtract(early)
-			if admitted {
-				late = late.intersect(dnsDenies.at(a))
-			}
-		}
-		return tcpWithdrawal{early, late}, true
-	}
-}
-
-func (d EstablishedDrops) carryExactTCP(previous, p *policy.NetworkPolicy, allow, deny tcpTargets, priorDNS knownDNS, leases map[netip.Addr]time.Time) exactTCP {
-	// Nothing in the new TCP policy can carry a block. In particular,
-	// do not walk old CIDR denies for every previously learned DNS address.
-	if p.DefaultAction == policy.ActionAllow && len(deny) == 0 {
-		return nil
-	}
-	allows, denies := allow.indexed(), deny.indexed()
-	reclassify := func(a netip.Addr, prev tcpWithdrawal) tcpWithdrawal {
-		blocked := prev.explicit.union(prev.implicit)
-		early := blocked.intersect(denies.at(a))
-		var late tcpSpans
-		if _, live := leases[a]; !live && p.DefaultAction != policy.ActionAllow {
-			late = blocked.subtract(early).subtract(allows.at(a))
-		}
-		return tcpWithdrawal{early, late}
-	}
-	out := make(exactTCP, len(d.exact))
-	for a, prev := range d.exact {
-		out[a] = reclassify(a, prev)
-	}
-	// A host first named on a plain reload also inherits the prior effective
-	// verdict, even when its new rule is an allow beneath a broader deny.
-	var snapshot func(netip.Addr, bool) (tcpWithdrawal, bool)
-	consider := func(a netip.Addr) {
-		if _, tracked := out[a]; tracked {
-			return
-		}
-		if snapshot == nil {
-			snapshot = d.snapshotTCP(previous)
-		}
-		_, admitted := priorDNS.installed[a]
-		prev, lateDrop := snapshot(a, admitted)
-		if lateDrop || len(prev.explicit) != 0 {
-			next := reclassify(a, prev)
-			// Even when all cuts retire, do not let a later catch-all
-			// override an established port that the old chain admitted.
-			if lateDrop || len(next.explicit)+len(next.implicit) != 0 {
-				out[a] = next
-			}
-		}
-	}
-	for _, targets := range [2]snapshotTargets{allows, denies} {
-		for a := range targets.exact {
-			consider(a)
-		}
-	}
-	// DNS can first identify an address between policy updates. Use the
-	// installed verdict to distinguish an actual reallow from a masked grant.
-	priorDNS.visit(consider)
-	for a := range leases {
-		if _, known := priorDNS.installed[a]; !known {
-			consider(a)
-		}
-	}
-	return out
-}
-
-func (d exactTCP) hasDrops() bool {
-	for _, host := range d {
-		if len(host.explicit)+len(host.implicit) != 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// Wide explicit denies remain in the legacy buckets. Intersect only current
-// explicit scope here; exact withdrawals use the saved per-port verdict.
-func (d EstablishedDrops) carryExplicitTCP(current tcpTargets, retainedWhole []netip.Prefix) []EstablishedPortDrop {
-	prior := compiledTCP(d.DenyPortDrops)
-	for _, prefix := range d.DenyPrefixes {
-		prior = append(prior, tcpTarget{prefix: prefix, spans: allTCP, whole: true})
-	}
-	kept := make(map[netip.Prefix]tcpSpans)
-	for _, r := range prior {
-		if _, tracked := d.exact[r.prefix.Addr()]; r.prefix.IsSingleIP() && tracked {
-			continue
-		}
-		for _, cur := range current {
-			if r.whole && cur.whole || r.prefix.IsValid() && cur.prefix.IsValid() && !r.prefix.Overlaps(cur.prefix) {
-				continue
-			}
-			prefix := r.prefix
-			if cur.prefix.Bits() > prefix.Bits() {
-				prefix = cur.prefix
-			}
-			if _, tracked := d.exact[prefix.Addr()]; prefix.IsSingleIP() && tracked {
-				continue
-			}
-			kept[prefix] = kept[prefix].union(r.spans.intersect(cur.spans))
-		}
-	}
-	var out []EstablishedPortDrop
-	for prefix, spans := range kept {
-		if prefix.IsValid() {
-			if slices.ContainsFunc(retainedWhole, func(p netip.Prefix) bool { return p.Bits() <= prefix.Bits() && p.Contains(prefix.Addr()) }) {
-				continue
-			}
-			spans = spans.subtract(kept[netip.Prefix{}])
-			for bits := prefix.Bits() - 1; bits >= 0 && len(spans) != 0; bits-- {
-				spans = spans.subtract(kept[netip.PrefixFrom(prefix.Addr(), bits).Masked()])
-			}
-		}
-		if len(spans) != 0 {
-			out = append(out, EstablishedPortDrop{Prefix: prefix, Ranges: spans})
-		}
-	}
-	slices.SortFunc(out, func(a, b EstablishedPortDrop) int {
-		if c := a.Prefix.Addr().Compare(b.Prefix.Addr()); c != 0 {
-			return c
-		}
-		return a.Prefix.Bits() - b.Prefix.Bits()
-	})
-	return out
-}
-
-// Reuse the sorted literal address buckets from stillRelevant. Index the
-// remaining rule targets once per render; only their addresses matter here.
-type remainderTargets struct {
-	addrs []netip.Addr
-	other snapshotTargets
-}
-
-func makeRemainderTargets(addrs []netip.Addr, prefixes []netip.Prefix, ports []EstablishedPortDrop) remainderTargets {
-	other := indexSnapshotTargets(nil, nil, prefixes)
-	for _, rule := range ports {
-		other.add(dropTCPPrefix(rule), allTCP)
-	}
-	return remainderTargets{addrs, other}
-}
-
-func (s remainderTargets) matches(addr netip.Addr) bool {
-	_, found := slices.BinarySearchFunc(s.addrs, addr, netip.Addr.Compare)
-	return found || len(s.other.at(addr)) != 0
-}
-
-func (d EstablishedDrops) writeExactTCP(b *strings.Builder, explicit bool) {
-	if len(d.exact) == 0 {
-		return
-	}
-	// Hash normalized content (not the slice identity); verify equality before
-	// grouping. A hash collision can cost a comparison but cannot widen scope.
-	type key struct {
-		sum uint64
-		v4  bool
-	}
-	type group struct {
-		spans tcpSpans
-		addrs []netip.Addr
-	}
-	groups := make(map[key][]int)
-	var rules []group
-	var tracked [2][]netip.Addr
-	seed := maphash.MakeSeed()
-	var coverage snapshotTargets
-	if explicit {
-		coverage = indexSnapshotTargets(d.DenyAddrs, d.DenyPortDrops, d.DenyPrefixes)
-	}
-	var keep, removed remainderTargets
-	if !explicit && d.broad == nil && (d.CatchAll || len(d.Addrs)+len(d.Prefixes)+len(d.PortDrops) != 0) {
-		keep = makeRemainderTargets(d.KeepAddrs, d.KeepPrefixes, nil)
-		if !d.CatchAll {
-			removed = makeRemainderTargets(d.Addrs, d.Prefixes, d.PortDrops)
-		}
-	}
-	for a, host := range d.exact {
-		spans := host.implicit
-		if explicit {
-			spans = host.explicit
-			if len(spans) == 0 {
-				continue
-			}
-			// Suppress only rules already emitted at this priority. The
-			// saved per-host withdrawal must outlive their coverage.
-			spans = spans.subtract(coverage.at(a))
-		} else if (d.broad != nil && len(d.broad.at(a)) != 0) ||
-			(d.broad == nil && (d.CatchAll || removed.matches(a)) && !keep.matches(a)) {
-			if a.Is4() {
-				tracked[0] = append(tracked[0], a)
-			} else {
-				tracked[1] = append(tracked[1], a)
-			}
-		}
-		if len(spans) == 0 {
-			continue
-		}
-		var h maphash.Hash
-		h.SetSeed(seed)
-		var bytes [4]byte
-		for _, r := range spans {
-			binary.LittleEndian.PutUint32(bytes[:], uint32(r.Lo)|uint32(r.Hi)<<16)
-			_, _ = h.Write(bytes[:])
-		}
-		k := key{h.Sum64(), a.Is4()}
-		i := len(rules)
-		for _, candidate := range groups[k] {
-			if slices.Equal(rules[candidate].spans, spans) {
-				i = candidate
-				break
-			}
-		}
-		if i == len(rules) {
-			rules = append(rules, group{spans: spans})
-			groups[k] = append(groups[k], i)
-		}
-		rules[i].addrs = append(rules[i].addrs, a)
-	}
-	for _, r := range rules {
-		slices.SortFunc(r.addrs, netip.Addr.Compare)
-	}
-	slices.SortFunc(rules, func(a, b group) int { return a.addrs[0].Compare(b.addrs[0]) })
-	for _, r := range rules {
-		writeExactAddrMatch(b, r.addrs)
-		b.WriteString(" tcp dport { ")
-		for i, span := range r.spans {
-			if i != 0 {
-				b.WriteString(", ")
-			}
-			fmt.Fprint(b, span.Lo)
-			if span.Lo != span.Hi {
-				fmt.Fprintf(b, "-%d", span.Hi)
-			}
-		}
-		b.WriteString(" } ct state established,related drop\n")
-	}
-	for _, addrs := range tracked {
-		if len(addrs) == 0 {
-			continue
-		}
-		slices.SortFunc(addrs, netip.Addr.Compare)
-		writeExactAddrMatch(b, addrs)
-		b.WriteString(" meta l4proto tcp ct state established,related accept\n")
-	}
-}
-
-func writeExactAddrMatch(b *strings.Builder, addrs []netip.Addr) {
-	family := "ip6"
-	if addrs[0].Is4() {
-		family = "ip"
-	}
-	fmt.Fprintf(b, "add rule inet %s %s %s daddr ", tableName, chainName, family)
-	if len(addrs) == 1 {
-		b.WriteString(addrs[0].String())
-		return
-	}
-	b.WriteString("{ ")
-	for i, addr := range addrs {
-		if i != 0 {
-			b.WriteString(", ")
-		}
-		b.WriteString(addr.String())
-	}
-	b.WriteString(" }")
 }

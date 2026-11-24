@@ -224,10 +224,69 @@ func TestApplyStatic_OnlyEffectiveBroadAllowsRetireTCP(t *testing.T) {
 	}
 }
 
+func TestPlainReloadKeepsEffectiveCIDRDenyWithoutNewDenyRule(t *testing.T) {
+	m, _ := recordingManager()
+	ctx := context.Background()
+	old := mustPolicy(t, `{"defaultAction":"allow"}`)
+	first := mustPolicy(t, `{"egress":[{"action":"allow","ports":[443,8443]},{"action":"deny","target":"192.0.2.0/24","ports":[443]}]}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
+	require.NoError(t, err)
+	p := mustPolicy(t, `{"egress":[{"action":"deny","target":"192.0.2.10","ports":[443]}]}`)
+	for _, next := range []*policy.NetworkPolicy{policy.DefaultDenyPolicy(), p, policy.DefaultDenyPolicy()} {
+		require.NoError(t, m.ApplyStatic(ctx, next))
+		require.True(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("192.0.2.10"), 443), "removing the deny rule was not a permit")
+		require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("198.51.100.10"), 443), "the global allow really did admit addresses outside the denied prefix")
+		require.False(t, m.lastDrops.MatchesFlow(netip.MustParseAddr("192.0.2.10"), 8443))
+	}
+}
+
+func TestPlainReloadReusesDNSWithdrawalCapacityAfterPartialReallow(t *testing.T) {
+	m, _ := recordingManager()
+	ctx := context.Background()
+	old := mustPolicy(t, `{"defaultAction":"allow"}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, policy.DefaultDenyPolicy())
+	require.NoError(t, err)
+	ips := make([]ResolvedIP, maxResolvedDomains*maxDomainAddresses)
+	for i := range ips {
+		ips[i] = ResolvedIP{Addr: netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)}), TTL: time.Minute}
+	}
+	require.NoError(t, m.AddResolvedIPs(ctx, ips))
+	nextHost := []ResolvedIP{{Addr: netip.MustParseAddr("203.0.113.1"), TTL: time.Minute}}
+	require.ErrorContains(t, m.AddResolvedIPs(ctx, nextHost), "history is at capacity")
+	require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[{"action":"allow","target":"198.18.0.0/16"},{"action":"allow","target":"b.example"}]}`)))
+	require.True(t, m.lastDrops.MatchesFlow(nextHost[0].Addr, 8443), "the catch-all still applies in B before DNS")
+	require.NoError(t, m.AddResolvedDomain(ctx, "b.example", nextHost), "a real query in B must be able to reuse the slots from A")
+	require.NoError(t, m.ApplyStatic(ctx, policy.DefaultDenyPolicy()))
+	require.False(t, m.lastDrops.MatchesFlow(ips[0].Addr, 8443))
+	require.False(t, m.lastDrops.MatchesFlow(nextHost[0].Addr, 8443), "B still needs an individual exception from catch-all")
+}
+
+func TestPlainReloadDoesNotRetainRedundantDNSHosts(t *testing.T) {
+	m, _ := recordingManager()
+	ctx := context.Background()
+	p := mustPolicy(t, `{"egress":[{"action":"allow","target":"198.18.0.0/16"},{"action":"allow","target":"r.example"}]}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, mustPolicy(t, `{"defaultAction":"allow"}`), p)
+	require.NoError(t, err)
+	now := time.Now()
+	m.tracker.now = func() time.Time { return now }
+	for i := byte(1); i <= 6; i++ {
+		a := netip.AddrFrom4([4]byte{198, 18, 0, i})
+		require.NoError(t, m.AddResolvedDomain(ctx, "r.example", []ResolvedIP{{Addr: a, TTL: time.Minute}}))
+		require.NoError(t, m.ApplyStatic(ctx, p))
+		now = now.Add(2 * time.Minute)
+		require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
+		m.applyDomainRefresh(ctx, "r.example", m.domains["r.example"], nil)
+		require.Empty(t, m.lastDrops.dnsKeeps, "rotating addresses entirely covered by a static permit need no private TCP history")
+		require.Empty(t, m.lastDrops.KeepAddrs, "the existing CIDR already preserves non-TCP traffic")
+		require.False(t, m.lastDrops.MatchesFlow(a, 443))
+	}
+}
+
 func TestDNSWithdrawalCapacityAppliesOnlyToAffectedACKs(t *testing.T) {
 	m, scripts := recordingManager()
 	ctx := context.Background()
-	first := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.0/24"}]}`)
+	const masked = `{"action":"allow","target":"masked.example"}`
+	first := mustPolicy(t, `{"egress":[`+masked+`,{"action":"deny","target":"203.0.113.0/24"},{"action":"allow","target":"192.0.2.0/24"}]}`)
 	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, mustPolicy(t, `{"defaultAction":"allow"}`), first)
 	require.NoError(t, err)
 	input := make([]ResolvedIP, maxResolvedDomains*maxDomainAddresses)
@@ -246,6 +305,12 @@ func TestDNSWithdrawalCapacityAppliesOnlyToAffectedACKs(t *testing.T) {
 	require.ErrorContains(t, m.AddResolvedIPs(ctx, []ResolvedIP{extra}), "history is at capacity")
 	require.Equal(t, writes, len(*scripts), "must not grant before capacity is available")
 	require.NoError(t, m.AddResolvedIPs(ctx, input[:1]), "renewal needs no additional history")
+	b := ResolvedIP{Addr: netip.MustParseAddr("203.0.113.1"), TTL: time.Minute}
+	require.NoError(t, m.AddResolvedDomain(ctx, "masked.example", []ResolvedIP{b}), "a fully masked grant needs no exception")
+	writes = len(*scripts)
+	require.ErrorIs(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[`+masked+`]}`)), errTCPHistoryCapacity)
+	require.Equal(t, writes, len(*scripts), "over-capacity replacement must not touch the installed rules")
+	require.True(t, m.lastDrops.MatchesFlow(b.Addr, 443))
 	require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"defaultAction":"allow"}`)))
 	require.NoError(t, m.AddResolvedIPs(ctx, []ResolvedIP{extra}), "no history needed after full reallow")
 }
@@ -288,9 +353,9 @@ func TestApplyStatic_PollCannotTurnPastDNSAdmissionIntoTeardown(t *testing.T) {
 func BenchmarkBuildRulesetRemovedDNS(b *testing.B) {
 	for _, count := range []int{1024, 4096, 8192} {
 		b.Run(strconv.Itoa(count), func(b *testing.B) {
-			p, history, base := removedDNSBenchmarkPlan(count)
-			base.captureExactTCP(nil, p, history, nil)
-			carried := base.stillRelevant(p, p, nil, knownDNS{}, nil)
+			p, base := removedDNSBenchmarkPlan(count)
+			base.captureTCP(p, nil)
+			carried := base.stillRelevant(p, nil, nil)
 			var size int
 			b.ReportAllocs()
 			for b.Loop() {
@@ -305,28 +370,24 @@ func BenchmarkBuildRulesetRemovedDNS(b *testing.B) {
 	}
 }
 
-func removedDNSBenchmarkPlan(count int) (*policy.NetworkPolicy, knownDNS, EstablishedDrops) {
+func removedDNSBenchmarkPlan(count int) (*policy.NetworkPolicy, EstablishedDrops) {
 	p := policy.DefaultDenyPolicy()
 	ips := make([]netip.Addr, count)
 	for i := range ips {
 		ips[i] = netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
 	}
 	history := map[string][]netip.Addr{"removed.example": ips}
-	ledger := &resolvedDomain{addresses: make(map[netip.Addr]domainLease, count)}
-	for _, ip := range ips {
-		ledger.addresses[ip] = domainLease{}
-	}
-	return p, knownDNS{domains: map[string]*resolvedDomain{"removed.example": ledger}}, ComputeEstablishedDrops(nil, p, history)
+	return p, ComputeEstablishedDrops(nil, p, history)
 }
 
 func BenchmarkCaptureExactTCPRemovedDNS(b *testing.B) {
 	for _, count := range []int{1024, 4096, 8192} {
 		b.Run(strconv.Itoa(count), func(b *testing.B) {
-			p, history, base := removedDNSBenchmarkPlan(count)
+			p, base := removedDNSBenchmarkPlan(count)
 			b.ReportAllocs()
 			for b.Loop() {
 				d := base
-				d.captureExactTCP(nil, p, history, nil)
+				d.captureTCP(p, nil)
 			}
 		})
 	}
