@@ -233,6 +233,8 @@ Code execution and command execution interfaces use SSE for real-time streaming 
 
 For Jupyter-backed `POST /code` executions, `execution_complete` is a success-only terminal event sent after the execution's output and result events. Failed executions report `error` without `execution_complete`. Read the stream through its terminal event; an earlier status update or the end of a connection alone does not establish success.
 
+If Jupyter sends no acknowledgment for the request within five seconds of submission, execd ends the stream with `KernelAcknowledgmentTimeout`. The deadline covers the initial acknowledgment, so an acknowledged execution can run longer. The timeout leaves the cell's execution outcome unknown.
+
 ### Resource Limits
 
 Supports flexible resource configuration (similar to Kubernetes):
