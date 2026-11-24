@@ -1,5 +1,6 @@
 # Unreleased
 
+- Fast Sandbox credential-bound (experimental): lower the default `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` from 131072 to 32768. Measurements in two KVM environments found 158–166 KB of egress memory per held decrypted connection, so the old default allowed about 21 GB. Set the variable explicitly to keep a different budget.
 - Report upstream TLS failures with a connection ID and a bounded certificate verification reason. Unknown transport failures remain unclassified; request and credential data are not logged by this diagnostic.
 
 # components/egress 1.0.4
