@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
@@ -152,7 +153,7 @@ func InitFlags() {
 }
 
 func warnDeprecatedPlaintextAccessToken() {
-	if ServerAccessToken != "" && !strings.HasPrefix(strings.TrimSpace(ServerAccessToken), "sha256:") {
+	if ServerAccessToken != "" && !strings.HasPrefix(strings.TrimSpace(ServerAccessToken), binding.AccessTokenHashPrefix) {
 		log.Warn("execd: plaintext EXECD_ACCESS_TOKEN / --access-token is deprecated; use sha256:<kid>:<nonce>:<verifier> or /internal/init accessTokenHash")
 	}
 }

@@ -85,8 +85,8 @@ class TestExecdTokenManager:
         assert env_val2 != env_val
         assert manager.resolve_raw_token(env_val2) != raw_token
 
-        # Legacy plaintext value is returned unchanged
-        assert manager.resolve_raw_token("legacy-plaintext-token") == "legacy-plaintext-token"
+        # Legacy plaintext value is returned trimmed
+        assert manager.resolve_raw_token("  legacy-plaintext-token  ") == "legacy-plaintext-token"
 
     def test_hot_reload_rotation_and_corrupt_fallback(self, tmp_path: Path) -> None:
         key_v1 = _gen_master_key_b64()
@@ -289,3 +289,62 @@ class TestK8sExecdAuthWiring:
             )
         assert exc_info.value.status_code == 400
         assert "use_server_proxy is not supported" in exc_info.value.detail["message"]
+
+    def test_docker_runtime_rejects_execd_auth_signing_key_file(self) -> None:
+        with pytest.raises(ValueError, match="only supported when runtime.type = 'kubernetes'"):
+            AppConfig(
+                runtime=RuntimeConfig(type="docker", execd_image="execd:test"),
+                execd=ExecdConfig(auth_signing_key_file="/var/run/secrets/keys.json"),
+            )
+
+    def test_windows_profile_rejected_when_execd_auth_enabled(self, tmp_path: Path) -> None:
+        from opensandbox_server.api.schema import PlatformSpec
+
+        manager = self._make_manager(tmp_path)
+        app_config = AppConfig(
+            runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
+            kubernetes=KubernetesRuntimeConfig(namespace="test-ns"),
+        )
+        provider = BatchSandboxProvider(MagicMock(), app_config=app_config)
+        provider.set_execd_token_manager(manager)
+
+        with pytest.raises(ValueError, match="Windows sandbox profile is not supported"):
+            provider.create_workload(
+                sandbox_id="win-sbx-id",
+                namespace="test-ns",
+                image_spec=ImageSpec(uri="dockurr/windows:latest"),
+                entrypoint=["/run/entry.sh"],
+                env={},
+                resource_limits={"cpu": "2", "memory": "4Gi"},
+                labels={"opensandbox.io/id": "win-sbx-id"},
+                expires_at=datetime(2026, 12, 1, tzinfo=timezone.utc),
+                execd_image="execd:test",
+                platform=PlatformSpec(os="windows", arch="amd64"),
+            )
+
+    def test_proxy_never_auto_injects_execd_token_and_rejects_execd_port(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from opensandbox_server.api import proxy
+
+        # _filter_proxy_headers must never inject X-EXECD-ACCESS-TOKEN from endpoint headers
+        filtered = proxy._filter_proxy_headers(
+            {},
+            {OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER: "derived-secret"},
+        )
+        assert OPEN_SANDBOX_EXECD_ACCESS_TOKEN_HEADER not in filtered
+
+        key_file = _write_key_file(tmp_path / "keys.json", "v1", {"v1": _gen_master_key_b64()})
+        cfg = AppConfig(
+            runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
+            kubernetes=KubernetesRuntimeConfig(namespace="test-ns"),
+            execd=ExecdConfig(auth_signing_key_file=str(key_file)),
+        )
+        monkeypatch.setattr(proxy, "get_config", lambda: cfg)
+
+        with pytest.raises(HTTPException) as exc_info:
+            proxy._reject_proxy_if_execd_auth_enabled(DEFAULT_EXECD_PORT)
+        assert exc_info.value.status_code == 400
+
+        # Non-execd ports are unaffected
+        proxy._reject_proxy_if_execd_auth_enabled(8080)

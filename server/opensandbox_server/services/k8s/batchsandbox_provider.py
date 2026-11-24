@@ -436,6 +436,10 @@ class BatchSandboxProvider(WorkloadProvider):
             self._validate_execd_isolation_template(extra_security_context)
 
         if windows_profile:
+            if self._execd_token_manager is not None:
+                raise ValueError(
+                    "Windows sandbox profile is not supported when execd.auth_signing_key_file is enabled"
+                )
             validate_windows_profile_resource_limits(resource_limits)
 
         has_egress = egress_settings is not None

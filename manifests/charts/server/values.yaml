@@ -79,7 +79,8 @@ server:
 
   execdAuth:
     # -- Name of an existing Secret holding versioned HMAC master keys (keys.json).
-    # Mounted read-only (mode 0400) at /var/run/secrets/opensandbox/execd-signing/keys.json.
+    # Mounted read-only (mode 0440) at /var/run/secrets/opensandbox/execd-signing/keys.json.
+    # For non-root server.containerSecurityContext.runAsUser, set a matching server.podSecurityContext.fsGroup.
     # Set [execd].auth_signing_key_file in configToml to this path to enable
     # sha256:<kid>:<nonce>:<verifier> execd access token derivation.
     existingSecret: ""

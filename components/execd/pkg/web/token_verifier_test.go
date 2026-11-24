@@ -65,6 +65,31 @@ func TestAccessTokenHashedVerifierFormat(t *testing.T) {
 	require.NotEqual(t, http.StatusUnauthorized, w.Code)
 }
 
+func TestAccessTokenTwoSegmentSha256Format(t *testing.T) {
+	prevBinding := binding.Apply(nil)
+	t.Cleanup(func() { binding.Apply(prevBinding) })
+
+	rawToken := "two-segment-raw-token"
+	sum := sha256.Sum256([]byte(rawToken))
+	envValue := binding.AccessTokenHashPrefix + hex.EncodeToString(sum[:])
+
+	r := NewRouter(envValue)
+
+	// Replaying the sha256:<hex> env value directly -> 401
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set(model.ApiAccessTokenHeader, envValue)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Presenting the raw token -> allowed
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set(model.ApiAccessTokenHeader, rawToken)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.NotEqual(t, http.StatusUnauthorized, w.Code)
+}
+
 func TestAccessTokenMalformedSha256FailsClosed(t *testing.T) {
 	prevBinding := binding.Apply(nil)
 	t.Cleanup(func() { binding.Apply(prevBinding) })

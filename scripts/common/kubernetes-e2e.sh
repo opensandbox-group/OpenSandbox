@@ -139,6 +139,10 @@ EOF
   kubectl delete pod/opensandbox-e2e-pvc-seed -n "${E2E_NAMESPACE}" --ignore-not-found=true
 }
 
+k8s_e2e_execd_auth_secret_name() {
+  printf '%s' "${E2E_EXECD_AUTH_SECRET_NAME:-opensandbox-execd-signing-keys}"
+}
+
 k8s_e2e_execd_auth_enabled() {
   # Default on for gateway-mode K8s nightly E2E legs (ingress-header,
   # ingress-uri, k8s-pool-e2e). Legs that use the deprecated server proxy
@@ -148,11 +152,12 @@ k8s_e2e_execd_auth_enabled() {
     [ "${E2E_EXECD_AUTH_ENABLED}" = "true" ]
     return
   fi
-  [ "${E2E_SERVER_GATEWAY_ENABLED:-false}" = "true" ]
+  [ "${E2E_SERVER_GATEWAY_ENABLED:-false}" = "true" ] && [ "${OPENSANDBOX_TEST_USE_SERVER_PROXY:-false}" != "true" ]
 }
 
 k8s_e2e_ensure_execd_auth_secret() {
-  local secret_name="${E2E_EXECD_AUTH_SECRET_NAME:-opensandbox-execd-signing-keys}"
+  local secret_name
+  secret_name="$(k8s_e2e_execd_auth_secret_name)"
   if kubectl get secret "${secret_name}" -n "${SERVER_NAMESPACE}" >/dev/null 2>&1; then
     return 0
   fi
@@ -166,7 +171,8 @@ k8s_e2e_ensure_execd_auth_secret() {
 k8s_e2e_write_server_helm_values() {
   local signing_key
   signing_key=$(openssl rand -base64 32 | tr -d '\n')
-  local execd_auth_secret="${E2E_EXECD_AUTH_SECRET_NAME:-opensandbox-execd-signing-keys}"
+  local execd_auth_secret
+  execd_auth_secret="$(k8s_e2e_execd_auth_secret_name)"
 
   {
     cat <<EOF

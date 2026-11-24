@@ -174,10 +174,15 @@ class ExecdTokenManager:
         return f"{HASH_PREFIX}{kid}:{effective_nonce}:{verifier}"
 
     def resolve_raw_token(self, env_value: str) -> str:
-        """Derive the raw token from ``sha256:<kid>:<nonce>:<verifier>`` or return legacy plaintext."""
+        """Derive the raw token from ``sha256:<kid>:<nonce>:<verifier>`` or return legacy plaintext.
+
+        Rotation contract: operators must retain old ``kid`` entries in the key ring
+        file until every sandbox minted under that ``kid`` has terminated; removing an
+        in-use ``kid`` fails closed with ``ValueError``.
+        """
         trimmed = env_value.strip()
         if not trimmed.startswith(HASH_PREFIX):
-            return env_value
+            return trimmed
 
         parts = trimmed.split(":")
         if len(parts) != 4 or not parts[1] or not parts[2] or not parts[3]:

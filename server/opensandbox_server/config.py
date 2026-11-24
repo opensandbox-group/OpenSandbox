@@ -917,9 +917,11 @@ class ExecdConfig(BaseModel):
         default=None,
         description=(
             "Path to a JSON key ring file (typically mounted read-only from a K8s Secret) "
-            "containing versioned HMAC master keys. When set on Kubernetes, server injects "
-            "a one-way verifier (sha256:<kid>:<nonce>:<verifier>) into EXECD_ACCESS_TOKEN "
-            "and derives the raw token on GetEndpoint(44772)."
+            "containing versioned HMAC master keys ({'active': '<kid>', 'keys': {'<kid>': '<base64>'}}, "
+            "each key >= 32 decoded bytes). Supported on runtime.type = 'kubernetes' only: server injects "
+            "a one-way verifier (sha256:<kid>:<nonce>:<verifier>) into EXECD_ACCESS_TOKEN and derives the "
+            "raw token on GetEndpoint(44772). Rotation contract: retain old key IDs in 'keys' until all "
+            "sandboxes minted under them have terminated."
         ),
     )
 
@@ -1786,6 +1788,14 @@ class AppConfig(BaseModel):
                 )
         if self.egress is not None and self.egress.mode == EGRESS_MODE_FORWARD:
             self._validate_egress_forward_runtime()
+        if (
+            self.execd is not None
+            and self.execd.auth_signing_key_file is not None
+            and self.runtime.type != "kubernetes"
+        ):
+            raise ValueError(
+                "execd.auth_signing_key_file is only supported when runtime.type = 'kubernetes'"
+            )
         return self
 
     def _validate_egress_forward_runtime(self) -> None:

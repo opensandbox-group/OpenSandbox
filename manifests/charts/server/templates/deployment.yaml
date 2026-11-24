@@ -151,7 +151,7 @@ spec:
         - name: execd-signing-keys
           secret:
             secretName: {{ $serverExecdAuth.existingSecret | quote }}
-            defaultMode: 0400
+            defaultMode: 0440
             items:
               - key: keys.json
                 path: keys.json
