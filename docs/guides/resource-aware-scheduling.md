@@ -71,8 +71,17 @@ Notes per path:
 Ratios are declared once per pool and express how much runtime limit is sold per unit of committed request.
 
 - CPU compresses well (guests are idle most of the time; cgroup throttling degrades gracefully) — ratios of 4–8× are common.
-- Memory is the hard backstop: Firecracker guest pages are backed by host pages and guests cannot swap — keep ratios conservative (1.25–2×).
+- Memory is the hard backstop: Firecracker guest pages are backed by host pages and guests cannot swap — keep ratios conservative (`1.0–2.0×` depending on workload profile). Even with `virtio-balloon` free-page reporting (FPR) enabled by default on newly built Native templates, FPR reclaims idle guest-freed anonymous pages but cannot prevent OOM when admitted sandboxes concurrently spike past the shared Fastlet cgroup limit.
 - The trade is density versus worst-case contention: ratio `8` CPU packs eight `1`-CPU sandboxes per committed core, but simultaneous saturation shares the Fastlet's real CPU through cgroup weights.
+
+Based on the [Firecracker FPR benchmark report](https://github.com/opensandbox-group/OpenSandbox/blob/main/benchmark/FPR-report.md), size `overcommitRatio.memory` by workload profile:
+
+| Workload profile | Suggested `overcommitRatio.memory` | Rationale |
+| --- | :---: | --- |
+| Bursty, anonymous-memory agents with long idle gaps | `1.5–2.0×` | FPR returned ~97% of freed anonymous memory within ~13–16 s; retain headroom for overlapping spikes. |
+| JVM / Maven / build workloads | `1.25–1.5×` | ~50% (~1.94 GiB) residual remained after Maven exit in benchmark testing. |
+| File-cache-heavy or frequent pause/resume workloads | `1.0–1.25×` | FPR does not evict guest page cache, and host snapshot/checkpoint file caches remain charged to the Fastlet cgroup. |
+| High overcommit (`≥ 4.0×`) | Not recommended | Triggered Fastlet `OOMKilled` restarts when two admitted VMs spiked concurrently inside a shared cgroup. |
 
 ## Rollout and rollback
 
