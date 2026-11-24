@@ -144,7 +144,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		if errors.As(err, &detailed) {
 			Logger.With(slogger.Field{Key: "error", Value: detailed.InternalCause()}).Errorf("ingress: provider resolution failed")
 		}
-		if respondWakeTimeout(sw, err) {
+		if respondWakeTimeout(sw, r, err) {
 			return
 		}
 		if status == 0 {
@@ -153,7 +153,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		if status == http.StatusServiceUnavailable {
 			sw.Header().Set("Retry-After", "1")
 		}
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+		writeIngressError(sw, r, status, fmt.Sprintf("OpenSandbox Ingress: %v", err))
 		return
 	}
 
@@ -166,7 +166,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 
 	targetURL, code, err := p.resolveRealHost(host, r.URL)
 	if err != nil {
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
+		writeIngressError(sw, r, code, fmt.Sprintf("OpenSandbox Ingress: %v", err))
 		return
 	}
 
@@ -214,7 +214,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 			if status == http.StatusServiceUnavailable {
 				sw.Header().Set("Retry-After", "1")
 			}
-			http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", replay.wakeErr), status)
+			writeIngressError(sw, r, status, fmt.Sprintf("OpenSandbox Ingress: %v", replay.wakeErr))
 		}
 		return
 	}
@@ -234,13 +234,13 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 			// other 503 branch carries.
 			sw.Header().Set("Retry-After", "1")
 		}
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+		writeIngressError(sw, r, status, fmt.Sprintf("OpenSandbox Ingress: %v", err))
 		return
 	}
 	host.info = endpoint
 	targetURL, code, err = p.resolveRealHost(host, r.URL)
 	if err != nil {
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
+		writeIngressError(sw, r, code, fmt.Sprintf("OpenSandbox Ingress: %v", err))
 		return
 	}
 	p.applyUpstreamRequest(r, host, targetURL)
@@ -450,6 +450,15 @@ func (w *statusCapturingResponseWriter) WriteHeader(code int) {
 		w.written = true
 	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// commitStatus records code as the final status without writing it, for
+// responses whose wire status differs from what metrics should report.
+func (w *statusCapturingResponseWriter) commitStatus(code int) {
+	if !w.written {
+		w.statusCode = code
+		w.written = true
+	}
 }
 
 func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {

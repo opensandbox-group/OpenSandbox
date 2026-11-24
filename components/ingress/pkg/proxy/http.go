@@ -81,6 +81,10 @@ func (hp *HTTPProxy) newReverseProxy(targetURL *url.URL) *httputil.ReverseProxy 
 		}
 
 		// Attempt to set 502; this is a no-op if headers are already sent.
+		if isGRPCRequest(req) {
+			writeIngressError(rw, req, http.StatusBadGateway, "OpenSandbox Ingress: upstream unavailable")
+			return
+		}
 		rw.WriteHeader(http.StatusBadGateway)
 	}
 	return proxy

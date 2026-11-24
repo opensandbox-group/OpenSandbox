@@ -58,7 +58,7 @@ type wakeTimeoutErrorBody struct {
 
 // respondWakeTimeout writes the marked wake-timeout 503 for a pre-forward
 // park-budget exhaustion; reports whether it did.
-func respondWakeTimeout(w http.ResponseWriter, err error) bool {
+func respondWakeTimeout(w http.ResponseWriter, r *http.Request, err error) bool {
 	var gate *wakeGateError
 	if !errors.As(err, &gate) || !errors.Is(err, wake.ErrBudgetExhausted) {
 		return false
@@ -74,6 +74,10 @@ func respondWakeTimeout(w http.ResponseWriter, err error) bool {
 	header := w.Header()
 	header.Set("Retry-After", "1")
 	header.Set(WakeMarkerHeader, WakeMarkerExpired)
+	if isGRPCRequest(r) {
+		writeIngressError(w, r, http.StatusServiceUnavailable, WakeTimeoutMessage)
+		return true
+	}
 	header.Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = w.Write(encoded)
