@@ -81,7 +81,7 @@ Today, validating and protecting this stack before each release has four structu
 |---|---|---|
 | R1 | `osb bench` is packaged as an official `osb` plugin (`opensandbox.cli.plugins`) and invoked via `osb bench <subcommand>` | Must Have |
 | R2 | Given a sufficiently privileged `kubeconfig` and a profile YAML, `osb bench env up` deploys the complete OverlayBD stack (charts, registry, optional Redis, in-cluster OTel trace stack, OverlayBD template, SandboxPool) and verifies readiness | Must Have |
-| R3 | Phase 1 benchmark suites cover `schedule-burst`, `steady-churn`, `pause-resume` (warm, cache-evicted, cross-node, `rootfsOnly`, multi-round layer squash), `wake-storm` (OSEP-0024), and `high-density-soak` on the `fast-sandbox` OverlayBD path | Must Have |
+| R3 | Phase 1 benchmark suites cover `schedule-burst`, `steady-churn`, `pause-resume` (Full checkpoint: warm, cache-evicted, cross-node, multi-round layer squash), `rootfs-only-restore` (create/fork from `RootfsOnly` snapshot: warm materialized, cold/cross-node, concurrent fan-out, and OSEP-0028 CPU/memory overrides), `wake-storm` (OSEP-0024), and `high-density-soak` on the `fast-sandbox` OverlayBD path | Must Have |
 | R4 | `osb bench` requires connectivity **only** to the Kubernetes API Server (via `kubeconfig`); all in-cluster API calls, workload generation, white-box metric/pool scraping, and trace queries execute inside an in-cluster Bench Bastion/Runner Pod so the client need not share a network with cluster Services/Pods and external RTT jitter is eliminated | Must Have |
 | R5 | End-to-end OTel tracing propagates W3C `traceparent` from `osb bench` through `server` / `ingress-gateway` into `fast-sandbox` (`FastPath`, `fastlet`, `fastlet-proxy`, `fsb-vm`) and `execd`, with spans covering Create, Resume, Pause, Snapshot (`Full` and `RootfsOnly`), and Wake-on-Access | Must Have |
 | R6 | `osb bench run` records `trace_id` per operation and automatically queries the in-cluster trace backend to attach span-level waterfall breakdowns for top slow (P99) and failed operations in the output bundle | Must Have |
@@ -179,7 +179,7 @@ osb bench env up --kubeconfig <path> --profile <profile.yaml> [--prepare-nodes]
 
 # 3. Execute benchmark suites via in-cluster runner + white-box metrics + trace drill-down + leak audit
 osb bench run --kubeconfig <path> --profile <profile.yaml> \
-  --suite <all|schedule-burst|steady-churn|pause-resume|wake-storm|high-density-soak> \
+  --suite <all|schedule-burst|steady-churn|pause-resume|rootfs-only-restore|wake-storm|high-density-soak> \
   --output <dir-or-json>
 
 # 4. Inspect a specific slow/failed operation's trace tree from a saved run bundle
@@ -225,7 +225,8 @@ For CI and pre-release automation, `osb bench run --provision --teardown` chains
 |---|---|---|
 | `schedule-burst` | Waves of concurrent `create -> ping -> first-exec -> delete` at stepped concurrency (e.g., `1, 4, 8, 16, 32, 64`) | Max scheduling throughput (sandboxes/s), P50/P95/P99 warm create latency, `ublkd` warm-pool hit-to-miss cliff when burst > `poolHigh`, Top-K candidate contention, `ResourceAware` admission behavior |
 | `steady-churn` | Sustained target RPS `create -> short workload -> delete` for a fixed duration (e.g., 10–15 min) | Steady-state tail latency, `deleting` slot backlog (`fsb-vm delete` / `ublkd` teardown speed), `blob-cache` & `shared_snapfiles` stability, memory/FD leak detection |
-| `pause-resume` | Matrix of `create -> write state -> pause -> resume -> verify state`: (a) same-node warm cache, (b) same-node cache-evicted (`trim-blob-cache` + clear `shared_snapfiles`), (c) deterministic cross-node resume, (d) `RootfsOnly` snapshot + cold-boot restore, (e) dirty-upper size ladder (`0MiB / 16MiB / 256MiB`), (f) long-chain multi-round pause/resume (`25+` rounds crossing `defaultMaxRootfsLayers=24` squash cliff) | Stop-the-world pause interruption window vs. async publish time, `Full` vs. `RootfsOnly` trade-offs, on-demand lazy-load penalty on first read, layer-chain squash spike magnitude |
+| `pause-resume` | Matrix of Full checkpoint `create -> write state -> pause -> resume -> verify state`: (a) same-node warm cache, (b) same-node cache-evicted (`trim-blob-cache` + clear `shared_snapfiles`), (c) deterministic cross-node resume, (d) dirty-upper size ladder (`0MiB / 16MiB / 256MiB`), (e) long-chain multi-round pause/resume (`25+` rounds crossing `defaultMaxRootfsLayers=24` squash cliff) | Stop-the-world pause interruption window vs. async publish time, on-demand lazy-load penalty on first read, layer-chain squash spike magnitude |
+| `rootfs-only-restore` | Create `RootfsOnly` snapshot (FSEP-0001) at dirty-upper ladder (`0MiB / 16MiB / 256MiB`), then create new sandboxes from that snapshot across: (a) first cold materialize vs. warm materialized `shared_snapfiles` read-lock path, (b) concurrent fan-out (N sandboxes created simultaneously from one `RootfsOnly` snapshot), (c) cross-node create, (d) OSEP-0028 CPU/memory override create (`verifyBootMachine`), verifying disk state persistence and fresh `execd` readiness | `RootfsOnly` capture interruption (`FIFREEZE`->`FITHAW`) vs. Full pause, cold-boot restore latency (`t_api_ack` -> `t_first_ping` guest kernel+init+`execd` boot gap), lockless materialized snapfiles fan-out scaling, cross-node/override portability |
 | `wake-storm` | Auto-pause a fleet of opted-in sandboxes (`lifecycle.idlePolicy`), then fire concurrent ingress traffic (both 1-request-per-sandbox fan-out and N-requests-to-1-sandbox singleflight bursts) | Wake-to-response P50/P95/P99, singleflight coalescing ratio, `--wake-park-max` / `--wake-restore-max` 503 shed rate, park-budget `Y` timeout rate, SDK retry convergence time |
 | `high-density-soak` | Pack nodes to high target sandbox density (e.g., 50% / 80% / 100% of `ResourceAware` overcommit capacity), run periodic in-sandbox exec + outbound egress HTTP/TLS traffic + ingress proxy requests + background churn | Host CPU/mem/I/O saturation, `fastlet` / `egress` / `fastlet-proxy` resource scaling per active sandbox, tail-latency degradation under high density |
 
@@ -239,7 +240,8 @@ All latency distributions are reported as **P50, P90, P95, P99, Max, and Mean** 
 |---|---|---|
 | **Create / Resume** | Client black-box | `t_api_ack` (API/FastPath gRPC return; sandbox is already running on completion), `t_first_ping` (first `200` from guest `/ping` via ingress gateway — replaces status-poll `Running` tracking, which only reflects control-plane projection lag), `t_first_exec` (first `execd` command + disk read verification) |
 | **Create / Resume** | Control Plane (`FastPath`) | `candidate_selection`, `crd_create`, `idempotency_read`, `fastlet_create`, `assignment_projection_wait` (`fast_sandbox_create_stage_latency_seconds`) |
-| **Create / Resume** | Fastlet & OverlayBD (`fsb-vm` + Firecracker) | `validation`, `admission`, `runtime_ensure`, `oci_prepare` (`ping`, `resolveTpl`, `cred`, `resolveImg`, `snapfiles`, `vmmCheck`, `rootfsCfg`, `ublkdAcquire`), `launch` (`waitSocket`), `configure`, `boot` (`snapshot/load` for Full vs. kernel cold boot for `RootfsOnly`), `data_plane_ready` |
+| **Create / Resume (`Full`)** | Fastlet & OverlayBD (`fsb-vm` + Firecracker) | `validation`, `admission`, `runtime_ensure`, `oci_prepare` (`ping`, `resolveTpl`, `cred`, `resolveImg`, `snapfiles`, `vmmCheck`, `rootfsCfg`, `ublkdAcquire`), `launch` (`waitSocket`), `configure`, `boot` (`snapshot/load`), `data_plane_ready` |
+| **Restore / Create (`RootfsOnly` Snapshot)** | Fastlet, OverlayBD & Guest Cold Boot | `oci_prepare` (highlighting `acquire_snapfiles`: first cold materialize vs. read-lock `tryAcquireMaterializedRootfsOnly` bypassing `ublkd.List`/ext4 mount), `pin_kernel` + jailer `rootfs-kernel` bind mount, `rootfs_boot_configure` (machine-config/boot-source/drives/NIC/vsock + OSEP-0028 CPU/memory override `verifyBootMachine`), `rootfs_boot_start` (`InstanceStart`), and **`guest_boot_to_first_ping_gap`** (kernel + `guest-init` + `execd` boot time from `t_api_ack` to `t_first_ping`) |
 | **Pause / Snapshot (`Full`)** | Stop-the-world vs. Async | **Interruption window**: `snapshotMu` wait, `vcpu_pause`, `snapshot_create` (RAM dump, spill hit/miss), `capture_oci_upper` (`reflink` vs. `extents` vs. `sparse_scan`), `vcpu_resume`. **Async publish**: `fsb-vm pack` (`overlaybd-commit`, `snapfiles` ext4, optional `squashRootfsTail`), `oci_push`, `cache_oci_checkpoint` (note: completes before `Paused` is reported) |
 | **Snapshot (`RootfsOnly`)** | Stop-the-world vs. Async | **Interruption window**: `guest_freeze_to_thaw` (vsock `FIFREEZE`/`FITHAW`), `vcpu_pause_to_resume`, `storage_drain_flush`, `capture_oci_upper`. **Async publish**: `fsb-vm pack --rootfs-only`, `oci_push`, `cache_oci_checkpoint` |
 
@@ -337,9 +339,10 @@ The target end-to-end trace waterfall for a single benchmark operation links eve
   │           │                       │           └── fsb_vm.ublkd_acquire (attr: pool_hit, layers)
   │           │                       ├── fastlet.firecracker.acquire (network slot)
   │           │                       ├── fastlet.firecracker.infra (egress action hook)
+  │           │                       ├── fastlet.firecracker.pin_kernel (RootfsOnly cold boot only)
   │           │                       ├── fastlet.firecracker.launch (waitSocket)
-  │           │                       ├── fastlet.firecracker.configure
-  │           │                       └── fastlet.firecracker.resume / rootfs_boot
+  │           │                       ├── fastlet.firecracker.configure (or rootfs_boot_configure + verify_boot_machine)
+  │           │                       └── fastlet.firecracker.resume (Full) / fastlet.firecracker.rootfs_boot_start (RootfsOnly)
   │           └── fastpath.create.assignment_projection_wait
   └── [osb-bench] bench.first_exec
         └── [ingress-gateway] ingress.proxy
@@ -363,6 +366,7 @@ Standard low-cardinality span attributes attached to OverlayBD spans:
 - `overlaybd.rootfs.layers` (int), `overlaybd.rootfs.squash_triggered` (bool)
 - `overlaybd.ublk.pool_hit` (bool), `overlaybd.snapfiles.cache_hit` (bool), `overlaybd.snapfiles.materialized` (bool)
 - `overlaybd.upper.copy_mode` (`reflink` | `extents` | `sparse_scan`), `overlaybd.spill.used` (bool)
+- `overlaybd.rootfs_boot.override_applied` (bool, OSEP-0028 CPU/memory override on `RootfsOnly` restore)
 
 #### 5.3 In-Cluster OTel Trace Stack
 
@@ -444,9 +448,15 @@ suites:
     targetRps: 5
     durationSeconds: 600
   pauseResume:
-    modes: [warm, cache-evicted, cross-node, rootfs-only]
+    modes: [warm, cache-evicted, cross-node]
     dirtyUpperMiB: [0, 16, 256]
     chainSquashRounds: 26
+  rootfsOnlyRestore:
+    dirtyUpperMiB: [0, 16, 256]
+    fanoutConcurrencies: [1, 8, 16]
+    crossNode: true
+    resourceOverrides:
+      - { vcpus: 2, memoryMiB: 4096 }
   wakeStorm:
     fleetSize: 32
     idleThresholdSeconds: 30
