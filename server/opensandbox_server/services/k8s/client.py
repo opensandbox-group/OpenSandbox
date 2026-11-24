@@ -45,8 +45,8 @@ class K8sClient:
     """
     Unified Kubernetes API client.
 
-    Encapsulates all cluster resource operations (CustomObject, Secret, Pod,
-    RuntimeClass). Callers never hold raw API handles directly.
+    Encapsulates all cluster resource operations (CustomObject, Secret, PVC,
+    Pod, RuntimeClass). Callers never hold raw API handles directly.
     """
 
     def __init__(self, k8s_config: KubernetesRuntimeConfig):
@@ -134,7 +134,7 @@ class K8sClient:
                     list_fn=list_fn,
                     resync_period_seconds=self.config.informer_resync_seconds,
                     watch_timeout_seconds=self.config.informer_watch_timeout_seconds,
-                    thread_name=f"workload-informer-{plural}-{namespace}",
+                    thread_name=f"workload-informer-{plural}.{group}-{namespace}",
                     event_handler=event_handler,
                 )
                 self._informers[key] = informer
@@ -203,7 +203,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_write(obj)
         return obj
 
     def get_custom_object(
@@ -213,17 +213,20 @@ class K8sClient:
         namespace: str,
         plural: str,
         name: str,
+        *,
+        use_cache: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """Get a namespaced custom resource by name.
 
-        Tries the informer cache first when available and synced.
-        Returns None on 404.
+        Tries the informer cache first when available and synced, unless
+        ``use_cache`` is False. Returns None on 404.
         """
-        informer = self._get_informer(group, version, plural, namespace)
-        if informer:
-            cached = informer.get_if_synced(name)
-            if cached is not None:
-                return cached
+        if use_cache:
+            informer = self._get_informer(group, version, plural, namespace)
+            if informer:
+                cached = informer.get_if_synced(name)
+                if cached is not None:
+                    return cached
 
         if self._read_limiter:
             self._read_limiter.acquire()
@@ -343,7 +346,7 @@ class K8sClient:
         """Delete a namespaced custom resource."""
         if self._write_limiter:
             self._write_limiter.acquire()
-        self.get_custom_objects_api().delete_namespaced_custom_object(
+        response = self.get_custom_objects_api().delete_namespaced_custom_object(
             group=group,
             version=version,
             namespace=namespace,
@@ -354,7 +357,7 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_delete(name, response)
 
     def patch_custom_object(
         self,
@@ -378,12 +381,9 @@ class K8sClient:
         )
         informer = self._lookup_informer(group, version, plural, namespace)
         if informer:
-            informer.invalidate()
+            informer.track_write(obj)
         return obj
 
-    # ------------------------------------------------------------------
-    # PersistentVolumeClaim operations
-    # ------------------------------------------------------------------
 
     def get_pvc(
         self,
@@ -484,9 +484,6 @@ class K8sClient:
             collection_formats={},
         )
 
-    # ------------------------------------------------------------------
-    # Secret operations
-    # ------------------------------------------------------------------
 
     def create_secret(self, namespace: str, body: Any) -> Any:
         """Create a namespaced Secret."""
@@ -497,6 +494,31 @@ class K8sClient:
             body=body,
         )
 
+
+    def patch_pod_labels(
+        self, namespace: str, name: str, labels: Dict[str, Optional[str]]
+    ) -> Any:
+        """Merge Pod labels, preserving null deletions and unrelated labels."""
+        if self._write_limiter:
+            self._write_limiter.acquire()
+        # Explicitly select merge patch: the generated Pod API defaults to JSON patch.
+        return self.get_core_v1_api().api_client.call_api(
+            "/api/v1/namespaces/{namespace}/pods/{name}",
+            "PATCH",
+            path_params={"namespace": namespace, "name": name},
+            query_params=[],
+            header_params={
+                "Accept": "application/json",
+                "Content-Type": "application/merge-patch+json",
+            },
+            body={"metadata": {"labels": labels}},
+            post_params=[],
+            files={},
+            response_type="V1Pod",
+            auth_settings=["BearerToken"],
+            _return_http_data_only=True,
+            collection_formats={},
+        )
 
     def list_pods(
         self,

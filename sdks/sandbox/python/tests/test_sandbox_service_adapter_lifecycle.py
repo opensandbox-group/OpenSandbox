@@ -87,9 +87,10 @@ def _api_list_sandboxes_response():
     )
 
 
-def _api_snapshot(snapshot_id: str):
+def _api_snapshot(snapshot_id: str, mode=None):
     from opensandbox.api.lifecycle.models.snapshot import Snapshot
     from opensandbox.api.lifecycle.models.snapshot_status import SnapshotStatus
+    from opensandbox.api.lifecycle.types import UNSET
 
     return Snapshot(
         id=snapshot_id,
@@ -97,6 +98,7 @@ def _api_snapshot(snapshot_id: str):
         name="before-upgrade",
         status=SnapshotStatus(state="Ready"),
         created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        mode=UNSET if mode is None else mode,
     )
 
 
@@ -552,6 +554,58 @@ async def test_snapshot_lifecycle_calls_openapi(
         ("list", ("sbx-1", "toolchain:python@rev-1", ["Ready"], 1, 10)),
         ("delete", "snap-1"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_create_snapshot_sends_mode_and_maps_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensandbox.api.lifecycle.models.snapshot_mode import SnapshotMode
+
+    seen: list[object] = []
+
+    async def _create_snapshot(*, client, sandbox_id, body):
+        seen.append(body)
+        return _Resp(
+            status_code=202,
+            parsed=_api_snapshot("snap-rootfs", mode=SnapshotMode.ROOTFSONLY),
+        )
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.snapshots.post_sandboxes_sandbox_id_snapshots.asyncio_detailed",
+        _create_snapshot,
+    )
+
+    adapter = SandboxesAdapter(ConnectionConfig())
+    created = await adapter.create_snapshot(
+        "sbx-1", CreateSnapshotRequest(name="workspace-state", mode="rootfsOnly")
+    )
+
+    assert seen[0].mode.value == "rootfsOnly"
+    assert created.mode == "rootfsOnly"
+
+
+@pytest.mark.asyncio
+async def test_adapter_create_snapshot_omits_mode_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    async def _create_snapshot(*, client, sandbox_id, body):
+        seen.append(body)
+        return _Resp(status_code=202, parsed=_api_snapshot("snap-full"))
+
+    monkeypatch.setattr(
+        "opensandbox.api.lifecycle.api.snapshots.post_sandboxes_sandbox_id_snapshots.asyncio_detailed",
+        _create_snapshot,
+    )
+
+    adapter = SandboxesAdapter(ConnectionConfig())
+    created = await adapter.create_snapshot("sbx-1")
+
+    # Omitted mode serializes to nothing: legacy servers never see the field.
+    assert "mode" not in seen[0].to_dict()
+    assert created.mode == "full"
 
 
 def test_sync_list_snapshots_forwards_name_filter(

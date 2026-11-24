@@ -67,7 +67,6 @@ class NetworkPolicyAdapterTest {
 
     @Test
     fun `getPolicy should read the policy payload from the lifecycle control plane`() {
-        // Mock response
         val responseBody =
             """
             {
@@ -81,15 +80,12 @@ class NetworkPolicyAdapterTest {
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(200))
 
-        // Execute
         val policy = networkPolicyAdapter.getPolicy()
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertEquals("GET", recorded.method)
         assertEquals("/v1/sandboxes/fsb-001/networkpolicy", recorded.path)
 
-        // Verify response
         assertEquals(NetworkPolicy.DefaultAction.DENY, policy.defaultAction)
         assertEquals(1, policy.egress!!.size)
         assertEquals(NetworkRule.Action.ALLOW, policy.egress!![0].action)
@@ -98,12 +94,10 @@ class NetworkPolicyAdapterTest {
 
     @Test
     fun `patchRules should send the rule array to the lifecycle control plane`() {
-        // Mock response
         mockWebServer.enqueue(
             MockResponse().setBody("""{"status": "ok", "mode": "deny_all"}""").setResponseCode(200),
         )
 
-        // Execute
         val rules =
             listOf(
                 NetworkRule.builder().action(NetworkRule.Action.ALLOW).target("pypi.org").build(),
@@ -111,7 +105,6 @@ class NetworkPolicyAdapterTest {
             )
         networkPolicyAdapter.patchRules(rules)
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertEquals("PATCH", recorded.method)
         assertEquals("/v1/sandboxes/fsb-001/networkpolicy", recorded.path)
@@ -124,15 +117,12 @@ class NetworkPolicyAdapterTest {
 
     @Test
     fun `deleteRules should send the target list to the lifecycle control plane`() {
-        // Mock response
         mockWebServer.enqueue(
             MockResponse().setBody("""{"status": "ok", "mode": "deny_all"}""").setResponseCode(200),
         )
 
-        // Execute
         networkPolicyAdapter.deleteRules(listOf("pypi.org", "evil.example.com"))
 
-        // Verify request
         val recorded = mockWebServer.takeRequest()
         assertEquals("DELETE", recorded.method)
         assertEquals("/v1/sandboxes/fsb-001/networkpolicy", recorded.path)

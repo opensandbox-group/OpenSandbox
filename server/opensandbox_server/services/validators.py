@@ -36,6 +36,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+RESERVED_METADATA_LABEL_PREFIXES = (
+    RESERVED_LABEL_PREFIX,
+    "batch-sandbox.sandbox.opensandbox.io/",
+)
+
 
 def ensure_entrypoint(entrypoint: Sequence[str]) -> None:
     if not entrypoint:
@@ -96,22 +101,21 @@ is_valid_label_value = _is_valid_label_value
 
 
 def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
-    """
-    Validate metadata keys/values against Kubernetes label rules.
-
-    Raises:
-        HTTPException: When a key/value is invalid.
-    """
+    """Validate metadata keys/values against Kubernetes label rules."""
     if not metadata:
         return
     for key, value in metadata.items():
-        if key.startswith(RESERVED_LABEL_PREFIX):
+        reserved_prefix = next(
+            (prefix for prefix in RESERVED_METADATA_LABEL_PREFIXES if key.startswith(prefix)),
+            None,
+        )
+        if reserved_prefix is not None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
                     "message": (
-                        f"Metadata key '{key}' uses the reserved prefix '{RESERVED_LABEL_PREFIX}'. "
+                        f"Metadata key '{key}' uses the reserved prefix '{reserved_prefix}'. "
                         "Keys under this prefix are managed by the system and cannot be set via metadata."
                     ),
                 },
@@ -135,12 +139,7 @@ def ensure_metadata_labels(metadata: Optional[Dict[str, str]]) -> None:
 
 
 def ensure_future_expiration(expires_at: datetime) -> datetime:
-    """
-    Validate and normalize expiration timestamps to UTC.
-
-    Raises:
-        HTTPException: If the timestamp is not in the future.
-    """
+    """Validate and normalize expiration timestamps to UTC; must be in the future."""
     if expires_at.tzinfo is None:
         normalized = expires_at.replace(tzinfo=timezone.utc)
     else:
@@ -173,12 +172,8 @@ def ensure_timeout_within_limit(timeout_seconds: Optional[int], max_timeout_seco
     """
     Validate that a requested sandbox TTL does not exceed the configured limit.
 
-    Args:
-        timeout_seconds: Requested sandbox TTL in seconds, or None for manual cleanup.
-        max_timeout_seconds: Configured maximum TTL in seconds, or None to disable the limit.
-
-    Raises:
-        HTTPException: When the timeout exceeds the configured maximum.
+    ``timeout_seconds`` of None means manual cleanup; ``max_timeout_seconds``
+    of None disables the limit.
     """
     if timeout_seconds is None:
         return
@@ -202,12 +197,7 @@ def ensure_timeout_within_limit(timeout_seconds: Optional[int], max_timeout_seco
 
 
 def calculate_expiration_or_raise(created_at: datetime, timeout_seconds: int) -> datetime:
-    """
-    Compute an expiration timestamp and convert datetime overflow into a 400 error.
-
-    Raises:
-        HTTPException: When the timeout value is too large to represent safely.
-    """
+    """Compute an expiration timestamp, converting datetime overflow into a 400 error."""
     try:
         return created_at + timedelta(seconds=timeout_seconds)
     except (OverflowError, ValueError) as exc:
@@ -224,13 +214,8 @@ def calculate_expiration_or_raise(created_at: datetime, timeout_seconds: int) ->
 
 def ensure_platform_valid(platform: Optional["PlatformSpec"]) -> None:
     """
-    Validate platform os/arch values for v1 platform contract.
-
-    Supported values in this iteration:
-    - os: linux, windows
-    - arch:
-      - linux: amd64, arm64
-      - windows: amd64, arm64
+    Validate platform os/arch for the v1 platform contract: os is
+    linux/windows, arch is amd64/arm64; values are normalized to lowercase.
     """
     if platform is None:
         return
@@ -266,19 +251,12 @@ def ensure_platform_valid(platform: Optional["PlatformSpec"]) -> None:
     platform.arch = normalized_arch
 
 
-# Volume name must be a valid DNS label
 VOLUME_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
-# Kubernetes resource name pattern
 K8S_RESOURCE_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 
 
 def ensure_valid_volume_name(name: str) -> None:
-    """
-    Validate that a volume name is a valid DNS label.
-
-    Raises:
-        HTTPException: When the name is invalid.
-    """
+    """Validate that a volume name is a non-empty DNS label of at most 63 chars."""
     if not name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -306,12 +284,7 @@ def ensure_valid_volume_name(name: str) -> None:
 
 
 def ensure_valid_mount_path(mount_path: str) -> None:
-    """
-    Validate that a mount path is an absolute path.
-
-    Raises:
-        HTTPException: When the path is not absolute.
-    """
+    """Validate that a mount path is a non-empty absolute path."""
     if not mount_path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -331,12 +304,7 @@ def ensure_valid_mount_path(mount_path: str) -> None:
 
 
 def ensure_valid_sub_path(sub_path: Optional[str]) -> None:
-    """
-    Validate that a subPath does not contain path traversal or is absolute.
-
-    Raises:
-        HTTPException: When the subPath is invalid.
-    """
+    """Validate that a subPath is relative and contains no ``..`` traversal."""
     if sub_path is None:
         return
 
@@ -344,7 +312,10 @@ def ensure_valid_sub_path(sub_path: Optional[str]) -> None:
         # Empty string is valid (no subpath)
         return
 
-    if sub_path.startswith("/"):
+    # Windows subPath uses '\\' as a separator. Treat it like the host-path
+    # check so 'foo\\..\\secret' cannot walk out of the volume root.
+    normalized = sub_path.replace("\\", "/")
+    if normalized.startswith("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -353,7 +324,7 @@ def ensure_valid_sub_path(sub_path: Optional[str]) -> None:
             },
         )
 
-    parts = sub_path.split("/")
+    parts = normalized.split("/")
     for part in parts:
         if part == "..":
             raise HTTPException(
@@ -369,12 +340,7 @@ def ensure_valid_host_path(
     path: str,
     allowed_prefixes: Optional[List[str]] = None,
 ) -> None:
-    """
-    Validate that a host path is absolute and optionally within allowed prefixes.
-
-    Raises:
-        HTTPException: When the path is invalid or not allowed.
-    """
+    """Validate that a host path is absolute, normalized, and within allowed prefixes."""
     if not path:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -403,7 +369,7 @@ def ensure_valid_host_path(
     _windows_drive_match = re.match(r"^[A-Za-z]:/", _path_fwd)
     _tail_fwd = _path_fwd[2:] if _windows_drive_match else _path_fwd
 
-    if "/.." in _tail_fwd or _tail_fwd == "/..":
+    if ".." in _tail_fwd.split("/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
@@ -441,12 +407,7 @@ def ensure_valid_host_path(
 
 
 def ensure_valid_pvc_name(claim_name: str) -> None:
-    """
-    Validate that a PVC claim name is a valid Kubernetes resource name.
-
-    Raises:
-        HTTPException: When the claim name is invalid.
-    """
+    """Validate that a PVC claim name is a valid Kubernetes resource name."""
     if not claim_name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -532,7 +493,13 @@ def normalize_network_policy_action(action: Optional[str], field: str) -> str:
     """Normalize action names using the existing Fast Sandbox deny fallback."""
     normalized = (action or "deny").strip().lower() or "deny"
     if normalized not in ("allow", "deny"):
-        raise HTTPException(400, detail=f"{field} must be allow or deny.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": f"{field} must be allow or deny.",
+            },
+        )
     return normalized
 
 
@@ -552,14 +519,7 @@ def ensure_egress_configured(
     network_policy: Optional["NetworkPolicy"],
     egress_config: Optional["EgressConfig"],
 ) -> None:
-    """
-    Validate that egress.image is configured when network policy is provided.
-
-    This is a common validation shared by Docker and Kubernetes runtimes.
-
-    Raises:
-        HTTPException: When network_policy is provided but egress.image is not configured.
-    """
+    """Validate that egress.image is configured when network policy is provided."""
     if not network_policy:
         return
     
@@ -613,11 +573,13 @@ def ensure_egress_runtime_compatible(
     network_policy: Optional["NetworkPolicy"],
     secure_runtime: Optional["SecureRuntimeConfig"] = None,
     effective_runtime_class: Optional[str] = None,
+    *,
+    egress_required: bool = False,
 ) -> None:
     """
-    Reject network_policy when the secure runtime cannot run the egress sidecar.
+    Reject egress attachment when the secure runtime cannot run the egress sidecar.
     """
-    if not network_policy:
+    if not network_policy and not egress_required:
         return
     runtime_type = None
     if secure_runtime is not None and secure_runtime.type:
@@ -627,15 +589,23 @@ def ensure_egress_runtime_compatible(
     if not runtime_type:
         return
     if runtime_type in _GVISOR_NAT_INCOMPATIBLE_RUNTIMES:
+        if egress_required and not network_policy:
+            message = (
+                f"egress forward mode is not compatible with runtime '{runtime_type}': "
+                "gVisor does not support the nftables rules required by the egress sidecar. "
+                "Use a compatible runtime (e.g. kata)."
+            )
+        else:
+            message = (
+                f"networkPolicy is not compatible with runtime '{runtime_type}': "
+                f"gVisor does not support the nftables rules required by the egress sidecar. "
+                f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
-                "message": (
-                    f"networkPolicy is not compatible with runtime '{runtime_type}': "
-                    f"gVisor does not support the nftables rules required by the egress sidecar. "
-                    f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
-                ),
+                "message": message,
             },
         )
 
@@ -644,12 +614,7 @@ def ensure_volumes_valid(
     volumes: Optional[List["Volume"]],
     allowed_host_prefixes: Optional[List[str]] = None,
 ) -> None:
-    """
-    Validate a list of volume definitions.
-
-    Raises:
-        HTTPException: When any validation fails.
-    """
+    """Validate a list of volume definitions (unique names, one backend each)."""
     if volumes is None or len(volumes) == 0:
         return
 

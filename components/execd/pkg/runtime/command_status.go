@@ -57,7 +57,7 @@ func (c *Controller) commandSnapshot(session string) *commandKernel {
 func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 	kernel := c.commandSnapshot(session)
 	if kernel == nil {
-		return nil, fmt.Errorf("command not found: %s", session)
+		return nil, fmt.Errorf("%w: %s", ErrCommandNotFound, session)
 	}
 
 	status := &CommandStatus{
@@ -78,10 +78,16 @@ func (c *Controller) GetCommandStatus(session string) (*CommandStatus, error) {
 // the current end of the file is clamped to the file size, so polling at (or
 // past) the tail returns empty output with the real end offset instead of
 // echoing back an offset that later writes would silently skip.
+//
+// At most maxBackgroundLogReadBytes are returned per call; the returned
+// cursor points past the bytes in this response, so clients page through
+// larger output by polling again with that cursor. When the cap splits a
+// UTF-8 sequence, the response ends at the sequence start and the cursor
+// stays there too, so each page decodes on its own.
 func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) ([]byte, int64, error) {
 	kernel := c.commandSnapshot(session)
 	if kernel == nil {
-		return nil, -1, fmt.Errorf("command not found: %s", session)
+		return nil, -1, fmt.Errorf("%w: %s", ErrCommandNotFound, session)
 	}
 
 	if !kernel.isBackground {
@@ -106,22 +112,28 @@ func (c *Controller) SeekBackgroundCommandOutput(session string, cursor int64) (
 		cursor = info.Size()
 	}
 
+	readStart := cursor
+
 	_, err = file.Seek(cursor, 0)
 	if err != nil {
 		return nil, -1, fmt.Errorf("error seek file: %w", err)
 	}
 
-	data, err := io.ReadAll(file)
+	data, err := io.ReadAll(io.LimitReader(file, maxBackgroundLogReadBytes))
 	if err != nil {
 		return nil, -1, fmt.Errorf("error read file: %w", err)
 	}
 
-	currentPos, err := file.Seek(0, 1)
-	if err != nil {
-		return nil, -1, fmt.Errorf("error get current position: %w", err)
+	// The response is labeled charset=utf-8 and clients decode each page on
+	// its own, so a read that filled the cap must not end inside a UTF-8
+	// sequence; step back to the sequence start and leave those bytes for
+	// the next page. Reads below the cap stopped at EOF, not at a boundary
+	// of ours, so they are returned as-is.
+	if len(data) == maxBackgroundLogReadBytes {
+		data = data[:lastRuneBoundary(data)]
 	}
 
-	return data, currentPos, nil
+	return data, readStart + int64(len(data)), nil
 }
 
 // markCommandFinished updates bookkeeping when a command exits.

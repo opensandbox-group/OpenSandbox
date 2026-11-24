@@ -232,6 +232,8 @@ Execute commands and handle output streams in real-time.
 
 Command and code-interpreter event streams accept LF, CRLF, and CR line endings, including when a line ending is split across network chunks.
 
+`timeoutSeconds` on `commands.run()` and `commands.runInSession()` is rounded to the nearest whole millisecond, with a minimum of 1 ms for positive values, so a positive sub-millisecond timeout cannot disable the timeout. Omitted timeouts and explicit zero retain the server defaults. Negative or non-finite values, including values that overflow the millisecond conversion, are rejected before a request is sent.
+
 ```ts
 import type { ExecutionHandlers } from "@alibaba-group/opensandbox";
 
@@ -259,7 +261,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Poll status and incremental logs. The command timeout is separate from sandbox TTL.
+Poll status and incremental logs. The command timeout is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```ts
 const execution = await sandbox.commands.run(
@@ -275,9 +277,13 @@ while (true) {
     throw new Error("Command did not finish");
   }
   const status = await sandbox.commands.getCommandStatus(execution.id);
-  const logs = await sandbox.commands.getBackgroundCommandLogs(execution.id, cursor);
-  process.stdout.write(logs.content);
-  cursor = logs.cursor ?? cursor;
+  while (true) {
+    const logs = await sandbox.commands.getBackgroundCommandLogs(execution.id, cursor);
+    process.stdout.write(logs.content);
+    const nextCursor = logs.cursor ?? cursor;
+    if (!logs.content || nextCursor === cursor) break;
+    cursor = nextCursor;
+  }
   if (status.running === false) {
     if (status.exitCode !== 0) throw new Error(`Command failed: ${status.exitCode}, ${status.error}`);
     break;
@@ -342,6 +348,10 @@ await sandbox.files.deleteDirectories(["/tmp/demo"]);
 For binary files, pass a `Uint8Array` to `writeFiles()` and read with `readBytes()` or `readBytesStream()`. Read options support `offset` and `limit` for partial downloads.
 
 Use `readBytesDetailed` or `readBytesStreamDetailed` for the body together with HTTP status and range metadata; unknown sizes use `-1`. Both methods are optional on `SandboxFiles`; check for support before calling them. Close a detailed stream body with `await download.body.close()` if it is not fully consumed.
+
+For content-encoded responses, `contentLength` and `contentRange` describe the encoded HTTP representation. Fetch decodes the body, so `totalSize` is `-1` when its decoded size cannot be determined from those headers.
+
+For cross-origin browser responses, `totalSize` is also `-1` if `Content-Encoding` is not exposed. Without that header the SDK cannot tell whether `Content-Length` describes compressed bytes.
 
 ```ts
 if (sandbox.files.readBytesDetailed) {
@@ -428,7 +438,7 @@ Read current sandbox resource usage with `await sandbox.getMetrics()`. This is s
 
 | Operation | Public API |
 | --- | --- |
-| Snapshot a sandbox | `manager.createSnapshot(sandboxId, { name })` |
+| Snapshot a sandbox | `manager.createSnapshot(sandboxId, { name, mode })` |
 | Inspect/list/delete snapshots | `manager.getSnapshot`, `listSnapshots`, `deleteSnapshot` |
 | Restore a snapshot | `Sandbox.create({ snapshotId, connectionConfig })` |
 | Manage Fsb templates | `manager.createTemplate`, `getTemplate`, `listTemplates`, `deleteTemplate` |
@@ -436,6 +446,13 @@ Read current sandbox resource usage with `await sandbox.getMetrics()`. This is s
 | Patch metadata | `sandbox.patchMetadata` or `manager.patchSandboxMetadata` |
 
 Poll snapshot status before restoring. Template builds are asynchronous; wait for `status.phase === "Succeeded"` before use. Template-backed creation requires a TTL and inherits workload configuration from the published template. Metadata patch values add/replace keys; `null` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
+
+Snapshot `mode` selects what the snapshot persists:
+
+- `"full"` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `"rootfsOnly"`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend; other backends reject the mode before any capture starts, and an unqualified fast-sandbox node fails the snapshot instead of silently producing a full artifact.
+
+`SnapshotInfo.mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `"full"`.
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. Wait for `Ready` before restoring; the snapshot remains available after this example:
 
@@ -464,6 +481,19 @@ try {
 } finally {
   await manager.close();
 }
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```ts
+const rootfsSnapshot = await manager.createSnapshot(sandbox.id, {
+  name: "workspace-state",
+  mode: "rootfsOnly",
+});
+// ... poll manager.getSnapshot(rootfsSnapshot.id) until Ready, then:
+const rebooted = await Sandbox.create({ snapshotId: rootfsSnapshot.id, connectionConfig: config });
+// Files written before the snapshot are present; processes were not preserved
+// and the entrypoint re-ran on boot.
 ```
 
 Use an existing template after its build reaches `Succeeded`:
@@ -505,7 +535,6 @@ An explicit `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `apiKey` a
 | `requestTimeoutSeconds` | Request timeout applied to SDK HTTP calls                                                                    | `30`             | -                      |
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
-| `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
 | `enableTracing` | Enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing) | `false` | - |
 | `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
@@ -557,7 +586,7 @@ credential replay. Node.js is unaffected.
 :::
 
 The JavaScript Code Interpreter SDK inherits the sandbox's connection
-configuration. With `useServerProxy: true`, context requests and streamed code
+configuration. With the deprecated `useServerProxy: true` (maintenance mode), context requests and streamed code
 execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server
 authentication. In direct mode, the SDK does not attach this key to code
 execution requests.
@@ -658,6 +687,12 @@ See [Credential Vault](/guides/credential-vault) for auth types, binding guidanc
 ### 5. Resource Cleanup
 
 Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to release the underlying agent.
+
+The companion `@alibaba-group/opensandbox-code-interpreter` SDK also releases each
+code execution response reader when streaming finishes or fails. Leaving a
+`codes.runStream()` loop early cancels its response body; a rejected `codes.run()`
+handler also cancels the body and propagates the handler's error. Use
+`codes.interrupt(executionId)` to request interruption of a running code execution.
 
 ## Browser Notes
 

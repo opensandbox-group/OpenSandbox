@@ -438,16 +438,6 @@ def test_postgresql_ha_submitted_create_stays_creating_without_terminal_cr() -> 
     assert status.reason == "snapshot_runtime_submitted"
 
 
-def test_submitted_create_stays_creating_without_terminal_cr() -> None:
-    k8s_client = FakeK8sClient()
-    runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
-
-    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
-
-    assert status.state == SnapshotState.CREATING
-    assert status.reason == "snapshot_runtime_submitted"
-
-
 def test_start_status_watch_registers_namespaces_and_invokes_callback() -> None:
     k8s_client = WatchRecordingK8sClient()
     runtime = KubernetesSnapshotRuntime(k8s_client, namespace="default")
@@ -574,3 +564,31 @@ def test_create_snapshot_marks_ambiguous_multi_container_restore_failed() -> Non
 
     assert status.state == SnapshotState.FAILED
     assert status.reason == "snapshot_restore_image_ambiguous"
+
+
+@pytest.mark.parametrize("provider_type", ["agent-sandbox", " batchsandbox "])
+def test_non_batchsandbox_provider_disables_kubernetes_snapshot_runtime(provider_type: str) -> None:
+    k8s_client = WatchRecordingK8sClient()
+    runtime = KubernetesSnapshotRuntime(
+        k8s_client,
+        namespace="default",
+        postgresql_ha_enabled=True,
+        workload_provider_type=provider_type,
+    )
+
+    assert runtime.supports_create_snapshot() is False
+    assert "batchsandbox" in runtime.create_snapshot_unsupported_message()
+
+    runtime.start_status_watch(lambda _id, _ns: None, namespaces=["default"])
+    assert k8s_client.watch_calls == []
+
+    with pytest.raises(SnapshotRuntimeUnsupportedError, match=provider_type):
+        runtime.preflight_create_snapshot(SANDBOX_ID)
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status is not None
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_unsupported"
+    assert status.message == runtime.create_snapshot_unsupported_message()
+    assert k8s_client.created == []

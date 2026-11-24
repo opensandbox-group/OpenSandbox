@@ -12,18 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FastSandboxTemplateService: fsb template management.
-
-The server store is the source of truth for the public catalog; the
-fast-sandbox ``SandboxTemplate`` CRD is the execution projection. Reads
-lazily sync the CRD build status into the row, so the catalog converges
-without a background task.
-"""
+"""The catalog owns build intent; the watch reactor, not reads, converges SandboxTemplate status."""
 
 from __future__ import annotations
 
 import logging
-import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -156,6 +149,17 @@ def _publish_validation_error(format: str, publish: str) -> Optional[str]:
         f"Unsupported template format {format!r}; "
         f"supported formats: {', '.join(_TEMPLATE_FORMATS)}."
     )
+
+
+def effective_machine(spec: dict) -> dict[str, str]:
+    """Effective guest machine ``{"cpu", "memory"}``: pinned ``machine`` if
+    present, else ``resourceLimits`` with defaults; ``disk`` excluded."""
+    machine = spec.get("machine") or {}
+    limits = spec.get("resourceLimits") or {}
+    return {
+        "cpu": str(machine.get("cpu") or limits.get("cpu") or DEFAULT_VCPU),
+        "memory": str(machine.get("memory") or limits.get("memory") or DEFAULT_MEMORY),
+    }
 
 
 class FastSandboxTemplateService:
@@ -338,6 +342,8 @@ class FastSandboxTemplateService:
             "publish": publish,
             "format": request.format,
         }
+        # OSEP-0026: pin the machine shape; resourceLimits stays verbatim.
+        spec["machine"] = effective_machine(spec)
         record = FastSandboxTemplateRecord(
             template_id=template_id,
             namespace=namespace,
@@ -444,11 +450,12 @@ class FastSandboxTemplateService:
                 ) from exc
         self._repo().delete(template_id, namespace)
 
-    def resolve_template_artifact(self, template_id: str) -> tuple[str, list[str]]:
-        """Resolve a Succeeded template to its runnable artifact + entrypoint.
+    def resolve_template_artifact(self, template_id: str) -> tuple[str, list[str], dict[str, str]]:
+        """Resolve a Succeeded template to artifact + entrypoint + machine.
 
         native → the template id (the builder's content-addressed index key);
-        overlaybd → the CRD's immutable OCI manifest_ref. Unknown,
+        overlaybd → the CRD's immutable OCI manifest_ref. machine is the
+        effective shape from :func:`effective_machine`. Unknown,
         non-Succeeded, or manifest-less templates all yield 404, so no
         existence information leaks. Reads the DB row only; the watch
         reactor converges build phase.
@@ -463,8 +470,9 @@ class FastSandboxTemplateService:
         if record.phase is not FastSandboxTemplatePhase.SUCCEEDED:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
         entrypoint = list(record.spec.get("entrypoint") or DEFAULT_ENTRYPOINT)
+        machine = effective_machine(record.spec)
         if str(record.spec.get("format") or "overlaybd") != "overlaybd":
-            return record.template_id, entrypoint
+            return record.template_id, entrypoint, machine
         manifest_ref = record.manifest_ref or ""
         if not re.fullmatch(re.escape(record.publish) + r"@sha256:[0-9a-f]{64}", manifest_ref):
             # Transient (status not landed) or a legacy overlaybd+S3 row
@@ -482,7 +490,7 @@ class FastSandboxTemplateService:
                     ),
                 },
             )
-        return manifest_ref, entrypoint
+        return manifest_ref, entrypoint, machine
 
     # -- CRD mapping -----------------------------------------------------------
 
@@ -496,8 +504,7 @@ class FastSandboxTemplateService:
 
     def _build_crd(self, record: FastSandboxTemplateRecord) -> dict:
         limits = record.spec.get("resourceLimits") or {}
-        vcpu = str(limits.get("cpu") or DEFAULT_VCPU)
-        memory = str(limits.get("memory") or DEFAULT_MEMORY)
+        machine = effective_machine(record.spec)
         # resourceLimits.disk (parallel to cpu/memory) is the logical size of
         # the guest rootfs; artifacts are stored and pulled at this size.
         rootfs_size = str(limits.get("disk") or DEFAULT_ROOTFS_SIZE)
@@ -515,7 +522,7 @@ class FastSandboxTemplateService:
             "entrypoint": list(record.spec.get("entrypoint") or DEFAULT_ENTRYPOINT),
             "execd": self._execd_image,
             "kernel": TEMPLATE_KERNEL,
-            "machine": {"vcpu": vcpu, "memory": memory},
+            "machine": {"vcpu": machine["cpu"], "memory": machine["memory"]},
             "output": {
                 "rootfsSize": rootfs_size,
                 "format": fmt,
@@ -628,8 +635,8 @@ def template_to_response(record: FastSandboxTemplateRecord) -> FsbTemplate:
     )
 
 
-def total_pages(total_items: int, page_size: int) -> int:
-    return math.ceil(total_items / page_size) if page_size > 0 else 0
-
-
-__all__ = ["FastSandboxTemplateService", "template_to_response", "total_pages"]
+__all__ = [
+    "FastSandboxTemplateService",
+    "effective_machine",
+    "template_to_response",
+]

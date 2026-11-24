@@ -51,6 +51,8 @@ func deleteHeaderFold(headers map[string]string, name string) {
 
 // SandboxCreateOptions configures sandbox creation.
 type SandboxCreateOptions struct {
+	// InheritSnapshotResources omits the SDK defaults for snapshot restores.
+	InheritSnapshotResources bool
 	// Image is the container image URI (required).
 	Image string
 	// SnapshotID restores the sandbox from a previously created snapshot.
@@ -162,6 +164,9 @@ func (s *Sandbox) templateBacked() bool {
 
 // CreateSandbox creates a new sandbox and waits for it to be ready.
 func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCreateOptions) (*Sandbox, error) {
+	if opts.InheritSnapshotResources && opts.SnapshotID == "" {
+		return nil, &InvalidArgumentError{Field: "InheritSnapshotResources", Message: "requires a snapshot ID"}
+	}
 	if (opts.Image == "") == (opts.SnapshotID == "") {
 		return nil, &InvalidArgumentError{Field: "Image/SnapshotID", Message: "exactly one of image or snapshotID is required"}
 	}
@@ -171,7 +176,7 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 		entrypoint = DefaultEntrypoint
 	}
 	limits := opts.ResourceLimits
-	if limits == nil {
+	if limits == nil && !(opts.InheritSnapshotResources && opts.SnapshotID != "") {
 		limits = DefaultResourceLimits
 	}
 	var timeout *int
@@ -614,6 +619,11 @@ func (s *Sandbox) waitForRunning(ctx context.Context, timeout time.Duration) err
 
 		info, err := s.lifecycle.GetSandbox(waitCtx, s.id)
 		if err != nil {
+			if waitCtx.Err() != nil {
+				// Classify a deadline or cancellation during the request the
+				// same way as one observed between status polls.
+				continue
+			}
 			return fmt.Errorf("opensandbox: get sandbox status: %w", err)
 		}
 		if info.Status.State == StateRunning {

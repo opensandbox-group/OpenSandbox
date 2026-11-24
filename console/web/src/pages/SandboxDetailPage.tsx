@@ -21,13 +21,16 @@ import { SandboxArchiveLogPanel } from '../components/SandboxArchiveLogPanel';
 import { SandboxLogPanel } from '../components/SandboxLogPanel';
 import type { Sandbox } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
+import { statusLabel, useI18n } from '../i18n';
 import { formatDuration, sandboxDisplayName } from '../utils/format';
+import { ShellLink } from '../components/ShellLink';
 
 export function SandboxDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { t } = useI18n();
   const adminTenant = searchParams.get('tenant') ?? '';
   const isAdminProxy = user?.role === 'admin' && Boolean(adminTenant);
   const defaultTab = searchParams.get('tab') === 'logs' ? 'logs' : 'overview';
@@ -70,37 +73,41 @@ export function SandboxDetailPage() {
     try {
       setSandbox(await api.get());
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '加载失败');
+      message.error(e instanceof Error ? e.message : t('sandboxDetail.loadFailed'));
     } finally {
       setLoading(false);
     }
-  }, [api]);
+  }, [api, t]);
 
   useEffect(() => {
     if (user?.role === 'admin' && !adminTenant) {
-      message.warning('Admin 查看详情需 URL 参数 tenant=');
+      message.warning(t('sandboxDetail.adminTenantWarning'));
       setLoading(false);
       return;
     }
     void load();
-  }, [load, user?.role, adminTenant]);
+  }, [load, user?.role, adminTenant, t]);
 
   const state = sandbox?.status?.state;
 
   const onDelete = () => {
     if (!api) return;
     Modal.confirm({
-      title: '确认删除沙箱？',
-      content: '此操作不可撤销。',
+      title: t('sandboxDetail.deleteTitle'),
+      content: t('sandboxDetail.deleteContent'),
+      // antd static methods do not read ConfigProvider, so the action labels
+      // are passed explicitly to keep the dialog in one language.
+      okText: t('common.delete'),
+      cancelText: t('common.cancel'),
       okType: 'danger',
       onOk: async () => {
         setDeleteLoading(true);
         try {
           await api.remove();
-          message.success('已删除');
+          message.success(t('sandboxDetail.deleted'));
           navigate(isAdminProxy ? '/admin/sandboxes' : '/sandboxes');
         } catch (e) {
-          message.error(e instanceof Error ? e.message : '删除失败');
+          message.error(e instanceof Error ? e.message : t('sandboxDetail.deleteFailed'));
           throw e;
         } finally {
           setDeleteLoading(false);
@@ -117,11 +124,11 @@ export function SandboxDetailPage() {
     setRenewLoading(true);
     try {
       await api.renew(expiresAt);
-      message.success('已续期');
+      message.success(t('sandboxDetail.renewed'));
       setRenewOpen(false);
       await load();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '续期失败');
+      message.error(e instanceof Error ? e.message : t('sandboxDetail.renewFailed'));
     } finally {
       setRenewLoading(false);
     }
@@ -133,10 +140,12 @@ export function SandboxDetailPage() {
     try {
       if (action === 'pause') await api.pause();
       else await api.resume();
-      message.success(action === 'pause' ? '已请求暂停' : '已请求恢复');
+      message.success(
+        action === 'pause' ? t('sandboxDetail.pauseRequested') : t('sandboxDetail.resumeRequested'),
+      );
       await load();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '操作失败');
+      message.error(e instanceof Error ? e.message : t('sandboxDetail.actionFailed'));
     } finally {
       setActionLoading(false);
     }
@@ -148,7 +157,7 @@ export function SandboxDetailPage() {
     try {
       setEndpointInfo(await api.endpoint(endpointPort));
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '获取 endpoint 失败');
+      message.error(e instanceof Error ? e.message : t('sandboxDetail.endpointFailed'));
       setEndpointInfo(null);
     } finally {
       setEndpointLoading(false);
@@ -162,8 +171,10 @@ export function SandboxDetailPage() {
       <Alert
         type="warning"
         showIcon
-        message="缺少 tenant 参数"
-        description="请从「全局沙箱」列表进入，或访问 /sandboxes/{id}?tenant=租户名"
+        message={t('sandboxDetail.missingTenant')}
+        description={t('sandboxDetail.missingTenantDescription', {
+          path: '/sandboxes/{id}?tenant=tenant-name',
+        })}
       />
     );
   }
@@ -176,7 +187,7 @@ export function SandboxDetailPage() {
         <Typography.Title level={4} style={{ margin: 0 }}>
           {sandbox ? sandboxDisplayName(sandbox) : id}
         </Typography.Title>
-        {state && <Tag color="blue">{state}</Tag>}
+        {state && <Tag color="blue">{statusLabel(t, state)}</Tag>}
         {isAdminProxy && <Tag>{adminTenant}</Tag>}
       </Space>
 
@@ -185,54 +196,66 @@ export function SandboxDetailPage() {
         items={[
           {
             key: 'overview',
-            label: '概览',
+            label: t('common.overview'),
             children: (
               <Row gutter={[16, 16]}>
                 <Col span={24}>
-                  <Card loading={loading} title="状态">
+                  <Card loading={loading} title={t('common.status')}>
                     <Descriptions column={1} bordered size="small">
                       <Descriptions.Item label="ID">{sandbox?.id}</Descriptions.Item>
-                      <Descriptions.Item label="状态">{state ?? '—'}</Descriptions.Item>
-                      <Descriptions.Item label="消息">{sandbox?.status?.message ?? '—'}</Descriptions.Item>
-                      <Descriptions.Item label="运行时长">
+                      <Descriptions.Item label={t('common.status')}>
+                        {state ? statusLabel(t, state) : '—'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label={t('sandboxDetail.message')}>
+                        {sandbox?.status?.message ?? '—'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label={t('common.uptime')}>
                         {formatDuration(sandbox?.runtimeSummary?.wallClockSeconds)}
                       </Descriptions.Item>
-                      <Descriptions.Item label="剩余">
+                      <Descriptions.Item label={t('common.remaining')}>
                         {sandbox?.runtimeSummary?.remainingSeconds !== undefined
                           ? formatDuration(sandbox.runtimeSummary.remainingSeconds)
                           : '—'}
                       </Descriptions.Item>
                       <Descriptions.Item label="expiresAt">{sandbox?.expiresAt ?? '—'}</Descriptions.Item>
-                      <Descriptions.Item label="镜像">{sandbox?.image?.uri ?? '—'}</Descriptions.Item>
+                      <Descriptions.Item label={t('common.image')}>
+                        {sandbox?.image?.uri ?? '—'}
+                      </Descriptions.Item>
                       <Descriptions.Item label="entrypoint">
                         {sandbox?.entrypoint?.join(' ') ?? '—'}
                       </Descriptions.Item>
                     </Descriptions>
                     <Space style={{ marginTop: 16 }} wrap>
-                      <Button onClick={() => setRenewOpen(true)}>续期</Button>
+                      <Button onClick={() => setRenewOpen(true)}>{t('common.renew')}</Button>
                       <Button danger loading={deleteLoading} onClick={onDelete}>
-                        删除
+                        {t('common.delete')}
                       </Button>
                       <Button
                         disabled={state !== 'Running'}
                         loading={actionLoading}
                         onClick={() => void onPauseResume('pause')}
                       >
-                        暂停
+                        {t('common.pause')}
                       </Button>
                       <Button
                         disabled={state !== 'Paused'}
                         loading={actionLoading}
                         onClick={() => void onPauseResume('resume')}
                       >
-                        恢复
+                        {t('common.resume')}
                       </Button>
-                      <Button onClick={() => void load()}>刷新</Button>
+                      <Button onClick={() => void load()}>{t('common.refresh')}</Button>
+                      <ShellLink
+                        sandboxId={id ?? ''}
+                        state={state}
+                        tenant={isAdminProxy ? adminTenant : undefined}
+                        variant="button"
+                      />
                     </Space>
                   </Card>
                 </Col>
                 <Col span={24}>
-                  <Card title="Endpoint">
+                  <Card title={t('sandboxDetail.endpoint')}>
                     <Space wrap>
                       <InputNumber
                         min={1}
@@ -240,7 +263,9 @@ export function SandboxDetailPage() {
                         value={endpointPort}
                         onChange={(v) => setEndpointPort(v ?? 8080)}
                       />
-                      <Button loading={endpointLoading} onClick={() => void fetchEndpoint()}>获取端口信息</Button>
+                      <Button loading={endpointLoading} onClick={() => void fetchEndpoint()}>
+                        {t('sandboxDetail.getEndpoint')}
+                      </Button>
                     </Space>
                     {endpointInfo && (
                       <pre style={{ marginTop: 16, background: '#f5f5f5', padding: 12, overflow: 'auto' }}>
@@ -254,19 +279,19 @@ export function SandboxDetailPage() {
           },
           {
             key: 'logs',
-            label: '运行日志',
+            label: t('sandboxDetail.runtimeLogs'),
             children: (
-              <Card title="日志">
+              <Card title={t('common.logs')}>
                 <Tabs
                   items={[
                     {
                       key: 'live',
-                      label: '实时（Lifecycle）',
+                      label: t('sandboxDetail.liveLifecycle'),
                       children: <SandboxLogPanel sandboxId={id} tenant={logTenant} autoLoad />,
                     },
                     {
                       key: 'archive',
-                      label: '归档（Node Agent）',
+                      label: t('sandboxDetail.archivedNodeAgent'),
                       children: (
                         <SandboxArchiveLogPanel sandboxId={id} tenant={logTenant} autoLoad />
                       ),
@@ -280,14 +305,19 @@ export function SandboxDetailPage() {
       />
 
       <Modal
-        title="续期"
+        title={t('common.renew')}
         open={renewOpen}
         confirmLoading={renewLoading}
         onOk={() => void onRenew()}
         onCancel={() => setRenewOpen(false)}
       >
-        <Typography.Paragraph>在当前 expiresAt 上增加指定小时数；没有过期时间时才从现在起算。</Typography.Paragraph>
-        <InputNumber min={1} value={renewHours} onChange={(v) => setRenewHours(v ?? 1)} addonAfter="小时" />
+        <Typography.Paragraph>{t('sandboxDetail.renewDescription')}</Typography.Paragraph>
+        <InputNumber
+          min={1}
+          value={renewHours}
+          onChange={(v) => setRenewHours(v ?? 1)}
+          addonAfter={t('sandboxDetail.hours')}
+        />
       </Modal>
     </div>
   );

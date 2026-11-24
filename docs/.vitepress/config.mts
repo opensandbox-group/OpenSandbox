@@ -218,14 +218,23 @@ export default withMermaid(defineConfig({
               text: "Chained Upstream Proxy",
               link: "/guides/egress-upstream-proxy",
             },
+            {
+              text: "Egress Forward Mode",
+              link: "/guides/egress-forward-mode",
+            },
             { text: "Secure Access", link: "/guides/secure-access" },
+            {
+              text: "Fast Sandbox System Authentication",
+              link: "/guides/fast-sandbox-system-auth",
+            },
             { text: "Secure Container", link: "/guides/secure-container" },
             {
-              text: "Network Isolation on Kubernetes",
-              link: "/guides/network-isolation",
+              text: "Sandbox Network Security",
+              link: "/guides/network-security",
             },
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
+            { text: "In-Sandbox Privilege Reduction", link: "/guides/privilege-reduction" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "OCI Templates", link: "/guides/oci-templates" },
             {
@@ -250,6 +259,10 @@ export default withMermaid(defineConfig({
               link: "/guides/egress-sse-truncation",
             },
             { text: "Lifecycle Hooks", link: "/guides/lifecycle-hooks" },
+            {
+              text: "Resource-Aware Scheduling for Fast Sandbox",
+              link: "/guides/resource-aware-scheduling",
+            },
             { text: "Windows Sandbox", link: "/guides/windows-sandbox" },
             {
               text: "Node Agent Configuration",
@@ -319,6 +332,7 @@ export default withMermaid(defineConfig({
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
             { text: "Windows", link: "/examples/windows" },
             { text: "AKS Kata", link: "/examples/aks-kata" },
+            { text: "ACK PeerPods", link: "/examples/ack-peerpods" },
             { text: "Harbor Evaluation", link: "/examples/harbor-evaluation" },
           ],
         },
@@ -356,10 +370,6 @@ export default withMermaid(defineConfig({
           items: [
             { text: "Contributing", link: "/community/contributing" },
             { text: "Code of Conduct", link: "/community/code-of-conduct" },
-            {
-              text: "Enhancement Proposals",
-              link: "/community/oseps",
-            },
           ],
         },
         {

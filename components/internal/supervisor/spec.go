@@ -81,9 +81,7 @@ type Spec struct {
 	PreStartTimeout time.Duration // default 30s
 	PostExitTimeout time.Duration // default 30s
 
-	// Backoff controls inter-restart sleep. Sleep grows exponentially from
-	// BackoffMin to BackoffMax with ±*BackoffJitter*prev jitter. After the
-	// worker has been alive at least StableAfter, the backoff resets.
+	// Jitter scales the doubled, clamped backoff base; a StableAfter run resets backoff.
 	BackoffMin time.Duration // default 1s
 	BackoffMax time.Duration // default 30s
 	// BackoffJitter is a *float64 so callers can distinguish "unset"
@@ -92,9 +90,7 @@ type Spec struct {
 	BackoffJitter *float64
 	StableAfter   time.Duration // default 60s
 
-	// Crashloop circuit breaker. If more than BurstMax launches occur
-	// within BurstWindow, the supervisor either returns (OnBurstExit=true,
-	// default) so the surrounding runtime can react, or continues looping.
+	// At BurstMax launches within BurstWindow, OnBurstExit chooses exit (default) or continued supervision.
 	BurstWindow time.Duration // default 5m
 	BurstMax    int           // default 10
 	// OnBurstExit selects burst behavior. Default true.

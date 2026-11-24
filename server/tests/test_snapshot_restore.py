@@ -185,3 +185,68 @@ async def test_snapshot_restore_passthrough_without_snapshot_id(monkeypatch, tmp
     resolved = await resolve_sandbox_image_from_request(image_backed)
     assert resolved is image_backed
     assert resolved.resolved_snapshot_backend is None
+
+
+@pytest.mark.asyncio
+async def test_snapshot_restore_replays_recorded_fsb_limits(monkeypatch, tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    repo.create(
+        SnapshotRecord(
+            id="snap-fsb-002",
+            source_sandbox_id="fsb-002",
+            restore_config=SnapshotRestoreConfig(
+                image="registry.example.com/fsb/snap-002:index",
+                backend="fsb",
+                limits={"cpu": "2", "memory": "1Gi"},
+            ),
+            status=SnapshotStatusRecord(
+                state=SnapshotState.READY,
+                last_transition_at=datetime.now(timezone.utc),
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository",
+        lambda: repo,
+    )
+
+    request = CreateSandboxRequest(
+        snapshotId="snap-fsb-002",
+        resourceLimits=ResourceLimits(root={"cpu": "2", "memory": "1Gi"}),
+    )
+
+    resolved = await resolve_sandbox_image_from_request(request)
+    assert resolved.resolved_snapshot_backend == "fsb"
+    assert resolved.resolved_snapshot_limits == {"cpu": "2", "memory": "1Gi"}
+
+
+@pytest.mark.asyncio
+async def test_snapshot_restore_without_recorded_limits_keeps_none(monkeypatch, tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    repo.create(
+        SnapshotRecord(
+            id="snap-fsb-003",
+            source_sandbox_id="fsb-003",
+            restore_config=SnapshotRestoreConfig(
+                image="registry.example.com/fsb/snap-003:index",
+                backend="fsb",
+            ),
+            status=SnapshotStatusRecord(
+                state=SnapshotState.READY,
+                last_transition_at=datetime.now(timezone.utc),
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository",
+        lambda: repo,
+    )
+
+    request = CreateSandboxRequest(
+        snapshotId="snap-fsb-003",
+        resourceLimits=ResourceLimits(root={"cpu": "500m"}),
+    )
+
+    resolved = await resolve_sandbox_image_from_request(request)
+    assert resolved.resolved_snapshot_backend == "fsb"
+    assert resolved.resolved_snapshot_limits is None

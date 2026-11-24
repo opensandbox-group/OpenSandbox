@@ -148,11 +148,14 @@ def _vault_ack(revision: int = 3) -> bytes:
 
 
 @pytest.fixture
-def vault_fsb(monkeypatch):
+def vault_fsb(monkeypatch, fastpath_tls):
+    ca, key = fastpath_tls
     fake = _FakeFastPathService()
     grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     pb2_grpc.add_FastPathServiceServicer_to_server(fake, grpc_server)
-    port = grpc_server.add_insecure_port("127.0.0.1:0")
+    port = grpc_server.add_secure_port(
+        "127.0.0.1:0", grpc.ssl_server_credentials([(key.read_bytes(), ca.read_bytes())])
+    )
     grpc_server.start()
 
     config = AppConfig(
@@ -167,7 +170,11 @@ def vault_fsb(monkeypatch):
         ),
         kubernetes=KubernetesRuntimeConfig(namespace="ns-1"),
     )
-    fastpath = FastPathClient(endpoint=f"127.0.0.1:{port}")
+    fastpath = FastPathClient(
+        endpoint=f"127.0.0.1:{port}",
+        token_source=Mock(token=lambda: "test-caller"),
+        tls_ca_file=str(ca),
+    )
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
     api = _FakeCustomObjectsApi()
@@ -293,7 +300,7 @@ def test_create_duplicate_maps_to_409_and_unknown_subject_to_404(vault_fsb):
     assert response.status_code == 404
 
     fake.outcome = (412, b"expectedRevision 1 does not match current revision 2")
-    response = client.put = client.post(
+    response = client.post(
         f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
         json={"credentials": [], "bindings": []},
     )
@@ -524,7 +531,6 @@ def test_exchange_shape_violations_are_422(vault_fsb):
 
 def test_patch_composes_get_merge_put_with_expected_revision(vault_fsb):
     client, fake, _ = vault_fsb
-    # GET (read revision 2) then PUT ack (revision 3).
     fake.outcomes = [
         (200, json.dumps(_FULL_REVISION).encode()),
         (200, _vault_ack(3)),
@@ -549,7 +555,6 @@ def test_patch_composes_get_merge_put_with_expected_revision(vault_fsb):
     assert names == ["tok", "tok2"]
     # Untouched records round-trip verbatim (values included, relay-only).
     assert merged["credentials"][0] == _FULL_REVISION["credentials"][0]
-    # The deleted binding is gone.
     assert merged["bindings"] == []
 
 
@@ -577,11 +582,6 @@ def test_patch_fencing_and_mutation_semantics(vault_fsb):
     fake.outcome = (200, json.dumps(_FULL_REVISION).encode())
 
     fake.calls.clear()
-    # delete of an unknown name is rejected server-side before any relay.
-
-    fake.calls.clear()
-    # delete of an unknown name is rejected server-side before any relay.
-    fake.calls.clear()
     response = client.patch(
         f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
         json={"credentials": {"delete": ["missing"]}},
@@ -592,7 +592,6 @@ def test_patch_fencing_and_mutation_semantics(vault_fsb):
     assert [call[0] for call in fake.calls] == ["GET"]
 
     fake.calls.clear()
-    # add of an existing name is rejected server-side.
     response = client.patch(
         f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
         json={
@@ -605,7 +604,6 @@ def test_patch_fencing_and_mutation_semantics(vault_fsb):
     assert "already exists" in response.json()["detail"]["message"]
 
     fake.calls.clear()
-    # A name mentioned by multiple operations is rejected.
     response = client.patch(
         f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
         json={
@@ -620,7 +618,6 @@ def test_patch_fencing_and_mutation_semantics(vault_fsb):
     assert [call[0] for call in fake.calls] == ["GET"]
 
     fake.calls.clear()
-    # replace of a missing name is rejected.
     response = client.patch(
         f"/v1/sandboxes/{_SANDBOX_ID}/credential-vault",
         json={
@@ -731,7 +728,6 @@ def test_non_fsb_sandbox_proxies_the_sidecar_vault(vault_fsb):
 
 
 def test_composite_service_routes_fsb_to_the_relay(vault_fsb, monkeypatch):
-    """A composite backend must keep routing fsb ids to the relay surface."""
     client, fake, service = vault_fsb
     composite = CompositeSandboxService(kubernetes=Mock(), fsb=service)
     monkeypatch.setattr(lifecycle, "sandbox_service", composite)

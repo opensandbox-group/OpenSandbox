@@ -16,10 +16,23 @@ package telemetry
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -288,6 +301,245 @@ func TestInitRegistrationFailureClearsProvider(t *testing.T) {
 	}
 }
 
+func TestInitAppliesDialControl(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		protocol string
+	}{
+		{name: "http", protocol: otlpHTTPProtocol},
+		{name: "grpc", protocol: otlpGRPCProtocol},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			preserveTelemetryGlobals(t)
+			t.Setenv(envSDKDisabled, "")
+			t.Setenv(envMetricsExporter, "")
+			t.Setenv(envOTLPMetricsEndpoint, "")
+			t.Setenv(envOTLPProtocol, "")
+			t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+
+			var waitExported func()
+			if tc.protocol == otlpGRPCProtocol {
+				endpoint, exported := newTestGRPCCollector(t)
+				t.Setenv(envOTLPMetricsProtocol, otlpGRPCProtocol)
+				t.Setenv(envOTLPEndpoint, endpoint)
+				waitExported = func() {
+					select {
+					case <-exported:
+					case <-time.After(3 * time.Second):
+						t.Fatal("timed out waiting for OTLP gRPC export")
+					}
+				}
+			} else {
+				endpoint, exported := newTestCollector(t)
+				t.Setenv(envOTLPMetricsProtocol, otlpHTTPProtocol)
+				t.Setenv(envOTLPEndpoint, endpoint)
+				waitExported = func() {
+					select {
+					case <-exported:
+					case <-time.After(3 * time.Second):
+						t.Fatal("timed out waiting for OTLP HTTP export")
+					}
+				}
+			}
+
+			var dialed atomic.Int32
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			shutdown, err := Init(ctx, Config{
+				ServiceName: "dial-control-test",
+				DialControl: func(network, address string, c syscall.RawConn) error {
+					dialed.Add(1)
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = shutdown(context.Background())
+			}()
+
+			counter, err := otel.Meter("test").Int64Counter("dial.control.count")
+			if err != nil {
+				t.Fatal(err)
+			}
+			counter.Add(ctx, 1)
+			if err := ForceFlush(ctx); err != nil {
+				t.Fatalf("ForceFlush: %v", err)
+			}
+			waitExported()
+			if dialed.Load() == 0 {
+				t.Fatal("expected DialControl to be invoked on OTLP dial")
+			}
+		})
+	}
+}
+
+func TestInitAppliesDialControlWithMTLS(t *testing.T) {
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+	caPool := x509.NewCertPool()
+	caPool.AppendCertsFromPEM(caPEM)
+
+	issue := func(serial int64, isServer bool) (certPEM, keyPEM []byte) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(serial),
+			Subject:      pkix.Name{CommonName: "test-leaf"},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+		}
+		if isServer {
+			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+			tmpl.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
+		} else {
+			tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyDER, err := x509.MarshalECPrivateKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+			pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	}
+
+	serverCertPEM, serverKeyPEM := issue(2, true)
+	serverPair, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCertPEM, clientKeyPEM := issue(3, false)
+
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.pem")
+	clientCertFile := filepath.Join(dir, "client.pem")
+	clientKeyFile := filepath.Join(dir, "client-key.pem")
+	for path, data := range map[string][]byte{
+		caFile:         caPEM,
+		clientCertFile: clientCertPEM,
+		clientKeyFile:  clientKeyPEM,
+	} {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		caEnv   string
+		certEnv string
+		keyEnv  string
+	}{
+		{"general", envOTLPCertificate, envOTLPClientCert, envOTLPClientKey},
+		{"metrics-specific", envOTLPMetricsCertificate, envOTLPMetricsClientCert, envOTLPMetricsClientKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			preserveTelemetryGlobals(t)
+			exported := make(chan *collector.ExportMetricsServiceRequest, 4)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				payload := &collector.ExportMetricsServiceRequest{}
+				if err := proto.Unmarshal(data, payload); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				exported <- payload
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.WriteHeader(http.StatusOK)
+			}))
+			server.TLS = &tls.Config{
+				Certificates: []tls.Certificate{serverPair},
+				ClientAuth:   tls.RequireAndVerifyClientCert,
+				ClientCAs:    caPool,
+				MinVersion:   tls.VersionTLS12,
+			}
+			server.StartTLS()
+			t.Cleanup(server.Close)
+
+			for _, k := range []string{
+				envSDKDisabled, envMetricsExporter, envOTLPMetricsEndpoint,
+				envOTLPProtocol, envOTLPMetricsProtocol,
+				envOTLPCertificate, envOTLPMetricsCertificate,
+				envOTLPClientCert, envOTLPMetricsClientCert,
+				envOTLPClientKey, envOTLPMetricsClientKey,
+			} {
+				t.Setenv(k, "")
+			}
+			t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+			t.Setenv(envOTLPEndpoint, server.URL)
+			t.Setenv(tc.caEnv, caFile)
+			t.Setenv(tc.certEnv, clientCertFile)
+			t.Setenv(tc.keyEnv, clientKeyFile)
+
+			var dialed atomic.Int32
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			shutdown, err := Init(ctx, Config{
+				ServiceName: "mtls-dial-control-test",
+				DialControl: func(network, address string, c syscall.RawConn) error {
+					dialed.Add(1)
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = shutdown(context.Background()) }()
+
+			counter, err := otel.Meter("test").Int64Counter("mtls.dial.control.count")
+			if err != nil {
+				t.Fatal(err)
+			}
+			counter.Add(ctx, 1)
+			if err := ForceFlush(ctx); err != nil {
+				t.Fatalf("ForceFlush: %v", err)
+			}
+			select {
+			case <-exported:
+			case <-time.After(3 * time.Second):
+				t.Fatal("timed out waiting for mTLS OTLP export")
+			}
+			if dialed.Load() == 0 {
+				t.Fatal("expected DialControl to be invoked on mTLS OTLP dial")
+			}
+		})
+	}
+}
+
 func preserveTelemetryGlobals(t *testing.T) {
 	t.Helper()
 	mp, tp, flush := otel.GetMeterProvider(), otel.GetTracerProvider(), meterProvider.Load()
@@ -300,6 +552,8 @@ func preserveTelemetryGlobals(t *testing.T) {
 
 func newTestCollector(t *testing.T) (string, <-chan *collector.ExportMetricsServiceRequest) {
 	t.Helper()
+	t.Setenv(envOTLPMetricsProtocol, "")
+	t.Setenv(envOTLPProtocol, "")
 	exported := make(chan *collector.ExportMetricsServiceRequest, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, err := io.ReadAll(r.Body)

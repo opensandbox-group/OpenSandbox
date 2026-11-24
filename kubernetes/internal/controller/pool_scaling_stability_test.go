@@ -17,6 +17,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -216,6 +217,114 @@ func TestScalePoolCountsTerminatingPodsAgainstPoolMax(t *testing.T) {
 	}
 	if len(podList.Items) != 2 {
 		t.Fatalf("active pod count = %d, want 2; terminating occupancy must block creation", len(podList.Items))
+	}
+}
+
+func TestScalePoolScalesInDownToPoolMax(t *testing.T) {
+	tests := []struct {
+		name        string
+		capacity    sandboxv1alpha1.CapacitySpec
+		allocated   int // pods allocated to sandboxes, never deleted
+		idle        int
+		wantDeleted int
+	}{
+		{
+			name:     "buffer above lowered pool max",
+			capacity: sandboxv1alpha1.CapacitySpec{PoolMax: 2, BufferMin: 1, BufferMax: 4},
+			idle:     4, wantDeleted: 2,
+		},
+		{
+			name:     "pool min above pool max",
+			capacity: sandboxv1alpha1.CapacitySpec{PoolMax: 2, PoolMin: 4, BufferMax: 4},
+			idle:     4, wantDeleted: 2,
+		},
+		{
+			name:      "allocated pods above pool max",
+			capacity:  sandboxv1alpha1.CapacitySpec{PoolMax: 2, BufferMax: 4},
+			allocated: 3, idle: 1, wantDeleted: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			poolScaleExpectations = expectations.NewScaleExpectations()
+			t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
+
+			now := time.Now()
+			var pods []*corev1.Pod
+			var objects []client.Object
+			var idleNames []string
+			for i := 0; i < tt.allocated+tt.idle; i++ {
+				pod := stabilityTestPod("pod-"+string(rune('a'+i)), true, now.Add(time.Duration(i)*time.Second))
+				pods = append(pods, pod)
+				objects = append(objects, pod)
+				if i >= tt.allocated {
+					idleNames = append(idleNames, pod.Name)
+				}
+			}
+			r := stabilityTestReconciler(t, objects...)
+			pool := stabilityTestPool(intstr.FromString("100%"))
+			pool.Spec.CapacitySpec = tt.capacity
+
+			_, err := r.scalePool(context.Background(), pool, &scaleArgs{
+				pods: pods, totalPodCnt: int32(len(pods)), allocatedCnt: int32(tt.allocated), idlePods: idleNames,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleted := poolScaleExpectations.GetExpectations(controllerutils.GetControllerKey(pool))[expectations.Delete]
+			if deleted.Len() != tt.wantDeleted {
+				t.Fatalf("deleted %d pods %v, want %d", deleted.Len(), deleted.List(), tt.wantDeleted)
+			}
+			for _, name := range deleted.List() {
+				if !slices.Contains(idleNames, name) {
+					t.Fatalf("deleted allocated pod %s", name)
+				}
+			}
+		})
+	}
+}
+
+func TestScalePoolCountsPlannedDeletionsTowardPoolMax(t *testing.T) {
+	tests := []struct {
+		name      string
+		idle      []string
+		supplyCnt int32
+	}{
+		// A recycled pod is still listed as idle.
+		{name: "recycle", idle: []string{"pod-a", "pod-b", "pod-c", "pod-d", "pod-e"}},
+		// A rolling update takes its pod out of the idle list and asks for a
+		// replacement.
+		{name: "rolling update", idle: []string{"pod-b", "pod-c", "pod-d", "pod-e"}, supplyCnt: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			poolScaleExpectations = expectations.NewScaleExpectations()
+			t.Cleanup(func() { poolScaleExpectations = expectations.NewScaleExpectations() })
+
+			now := time.Now()
+			var pods []*corev1.Pod
+			var objects []client.Object
+			for i := 0; i < 5; i++ {
+				pod := stabilityTestPod("pod-"+string(rune('a'+i)), true, now.Add(time.Duration(i)*time.Second))
+				pods = append(pods, pod)
+				objects = append(objects, pod)
+			}
+			r := stabilityTestReconciler(t, objects...)
+			pool := stabilityTestPool(intstr.FromString("100%"))
+			pool.Spec.CapacitySpec = sandboxv1alpha1.CapacitySpec{PoolMax: 4, BufferMin: 4, BufferMax: 5}
+
+			// Deleting the planned pod-a already brings the pool down to PoolMax.
+			_, err := r.scalePool(context.Background(), pool, &scaleArgs{
+				pods: pods, totalPodCnt: 5, idlePods: tt.idle, supplyCnt: tt.supplyCnt, toDeletePods: []string{"pod-a"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			deleted := poolScaleExpectations.GetExpectations(controllerutils.GetControllerKey(pool))[expectations.Delete]
+			if deleted.Len() != 1 || !deleted.Has("pod-a") {
+				t.Fatalf("deleted %v, want only the planned pod-a", deleted.List())
+			}
+		})
 	}
 }
 

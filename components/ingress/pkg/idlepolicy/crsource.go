@@ -22,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"knative.dev/pkg/injection"
+	"k8s.io/client-go/rest"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 )
@@ -103,10 +103,10 @@ func NewCRPolicySource(ctx context.Context, client dynamic.Interface, ttl time.D
 	return s
 }
 
-// NewInClusterCRPolicySource builds a CRPolicySource from the
-// environment's Kubernetes credentials.
-func NewInClusterCRPolicySource(ctx context.Context) (*CRPolicySource, error) {
-	cfg := injection.ParseAndGetRESTConfigOrDie()
+// NewCRPolicySourceForConfig builds a CRPolicySource without parsing global flags
+// or modifying the caller's Kubernetes config.
+func NewCRPolicySourceForConfig(ctx context.Context, config *rest.Config) (*CRPolicySource, error) {
+	cfg := rest.CopyConfig(config)
 	cfg.UserAgent = "opensandbox-ingress-idlepolicy"
 	client, err := dynamic.NewForConfig(cfg)
 	if err != nil {

@@ -43,6 +43,7 @@ function createSandboxesStub() {
     },
     async renewSandboxExpiration(sandboxId, body) {
       calls.push({ method: "renewSandboxExpiration", args: [sandboxId, body] });
+      return { expiresAt: new Date(body.expiresAt) };
     },
     async createSnapshot(sandboxId, body) {
       calls.push({ method: "createSnapshot", args: [sandboxId, body] });
@@ -100,9 +101,14 @@ test("SandboxManager delegates lifecycle operations and closes its transport", a
   await manager.pauseSandbox("sbx-42");
   await manager.resumeSandbox("sbx-42");
   await manager.killSandbox("sbx-42");
-  await manager.renewSandbox("sbx-42", 30);
-  const snapshot = await manager.createSnapshot("sbx-42", { name: "before-upgrade" });
+  const renewed = await manager.renewSandbox("sbx-42", 30);
+  assert.ok(renewed.expiresAt instanceof Date);
+  const snapshot = await manager.createSnapshot("sbx-42", { name: "before-upgrade", mode: "rootfsOnly" });
   assert.equal(snapshot.id, "snap-1");
+  assert.deepEqual(
+    calls.find((entry) => entry.method === "createSnapshot").args,
+    ["sbx-42", { name: "before-upgrade", mode: "rootfsOnly" }],
+  );
   const snapshots = await manager.listSnapshots({
     sandboxId: "sbx-42",
     name: "toolchain:node@rev-1",
@@ -140,7 +146,7 @@ test("SandboxManager delegates lifecycle operations and closes its transport", a
   assert.equal(calls[6].args[0], "sbx-42");
   assert.ok(typeof calls[6].args[1].expiresAt === "string");
   assert.ok(Number.isFinite(Date.parse(calls[6].args[1].expiresAt)));
-  assert.deepEqual(calls[7].args, ["sbx-42", { name: "before-upgrade" }]);
+  assert.deepEqual(calls[7].args, ["sbx-42", { name: "before-upgrade", mode: "rootfsOnly" }]);
   assert.deepEqual(calls[8].args[0], {
     sandboxId: "sbx-42",
     name: "toolchain:node@rev-1",
@@ -174,6 +180,5 @@ test("SandboxManager.close leaves caller-initialized transports open", async () 
   await manager.close();
 
   assert.equal(closeCalls, 0);
-  // Cleanup for the test itself: the caller owns this transport.
   await connectionConfig.closeTransport();
 });

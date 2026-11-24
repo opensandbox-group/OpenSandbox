@@ -175,12 +175,7 @@ func (c *LifecycleClient) GetNetworkPolicy(ctx context.Context, sandboxID string
 	return &resp, nil
 }
 
-// PatchNetworkPolicy merges egress rules into the sandbox's policy using the
-// same semantics as the sandbox-side egress service: incoming rules take
-// priority over existing rules with the same target and replace them in
-// place; within one patch payload, the first rule for a target wins;
-// existing rules for other targets and the current defaultAction are
-// preserved.
+// PatchNetworkPolicy replaces matching (case-insensitive target, sorted ports) scopes; first patch rule wins, defaultAction stays.
 func (c *LifecycleClient) PatchNetworkPolicy(ctx context.Context, sandboxID string, rules []NetworkRule) (*PolicyStatusResponse, error) {
 	var resp PolicyStatusResponse
 	if err := c.doRequest(ctx, "PATCH", "/sandboxes/"+url.PathEscape(sandboxID)+"/networkpolicy", rules, &resp); err != nil {
@@ -189,10 +184,7 @@ func (c *LifecycleClient) PatchNetworkPolicy(ctx context.Context, sandboxID stri
 	return &resp, nil
 }
 
-// DeleteNetworkPolicyRules removes the sandbox's egress rules whose target
-// matches one of the given entries. Matching is by exact target string;
-// unknown targets are silently ignored (idempotent). The current
-// defaultAction is preserved.
+// DeleteNetworkPolicyRules matches targets case-insensitively; "" removes port-only rules, misses are ignored, and defaultAction stays.
 func (c *LifecycleClient) DeleteNetworkPolicyRules(ctx context.Context, sandboxID string, targets []string) (*PolicyStatusResponse, error) {
 	var resp PolicyStatusResponse
 	if err := c.doRequest(ctx, "DELETE", "/sandboxes/"+url.PathEscape(sandboxID)+"/networkpolicy", targets, &resp); err != nil {
@@ -285,6 +277,13 @@ func (c *LifecycleClient) GetCredentialVaultBinding(ctx context.Context, sandbox
 	return &resp, nil
 }
 
+// normalizeSnapshotMode reports snapshots that predate the mode field as full.
+func normalizeSnapshotMode(info *SnapshotInfo) {
+	if info.Mode == "" {
+		info.Mode = SnapshotModeFull
+	}
+}
+
 // ListSnapshots returns a paginated list of snapshots with optional filtering.
 func (c *LifecycleClient) ListSnapshots(ctx context.Context, opts ListSnapshotsOptions) (*ListSnapshotsResponse, error) {
 	params := url.Values{}
@@ -313,6 +312,9 @@ func (c *LifecycleClient) ListSnapshots(ctx context.Context, opts ListSnapshotsO
 	if err := c.doRequest(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, err
 	}
+	for i := range resp.Items {
+		normalizeSnapshotMode(&resp.Items[i])
+	}
 	return &resp, nil
 }
 
@@ -322,6 +324,7 @@ func (c *LifecycleClient) CreateSnapshot(ctx context.Context, sandboxID string, 
 	if err := c.doRequest(ctx, "POST", "/sandboxes/"+url.PathEscape(sandboxID)+"/snapshots", req, &resp); err != nil {
 		return nil, err
 	}
+	normalizeSnapshotMode(&resp)
 	return &resp, nil
 }
 
@@ -331,6 +334,7 @@ func (c *LifecycleClient) GetSnapshot(ctx context.Context, id string) (*Snapshot
 	if err := c.doRequest(ctx, "GET", "/snapshots/"+url.PathEscape(id), nil, &resp); err != nil {
 		return nil, err
 	}
+	normalizeSnapshotMode(&resp)
 	return &resp, nil
 }
 
@@ -409,6 +413,10 @@ func (c *LifecycleClient) RenewExpiration(ctx context.Context, id string, expire
 // on the specified port inside the sandbox. Results are cached with LRU+TTL
 // and deduplicated via singleflight. If useServerProxy is non-nil,
 // the server proxy query parameter is included.
+//
+// The useServerProxy option is deprecated: the server-proxied data path is in
+// maintenance mode and only receives security fixes and bug fixes. Route
+// data-plane traffic through the ingress gateway instead.
 func (c *LifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*Endpoint, error) {
 	if c.cache == nil {
 		return c.getEndpointFromServer(ctx, sandboxID, port, useServerProxy)

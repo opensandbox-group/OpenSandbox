@@ -13,10 +13,8 @@
 # limitations under the License.
 
 """
-Factory for creating sandbox service instances.
-
-This module provides a factory function to create sandbox service implementations
-based on application configuration loaded from sandbox_server.config.
+Factory for creating sandbox service instances from application
+configuration (opensandbox_server.config).
 """
 
 import logging
@@ -36,26 +34,16 @@ def create_sandbox_service(
     service_type: Optional[str] = None,
     config: Optional[AppConfig] = None,
 ) -> SandboxService:
-    """
-    Create a sandbox service instance based on configuration.
+    """Create the configured sandbox service implementation.
 
-    Args:
-        service_type: Optional override for service implementation type.
-        config: Optional application configuration. Defaults to global config.
-
-    Returns:
-        SandboxService: An instance of the configured sandbox service implementation.
-
-    Raises:
-        ValueError: If the configured service type is not supported.
+    ``service_type`` overrides ``config.runtime.type``; ``config`` defaults
+    to the global config. Raises ValueError for unsupported types.
     """
     active_config = config or get_config()
     selected_type = (service_type or active_config.runtime.type).lower()
 
     logger.info(f"Creating sandbox service with type: {selected_type}")
 
-    # Service implementation registry
-    # Add new implementations here as they are created
     implementations = {
         "docker": DockerSandboxService,
         "kubernetes": KubernetesSandboxService,

@@ -30,6 +30,8 @@ from opensandbox.exceptions import (
 from opensandbox.transport._deadline_sync import DEADLINE_EXTENSION
 
 T = TypeVar("T")
+# Keep stalled health connections from consuming the whole readiness budget.
+HEALTH_PING_TIMEOUT = timedelta(seconds=5)
 _cancelled_tasks: set[asyncio.Future[Any]] = set()
 
 

@@ -52,6 +52,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxMetrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxRenewResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotMode
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotStatus
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import java.time.Duration
@@ -299,7 +300,7 @@ internal object SandboxModelConverter {
             env = env,
             metadata = metadata,
             lifecycle = lifecycle?.takeUnless { it.isEmpty }?.toApiSandboxLifecycle(),
-            resourceLimits = resource,
+            resourceLimits = resource.takeUnless { snapshotId != null && it.isEmpty() },
             resourceRequests = resourceRequests,
             platform = platform?.toApiPlatformSpec(),
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
@@ -502,6 +503,8 @@ internal object SandboxModelConverter {
                     lastTransitionAt = this.status.lastTransitionAt,
                 ),
             createdAt = this.createdAt,
+            // Responses that predate the mode field read back as full.
+            mode = this.mode?.value ?: SnapshotMode.FULL,
         )
     }
 

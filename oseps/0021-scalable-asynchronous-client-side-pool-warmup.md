@@ -4,7 +4,7 @@ authors:
   - "@ninan"
 creation-date: 2026-08-19
 last-updated: 2026-08-19
-status: draft
+status: implemented
 ---
 
 # OSEP-0021: Scalable Asynchronous Client-Side Pool Warmup

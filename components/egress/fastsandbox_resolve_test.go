@@ -68,6 +68,7 @@ type fakeResolverServer struct {
 	server   *httptest.Server
 	requests chan resolveServerRequest
 	delay    time.Duration
+	release  <-chan struct{} // optional test barrier after request receipt
 }
 
 type resolveServerRequest struct {
@@ -113,7 +114,9 @@ func startFakeResolverServer(t *testing.T, delay time.Duration) *fakeResolverSer
 			Authority:  document.Destination.Authority,
 			Path:       document.Request.Path,
 		}
-		if fake.delay > 0 {
+		if fake.release != nil {
+			<-fake.release
+		} else if fake.delay > 0 {
 			time.Sleep(fake.delay)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -380,9 +383,7 @@ func TestFastSandboxResolveWireSubjectRefreshesWithFence(t *testing.T) {
 	require.Equal(t, "fsb-second", served.Subject)
 }
 
-// ---------------------------------------------------------------------------
 // Sidecar profile
-// ---------------------------------------------------------------------------
 
 func TestSidecarResolveVaultAccessEnvSubject(t *testing.T) {
 	s := &policyServer{credentialVault: credentialvault.NewStore(nil, nil)}

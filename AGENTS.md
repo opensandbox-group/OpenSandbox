@@ -36,6 +36,7 @@ Use this file as the root router for the monorepo. Prefer the nearest `AGENTS.md
 - Think before coding: state assumptions, surface ambiguity, and ask or push back when the request has conflicting interpretations.
 - Simplicity first: implement the smallest solution that satisfies the request; avoid speculative features, one-off abstractions, and unnecessary configurability.
 - Surgical changes: touch only files and lines needed for the task, match local style, and do not refactor or delete unrelated pre-existing code.
+- Meaningful comments only: explain why, not what — add or keep comments only for non-obvious invariants, constraints, edge cases, workarounds, or required public API docs; omit comments that merely narrate self-explanatory code or change history, avoid boilerplate and commented-out code, and update or remove touched comments when behavior changes.
 - Goal-driven execution: translate non-trivial work into verifiable success criteria, add or update focused tests when behavior changes, and loop until checks pass or blockers are clear.
 
 ## Guardrails
@@ -73,7 +74,7 @@ Never:
 | SDK, CLI, Helm, and other publishable package READMEs | package directory | Keep install, quick start, and package entry points; no long-form docs |
 | Non-publishable component/module READMEs | component/module directory | Keep minimal pointers to `docs/` when a docs page exists |
 | Examples | `docs/examples/` + runnable code under `examples/` | Put docs in `docs/examples/`; keep example READMEs as thin pointers |
-| OSEPs | `oseps/` | `docs/community/oseps.md` only indexes GitHub proposals |
+| OSEPs | `oseps/` | Proposals live only here; there is no docs-site page |
 | CONTRIBUTING, CODE_OF_CONDUCT, DEVELOPMENT | repo root / component directory | `docs/community/` links to them, does not duplicate them |
 
 **When adding design/how-it-works content**: high-level architecture design and implementation principles go under `docs/architecture/`; user-facing usage instructions go under `docs/guides/`. Do not mix usage how-tos into architecture pages, or internals into guides.

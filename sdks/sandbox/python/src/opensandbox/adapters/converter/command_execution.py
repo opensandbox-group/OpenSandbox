@@ -21,7 +21,11 @@ import logging
 from datetime import timedelta
 
 from opensandbox.adapters.converter.event_node import EventNode
-from opensandbox.exceptions import InvalidArgumentException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxError,
+    SandboxInternalException,
+)
 from opensandbox.models.execd import Execution, RunCommandOpts
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,14 @@ def resolve_run_in_session_timeout(timeout: timedelta | None) -> int | None:
         # Round up using integer microseconds to preserve whole milliseconds exactly.
         return (timeout // timedelta(microseconds=1) + 999) // 1000
     raise InvalidArgumentException("timeout must be a datetime.timedelta or None")
+
+
+def require_command_terminal(execution: Execution) -> None:
+    if execution.complete is None and execution.error is None:
+        raise SandboxInternalException(
+            "Foreground command stream ended without a terminal event",
+            error=SandboxError(SandboxError.COMMAND_STREAM_INCOMPLETE),
+        )
 
 
 def infer_foreground_exit_code(execution: Execution) -> int | None:

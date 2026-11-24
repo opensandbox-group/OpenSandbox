@@ -53,6 +53,10 @@ func (c *FilesystemController) DownloadFile() {
 		)
 		return
 	}
+	if err := rejectStagingPath(resolvedFilePath); err != nil {
+		c.handleFileError(err)
+		return
+	}
 
 	rawOffset := c.ctx.Query("offset")
 	rawLimit := c.ctx.Query("limit")
@@ -75,12 +79,6 @@ func (c *FilesystemController) DownloadFile() {
 	}
 	defer file.Close()
 
-	if hasLineParams {
-		c.serveLineRange(file, rawOffset, rawLimit)
-		rec.MarkSuccess()
-		return
-	}
-
 	fileInfo, err := file.Stat()
 	if err != nil {
 		c.RespondError(
@@ -88,6 +86,22 @@ func (c *FilesystemController) DownloadFile() {
 			model.ErrorCodeRuntimeError,
 			fmt.Sprintf("error getting file stat info: %s. %v", resolvedFilePath, err),
 		)
+		return
+	}
+	// A directory opens like a file but cannot be read or seeked as one, so
+	// refuse it before either download mode starts.
+	if fileInfo.IsDir() {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("path is a directory: %s", resolvedFilePath),
+		)
+		return
+	}
+
+	if hasLineParams {
+		c.serveLineRange(file, rawOffset, rawLimit)
+		rec.MarkSuccess()
 		return
 	}
 
@@ -99,6 +113,7 @@ func (c *FilesystemController) DownloadFile() {
 			c.RespondError(
 				http.StatusRequestedRangeNotSatisfiable,
 				model.ErrorCodeUnknown,
+				fmt.Sprintf("invalid Range header: %s", rangeHeader),
 			)
 			return
 		}
@@ -108,7 +123,7 @@ func (c *FilesystemController) DownloadFile() {
 	c.ctx.Header("Content-Disposition", formatContentDisposition(filepath.Base(resolvedFilePath)))
 	c.ctx.Header("Content-Length", strconv.FormatInt(fileInfo.Size(), 10))
 
-	if len(ranges) > 0 {
+	if len(ranges) == 1 {
 		r := ranges[0]
 		c.ctx.Status(http.StatusPartialContent)
 		c.ctx.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", r.start, r.start+r.length-1, fileInfo.Size()))
@@ -120,8 +135,15 @@ func (c *FilesystemController) DownloadFile() {
 		return
 	}
 
+	request := c.ctx.Request
+	if len(ranges) > 1 {
+		// ServeContent would otherwise generate a multipart response.
+		request = request.Clone(request.Context())
+		request.Header.Del("Range")
+	}
+
 	rec.MarkSuccess()
-	http.ServeContent(c.ctx.Writer, c.ctx.Request, filepath.Base(resolvedFilePath), fileInfo.ModTime(), file)
+	http.ServeContent(c.ctx.Writer, request, filepath.Base(resolvedFilePath), fileInfo.ModTime(), file)
 }
 
 // serveLineRange reads lines from file starting at a 1-based offset and
@@ -189,7 +211,8 @@ func formatContentDisposition(filename string) string {
 	needsEncoding := false
 	for _, r := range filename {
 		// A quote closes, and a backslash escapes inside, the quoted-string below.
-		if r > 127 || r == '"' || r == '\\' {
+		// CR, LF, and other controls would split the header or inject another one.
+		if r < 0x20 || r == 0x7f || r > 127 || r == '"' || r == '\\' {
 			needsEncoding = true
 			break
 		}

@@ -24,7 +24,7 @@ from typing import Callable, Dict, List, Any, Optional
 
 from kubernetes.client import ApiException
 
-from opensandbox_server.config import AppConfig
+from opensandbox_server.config import AppConfig, EGRESS_MODE_FORWARD
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
 from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
 from opensandbox_server.services.helpers import format_ingress_endpoint
@@ -32,7 +32,10 @@ from opensandbox_server.api.schema import Endpoint, ImageSpec, PlatformSpec, Vol
 from opensandbox_server.services.k8s.agent_sandbox_template import AgentSandboxTemplateManager
 from opensandbox_server.services.validators import ensure_egress_runtime_compatible
 from opensandbox_server.services.k8s.client import K8sClient
-from opensandbox_server.services.k8s.egress_helper import apply_egress_to_spec
+from opensandbox_server.services.k8s.egress_helper import (
+    apply_egress_to_spec,
+    validate_forward_mode_pod_spec,
+)
 from opensandbox_server.services.k8s.image_pull_secret_helper import (
     build_image_pull_secret,
     build_image_pull_secret_name,
@@ -138,8 +141,8 @@ class AgentSandboxProvider(WorkloadProvider):
         self,
         sandbox_id: str,
         namespace: str,
-        image_spec: ImageSpec,
-        entrypoint: List[str],
+        image_spec: Optional[ImageSpec],
+        entrypoint: Optional[List[str]],
         env: Dict[str, str],
         resource_limits: Dict[str, str],
         labels: Dict[str, str],
@@ -153,6 +156,12 @@ class AgentSandboxProvider(WorkloadProvider):
         resource_requests: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Create an agent-sandbox Sandbox CRD workload."""
+        if (extensions or {}).get("poolRef", "").strip():
+            raise ValueError("poolRef is not supported by agent-sandbox.")
+        if image_spec is None:
+            raise ValueError("image is required for agent-sandbox workloads.")
+        entrypoint = entrypoint or []
+
         if is_windows_profile(platform):
             raise ValueError("agent-sandbox does not support platform.os=windows.")
 
@@ -217,7 +226,10 @@ class AgentSandboxProvider(WorkloadProvider):
         ensure_egress_runtime_compatible(
             egress_settings.network_policy if egress_settings is not None else None,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),
+            egress_required=egress_settings is not None,
         )
+        if egress_settings is not None and egress_settings.mode == EGRESS_MODE_FORWARD:
+            validate_forward_mode_pod_spec(merged_pod_spec)
         if platform is not None:
             WorkloadProvider.ensure_platform_compatible_with_affinity(merged_pod_spec, platform)
 
@@ -303,8 +315,8 @@ class AgentSandboxProvider(WorkloadProvider):
         extensions: Optional[Dict[str, str]] = None,
         sandbox_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Build pod spec dict for the Sandbox CRD."""
         has_egress = egress_settings is not None
+        is_forward = egress_settings is not None and egress_settings.mode == EGRESS_MODE_FORWARD
         disable_ipv6_for_egress = (
             egress_settings.disable_ipv6 if egress_settings is not None else False
         )
@@ -326,6 +338,7 @@ class AgentSandboxProvider(WorkloadProvider):
             env=main_env,
             resource_limits=resource_limits,
             has_network_policy=has_egress,
+            drop_net_raw=is_forward,
             isolation_enabled=(extensions or {}).get(BOOTSTRAP_EXECD_ISOLATION_KEY) == "enable",
             resource_requests=resource_requests,
         )
@@ -357,6 +370,7 @@ class AgentSandboxProvider(WorkloadProvider):
             egress_settings=egress_settings,
             sandbox_id=sandbox_id,
             pod_volumes=pod_spec["volumes"],
+            init_containers=pod_spec["initContainers"],
         )
 
         return pod_spec
@@ -738,7 +752,9 @@ class AgentSandboxProvider(WorkloadProvider):
                 )
                 for pod in pods:
                     if pod.status and pod.status.pod_ip and pod.status.phase == "Running":
-                        return Endpoint(endpoint=f"{pod.status.pod_ip}:{port}")
+                        pod_ip = pod.status.pod_ip
+                        host = f"[{pod_ip}]" if ":" in pod_ip else pod_ip
+                        return Endpoint(endpoint=f"{host}:{port}")
             except Exception as e:
                 logger.warning(f"Failed to resolve pod endpoint: {e}")
 

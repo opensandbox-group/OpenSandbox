@@ -18,10 +18,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -96,10 +96,20 @@ func (c *Controller) executeSelectSQLQuery(ctx context.Context, request *Execute
 		}
 		row := make([]any, len(columns))
 		for i, v := range values {
-			if v == nil {
+			switch x := v.(type) {
+			case nil:
 				row[i] = nil
-			} else {
-				row[i] = fmt.Sprintf("%v", v)
+			case []byte:
+				// MySQL's text protocol returns non-numeric columns as raw bytes.
+				// Keep non-UTF-8 payloads lossless: json.Marshal would otherwise
+				// silently replace invalid bytes with U+FFFD.
+				if utf8.Valid(x) {
+					row[i] = string(x)
+				} else {
+					row[i] = fmt.Sprintf("%v", x)
+				}
+			default:
+				row[i] = fmt.Sprintf("%v", x)
 			}
 		}
 		result = append(result, row)
@@ -169,43 +179,36 @@ func (c *Controller) getQueryType(query string) string {
 	return strings.ToUpper(fields[0])
 }
 
+// sandboxMySQLDSN is the local sandbox database. Tests point it at a closed
+// port; production keeps the historical default.
+var sandboxMySQLDSN = "root:@tcp(127.0.0.1:3306)/"
+
 // initDB lazily opens the local sandbox database.
+// A failed attempt closes the pool and leaves c.db nil, so a later call can
+// try again. sync.Once made the first dial error permanent.
 func (c *Controller) initDB() error {
-	var initErr error
-	c.dbOnce.Do(func() {
-		dsn := "root:@tcp(127.0.0.1:3306)/"
-		db, err := sql.Open("mysql", dsn)
-		if err != nil {
-			initErr = err
-			return
-		}
-
-		err = db.Ping()
-		if err != nil {
-			initErr = err
-			return
-		}
-
-		_, err = db.Exec("CREATE DATABASE IF NOT EXISTS sandbox")
-		if err != nil {
-			initErr = err
-			return
-		}
-
-		_, err = db.Exec("USE sandbox")
-		if err != nil {
-			initErr = err
-			return
-		}
-
-		c.db = db
-	})
-
-	if initErr != nil {
-		return initErr
+	c.dbMu.Lock()
+	defer c.dbMu.Unlock()
+	if c.db != nil {
+		return nil
 	}
-	if c.db == nil {
-		return errors.New("db is not initialized")
+
+	db, err := sql.Open("mysql", sandboxMySQLDSN)
+	if err != nil {
+		return err
 	}
+	if err = db.Ping(); err != nil {
+		_ = db.Close()
+		return err
+	}
+	if _, err = db.Exec("CREATE DATABASE IF NOT EXISTS sandbox"); err != nil {
+		_ = db.Close()
+		return err
+	}
+	if _, err = db.Exec("USE sandbox"); err != nil {
+		_ = db.Close()
+		return err
+	}
+	c.db = db
 	return nil
 }

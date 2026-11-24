@@ -19,10 +19,13 @@ import { useNavigate } from 'react-router-dom';
 
 import { authApi } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
+import { LanguageSelect } from '../components/LanguageSelect';
+import { useI18n } from '../i18n';
 
 export function LoginPage() {
   const navigate = useNavigate();
   const { refresh } = useAuth();
+  const { t } = useI18n();
   const [loading, setLoading] = useState(false);
 
   const onTenant = async (values: { apiKey: string }) => {
@@ -30,10 +33,10 @@ export function LoginPage() {
     try {
       await authApi.loginTenant(values.apiKey.trim());
       await refresh();
-      message.success('租户登录成功');
+      message.success(t('login.tenantSuccess'));
       navigate('/', { replace: true });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '登录失败');
+      message.error(e instanceof Error ? e.message : t('login.failed'));
     } finally {
       setLoading(false);
     }
@@ -44,10 +47,10 @@ export function LoginPage() {
     try {
       await authApi.loginAdmin(values.adminToken.trim());
       await refresh();
-      message.success('Admin 登录成功');
+      message.success(t('login.adminSuccess'));
       navigate('/', { replace: true });
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '登录失败');
+      message.error(e instanceof Error ? e.message : t('login.failed'));
     } finally {
       setLoading(false);
     }
@@ -62,52 +65,56 @@ export function LoginPage() {
         justifyContent: 'center',
         background: '#f0f2f5',
         padding: 24,
+        position: 'relative',
       }}
     >
+      <div style={{ position: 'absolute', top: 24, right: 24 }}>
+        <LanguageSelect />
+      </div>
       <Card style={{ width: 420, maxWidth: '100%' }}>
         <Typography.Title level={3} style={{ marginTop: 0 }}>
-          OpenSandbox Console
+          {t('login.title')}
         </Typography.Title>
         <Alert
           type="info"
           showIcon
-          message="API Key 仅提交给 BFF，浏览器不长期保存 Lifecycle Key。"
+          message={t('login.apiKeyNotice')}
           style={{ marginBottom: 16 }}
         />
         <Tabs
           items={[
             {
               key: 'tenant',
-              label: '租户研发',
+              label: t('login.tenantTab'),
               children: (
                 <Form layout="vertical" onFinish={onTenant}>
                   <Form.Item
                     name="apiKey"
-                    label="租户 API Key"
-                    rules={[{ required: true, message: '请输入 API Key' }]}
+                    label={t('login.tenantApiKey')}
+                    rules={[{ required: true, message: t('login.tenantApiKeyRequired') }]}
                   >
                     <Input.Password prefix={<UserOutlined />} placeholder="OPEN-SANDBOX-API-KEY" />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" block loading={loading}>
-                    登录
+                    {t('login.signIn')}
                   </Button>
                 </Form>
               ),
             },
             {
               key: 'admin',
-              label: '平台 Admin',
+              label: t('login.adminTab'),
               children: (
                 <Form layout="vertical" onFinish={onAdmin}>
                   <Form.Item
                     name="adminToken"
-                    label="BFF Admin Token"
-                    rules={[{ required: true, message: '请输入 Admin Token' }]}
+                    label={t('login.adminToken')}
+                    rules={[{ required: true, message: t('login.adminTokenRequired') }]}
                   >
                     <Input.Password prefix={<LockOutlined />} />
                   </Form.Item>
                   <Button type="primary" htmlType="submit" block loading={loading}>
-                    登录
+                    {t('login.signIn')}
                   </Button>
                 </Form>
               ),

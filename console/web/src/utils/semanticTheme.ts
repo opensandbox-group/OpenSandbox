@@ -14,7 +14,7 @@
 
 import { SANDBOX_STATES } from './format';
 
-/** Console 内统一的语义色：日志 ANSI、Ant Design Tag 等共用同一套映射。 */
+/** Shared semantic colors for console log ANSI output, Ant Design tags, and related UI. */
 
 export const LOG_ANSI = {
   reset: '\x1b[0m',
@@ -40,21 +40,21 @@ const TENANT_TAG_COLORS = [
 
 export type TenantTagColor = (typeof TENANT_TAG_COLORS)[number];
 
-/** 租户名稳定映射到 Tag 色，全站表格一致。 */
+/** Map tenant names to stable tag colors across all tables. */
 export function tenantTagColor(tenant: string): TenantTagColor {
   let h = 0;
   for (let i = 0; i < tenant.length; i++) h = (h * 31 + tenant.charCodeAt(i)) >>> 0;
   return TENANT_TAG_COLORS[h % TENANT_TAG_COLORS.length];
 }
 
-/** 与 Lifecycle 枚举对齐（大小写不敏感）。 */
+/** Matches Lifecycle enum values case-insensitively. */
 export function normalizeSandboxState(state: string): string {
   const trimmed = state.trim();
   const canonical = SANDBOX_STATES.find((s) => s.toLowerCase() === trimmed.toLowerCase());
   return canonical ?? trimmed;
 }
 
-/** 沙箱 lifecycle 状态 → Ant Design Tag color。仅 Failed 为 error；Terminated 为正常结束。 */
+/** Map sandbox lifecycle status to Ant Design tag colors. Only Failed is an error; Terminated is a normal end state. */
 export function sandboxStateTagColor(state?: string | null): string | undefined {
   if (!state?.trim()) return undefined;
   switch (normalizeSandboxState(state)) {
@@ -77,7 +77,7 @@ export function sandboxStateTagColor(state?: string | null): string | undefined 
   }
 }
 
-/** 日志 level（含 zap 的 warn / Python 单字母 I）→ ANSI 前景色转义。 */
+/** Map log levels, including zap's warn and Python's single-letter I, to ANSI foreground colors. */
 export function logLevelAnsi(level: string): string {
   const u = level.toUpperCase();
   if (

@@ -74,6 +74,10 @@ func (c *FilesystemController) GetFilesInfo() {
 
 	resp := make(map[string]model.FileInfo)
 	for _, filePath := range paths {
+		if err := rejectStagingPath(filePath); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		fileInfo, err := GetFileInfo(filePath)
 		if err != nil {
 			c.handleFileError(err)
@@ -92,6 +96,10 @@ func (c *FilesystemController) RemoveFiles() {
 
 	paths := c.ctx.QueryArray("path")
 	for _, filePath := range paths {
+		if err := rejectStagingPath(filePath); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		if err := DeleteFile(filePath); err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,
@@ -121,6 +129,10 @@ func (c *FilesystemController) ChmodFiles() {
 	}
 
 	for file, item := range request {
+		if err := rejectStagingPath(file); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		err := ChmodFile(file, item)
 		if err != nil {
 			c.RespondError(
@@ -150,7 +162,20 @@ func (c *FilesystemController) RenameFiles() {
 		return
 	}
 
+	if err := validateExpandedRenameFiles(request); err != nil {
+		c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, err.Error())
+		return
+	}
+
 	for _, renameItem := range request {
+		if err := rejectStagingPath(renameItem.Src); err != nil {
+			c.handleFileError(err)
+			return
+		}
+		if err := rejectStagingPath(renameItem.Dest); err != nil {
+			c.handleFileError(err)
+			return
+		}
 		if err := RenameFile(renameItem); err != nil {
 			c.handleFileError(err)
 			return
@@ -199,6 +224,10 @@ func (c *FilesystemController) RemoveDirs() {
 				model.ErrorCodeRuntimeError,
 				fmt.Sprintf("error resolving directory %s. %v", dir, err),
 			)
+			return
+		}
+		if err := rejectStagingPath(resolvedDir); err != nil {
+			c.handleFileError(err)
 			return
 		}
 		if err := os.RemoveAll(resolvedDir); err != nil {
@@ -307,7 +336,7 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 		}
 
 		for _, entry := range dirEntries {
-			if isUploadStagingName(entry.Name()) {
+			if isAnyStagingName(entry.Name()) {
 				continue
 			}
 			entryPath := filepath.Join(dir, entry.Name())
@@ -368,9 +397,40 @@ func (c *FilesystemController) SearchFiles() {
 	if pattern == "" {
 		pattern = "**"
 	}
+	if !glob.ValidPattern(pattern) {
+		c.RespondError(
+			http.StatusBadRequest,
+			model.ErrorCodeInvalidRequest,
+			fmt.Sprintf("invalid pattern %s", pattern),
+		)
+		return
+	}
 
 	files := make([]model.FileInfo, 0, 16)
-	err = filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(path, func(filePath string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("error accessing path %s: %w", filePath, err)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if isAnyStagingName(entry.Name()) {
+			return nil
+		}
+
+		match, err := glob.PathMatch(pattern, entry.Name())
+		if err != nil {
+			return fmt.Errorf("invalid pattern %s: %w", pattern, err)
+		}
+		if !match {
+			return nil
+		}
+
+		// Unmatched entries need no metadata; matched entries may have disappeared.
+		info, err := os.Lstat(filePath)
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
@@ -380,22 +440,11 @@ func (c *FilesystemController) SearchFiles() {
 		if info.IsDir() {
 			return nil
 		}
-		if isUploadStagingName(info.Name()) {
-			return nil
-		}
-
-		match, err := glob.PathMatch(pattern, info.Name())
+		fileInfo, err := buildFileInfo(filePath, info)
 		if err != nil {
-			return fmt.Errorf("invalid pattern %s: %w", pattern, err)
+			return err
 		}
-
-		if match {
-			fileInfo, err := buildFileInfo(filePath, info)
-			if err != nil {
-				return err
-			}
-			files = append(files, fileInfo)
-		}
+		files = append(files, fileInfo)
 
 		return nil
 	})
@@ -438,6 +487,10 @@ func (c *FilesystemController) ReplaceContent() {
 		origPath := file
 		file, err := pathutil.ExpandAbsPath(file)
 		if err != nil {
+			c.handleFileError(err)
+			return
+		}
+		if err := rejectStagingPath(file); err != nil {
 			c.handleFileError(err)
 			return
 		}

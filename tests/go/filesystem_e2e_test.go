@@ -183,14 +183,12 @@ func TestFilesystem_ReplaceInFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, exec.Text(), "example.com")
 
-	// No match → replacedCount=0
 	resp, err = sb.ReplaceInFilesDetailed(ctx, opensandbox.ReplaceRequest{
 		"/tmp/replace-e2e.txt": {Old: "nonexistent", New: "irrelevant"},
 	})
 	require.NoError(t, err)
 	require.Equal(t, 0, resp["/tmp/replace-e2e.txt"].ReplacedCount)
 
-	// Multiple matches
 	_, err = sb.RunCommand(ctx, `echo "foo bar foo baz foo" > /tmp/replace-multi.txt`, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sb.DeleteFiles(context.Background(), []string{"/tmp/replace-multi.txt"}) })
@@ -200,7 +198,6 @@ func TestFilesystem_ReplaceInFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 3, resp["/tmp/replace-multi.txt"].ReplacedCount)
 
-	// Batch replace across multiple files
 	_, err = sb.RunCommand(ctx, `echo "hello world" > /tmp/replace-batch-a.txt`, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sb.DeleteFiles(context.Background(), []string{"/tmp/replace-batch-a.txt"}) })
@@ -224,7 +221,6 @@ func TestFilesystem_ReplaceInFiles(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, execB.Text(), "hi hi")
 
-	// Verify original ReplaceInFiles (verbose=false, error-only return) still works
 	err = sb.ReplaceInFiles(ctx, opensandbox.ReplaceRequest{
 		"/tmp/replace-multi.txt": {Old: "qux", New: "done"},
 	})
@@ -243,7 +239,6 @@ func TestFilesystem_DownloadFileLineReading(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sb.DeleteFiles(context.Background(), []string{remotePath}) })
 
-	// offset=2, limit=2 → lines 2-3
 	rc, err := sb.DownloadFile(ctx, remotePath, "", opensandbox.DownloadFileOptions{Offset: 2, Limit: 2})
 	require.NoError(t, err)
 	data, err := io.ReadAll(rc)
@@ -251,7 +246,6 @@ func TestFilesystem_DownloadFileLineReading(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "line2\nline3", string(data))
 
-	// offset=4, no limit → lines 4-5
 	rc, err = sb.DownloadFile(ctx, remotePath, "", opensandbox.DownloadFileOptions{Offset: 4})
 	require.NoError(t, err)
 	data, err = io.ReadAll(rc)
@@ -259,7 +253,6 @@ func TestFilesystem_DownloadFileLineReading(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "line4\nline5", string(data))
 
-	// limit=2, no offset → lines 1-2
 	rc, err = sb.DownloadFile(ctx, remotePath, "", opensandbox.DownloadFileOptions{Limit: 2})
 	require.NoError(t, err)
 	data, err = io.ReadAll(rc)

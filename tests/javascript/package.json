@@ -15,7 +15,7 @@
       "@humanfs/node": "0.16.8",
       "esbuild": "0.25.2",
       "postcss": "8.5.23",
-      "vite": "6.4.4",
+      "vite": "6.4.5",
       "js-yaml": "5.4.1"
     }
   },
@@ -37,8 +37,8 @@
     "eslint": "^9.39.4",
     "redis": "^5.12.1",
     "typescript": "^5.7.2",
-    "typescript-eslint": "^8.59.0",
-    "vite": "^6.4.4",
+    "typescript-eslint": "^8.73.0",
+    "vite": "^6.4.5",
     "vitest": "^4.1.12"
   }
 }

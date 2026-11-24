@@ -65,6 +65,10 @@ const (
 	batchSandboxFirstPodIndex = 0
 	poolAllocationRetryTime   = 5 * time.Second
 	poolAutoAssignRef         = "*"
+	allocatedPoolPodIndex     = "allocatedPoolPod"
+	// Metadata-only Pod label changes must not advance BatchSandbox spec.generation:
+	// the pause/resume controller uses that generation to detect new intent.
+	annoPodLabelOverrides = "sandbox.opensandbox.io/pod-label-overrides"
 )
 
 const poolCapacityExhaustedReason = poolassign.FailureCodeCapacityExhausted
@@ -74,7 +78,6 @@ type taskScheduleResult struct {
 	LastErrorMessage                           string
 }
 
-// BatchSandboxReconciler reconciles a BatchSandbox object
 type BatchSandboxReconciler struct {
 	client.Client
 	APIReader           client.Reader
@@ -90,6 +93,9 @@ type BatchSandboxReconciler struct {
 	FeatureConfig *FeatureConfig
 	// podRecoveryNow overrides the clock used by pod recovery; tests only.
 	podRecoveryNow func() time.Time
+	// stateOwners maps namespace/name to the UID whose name-keyed in-memory
+	// state (scale expectations, pod recovery budget, task scheduler) is held.
+	stateOwners sync.Map
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -99,15 +105,6 @@ type BatchSandboxReconciler struct {
 // +kubebuilder:rbac:groups=sandbox.opensandbox.io,resources=batchsandboxes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=sandbox.opensandbox.io,resources=batchsandboxes/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// It reconciles the BatchSandbox object against the actual cluster state
-// (pod scaling, pool allocation parsing, task scheduling, expiry cleanup,
-// and pause/resume handoff) and makes the cluster state reflect the desired
-// one.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.21.0/pkg/reconcile
 func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	log := logf.FromContext(ctx)
 	start := time.Now()
@@ -117,15 +114,24 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		log.Info("Reconcile finished", "duration", time.Since(start).String(), "requeueAfter", result.RequeueAfter.String(), "error", retErr)
 	}()
 	batchSbx := &sandboxv1alpha1.BatchSandbox{}
+	// Workqueue key serialization makes removal safe after the previous reconcile's state writes.
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: req.Namespace,
 		Name:      req.Name,
 	}, batchSbx); err != nil {
 		if errors.IsNotFound(err) {
+			r.forgetBatchSandbox(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
+	// The informer may report a delete and a same-name recreation as one
+	// update, so a replacement can show up without a NotFound in between.
+	if owner, seen := r.stateOwners.Load(req.String()); seen && owner != batchSbx.UID {
+		r.forgetBatchSandbox(req.NamespacedName)
+	}
+	r.stateOwners.Store(req.String(), batchSbx.UID)
+	r.StatusRVExpectation.DeleteOthers(req.NamespacedName, batchSbx.UID)
 	if batchSbx.DeletionTimestamp != nil {
 		return r.reconcileDeletion(ctx, batchSbx)
 	}
@@ -133,7 +139,15 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		now := time.Now()
 		if expireAt.Time.Before(now) {
 			log.Info("batch sandbox expired, delete", "expireAt", expireAt)
-			err := r.Delete(ctx, batchSbx, client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			// The cached copy may predate a renewal that is already persisted.
+			// Delete only the exact version judged expired so a newer object
+			// always gets a fresh decision.
+			err := r.Delete(ctx, batchSbx,
+				client.Preconditions{UID: &batchSbx.UID, ResourceVersion: &batchSbx.ResourceVersion},
+				client.PropagationPolicy(batchSandboxDeletionPolicy(batchSbx)))
+			if errors.IsConflict(err) {
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		} else {
 			durationStore.Push(types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String(), expireAt.Time.Sub(now))
@@ -204,9 +218,11 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}).Sort)
 	// Normal mode owns pod lifecycle except while a sandbox is fully paused. In Paused, the
 	// snapshot-backed runtime is quiesced and pods must stay absent until resume rewrites the
-	// template images and transitions back through Resuming.
+	// template images and transitions back through Resuming. Completed sandboxes skip scaling
+	// too: a finished workload must not re-run, so a removed pod stays removed until expireTime.
 	if !poolStrategy.IsPooledMode() &&
 		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused &&
+		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseCompleted &&
 		!hasTerminalPodFailureCondition(batchSbx.Status.Conditions) {
 		// Bounded replacement of stuck provisioning pods; scale recreates them.
 		r.recoverStuckPods(ctx, batchSbx, pods)
@@ -234,7 +250,11 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
 	}
 
-	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused
+	// Completed is terminal like Paused: the runtime is gone, so task scheduling
+	// must stop and stale scheduler state must be cleared instead of re-polling
+	// (and possibly dispatching new work to an exited executor) until expireTime.
+	skipTaskScheduling := batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhasePaused ||
+		batchSbx.Status.Phase == sandboxv1alpha1.BatchSandboxPhaseCompleted
 	if skipTaskScheduling {
 		r.deleteTaskScheduler(ctx, batchSbx)
 	}
@@ -537,6 +557,17 @@ func (r *BatchSandboxReconciler) getTaskScheduler(ctx context.Context, batchSbx 
 	return tSch, nil
 }
 
+// forgetBatchSandbox drops the in-memory state kept for a BatchSandbox that no
+// longer exists. Apart from status expectations it is keyed by namespace/name,
+// so a later BatchSandbox with the same name would otherwise inherit it.
+func (r *BatchSandboxReconciler) forgetBatchSandbox(key types.NamespacedName) {
+	r.StatusRVExpectation.DeleteOthers(key, "")
+	r.stateOwners.Delete(key.String())
+	batchSandboxScaleExpectations.DeleteExpectations(key.String())
+	podRecoveryBudgets.delete(key.String())
+	r.taskSchedulers.Delete(key.String())
+}
+
 func (r *BatchSandboxReconciler) deleteTaskScheduler(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox) {
 	key := types.NamespacedName{Namespace: batchSbx.Namespace, Name: batchSbx.Name}.String()
 	if _, ok := r.taskSchedulers.LoadAndDelete(key); ok {
@@ -609,14 +640,22 @@ func (r *BatchSandboxReconciler) getTasksCleanupUnfinished(batchSbx *sandboxv1al
 	return notReleased
 }
 
+// releasePods adds toReleasePods to the release annotation. The patch carries
+// batchSbx's resourceVersion and, once it succeeds, batchSbx takes the patched
+// metadata, so the status patch later in this reconcile, which is guarded by
+// the same resourceVersion, neither conflicts with this write nor overwrites a
+// concurrent one.
 func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sandboxv1alpha1.BatchSandbox, toReleasePods []string) error {
-	releasedSet := make(sets.Set[string])
 	released, err := parseSandboxReleased(batchSbx)
 	if err != nil {
 		return err
 	}
-	releasedSet.Insert(released.Pods...)
-	releasedSet.Insert(toReleasePods...)
+	releasedSet := sets.New(released.Pods...)
+	newlyReleased := sets.List(sets.New(toReleasePods...).Difference(releasedSet))
+	if len(newlyReleased) == 0 {
+		return nil
+	}
+	releasedSet.Insert(newlyReleased...)
 	newRelease := allocationRelease{
 		Pods: sets.List(releasedSet),
 	}
@@ -628,6 +667,7 @@ func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sand
 		MetaData metav1.ObjectMeta `json:"metadata"`
 	}{
 		MetaData: metav1.ObjectMeta{
+			ResourceVersion: batchSbx.ResourceVersion,
 			Annotations: map[string]string{
 				annoAllocReleaseKey: string(raw),
 			},
@@ -643,13 +683,38 @@ func (r *BatchSandboxReconciler) releasePods(ctx context.Context, batchSbx *sand
 		r.Recorder.Eventf(batchSbx, corev1.EventTypeWarning, eventReasonFailedRelease, "Failed to release pods: %v", err)
 		return err
 	}
-	if len(toReleasePods) > 0 {
-		r.Recorder.Eventf(batchSbx, corev1.EventTypeNormal, eventReasonPodReleased, "Released %d pod(s) back to pool: %v", len(toReleasePods), toReleasePods)
-	}
+	batchSbx.ObjectMeta = b.ObjectMeta
+	r.Recorder.Eventf(batchSbx, corev1.EventTypeNormal, eventReasonPodReleased, "Released %d pod(s) back to pool: %v", len(newlyReleased), newlyReleased)
 	return nil
 }
 
 // Normal Mode
+// applyPodLabelOverrides overlays runtime-selected metadata labels on newly
+// created dedicated Pods. Null entries delete an original template label.
+// This is independent of spec.template, so metadata patches cannot replay
+// pause/resume intent by advancing the BatchSandbox generation.
+func applyPodLabelOverrides(batchSandbox *sandboxv1alpha1.BatchSandbox, pod *corev1.Pod) error {
+	raw := batchSandbox.Annotations[annoPodLabelOverrides]
+	if raw == "" {
+		return nil
+	}
+	var overrides map[string]*string
+	if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+		return fmt.Errorf("invalid Pod label overrides on BatchSandbox %s: %w", batchSandbox.Name, err)
+	}
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	for key, value := range overrides {
+		if value == nil {
+			delete(pod.Labels, key)
+		} else {
+			pod.Labels[key] = *value
+		}
+	}
+	return nil
+}
+
 func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSandbox *sandboxv1alpha1.BatchSandbox, podTemplateSpec *corev1.PodTemplateSpec, pods []*corev1.Pod) error {
 	log := logf.FromContext(ctx)
 	indexedPodMap := map[int]*corev1.Pod{}
@@ -663,9 +728,18 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 		indexedPodMap[idx] = pod
 	}
 	if satisfied, unsatisfiedDuration, dirtyPods := batchSandboxScaleExpectations.SatisfiedExpectations(controllerutils.GetControllerKey(batchSandbox)); !satisfied {
-		log.Info("scale expectation is not satisfied", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
-		durationStore.Push(types.NamespacedName{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}.String(), expectations.ExpectationTimeout-unsatisfiedDuration)
-		return nil
+		// A Pod deleted before any reconcile listed it is never observed, and
+		// the timed requeue below stops once the timeout has passed, so drop
+		// a timed-out expectation instead of blocking every later scale (as
+		// the Pool controller does).
+		if unsatisfiedDuration >= expectations.ExpectationTimeout {
+			log.Info("scale expectations timed out, clearing stale expectations", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
+			batchSandboxScaleExpectations.DeleteExpectations(controllerutils.GetControllerKey(batchSandbox))
+		} else {
+			log.Info("scale expectation is not satisfied", "unsatisfiedDuration", unsatisfiedDuration, "dirtyPods", dirtyPods)
+			durationStore.Push(types.NamespacedName{Namespace: batchSandbox.Namespace, Name: batchSandbox.Name}.String(), expectations.ExpectationTimeout-unsatisfiedDuration)
+			return nil
+		}
 	}
 	// TODO consider supply Pods if Pods is deleted unexpectedly
 	var needCreateIndex []int
@@ -697,6 +771,9 @@ func (r *BatchSandboxReconciler) scaleBatchSandbox(ctx context.Context, batchSan
 			if err := json.Unmarshal(modifiedPodBytes, pod); err != nil {
 				return fmt.Errorf("failed to unmarshal patched pod for index %d: %w", idx, err)
 			}
+		}
+		if err := applyPodLabelOverrides(batchSandbox, pod); err != nil {
+			return err
 		}
 		if err := ctrl.SetControllerReference(pod, batchSandbox, r.Scheme); err != nil {
 			return err
@@ -767,6 +844,9 @@ func (r *BatchSandboxReconciler) assignPool(ctx context.Context, batchSbx *sandb
 // SetupWithManager sets up the controller with the Manager.
 func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurrentReconciles int) error {
 	r.APIReader = mgr.GetAPIReader()
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &sandboxv1alpha1.BatchSandbox{}, allocatedPoolPodIndex, allocatedPoolPodKeys); err != nil {
+		return fmt.Errorf("index BatchSandboxes by allocated pool Pod: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&sandboxv1alpha1.BatchSandbox{}).
 		Named("batchsandbox").
@@ -777,6 +857,27 @@ func (r *BatchSandboxReconciler) SetupWithManager(mgr ctrl.Manager, maxConcurren
 		Complete(r)
 }
 
+func allocatedPoolPodKeys(obj client.Object) []string {
+	batchSandbox := obj.(*sandboxv1alpha1.BatchSandbox)
+	if batchSandbox.Spec.PoolRef == "" {
+		return nil
+	}
+	allocation, err := parseSandboxAllocation(batchSandbox)
+	if err != nil {
+		// Reconcile reports parse errors outside the cache write lock.
+		return nil
+	}
+	keys := make([]string, 0, len(allocation.Pods))
+	for _, podName := range allocation.Pods {
+		keys = append(keys, allocatedPoolPodKey(batchSandbox.Spec.PoolRef, podName))
+	}
+	return keys
+}
+
+func allocatedPoolPodKey(poolName, podName string) string {
+	return poolName + "/" + podName
+}
+
 func (r *BatchSandboxReconciler) findBatchSandboxesForPooledPod(ctx context.Context, obj client.Object) []reconcile.Request {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok || pod.Labels[labelPoolName] == "" {
@@ -784,9 +885,8 @@ func (r *BatchSandboxReconciler) findBatchSandboxesForPooledPod(ctx context.Cont
 	}
 
 	batchSandboxes := &sandboxv1alpha1.BatchSandboxList{}
-	if err := r.List(ctx, batchSandboxes, &client.ListOptions{
-		Namespace:     pod.Namespace,
-		FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForPoolRef: pod.Labels[labelPoolName]}),
+	if err := r.List(ctx, batchSandboxes, client.InNamespace(pod.Namespace), client.MatchingFields{
+		allocatedPoolPodIndex: allocatedPoolPodKey(pod.Labels[labelPoolName], pod.Name),
 	}); err != nil {
 		logf.FromContext(ctx).Error(err, "Failed to find BatchSandbox for pooled Pod", "pod", pod.Name)
 		return nil
@@ -795,14 +895,7 @@ func (r *BatchSandboxReconciler) findBatchSandboxesForPooledPod(ctx context.Cont
 	requests := make([]reconcile.Request, 0, 1)
 	for i := range batchSandboxes.Items {
 		batchSandbox := &batchSandboxes.Items[i]
-		allocation, err := parseSandboxAllocation(batchSandbox)
-		if err != nil {
-			logf.FromContext(ctx).Error(err, "Failed to parse BatchSandbox allocation", "batchSandbox", batchSandbox.Name)
-			continue
-		}
-		if !slices.Contains(allocation.Pods, pod.Name) {
-			continue
-		}
+		// A release request stops event routing before the pool completes recycling.
 		released, err := parseSandboxReleased(batchSandbox)
 		if err != nil {
 			logf.FromContext(ctx).Error(err, "Failed to parse BatchSandbox release", "batchSandbox", batchSandbox.Name)

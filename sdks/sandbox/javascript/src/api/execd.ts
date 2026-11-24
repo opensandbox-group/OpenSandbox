@@ -238,6 +238,8 @@ export interface paths {
          *     In foreground mode, stdout and stderr event text preserves the original line endings
          *     (`\n`, `\r`, or `\r\n`). Concatenate text from each stream's events to recover its output;
          *     the final event may contain an unterminated fragment.
+         *     A line longer than 16 MiB is split across several events, and only the last of them
+         *     ends with the line ending.
          *     Optionally specify `timeout` (milliseconds) to enforce a maximum runtime; the server will
          *     terminate the process when the timeout is reached. You can also pass `uid`/`gid` to run
          *     with specific user/group IDs, and `envs` to inject environment variables.
@@ -289,10 +291,11 @@ export interface paths {
          * @description Returns stdout and stderr for a background (detached) command by command ID.
          *     Foreground commands should be consumed via SSE; this endpoint is intended for
          *     polling logs of background commands. Supports incremental reads similar to a file seek:
-         *     pass a starting line via query to fetch output after that line and receive the latest
-         *     tail cursor for the next poll. When no starting line is provided, the full logs are returned.
-         *     Response body is plain text so it can be rendered directly in browsers; the latest line index
-         *     is provided via response header `EXECD-COMMANDS-TAIL-CURSOR` for subsequent incremental requests.
+         *     pass a byte offset via the `cursor` query parameter to fetch output after that position
+         *     and receive the offset after the returned bytes via the `EXECD-COMMANDS-TAIL-CURSOR`
+         *     response header for the next poll. When no cursor is provided, the log is returned from the start.
+         *     At most 16 MiB are returned per request; use the returned cursor to fetch the remainder.
+         *     Response body is plain text so it can be rendered directly in browsers.
          *     Completed background command output is retained for at least 24 hours and then
          *     removed by an hourly cleanup. Running command output is never removed by retention cleanup.
          */
@@ -1016,7 +1019,7 @@ export interface paths {
          * @description Returns the combined stdout/stderr of a background run as plain text.
          *     Supports incremental reads similar to a file seek: pass a byte offset
          *     via the `cursor` query parameter to fetch output after that position
-         *     and receive the latest tail cursor via the
+         *     and receive the offset after the returned bytes via the
          *     `EXECD-ISOLATED-TAIL-CURSOR` response header for the next poll.
          *     When no cursor is provided, the log is returned from the start. At
          *     most 16 MiB are returned per request; use the returned cursor to
@@ -1455,12 +1458,12 @@ export interface components {
             /** @description Execution error details if an error occurred */
             error?: {
                 /**
-                 * @description Error name/type
+                 * @description Error name/type. Foreground commands that fail after their execution deadline use `CommandTimeout`; other command failures use `CommandExecError`.
                  * @example NameError
                  */
                 ename?: string;
                 /**
-                 * @description Error value/message. For `CommandExecError` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when the process could not be started; use `exit_code` to tell the two apart.
+                 * @description Error value/message. For `CommandExecError` and `CommandTimeout` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when no exit status is available; use `exit_code` to tell the two apart.
                  * @example name 'undefined_var' is not defined
                  */
                 evalue?: string;
@@ -1474,7 +1477,7 @@ export interface components {
                  */
                 traceback?: string[];
                 /**
-                 * @description Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` events emitted after the process ran; omitted when the process failed to start and for non-command errors.
+                 * @description Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` and `CommandTimeout` events emitted after the process ran; omitted when the process failed to start, no exit status was observed, or the error is not from a command.
                  * @example 3
                  */
                 exit_code?: number;
@@ -1569,7 +1572,7 @@ export interface components {
              */
             mode?: number;
         };
-        /** @description File rename/move operation */
+        /** @description File rename/move operation. Both src and dest must be non-empty. On ordinary filesystem routes, including execution-identity routes, paths must also remain non-empty after environment-variable and home-directory expansion; isolated-session paths are literal. Missing or empty paths, or empty expansions on ordinary routes, return 400 INVALID_REQUEST_BODY before any rename in the batch. Other path-expansion and filesystem errors retain their existing handling and can leave earlier renames applied. */
         RenameFileItem: {
             /**
              * @description Source file path
@@ -1719,7 +1722,7 @@ export interface components {
         };
         IsolatedRunRequest: {
             /**
-             * @description Shell code to execute inside the session
+             * @description Shell code to execute inside the session. Its standard input is /dev/null; pass input through a file or a here-document.
              * @example echo hello
              */
             code: string;
@@ -2340,10 +2343,12 @@ export interface operations {
         parameters: {
             query?: {
                 /**
-                 * @description Optional 0-based line cursor (behaves like a file seek). When provided, only
-                 *     stdout/stderr lines after this line are returned. The response includes the
-                 *     latest line index (`cursor`) so the client can request incremental output
-                 *     on subsequent calls. If omitted, the full log is returned.
+                 * @description Optional byte offset into the combined stdout/stderr output (behaves like a
+                 *     file seek). When provided, only bytes after this offset are returned. The
+                 *     response includes the offset after the returned bytes
+                 *     (`EXECD-COMMANDS-TAIL-CURSOR`) so the client can request incremental output
+                 *     on subsequent calls. At most 16 MiB are returned per request. If omitted,
+                 *     the log is returned from the start.
                  * @example 120
                  */
                 cursor?: number;
@@ -2363,7 +2368,7 @@ export interface operations {
             /** @description Command output (plain text) and status metadata via headers */
             200: {
                 headers: {
-                    /** @description Highest available 0-based line index after applying the request cursor (use as the next cursor for incremental reads) */
+                    /** @description Byte offset immediately after the bytes returned in this response; pass it as the next request's cursor to continue reading from there */
                     "EXECD-COMMANDS-TAIL-CURSOR"?: number;
                     [name: string]: unknown;
                 };
@@ -3722,8 +3727,9 @@ export interface operations {
                 /**
                  * @description Optional byte offset (behaves like a file seek). When provided,
                  *     only log bytes after this offset are returned. The response
-                 *     includes the latest offset (`EXECD-ISOLATED-TAIL-CURSOR`) so the
-                 *     client can request incremental output on subsequent calls.
+                 *     includes the offset after the returned bytes
+                 *     (`EXECD-ISOLATED-TAIL-CURSOR`) so the client can request
+                 *     incremental output on subsequent calls.
                  *     At most 16 MiB are returned per request.
                  *     If omitted, the log is returned from the start.
                  * @example 120
@@ -3743,7 +3749,7 @@ export interface operations {
             /** @description Background run log (plain text) and tail cursor via header */
             200: {
                 headers: {
-                    /** @description Highest available byte offset after applying the request cursor (use as the next cursor for incremental reads) */
+                    /** @description Byte offset immediately after the bytes returned in this response; pass it as the next request's cursor to continue reading from there */
                     "EXECD-ISOLATED-TAIL-CURSOR"?: number;
                     [name: string]: unknown;
                 };

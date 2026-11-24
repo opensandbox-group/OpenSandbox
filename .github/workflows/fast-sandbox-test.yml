@@ -7,21 +7,36 @@ on:
         description: Optional fast-sandbox commit SHA to test instead of the pinned commit (full 40-char SHA; a PR head SHA works)
         required: false
         type: string
+      pool_mode:
+        description: SandboxPool profile (resource-aware | legacy)
+        required: false
+        type: string
+        default: resource-aware
+      egress_modes:
+        description: Comma-separated egress modes (default, credential-bound); PRs always run both
+        required: false
+        type: string
+        default: default
   repository_dispatch:
     types: [fast-sandbox-pr]
   pull_request:
     branches: [ main ]
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
   pull-requests: read
   actions: write
 
-# Unique group per dispatch run (GitHub concurrency would otherwise fold
-# queued runs away); PR pushes keep superseding each other.
+# PR pushes supersede each other. Dispatch runs key on client_payload.pr so a
+# new push to the same fast-sandbox PR cancels the in-flight KVM run (its
+# dispatcher is already gone); no pr -> unique group per run. Unrelated
+# `labeled` events get their own group: the job gate skips them anyway, and a
+# shared group would let cancel-in-progress kill an in-flight KVM run before
+# the gate gets a chance to skip.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test') && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '' && format('fsb-pr-{0}', github.event.client_payload.pr)) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '') }}
 
 jobs:
   changes:
@@ -29,18 +44,137 @@ jobs:
     with:
       area: fast-sandbox
 
-  integration:
-    name: Integration Env (self-hosted kvm)
+  verifier-tests:
+    name: Credential-bound verifier tests
     needs: changes
-    if: needs.changes.outputs.relevant == 'true'
+    if: github.event_name != 'pull_request' || needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Shared by the prerequisite guard and all golden comparisons. Bump in
+      # lockstep with GOLDEN_BASE in scripts/fast-sandbox-env/tests/test_credential_bound.py
+      # whenever a stage-list change is intentional.
+      CBV_GOLDEN_BASE: 02be68b5fde9c74d69f5ba69a2dbb97c76f23c06
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Golden render/stage tests compare against the pre-change commit.
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test dependency
+        run: python -m pip install PyYAML==6.0.3
+      - name: Verify local test prerequisites
+        # Fail instead of letting the golden/YAML/TLS/proc tests skip.
+        run: |
+          bash -c 'test "${BASH_VERSINFO[0]}" -ge 4'
+          python -c 'import yaml'
+          command -v jq
+          command -v openssl
+          test -d /proc/self
+          git cat-file -e "${CBV_GOLDEN_BASE}^{commit}" || {
+            echo "::error::golden baseline commit ${CBV_GOLDEN_BASE} not present; check CBV_GOLDEN_BASE and fetch history"
+            exit 1
+          }
+      - name: Run verifier regression tests
+        run: python -m unittest discover -v -s scripts/fast-sandbox-env/tests -p 'test_*.py'
+
+  # Emits the integration matrix: PRs exercise both default and OSEP-0023
+  # credential-bound in a single KVM run (reusing the cluster and built
+  # templates via an in-place SandboxPool switch); standalone
+  # egress_modes=credential-bound dispatches keep a dedicated full leg.
+  egress-modes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.modes.outputs.matrix }}
+      run_credential_bound_delta: ${{ steps.modes.outputs.run_credential_bound_delta }}
+    steps:
+      - id: modes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.egress_modes || github.event.client_payload.egress_modes || '' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          values = {"default": "", "credential-bound": "credential-bound"}
+          requested = os.environ["REQUESTED"]
+          if os.environ["EVENT_NAME"] == "pull_request":
+              requested = "default,credential-bound"
+          modes = []
+          for part in (p.strip() for p in requested.split(",")):
+              if not part:
+                  continue
+              if part not in values:
+                  print(f"::error::unknown egress mode '{part}' (valid: {', '.join(values)})")
+                  sys.exit(1)
+              if values[part] not in modes:
+                  modes.append(values[part])
+          if not modes:
+              modes = [""]
+          # When both default and credential-bound are requested, run a single
+          # KVM leg and switch the SandboxPool in-place for the OSEP-0023
+          # egress-sensitive delta instead of rebuilding the whole stack twice.
+          if "" in modes and "credential-bound" in modes:
+              matrix = [""]
+              run_cb_delta = "true"
+          else:
+              matrix = modes
+              run_cb_delta = "false"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"matrix={json.dumps(matrix)}\n")
+              out.write(f"run_credential_bound_delta={run_cb_delta}\n")
+          PY
+
+  integration:
+    # The default leg keeps the original check name; the OSEP-0023 leg adds
+    # its mode to the name.
+    name: Integration Env (self-hosted kvm${{ matrix.egress_interception_mode != '' && format(', {0}', matrix.egress_interception_mode) || '' }})
+    needs: [changes, egress-modes]
+    if: >-
+      github.event_name != 'pull_request' ||
+      ( needs.changes.outputs.relevant == 'true' &&
+      contains(github.event.pull_request.labels.*.name, 'ok-to-test') &&
+      ( github.event.action != 'labeled' ||
+      github.event.label.name == 'ok-to-test' ) )
+    # OSEP-0023 (experimental): when a single mode is requested, one leg owns
+    # the runner for a full up -> verify -> teardown. When both default and
+    # credential-bound are requested (including PRs), egress-modes collapses
+    # the matrix to [''] and runs the credential-bound delta in-place after
+    # active sandboxes drain and the SandboxPool is recreated.
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        egress_interception_mode: ${{ fromJSON(needs.egress-modes.outputs.matrix) }}
     runs-on: kvm
     timeout-minutes: 240
     env:
       # Full-stack profile (single round while scenarios stabilize).
       IDLE_PAUSE: "1"
       IDLE_PAUSE_ROUNDS: "1"
+      # OSEP-0026: the integration lane exercises the ResourceAware pool by
+      # default; LegacySlot regression moved to the nightly full-stack run
+      # (pool_mode is the forwarding switch, not a server-side flag).
+      POOL_MODE: ${{ inputs.pool_mode || github.event.client_payload.pool_mode || 'resource-aware' }}
       # workflow_dispatch input or repository_dispatch client_payload (empty on PRs).
       FSB_COMMIT_OVERRIDE: ${{ inputs.fsb_commit || github.event.client_payload.fsb_commit }}
+      # Empty on the default leg: integration-env.sh then renders the Pool
+      # exactly as before and passes no switch to egress.
+      EGRESS_INTERCEPTION_MODE: ${{ matrix.egress_interception_mode }}
+      # This runner is OVERSEAS (Alibaba Cloud Singapore, hostname *sg52):
+      # github.com and proxy.golang.org are directly reachable, while the
+      # China mirrors (goproxy.cn, mirrors.aliyun.com) are cross-border and
+      # the VPC mirror edge serves stale bytes. Keep the canonical Go module
+      # proxy pinned (matches integration-env.sh's default): pure
+      # GOPROXY=direct fails on dead vanity domains in fast-sandbox's tree
+      # (nhooyr.io/websocket: "lookup nhooyr.io: no such host"), whereas
+      # proxy.golang.org serves it from cache with full sumdb verification.
+      FSB_GOPROXY: https://proxy.golang.org,direct
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)
@@ -54,7 +188,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: '1.26.11'
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7
@@ -75,14 +209,26 @@ jobs:
       - name: Run integration tests (environment init)
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
+      # Thin lane: native boot path + egress rules only (~4 min observed);
+      # the full scenario matrix runs on the overlaybd template below.
       - name: Run native template verify
-        timeout-minutes: 75
+        # The credential-bound leg adds its verify stage to this lane. The
+        # larger budgets are reserved upper bounds, not measured durations.
+        timeout-minutes: ${{ matrix.egress_interception_mode == 'credential-bound' && 60 || 30 }}
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
 
       - name: Run overlaybd template verify
         # Builds the overlaybd template first; no-op when OCI_STACK=0.
-        timeout-minutes: 90
+        timeout-minutes: ${{ matrix.egress_interception_mode == 'credential-bound' && 120 || 90 }}
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
+
+      - name: Run ResourceAware verify (OSEP-0026)
+        # Shaped-template forwarding + cgroup enforcement, oversized -> 400,
+        # snapshot round-trip with recorded-limit replay, saturation -> 429.
+        # pool_mode=legacy dispatches keep the legacy matrix only.
+        if: env.POOL_MODE == 'resource-aware'
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-resourceaware
 
       - name: Run base SDK e2e
         # Runs on the overlaybd template (native only under OCI_STACK=0).
@@ -92,6 +238,23 @@ jobs:
       - name: Run idle-pause SDK e2e
         timeout-minutes: 45
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
+
+      # OSEP-0023 delta on the live stack: switches SandboxPool to
+      # credential-bound after active sandboxes drain and reuses the already
+      # built native + overlaybd templates to run all egress-sensitive stages
+      # plus the egress/network-policy SDK slice.
+      - name: Run credential-bound egress verify (OSEP-0023)
+        if: needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''
+        timeout-minutes: 60
+        run: sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound" ./scripts/fast-sandbox-env/integration-env.sh verify-credential-bound
+
+      - name: Run credential-bound SDK egress e2e (OSEP-0023)
+        if: needs.egress-modes.outputs.run_credential_bound_delta == 'true' && matrix.egress_interception_mode == ''
+        timeout-minutes: 30
+        run: >-
+          sudo -E env "PATH=$PATH" "EGRESS_INTERCEPTION_MODE=credential-bound"
+          "PYTEST_ADDOPTS=-k 'test_02_sandbox_surface_and_egress_methods or test_02b_network_policy_port_scoped_contract or test_02c_network_policy_port_scoped_enforcement'"
+          ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
       # Collect the env's own failure dump ($WORK/logs/failure-*.txt: kind
       # nodes/pods, controller / firecracker-runtime / fastlet / builder /
@@ -111,7 +274,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fast-sandbox-diagnostics-${{ github.run_attempt }}
+          name: fast-sandbox-diagnostics-${{ matrix.egress_interception_mode || 'default' }}-${{ github.run_attempt }}
           path: diagnostics/
           retention-days: 7
 

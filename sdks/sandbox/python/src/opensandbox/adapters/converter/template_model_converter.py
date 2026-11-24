@@ -38,10 +38,12 @@ from opensandbox.api.lifecycle.models.fsb_template import FsbTemplate as ApiTemp
 from opensandbox.api.lifecycle.models.fsb_template_readiness import (
     FsbTemplateReadiness as ApiTemplateReadiness,
 )
+from opensandbox.api.lifecycle.models.fsb_template_resource_limits import (
+    FsbTemplateResourceLimits,
+)
 from opensandbox.api.lifecycle.models.list_fsb_templates_response import (
     ListFsbTemplatesResponse as ApiListTemplatesResponse,
 )
-from opensandbox.api.lifecycle.models.resource_limits import ResourceLimits
 from opensandbox.api.lifecycle.types import UNSET, Unset
 from opensandbox.models.sandboxes import PaginationInfo
 from opensandbox.models.templates import (
@@ -105,7 +107,7 @@ class TemplateModelConverter:
             image=request.image,
             publish=request.publish,
             resource_limits=(
-                ResourceLimits.from_dict(request.resource_limits)
+                FsbTemplateResourceLimits.from_dict(request.resource_limits)
                 if request.resource_limits
                 else UNSET
             ),

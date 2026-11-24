@@ -105,14 +105,13 @@ sandbox:
 | `protocol` | `http` | Use `https` for any non-loopback domain |
 | `request_timeout` | `30` | Management API request timeout in seconds |
 | `ready_timeout` | `30` | Create and readiness deadline in seconds |
-| `use_server_proxy` | `false` | Route execd and file traffic through the server |
 | `sandbox_timeout` | `14400` | Server-side lifetime in seconds; `0` disables renewal |
 | `bash_command_timeout` | `600` | Default command deadline in seconds |
 | `replicas` | `3` | Active plus warm sandbox cap per gateway process |
 | `idle_timeout` | `600` | Idle seconds before a warm sandbox is destroyed; `0` disables |
 | `environment` | `{}` | Environment variables injected into sandbox commands. A value starting with `$` is resolved from the gateway process environment. |
 
-`api_key` and `domain` may be omitted when `OPEN_SANDBOX_API_KEY` and `OPEN_SANDBOX_DOMAIN` are exported, which is how the example passes them. Set `use_server_proxy: true` when the gateway can reach the OpenSandbox management service but cannot reach sandbox `execd` endpoints directly.
+`api_key` and `domain` may be omitted when `OPEN_SANDBOX_API_KEY` and `OPEN_SANDBOX_DOMAIN` are exported, which is how the example passes them.
 
 Then run one headless agent turn. The prompt makes the agent call its `bash` tool, which now executes inside OpenSandbox:
 

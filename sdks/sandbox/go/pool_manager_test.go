@@ -83,8 +83,6 @@ func seedIdle(t *testing.T, store PoolStateStore, poolName string, n int) {
 
 func durationPtr(d time.Duration) *time.Duration { return &d }
 
-// ---------- Destroy Protocol Tests ----------
-
 func TestSandboxPoolManager_Destroy(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -380,8 +378,6 @@ func TestSandboxPoolManager_Destroy_InvalidOptions(t *testing.T) {
 	}
 }
 
-// ---------- Fence Observation Tests ----------
-
 func TestSandboxPoolManager_Destroy_FenceStopsLivePool(t *testing.T) {
 	ctx := context.Background()
 	execdSrv := newMockExecdServer(t)
@@ -515,10 +511,7 @@ func (s *scriptedDestroyStateStore) GetDestroyState(_ context.Context, _ string)
 	return PoolDestroyStateDestroyed, nil
 }
 
-// TestSandboxPoolManager_Destroy_BlocksDirectCreateOnLivePool covers the case a
-// store-level fence alone cannot: a peer that is still RUNNING when the fence
-// lands would otherwise find an empty idle buffer and mint a fresh sandbox into
-// the retired namespace via the direct-create fallthrough.
+// A store fence alone cannot prevent a running peer from direct-creating into a retired namespace.
 func TestSandboxPoolManager_Destroy_BlocksDirectCreateOnLivePool(t *testing.T) {
 	ctx := context.Background()
 	execdSrv := newMockExecdServer(t)
@@ -569,8 +562,6 @@ func TestSandboxPoolManager_Destroy_BlocksDirectCreateOnLivePool(t *testing.T) {
 	}
 }
 
-// TestPool_Acquire_KillsSandboxFencedMidCreate covers a destroy that lands while
-// a direct create is already in flight.
 func TestPool_Acquire_KillsSandboxFencedMidCreate(t *testing.T) {
 	ctx := context.Background()
 	execdSrv := newMockExecdServer(t)
@@ -611,11 +602,7 @@ func TestPool_Acquire_KillsSandboxFencedMidCreate(t *testing.T) {
 	}
 }
 
-// TestPool_Acquire_KillsIdleSandboxFencedMidAcquire covers the fence landing
-// between the preflight check and the idle take. TryTakeIdle is unfenced so the
-// destroy manager can drain, which means the ID is already out of the store by
-// then and a concurrent Destroy can no longer reach it: the acquire has to kill
-// it rather than hand back a sandbox from a retired namespace.
+// Destroy cannot reach an idle already taken from the store; acquire owns its cleanup after a fence.
 func TestPool_Acquire_KillsIdleSandboxFencedMidAcquire(t *testing.T) {
 	ctx := context.Background()
 	execdSrv := newMockExecdServer(t)
@@ -662,9 +649,7 @@ func TestPool_Acquire_KillsIdleSandboxFencedMidAcquire(t *testing.T) {
 	}
 }
 
-// TestPool_Acquire_IdlePathFenceCheckIsFailClosed pins the deliberate asymmetry
-// with the direct-create path: an idle sandbox is already out of the store, so an
-// unreachable store cannot be assumed ACTIVE the way direct create may.
+// A taken idle is no longer store-owned, so store outages must fail closed on this path.
 func TestPool_Acquire_IdlePathFenceCheckIsFailClosed(t *testing.T) {
 	ctx := context.Background()
 	execdSrv := newMockExecdServer(t)
@@ -729,9 +714,6 @@ func (s *outageAfterNCallsStore) GetDestroyState(ctx context.Context, poolName s
 	}
 }
 
-// TestPool_Acquire_NamespaceCheckDegradesOnStoreOutage keeps a store outage from
-// making direct-create policies less available than the OSEP-0005 matrix
-// documents, while fail-closed policies still surface it.
 func TestPool_Acquire_NamespaceCheckDegradesOnStoreOutage(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -934,8 +916,6 @@ func TestInMemoryPoolStateStore_MarkDestroyedRejectsBlankOwnerAndNegativeTTL(t *
 		t.Error("BeginDestroy with a blank owner succeeded, want error")
 	}
 }
-
-// ---------- Builder Tests ----------
 
 func TestSandboxPoolManagerBuilder_Validation(t *testing.T) {
 	tests := []struct {

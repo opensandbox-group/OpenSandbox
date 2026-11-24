@@ -1,0 +1,493 @@
+<!--
+Copyright 2026 The OpenSandbox Authors
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<!DOCTYPE html>
+<html lang="zh" data-lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR #{{N}} Review · {{title}}</title>
+<!--
+  opensandbox-pr-review report skeleton.
+  Fill every {{placeholder}}. Keep sections 1–3 and their order. Keep ONE value-card
+  block and delete the other two, then delete the rows that do not apply. Keep the
+  collapsed evidence section only when a card row or a finding depends on it.
+  Verdict banner classes: .verdict (default pass/green), .verdict.v-warn (amber),
+  .verdict.v-fail (red).
+  Verdict & severity badges: b-pass ✓, b-part △, b-fail ✗, b-crit, b-high, b-med,
+  b-low, b-warn, b-info — set the class and glyph to match each row.
+  Key emphasis: use <strong> for key conclusions/metrics and <strong class="hl-red">
+  for breaking changes, failures, blocking risks, or merge conditions (sparingly).
+  Escape untrusted values (PR title, author, branch names, commit subjects, quoted
+  body text, command output) before substitution; <pre> escapes nothing by itself.
+  Length limits: a card row is at most 2 lines, a finding at most 2 lines, and the
+  default-language view fits in about two screens before the verification log.
+-->
+<style>
+  :root {
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --surface-sub: #f1f5f9;
+    --fg: #0f172a;
+    --fg-body: #334155;
+    --muted: #64748b;
+    --border: #e2e8f0;
+    --border-sub: #f1f5f9;
+    --code-bg: #f1f5f9;
+    --code-fg: #1e293b;
+    --code-bd: #e2e8f0;
+    --accent: #2563eb;
+    --shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 1px 3px rgba(15, 23, 42, .03);
+
+    --pass: #15803d; --pass-bg: #ecfdf5; --pass-bd: #bbf7d0; --pass-bar: #16a34a;
+    --part: #a16207; --part-bg: #fefce8; --part-bd: #fde68a; --part-bar: #d97706;
+    --warn: #a16207; --warn-bg: #fefce8; --warn-bd: #fde68a;
+    --med: #c2410c; --med-bg: #fff7ed; --med-bd: #fed7aa;
+    --fail: #b91c1c; --fail-bg: #fef2f2; --fail-bd: #fecaca; --fail-bar: #dc2626;
+    --info: #1d4ed8; --info-bg: #eff6ff; --info-bd: #bfdbfe;
+
+    --add: #15803d;
+    --del: #b91c1c;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0f17;
+      --surface: #111827;
+      --surface-sub: #1a2234;
+      --fg: #f1f5f9;
+      --fg-body: #cbd5e1;
+      --muted: #94a3b8;
+      --border: #1e293b;
+      --border-sub: #172032;
+      --code-bg: rgba(148, 163, 184, .12);
+      --code-fg: #e2e8f0;
+      --code-bd: rgba(148, 163, 184, .16);
+      --accent: #60a5fa;
+      --shadow: 0 1px 3px rgba(0, 0, 0, .28);
+
+      --pass: #4ade80; --pass-bg: rgba(22, 163, 74, .12); --pass-bd: rgba(74, 222, 128, .24); --pass-bar: #22c55e;
+      --part: #fbbf24; --part-bg: rgba(217, 119, 6, .14); --part-bd: rgba(251, 191, 36, .26); --part-bar: #f59e0b;
+      --warn: #fbbf24; --warn-bg: rgba(217, 119, 6, .14); --warn-bd: rgba(251, 191, 36, .26);
+      --med: #fb923c; --med-bg: rgba(234, 88, 12, .14); --med-bd: rgba(251, 146, 60, .26);
+      --fail: #f87171; --fail-bg: rgba(220, 38, 38, .14); --fail-bd: rgba(248, 113, 113, .26); --fail-bar: #ef4444;
+      --info: #60a5fa; --info-bg: rgba(37, 99, 235, .16); --info-bd: rgba(96, 165, 250, .26);
+
+      --add: #4ade80;
+      --del: #f87171;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg-body);
+    font: 14.5px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 940px; margin: 0 auto; padding: 36px 24px 72px; }
+
+  /* Header */
+  .top { display: flex; gap: 16px; justify-content: space-between; align-items: flex-start; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12.5px; font-weight: 600; color: var(--muted);
+    letter-spacing: .01em; margin-bottom: 6px;
+  }
+  .pr-num {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    background: var(--surface-sub); border: 1px solid var(--border);
+    color: var(--fg); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px; font-weight: 600;
+  }
+  h1 {
+    font-size: 21px; line-height: 1.38; font-weight: 650;
+    color: var(--fg); margin: 0 0 12px; letter-spacing: -.01em;
+  }
+  .meta-row {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+    color: var(--muted); font-size: 13px; line-height: 1.5;
+  }
+  .meta-row + .meta-row { margin-top: 6px; font-size: 12.5px; }
+  .meta-item { display: inline-flex; align-items: center; gap: 5px; }
+  .dot { color: var(--border); user-select: none; }
+  .stat-add { color: var(--add); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; }
+  .stat-del { color: var(--del); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; }
+
+  /* Language Toggle */
+  .toggle {
+    display: inline-flex; flex-shrink: 0; padding: 3px; gap: 2px;
+    background: var(--surface-sub); border: 1px solid var(--border); border-radius: 9px;
+  }
+  .toggle button {
+    background: transparent; color: var(--muted); border: 0; border-radius: 6px;
+    padding: 5px 12px; cursor: pointer; font-size: 12.5px; font-weight: 500;
+    transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+  }
+  .toggle button:hover { color: var(--fg); }
+  .toggle button.on {
+    background: var(--surface); color: var(--fg); font-weight: 600;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .08);
+  }
+
+  /* Verdict Banner */
+  .verdict {
+    --v-fg: var(--pass); --v-bg: var(--pass-bg); --v-bd: var(--pass-bd); --v-bar: var(--pass-bar);
+    margin: 22px 0 30px; padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--v-bd);
+    border-left: 4px solid var(--v-bar);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .verdict.v-warn { --v-fg: var(--part); --v-bg: var(--part-bg); --v-bd: var(--part-bd); --v-bar: var(--part-bar); }
+  .verdict.v-fail { --v-fg: var(--fail); --v-bg: var(--fail-bg); --v-bd: var(--fail-bd); --v-bar: var(--fail-bar); }
+  .verdict-head {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 15px; font-weight: 650; color: var(--v-fg);
+    margin-bottom: 6px;
+  }
+  .verdict-body { color: var(--fg-body); font-size: 14px; line-height: 1.65; }
+
+  /* Sections */
+  section { margin: 30px 0; }
+  h2 {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 15.5px; font-weight: 650; color: var(--fg);
+    margin: 0 0 14px; letter-spacing: -.005em;
+  }
+  .sec-tag {
+    font-size: 11.5px; font-weight: 600; color: var(--muted);
+    background: var(--surface-sub); border: 1px solid var(--border);
+    padding: 1px 8px; border-radius: 999px;
+  }
+
+  /* Code */
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code {
+    font-size: 12.5px; line-height: 1.45;
+    background: var(--code-bg); color: var(--code-fg);
+    border: 1px solid var(--code-bd);
+    padding: 1px 6px; border-radius: 5px;
+    overflow-wrap: anywhere;
+  }
+  pre {
+    margin: 12px 0 0; padding: 14px 16px; border-radius: 8px;
+    background: var(--surface-sub); border: 1px solid var(--border);
+    font-size: 12.5px; line-height: 1.55; overflow-x: auto; color: var(--fg);
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+
+  /* Badges */
+  .badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 650; line-height: 1;
+    padding: 3px 8px; border-radius: 999px; margin-right: 6px;
+    white-space: nowrap; vertical-align: 1px; letter-spacing: .02em;
+    border: 1px solid transparent;
+  }
+  .b-pass { color: var(--pass); background: var(--pass-bg); border-color: var(--pass-bd); }
+  .b-part, .b-warn, .b-low { color: var(--part); background: var(--part-bg); border-color: var(--part-bd); }
+  .b-med { color: var(--med); background: var(--med-bg); border-color: var(--med-bd); }
+  .b-fail, .b-high, .b-crit { color: var(--fail); background: var(--fail-bg); border-color: var(--fail-bd); }
+  .b-info { color: var(--info); background: var(--info-bg); border-color: var(--info-bd); }
+
+  /* Key information emphasis */
+  strong { color: var(--fg); font-weight: 650; }
+  .hl-red { color: var(--fail); font-weight: 650; }
+
+  /* Value Card: structured label/value grid for low visual density */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    margin: 0 0 18px;
+  }
+  .cell {
+    display: grid;
+    grid-template-columns: 152px minmax(0, 1fr);
+    gap: 16px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border-sub);
+    align-items: baseline;
+  }
+  .cell:last-child { border-bottom: 0; }
+  .cell .label {
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.5;
+  }
+  .cell .val {
+    color: var(--fg);
+    font-size: 14px;
+    line-height: 1.7;
+    min-width: 0;
+  }
+
+  /* Change bullets & findings lists */
+  ul.clean-list {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  ul.clean-list li {
+    position: relative; padding: 10px 16px 10px 28px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 9px; line-height: 1.65;
+  }
+  ul.clean-list li::before {
+    content: ""; position: absolute; left: 13px; top: 19px;
+    width: 5px; height: 5px; border-radius: 50%; background: var(--muted);
+  }
+  ul.findings-list {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  ul.findings-list li {
+    padding: 12px 16px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 9px; line-height: 1.65;
+  }
+
+  /* Fallback styling for plain lists inside evidence */
+  ul { margin: 8px 0 0; padding-left: 20px; }
+  li { margin: 5px 0; }
+
+  /* Verification Table */
+  .table-wrap {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+  }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { padding: 11px 16px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border-sub); }
+  tr:last-child td { border-bottom: 0; }
+  th {
+    background: var(--surface-sub); color: var(--muted);
+    font-size: 12px; font-weight: 600; letter-spacing: .02em;
+    border-bottom: 1px solid var(--border);
+  }
+  td:last-child, th:last-child { white-space: nowrap; }
+
+  /* Evidence Collapsible */
+  details {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  summary {
+    cursor: pointer; list-style: none;
+    padding: 13px 18px; font-size: 14.5px; font-weight: 600; color: var(--fg);
+    display: flex; align-items: center; gap: 8px; user-select: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: "▸"; display: inline-block; color: var(--muted); font-size: 13px;
+    transition: transform .15s ease;
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  details[open] summary { border-bottom: 1px solid var(--border-sub); }
+  .evidence-body { padding: 14px 18px 18px; font-size: 13.5px; }
+
+  /* Responsive */
+  @media (max-width: 680px) {
+    main { padding: 20px 16px 48px; }
+    .top { flex-direction: column; }
+    .cell { grid-template-columns: 1fr; gap: 4px; padding: 12px 16px; }
+  }
+
+  @media print {
+    body { background: #fff; }
+    main { max-width: none; padding: 0; }
+    .toggle { display: none; }
+    .card, .verdict, .table-wrap, details, ul.clean-list li, ul.findings-list li { box-shadow: none; }
+  }
+
+  html[data-lang="zh"] .en, html[data-lang="en"] .zh { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="top">
+    <div>
+      <div class="eyebrow">
+        <span class="pr-num">PR #{{N}}</span>
+        <span class="zh">评审报告</span><span class="en">Review Report</span>
+      </div>
+      <h1>{{title}}</h1>
+      <div class="meta-row">
+        <span class="meta-item">{{author}}</span>
+        <span class="dot">·</span>
+        <span class="meta-item"><code>{{head branch}}</code> → <code>{{base}}</code></span>
+        <span class="dot">·</span>
+        <span class="meta-item">{{c}} commits · {{f}} files · <span class="stat-add">+{{a}}</span> / <span class="stat-del">−{{d}}</span></span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-item"><span class="zh">评审区间</span><span class="en">Range</span> <code>{{base sha}}..{{head sha}}</code></span>
+        <span class="dot">·</span>
+        <span class="meta-item"><span class="zh">方法：{{OCR + 人工核对 + worktree 复跑}}</span><span class="en">Method: {{OCR + manual verification + worktree runs}}</span></span>
+      </div>
+    </div>
+    <div class="toggle" role="group" aria-label="language">
+      <button type="button" id="btn-zh" class="on">中文</button>
+      <button type="button" id="btn-en">English</button>
+    </div>
+  </div>
+
+  <!-- Verdict classes: default pass (green), .v-warn (amber), .v-fail (red) -->
+  <div class="verdict">
+    <div class="verdict-head"><span class="zh">{{✅ 推荐合入}}</span><span class="en">{{✅ Recommend merging}}</span></div>
+    <div class="verdict-body"><span class="zh">{{one-line reason}} · {{merge condition, if any}}</span><span class="en">{{one-line reason}} · {{merge condition, if any}}</span></div>
+  </div>
+</header>
+
+<section>
+  <h2>
+    <span class="zh">1. 变更内容</span><span class="en">1. What changed</span>
+    <span class="sec-tag">{{bugfix}}</span>
+  </h2>
+
+  <!-- VALUE CARD: keep ONE of the three blocks below, delete the other two -->
+
+  <!-- bugfix card -->
+  <div class="card">
+    <div class="cell">
+      <div class="label"><span class="zh">修复的问题</span><span class="en">Problem fixed</span></div>
+      <div class="val"><span class="zh">{{≤2 行：什么坏了、对谁、什么现象}}</span><span class="en">{{≤2 lines: what breaks, for whom, how it shows}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">问题是否成立</span><span class="en">Is it real</span></div>
+      <div class="val"><span class="badge {{b-pass|b-part|b-fail}}">{{✓|△|✗}}</span><span class="zh">{{决定性证据，如「TestX 在 base 失败：expected 200, actual 206」}}</span><span class="en">{{decisive evidence, e.g. "TestX fails on base: expected 200, actual 206"}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">修复方式</span><span class="en">Fix</span></div>
+      <div class="val"><span class="zh">{{机制 + file:line}}</span><span class="en">{{mechanism + file:line}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">引入的成本</span><span class="en">Cost</span></div>
+      <div class="val"><span class="zh">性能 {{✓/⚠ 一句}} · 兼容 {{✓/⚠ 一句}} · 复杂度 {{✓/⚠ 一句}}</span><span class="en">Performance {{✓/⚠ one clause}} · Compatibility {{✓/⚠ one clause}} · Complexity {{✓/⚠ one clause}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">测试覆盖</span><span class="en">Test coverage</span></div>
+      <div class="val"><span class="badge {{b-pass|b-part|b-fail}}">{{✓|△|✗}}</span><span class="zh">{{哪些改动路径被钉住、回归是否在 base 失败、新分支实测覆盖}}</span><span class="en">{{which changed paths are pinned, does the regression fail on base, measured coverage of new branches}}</span></div>
+    </div>
+  </div>
+
+  <!-- feature card -->
+  <div class="card">
+    <div class="cell">
+      <div class="label"><span class="zh">新增或变更的公开面</span><span class="en">Public surface</span></div>
+      <div class="val"><span class="zh">{{逐项：配置键 / flag / env / Helm value / API 字段 / operationId / SDK 方法 + 类型 + 默认值}}</span><span class="en">{{one per item: config key / flag / env / Helm value / API field / operationId / SDK method + type + default}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">默认值与兼容性</span><span class="en">Defaults &amp; compat</span></div>
+      <div class="val"><span class="zh">{{additive 还是 breaking；不设置新项时旧行为是否保留}}</span><span class="en">{{additive or breaking; is the old behavior kept when unset?}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">契约同步</span><span class="en">Contract sync</span></div>
+      <div class="val"><span class="zh">spec {{✓/✗}} · docs {{✓/✗}} · SDK {{✓/✗}} · CLI / examples {{✓/✗}}，各带 file ref</span><span class="en">spec {{✓/✗}} · docs {{✓/✗}} · SDK {{✓/✗}} · CLI / examples {{✓/✗}}, each with a file ref</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">测试覆盖</span><span class="en">Test coverage</span></div>
+      <div class="val"><span class="badge {{b-pass|b-part|b-fail}}">{{✓|△|✗}}</span><span class="zh">{{每个新项及其默认值是否有测试；生成物是否校验}}</span><span class="en">{{is each new item and its default tested; is generated output verified}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">迁移</span><span class="en">Migration</span></div>
+      <div class="val"><span class="zh">{{可选：升级路径}}</span><span class="en">{{optional: upgrade path}}</span></div>
+    </div>
+  </div>
+
+  <!-- other card (refactor / perf / docs / test / chore) -->
+  <div class="card">
+    <div class="cell">
+      <div class="label"><span class="zh">目的</span><span class="en">Purpose</span></div>
+      <div class="val"><span class="zh">{{为什么做}}</span><span class="en">{{why}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">影响面</span><span class="en">Impact</span></div>
+      <div class="val"><span class="zh">{{哪些模块 / 行为受影响}}</span><span class="en">{{which modules / behaviors are affected}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">风险</span><span class="en">Risk</span></div>
+      <div class="val"><span class="zh">{{✓/⚠ 一句}}</span><span class="en">{{✓/⚠ one clause}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">测试覆盖</span><span class="en">Test coverage</span></div>
+      <div class="val"><span class="badge {{b-pass|b-part|b-fail}}">{{✓|△|✗}}</span><span class="zh">{{行为有变化时填写}}</span><span class="en">{{fill in when behavior changed}}</span></div>
+    </div>
+  </div>
+
+  <ul class="clean-list">
+    <!-- at most 5 bullets: what was done and where -->
+    <li><code>{{path:line}}</code> — <span class="zh">{{做了什么}}</span><span class="en">{{what was done}}</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="zh">2. 发现</span><span class="en">2. Findings</span></h2>
+  <ul class="findings-list">
+    <!-- most severe first; at most 2 lines each; write "无" when there is nothing to report -->
+    <li><span class="badge b-low">LOW</span><code>{{path:line}}</code> <span class="zh">{{现象 → 建议}}（{{本次引入 / 基线已有}}）</span><span class="en">{{issue → suggestion}} ({{introduced by this PR / pre-existing}})</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="zh">3. 验证记录</span><span class="en">3. Verification log</span></h2>
+  <div class="table-wrap">
+    <table>
+      <tr><th><span class="zh">检查</span><span class="en">Check</span></th><th><span class="zh">位置</span><span class="en">Where</span></th><th><span class="zh">结果</span><span class="en">Result</span></th></tr>
+      <tr><td><code>{{go test ...}}</code></td><td><span class="zh">{{PR head}}</span><span class="en">{{PR head}}</span></td><td><span class="badge b-pass">PASS</span></td></tr>
+      <!-- one row per check; an unrun item gets <span class="badge b-warn">⚠</span> plus the author's claim -->
+    </table>
+  </div>
+</section>
+
+<section>
+  <details>
+    <summary><span class="zh">4. 证据（按需展开）</span><span class="en">4. Evidence (expand)</span></summary>
+    <div class="evidence-body">
+      <ul>
+        <li><span class="zh">{{base 复现输出 / 机制追踪 / 边界与并发推理，仅保留卡片行或发现所依赖的部分}}</span><span class="en">{{base reproduction output / mechanism trace / edge-case and concurrency reasoning — only what a card row or a finding depends on}}</span></li>
+      </ul>
+      <pre><code>{{command output}}</code></pre>
+    </div>
+  </details>
+</section>
+</main>
+<script>
+  (function () {
+    var root = document.documentElement, bz = document.getElementById('btn-zh'), be = document.getElementById('btn-en');
+    function setLang(lang) {
+      root.setAttribute('data-lang', lang); root.setAttribute('lang', lang);
+      bz.classList.toggle('on', lang === 'zh'); be.classList.toggle('on', lang === 'en');
+      try { localStorage.setItem('pr-review-lang', lang); } catch (e) {}
+    }
+    var saved = null; try { saved = localStorage.getItem('pr-review-lang'); } catch (e) {}
+    setLang(saved === 'en' ? 'en' : 'zh');
+    bz.addEventListener('click', function () { setLang('zh'); });
+    be.addEventListener('click', function () { setLang('en'); });
+  })();
+</script>
+</body>
+</html>

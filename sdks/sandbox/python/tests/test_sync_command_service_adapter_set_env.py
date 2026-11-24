@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Tests for CommandsAdapterSync.set_env (runtime env variable injection)."""
-
 from __future__ import annotations
 
 import json

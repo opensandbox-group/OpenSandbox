@@ -15,8 +15,13 @@
 package flag
 
 import (
+	"errors"
 	"flag"
+	"fmt"
+	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // deprecatedNamespace is kept so old command lines with --namespace still parse.
@@ -24,12 +29,19 @@ import (
 var deprecatedNamespace string
 
 func InitFlags() {
+	ClientConfig.InitFlags(flag.CommandLine)
+
 	// Core server options.
 	flag.StringVar(&LogLevel, "log-level", "info", "Server log level")
 	flag.IntVar(&Port, "port", 28888, "Server listening port")
 	flag.StringVar(&deprecatedNamespace, "namespace", "opensandbox", "Deprecated compatibility flag (ingress now watches sandbox resources across all namespaces)")
 	flag.StringVar(&ProviderType, "provider-type", "batchsandbox", "The sandbox provider type (batchsandbox, agent-sandbox, fast-sandbox)")
 	flag.StringVar(&Mode, "mode", "header", "The sandbox service discovery mode")
+
+	// HTTP upstream connection pooling.
+	flag.IntVar(&HTTPMaxIdleConns, "http-max-idle-conns", 100, "Maximum idle upstream HTTP connections across all hosts per ingress replica (0 = no limit)")
+	flag.IntVar(&HTTPMaxIdleConnsPerHost, "http-max-idle-conns-per-host", 2, "Maximum idle upstream HTTP connections per host (0 = Go default of 2)")
+	flag.DurationVar(&HTTPIdleConnTimeout, "http-idle-conn-timeout", 90*time.Second, "Maximum time an upstream HTTP connection remains idle (0 = no idle timeout)")
 
 	// Renew-intent publishing.
 	flag.BoolVar(&RenewIntentEnabled, "renew-intent-enabled", false, "Enable publishing renew-intent events to Redis")
@@ -55,6 +67,22 @@ func InitFlags() {
 	// Secure access (signed routes) and FastPath (Fast Sandbox) routing.
 	flag.StringVar(&SecureAccessKeys, "secure-access-keys", "", "Verification keys for signed ingress routes and Fast Sandbox route scopes: a=base64,b=base64 (comma-separated; key_id is 1 char [0-9a-z])")
 	flag.StringVar(&FastPathEndpoint, "fastpath-endpoint", "", "FastPath v2 gRPC endpoint; a non-empty value enables Fast Sandbox routing")
+	FastSandboxNamespace = ""
+	namespaceSet := false
+	flag.Func("fast-sandbox-namespace", "Restrict Fast Sandbox routes to one namespace and enable unsigned wildcard routing in header mode (requires external access control)", func(value string) error {
+		if namespaceSet {
+			return errors.New("--fast-sandbox-namespace may only be specified once")
+		}
+		if errs := validation.IsDNS1123Label(value); len(errs) != 0 {
+			return fmt.Errorf("--fast-sandbox-namespace must be one Kubernetes namespace: %s", strings.Join(errs, "; "))
+		}
+		FastSandboxNamespace = value
+		namespaceSet = true
+		return nil
+	})
+	flag.BoolVar(&FastPathAuthEnabled, "fastpath-auth-enabled", false, "Enable FastPath caller authentication and TLS (default false; set true to enforce caller authentication over TLS)")
+	flag.StringVar(&FastPathTLSCAFile, "fastpath-tls-ca-file", "", "FastPath serving CA bundle; empty uses system roots")
+	flag.StringVar(&FastPathTLSServerName, "fastpath-tls-server-name", "", "Expected FastPath certificate DNS identity")
 	flag.StringVar(&FastPathAccessMode, "fastpath-access-mode", "direct-fastlet-proxy", "FastPath Fast Sandbox data-plane mode: central-proxy or direct-fastlet-proxy")
 	flag.IntVar(&FastPathWaitTimeoutMillis, "fastpath-wait-timeout-millis", 2000, "FastPath ResolveEndpoint RPC timeout for one ingress request")
 

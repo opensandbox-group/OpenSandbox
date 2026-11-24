@@ -103,6 +103,19 @@ class TLSAdmissionTelemetryTest(unittest.TestCase):
                 self.assertEqual(data.ignore_connection, item["decision"] == "passthrough")
                 self.assertEqual(data.client_conn.closed, item["decision"] == "deny")
 
+    def test_non_canonical_port_records_deny_without_registry_or_passthrough(self):
+        self.install_bound()
+        for port in (80, 8443):
+            with self.subTest(port=port):
+                self.system.ctx.log.messages.clear()
+                data = fixtures._ClientHelloData("api.example.com")
+                data.context.server.address = ("192.0.2.1", port)
+                self.system.tls_clienthello(data)
+                self.assertEqual(self.events(), [PREFIX + "deny non_canonical_port"])
+                self.assertFalse(data.ignore_connection)
+                self.assertTrue(data.client_conn.closed)
+                self.assertEqual(self.runtime.registry.count, 0)
+
     def test_pre_admission_denials_and_logging_failures(self):
         for reason in ("ssl_insecure", "malformed_extensions"):
             for broken_log in (False, True):

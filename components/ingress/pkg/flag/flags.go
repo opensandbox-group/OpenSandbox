@@ -14,14 +14,16 @@
 
 package flag
 
-import "time"
+import (
+	"time"
+
+	"knative.dev/pkg/environment"
+)
 
 // Core server options.
 var (
-	// LogLevel controls the router log verbosity.
 	LogLevel string
 
-	// Port controls the HTTP listener port.
 	Port int
 
 	// ProviderType specifies the sandbox provider type (batchsandbox, agent-sandbox, fast-sandbox).
@@ -29,6 +31,15 @@ var (
 
 	// Mode specifies the sandbox service discovery mode (header or uri).
 	Mode string
+
+	ClientConfig environment.ClientConfig
+)
+
+// HTTP upstream connection pooling.
+var (
+	HTTPMaxIdleConns        int
+	HTTPMaxIdleConnsPerHost int
+	HTTPIdleConnTimeout     time.Duration
 )
 
 // Renew-intent publishing: ingress records observed traffic so the lifecycle
@@ -45,9 +56,7 @@ var (
 // records per-sandbox last-traffic observations in Redis, and requests that
 // hit a paused fast sandbox park while a resume flight restores it.
 var (
-	// ActivityEnabled turns on per-request activity recording.
-	ActivityEnabled bool
-	// ActivityRedisDSN is the Redis DSN for activity keys.
+	ActivityEnabled  bool
 	ActivityRedisDSN string
 	// ActivityMinInterval coalesces writes per sandbox.
 	ActivityMinInterval time.Duration
@@ -83,7 +92,12 @@ var (
 	SecureAccessKeys string
 
 	// FastPathEndpoint is the FastPath v2 gRPC endpoint; non-empty enables Fast Sandbox routing.
-	FastPathEndpoint string
+	FastPathEndpoint      string
+	FastPathAuthEnabled   bool
+	FastPathTLSCAFile     string
+	FastPathTLSServerName string
+
+	FastSandboxNamespace string
 
 	// FastPathAccessMode selects the Fast Sandbox data-plane mode (central-proxy or direct-fastlet-proxy).
 	FastPathAccessMode string

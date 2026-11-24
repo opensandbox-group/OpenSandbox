@@ -107,6 +107,138 @@ func TestFilesystemControllerRenameFilesReturnsNotFoundForMissingSource(t *testi
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
+func TestFilesystemControllerRenameFilesRejectsEmptyPaths(t *testing.T) {
+	t.Setenv("EXECD_RENAME_EMPTY_PATH", "")
+	tests := []struct {
+		name  string
+		field string
+		omit  bool
+		value string
+	}{
+		{name: "missing_src", field: "src", omit: true},
+		{name: "empty_src", field: "src"},
+		{name: "missing_dest", field: "dest", omit: true},
+		{name: "empty_dest", field: "dest"},
+		// No "${}" case: expansion substitutes only valid variable names, so
+		// "${}" stays literal (see pathutil.ExpandPathWithEnv) and is not an
+		// empty-expanded path. "Expands to empty" is covered by empty_env_src
+		// and empty_env_dest below.
+		{name: "empty_env_src", field: "src", value: "$EXECD_RENAME_EMPTY_PATH"},
+		{name: "empty_env_dest", field: "dest", value: "$EXECD_RENAME_EMPTY_PATH"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			workDir := filepath.Join(root, "cwd")
+			require.NoError(t, os.Mkdir(workDir, 0o755))
+			t.Chdir(workDir)
+			originalCwd, err := os.Getwd()
+			require.NoError(t, err)
+
+			firstSrc := filepath.Join(root, "first.txt")
+			badSrc := filepath.Join(root, "invalid.txt")
+			lastSrc := filepath.Join(root, "last.txt")
+			marker := filepath.Join(workDir, "marker.txt")
+			sources := []string{firstSrc, badSrc, lastSrc, marker}
+			for _, src := range sources {
+				require.NoError(t, os.WriteFile(src, []byte(src), 0o644))
+			}
+			outputDir := filepath.Join(root, "renamed")
+			firstDest := filepath.Join(outputDir, "first.txt")
+			badDest := filepath.Join(root, "moved-cwd")
+			lastDest := filepath.Join(outputDir, "last.txt")
+			invalid := map[string]string{"src": badSrc, "dest": badDest}
+			if tt.omit {
+				delete(invalid, tt.field)
+			} else {
+				invalid[tt.field] = tt.value
+			}
+			payload, err := json.Marshal([]map[string]string{
+				{"src": firstSrc, "dest": firstDest},
+				invalid,
+				{"src": lastSrc, "dest": lastDest},
+			})
+			require.NoError(t, err)
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", payload)
+
+			ctrl.RenameFiles()
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+			}
+			require.DirExists(t, workDir, "the daemon's working directory was moved")
+			cwd, err := os.Getwd()
+			require.NoError(t, err)
+			require.Equal(t, originalCwd, cwd)
+			for _, src := range sources {
+				content, err := os.ReadFile(src)
+				require.NoError(t, err, "source changed: %s", src)
+				require.Equal(t, src, string(content))
+			}
+			for _, dest := range []string{firstDest, badDest, lastDest, outputDir} {
+				_, err := os.Stat(dest)
+				require.ErrorIs(t, err, os.ErrNotExist, "destination created: %s", dest)
+			}
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+		})
+	}
+}
+
+func TestFilesystemControllerRenameFilesPreservesExpansionErrors(t *testing.T) {
+	t.Setenv("EXECD_RENAME_UNDEFINED_PATH", "")
+	require.NoError(t, os.Unsetenv("EXECD_RENAME_UNDEFINED_PATH"))
+	for _, field := range []string{"src", "dest"} {
+		t.Run(field, func(t *testing.T) {
+			root := t.TempDir()
+			src := filepath.Join(root, "source.txt")
+			dest := filepath.Join(root, "destination.txt")
+			require.NoError(t, os.WriteFile(src, []byte(src), 0o644))
+			item := map[string]string{"src": src, "dest": dest}
+			item[field] = "$EXECD_RENAME_UNDEFINED_PATH"
+			payload, err := json.Marshal([]map[string]string{item})
+			require.NoError(t, err)
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", payload)
+
+			ctrl.RenameFiles()
+
+			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeRuntimeError, resp.Code)
+			content, err := os.ReadFile(src)
+			require.NoError(t, err)
+			require.Equal(t, src, string(content))
+			require.NoFileExists(t, dest)
+		})
+	}
+}
+
+func TestFilesystemControllerRenameFilesValidBatch(t *testing.T) {
+	root := t.TempDir()
+	items := []model.RenameFileItem{
+		{Src: filepath.Join(root, "first.txt"), Dest: filepath.Join(root, "moved-first.txt")},
+		{Src: filepath.Join(root, "last.txt"), Dest: filepath.Join(root, "moved-last.txt")},
+	}
+	for _, item := range items {
+		require.NoError(t, os.WriteFile(item.Src, []byte(item.Src), 0o644))
+	}
+	payload, err := json.Marshal(items)
+	require.NoError(t, err)
+	ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", payload)
+
+	ctrl.RenameFiles()
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, item := range items {
+		content, err := os.ReadFile(item.Dest)
+		require.NoError(t, err)
+		require.Equal(t, item.Src, string(content))
+		require.NoFileExists(t, item.Src)
+	}
+}
+
 func TestFilesystemControllerSearchFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	a := filepath.Join(tmpDir, "alpha.txt")
@@ -125,6 +257,26 @@ func TestFilesystemControllerSearchFiles(t *testing.T) {
 	require.Len(t, files, 1)
 	require.Equal(t, a, files[0].Path)
 	require.Equal(t, "file", files[0].Type)
+}
+
+func TestFilesystemControllerSearchFilesRejectsInvalidPattern(t *testing.T) {
+	populated := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(populated, "alpha.txt"), []byte("alpha"), 0o644))
+
+	for name, dir := range map[string]string{"populated": populated, "empty": t.TempDir()} {
+		t.Run(name, func(t *testing.T) {
+			rawURL := fmt.Sprintf("/files/search?path=%s&pattern=%s", url.QueryEscape(dir), url.QueryEscape("["))
+			ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+
+			ctrl.SearchFiles()
+
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+			require.Equal(t, "invalid pattern [", resp.Message)
+		})
+	}
 }
 
 func TestFilesystemControllerSearchFilesHidesUploadStaging(t *testing.T) {
@@ -424,6 +576,77 @@ func TestReplaceContentFailsUnknownFile(t *testing.T) {
 	require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
 }
 
+func TestFilesystemDirectoryRoutesRejectStagingNames(t *testing.T) {
+	for _, stagingName := range []string{
+		".osb-staging-0123456789abcdef",
+		uploadTempPattern + "0123456789abcdef",
+	} {
+		t.Run(stagingName, func(t *testing.T) {
+			t.Run("make", func(t *testing.T) {
+				target := filepath.Join(t.TempDir(), stagingName)
+				payload, err := json.Marshal(map[string]model.Permission{
+					target + string(os.PathSeparator) + ".": {Mode: 0o755},
+				})
+				require.NoError(t, err)
+
+				ctrl, rec := newFilesystemController(t, http.MethodPost, "/directories", payload)
+				ctrl.MakeDirs()
+
+				require.Equal(t, http.StatusNotFound, rec.Code)
+				_, err = os.Stat(target)
+				require.ErrorIs(t, err, os.ErrNotExist)
+			})
+
+			t.Run("remove", func(t *testing.T) {
+				target := filepath.Join(t.TempDir(), stagingName)
+				require.NoError(t, os.WriteFile(target, []byte("in flight"), 0o600))
+
+				rawURL := fmt.Sprintf("/directories?path=%s", url.QueryEscape(target+string(os.PathSeparator)+"."))
+				ctrl, rec := newFilesystemController(t, http.MethodDelete, rawURL, nil)
+				ctrl.RemoveDirs()
+
+				require.Equal(t, http.StatusNotFound, rec.Code)
+				got, err := os.ReadFile(target)
+				require.NoError(t, err)
+				require.Equal(t, "in flight", string(got), "an in-flight staging file must not be removed through the directory API")
+			})
+		})
+	}
+}
+
+// ReplaceContent reads and truncates the target in place, so it must resolve a
+// trailing "/." the same way the filesystem helpers do before checking the
+// reserved staging names. Otherwise it can expose or corrupt an upload another
+// route is still staging.
+func TestReplaceContentRejectsStagingPath(t *testing.T) {
+	for _, stagingName := range []string{
+		".osb-staging-0123456789abcdef",
+		uploadTempPattern + "0123456789abcdef",
+	} {
+		t.Run(stagingName, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), stagingName)
+			require.NoError(t, os.WriteFile(target, []byte("hello world"), 0o644))
+
+			requestPath := target + string(os.PathSeparator) + "."
+			body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
+				requestPath: {
+					Old: "world",
+					New: "universe",
+				},
+			})
+			require.NoError(t, err)
+
+			ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/replace", body)
+			ctrl.ReplaceContent()
+
+			require.Equal(t, http.StatusNotFound, rec.Code)
+			got, err := os.ReadFile(target)
+			require.NoError(t, err)
+			require.Equal(t, "hello world", string(got), "the in-flight staging file must not be rewritten")
+		})
+	}
+}
+
 func TestFormatContentDisposition(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -464,6 +687,11 @@ func TestFormatContentDisposition(t *testing.T) {
 			name:     "Backslash in filename",
 			filename: `a\b.txt`,
 			want:     "attachment; filename=\"a%5Cb.txt\"; filename*=UTF-8''a%5Cb.txt",
+		},
+		{
+			name:     "CRLF in filename",
+			filename: "ok\r\nSet-Cookie: x",
+			want:     "attachment; filename=\"ok%0D%0ASet-Cookie%3A%20x\"; filename*=UTF-8''ok%0D%0ASet-Cookie%3A%20x",
 		},
 	}
 
@@ -654,6 +882,161 @@ func TestDownloadFileInvalidLimit(t *testing.T) {
 			ctrl, rec := newFilesystemController(t, http.MethodGet, tt.rawURL, nil)
 			ctrl.DownloadFile()
 			require.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
+}
+
+// requireDirectoryRejected checks the 400 that a download of a directory gets,
+// whichever download mode the request selects.
+func requireDirectoryRejected(t *testing.T, rec *httptest.ResponseRecorder, dir string) {
+	t.Helper()
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Empty(t, rec.Header().Get("Content-Disposition"))
+	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+	var resp model.ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, model.ErrorCodeInvalidRequest, resp.Code)
+	require.Contains(t, resp.Message, dir)
+}
+
+func TestDownloadFileRejectsDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "docs")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "inside.txt"), []byte("inside\n"), 0o644))
+
+	tests := []struct {
+		name  string
+		query string
+		rng   string
+	}{
+		{name: "plain"},
+		{name: "range header", rng: "bytes=0-3"},
+		{name: "offset and limit", query: "&offset=1&limit=2"},
+		{name: "offset only", query: "&offset=1"},
+		{name: "limit only", query: "&limit=2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rawURL := fmt.Sprintf("/files/download?path=%s%s", url.QueryEscape(dir), tt.query)
+			ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+			if tt.rng != "" {
+				ctx.Request.Header.Set("Range", tt.rng)
+			}
+			NewFilesystemController(ctx).DownloadFile()
+
+			requireDirectoryRejected(t, rec, dir)
+		})
+	}
+}
+
+func TestDownloadFileRejectsSymlinkToDirectory(t *testing.T) {
+	tmpDir := t.TempDir()
+	dir := filepath.Join(tmpDir, "docs")
+	link := filepath.Join(tmpDir, "docs-link")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	for _, tt := range []struct{ name, query string }{
+		{name: "plain"},
+		{name: "offset and limit", query: "&offset=1&limit=2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rawURL := fmt.Sprintf("/files/download?path=%s%s", url.QueryEscape(link), tt.query)
+			ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+			ctrl.DownloadFile()
+
+			requireDirectoryRejected(t, rec, link)
+		})
+	}
+}
+
+func TestDownloadFileMalformedRangeErrorBody(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "data.bin")
+	require.NoError(t, os.WriteFile(target, []byte("0123456789"), 0o644))
+	rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(target))
+
+	for _, header := range []string{"bytes=abc", "2-5", "bytes=5-2", "bytes=a-b"} {
+		t.Run(header, func(t *testing.T) {
+			ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+			ctx.Request.Header.Set("Range", header)
+			NewFilesystemController(ctx).DownloadFile()
+
+			require.Equal(t, http.StatusRequestedRangeNotSatisfiable, rec.Code)
+			// The error schema in specs/execd-api.yaml requires both fields.
+			var body map[string]string
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Equal(t, string(model.ErrorCodeUnknown), body["code"])
+			require.NotEmpty(t, body["message"])
+			require.Contains(t, body["message"], header)
+		})
+	}
+}
+
+// The controls keep the paths around the directory check as they were: a
+// whole-file read, byte ranges, a range ServeContent answers itself, a symlink
+// to a file and a missing file.
+func TestDownloadFileRegularFileControls(t *testing.T) {
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "data.bin")
+	require.NoError(t, os.WriteFile(target, []byte("0123456789"), 0o644))
+	empty := filepath.Join(tmpDir, "empty.bin")
+	require.NoError(t, os.WriteFile(empty, nil, 0o644))
+	link := filepath.Join(tmpDir, "data-link.bin")
+	symlinked := os.Symlink(target, link) == nil
+
+	tests := []struct {
+		name       string
+		path       string
+		rng        string
+		wantStatus int
+		wantBody   string
+		wantRange  string
+	}{
+		{name: "whole file", path: target, wantStatus: http.StatusOK, wantBody: "0123456789"},
+		{name: "empty file", path: empty, wantStatus: http.StatusOK},
+		{name: "first byte", path: target, rng: "bytes=0-0", wantStatus: http.StatusPartialContent, wantBody: "0", wantRange: "bytes 0-0/10"},
+		{name: "suffix", path: target, rng: "bytes=-3", wantStatus: http.StatusPartialContent, wantBody: "789", wantRange: "bytes 7-9/10"},
+		{name: "open ended", path: target, rng: "bytes=8-", wantStatus: http.StatusPartialContent, wantBody: "89", wantRange: "bytes 8-9/10"},
+		{name: "start past end", path: target, rng: "bytes=99-", wantStatus: http.StatusRequestedRangeNotSatisfiable, wantRange: "bytes */10"},
+		{name: "symlink to file", path: link, wantStatus: http.StatusOK, wantBody: "0123456789"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.path == link && !symlinked {
+				t.Skip("symlink unavailable")
+			}
+			rawURL := fmt.Sprintf("/files/download?path=%s", url.QueryEscape(tt.path))
+			ctx, rec := newTestContext(http.MethodGet, rawURL, nil)
+			if tt.rng != "" {
+				ctx.Request.Header.Set("Range", tt.rng)
+			}
+			NewFilesystemController(ctx).DownloadFile()
+
+			require.Equal(t, tt.wantStatus, rec.Code)
+			require.Equal(t, tt.wantRange, rec.Header().Get("Content-Range"))
+			if tt.wantStatus != http.StatusRequestedRangeNotSatisfiable {
+				require.Equal(t, tt.wantBody, rec.Body.String())
+			}
+		})
+	}
+
+	missing := filepath.Join(tmpDir, "missing.bin")
+	for _, tt := range []struct{ name, query string }{
+		{name: "missing file", query: ""},
+		{name: "missing file with line parameters", query: "&offset=1&limit=2"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rawURL := fmt.Sprintf("/files/download?path=%s%s", url.QueryEscape(missing), tt.query)
+			ctrl, rec := newFilesystemController(t, http.MethodGet, rawURL, nil)
+			ctrl.DownloadFile()
+
+			require.Equal(t, http.StatusNotFound, rec.Code)
+			var resp model.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.Equal(t, model.ErrorCodeFileNotFound, resp.Code)
+			require.NotEmpty(t, resp.Message)
 		})
 	}
 }

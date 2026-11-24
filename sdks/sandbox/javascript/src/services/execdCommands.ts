@@ -29,6 +29,9 @@ export interface ExecdCommands {
 
   /**
    * Convenience: run a command, consume the stream, and build a structured execution result.
+   *
+   * @throws SandboxException with code `COMMAND_STREAM_INCOMPLETE` if a foreground stream
+   * ends normally without a completion or execution error event. Handlers may have received partial output.
    */
   run(command: string | string[], opts?: RunCommandOpts, handlers?: ExecutionHandlers, signal?: AbortSignal): Promise<CommandExecution>;
 
@@ -78,6 +81,8 @@ export interface ExecdCommands {
   /**
    * Run a shell command in an existing bash session (SSE stream, same event shape as run).
    * Optional workingDirectory and timeout apply to this run only; session state (e.g. env) persists.
+   * timeoutSeconds is rounded to the nearest millisecond (minimum 1 ms for positive values)
+   * and must be finite and non-negative.
    */
   runInSession(
     sessionId: string,

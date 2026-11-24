@@ -180,8 +180,10 @@ func (e *ExecdClient) GetCommandStatus(ctx context.Context, commandID string) (*
 }
 
 // GetCommandLogs returns stdout/stderr for a background command. Pass a nil
-// cursor or cursor=0 for the full log. The returned CommandLogsResponse includes
-// the tail cursor for incremental polling.
+// cursor or cursor=0 to read from the start of the log; a longer log spans
+// several pages. The cursor is a byte offset into the combined output; each
+// response returns at most 16 MiB and carries the cursor just past the
+// returned bytes in CommandLogsResponse.Cursor for incremental polling.
 func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, cursor *int64) (*CommandLogsResponse, error) {
 	if cursor != nil && *cursor < 0 {
 		return nil, &InvalidArgumentError{Field: "cursor", Message: "must not be negative"}
@@ -193,7 +195,7 @@ func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, curs
 	}
 
 	var result *CommandLogsResponse
-	err := e.client.withRetry(ctx, func() error {
+	err := e.client.withRetry(ctx, func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+path, nil)
 		if err != nil {
 			return fmt.Errorf("opensandbox: create request: %w", err)
@@ -202,12 +204,14 @@ func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, curs
 		for k, v := range e.client.headers {
 			req.Header.Set(k, v)
 		}
-		if e.client.apiKey != "" {
+		// A caller-supplied auth header entry (any casing, including empty)
+		// takes precedence over the configured token.
+		if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 			req.Header.Set(e.client.authHeader, e.client.apiKey)
 		}
 		req.Header.Set("Accept", "text/plain")
 
-		resp, err := e.client.httpClient.Do(req)
+		resp, err := doAttempt(e.client.httpClient, req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}
@@ -360,7 +364,9 @@ func (e *ExecdClient) UploadFiles(ctx context.Context, entries []UploadFileEntry
 			req.Header.Set(k, v)
 		}
 	}
-	if e.client.apiKey != "" {
+	// A caller-supplied auth header entry (any casing, including empty)
+	// takes precedence over the configured token.
+	if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 		req.Header.Set(e.client.authHeader, e.client.apiKey)
 	}
 
@@ -575,7 +581,7 @@ func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath strin
 	reqPath := "/files/download?" + params.Encode()
 
 	var resp *http.Response
-	err := e.client.withRetry(ctx, func() error {
+	err := e.client.withRetry(ctx, func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+reqPath, nil)
 		if err != nil {
 			return fmt.Errorf("opensandbox: create request: %w", err)
@@ -584,14 +590,16 @@ func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath strin
 		for k, v := range e.client.headers {
 			req.Header.Set(k, v)
 		}
-		if e.client.apiKey != "" {
+		// A caller-supplied auth header entry (any casing, including empty)
+		// takes precedence over the configured token.
+		if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 			req.Header.Set(e.client.authHeader, e.client.apiKey)
 		}
 		if rangeHeader != "" {
 			req.Header.Set("Range", rangeHeader)
 		}
 
-		r, err := e.client.transferHTTPClient().Do(req)
+		r, err := doAttempt(e.client.transferHTTPClient(), req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}
@@ -599,6 +607,7 @@ func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath strin
 			defer r.Body.Close()
 			return handleError(r)
 		}
+		r.Body = keepAttemptBody(ctx, r.Body)
 		resp = r
 		return nil
 	})

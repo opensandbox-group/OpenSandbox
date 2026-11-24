@@ -43,6 +43,8 @@ try
         ConnectionConfig = config,
         Image = "ubuntu",
         TimeoutSeconds = 10 * 60,
+        // Total budget for endpoint publication and health checks (default 30s)
+        ReadyTimeoutSeconds = 30,
     });
 
     var execution = await sandbox.Commands.RunAsync("echo 'Hello Sandbox!'");
@@ -91,6 +93,40 @@ var manual = await Sandbox.CreateAsync(new SandboxCreateOptions
 ```
 
 Note: unlike the Python, JavaScript, and Kotlin SDKs, the C# SDK uses an explicit `ManualCleanup` flag instead of `TimeoutSeconds = null`. This is intentional: `int?` in the current options model cannot reliably distinguish "unset, use the default TTL" from "explicitly request manual cleanup" without making the default creation path ambiguous.
+
+Renew on access instead of on a timer (OSEP-0009): `RenewalPolicy` moves the expiration to `max(now + ExtendSeconds, current)` on every observed access, client-validated to 300–86400 seconds. It replaces the deprecated `access.renew.extend.seconds` extensions key, which keeps working through 1.x and is removed in 2.0. Backend prerequisites: the fast-sandbox backend rejects the field outright (HTTP 400); on Docker and Kubernetes it takes effect only when the operator enables the `[renew_intent]` integration.
+
+```csharp
+var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "ubuntu",
+    Lifecycle = new SandboxLifecycle
+    {
+        RenewalPolicy = new RenewalPolicy { ExtendSeconds = 3600 },
+    },
+});
+```
+
+Auto-pause and wake-on-access (OSEP-0024, fast-sandbox backend only): `IdlePolicy` pauses the sandbox after `IdleTimeoutSeconds` continuously idle seconds (30–86400; `OnIdle` only takes `pause` today). Incoming traffic then wakes it:
+
+```csharp
+var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "ubuntu",
+    Lifecycle = new SandboxLifecycle
+    {
+        IdlePolicy = new IdlePolicy
+        {
+            IdleTimeoutSeconds = 600,
+            OnIdle = OnIdleAction.Pause,
+        },
+    },
+});
+```
+
+While a paused sandbox restores, the gateway parks the request and answers `503` with an `OpenSandbox-Wake: expired` marker — its presence proves the request was never forwarded, so the SDK resends it for any method after waiting per `Retry-After`, under a bounded budget (`WakeRetryEnabled` / `WakeMaxAttempts` / `WakeOverallDeadlineSeconds` on the connection config; defaults 5 attempts / 60 seconds; bare `503` responses are never affected). When the budget runs out, the request fails with `SandboxWakeTimeoutException`. Note: the request that starts a stream does not wake-retry in C# today — a marked `503` on a stream start fails fast instead.
 
 ### Connect to an Existing Sandbox
 
@@ -199,6 +235,14 @@ await using var manager = SandboxManager.Create(new SandboxManagerOptions
 });
 
 var snapshot = await manager.CreateSnapshotAsync(sandboxId, "pre-migration");
+
+// `mode` selects what the snapshot persists. The default "full" also captures
+// memory and process state; "rootfsOnly" keeps only the writable filesystem —
+// restoring boots a fresh sandbox and re-runs the entrypoint (requires the
+// fast-sandbox backend; a deployment that cannot produce one fails the
+// request instead of silently saving a full snapshot).
+var rootfsSnapshot = await manager.CreateSnapshotWithModeAsync(
+    sandboxId, "clean-baseline", "rootfsOnly");
 
 // Poll until Ready — C# has no built-in wait helper, so poll GetSnapshotAsync
 // and treat Failed as terminal
@@ -358,7 +402,7 @@ The `ConnectionConfig` class manages API server connection settings.
 
 Transfer timeouts:
 
-- `RequestTimeoutSeconds` bounds the wait for response headers, not the whole transfer. The deadline starts with the request (bounding the connect phase), is cleared while the request body is written, and is re-armed once the body of the current hop has been sent: a healthy upload or download that keeps making progress is never cut off by it. A download that gets no response headers, or an upload that gets none within the timeout after its body has been sent, fails with a `TaskCanceledException` carrying a `TimeoutException` instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract); a caller cancellation still surfaces as an `OperationCanceledException` with the caller's token. All non-transfer calls keep the whole-call request timeout.
+- `RequestTimeoutSeconds` bounds the wait for response headers, not the whole transfer. The deadline starts with the request (bounding the connect phase), is cleared while the request body is written, and is re-armed once the body of the current hop has been sent: a healthy upload or download that keeps making progress is never cut off by it. A download that gets no response headers, or an upload that gets none within the timeout after its body has been sent, fails with a `TaskCanceledException` carrying a `TimeoutException` instead of hanging (the Go SDK's `ResponseHeaderTimeout` contract); a caller cancellation still surfaces as an `OperationCanceledException` with the caller's token. Streaming (SSE) calls are not capped as a whole either: they fail when the response headers or the next stream bytes take longer than `max(RequestTimeoutSeconds, 30s)`. All other calls keep the whole-call request timeout.
 - A request body that never finishes being sent, and a response body that stops making progress after the headers have arrived, are bounded only by the `CancellationToken` you pass to the call, so pass one when a transfer needs an end-to-end cap.
 - A 307/308 redirect makes the transport resend the request body once per hop. A seekable upload source (`FileStream`, `MemoryStream`, ...) is rewound and resent in full; a non-seekable source cannot be replayed without buffering it, so the upload fails with a clear error instead of sending an empty file part to the redirected endpoint.
 - The upload guarantee assumes the HTTP handler streams the request body (for example `SocketsHttpHandler` on .NET 5+). On .NET Framework the default `HttpClientHandler` buffers the request body before sending it, so a slow but progressing upload can still count against the header timeout there.
@@ -368,7 +412,7 @@ Transfer timeouts:
 | `ApiKey` | API key for authentication | Optional | `OPEN_SANDBOX_API_KEY` |
 | `Domain` | Sandbox service domain (`host[:port]`) | `localhost:8080` | `OPEN_SANDBOX_DOMAIN` |
 | `Protocol` | HTTP protocol (`Http`/`Https`) | `Http` | - |
-| `RequestTimeoutSeconds` | Request timeout applied to SDK HTTP calls | `30` | - |
+| `RequestTimeoutSeconds` | Request timeout applied to SDK HTTP calls; command, code and isolated-session streams (SSE) wait at most `max(RequestTimeoutSeconds, 30s)` for the response and between stream bytes | `30` | - |
 | `UseServerProxy` | Request server-proxied sandbox endpoint URLs | `false` | - |
 | `Headers` | Extra headers applied to every request | `{}` | - |
 
@@ -434,6 +478,7 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
 | `Env` | Environment variables | `{}` |
 | `Metadata` | Custom metadata tags | `{}` |
 | `NetworkPolicy` | Optional outbound network policy (egress) | - |
+| `Lifecycle` | Pre-start and periodic hooks, `IdlePolicy` (OSEP-0024) and `RenewalPolicy` (OSEP-0009) | - |
 | `CredentialProxy` | Optional Credential Vault proxy startup settings | - |
 | `Volumes` | Optional storage mounts (`Host` / `PVC`, supports `ReadOnly` and `SubPath`) | - |
 | `Extensions` | Extra server-defined fields | `{}` |
@@ -455,6 +500,26 @@ var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
         Egress = new List<NetworkRule>
         {
             new() { Action = NetworkRuleAction.Allow, Target = "pypi.org" }
+        }
+    },
+});
+
+// A rule can scope by TCP destination ports instead of a target — Ports
+// (each 1-65535, at most 256 per rule, no duplicates) may replace Target
+// entirely, and combining a domain Target with Ports is rejected. Docker,
+// Kubernetes, and Fast Sandbox backends all enforce Ports rules; a targetless
+// Ports rule matches direct IP connections only, so under a deny-default
+// policy hostname traffic still needs a domain rule alongside it.
+var byPorts = await Sandbox.CreateAsync(new SandboxCreateOptions
+{
+    ConnectionConfig = config,
+    Image = "python:3.11",
+    NetworkPolicy = new NetworkPolicy
+    {
+        DefaultAction = NetworkRuleAction.Deny,
+        Egress = new List<NetworkRule>
+        {
+            new() { Action = NetworkRuleAction.Allow, Ports = new List<int> { 443, 8443 } }
         }
     },
     Volumes = new[]
@@ -568,7 +633,7 @@ See [Credential Vault](../../../docs/guides/credential-vault.md) for auth types,
 
 ### 6. Timeout and Retry Behavior
 
-- `ConnectionConfig.RequestTimeoutSeconds` controls timeout for SDK HTTP calls. File uploads and downloads are exempt while they keep making progress; the timeout still bounds the connect phase and how long a transfer waits for response headers before failing.
+- `ConnectionConfig.RequestTimeoutSeconds` controls timeout for SDK HTTP calls. File uploads and downloads are exempt while they keep making progress; the timeout still bounds the connect phase and how long a transfer waits for response headers before failing. Streaming (SSE) calls run for as long as the command does, but fail after `max(RequestTimeoutSeconds, 30s)` without response headers or stream bytes.
 - `RunCommandOptions.TimeoutSeconds` controls command execution timeout for command runs.
 - `RunInSessionOptions.TimeoutSeconds` controls command execution timeout for session runs.
 - `SandboxCreateOptions.TimeoutSeconds` controls sandbox server-side TTL.

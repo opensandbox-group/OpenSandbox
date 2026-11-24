@@ -94,7 +94,6 @@ def main() -> None:
                 f.write(chunk)
         print(f"Screenshot saved to {screenshot_path}")
 
-        # kill sandbox finally
         sandbox.kill()
 
 

@@ -17,6 +17,8 @@ package idlepolicy
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -24,11 +26,40 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
+
+func TestCRPolicySourceReusesConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/apis/sandbox.fast.io/v1alpha2/namespaces/tenant-a/sandboxes/sb" {
+			t.Errorf("unexpected policy request path: %s", r.URL.Path)
+		}
+		if r.UserAgent() != "opensandbox-ingress-idlepolicy" {
+			t.Errorf("unexpected policy user agent: %s", r.UserAgent())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"apiVersion":"sandbox.fast.io/v1alpha2","kind":"Sandbox","metadata":{"name":"sb","annotations":{"sandbox.opensandbox.io/idle-policy":"{}"}}}`))
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	config := &rest.Config{Host: server.URL, UserAgent: "routing-provider"}
+	config.ContentType = runtime.ContentTypeProtobuf
+	original := rest.CopyConfig(config)
+	for range 2 {
+		source, err := NewCRPolicySourceForConfig(ctx, config)
+		require.NoError(t, err)
+		require.True(t, source.WakeAllowed(ctx, "tenant-a", "sb"))
+	}
+	// The routing provider's client settings must survive policy initialization.
+	// Dynamic clients must still read Sandbox CRs as JSON.
+	require.Equal(t, original, config)
+}
 
 // fakeDynamic satisfies dynamic.Interface; the vendored dynamicfake
 // indexes objects by naive pluralization ("sandboxs") and cannot serve the

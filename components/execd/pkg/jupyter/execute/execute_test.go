@@ -97,6 +97,7 @@ func TestExecuteCodeStream(t *testing.T) {
 			Content:      json.RawMessage(resultContent),
 		}
 		conn.WriteJSON(executeResultMsg)
+		sendExecuteReply(conn, 1, executeRequest.Header)
 
 		statusContent, _ := json.Marshal(StatusUpdate{
 			ExecutionState: StateIdle,
@@ -189,6 +190,7 @@ func TestExecuteCodeStreamWaitsForLateExecuteResultUsingConfiguredPollInterval(t
 			Content:      json.RawMessage(resultContent),
 		}
 		require.NoError(t, conn.WriteJSON(executeResultMsg))
+		sendExecuteReply(conn, 1, executeRequest.Header)
 	})
 	defer server.Close()
 
@@ -258,6 +260,7 @@ func TestExecuteCodeStreamFallsBackWhenPollIntervalIsNonPositive(t *testing.T) {
 			Content:      json.RawMessage(resultContent),
 		}
 		require.NoError(t, conn.WriteJSON(executeResultMsg))
+		sendExecuteReply(conn, 1, executeRequest.Header)
 	})
 	defer server.Close()
 
@@ -421,6 +424,77 @@ func TestExecuteCodeStreamDisconnectIsNotReportedAsLostConnection(t *testing.T) 
 	}
 }
 
+func TestExecuteCodeStreamDisconnectAfterIdleStopsFinalizer(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		blockedOutput bool
+		replyReceived bool
+	}{
+		{name: "waiting for reply"},
+		{name: "blocked output", blockedOutput: true},
+		{name: "blocked terminal", replyReceived: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient("", nil)
+			state := newStreamExecutionState(time.Now())
+			state.requestID = "request"
+			parent := Header{MessageID: state.requestID}
+			results := make(chan *ExecutionResult)
+			client.registerExecuteCodeStreamHandlers(state, results)
+
+			dispatchTestKernelMessage(t, client, MsgError, ErrorOutput{EName: "ValueError", EValue: "failed cell"}, parent)
+			if tc.replyReceived {
+				dispatchTestKernelMessage(t, client, MsgExecuteReply, ExecuteReply{Status: "error"}, parent)
+			}
+			dispatchTestKernelMessage(t, client, MsgStatus, StatusUpdate{ExecutionState: StateIdle}, parent)
+			state.executeMutex.Lock()
+			finalizing := state.executeDone
+			state.executeMutex.Unlock()
+			require.True(t, finalizing, "matching idle must launch the finalizer")
+
+			var outputDone chan struct{}
+			if tc.blockedOutput {
+				outputDone = make(chan struct{})
+				go func() {
+					state.trySend(results, &ExecutionResult{Stream: []*StreamOutput{{Name: StreamStdout, Text: "pending\n"}}})
+					close(outputDone)
+				}()
+			}
+			if tc.blockedOutput || tc.replyReceived {
+				require.Eventually(t, func() bool {
+					if state.chanMutex.TryLock() {
+						state.chanMutex.Unlock()
+						return false
+					}
+					return true
+				}, time.Second, time.Millisecond, "sender must be blocked on the undrained channel")
+			}
+
+			disconnected := make(chan struct{})
+			go func() {
+				client.Disconnect()
+				close(disconnected)
+			}()
+			select {
+			case <-disconnected:
+			case <-time.After(time.Second):
+				t.Fatal("Disconnect blocked on an undrained channel")
+			}
+			client.Disconnect()
+			require.Empty(t, collectUntilClosed(t, results, time.Second), "disconnect must not emit a terminal result or pending output")
+			if outputDone != nil {
+				select {
+				case <-outputDone:
+				case <-time.After(time.Second):
+					t.Fatal("output sender did not stop after Disconnect")
+				}
+			}
+			dispatchTestKernelMessage(t, client, MsgStream, StreamOutput{Name: StreamStdout, Text: "late\n"}, parent)
+			dispatchTestKernelMessage(t, client, MsgStatus, StatusUpdate{ExecutionState: StateIdle}, parent)
+		})
+	}
+}
+
 func sendExecuteReply(conn *websocket.Conn, executionCount int, parent Header) {
 	content, _ := json.Marshal(ExecuteReply{ExecutionCount: executionCount, Status: "ok"})
 	_ = conn.WriteJSON(Message{
@@ -477,6 +551,161 @@ func TestExecuteCodeStreamConnectionClosedAfterReplyIsNotAnError(t *testing.T) {
 			}
 			if !completed {
 				t.Fatalf("results = %+v, want a completion", results)
+			}
+		})
+	}
+}
+
+func dispatchTestKernelMessage(t *testing.T, client *Client, msgType MessageType, content interface{}, parent Header) {
+	t.Helper()
+	data, err := json.Marshal(content)
+	require.NoError(t, err)
+	client.handleMessage(&Message{
+		Header:       Header{MessageType: string(msgType)},
+		ParentHeader: parent,
+		Content:      data,
+	})
+}
+
+func TestExecuteCodeStreamCompletionWaitsForReplyAndIdle(t *testing.T) {
+	previousPollInterval := execdflag.JupyterIdlePollInterval
+	execdflag.JupyterIdlePollInterval = time.Millisecond
+	t.Cleanup(func() { execdflag.JupyterIdlePollInterval = previousPollInterval })
+
+	for _, replyFirst := range []bool{true, false} {
+		name := "idle before reply"
+		if replyFirst {
+			name = "reply before idle"
+		}
+		t.Run(name, func(t *testing.T) {
+			client := NewClient("", nil)
+			state := newStreamExecutionState(time.Now())
+			results := make(chan *ExecutionResult, 10)
+			client.registerExecuteCodeStreamHandlers(state, results)
+
+			// These synthetic messages use the state's default empty request ID.
+			// A different parent's idle must not finish this execution.
+			dispatchTestKernelMessage(t, client, MsgStatus, StatusUpdate{ExecutionState: StateIdle}, Header{MessageID: "other-request"})
+			assertWaiting := func() {
+				t.Helper()
+				select {
+				case result, ok := <-results:
+					t.Errorf("execution finished before both reply and matching idle: result=%+v, open=%v", result, ok)
+				case <-time.After(100 * time.Millisecond):
+				}
+			}
+			assertWaiting()
+
+			reply := ExecuteReply{Status: "ok", ExecutionCount: 1}
+			if replyFirst {
+				dispatchTestKernelMessage(t, client, MsgExecuteReply, reply, Header{})
+				assertWaiting()
+			}
+			dispatchTestKernelMessage(t, client, MsgStream, StreamOutput{Name: StreamStdout, Text: "before result\n"}, Header{})
+			dispatchTestKernelMessage(t, client, MsgExecuteResult, ExecuteResult{
+				ExecutionCount: 1,
+				Data:           map[string]interface{}{"text/plain": "4"},
+			}, Header{})
+
+			output := <-results
+			require.NotNil(t, output)
+			require.Len(t, output.Stream, 1)
+			require.Equal(t, "before result\n", output.Stream[0].Text)
+			result := <-results
+			require.NotNil(t, result)
+			require.Equal(t, "4", result.ExecutionData["text/plain"])
+
+			dispatchTestKernelMessage(t, client, MsgStatus, StatusUpdate{ExecutionState: StateIdle}, Header{})
+			if !replyFirst {
+				// execute_result's count is not a substitute for execute_reply.
+				assertWaiting()
+				dispatchTestKernelMessage(t, client, MsgExecuteReply, reply, Header{})
+			}
+			terminal := collectUntilClosed(t, results, 3*time.Second)
+			require.Len(t, terminal, 1)
+			require.Nil(t, terminal[0].Error)
+			require.Positive(t, terminal[0].ExecutionTime)
+			require.Empty(t, terminal[0].Stream)
+			require.Empty(t, terminal[0].ExecutionData)
+		})
+	}
+}
+
+func TestExecuteCodeStreamFailedExecutionDoesNotComplete(t *testing.T) {
+	errOutput := ErrorOutput{EName: "ValueError", EValue: "failed cell", Traceback: []string{"trace"}}
+	for _, tc := range []struct {
+		name       string
+		reply      ExecuteReply
+		iopubError bool
+		errorName  string
+	}{
+		{"IOPub error", ExecuteReply{Status: "error", ExecutionCount: 1, ErrorOutput: errOutput}, true, "ValueError"},
+		{"reply error only", ExecuteReply{Status: "error", ExecutionCount: 1, ErrorOutput: errOutput}, false, "ValueError"},
+		{"aborted reply", ExecuteReply{Status: "aborted"}, false, "ExecutionError"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := NewClient("", nil)
+			state := newStreamExecutionState(time.Now())
+			results := make(chan *ExecutionResult, 10)
+			client.registerExecuteCodeStreamHandlers(state, results)
+
+			dispatchTestKernelMessage(t, client, MsgStream, StreamOutput{Name: StreamStdout, Text: "before error\n"}, Header{})
+			if tc.iopubError {
+				dispatchTestKernelMessage(t, client, MsgError, errOutput, Header{})
+				dispatchTestKernelMessage(t, client, MsgStream, StreamOutput{Name: StreamStdout, Text: "after error\n"}, Header{})
+			}
+			dispatchTestKernelMessage(t, client, MsgStatus, StatusUpdate{ExecutionState: StateIdle}, Header{})
+			dispatchTestKernelMessage(t, client, MsgExecuteReply, tc.reply, Header{})
+
+			got := collectUntilClosed(t, results, 3*time.Second)
+			wantResults := 2
+			if tc.iopubError {
+				wantResults++
+			}
+			require.Len(t, got, wantResults, "output must be followed by exactly one error")
+			require.Len(t, got[0].Stream, 1)
+			require.Equal(t, "before error\n", got[0].Stream[0].Text)
+			if tc.iopubError {
+				require.Len(t, got[1].Stream, 1)
+				require.Equal(t, "after error\n", got[1].Stream[0].Text)
+			}
+			terminal := got[len(got)-1]
+			require.NotNil(t, terminal.Error)
+			require.Equal(t, tc.errorName, terminal.Error.EName)
+			for _, result := range got {
+				require.Zero(t, result.ExecutionTime, "failed executions must not report successful completion")
+			}
+		})
+	}
+}
+
+func TestExecuteCodeStreamIOPubErrorSurvivesConnectionLoss(t *testing.T) {
+	for _, idleFirst := range []bool{false, true} {
+		name := "loss without idle"
+		if idleFirst {
+			name = "idle before loss"
+		}
+		t.Run(name, func(t *testing.T) {
+			client := NewClient("", nil)
+			state := newStreamExecutionState(time.Now())
+			results := make(chan *ExecutionResult, 10)
+			client.registerExecuteCodeStreamHandlers(state, results)
+
+			errOutput := ErrorOutput{EName: "ValueError", EValue: "failed cell", Traceback: []string{"trace"}}
+			dispatchTestKernelMessage(t, client, MsgError, errOutput, Header{})
+			dispatchTestKernelMessage(t, client, MsgStream, StreamOutput{Name: StreamStderr, Text: "after error\n"}, Header{})
+			if idleFirst {
+				dispatchTestKernelMessage(t, client, MsgStatus, StatusUpdate{ExecutionState: StateIdle}, Header{})
+			}
+			client.onConnectionLost(&websocket.CloseError{Code: websocket.CloseAbnormalClosure})
+
+			got := collectUntilClosed(t, results, 3*time.Second)
+			require.Len(t, got, 2)
+			require.Len(t, got[0].Stream, 1)
+			require.Equal(t, "after error\n", got[0].Stream[0].Text)
+			require.Equal(t, &errOutput, got[1].Error)
+			for _, result := range got {
+				require.Zero(t, result.ExecutionTime, "failed executions must not report successful completion")
 			}
 		})
 	}

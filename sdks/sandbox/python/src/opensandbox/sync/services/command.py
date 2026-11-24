@@ -67,6 +67,8 @@ class CommandsSync(Protocol):
 
         Raises:
             SandboxException: If the operation fails.
+            SandboxInternalException: If a foreground stream ends normally without a
+                completion or execution error event. Handlers may have received partial output.
         """
         ...
 
@@ -131,10 +133,11 @@ class CommandsSync(Protocol):
 
         Args:
             execution_id: Unique identifier of the execution to query
-            cursor: Optional line cursor for incremental reads
+            cursor: Optional byte offset into the combined output for incremental reads
 
         Returns:
-            CommandLogs containing raw output and latest cursor
+            CommandLogs containing the raw output page and the cursor just
+            past the returned bytes
 
         Raises:
             SandboxException: If the operation fails.

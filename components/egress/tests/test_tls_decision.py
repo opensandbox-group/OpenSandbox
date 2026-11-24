@@ -116,15 +116,46 @@ class TLSDecisionTest(unittest.TestCase):
         ech=False,
         static=(),
         view=_DEFAULT,
+        port=443,
     ):
         return tls_decision.classify(
             identity=self.identity if identity is _DEFAULT else identity,
             sni=sni,
             ech_hidden=ech,
             static_passthrough=static,
-            destination_port=443,
+            destination_port=port,
             view=self.compile() if view is _DEFAULT else view,
         )
+
+    def test_non_canonical_port_denies_even_bound_or_missing_snapshot(self):
+        for port in (1, 80, 8443, 65535):
+            for view in (self.compile(), None):
+                with self.subTest(port=port, view=view):
+                    result = self.classify(port=port, view=view)
+                    self.assertEqual((result.action, result.reason),
+                                     ("deny", "non_canonical_port"))
+        result = self.classify(port=443)
+        self.assertEqual((result.action, result.reason),
+                         ("needs_registry", "binding_host"))
+
+    def test_invalid_destination_port_denies_before_snapshot_lookup(self):
+        for port in (None, True, False, "443", 443.0, -1, 0, 65536):
+            for view in (self.compile(), None):
+                with self.subTest(port=port, view=view):
+                    result = self.classify(port=port, view=view)
+                    self.assertEqual((result.action, result.reason),
+                                     ("deny", "invalid_input"))
+
+    def test_destination_port_gate_preserves_early_identity_ech_sni_order(self):
+        cases = ((dict(identity=None), "deny", "unknown_identity"),
+                 (dict(ech=True), "passthrough", "ech"),
+                 (dict(sni=None), "passthrough", "no_sni"),
+                 (dict(sni="bad"), "deny", "invalid_sni"))
+        for port in (None, 8443):
+            for args, action, reason in cases:
+                with self.subTest(port=port, args=args):
+                    result = self.classify(port=port, **args)
+                    self.assertEqual((result.action, result.reason), (action, reason))
 
     def test_compiled_view_retains_only_revision_metadata_and_selectors(self):
         snapshot = self.snapshot()

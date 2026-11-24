@@ -170,7 +170,8 @@ def _live_system(hosts: list[str] | None = None) -> tuple[object, object]:
 def _hello_data(client_hello: object, conn: _ClientConn) -> object:
     return types.SimpleNamespace(
         client_hello=client_hello,
-        context=types.SimpleNamespace(client=conn),
+        context=types.SimpleNamespace(
+            client=conn, server=types.SimpleNamespace(address=("192.0.2.1", 443))),
         ignore_connection=False,
     )
 
@@ -219,7 +220,7 @@ def run_ech_parse() -> int:
 
 def _admitted_conn(runtime: object, sni: str) -> _ClientConn:
     conn = _ClientConn(sni)
-    result = runtime.admit_tls(sni)
+    result = runtime.admit_tls(sni, destination_port=443)
     assert result.token is not None, f"admission refused for {sni}"
     assert runtime.track(result.token, conn)
     return conn

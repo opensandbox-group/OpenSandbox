@@ -14,6 +14,7 @@
 
 import { Tag } from 'antd';
 
+import { statusLabel, useI18n } from '../i18n';
 import { sandboxStateTagColor, tenantTagColor } from '../utils/semanticTheme';
 
 import './SemanticTags.css';
@@ -38,14 +39,15 @@ type SandboxStateTagProps = {
 };
 
 export function SandboxStateTag({ state }: SandboxStateTagProps) {
+  const { t } = useI18n();
   const s = state?.trim();
   if (!s) return <>—</>;
   return (
     <Tag color={sandboxStateTagColor(s)} className="console-semantic-tag">
-      {s}
+      {statusLabel(t, s)}
     </Tag>
   );
 }
 
-/** 表格内 Tag 列：防止窄列溢出到相邻单元格。 */
+/** Tag column for tables; prevents narrow columns from overflowing into adjacent cells. */
 export const consoleTagTableCellProps = { className: 'console-tag-table-cell' as const };

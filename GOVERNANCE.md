@@ -77,27 +77,30 @@ Nominations are decided through public review and voting on the pull request:
 
 - **Discussion and Voting Period**: The nomination pull request must remain open for at least seven full calendar days from opening. Reaching the approval threshold early does not waive or shorten this period.
 - **Eligible Electorate**: The voting electorate consists of all current Project Maintainers recorded in the fallback `*` rule of [`CODEOWNERS`](.github/CODEOWNERS) on the base branch at the time the nomination pull request is opened. Each eligible Project Maintainer has one vote. Candidates cannot vote on their own nomination, and candidate acceptance is not counted as an approval vote.
+- **Sponsor Votes**: A sponsor who is an eligible Project Maintainer may vote. Because GitHub does not allow pull request authors to approve their own pull requests, the sponsor votes by posting an explicit LGTM comment on the nomination pull request; opening the pull request alone is not a vote.
 - **Approval Thresholds**:
-  - **Maintainer (component scope)**: Requires affirmative approvals (pull request approval or explicit LGTM) from at least **one-third (1/3)** of the eligible Project Maintainers, rounded up to the nearest whole maintainer.
+  - **Maintainer (component scope)**: Requires affirmative approvals (pull request approval or explicit LGTM) from a **majority (more than one-half)** of the eligible Project Maintainers, consistent with [Section 2.c.iii. of the Technical Charter](CHARTER.md#2-technical-steering-committee).
   - **Project Maintainer**: Requires affirmative approvals from at least **two-thirds (2/3)** of the eligible Project Maintainers, rounded up to the nearest whole maintainer.
+- **Path Owner Support**: A component Maintainer nomination also requires explicit support, by sponsorship, pull request approval, or LGTM, from at least one existing owner of each target path in [`CODEOWNERS`](.github/CODEOWNERS) other than the candidate. This support is a separate requirement and is not itself a vote; it counts toward the approval threshold only when the supporter is an eligible Project Maintainer voting under the rules above.
 - **Voting Rules**: Approvals must be affirmative. Maintainers with direct conflicts of interest should recuse themselves. Abstentions, non-responses, or recusals do not count as approvals and do not lower the denominator. These nomination thresholds govern the role-specific advancement process; formal TSC votes follow [Consensus and Voting](#consensus-and-voting) and the Technical Charter.
 - **Public Objections**: Any objections or concerns should be discussed publicly in the pull request during the seven-day period. There is no unanimity requirement or individual veto beyond the specified vote.
 
 ### Decision and Onboarding
 
-- After the full seven calendar days have passed, a Project Maintainer verifies that the approval threshold has been met and that the candidate has explicitly accepted the nomination. The Project Maintainer then merges the pull request and coordinates the necessary scoped repository permissions.
+- After the full seven calendar days have passed, a Project Maintainer verifies that the approval threshold has been met, that the candidate has explicitly accepted the nomination, and, for component Maintainer nominations, that the path owner support requirement has been met. The Project Maintainer then merges the pull request and grants the repository role for the appointment.
+- New component Maintainers receive the repository **Write** role and Project Maintainers receive the **Admin** role. GitHub repository roles apply to the whole repository; component scope is defined by [`CODEOWNERS`](.github/CODEOWNERS) and enforced by the required code owner review on the default branch, so changes to a path still need approval from that path's owners. Maintainers are expected to review and merge within their assigned areas.
 - If the threshold is not met, the pull request cannot be merged and is closed without promotion. There is no automatic promotion based solely on time or contribution counts.
 - Keep [MAINTAINERS.md](MAINTAINERS.md) and [`CODEOWNERS`](.github/CODEOWNERS) synchronized when recording the appointment.
 
 ## Maintainer Inactivity and Removal
 
-Maintainers may step down at any time by notifying the project.
+Maintainers may step down at any time by notifying the project. A Project Maintainer then opens a pull request that removes them from [`CODEOWNERS`](.github/CODEOWNERS), moves them to the Emeritus section of [MAINTAINERS.md](MAINTAINERS.md), and revokes their repository role. Emeritus Maintainers are recognized for past contributions but hold no review, merge, or voting rights; returning to an active role follows [Becoming a Maintainer](#becoming-a-maintainer).
 
-Project Maintainers may also update maintainer status when someone has been inactive for an extended period, for example several months without meaningful review or maintenance activity.
+Project Maintainers may also propose moving a Maintainer to emeritus status after an extended period of inactivity, for example several months without meaningful review or maintenance activity, or removing a Maintainer for serious violations of project expectations, including repeated abuse of project privileges or violations of the Code of Conduct.
+
+Such proposals are made through a public pull request that updates [`CODEOWNERS`](.github/CODEOWNERS) and [MAINTAINERS.md](MAINTAINERS.md); a Maintainer removed for cause is not listed as emeritus, and their repository role is revoked in either case. The affected Maintainer should be notified and given a reasonable opportunity to respond. The change requires affirmative approvals from a majority (more than one-half) of the current Project Maintainers, consistent with [Section 2.c.iii. of the Technical Charter](CHARTER.md#2-technical-steering-committee); a Project Maintainer who is the subject of the proposal does not vote but remains in the count, so recusal does not lower the denominator. Code of Conduct matters may keep sensitive details out of the public record as required by [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 Removal should be handled respectfully and pragmatically, with the goal of keeping ownership accurate rather than punitive.
-
-Maintainers may also be removed for serious violations of project expectations, including repeated abuse of project privileges or violations of the Code of Conduct.
 
 ## Governance Changes
 

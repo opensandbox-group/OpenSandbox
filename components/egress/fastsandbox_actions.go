@@ -12,42 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fastlet Sandbox Actions Handler surface (sandbox.fast.io/actions/v1,
-// fast-sandbox docs/concepts/sandbox-actions.md): the Fastlet is the sole
-// lifecycle dispatcher and the egress process is the Handler. It replaces
-// the earlier file-driven slot-store observation: binding synchronization and
-// lifecycle checkpoints arrive over the Pod-loopback HTTP endpoints instead
-// of being polled from /run/fast-sandbox/network/*.json.
-//
-// Operation mapping:
-//
-//	SET_BINDING        register the subject (deny-first) and seed the input
-//	                   policy on a fresh subject (an existing record
-//	                   supersedes the input); activate immediately when the
-//	                   subject is already active. A JSON-null input removes
-//	                   the policy and reverts to deny-first. A key held by
-//	                   a different live subject is a stale-subject
-//	                   takeover (OSEP-0022): the previous owner goes first.
-//	LIFECYCLE_HOOK     sandbox.runtime-ready only confirms the deny-first
-//	                   install (idempotent); sandbox.data-plane-ready applies
-//	                   the pending policy -> active. Unknown Hooks are
-//	                   rejected, never silently ignored.
-//	REMOVE_BINDING     terminal cleanup; a fence mismatch (stale removal for
-//	                   a previous instance of the same UID) is ignored.
-//	VAULT_EXPORT       copy the vault file into the snapshot bundle and seal
-//	                   the subject — pause flow, before teardown.
-//	VAULT_IMPORT       land the bundle re-stamped with the restored fence —
-//	                   resume flow, before data-plane-ready.
-//	POLICY_EXPORT      copy the recorded policy file into the snapshot bundle
-//	                   and seal the subject — pause flow, before teardown.
-//	POLICY_IMPORT      land the policy bundle re-stamped with the restored
-//	                   fence — resume flow, before data-plane-ready.
-//
-// Fail-closed invariants: the subject is deny-first from registration until
-// its data-plane-ready Hook succeeds, so policy delivery can be late but
-// never early-open; enforcement failures return non-200 and are retryable
-// (at-least-once, same invocationId). Cancellation or terminal Delete may
-// stop retries; unfinished cleanup is not guaranteed to run again.
+// Subjects remain deny-first until data-plane-ready succeeds; canceled lifecycle delivery cannot guarantee cleanup retries.
 package main
 
 import (
@@ -77,8 +42,7 @@ import (
 func newHandlerInstanceID() string {
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failure is fatal enough that a deterministic fallback
-		// (pid + start time) still satisfies the incarnation contract.
+		// The incarnation ID is not a secret; PID and time still distinguish restarts.
 		return fmt.Sprintf("egress-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 	return fmt.Sprintf("egress-%d-%s", os.Getpid(), hex.EncodeToString(b[:]))
@@ -99,7 +63,12 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 	writeJSON(w, http.StatusOK, s.actionStatusResponse())
 }
 
-func (s *fastSandboxPolicyServer) actionStatusResponse() actionhandler.StatusResponse {
+type fastSandboxActionStatusResponse struct {
+	actionhandler.StatusResponse
+	SubjectLifecycleDegraded []string `json:"subjectLifecycleDegraded,omitempty"`
+}
+
+func (s *fastSandboxPolicyServer) actionStatusResponse() fastSandboxActionStatusResponse {
 	recovery := s.vaultRecoveryActive()
 	policyRecovery := s.policyRecoveryActive()
 	degraded := s.degradedVaultUIDs()
@@ -135,7 +104,7 @@ func (s *fastSandboxPolicyServer) actionStatusResponse() actionhandler.StatusRes
 			resp.MitmCaError = reason
 		}
 	}
-	return resp
+	return fastSandboxActionStatusResponse{StatusResponse: resp, SubjectLifecycleDegraded: s.subjectLifecycleDegraded()}
 }
 
 func (s *fastSandboxPolicyServer) handleActionsV2Status(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +138,11 @@ func (s *fastSandboxPolicyServer) handleActions(w http.ResponseWriter, r *http.R
 	if err != nil {
 		http.Error(w, fmt.Sprintf("invalid action envelope: %v", err), http.StatusBadRequest)
 		return
+	}
+	if env.Operation == actionhandler.OperationLifecycleHook && env.Hook != nil && env.Hook.Name == constants.HookDataPlaneReady {
+		// Before the action gate: other subjects' actions must not queue
+		// behind this wait. Actions v2 holds an owner stripe and is unchanged.
+		s.awaitSubjectReadyACK(r.Context(), subject.FromSandboxUID(env.Sandbox.UID), subject.FromRevision(env))
 	}
 	status, err := s.dispatchAction(r.Context(), env)
 	if err != nil {
@@ -548,6 +522,8 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 			s.reg.Unregister(subj)
 			s.mu.Lock()
+			// The registry has retired this fence even if the local purge fails.
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			if err := s.dropSubjectStateLocked(subj); err != nil { // preserve this exact token through C publication
 				status := s.vaultPurgeFailureStatusLocked(subj)
 				s.mu.Unlock()
@@ -565,6 +541,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 				s.mu.Unlock()
 				return status, fmt.Errorf("subject rebind purge: %w", err)
 			}
+			s.recordSubjectIntentLocked(subj, token.old, true)
 			token.purged = true
 		}
 		removeOld := token.removeOld && !token.oldRemoved
@@ -620,6 +597,14 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	// action gate prevents a victim being re-registered before this purge.
 	for _, victim := range victims {
 		if _, exists := s.reg.Fence(victim); !exists {
+			s.mu.Lock()
+			victimFence, known := s.subjFence[victim]
+			// Actual eviction is known outside the callback, even if a
+			// subsequent best-effort file purge refuses cleanup.
+			if s.subjectDrain != nil && known {
+				s.recordSubjectIntentLocked(victim, victimFence, true)
+			}
+			s.mu.Unlock()
 			s.dropSubjectState(victim)
 		}
 	}
@@ -646,6 +631,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			}
 		}
 		s.finishRebind(subj, token)
+		s.recordBindingSnapshot(subj, fence)
 		log.Infof("subject %s: binding removed (deny-first)", subj)
 		return http.StatusOK, nil
 	}
@@ -656,6 +642,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		log.Errorf("subject %s: binding policy commit failed: %v", subj, err)
 		return http.StatusInternalServerError, fmt.Errorf("binding policy commit: %w", err)
 	}
+	s.recordBindingSnapshot(subj, fence)
 	s.finishRebind(subj, token)
 	policyCommit := time.Since(policyStarted)
 	log.Infof("subject %s: SET_BINDING applied (state=%s) total=%dms denyFirstInstall=%dms policyCommit=%dms",
@@ -701,6 +688,22 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		// ever consume.
 		s.policyCommitMu.Lock()
 		defer s.policyCommitMu.Unlock()
+		// A failed activation rollback must be retried before the ACK gate,
+		// even while no child can acknowledge a snapshot. Do not infer this
+		// from registry Active: a healthy active subject may await a new ACK.
+		s.mu.Lock()
+		retryRevert := s.fenceMatchesLocked(subj, fence) && s.subjectDrain != nil && s.subjectDrain.revertPending[subj]
+		att := s.subjAtt[subj]
+		s.mu.Unlock()
+		if retryRevert {
+			if err := s.revertToDenyFirst(subj, att); err != nil {
+				log.Errorf("subject %s: data-plane-ready activation rollback failed, pending retry: %v", subj, err)
+				return http.StatusInternalServerError, err
+			}
+			s.mu.Lock()
+			delete(s.subjectDrain.revertPending, subj)
+			s.mu.Unlock()
+		}
 		// Fence re-validation AND the pending peek under one s.mu hold
 		// (policyCommitMu → s.mu, the established order): fenceMatchesLocked
 		// reads subjFence, which terminal cleanup deletes under s.mu. An
@@ -710,6 +713,13 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		s.mu.Lock()
 		stale := !s.fenceMatchesLocked(subj, fence)
 		pol := s.pendingPolicies[subj]
+		acknowledged := s.subjectSnapshotAcknowledgedLocked(subj, fence)
+		var checkedEpoch *fastSandboxSubjectEpoch
+		var checkedACK fastSandboxSubjectACK
+		if d := s.subjectDrain; d != nil {
+			checkedEpoch, checkedACK = d.current, d.acked[subj]
+		}
+		att = s.subjAtt[subj]
 		s.mu.Unlock()
 		if stale {
 			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
@@ -720,10 +730,43 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 			// the subject must never activate without its current policy.
 			return http.StatusConflict, fmt.Errorf("data-plane-ready for subject %s with no pending policy", subj)
 		}
+		if !acknowledged {
+			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
+		}
 		applyStarted := time.Now()
 		if err := s.applyPolicy(subj, pol); err != nil {
 			return http.StatusInternalServerError, fmt.Errorf("policy apply: %w", err)
 		}
+		// Child publication/detach and worker failures do not take policyCommitMu.
+		// Fence completion against the exact epoch, registration and digest that
+		// passed the gate; a replacement's ACK cannot complete this activation.
+		s.mu.Lock()
+		if checkedEpoch != nil {
+			d := s.subjectDrain
+			acknowledged = d != nil && d.current == checkedEpoch && d.acked[subj] == checkedACK && s.subjectSnapshotAcknowledgedLocked(subj, fence)
+		}
+		s.mu.Unlock()
+		if !acknowledged {
+			// Keep pending policy for a retried hook. Kernel I/O stays outside mu;
+			// the existing primitive resets nft before unsetting registry policy.
+			if err := s.revertToDenyFirst(subj, att); err != nil {
+				s.mu.Lock()
+				if s.subjectDrain.revertPending == nil {
+					s.subjectDrain.revertPending = make(map[subject.Subject]bool)
+				}
+				s.subjectDrain.revertPending[subj] = true
+				s.mu.Unlock()
+				log.Errorf("subject %s: data-plane-ready activation rollback failed, pending retry: %v", subj, err)
+				return http.StatusInternalServerError, err
+			}
+			return http.StatusServiceUnavailable, fmt.Errorf("subject snapshot not acknowledged")
+		}
+		s.mu.Lock()
+		if s.subjectDrain != nil {
+			delete(s.subjectDrain.revertPending, subj)
+		}
+		s.mu.Unlock()
+		s.recordBindingSnapshot(subj, fence)
 		// The pending slot stays: it now mirrors what is enforced, so a
 		// data-plane-ready replayed after a lost ack is idempotent (same
 		// rationale as the relay PUT and policy import).
@@ -785,6 +828,16 @@ func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope
 	// does not promise automatic cleanup retry.
 	s.policyCommitMu.Lock()
 	s.mu.Lock()
+	if s.subjectDrain != nil {
+		// A pending rebind REMOVE may carry expectedNew while the actually
+		// unregistered owner is still old. If already absent, retire only an
+		// existing drain mirror, never the unregistered expectedNew fence.
+		if ok {
+			s.recordSubjectIntentLocked(subj, registeredFence, true)
+		} else if mirroredFence, exists := s.subjectDrain.fences[subj]; exists {
+			s.recordSubjectIntentLocked(subj, mirroredFence, true)
+		}
+	}
 	if err := s.dropSubjectStateLocked(subj); err != nil {
 		status := s.vaultPurgeFailureStatusLocked(subj)
 		s.mu.Unlock()

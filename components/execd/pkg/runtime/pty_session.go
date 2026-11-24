@@ -65,14 +65,6 @@ func NewPTYSessionID() string {
 	return uuidString()
 }
 
-// ptySession manages a single interactive PTY or pipe-mode shell process.
-//
-// Lifecycle:
-//  1. Create via newPTYSession.
-//  2. Call StartPTY() or StartPipe() from the WS handler (after LockWS).
-//  3. Zero or more clients call AttachOutput() to receive live output.
-//  4. The bash process exits → Done() closes → exit frame sent.
-//  5. Call close() to terminate an early session and release resources.
 type ptySession struct {
 	id      string
 	cwd     string
@@ -298,6 +290,9 @@ func (s *ptySession) StartPTY() error {
 		return perr
 	})
 	if err != nil {
+		if ptmx != nil {
+			_ = ptmx.Close()
+		}
 		return fmt.Errorf("pty.StartWithSize: %w", err)
 	}
 
@@ -434,12 +429,7 @@ func (s *ptySession) broadcastPipe(r *os.File, isStdout bool) {
 	_ = r.Close()
 }
 
-// writeAndFanout writes chunk to the replay buffer and delivers it to the
-// active per-connection pipe, atomically under outMu.
-//
-// Holding outMu across both operations closes the window where bytes written
-// to replay after ReadFrom but before AttachOutput would be silently dropped.
-// Lock order is always outMu → replay.mu (both paths), so no deadlock is possible.
+// Replay insertion and fanout selection share outMu with snapshot attachment; pipe writes remain outside it.
 func (s *ptySession) writeAndFanout(chunk []byte, isStdout bool) {
 	s.outMu.Lock()
 	s.replay.write(chunk) // acquires replay.mu inside (outMu → replay.mu)
@@ -525,17 +515,7 @@ func (s *ptySession) WriteStdin(p []byte) (int, error) {
 	return w.Write(p)
 }
 
-// AttachOutput creates a fresh per-connection io.Pipe and swaps it into the
-// broadcast fanout path.
-//
-// Ordering guarantee (no duplicates on reconnect):
-//   - Caller must snapshot the replay buffer BEFORE calling AttachOutput.
-//   - Bytes produced between the snapshot and AttachOutput are delivered via
-//     the live pipe only (not in the snapshot), so each byte arrives exactly once.
-//
-// Returns (stdout reader, stderr reader [nil in PTY mode], detach func).
-// Calling detach() closes the writers, sending EOF to the readers and
-// unblocking all pump goroutines.
+// Separate replay reads and attachment can lose output; use AttachOutputWithSnapshot for an atomic handoff.
 func (s *ptySession) AttachOutput() (io.Reader, io.Reader, func()) {
 	stdoutR, stdoutW := io.Pipe()
 
@@ -571,16 +551,7 @@ func (s *ptySession) AttachOutput() (io.Reader, io.Reader, func()) {
 	return stdoutR, stderrR, detach
 }
 
-// AttachOutputWithSnapshot atomically snapshots the replay buffer and attaches
-// the per-connection output pipe, eliminating the output-loss window that exists
-// when ReadFrom and AttachOutput are called separately.
-//
-// Must be used together with writeAndFanout (which holds outMu during both
-// replay.write and the fanout pointer read).
-//
-// Lock order is always outMu → replay.mu (both paths), so no deadlock is possible.
-//
-// Returns (stdoutR, stderrR [nil in PTY mode], detach, snapshotBytes, snapshotOffset).
+// Atomic replay/live handoff with writeAndFanout uses outMu → replay.mu; stderr is nil in PTY mode.
 func (s *ptySession) AttachOutputWithSnapshot(since int64) (io.Reader, io.Reader, func(), []byte, int64) {
 	stdoutR, stdoutW := io.Pipe()
 	var stderrR io.Reader
@@ -664,6 +635,30 @@ func (s *ptySession) ResizePTY(cols, rows uint16) error {
 	return pty.Setsize(ptmx, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
+// ptyHangUpGrace bounds how long close waits for the shell to exit after
+// SIGHUP before killing its process group.
+const ptyHangUpGrace = 500 * time.Millisecond
+
+// hangUp sends SIGHUP to the PTY shell, as closing a terminal does, and waits
+// up to ptyHangUpGrace for it to exit. Interactive bash passes SIGHUP on to its
+// jobs, which job control puts in their own process groups; killing the
+// shell's group alone leaves them running and holding the terminal open.
+func (s *ptySession) hangUp(pid int) {
+	if err := syscall.Kill(pid, syscall.SIGHUP); err != nil {
+		return
+	}
+	deadline := time.Now().Add(ptyHangUpGrace)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		exited := s.pid != pid
+		s.mu.Unlock()
+		if exited {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // close terminates the session and releases all resources.
 // Safe to call multiple times.
 func (s *ptySession) close() {
@@ -676,9 +671,15 @@ func (s *ptySession) close() {
 	pid := s.pid
 	ptmx := s.ptmx
 	stdin := s.stdin
+	isPTY := s.isPTY
 	s.mu.Unlock()
 
 	if pid != 0 {
+		if isPTY {
+			s.hangUp(pid)
+		}
+		// Kill whatever is left in the shell's group even if the shell has
+		// exited: a group id is not reused while any member is alive.
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
 	}
 	if ptmx != nil {

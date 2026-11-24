@@ -32,6 +32,10 @@ When routing cannot proceed, the failure is precise — clients can branch on st
 
 Once a sandbox is reached, its responses pass through **verbatim**, including redirects and errors. The ingress never follows a redirect itself, so a stale `Location` can never leak credentials to an unrelated endpoint.
 
+## Upstream HTTP connection reuse
+
+Each ingress replica reuses one HTTP transport across requests to different sandbox upstreams. Its idle connection pool can be configured independently of connection observation; WebSocket traffic keeps a separate transport. See [Ingress HTTP connection pool](/guides/ingress-connection-pool) for configuration and zero-value semantics, and the [defaults decision](/architecture/network/ingress-http-pool-defaults) for compatibility and resource trade-offs.
+
 ## WebSocket support
 
 WebSocket is a first-class path, not an upgrade hack bolted onto HTTP proxying:
@@ -75,7 +79,6 @@ A single request can opt out of renew-intent publishing with a control header:
 OpenSandbox-Access-Renew: skip
 ```
 
-- Honored by both proxy paths — the ingress gateway and the server's `/sandboxes/{id}/proxy/{port}/...` route — so behavior does not depend on which path serves the traffic.
 - The exact sentinel value `skip` suppresses the intent for that one request (it bypasses the per-sandbox throttle entirely); unknown values are ignored for forward compatibility.
 - The header is stripped before forwarding upstream, like `OpenSandbox-Ingress-To`, so backend applications never observe it.
 - Typical use: health probes and other background traffic hitting an opted-in sandbox without extending its lifetime.
@@ -84,4 +87,4 @@ WebSocket upgrades carry the header on the handshake request; long-lived connect
 
 ## Fast Sandbox routes
 
-The `FastSandboxProvider` serves authenticated `f1.` route scopes by resolving endpoints through FastPath v2 and forwarding traffic to Fastlet pods. It can run standalone or share one ingress process with the legacy Kubernetes providers; route-scope verification uses the same signing key ring as the server. See [Fast Sandbox: Networking](/architecture/fast-sandbox/networking).
+The `FastSandboxProvider` resolves endpoints through FastPath v2 and forwards traffic to Fastlet pods. It can run standalone or share one ingress process with the legacy Kubernetes providers. Header and URI `f1.` route scopes use the same signing key ring as the server. The single-value `--fast-sandbox-namespace` option additionally enables unsigned `<fsb-sandbox-id>-<port>.<gateway-domain>` routes in header mode, carried in the Host or the routing header, and restricts all Fast Sandbox routes, including signed scopes, to that namespace. Unsigned routes require external access control; they do not authenticate clients. See [Fast Sandbox: Networking](/architecture/fast-sandbox/networking).

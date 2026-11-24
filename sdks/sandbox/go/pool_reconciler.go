@@ -37,7 +37,6 @@ type reconcileState struct {
 	healthState       PoolHealthState
 }
 
-// newReconcileState creates a new reconcileState with the given degraded threshold.
 func newReconcileState(degradedThreshold int) *reconcileState {
 	return &reconcileState{
 		degradedThreshold: degradedThreshold,
@@ -91,14 +90,12 @@ func (s *reconcileState) recordFailures(count int, err error) {
 	}
 }
 
-// shouldBackoff returns true if the reconciler is in a backoff period.
 func (s *reconcileState) shouldBackoff() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return time.Now().Before(s.backoffUntil)
 }
 
-// snapshot returns a point-in-time view of the reconcile health state.
 func (s *reconcileState) snapshot() (PoolHealthState, int, bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,18 +103,7 @@ func (s *reconcileState) snapshot() (PoolHealthState, int, bool, string) {
 	return s.healthState, s.failureCount, backoffActive, s.lastError
 }
 
-// reconcileTick performs a single reconciliation pass. It is designed to be
-// called periodically by the pool's background loop.
-//
-// Logic (follows OSEP-0005 and Kotlin/Python SDKs):
-//  1. Acquire the primary lock (leader election). If it fails, return immediately.
-//  2. Reap expired idle entries, killing any discarded-alive sandboxes.
-//  3. If idle count exceeds maxIdle, shrink excess entries.
-//  4. If a deficit exists and we are not in backoff, create sandboxes up to warmupConcurrency.
-//
-// The leader lock is NOT released at end of tick; it is held until TTL expires
-// or renew fails. This reduces lock contention in distributed (Redis) scenarios.
-// Only Shutdown releases the lock explicitly.
+// Retain leader ownership between ticks to reduce distributed lock contention.
 func reconcileTick(
 	ctx context.Context,
 	cfg *PoolConfig,
@@ -131,11 +117,16 @@ func reconcileTick(
 	ownerID := cfg.OwnerID
 	lockTTL := cfg.PrimaryLockTTL
 
-	// Step 1: Try to acquire the primary lock.
+	// A maintenance tick during creation backoff must neither extend the retry
+	// deadline on a store error nor clear it on a successful shrink.
+	maintenanceOnly := state.shouldBackoff()
+
 	acquired, err := store.TryAcquirePrimaryLock(ctx, poolName, ownerID, lockTTL)
 	if err != nil {
 		logger.Warn("reconcile: lock acquire error", "pool_name", poolName, "error", err)
-		state.recordFailure(err)
+		if !maintenanceOnly {
+			state.recordFailure(err)
+		}
 		return
 	}
 	if !acquired {
@@ -143,7 +134,6 @@ func reconcileTick(
 		return
 	}
 
-	// Step 2: Reap expired idle entries.
 	minTTL := cfg.AcquireMinRemainingTTL
 	if minTTL > 0 {
 		reapResult, reapErr := store.ReapExpiredIdleWithMinTTL(ctx, poolName, time.Now(), minTTL)
@@ -163,7 +153,6 @@ func reconcileTick(
 		}
 	}
 
-	// Step 3: Snapshot counters and determine current state.
 	counters, err := store.SnapshotCounters(ctx, poolName)
 	if err != nil {
 		logger.Warn("reconcile: snapshot error", "pool_name", poolName, "error", err)
@@ -176,7 +165,6 @@ func reconcileTick(
 	}
 	idleCount := counters.IdleCount
 
-	// Step 4: If idle > maxIdle, shrink excess.
 	if idleCount > maxIdle {
 		excess := idleCount - maxIdle
 		toRemove := intMin(excess, cfg.WarmupConcurrency)
@@ -196,7 +184,9 @@ func reconcileTick(
 			sandboxID, takeErr := store.TryTakeIdle(ctx, poolName)
 			if takeErr != nil {
 				logger.Warn("reconcile: TryTakeIdle error during shrink", "pool_name", poolName, "error", takeErr)
-				state.recordFailure(takeErr)
+				if !maintenanceOnly {
+					state.recordFailure(takeErr)
+				}
 				shrinkErr = true
 				break
 			}
@@ -206,18 +196,17 @@ func reconcileTick(
 			deleteFn(sandboxID)
 			removedCount++
 		}
-		if !shrinkErr && removedCount > 0 {
+		if !maintenanceOnly && !shrinkErr && removedCount > 0 {
 			state.recordSuccess()
 		}
 		return
 	}
 
-	// Step 5: If deficit > 0 and not in backoff, create sandboxes.
 	deficit := maxIdle - idleCount
 	if deficit <= 0 {
 		return
 	}
-	if state.shouldBackoff() {
+	if maintenanceOnly {
 		logger.Debug("reconcile: backoff active, skipping replenish",
 			"pool_name", poolName,
 			"deficit", deficit)

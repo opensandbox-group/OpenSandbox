@@ -4,7 +4,7 @@ authors:
   - "@ryanzhang-oss"
 creation-date: 2026-06-27
 last-updated: 2026-06-27
-status: draft
+status: implemented
 ---
 
 # OSEP-0015: Spec-Driven Pod Snapshot for Pause and Resume

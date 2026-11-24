@@ -33,9 +33,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
 
-// ---------------------------------------------------------------------------
 // Relay policy surface: /policy/{sandboxUid}
-// ---------------------------------------------------------------------------
 
 const policyTestUID = "policy-u"
 
@@ -131,10 +129,6 @@ func TestPolicyRelayPutReplacesSeededRecord(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), "other.example.com")
 }
 
-// TestRelayPutReArmsEnforcement (bug report: relay PUT persists + GET but
-// enforcement stays at the SET_BINDING-time deny): after activation with a
-// deny bootstrap, a relay PUT(allow) must re-apply enforcement — nft gets
-// the allow policy and the registry flips to it.
 func TestRelayPutReArmsEnforcement(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(`{"defaultAction":"deny"}`))
@@ -165,9 +159,6 @@ func TestRelayPutReArmsEnforcement(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), "example.com")
 }
 
-// TestFirstPutAfterSeedArmsEnforcement (review discriminator: the FIRST
-// relay PUT after SET_BINDING must re-arm enforcement to the committed
-// record, in BOTH hook orderings).
 func TestFirstPutAfterSeedArmsEnforcement(t *testing.T) {
 	const allowPol = `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
 
@@ -280,6 +271,44 @@ func TestPolicyRelayInvalidPolicyKeepsLastGood(t *testing.T) {
 	assert.Equal(t, "allow", reg.UserPolicy(s).Evaluate("other.example.com"), "last-good policy untouched")
 }
 
+func TestPolicyRelayInvalidPortRulesKeepLastGood(t *testing.T) {
+	invalidRules := []string{
+		`{"action":"deny","ports":[0]}`,
+		`{"action":"deny","ports":[65536]}`,
+		`{"action":"deny","ports":[25,25]}`,
+		`{"action":"allow","target":"example.com","ports":[443]}`,
+		`{"action":"deny","target":"","ports":[]}`,
+		`{"action":"deny","ports":["25"]}`,
+	}
+	ports := make([]string, 257)
+	for i := range ports {
+		ports[i] = strconv.Itoa(i + 1)
+	}
+	invalidRules = append(invalidRules, `{"action":"allow","ports":[`+strings.Join(ports, ",")+`]}`)
+	for _, rule := range invalidRules {
+		t.Run(rule, func(t *testing.T) {
+			srv, reg, nft := fastSandboxTestServer(t)
+			good := `{"defaultAction":"deny","egress":[{"action":"allow","target":"10.0.0.9","ports":[443]}]}`
+			s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(good))
+			before := nft.appliedCount()
+			rec := doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(`{"defaultAction":"deny","egress":[`+rule+`]}`, 1, false, true), "")
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Equal(t, before, nft.appliedCount())
+			rec = doPolicy(t, srv, http.MethodGet, policyTestUID, "", "")
+			rev, doc := mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(1), rev)
+			pol, err := policy.ParsePolicy(string(doc.Policy))
+			require.NoError(t, err)
+			deny, allow := pol.PortScopedRules()
+			assert.Empty(t, deny)
+			require.Len(t, allow, 1)
+			assert.Equal(t, []int{443}, allow[0].Ports)
+			assert.Equal(t, "10.0.0.9", allow[0].Target)
+			assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+		})
+	}
+}
+
 func TestPolicyRelayDeleteEnforcesDenyTombstone(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(policyAllow()))
@@ -359,10 +388,6 @@ func TestPolicyRelayDenyingSubjectHoldsPending(t *testing.T) {
 	assert.Equal(t, "allow", reg_UserEvaluate(srv, s, "other.example.com"))
 }
 
-// TestPolicyRelayPutReplacesStalePendingTombstone (review F4): after a
-// DELETE on an active subject, the pending slot holds the deny tombstone; a
-// later relay PUT must replace it, so an at-least-once data-plane-ready
-// replay re-applies the REPLACEMENT, never the stale deny.
 func TestPolicyRelayPutReplacesStalePendingTombstone(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(policyAllow()))
@@ -401,14 +426,7 @@ func (h *hookNft) ApplyPolicy(ctx context.Context, s subject.Subject, pol *polic
 	return h.fakeNft.ApplyPolicy(ctx, s, pol)
 }
 
-// TestRelayPutRacingRebindNeverActivatesPredecessorPolicy (review H3): a
-// relay PUT for the PREDECESSOR identity whose apply lands after the
-// rebind's registration must not activate the successor under the
-// predecessor's policy. The rebind runs on another goroutine from inside
-// the relay's enforcement step, forcing the fence flip into the apply
-// window; the fixed serialization (the whole SET_BINDING mutation holds
-// policyCommitMu) makes the rebind wait, the relay commit completes against
-// the old instance, and the purge discards it.
+// Inject rebind during enforcement to verify policyCommitMu prevents predecessor policy from reaching the successor.
 func TestRelayPutRacingRebindNeverActivatesPredecessorPolicy(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	hnft := &hookNft{}

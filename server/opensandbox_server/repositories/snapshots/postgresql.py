@@ -44,6 +44,7 @@ _SELECT_COLUMNS = """
     namespace,
     name,
     description,
+    mode,
     restore_config,
     state,
     reason,
@@ -58,6 +59,7 @@ _UPDATE_COLUMNS = """
     namespace = %(namespace)s,
     name = %(name)s,
     description = %(description)s,
+    mode = %(mode)s,
     restore_config = %(restore_config)s,
     state = %(state)s,
     reason = %(reason)s,
@@ -108,6 +110,7 @@ class PostgreSQLSnapshotRepository:
                     namespace,
                     name,
                     description,
+                    mode,
                     restore_config,
                     state,
                     reason,
@@ -121,6 +124,7 @@ class PostgreSQLSnapshotRepository:
                     %(namespace)s,
                     %(name)s,
                     %(description)s,
+                    %(mode)s,
                     %(restore_config)s,
                     %(state)s,
                     %(reason)s,
@@ -158,6 +162,15 @@ class PostgreSQLSnapshotRepository:
         if query.states:
             clauses.append(sql.SQL("state = ANY(%(states)s)"))
             params["states"] = query.states
+        if query.after_created_at is not None and query.after_id is not None:
+            clauses.append(
+                sql.SQL(
+                    "(created_at < %(after_created_at)s"
+                    " OR (created_at = %(after_created_at)s AND id < %(after_id)s))"
+                )
+            )
+            params["after_created_at"] = query.after_created_at
+            params["after_id"] = query.after_id
 
         where_sql = (
             sql.SQL("WHERE {}").format(sql.SQL(" AND ").join(clauses)) if clauses else sql.SQL("")
@@ -240,6 +253,7 @@ class PostgreSQLSnapshotRepository:
                     namespace TEXT DEFAULT NULL,
                     name TEXT,
                     description TEXT,
+                    mode TEXT,
                     restore_config JSONB NOT NULL,
                     state TEXT NOT NULL,
                     reason TEXT,
@@ -248,6 +262,11 @@ class PostgreSQLSnapshotRepository:
                     created_at TIMESTAMPTZ NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL
                 )
+                """
+            )
+            conn.execute(
+                """
+                ALTER TABLE snapshots ADD COLUMN IF NOT EXISTS mode TEXT
                 """
             )
             conn.execute(
@@ -283,6 +302,7 @@ class PostgreSQLSnapshotRepository:
             "namespace": record.namespace,
             "name": record.name,
             "description": record.description,
+            "mode": record.mode,
             "restore_config": Jsonb(record.restore_config.to_dict()),
             "state": record.status.state.value,
             "reason": record.status.reason,
@@ -319,6 +339,8 @@ class PostgreSQLSnapshotRepository:
             namespace=row["namespace"],
             name=row["name"],
             description=row["description"],
+            # Absent (legacy rows) reads as None = full.
+            mode=row.get("mode"),
             restore_config=SnapshotRestoreConfig.from_dict(restore_config),
             status=SnapshotStatusRecord(
                 state=SnapshotState(row["state"]),

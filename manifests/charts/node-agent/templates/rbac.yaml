@@ -1,4 +1,4 @@
-{{- if and .Values.enabled .Values.rbac.create }}
+{{- if and .Values.enabled .Values.rbac.create (without .Values.config.sources "vm-console") }}
 {{- if and (not .Values.serviceAccount.create) (empty .Values.serviceAccount.name) }}
 {{- fail "serviceAccount.name must be set when rbac.create=true and serviceAccount.create=false" }}
 {{- end }}

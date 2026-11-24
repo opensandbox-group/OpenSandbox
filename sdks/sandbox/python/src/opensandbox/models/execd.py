@@ -85,10 +85,10 @@ class ExecutionError(BaseModel):
     exit_code: int | None = Field(
         default=None,
         description=(
-            "Exit status reported by execd for a CommandExecError when the command ran "
-            "and finished with a non-zero status (-1 when it was terminated by a signal). "
-            "None when the process failed to start, for non-command errors, and on "
-            "servers that predate error.exit_code."
+            "Exit status for CommandExecError or CommandTimeout after a command exits "
+            "non-zero (-1 when terminated by a signal). None when the process failed to "
+            "start, no exit status was observed, or the error is not from a command. "
+            "Also None on servers that predate error.exit_code."
         ),
     )
 
@@ -111,11 +111,9 @@ class ExecutionLogs(BaseModel):
     )
 
     def add_stdout(self, message: OutputMessage) -> None:
-        """Add a message to standard output log."""
         self.stdout.append(message)
 
     def add_stderr(self, message: OutputMessage) -> None:
-        """Add a message to standard error log."""
         self.stderr.append(message)
 
 
@@ -206,7 +204,6 @@ class Execution(BaseModel):
     )
 
     def add_result(self, result: ExecutionResult) -> None:
-        """Add a new execution result."""
         self.result.append(result)
 
     @property

@@ -34,7 +34,7 @@ class CompiledStaticPassthroughTest(unittest.TestCase):
         with mock.patch.object(static_passthrough, "parse_canonical",
                                side_effect=AssertionError("startup selector reparsed")):
             for host, port, reason in (("a255.example", 443, "static_ignore"),
-                                       ("a255.example", 8443, "snapshot_missing"),
+                                       ("a255.example", 8443, "non_canonical_port"),
                                        ("elsewhere.example", 443, "snapshot_missing")):
                 self.assertEqual(self.runtime.admit_tls(host, destination_port=port).reason, reason)
         self.assertEqual(self.receiver.registry.count, 0)

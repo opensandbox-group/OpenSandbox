@@ -275,7 +275,7 @@ func TestUnavailablePoolWaitsForAllocatedPodDeletion(t *testing.T) {
 					return c.Get(ctx, key, obj, opts...)
 				},
 			})
-			r := &PoolReconciler{Client: c, APIReader: apiReader, Allocator: NewDefaultAllocator(c)}
+			r := &PoolReconciler{Client: c, APIReader: apiReader, Allocator: NewDefaultAllocator(c, apiReader)}
 			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pool)}
 			if _, err := r.Reconcile(ctx, req); err == nil {
 				t.Fatal("pod query failure was treated as completed cleanup")
@@ -447,7 +447,7 @@ func TestCleanupTerminatingSandboxesForUnavailablePool(t *testing.T) {
 		WithIndex(&sandboxv1alpha1.BatchSandbox{}, fieldindex.IndexNameForPoolRef, fieldindex.PoolRefIndexFunc).
 		WithObjects(stranded, released, pod, active, otherPool).
 		Build()
-	r := &PoolReconciler{Client: fakeClient, APIReader: fakeClient, Allocator: NewDefaultAllocator(fakeClient)}
+	r := &PoolReconciler{Client: fakeClient, APIReader: fakeClient, Allocator: NewDefaultAllocator(fakeClient, fakeClient)}
 
 	cleanupComplete, err := r.cleanupTerminatingSandboxesForUnavailablePool(context.Background(), "default", "missing-pool", "")
 	if err != nil {
@@ -617,7 +617,7 @@ func TestPooledTaskDeletionHandoff(t *testing.T) {
 		t.Run(string(recycleType), func(t *testing.T) {
 			ctx := context.Background()
 			now := metav1.Now()
-			pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+			pool := &sandboxv1alpha1.Pool{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default", UID: "pool-uid"},
 				Spec: sandboxv1alpha1.PoolSpec{RecycleStrategy: &sandboxv1alpha1.RecycleStrategy{Type: recycleType}}}
 			sandbox := terminatingPoolSandbox("task-sandbox", pool.Name, &now)
 			sandbox.Finalizers = append(sandbox.Finalizers, finalizerTaskCleanup)
@@ -625,7 +625,10 @@ func TestPooledTaskDeletionHandoff(t *testing.T) {
 			sandbox.Spec.TaskTemplate = &sandboxv1alpha1.TaskTemplateSpec{Spec: sandboxv1alpha1.TaskSpec{
 				Process: &sandboxv1alpha1.ProcessTask{Command: []string{"sleep", "3600"}},
 			}}
-			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "task-pod", Namespace: "default", Finalizers: []string{"test/keep"}}}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "task-pod", Namespace: "default", Finalizers: []string{"test/keep"},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pool, sandboxv1alpha1.GroupVersion.WithKind("Pool"))},
+			}}
 			setSandboxAllocation(sandbox, sandboxAllocation{Pods: []string{pod.Name}})
 			r := newTestReconciler(pool, sandbox, pod)
 			key := client.ObjectKeyFromObject(sandbox)
@@ -635,7 +638,7 @@ func TestPooledTaskDeletionHandoff(t *testing.T) {
 			}}
 			r.taskSchedulers.Store(key.String(), scheduler)
 			poolReconciler := &PoolReconciler{Client: r.Client, APIReader: r.APIReader,
-				Allocator: NewDefaultAllocator(r.Client), Recorder: record.NewFakeRecorder(100)}
+				Allocator: NewDefaultAllocator(r.Client, r.APIReader), Recorder: record.NewFakeRecorder(100)}
 			schedule := func(pods []*corev1.Pod) *scheduleResult {
 				t.Helper()
 				require.NoError(t, r.Get(ctx, key, sandbox))
@@ -698,6 +701,41 @@ func TestDeletionRecoversAfterPodsDisappear(t *testing.T) {
 	var pods corev1.PodList
 	require.NoError(t, r.List(ctx, &pods))
 	require.Empty(t, pods.Items)
+}
+
+func TestDeletionWithMalformedShardTaskPatch(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cachedScheduler=%v", cached), func(t *testing.T) {
+			ctx := context.Background()
+			now := metav1.Now()
+			sandbox := &sandboxv1alpha1.BatchSandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-shard", Namespace: "default", DeletionTimestamp: &now, Finalizers: []string{finalizerTaskCleanup}},
+				Spec: sandboxv1alpha1.BatchSandboxSpec{
+					Replicas: ptr.To(int32(1)),
+					TaskTemplate: &sandboxv1alpha1.TaskTemplateSpec{Spec: sandboxv1alpha1.TaskSpec{
+						Process: &sandboxv1alpha1.ProcessTask{Command: []string{"sleep"}},
+					}},
+					ShardTaskPatches: []runtime.RawExtension{{Raw: []byte(`{"spec":{"process":{"args":[3600]}}}`)}},
+				},
+			}
+			r := newTestReconciler(sandbox)
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)}
+			if cached {
+				sch := &recordingTaskScheduler{tasks: []taskscheduler.Task{fakeSchedulerTask{name: "bad-shard-0", state: taskscheduler.RunningTaskState}}}
+				r.taskSchedulers.Store(req.String(), sch)
+				result, err := r.Reconcile(ctx, req)
+				require.NoError(t, err)
+				require.Positive(t, result.RequeueAfter)
+				require.Equal(t, 1, sch.stopCalls)
+				require.NoError(t, r.Get(ctx, req.NamespacedName, sandbox))
+				require.Contains(t, sandbox.Finalizers, finalizerTaskCleanup)
+				sch.tasks = nil // executor confirms cleanup
+			}
+			_, err := r.Reconcile(ctx, req)
+			require.NoError(t, err)
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, req.NamespacedName, sandbox)))
+		})
+	}
 }
 
 func TestExpiryDeletionPolicy(t *testing.T) {

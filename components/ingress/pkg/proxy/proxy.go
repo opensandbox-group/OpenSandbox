@@ -57,8 +57,9 @@ type Proxy struct {
 	activity             activity.Recorder
 	waker                *wake.Waker
 
-	secure *signature.Verifier
-	scope  *routescope.Verifier
+	secure               *signature.Verifier
+	scope                *routescope.Verifier
+	fastSandboxNamespace string
 
 	httpTransport             http.RoundTripper
 	websocketClient           *http.Client
@@ -82,7 +83,8 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		waker:                     options.waker,
 		secure:                    secure,
 		scope:                     scope,
-		httpTransport:             newObservedHTTPTransport(options.connectObserver),
+		fastSandboxNamespace:      options.fastSandboxNamespace,
+		httpTransport:             newHTTPTransport(options.connectObserver, options.httpConnectionPool),
 		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
 		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,
 	}
@@ -349,18 +351,7 @@ func (p *Proxy) upstreamErrorObserver(target sandbox.EndpointTarget) func(error)
 	}
 }
 
-// isWebSocketRequest reports whether r is an HTTP/1.1 WebSocket upgrade
-// (RFC 6455). The Upgrade header must equal "websocket" and any Connection
-// header must carry an "upgrade" token, both matched case-insensitively;
-// some L7 proxies emit "Connection: keep-alive, Upgrade" which the previous
-// strict equality check in this package would have missed.
-//
-// The ingress does not natively accept RFC 8441 HTTP/2 Extended CONNECT
-// WebSocket upgrades — coder/websocket v1.8.15 only supports the HTTP/1.1
-// handshake shape (see accept.go:184-201). The L7 must ensure that the
-// ingress-facing WebSocket request uses the HTTP/1.1 Upgrade handshake;
-// translation and per-WebSocket fallback behavior are product-specific.
-// See "L7 Frontend Configuration for WebSocket" in docs/components/ingress.md.
+// Accept RFC 6455 GET upgrades, not RFC 8441 Extended CONNECT.
 func (p *Proxy) isWebSocketRequest(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
@@ -371,10 +362,7 @@ func (p *Proxy) isWebSocketRequest(r *http.Request) bool {
 	return connectionHasToken(r, "upgrade")
 }
 
-// connectionHasToken reports whether any Connection header value in r contains
-// the given token, matched case-insensitively after comma splitting. This
-// accepts "Connection: keep-alive, Upgrade" and other token-list forms allowed
-// by RFC 7230 §6.1.
+// Connection headers carry comma-separated tokens (RFC 7230 §6.1).
 func connectionHasToken(r *http.Request, token string) bool {
 	for _, v := range r.Header.Values(HopByHopConnection) {
 		for _, tok := range strings.Split(v, ",") {
@@ -488,10 +476,10 @@ func (w *statusCapturingResponseWriter) Flush() {
 // finally falls back to the remote address.
 func (p *Proxy) getClientIP(r *http.Request) string {
 	if xff := r.Header.Get(XForwardedFor); xff != "" {
-		if idx := strings.Index(xff, ", "); idx != -1 {
-			return xff[:idx]
+		first, _, _ := strings.Cut(xff, ",")
+		if first = strings.TrimSpace(first); first != "" {
+			return first
 		}
-		return xff
 	}
 	if realIP := r.Header.Get(XRealIP); realIP != "" {
 		return realIP

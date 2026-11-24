@@ -117,6 +117,13 @@ class ExecdEventSupportTest {
     }
 
     @Test
+    fun `event lines drop only one BOM at the start of the stream`() {
+        val body = "\uFEFF\uFEFFfirst\n\uFEFFsecond\n"
+        val lines = ExecdEventSupport.eventLines(body.reader().buffered()).toList()
+        assertEquals(listOf("\uFEFFfirst", "\uFEFFsecond"), lines)
+    }
+
+    @Test
     fun `foreground exit code is zero only on completion without error`() {
         val complete = Execution().apply { complete = ExecutionComplete(timestamp = 1, executionTimeInMillis = 1) }
         assertEquals(0, ExecdEventSupport.inferForegroundExitCode(complete))

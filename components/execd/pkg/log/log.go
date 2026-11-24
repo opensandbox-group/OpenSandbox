@@ -16,21 +16,29 @@ package log
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/alibaba/opensandbox/internal/safego"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const logFileEnvKey = "EXECD_LOG_FILE"
 
-var current slogger.Logger
+type loggerState struct {
+	legacy slogger.Logger
+	native *zap.Logger
+}
+
+var current *loggerState
 
 // Init constructs the singleton logger. Call once during startup.
 // Legacy levels: 0/1/2=fatal, 3=error, 4=warn, 5/6=info, 7+=debug.
 func Init(level int) {
 	current = newLogger(mapLevel(level))
-	safego.InitPanicLogger(context.Background(), current)
+	safego.InitPanicLogger(context.Background(), current.legacy)
 }
 
 func mapLevel(level int) string {
@@ -48,7 +56,7 @@ func mapLevel(level int) string {
 	}
 }
 
-func newLogger(level string) slogger.Logger {
+func newLogger(level string) *loggerState {
 	cfg := slogger.Config{
 		Level: level,
 	}
@@ -56,10 +64,15 @@ func newLogger(level string) slogger.Logger {
 		cfg.OutputPaths = []string{logFile}
 		cfg.ErrorOutputPaths = cfg.OutputPaths
 	}
-	return slogger.MustNew(cfg)
+	legacy := slogger.MustNew(cfg)
+	sugar, ok := slogger.AsZapSugared(legacy)
+	if !ok {
+		panic("execd log: constructed logger has no native Zap accessor")
+	}
+	return &loggerState{legacy: legacy, native: sugar.Desugar()}
 }
 
-func getLogger() slogger.Logger {
+func getLogger() *loggerState {
 	if current != nil {
 		return current
 	}
@@ -68,14 +81,55 @@ func getLogger() slogger.Logger {
 	return l
 }
 
+// InfoWithCommandID preserves formatted-message sampling and adds only correlation.
+func InfoWithCommandID(commandID, format string, args ...any) {
+	logWithCommandID(zap.InfoLevel, commandID, format, args...)
+}
+
+func WarnWithCommandID(commandID, format string, args ...any) {
+	logWithCommandID(zap.WarnLevel, commandID, format, args...)
+}
+
+func ErrorWithCommandID(commandID, format string, args ...any) {
+	logWithCommandID(zap.ErrorLevel, commandID, format, args...)
+}
+
+func logWithCommandID(level zapcore.Level, commandID, format string, args ...any) {
+	logger := getLogger().native
+	if !logger.Core().Enabled(level) {
+		return
+	}
+	message := format
+	switch {
+	case len(args) == 0:
+	case format != "":
+		message = fmt.Sprintf(format, args...)
+	case len(args) == 1:
+		if text, ok := args[0].(string); ok {
+			message = text
+		} else {
+			message = fmt.Sprint(args...)
+		}
+	default:
+		message = fmt.Sprint(args...)
+	}
+	if event := logger.Check(level, message); event != nil {
+		if commandID == "" {
+			event.Write()
+		} else {
+			event.Write(zap.String("command_id", commandID))
+		}
+	}
+}
+
 func Info(format string, args ...any) {
-	getLogger().Infof(format, args...)
+	getLogger().legacy.Infof(format, args...)
 }
 
 func Warn(format string, args ...any) {
-	getLogger().Warnf(format, args...)
+	getLogger().legacy.Warnf(format, args...)
 }
 
 func Error(format string, args ...any) {
-	getLogger().Errorf(format, args...)
+	getLogger().legacy.Errorf(format, args...)
 }

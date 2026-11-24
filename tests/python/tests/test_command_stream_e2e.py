@@ -104,7 +104,6 @@ async def test_foreground_command_stream_completion(stream_sandbox, scenario):
     async def on_init(_):
         events.append("init")
         if scenario != "empty":
-            # Leave a real producer running while the SDK consumer is delayed.
             await asyncio.sleep(0.1)
 
     async def on_stdout(message):

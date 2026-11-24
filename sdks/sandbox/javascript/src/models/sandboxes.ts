@@ -24,9 +24,14 @@
 
 export type SandboxId = string;
 
+/**
+ * Registry authentication accepts only username and password on the lifecycle API.
+ * Additional properties are forwarded as supplied and rejected with HTTP 422.
+ */
 export interface ImageAuth extends Record<string, unknown> {
   username?: string;
   password?: string;
+  /** @deprecated Use password for registry tokens; the lifecycle API rejects this key. */
   token?: string;
 }
 
@@ -79,9 +84,6 @@ export interface NetworkPolicy extends Record<string, unknown> {
   egress?: NetworkRule[];
 }
 
-// ============================================================================
-// Credential Vault Models
-// ============================================================================
 
 export interface CredentialProxyConfig extends Record<string, unknown> {
   /**
@@ -306,9 +308,6 @@ export interface CredentialVaultPatchRequest extends Record<string, unknown> {
   bindings?: CredentialBindingMutationSet;
 }
 
-// ============================================================================
-// Volume Models
-// ============================================================================
 
 /**
  * Host path bind mount backend.
@@ -615,7 +614,7 @@ export interface CreateSandboxRequest extends Record<string, unknown> {
    * Timeout in seconds (server semantics).
    */
   timeout?: number | null;
-  resourceLimits: ResourceLimits;
+  resourceLimits?: ResourceLimits;
   resourceRequests?: ResourceLimits;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
@@ -683,6 +682,13 @@ export interface CreateSandboxResponse extends Record<string, unknown> {
 
 export type SnapshotState = "Creating" | "Deleting" | "Ready" | "Failed" | string;
 
+/**
+ * Artifact class of a snapshot: `full` is the runtime's most complete capture
+ * (memory and process state on the fast-sandbox backend; filesystem-only on
+ * Docker and Kubernetes), `rootfsOnly` preserves only the writable filesystem.
+ */
+export type SnapshotMode = "full" | "rootfsOnly";
+
 export interface SnapshotStatus extends Record<string, unknown> {
   state: SnapshotState;
   reason?: string;
@@ -694,12 +700,23 @@ export interface SnapshotInfo extends Record<string, unknown> {
   id: string;
   sandboxId: SandboxId;
   name?: string;
+  /**
+   * Artifact class of the snapshot. Built-in HTTP responses always populate
+   * it (absent fields are normalized to `full`), but it stays optional so
+   * custom `Sandboxes` adapters and existing fixtures keep type-checking.
+   */
+  mode?: SnapshotMode;
   status: SnapshotStatus;
   createdAt: Date;
 }
 
 export interface CreateSnapshotRequest extends Record<string, unknown> {
   name?: string;
+  /**
+   * What the snapshot persists. Omit to let the server apply its default
+   * (`full`) — the field stays off the wire for servers that predate it.
+   */
+  mode?: SnapshotMode;
 }
 
 export interface ListSnapshotsResponse extends Record<string, unknown> {

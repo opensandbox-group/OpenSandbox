@@ -26,6 +26,9 @@ spec:
               value: "UTC"
             - name: LIFECYCLE_API_BASE
               value: "http://opensandbox-server:8090/v1"
+            # server: 集群内 Lifecycle 代理。gateway: 公网 ingress endpoint。
+            - name: BFF_SHELL_ENDPOINT_MODE
+              value: "server"
             - name: TENANTS_TOML_PATH
               value: "/etc/opensandbox/tenants.toml"
             - name: BFF_COOKIE_SECURE

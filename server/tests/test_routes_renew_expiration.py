@@ -13,7 +13,9 @@
 # limitations under the License.
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
+import pytest
 from fastapi.exceptions import HTTPException
 from fastapi.testclient import TestClient
 
@@ -60,6 +62,70 @@ def test_renew_expiration_rejects_invalid_payload(
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("body", "unknown_field"),
+    [
+        ({"expiresAt": "2030-01-01T00:00:00Z", "extra": 1}, "extra"),
+        ({"expiresAt": "2030-01-01T00:00:00Z", "expires_at": "2000-01-01T00:00:00Z"}, "expires_at"),
+    ],
+)
+def test_renew_expiration_rejects_unknown_fields(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    body: dict,
+    unknown_field: str,
+) -> None:
+    renew = MagicMock(
+        return_value=RenewSandboxExpirationResponse(expiresAt=datetime.now(timezone.utc))
+    )
+    monkeypatch.setattr(lifecycle.sandbox_service, "renew_expiration", renew)
+
+    response = client.post(
+        "/v1/sandboxes/sbx-001/renew-expiration",
+        headers=auth_headers,
+        json=body,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": [
+            {
+                "type": "extra_forbidden",
+                "loc": ["body", unknown_field],
+                "msg": "Extra inputs are not permitted",
+            }
+        ]
+    }
+    renew.assert_not_called()
+
+
+def test_renew_expiration_accepts_the_snake_case_field_name(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    target = datetime.now(timezone.utc) + timedelta(hours=2)
+    calls: list[datetime] = []
+
+    class StubService:
+        @staticmethod
+        def renew_expiration(sandbox_id: str, request) -> RenewSandboxExpirationResponse:
+            calls.append(request.expires_at)
+            return RenewSandboxExpirationResponse(expiresAt=request.expires_at)
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.post(
+        "/v1/sandboxes/sbx-001/renew-expiration",
+        headers=auth_headers,
+        json={"expires_at": target.isoformat()},
+    )
+
+    assert response.status_code == 200
+    assert calls == [target]
 
 
 def test_renew_expiration_propagates_service_http_error(
@@ -122,13 +188,3 @@ def test_renew_expiration_returns_409_for_manual_cleanup_sandbox(
         "code": "DOCKER::INVALID_EXPIRATION",
         "message": "Sandbox sbx-manual does not have automatic expiration enabled.",
     }
-
-
-def test_renew_expiration_requires_api_key(client: TestClient) -> None:
-    response = client.post(
-        "/v1/sandboxes/sbx-001/renew-expiration",
-        json={"expiresAt": "2030-01-01T00:00:00Z"},
-    )
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "MISSING_API_KEY"

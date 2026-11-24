@@ -49,7 +49,7 @@ test(
     const metricsPosts: Array<{ url: string; body: Record<string, unknown> }> =
       [];
 
-    let connectionConfig = createConnectionConfig().withTransportIfMissing();
+    const connectionConfig = createConnectionConfig().withTransportIfMissing();
     const baseFetch = connectionConfig.fetch.bind(connectionConfig);
     Object.defineProperty(connectionConfig, "fetch", {
       configurable: true,

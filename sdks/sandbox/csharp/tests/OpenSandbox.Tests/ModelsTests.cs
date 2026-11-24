@@ -135,10 +135,8 @@ public class ModelsTests
     [Fact]
     public void Execution_ShouldInitializeWithEmptyCollections()
     {
-        // Arrange & Act
         var execution = new Execution();
 
-        // Assert
         execution.Id.Should().BeNull();
         execution.ExecutionCount.Should().BeNull();
         execution.Logs.Should().NotBeNull();
@@ -153,16 +151,13 @@ public class ModelsTests
     [Fact]
     public void ExecutionLogs_ShouldAllowAddingMessages()
     {
-        // Arrange
         var logs = new ExecutionLogs();
         var stdoutMsg = new OutputMessage { Text = "stdout", Timestamp = 1000, IsError = false };
         var stderrMsg = new OutputMessage { Text = "stderr", Timestamp = 2000, IsError = true };
 
-        // Act
         logs.Stdout.Add(stdoutMsg);
         logs.Stderr.Add(stderrMsg);
 
-        // Assert
         logs.Stdout.Should().HaveCount(1);
         logs.Stdout[0].Text.Should().Be("stdout");
         logs.Stderr.Should().HaveCount(1);
@@ -173,7 +168,6 @@ public class ModelsTests
     [Fact]
     public void OutputMessage_ShouldStoreProperties()
     {
-        // Arrange & Act
         var msg = new OutputMessage
         {
             Text = "Hello World",
@@ -181,7 +175,6 @@ public class ModelsTests
             IsError = false
         };
 
-        // Assert
         msg.Text.Should().Be("Hello World");
         msg.Timestamp.Should().Be(1234567890);
         msg.IsError.Should().BeFalse();
@@ -190,7 +183,6 @@ public class ModelsTests
     [Fact]
     public void ExecutionResult_ShouldStoreProperties()
     {
-        // Arrange & Act
         var result = new ExecutionResult
         {
             Text = "Result text",
@@ -198,7 +190,6 @@ public class ModelsTests
             Raw = new Dictionary<string, object> { ["text/plain"] = "Result text" }
         };
 
-        // Assert
         result.Text.Should().Be("Result text");
         result.Timestamp.Should().Be(1234567890);
         result.Raw.Should().ContainKey("text/plain");
@@ -207,7 +198,6 @@ public class ModelsTests
     [Fact]
     public void ExecutionError_ShouldStoreProperties()
     {
-        // Arrange & Act
         var error = new ExecutionError
         {
             Name = "ValueError",
@@ -216,7 +206,6 @@ public class ModelsTests
             Traceback = new List<string> { "line 1", "line 2" }
         };
 
-        // Assert
         error.Name.Should().Be("ValueError");
         error.Value.Should().Be("Invalid value");
         error.Timestamp.Should().Be(1234567890);
@@ -226,14 +215,12 @@ public class ModelsTests
     [Fact]
     public void ExecutionComplete_ShouldStoreProperties()
     {
-        // Arrange & Act
         var complete = new ExecutionComplete
         {
             Timestamp = 1234567890,
             ExecutionTimeMs = 500
         };
 
-        // Assert
         complete.Timestamp.Should().Be(1234567890);
         complete.ExecutionTimeMs.Should().Be(500);
     }
@@ -241,7 +228,6 @@ public class ModelsTests
     [Fact]
     public void SandboxInfo_ShouldStoreProperties()
     {
-        // Arrange & Act
         var info = new SandboxInfo
         {
             Id = "sandbox-123",
@@ -254,7 +240,6 @@ public class ModelsTests
             Metadata = new Dictionary<string, string> { ["key"] = "value" }
         };
 
-        // Assert
         info.Id.Should().Be("sandbox-123");
         info.Image.Uri.Should().Be("ubuntu:latest");
         info.Platform.Should().NotBeNull();
@@ -282,7 +267,6 @@ public class ModelsTests
     [Fact]
     public void SandboxStatus_ShouldStoreProperties()
     {
-        // Arrange & Act
         var status = new SandboxStatus
         {
             State = "Error",
@@ -290,7 +274,6 @@ public class ModelsTests
             Message = "Failed to pull image"
         };
 
-        // Assert
         status.State.Should().Be("Error");
         status.Reason.Should().Be("ImagePullFailed");
         status.Message.Should().Be("Failed to pull image");
@@ -299,7 +282,6 @@ public class ModelsTests
     [Fact]
     public void ImageSpec_WithAuth_ShouldStoreCredentials()
     {
-        // Arrange & Act
         var image = new ImageSpec
         {
             Uri = "private-registry.com/image:tag",
@@ -310,7 +292,6 @@ public class ModelsTests
             }
         };
 
-        // Assert
         image.Uri.Should().Be("private-registry.com/image:tag");
         image.Auth.Should().NotBeNull();
         image.Auth!.Username.Should().Be("user");
@@ -320,7 +301,6 @@ public class ModelsTests
     [Fact]
     public void NetworkPolicy_ShouldStoreRules()
     {
-        // Arrange & Act
         var policy = new NetworkPolicy
         {
             DefaultAction = NetworkRuleAction.Deny,
@@ -331,7 +311,6 @@ public class ModelsTests
             }
         };
 
-        // Assert
         policy.DefaultAction.Should().Be(NetworkRuleAction.Deny);
         policy.Egress.Should().HaveCount(2);
         policy.Egress![0].Action.Should().Be(NetworkRuleAction.Allow);
@@ -380,7 +359,6 @@ public class ModelsTests
     [Fact]
     public void SandboxMetrics_ShouldStoreProperties()
     {
-        // Arrange & Act
         var metrics = new SandboxMetrics
         {
             CpuCount = 4,
@@ -390,7 +368,6 @@ public class ModelsTests
             Timestamp = 1234567890
         };
 
-        // Assert
         metrics.CpuCount.Should().Be(4);
         metrics.CpuUsedPercentage.Should().Be(25.5);
         metrics.MemoryTotalMiB.Should().Be(8192);
@@ -401,7 +378,6 @@ public class ModelsTests
     [Fact]
     public void SandboxFileInfo_ShouldStoreProperties()
     {
-        // Arrange & Act
         var fileInfo = new SandboxFileInfo
         {
             Path = "/tmp/test.txt",
@@ -413,7 +389,6 @@ public class ModelsTests
             ModifiedAt = DateTime.UtcNow
         };
 
-        // Assert
         fileInfo.Path.Should().Be("/tmp/test.txt");
         fileInfo.Size.Should().Be(1024);
         fileInfo.Mode.Should().Be(644);
@@ -423,7 +398,6 @@ public class ModelsTests
     [Fact]
     public void WriteEntry_ShouldStoreProperties()
     {
-        // Arrange & Act
         var entry = new WriteEntry
         {
             Path = "/tmp/file.txt",
@@ -433,7 +407,6 @@ public class ModelsTests
             Group = "group"
         };
 
-        // Assert
         entry.Path.Should().Be("/tmp/file.txt");
         entry.Data.Should().Be("Hello World");
         entry.Mode.Should().Be(644);
@@ -442,14 +415,12 @@ public class ModelsTests
     [Fact]
     public void SearchEntry_ShouldStoreProperties()
     {
-        // Arrange & Act
         var entry = new SearchEntry
         {
             Path = "/tmp",
             Pattern = "*.txt"
         };
 
-        // Assert
         entry.Path.Should().Be("/tmp");
         entry.Pattern.Should().Be("*.txt");
     }
@@ -457,14 +428,12 @@ public class ModelsTests
     [Fact]
     public void MoveEntry_ShouldStoreProperties()
     {
-        // Arrange & Act
         var entry = new MoveEntry
         {
             Src = "/tmp/old.txt",
             Dest = "/tmp/new.txt"
         };
 
-        // Assert
         entry.Src.Should().Be("/tmp/old.txt");
         entry.Dest.Should().Be("/tmp/new.txt");
     }
@@ -472,7 +441,6 @@ public class ModelsTests
     [Fact]
     public void RunCommandOptions_ShouldStoreProperties()
     {
-        // Arrange & Act
         var options = new RunCommandOptions
         {
             WorkingDirectory = "/home/user",
@@ -486,7 +454,6 @@ public class ModelsTests
             }
         };
 
-        // Assert
         options.WorkingDirectory.Should().Be("/home/user");
         options.Background.Should().BeTrue();
         options.TimeoutSeconds.Should().Be(30);
@@ -545,7 +512,6 @@ public class ModelsTests
     [Fact]
     public void ServerStreamEvent_ShouldStoreProperties()
     {
-        // Arrange & Act
         var ev = new ServerStreamEvent
         {
             Type = "stdout",
@@ -555,7 +521,6 @@ public class ModelsTests
             ExecutionTime = 100
         };
 
-        // Assert
         ev.Type.Should().Be("stdout");
         ev.Text.Should().Be("output text");
         ev.Timestamp.Should().Be(1234567890);
@@ -603,7 +568,6 @@ public class ModelsTests
     [Fact]
     public void PaginationInfo_ShouldStoreProperties()
     {
-        // Arrange & Act
         var pagination = new PaginationInfo
         {
             Page = 1,
@@ -613,7 +577,6 @@ public class ModelsTests
             HasNextPage = true
         };
 
-        // Assert
         pagination.Page.Should().Be(1);
         pagination.PageSize.Should().Be(10);
         pagination.TotalItems.Should().Be(100);

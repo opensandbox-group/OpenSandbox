@@ -15,12 +15,14 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -49,7 +51,6 @@ func TestGetCommandStatus_Running(t *testing.T) {
 	require.NoError(t, c.runBackgroundCommand(ctx, cancel, req))
 	require.NotEmpty(t, session, "session should be set by OnExecuteInit")
 
-	// Poll until status is registered (runBackgroundCommand stores kernel asynchronously).
 	deadline := time.Now().Add(5 * time.Second)
 	var (
 		status *CommandStatus
@@ -108,9 +109,6 @@ func TestSeekBackgroundCommandOutput_Completed(t *testing.T) {
 	require.Equal(t, stdoutContent, string(output))
 }
 
-// TestSeekBackgroundCommandOutput_ClampsCursorPastEOF verifies a cursor beyond
-// the current end of the log returns empty output with the real end offset, so
-// later writes are still delivered on the next poll (#1010).
 func TestSeekBackgroundCommandOutput_ClampsCursorPastEOF(t *testing.T) {
 	c := NewController("", "")
 
@@ -139,9 +137,71 @@ func TestSeekBackgroundCommandOutput_ClampsCursorPastEOF(t *testing.T) {
 	require.Equal(t, int64(11), cursor)
 }
 
-// TestSeekBackgroundCommandOutput_RejectsNegativeCursor verifies the cursor is
-// validated before seeking (the spec declares minimum: 0), instead of
-// surfacing a platform-specific seek error.
+func TestSeekBackgroundCommandOutput_CapsReadSize(t *testing.T) {
+	c := NewController("", "")
+
+	tmpDir := t.TempDir()
+	session := "sess-capped"
+	stdoutPath := filepath.Join(tmpDir, session+".stdout")
+
+	payload := bytes.Repeat([]byte("x"), maxBackgroundLogReadBytes+1234)
+	require.NoError(t, os.WriteFile(stdoutPath, payload, 0o644))
+
+	c.storeCommandKernel(session, &commandKernel{
+		pid:          791,
+		stdoutPath:   stdoutPath,
+		isBackground: true,
+		startedAt:    time.Now(),
+		running:      true,
+	})
+
+	output, cursor, err := c.SeekBackgroundCommandOutput(session, 0)
+	require.NoError(t, err)
+	require.Len(t, output, maxBackgroundLogReadBytes, "a single read must not exceed the cap")
+	require.Equal(t, int64(maxBackgroundLogReadBytes), cursor, "cursor should advance to the end of the returned bytes")
+
+	output, cursor, err = c.SeekBackgroundCommandOutput(session, cursor)
+	require.NoError(t, err)
+	require.Len(t, output, 1234, "the remainder should be returned on the next poll")
+	require.Equal(t, int64(len(payload)), cursor)
+}
+
+func TestSeekBackgroundCommandOutput_KeepsUTF8Boundary(t *testing.T) {
+	c := NewController("", "")
+
+	tmpDir := t.TempDir()
+	session := "sess-rune"
+	stdoutPath := filepath.Join(tmpDir, session+".stdout")
+
+	// Place a 3-byte rune so that it straddles the cap: the first byte is
+	// the last byte of the first page, the other two are the first bytes of
+	// the second page.
+	const multibyte = "中"
+	payload := append(bytes.Repeat([]byte("a"), maxBackgroundLogReadBytes-1), []byte(multibyte+"tail")...)
+	require.NoError(t, os.WriteFile(stdoutPath, payload, 0o644))
+
+	c.storeCommandKernel(session, &commandKernel{
+		pid:          792,
+		stdoutPath:   stdoutPath,
+		isBackground: true,
+		startedAt:    time.Now(),
+		running:      true,
+	})
+
+	first, cursor, err := c.SeekBackgroundCommandOutput(session, 0)
+	require.NoError(t, err)
+	require.Len(t, first, maxBackgroundLogReadBytes-1, "first page should end before the split rune")
+	require.Equal(t, int64(maxBackgroundLogReadBytes-1), cursor, "cursor should point at the rune start")
+	require.True(t, utf8.Valid(first), "first page must be valid UTF-8 on its own")
+
+	second, cursor, err := c.SeekBackgroundCommandOutput(session, cursor)
+	require.NoError(t, err)
+	require.Equal(t, multibyte+"tail", string(second), "second page should start with the whole rune")
+	require.Equal(t, int64(len(payload)), cursor)
+
+	require.Equal(t, string(payload), string(first)+string(second), "pages should reassemble the log")
+}
+
 func TestSeekBackgroundCommandOutput_RejectsNegativeCursor(t *testing.T) {
 	c := NewController("", "")
 

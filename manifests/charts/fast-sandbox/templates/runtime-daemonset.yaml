@@ -72,6 +72,7 @@ subjects:
 - kind: ServiceAccount
   name: fast-sandbox-firecracker-runtime
   namespace: {{ $ns }}
+{{- if eq (include "fast-sandbox.p2pEnabled" .) "true" }}
 ---
 # Headless Service backing DART peer discovery: DNS seeding hands out the
 # ready runtime Pod IPs so node-local DART daemons can find each other
@@ -96,6 +97,7 @@ spec:
     port: {{ .Values.runtime.dartPeerPort }}
     targetPort: peer
     protocol: TCP
+{{- end }}
 ---
 # All agent tunables live in this config (mounted at
 # /etc/fast-sandbox/agent-config/agent.yaml); the nodeReadiness section
@@ -119,6 +121,7 @@ data:
     stateRoot: {{ .Values.runtime.stateRoot }}
     registryConfig: /etc/fast-sandbox/agent/registry.json
     hostnameFile: /etc/hostname
+    {{- if eq (include "fast-sandbox.p2pEnabled" .) "true" }}
     p2p:
       dart:
         addr: http://127.0.0.1:8145
@@ -126,6 +129,7 @@ data:
         admin: 127.0.0.1:8147
         cacheSize: 8GiB
         discover: {{ $dartDiscover }}
+    {{- end }}
     nodeReadiness:
       enabled: true
       assetsDir: /opt/fast-sandbox/firecracker
@@ -155,11 +159,17 @@ spec:
       labels:
         app: fast-sandbox
         component: firecracker-runtime
+        {{- with .Values.runtime.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9092"
         prometheus.io/path: /metrics
         kubectl.kubernetes.io/default-container: firecracker-agent
+        {{- with .Values.runtime.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -179,6 +189,10 @@ spec:
       {{- end }}
       {{- with .Values.runtime.nodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runtime.affinity }}
+      affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       # The runtime runs on the cluster network (NOT hostNetwork): its dart
@@ -252,10 +266,12 @@ spec:
           initialDelaySeconds: 2
           periodSeconds: 5
           timeoutSeconds: 3
+        {{- if eq (include "fast-sandbox.p2pEnabled" .) "true" }}
         ports:
         - name: peer
           containerPort: {{ .Values.runtime.dartPeerPort }}
           protocol: TCP
+        {{- end }}
         {{- with .Values.runtime.resources.agent }}
         resources:
           {{- toYaml . | nindent 10 }}
@@ -300,6 +316,12 @@ spec:
           value: {{ .Values.runtime.stateRoot }}
         - name: OVERLAYBD_CACHE_SIZE_GB
           value: {{ .Values.runtime.oci.cacheSizeGB | quote }}
+        - name: OVERLAYBD_POOL_LOW
+          value: {{ .Values.runtime.oci.poolLow | quote }}
+        - name: OVERLAYBD_POOL_HIGH
+          value: {{ .Values.runtime.oci.poolHigh | quote }}
+        - name: OVERLAYBD_POOL_SIZE_GB
+          value: {{ .Values.runtime.oci.poolSizeGB | quote }}
         securityContext:
           privileged: true
         {{- with .Values.runtime.resources.ublkd }}

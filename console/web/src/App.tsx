@@ -13,10 +13,10 @@
 // limitations under the License.
 
 import { ConfigProvider } from 'antd';
-import zhCN from 'antd/locale/zh_CN';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 
 import { AuthProvider, RequireAdmin, RequireAuth } from './auth/AuthContext';
+import { I18nProvider, antdLocales, useI18n } from './i18n';
 import { AppLayout } from './layout/AppLayout';
 import { AdminSandboxesPage } from './pages/AdminSandboxesPage';
 import { DiagnosticsPage } from './pages/DiagnosticsPage';
@@ -26,6 +26,7 @@ import { PoolsPage } from './pages/PoolsPage';
 import { SandboxCreatePage } from './pages/SandboxCreatePage';
 import { SandboxDetailPage } from './pages/SandboxDetailPage';
 import { SandboxListPage } from './pages/SandboxListPage';
+import { SandboxShellPage } from './pages/SandboxShellPage';
 import { SnapshotsPage } from './pages/SnapshotsPage';
 import { ComponentHealthPage } from './pages/platform/ComponentHealthPage';
 import { K8sEventsPage } from './pages/platform/K8sEventsPage';
@@ -57,9 +58,11 @@ const consoleTheme = {
   },
 };
 
-export default function App() {
+function ConsoleApp() {
+  const { locale } = useI18n();
+
   return (
-    <ConfigProvider locale={zhCN} theme={consoleTheme}>
+    <ConfigProvider locale={antdLocales[locale]} theme={consoleTheme}>
       <BrowserRouter>
         <AuthProvider>
           <Routes>
@@ -74,6 +77,7 @@ export default function App() {
               <Route index element={<OverviewPage />} />
               <Route path="sandboxes" element={<SandboxListPage />} />
               <Route path="sandboxes/new" element={<SandboxCreatePage />} />
+              <Route path="sandboxes/:id/shell" element={<SandboxShellPage />} />
               <Route path="sandboxes/:id" element={<SandboxDetailPage />} />
               <Route
                 path="admin/sandboxes"
@@ -103,5 +107,13 @@ export default function App() {
         </AuthProvider>
       </BrowserRouter>
     </ConfigProvider>
+  );
+}
+
+export default function App() {
+  return (
+    <I18nProvider>
+      <ConsoleApp />
+    </I18nProvider>
   );
 }

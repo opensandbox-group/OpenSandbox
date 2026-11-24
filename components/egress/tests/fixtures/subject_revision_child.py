@@ -73,12 +73,26 @@ def main():
             if command["command"] == "fault":
                 operations = command.get("operations", [command.get("operation")])
                 if (type(operations) is not list or not 1 <= len(operations) <= 4
-                        or any(op not in ("register", "unload", "prepare", "commit", "abort")
+                        or any(op not in ("register", "unload", "suspend", "lifecycle-status", "prepare", "commit", "abort")
                                for op in operations)):
                     raise ValueError("invalid test fault")
                 with lock:
                     state["drop"] = list(operations)
                 emit({"ready": True})
+            elif command["command"] == "fail-close":
+                with owner._operation_lock:
+                    entry = owner._entries[command["subjectKey"]]
+                    original_close = entry.receiver.close
+                    def fail_close():
+                        original_close()
+                        raise RuntimeError("injected close failure after fencing")
+                    entry.receiver.close = fail_close
+                emit({"ready": True})
+            elif command["command"] == "lookup":
+                view = owner.lookup_source(command["address"])
+                emit({"target": {"subjectKey": view.target.subject_key,
+                                 "subjectGeneration": view.target.subject_generation} if view else None,
+                      "revision": _to_wire(view.snapshot.revision) if view and view.snapshot else None})
             elif command["command"] == "inspect":
                 target = Target(command["subjectKey"], command["subjectGeneration"])
                 identity = (config["control"], target.subject_generation)
@@ -94,6 +108,7 @@ def main():
                     identity=identity, sni=command.get("sni"),
                     ech_hidden=command.get("ech", False),
                     static_passthrough=(), view=view,
+                    destination_port=command.get("destinationPort", 443),
                 )
                 with lock:
                     dropped = state["dropped"]

@@ -6,10 +6,16 @@ Components:
     Service: fast-sandbox-fastpath.{{ include "fast-sandbox.namespace" . }}.svc:9090
 {{- end }}
 {{- if .Values.runtime.enabled }}
-  - firecracker-runtime (per-node UDS management API + DART P2P + node
-    readiness loop: host checks, Firecracker asset install, self-applied
-    scheduling labels + FirecrackerReady condition; janitor sidecar;
-    peer discovery Service: dart.{{ include "fast-sandbox.namespace" . }}.svc)
+  - firecracker-runtime (per-node UDS management API + node readiness
+    loop: host checks, Firecracker asset install, self-applied scheduling
+    labels + FirecrackerReady condition; janitor sidecar
+{{- if eq (include "fast-sandbox.p2pEnabled" .) "true" }}
+    + DART P2P delivery, peer discovery Service:
+    dart.{{ include "fast-sandbox.namespace" . }}.svc
+{{- else }}
+    + direct origin artifact pulls (DART P2P disabled via runtime.p2p.enabled=false)
+{{- end }}
+  )
 {{- if .Values.runtime.oci.enabled }}
     + OverlayBD OCI stack: install-oci-tools init, overlaybd-ublkd
     sidecar (socket /run/fast-sandbox/overlaybd/ublkd.sock), agent
@@ -37,7 +43,7 @@ Next steps:
      ConfigMap in the pool's namespace, and point SandboxTemplate
      output.publish at an oci:// registry the nodes trust.
 {{- end }}
-{{- if and .Values.routeKeys.create .Values.routeKeys.developmentOnly }}
+{{- if and .Values.routeKeys.create (not .Values.routeKeys.existingSecret) .Values.routeKeys.developmentOnly }}
 
 WARNING: the Ed25519 controller route keys in fast-sandbox-route-keys are
 the published development-only test keys. Provision production keys via

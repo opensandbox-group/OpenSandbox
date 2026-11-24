@@ -33,6 +33,7 @@ from opensandbox.adapters.converter.filesystem_model_converter import (
     FilesystemModelConverter,
 )
 from opensandbox.adapters.converter.response_handler import (
+    build_api_exception_from_httpx,
     extract_request_id,
     handle_api_error,
 )
@@ -228,16 +229,18 @@ class IsolatedFilesystemAdapter(Filesystem):
                     await response.aread()
                 finally:
                     await response.aclose()
-                raise SandboxApiException(
-                    f"Failed to stream file {path}: {response.status_code}",
-                    status_code=response.status_code,
-                    request_id=extract_request_id(response.headers),
+                raise build_api_exception_from_httpx(
+                    response, f"Stream file {path}"
                 )
-            return create_read_bytes_response(
-                response,
-                iter_async_response_bytes(response, chunk_size),
-                line_based=offset is not None or limit is not None,
-            )
+            try:
+                return create_read_bytes_response(
+                    response,
+                    iter_async_response_bytes(response, chunk_size),
+                    line_based=offset is not None or limit is not None,
+                )
+            except BaseException:
+                await response.aclose()
+                raise
         except Exception as e:
             raise ExceptionConverter.to_sandbox_exception(e) from e
 

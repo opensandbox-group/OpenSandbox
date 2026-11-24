@@ -64,7 +64,6 @@ async def main() -> None:
         request_timeout=timedelta(seconds=60),
     )
 
-    # Inject Claude settings into container environment for CLI access
     env = {
         "ANTHROPIC_AUTH_TOKEN": claude_auth_token,
         "ANTHROPIC_BASE_URL": claude_base_url,
@@ -87,7 +86,6 @@ async def main() -> None:
         )
         await _print_execution_logs(install_exec)
 
-        # Use Claude CLI to send a message
         run_exec = await sandbox.commands.run(
             'claude "Compute 1+1=?."'
         )

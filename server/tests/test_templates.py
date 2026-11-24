@@ -38,7 +38,10 @@ from opensandbox_server.services.templates.template_models import (
     FastSandboxTemplatePhase,
     FastSandboxTemplateRecord,
 )
-from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
+from opensandbox_server.services.templates.template_service import (
+    FastSandboxTemplateService,
+    effective_machine,
+)
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.informer import WorkloadInformer
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
@@ -47,7 +50,15 @@ from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as p
 def _config(namespace: str = "ns-1", runtime: str = "kubernetes") -> AppConfig:
     config = AppConfig(
         server=ServerConfig(host="0.0.0.0", port=8080, api_key="x"),
-        runtime=RuntimeConfig(type=runtime, execd_image="opensandbox/execd:1.1.0"),
+        # Pinned to the classic topology: most tests here assert env projection
+        # without EXECD_INIT. Init-mode projection is covered by the
+        # execd_init_service fixture (the config default is execd_run_as_init
+        # = true; see test_config.py).
+        runtime=RuntimeConfig(
+            type=runtime,
+            execd_image="opensandbox/execd:1.1.0",
+            execd_run_as_init=False,
+        ),
     )
     if runtime != "docker":
         config.kubernetes = KubernetesRuntimeConfig(
@@ -304,6 +315,23 @@ def test_create_rejects_native_oci_before_side_effects(service, crs):
     assert not crs.created
 
 
+@pytest.mark.parametrize("alias", ["storage", "ephemeral-storage"])
+def test_create_rejects_sandbox_disk_quota_aliases(service, crs, alias):
+    """The sandbox writable-layer quota aliases are not template keys.
+
+    Template resourceLimits describe guest machine sizing (disk = guest
+    rootfs size), and the shared sandbox-create component must not promise
+    the aliases here.
+    """
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(resourceLimits={"cpu": "1", alias: "10G"}))
+    assert excinfo.value.status_code == 400
+    assert excinfo.value.detail["code"] == "SANDBOX::INVALID_PARAMETER"
+    assert alias in excinfo.value.detail["message"]
+    assert "cpu, memory, disk" in excinfo.value.detail["message"]
+    assert not crs.created
+
+
 @pytest.mark.parametrize("manifest_ref", [
     None,
     "oci://registry.example.com/team/templates:latest",
@@ -387,6 +415,93 @@ def test_create_maps_disk_resource_to_rootfs_size(service, crs):
     assert spec["machine"] == {"vcpu": "1", "memory": "512Mi"}
 
 
+def test_effective_machine_declared():
+    spec = {"resourceLimits": {"cpu": "2", "memory": "1Gi", "disk": "5Gi"}}
+    assert effective_machine(spec) == {"cpu": "2", "memory": "1Gi"}
+
+
+def test_effective_machine_defaults_when_undeclared():
+    assert effective_machine({}) == {"cpu": "1", "memory": "512Mi"}
+    assert effective_machine({"resourceLimits": None}) == {"cpu": "1", "memory": "512Mi"}
+
+
+@pytest.mark.parametrize(
+    "limits, expected",
+    [
+        ({"cpu": "4"}, {"cpu": "4", "memory": "512Mi"}),
+        ({"memory": "2Gi"}, {"cpu": "1", "memory": "2Gi"}),
+    ],
+)
+def test_effective_machine_partial_declaration(limits, expected):
+    assert effective_machine({"resourceLimits": limits}) == expected
+
+
+def test_effective_machine_prefers_pinned_machine():
+    """A pinned machine is echoed verbatim; resourceLimits never re-derives it."""
+    spec = {
+        "resourceLimits": {"cpu": "1", "memory": "512Mi"},
+        "machine": {"cpu": "2", "memory": "1Gi"},
+    }
+    assert effective_machine(spec) == {"cpu": "2", "memory": "1Gi"}
+
+
+def test_create_persists_effective_machine(service, crs, repo):
+    record = service.create_template(_create_request())
+    assert record.spec["machine"] == {"cpu": "2", "memory": "1Gi"}
+    assert "disk" not in record.spec["machine"]
+    # resourceLimits stays verbatim for the API echo (disk included).
+    assert record.spec["resourceLimits"] == {"cpu": "2", "memory": "1Gi", "disk": "5Gi"}
+    assert crs.created[-1]["spec"]["machine"] == {"vcpu": "2", "memory": "1Gi"}
+    assert repo.get(record.template_id, "ns-1").spec["machine"] == {"cpu": "2", "memory": "1Gi"}
+
+
+def test_create_persists_default_and_partial_machine(service, crs):
+    record = service.create_template(_create_request(resourceLimits=None))
+    assert record.spec["machine"] == {"cpu": "1", "memory": "512Mi"}
+
+    record = service.create_template(_create_request(resourceLimits={"memory": "2Gi"}))
+    assert record.spec["machine"] == {"cpu": "1", "memory": "2Gi"}
+    assert crs.created[-1]["spec"]["machine"] == {"vcpu": "1", "memory": "2Gi"}
+
+
+def test_resolve_artifact_derives_machine_for_legacy_rows(service, repo):
+    """Rows written before OSEP-0026 carry no machine key; resolve derives it."""
+    record = FastSandboxTemplateRecord(
+        template_id="tpl-legacy",
+        namespace="ns-1",
+        crd_name="tpl-legacy",
+        spec={
+            "image": "alpine:3.19",
+            "publish": "s3://b/p",
+            "format": "native",
+            "resourceLimits": {"cpu": "2", "memory": "1Gi", "disk": "5Gi"},
+        },
+        phase=FastSandboxTemplatePhase.SUCCEEDED,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    repo.create(record)
+    artifact_ref, _entrypoint, machine = service.resolve_template_artifact("tpl-legacy")
+    assert artifact_ref == "tpl-legacy"
+    assert machine == {"cpu": "2", "memory": "1Gi"}
+
+
+def test_resolve_artifact_derives_default_machine_for_legacy_row(service, repo):
+    record = service_record("tpl-legacy-default", "ns-1")
+    record.phase = FastSandboxTemplatePhase.SUCCEEDED
+    repo.create(record)
+    _artifact_ref, _entrypoint, machine = service.resolve_template_artifact("tpl-legacy-default")
+    assert machine == {"cpu": "1", "memory": "512Mi"}
+
+
+def test_resolve_artifact_echoes_pinned_machine(service, crs):
+    record = service.create_template(_create_request(resourceLimits={"cpu": "2", "memory": "1Gi"}))
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+    _artifact_ref, _entrypoint, machine = service.resolve_template_artifact(record.template_id)
+    assert machine == {"cpu": "2", "memory": "1Gi"}
+
+
 def test_create_projects_env_to_crd(service, crs):
     service.create_template(_create_request(env={"LOG_LEVEL": "info", "API_KEY": "k"}))
     spec = crs.created[-1]["spec"]
@@ -413,7 +528,6 @@ def execd_init_service(repo, crs, monkeypatch):
 
 
 def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
-    # A client-provided EXECD_INIT must not win over the server switch.
     record = execd_init_service.create_template(
         _create_request(env={"EXECD_INIT": "0", "LOG_LEVEL": "info"})
     )
@@ -426,7 +540,7 @@ def test_create_injects_execd_init_env_when_enabled(execd_init_service, crs):
     assert crs.created[-1]["spec"]["envs"] == [{"name": "EXECD_INIT", "value": "1"}]
 
 
-def test_create_does_not_inject_execd_init_by_default(service, crs):
+def test_create_does_not_inject_execd_init_when_disabled(service, crs):
     service.create_template(_create_request(env={"LOG_LEVEL": "info"}))
     envs = {e["name"]: e["value"] for e in crs.created[-1]["spec"]["envs"]}
     assert envs == {"LOG_LEVEL": "info"}
@@ -574,13 +688,12 @@ def test_resolve_artifact_requires_succeeded(service, crs):
 
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
     _converge(service, crs, "ns-1", record.crd_name)
-    artifact_ref, entrypoint = service.resolve_template_artifact(record.template_id)
+    artifact_ref, entrypoint, machine = service.resolve_template_artifact(record.template_id)
     assert artifact_ref == record.template_id
     assert entrypoint == ["sleep", "1"]
 
 
 def test_resolve_gate_trusts_db_row_not_crd(service, crs):
-    """The create gate reads the DB projection only."""
     record = service.create_template(_create_request(entrypoint=["sleep", "1"]))
 
     # CR already says Succeeded but the event has not been delivered: 404.
@@ -593,7 +706,7 @@ def test_resolve_gate_trusts_db_row_not_crd(service, crs):
     # if the CR store regresses afterwards (the gate never re-reads the CR).
     _converge(service, crs, "ns-1", record.crd_name)
     crs.set_status("ns-1", record.crd_name, {"phase": "Failed"})
-    artifact_ref, entrypoint = service.resolve_template_artifact(record.template_id)
+    artifact_ref, entrypoint, _machine = service.resolve_template_artifact(record.template_id)
     assert artifact_ref == record.template_id
     assert entrypoint == ["sleep", "1"]
 
@@ -608,9 +721,6 @@ def test_resolve_restarts_watch_for_non_terminal_rows(service, crs, repo):
         service.resolve_template_artifact(record.template_id)
     assert excinfo.value.status_code == 404
     assert "ns-1" in service._watched_namespaces
-
-
-# -- overlaybd (OCI publication) ------------------------------------------------
 
 
 def _overlaybd_config(**overrides) -> KubernetesRuntimeConfig:
@@ -658,7 +768,9 @@ def test_resolve_overlaybd_returns_manifest_ref(overlaybd_service, crs):
     manifest_ref = "oci://registry.example.com/sandbox/templates@sha256:" + "a" * 64
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": manifest_ref})
     _converge(overlaybd_service, crs, "ns-1", record.crd_name)
-    artifact_ref, entrypoint = overlaybd_service.resolve_template_artifact(record.template_id)
+    artifact_ref, entrypoint, _machine = overlaybd_service.resolve_template_artifact(
+        record.template_id
+    )
     assert artifact_ref == manifest_ref
     assert entrypoint == ["sleep", "1"]
 
@@ -810,6 +922,16 @@ def test_routes_list_filters_on_empty_metadata_value(client, service):
     assert [item["templateId"] for item in payload["items"]] == [empty.template_id]
 
 
+def test_routes_list_rejects_malformed_metadata_filter(client, service):
+    service.create_template(_create_request(metadata={"env": "prod"}))
+
+    listing = client.get("/v1/templates", params={"metadata": "env=prod&broken"})
+    assert listing.status_code == 400, listing.text
+    detail = listing.json()["detail"]
+    assert detail["code"] == "INVALID_METADATA_FORMAT"
+    assert "bad query field" in detail["message"]
+
+
 def test_routes_reject_extra_fields(client):
     response = client.post(
         "/v1/templates",
@@ -864,6 +986,7 @@ def test_template_mode_request_validation():
 class _StubFastPath:
     def __init__(self):
         self.last_create = None
+        self.get_pool_calls = 0
         info = pb2.SandboxInfo(
             identity=pb2.SandboxIdentity(uid="u-1", name="sbx", namespace="ns-1"),
             runtime=pb2.RuntimeInfo(state=pb2.RUNTIME_STATE_READY),
@@ -876,6 +999,11 @@ class _StubFastPath:
     def create_sandbox(self, request, *, wait_timeout_millis=None):
         self.last_create = request
         return self._response
+
+    def get_pool(self, namespace, pool_ref):
+        self.get_pool_calls += 1
+        # No sandbox_resource_profile: older FastPath shape, gate stays closed.
+        return pb2.PoolInfo(namespace=namespace, name=pool_ref)
 
     def close(self):
         return None
@@ -917,6 +1045,46 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs, oci):
     assert stub.last_create.pool_ref == "default-pool"
     assert response.id.startswith("fsb-")
     assert response.entrypoint == ["python", "app.py"]
+
+
+def test_template_mode_pool_mode_cache_serves_repeated_creates(service, crs):
+    """GetPool is read once per TTL window, not per create."""
+    import asyncio
+
+    from opensandbox_server.services.fast_sandbox.service import (
+        FastSandboxService,
+        _POOL_MODE_CACHE_TTL_SECONDS,
+    )
+
+    record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    stub = _StubFastPath()
+    sandbox_service = FastSandboxService(
+        _config(), fastpath_client=stub, k8s_client=k8s, template_service=service
+    )
+    try:
+        request = CreateSandboxRequest.model_validate(
+            {"templateId": record.template_id, "timeout": 3600}
+        )
+        asyncio.run(sandbox_service.create_sandbox(request))
+        asyncio.run(sandbox_service.create_sandbox(request))
+        assert stub.get_pool_calls == 1
+
+        # Force the cached entry past the TTL: the next create re-reads.
+        key = ("ns-1", "default-pool")
+        aware, fetched_at = sandbox_service._pool_mode_cache[key]
+        sandbox_service._pool_mode_cache[key] = (
+            aware,
+            fetched_at - _POOL_MODE_CACHE_TTL_SECONDS - 1,
+        )
+        asyncio.run(sandbox_service.create_sandbox(request))
+        assert stub.get_pool_calls == 2
+    finally:
+        sandbox_service.close()
 
 
 def test_template_mode_create_rejects_unknown_template(service):

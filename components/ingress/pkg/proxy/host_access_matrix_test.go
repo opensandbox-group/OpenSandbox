@@ -66,8 +66,6 @@ func makeRouteSig(t *testing.T, secret []byte, key, sandboxID string, port int, 
 	return h8 + key
 }
 
-// --- No access verification required (GetEndpoint: empty access token) ---
-
 func TestMatrix_NoAccessVerification_Header(t *testing.T) {
 	prov := newTestProvider()
 	secret := []byte{0x5e, 0x5e, 0x5e, 0x5e}
@@ -160,8 +158,6 @@ func TestMatrix_NoAccessVerification_URI(t *testing.T) {
 		assert.Equal(t, "/"+exp+"/"+goodSig+"/api", h.requestURI)
 	})
 }
-
-// --- Access required (GetEndpoint: non-empty SecureAccessToken) ---
 
 func TestMatrix_AccessRequired_Header(t *testing.T) {
 	prov := newTestProvider()

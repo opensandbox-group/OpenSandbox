@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/internal/safego"
@@ -44,6 +45,7 @@ type Client struct {
 	// onConnectionLost is called when the kernel connection fails while it is
 	// still in use, i.e. not after Disconnect.
 	onConnectionLost func(error)
+	onDisconnect     func()
 
 	session string
 
@@ -89,6 +91,10 @@ func (c *Client) Disconnect() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.onDisconnect != nil {
+		c.onDisconnect()
+		c.onDisconnect = nil
+	}
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
@@ -103,26 +109,39 @@ func (c *Client) IsConnected() bool {
 
 type streamExecutionState struct {
 	startTime    time.Time
+	requestID    string
 	result       *ExecutionResult
 	executeDone  bool
 	executeMutex sync.Mutex
 	resultMutex  sync.Mutex
+	cancelled    chan struct{}
 
-	// chanMutex guards resultChan's close-vs-send race. state.result.ExecutionCount/Error can be
-	// set by handleExecuteReply with no corresponding resultChan send at all (e.g. plain print()
-	// cells never emit execute_result), so finalizeExecution's poll loop can observe "done" and
-	// close resultChan at any time -- independent of whether some other handler is concurrently
-	// mid-send (e.g. a late stream message from a background thread that outlives the reply).
-	// Senders take RLock for the duration of their send so the closer's Lock() cannot proceed
+	// Protected by resultMutex. An execute_result is output, not an execute_reply.
+	replyReceived bool
+	terminated    bool
+
+	// chanMutex guards resultChan's close-vs-send race. The finalizer can close resultChan
+	// independently of a straggling send (e.g. output from a background thread after idle).
+	// Output senders take RLock for their send so the closer's Lock() cannot proceed
 	// until any in-flight send completes; once closed is true, later senders skip the send
 	// instead of racing a closed channel.
 	chanMutex sync.RWMutex
 	closed    bool
+
+	// outputActivity counts delivered output results (stream and execute_result).
+	// The reply deadline uses it to expire on output silence instead of on
+	// absolute wall-clock time, so a slow relay cannot be cut off mid-delivery.
+	outputActivity atomic.Int64
+	// outputInFlight counts output sends that have not returned yet. A send
+	// blocked on a full resultChan is output waiting on a slow consumer, not
+	// silence, so the reply deadline does not expire while one is pending.
+	outputInFlight atomic.Int64
 }
 
 func newStreamExecutionState(startTime time.Time) *streamExecutionState {
 	return &streamExecutionState{
 		startTime: startTime,
+		cancelled: make(chan struct{}),
 		result: &ExecutionResult{
 			Status:        "ok",
 			Stream:        make([]*StreamOutput, 0),
@@ -131,24 +150,52 @@ func newStreamExecutionState(startTime time.Time) *streamExecutionState {
 	}
 }
 
-// trySend delivers notify on resultChan unless the channel has already been closed. It must be
-// used for every send on resultChan so sends can never race closeResultChan.
+// trySend delivers notify on resultChan unless cancelled or already closed. Nonterminal
+// sends use this guard; closeResultChan holds the exclusive lock for the terminal send and close.
 func (state *streamExecutionState) trySend(resultChan chan *ExecutionResult, notify *ExecutionResult) {
 	state.chanMutex.RLock()
 	defer state.chanMutex.RUnlock()
 	if state.closed {
 		return
 	}
-	resultChan <- notify
+	select {
+	case <-state.cancelled:
+		return
+	default:
+	}
+	select {
+	case resultChan <- notify:
+	case <-state.cancelled:
+	}
 }
 
-// closeResultChan closes resultChan after waiting for any in-flight trySend calls to finish, and
-// prevents later trySend calls from sending on the now-closed channel. Must only be called once,
-// from finalizeExecution.
-func (state *streamExecutionState) closeResultChan(resultChan chan *ExecutionResult) {
+// sendOutput forwards one output result and records it for the reply deadline.
+func (state *streamExecutionState) sendOutput(resultChan chan *ExecutionResult, notify *ExecutionResult) {
+	state.outputInFlight.Add(1)
+	state.trySend(resultChan, notify)
+	// Count the delivery before clearing the in-flight mark; see the matching
+	// read order in finalizeOnReplyDeadline.
+	state.outputActivity.Add(1)
+	state.outputInFlight.Add(-1)
+}
+
+// closeResultChan waits for in-flight sends, sends an optional terminal result last, and closes
+// resultChan. The exclusive lock prevents a straggling sender from following the terminal result.
+func (state *streamExecutionState) closeResultChan(resultChan chan *ExecutionResult, terminal *ExecutionResult) {
 	state.chanMutex.Lock()
 	defer state.chanMutex.Unlock()
 	state.closed = true
+	select {
+	case <-state.cancelled:
+		terminal = nil
+	default:
+	}
+	if terminal != nil {
+		select {
+		case resultChan <- terminal:
+		case <-state.cancelled:
+		}
+	}
 	close(resultChan)
 }
 
@@ -163,6 +210,7 @@ func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult
 	}
 
 	state := newStreamExecutionState(time.Now())
+	state.requestID = msg.Header.MessageID
 
 	c.clearTemporaryHandlers()
 	c.registerExecuteCodeStreamHandlers(state, resultChan)
@@ -210,7 +258,7 @@ func (c *Client) buildExecuteMessage(code string) (*Message, error) {
 
 func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, resultChan chan *ExecutionResult) {
 	c.registerHandler(MsgExecuteReply, func(msg *Message) {
-		c.handleExecuteReply(msg, state)
+		c.handleExecuteReply(msg, state, resultChan)
 	})
 	c.registerHandler(MsgExecuteResult, func(msg *Message) {
 		c.handleExecuteResult(msg, state, resultChan)
@@ -219,7 +267,7 @@ func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, 
 		c.handleStreamOutput(msg, state, resultChan)
 	})
 	c.registerHandler(MsgError, func(msg *Message) {
-		c.handleExecutionError(msg, state, resultChan)
+		c.handleExecutionError(msg, state)
 	})
 	c.registerHandler(MsgStatus, func(msg *Message) {
 		c.handleExecutionStatus(msg, state, resultChan)
@@ -231,40 +279,97 @@ func (c *Client) registerExecuteCodeStreamHandlers(state *streamExecutionState, 
 			EValue: err.Error(),
 		})
 	}
+	c.onDisconnect = func() {
+		close(state.cancelled)
+		// Let in-flight sends stop before Disconnect returns. Only the finalizer
+		// closes resultChan, so cancellation cannot cause a second close.
+		state.chanMutex.Lock()
+		state.chanMutex.Unlock()
+	}
 	c.mu.Unlock()
 }
 
-func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState) {
+func (c *Client) handleExecuteReply(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
+	if msg.ParentHeader.MessageID != state.requestID {
+		return
+	}
+
 	var execReply ExecuteReply
 	if err := json.Unmarshal(msg.Content, &execReply); err != nil {
 		return
 	}
 
 	state.resultMutex.Lock()
-	defer state.resultMutex.Unlock()
+	state.replyReceived = true
 	state.result.ExecutionCount = execReply.ExecutionCount
-	if execReply.EName != "" {
-		state.result.Error = &execReply.ErrorOutput
+	if execReply.Status != "ok" || execReply.EName != "" {
+		errOutput := execReply.ErrorOutput
+		if errOutput.EName == "" {
+			errOutput.EName = "ExecutionError"
+			errOutput.EValue = "kernel execution returned status: " + execReply.Status
+		}
+		if state.result.Error == nil {
+			state.result.Error = &errOutput
+		}
 	}
+	state.resultMutex.Unlock()
+
+	// A lost matching idle must not keep a finished cell's stream and session lock open indefinitely.
+	replyDeadline := execdflag.JupyterReplyFinalizeTimeout
+	safego.Go(func() { c.finalizeOnReplyDeadline(state, resultChan, replyDeadline) })
+}
+
+// Expire on output silence, not absolute time, so a slow active relay is not truncated; executeDone arbitrates with idle finalization.
+func (c *Client) finalizeOnReplyDeadline(state *streamExecutionState, resultChan chan *ExecutionResult, timeout time.Duration) {
+	if timeout <= 0 {
+		return
+	}
+
+	delivered := state.outputActivity.Load()
+	for {
+		timer := time.NewTimer(timeout)
+		select {
+		case <-state.cancelled:
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		// Load the in-flight count before the delivery count: a send that
+		// finishes between the two loads has already bumped outputActivity.
+		inFlight := state.outputInFlight.Load()
+		latest := state.outputActivity.Load()
+		if inFlight == 0 && latest == delivered {
+			break
+		}
+		delivered = latest
+	}
+
+	state.executeMutex.Lock()
+	alreadyFinalizing := state.executeDone
+	state.executeDone = true
+	state.executeMutex.Unlock()
+	if alreadyFinalizing {
+		return
+	}
+	c.finalizeExecution(state, resultChan)
 }
 
 func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
+	if msg.ParentHeader.MessageID != state.requestID {
+		return
+	}
+
 	var execResult ExecuteResult
 	if err := json.Unmarshal(msg.Content, &execResult); err != nil {
 		return
 	}
 
-	// resultChan send happens outside resultMutex: sending can block indefinitely on a full,
-	// undrained channel, and holding resultMutex across that block would starve any other
-	// goroutine that needs it -- including finalizeExecution's poll loop. trySend (see
-	// streamExecutionState) separately makes this send race-free against finalizeExecution
-	// closing resultChan, since ExecutionCount/Error can also be set by handleExecuteReply with
-	// no send of its own.
+	// A blocked send must not hold resultMutex needed by finalization; trySend guards against concurrent close.
 	notify := &ExecutionResult{
 		ExecutionCount: execResult.ExecutionCount,
 		ExecutionData:  execResult.Data,
 	}
-	state.trySend(resultChan, notify)
+	state.sendOutput(resultChan, notify)
 
 	state.resultMutex.Lock()
 	state.result.ExecutionCount = execResult.ExecutionCount
@@ -272,6 +377,10 @@ func (c *Client) handleExecuteResult(msg *Message, state *streamExecutionState, 
 }
 
 func (c *Client) handleStreamOutput(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
+	if msg.ParentHeader.MessageID != state.requestID {
+		return
+	}
+
 	var stream StreamOutput
 	if err := json.Unmarshal(msg.Content, &stream); err != nil {
 		return
@@ -285,25 +394,21 @@ func (c *Client) handleStreamOutput(msg *Message, state *streamExecutionState, r
 	notify := &ExecutionResult{
 		Stream: []*StreamOutput{&stream},
 	}
-	state.trySend(resultChan, notify)
+	state.sendOutput(resultChan, notify)
 }
 
-func (c *Client) handleExecutionError(msg *Message, state *streamExecutionState, resultChan chan *ExecutionResult) {
+func (c *Client) handleExecutionError(msg *Message, state *streamExecutionState) {
+	if msg.ParentHeader.MessageID != state.requestID {
+		return
+	}
+
 	var errOutput ErrorOutput
 	if err := json.Unmarshal(msg.Content, &errOutput); err != nil {
 		return
 	}
 
-	// See handleExecuteResult: resultChan send must stay outside resultMutex, and goes through
-	// trySend so it can't race finalizeExecution closing resultChan.
-	notify := &ExecutionResult{
-		Error:  &errOutput,
-		Status: "error",
-	}
-	state.trySend(resultChan, notify)
-
+	// Keep the error until finalization so output before idle precedes the terminal event.
 	state.resultMutex.Lock()
-	state.result.Status = "error"
 	state.result.Error = &errOutput
 	state.resultMutex.Unlock()
 }
@@ -315,6 +420,11 @@ func (c *Client) handleExecutionStatus(msg *Message, state *streamExecutionState
 	}
 	switch status.ExecutionState {
 	case StateIdle:
+		// Startup and other requests can also emit idle. Only this request's idle
+		// marks the end of its IOPub output, handled synchronously by receiveMessages.
+		if msg.ParentHeader.MessageID != state.requestID {
+			return
+		}
 	case StateRestarting, StateDead:
 		// The kernel died, so this execution will never get a reply.
 		c.failExecution(state, resultChan, ErrorOutput{
@@ -335,14 +445,15 @@ func (c *Client) handleExecutionStatus(msg *Message, state *streamExecutionState
 	safego.Go(func() { c.finalizeExecution(state, resultChan) })
 }
 
-// failExecution ends an execution that lost its kernel or connection: it
-// reports errOutput and closes resultChan, or lets a running finalizeExecution
-// close it, since that stops waiting once an error is recorded. If the kernel
-// already replied, that outcome stands and the execution is finalized instead.
-// It runs on the receive goroutine, after every earlier message was handled.
+// failExecution ends an execution that lost its kernel or connection. It preserves
+// an outcome already received and releases finalization without waiting for missing
+// protocol messages. It runs on the receive goroutine, after earlier messages.
 func (c *Client) failExecution(state *streamExecutionState, resultChan chan *ExecutionResult, errOutput ErrorOutput) {
 	state.resultMutex.Lock()
-	replied := state.result.ExecutionCount > 0 || state.result.Error != nil
+	if !state.replyReceived && state.result.Error == nil {
+		state.result.Error = &errOutput
+	}
+	state.terminated = true
 	state.resultMutex.Unlock()
 
 	state.executeMutex.Lock()
@@ -350,37 +461,12 @@ func (c *Client) failExecution(state *streamExecutionState, resultChan chan *Exe
 	state.executeDone = true
 	state.executeMutex.Unlock()
 
-	if replied {
-		if !finalizing {
-			c.finalizeExecution(state, resultChan)
-		}
-		return
-	}
-
-	state.trySend(resultChan, &ExecutionResult{Error: &errOutput, Status: "error"})
-
-	state.resultMutex.Lock()
-	state.result.Status = "error"
-	state.result.Error = &errOutput
-	state.resultMutex.Unlock()
-
 	if !finalizing {
-		state.closeResultChan(resultChan)
+		c.finalizeExecution(state, resultChan)
 	}
 }
 
 func (c *Client) finalizeExecution(state *streamExecutionState, resultChan chan *ExecutionResult) {
-	// See handleExecuteResult: resultChan send must stay outside resultMutex.
-	state.resultMutex.Lock()
-	state.result.ExecutionTime = time.Since(state.startTime)
-	executionTime := state.result.ExecutionTime
-	state.resultMutex.Unlock()
-
-	notify := &ExecutionResult{
-		ExecutionTime: executionTime,
-	}
-	state.trySend(resultChan, notify)
-
 	pollInterval := execdflag.JupyterIdlePollInterval
 	if pollInterval <= 0 {
 		pollInterval = 100 * time.Millisecond
@@ -388,19 +474,37 @@ func (c *Client) finalizeExecution(state *streamExecutionState, resultChan chan 
 
 	for {
 		state.resultMutex.Lock()
-		done := state.result.ExecutionCount > 0 || state.result.Error != nil
+		done := state.replyReceived || state.terminated
 		state.resultMutex.Unlock()
 		if done {
 			break
 		}
-		time.Sleep(pollInterval)
+		select {
+		case <-state.cancelled:
+			state.closeResultChan(resultChan, nil)
+			return
+		case <-time.After(pollInterval):
+		}
 	}
 
-	// closeResultChan waits for any send from handleExecuteResult/handleStreamOutput/
-	// handleExecutionError still in flight to finish before closing, and marks resultChan closed
-	// so any later, straggling message for this execution (e.g. output from a background thread
-	// that outlives execute_reply) is dropped by trySend instead of racing this close.
-	state.closeResultChan(resultChan)
+	// Normal completion requires both the matching IOPub idle and execute_reply,
+	// in either order. Kernel death/disconnect can also release this wait, preserving
+	// an outcome already received. Never send while holding resultMutex.
+	state.resultMutex.Lock()
+	state.result.ExecutionTime = time.Since(state.startTime)
+	executionTime := state.result.ExecutionTime
+	errOutput := state.result.Error
+	state.resultMutex.Unlock()
+
+	var terminal *ExecutionResult
+	if errOutput == nil {
+		terminal = &ExecutionResult{ExecutionTime: executionTime}
+	} else {
+		terminal = &ExecutionResult{Error: errOutput, Status: "error"}
+	}
+
+	// closeResultChan waits for in-flight output before the terminal result and drops later output.
+	state.closeResultChan(resultChan, terminal)
 }
 
 func (c *Client) writeMessage(msg *Message) error {
@@ -517,6 +621,7 @@ func (c *Client) clearTemporaryHandlers() {
 	defer c.mu.Unlock()
 	c.handlers = make(map[MessageType]func(*Message))
 	c.onConnectionLost = nil
+	c.onDisconnect = nil
 	c.registerDefaultHandlers()
 }
 

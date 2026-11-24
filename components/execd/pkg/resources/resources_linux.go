@@ -32,6 +32,7 @@ import (
 // Test-overridable input paths.
 var (
 	procSelfCgroupFile  = "/proc/self/cgroup"
+	procSelfMountinfo   = "/proc/self/mountinfo"
 	cgroupV2Dir         = "/sys/fs/cgroup"
 	cgroupV1MemoryDir   = "/sys/fs/cgroup/memory"
 	cgroupV1CPUAcctDirs = []string{"/sys/fs/cgroup/cpu,cpuacct", "/sys/fs/cgroup/cpuacct"}
@@ -138,10 +139,12 @@ func newCgroupV2Backend(relPath string) (backend, error) {
 
 func newCgroupV1Backend(memRel, cpuRel, cpuacctRel string) (backend, error) {
 	b := &cgroupBackend{}
+	// Unreadable mountinfo keeps the plain mount point + cgroup path join.
+	mountinfo, _ := os.ReadFile(procSelfMountinfo)
 
 	if memRel != "" {
 		if dir, err := cgroupV1MountDir([]string{cgroupV1MemoryDir}, "memory"); err == nil {
-			memDir := filepath.Join(dir, filepath.FromSlash(memRel))
+			memDir := cgroupfs.Dir(mountinfo, dir, memRel)
 			usedPath := filepath.Join(memDir, "memory.usage_in_bytes")
 			limitPath := filepath.Join(memDir, "memory.limit_in_bytes")
 			if fileExists(usedPath) && fileExists(limitPath) {
@@ -159,12 +162,12 @@ func newCgroupV1Backend(memRel, cpuRel, cpuacctRel string) (backend, error) {
 		// still reports cgroup-scoped CPU (same approach as the egress
 		// sidecar's cgroup reader).
 		if dir, err := cgroupV1MountDir(cgroupV1CPUAcctDirs, "cpuacct"); err == nil {
-			usagePath := filepath.Join(dir, filepath.FromSlash(cpuacctRel), "cpuacct.usage")
+			usagePath := filepath.Join(cgroupfs.Dir(mountinfo, dir, cpuacctRel), "cpuacct.usage")
 			if fileExists(usagePath) {
 				b.usagePath, b.usageNS = usagePath, true
 				if cpuRel != "" {
 					if quotaDir, err := cgroupV1MountDir(cgroupV1QuotaDirs, "cpu"); err == nil {
-						b.quotaCores = v1QuotaCores(filepath.Join(quotaDir, filepath.FromSlash(cpuRel)))
+						b.quotaCores = v1QuotaCores(cgroupfs.Dir(mountinfo, quotaDir, cpuRel))
 					}
 				}
 			}

@@ -31,6 +31,7 @@ const (
 	accessTokenEnv             = "EXECD_ACCESS_TOKEN"
 	gracefulShutdownTimeoutEnv = "EXECD_API_GRACE_SHUTDOWN"
 	jupyterIdlePollIntervalEnv = "EXECD_JUPYTER_IDLE_POLL_INTERVAL"
+	jupyterReplyFinalizeEnv    = "EXECD_JUPYTER_REPLY_FINALIZE_TIMEOUT"
 	isolationConfigEnv         = "EXECD_ISOLATION_CONFIG"
 	runtimeInitEnv             = "EXECD_RUNTIME_INIT"
 	sseLegacyCompatEnv         = "EXECD_SSE_LEGACY_COMPAT"
@@ -43,13 +44,13 @@ func InitFlags() {
 	ServerAccessToken = ""
 	ApiGracefulShutdownTimeout = 200 * time.Millisecond
 	JupyterIdlePollInterval = 100 * time.Millisecond
+	JupyterReplyFinalizeTimeout = 2 * time.Second
 	IsolationConfigPath = ""
 	InitMode = false
 	LifecycleStartupStatusFile = ""
 	RuntimeInit = false
 	SseLegacyCompat = false
 
-	// First, set default values from environment variables
 	if jupyterFromEnv := os.Getenv(jupyterHostEnv); jupyterFromEnv != "" {
 		if !strings.HasPrefix(jupyterFromEnv, "http://") && !strings.HasPrefix(jupyterFromEnv, "https://") {
 			stdlog.Panic("Invalid JUPYTER_HOST format: must start with http:// or https://")
@@ -65,7 +66,6 @@ func InitFlags() {
 		ServerAccessToken = accessTokenFromEnv
 	}
 
-	// Then define flags with current values as defaults
 	flag.StringVar(&JupyterServerHost, "jupyter-host", JupyterServerHost, "Jupyter server host address (e.g., http://localhost, http://192.168.1.100)")
 	flag.StringVar(&JupyterServerToken, "jupyter-token", JupyterServerToken, "Jupyter server authentication token")
 	flag.IntVar(&ServerPort, "port", ServerPort, "Server listening port (default: 44772)")
@@ -92,8 +92,21 @@ func InitFlags() {
 		}
 	}
 
+	if replyFinalize := os.Getenv(jupyterReplyFinalizeEnv); replyFinalize != "" {
+		duration, err := time.ParseDuration(replyFinalize)
+		if err != nil {
+			stdlog.Panicf("Failed to parse jupyter reply finalize timeout from env: %v", err)
+		}
+		if duration <= 0 {
+			stdlog.Printf("Invalid %s=%s; fallback to default %s", jupyterReplyFinalizeEnv, replyFinalize, JupyterReplyFinalizeTimeout)
+		} else {
+			JupyterReplyFinalizeTimeout = duration
+		}
+	}
+
 	flag.DurationVar(&ApiGracefulShutdownTimeout, "graceful-shutdown-timeout", ApiGracefulShutdownTimeout, "API graceful shutdown timeout duration (default: 200ms)")
 	flag.DurationVar(&JupyterIdlePollInterval, "jupyter-idle-poll-interval", JupyterIdlePollInterval, "Polling interval after Jupyter idle status before closing stream (default: 100ms)")
+	flag.DurationVar(&JupyterReplyFinalizeTimeout, "jupyter-reply-finalize-timeout", JupyterReplyFinalizeTimeout, "Wait for the matching idle status after execute_reply before finalizing; the wait extends while IOPub output keeps arriving (default: 2s)")
 
 	if v := os.Getenv(isolationConfigEnv); v != "" {
 		IsolationConfigPath = v
@@ -122,11 +135,14 @@ func InitFlags() {
 		SseLegacyCompat = enabled
 	}
 
-	// Parse flags - these will override environment variables if provided
 	flag.Parse()
 	if JupyterIdlePollInterval <= 0 {
 		stdlog.Printf("Invalid --jupyter-idle-poll-interval=%s; fallback to default %s", JupyterIdlePollInterval, 100*time.Millisecond)
 		JupyterIdlePollInterval = 100 * time.Millisecond
+	}
+	if JupyterReplyFinalizeTimeout <= 0 {
+		stdlog.Printf("Invalid --jupyter-reply-finalize-timeout=%s; fallback to default %s", JupyterReplyFinalizeTimeout, 2*time.Second)
+		JupyterReplyFinalizeTimeout = 2 * time.Second
 	}
 
 	log.Info("jupyter: server host=%s", JupyterServerHost)

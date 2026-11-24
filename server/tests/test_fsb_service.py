@@ -31,7 +31,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from kubernetes.client import ApiException, CustomObjectsApi, V1APIResource, V1APIResourceList
 
-from opensandbox_server.api import lifecycle, network_policy
+from opensandbox_server.api import diagnostics, lifecycle, network_policy
 from opensandbox_server.api.schema import RenewSandboxExpirationRequest
 from opensandbox_server.config import (
     AppConfig,
@@ -99,6 +99,12 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
             data_plane=pb2.DataPlaneInfo(state=pb2.DATA_PLANE_STATE_READY),
             ready=True,
         )
+
+    def CreateRootfsSandbox(self, request, context):
+        if getattr(self, "rootfs_rpc_unavailable", False):
+            context.abort(grpc.StatusCode.UNIMPLEMENTED, "unknown method")
+        self.rootfs_request = request
+        return self.CreateSandbox(request.create, context)
 
     def CreateSandbox(self, request, context):
         self.last_create = request
@@ -363,11 +369,14 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
 
 
 @pytest.fixture
-def http_fsb(monkeypatch):
+def http_fsb(monkeypatch, fastpath_tls):
+    ca, key = fastpath_tls
     fake = _FakeFastPathService()
     grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     pb2_grpc.add_FastPathServiceServicer_to_server(fake, grpc_server)
-    port = grpc_server.add_insecure_port("127.0.0.1:0")
+    port = grpc_server.add_secure_port("127.0.0.1:0", grpc.ssl_server_credentials([
+        (key.read_bytes(), ca.read_bytes()),
+    ]))
     grpc_server.start()
 
     config = AppConfig(
@@ -380,7 +389,9 @@ def http_fsb(monkeypatch):
         runtime=RuntimeConfig(type="kubernetes", execd_image="ghcr.io/opensandbox/execd:latest"),
         kubernetes=KubernetesRuntimeConfig(namespace="ns-1"),
     )
-    fastpath = FastPathClient(endpoint=f"127.0.0.1:{port}")
+    fastpath = FastPathClient(endpoint=f"127.0.0.1:{port}",
+                              token_source=Mock(token=lambda: "test-caller"),
+                              tls_ca_file=str(ca))
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
     monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
@@ -872,7 +883,6 @@ def test_create_without_network_policy_still_registers_egress_binding(persisted_
     assert [b["handler"] for b in bindings] == ["egress"]
     assert json.loads(bindings[0]["input"]) == {"defaultAction": "allow", "egress": []}
 
-    # The sandbox can adopt a policy later through the relay.
     policy = {"defaultAction": "allow", "egress": [{"action": "allow", "target": "a.com"}]}
     response = client.put(url, json=policy)
     assert response.status_code == 200
@@ -992,12 +1002,19 @@ def test_http_policy_patch_and_delete_match_sidecar_semantics(persisted_fsb):
         fake.policy_records[sid]["revision"] += 1
         return state
 
+    policy_before = deepcopy(fake.policy_records[sandbox_id]["policy"])
+    revision_before = fake.policy_records[sandbox_id]["revision"]
     policy_relay_module._relay_get_full = racy_get_full
     try:
-        response = client.patch(url, json=[{"action": "deny", "target": "d.com"}])
+        response = client.patch(url, json=[{"action": "deny", "ports": [25, 587]}])
     finally:
         policy_relay_module._relay_get_full = real_get_full
     assert response.status_code == 409
+    assert fake.last_relay.method == "PUT"
+    payload = json.loads(fake.last_relay.payload)
+    assert payload["expectedRevision"] == revision_before
+    assert payload["policy"]["egress"][-1] == {"action": "deny", "target": "", "ports": [25, 587]}
+    assert fake.policy_records[sandbox_id]["policy"] == policy_before
 
 
 def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
@@ -1018,20 +1035,143 @@ def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):
         set_current_tenant(previous)
 
 
-def test_policy_rejects_port_scoped_rules(persisted_fsb):
-    """Fast Sandbox enforcement does not cover port-scoped rules yet; accepting
-    them would silently drop deny rules (fail-open), so both PUT and PATCH
-    reject them until the fastlet path catches up."""
+def test_http_create_port_scopes_roundtrip_through_egress_binding(http_fsb):
+    client, fake, _ = http_fsb
+    policy = {
+        "defaultAction": "deny",
+        "egress": [
+            {"action": "deny", "ports": [25, 587]},
+            {"action": "allow", "target": "10.0.0.0/24", "ports": [443, 80]},
+            {"action": "allow", "target": "Example.COM"},
+        ],
+    }
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "networkPolicy": policy,
+        },
+    )
+    assert response.status_code == 202
+    sandbox_id = response.json()["id"]
+    expected = deepcopy(policy)
+    expected["egress"][0]["target"] = ""
+    assert len(fake.last_create.action_bindings) == 1
+    binding = fake.last_create.action_bindings[0]
+    assert binding.handler == "egress"
+    assert json.loads(binding.input) == expected
+    assert fake.policy_records[sandbox_id]["policy"] == expected
+    assert client.get(f"/v1/sandboxes/{sandbox_id}/networkpolicy").json() == {
+        "status": "ok", "mode": "enforcing", "policy": expected,
+    }
+
+
+@pytest.mark.parametrize("default_action", ["allow", "deny"])
+def test_policy_supports_port_scoped_rules(persisted_fsb, default_action):
     client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
-    port_only = {"action": "deny", "ports": [25]}
-    scoped = {"action": "allow", "target": "10.0.0.5", "ports": [22]}
-    assert client.put(url, json={"defaultAction": "deny", "egress": [port_only]}).status_code == 400
-    assert client.put(url, json={"defaultAction": "deny", "egress": [scoped]}).status_code == 400
-    assert client.patch(url, json=[port_only]).status_code == 400
-    assert client.patch(url, json=[scoped]).status_code == 400
+    bindings_before = deepcopy(fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"])
+    policy = {
+        "defaultAction": default_action,
+        "egress": [
+            {"action": "deny", "ports": [25, 587]},
+            {"action": "allow", "target": "", "ports": [443]},
+            {"action": "deny", "target": "10.0.0.5"},
+            {"action": "deny", "target": "10.0.0.5", "ports": [443, 80]},
+            {"action": "allow", "target": "10.0.0.5", "ports": [22]},
+            {"action": "allow", "target": "10.0.0.0/24", "ports": [8080]},
+            {"action": "allow", "target": "2001:db8::5", "ports": [8443]},
+            {"action": "deny", "target": "Example.COM"},
+        ],
+    }
+    expected = deepcopy(policy)
+    expected["egress"][0]["target"] = ""
+    replaced = client.put(url, json=policy)
+    assert replaced.status_code == 200
+    assert replaced.json()["policy"] == expected
+    assert json.loads(fake.last_relay.payload) == {"policy": expected}
+    assert client.get(url).json() == replaced.json()
+
+    # Same sorted ports replace one scope; neither portless nor other port
+    # sets are evicted. The first incoming rule wins, retaining its port order.
+    patched = client.patch(url, json=[
+        {"action": "allow", "target": "10.0.0.5", "ports": [80, 443]},
+        {"action": "deny", "target": "10.0.0.5", "ports": [443, 80]},
+        {"action": "allow", "ports": [587, 25]},
+        {"action": "deny", "target": "", "ports": [25, 587]},
+        {"action": "allow", "target": "example.com"},
+        {"action": "deny", "target": "EXAMPLE.COM"},
+        {"action": "deny", "ports": [3306]},
+    ])
+    expected["egress"][0] = {"action": "allow", "target": "", "ports": [587, 25]}
+    expected["egress"][3] = {"action": "allow", "target": "10.0.0.5", "ports": [80, 443]}
+    expected["egress"][7] = {"action": "allow", "target": "example.com"}
+    expected["egress"].append({"action": "deny", "target": "", "ports": [3306]})
+    assert patched.status_code == 200
+    assert patched.json()["policy"] == expected
+    assert json.loads(fake.last_relay.payload) == {"policy": expected, "expectedRevision": 2}
+    assert client.get(url).json() == patched.json()
+
+    # A missing target does not implicitly remove port-only rules.
+    assert client.request("DELETE", url, json=["missing.com"]).json()["policy"] == expected
+    deleted = client.request("DELETE", url, json=["", " EXAMPLE.COM "])
+    expected["egress"] = [r for r in expected["egress"] if r["target"] not in ("", "example.com")]
+    assert deleted.status_code == 200
+    assert deleted.json()["policy"] == expected
+    assert client.get(url).json() == deleted.json()
+    assert client.request("DELETE", url, json=[""]).json()["policy"] == expected
+
+    # Target deletion removes both portless and port-scoped IP rules.
+    deleted_ip = client.request("DELETE", url, json=["10.0.0.5"])
+    expected["egress"] = [r for r in expected["egress"] if r["target"] != "10.0.0.5"]
+    assert deleted_ip.status_code == 200
+    assert deleted_ip.json()["policy"] == expected
+    assert client.get(url).json() == deleted_ip.json()
     assert fake.last_update is None
-    assert fake.last_relay is None or fake.last_relay.method == "GET"
+    assert fake.crs[("ns-1", sandbox_id)]["spec"]["actionBindings"] == bindings_before
+
+
+@pytest.mark.parametrize("method", ["CREATE", "PUT", "PATCH"])
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"action": "deny", "ports": []},
+        {"action": "deny", "ports": [0]},
+        {"action": "deny", "ports": [65536]},
+        {"action": "deny", "ports": [80, 80]},
+        {"action": "deny", "ports": list(range(1, 258))},
+        {"action": "allow", "target": "example.com", "ports": [443]},
+        {"action": "allow", "target": "*.example.com", "ports": [443]},
+    ],
+    ids=["empty", "too-low", "too-high", "duplicate", "too-many", "domain", "wildcard"],
+)
+def test_policy_invalid_ports_rejected_before_write(persisted_fsb, method, rule):
+    client, fake, _, sandbox_id = persisted_fsb
+    url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
+    records_before = deepcopy(fake.policy_records)
+    create_before = fake.last_create
+    if method == "CREATE":
+        response = client.post(
+            "/v1/sandboxes",
+            json={
+                "image": {"uri": "python:3.11"},
+                "entrypoint": ["python"],
+                "timeout": 3600,
+                "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+                "networkPolicy": {"egress": [rule]},
+            },
+        )
+    else:
+        response = client.request(method, url, json=[rule] if method == "PATCH" else {"egress": [rule]})
+
+    assert response.status_code == 422
+    assert fake.last_create is create_before
+    assert fake.last_relay is None
+    assert fake.last_update is None
+    assert fake.policy_records == records_before
 
 
 def test_legacy_policy_route_preserves_body_for_existing_proxy(http_fsb, monkeypatch):
@@ -1356,6 +1496,33 @@ def test_diagnostics_use_new_structured_state(http_fsb):
     assert '"runtime_state": "99"' in service.get_sandbox_events(sandbox_id)
 
 
+def test_event_diagnostics_route_serves_events_without_sandbox_logs(http_fsb, monkeypatch):
+    client, _, service = http_fsb
+    sandbox_id = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+        },
+    ).json()["id"]
+    monkeypatch.setattr(diagnostics, "sandbox_service", service)
+    app = FastAPI()
+    app.include_router(diagnostics.router, prefix="/v1")
+
+    with TestClient(app) as diagnostics_client:
+        response = diagnostics_client.get(
+            f"/v1/sandboxes/{sandbox_id}/diagnostics/events?scope=runtime"
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["kind"] == "events"
+    assert body["scope"] == "runtime"
+    assert "sandbox ready" in body["content"]
+
+
 def test_event_diagnostics_enforce_stable_scope_contract(http_fsb):
     _, _, service = http_fsb
 
@@ -1525,12 +1692,12 @@ def test_endpoint_binds_port_and_default_namespace(http_fsb, port):
 
 
 @pytest.mark.parametrize(
-    "invalid", ["no_gateway", "no_keys", "wildcard", "expires", "port", "identity"]
+    "invalid", ["no_gateway", "no_keys", "expires", "port", "identity"]
 )
 def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
     _, _, service = http_fsb
     config = service._app_config
-    config.ingress = _gateway_config("wildcard" if invalid == "wildcard" else "header")
+    config.ingress = _gateway_config()
     if invalid == "no_gateway":
         config.ingress = None
     elif invalid == "no_keys":
@@ -1541,6 +1708,51 @@ def test_endpoint_rejects_unsupported_or_invalid_routes(http_fsb, invalid):
             0 if invalid == "port" else 44772,
             expires=2_000_000_000 if invalid == "expires" else None,
         )
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.parametrize("with_keys", [False, True])
+@pytest.mark.parametrize("port", [1, 8080, 44772, 65535])
+def test_http_wildcard_endpoint_without_routing_headers(http_fsb, monkeypatch, with_keys, port):
+    client, _, service = http_fsb
+    service._app_config.ingress = _gateway_config("wildcard")
+    if not with_keys:
+        service._app_config.ingress.secure_access = None
+    fastpath = Mock(spec=FastPathClient)
+    monkeypatch.setattr(service, "_fastpath", fastpath)
+    sandbox_id = service.generate_sandbox_id()
+
+    response = client.get(f"/v1/sandboxes/{sandbox_id}/endpoints/{port}")
+
+    assert response.status_code == 200
+    assert response.json() == {"endpoint": f"{sandbox_id}-{port}.example.com"}
+    assert fastpath.mock_calls == []
+
+
+@pytest.mark.parametrize("sandbox_id", ["fsb-a.b", "fsb-A", "fsb-a_b", "fsb-a-", "sandbox-123", "fsb-" + "a" * 54])
+def test_wildcard_endpoint_rejects_invalid_dns_labels(http_fsb, sandbox_id):
+    _, _, service = http_fsb
+    service._app_config.ingress = _gateway_config("wildcard")
+    with pytest.raises(HTTPException) as exc_info:
+        service.get_endpoint(sandbox_id, 44772)
+    assert exc_info.value.status_code == 400
+
+
+def test_wildcard_endpoint_accepts_maximum_dns_label(http_fsb):
+    _, _, service = http_fsb
+    service._app_config.ingress = _gateway_config("wildcard")
+    sandbox_id = "fsb-" + "a" * 53
+    endpoint = service.get_endpoint(sandbox_id, 44772)
+    assert endpoint.endpoint == f"{sandbox_id}-44772.example.com"
+    assert len(endpoint.endpoint.split(".")[0]) == 63
+    assert not endpoint.headers
+
+
+def test_wildcard_endpoint_rejects_expires(http_fsb):
+    _, _, service = http_fsb
+    service._app_config.ingress = _gateway_config("wildcard")
+    with pytest.raises(HTTPException) as exc_info:
+        service.get_endpoint("fsb-123", 44772, expires=2_000_000_000)
     assert exc_info.value.status_code == 400
 
 
@@ -1665,3 +1877,72 @@ def test_fsb_list_excludes_old_prefix(persisted_fsb):
     response = client.get("/v1/sandboxes")
     assert response.status_code == 200
     assert [item["id"] for item in response.json()["items"]] == [sandbox_id]
+
+
+def test_pool_is_resource_aware_requires_explicit_resource_aware_profile():
+    """The gate fails safe: only an explicit RESOURCE_AWARE mode passes."""
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(namespace="ns-1", name="p")
+    )
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(),
+        )
+    )
+    assert not FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(
+                mode=pb2.SANDBOX_RESOURCE_MODE_LEGACY_SLOT
+            ),
+        )
+    )
+    assert FastSandboxService._pool_is_resource_aware(
+        pb2.PoolInfo(
+            namespace="ns-1",
+            name="p",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(
+                mode=pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+            ),
+        )
+    )
+
+def test_rootfs_http_forwards_partial_limits_to_distinct_rpc(http_fsb, monkeypatch):
+    from opensandbox_server.services.k8s.snapshot_runtime import build_public_snapshot_name
+    from opensandbox_server.services.snapshot_models import (
+        SnapshotRecord, SnapshotRestoreConfig, SnapshotState, SnapshotStatusRecord,
+    )
+
+    client, fake, _ = http_fsb
+    record = SnapshotRecord(
+        id="snap-size", source_sandbox_id="old", mode="rootfsOnly",
+        restore_config=SnapshotRestoreConfig(backend="fsb", image="native-source",
+                                             limits={"cpu": "500m", "memory": "1Gi"}),
+        status=SnapshotStatusRecord(state=SnapshotState.READY),
+    )
+    repo = Mock()
+    repo.get.return_value = record
+    monkeypatch.setattr("opensandbox_server.services.snapshot_restore.get_snapshot_repository", lambda: repo)
+    data = {"snapshotId": record.id, "timeout": 600, "resourceLimits": {"memory": "2Gi"}}
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 202, response.text
+    assert fake.rootfs_request.snapshot_name == build_public_snapshot_name(record.id)
+    assert fake.rootfs_request.source_limits.cpu == "500m"
+    assert fake.rootfs_request.create.resources.limits.cpu == ""
+    assert fake.rootfs_request.create.resources.limits.memory == "2Gi"
+    del data["resourceLimits"]
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 202, response.text
+    assert not fake.rootfs_request.create.HasField("resources")
+
+    fake.rootfs_rpc_unavailable = True
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 503
+    assert "upgrade fast-sandbox" in response.text
+
+    record.mode = "full"
+    response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 422

@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
+	"github.com/alibaba/opensandbox/execd/pkg/resources"
 )
 
 const (
@@ -87,7 +88,66 @@ func registerExecdMetrics() error {
 		return err
 	}
 
+	if err := registerSystemMetrics(meter); err != nil {
+		return err
+	}
+
+	oomKills, err = meter.Int64Counter(
+		"execd.system.oom.kills",
+		metric.WithDescription("OOM kills observed in the sandbox cgroup"),
+		metric.WithUnit("{kill}"),
+	)
+	if err != nil {
+		return err
+	}
+
+	isolationRunDurationMs, err = meter.Float64Histogram(
+		"execd.isolation.run.duration",
+		metric.WithDescription("Duration of isolated session runs by result"),
+		metric.WithUnit("ms"),
+	)
+	if err != nil {
+		return err
+	}
+
 	_, err = meter.Int64ObservableGauge(
+		"execd.isolation.session.count",
+		metric.WithDescription("Current number of active isolated sessions"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			if isolationStatsProvider == nil {
+				return nil
+			}
+			obs.Observe(isolationStatsProvider().ActiveSessions, metric.WithAttributes(sharedAttrs()...))
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableGauge(
+		"execd.isolation.upper.usage_bytes",
+		metric.WithDescription("Total bytes used by isolated session upper directories"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			if isolationStatsProvider == nil {
+				return nil
+			}
+			stats := isolationStatsProvider()
+			if !stats.UpperUsageValid {
+				return nil // Missing data must not be reported as zero bytes.
+			}
+			obs.Observe(stats.UpperUsageBytes, metric.WithAttributes(sharedAttrs()...))
+			return nil
+		}),
+	)
+	return err
+}
+
+// registerSystemMetrics registers the periodic system-observability gauges
+// and counters: process/CPU/memory/network plus disk usage and IO.
+func registerSystemMetrics(meter metric.Meter) error {
+	_, err := meter.Int64ObservableGauge(
 		"execd.system.process.count",
 		metric.WithDescription("Current number of processes in the system"),
 		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
@@ -155,33 +215,21 @@ func registerExecdMetrics() error {
 	if err != nil {
 		return err
 	}
+	return registerDiskMetrics(meter)
+}
 
-	oomKills, err = meter.Int64Counter(
-		"execd.system.oom.kills",
-		metric.WithDescription("OOM kills observed in the sandbox cgroup"),
-		metric.WithUnit("{kill}"),
-	)
-	if err != nil {
-		return err
-	}
-
-	isolationRunDurationMs, err = meter.Float64Histogram(
-		"execd.isolation.run.duration",
-		metric.WithDescription("Duration of isolated session runs by result"),
-		metric.WithUnit("ms"),
-	)
-	if err != nil {
-		return err
-	}
-
-	_, err = meter.Int64ObservableGauge(
-		"execd.isolation.session.count",
-		metric.WithDescription("Current number of active isolated sessions"),
+// registerDiskMetrics registers the per-mount disk usage gauges and the
+// rebased cumulative disk IO counters.
+func registerDiskMetrics(meter metric.Meter) error {
+	_, err := meter.Int64ObservableGauge(
+		"execd.system.disk.usage_bytes",
+		metric.WithDescription("Per-mount filesystem used bytes (real mounts only; FUSE/remote values are as reported by the filesystem)"),
+		metric.WithUnit("By"),
 		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
-			if isolationStatsProvider == nil {
-				return nil
+			base := append([]attribute.KeyValue{}, sharedAttrs()...)
+			for _, usage := range systemDiskUsages() {
+				obs.Observe(usage.UsedBytes, metric.WithAttributes(diskUsageAttrs(base, usage)...))
 			}
-			obs.Observe(isolationStatsProvider().ActiveSessions, metric.WithAttributes(sharedAttrs()...))
 			return nil
 		}),
 	)
@@ -190,18 +238,50 @@ func registerExecdMetrics() error {
 	}
 
 	_, err = meter.Int64ObservableGauge(
-		"execd.isolation.upper.usage_bytes",
-		metric.WithDescription("Total bytes used by isolated session upper directories"),
+		"execd.system.disk.total_bytes",
+		metric.WithDescription("Per-mount filesystem total capacity (real mounts only; FUSE/remote values are as reported by the filesystem)"),
 		metric.WithUnit("By"),
 		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
-			if isolationStatsProvider == nil {
-				return nil
+			base := append([]attribute.KeyValue{}, sharedAttrs()...)
+			for _, usage := range systemDiskUsages() {
+				obs.Observe(usage.TotalBytes, metric.WithAttributes(diskUsageAttrs(base, usage)...))
 			}
-			stats := isolationStatsProvider()
-			if !stats.UpperUsageValid {
-				return nil // Missing data must not be reported as zero bytes.
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableCounter(
+		"execd.system.disk.io.bytes",
+		metric.WithDescription("Cumulative disk IO bytes by direction since the current binding (rebased at warm-rebind handoffs; sandbox cgroup IO accounting, /proc/diskstats fallback)"),
+		metric.WithUnit("By"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			// Unavailable (e.g. non-Linux) must not be reported as zero.
+			if io, ok := systemDiskIO(); ok {
+				base := append([]attribute.KeyValue{}, sharedAttrs()...)
+				obs.Observe(io.ReadBytes, metric.WithAttributes(append(base, attribute.String("direction", "read"))...))
+				obs.Observe(io.WrittenBytes, metric.WithAttributes(append(base, attribute.String("direction", "write"))...))
 			}
-			obs.Observe(stats.UpperUsageBytes, metric.WithAttributes(sharedAttrs()...))
+			return nil
+		}),
+	)
+	if err != nil {
+		return err
+	}
+
+	_, err = meter.Int64ObservableCounter(
+		"execd.system.disk.io.operations",
+		metric.WithDescription("Cumulative completed disk IO operations by direction since the current binding (rebased at warm-rebind handoffs; sandbox cgroup IO accounting, /proc/diskstats fallback)"),
+		metric.WithUnit("{operation}"),
+		metric.WithInt64Callback(func(ctx context.Context, obs metric.Int64Observer) error {
+			// Unavailable (e.g. non-Linux) must not be reported as zero.
+			if io, ok := systemDiskIO(); ok {
+				base := append([]attribute.KeyValue{}, sharedAttrs()...)
+				obs.Observe(io.ReadOps, metric.WithAttributes(append(base, attribute.String("direction", "read"))...))
+				obs.Observe(io.WriteOps, metric.WithAttributes(append(base, attribute.String("direction", "write"))...))
+			}
 			return nil
 		}),
 	)
@@ -236,10 +316,18 @@ func bindingDynamicAttrs(b *binding.RuntimeBinding) []attribute.KeyValue {
 	return attrs
 }
 
-// execdSharedAttrs returns the attribute set stamped onto every metric:
-// static env-derived attrs plus, once a RuntimeBinding is applied, the
-// dynamic sandbox attrs captured at record time (binding wins on key
-// conflicts).
+func diskUsageAttrs(base []attribute.KeyValue, usage resources.DiskUsage) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, 0, len(base)+3)
+	attrs = append(attrs, base...)
+	attrs = append(attrs,
+		attribute.String("mountpoint", usage.Mountpoint),
+		attribute.String("fstype", usage.FSType),
+		attribute.String("source", usage.Source),
+	)
+	return attrs
+}
+
+// RuntimeBinding attributes override static environment attributes at record time.
 func sharedAttrs() []attribute.KeyValue {
 	staticAttrs := execdSharedAttrs()
 	b := binding.Current()

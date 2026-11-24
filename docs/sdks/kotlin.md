@@ -288,6 +288,8 @@ RunCommandRequest request = RunCommandRequest.builder()
 sandbox.commands().run(request);
 ```
 
+If an execution handler throws an exception during command, command-session, or code execution, the SDK stops processing the stream and reports a `SandboxException` to the caller. A handler that throws a `SandboxException` passes that instance through. For other exceptions, the original exception is available as the cause. Catch recoverable errors inside the handler if execution events should continue to be processed.
+
 To execute a native program without shell parsing, pass an argument list. On Linux, this example prints literal `$HOME` and keeps `hello world` as one argument:
 
 ```java
@@ -300,7 +302,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 #### Background commands
 
-Poll incremental logs and status. Command timeout is separate from sandbox TTL.
+Poll incremental logs and status. Command timeout is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```java
 Execution execution = sandbox.commands().run(RunCommandRequest.builder()
@@ -315,9 +317,13 @@ while (true) {
         throw new IllegalStateException("Command did not finish");
     }
     CommandStatus status = sandbox.commands().getCommandStatus(commandId);
-    CommandLogs logs = sandbox.commands().getBackgroundCommandLogs(commandId, cursor);
-    System.out.print(logs.getContent());
-    if (logs.getCursor() != null) cursor = logs.getCursor();
+    while (true) {
+        CommandLogs page = sandbox.commands().getBackgroundCommandLogs(commandId, cursor);
+        System.out.print(page.getContent());
+        Long next = page.getCursor() != null ? page.getCursor() : cursor;
+        if (page.getContent().isEmpty() || next.equals(cursor)) break;
+        cursor = next;
+    }
     if (Boolean.FALSE.equals(status.getRunning())) {
         if (!Integer.valueOf(0).equals(status.getExitCode())) {
             throw new IllegalStateException("Command failed: " + status.getExitCode() + ", " + status.getError());
@@ -438,7 +444,14 @@ Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/obser
 
 ## Snapshots and metadata
 
-Create a snapshot with `sandbox.createSnapshot` or `manager.createSnapshot`. `SandboxManager` exposes `getSnapshot`, `listSnapshots`, `deleteSnapshot`, and `waitForSnapshotReady` to wait for asynchronous snapshot completion. Restore with `Sandbox.builder().snapshotId(snapshotId).connectionConfig(config).build()`.
+Create a snapshot with `sandbox.createSnapshot(name, mode)` or `manager.createSnapshot(sandboxId, name, mode)`. `SandboxManager` exposes `getSnapshot`, `listSnapshots`, `deleteSnapshot`, and `waitForSnapshotReady` to wait for asynchronous snapshot completion. Restore with `Sandbox.builder().snapshotId(snapshotId).connectionConfig(config).build()`.
+
+Snapshot `mode` selects what the snapshot persists:
+
+- `SnapshotMode.FULL` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `SnapshotMode.ROOTFS_ONLY`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend; other backends reject the mode before any capture starts, and an unqualified fast-sandbox node fails the snapshot instead of silently producing a full artifact.
+
+`SnapshotInfo.getMode()` reports the artifact class of an existing snapshot; snapshots created before the field existed report `SnapshotMode.FULL`.
 
 Use `sandbox.patchMetadata` or `manager.patchSandboxMetadata` to add/replace metadata keys; a `null` value removes a key. Runtime support is described by the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml).
 
@@ -459,6 +472,17 @@ try (SandboxManager manager = SandboxManager.builder().connectionConfig(config).
     }
     // The snapshot is retained. When no longer needed: manager.deleteSnapshot(snapshot.getId());
 }
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```java
+SnapshotInfo rootfsSnapshot = sandbox.createSnapshot("workspace-state", SnapshotMode.ROOTFS_ONLY);
+manager.waitForSnapshotReady(rootfsSnapshot.getId(), Duration.ofMinutes(15));
+Sandbox rebooted = Sandbox.builder()
+        .snapshotId(rootfsSnapshot.getId()).connectionConfig(config).build();
+// Files written before the snapshot are present; processes were not preserved
+// and the entrypoint re-ran on boot.
 ```
 
 Metadata updates can include both replacement values and removals. Use a map that accepts null values (`Map.of` does not):
@@ -487,12 +511,11 @@ An explicit `OPEN-SANDBOX-API-KEY` entry in `headers` takes precedence over `api
 | `apiKey`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
 | `domain`         | The endpoint domain of the sandbox service | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`       | HTTP protocol (http/https)                 | `http`                       | -                      |
-| `requestTimeout` | Timeout for API requests                   | 30 seconds                   | -                      |
+| `requestTimeout` | Timeout for API requests; command, code and isolated-session streams (SSE) wait at most `max(requestTimeout, 30s)` for the response and between stream bytes, with no cap on the whole stream | 30 seconds                   | -                      |
 | `debug`          | Enable debug logging for HTTP requests     | `false`                      | -                      |
 | `headers`        | Custom HTTP headers                        | Empty                        | -                      |
 | `connectionPool` | Shared OKHttp ConnectionPool               | SDK-created per instance     | -                      |
 | `retryPolicy`    | Automatic retry policy for non-streaming requests (see [Automatic retries](#_2-automatic-retries)) | Enabled (`RetryPolicy()`) | -                 |
-| `useServerProxy` | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false` | -                      |
 | `disableMetrics` | Disable SDK create-latency telemetry (see [SDK Telemetry](/sdks/observability#creation-metrics)) | `false` | `OPENSANDBOX_DISABLE_METRICS` |
 | `enableTracing` | Enable OpenTelemetry tracing for pool warmup (see [SDK Tracing](/sdks/observability#pool-warmup-tracing)) | `false` | - |
 

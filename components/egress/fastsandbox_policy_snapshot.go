@@ -336,6 +336,7 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 		return status, errors.New("policy import persistence failure")
 	}
 	if registered {
+		s.recordBindingSnapshot(subj, fence)
 		log.Infof("subject %s: policy imported from snapshot bundle (revision %d, re-stamped to %s/%s)",
 			subj, pf.Revision, fence.RuntimeInstanceID, fence.AttachmentID)
 	} else {

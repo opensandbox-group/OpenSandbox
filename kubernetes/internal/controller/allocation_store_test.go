@@ -454,7 +454,6 @@ func TestInMemoryAllocationStore_SandboxDeleted_PodsReturnedToPool(t *testing.T)
 	err = store.SetAllocation(ctx, pool, updatedAlloc)
 	assert.NoError(t, err)
 
-	// Verify pods are returned to pool (no longer allocated)
 	result, err := store.GetAllocation(ctx, pool)
 	assert.NoError(t, err)
 	assert.Len(t, result.PodAllocation, 1)
@@ -469,14 +468,12 @@ func TestInMemoryAllocationStore_UpdateAllocation_EmptyPods_ReleaseAll(t *testin
 	store := newInMemoryAllocationStore().(*inMemoryAllocationStore)
 	ctx := context.Background()
 
-	// Setup initial allocation
 	store.UpdateAllocation(ctx, "default", "pool1", "sandbox1", []string{"pod1", "pod2"})
 	assert.Equal(t, 2, len(store.pools["default/pool1"].data))
 
 	// Update with empty pods (simulates release)
 	store.UpdateAllocation(ctx, "default", "pool1", "sandbox1", []string{})
 
-	// Verify all pods are released
 	assert.Empty(t, store.pools["default/pool1"].data, "all pods should be released when empty slice provided")
 }
 
@@ -514,13 +511,10 @@ func TestInMemoryAllocationStore_SetAllocation_ReplaceAll(t *testing.T) {
 	assert.Equal(t, "sandbox2", result.PodAllocation["pod4"])
 }
 
-// TestInMemoryAllocationStore_MultiNamespaceSamePoolName tests that pools with the same name
-// in different namespaces are properly isolated from each other.
 func TestInMemoryAllocationStore_MultiNamespaceSamePoolName(t *testing.T) {
 	store := newInMemoryAllocationStore()
 	ctx := context.Background()
 
-	// Create two pools with the same name but in different namespaces
 	poolNs1 := &sandboxv1alpha1.Pool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "shared-pool",
@@ -534,7 +528,6 @@ func TestInMemoryAllocationStore_MultiNamespaceSamePoolName(t *testing.T) {
 		},
 	}
 
-	// Set different allocations for each namespace
 	_ = store.SetAllocation(ctx, poolNs1, &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod1": "sandbox1-ns1",
@@ -548,32 +541,27 @@ func TestInMemoryAllocationStore_MultiNamespaceSamePoolName(t *testing.T) {
 		},
 	})
 
-	// Verify each namespace only sees its own allocations
 	allocNs1, _ := store.GetAllocation(ctx, poolNs1)
 	allocNs2, _ := store.GetAllocation(ctx, poolNs2)
 
-	// Namespace1 should have pod1 and pod2
 	assert.Len(t, allocNs1.PodAllocation, 2)
 	assert.Equal(t, "sandbox1-ns1", allocNs1.PodAllocation["pod1"])
 	assert.Equal(t, "sandbox1-ns1", allocNs1.PodAllocation["pod2"])
 	assert.Empty(t, allocNs1.PodAllocation["pod3"], "namespace1 should not see namespace2's pods")
 	assert.Empty(t, allocNs1.PodAllocation["pod4"], "namespace1 should not see namespace2's pods")
 
-	// Namespace2 should have pod3 and pod4
 	assert.Len(t, allocNs2.PodAllocation, 2)
 	assert.Equal(t, "sandbox1-ns2", allocNs2.PodAllocation["pod3"])
 	assert.Equal(t, "sandbox1-ns2", allocNs2.PodAllocation["pod4"])
 	assert.Empty(t, allocNs2.PodAllocation["pod1"], "namespace2 should not see namespace1's pods")
 	assert.Empty(t, allocNs2.PodAllocation["pod2"], "namespace2 should not see namespace1's pods")
 
-	// Update allocation in namespace1 should not affect namespace2
 	_ = store.SetAllocation(ctx, poolNs1, &poolAllocation{
 		PodAllocation: map[string]string{
 			"pod5": "sandbox2-ns1",
 		},
 	})
 
-	// Verify namespace2 is unchanged
 	allocNs2AfterUpdate, _ := store.GetAllocation(ctx, poolNs2)
 	assert.Len(t, allocNs2AfterUpdate.PodAllocation, 2, "namespace2 should still have 2 pods")
 	assert.Equal(t, "sandbox1-ns2", allocNs2AfterUpdate.PodAllocation["pod3"])

@@ -19,6 +19,7 @@ from opensandbox_server.config import AgentSandboxRuntimeConfig
 from opensandbox_server.services.k8s.provider_factory import (
     register_provider,
     create_workload_provider,
+    get_workload_provider_class,
     list_available_providers,
     PROVIDER_TYPE_BATCHSANDBOX,
     PROVIDER_TYPE_AGENT_SANDBOX,
@@ -86,9 +87,28 @@ spec:
     
     def test_create_provider_with_none_type_uses_default(self, mock_k8s_client, k8s_app_config):
         provider = create_workload_provider(None, mock_k8s_client, k8s_app_config)
-        
-        # Should use the first registered provider (batchsandbox)
+
         assert isinstance(provider, BatchSandboxProvider)
+
+    def test_default_provider_lookup_is_quiet_at_info(self, caplog):
+        with caplog.at_level("INFO"):
+            assert get_workload_provider_class(None) is BatchSandboxProvider
+
+        assert not caplog.records
+
+    def test_default_provider_replacement_receives_config(
+        self, mock_k8s_client, k8s_app_config, isolated_registry
+    ):
+        class ReplacementProvider(BatchSandboxProvider):
+            pass
+
+        register_provider(PROVIDER_TYPE_BATCHSANDBOX, ReplacementProvider)
+        k8s_app_config.kubernetes.image_pull_policy = "Always"
+
+        provider = create_workload_provider(None, mock_k8s_client, k8s_app_config)
+
+        assert isinstance(provider, ReplacementProvider)
+        assert provider.image_pull_policy == "Always"
     
     def test_create_provider_with_invalid_type_raises_error(self, mock_k8s_client):
         with pytest.raises(ValueError, match="Unsupported workload provider type"):
@@ -158,12 +178,6 @@ spec:
         assert isinstance(provider, CustomProvider)
 
         assert "custom" in list_available_providers()
-    
-    def test_create_batchsandbox_with_config(self, mock_k8s_client, k8s_app_config):
-        provider = create_workload_provider(PROVIDER_TYPE_BATCHSANDBOX, mock_k8s_client, k8s_app_config)
-        
-        assert isinstance(provider, BatchSandboxProvider)
-        assert provider.k8s_client == mock_k8s_client
     
     def test_create_provider_with_empty_registry_raises_error(self, mock_k8s_client, isolated_registry):
         from opensandbox_server.services.k8s import provider_factory

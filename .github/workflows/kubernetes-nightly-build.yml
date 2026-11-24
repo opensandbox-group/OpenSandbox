@@ -40,7 +40,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.0'
+          go-version: "1.26.11"
           cache-dependency-path: kubernetes/go.sum
 
       - name: Run core e2e tests
@@ -72,6 +72,15 @@ jobs:
             script: scripts/python-k8s-e2e-ingress.sh
             e2e_gateway_route_mode: uri
             execd_run_as_init: "true"
+          - variant: execd-init-off-hardening
+            script: scripts/python-k8s-execd-init-e2e.sh
+            e2e_gateway_route_mode: ""
+            execd_run_as_init: "false"
+          - variant: execd-hardening-caps-drop
+            script: scripts/python-k8s-execd-init-e2e.sh
+            e2e_gateway_route_mode: ""
+            execd_run_as_init: "true"
+            hardening_degradation: "true"
     env:
       KIND_CLUSTER: opensandbox-e2e
       KIND_K8S_VERSION: v1.30.4
@@ -91,7 +100,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.0"
+          go-version: "1.26.11"
           cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
@@ -112,6 +121,7 @@ jobs:
         env:
           E2E_GATEWAY_ROUTE_MODE: ${{ matrix.e2e_gateway_route_mode }}
           E2E_EXECD_RUN_AS_INIT: ${{ matrix.execd_run_as_init }}
+          OPENSANDBOX_HARDENING_DEGRADATION: ${{ matrix.hardening_degradation }}
         run: bash "./${{ matrix.script }}"
 
       - name: Dump kind diagnostics
@@ -170,7 +180,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.0"
+          go-version: "1.26.11"
           cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
@@ -254,7 +264,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.0"
+          go-version: "1.26.11"
           cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
@@ -336,7 +346,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.0"
+          go-version: "1.26.11"
           cache-dependency-path: kubernetes/go.sum
 
       - name: Add Go bin to PATH
@@ -378,6 +388,14 @@ jobs:
     env:
       # Covers up, both e2e steps, and the failure diagnostics.
       IDLE_PAUSE: "1"
+      # LegacySlot E2E regression lives here on purpose: the PR integration
+      # lane (fast-sandbox-test.yml) switched to the ResourceAware profile
+      # (OSEP-0026); keep this nightly on the legacy pool shape.
+      POOL_MODE: "legacy"
+      # Overseas KVM runner (Alibaba Cloud Singapore): proxy.golang.org is
+      # directly reachable and serves dead vanity domains (nhooyr.io/websocket)
+      # from cache while keeping full sumdb verification.
+      FSB_GOPROXY: https://proxy.golang.org,direct
     steps:
       # actions/checkout always executes as the runner user; the script
       # steps below run as root and leave root-owned files (venv, pycache)
@@ -391,7 +409,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25'
+          go-version: '1.26.11'
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v7

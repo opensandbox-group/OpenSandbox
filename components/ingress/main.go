@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -25,7 +26,7 @@ import (
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/alibaba/opensandbox/internal/version"
 	"k8s.io/apimachinery/pkg/runtime"
-	"knative.dev/pkg/injection"
+	"k8s.io/client-go/rest"
 	"knative.dev/pkg/signals"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/activity"
@@ -41,10 +42,39 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
+func validateFastPathRouting(endpoint, namespace, mode, keys string) error {
+	if strings.TrimSpace(endpoint) == "" {
+		if namespace != "" {
+			return errors.New("--fast-sandbox-namespace requires --fastpath-endpoint")
+		}
+		return nil
+	}
+	if strings.TrimSpace(keys) == "" && (namespace == "" || mode != "header") {
+		return errors.New("FastPath routing requires --secure-access-keys or --mode header with --fast-sandbox-namespace for unsigned wildcard routes")
+	}
+	return nil
+}
+
+func validateHTTPConnectionPool(maxIdleConns, maxIdleConnsPerHost int, idleConnTimeout time.Duration) error {
+	if maxIdleConns < 0 {
+		return errors.New("--http-max-idle-conns must be non-negative")
+	}
+	if maxIdleConnsPerHost < 0 {
+		return errors.New("--http-max-idle-conns-per-host must be non-negative")
+	}
+	if idleConnTimeout < 0 {
+		return errors.New("--http-idle-conn-timeout must be non-negative")
+	}
+	return nil
+}
+
 func main() {
 	version.EchoVersion("OpenSandbox Ingress")
 
 	flag.InitFlags()
+	if err := validateHTTPConnectionPool(flag.HTTPMaxIdleConns, flag.HTTPMaxIdleConnsPerHost, flag.HTTPIdleConnTimeout); err != nil {
+		log.Fatal(err)
+	}
 
 	ctx := signals.NewContext()
 	ctx = withLogger(ctx, flag.LogLevel)
@@ -76,8 +106,22 @@ func main() {
 			scopeVerifier = &routescope.Verifier{Keys: keys}
 		}
 	}
-	if fastPathEnabled && scopeVerifier == nil {
-		log.Panic("FastPath routing requires --secure-access-keys for authenticated route scopes")
+	if err := validateFastPathRouting(flag.FastPathEndpoint, flag.FastSandboxNamespace, flag.Mode, flag.SecureAccessKeys); err != nil {
+		log.Panic(err)
+	}
+
+	var kubeConfig *rest.Config
+	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled || flag.FastPathAuthEnabled {
+		kubeConfig, err = flag.ClientConfig.GetRESTConfig()
+		if err != nil {
+			log.Panicf("Error loading Kubernetes client config: %v", err)
+		}
+	}
+	fastPathAuth := sandbox.FastPathAuthConfig{
+		Disabled:   !flag.FastPathAuthEnabled,
+		Kubernetes: kubeConfig,
+		CAFile:     flag.FastPathTLSCAFile,
+		ServerName: flag.FastPathTLSServerName,
 	}
 
 	var sandboxProvider sandbox.Provider
@@ -87,10 +131,11 @@ func main() {
 			flag.FastPathEndpoint,
 			time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 			flag.FastPathAccessMode,
+			fastPathAuth,
 		)
 		sandboxProvider = fsbProvider
 	} else {
-		cfg := injection.ParseAndGetRESTConfigOrDie()
+		cfg := rest.CopyConfig(kubeConfig)
 		cfg.ContentType = runtime.ContentTypeProtobuf
 		cfg.UserAgent = "opensandbox-ingress/" + version.GitCommit
 		providerFactory := sandbox.NewProviderFactory(cfg, time.Second*30)
@@ -100,6 +145,7 @@ func main() {
 				flag.FastPathEndpoint,
 				time.Duration(flag.FastPathWaitTimeoutMillis)*time.Millisecond,
 				flag.FastPathAccessMode,
+				fastPathAuth,
 			)
 			if err == nil {
 				sandboxProvider = sandbox.NewCompositeProvider(sandboxProvider, fsbProvider)
@@ -137,7 +183,10 @@ func main() {
 		MinDistinctSignalTargets: flag.NetworkReadinessShadowMinSignalTargets,
 		DegradedFailureRatio:     flag.NetworkReadinessShadowDegradedFailureRatio,
 	})
-	proxyOptions := make([]proxy.Option, 0, 3)
+	proxyOptions := []proxy.Option{
+		proxy.WithFastSandboxNamespace(flag.FastSandboxNamespace),
+		proxy.WithHTTPConnectionPool(flag.HTTPMaxIdleConns, flag.HTTPMaxIdleConnsPerHost, flag.HTTPIdleConnTimeout),
+	}
 	if err != nil {
 		log.Printf("network readiness shadow assessment disabled (invalid configuration): %v", err)
 	} else {
@@ -145,14 +194,13 @@ func main() {
 	}
 	activityRecorder, activityOptions := newActivityRecorder(ctx)
 	proxyOptions = append(proxyOptions, activityOptions...)
-	proxyOptions = append(proxyOptions, newWakeOption(ctx, fsbProvider, activityRecorder)...)
+	proxyOptions = append(proxyOptions, newWakeOption(ctx, fsbProvider, activityRecorder, kubeConfig)...)
 	if flag.WakeEnabled && !flag.ActivityEnabled {
 		log.Printf("--wake-enabled without --activity-enabled: completed resumes are not recorded as activity, " +
 			"so the server-side idle sweeper will re-pause freshly resumed sandboxes after the idle threshold; " +
 			"enable activity recording for a stable wake loop")
 	}
 
-	// Create reverse proxy with sandbox provider.
 	reverseProxy := proxy.NewProxy(
 		ctx,
 		sandboxProvider,
@@ -193,14 +241,14 @@ func newActivityRecorder(ctx context.Context) (activity.Recorder, []proxy.Option
 
 // newWakeOption wires the OSEP-0024 wake-on-access orchestrator; every
 // flight is gated on the per-sandbox idle policy read from the Sandbox CR.
-func newWakeOption(ctx context.Context, fsbProvider *sandbox.FastSandboxProvider, activityWriter wake.ActivityWriter) []proxy.Option {
+func newWakeOption(ctx context.Context, fsbProvider *sandbox.FastSandboxProvider, activityWriter wake.ActivityWriter, kubeConfig *rest.Config) []proxy.Option {
 	if !flag.WakeEnabled {
 		return nil
 	}
 	if fsbProvider == nil {
 		log.Panic("Wake-on-access requires a Fast Sandbox provider (set --provider-type=fast-sandbox or --fastpath-endpoint)")
 	}
-	policySource, err := idlepolicy.NewInClusterCRPolicySource(ctx)
+	policySource, err := idlepolicy.NewCRPolicySourceForConfig(ctx, kubeConfig)
 	if err != nil {
 		log.Panicf("Wake-on-access requires Kubernetes API access to read sandbox idle policies: %v", err)
 	}

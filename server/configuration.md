@@ -74,6 +74,10 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 
 ## `[proxy]`
 
+::: warning Deprecated — maintenance mode
+The server-proxied data path (`/sandboxes/{id}/proxy/{port}`) is deprecated: no new features, security and bug fixes only. Route data-plane traffic through the ingress gateway instead. With `runtime.type = "docker"` the server accepts only `mode = "direct"` in [`[ingress]`](#ingress), so on Docker the data path off the server proxy is the direct endpoint the server returns for each sandbox; see [Single-Host Network (Docker)](../docs/architecture/network/single-host-network.md).
+:::
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `resolve_internal` | boolean | `true` | `true`: reverse-proxy targets the sandbox internal IP (Docker bridge / provider internal endpoint). `false`: targets the server-local host-mapped port — required when the server cannot route to sandbox bridge IPs (e.g. server container on a Compose network while sandboxes run on the default bridge; macOS launchd/systemd session). |
@@ -99,7 +103,8 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 |-----|------|---------|-------------|
 | `type` | string | — | **`docker`** or **`kubernetes`**. |
 | `execd_image` | string | — | OCI image containing the **execd** binary (in-sandbox bootstrap). |
-| `execd_run_as_init` | boolean | `false` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 (child reaping, container lifecycle, hardening floor). fsb template builds bake `EXECD_INIT=1` into the golden image instead: execd runs as a subreaper under the fsb guest init, so reaping, signal forwarding, and the hardening floor still apply but the PID 1 signal shield does not. |
+| `execd_run_as_init` | boolean | `true` | Run execd as sandbox init (OSEP-0018): execd becomes PID 1 owning child reaping, signal forwarding, and the container lifecycle. This switch only injects `EXECD_INIT=1`; the hardening floor (cap-drop/seccomp/no-new-privileges) is **not** included by default — it stays off unless an execd isolation config enables it (`[hardening] enabled = true`, staged via `EXECD_ISOLATION_CONFIG`). Set `false` for the classic background-and-wait topology. fsb template builds bake `EXECD_INIT=1` into the golden image instead: execd runs as a subreaper under the fsb guest init, so reaping and signal forwarding still apply but the PID 1 signal shield does not. |
+| `execd_isolation_config` | string | unset | Path to the operator's isolation TOML inside Docker and Kubernetes pod-based sandboxes (not `templateId`/fsb fast-sandbox sandboxes). When set for supported sandbox types, the server injects this path as `EXECD_ISOLATION_CONFIG` and ignores request values for that key. The file must be provisioned at that path. Omit this setting to allow creator-managed paths. |
 
 ---
 
@@ -114,11 +119,11 @@ Example files: [`example.config.toml`](opensandbox_server/examples/example.confi
 | `apparmor_profile` | string \| omitted | `null` | AppArmor profile name; empty uses Docker default. Also applied to the execd cache container. |
 | `no_new_privileges` | boolean | `true` | Block privilege escalation. |
 | `seccomp_profile` | string \| omitted | `null` | Seccomp profile name or absolute path; empty uses Docker default. Also applied to the execd cache container (e.g. set `unconfined` on hosts whose default profile blocks execd). |
-| `pids_limit` | integer \| null | `4096` | Max PIDs per sandbox container; `null` disables. |
-| `sandbox_env` | table | `{}` | Env vars injected into every sandbox; create-request keys override same-named ones. |
+| `pids_limit` | integer | `4096` | Max PIDs per sandbox container; `0` disables. |
+| `sandbox_env` | table | `{}` | Env vars injected into every sandbox. Create-request keys override these defaults. When configured, `runtime.execd_isolation_config` supplies `EXECD_ISOLATION_CONFIG` regardless of either value. |
 | `sandbox_binds` | string[] | `[]` | Bind mounts for every sandbox (`host:container[:mode]`); prepended to request-derived binds. |
 | `port_range_min` / `port_range_max` | integer | `40000` / `60000` | Host port range for bridge-mode allocation. Range must span ≥ 100 ports; each sandbox needs 2–3 ports (3 with egress). |
-| `publish_host` | string | `"0.0.0.0"` | Address Docker publishes sandbox ports on. Use `127.0.0.1` (server on host) or the bridge gateway IP (server in container) to keep ports off public interfaces. Must be an IPv4 address. |
+| `publish_host` | string | `"0.0.0.0"` | Address Docker publishes sandbox ports on. Use `127.0.0.1` (server on host) or the bridge gateway IP (server in container) to keep ports off public interfaces; the server then reaches sandbox ports at that address. Must be an IPv4 address. |
 
 ---
 
@@ -132,6 +137,7 @@ Missing table → defaults from `KubernetesRuntimeConfig`.
 | `insecure_skip_tls_verify` | boolean | `false` | Skip apiserver TLS verification (temporary workaround only). |
 | `namespace` | string \| omitted | `null` | Namespace for sandbox workloads. |
 | `workload_provider` | string \| omitted | `null` | **`batchsandbox`** (default) or **`agent-sandbox`**. |
+| `metadata_sync_pods` | boolean | `false` | When enabled, synchronize all accepted metadata label changes to dedicated BatchSandbox Pods and persist recreation overrides. Pooled Pods and other providers are excluded. See [Pod label updates](../docs/getting-started/configuration.md#updating-kubernetes-pod-labels-from-metadata). |
 | `batchsandbox_template_file` | string \| omitted | `null` | BatchSandbox CR YAML template path (batchsandbox only). |
 | `image_pull_policy` | string \| omitted | `"IfNotPresent"` | BatchSandbox main container pull policy (`Always`/`IfNotPresent`/`Never`). |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max wait for a new sandbox to become ready. |
@@ -163,6 +169,9 @@ The kubernetes runtime also serves fsb (`fsb-`) sandboxes side by side; these fi
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `fastpath_endpoint` | string | `"fast-sandbox-fastpath.opensandbox.svc:9090"` | Fast-Path Server gRPC endpoint. |
+| `fastpath_auth_enabled` | boolean | `false` | Enable FastPath caller authentication and TLS; defaults to `false` (plaintext gRPC) for zero-prerequisite compatibility. |
+| `fastpath_tls_ca_file` | string \| omitted | `null` | Trusted FastPath serving CA PEM file, reloaded when changed; omitted uses system roots. |
+| `fastpath_tls_server_name` | string \| omitted | `null` | Explicit expected TLS DNS identity when different from the connection address. Certificate verification remains mandatory. |
 | `fastpath_timeout_seconds` | number | `30.0` | Per-RPC gRPC deadline. |
 | `fastpath_wait_ready_seconds` | number | `30.0` | Bounded readiness wait for DataPlaneReady after Create. |
 | `fastpath_resource_pool` | string | `"default-pool"` | SandboxPool when `extensions.poolRef` is unset. |
@@ -194,21 +203,30 @@ Ingress exposure for sandbox endpoints. With `runtime.type = "docker"`, only `mo
 | `gateway.route.mode` | string | — | **`wildcard`** (host-based) / **`uri`** (path-prefix) / **`header`** routing. |
 | `secure_access` | table \| omitted | `null` | OSEP-0011 signing config: signed route tokens + static SecureAccessTokens. Also injectable via `OPENSANDBOX_SECURE_ACCESS_KEYS` / `OPENSANDBOX_SECURE_ACCESS_ACTIVE_KEY`. |
 
+### Fast Sandbox unsigned wildcard endpoints
+
+For a single namespace, configure `[ingress.gateway]` with `address = "*.sandbox.example.com"` and `[ingress.gateway.route]` with `mode = "wildcard"`. Start ingress with `--mode header --fastpath-endpoint <host:port> --fast-sandbox-namespace <namespace>` (and `--provider-type fast-sandbox` for a standalone Fast Sandbox gateway). The namespace must match the namespace the server uses for these sandboxes; the option accepts exactly one Kubernetes namespace, not a list or wildcard. `getEndpoint` then returns `<sandbox-id>-<port>.sandbox.example.com` without routing headers. Configure wildcard DNS and TLS at the front proxy, preserving the Host header.
+
+For the ingress-gateway Helm chart, set `gateway.fastSandboxNamespace` to the same namespace and `gateway.fastpathEndpoint` to the FastPath address; keep `gateway.gatewayRouteMode = "header"` for Host routing.
+
+Signing keys are not required for this wildcard mode. It provides no client authentication: protect the gateway with network isolation or an authenticating front proxy, especially for execd access. The namespace restriction also rejects signed `f1.` routes for other namespaces. Header and URI endpoint generation still requires shared signing keys; `expires` remains unsupported for Fast Sandbox endpoints. See [Fast Sandbox networking](../docs/architecture/fast-sandbox/networking.md).
+
 ---
 
 ## `[egress]`
 
-Egress sidecar image and enforcement mode. The sidecar is only attached to sandboxes created **with** a `networkPolicy`.
+Egress sidecar image and enforcement mode. The sidecar is only attached to sandboxes created **with** a `networkPolicy`, except in `mode = "forward"`, where it is attached to every sandbox.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `image` | string \| omitted | `null` | Egress sidecar OCI image. **Required** when clients send `networkPolicy`. |
-| `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available. |
+| `mode` | string | `"dns"` | **`dns`** — DNS-proxy enforcement (CIDR/IP rules not enforced); **`dns+nft`** — adds nftables for CIDR/IP enforcement where available; **`forward`** — relay every sandbox TCP connection to `upstream_proxy` via `CONNECT` (Docker bridge & Kubernetes non-pooled, see below). |
+| `dns_upstreams` | list \| omitted | `null` | `forward` only: policy DNS resolver(s), literal IP with optional `:port`. `REFUSED` is final and there is no fallback resolver. |
 | `disable_ipv6` | bool | `true` | IPv6 egress is incomplete (esp. Kubernetes); set `false` only deliberately. |
 | `otlp_endpoint` | string \| omitted | `null` | OTLP/**HTTP** endpoint for sidecar metrics (both runtimes). Infrastructure config — not settable per request. |
 | `readiness_timeout_seconds` | float | `30.0` | Docker only: max wait for sidecar health endpoint (> 0). |
 | `requests` / `limits` | map \| omitted | `null` | Kubernetes only: sidecar resources. Omit independently; invalid quantities fail config load. |
-| `upstream_proxy` | table \| omitted | `null` | Chain mitmproxy egress through an upstream HTTP(S) CONNECT proxy. Requires `mode = "dns+nft"`. See below. |
+| `upstream_proxy` | table \| omitted | `null` | Chain mitmproxy egress through an upstream HTTP(S) CONNECT proxy. Requires `mode = "dns+nft"`, or `mode = "forward"` (then `authorization` is required). See below. |
 
 ```toml
 [egress]
@@ -233,6 +251,15 @@ url = "http://proxy.example.com:3128"
 - CA fields are runtime-specific and validated at load (`ca_cert_path`: absolute path on the Docker daemon host; `ca_secret_name`: Secret key `ca.crt`, mounted read-only into the sidecar only). They **augment** the system trust store and apply to all mitmproxy upstream TLS verification. Missing/invalid CA fails closed — traffic is never chained with reduced verification.
 - Config changes affect newly created sandboxes only.
 - Data-plane details: [`components/egress/docs/mitmproxy-transparent.md`](../components/egress/docs/mitmproxy-transparent.md#6-chain-through-an-upstream-proxy-corporateforward-egress); operations: [`docs/guides/egress-upstream-proxy.md`](../docs/guides/egress-upstream-proxy.md).
+
+**`forward` notes (OSEP-0030):**
+
+- Every sandbox gets the egress sidecar; all outbound TCP is tunneled byte-for-byte to `upstream_proxy.url` via `CONNECT <original-ip>:<port>` with `Proxy-Authorization`, `OpenSandbox-Sandbox-Id`, `OpenSandbox-Sandbox-Namespace` (Kubernetes, single- and multi-tenant), and `OpenSandbox-Tenant-Name` (Kubernetes multi-tenant only). No local TLS interception, no direct-dial fallback; UDP, ICMP, link-local and IPv6 TCP are dropped.
+- Supported runtimes: Docker (`docker.network_mode = "bridge"`, `docker.drop_capabilities` dropping `NET_ADMIN` and `NET_RAW`) and Kubernetes non-pooled (`BatchSandbox` template mode and `AgentSandbox`). Requires `egress.image`, `upstream_proxy.url` and `upstream_proxy.authorization`; gVisor, Kubernetes pool mode (`extensions.poolRef`), Windows profile, pod templates enabling `shareProcessNamespace`/`hostPID`/`hostNetwork`/`privileged`/`NET_ADMIN`/`NET_RAW`, and Fast Sandbox are rejected.
+- Pre-workload enforcement: Docker waits for `/healthz` before starting the sandbox container; Kubernetes installs a bootstrap default-deny nftables fence in an `egress-init` initContainer before workload containers start, which the egress sidecar atomically replaces once initialized.
+- The sidecar reports ready only while the gateway is reachable, so creation fails if the gateway is not reachable within `readiness_timeout_seconds` (Docker) or `sandbox_create_timeout_seconds` (Kubernetes).
+- Creates with `networkPolicy`, `credentialProxy`, or env `OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT` / `_SSL_INSECURE` return `400`, as do `PUT`/`PATCH /sandboxes/{id}/networkpolicy`.
+- Guide: [`docs/guides/egress-forward-mode.md`](../docs/guides/egress-forward-mode.md).
 
 **Runtime notes:** Docker — `networkPolicy` requires `docker.network_mode = "bridge"`; raise `readiness_timeout_seconds` if the sidecar starts slowly. Kubernetes — set `requests`/`limits` when namespace `LimitRange` defaults are too large. Sidecar behavior: [`components/egress/README.md`](../components/egress/README.md).
 

@@ -49,7 +49,8 @@ class StaticPassthroughTest(unittest.TestCase):
                     ech_hidden=False, static_passthrough=static.parse_handoff('["*.example.com"]'), view=None)
         self.assertEqual(fixtures.tls_decision.classify(**args, destination_port=443).reason, "static_ignore")
         for port in (80, 8443):
-            self.assertEqual(fixtures.tls_decision.classify(**args, destination_port=port).reason, "snapshot_missing")
+            result = fixtures.tls_decision.classify(**args, destination_port=port)
+            self.assertEqual((result.action, result.reason), ("deny", "non_canonical_port"))
         for port in (None, True, "443", 0, 65536):
             self.assertEqual(fixtures.tls_decision.classify(**args, destination_port=port).action, "deny")
         for override, reason in ((dict(identity=None), "unknown_identity"), (dict(ech_hidden=True), "ech"),

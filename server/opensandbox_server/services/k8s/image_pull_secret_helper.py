@@ -59,25 +59,11 @@ def build_image_pull_secret(
     """
     Build a kubernetes.io/dockerconfigjson Secret for image pull auth.
 
-    The Secret's ownerReference points to the owning CR so it is
-    garbage-collected automatically when the owner is deleted.
-
-    Args:
-        sandbox_id: Sandbox identifier (used to derive Secret name)
-        image_uri: Container image URI (used to determine registry hostname)
-        auth: ImageAuth credentials
-        owner_uid: UID of the owning CR
-        owner_api_version: apiVersion of the owning CR (e.g. "sandbox.opensandbox.io/v1alpha1")
-        owner_kind: Kind of the owning CR (e.g. "BatchSandbox")
-        owner_name: Name of the owning CR. Defaults to sandbox_id, which is
-            only valid when the CR is named after the id verbatim
-            (BatchSandbox). Providers that rename the CR — agent-sandbox
-            prefixes digit-leading ids with "sandbox-" for DNS1035 — must
-            pass the actual CR name, or K8s GC deletes the Secret as an
-            orphan
-
-    Returns:
-        V1Secret ready to be created via CoreV1Api
+    The Secret's ownerReference points at the owning CR so K8s GC removes it
+    with the owner. ``owner_name`` must be the CR's actual name: providers
+    that rename the CR (agent-sandbox prefixes digit-leading ids with
+    "sandbox-" for DNS1035) must pass it explicitly, or K8s GC deletes the
+    Secret as an orphan.
     """
     secret_name = build_image_pull_secret_name(sandbox_id)
 

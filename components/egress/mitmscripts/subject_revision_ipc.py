@@ -171,7 +171,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _dispatch(self, operation: str, raw: bytes) -> tuple[int, dict[str, Any]]:
         owner = self.server.owner
-        if operation in ("register", "unload"):
+        if operation in ("register", "unload", "suspend"):
             receipt = owner.lifecycle(operation, raw)
             return receipt["result"]["httpStatus"], receipt
         value = parse_object(raw)
@@ -222,6 +222,7 @@ class _Handler(BaseHTTPRequestHandler):
         operation = {
             "/v2/subjects/register": "register",
             "/v2/subjects/unload": "unload",
+            "/v2/subjects/suspend": "suspend",
             "/v2/subjects/lifecycle-status": "lifecycle-status",
             "/v2/revisions/prepare": "prepare",
             "/v2/revisions/commit": "commit",

@@ -53,22 +53,6 @@ const (
 )
 
 // PTYSessionWebSocket handles GET /pty/:sessionId/ws.
-//
-//  1. Look up session → 404 before upgrade if missing
-//  2. Acquire WS lock without eviction → 409 if held and not a ?takeover=1 request
-//  3. Upgrade HTTP → WebSocket
-//     3b. Takeover (if requested): evict the holder and acquire — only now that the
-//     handshake is accepted, so a failed upgrade never evicts anyone
-//  4. Start the shell if not already running
-//     5+6. AtomicAttachOutputWithSnapshot (snapshot + attach under outMu — no loss window)
-//  7. defer: detach → pumpWg.Wait → UnlockWS → ClearEvictHandler (hook live through cleanup)
-//     Register close-only eviction hook (before initial writes, so a stalled replay can
-//     be interrupted without a connMu race)
-//  8. Send replay frame if snapshot non-empty
-//  9. Send connected frame, then upgrade hook to full evictClose+cancelOnce
-//     (initial writes done; all subsequent writes serialized by connMu)
-//  10. Start RFC 6455 ping, streamPump(s), exitWatcher goroutines
-//  11. Read loop: dispatch client frames
 func PTYSessionWebSocket(ctx *gin.Context) {
 	id := ctx.Param("sessionId")
 	if id == "" {
@@ -94,11 +78,7 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		return
 	}
 
-	// 2. Decide how to acquire the exclusive WS lock. Try without evicting first; a
-	//    plain "already connected" with no takeover is refused with HTTP 409 *before*
-	//    the upgrade. A ?takeover=1 request (on a real WS handshake) instead evicts the
-	//    current holder — but only AFTER the handshake is fully accepted (step 3b), so a
-	//    request that announces an upgrade yet fails the handshake never evicts anyone.
+	// Refuse lock conflicts before upgrade; takeover must not evict until the handshake succeeds.
 	locked := session.LockWS()
 	wantsTakeover := !locked && ctx.Query("takeover") == "1" && websocket.IsWebSocketUpgrade(ctx.Request)
 	if !locked && !wantsTakeover {
@@ -109,8 +89,6 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		return
 	}
 
-	// 3. Upgrade HTTP connection to WebSocket. For a takeover this happens BEFORE
-	//    evicting, so a bad or incomplete handshake cannot kill the current holder.
 	conn, err := wsUpgrader.Upgrade(ctx.Writer, ctx.Request, nil)
 	if err != nil {
 		log.Warn("pty ws: upgrade session=%s: %v", id, err)
@@ -120,8 +98,6 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		return
 	}
 
-	// 3b. Takeover: the handshake succeeded, so now evict the current holder and
-	//     acquire the lock. The shell keeps running; this client reattaches with replay.
 	if !locked {
 		if !session.TakeoverWS(wsTakeoverTimeout) {
 			writeErrFrame(conn, model.WSErrCodeAlreadyConnected,
@@ -136,7 +112,6 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 	pipeMode := ctx.Query("pty") == "0"
 	since := queryInt64(ctx.Query("since"), 0)
 
-	// 4. Start the shell if not already running.
 	if !session.IsRunning() {
 		var startErr error
 		if pipeMode {
@@ -166,10 +141,14 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 	//    never clears a successor's hook; a zero evictGen (hook never registered, e.g. an
 	//    early return below) is a no-op.
 	var pumpWg sync.WaitGroup
+	var drainWg sync.WaitGroup
 	var evictGen uint64
 	defer func() {
 		detach()
 		pumpWg.Wait()
+		// The output drainer may call detach too; it must finish before UnlockWS so
+		// it never clears a successor's freshly attached writers.
+		drainWg.Wait()
 		session.UnlockWS()
 		session.ClearEvictHandler(evictGen)
 	}()
@@ -280,9 +259,14 @@ func PTYSessionWebSocket(ctx *gin.Context) {
 		})
 	}
 
-	// 10d. Exit watcher: waits for the process to exit, then sends exit frame
-	// and closes the WS connection immediately (unblocks ReadJSON in the read loop).
-	safego.Go(func() { ptyExitWatcher(session, writeJSON, closeConn, nil, cancelCh, cancelOnce) })
+	// 10d. Output drainer: once the process exits and the runtime has fanned out its
+	// final output, detach the live pipes and wait for the pumps to forward what they
+	// already read. The exit watcher waits for it, so exit always follows the output.
+	holderOutputDrained := startPTYHolderOutputDrainer(session, detach, &pumpWg, &drainWg, cancelCh)
+
+	// 10e. Exit watcher: waits for the process to exit and its output to drain, then
+	// sends exit frame and closes the WS connection (unblocks ReadJSON in the read loop).
+	safego.Go(func() { ptyExitWatcher(session, writeJSON, closeConn, holderOutputDrained, cancelCh, cancelOnce) })
 
 	// 11. Client read loop.
 	ptyClientReadLoop(conn, session, id, writeJSON, cancelCh, cancelOnce)
@@ -375,12 +359,7 @@ func ptyViewerWebSocket(ctx *gin.Context, session runtime.PTYSession, id string)
 	// output broadcasters finish. This prevents a short-lived pipe-mode shell
 	// from closing doneCh while stdout or stderr is still being appended to replay.
 	viewerOutputDrained := make(chan struct{})
-	outputDoneCh := session.Done()
-	if outputSession, ok := session.(interface{ OutputDone() <-chan struct{} }); ok {
-		if ch := outputSession.OutputDone(); ch != nil {
-			outputDoneCh = ch
-		}
-	}
+	outputDoneCh := ptyOutputDone(session)
 	workerWg.Add(3)
 	safego.Go(func() {
 		defer workerWg.Done()
@@ -396,6 +375,64 @@ func ptyViewerWebSocket(ctx *gin.Context, session runtime.PTYSession, id string)
 	})
 
 	ptyViewerClientReadLoop(conn, writeJSON, cancelCh, cancelOnce)
+}
+
+// ptyOutputDone returns the channel that closes once the session's output
+// broadcasters have finished, falling back to Done when it is unavailable.
+func ptyOutputDone(session runtime.PTYSession) <-chan struct{} {
+	if outputSession, ok := session.(interface{ OutputDone() <-chan struct{} }); ok {
+		if ch := outputSession.OutputDone(); ch != nil {
+			return ch
+		}
+	}
+	return session.Done()
+}
+
+// ptyHolderOutputDrainTimeout bounds how long the holder waits, after the process
+// exits, for the runtime to finish fanning out output. A background child that
+// inherited stdout can keep the pipe open indefinitely, so the exit frame must not
+// wait for it forever.
+const ptyHolderOutputDrainTimeout = 2 * time.Second
+
+// startPTYHolderOutputDrainer runs ptyHolderDrainOutput in a goroutine tracked
+// by drainWg and returns the channel it closes once the holder's output drained.
+func startPTYHolderOutputDrainer(session runtime.PTYSession, detach func(), pumpWg, drainWg *sync.WaitGroup, cancelCh <-chan struct{}) <-chan struct{} {
+	drained := make(chan struct{})
+	drainWg.Add(1)
+	safego.Go(func() {
+		defer drainWg.Done()
+		ptyHolderDrainOutput(session, detach, pumpWg, drained, cancelCh)
+	})
+	return drained
+}
+
+// ptyHolderDrainOutput closes drained once the process has exited and the holder's
+// pumps have forwarded all output fanned out to them. Pipe mode closes Done right
+// after the process is reaped, while the broadcasters may still be fanning out the
+// final chunk, so it first waits for the runtime's output to finish. It then
+// detaches the live pipes, which lets each pump write the chunk it already read
+// and return on EOF.
+func ptyHolderDrainOutput(session runtime.PTYSession, detach func(), pumpWg *sync.WaitGroup, drained chan<- struct{}, cancelCh <-chan struct{}) {
+	doneCh := session.Done()
+	if doneCh == nil {
+		return
+	}
+	select {
+	case <-doneCh:
+	case <-cancelCh:
+		return
+	}
+	timer := time.NewTimer(ptyHolderOutputDrainTimeout)
+	defer timer.Stop()
+	select {
+	case <-ptyOutputDone(session):
+	case <-timer.C:
+	case <-cancelCh:
+		return
+	}
+	detach()
+	pumpWg.Wait()
+	close(drained)
 }
 
 // ptyViewerStreamPump wakes on replay-buffer changes and sends every retained

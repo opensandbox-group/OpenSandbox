@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +32,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/fastsandboxnft"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
@@ -163,9 +166,207 @@ func policySnapshotBody(t *testing.T, uid, runtimeID, attID, op, path string, se
 	return string(raw)
 }
 
-// ---------------------------------------------------------------------------
-// SET_BINDING seeds and persists the record
-// ---------------------------------------------------------------------------
+// Port regressions use the real applier; only the nft command is substituted.
+// The same recorder/assertions cover relay, restart, and snapshot transfer.
+type policyPortNFTRunner struct {
+	mu      sync.Mutex
+	scripts []string
+}
+
+func (r *policyPortNFTRunner) run(_ context.Context, script string) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.scripts = append(r.scripts, script)
+	return nil, nil
+}
+
+func (r *policyPortNFTRunner) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.scripts)
+}
+
+func (r *policyPortNFTRunner) last(t *testing.T) string {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	require.NotEmpty(t, r.scripts)
+	return r.scripts[len(r.scripts)-1]
+}
+
+func wirePolicyPortApplier(srv *fastSandboxPolicyServer, mitmPort int) *policyPortNFTRunner {
+	runner := &policyPortNFTRunner{}
+	srv.nft = fastsandboxnft.NewApplier(runner.run, fastsandboxnft.Options{MitmRedirectPort: mitmPort})
+	return runner
+}
+
+const (
+	policyPortsCreate = `{"defaultAction":"deny","egress":[{"action":"deny","ports":[25]},{"action":"allow","target":"198.51.100.10","ports":[443]},{"action":"allow","target":"2001:db8::/64","ports":[8443]}]}`
+	policyPortsUpdate = `{"defaultAction":"deny","egress":[{"action":"deny","ports":[25]},{"action":"deny","target":"198.51.100.10","ports":[22]},{"action":"allow","target":"2001:db8::/64","ports":[8443]}]}`
+)
+
+func assertPolicyPortBody(t *testing.T, raw json.RawMessage, want string) {
+	t.Helper()
+	var got, expected policy.NetworkPolicy
+	require.NoError(t, json.Unmarshal(raw, &got))
+	require.NoError(t, json.Unmarshal([]byte(want), &expected))
+	assert.Equal(t, expected, got, "all actions, targets, and Ports must survive serialization")
+	for _, rule := range got.Egress {
+		require.NotEmpty(t, rule.Ports, "target %q must remain port-scoped", rule.Target)
+	}
+}
+
+func assertPolicyPortDenyFirst(t *testing.T, runner *policyPortNFTRunner, mitmPort int) {
+	t.Helper()
+	script := runner.last(t)
+	assert.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_policy_u drop\n")
+	assert.NotContains(t, script, "meta mark set")
+	assert.NotContains(t, script, "tcp dport { 25 }")
+	assert.NotContains(t, script, "198.51.100.10")
+	assert.NotContains(t, script, "2001:db8::/64")
+	if mitmPort > 0 {
+		assert.Contains(t, script, "add rule inet opensandbox-fast-sandbox subj_s_policy_u_in drop\n")
+	} else {
+		assert.NotContains(t, script, "subj_s_policy_u_in")
+	}
+}
+
+func assertPolicyPortScript(t *testing.T, script string, mitmPort int, updated bool) {
+	t.Helper()
+	const prefix = "add rule inet opensandbox-fast-sandbox "
+	assert.Contains(t, script, prefix+"subj_s_policy_u tcp dport { 25 } drop\n")
+	assert.Contains(t, script, prefix+"mark_s_policy_u ip6 daddr 2001:db8::/64 tcp dport { 8443 } meta mark set 0x2\n")
+	if updated {
+		assert.Contains(t, script, prefix+"subj_s_policy_u ip daddr 198.51.100.10 tcp dport { 22 } drop\n")
+		assert.NotContains(t, script, "tcp dport { 443 }")
+		assert.NotContains(t, script, "ct original proto-dst { 443 }")
+	} else {
+		assert.Contains(t, script, prefix+"mark_s_policy_u ip daddr 198.51.100.10 tcp dport { 443 } meta mark set 0x2\n")
+		assert.NotContains(t, script, "tcp dport { 22 }")
+	}
+	assert.NotContains(t, script, "add element", "port-scoped targets must not become portless set entries")
+	if mitmPort == 0 {
+		assert.NotContains(t, script, "ct original")
+		assert.NotContains(t, script, "subj_s_policy_u_in")
+		return
+	}
+	assert.Contains(t, script, prefix+"subj_s_policy_u_in meta l4proto tcp ct original proto-dst { 25 } drop\n")
+	assert.Contains(t, script, prefix+"subj_s_policy_u_in ct original ip6 daddr 2001:db8::/64 meta l4proto tcp ct original proto-dst { 8443 } accept\n")
+	if updated {
+		assert.Contains(t, script, prefix+"subj_s_policy_u_in ct original ip daddr 198.51.100.10 meta l4proto tcp ct original proto-dst { 22 } drop\n")
+	} else {
+		assert.Contains(t, script, prefix+"subj_s_policy_u_in ct original ip daddr 198.51.100.10 meta l4proto tcp ct original proto-dst { 443 } accept\n")
+	}
+	assert.NotContains(t, script, "ct original proto-dst { 18081 }", "input must match the original port, not the MITM listener")
+	assert.NotContains(t, script, "subj_s_policy_u_in tcp dport")
+}
+
+func TestPolicyPersistCreateCarriedPortsAndRelay(t *testing.T) {
+	for _, mitmPort := range []int{0, 18081} {
+		t.Run(fmt.Sprintf("mitm_%d", mitmPort), func(t *testing.T) {
+			h := newPolicyPersistHarness(t)
+			runner := wirePolicyPortApplier(h.srv, mitmPort)
+			subj := subject.FromSandboxUID(policyTestUID)
+
+			rec := doAction(t, h.srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(policyPortsCreate)))
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, subject.StateDenying, mustState(h.reg.Get(subj)))
+			require.Equal(t, 1, runner.count())
+			assertPolicyPortDenyFirst(t, runner, mitmPort)
+			rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+			rev, doc := mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(1), rev)
+			assertPolicyPortBody(t, doc.Policy, policyPortsCreate)
+			pf, body := decodePolicyFile(t, h.fileFor(policyTestUID))
+			assert.Equal(t, int64(1), pf.Revision)
+			assertPolicyPortBody(t, body, policyPortsCreate)
+
+			rec = doAction(t, h.srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, subject.StateDenying, mustState(h.reg.Get(subj)))
+			require.Equal(t, 1, runner.count(), "runtime-ready alone must not install the carried allows")
+			assertPolicyPortDenyFirst(t, runner, mitmPort)
+			rec = doAction(t, h.srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, subject.StateActive, mustState(h.reg.Get(subj)))
+			require.Equal(t, 2, runner.count())
+			assertPolicyPortScript(t, runner.last(t), mitmPort, false)
+
+			rec = doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyPortsUpdate, 1, false, true), "")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			rev, doc = mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(2), rev)
+			assertPolicyPortBody(t, doc.Policy, policyPortsUpdate)
+			require.Equal(t, 3, runner.count(), "a successful relay write submits one nft transaction")
+			assertPolicyPortScript(t, runner.last(t), mitmPort, true)
+			rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+			rev, doc = mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(2), rev)
+			assertPolicyPortBody(t, doc.Policy, policyPortsUpdate)
+			pf, body = decodePolicyFile(t, h.fileFor(policyTestUID))
+			assert.Equal(t, testFenceR, pf.Incarnation)
+			assert.Equal(t, testFenceA, pf.AttachmentID)
+			assert.Equal(t, int64(2), pf.Revision)
+			assertPolicyPortBody(t, body, policyPortsUpdate)
+
+			before := runner.count()
+			fileBefore := append([]byte(nil), h.fileFor(policyTestUID).data...)
+			rec = doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyPortsCreate, 1, false, true), "")
+			require.Equal(t, http.StatusPreconditionFailed, rec.Code)
+			assert.Equal(t, before, runner.count())
+			assert.Equal(t, fileBefore, h.fileFor(policyTestUID).data)
+			rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+			rev, doc = mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(2), rev)
+			assertPolicyPortBody(t, doc.Policy, policyPortsUpdate)
+		})
+	}
+}
+
+func TestPolicyPersistRestartRetainsPorts(t *testing.T) {
+	for _, mitmPort := range []int{0, 18081} {
+		t.Run(fmt.Sprintf("mitm_%d", mitmPort), func(t *testing.T) {
+			h := newPolicyPersistHarness(t)
+			runner := wirePolicyPortApplier(h.srv, mitmPort)
+			setBindingAndReady(t, h.srv, h.reg, policyTestUID, vaultTestIP, strPtr(policyPortsCreate))
+			rec := doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyPortsUpdate, 1, false, true), "")
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assertPolicyPortScript(t, runner.last(t), mitmPort, true)
+			fileBefore := append([]byte(nil), h.fileFor(policyTestUID).data...)
+
+			// Replaying the old binding must not overwrite a durable relay mutation.
+			srv2, reg2, _ := fastSandboxTestServer(t)
+			srv2.SetPolicyFiles(h.pp)
+			runner2 := wirePolicyPortApplier(srv2, mitmPort)
+			rec = doAction(t, srv2, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(policyPortsCreate)))
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, subject.StateDenying, mustState(reg2.Get(subject.FromSandboxUID(policyTestUID))))
+			require.Equal(t, 1, runner2.count())
+			assertPolicyPortDenyFirst(t, runner2, mitmPort)
+			rec = doPolicy(t, srv2, http.MethodGet, policyTestUID, "", "")
+			rev, doc := mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(2), rev)
+			assertPolicyPortBody(t, doc.Policy, policyPortsUpdate)
+
+			rec = doAction(t, srv2, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, 1, runner2.count())
+			rec = doAction(t, srv2, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, subject.StateActive, mustState(reg2.Get(subject.FromSandboxUID(policyTestUID))))
+			require.Equal(t, 2, runner2.count())
+			assertPolicyPortScript(t, runner2.last(t), mitmPort, true)
+			rec = doPolicy(t, srv2, http.MethodGet, policyTestUID, "", "")
+			rev, doc = mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(2), rev)
+			assertPolicyPortBody(t, doc.Policy, policyPortsUpdate)
+			assert.Equal(t, fileBefore, h.fileFor(policyTestUID).data, "reload must not reseed from the old binding")
+			pf, body := decodePolicyFile(t, h.fileFor(policyTestUID))
+			assert.Equal(t, int64(2), pf.Revision)
+			assertPolicyPortBody(t, body, policyPortsUpdate)
+		})
+	}
+}
 
 func TestPolicyPersistSetBindingStampsFile(t *testing.T) {
 	h := newPolicyPersistHarness(t)
@@ -178,13 +379,11 @@ func TestPolicyPersistSetBindingStampsFile(t *testing.T) {
 	assert.Equal(t, int64(1), pf.Revision)
 	assert.Contains(t, string(body), "api.example.com")
 
-	// GET serves the seeded policy + revision.
 	rec := doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
 	rev, doc := mustPolicyRevision(t, rec)
 	assert.Equal(t, int64(1), rev)
 	assert.Contains(t, string(doc.Policy), "api.example.com")
 
-	// A relay write persists the successor revision.
 	rec = doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllowAlt(), 1, false, true), "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	pf, body = decodePolicyFile(t, h.fileFor(policyTestUID))
@@ -192,9 +391,7 @@ func TestPolicyPersistSetBindingStampsFile(t *testing.T) {
 	assert.Contains(t, string(body), "other.example.com")
 }
 
-// ---------------------------------------------------------------------------
 // Reload at SET_BINDING (egress-restart recovery): the file wins
-// ---------------------------------------------------------------------------
 
 func TestPolicyPersistReloadSupersedesBindingInput(t *testing.T) {
 	h := newPolicyPersistHarness(t)
@@ -245,9 +442,6 @@ func TestPolicyPersistReloadSupersedesBindingInput(t *testing.T) {
 	assert.Equal(t, int64(6), rev, "relay writes keep the record file-backed")
 }
 
-// TestPolicyPersistRestartRecoversRelayWrites: simulate an egress restart —
-// a fresh server over the same persistence state — and verify the relayed
-// policy survives the binding replay.
 func TestPolicyPersistRestartRecoversRelayWrites(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -353,9 +547,7 @@ func TestPolicyPersistUnusableFilesDegradeFailClosed(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
 // Removal / rebind purge the durable record
-// ---------------------------------------------------------------------------
 
 func TestPolicyPersistRemovalPurgesRecord(t *testing.T) {
 	h := newPolicyPersistHarness(t)
@@ -403,9 +595,7 @@ func TestPolicyPersistRebindPurgesRecord(t *testing.T) {
 	assert.Equal(t, newRuntime, pf.Incarnation, "the file is stamped with the successor's fence")
 }
 
-// ---------------------------------------------------------------------------
 // Commit protocol outcomes
-// ---------------------------------------------------------------------------
 
 func TestPolicyPersistCommitOutcomes(t *testing.T) {
 	t.Run("pre-rename failure nacks without latch", func(t *testing.T) {
@@ -479,10 +669,7 @@ func mustReadRevision(t *testing.T, h *policyPersistHarness, uid string) int64 {
 	return rev
 }
 
-// TestPolicyPersistDeleteTombstoneSurvivesRestart: a relay DELETE persists
-// an authoritative default-deny record, so an egress restart's binding
-// replay loads the tombstone instead of resurrecting the deleted policy —
-// and a replayed data-plane-ready activates the deny record.
+// A durable deny tombstone prevents binding replay from resurrecting deleted policy.
 func TestPolicyPersistDeleteTombstoneSurvivesRestart(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -528,9 +715,6 @@ func TestPolicyPersistDeleteTombstoneSurvivesRestart(t *testing.T) {
 	assert.Equal(t, "deny", last.Evaluate("other.example.com"))
 }
 
-// TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration: a leftover
-// record under a foreign fence (purge outcome uncertain) must not make
-// applyBindingPolicy supersede the fresh registration's binding input.
 func TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 
@@ -558,10 +742,6 @@ func TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration(t *testing.T) 
 	assert.Equal(t, newRuntime, pf.Incarnation)
 }
 
-// TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone (review F3): a
-// binding removal whose durable purge fails must not leave the removed
-// policy's file recoverable — a deny tombstone lands instead, so a later
-// same-fence registration loads deny, never the removed policy.
 func TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	h.readySubject(t, policyTestUID, vaultTestIP)
@@ -590,10 +770,7 @@ func TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), `"defaultAction":"deny"`)
 }
 
-// TestPolicyPersistSealedFilelessSubjectSurvivesRestart (review C1): an
-// export seals a file-less subject; the restart's binding replay must
-// restore the seal WITHOUT deadlocking (the sealed branch runs under the
-// reload's own s.mu), and the relay ops stay 409 with default-deny pending.
+// Seal restoration runs under reload's s.mu and must not reacquire it.
 func TestPolicyPersistSealedFilelessSubjectSurvivesRestart(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 
@@ -641,11 +818,7 @@ func TestPolicyPersistSealedFilelessSubjectSurvivesRestart(t *testing.T) {
 	_ = reg2
 }
 
-// TestTemplateCloneAdoptsPolicyAndVault (issue #2312 acceptance 2): the
-// template's policy and vault records are adopted at the clone's first
-// registration — re-stamped to the clone's fence, revision preserved, vault
-// validated against the LANDED template policy (not the bootstrap input),
-// and enforced in-guest.
+// Validate the carried vault against the landed template policy, not the bootstrap input.
 func TestTemplateCloneAdoptsPolicyAndVault(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 
@@ -720,9 +893,7 @@ func TestTemplateCloneAdoptsPolicyAndVault(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), "a.com")
 }
 
-// ---------------------------------------------------------------------------
 // Capability + healthy posture
-// ---------------------------------------------------------------------------
 
 func TestPolicyPersistCapabilityFlag(t *testing.T) {
 	// Policy persistence is required in the profile: every server advertises

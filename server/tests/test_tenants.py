@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the tenants package: file provider, HTTP provider, context, and validation."""
-
 from __future__ import annotations
 
 import time
@@ -74,9 +72,6 @@ api_keys = []
 """
 
 
-# --- context tests ---
-
-
 def test_context_default_is_none():
     assert get_current_tenant() is None
 
@@ -87,9 +82,6 @@ def test_context_set_and_get():
     assert get_current_tenant() is entry
     set_current_tenant(None)
     assert get_current_tenant() is None
-
-
-# --- resolve_tenants_path ---
 
 
 def test_resolve_tenants_path_explicit():
@@ -106,9 +98,6 @@ def test_resolve_tenants_path_default(monkeypatch):
     monkeypatch.delenv("SANDBOX_TENANTS_CONFIG_PATH", raising=False)
     p = resolve_tenants_path()
     assert p == Path.home() / ".opensandbox" / "tenants.toml"
-
-
-# --- _parse_tenants_file / _build_lookup_dict ---
 
 
 def test_parse_tenants_file(tmp_path):
@@ -146,9 +135,6 @@ def test_build_lookup_dict():
     assert lookup["k2"].name == "a"
     assert lookup["k3"].name == "b"
     assert "k4" not in lookup
-
-
-# --- FileTenantProvider ---
 
 
 def test_file_provider_start_and_lookup(tmp_path):
@@ -251,9 +237,6 @@ def test_file_provider_on_reload_callback(tmp_path):
         provider.close()
 
 
-# --- HTTPTenantProvider ---
-
-
 def test_http_provider_start_close():
     cfg = HTTPTenantProviderConfig(endpoint="http://localhost:9999/tenants")
     provider = HTTPTenantProvider(cfg)
@@ -297,6 +280,26 @@ def test_http_provider_lookup_cache_miss_fetch(monkeypatch):
         assert result is not None
         assert result.namespace == "ns-fetched"
         assert "key-fetch" in provider._cache
+    finally:
+        provider.close()
+
+
+@pytest.mark.parametrize("ttl", [None, "soon", float("inf"), float("nan"), -5, [60]])
+def test_http_provider_malformed_ttl_falls_back_to_default(ttl):
+    cfg = HTTPTenantProviderConfig(endpoint="http://localhost:9999/tenants")
+    provider = HTTPTenantProvider(cfg)
+    provider.start()
+    try:
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"namespace": "ns-fetched", "ttl": ttl}
+        mock_response.raise_for_status = MagicMock()
+
+        provider._client.get = MagicMock(return_value=mock_response)
+        result = provider.lookup("key-ttl")
+        assert result is not None
+        assert result.namespace == "ns-fetched"
+        assert provider._cache["key-ttl"].ttl == 30
     finally:
         provider.close()
 
@@ -463,9 +466,6 @@ def test_http_provider_auth_header():
         provider.close()
 
 
-# --- validate_tenant_config ---
-
-
 def test_validate_tenant_config_no_tenants():
     cfg = MagicMock()
     cfg.tenants = None
@@ -495,9 +495,6 @@ def test_validate_tenant_config_ok():
     cfg.runtime.type = "kubernetes"
     cfg.server.api_key = None
     validate_tenant_config(cfg)
-
-
-# --- validate_tenant_namespaces ---
 
 
 def _tenant(name: str, namespace: str) -> TenantEntry:
@@ -557,9 +554,6 @@ def test_validate_tenant_namespaces_aggregates_failures():
     message = str(exc_info.value)
     assert "missing-1" in message
     assert "missing-2" in message
-
-
-# --- validate_tenant_namespaces_on_startup ---
 
 
 def test_startup_validation_file_provider_validates(tmp_path):

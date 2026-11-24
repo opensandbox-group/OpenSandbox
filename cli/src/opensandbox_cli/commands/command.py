@@ -20,10 +20,13 @@ import shlex
 import sys
 from collections.abc import Callable
 from datetime import timedelta
+from functools import partial
 
 import click
+from opensandbox.exceptions import SandboxInternalException
 from opensandbox.models.execd import Execution, OutputMessage, RunCommandOpts
 from opensandbox.models.execd_sync import ExecutionHandlersSync
+from opensandbox.sync.sandbox import SandboxSync
 
 from opensandbox_cli.client import ClientContext
 from opensandbox_cli.utils import (
@@ -79,9 +82,8 @@ def _run_command(
     """Shared implementation for ``command run``.
 
     Foreground mode streams output and allows only ``-o raw``; background mode
-    returns a tracked execution object and allows structured output. The payload
-    is joined into one shell command string unless ``argv`` sends it as a
-    literal argv list (needs an argv-capable execd).
+    returns a tracked execution object and allows structured output. ``--argv``
+    sends the payload as a literal argv list instead of a joined shell command.
     """
     allowed = ("table", "json", "yaml") if background else ("raw",)
     fallback = "table" if background else "raw"
@@ -114,7 +116,12 @@ def _run_command(
             return
 
         handlers, flush_newline = _stream_handlers()
-        execution = sandbox.commands.run(payload, opts=opts, handlers=handlers)
+        try:
+            execution = sandbox.commands.run(payload, opts=opts, handlers=handlers)
+        except SandboxInternalException as exc:
+            if exc.error.code != "COMMAND_STREAM_INCOMPLETE":
+                raise
+            execution = None
         flush_newline()
         _handle_execution_error(obj, execution)
     finally:
@@ -122,16 +129,16 @@ def _run_command(
 
 
 def _handle_execution_error(
-    obj: ClientContext, execution: Execution, *, background: bool = False
+    obj: ClientContext, execution: Execution | None, *, background: bool = False
 ) -> None:
     """Exit non-zero on execution errors or missing completion/startup confirmation."""
-    if execution.error:
+    if execution is not None and execution.error:
         obj.output.error_panel(
             f"{execution.error.name}: {execution.error.value}",
             title="Execution Error",
         )
         sys.exit(1)
-    if execution.complete is None:
+    if execution is None or execution.complete is None:
         confirmation = (
             "background command startup was confirmed" if background else "the command finished"
         )
@@ -147,9 +154,12 @@ def _handle_execution_error(
     help="Run a command in a sandbox. Use `--` before the sandbox command payload.",
     epilog=(
         "Separator rule: use `--` before the sandbox command payload.\n\n"
-        "By default the payload is joined into one shell command string. Add "
-        "`--argv` to pass the arguments to the executable as-is (no shell), so "
-        "literal `$HOME`, quotes, and empty strings are preserved; this needs a "
+        "By default each payload word is quoted as a single shell token and "
+        "the tokens are joined into one shell command line, so shell syntax "
+        "such as redirects or pipes must ride inside an explicit word "
+        "(for example: -- sh -c 'echo hi > /tmp/x'). Add `--argv` to pass "
+        "the arguments to the executable as-is (no shell), so literal "
+        "`$HOME`, quotes, and empty strings are preserved; this needs a "
         "sandbox image whose execd accepts argv requests."
     ),
 )
@@ -217,6 +227,48 @@ def command_status(
         sandbox.close()
 
 
+def _drain_background_logs(
+    sandbox: SandboxSync,
+    execution_id: str,
+    cursor: int | None,
+    emit: Callable[[str], None] | None = None,
+) -> tuple[str, int | None]:
+    """Read log pages, following the cursor only once the command finished.
+
+    Each response carries at most 16 MiB, so a finished command with a
+    longer log needs several reads; follow the cursor so no tail page is
+    left behind. A command that is still running can produce output at or
+    above the read rate, which would make the drain loop follow it forever,
+    so a running command returns a single page and the caller polls with
+    the cursor instead.
+
+    When ``emit`` is given, every page is passed to it as it arrives and
+    the returned content is empty, so raw output never has to be buffered.
+    """
+    drain = sandbox.commands.get_command_status(execution_id).running is False
+    pages: list[str] = []
+    requested = cursor
+    next_cursor = cursor
+    while True:
+        logs = sandbox.commands.get_background_command_logs(
+            execution_id, cursor=requested
+        )
+        next_cursor = logs.cursor if logs.cursor is not None else requested
+        if requested is not None and next_cursor == requested:
+            # No page beyond what was already returned; stop without
+            # duplicating the content of the last read.
+            break
+        if logs.content:
+            if emit is not None:
+                emit(logs.content)
+            else:
+                pages.append(logs.content)
+        if not logs.content or logs.cursor is None or not drain:
+            break
+        requested = next_cursor
+    return "".join(pages), next_cursor
+
+
 @command_group.command("logs")
 @click.argument("sandbox_id")
 @click.argument("execution_id")
@@ -237,13 +289,28 @@ def command_logs(
     )
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
-        logs = sandbox.commands.get_background_command_logs(execution_id, cursor=cursor)
         if obj.output.fmt in ("json", "yaml"):
+            # Keep the single-page model; machines follow logs.cursor.
+            logs = sandbox.commands.get_background_command_logs(
+                execution_id, cursor=cursor
+            )
             obj.output.print_model(logs, title="Command Logs")
-        elif obj.output.fmt == "raw":
-            click.echo(logs.content)
+            return
+        if obj.output.fmt == "raw":
+            # Echo each page as it arrives so a long log is never buffered
+            # twice (page list plus joined copy).
+            _drain_background_logs(
+                sandbox,
+                execution_id,
+                cursor,
+                emit=partial(click.echo, nl=False),
+            )
+            click.echo()
         else:
-            obj.output.panel(logs.content, title="Command Logs")
+            content, next_cursor = _drain_background_logs(sandbox, execution_id, cursor)
+            # The next cursor is the only way to continue an incremental read.
+            obj.output.print_dict({"cursor": next_cursor}, title="Command Logs")
+            obj.output.panel(content, title="Content")
     finally:
         sandbox.close()
 

@@ -40,9 +40,9 @@ type SourceState interface {
 // and Store are scoped to the Source being built.
 type SourceDependencies struct {
 	Config config.Config
-	// Store is an isolated view of the node-local sandbox Pod cache. A Source
-	// must call Store.Forget for each terminated Pod after it no longer needs
-	// that identity; the shared Store retains the Pod until every Source does so.
+	// Store is an isolated view of the node-local sandbox Pod cache for
+	// Pod-based Sources. These Sources must call Store.Forget after they no
+	// longer need a terminated Pod; filesystem-only Sources do not use Store.
 	Store   store.View
 	State   SourceState
 	Logger  logger.Logger
@@ -93,9 +93,8 @@ func RegisterSink(name string, targetID sinkTargetID, factory sinkFactory) {
 	sinks[name] = sinkRegistration{targetID: targetID, factory: factory}
 }
 
-// BuildSource constructs the registered Source under name.
 func BuildSource(name string, dependencies SourceDependencies) (api.Source, error) {
-	if dependencies.State == nil || dependencies.Store == nil || dependencies.Logger == nil {
+	if dependencies.State == nil || dependencies.Logger == nil || name != api.SourceNameVMConsole && dependencies.Store == nil {
 		return nil, errors.New("source dependencies require private State, Store, and Logger")
 	}
 	factory := sources[name]
@@ -115,7 +114,6 @@ func TargetID(name string, cfg config.Config) (string, error) {
 	return registration.targetID(cfg)
 }
 
-// BuildSink constructs the registered Sink under name.
 func BuildSink(name string, dependencies SinkDependencies) (api.Sink, error) {
 	if dependencies.State == nil {
 		return nil, errors.New("sink dependencies require State")

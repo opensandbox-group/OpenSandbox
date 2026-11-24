@@ -17,8 +17,63 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestValidateHTTPConnectionPool(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		maxIdleConns    int
+		maxIdlePerHost  int
+		idleTimeout     time.Duration
+		wantInvalidFlag string
+	}{
+		{name: "defaults", maxIdleConns: 100, maxIdlePerHost: 2, idleTimeout: 90 * time.Second},
+		{name: "custom", maxIdleConns: 1000, maxIdlePerHost: 8, idleTimeout: 2 * time.Minute},
+		{name: "zero"},
+		{name: "negative total", maxIdleConns: -1, wantInvalidFlag: "--http-max-idle-conns"},
+		{name: "negative per host", maxIdlePerHost: -1, wantInvalidFlag: "--http-max-idle-conns-per-host"},
+		{name: "negative timeout", idleTimeout: -time.Nanosecond, wantInvalidFlag: "--http-idle-conn-timeout"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateHTTPConnectionPool(test.maxIdleConns, test.maxIdlePerHost, test.idleTimeout)
+			if test.wantInvalidFlag == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantInvalidFlag) {
+				t.Fatalf("validateHTTPConnectionPool() = %v, want error naming %s", err, test.wantInvalidFlag)
+			}
+		})
+	}
+}
+
+func TestValidateFastPathRouting(t *testing.T) {
+	for _, test := range []struct {
+		name, endpoint, namespace, mode, keys string
+		valid                                 bool
+	}{
+		{name: "legacy", mode: "header", valid: true},
+		{name: "wildcard without keys", endpoint: "fastpath:9090", namespace: "tenant-a", mode: "header", valid: true},
+		{name: "signed header", endpoint: "fastpath:9090", mode: "header", keys: "k=c2VjcmV0", valid: true},
+		{name: "signed URI restricted namespace", endpoint: "fastpath:9090", namespace: "tenant-a", mode: "uri", keys: "k=c2VjcmV0", valid: true},
+		{name: "missing FastPath", namespace: "tenant-a", mode: "header"},
+		{name: "missing credentials and namespace", endpoint: "fastpath:9090", mode: "header"},
+		{name: "unsigned URI", endpoint: "fastpath:9090", namespace: "tenant-a", mode: "uri"},
+		{name: "blank keys", endpoint: "fastpath:9090", mode: "header", keys: " "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateFastPathRouting(test.endpoint, test.namespace, test.mode, test.keys)
+			if (err == nil) != test.valid {
+				t.Fatalf("validateFastPathRouting() = %v, valid = %v", err, test.valid)
+			}
+		})
+	}
+}
 
 func pathRecorder(name string, got *string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -147,3 +147,19 @@ func TestDecodeRejectsExcessiveUnknownMemberNesting(t *testing.T) {
 		t.Fatalf("deep nesting error=%v", err)
 	}
 }
+
+func TestVMConsoleMarkerWithoutPodIdentity(t *testing.T) {
+	request := api.FinalizeRequest{FinalizeID: "f", TargetID: "t", StreamRef: api.StreamRef{ID: "vm-console/uid", Kind: api.RecordKindVMConsole}, Revision: 1, CoverageStartedAt: time.Date(2026, 11, 2, 1, 0, 0, 0, time.UTC), FinalizedAt: time.Date(2026, 11, 2, 1, 1, 0, 0, time.UTC), Resource: api.Resource{SandboxID: "sandbox", ClusterName: "cluster", Namespace: "ns", NodeName: "node"}}
+	data, err := Encode(New(request, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := Decode(data)
+	if err != nil || decoded.Resource != request.Resource {
+		t.Fatalf("VM identity did not round-trip: %v", err)
+	}
+	request.StreamRef = api.StreamRef{ID: "container-logs/pod/sandbox", Kind: api.RecordKindContainerLog}
+	if _, err := Encode(New(request, nil)); err == nil {
+		t.Fatal("container marker accepted missing Pod identity")
+	}
+}

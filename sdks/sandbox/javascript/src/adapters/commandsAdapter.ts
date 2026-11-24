@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { SandboxError, SandboxException } from "../core/exceptions.js";
 import type { ExecdClient } from "../openapi/execdClient.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 import { parseJsonEventStream } from "./sse.js";
@@ -52,6 +53,15 @@ interface StreamingExecutionSpec<TBody> {
   fallbackErrorMessage: string;
 }
 
+function toTimeoutMilliseconds(timeoutSeconds: number): number {
+  const milliseconds = timeoutSeconds * 1000;
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 0 || !Number.isFinite(milliseconds)) {
+    throw new Error("timeoutSeconds must be finite, non-negative, and representable in milliseconds");
+  }
+  // Zero selects the server default, so never round a positive timeout down to zero.
+  return timeoutSeconds > 0 ? Math.max(1, Math.round(milliseconds)) : 0;
+}
+
 function toRunCommandRequest(command: string | string[], opts?: RunCommandOpts): ApiRunCommandRequest {
   if (opts?.gid != null && opts.uid == null) {
     throw new Error("uid is required when gid is provided");
@@ -63,7 +73,7 @@ function toRunCommandRequest(command: string | string[], opts?: RunCommandOpts):
     background: !!opts?.background,
   };
   if (opts?.timeoutSeconds != null) {
-    body.timeout = Math.round(opts.timeoutSeconds * 1000);
+    body.timeout = toTimeoutMilliseconds(opts.timeoutSeconds);
   }
   if (opts?.uid != null) {
     body.uid = opts.uid;
@@ -88,7 +98,7 @@ function toRunInSessionRequest(
     body.cwd = opts.workingDirectory;
   }
   if (opts?.timeoutSeconds != null) {
-    body.timeout = Math.round(opts.timeoutSeconds * 1000);
+    body.timeout = toTimeoutMilliseconds(opts.timeoutSeconds);
   }
   return body;
 }
@@ -266,7 +276,7 @@ export class CommandsAdapter implements ExecdCommands {
 
   async setEnv(key: string, value: string): Promise<void> {
     const command = buildSetEnvCommand(key, value);
-    const execution = await this.run(command);
+    const execution = await this.consumeExecutionStream(this.runStream(command), undefined, true);
     if (execution.error != null || execution.exitCode !== 0) {
       const stderr = execution.logs.stderr.map((m) => m.text).join("").trim();
       const detail = stderr.length > 0 ? stderr : (execution.error?.value?.trim() ?? "");
@@ -348,12 +358,20 @@ export class CommandsAdapter implements ExecdCommands {
     handlers?: ExecutionHandlers,
     signal?: AbortSignal,
   ): Promise<CommandExecution> {
-    return this.consumeExecutionStream(
+    const background = !!opts?.background;
+    const execution = await this.consumeExecutionStream(
       this.runStream(command, opts, signal),
       handlers,
-      !opts?.background,
-      !!opts?.background,
+      !background,
+      background,
     );
+    if (!background && execution.complete == null && execution.error == null) {
+      throw new SandboxException({
+        message: "Foreground command stream ended without a terminal event",
+        error: new SandboxError(SandboxError.COMMAND_STREAM_INCOMPLETE),
+      });
+    }
+    return execution;
   }
 
   async createSession(options?: { workingDirectory?: string }): Promise<string> {

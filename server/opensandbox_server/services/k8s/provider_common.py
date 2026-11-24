@@ -51,30 +51,26 @@ _GPU_RESOURCE_LIMIT_KEY = "gpu"
 # (e.g. amd.com/gpu, gpu.intel.com/i915) can be added as a follow-up.
 _K8S_NVIDIA_GPU_RESOURCE = "nvidia.com/gpu"
 
+# resourceLimits disk-quota aliases, resolved with the same precedence as the
+# Docker runtime (_resolve_resource_limits) and the Windows profile
+# (windows_common). Kubernetes only accepts the canonical container resource
+# name `ephemeral-storage`, so the aliases must be translated instead of being
+# passed through verbatim as unknown resource keys (which the API server
+# rejects).
+_DISK_RESOURCE_LIMIT_KEYS = ("disk", "storage", "ephemeral-storage")
+_K8S_EPHEMERAL_STORAGE_RESOURCE = "ephemeral-storage"
+
 
 def _translate_resource_limits_for_k8s(
     resource_limits: Dict[str, str],
 ) -> Dict[str, str]:
     """Translate request-level resource limits into Kubernetes resource keys.
 
-    The lifecycle API exposes a portable ``gpu`` key on ``resourceLimits``.
-    Kubernetes requires the canonical extended-resource name
-    (``nvidia.com/gpu``) so the device plugin can schedule the request;
-    otherwise the value is silently treated as an unknown extended resource.
-
-    Args:
-        resource_limits: Raw resource limits from the create request.
-
-    Returns:
-        A new dict with the ``gpu`` key translated to ``nvidia.com/gpu``
-        and any unparseable GPU value dropped. Other keys (cpu, memory, ...)
-        are passed through unchanged.
-
-    Raises:
-        HTTPException: If ``gpu`` is the ``"all"`` sentinel. Docker accepts
-            ``"all"`` (mapped to an unbounded DeviceRequest), but Kubernetes
-            extended resources require an integer count, so we surface a
-            400 rather than silently scheduling without a GPU.
+    The portable ``gpu`` key becomes the canonical ``nvidia.com/gpu`` extended
+    resource; the ``disk``/``storage``/``ephemeral-storage`` aliases become the
+    ``ephemeral-storage`` container resource with Docker-runtime precedence;
+    other keys pass through unchanged. Raises HTTPException (400) for the
+    ``gpu="all"`` sentinel, which Kubernetes extended resources cannot express.
     """
     if not resource_limits:
         return {}
@@ -82,8 +78,17 @@ def _translate_resource_limits_for_k8s(
     translated: Dict[str, str] = {
         key: value
         for key, value in resource_limits.items()
-        if key != _GPU_RESOURCE_LIMIT_KEY
+        if key != _GPU_RESOURCE_LIMIT_KEY and key not in _DISK_RESOURCE_LIMIT_KEYS
     }
+
+    # The portable disk-quota key (canonical name `disk`, aliases `storage` /
+    # `ephemeral-storage`) becomes the Kubernetes container storage resource;
+    # the value keeps its Docker/Kubernetes-style quantity form, which the
+    # API server's quantity parser accepts.
+    for alias in _DISK_RESOURCE_LIMIT_KEYS:
+        if alias in resource_limits:
+            translated[_K8S_EPHEMERAL_STORAGE_RESOURCE] = resource_limits[alias]
+            break
 
     raw_gpu = resource_limits.get(_GPU_RESOURCE_LIMIT_KEY)
     if raw_gpu is None:
@@ -170,6 +175,7 @@ def _build_main_container(
     resource_limits: Dict[str, str],
     *,
     has_network_policy: bool = False,
+    drop_net_raw: bool = False,
     isolation_enabled: bool = False,
     image_pull_policy: Optional[str] = None,
     resource_requests: Optional[Dict[str, str]] = None,
@@ -199,7 +205,9 @@ def _build_main_container(
 
     security_context = None
     if has_network_policy:
-        security_context_dict = build_security_context_for_sandbox_container(True)
+        security_context_dict = build_security_context_for_sandbox_container(
+            True, drop_net_raw=drop_net_raw
+        )
         security_context = build_security_context_from_dict(security_context_dict)
 
     if isolation_enabled:

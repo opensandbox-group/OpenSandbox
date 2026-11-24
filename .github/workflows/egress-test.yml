@@ -30,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.11'
           cache-dependency-path: components/egress/go.sum
 
       - name: Set up Python
@@ -93,9 +93,19 @@ jobs:
           sudo apt-get install -y nftables iproute2 util-linux
           bash scripts/ci-nft-go-test.sh ./pkg/nftables \
             TestDynamicElementRenewal \
+            TestNftDomainAnswerDoesNotShortenSharedLease \
+            TestNftPolicyReplacementKeepsOnlySurvivingDomainLeases \
+            TestNftSharedIPTeardownCountsOnlyDroppedLeases \
+            TestNftExpiredDomainCannotAcquireUnownedTCPLease \
+            TestNftReloadKeepsTCPFinalGrace \
+            TestNftFallbackReplansDNSLeases \
+            TestNftUnknownPolicyApplyFencesDNSUntilVerifiedReplacement \
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \
-            TestNftRealMissingTableFallback
+            TestNftRealMissingTableFallback \
+            TestNftEstablishedDropKernelRuleOrder
+          bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
+            TestResolvedIPRenewalExtendsKernelExpiry
           bash scripts/ci-nft-go-test.sh ./pkg/iptables \
             TestGatewayDNSRedirectKernelPrivateNS
           bash scripts/ci-nft-go-test.sh . \
@@ -163,7 +173,7 @@ jobs:
           python -m unittest discover -v -s tests -p "test_*.py"
 
       - name: Set up exact Go for held-old HTTP/2 fixture
-        # Keep the repository's Go 1.25.9 tests above on their pinned toolchain.
+        # Keep the repository's Go 1.26.11 tests above on their pinned toolchain.
         uses: actions/setup-go@v6
         with:
           go-version: '1.27.2'
@@ -327,6 +337,12 @@ jobs:
           chmod +x tests/smoke-dynamic-ip.sh
           ./tests/smoke-dynamic-ip.sh
 
+      - name: Run forward mode test
+        working-directory: components/egress
+        run: |
+          chmod +x tests/smoke-forward.sh
+          ./tests/smoke-forward.sh
+
       - name: Run dns upstream probe test
         working-directory: components/egress
         run: |
@@ -358,7 +374,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.11'
           cache-dependency-path: components/egress/go.sum
 
       - name: Install nftables

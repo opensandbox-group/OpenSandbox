@@ -231,6 +231,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 			if commitErr != nil {
 				return func() { writeVaultRelayError(w, commitErr) }
 			}
+			s.recordSubjectSnapshotLocked(subj, fence)
 			return func() { writeVaultRelayWriteResponse(w, r, state, created) }
 		}
 
@@ -275,6 +276,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 			}
 			return func() { http.Error(w, "vault persistence failure", status) }
 		}
+		s.recordSubjectSnapshotLocked(subj, fence)
 		if r.Method == http.MethodDelete {
 			return func() { w.WriteHeader(http.StatusNoContent) }
 		}

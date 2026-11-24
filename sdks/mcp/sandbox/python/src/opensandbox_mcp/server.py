@@ -24,7 +24,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from opensandbox import Sandbox, SandboxManager
 from opensandbox.config import ConnectionConfig
 from opensandbox.exceptions import SandboxException
-from opensandbox.models.execd import Execution, RunCommandOpts
+from opensandbox.models.execd import (
+    CommandLogs,
+    CommandStatus,
+    Execution,
+    RunCommandOpts,
+)
 from opensandbox.models.filesystem import (
     ContentReplaceEntry,
     ContentReplaceResult,
@@ -101,9 +106,7 @@ class FileReadResponse(BaseModel):
 
 
 def _borrowed_config(state: ServerState) -> ConnectionConfig:
-    """Clone the shared config for one Sandbox/Manager call without ownership
-    of the server-wide transport, so per-call close() never tears down
-    connections still used by other registered sandboxes."""
+    """Borrow the shared transport so per-call cleanup cannot close other sandboxes' connections."""
     config = state.connection_config.model_copy()
     config._owns_transport = False
     return config
@@ -413,11 +416,16 @@ def register_tools(
         *,
         timeout_seconds: float,
     ) -> SandboxRenewResponse:
-        """Renew sandbox expiration time.
+        """Set the sandbox to expire timeout_seconds from now.
+
+        This replaces the current expiration time instead of adding to it, so a
+        value smaller than the remaining lifetime shortens the sandbox's life.
+        Call sandbox_get_info first and compare expires_at if you only want to
+        extend it.
 
         Parameters:
             sandbox_id: Target sandbox identifier.
-            timeout_seconds: Additional lifetime in seconds.
+            timeout_seconds: Seconds from now until the sandbox expires.
 
         Returns:
             Renew response dict including new expiration time.
@@ -539,6 +547,83 @@ def register_tools(
         )
         await sandbox.commands.interrupt(execution_id)
         return StatusResponse(status="interrupted")
+
+    @tool()
+    async def command_get_status(
+        sandbox_id: str,
+        execution_id: str,
+        *,
+        connect_if_missing: bool = False,
+    ) -> CommandStatus:
+        """Get the status of a command started by command_run.
+
+        Works for both foreground and background executions.
+
+        Parameters:
+            sandbox_id: Target sandbox identifier.
+            execution_id: Execution identifier returned by command_run.
+            connect_if_missing: Connect if sandbox not in local registry.
+
+        Returns:
+            Command status with running flag, exit code, error, and
+            start/finish timestamps. ``running=False`` means the command has
+            finished; check ``exit_code`` and ``error`` for the outcome.
+            ``running=None`` means the state is unknown, not that the command
+            failed. Completed command records are retained for at least 24
+            hours, so a "not found" error can mean the record expired.
+
+        Example:
+            status = await command_get_status("sbx_123", "cmd_abc")
+        """
+        sandbox = await _get_or_connect_sandbox(
+            sandbox_id,
+            connect_if_missing=connect_if_missing,
+        )
+        return await sandbox.commands.get_command_status(execution_id)
+
+    @tool()
+    async def command_get_logs(
+        sandbox_id: str,
+        execution_id: str,
+        *,
+        cursor: int | None = None,
+        connect_if_missing: bool = False,
+    ) -> CommandLogs:
+        """Read the combined stdout/stderr of a background command.
+
+        Pass the returned ``cursor`` back on the next call to read only new
+        output; omit it to read from the start of the log. Treat ``cursor``
+        as an opaque server-side position and never derive it from the
+        content length.
+        Empty ``content`` does not mean the command finished; use
+        command_get_status for that. Each read returns at most one page of
+        16 MiB, so once command_get_status reports ``running=False``, keep
+        calling this tool with the last cursor until ``content`` is empty and
+        ``cursor`` stops advancing to drain the remaining output.
+
+        Parameters:
+            sandbox_id: Target sandbox identifier.
+            execution_id: Execution identifier returned by command_run with
+                background=True.
+            cursor: Cursor returned by a previous call; omit to read from the
+                start of the log.
+            connect_if_missing: Connect if sandbox not in local registry.
+
+        Returns:
+            Command logs with ``content`` (stdout and stderr combined) and the
+            ``cursor`` for the next incremental read. ``cursor`` is null when
+            the server does not report one; keep the previous cursor then.
+
+        Example:
+            logs = await command_get_logs("sbx_123", "cmd_abc", cursor=128)
+        """
+        sandbox = await _get_or_connect_sandbox(
+            sandbox_id,
+            connect_if_missing=connect_if_missing,
+        )
+        return await sandbox.commands.get_background_command_logs(
+            execution_id, cursor=cursor
+        )
 
     @tool()
     async def file_read(
@@ -800,7 +885,10 @@ def create_server(connection_config: ConnectionConfig | None = None) -> MCPServe
             "Always keep track of the sandbox_id returned by sandbox_create/connect. "
             "Use command_run for execution, file_read/file_write for file IO, and "
             "sandbox_kill to terminate remote sandboxes. Use sandbox_get_endpoint to "
-            "expose sandbox ports; for large files, prefer range reads."
+            "expose sandbox ports; for large files, prefer range reads. "
+            "For command_run with background=True, poll command_get_status and read "
+            "new output with command_get_logs, passing back the returned cursor; "
+            "once the status reports running=false, read the logs one last time."
         ),
     )
     register_tools(mcp, connection_config=connection_config)

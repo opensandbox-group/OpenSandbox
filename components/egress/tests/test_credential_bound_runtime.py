@@ -333,7 +333,7 @@ class LiveRuntimeHarness:
         # intercepted request port stays 443, as real HTTPS interception has.
         # Loopback-only runs may pass an ephemeral high port instead; the
         # canonical_port_443 fixture addon then reproduces the canonical 443
-        # identity inside requestheaders (documented test-only remap, never
+        # identity in ClientHello and requestheaders (test-only remap, never
         # production configurability).
         self.origin_port = 443 if origin_port is None else origin_port
         self.proxy_port = free_port()
@@ -371,7 +371,7 @@ class LiveRuntimeHarness:
             "OPENSANDBOX_EGRESS_MITMPROXY_PASSTHROUGH_HOSTS": "[]",
         }
 
-    def start(self, drain_seconds: int = 1) -> None:
+    def start(self, drain_seconds: int = 1, *, canonical_port_443: bool = True) -> None:
         self.process = subprocess.Popen(
             [
                 MITMDUMP,
@@ -383,7 +383,7 @@ class LiveRuntimeHarness:
                 "--set", "ssl_verify_upstream_trusted_ca=" + str(self.root / "origin.pem"),
                 *(
                     ["-s", str(TESTS / "fixtures" / "canonical_port_443.py")]
-                    if self.origin_port != 443
+                    if self.origin_port != 443 and canonical_port_443
                     else []
                 ),
                 "-s", str(MITMSCRIPTS / "system.py"),
@@ -489,6 +489,26 @@ class LiveRuntimeHarness:
     def connect(self, *, sni: str | None, trust: str) -> TunneledConnection:
         ca_file = self.mitm_ca() if trust == "mitm" else self.origin_ca() if trust == "origin" else None
         return TunneledConnection(self.proxy_port, self.origin_port, sni=sni, ca_file=ca_file)
+
+
+@unittest.skipUnless(MITMDUMP, "mitmdump is not installed")
+class NonCanonicalPortRuntimeTest(unittest.TestCase):
+    def test_high_port_without_canonical_fixture_denies_bound_tls(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="osport-", dir="/tmp") as directory:
+            harness = LiveRuntimeHarness(Path(directory), origin_port=free_port())
+            try:
+                harness.start(canonical_port_443=False)
+                harness.install(1, [binding(SECRET_ONE)], [SECRET_ONE], 1)
+                with self.assertRaises((ssl.SSLError, ClientError, OSError, ConnectionError)):
+                    connection = harness.connect(sni=BOUND, trust="mitm")
+                    connection.close()
+            finally:
+                harness.stop()
+            # Process exit flushes mitmdump's redirected stdout before readback.
+            output = harness.log_path.read_text(errors="replace")
+            self.assertIn("credential proxy: tls-admission-v1 deny non_canonical_port", output)
+            self.assertNotIn("credential proxy: tls-admission-v1 decrypt", output)
+            self.assertNotIn(SECRET_ONE, output)
 
 
 @unittest.skipUnless(MITMDUMP, "mitmdump is not installed")

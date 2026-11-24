@@ -12,14 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fast Sandbox-profile control plane surface: one listener on the Pod
-// netns loopback, N subjects. Subject lifecycle is driven by the fast-sandbox
-// Sandbox Actions Handler protocol (SET_BINDING / LIFECYCLE_HOOK /
-// REMOVE_BINDING delivered by the Fastlet over /_fastlet/v1/actions); the
-// binding input is the authoritative policy and the credential vault is
-// egress-held behind the FastPath handler-relay (OSEP-0022) — the listener
-// itself has no proxy-route surface (the only peers: the listener binds
-// 127.0.0.1 and sandbox netns cannot reach it).
+// The control-plane listener binds Pod-netns loopback, unreachable from sandbox network namespaces.
+// Binding input seeds policy; persisted relay mutations supersede it on replay.
 package main
 
 import (
@@ -41,6 +35,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
+	"github.com/alibaba/opensandbox/internal/safego"
 )
 
 // fastSandboxNftApplier is the per-subject nft surface used by the fast-sandbox control plane
@@ -48,7 +43,18 @@ import (
 type fastSandboxNftApplier interface {
 	ApplyDenyFirst(ctx context.Context, s subject.Subject, att actionhandler.NetworkAttachment) error
 	ApplyPolicy(ctx context.Context, s subject.Subject, pol *policy.NetworkPolicy) error
+	ApplyAlwaysRulesReload(ctx context.Context, portFloor []policy.PortRange, pols map[subject.Subject]*policy.NetworkPolicy) error
 	Remove(ctx context.Context, s subject.Subject) error
+}
+
+// alwaysRuleReloadLoader stages the operator always-rule files with an apply
+// veto: a failed apply keeps the previous rules published and the candidate
+// retried next tick (policy.AlwaysRuleLoader's contract). Narrowed from
+// policy.AlwaysRuleLoader for testability.
+type alwaysRuleReloadLoader interface {
+	CurrentRules() (deny, allow []policy.EgressRule)
+	SetCurrentRules(deny, allow []policy.EgressRule)
+	RefreshIfDueWithApply(now time.Time, apply func(deny, allow []policy.EgressRule) error) (deny, allow []policy.EgressRule, changed bool, err error)
 }
 
 // fastSandboxPolicyServer is the multi-subject control plane. It implements
@@ -68,10 +74,7 @@ type fastSandboxPolicyServer struct {
 	// Pre-read identities are validated against subjFence under mu.
 	mu      sync.Mutex
 	rebinds map[subject.Subject]*subjectRebind
-	// pendingPolicies holds the SET_BINDING input of a still-denying subject
-	// until its data-plane-ready Hook activates it. Deliberately NOT stored
-	// in the registry: DNS dispatch must keep denying (fail closed) while the
-	// policy has not been made effective.
+	// Keep pending policy outside the registry so DNS denies until data-plane-ready activates it.
 	pendingPolicies map[subject.Subject]*policy.NetworkPolicy
 	vaults          map[subject.Subject]vaultEntry
 	// subjAtt records the latest validated registration attempt, including
@@ -81,12 +84,10 @@ type fastSandboxPolicyServer struct {
 	// D11); the resolve path puts it on the resolver wire. Refreshed and
 	// purged with subjAtt.
 	subjSandbox map[subject.Subject]string
-	// subjFence mirrors the registered fence per subject: the relay paths
-	// finish registry pre-reads before taking s.mu; no registry lock spans mu.
-	// The mirror is published after successful registration, and
-	// this in-lock comparison rejects requests whose pre-read went stale
-	// across a rebind.
+	// Mirror the registered fence under mu to reject pre-reads made stale by rebinds without nesting registry locks.
 	subjFence map[subject.Subject]subject.Fencing
+	// Set once during attach, then read-only; nil outside experimental subject mode.
+	subjectDrain *fastSandboxSubjectDrain
 
 	// vaultFiles owns the per-subject vault files; nil keeps the vault
 	// memory-only (the default, and the sidecar posture).
@@ -96,13 +97,7 @@ type fastSandboxPolicyServer struct {
 	// lock-free so healthz never contends).
 	vaultRecovery atomic.Pointer[vaultRecoveryState]
 
-	// policies tracks the recorded policy of each subject: the revision the
-	// relay preconditions fence on, the runtime fence the state was
-	// materialized under, and whether the policy is file-backed (loaded from
-	// the persisted file — the binding input no longer drives it). The
-	// policy itself lives in the registry (active subjects) or
-	// pendingPolicies (denying subjects); this entry carries only the
-	// bookkeeping the vault entry carries for vault state.
+	// Revision/fence/persistence metadata only; policy bodies live in the registry or pendingPolicies.
 	policies map[subject.Subject]*policyEntry
 	// policyFiles owns the per-subject policy files. Always non-nil in the
 	// fast-sandbox profile (startup fails without it); nil only in unit
@@ -116,18 +111,12 @@ type fastSandboxPolicyServer struct {
 	// each other or with a concurrent SET_BINDING commit).
 	policyCommitMu sync.Mutex
 
-	// gatewayDNSRefs maps each subject to its gateway; the shared prerouting
-	// REDIRECT table is rebuilt from its complete gateway set. The staged map
-	// is published only after the nft replacement succeeds, so failures retain
-	// ownership for a later lifecycle retry. gwMu serializes map/table updates.
+	// Under gwMu, publish gateway ownership only after nft replacement succeeds so failed cleanup stays retryable.
 	gwMu             sync.Mutex
 	gatewayDNSRefs   map[subject.Subject]netip.Addr
 	dnsRedirectApply func(ctx context.Context, gateways []netip.Addr, port int) error
 
-	// mitmMu guards the per-subject interception entries; the Pod-netns table
-	// is rebuilt wholesale from this map on every change (see
-	// pkg/iptables.InstallMitmRedirects). nil mitmInstall = MITM disabled
-	// (the hooks skip interception entirely).
+	// Rebuild the Pod-netns table from mitmEntries under mitmMu; nil mitmInstall disables interception.
 	mitmMu      sync.Mutex
 	mitmEntries map[subject.Subject]iptables.MitmRedirectEntry
 	mitmInstall func(entries []iptables.MitmRedirectEntry) error
@@ -135,6 +124,10 @@ type fastSandboxPolicyServer struct {
 	mitmGate    *mitmproxy.HealthGate // nil when MITM disabled
 
 	policyMu sync.Mutex // serializes policy applies (registry + nft stay ordered)
+
+	// alwaysLoader polls the operator always-rule files; nil disables the
+	// reload job. Wired by SetAlwaysRuleLoader at profile assembly.
+	alwaysLoader alwaysRuleReloadLoader
 
 	// instanceID identifies this Handler process incarnation; a changed value
 	// makes the Fastlet invalidate Binding readiness and replay SET_BINDING
@@ -212,8 +205,6 @@ func (s *fastSandboxPolicyServer) mitmRedirectRebuild() error {
 	return s.mitmInstall(entries)
 }
 
-// fastSandboxDNSProxyPort is where the shared DNS proxy listens on loopback; the
-// per-subject gateway REDIRECT forwards sandbox DNS here.
 const fastSandboxDNSProxyPort = 15353
 
 // policyApplyTimeout bounds one kernel policy transaction on every path
@@ -463,6 +454,20 @@ func (s *fastSandboxPolicyServer) withVaultAccess(
 // never a protocol value). Runs again at recheck; failure there is a scoped
 // invalidation of the in-flight resolution.
 func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	admission, err := credentialvault.ReadResolveAdmission(r)
+	if err != nil {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusBadRequest, Reason: "invalid resolve admission"}
+	}
+	if admission != nil {
+		return s.resolveAdmittedVaultAccess(*admission)
+	}
+	s.mu.Lock()
+	live := s.subjectDrain != nil && s.subjectDrain.current != nil && s.subjectDrain.current.handoff.TLSAdmission
+	s.mu.Unlock()
+	if live {
+		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusBadRequest, Reason: "resolve admission required"}
+	}
+
 	raw := strings.TrimSpace(r.URL.Query().Get("clientIp"))
 	if raw == "" {
 		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{
@@ -492,6 +497,29 @@ func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentia
 	return credentialvault.ResolveAccess{SandboxID: result.sandboxID, Store: result.store}, nil
 }
 
+// resolveAdmittedVaultAccess never consults source-IP dispatch. Capture and
+// recheck both require the exact acknowledged identity and current authority.
+func (s *fastSandboxPolicyServer) resolveAdmittedVaultAccess(admission credentialvault.ResolveAdmission) (credentialvault.ResolveAccess, *credentialvault.ResolveAccessError) {
+	subj := subject.Subject(admission.SubjectKey)
+	fence, registered := s.reg.Fence(subj)
+	denied := &credentialvault.ResolveAccessError{Status: http.StatusConflict, Reason: "resolution invalidated"}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.subjectDrain
+	if !registered || d == nil || !s.fenceMatchesLocked(subj, fence) || s.subjectRebindingLocked(subj) ||
+		s.vaultSealedLocked(subj) || !s.subjectSnapshotAcknowledgedLocked(subj, fence) ||
+		d.acked[subj].identity != admission.Revision ||
+		mustSubjectTarget(subj, fence).SubjectGeneration != admission.Revision.SubjectGeneration {
+		return credentialvault.ResolveAccess{}, denied
+	}
+	sandboxID := s.subjSandbox[subj]
+	entry := s.vaults[subj]
+	if sandboxID == "" || entry.store == nil {
+		return credentialvault.ResolveAccess{}, denied
+	}
+	return credentialvault.ResolveAccess{SandboxID: sandboxID, Store: entry.store, ExpectedRevision: &admission.Revision.VaultRevision}, nil
+}
+
 // applyPolicy applies a policy to a subject. Ordering: nft FIRST, registry
 // AFTER — a failed kernel apply leaves the registry (and therefore DNS
 // dispatch) on the previous policy, so the documented atomic transition
@@ -499,9 +527,9 @@ func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentia
 // reporting the new policy while the kernel still enforces the old one.
 // The nft swap uses the always-rule MERGED policy (reg.EffectiveOf), so
 // allow.always/deny.always are enforced at the IP layer too — matching the
-// sidecar profile's commitPolicy behavior. The always files are loaded once
-// at startup; runtime file changes are not picked up (sidecar reloads them
-// every minute).
+// sidecar profile's commitPolicy behavior. The operator always-rule overlay
+// hot-reloads atomically (reloadAlwaysRules), so kernel and DNS never
+// disagree about a subject.
 func (s *fastSandboxPolicyServer) applyPolicy(subj subject.Subject, pol *policy.NetworkPolicy) error {
 	s.policyMu.Lock()
 	defer s.policyMu.Unlock()
@@ -519,6 +547,106 @@ func (s *fastSandboxPolicyServer) applyPolicy(subj subject.Subject, pol *policy.
 	}
 	log.Infof("subject %s: policy applied (defaultAction=%s, rules=%d)", subj, pol.DefaultAction, len(pol.Egress))
 	return nil
+}
+
+// SetAlwaysRuleLoader wires the periodic always-rule reloader; nil (the
+// test default) keeps the reload job off.
+func (s *fastSandboxPolicyServer) SetAlwaysRuleLoader(l alwaysRuleReloadLoader) {
+	s.alwaysLoader = l
+}
+
+// startAlwaysRuleReloadJob polls the operator always-rule files every
+// minute (the sidecar cadence, matched to the kubelet ConfigMap sync
+// period); failures log and retry on the next tick.
+func (s *fastSandboxPolicyServer) startAlwaysRuleReloadJob() {
+	if s.alwaysLoader == nil {
+		return
+	}
+	safego.Go(func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-ticker.C:
+				changed, err := s.reloadAlwaysRules()
+				if err != nil {
+					log.Warnf("fast-sandbox: periodic always-rule reload failed (will retry): %v", err)
+					continue
+				}
+				if !changed {
+					continue
+				}
+				deny, allow := s.alwaysLoader.CurrentRules()
+				log.Infof("fast-sandbox: always rules reloaded (deny=%d allow=%d fp=%016x)",
+					len(deny), len(allow), fingerprintRules(deny, allow))
+			}
+		}
+	})
+}
+
+// reloadAlwaysRules applies a changed always overlay fail-closed: kernel
+// rebuild first, registry (DNS dispatch) second; a kernel failure leaves the
+// loader's previous state published and the candidate retries next tick.
+// Unlike the sidecar, no telemetry endpoints join always-allow (startup
+// parity), and the shared dnsproxy needs no update — its per-query selector
+// reads the registry effective policies that SetAlwaysRules recomputes.
+func (s *fastSandboxPolicyServer) reloadAlwaysRules() (bool, error) {
+	if s.alwaysLoader == nil {
+		return false, nil
+	}
+	_, _, changed, err := s.alwaysLoader.RefreshIfDueWithApply(time.Now(), s.applyAlwaysOverlay)
+	return changed, err
+}
+
+// applyAlwaysOverlay is the loader's apply callback. policyCommitMu comes
+// first (the applyPolicy caller order): the SET_BINDING / hook / rollback
+// deny-first transitions hold it but not policyMu, so without it a reload
+// could snapshot an active policy whose deny-first transition commits first
+// and get that stale allow policy re-emitted by the rebuild. A registering
+// subject cannot reach active state (policy application needs policyMu); a
+// subject the applier holds deny-first stays deny-first via the reload's
+// inst.pol guard even if it raced the snapshot.
+func (s *fastSandboxPolicyServer) applyAlwaysOverlay(deny, allow []policy.EgressRule) error {
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+
+	pols := make(map[subject.Subject]*policy.NetworkPolicy)
+	for _, subj := range s.reg.List() {
+		if state, ok := s.reg.Get(subj); !ok || state != subject.StateActive {
+			continue
+		}
+		user := s.reg.UserPolicy(subj)
+		if user == nil {
+			continue
+		}
+		pols[subj] = policy.MergeAlwaysOverlay(user, deny, allow)
+	}
+
+	// Kernel first, bounded like applyPolicy; one atomic transaction swaps
+	// the floor and every subject's merged policy.
+	nftCtx, cancel := context.WithTimeout(s.ctx, policyApplyTimeout)
+	defer cancel()
+	if err := s.nft.ApplyAlwaysRulesReload(nftCtx, alwaysFloorRanges(deny), pols); err != nil {
+		return fmt.Errorf("always-overlay nft rebuild: %w", err)
+	}
+	// Registry second: DNS dispatch picks up the new overlay per query.
+	s.reg.SetAlwaysRules(deny, allow)
+	return nil
+}
+
+// alwaysFloorRanges extracts the port-floor ranges from a candidate deny
+// set: only the reachable.ports.cap floor rules carry PortRanges, so the
+// union is exactly the floor.
+func alwaysFloorRanges(deny []policy.EgressRule) []policy.PortRange {
+	var out []policy.PortRange
+	for _, r := range deny {
+		out = append(out, r.PortRanges...)
+	}
+	return out
 }
 
 // vaultEntry binds a vault store to the registration fence it was
@@ -591,7 +719,7 @@ func (s *fastSandboxPolicyServer) vaultForLocked(subj subject.Subject, fence sub
 			if s.vaultFiles != nil && s.vaultFiles.isSealed(subj) {
 				e.sealed = true
 			}
-			s.vaults[subj] = e
+			s.setSubjectVaultEntryLocked(subj, e)
 			return e.store
 		}
 		delete(s.vaults, subj)
@@ -602,7 +730,7 @@ func (s *fastSandboxPolicyServer) vaultForLocked(subj subject.Subject, fence sub
 	if s.vaultFiles != nil && s.vaultFiles.isSealed(subj) {
 		e.sealed = true
 	}
-	s.vaults[subj] = e
+	s.setSubjectVaultEntryLocked(subj, e)
 	return v
 }
 
@@ -791,6 +919,7 @@ func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att a
 func (s *fastSandboxPolicyServer) recordRegisteredFence(subj subject.Subject, fence subject.Fencing) {
 	s.mu.Lock()
 	s.subjFence[subj] = fence
+	s.recordSubjectIntentLocked(subj, fence, false)
 	s.mu.Unlock()
 }
 

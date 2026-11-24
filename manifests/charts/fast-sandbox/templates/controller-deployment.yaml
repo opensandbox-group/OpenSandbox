@@ -1,5 +1,16 @@
 {{- if .Values.controller.enabled }}
+{{- if ne (toString .Values.controller.replicaCount) "1" }}
+{{- fail "controller.replicaCount must be 1 because the fast-sandbox chart runs --role=all without leader election" }}
+{{- end }}
 {{- $builderImage := .Values.controller.sandboxtemplateBuilderImage | default (printf "opensandbox/fsb-sandboxtemplate-builder:release-%s" .Chart.AppVersion) }}
+{{/*
+`helm upgrade --reuse-values` can omit newly added chart defaults, so preserve
+the legacy Fastlet Proxy resources when this subtree is absent.
+*/}}
+{{- $fastletProxy := .Values.controller.fastletProxy | default dict }}
+{{- $fastletProxyResources := $fastletProxy.resources | default dict }}
+{{- $fastletProxyRequests := $fastletProxyResources.requests | default dict }}
+{{- $fastletProxyLimits := $fastletProxyResources.limits | default dict }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -13,6 +24,8 @@ metadata:
     fast-sandbox.io/control-plane-role: all
 spec:
   replicas: {{ .Values.controller.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "fast-sandbox.controllerSelectorLabels" . | nindent 6 }}
@@ -20,6 +33,17 @@ spec:
     metadata:
       labels:
         {{- include "fast-sandbox.controllerSelectorLabels" . | nindent 8 }}
+        {{- with .Values.controller.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- $callerAuthEnabled := ((.Values.fastpath).callerAuth).enabled }}
+        {{- if $callerAuthEnabled }}
+        checksum/fastpath-auth: {{ include (print $.Template.BasePath "/fastpath-auth.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.controller.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -33,8 +57,23 @@ spec:
         - --metrics-bind-address=:9091
         - --health-probe-bind-address=:5758
         - --fastpath-bind-address=:9090
+        {{- if $callerAuthEnabled }}
+        - --fastpath-auth-enabled=true
+        - --fastpath-auth-policy-file=/etc/fast-sandbox/callers/callers.json
+        - --fastpath-tls-cert-file=/etc/fast-sandbox/tls/tls.crt
+        - --fastpath-tls-key-file=/etc/fast-sandbox/tls/tls.key
+        {{- end }}
+        {{- if gt (.Values.controller.fastpathHTTPPort | int) 0 }}
+        # Optional gRPC-Web listener (HTTP/1.1 clients); the value above keeps
+        # it disabled when 0.
+        - --fastpath-http-port={{ .Values.controller.fastpathHTTPPort }}
+        {{- end }}
         - --sandboxtemplate-builder-image={{ $builderImage }}
         - --fastlet-proxy-image={{ .Values.controller.fastletProxyImage }}
+        - --fastlet-proxy-request-cpu={{ $fastletProxyRequests.cpu | default "50m" }}
+        - --fastlet-proxy-request-memory={{ $fastletProxyRequests.memory | default "64Mi" }}
+        - --fastlet-proxy-limit-cpu={{ $fastletProxyLimits.cpu | default "250m" }}
+        - --fastlet-proxy-limit-memory={{ $fastletProxyLimits.memory | default "256Mi" }}
         # The controller's default namespace for the platform
         # runtime-environment ConfigMap is the upstream-hardcoded
         # fast-sandbox-system; pin it to this chart's system namespace so
@@ -82,6 +121,10 @@ spec:
         ports:
         - name: grpc
           containerPort: 9090
+        {{- if gt (.Values.controller.fastpathHTTPPort | int) 0 }}
+        - name: grpc-web
+          containerPort: {{ .Values.controller.fastpathHTTPPort }}
+        {{- end }}
         - name: health
           containerPort: 5758
         - name: metrics
@@ -89,6 +132,14 @@ spec:
         resources:
           {{- toYaml .Values.controller.resources | nindent 10 }}
         volumeMounts:
+        {{- if $callerAuthEnabled }}
+        - name: fastpath-callers
+          mountPath: /etc/fast-sandbox/callers
+          readOnly: true
+        - name: fastpath-tls
+          mountPath: /etc/fast-sandbox/tls
+          readOnly: true
+        {{- end }}
         - name: artifact-store
           mountPath: /etc/fast-sandbox/artifact-store
           readOnly: true
@@ -96,11 +147,27 @@ spec:
           mountPath: /etc/fast-sandbox/builder-pod-template
           readOnly: true
       serviceAccountName: fast-sandbox-controller
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.controller.tolerations }}
       tolerations:
       {{- toYaml . | nindent 6 }}
       {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
+      {{- if $callerAuthEnabled }}
+      - name: fastpath-callers
+        configMap:
+          name: fast-sandbox-fastpath-callers
+      - name: fastpath-tls
+        secret:
+          secretName: {{ ((.Values.fastpath).tls).existingSecret | default "fast-sandbox-fastpath-tls" }}
+      {{- end }}
       - name: artifact-store
         configMap:
           name: fast-sandbox-artifact-store

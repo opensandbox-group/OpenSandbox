@@ -228,9 +228,7 @@ func decodeFile(t *testing.T, f *fakeVaultFile) (credentialvault.VaultFile, cred
 	return vf, body
 }
 
-// ---------------------------------------------------------------------------
 // Commit protocol: persist → apply → ack (three-state classification)
-// ---------------------------------------------------------------------------
 
 func TestVaultPersistWriteStampsFileAndApplies(t *testing.T) {
 	h := newVaultPersistHarness(t)
@@ -390,9 +388,7 @@ func TestVaultPersistApplyFailureRollsBackFile(t *testing.T) {
 	assert.True(t, srv.vaultRecoveryActive())
 }
 
-// ---------------------------------------------------------------------------
 // Reload at registration (egress-restart recovery) + incarnation fencing
-// ---------------------------------------------------------------------------
 
 const reloadVaultBody = `{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],` +
 	`"bindings":[{"name":"api","match":{"hosts":["api.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}`
@@ -627,10 +623,6 @@ func TestVaultPersistDuplicateSetBindingKeepsLiveSlice(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"revision":2`)
 }
 
-// TestVaultPersistForeignFenceEntryNeverSurvivesReset: an entry left by a
-// failed registration of a previous generation must not be inherited by the
-// reset's successor — the fence check at rehydration drops it together with
-// the stale file.
 func TestVaultPersistForeignFenceEntryNeverSurvivesReset(t *testing.T) {
 	h := newVaultPersistHarness(t)
 
@@ -660,9 +652,7 @@ func TestVaultPersistForeignFenceEntryNeverSurvivesReset(t *testing.T) {
 	assert.False(t, h.fileFor(vaultTestUID).exists, "the stale file is purged")
 }
 
-// ---------------------------------------------------------------------------
 // Purge: REMOVE_BINDING (terminal) and rebind
-// ---------------------------------------------------------------------------
 
 func TestVaultPersistRemoveBindingPurgesFile(t *testing.T) {
 	h := newVaultPersistHarness(t)
@@ -711,9 +701,7 @@ func TestVaultPersistRebindPurgesFile(t *testing.T) {
 	assert.False(t, h.fileFor(vaultTestUID).exists, "the rebind purges the previous instance's file")
 }
 
-// ---------------------------------------------------------------------------
 // Startup: staged leftovers discarded, directory contract
-// ---------------------------------------------------------------------------
 
 func TestVaultPersistStartupDiscardsStagedLeftovers(t *testing.T) {
 	dir := t.TempDir()
@@ -763,9 +751,7 @@ func TestVaultPersistenceRejectsBadDirectories(t *testing.T) {
 	assert.ErrorContains(t, err, "not a directory")
 }
 
-// ---------------------------------------------------------------------------
 // Status payload + healthy posture
-// ---------------------------------------------------------------------------
 
 func TestVaultPersistHealthyStatusOmitsFields(t *testing.T) {
 	h := newVaultPersistHarness(t)
@@ -785,10 +771,7 @@ func TestVaultPersistHealthyStatusOmitsFields(t *testing.T) {
 	assert.Equal(t, http.StatusOK, doRequest(t, h.srv, http.MethodGet, "/healthz", "").Code)
 }
 
-// Review-fix regressions.
-
-// TestVaultRelayStalledBodyDoesNotHoldServerLock pins the parse-before-lock
-// ordering: with the parse under the lock, the probe below deadlocks.
+// Reading a stalled body under the server lock would deadlock the concurrent probe.
 func TestVaultRelayStalledBodyDoesNotHoldServerLock(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
 	ts := httptest.NewServer(srv.Handler())
@@ -830,8 +813,6 @@ func TestVaultRelayStalledBodyDoesNotHoldServerLock(t *testing.T) {
 	}
 }
 
-// TestVaultPersistRemovalReplayDoesNotDegrade: a removal replay skips the
-// reload (nothing to revalidate against); the file stays fenced on disk.
 func TestVaultPersistRemovalReplayDoesNotDegrade(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	h.seedVaultFile(vaultTestUID, testFenceR, testFenceA, 5, reloadVaultBody)
@@ -855,9 +836,7 @@ func TestVaultPersistRemovalReplayDoesNotDegrade(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"revision":5`)
 }
 
-// TestVaultPersistAttachmentOnlyRebindDiscardsFile: an attachment-only rebind
-// with an uncertain purge must find the predecessor's file stale —
-// incarnation-only fencing would silently resurrect the old credentials.
+// Incarnation-only fencing would resurrect predecessor credentials after an attachment-only rebind.
 func TestVaultPersistAttachmentOnlyRebindDiscardsFile(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	h.readySubject(t, vaultTestUID, vaultTestIP)
@@ -895,8 +874,6 @@ func TestVaultPersistAttachmentOnlyRebindDiscardsFile(t *testing.T) {
 	assert.Equal(t, newAttachment, vf.AttachmentID)
 }
 
-// TestVaultPersistPurgeEvictsCachedFileStore: the per-subject file-store
-// cache must not leak an entry per subject on a long-lived pool pod.
 func TestVaultPersistPurgeEvictsCachedFileStore(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	h.readySubject(t, vaultTestUID, vaultTestIP)
@@ -918,9 +895,6 @@ func TestVaultPersistPurgeEvictsCachedFileStore(t *testing.T) {
 	assert.False(t, cached, "a purged subject's file store must be evicted")
 }
 
-// TestVaultPersistFailureResponseIsGeneric: persistence failures are a
-// retryable classification on the relay contract; host paths and I/O phases
-// stay in the server log.
 func TestVaultPersistFailureResponseIsGeneric(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	h.readySubject(t, vaultTestUID, vaultTestIP)
@@ -937,9 +911,7 @@ func TestVaultPersistFailureResponseIsGeneric(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "no space")
 }
 
-// ---------------------------------------------------------------------------
 // Shared helpers
-// ---------------------------------------------------------------------------
 
 func mustRevision(t *testing.T, rec *httptest.ResponseRecorder) int64 {
 	t.Helper()

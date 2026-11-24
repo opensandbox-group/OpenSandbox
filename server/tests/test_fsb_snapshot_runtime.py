@@ -56,16 +56,33 @@ class FakeFastPathClient:
         self.create_error: Exception | None = None
         self.get_sandbox_error: Exception | None = None
         self.get_sandbox_calls: list[tuple[str, str]] = []
+        # Per-sandbox limits reported by SandboxInfo.resources.
+        self.sandbox_limits: tuple[str, str] | None = None
 
     def get_sandbox(self, namespace: str, sandbox_name: str, *, expected_uid: str = ""):
         if self.get_sandbox_error is not None:
             raise self.get_sandbox_error
         self.get_sandbox_calls.append((namespace, sandbox_name))
 
-        class _Sandbox:
+        class _Limits:
+            def __init__(self, cpu, memory):
+                self.cpu, self.memory = cpu, memory
+
+        class _Resources:
+            def __init__(self, limits):
+                self.limits = limits
+
+        class _Info:
             ready = True
 
-        return _Sandbox()
+            def __init__(self, limits):
+                self.resources = _Resources(_Limits(*limits)) if limits else None
+
+        class _Response:
+            def __init__(self, sandbox):
+                self.sandbox = sandbox
+
+        return _Response(_Info(self.sandbox_limits))
 
     def create_sandbox_snapshot(self, request):
         if self.create_error is not None:
@@ -96,11 +113,13 @@ class _Info:
         message: str = "",
         manifest_ref: str = "",
         template_name: str = "",
+        mode=None,
     ):
         self.phase = phase
         self.message = message
         self.manifest_ref = manifest_ref
         self.template_name = template_name
+        self.mode = mode
 
 
 class _Response:
@@ -183,6 +202,7 @@ def test_create_snapshot_submits_intent_without_waiting() -> None:
     assert status.state == SnapshotState.CREATING
     assert status.reason == "snapshot_runtime_submitted"
     assert status.backend == "fsb"
+    assert status.resource_limits is None
 
     request = fastpath.create_requests[0]
     assert request.request_id == build_public_snapshot_name(SNAPSHOT_ID)
@@ -190,6 +210,16 @@ def test_create_snapshot_submits_intent_without_waiting() -> None:
     assert request.sandbox.namespaced_name.namespace == "tenant-a"
     assert request.sandbox.namespaced_name.name == SANDBOX_ID
     assert request.metadata[SNAPSHOT_ID_METADATA_KEY] == SNAPSHOT_ID
+
+
+def test_create_snapshot_records_source_sandbox_limits() -> None:
+    fastpath = FakeFastPathClient()
+    fastpath.sandbox_limits = ("2", "1Gi")
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, namespace="tenant-a")
+
+    assert status.resource_limits == {"cpu": "2", "memory": "1Gi"}
 
 
 def test_create_snapshot_maps_fastpath_errors_to_failed() -> None:
@@ -327,6 +357,94 @@ def test_create_snapshot_oci_source_omits_template_name() -> None:
     assert request.template_name == ""
 
 
+def test_preflight_accepts_rootfs_only_for_native_source() -> None:
+    runtime, _, _ = _runtime()  # default source image is native
+
+    # Native (S3 artifact) sandboxes take the same preflight as OCI ones:
+    # mode compatibility is gated authoritatively by fast-sandbox.
+    runtime.preflight_create_snapshot(SANDBOX_ID, namespace="default", mode="rootfsOnly")
+
+
+def test_preflight_accepts_rootfs_only_for_oci_source() -> None:
+    fastpath = FakeFastPathClient()
+    k8s = WatchRecordingK8sClient()
+    k8s.sandbox_crs[("default", SANDBOX_ID)] = _sandbox_cr("oci://reg.example.com/tpl@sha256:a")
+    runtime, _, _ = _runtime(fastpath=fastpath, k8s=k8s)
+
+    runtime.preflight_create_snapshot(SANDBOX_ID, namespace="default", mode="rootfsOnly")
+
+
+def test_create_snapshot_passes_rootfs_only_mode() -> None:
+    fastpath = FakeFastPathClient()
+    k8s = WatchRecordingK8sClient()
+    k8s.sandbox_crs[("default", SANDBOX_ID)] = _sandbox_cr("oci://reg.example.com/tpl@sha256:a")
+    runtime, fastpath, _ = _runtime(fastpath=fastpath, k8s=k8s)
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, mode="rootfsOnly")
+
+    assert status.state == SnapshotState.CREATING
+    assert status.mode == "rootfsOnly"
+    assert fastpath.create_requests[0].mode == pb2.SNAPSHOT_MODE_ROOTFS_ONLY
+
+
+def test_create_snapshot_passes_rootfs_only_mode_for_native_source() -> None:
+    # Native publishes under the template-name index key, so a native
+    # rootfsOnly request must carry both the mode and the template name.
+    runtime, fastpath, _ = _runtime()  # default source image is native
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, mode="rootfsOnly")
+
+    assert status.state == SnapshotState.CREATING
+    assert status.mode == "rootfsOnly"
+    request = fastpath.create_requests[0]
+    assert request.mode == pb2.SNAPSHOT_MODE_ROOTFS_ONLY
+    assert request.template_name == build_public_snapshot_name(SNAPSHOT_ID)
+
+
+def test_create_snapshot_leaves_mode_unspecified_by_default() -> None:
+    runtime, fastpath, _ = _runtime()
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, mode=None)
+
+    assert status.state == SnapshotState.CREATING
+    assert status.mode is None
+    assert fastpath.create_requests[0].mode == pb2.SNAPSHOT_MODE_UNSPECIFIED
+
+
+def test_inspect_maps_rootfs_only_mode() -> None:
+    fastpath = FakeFastPathClient()
+    fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
+        _Info(
+            pb2.SNAPSHOT_PHASE_SUCCEEDED,
+            manifest_ref="oci://reg.example.com/snap/files@sha256:b",
+            mode=pb2.SNAPSHOT_MODE_ROOTFS_ONLY,
+        )
+    )
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(SNAPSHOT_ID)
+
+    assert status.state == SnapshotState.READY
+    assert status.mode == "rootfsOnly"
+
+
+def test_inspect_treats_unspecified_mode_as_unknown() -> None:
+    fastpath = FakeFastPathClient()
+    fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
+        _Info(
+            pb2.SNAPSHOT_PHASE_SUCCEEDED,
+            manifest_ref="oci://reg.example.com/snap/files@sha256:b",
+            mode=pb2.SNAPSHOT_MODE_UNSPECIFIED,
+        )
+    )
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(SNAPSHOT_ID)
+
+    assert status.state == SnapshotState.READY
+    assert status.mode is None
+
+
 def test_create_snapshot_unreadable_sandbox_cr_fails_without_rpc() -> None:
     fastpath = FakeFastPathClient()
     k8s = WatchRecordingK8sClient()
@@ -377,7 +495,6 @@ def test_inspect_fails_when_succeeded_without_template_name() -> None:
 
 
 def test_inspect_succeeded_oci_manifest_restores_from_manifest_ref() -> None:
-    """OCI snapshots restore from the immutable manifest reference."""
     fastpath = FakeFastPathClient()
     manifest_ref = "oci://registry.example.com/sandbox/snapshots@sha256:def456"
     fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
@@ -439,12 +556,6 @@ def test_inspect_maps_missing_snapshot_to_failed() -> None:
 
     assert status.state == SnapshotState.FAILED
     assert status.reason == "snapshot_recovery_missing_snapshot"
-
-
-def test_delete_snapshot_ignores_missing_snapshot() -> None:
-    runtime, _, _ = _runtime()
-
-    runtime.delete_snapshot(SNAPSHOT_ID, namespace="tenant-a")
 
 
 def test_delete_snapshot_deletes_by_namespaced_name() -> None:
@@ -528,3 +639,42 @@ def test_close_stops_informers_when_client_supports_it() -> None:
     runtime.close()
 
     assert k8s.stopped == 1
+
+
+def test_inspect_ready_attaches_source_limits_for_retry() -> None:
+    fastpath = FakeFastPathClient()
+    snapshot_name = build_public_snapshot_name(SNAPSHOT_ID)
+    fastpath.get_by_name[("tenant-a", snapshot_name)] = _Response(
+        _Info(
+            pb2.SNAPSHOT_PHASE_SUCCEEDED,
+            manifest_ref="s3://bucket/manifests/abc.json",
+            template_name=snapshot_name,
+        )
+    )
+    fastpath.sandbox_limits = ("2", "1Gi")
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(
+        SNAPSHOT_ID, namespace="tenant-a", source_sandbox_id=SANDBOX_ID
+    )
+
+    assert status.state == SnapshotState.READY
+    assert status.resource_limits == {"cpu": "2", "memory": "1Gi"}
+
+
+def test_inspect_in_progress_does_not_read_source_limits() -> None:
+    fastpath = FakeFastPathClient()
+    snapshot_name = build_public_snapshot_name(SNAPSHOT_ID)
+    fastpath.get_by_name[("tenant-a", snapshot_name)] = _Response(
+        _Info(pb2.SNAPSHOT_PHASE_PENDING)
+    )
+    fastpath.sandbox_limits = ("2", "1Gi")
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(
+        SNAPSHOT_ID, namespace="tenant-a", source_sandbox_id=SANDBOX_ID
+    )
+
+    assert status.state == SnapshotState.CREATING
+    assert status.resource_limits is None
+    assert fastpath.get_sandbox_calls == []

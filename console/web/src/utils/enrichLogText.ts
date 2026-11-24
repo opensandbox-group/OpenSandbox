@@ -14,7 +14,7 @@
 
 import { LOG_ANSI, logLevelAnsi } from './semanticTheme';
 
-/** 去掉行内已有 ANSI，避免业务日志（如 Jupyter）局部着色导致整段跳过我们的规则。 */
+/** Strip inline ANSI codes so partial coloring in application logs (such as Jupyter) does not skip our rules. */
 const STRIP_ANSI = /\x1b\[[0-9;]*m/g;
 
 const TIMESTAMP_SOURCE =
@@ -60,7 +60,7 @@ function applyKeywordHighlights(text: string): string {
   return text.replace(new RegExp(KEYWORDS_SOURCE, 'gi'), (m) => `${keywordColor(m)}${m}${RESET}`);
 }
 
-/** K8s 采集前缀 + zap/uber JSON：`2026-09-29T…+08:00{"level":"warn","ts":"…","msg":"…"}` */
+/** K8s collection prefix followed by zap/uber JSON: `2026-09-29T…+08:00{"level":"warn","ts":"…","msg":"…"}` */
 function colorizeJsonLine(line: string): string | null {
   const jsonStart = line.indexOf('{');
   if (jsonStart < 0) return null;
@@ -90,7 +90,7 @@ function colorizeJsonLine(line: string): string | null {
   return dimTimestamps(prefix.replace(STRIP_ANSI, '')) + jsonOut;
 }
 
-/** 为纯文本日志注入颜色，供 LazyLog 解析展示。 */
+/** Add colors to plain-text logs for LazyLog to parse and display. */
 function colorizePlainLine(line: string): string {
   const stripped = line.replace(STRIP_ANSI, '');
   const jsonColored = colorizeJsonLine(stripped);
@@ -113,7 +113,7 @@ function colorizePlainLine(line: string): string {
   return out;
 }
 
-/** 按行着色；混有业务进程自带 ANSI 的容器日志也会统一处理。 */
+/** Color each line; container logs with application-provided ANSI codes are normalized too. */
 export function enrichLogTextForDisplay(raw: string | null | undefined): string {
   const text = raw?.trim() ? raw : '(empty)';
   return text.split('\n').map(colorizePlainLine).join('\n');

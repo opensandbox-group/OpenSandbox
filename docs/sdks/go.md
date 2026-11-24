@@ -40,9 +40,8 @@ func run() error {
     ctx := context.Background()
     ttl := 600
     config := opensandbox.ConnectionConfig{
-        Domain: "localhost:8080",
+        Domain:   "localhost:8080",
         Protocol: "http",
-        UseServerProxy: true,
     }
     sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
         Image: "python:3.12",
@@ -71,7 +70,7 @@ func main() {
 
 `ConnectSandbox` and `ResumeSandbox` check health only when you pass the optional `ReadyOptions` argument (an empty `ReadyOptions{}` uses the default check). Omitting it resolves the endpoint without a health check. Pause is asynchronous: wait until sandbox info reports `Paused` before resuming.
 
-`ConnectionConfig.APIKey` authenticates lifecycle requests. Data-plane requests carry `OPEN-SANDBOX-API-KEY` only when `UseServerProxy` is true; in direct mode the SDK removes that header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for direct data-plane authentication. Endpoint headers override `ConnectionConfig.Headers` with the same case-insensitive HTTP header name.
+`ConnectionConfig.APIKey` authenticates lifecycle requests. An explicit `OPEN-SANDBOX-API-KEY` entry in `ConnectionConfig.Headers` takes precedence over `APIKey` and its environment fallback, regardless of header-name casing; a present-but-empty entry is preserved. Data-plane requests carry `OPEN-SANDBOX-API-KEY` only when the deprecated `UseServerProxy` is true (maintenance mode); in direct mode the SDK removes that header from `ConnectionConfig.Headers` before sending to execd or egress because those endpoints run inside the sandbox. Use the endpoint headers returned by `GetEndpoint` for direct data-plane authentication. Endpoint headers override `ConnectionConfig.Headers` with the same case-insensitive HTTP header name.
 
 The following snippets go inside a function returning `error`, with the live `sandbox`, `config`, and `ctx` above. Add standard-library imports used by each snippet. Creation examples are alternatives; terminate sandboxes with `Kill` when done. `Close` currently does not terminate the sandbox.
 
@@ -151,7 +150,7 @@ Native argv execution requires an updated execd. See [command execution modes](/
 
 ### Background commands
 
-Reuse the `exec` client from the streaming example to poll status and incremental logs. Command timeout is in milliseconds and is separate from sandbox TTL.
+Reuse the `exec` client from the streaming example to poll status and incremental logs. Command timeout is in milliseconds and is separate from sandbox TTL. Each log read returns at most 16 MiB; follow the returned cursor until it stops advancing so a longer log is fully drained.
 
 ```go
 execution, err := sandbox.RunCommandWithOpts(ctx, opensandbox.RunCommandRequest{
@@ -178,12 +177,17 @@ for {
     if err != nil {
         return err
     }
-    logs, err := exec.GetCommandLogs(ctx, execution.ID, &cursor)
-    if err != nil {
-        return err
+    for {
+        logs, err := exec.GetCommandLogs(ctx, execution.ID, &cursor)
+        if err != nil {
+            return err
+        }
+        fmt.Print(logs.Output)
+        if logs.Output == "" || logs.Cursor == cursor {
+            break
+        }
+        cursor = logs.Cursor
     }
-    fmt.Print(logs.Output)
-    cursor = logs.Cursor
     if !status.Running {
         if status.ExitCode == nil || *status.ExitCode != 0 {
             return fmt.Errorf("command failed: %s", status.Error)
@@ -340,6 +344,8 @@ if _, err := resumed.Renew(ctx, 30*time.Minute); err != nil {
 ```
 
 During sandbox creation, `ReadyTimeout` bounds the wait for the lifecycle state to become `Running`, even when the caller context has a longer deadline. An earlier caller deadline or cancellation still takes precedence.
+
+Expiration of this running-state budget or an earlier caller deadline returns `*SandboxRunningTimeoutError`, including when a status request is in flight. Use `errors.As` to identify this error and `errors.Is(err, context.DeadlineExceeded)` to inspect its cause. Caller cancellation remains `context.Canceled`. A request failure before the running-state deadline, including a shorter HTTP-client timeout, remains a request error.
 
 Use `ConnectSandbox(ctx, config, id, opensandbox.ReadyOptions{})` to attach to an already running sandbox with a readiness check. See [Pause and Resume](/guides/pause-resume).
 
@@ -528,6 +534,8 @@ SSE bootstraps do not use the generic retry loop, even when a write status code 
 
 A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the client recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the client returns a `*SandboxWakeTimeoutError` (carrying `Attempts` and `Waited`) while the server-side resume continues in the background. Bare `503` responses follow the existing retry rules untouched. Wake retry is active whenever a `WithRetry` config is set (`WakeRetryEnabled` defaults to enabled even for hand-built configs; pass `WakeRetryDisabled()` to opt out). It also covers the request that starts an SSE stream, so a command or code execution against an auto-paused sandbox wakes it like any other request; once a stream is established, its events are never re-executed.
 
+Once a marked wake response starts the wake phase, generic retry backoff and `Retry-After` delays must also fit the remaining `WakeOverallDeadline`. If an ordinary retryable failure needs a longer delay, the SDK returns that last error immediately without another request. It does not replace the ordinary failure with an earlier marked response that claims the request was never forwarded. A negative `WakeOverallDeadline` keeps wake retries unbounded by time; requests that never receive a wake marker retain their normal retry policy.
+
 ## Fsb Template Management
 
 fsb (fast-sandbox microVM) golden-image templates are managed through `SandboxManager`. Template builds are asynchronous: `CreateTemplate` returns with `Status.Phase` set to `Pending`; poll `GetTemplate` until the phase reaches `Succeeded` or `Failed`. Only a `Succeeded` template can create sandboxes. Template management requires a configured Fsb provider on Kubernetes. Replace the publish URI with a location configured for your server.
@@ -608,6 +616,13 @@ fmt.Println(sandbox.Origin()) // "template"
 
 `Sandbox.CreateSnapshot` and `SandboxManager.CreateSnapshot` start snapshot creation. Use manager `GetSnapshot`, `ListSnapshots`, and `DeleteSnapshot` to manage snapshots, then pass `SnapshotID` to `SandboxCreateOptions` to restore. Poll snapshot status before restore. Use `Sandbox.PatchMetadata` or `SandboxManager.PatchSandboxMetadata` to add/replace keys; nil values remove keys.
 
+Snapshot `Mode` selects what the snapshot persists:
+
+- `opensandbox.SnapshotModeFull` (default): the most complete capture the runtime supports. On the fast-sandbox backend that includes memory and process state, and restoring resumes the sandbox in place. Docker and Kubernetes snapshots capture the filesystem only — running processes are not restored there.
+- `opensandbox.SnapshotModeRootfsOnly`: only the writable filesystem. Restoring boots a fresh sandbox from the disk — the entrypoint re-runs, and resume moves from milliseconds (fast-sandbox in-place restore) to seconds (cold boot). The artifact is smaller and CPU-portable. Requires the fast-sandbox backend; other backends reject the mode before any capture starts, and an unqualified fast-sandbox node fails the snapshot instead of silently producing a full artifact.
+
+`SnapshotInfo.Mode` reports the artifact class of an existing snapshot; snapshots created before the field existed report `SnapshotModeFull`. Leave `CreateSnapshotRequest.Mode` empty to keep the field off the wire and let the server apply its default.
+
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. Wait for `Ready` before restoring. This example retains the snapshot for reuse:
 
 ```go
@@ -646,6 +661,21 @@ defer restored.Close()
 defer restored.Kill(context.Background())
 fmt.Println(restored.ID())
 // When no longer needed: manager.DeleteSnapshot(ctx, snapshot.ID)
+```
+
+Create a rootfs-only snapshot for workspace persistence (fast-sandbox backend only). Restoring is a cold boot, so budget seconds instead of milliseconds for readiness:
+
+```go
+rootfsSnapshot, err := sandbox.CreateSnapshot(ctx, opensandbox.CreateSnapshotRequest{
+    Name: "workspace-state",
+    Mode: opensandbox.SnapshotModeRootfsOnly,
+})
+// ... poll manager.GetSnapshot(ctx, rootfsSnapshot.ID) until Ready, then:
+rebooted, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
+    SnapshotID: rootfsSnapshot.ID,
+})
+// Files written before the snapshot are present; processes were not preserved
+// and the entrypoint re-ran on boot.
 ```
 
 Add/replace a metadata key and remove another:
@@ -771,6 +801,8 @@ Created with `NewEgressClient(baseURL, authToken string, opts ...Option)`.
 ## SSE Streaming
 
 The stream parser accepts LF, CRLF, and CR line endings for both standard SSE and execd's legacy bare-JSON frames, including when a line ending is split across network reads.
+
+One leading UTF-8 byte order mark (BOM) is ignored at the start of each response, including when its bytes arrive in separate reads. A BOM inside event data or later in the stream is preserved.
 
 Methods that stream output (`RunCommand`, `ExecuteCode`, `RunInSession`, `WatchMetrics`) accept an `EventHandler` callback:
 

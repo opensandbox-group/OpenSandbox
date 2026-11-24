@@ -68,6 +68,7 @@ def test_snapshot_restore_config_serialization_ignores_unknown_fields() -> None:
     assert config.to_dict() == {
         "image": "registry.example.com/snapshots/snap-003:latest",
         "backend": None,
+        "limits": None,
     }
     assert (
         SnapshotRestoreConfig.from_dict(
@@ -78,3 +79,13 @@ def test_snapshot_restore_config_serialization_ignores_unknown_fields() -> None:
         )
         == config
     )
+
+
+def test_snapshot_restore_config_roundtrips_recorded_limits() -> None:
+    config = SnapshotRestoreConfig(
+        image="registry.example.com/fsb/snap-001:index",
+        backend="fsb",
+        limits={"cpu": "2", "memory": "1Gi"},
+    )
+
+    assert SnapshotRestoreConfig.from_dict(config.to_dict()) == config

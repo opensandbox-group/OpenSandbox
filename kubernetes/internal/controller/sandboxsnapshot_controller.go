@@ -34,10 +34,8 @@ import (
 )
 
 const (
-	// sandboxSnapshotFinalizer is the finalizer for SandboxSnapshot cleanup
 	sandboxSnapshotFinalizer = "sandboxsnapshot.sandbox.opensandbox.io/cleanup"
 
-	// defaultCommitJobTimeout is the default timeout for commit jobs
 	defaultCommitJobTimeout = 10 * time.Minute
 
 	// DefaultCommitJobBackoffLimit bounds commit/push retries so stable failures
@@ -47,24 +45,18 @@ const (
 
 	defaultTTLSecondsAfterFinished = 300
 
-	// commitJobContainerName is the container name in commit job
 	commitJobContainerName = "commit"
 
-	// ContainerdSocketPath is the default containerd socket path
 	ContainerdSocketPath = "/var/run/containerd/containerd.sock"
 
 	// containerdFIFODir is available to image-committer implementations that
 	// use containerd task exec with FIFO-backed process I/O.
 	containerdFIFODir = "/run/containerd/fifo"
 
-	// labelSandboxSnapshotName is the label key for sandbox snapshot name
 	labelSandboxSnapshotName = "sandbox.opensandbox.io/sandbox-snapshot-name"
 )
 
-// SandboxSnapshotReconciler reconciles a SandboxSnapshot object.
-// Pure atomic capability: reads BatchSandbox via spec.sandboxName, finds Pod,
-// creates commit Job to commit+push container images, reports status.
-// No business logic (no scaling, no pool, no resume).
+// Snapshot reconciliation owns image commit jobs, not sandbox scaling or resume orchestration.
 type SandboxSnapshotReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
@@ -81,10 +73,8 @@ type SandboxSnapshotReconciler struct {
 	// ContainerdSocketPath is the host containerd socket mounted into image-committer Jobs.
 	ContainerdSocketPath string
 
-	// CommitJobTimeout is the timeout for commit jobs (default: 10 minutes)
 	CommitJobTimeout time.Duration
 
-	// SnapshotRegistry is the OCI registry for snapshot images (from Controller Manager startup params)
 	SnapshotRegistry string
 
 	// SnapshotImageURITemplate overrides image naming; nil uses DefaultSnapshotImageURITemplate.
@@ -129,12 +119,10 @@ func (r *SandboxSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// Handle deletion
 	if !snapshot.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, snapshot)
 	}
 
-	// Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(snapshot, sandboxSnapshotFinalizer) {
 		if err := utils.UpdateFinalizer(r.Client, snapshot, utils.AddFinalizerOpType, sandboxSnapshotFinalizer); err != nil {
 			return ctrl.Result{}, err

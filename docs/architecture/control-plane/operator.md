@@ -56,7 +56,7 @@ Status separates sandbox health from task progress: `replicas` / `allocated` / `
 | `updateStrategy` | Same cap for rolling out template changes across existing pods |
 | `recycleStrategy` | What happens when an allocated pod is released back: `Delete` (default), `Restart`, or `Noop` |
 
-Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template.
+Status reports `total` / `allocated` / `available` / `updated` plus a `revision` identifying the current template version — a SHA-256 hash (first 8 bytes) of the template. `total` counts the pods the pool accounts for: non-terminated pods plus pods that are still allocated to a sandbox (they stay owed until handback), including terminal-phase pods and pods that are already terminating, so `allocated / total` stays a utilization fraction. Terminal idle pods are excluded from `total` and `updated`; a terminating allocated pod stays in `total` until its reservation is handed back but no longer counts toward `updated`; no terminal pod is ever counted as `available`, because it can never serve again — otherwise a pool with a dead buffer would look healthy. Unreaped terminal pods still hold their slot in the `poolMax` budget until the controller reclaims them.
 
 ### Pool design
 
@@ -65,7 +65,7 @@ The pool maintains a **two-level capacity model**:
 ![Pool capacity model](../../public/images/operator-pool-capacity.svg)
 
 - **Buffer** — warm, unallocated pods that are Running and Ready. This is what allocations draw from, kept between `bufferMin` and `bufferMax`. The controller continuously reconciles toward this band: an allocation that drains the buffer triggers a scale-up; released capacity above `bufferMax` triggers a scale-down.
-- **Total pool** — everything the pool owns, allocated or not, bounded by `poolMin` and `poolMax`. Pods that are still starting count toward the total but are never advertised as available buffer, so the pool never promises capacity it cannot hand out.
+- **Total pool** — everything the pool owns that can still serve or still owes to a sandbox, allocated or not, bounded by `poolMin` and `poolMax`. Pods that are still starting count toward the total but are never advertised as available buffer, so the pool never promises capacity it cannot hand out. Terminal pods (Failed or Succeeded) count only while they are still allocated to a sandbox; terminal idle pods are excluded from the reported total. Unreaped terminal pods keep consuming the `poolMax` budget, so a pool with unreaped terminal pods can report `total` below `poolMax` while it is not creating replacements.
 
 Scaling is deliberately paced: each reconcile creates or deletes at most `maxUnavailable` pods (minus the ones already not-ready), so a burst of allocations produces a measured ramp of new pods, not a thundering herd.
 
@@ -97,6 +97,8 @@ A process task can run **Local** (inside the task-executor container, the defaul
 
 API deletion and TTL expiration finish task cleanup, including `postStop`, before deleting or recycling pods. Direct foreground deletion of the BatchSandbox, or deletion of its Pool or pods, can bypass this ordering.
 
+The task scheduler binds each task to a Pod instance by name, UID, and IP. Once the controller observes that the bound Pod is terminating, missing, or has a different identity or IP, the scheduler stops querying and sending tasks to that endpoint, including stop requests. It also skips terminating Pods during task assignment and recovery. A task whose binding is gone is marked failed and released locally, and a completed task keeps its recorded outcome. Requests already in flight can still reach the endpoint.
+
 ## SandboxSnapshot
 
 `SandboxSnapshot` is the checkpoint record behind pause/resume. Its spec is a single field — the target `BatchSandbox` name (same namespace); the controller resolves the pod and node. Registry, push credentials, and snapshot type come from controller startup flags, not the spec. Status carries the outcome: a `Pending → Committing → Succeed / Failed` phase, a `format` of `rootfs-v1` (default) or `qemu-v1`, per-container committed image URIs with immutable config digests, the source pod and node, and — for the QEMU contract — a separate VM-state image with payload digests and a restore-compatibility summary. See [QEMU VMState Snapshots](/guides/qemu-vmstate-snapshots).
@@ -117,6 +119,7 @@ The phase reports sandbox runtime health; the conditions explain it. Both are Ku
 | `Succeed` | At least one sandbox pod is running and ready — the steady state, **not** task completion |
 | `Pausing` / `Paused` / `Resuming` | Pause/resume transitions |
 | `Failed` | Terminal runtime failure — inspect conditions and pod events |
+| `Completed` | Terminal: the main container exited 0 under a restart policy that will not bring it back (`Never`, or `OnFailure` which restarts only non-zero exits). The `Ready` condition carries the pod, exit code, and finish time; the pod and CRD are retained until `expireTime`, pause/resume are refused, and task scheduling stops |
 
 Conditions (`Ready`, `Progressing`, `Paused`, `PauseFailed`, `ResumeFailed`, `PodFailed`, `PoolAllocationPending`) carry reasons and messages; count a condition only when it exists with status `True`, and check `status.observedGeneration` against `metadata.generation` before trusting post-update status.
 

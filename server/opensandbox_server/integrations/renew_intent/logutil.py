@@ -23,7 +23,6 @@ RENEW_SOURCE_REDIS_QUEUE = "redis_queue"
 
 RENEW_EVENT_SUCCEEDED = "renew_succeeded"
 RENEW_EVENT_FAILED = "renew_failed"
-RENEW_EVENT_TASK_FAILED = "renew_task_failed"
 RENEW_EVENT_WORKERS_STARTED = "workers_started"
 RENEW_EVENT_WORKERS_NOT_STARTED = "workers_not_started"
 RENEW_EVENT_REDIS_CONNECTED = "redis_connected"

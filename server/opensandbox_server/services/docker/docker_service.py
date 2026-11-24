@@ -12,20 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Docker-based implementation of SandboxService.
-
-This module provides a Docker implementation of the sandbox service interface,
-using Docker containers for sandbox lifecycle management.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import inspect
 import json
 import logging
-import math
 import os
 import time
 from _thread import LockType
@@ -51,7 +43,6 @@ from opensandbox_server.api.schema import (
     ImageSpec,
     ListSandboxesRequest,
     ListSandboxesResponse,
-    PaginationInfo,
     PatchSandboxMetadataRequest,
     RenewSandboxExpirationRequest,
     RenewSandboxExpirationResponse,
@@ -113,6 +104,8 @@ from opensandbox_server.services.endpoint_auth import (
     generate_egress_token,
 )
 from opensandbox_server.services.helpers import (
+    build_list_sandboxes_response,
+    is_egress_forward_mode,
     matches_filter,
     parse_timestamp,
     split_egress_env,
@@ -203,7 +196,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._ossfs_mount_ref_counts: Dict[str, int] = {}
         self._restore_existing_sandboxes()
 
-        # Initialize secure runtime resolver
         self.resolver = SecureRuntimeResolver(self.app_config)
         self.docker_runtime = self.resolver.get_docker_runtime()
 
@@ -271,8 +263,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             )
         except DockerNotFound as exc:
             # Container disappeared between list-summary and inspect; treat as
-            # not found rather than surfacing a 500. See list_sandboxes for
-            # the full-table variant of this fix.
+            # not found rather than surfacing a 500.
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
@@ -451,7 +442,6 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             managed_volumes = []
 
         self._remove_expiration_tracking(sandbox_id)
-        # Ensure sidecar is also cleaned up on expiration
         self._cleanup_egress_sidecar(sandbox_id)
         self._cleanup_windows_oem_volume(sandbox_id, labels)
         self._release_ossfs_mounts(mount_keys)
@@ -726,13 +716,16 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
     def _prepare_resource_limits(
         self, request: CreateSandboxRequest
-    ) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    ) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
         """Validate platform resource limits and return outer Docker limits."""
         if is_windows_platform(request.platform):
             validate_windows_resource_limits(
                 (request.resource_limits.root if request.resource_limits else None) or {}
             )
-            return None, None, None
+            # The Windows profile handles resourceLimits.disk as a sandbox
+            # environment size hint (windows_common); there is no Docker
+            # StorageOpt equivalent to apply on the outer container.
+            return None, None, None, None
         return self._resolve_resource_limits(request)
 
     def _provision_sandbox(
@@ -741,7 +734,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         request: CreateSandboxRequest,
         created_at: datetime,
         expires_at: Optional[datetime],
-        resource_limits: tuple[Optional[int], Optional[int], Optional[int]],
+        resource_limits: tuple[Optional[int], Optional[int], Optional[int], Optional[int]],
         pvc_inspect_cache: Optional[dict[str, dict]] = None,
         auto_created_volumes: Optional[list[str]] = None,
         sandbox_env: Optional[Dict[str, Optional[str]]] = None,
@@ -757,7 +750,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 auto_created_volumes, separators=(",", ":"),
             )
         image_uri, auth_config = self._resolve_image_auth(request, sandbox_id)
-        mem_limit, nano_cpus, gpu_count = resource_limits
+        mem_limit, nano_cpus, gpu_count, disk_quota = resource_limits
         egress_token: Optional[str] = None
         requested_windows_profile = is_windows_platform(request.platform)
 
@@ -775,8 +768,17 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             credential_proxy_enabled=credential_proxy_enabled,
             egress_env=egress_env or {},
         )
+        # Forward mode (OSEP-0030) attaches egress to every sandbox, with or
+        # without networkPolicy; the request cannot opt out.
+        forward_mode = is_egress_forward_mode(self.app_config.egress)
+        if forward_mode and requested_windows_profile:
+            raise ValueError(
+                'Windows sandbox profile is not supported when egress.mode = "forward": '
+                "it requires NET_ADMIN and NET_RAW"
+            )
+        attach_egress = bool(request.network_policy) or forward_mode
 
-        if egress_env and not request.network_policy:
+        if egress_env and not attach_egress:
             dropped_keys = sorted(egress_env.keys())
             logger.warning(
                 f"Sandbox {sandbox_id} has OPENSANDBOX_EGRESS_ env vars {dropped_keys} "
@@ -809,6 +811,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             effective_mem_limit = None if requested_windows_profile else mem_limit
             effective_nano_cpus = None if requested_windows_profile else nano_cpus
             effective_gpu_count = None if requested_windows_profile else gpu_count
+            effective_disk_quota = None if requested_windows_profile else disk_quota
 
             # pvc_inspect_cache carries Docker volume inspect data from the
             # validation phase, avoiding a redundant API call.
@@ -822,7 +825,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 exposed_ports.extend(["3389/tcp", "3389/udp", "8006/tcp"])
             container_exposed_ports: Optional[list[str]] = exposed_ports
 
-            if request.network_policy:
+            if attach_egress:
                 runtime_volume_name = f"opensandbox-runtime-{sandbox_id}"
                 with self._docker_operation(
                     "create egress runtime volume", sandbox_id
@@ -881,6 +884,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 host_config_kwargs = self._base_host_config_kwargs(
                     effective_mem_limit, effective_nano_cpus, f"container:{sidecar_container.id}",
                     gpu_count=effective_gpu_count,
+                    disk_quota=effective_disk_quota,
                 )
                 # Container network namespace is shared with sidecar. Docker rejects
                 # exposing ports on the main container in "container:<id>" mode.
@@ -888,12 +892,17 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 # Drop NET_ADMIN for the main container; only the sidecar should keep it
                 cap_drop = set(host_config_kwargs.get("cap_drop") or [])
                 cap_drop.add("NET_ADMIN")
+                if forward_mode:
+                    # Without NET_RAW too, the workload cannot set the
+                    # forwarder's SO_MARK and bypass capture (OSEP-0030 R8).
+                    cap_drop.add("NET_RAW")
                 if cap_drop:
                     host_config_kwargs["cap_drop"] = list(cap_drop)
             else:
                 host_config_kwargs = self._base_host_config_kwargs(
                     effective_mem_limit, effective_nano_cpus, self.network_mode,
                     gpu_count=effective_gpu_count,
+                    disk_quota=effective_disk_quota,
                 )
                 if self.network_mode != HOST_NETWORK_MODE:
                     port_bindings = allocate_port_bindings(
@@ -959,7 +968,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     "(bootstrap.execd.isolation=enable)"
                 )
 
-            if self.network_mode != HOST_NETWORK_MODE and request.network_policy is None:
+            if self.network_mode != HOST_NETWORK_MODE and not attach_egress:
                 for attempt in range(MAX_PORT_PUBLISH_ATTEMPTS):
                     try:
                         created_container = self._create_and_start_container(
@@ -1098,37 +1107,13 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                         "message": f"Failed to query sandbox containers: {str(exc)}",
                     },
                 ) from exc
+            # Filter per container, before deduplicating by sandbox id, so a
+            # non-matching container never replaces a matching one.
             sandbox_obj = self._container_to_sandbox(container, sandbox_id)
             if matches_filter(sandbox_obj, request.filter):
                 sandboxes_by_id[sandbox_id] = sandbox_obj
 
-        sandboxes: list[Sandbox] = list(sandboxes_by_id.values())
-
-        sandboxes.sort(key=lambda s: s.created_at or datetime.min, reverse=True)
-
-        if request.pagination:
-            page = request.pagination.page
-            page_size = request.pagination.page_size
-        else:
-            page = 1
-            page_size = 20
-
-        total_items = len(sandboxes)
-        total_pages = math.ceil(total_items / page_size) if total_items else 0
-        start_index = (page - 1) * page_size
-        end_index = start_index + page_size
-        items = sandboxes[start_index:end_index]
-        has_next_page = page < total_pages
-
-        pagination_info = PaginationInfo(
-            page=page,
-            page_size=page_size,
-            total_items=total_items,
-            total_pages=total_pages,
-            has_next_page=has_next_page,
-        )
-
-        return ListSandboxesResponse(items=items, pagination=pagination_info)
+        return build_list_sandboxes_response(list(sandboxes_by_id.values()), request)
 
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
         container = self._get_container_by_sandbox_id(sandbox_id)
@@ -1187,6 +1172,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             self._delete_sandbox_locked(sandbox_id)
 
     def _delete_sandbox_locked(self, sandbox_id: str) -> None:
+        """Delete a sandbox's container, then run the remaining cleanup.
+
+        `container.kill()` and `container.remove(force=True)` complete before
+        this method returns, so on the Docker backend the container itself is
+        gone when DELETE returns 204. Expiration tracking, egress-sidecar,
+        volume, and metadata cleanup run after container removal in the same
+        call; they do not change the fact that the container is gone.
+        """
         try:
             container = self._get_container_by_sandbox_id(sandbox_id)
         except HTTPException as exc:
@@ -1436,6 +1429,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         sandbox_id: str,
         request: RenewSandboxExpirationRequest,
     ) -> RenewSandboxExpirationResponse:
+        with self._sandbox_lifecycle_lock(sandbox_id):
+            return self._renew_expiration_locked(sandbox_id, request)
+
+    def _renew_expiration_locked(
+        self,
+        sandbox_id: str,
+        request: RenewSandboxExpirationRequest,
+    ) -> RenewSandboxExpirationResponse:
         container = self._get_container_by_sandbox_id(sandbox_id)
         new_expiration = ensure_future_expiration(request.expires_at)
 
@@ -1476,24 +1477,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
     def patch_sandbox_metadata(self, sandbox_id: str, patch: PatchSandboxMetadataRequest) -> Sandbox:
         """Patch sandbox metadata via JSON Merge Patch (RFC 7396). Docker cannot update labels on running containers, so metadata is persisted to file."""
-        from opensandbox_server.services.validators import ensure_metadata_labels
-
         container = self._get_container_by_sandbox_id(sandbox_id)
         labels = dict(container.attrs.get("Config", {}).get("Labels") or {})
 
-        for key in patch:
-            if SandboxService._is_system_label(key):
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "code": "INVALID_METADATA_LABEL",
-                        "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
-                    },
-                )
-
-        patch_additions = {k: str(v) for k, v in patch.items() if v is not None}
-        if patch_additions:
-            ensure_metadata_labels(patch_additions)
+        self._validate_metadata_patch(patch)
 
         self._metadata_store.patch(sandbox_id, labels, patch)
         return self._container_to_sandbox(container, sandbox_id)

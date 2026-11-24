@@ -78,16 +78,15 @@
 # re-derives the echo endpoint's kind-network IP from the live container, so
 # both stages run against a live stack from a prior `up`.
 #
-# NOTE: integration-env.sh (the monolith CI drives today) carries working
-# copies of these stages; keep the two in sync until the env.sh split is
-# completed and this file becomes the single home.
+# NOTE: integration-env.sh (the monolith CI drives) carries working copies
+# of these stages; keep the two in sync until the split layout becomes the
+# single home.
 #
 # Housekeeping: the artifact store is pruned at entry — stale checkpoint /
 # template sets are removed, the baseline golden template set and the
 # indexes pointing into it are preserved.
 #
-# Runs as part of `integration.sh up` (the entry chains every verify
-# script) or standalone against a live stack from `env.sh up`.
+# Standalone against a live stack from `integration-env.sh up`.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
@@ -101,22 +100,10 @@ MITM_ECHO_DOMAIN="${MITM_ECHO_DOMAIN:-echo.test}"
 MITM_ECHO_PORT=443
 MITM_ECHO_IP=""
 
-# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay) --------
+# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay)
 
 # Status-code-returning variant of server_api for negative-path assertions
 # (curl -f hides the status).
-server_api_status() { # method path [json-body]
-	local method="$1" path="$2" body="${3:-}" out
-	if [[ -n "$body" ]]; then
-		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
-			-H "Content-Type: application/json" -d "$body" -w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
-	else
-		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
-			-w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
-	fi
-	printf '%s' "${out##*$'\n'}"
-}
-
 # The vault stage's sandbox must ride the subject-scoped egress log markers
 # (export/import/registration), so every log assertion goes through this.
 vault_log_contains() { # <fixed-substring>
@@ -220,7 +207,7 @@ vault_lifecycle_verify() {
 	wait_for "vault sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning) ----
+# --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning)
 
 # first_pool_pod -> one fastlet pod of the pool (the egress /healthz probe
 # binds Pod loopback, so it must exec into a specific pod).
@@ -408,7 +395,7 @@ mitm_ca_chain_verify() {
 	wait_for "mitm-ca sandbox deleted" 120 verify_sandbox_gone
 }
 
-# --- stage: exchange resolver verify (OSEP-0025: per-request dynamic headers) ----
+# --- stage: exchange resolver verify (OSEP-0025: per-request dynamic headers)
 
 # The T6 stub (stdlib-only) delivered via kubectl cp into every pool egress
 # container; the stub enforces the production 0710/0660 UDS layout itself.
@@ -479,7 +466,24 @@ exchange_guest_status() { # <path>
 		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT$1"
 }
 
-exchange_vault_status_is_407() {
+exchange_vault_fails_closed() {
+	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+		# Subject admission terminates the transport on resolve failure. Only
+		# an empty reply/reset counts; timeouts and unreachable origins do not.
+		local out
+		out="$(osb_api command run "$VERIFY_ID" -- sh -c '
+			code=$(curl -s --http1.1 -o /dev/null -w "%{http_code}" -m 20 --resolve "$1" "$2")
+			rc=$?
+			if [ "$code" = 000 ] && { [ "$rc" = 52 ] || [ "$rc" = 56 ]; }; then
+				echo EXCHANGE_DENIED
+			else
+				printf "EXCHANGE_PROBE http_code=%s curl_rc=%s\n" "$code" "$rc"
+			fi
+		' sh "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" "https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/vault/echo?x=1" 2>>"$LOGS_DIR/exchange-guest-curl.err")" || return 1
+		case "$out" in EXCHANGE_PROBE\ *) printf '%s\n' "$out" >>"$LOGS_DIR/exchange-guest-curl.err" ;; esac
+		[[ "$out" == "EXCHANGE_DENIED" ]]
+		return
+	fi
 	[[ "$(exchange_guest_status "/vault/echo?x=1")" == "407" ]]
 }
 
@@ -549,13 +553,13 @@ exchange_resolver_verify() {
 	fi
 	pass "off-scope path stays static (resolver engaged only on /vault/*)"
 
-	# 4) fail-closed: resolver down in every pod -> 407 on the exchange
-	#    path while the static binding keeps flowing.
+	# 4) fail-closed: resolver down in every pod -> 407 (pull) or closed
+	#    subject transport while the static binding keeps flowing.
 	exchange_resolver_stop_all
-	wait_for "resolver outage fails closed with 407 on the exchange path" 60 exchange_vault_status_is_407
+	wait_for "resolver outage fails closed on the exchange path" 60 exchange_vault_fails_closed
 	wait_for "static binding unaffected by the resolver outage" 120 \
 		exchange_guest_header_is "x-api-key" "$static_secret" "/static/echo"
-	pass "resolver outage fails closed (407) while the static binding flows"
+	pass "resolver outage fails closed while the static binding flows"
 
 	# 5) recovery: the next resolve is fresh (a failure never poisons the
 	#    following request).
@@ -584,7 +588,7 @@ exchange_resolver_verify() {
 	exchange_resolver_stop_all
 }
 
-# --- standalone entry ----------------------------------------------------------------
+# --- standalone entry
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	resolve_osb
@@ -592,5 +596,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	trap 'on_error vault-verify' ERR
 	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
 	run_stage "MITM CA chain verify (baked CA -> injection -> pinning)" mitm_ca_chain_verify
-	run_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" exchange_resolver_verify
+	# exchange_stage (lib.sh) runs in both interception modes.
+	exchange_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" ""
+	[[ "$EGRESS_INTERCEPTION_MODE" != "credential-bound" ]] || stage_summary
 fi

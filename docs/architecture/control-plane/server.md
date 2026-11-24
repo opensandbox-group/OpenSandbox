@@ -45,7 +45,7 @@ For Kubernetes BatchSandbox workloads, `DELETE /sandboxes/{id}` returns `204` an
 
 ### Endpoint resolution is part of the contract
 
-Clients never guess how to reach a sandbox service. `GET /sandboxes/{id}/endpoints/{port}` returns a reachable address in one of three forms, chosen by runtime and deployment topology: a direct address (Docker host mapping or pod IP), an ingress gateway route, or a server-proxied URL for deployments where neither direct nor gateway paths exist. The proxy is the compatibility fallback, not the fast path.
+Clients never guess how to reach a sandbox service. `GET /sandboxes/{id}/endpoints/{port}` returns a reachable address in one of two forms, chosen by runtime and deployment topology: a direct address (Docker host mapping or pod IP) or an ingress gateway route.
 
 ### Fail-fast security posture
 

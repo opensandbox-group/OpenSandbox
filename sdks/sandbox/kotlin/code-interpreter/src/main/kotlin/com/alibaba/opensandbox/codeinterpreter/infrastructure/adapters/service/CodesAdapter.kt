@@ -146,17 +146,13 @@ class CodesAdapter(
 
                 response.body?.byteStream()?.bufferedReader(Charsets.UTF_8)?.use { reader ->
                     val dispatcher = ExecutionEventDispatcher(execution, request.handlers)
-                    reader.lineSequence()
+                    ExecdEventSupport.eventLines(reader)
                         .forEach { line ->
                             val eventNode =
                                 ExecdEventSupport.decodeEventLine(line) { failingLine, error ->
                                     logger.error("Failed to parse SSE line: {}", failingLine, error)
                                 } ?: return@forEach
-                            try {
-                                dispatcher.dispatch(eventNode)
-                            } catch (e: Exception) {
-                                logger.error("Failed to dispatch SSE event: {}", eventNode, e)
-                            }
+                            dispatcher.dispatch(eventNode)
                         }
                 }
             }

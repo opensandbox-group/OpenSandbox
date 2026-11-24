@@ -11,7 +11,7 @@ OpenSandbox Lifecycle API server: provides sandbox create/delete and other lifec
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+
 - Helm 3.0+
 - OpenSandbox CRDs installed (deploy opensandbox-controller first)
 - A sandbox workload namespace matching `[kubernetes].namespace` in `configToml` (default: `opensandbox`)
@@ -101,8 +101,9 @@ helm install opensandbox-server ./manifests/charts/server \
   --set server.gateway.host=gateway.example.com
 ```
 
-Keep `server.gateway.gatewayRouteMode` in sync with `gateway.gatewayRouteMode`
-of the ingress-gateway chart.
+Use ingress `gateway.gatewayRouteMode=header` for server `server.gateway.gatewayRouteMode=header` or `wildcard`; use `uri` on both charts for URI routing.
+
+For unsigned Fast Sandbox wildcard endpoints, set `server.gateway.gatewayRouteMode=wildcard` and `server.gateway.host=*.sandbox.example.com`. Configure ingress with `gateway.gatewayRouteMode=header`, `gateway.fastpathEndpoint`, and a single `gateway.fastSandboxNamespace` matching the server's sandbox namespace. No signing keys are required. Protect unsigned access with network isolation or an authenticating front proxy. See the [Helm deployment guide](../../HELM-DEPLOYMENT.md#fast-sandbox-unsigned-wildcard-routing).
 
 ### OSEP-0011 secure-access keys
 
@@ -132,7 +133,7 @@ Versioning note:
 - To deploy a specific image build, override `server.image.tag` explicitly
   (for example `--set server.image.tag=v0.1.13`).
 
-**Gateway**: When `server.gateway.enabled=true`, the chart writes `[ingress] mode = "gateway"` in config.toml so the server returns the gateway address to clients. The gateway workload itself runs from the separate `ingress-gateway` chart (`manifests/charts/ingress-gateway`); its `--mode` must match `server.gateway.gatewayRouteMode`. External access must be configured separately.
+**Gateway**: When `server.gateway.enabled=true`, the chart writes `[ingress] mode = "gateway"` in config.toml so the server returns the gateway address to clients. The gateway workload itself runs from the separate `ingress-gateway` chart (`manifests/charts/ingress-gateway`); its `--mode` is `header` for server `header`/`wildcard` routing, or `uri` for server `uri` routing. External access must be configured separately.
 
 Set `[kubernetes].namespace` in config for the sandbox workload namespace and create that namespace before submitting workloads. Configure `OPENSANDBOX_SERVER_API_KEY` from a Secret in production. The container and its Service use port `80`; keep `[server].port = 80` when replacing `configToml`. The Service is `ClusterIP` unless `server.service.type` says otherwise.
 

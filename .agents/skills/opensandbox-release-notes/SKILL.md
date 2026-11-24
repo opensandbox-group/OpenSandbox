@@ -1,6 +1,6 @@
 ---
 name: opensandbox-release-notes
-version: 2.0.0
+version: 2.1.0
 description: Generate umbrella release notes for the whole OpenSandbox repository (docs/releases/X.Y.Z.md) by analyzing all merged PRs since the previous release baseline. Triggered when users ask to write or generate OpenSandbox release notes, changelogs, or release summaries for a specific version.
 ---
 
@@ -37,16 +37,9 @@ Priority order:
 | Misc CLI | last `cli/v*` release |
 | Misc node-agent, docs, CI, deps | no legacy release → include everything in the window |
 
-3. **rc.N**: baseline is the previous rc tag on the same line (`release-X.Y.0-rc.(N-1)`), or the line's birth baseline for `rc.1`.
+3. **rc.N**: baseline is the previous rc tag on the same line (`release-X.Y.Z-rc.(N-1)`), or the line's birth baseline for `rc.1` (e.g. `1.2.1-rc.1` → `release-1.2.0`).
 
-**Prefer git ancestry over dates.** For each PR, resolve its merge commit (`gh pr list --json mergeCommit`) and test it against the baseline tag locally — a date cutoff misclassifies PRs merged on release day:
-
-```bash
-git fetch upstream --tags
-git merge-base --is-ancestor <merge_commit_sha> <baseline_tag>^{commit} && echo SHIPPED
-```
-
-`SHIPPED` = the change already reached users in that release → exclude it from that section. `NEW` = first ships in `<version>` → include.
+**Prefer git ancestry over dates.** For each PR, resolve its merge commit (`gh pr list --json mergeCommit`) and test it against the baseline tag locally — a date cutoff misclassifies PRs merged on release day. `SHIPPED` = the change already reached users in that release → exclude it from that section. `NEW` = first ships in `<version>` → include. The batch pipeline lives in Step 2.
 
 Rules for edge cases (fallback mode only):
 
@@ -68,7 +61,7 @@ Read these from the working tree (they define the format — never invent sectio
 
 Release type from `<version>`:
 
-- `X.Y.0-rc.N` — pre-release: images published, **all packages held**; notes are short (mechanics only, no functional claims), SDK/CLI artifacts and Installation SDK lines are omitted
+- `X.Y.Z-rc.N` (any Z) — pre-release: images published, **all packages held**; notes cover the full functional delta but omit SDK/CLI artifact claims and `## Installation` SDK lines, and say packages ship at the stable bump
 - `X.Y.0` — line birth; `X.Y.Z (Z>0)` — in-line snapshot
 
 ### Step 2: Collect merged PRs since the baseline
@@ -81,7 +74,19 @@ gh pr list --repo "<owner>/<repo>" --state merged --limit 1000 \
   --search "merged:>=<YYYY-MM-DD>" > /tmp/prs-<version>.json
 ```
 
-Then classify each PR per section with the ancestry test (Parameters section) — not with the global date.
+Then classify each PR per section with the ancestry test (Parameters section) — not with the global date. Proven pipeline (writes a SHIPPED/NEW status file, then derives the NEW working set):
+
+```bash
+jq -r '.[] | "\(.number) \(.mergeCommit.oid)"' /tmp/prs-<version>.json | while read num sha; do
+  if git merge-base --is-ancestor "$sha" <baseline_tag>^{commit} 2>/dev/null; then echo "$num SHIPPED"; else echo "$num NEW"; fi
+done > /tmp/prs-<version>-status.txt
+
+NUMS=$(grep NEW /tmp/prs-<version>-status.txt | awk '{print $1}' | paste -sd, -)
+jq -r --argjson keep "[$NUMS]" 'map(select(.number as $n | $keep | index($n))) | sort_by(.number) | .[] |
+  "\(.number)\t\([.labels[].name] | join(","))\t\(.title)"' /tmp/prs-<version>.json
+```
+
+Note: `jq --argfile` is not supported by all builds — pass the number list via `--argjson keep "[$NUMS]"`.
 
 ### Step 3: Classify each PR into template sections
 
@@ -115,9 +120,16 @@ For every classified PR, read `body` and extract:
 
 Fall back to the PR title + diff summary (`gh pr view <num> --repo <owner>/<repo>`) only when the body is empty or uninformative.
 
+Read bodies in bulk, not per-PR: dump all NEW PRs' title+body into one file and read it in chunks — one `jq` call, then `Read` with offsets:
+
+```bash
+jq -r --argjson keep "[$NUMS]" 'map(select(.number as $n | $keep | index($n))) | sort_by(.number) | .[] |
+  "=====\nPR \(.number) | \(.title)\n-----\n\(.body // "(no body)")\n"' /tmp/prs-<version>.json > /tmp/pr-bodies.txt
+```
+
 ### Step 4b: Verify pinned third-party upstream changes against the upstream repo
 
-Fast Sandbox is vendored from `opensandbox-group/fast-sandbox` via a pin file; the OpenSandbox PRs that bump it ("chore(manifests): bump fast-sandbox pin to …") summarize upstream changes in their bodies — **do not trust those summaries as the source of truth**. Verify every upstream claim against the actual upstream git history before it enters the note:
+Fast Sandbox is vendored from `opensandbox-group/fast-sandbox` via a pin file; the OpenSandbox PRs that bump it ("chore(manifests): bump fast-sandbox pin to …") may summarize upstream changes in their bodies — **do not trust those summaries as the source of truth**, and some pin-bump PRs carry no upstream summary at all (just a SHA + CRD-sync note). Either way, the upstream git log is the only reliable source; derive the substance yourself from it:
 
 1. Resolve the pin: read `manifests/third-party/fast-sandbox.commit` (repo URL + pinned SHA) and the previous pin from the PR diff (or git history of that file). The local checkout `.fast-sandbox/src` (created by `manifests/release/build-fast-sandbox.sh`) is usually already at the pin — confirm with `git -C .fast-sandbox/src rev-parse HEAD`; fetch inside it if needed.
 2. List the real range: `git -C .fast-sandbox/src log --oneline <old-pin>..<new-pin>` and check every claim in the PR body ("Upstream highlights" etc.) maps to a real commit subject; note the commits that carry `!`/`BREAKING CHANGE` — they must appear in the note and in Upgrade & Compatibility. Claims that don't resolve to a commit get dropped, not paraphrased.
@@ -127,7 +139,7 @@ Fast Sandbox is vendored from `opensandbox-group/fast-sandbox` via a pin file; t
 
 The same rule applies to any other pinned third-party source under `manifests/third-party/`.
 
-**Writing rule for pin bumps:** the note carries the upstream project's real behavior changes, not the pin mechanics. Never write "bump the pinned fast-sandbox source from `<old>` to `<new>`", upstream PR numbers, or CRD-bundle sync/verification details in the note — those are provenance for this step, not user-facing content. Instead, read the real substance (upstream commit bodies are often empty — prefer the docs/diff changes the commits touch, e.g. `git -C .fast-sandbox/src diff <old>..<new> -- docs/`), group them into one bullet per distinct story (problem → behavior change → why it matters), and cite the OpenSandbox pin-bump PR on each bullet as the carrier.
+**Writing rule for pin bumps:** the note carries the upstream project's real behavior changes, not the pin mechanics — never lead a bullet with "pin bump to `<sha>`"; write the fsb feature/behavior as the story and treat the bump as provenance. Never write the pin SHA walk ("bump the pinned fast-sandbox source from `<old>` to `<new>`") or CRD-bundle sync/verification details. Read the real substance (upstream commit bodies are often empty — prefer the docs/diff changes the commits touch, e.g. `git -C .fast-sandbox/src diff <old>..<new> -- docs/`), group it into one bullet per distinct story (problem → behavior change → why it matters), and on each bullet cite the OpenSandbox pin-bump PR as carrier **plus a link to the corresponding upstream PR**, e.g. `([#2546](…/OpenSandbox/pull/2546) [fast-sandbox#158](https://github.com/opensandbox-group/fast-sandbox/pull/158))`. Map stories to upstream PRs via the merge commits (`git -C .fast-sandbox/src log --merges --oneline <old>..<new>`) and attribute each commit to the **earliest** upstream merge that contains it — stacked PRs contain each other's commits, so ancestry alone over-attributes (`git merge-base --is-ancestor <commit> <merge_sha>` per candidate). Pull OpenSandbox-side fsb PRs (template/init wiring, integration env, e2e defaults) into this section too — the section is "everything fsb", not only the pin deltas.
 
 ### Step 5: Draft the note
 
@@ -137,12 +149,11 @@ Writing rules:
 
 - **No hard line wrapping** — one paragraph or one bullet per line, no matter how long; markdown renderers join them anyway.
 - **Within a component: Features first, then Bug Fixes.** Split the Networking section into `### egress` and `### ingress` subsections (shared items go at the end of the more relevant one, labeled). Split the SDKs section into one `### <Language>` subsection per language (Python, JavaScript, Kotlin, C#, Go) with fsb/feature entries distributed to their language; cross-language items stay as lead bullets directly under `## SDKs` — never use a "Cross-SDK" subheading. Cross-SDK changes always go first.
-- **Do not copy PR titles** — synthesize; each entry is tight and dense: problem → change → key scope, in 1–3 sentences, no filler.
-- **Apply a density gradient: major fixes and features expand, minor bugfixes get one sentence.** Headline features, breaking changes, security fixes, and fixes with a user-visible failure story (data loss, hangs, wrong results, outages) each get their own bullet expanded to 2–4 sentences (problem → change → impact). Individually trivial bugfixes get exactly one sentence each ("what broke → now fixed"), and may be folded into a single trailing "smaller fixes/items" bullet per component — semicolon-separated, each with its own `[#NNNN]` citation — so the section leads with what matters. Trivial means: no data-loss/security angle, no behavior change an operator must react to, no migration step.
+- **Concise and dense.** Never copy PR titles — synthesize. Major entries (headline features, breaking changes, security fixes, user-visible failure stories) get at most 2 sentences (problem → change → impact); minor bugfixes get exactly one sentence ("what broke → now fixed") and should be folded into a single trailing "smaller fixes" bullet per component — semicolon-separated, each with its own `[#NNNN]` citation. Trivial means: no data-loss/security angle, no operator reaction, no migration step.
 - **Group only PRs that are the same story.** Cite several `[#NNNN](…pull/NNNN)` links in one entry only when they implement one user story (e.g. the same feature across languages, or one coordinated fix campaign) — or when they are individually trivial one-liners folded together per the density-gradient rule above. Never bundle unrelated *substantive* fixes into a "misc correctness" entry just because they share a component — give each its own bullet instead.
 - **Reference every PR** as a full markdown link `[#NNNN](https://github.com/<owner>/<repo>/pull/NNNN)` at the end of its entry (space-separated for groups, each inside one shared parenthesis).
 - **User-facing** — what operators/consumers need, not internals.
-- The opening paragraph carries only what Highlights cannot: line context (stable cut / rc, what baseline the sections cover), who should upgrade, and package/image shipping timing. It must NOT enumerate the headline features — that is `## Highlights`' job; restating them verbatim is redundancy. The GitHub Release supplies the title (no H1 here), so this paragraph is the first prose on the page; for a first umbrella / GA (e.g. `1.1.0`), also state the unified-versioning context and the `1.0.0` gap rationale per the umbrella governance OSEP.
+- The opening paragraph carries only what Highlights cannot: line context (rc or stable cut, baseline), who should upgrade, and package/image shipping timing — never enumerate headline features (that is `## Highlights`' job). For a first umbrella / GA, also state the unified-versioning context per the umbrella governance OSEP.
 - rc notes omit: SDK/CLI package claims, `## Installation` SDK lines, `## 👥 Contributors` (optional), and say packages ship at the stable bump.
 - **Upgrade & Compatibility never gets the density gradient** — every behavior change, breaking change, deprecation, and migration step keeps its own complete bullet there, even when its component-section entry was compressed to one sentence.
 
@@ -154,11 +165,13 @@ Fixed boilerplate (fill from the BOM/compat facts, keep wording):
 
 ### Step 6: Contributors
 
-Deduplicate authors across all final PRs; exclude bots (`dependabot[bot]`, `github-actions[bot]`, `app/github-actions`, etc.):
+Deduplicate authors across the NEW PRs only (not the SHIPPED ones in the same file); exclude bots (`dependabot[bot]`, `github-actions[bot]`, `app/github-actions`, etc.):
 
 ```bash
-jq -r '[.[].author.login] | unique | .[]' /tmp/prs-<version>.json
+jq -r --argjson keep "[$NUMS]" '[.[] | select(.number as $n | $keep | index($n)) | .author.login] | unique | .[]' /tmp/prs-<version>.json
 ```
+
+Also include the authors of every upstream PR linked in the note (e.g. fast-sandbox pin-bump carriers: `gh pr view <N> --repo opensandbox-group/fast-sandbox --json author`), deduplicated into the same list; these upstream authors usually also appear as OpenSandbox contributors, so additions are rare — add only the genuinely new logins.
 
 Write one bullet per contributor as a GitHub mention, matching the format of previous releases:
 
@@ -177,6 +190,16 @@ Write to `docs/releases/<version>.md` in the repo working tree (this is the auth
 - No bare `#NNNN` references remain — all are full markdown links to `https://github.com/<owner>/<repo>/pull/NNNN`
 - Title and all version strings match `<version>` exactly
 
+Run the definitive completeness check — the cited-PR set must equal the NEW set exactly:
+
+```bash
+grep -oE "pull/[0-9]+" docs/releases/<version>.md | sort -u | sed 's/pull\///' > /tmp/cited.txt
+grep NEW /tmp/prs-<version>-status.txt | awk '{print $1}' | sort > /tmp/expected.txt
+diff /tmp/cited.txt /tmp/expected.txt && echo OK
+```
+
+**Refresh after new merges:** PRs may land between drafting and the release cut. Re-run Step 2, diff the PR numbers against `/tmp/cited.txt` to isolate the delta, and add only the new PRs — full re-verification afterwards.
+
 Print the file path when done.
 
 ### Step 8: Stop — do not release
@@ -189,6 +212,4 @@ This skill only **generates** `docs/releases/<version>.md`. Do NOT:
 
 Hand off: tell the user the note must be committed on the release branch before triggering the workflow, and that they may edit the file freely before then.
 
-## Example
-
-Input: version `1.1.0` — no previous umbrella tag exists, so baselines fall back to the last legacy releases (controller `v0.2.0`/May, ingress `v1.0.10`/Jul, CLI `v0.1.1`/May, server & execd & python Aug 26, js/csharp/go Jul 24, kotlin Aug 25). For `1.1.1`, the baseline would simply be the `release-1.1.0` tag for every section. Output: `docs/releases/1.1.0.md` with Highlights, component sections covering every first-ship PR per component (ancestry-tested against each component's baseline tag), Upgrade & Compatibility (Kubernetes v1.24–v1.34), Contributors, Artifacts, Installation — ready to commit on `release-1.1` before the umbrella workflow runs.
+Related prep (only on explicit request, not part of note generation): the platform version bump across charts/values/Chart.lock/chart READMEs is `manifests/release/bump-versions.sh --version <version>` — it rewrites and **auto-commits**; on rc it leaves SDK/CLI versions untouched (they bump at the stable release). It requires a clean tracked worktree (untracked notes don't block).

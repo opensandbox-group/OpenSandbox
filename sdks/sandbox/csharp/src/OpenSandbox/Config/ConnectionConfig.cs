@@ -69,6 +69,10 @@ public class ConnectionConfigOptions
     /// <summary>
     /// Gets or sets whether to use server-proxied endpoint URLs.
     /// </summary>
+    [Obsolete(
+        "The server-proxied data path is in maintenance mode (security and bug fixes only). "
+            + "Route data-plane traffic through the ingress gateway instead."
+    )]
     public bool? UseServerProxy { get; set; }
 
     /// <summary>
@@ -194,6 +198,8 @@ public sealed class ConnectionConfig
 
     /// <summary>
     /// Gets whether server-proxied endpoint URLs should be requested.
+    /// Deprecated: the server-proxied data path is in maintenance mode (security
+    /// and bug fixes only); route data-plane traffic through the ingress gateway instead.
     /// </summary>
     public bool UseServerProxy { get; }
 
@@ -250,7 +256,9 @@ public sealed class ConnectionConfig
         Domain = domainBase;
         ApiKey = options.ApiKey ?? envApiKey;
         RequestTimeoutSeconds = options.RequestTimeoutSeconds ?? Constants.DefaultRequestTimeoutSeconds;
+#pragma warning disable CS0618 // Reading the deprecated option here is intentional.
         UseServerProxy = options.UseServerProxy ?? false;
+#pragma warning restore CS0618
         EndpointCacheTtlSeconds = options.EndpointCacheTtlSeconds ?? 600;
         EndpointCacheSize = options.EndpointCacheSize ?? 1024;
         EndpointCacheDisabled = options.EndpointCacheDisabled ?? false;
@@ -340,14 +348,12 @@ public sealed class ConnectionConfig
             Timeout = TimeSpan.FromSeconds(RequestTimeoutSeconds)
         };
 
-        // Set default headers
         client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
 
         foreach (var header in Headers)
         {
             if (!client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value))
             {
-                // Some headers need to be added differently
                 if (header.Key.Equals("Content-Type", StringComparison.OrdinalIgnoreCase))
                 {
                     continue; // Content-Type is set per request
@@ -361,13 +367,22 @@ public sealed class ConnectionConfig
     }
 
     /// <summary>
+    /// How long an SSE stream may go without data before it fails: the request timeout, but at
+    /// least <see cref="Constants.SseReadTimeoutFloorSeconds"/>.
+    /// </summary>
+    internal TimeSpan SseReadTimeout =>
+        TimeSpan.FromSeconds(Math.Max(RequestTimeoutSeconds, Constants.SseReadTimeoutFloorSeconds));
+
+    /// <summary>
     /// Creates a new HttpClient configured for SSE (Server-Sent Events) streaming.
-    /// This client has no timeout to allow for long-running streams.
+    /// This client has no whole-call timeout, so a long-running stream can stay open, but it
+    /// fails when the response headers or the next bytes take longer than the SSE read timeout
+    /// (the request timeout, at least 30 seconds).
     /// </summary>
     /// <returns>A new configured HttpClient instance for SSE.</returns>
     public HttpClient CreateSseHttpClient()
     {
-        return CreateStreamingHttpClient();
+        return CreateStreamingHttpClient(SseReadTimeout);
     }
 
     /// <summary>
@@ -384,7 +399,7 @@ public sealed class ConnectionConfig
         return CreateStreamingHttpClient();
     }
 
-    private HttpClient CreateStreamingHttpClient()
+    private HttpClient CreateStreamingHttpClient(TimeSpan? readTimeout = null)
     {
         var handler = new HttpClientHandler
         {
@@ -392,12 +407,17 @@ public sealed class ConnectionConfig
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate
         };
 
-        var client = new HttpClient(new ProtectedRedirectHandler(handler))
+        HttpMessageHandler pipeline = new ProtectedRedirectHandler(handler);
+        if (readTimeout is { } timeout)
+        {
+            pipeline = new StreamReadTimeoutHandler(pipeline, timeout);
+        }
+
+        var client = new HttpClient(pipeline)
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
 
-        // Set default headers
         client.DefaultRequestHeaders.UserAgent.ParseAdd(UserAgent);
 
         foreach (var header in Headers)
@@ -410,16 +430,7 @@ public sealed class ConnectionConfig
         return client;
     }
 
-    /// <summary>
-    /// Best-effort: add the SDK host's own IP as a default request header so the
-    /// server can see the client's self-reported address. Applied on every client
-    /// (normal and SSE) so all request paths — including raw/streaming sends that
-    /// bypass <c>HttpClientWrapper</c> — carry it. A custom (non-standard) header
-    /// name is used on purpose: standard forwarded headers such as X-Forwarded-For
-    /// are rewritten or stripped by intermediaries. Never overrides a value the
-    /// caller already supplied via <see cref="Headers"/>, and is skipped silently
-    /// when the IP cannot be determined.
-    /// </summary>
+    // Use a custom header because intermediaries can rewrite standard forwarded headers.
     private static void ApplyClientIpDefaultHeader(HttpClient client)
     {
         if (client.DefaultRequestHeaders.Contains(Constants.ClientIpHeader))

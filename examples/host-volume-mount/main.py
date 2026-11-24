@@ -70,12 +70,6 @@ async def print_exec(sandbox: Sandbox, command: str) -> str | None:
 
 
 async def demo_readwrite_mount(config: ConnectionConfig, image: str, host_dir: str) -> None:
-    """
-    Scenario 1: Read-write mount.
-
-    Mount a host directory into the sandbox at /mnt/shared. Write a file from
-    inside the sandbox, then verify it appears on the host.
-    """
     print("\n" + "=" * 60)
     print("Scenario 1: Read-Write Host Volume Mount")
     print("=" * 60)
@@ -98,11 +92,9 @@ async def demo_readwrite_mount(config: ConnectionConfig, image: str, host_dir: s
 
     async with sandbox:
         try:
-            # Read existing files from host
             print("\n  [1] Listing files visible from inside the sandbox:")
             await print_exec(sandbox, "ls -la /mnt/shared/")
 
-            # Write a file from inside the sandbox
             print("\n  [2] Writing a file from inside the sandbox:")
             await print_exec(
                 sandbox,
@@ -110,11 +102,9 @@ async def demo_readwrite_mount(config: ConnectionConfig, image: str, host_dir: s
             )
             print("  -> Written: /mnt/shared/sandbox-greeting.txt")
 
-            # Verify the file content
             print("\n  [3] Reading back the file:")
             await print_exec(sandbox, "cat /mnt/shared/sandbox-greeting.txt")
 
-            # Check host-side: the file should now exist on the host
             host_file = Path(host_dir) / "sandbox-greeting.txt"
             if host_file.exists():
                 print(f"\n  [4] Verified on host: {host_file}")
@@ -157,15 +147,12 @@ async def demo_readonly_mount(config: ConnectionConfig, image: str, host_dir: st
 
     async with sandbox:
         try:
-            # Read existing files
             print("\n  [1] Reading files from read-only mount:")
             await print_exec(sandbox, "ls -la /mnt/readonly/")
 
-            # Read the marker file
             print("\n  [2] Reading marker.txt:")
             await print_exec(sandbox, "cat /mnt/readonly/marker.txt")
 
-            # Attempt to write (should fail)
             print("\n  [3] Attempting to write (should fail):")
             result = await sandbox.commands.run(
                 "touch /mnt/readonly/should-fail.txt 2>&1 || echo 'Write denied (expected)'"
@@ -193,7 +180,6 @@ async def demo_subpath_mount(config: ConnectionConfig, image: str, host_dir: str
     print("Scenario 3: SubPath Host Volume Mount")
     print("=" * 60)
 
-    # Ensure subdirectory exists on host
     sub_dir = Path(host_dir) / "datasets" / "train"
     sub_dir.mkdir(parents=True, exist_ok=True)
     (sub_dir / "data.csv").write_text("id,value\n1,100\n2,200\n3,300\n")
@@ -219,11 +205,9 @@ async def demo_subpath_mount(config: ConnectionConfig, image: str, host_dir: str
 
     async with sandbox:
         try:
-            # List the mounted subdirectory
             print("\n  [1] Listing mounted subpath content:")
             await print_exec(sandbox, "ls -la /mnt/training-data/")
 
-            # Read the CSV data
             print("\n  [2] Reading data.csv:")
             await print_exec(sandbox, "cat /mnt/training-data/data.csv")
 
@@ -239,7 +223,6 @@ async def main() -> None:
     image = os.getenv("SANDBOX_IMAGE", "ubuntu")
     host_dir = os.getenv("HOST_VOLUME_PATH", "")
 
-    # If no host path specified, create a temporary directory with sample data
     if not host_dir:
         host_dir = tempfile.mkdtemp(prefix="opensandbox-vol-")
         print(f"No HOST_VOLUME_PATH set, using temporary directory: {host_dir}")

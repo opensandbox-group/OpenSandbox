@@ -18,6 +18,7 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.ActivityProbe
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
@@ -34,6 +35,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxState
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotFilter
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SnapshotMode
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -81,7 +83,6 @@ class SandboxesAdapterTest {
 
     @Test
     fun `createSandbox should send correct request and parse response`() {
-        // Mock response
         val responseBody =
             """
             {
@@ -95,7 +96,6 @@ class SandboxesAdapterTest {
             """.trimIndent()
         mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
 
-        // Execute
         val spec = SandboxImageSpec.builder().image("ubuntu:latest").build()
         val extensions = mapOf("storage.id" to "abc123", "debug" to "true")
         val networkPolicy =
@@ -145,7 +145,6 @@ class SandboxesAdapterTest {
                         .build(),
             )
 
-        // Verify request
         val request = mockWebServer.takeRequest()
         assertEquals("POST", request.method)
         assertEquals("/v1/sandboxes", request.path)
@@ -185,7 +184,6 @@ class SandboxesAdapterTest {
         assertEquals("true", gotCredentialProxy!!["enabled"]!!.jsonPrimitive.content)
         assertEquals("true", payload["secureAccess"]!!.jsonPrimitive.content)
 
-        // Verify response
         assertEquals("550e8400-e29b-41d4-a716-446655440000", result.id)
         assertEquals("amd64", result.platform?.arch)
     }
@@ -435,6 +433,86 @@ class SandboxesAdapterTest {
         assertEquals("/v1/sandboxes/$sandboxId/snapshots", request.path)
         val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
         assertEquals("baseline", payload["name"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `createSnapshot should send the requested rootfsOnly mode and map it back`() {
+        val sandboxId = "sandbox-123"
+        val responseBody =
+            """
+            {
+                "id": "snap-123",
+                "sandboxId": "$sandboxId",
+                "name": "workspace-state",
+                "mode": "rootfsOnly",
+                "status": {
+                    "state": "Ready",
+                    "reason": "snapshot_ready",
+                    "message": null,
+                    "lastTransitionAt": "2023-01-01T10:00:00Z"
+                },
+                "createdAt": "2023-01-01T10:00:00Z"
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        val result = sandboxesAdapter.createSnapshot(sandboxId, "workspace-state", SnapshotMode.ROOTFS_ONLY)
+
+        assertEquals(SnapshotMode.ROOTFS_ONLY, result.mode)
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("workspace-state", payload["name"]!!.jsonPrimitive.content)
+        assertEquals("rootfsOnly", payload["mode"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `createSnapshot should keep an unset mode off the generated default and read legacy responses as full`() {
+        val sandboxId = "sandbox-123"
+        // The response body predates the mode field: it must read back as full.
+        val responseBody =
+            """
+            {
+                "id": "snap-123",
+                "sandboxId": "$sandboxId",
+                "name": "baseline",
+                "status": {
+                    "state": "Ready",
+                    "reason": "snapshot_ready",
+                    "message": null,
+                    "lastTransitionAt": "2023-01-01T10:00:00Z"
+                },
+                "createdAt": "2023-01-01T10:00:00Z"
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        val result = sandboxesAdapter.createSnapshot(sandboxId, "baseline")
+
+        assertEquals(SnapshotMode.FULL, result.mode)
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals("baseline", payload["name"]!!.jsonPrimitive.content)
+        // The generated serializer (encodeDefaults = true, explicitNulls = true)
+        // cannot omit the field entirely, so an unset mode serializes as an
+        // explicit null. Every server tolerates that: Optional[Literal] on the
+        // current server, pydantic's default extra=ignore on servers predating
+        // the field. What must never reach the wire is the generated `full`
+        // default, which would mislabel servers that forbid unknown fields.
+        val mode = payload["mode"]
+        assertTrue(
+            mode is JsonNull,
+            "unset mode must serialize as an explicit null, got: $payload",
+        )
+    }
+
+    @Test
+    fun `createSnapshot should reject an unknown mode before any request is sent`() {
+        assertThrows(InvalidArgumentException::class.java) {
+            sandboxesAdapter.createSnapshot("sandbox-123", "baseline", "diskOnly")
+        }
+        assertEquals(0, mockWebServer.requestCount)
     }
 
     @Test

@@ -74,7 +74,7 @@ func (c *Controller) GetContext(session string) (CodeContext, error) {
 func (c *Controller) ListContext(language string) ([]CodeContext, error) {
 	switch language {
 	case Command.String(), BackgroundCommand.String(), SQL.String():
-		return nil, fmt.Errorf("unsupported language context operation: %s", language)
+		return nil, fmt.Errorf("%w context operation: %s", ErrUnsupportedLanguage, language)
 	case "":
 		return c.listAllContexts()
 	default:
@@ -111,7 +111,9 @@ func (c *Controller) deleteSessionAndCleanup(session string) error {
 	if client == nil {
 		client = c.jupyterClient()
 	}
-	if err := client.DeleteSession(session); err != nil {
+	// A session Jupyter no longer has (e.g. after a Jupyter restart) is
+	// already deleted; drop the stale entry instead of failing forever.
+	if err := client.DeleteSession(session); err != nil && !errors.Is(err, jupytersession.ErrSessionNotFound) {
 		return err
 	}
 	c.jupyterClientMap.Delete(session)
@@ -169,7 +171,8 @@ func (c *Controller) waitForJupyterContext(ctx context.Context, req CreateContex
 		session *jupytersession.Session
 	)
 	err := retry.OnError(kernelWaitingBackoff, func(err error) bool {
-		if ctx.Err() != nil || errors.Is(err, errJupyterNotConfigured) {
+		if ctx.Err() != nil || errors.Is(err, errJupyterNotConfigured) || errors.Is(err, ErrUnsupportedLanguage) ||
+			errors.Is(err, ErrInvalidContextCwd) {
 			return false
 		}
 		log.Error("jupyter: create context failed, retrying: %v", err)
@@ -185,7 +188,6 @@ func (c *Controller) waitForJupyterContext(ctx context.Context, req CreateContex
 	return client, session, err
 }
 
-// createJupyterContext performs the actual context creation workflow.
 func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyter.Client, *jupytersession.Session, error) {
 	tokens := c.jupyterTokens()
 	if c.baseURL == "" || len(tokens) == 0 {
@@ -197,6 +199,7 @@ func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyte
 		kernel string
 		err    error
 	)
+	var unsupported error
 	for _, token := range tokens {
 		candidateClient := c.jupyterClientWithToken(token)
 		kernel, err = c.searchKernel(candidateClient, request.Language)
@@ -204,15 +207,23 @@ func (c *Controller) createJupyterContext(request CreateContextRequest) (*jupyte
 			client = candidateClient
 			break
 		}
+		if errors.Is(err, ErrUnsupportedLanguage) {
+			unsupported = err
+		}
 	}
 	if err != nil {
+		// A token that reached Jupyter and found no matching kernel is more
+		// telling than a later stale token's auth failure.
+		if unsupported != nil {
+			return nil, nil, unsupported
+		}
 		return nil, nil, err
 	}
 
 	sessionID := c.newContextID()
 	ipynb, err := c.newIpynbPath(sessionID, request.Cwd)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%w %q: %w", ErrInvalidContextCwd, request.Cwd, err)
 	}
 
 	jupyterSession, err := client.CreateSession(sessionID, ipynb, kernel)
@@ -313,7 +324,6 @@ func (c *Controller) listAllContexts() ([]CodeContext, error) {
 		if session == "" {
 			return true
 		}
-		// Skip if already collected from jupyterClientMap to avoid duplicates.
 		if _, exists := seen[session]; exists {
 			return true
 		}
@@ -338,7 +348,6 @@ func (c *Controller) listLanguageContexts(language Language) ([]CodeContext, err
 	})
 
 	if defaultContext := c.getDefaultLanguageSession(language); defaultContext != "" {
-		// Skip if already collected from jupyterClientMap to avoid duplicates.
 		if _, exists := seen[defaultContext]; !exists {
 			contexts = append(contexts, CodeContext{ID: defaultContext, Language: language})
 		}

@@ -12,7 +12,7 @@ The opt-in [runner](https://github.com/opensandbox-group/OpenSandbox/blob/main/t
 - A lifecycle server configured for the Kubernetes BatchSandbox provider, with the controller and OCI snapshot registry configured as in [Pause and Resume](/guides/pause-resume).
 - `kubectl` connected to the same cluster, with permission to read BatchSandbox, SandboxSnapshots, Pods, nodes, and cluster version in the sandbox namespace. Pass an explicit context to avoid measuring against a different cluster.
 - An immutable image digest containing `/bin/sh`, `cat`, and `sleep`. The server must inject execd. Do not put the marker directory under a volume mount.
-- A runner with network access to the lifecycle server and sandbox endpoints; `--server-proxy` measures the server proxy route instead of direct access.
+- A runner with network access to the lifecycle server and sandbox endpoints.
 
 This is an explicit benchmark, not part of the default E2E suite. Use a dedicated test cluster. No node caches are evicted by the runner.
 
@@ -49,7 +49,7 @@ uv run python benchmarks/kubernetes_resume.py \
   --warmups 3 --samples 30 --output resume-uncontrolled.jsonl
 ```
 
-Use `--protocol https` for a TLS server and `--server-proxy` when direct endpoints are inaccessible. Run `--help` for resource, polling, and timeout options. The script disables SDK retries and telemetry for this experiment. Polling remains explicit and includes its delay in the measured observation time.
+Use `--protocol https` for a TLS server. Run `--help` for resource, polling, and timeout options. The script disables SDK retries and telemetry for this experiment. Polling remains explicit and includes its delay in the measured observation time.
 
 ## Measurement boundaries
 

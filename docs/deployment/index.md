@@ -11,7 +11,7 @@ Charts are versioned sources in the [OpenSandbox repository](https://github.com/
 
 ## Prerequisites
 
-- Kubernetes 1.21.1+
+- Kubernetes 1.22+
 - Helm 3.x
 - `kubectl` configured for your cluster
 
@@ -35,6 +35,12 @@ base → opensandbox-controller → fast-sandbox* → ingress-gateway → opensa
 | 6 | `opensandbox-node-agent` (optional) | Node-level sandbox data collection. Order-independent. |
 
 If you use the umbrella chart, this order is handled for you in a single release.
+
+## Fast Sandbox system authentication
+
+FastPath business RPCs support optional Kubernetes-issued caller tokens (`audience: fast-sandbox-fastpath`) over verified TLS. System authentication and TLS are disabled by default (`callerAuth.enabled: false` / `fastpath_auth_enabled = false`) for zero-prerequisite compatibility; when enabled, `opensandbox-server` and `opensandbox-ingress-gateway` automatically mint and refresh short-lived ServiceAccount tokens and FastPath authorizes each call by component profile (`server` vs. `gateway`) and workload namespace.
+
+For step-by-step setup (in-cluster, external Server with `kubeconfig`, and rolling upgrades), see the [Fast Sandbox System Authentication guide](/guides/fast-sandbox-system-auth).
 
 ## Install
 
@@ -342,7 +348,7 @@ extraEnv:
 | `controller.batchsandbox.pods` | `{pod}` | `namespace`, `state`, `allocation_mode` | Desired, current, allocated, and ready BatchSandbox Pod counts |
 | `controller.capacity.collect.duration` | `s` | None | Time spent reading cached objects and collecting one capacity snapshot |
 
-The metrics deliberately omit sandbox, BatchSandbox, and Pod identifiers. Only the leader exports them, so multiple controller replicas do not duplicate cluster totals. An unset initial BatchSandbox phase is exported as `Unknown`. Derive Pool utilization from `allocated / total` and calculate peak, valley, or percentile capacity in the telemetry backend. Actual CPU and memory usage remains available from kubelet/cAdvisor rather than being duplicated here.
+The metrics deliberately omit sandbox, BatchSandbox, and Pod identifiers. Only the leader exports them, so multiple controller replicas do not duplicate cluster totals. An unset initial BatchSandbox phase is exported as `Unknown`. Derive Pool utilization from `allocated / total` and calculate peak, valley, or percentile capacity in the telemetry backend. To keep the ratio at or below 1, `total` counts non-terminal, non-terminating pods and outstanding allocations for terminal, terminating, or deleted pods. The `controller.pool.cpu.requested` and `controller.pool.memory.requested` series count resource requests only for non-terminal, non-terminating pods. Actual CPU and memory usage remains available from kubelet/cAdvisor rather than being duplicated here.
 
 Each collection reads all Pools and BatchSandboxes from the controller manager's informer cache, then performs one cached, owner-UID-indexed Pod list for every non-deleting Pool. Collection CPU and memory therefore grow linearly with the number of cached Pools, BatchSandboxes, and Pool-owned Pods, without issuing one API-server list request per Pool. The OpenTelemetry periodic reader exports every 60 seconds by default; `OTEL_METRIC_EXPORT_INTERVAL` can change the interval in milliseconds. Monitor `controller.capacity.collect.duration` and validate the target cluster scale before shortening that interval. If OTLP setup fails after an endpoint is configured, the controller continues reconciling and logs the failed setup stage together with the endpoint environment variable and a credential-stripped endpoint.
 
@@ -398,5 +404,5 @@ kubectl delete namespace opensandbox-dataplane
 - [Kubernetes Overview](/architecture/control-plane/operator) — Operator features and CRDs
 - [Pause & Resume](/guides/pause-resume) — Snapshot-based pause/resume on Kubernetes
 - [Secure Container](/guides/secure-container) — gVisor and Kata on Kubernetes
-- [Network Isolation on Kubernetes](/guides/network-isolation) — Egress policy design for Kubernetes
+- [Sandbox Network Security](/guides/network-security) — Cluster-wide egress isolation baseline (CIDRs, domains, ports)
 - [Helm charts source](https://github.com/opensandbox-group/OpenSandbox/tree/main/manifests/charts) — Chart sources and values reference

@@ -30,13 +30,15 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.11'
           cache-dependency-path: components/execd/go.sum
 
       - name: Check gofmt
         working-directory: components/execd
         run: |
-          files="$(gofmt -l . ../internal)"
+          # vendor/ mirrors upstream formatting; go1.26 gofmt enforces stricter
+          # doc-comment indentation than go1.25 did when those files were snapshotted.
+          files="$(gofmt -l . ../internal | grep -v '^vendor/' || true)"
           if [ -n "$files" ]; then
             echo "$files"
             exit 1
@@ -56,6 +58,14 @@ jobs:
         working-directory: components/execd
         run: |
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
+
+      - name: Verify process QoS and hardening with race detector
+        working-directory: components/execd/pkg/runtime
+        run: |
+          cc --version
+          go test -race -c -o "${RUNNER_TEMP}/execd-qos.test" .
+          "${RUNNER_TEMP}/execd-qos.test" -test.run '^(TestQoS|TestHardening)' -test.v -test.count=1 -test.timeout=120s
+          sudo "${RUNNER_TEMP}/execd-qos.test" -test.run '^(TestQoS|TestHardening)' -test.v -test.count=1 -test.timeout=120s
 
       - name: Verify filesystem identity permissions as root
         working-directory: components/execd
@@ -130,7 +140,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.11'
           cache: ${{ matrix.os != 'self-hosted' }}
           cache-dependency-path: components/execd/go.sum
 
@@ -186,6 +196,30 @@ jobs:
         timeout-minutes: 5
         working-directory: components/execd
         run: python3 tests/test_mitm_ca_jdk.py
+
+      - name: MITM CA race bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: |
+          chmod +x tests/mitm_ca_race.sh
+          bash tests/mitm_ca_race.sh
+
+      - name: MITM CA rotation watcher bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: |
+          chmod +x tests/mitm_ca_watch.sh
+          bash tests/mitm_ca_watch.sh
+
+      - name: MITM CA egress rotation smoke (full bootstrap)
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: |
+          chmod +x tests/mitm_ca_smoke.sh
+          bash tests/mitm_ca_smoke.sh
 
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
@@ -249,7 +283,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.11'
           cache-dependency-path: components/execd/go.sum
 
       - name: Build latest bubblewrap (v0.11.2)

@@ -28,18 +28,28 @@ type ResourceVersionExpectation interface {
 	Observe(obj metav1.Object)
 	IsSatisfied(obj metav1.Object) (bool, time.Duration)
 	Delete(obj metav1.Object)
+	// DeleteOthers drops the expectations of every object named key except
+	// the one with UID keep, which may be empty when no such object exists.
+	// It cleans up after objects that were deleted or replaced under the same
+	// name, which are never seen again.
+	DeleteOthers(key types.NamespacedName, keep types.UID)
 }
 
 func NewResourceVersionExpectation() ResourceVersionExpectation {
-	return &realResourceVersionExpectation{objectVersions: make(map[types.UID]*objectCacheVersions, 100)}
+	return &realResourceVersionExpectation{
+		objectVersions: make(map[types.UID]*objectCacheVersions, 100),
+		uidsByName:     make(map[types.NamespacedName]map[types.UID]struct{}, 100),
+	}
 }
 
 type realResourceVersionExpectation struct {
 	sync.Mutex
 	objectVersions map[types.UID]*objectCacheVersions
+	uidsByName     map[types.NamespacedName]map[types.UID]struct{}
 }
 
 type objectCacheVersions struct {
+	key                       types.NamespacedName
 	version                   string
 	firstUnsatisfiedTimestamp time.Time
 }
@@ -50,7 +60,12 @@ func (r *realResourceVersionExpectation) Expect(obj metav1.Object) {
 
 	expectations := r.objectVersions[obj.GetUID()]
 	if expectations == nil {
-		r.objectVersions[obj.GetUID()] = &objectCacheVersions{}
+		key := types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}
+		r.objectVersions[obj.GetUID()] = &objectCacheVersions{key: key}
+		if r.uidsByName[key] == nil {
+			r.uidsByName[key] = make(map[types.UID]struct{}, 1)
+		}
+		r.uidsByName[key][obj.GetUID()] = struct{}{}
 	}
 	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
 		r.objectVersions[obj.GetUID()].version = obj.GetResourceVersion()
@@ -66,7 +81,7 @@ func (r *realResourceVersionExpectation) Observe(obj metav1.Object) {
 		return
 	}
 	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
-		delete(r.objectVersions, obj.GetUID())
+		r.deleteLocked(obj.GetUID())
 	}
 }
 
@@ -80,7 +95,7 @@ func (r *realResourceVersionExpectation) IsSatisfied(obj metav1.Object) (bool, t
 	}
 
 	if isResourceVersionNewer(r.objectVersions[obj.GetUID()].version, obj.GetResourceVersion()) {
-		delete(r.objectVersions, obj.GetUID())
+		r.deleteLocked(obj.GetUID())
 	}
 	_, existing := r.objectVersions[obj.GetUID()]
 	if existing {
@@ -97,7 +112,30 @@ func (r *realResourceVersionExpectation) IsSatisfied(obj metav1.Object) (bool, t
 func (r *realResourceVersionExpectation) Delete(obj metav1.Object) {
 	r.Lock()
 	defer r.Unlock()
-	delete(r.objectVersions, obj.GetUID())
+	r.deleteLocked(obj.GetUID())
+}
+
+func (r *realResourceVersionExpectation) DeleteOthers(key types.NamespacedName, keep types.UID) {
+	r.Lock()
+	defer r.Unlock()
+	for uid := range r.uidsByName[key] {
+		if uid != keep {
+			r.deleteLocked(uid)
+		}
+	}
+}
+
+func (r *realResourceVersionExpectation) deleteLocked(uid types.UID) {
+	expectations := r.objectVersions[uid]
+	if expectations == nil {
+		return
+	}
+	delete(r.objectVersions, uid)
+	uids := r.uidsByName[expectations.key]
+	delete(uids, uid)
+	if len(uids) == 0 {
+		delete(r.uidsByName, expectations.key)
+	}
 }
 
 func isResourceVersionNewer(old, new string) bool {

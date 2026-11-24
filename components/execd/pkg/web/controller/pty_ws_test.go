@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -43,7 +44,6 @@ import (
 // buildPTYRouter assembles a minimal Gin router with only the /pty routes,
 // avoiding any import cycle with pkg/web.
 func buildPTYRouter() *gin.Engine {
-	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 
@@ -509,6 +509,144 @@ func TestPTYWS_ExitFrame(t *testing.T) {
 	require.Equal(t, 0, *f.ExitCode)
 }
 
+// exitedPipePTYSession is a running pipe-mode session whose process exit, output
+// fanout and output completion are driven by the test, so a test can reproduce
+// the runtime closing Done before the broadcasters fan out the final chunk.
+type exitedPipePTYSession struct {
+	runtime.PTYSession
+	doneCh       chan struct{}
+	outputDoneCh chan struct{}
+	stdoutR      *io.PipeReader
+	stdoutW      *io.PipeWriter
+	stderrR      *io.PipeReader
+	stderrW      *io.PipeWriter
+}
+
+func newExitedPipePTYSession() *exitedPipePTYSession {
+	s := &exitedPipePTYSession{
+		doneCh:       make(chan struct{}),
+		outputDoneCh: make(chan struct{}),
+	}
+	s.stdoutR, s.stdoutW = io.Pipe()
+	s.stderrR, s.stderrW = io.Pipe()
+	return s
+}
+
+func (s *exitedPipePTYSession) LockWS() bool                     { return true }
+func (s *exitedPipePTYSession) UnlockWS()                        {}
+func (s *exitedPipePTYSession) SetEvictHandler(func()) uint64    { return 1 }
+func (s *exitedPipePTYSession) ClearEvictHandler(uint64)         {}
+func (s *exitedPipePTYSession) IsRunning() bool                  { return true }
+func (s *exitedPipePTYSession) IsPTY() bool                      { return false }
+func (s *exitedPipePTYSession) ExitCode() int                    { return 0 }
+func (s *exitedPipePTYSession) Done() <-chan struct{}            { return s.doneCh }
+func (s *exitedPipePTYSession) OutputDone() <-chan struct{}      { return s.outputDoneCh }
+func (s *exitedPipePTYSession) WriteStdin(p []byte) (int, error) { return len(p), nil }
+func (s *exitedPipePTYSession) SendSignal(string)                {}
+
+func (s *exitedPipePTYSession) AttachOutputWithSnapshot(int64) (io.Reader, io.Reader, func(), []byte, int64) {
+	detach := func() {
+		_ = s.stdoutW.Close()
+		_ = s.stderrW.Close()
+	}
+	return s.stdoutR, s.stderrR, detach, nil, 0
+}
+
+type fakePTYSessionRunner struct {
+	codeExecutionRunner
+	session runtime.PTYSession
+}
+
+func (r *fakePTYSessionRunner) GetPTYSession(string) runtime.PTYSession { return r.session }
+
+func newFakePTYSessionServer(t *testing.T, session runtime.PTYSession) *httptest.Server {
+	t.Helper()
+	prev := codeRunner
+	codeRunner = &fakePTYSessionRunner{codeExecutionRunner: runtime.NewController("", ""), session: session}
+	t.Cleanup(func() { codeRunner = prev })
+	srv := httptest.NewServer(buildPTYRouter())
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestPTYWS_HolderPipeModeFlushesOutputBeforeExit reproduces issue #2643: in pipe
+// mode Done closes as soon as the process is reaped, possibly before the final
+// stdout chunk is fanned out to the holder. The holder must still deliver that
+// chunk before the exit frame.
+func TestPTYWS_HolderPipeModeFlushesOutputBeforeExit(t *testing.T) {
+	session := newExitedPipePTYSession()
+	srv := newFakePTYSessionServer(t, session)
+
+	conn := wsDialPTY(t, srv.URL, "/pty/fake/ws", "pty=0")
+	f := ptyWaitFrame(t, conn, "connected", 5*time.Second)
+	require.Equal(t, "pipe", f.Mode)
+
+	close(session.doneCh)
+	// Give an exit watcher that does not wait for output time to send exit first.
+	time.Sleep(100 * time.Millisecond)
+	fanoutErr := make(chan error, 1)
+	go func() {
+		_, err := session.stdoutW.Write([]byte("final_chunk\n"))
+		fanoutErr <- err
+	}()
+	require.NoError(t, <-fanoutErr, "pump should consume the final chunk")
+	close(session.outputDoneCh)
+
+	f, err := ptyReadFrame(conn, 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "stdout", f.Type, "final stdout chunk must precede the exit frame")
+	require.Equal(t, "final_chunk\n", f.Data)
+
+	f, err = ptyReadFrame(conn, 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, "exit", f.Type)
+	require.NotNil(t, f.ExitCode)
+	require.Equal(t, 0, *f.ExitCode)
+}
+
+// TestPTYWS_HolderExitNotBlockedByUnfinishedOutput verifies that a pipe that never
+// reaches EOF after the process exits (for example one held open by a background
+// child) delays the exit frame by at most ptyHolderOutputDrainTimeout.
+func TestPTYWS_HolderExitNotBlockedByUnfinishedOutput(t *testing.T) {
+	session := newExitedPipePTYSession()
+	srv := newFakePTYSessionServer(t, session)
+
+	conn := wsDialPTY(t, srv.URL, "/pty/fake/ws", "pty=0")
+	ptyWaitFrame(t, conn, "connected", 5*time.Second)
+
+	close(session.doneCh)
+	f := ptyWaitFrame(t, conn, "exit", ptyHolderOutputDrainTimeout+5*time.Second)
+	require.NotNil(t, f.ExitCode)
+	require.Equal(t, 0, *f.ExitCode)
+}
+
+// TestPTYWS_HolderPipeModeOutputBeforeExit checks the same ordering end to end
+// with a real pipe-mode shell that prints and exits in one command.
+func TestPTYWS_HolderPipeModeOutputBeforeExit(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+	conn := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "pty=0")
+	ptyWaitFrame(t, conn, "connected", 10*time.Second)
+
+	ptyWriteStdin(t, conn, "printf holder_exit_marker; exit\n")
+	var output strings.Builder
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		f, err := ptyReadFrame(conn, time.Until(deadline))
+		require.NoError(t, err, "expected exit frame")
+		if f.Type == "stdout" {
+			output.WriteString(f.Data)
+		}
+		if f.Type == "exit" {
+			break
+		}
+	}
+	require.Equal(t, "holder_exit_marker", output.String())
+}
+
 func TestPTYWS_ReplayOnReconnect(t *testing.T) {
 	requireBash(t)
 	srv := newPTYTestServer(t)
@@ -568,7 +706,6 @@ func TestPTYWS_TakeoverEvictsHolder(t *testing.T) {
 
 	conn2 := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "takeover=1&since=0")
 
-	// 1. The holder's connection is closed with the takeover close code.
 	var closeErr *websocket.CloseError
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
@@ -580,11 +717,9 @@ func TestPTYWS_TakeoverEvictsHolder(t *testing.T) {
 	require.NotNil(t, closeErr, "holder should be closed with a WS CloseError after takeover")
 	require.Equal(t, model.WSCloseTakenOver, closeErr.Code)
 
-	// 2. The taking-over client replays the prior scrollback...
 	ptyOutputContains(t, conn2, "holder_marker", 8*time.Second)
 	ptyWaitFrame(t, conn2, "connected", 8*time.Second)
 
-	// 3. ...and it is the SAME shell: the var set on conn1 is still readable.
 	ptyWriteStdin(t, conn2, "echo SAMESHELL_$TAKEOVER_VAR\n")
 	ptyOutputContains(t, conn2, "SAMESHELL_alive", 8*time.Second)
 }

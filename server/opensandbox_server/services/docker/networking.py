@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Network management mixin for Docker sandboxes.
-
-Provides network validation, endpoint resolution, egress sidecar lifecycle,
-and bridge IP extraction. Mixed into DockerSandboxService.
-"""
-
 from __future__ import annotations
 
 import json
@@ -57,7 +50,10 @@ from opensandbox_server.services.endpoint_auth import (
     build_egress_auth_headers,
     merge_endpoint_headers,
 )
-from opensandbox_server.services.helpers import upstream_proxy_egress_env
+from opensandbox_server.services.helpers import (
+    forward_mode_egress_env,
+    upstream_proxy_egress_env,
+)
 from opensandbox_server.services.validators import (
     ensure_credential_proxy_configured,
     ensure_egress_configured,
@@ -131,6 +127,7 @@ EGRESS_SIDECAR_LABEL = "opensandbox.io/egress-sidecar-for"
 class DockerNetworkingMixin:
     """Mixin providing network validation, endpoint resolution, and egress sidecar."""
 
+
     def _is_user_defined_network(self) -> bool:
         """Return True when network_mode is a named user-defined network.
 
@@ -178,7 +175,6 @@ class DockerNetworkingMixin:
         if not request.network_policy:
             return
 
-        # Docker-specific validation: network_mode must be bridge
         if self.network_mode == HOST_NETWORK_MODE:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -220,7 +216,6 @@ class DockerNetworkingMixin:
                 },
             )
 
-        # Common validation: egress.image must be configured
         ensure_egress_configured(request.network_policy, self.app_config.egress)
         ensure_credential_proxy_configured(
             request.credential_proxy, request.network_policy, self.app_config.egress
@@ -255,7 +250,7 @@ class DockerNetworkingMixin:
         Get sandbox access endpoint.
 
         Args:
-            resolve_internal: If True, return the internal container IP (for proxy), ignoring router config.
+            resolve_internal: If True, select a server-reachable container or host-mapped endpoint.
             expires: Not supported by Docker runtime.
             use_proxy_host: When True and resolve_internal is False, build the
                 host-mapped endpoint from the server-local proxy host
@@ -439,6 +434,11 @@ class DockerNetworkingMixin:
                 host_ip = self._get_docker_host_ip()
                 if host_ip:
                     return host_ip
+        # Outside host networking, sandbox ports are published on [docker].publish_host; when it
+        # names one address they answer only there, whatever address the server listens on.
+        publish_host = self.app_config.docker.publish_host
+        if self.network_mode != HOST_NETWORK_MODE and publish_host != "0.0.0.0":
+            return publish_host
         if host_key in {"", "0.0.0.0", "::"}:
             return "127.0.0.1"
         return host_cfg
@@ -453,10 +453,6 @@ class DockerNetworkingMixin:
         labels = container.attrs.get("Config", {}).get("Labels") or {}
         self._attach_egress_auth_headers(endpoint, labels, port)
         return endpoint
-
-    # ---------------------------
-    # Common helpers for creation
-    # ---------------------------
 
     def _cleanup_egress_sidecar(self, sandbox_id: str) -> None:
         """
@@ -495,7 +491,7 @@ class DockerNetworkingMixin:
     def _start_egress_sidecar(
         self,
         sandbox_id: str,
-        network_policy: NetworkPolicy,
+        network_policy: Optional[NetworkPolicy],
         egress_token: str,
         host_execd_port: int,
         host_http_port: int,
@@ -510,23 +506,24 @@ class DockerNetworkingMixin:
             EGRESS_SIDECAR_LABEL: sandbox_id,
         }
 
-        # Ensure sidecar image is available before create/start.
         egress_image = self.app_config.egress.image if self.app_config.egress else None
         if not egress_image:
             raise ValueError("egress.image must be configured when networkPolicy is provided.")
         self._ensure_image_available(egress_image, None, sandbox_id)
 
-        policy_payload = json.dumps(network_policy.model_dump(by_alias=True, exclude_none=True))
         assert (
             self.app_config.egress is not None
-        )  # validated by ensure_egress_configured with networkPolicy
+        )  # validated by ensure_egress_configured with networkPolicy, or by forward-mode config
         egress_mode = self.app_config.egress.mode
         sidecar_env = [
-            f"{EGRESS_RULES_ENV}={policy_payload}",
             f"{EGRESS_MODE_ENV}={egress_mode}",
             f"{OPENSANDBOX_EGRESS_TOKEN}={egress_token}",
             f"{OPENSANDBOX_EGRESS_SANDBOX_ID}={sandbox_id}",
         ]
+        # Forward mode carries no local policy (OSEP-0030).
+        if network_policy is not None:
+            policy_payload = json.dumps(network_policy.model_dump(by_alias=True, exclude_none=True))
+            sidecar_env.insert(0, f"{EGRESS_RULES_ENV}={policy_payload}")
         if self.app_config.egress.otlp_endpoint:
             sidecar_env.append(
                 f"{OTEL_EXPORTER_OTLP_ENDPOINT}={self.app_config.egress.otlp_endpoint}"
@@ -534,6 +531,8 @@ class DockerNetworkingMixin:
         for key, value in upstream_proxy_egress_env(
             self.app_config.egress.upstream_proxy
         ).items():
+            sidecar_env.append(f"{key}={value}")
+        for key, value in forward_mode_egress_env(self.app_config.egress).items():
             sidecar_env.append(f"{key}={value}")
         if credential_proxy_enabled:
             sidecar_env.append(f"{OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT}=true")
@@ -736,16 +735,13 @@ class DockerNetworkingMixin:
         ip_address: Optional[str] = None
 
         if self._is_user_defined_network():
-            # Prefer the explicit network entry for the configured named network.
             net_conf = networks.get(self.network_mode) or {}
             ip_address = net_conf.get("IPAddress") or None
 
         if not ip_address:
-            # Default bridge path (or fallback): check the top-level IPAddress first.
             ip_address = network_settings.get("IPAddress") or None
 
         if not ip_address:
-            # Last resort: iterate all network entries and take the first populated IP.
             for net_conf in networks.values():
                 if net_conf and net_conf.get("IPAddress"):
                     ip_address = net_conf.get("IPAddress")

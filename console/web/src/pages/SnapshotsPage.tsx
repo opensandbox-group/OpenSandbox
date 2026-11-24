@@ -76,7 +76,7 @@ export function SnapshotsPage() {
         setItems([]);
         setTotal(0);
       } else {
-        message.error(e instanceof Error ? e.message : '加载失败');
+        message.error(e instanceof Error ? e.message : 'Failed to load');
       }
     } finally {
       if (seq === requestSeq.current) setLoading(false);
@@ -89,7 +89,7 @@ export function SnapshotsPage() {
 
   const onDelete = (id: string) => {
     Modal.confirm({
-      title: '删除快照？',
+      title: 'Delete snapshot?',
       okType: 'danger',
       onOk: async () => {
         try {
@@ -98,10 +98,10 @@ export function SnapshotsPage() {
           } else {
             await snapshotApi.remove(id);
           }
-          message.success('已删除');
+          message.success('Deleted');
           await load();
         } catch (e) {
-          message.error(e instanceof Error ? e.message : '删除失败');
+          message.error(e instanceof Error ? e.message : 'Failed to delete');
         }
       },
     });
@@ -111,39 +111,39 @@ export function SnapshotsPage() {
     try {
       if (user?.role === 'admin') {
         if (!adminTenant) {
-          message.warning('请选择租户');
+          message.warning('Select a tenant');
           return;
         }
         await adminApi.createSnapshot(values.sandboxId.trim(), adminTenant, values.name ? { name: values.name } : undefined);
       } else {
         await sandboxApi.createSnapshot(values.sandboxId.trim(), values.name ? { name: values.name } : undefined);
       }
-      message.success('快照创建已提交');
+      message.success('Snapshot creation requested');
       setCreateOpen(false);
       await load();
     } catch (e) {
-      message.error(e instanceof Error ? e.message : '创建失败');
+      message.error(e instanceof Error ? e.message : 'Failed to create');
     }
   };
 
   const columns: ColumnsType<Snapshot> = [
     { title: 'ID', dataIndex: 'id' },
-    { title: '名称', dataIndex: 'name', render: (v) => v ?? '—' },
-    { title: '来源沙箱', dataIndex: 'sourceSandboxId' },
+    { title: 'Name', dataIndex: 'name', render: (v) => v ?? '—' },
+    { title: 'Source Sandbox', dataIndex: 'sourceSandboxId' },
     {
-      title: '状态',
+      title: 'Status',
       render: (_, r) => <SandboxStateTag state={r.status?.state} />,
     },
     {
-      title: '创建时间',
+      title: 'Created At',
       dataIndex: 'createdAt',
       render: (v: string | undefined) => formatDateTime(v),
     },
     {
-      title: '操作',
+      title: 'Actions',
       render: (_, r) => (
         <Button danger size="small" onClick={() => onDelete(r.id)}>
-          删除
+          Delete
         </Button>
       ),
     },
@@ -153,12 +153,12 @@ export function SnapshotsPage() {
     <div>
       <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
         <Typography.Title level={4} style={{ margin: 0 }}>
-          快照
+          Snapshots
         </Typography.Title>
         <Space>
           {user?.role === 'admin' && (
             <Input
-              placeholder="tenant 名称"
+              placeholder="Tenant name"
               style={{ width: 160 }}
               value={tenantInput}
               onChange={(e) => setTenantInput(e.target.value)}
@@ -172,19 +172,19 @@ export function SnapshotsPage() {
           )}
           {(user?.role === 'tenant' || (user?.role === 'admin' && adminTenant)) && (
             <Button type="primary" onClick={() => setCreateOpen(true)}>
-              从沙箱创建
+              Create from Sandbox
             </Button>
           )}
         </Space>
       </Space>
 
       {user?.role === 'admin' && !adminTenant && (
-        <Typography.Paragraph type="secondary">Admin 请先选择租户以代发 Lifecycle Key。</Typography.Paragraph>
+        <Typography.Paragraph type="secondary">Admins must select a tenant first so the BFF can use its Lifecycle key.</Typography.Paragraph>
       )}
 
       {unavailable && (
         <Typography.Paragraph type="secondary">
-          快照 API 不可用或未对当前 runtime 启用。
+          The snapshot API is unavailable or not enabled for the current runtime.
         </Typography.Paragraph>
       )}
 
@@ -205,16 +205,16 @@ export function SnapshotsPage() {
         }}
       />
 
-      <Modal title="从沙箱创建快照" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null}>
+      <Modal title="Create Snapshot from Sandbox" open={createOpen} onCancel={() => setCreateOpen(false)} footer={null}>
         <Form layout="vertical" onFinish={onCreate}>
           <Form.Item name="sandboxId" label="Sandbox ID" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="name" label="名称（可选）">
+          <Form.Item name="name" label="Name (optional)">
             <Input />
           </Form.Item>
           <Button type="primary" htmlType="submit" block>
-            创建
+            Create
           </Button>
         </Form>
       </Modal>

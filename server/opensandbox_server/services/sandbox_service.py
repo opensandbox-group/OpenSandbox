@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Sandbox service layer for business logic.
-
-This module contains the business logic for sandbox lifecycle management.
-This module defines the abstract interface for sandbox services.
-"""
-
 from abc import ABC, abstractmethod
 import socket
 from typing import Optional
@@ -38,16 +31,13 @@ from opensandbox_server.api.schema import (
     Sandbox,
 )
 from opensandbox_server.services.diagnostics import DiagnosticContext, DiagnosticResult
-from opensandbox_server.services.validators import ensure_valid_port
+from opensandbox_server.services.validators import (
+    RESERVED_METADATA_LABEL_PREFIXES,
+    ensure_valid_port,
+)
 
 
 class SandboxService(ABC):
-    """
-    Abstract service interface for sandbox lifecycle operations.
-
-    This class defines the interface for all sandbox service implementations.
-    Implementations should handle creating, managing, and destroying sandboxes.
-    """
 
     def set_tenant_provider(self, provider: object) -> None:
         """Inject tenant provider (no-op for non-K8s implementations)."""
@@ -57,22 +47,12 @@ class SandboxService(ABC):
 
     @staticmethod
     def generate_sandbox_id() -> str:
-        """
-        Generate a unique sandbox identifier.
-
-        Returns:
-            str: A RFC4122-compliant UUID4 string (with hyphens)
-        """
+        """Generate a unique RFC4122 UUID4 sandbox identifier (with hyphens)."""
         return str(uuid4())
 
     @staticmethod
     def _resolve_bind_ip(family: int = socket.AF_INET) -> str:
-        """
-        Resolve the outward-facing IP for hosts binding to 0.0.0.0.
-
-        Returns:
-            str: Detected local IP address, or 127.0.0.1 as a safe fallback.
-        """
+        """Resolve an outward-facing address; discovery failure falls back to loopback."""
         try:
             target = ("2001:4860:4860::8888", 80, 0, 0) if family == socket.AF_INET6 else ("8.8.8.8", 80)
             with socket.socket(family, socket.SOCK_DGRAM) as sock:
@@ -100,99 +80,36 @@ class SandboxService(ABC):
 
     @staticmethod
     def validate_port(port: int) -> None:
-        """
-        Validate that the supplied port falls within the allowed range.
-
-        Args:
-            port: Port to validate
-
-        Raises:
-            ValueError: If port is outside 1-65535
-        """
+        """Validate that the port is within 1-65535; raises HTTPException(400) otherwise."""
         ensure_valid_port(port)
 
     @abstractmethod
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
-        """
-        Create a new sandbox from a container image.
-
-        Args:
-            request: Sandbox creation request
-
-        Returns:
-            CreateSandboxResponse: Created sandbox information
-
-        Raises:
-            HTTPException: If sandbox creation fails
-        """
+        """Create from a validated request; HTTPException reports backend failure."""
         pass
 
     @abstractmethod
     def list_sandboxes(self, request: ListSandboxesRequest) -> ListSandboxesResponse:
-        """
-        List sandboxes with optional filtering and pagination.
-
-        Args:
-            request: List request with filters and pagination
-
-        Returns:
-            ListSandboxesResponse: Paginated list of sandboxes
-        """
         pass
 
     @abstractmethod
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
-        """
-        Fetch a sandbox by id.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Returns:
-            Sandbox: Complete sandbox information
-
-        Raises:
-            HTTPException: If sandbox not found
-        """
+        """Raise HTTPException when the sandbox is not found."""
         pass
 
     @abstractmethod
     def delete_sandbox(self, sandbox_id: str) -> None:
-        """
-        Delete a sandbox.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Raises:
-            HTTPException: If sandbox not found or deletion fails
-        """
+        """Request deletion (HTTPException on failure); return does not universally confirm runtime termination."""
         pass
 
     @abstractmethod
     def pause_sandbox(self, sandbox_id: str) -> None:
-        """
-        Pause a running sandbox.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Raises:
-            HTTPException: If sandbox not found or cannot be paused
-        """
+        """Raise HTTPException when the sandbox is missing or cannot be paused."""
         pass
 
     @abstractmethod
     def resume_sandbox(self, sandbox_id: str) -> None:
-        """
-        Resume a paused sandbox.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Raises:
-            HTTPException: If sandbox not found or cannot be resumed
-        """
+        """Raise HTTPException when the sandbox is missing or cannot be resumed."""
         pass
 
     @abstractmethod
@@ -201,19 +118,7 @@ class SandboxService(ABC):
         sandbox_id: str,
         request: RenewSandboxExpirationRequest,
     ) -> RenewSandboxExpirationResponse:
-        """
-        Renew sandbox expiration time.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-            request: Renewal request with new expiration time
-
-        Returns:
-            RenewSandboxExpirationResponse: Updated expiration time
-
-        Raises:
-            HTTPException: If sandbox not found or renewal fails
-        """
+        """Set the requested absolute expiration; HTTPException reports a missing sandbox or renewal failure."""
         pass
 
     @abstractmethod
@@ -223,12 +128,16 @@ class SandboxService(ABC):
 
     @staticmethod
     def _is_system_label(key: str) -> bool:
-        return key.startswith("opensandbox.io/")
+        return key.startswith(RESERVED_METADATA_LABEL_PREFIXES)
 
     @staticmethod
-    def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
-        """Apply JSON Merge Patch to labels: separate user metadata, merge, validate, rebuild."""
+    def _validate_metadata_patch(patch: dict) -> None:
+        """Reject a metadata patch that touches reserved keys or adds invalid labels.
+
+        Only the incoming values are validated, not the labels already present.
+        """
         from fastapi import HTTPException
+        from opensandbox_server.services.constants import SandboxErrorCodes
         from opensandbox_server.services.validators import ensure_metadata_labels
 
         for key in patch:
@@ -236,15 +145,19 @@ class SandboxService(ABC):
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "code": "INVALID_METADATA_LABEL",
-                        "message": f"Metadata key '{key}' is reserved (opensandbox.io/ prefix).",
+                        "code": SandboxErrorCodes.INVALID_METADATA_LABEL,
+                        "message": f"Metadata key '{key}' is reserved (system-managed label prefix).",
                     },
                 )
 
-        # Validate only incoming patch values, not existing labels
         patch_additions = {k: str(v) for k, v in patch.items() if v is not None}
         if patch_additions:
             ensure_metadata_labels(patch_additions)
+
+    @staticmethod
+    def _apply_metadata_patch(labels: dict, patch: dict) -> dict:
+        """Apply JSON Merge Patch to labels: validate, separate user metadata, merge, rebuild."""
+        SandboxService._validate_metadata_patch(patch)
 
         current_metadata = {
             k: v for k, v in labels.items() if not SandboxService._is_system_label(k)
@@ -260,9 +173,6 @@ class SandboxService(ABC):
         for k, v in current_metadata.items():
             new_labels[k] = str(v)
         return new_labels
-
-    # Diagnostics (DevOps)
-    # ------------------------------------------------------------------
 
     def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
         """Return backend context; extensions may override this capability."""
@@ -280,15 +190,7 @@ class SandboxService(ABC):
         sandbox_id: str,
         scope: str,
     ) -> DiagnosticResult:
-        """Collect stable log diagnostics using runtime-specific policy.
-
-        Args:
-            sandbox_id: Unique sandbox identifier.
-            scope: Diagnostic scope requested by the caller.
-
-        Returns:
-            Runtime-provided stable diagnostic result.
-        """
+        """Collect stable log diagnostics using runtime-specific policy."""
         pass
 
     @abstractmethod
@@ -297,15 +199,7 @@ class SandboxService(ABC):
         sandbox_id: str,
         scope: str,
     ) -> DiagnosticResult:
-        """Collect stable event diagnostics using runtime-specific policy.
-
-        Args:
-            sandbox_id: Unique sandbox identifier.
-            scope: Diagnostic scope requested by the caller.
-
-        Returns:
-            Runtime-provided stable diagnostic result.
-        """
+        """Collect stable event diagnostics using runtime-specific policy."""
         pass
 
     @abstractmethod
@@ -313,49 +207,13 @@ class SandboxService(ABC):
         self,
         sandbox_id: str,
         tail: int = 100,
-        since: str | None = None,
-        container: str | None = None,
     ) -> str:
-        """
-        Retrieve container logs for a sandbox.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-            tail: Number of trailing log lines to return
-            since: Only return logs newer than this duration (e.g. "10m", "1h")
-            container: Optional container name. When omitted, backends select a
-                sensible default (typically the user "sandbox" container).
-
-        Returns:
-            str: Plain-text log output
-        """
-        pass
-
-    @abstractmethod
-    def get_sandbox_inspect(self, sandbox_id: str) -> str:
-        """
-        Retrieve detailed inspection info for a sandbox container.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-
-        Returns:
-            str: Plain-text inspection output
-        """
+        """Return the trailing tail log lines as plain text."""
         pass
 
     @abstractmethod
     def get_sandbox_events(self, sandbox_id: str, limit: int = 50) -> str:
-        """
-        Retrieve events related to a sandbox.
-
-        Args:
-            sandbox_id: Unique sandbox identifier
-            limit: Maximum number of events to return
-
-        Returns:
-            str: Plain-text event output
-        """
+        """Return at most limit events as plain text."""
         pass
 
     @abstractmethod
@@ -368,7 +226,7 @@ class SandboxService(ABC):
         Args:
             sandbox_id: Unique sandbox identifier
             port: Port number where the service is listening inside the sandbox
-            resolve_internal: If True, return the internal container IP (for proxy), ignoring router config.
+            resolve_internal: If True, bypass public routing for a server-reachable endpoint.
             expires: Unix epoch seconds for a signed route token. When provided, the
                 endpoint is wrapped in a cryptographically signed route per OSEP-0011.
                 Requires ingress gateway mode with secure_access keys configured.
