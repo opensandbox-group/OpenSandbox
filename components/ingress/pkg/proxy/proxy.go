@@ -62,6 +62,7 @@ type Proxy struct {
 	fastSandboxNamespace string
 
 	httpTransport             http.RoundTripper
+	grpcTransport             http.RoundTripper
 	websocketClient           *http.Client
 	websocketMessageSizeLimit int64
 }
@@ -85,6 +86,7 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		scope:                     scope,
 		fastSandboxNamespace:      options.fastSandboxNamespace,
 		httpTransport:             newHTTPTransport(options.connectObserver, options.httpConnectionPool),
+		grpcTransport:             newGRPCTransport(options.connectObserver, options.httpConnectionPool),
 		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
 		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,
 	}
@@ -306,6 +308,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 		httpProxy := NewHTTPProxy(append([]func(*http.Response){stripWakeMarkerObserver()}, append(extraResponseObservers, p.upstreamResponseObserver(target))...)...) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 		httpProxy.errorObserver = p.upstreamErrorObserver(target)
 		httpProxy.transport = p.httpTransport
+		if isGRPCRequest(r) {
+			httpProxy.transport = p.grpcTransport
+		}
 		httpProxy.ServeHTTP(w, r)
 	}
 }
