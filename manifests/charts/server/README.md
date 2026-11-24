@@ -137,6 +137,7 @@ The following table lists the configurable parameters of the chart and their def
 | server.affinity | object | `{}` | Affinity for the server pod. |
 | server.containerSecurityContext | object | `{}` | Container-level security context for the server container. |
 | server.env | list | `[]` | Additional environment variables for the server container. |
+| server.execdAuth.existingSecret | string | `""` | Name of an existing Secret holding versioned HMAC master keys (keys.json). Mounted read-only (mode 0400) at /var/run/secrets/opensandbox/execd-signing/keys.json. Set [execd].auth_signing_key_file in configToml to this path to enable sha256:<kid>:<nonce>:<verifier> execd access token derivation. |
 | server.fastpath.caConfigMap | string | `""` | Public serving CA ConfigMap (ca.crt); mounted at /etc/opensandbox/fastpath-ca/ca.crt. Set kubernetes.fastpath_tls_ca_file in configToml to this path. |
 | server.gateway.enabled | bool | `false` | Whether the server announces an ingress gateway (config [ingress] mode = "gateway"). |
 | server.gateway.gatewayRouteMode | string | `"header"` | Route mode: header, wildcard, or uri. Ingress uses header for header/wildcard, uri otherwise. |

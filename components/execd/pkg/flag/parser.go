@@ -145,12 +145,16 @@ func InitFlags() {
 		JupyterReplyFinalizeTimeout = 2 * time.Second
 	}
 
-	if ServerAccessToken != "" && !strings.HasPrefix(strings.TrimSpace(ServerAccessToken), "sha256:") {
-		log.Warn("execd: plaintext EXECD_ACCESS_TOKEN / --access-token is deprecated; use sha256:<kid>:<nonce>:<verifier> or /internal/init accessTokenHash")
-	}
+	warnDeprecatedPlaintextAccessToken()
 
 	log.Info("jupyter: server host=%s", JupyterServerHost)
 	log.Info("jupyter: server token=%s", log.MaskToken(JupyterServerToken))
+}
+
+func warnDeprecatedPlaintextAccessToken() {
+	if ServerAccessToken != "" && !strings.HasPrefix(strings.TrimSpace(ServerAccessToken), "sha256:") {
+		log.Warn("execd: plaintext EXECD_ACCESS_TOKEN / --access-token is deprecated; use sha256:<kid>:<nonce>:<verifier> or /internal/init accessTokenHash")
+	}
 }
 
 // Args returns the non-flag arguments after flag.Parse — in init mode this is

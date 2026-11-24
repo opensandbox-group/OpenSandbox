@@ -487,8 +487,8 @@ def get_sandbox_endpoint(
 
     if use_server_proxy and port == DEFAULT_EXECD_PORT:
         cfg = get_config()
-        execd_cfg = cfg.execd
-        if execd_cfg and execd_cfg.auth_signing_key_file:
+        execd_cfg = getattr(cfg, "execd", None)
+        if execd_cfg and getattr(execd_cfg, "auth_signing_key_file", None):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
