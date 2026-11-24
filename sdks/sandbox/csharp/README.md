@@ -43,6 +43,8 @@ try
         ConnectionConfig = config,
         Image = "ubuntu",
         TimeoutSeconds = 10 * 60,
+        // Total budget for endpoint publication and health checks (default 30s)
+        ReadyTimeoutSeconds = 30,
     });
 
     var execution = await sandbox.Commands.RunAsync("echo 'Hello Sandbox!'");
