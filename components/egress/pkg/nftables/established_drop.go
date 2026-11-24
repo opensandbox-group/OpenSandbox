@@ -206,8 +206,8 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 	if newPol == nil {
 		newPol = policy.DefaultDenyPolicy()
 	}
-	ipPolicy := compilePortlessIPPolicy(newPol)
-	portFilter := teardownPortFilter{policy: newPol, ips: ipPolicy}
+	portFilter := newTeardownPortFilter(newPol)
+	ipPolicy := portFilter.ips
 
 	// IPs still covered by a surviving domain lease (and not explicitly denied).
 	survivingDomainIPs := make(map[netip.Addr]struct{})
@@ -322,8 +322,7 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 			denyPrefixes.add(parseRulePrefix(r))
 		}
 	}
-	portDeny, portAllow := newPol.PortScopedRules()
-	for _, r := range portDeny {
+	for _, r := range portFilter.rawDeny {
 		if pd, ok := portDropFromScoped(r); ok {
 			out.DenyPortDrops = append(out.DenyPortDrops, pd)
 		}
@@ -344,7 +343,7 @@ func computeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains,
 	}
 	keepPrefixes := newPrefixSet()
 	ipPolicy.addKeeps(keepAddrs, keepPrefixes)
-	for _, r := range portAllow {
+	for _, r := range portFilter.rawAllow {
 		if pd, ok := portDropFromScoped(r); ok {
 			out.KeepPorts = append(out.KeepPorts, pd)
 		}
@@ -368,8 +367,8 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
-	ipPolicy := compilePortlessIPPolicy(p)
-	portFilter := teardownPortFilter{policy: p, ips: ipPolicy}
+	portFilter := newTeardownPortFilter(p)
+	ipPolicy := portFilter.ips
 	var out EstablishedDrops
 
 	// Deny bucket: only what p still explicitly denies (it precedes keeps).
@@ -393,9 +392,8 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 			}
 		}
 	}
-	portDeny, portAllow := p.PortScopedRules()
 	for _, old := range d.DenyPortDrops {
-		for _, r := range portDeny {
+		for _, r := range portFilter.rawDeny {
 			if cur, ok := portDropFromScoped(r); ok && samePortDrop(old, cur) {
 				out.DenyPortDrops = append(out.DenyPortDrops, old)
 				break
@@ -456,7 +454,7 @@ func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip
 	out.KeepAddrs = keepAddrs.sorted()
 	out.KeepPrefixes = keepPrefixes.sorted()
 	out.KeepPorts = append([]EstablishedPortDrop(nil), d.KeepPorts...)
-	for _, r := range portAllow {
+	for _, r := range portFilter.rawAllow {
 		cur, ok := portDropFromScoped(r)
 		if !ok {
 			continue

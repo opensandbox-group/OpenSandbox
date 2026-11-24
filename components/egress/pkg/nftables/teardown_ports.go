@@ -26,6 +26,15 @@ func teardownSelectorFor(target string) teardownSelector {
 	return teardownSelector{prefix: prefix.Masked()}
 }
 
+// An omitted (wildcard) target is handled by the caller. An invalid or
+// nonmatching target must never become a wildcard when checking raw rules.
+func (s teardownSelector) matches(addr netip.Addr) bool {
+	if s.literal.IsValid() {
+		return s.literal == addr
+	}
+	return s.prefix.Contains(addr)
+}
+
 type teardownPortRule struct {
 	teardownSelector
 	ports  []int
@@ -45,10 +54,28 @@ func compileScopedPorts(rules []policy.PortScopedRule) []teardownPortRule {
 }
 
 type teardownPortFilter struct {
-	policy      *policy.NetworkPolicy
-	ips         portlessIPPolicy
-	deny, allow []teardownPortRule
-	compiled    bool
+	policy            *policy.NetworkPolicy
+	ips               portlessIPPolicy
+	rawDeny, rawAllow []policy.PortScopedRule
+	deny, allow       []teardownPortRule
+	probed, compiled  bool
+}
+
+func newTeardownPortFilter(p *policy.NetworkPolicy) teardownPortFilter {
+	deny, allow := p.PortScopedRules()
+	return teardownPortFilter{policy: p, ips: compilePortlessIPPolicy(p), rawDeny: deny, rawAllow: allow}
+}
+
+func matchesSinglePort(rules []policy.PortScopedRule, addr netip.Addr, port int) bool {
+	for _, r := range rules {
+		if !slices.Contains(r.Ports, port) && !slices.ContainsFunc(r.Ranges, func(rg policy.PortRange) bool { return rg.Contains(port) }) {
+			continue
+		}
+		if r.Target == "" || teardownSelectorFor(r.Target).matches(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // Evaluate only the requested window. Within it, static denies take
@@ -59,19 +86,27 @@ func (f *teardownPortFilter) deniedWindow(addr netip.Addr, window tcpSpans) tcpS
 	}
 	addr = addr.Unmap()
 	if !f.compiled {
-		d, a := f.policy.PortScopedRules()
-		f.deny, f.allow = compileScopedPorts(d), compileScopedPorts(a)
+		// A single withdrawal need not pay to compile any selector array
+		// or sort any rule's ports. Switch to the reusable index if queried again.
+		if !f.probed && len(window) == 1 && window[0].Lo == window[0].Hi {
+			f.probed = true
+			port := window[0].Lo
+			if matchesSinglePort(f.rawDeny, addr, port) {
+				return window
+			}
+			if f.ips.allows(addr) || matchesSinglePort(f.rawAllow, addr, port) {
+				return nil
+			}
+			return window
+		}
+		f.deny, f.allow = compileScopedPorts(f.rawDeny), compileScopedPorts(f.rawAllow)
 		f.compiled = true
 	}
 	matching := func(rules []teardownPortRule) tcpSpans {
 		var group hostSpans
 		for i := range rules {
 			r := &rules[i]
-			if r.literal.IsValid() {
-				if r.literal != addr {
-					continue
-				}
-			} else if r.prefix.IsValid() && !r.prefix.Contains(addr) {
+			if r.prefix.IsValid() && !r.matches(addr) {
 				continue
 			}
 			if r.spans == nil {
