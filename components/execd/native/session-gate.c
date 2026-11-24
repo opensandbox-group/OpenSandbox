@@ -97,6 +97,15 @@ int main(int argc, char **argv)
         socket_type != SOCK_SEQPACKET)
         fail_closed(control_fd, -1);
 
+    /*
+     * execd interrupts a run by signalling the workload's process group.
+     * Without a group of its own the workload stays in bubblewrap's, and
+     * bubblewrap takes SIGINT's default action, which ends the session. Do
+     * this before announcing, so the group exists once execd knows the PID.
+     */
+    if (setpgid(0, 0) != 0)
+        fail_closed(control_fd, -1);
+
     sent = send(control_fd, waiting_frame, sizeof(waiting_frame) - 1,
                 MSG_NOSIGNAL);
     if (sent != (ssize_t)(sizeof(waiting_frame) - 1))
