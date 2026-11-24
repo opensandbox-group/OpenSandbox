@@ -7,7 +7,7 @@ last-updated: 2026-11-18
 status: draft
 ---
 
-# OSEP-0033: Working-Set-Aware Admission, Memory Reclamation, and OOM Isolation for Ultra-High-Density Fast Sandbox
+# OSEP-0037: Working-Set-Aware Admission, Memory Reclamation, and OOM Isolation for Ultra-High-Density Fast Sandbox
 
 <!-- toc -->
 - [Summary](#summary)
