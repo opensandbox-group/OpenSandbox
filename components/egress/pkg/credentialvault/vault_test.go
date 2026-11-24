@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -852,18 +853,82 @@ func TestCredentialVaultExchangeGateCoversUnreferencedCredentials(t *testing.T) 
 	require.NoError(t, err)
 }
 
-func TestCredentialVaultLiveRevisionRuntimeRejectsExchange(t *testing.T) {
-	store := NewLiveStore(nil, func() bool { return true }, mitmpassthrough.Config{})
-	store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true})
-	_, err := store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
-	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
-	_, err = store.PrepareCreate(testExchangeVaultRequest(), testExchangePolicy(t))
-	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
-
-	// The live runtime still admits inline-only vaults unchanged.
-	pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
-	_, err = store.Create(testCredentialVaultRequest(), pol)
-	require.NoError(t, err)
+func TestCredentialVaultLiveRevisionRuntimeExchangeAdmission(t *testing.T) {
+	for _, operation := range []string{"create", "prepare", "patch", "prepare patch"} {
+		for _, timeout := range []string{"5", "", "invalid", "not injected"} {
+			t.Run(operation+"/timeout="+timeout, func(t *testing.T) {
+				t.Setenv(constants.EnvCredentialResolverTimeout, timeout)
+				store := NewLiveStore(nil, func() bool { return true }, mitmpassthrough.Config{})
+				config, configErr := ResolverConfigFromEnv()
+				if timeout == "invalid" {
+					require.Error(t, configErr)
+				}
+				if timeout == "not injected" {
+					config = ResolverConfig{}
+				}
+				store.SetResolverConfig(config)
+				pol := testExchangePolicy(t)
+				request := testExchangeVaultRequest()
+				if strings.Contains(operation, "patch") {
+					_, err := store.Create(CreateRequest{}, pol)
+					require.NoError(t, err)
+				}
+				before, beforeErr := store.Sanitized()
+				patch := MutationRequest{Credentials: &CredentialMutationSet{Add: request.Credentials}, Bindings: &BindingMutationSet{Add: request.Bindings}}
+				var candidate *MutationCandidate
+				var err error
+				switch operation {
+				case "create":
+					_, err = store.Create(request, pol)
+				case "prepare":
+					candidate, err = store.PrepareCreate(request, pol)
+				case "patch":
+					_, err = store.Patch(patch, pol)
+				case "prepare patch":
+					candidate, err = store.PreparePatch(patch, pol)
+				}
+				if !config.Ready() {
+					require.ErrorContains(t, err, "credential resolver operator configuration")
+					require.Nil(t, candidate)
+					after, afterErr := store.Sanitized()
+					require.Equal(t, beforeErr, afterErr)
+					require.Equal(t, before, after)
+					return
+				}
+				require.NoError(t, err)
+				if candidate != nil {
+					after, afterErr := store.Sanitized()
+					require.Equal(t, beforeErr, afterErr)
+					require.Equal(t, before, after)
+					_, err = candidate.ActiveSnapshot(context.Background())
+					require.NoError(t, err)
+					_, err = store.CommitCandidate(candidate)
+					require.NoError(t, err)
+				}
+				snapshot, err := store.ActiveSnapshot()
+				require.NoError(t, err)
+				require.Equal(t, &ExchangeRef{Credential: "spi-signer"}, snapshot.Bindings[0].Exchange)
+			})
+		}
+	}
+	t.Run("static passthrough conflict", func(t *testing.T) {
+		config, err := mitmpassthrough.Parse(`["api.internal.example.com"]`, true)
+		require.NoError(t, err)
+		store := NewLiveStore(nil, func() bool { return true }, config)
+		store.SetResolverConfig(ResolverConfig{TimeoutConfigured: true})
+		_, err = store.Create(testExchangeVaultRequest(), testExchangePolicy(t))
+		require.ErrorContains(t, err, "overlaps static passthrough")
+		_, err = store.PrepareCreate(testExchangeVaultRequest(), testExchangePolicy(t))
+		require.ErrorContains(t, err, "overlaps static passthrough")
+		_, err = store.Sanitized()
+		require.ErrorIs(t, err, ErrNotFound)
+	})
+	t.Run("inline without resolver", func(t *testing.T) {
+		store := NewLiveStore(nil, func() bool { return true }, mitmpassthrough.Config{})
+		pol := testCredentialPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"code.example.com"}]}`)
+		_, err := store.Create(testCredentialVaultRequest(), pol)
+		require.NoError(t, err)
+	})
 }
 
 func TestCredentialVaultExchangeReloadRequiresNoResolverListener(t *testing.T) {
