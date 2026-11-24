@@ -141,6 +141,8 @@ else
 fi
 LOGS_DIR="$WORK/logs"
 GEN_DIR="$WORK/gen"
+ACTIVE_RUN_FILE="$WORK/active-run.pid"
+REAP_GRACE_SECONDS="${REAP_GRACE_SECONDS:-5}"
 
 # Env-owned fast-sandbox clone; the source is exactly the commit pinned in
 # manifests/third-party/fast-sandbox.commit (no ref override — bump the pin).
@@ -442,6 +444,156 @@ wait_for() { # description attempts command [args...]
 kubectl_get() { kubectl -n "$RESOURCE_NS" get "$1" -o jsonpath="$2"; }
 
 sudo_() { if [[ "$(id -u)" == 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+# --- active-run tracking & orphan reaping
+# GitHub Actions runners are non-root and cannot signal a `sudo`-elevated
+# integration-env.sh tree on cancel-in-progress. Track the active run's PID
+# and PGID under $WORK so teardown (down) and subsequent invocations reap any
+# surviving root process tree before mutating the shared host or cluster.
+
+_is_ancestor_pid() {
+	local target="$1" cur="$$" ppid depth=0
+	while [[ -n "$cur" && "$cur" =~ ^[0-9]+$ && "$cur" -gt 1 && "$depth" -lt 64 ]]; do
+		[[ "$cur" == "$target" ]] && return 0
+		ppid="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ' || true)"
+		[[ -n "$ppid" && "$ppid" != "$cur" ]] || break
+		cur="$ppid"
+		depth=$((depth + 1))
+	done
+	return 1
+}
+
+_is_ancestor_pgid() {
+	local target="$1" cur="$$" pgid ppid depth=0
+	while [[ -n "$cur" && "$cur" =~ ^[0-9]+$ && "$cur" -gt 1 && "$depth" -lt 64 ]]; do
+		pgid="$(ps -o pgid= -p "$cur" 2>/dev/null | tr -d ' ' || true)"
+		[[ "$pgid" == "$target" ]] && return 0
+		ppid="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ' || true)"
+		[[ -n "$ppid" && "$ppid" != "$cur" ]] || break
+		cur="$ppid"
+		depth=$((depth + 1))
+	done
+	return 1
+}
+
+_descendant_pids() {
+	local root="$1"
+	ps -eo pid=,ppid= 2>/dev/null | awk -v root="$root" '
+		{ children[$2] = children[$2] " " $1 }
+		END {
+			n = split(children[root], queue, " ")
+			for (i = 1; i <= n; i++) {
+				p = queue[i]
+				if (p == "" || seen[p]++) continue
+				print p
+				m = split(children[p], more, " ")
+				for (j = 1; j <= m; j++) {
+					if (more[j] != "") queue[++n] = more[j]
+				}
+			}
+		}
+	'
+}
+
+_signal_target() {
+	local sig="$1" target="$2"
+	kill "-$sig" "$target" 2>/dev/null \
+		|| { [[ "$(id -u)" == 0 ]] || sudo -n kill "-$sig" "$target" 2>/dev/null || true; }
+}
+
+_pid_alive() {
+	local pid="$1"
+	kill -0 "$pid" 2>/dev/null && return 0
+	[[ "$(id -u)" == 0 ]] && return 1
+	sudo -n kill -0 "$pid" 2>/dev/null
+}
+
+register_active_run() {
+	local action="$1" pgid
+	mkdir -p "$WORK"
+	pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+	printf '%s %s %s\n' "$$" "${pgid:-0}" "$action" > "$ACTIVE_RUN_FILE"
+}
+
+clear_active_run() {
+	[[ -f "$ACTIVE_RUN_FILE" ]] || return 0
+	local pid="" _pgid="" _action=""
+	read -r pid _pgid _action < "$ACTIVE_RUN_FILE" 2>/dev/null || return 0
+	if [[ "$pid" == "$$" ]]; then
+		rm -f "$ACTIVE_RUN_FILE"
+	fi
+}
+
+reap_active_run() {
+	[[ -f "$ACTIVE_RUN_FILE" ]] || return 0
+	local old_pid="" old_pgid="" old_action="" old_args=""
+	read -r old_pid old_pgid old_action < "$ACTIVE_RUN_FILE" 2>/dev/null || true
+	if [[ ! "$old_pid" =~ ^[0-9]+$ ]]; then
+		rm -f "$ACTIVE_RUN_FILE"
+		return 0
+	fi
+	if _is_ancestor_pid "$old_pid"; then
+		return 0
+	fi
+	if ! _pid_alive "$old_pid"; then
+		rm -f "$ACTIVE_RUN_FILE"
+		return 0
+	fi
+	old_args="$(ps -o args= -p "$old_pid" 2>/dev/null || true)"
+	if [[ "$old_args" != *integration-env.sh* ]]; then
+		log "active-run pid=$old_pid no longer belongs to integration-env.sh; clearing stale pidfile"
+		rm -f "$ACTIVE_RUN_FILE"
+		return 0
+	fi
+	log "reaping orphaned integration-env.sh run (pid=$old_pid pgid=${old_pgid:-0} action=${old_action:-unknown})"
+	local safe_pgid=0
+	if [[ "$old_pgid" =~ ^[0-9]+$ && "$old_pgid" -gt 1 ]] && ! _is_ancestor_pgid "$old_pgid"; then
+		safe_pgid=1
+	fi
+	local -a pids=("$old_pid")
+	local desc
+	while IFS= read -r desc; do
+		[[ -n "$desc" ]] || continue
+		_is_ancestor_pid "$desc" && continue
+		pids+=("$desc")
+	done < <(_descendant_pids "$old_pid")
+
+	if [[ "$safe_pgid" == 1 ]]; then
+		_signal_target TERM "-$old_pgid"
+	fi
+	local p
+	for p in "${pids[@]}"; do
+		_signal_target TERM "$p"
+	done
+
+	local ticks=$((REAP_GRACE_SECONDS * 5)) alive=1 i
+	for ((i = 0; i <= ticks; i++)); do
+		alive=0
+		for p in "${pids[@]}"; do
+			if _pid_alive "$p"; then
+				alive=1
+				break
+			fi
+		done
+		[[ "$alive" == 0 ]] && break
+		[[ "$i" -lt "$ticks" ]] && sleep 0.2
+	done
+
+	if [[ "$alive" == 1 ]]; then
+		log "escalating to SIGKILL for orphaned integration-env.sh run (pid=$old_pid)"
+		if [[ "$safe_pgid" == 1 ]]; then
+			_signal_target KILL "-$old_pgid"
+		fi
+		for p in "${pids[@]}"; do
+			_pid_alive "$p" && _signal_target KILL "$p"
+		done
+		for ((i = 0; i < 10; i++)); do
+			_pid_alive "$old_pid" || break
+			sleep 0.2
+		done
+	fi
+	rm -f "$ACTIVE_RUN_FILE"
+}
 
 # --- helpers
 
@@ -5328,6 +5480,7 @@ env_summary() {
 # --- down
 
 down() {
+	reap_active_run
 	log "down: teardown"
 	if kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null; then
 		kind delete cluster --name "$KIND_CLUSTER" > "$LOGS_DIR/kind-delete.log" 2>&1 || true
@@ -5481,6 +5634,9 @@ mkdir -p "$WORK" "$LOGS_DIR"
 
 case "$ACTION" in
 	up)
+		reap_active_run
+		register_active_run up
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env up ($(date -u +%FT%TZ)) ==="
 		{
@@ -5536,6 +5692,9 @@ case "$ACTION" in
 		highlight "== next: verify-native, verify-overlaybd, sdk-e2e, idle-e2e =="
 		;;
 	pool)
+		reap_active_run
+		register_active_run pool
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
 			|| die "cluster $KIND_CLUSTER is not up (run up first)"
@@ -5548,6 +5707,9 @@ case "$ACTION" in
 		status
 		;;
 	sdk-e2e)
+		reap_active_run
+		register_active_run sdk-e2e
+		trap 'clear_active_run' EXIT
 		kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
 			|| die "cluster $KIND_CLUSTER is not up (run up first)"
 		trap 'on_error sdk-e2e' ERR
@@ -5555,6 +5717,9 @@ case "$ACTION" in
 		trap - ERR
 		;;
 	idle-e2e)
+		reap_active_run
+		register_active_run idle-e2e
+		trap 'clear_active_run' EXIT
 		kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
 			|| die "cluster $KIND_CLUSTER is not up (run up first)"
 		trap 'on_error idle-e2e' ERR
@@ -5562,6 +5727,9 @@ case "$ACTION" in
 		trap - ERR
 		;;
 	verify-native)
+		reap_active_run
+		register_active_run verify-native
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env verify-native ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-native' ERR
@@ -5570,6 +5738,9 @@ case "$ACTION" in
 		stage_summary
 		;;
 	verify-resourceaware)
+		reap_active_run
+		register_active_run verify-resourceaware
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env verify-resourceaware ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-resourceaware' ERR
@@ -5578,6 +5749,9 @@ case "$ACTION" in
 		stage_summary
 		;;
 	verify-overlaybd)
+		reap_active_run
+		register_active_run verify-overlaybd
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env verify-overlaybd ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-overlaybd' ERR
@@ -5586,6 +5760,9 @@ case "$ACTION" in
 		stage_summary
 		;;
 	verify-credential-bound)
+		reap_active_run
+		register_active_run verify-credential-bound
+		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
 		log "=== fast-sandbox-env verify-credential-bound ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-credential-bound' ERR
