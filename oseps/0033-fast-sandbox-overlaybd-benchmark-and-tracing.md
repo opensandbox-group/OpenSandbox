@@ -148,7 +148,9 @@ flowchart TB
 ### Notes/Constraints/Caveats
 
 - **OverlayBD `poolSizeGB` exact match constraint**: As documented in `manifests/charts/fast-sandbox/values.yaml`, `runtime.oci.poolSizeGB` must exactly equal the built template's `rootfsSizeMiB / 1024` (e.g., `2` for 2 GiB); even a larger pool device causes a silent fallback to cold device creation. `osb bench env up` enforces this invariant automatically from the benchmark profile and fails fast on mismatch.
-- **Two distinct node-side OverlayBD caches**: `runtime.oci.cacheSizeGB` (`OVERLAYBD_CACHE_SIZE_GB`) governs the `overlaybd-ublkd` block cache, whereas `FAST_SANDBOX_OCI_BLOB_CACHE_SIZE_BYTES` governs `fsb-vm`'s local checkpoint blob cache (`oci/blobs/sha256`, capped at 4096 files and 1 GiB free-space floor). Both must be pinned in the profile and audited separately.
+- **Ephemeral registry TLS trust without rebuilding release images**: Unlike local dev scripts that bake a custom `ca.crt` into rebuilt container images, `osb bench` deploys pre-built release images onto remote clusters. Furthermore, `sandboxtemplate-builder` Pods spawned dynamically by `fsb-controller` currently whitelist only scheduling fields (`tolerations`, `affinity`, `topologySpreadConstraints`). Phase 1 therefore adds an explicit `registryCABundleSecret` contract to the `fast-sandbox` chart and controller so the ephemeral registry's CA bundle is mounted into `fsb-fastlet`, `firecracker-runtime` (`overlaybd-ublkd`), and `sandboxtemplate-builder` Pods without rebuilding images.
+- **Synchronous Create vs. asynchronous CRD-reconciled Pause/Resume/Snapshot**: In `fast-sandbox`, `CreateSandbox` synchronously invokes `fastlet` so the VM is running when the RPC returns; by contrast, `PauseSandbox`, `ResumeSandbox`, and `CreateSandboxSnapshot` (`sandbox_state.go`, `snapshot.go`) are compare-and-set CRD intent patches that return in milliseconds while the controller reconciles asynchronously. Both latency definitions (§4.1) and W3C trace propagation (§5.2) explicitly account for this split.
+- **Two distinct node-side OverlayBD caches**: `runtime.oci.cacheSizeGB` (`OVERLAYBD_CACHE_SIZE_GB`) governs the `overlaybd-ublkd` block cache, whereas `FAST_SANDBOX_OCI_BLOB_CACHE_SIZE_BYTES` governs `fsb-vm`'s local checkpoint blob cache (`oci/blobs/sha256`, capped at 4096 files and 1 GiB free-space floor). Both must be pinned in the profile, audited separately, and cleared together in `cache-evicted` tests.
 - **Client polling bias**: SDK default readiness polling (`200ms`) masks sub-100ms warm create latencies. `osb bench` defaults to `10ms` readiness polling (matching the `fast-sandbox-ack-2026-10-08.json` methodology) and records the exact polling interval in the report metadata.
 - **In-guest `execd` trace export**: Exporting OTLP traces directly from inside Firecracker microVMs (`execd`) depends on guest egress rules permitting traffic to the in-cluster OTel Collector. When egress policies restrict guest outbound traffic, `execd` tracing is optional; the `fastlet-proxy` outbound client span still brackets the exact `execd` round-trip latency without requiring guest egress exemptions.
 
@@ -157,10 +159,12 @@ flowchart TB
 | Risk | Mitigation |
 |---|---|
 | Privileged `kubeconfig` or node-prep accidentally mutates a shared/production cluster | `osb bench env up` installs into dedicated/explicitly named namespaces, labels all resources with `opensandbox.io/bench-run=<id>`, and keeps `--prepare-nodes` off by default (read-only preflight unless explicitly opted in). |
-| 100% OTel trace sampling distorts P99 latency under high-concurrency or high-density load | Use async `BatchSpanProcessor` with bounded queues (`drop` on overflow, never block request paths), run OTel Collector on a non-runtime control node, and support configurable sampling (`always_on` for low/medium concurrency suites, `parentbased_traceidratio` + tail-sampling for `high-density-soak`). |
-| `fsb-vm` short-lived CLI process exits before async OTLP batch flush completes | `fsb-vm` explicitly calls `provider.ForceFlush(ctx)` with a short bounded timeout (e.g., `200ms`) before process exit, or flushes to the local node OTel agent over loopback/UDS so flushing adds sub-millisecond overhead and never blocks sandbox creation on collector failure. |
-| Benchmark runner Pod contends with Firecracker VMs for CPU/memory | Schedule the in-cluster runner Pod and OTel Collector via `nodeAffinity` / `podAntiAffinity` away from `fast-sandbox.io/firecracker-node=true` runtime nodes whenever control/utility nodes are available, and record runner placement in report metadata. |
-| Cross-node resume fails on heterogeneous CPU clusters | `preflight` checks CPU family/model/stepping homogeneity across candidate nodes; if heterogeneous, `Full` cross-node resume is flagged as unsupported while `RootfsOnly` cross-node resume still executes. |
+| Ephemeral `registry:2` runs out of disk or bottlenecks on slow backing storage during multi-round Full checkpoints | Default ephemeral registry storage budget to `200Gi` backed by fast local NVMe (`hostPath` / fast `StorageClass`), enable `REGISTRY_STORAGE_DELETE_ENABLED=true`, and run registry garbage collection / reset between major suites so checkpoint I/O reflects OverlayBD rather than slow disk or `disk full` failures. |
+| Single-replica `opensandbox-server` (`replicaCount: 1`) saturates before `fast-sandbox` at high concurrency | Monitor `opensandbox-server` and `ingress-gateway` CPU/RSS/request queueing alongside node components, and report both `t_server_total` and trace-extracted `t_fastpath_grpc` so `server`-side queueing is cleanly separated from `FastPath`/`fastlet` scheduling latency. |
+| 100% OTel trace sampling distorts P99 latency or overwhelms the ephemeral trace store during long/high-density runs | Bind sampling policy per suite: `1.0` (100%) on bounded latency-attribution suites (`schedule-burst`, `pause-resume`, `rootfs-only-restore`, `wake-storm`), and low head-sampling (`0.02`) + Collector tail-sampling (retaining slow/error traces) on sustained capacity suites (`steady-churn`, `high-density-soak`), with non-blocking drop-on-overflow queues. |
+| `fsb-vm` short-lived CLI process exits before async OTLP batch flush completes | `fsb-vm` explicitly calls `provider.ForceFlush(ctx)` with a short bounded timeout (e.g., `200ms`) before process exit, or flushes to a node-local OTel Collector agent so flushing adds sub-millisecond overhead and never blocks sandbox creation on collector failure. |
+| Benchmark runner Pod contends with Firecracker VMs for CPU/memory | Schedule the in-cluster runner Pod, ephemeral `registry:2`, and OTel stack via `nodeAffinity` / `podAntiAffinity` away from `fast-sandbox.io/firecracker-node=true` runtime nodes whenever control/utility nodes are available, and record placement in report metadata. |
+| Cross-node resume fails on heterogeneous CPU clusters or silently lands back on the source node | `preflight` checks CPU family/model/stepping homogeneity across candidate nodes; cross-node tests isolate the source node's `fastlet` from `FastPath` placement (rather than relying on `kubectl cordon`, which `FastPath` ignores) and assert `before_node != after_node` on every sample. |
 
 ## Design Details
 
@@ -202,8 +206,8 @@ For CI and pre-release automation, `osb bench run --provision --teardown` chains
    - Launches a short-lived inspection Job/DaemonSet on candidate nodes to probe `/dev/kvm`, cgroup v2, `ublk_drv` kernel module availability, `StateRoot` mount filesystem type and `cp --reflink=always` capability, `FAST_SANDBOX_SNAPSHOT_SPILL_DIR` availability/size, and host CPU identity (`family/model/stepping`).
    - Captures node capacity, kernel version, OS image, containerd version, and Kubernetes version into the environment fingerprint.
 2. **Supporting Infrastructure Stage**:
-   - **Ephemeral In-Cluster OCI Registry**: Always deploys an ephemeral in-cluster HTTPS `registry:2` (backed by benchmark-scoped storage and a generated self-signed CA) in the benchmark namespace, and automatically provisions `fast-sandbox-agent-registry` and `template_oci_publish_secret` (no external/real OCI registry is required; all published templates and checkpoints are discarded cleanly on `osb bench env down`).
-   - **In-Cluster OTel Stack**: Deploys an OpenTelemetry Collector + ephemeral trace backend (Jaeger v2 or Grafana Tempo single-binary) in the benchmark observability namespace (`opensandbox-bench-obs`), exposing OTLP gRPC (`4317`) and HTTP query APIs inside the cluster.
+   - **Ephemeral In-Cluster OCI Registry**: Always deploys an ephemeral in-cluster HTTPS `registry:2` (with `REGISTRY_STORAGE_DELETE_ENABLED=true`, backed by a fast 200 GiB NVMe `hostPath` or explicit high-IOPS `StorageClass`, and a generated benchmark-scoped CA) in the benchmark namespace. Provisions `fast-sandbox-agent-registry`, `template_oci_publish_secret`, and `registryCABundleSecret` so `fsb-fastlet`, `firecracker-runtime` (`overlaybd-ublkd`), and `sandboxtemplate-builder` Pods trust the ephemeral registry CA without rebuilding release images. An optional `imageRegistryMirror` in `profile.yaml` may mirror read-only upstream component/base images in air-gapped clusters, while 100% of benchmark template and snapshot reads/writes hit the ephemeral in-cluster `registry:2` (with garbage collection/reset between suites and full teardown on `osb bench env down`).
+   - **In-Cluster OTel Stack**: Deploys an OpenTelemetry Collector (with `memory_limiter`, batching, and optional `tail_sampling` for soak suites) + ephemeral trace backend (Jaeger v2 or Grafana Tempo single-binary) in the benchmark observability namespace (`opensandbox-bench-obs`), exposing OTLP gRPC (`4317`) and HTTP query APIs inside the cluster.
    - **Redis (conditional)**: Deployed when `wake-storm` is enabled in the profile.
 3. **OpenSandbox + `fast-sandbox` Helm Stage**:
    - Installs/upgrades `manifests/charts/opensandbox` (or individual sub-charts `base`, `fast-sandbox`, `server`, `ingress-gateway`) with profile-pinned values:
@@ -225,7 +229,7 @@ For CI and pre-release automation, `osb bench run --provision --teardown` chains
 |---|---|---|
 | `schedule-burst` | Waves of concurrent `create -> ping -> first-exec -> delete` at stepped concurrency (e.g., `1, 4, 8, 16, 32, 64`) | Max scheduling throughput (sandboxes/s), P50/P95/P99 warm create latency, `ublkd` warm-pool hit-to-miss cliff when burst > `poolHigh`, Top-K candidate contention, `ResourceAware` admission behavior |
 | `steady-churn` | Sustained target RPS `create -> short workload -> delete` for a fixed duration (e.g., 10–15 min) | Steady-state tail latency, `deleting` slot backlog (`fsb-vm delete` / `ublkd` teardown speed), `blob-cache` & `shared_snapfiles` stability, memory/FD leak detection |
-| `pause-resume` | Matrix of Full checkpoint `create -> write state -> pause -> resume -> verify state`: (a) same-node warm cache, (b) same-node cache-evicted (`trim-blob-cache` + clear `shared_snapfiles`), (c) deterministic cross-node resume, (d) dirty-upper size ladder (`0MiB / 16MiB / 256MiB`), (e) long-chain multi-round pause/resume (`25+` rounds crossing `defaultMaxRootfsLayers=24` squash cliff) | Stop-the-world pause interruption window vs. async publish time, on-demand lazy-load penalty on first read, layer-chain squash spike magnitude |
+| `pause-resume` | Matrix of Full checkpoint `create -> write state -> pause -> resume -> verify state`: (a) same-node warm cache, (b) same-node cache-evicted (evicting `fsb-vm` `blob-cache`, `manifest-cache`, `shared_snapfiles`, **and** `overlaybd-ublkd` block cache while re-warming `/v1/pool` to `poolLow` so ublk device cold-create is not conflated with storage cache misses), (c) deterministic cross-node resume (isolating/draining the source node's `fastlet` from `FastPath` placement rather than `kubectl cordon`, and asserting `before_node != after_node`), (d) dirty-upper size ladder (`0MiB / 16MiB / 256MiB`), (e) long-chain multi-round pause/resume (`25+` rounds crossing `defaultMaxRootfsLayers=24` squash cliff) | Stop-the-world pause interruption window vs. async publish time, true Registry HTTP range-read lazy-load penalty on uncached blocks, layer-chain squash spike magnitude |
 | `rootfs-only-restore` | Create `RootfsOnly` snapshot (FSEP-0001) at dirty-upper ladder (`0MiB / 16MiB / 256MiB`), then create new sandboxes from that snapshot across: (a) first cold materialize vs. warm materialized `shared_snapfiles` read-lock path, (b) concurrent fan-out (N sandboxes created simultaneously from one `RootfsOnly` snapshot), (c) cross-node create, (d) OSEP-0028 CPU/memory override create (`verifyBootMachine`), verifying disk state persistence and fresh `execd` readiness | `RootfsOnly` capture interruption (`FIFREEZE`->`FITHAW`) vs. Full pause, cold-boot restore latency (`t_api_ack` -> `t_first_ping` guest kernel+init+`execd` boot gap), lockless materialized snapfiles fan-out scaling, cross-node/override portability |
 | `wake-storm` | Auto-pause a fleet of opted-in sandboxes (`lifecycle.idlePolicy`), then fire concurrent ingress traffic (both 1-request-per-sandbox fan-out and N-requests-to-1-sandbox singleflight bursts) | Wake-to-response P50/P95/P99, singleflight coalescing ratio, `--wake-park-max` / `--wake-restore-max` 503 shed rate, park-budget `Y` timeout rate, SDK retry convergence time |
 | `high-density-soak` | Pack nodes to high target sandbox density (e.g., 50% / 80% / 100% of `ResourceAware` overcommit capacity), run periodic in-sandbox exec + outbound egress HTTP/TLS traffic + ingress proxy requests + background churn | Host CPU/mem/I/O saturation, `fastlet` / `egress` / `fastlet-proxy` resource scaling per active sandbox, tail-latency degradation under high density |
@@ -238,7 +242,8 @@ All latency distributions are reported as **P50, P90, P95, P99, Max, and Mean** 
 
 | Path | Layer | Metrics / Stages |
 |---|---|---|
-| **Create / Resume** | Client black-box | `t_api_ack` (API/FastPath gRPC return; sandbox is already running on completion), `t_first_ping` (first `200` from guest `/ping` via ingress gateway — replaces status-poll `Running` tracking, which only reflects control-plane projection lag), `t_first_exec` (first `execd` command + disk read verification) |
+| **Create (Synchronous)** | Client black-box | `t_api_ack` (`CreateSandbox` gRPC return; VM is already running on completion, plus trace-split `t_server_overhead` vs. `t_fastpath_grpc`), `t_first_ping` (first `200` from guest `/ping` via ingress gateway — replaces status-poll `Running` tracking), `t_first_exec` (first `execd` command + disk read verification) |
+| **Resume (Async CRD Intent)** | Client black-box | `t_api_ack` (CAS patch of `spec.state=Running` only; VM is **not** yet restored), `t_first_ping` (true end-to-end resume completion once async controller reconciliation + VM restore + ingress route convergence serve `/ping` `200`), `t_first_exec` (state-verified command + disk/memory marker check) |
 | **Create / Resume** | Control Plane (`FastPath`) | `candidate_selection`, `crd_create`, `idempotency_read`, `fastlet_create`, `assignment_projection_wait` (`fast_sandbox_create_stage_latency_seconds`) |
 | **Create / Resume (`Full`)** | Fastlet & OverlayBD (`fsb-vm` + Firecracker) | `validation`, `admission`, `runtime_ensure`, `oci_prepare` (`ping`, `resolveTpl`, `cred`, `resolveImg`, `snapfiles`, `vmmCheck`, `rootfsCfg`, `ublkdAcquire`), `launch` (`waitSocket`), `configure`, `boot` (`snapshot/load`), `data_plane_ready` |
 | **Restore / Create (`RootfsOnly` Snapshot)** | Fastlet, OverlayBD & Guest Cold Boot | `oci_prepare` (highlighting `acquire_snapfiles`: first cold materialize vs. read-lock `tryAcquireMaterializedRootfsOnly` bypassing `ublkd.List`/ext4 mount), `pin_kernel` + jailer `rootfs-kernel` bind mount, `rootfs_boot_configure` (machine-config/boot-source/drives/NIC/vsock + OSEP-0028 CPU/memory override `verifyBootMachine`), `rootfs_boot_start` (`InstanceStart`), and **`guest_boot_to_first_ping_gap`** (kernel + `guest-init` + `execd` boot time from `t_api_ack` to `t_first_ping`) |
@@ -291,7 +296,7 @@ During `high-density-soak` and high-concurrency `schedule-burst` / `steady-churn
 | **Egress (`egress` sidecar container)** | Container CPU cores & throttling, RSS memory (and per-sandbox overhead), OSEP-0010 OTel/Prometheus metrics (DNS query QPS & latency, nftables rule count & policy apply duration, MITM TLS handshake latency & active intercepted connections, policy reload errors), Pod netns socket/conntrack pressure | DNS/nftables scaling cliff as per-Pod sandbox count grows, MITM TLS CPU bottleneck under concurrent outbound traffic |
 | **Fastlet-Proxy (`fsb-fastlet-proxy` container)** | Container CPU cores & throttling, RSS memory, active proxied connections/streams, request throughput & proxy forwarding latency overhead (`fastlet-proxy` span duration minus `execd` duration), route table size & route-sync latency, 5xx/upstream-reset counts | Proxy CPU/memory saturation, connection-pool exhaustion, stale route errors during high churn or wake-storms |
 
-Also capture **`firecracker-runtime` (`agent` + `overlaybd-ublkd` + `janitor`)** CPU/RSS/throttling so node-daemon overhead is separated from per-Pod `fastlet` overhead.
+Also capture **`firecracker-runtime` (`agent` + `overlaybd-ublkd` + `janitor`)** CPU/RSS/throttling (separating node-daemon overhead from per-Pod `fastlet` overhead) and **`opensandbox-server` + `ingress-gateway`** CPU/RSS/request-queueing latency (detecting single-replica `server` saturation so control-plane bottlenecks above `FastPath` are never misattributed to `fast-sandbox`).
 
 #### 4.6 Correctness Verification and Leak Audit
 
@@ -307,8 +312,8 @@ Every suite asserts functional correctness and cleanliness; failures mark the ru
 |---|---|---|
 | `osb bench` Runner | Not implemented | Start root span per benchmark operation, inject W3C `traceparent` into all HTTP requests (Server and Ingress), record `trace_id` in per-sample results |
 | `opensandbox-server` (Python) | No `TracerProvider` or gRPC trace propagation | Initialize OTLP tracer (gated by `OTEL_EXPORTER_OTLP_*`), extract `traceparent` on FastAPI ingress, create lifecycle spans (`server.sandbox.create/pause/resume/delete`), inject `traceparent` into `FastPath` gRPC metadata |
-| `ingress-gateway` (Go) | Metrics/Logs only (OSEP-0010 excluded tracing) | Initialize optional OTLP `TracerProvider`, extract `traceparent`, add spans for route lookup (`ResolveEndpoint`), OSEP-0024 request parking (`ingress.wake.park`, `ingress.wake.resume_rpc`), and upstream forwarding (`ingress.proxy.forward`), inject `traceparent` to `FastPath` gRPC and `fastlet-proxy` HTTP |
-| `fast-sandbox` `controller/FastPath` & `fastlet` & `fastlet-proxy` (Go) | `internal/observability/setup.go`, `trace.go`, `grpc.go` already exist; Create path spans exist | Verify Helm chart wires `OTEL_EXPORTER_OTLP_*` env vars to all binaries; add missing spans on **Pause / Resume / Snapshot (`Full` & `RootfsOnly`)** (`snapshot_driver.go`, `oci_checkpoint.go`, `rootfs_coordinator.go`) and **Delete** |
+| `ingress-gateway` (Go) | Metrics/Logs only (OSEP-0010 excluded tracing) | Initialize optional OTLP `TracerProvider`, extract `traceparent`, add spans for route lookup (`ResolveEndpoint`), OSEP-0024 request parking (`ingress.wake.park`, `ingress.wake.resume_rpc` with **OTel Span Links** connecting coalesced parked requests to the active singleflight resume trace), and upstream forwarding (`ingress.proxy.forward`), inject `traceparent` to `FastPath` gRPC and `fastlet-proxy` HTTP |
+| `fast-sandbox` `controller/FastPath` & `fastlet` & `fastlet-proxy` (Go) | `internal/observability/setup.go`, `trace.go`, `grpc.go` exist; synchronous Create spans exist, but async `Pause`/`Resume`/`Snapshot` lose trace context across K8s Informer queues | Wire `OTEL_EXPORTER_OTLP_*` via Helm chart; persist W3C `traceparent` on `Sandbox` / `SandboxSnapshot` CR annotations (`observability.fast-sandbox.io/traceparent`) during `PauseSandbox`, `ResumeSandbox`, and `CreateSandboxSnapshot` so controller reconcilers extract and continue the caller's trace across async reconciliation into `fastlet`; add missing spans on **Pause / Resume / Snapshot (`Full` & `RootfsOnly`)** and **Delete** |
 | `fast-sandbox` `fsb-vm` (Go CLI subprocess) | **Trace breaks at `exec.Command("fsb-vm", ...)`**; timing only printed to stderr | Propagate W3C `TRACEPARENT` (and `TRACESTATE`) env var from `fastlet` into `fsb-vm`; initialize `observability.Configure` in `fsb-vm` and emit child spans for `fsb-vm create` (`ping`, `resolve_tpl`, `cred`, `resolve_img`, `snapfiles`, `vmm_check`, `rootfs_cfg`, `ublkd_acquire`) and `fsb-vm pack` (`pack_rootfs`, `capture_snapfiles`, `seal_upper`, `squash_rootfs_tail`) |
 | `execd` (Go, in-guest) | Metrics/Logs only (OSEP-0010) | Optional lightweight W3C `traceparent` extraction + HTTP/exec span when `OTEL_EXPORTER_OTLP_ENDPOINT` is set; no-op by default |
 
@@ -351,7 +356,9 @@ The target end-to-end trace waterfall for a single benchmark operation links eve
                     └── [execd] execd.command.run (optional)
 ```
 
-For Pause / Snapshot (`Full` and `RootfsOnly`), new spans are added under `fastlet.snapshot.create`:
+For asynchronous CRD-reconciled operations (`PauseSandbox`, `ResumeSandbox`, `CreateSandboxSnapshot`), `FastPath` writes the active W3C `traceparent` (and `tracestate`) onto `observability.fast-sandbox.io/traceparent` when patching `Sandbox` or creating `SandboxSnapshot`. The controller reconciler (`sandbox_controller.go`, `sandboxsnapshot_controller.go`) extracts that carrier to parent its reconciliation and outbound `fastlet` RPC spans under the original `trace_id` (clearing/superseding the annotation on terminal convergence). For OSEP-0024 wake singleflight, coalesced `ingress.wake.park` spans attach an **OTel Span Link** (and `opensandbox.wake.flight_trace_id` attribute) pointing to the leader request's `ResumeSandbox` trace so every parked caller can drill down into the underlying restore waterfall.
+
+Under `fastlet.snapshot.create`, new spans cover both `Full` and `RootfsOnly` capture and publication:
 - `fastlet.firecracker.snapshot.capacity_check`
 - `fastlet.firecracker.snapshot.lock_wait` (`snapshotMu` contention)
 - `fastlet.firecracker.snapshot.guest_freeze` / `guest_thaw` (`RootfsOnly` vsock control)
@@ -405,17 +412,18 @@ environment:
     inCluster: true
     cpuLimit: "4"
     memoryLimit: "4Gi"
+  imageRegistryMirror: "" # optional read-only mirror for base/component images in air-gapped clusters
   registry:
-    ephemeralInCluster: true # self-contained HTTPS registry:2, torn down with env down
+    ephemeralInCluster: true # self-contained HTTPS registry:2 + CA bundle injection, torn down with env down
     image: registry:2
-    storageSize: 50Gi
+    storageSize: 200Gi # fast local NVMe hostPath or explicit high-IOPS StorageClass; GC run between suites
   redis:
     enabled: true
   tracing:
     inCluster: true
     backend: jaeger # or tempo
     sampler: parentbased_traceidratio
-    samplerArg: 1.0 # lowered automatically for high-density-soak if desired
+    defaultSamplerArg: 1.0 # 100% on bounded latency suites; overridden on sustained/soak suites below
 stack:
   chartPath: manifests/charts/opensandbox
   fastSandbox:
@@ -447,10 +455,12 @@ suites:
   steadyChurn:
     targetRps: 5
     durationSeconds: 600
+    traceSamplerArg: 0.05 # 5% head sampling + tail-sampling on slow/error traces
   pauseResume:
     modes: [warm, cache-evicted, cross-node]
     dirtyUpperMiB: [0, 16, 256]
     chainSquashRounds: 26
+    chainSquashTemplateMemoryMiB: 512 # compact RAM footprint when isolating 24-layer rootfs squash behavior
   rootfsOnlyRestore:
     dirtyUpperMiB: [0, 16, 256]
     fanoutConcurrencies: [1, 8, 16]
@@ -466,6 +476,7 @@ suites:
     targetSandboxesPerNode: 50
     durationSeconds: 900
     samplerIntervalSeconds: 2
+    traceSamplerArg: 0.02 # 2% head sampling + tail-sampling on slow/error traces to avoid observer effect
 ```
 
 Structured JSON report (`schema_version: 2`, backward-aligned with `fast-sandbox-ack-2026-10-08.json`) contains:
@@ -480,8 +491,8 @@ Structured JSON report (`schema_version: 2`, backward-aligned with `fast-sandbox
 
 | Scope | Required Permissions | Purpose |
 |---|---|---|
-| Cluster-scoped (`kubeconfig` + Runner SA) | CRDs, ClusterRoles, ClusterRoleBindings (`base` chart & Runner SA); `nodes` (`get`, `list`, `watch`, `patch` for cross-node resume control) | Full-stack chart installation, node preflight, deterministic cross-node tests |
-| Namespace-scoped (`opensandbox-system`, `opensandbox-dataplane`, `opensandbox-bench*`) | Deployments, DaemonSets, Jobs, Services, ConfigMaps, Secrets, `SandboxPool`/`Sandbox`/`SandboxTemplate`/`SandboxSnapshot` CRs; `pods/exec`, `pods/log` | Stack lifecycle, launching and streaming from the in-cluster Bench Bastion/Runner Pod, pulling `run-bundle/` over `exec` tar stream, controlled `trim-blob-cache` injection (all `/metrics`, `/v1/pool`, and Trace API calls stay inside the cluster from the Runner Pod) |
+| Cluster-scoped (`kubeconfig` + Runner SA) | CRDs, ClusterRoles, ClusterRoleBindings (`base` chart & Runner SA); `nodes` (`get`, `list`, `watch`) | Full-stack chart installation, node hardware/CPU preflight |
+| Namespace-scoped (`opensandbox-system`, `opensandbox-dataplane`, `opensandbox-bench*`) | Deployments, DaemonSets, Jobs, Services, ConfigMaps, Secrets, `SandboxPool`/`Sandbox`/`SandboxTemplate`/`SandboxSnapshot` CRs; `pods` (`get`, `list`, `delete`), `pods/exec`, `pods/log` | Stack lifecycle, launching and streaming from the in-cluster Bench Bastion/Runner Pod, pulling `run-bundle/` over `exec` tar stream, isolating source `fastlet` Pods for deterministic cross-node resume, and clearing all node-side caches for `cache-evicted` tests |
 | Privileged Pod (opt-in only) | Only used when `--prepare-nodes` is explicitly passed or when collecting host-level `/proc` / `ublk` / `StateRoot` stats via a read-only host-metrics DaemonSet | Keep default runs strictly read-only on host filesystems |
 
 ## Test Plan
@@ -524,5 +535,5 @@ Structured JSON report (`schema_version: 2`, backward-aligned with `fast-sandbox
   - OTel tracing in `server`, `ingress-gateway`, `execd`, and `fast-sandbox` defaults to disabled (no-op) unless `OTEL_EXPORTER_OTLP_*` or Helm `tracing.enabled=true` is explicitly set.
   - Existing `fast-sandbox` Prometheus metrics and stderr timing logs remain intact during Phase 1 so existing scripts and dashboards continue working while teams transition to trace-based drill-down.
 - **Phased rollout**:
-  - **Phase 1 (this OSEP)**: `osb bench` plugin (preflight, full-stack OverlayBD provisioning, 5 OverlayBD suites, high-density load sampling, automated trace drill-down, `compare`) + end-to-end OTel tracing completion across OpenSandbox and `fast-sandbox` OverlayBD paths.
+  - **Phase 1 (this OSEP)**: `osb bench` plugin (preflight, full-stack OverlayBD provisioning with CA-injected ephemeral registry, 6 OverlayBD suites, high-density load sampling, automated trace drill-down, `compare`) + end-to-end OTel tracing completion (including async CRD annotation carriers and wake singleflight Span Links) across OpenSandbox and `fast-sandbox` OverlayBD paths.
   - **Phase 2 (follow-up)**: Extend `osb bench` profiles to cover `fast-sandbox` Native S3/DART, classic Kubernetes (`BatchSandbox` + `Pool`), and Docker runtimes.
