@@ -4906,8 +4906,8 @@ bench_require_egress_mode() {
 		|| fail "bench: live Pod modes differ from expected $expected (or no Pods found)"
 }
 
-# OSEP-0023 cost measurements (credential-bound-bench.sh): M1/M2 reports
-# under $WORK/bench/<leg>; runs in either interception leg.
+# OSEP-0023 cost measurements (credential-bound-bench.sh): M1-M4 reports
+# under $WORK/bench/<leg>; runs in either leg, M3 only in credential-bound.
 bench_credential_bound() {
 	# Failed preflights must never leave reports from a previous invocation.
 	rm -rf "${BENCH_REPORT_DIR:-$WORK/bench/${EGRESS_INTERCEPTION_MODE:-default}}"
@@ -5626,7 +5626,9 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
   bench-credential-bound
                    OSEP-0023 cost measurements in the current leg
                    (EGRESS_INTERCEPTION_MODE): M1 create latency, M2 guest
-                   TLS connect latency per path;
+                   TLS connect latency per path, M3 egress memory per held
+                   bound connection (credential-bound only, bench-only Pool
+                   render, default Pool re-applied after), M4 egress CPU;
                    JSON reports under $WORK/bench/<leg>; requires `up`
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
   status   nodes / pods / pool / DART P2P counters / RustFS / OpenSandbox health

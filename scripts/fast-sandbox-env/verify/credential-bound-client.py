@@ -37,10 +37,13 @@ above still applies to once/hold):
         times and first-response times (client-side, milliseconds), plus
         tallies of presented leaf digests, origin credential codes and
         failure kinds.
+  hold-many  --conns connections, each verified by one request and then kept
+        open: <dir>/status.json once all are opened, wait for <dir>/go, then
+        one more request per held socket and close -> <dir>/done.json.
 
 Output: a single line ``CBV-RESULT <json>`` (once), ``CBV-BENCH <json>``
 (handshake-bench, also written to --out when given) or the JSON files
-(hold). Bench output carries only digests, counts and timings.
+(hold, hold-many). Bench output carries only digests, counts and timings.
 Exit status: 0 when every request succeeded, 3 otherwise, 2 on usage errors.
 """
 
@@ -109,9 +112,10 @@ class Connection(object):
 
     connects = 0
 
-    def __init__(self, args, multi=False):
+    def __init__(self, args, multi=False, ctx=None):
         self.args = args
         self.multi = multi
+        self.ctx = ctx  # shared context (hold-many); None = one per connect
         self.sock = None
         self.socket_id = uuid.uuid4().hex
         self.buf = b""
@@ -122,7 +126,7 @@ class Connection(object):
         if Connection.connects and not self.multi:
             raise ProbeError("connect", "reconnect_forbidden")
         Connection.connects += 1
-        ctx = client_context(self.args)
+        ctx = self.ctx or client_context(self.args)
         start = time.perf_counter()
         try:
             raw = socket.create_connection((self.args.ip, self.args.port), timeout=self.args.connect_timeout)
@@ -337,6 +341,18 @@ def client_context(args):
     return ctx
 
 
+def raise_nofile(want):
+    """Best effort: lift the soft fd limit for hold-many (never above hard)."""
+    try:
+        import resource  # noqa: PLC0415 - POSIX only
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = want if hard == resource.RLIM_INFINITY else min(want, hard)
+        if soft != resource.RLIM_INFINITY and soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except (ImportError, ValueError, OSError):
+        pass
+
+
 def run_handshake_bench(args):
     tcp, handshake, request = [], [], []
     leaves, creds, errors = {}, {}, {}
@@ -380,9 +396,71 @@ def run_handshake_bench(args):
     return 0 if not errors else 3
 
 
+def run_hold_many(args):
+    if not os.path.isdir(args.dir):
+        os.makedirs(args.dir)
+    raise_nofile(args.conns + 64)
+    held, leaves, creds, errors = [], {}, {}, {}
+    started = time.time()
+    # One context for every held socket: a context per connection keeps its
+    # CA store alive per socket and inflates guest memory at large K.
+    ctx = client_context(args)
+    phase = "holding"
+    try:
+        for seq in range(1, args.conns + 1):
+            conn = Connection(args, multi=True, ctx=ctx)
+            try:
+                conn.connect()
+                tally(leaves, conn.info.get("leaf_sha256") or "none")
+                tally(creds, origin_cred(origin_response(conn.request(args.tag, 1))))
+                held.append(conn)
+            except ProbeError as exc:
+                tally(errors, error_key(exc))
+                conn.close()
+            except OSError as exc:  # e.g. EMFILE outside connect/request
+                tally(errors, error_key(classify("hold", exc)))
+                conn.close()
+    except MemoryError:
+        # Report what is held instead of dying without a status file.
+        tally(errors, "hold/memory_error")
+        phase = "aborted"
+    status = {
+        "v": PROTOCOL_VERSION,
+        "mode": "hold-many",
+        "phase": phase,
+        "target": args.conns,
+        "held": len(held),
+        "failed": args.conns - len(held),
+        "open_s": round(time.time() - started, 3),
+        "leaf_sha256": leaves,
+        "origin_cred": creds,
+        "errors": errors,
+    }
+    write_json(os.path.join(args.dir, "status.json"), status)
+    deadline = time.time() + args.wait_timeout
+    go = os.path.join(args.dir, "go")
+    released = True
+    while not os.path.exists(go):
+        if time.time() >= deadline:
+            released = False
+            break
+        time.sleep(0.5)
+    alive, closed = 0, {}
+    for conn in held:
+        try:
+            origin_response(conn.request(args.tag, 2))
+            alive += 1
+        except ProbeError as exc:
+            tally(closed, error_key(exc))
+        conn.close()
+    done = dict(status, phase="done", released=released, alive_at_release=alive, release_errors=closed)
+    write_json(os.path.join(args.dir, "done.json"), done)
+    return 0 if not errors and not closed and released else 3
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("mode", choices=("once", "hold", "handshake-bench", "version"))
+    parser.add_argument("mode", choices=("once", "hold", "handshake-bench", "hold-many", "version"))
     parser.add_argument("--host", default="")
     parser.add_argument("--ip", default="")
     parser.add_argument("--port", type=int, default=443)
@@ -395,6 +473,7 @@ def parse_args(argv):
     parser.add_argument("--wait-timeout", type=float, default=1200.0)
     parser.add_argument("--samples", type=int, default=200)
     parser.add_argument("--interval-ms", type=int, default=0)
+    parser.add_argument("--conns", type=int, default=100)
     parser.add_argument("--out", default="")
     args = parser.parse_args(argv)
     if args.mode != "version":
@@ -404,10 +483,12 @@ def parse_args(argv):
             parser.error("--tag must be [A-Za-z0-9._-]")
         if args.count < 1 or args.count > 10:
             parser.error("--count must be 1..10")
-        if args.mode == "hold" and not args.dir:
+        if args.mode in ("hold", "hold-many") and not args.dir:
             parser.error("%s requires --dir" % args.mode)
         if not 1 <= args.samples <= MAX_BENCH_CONNECTIONS:
             parser.error("--samples must be 1..%d" % MAX_BENCH_CONNECTIONS)
+        if not 1 <= args.conns <= MAX_BENCH_CONNECTIONS:
+            parser.error("--conns must be 1..%d" % MAX_BENCH_CONNECTIONS)
         if not 0 <= args.interval_ms <= 10000:
             parser.error("--interval-ms must be 0..10000")
         if args.cafile is not None and not os.path.isfile(args.cafile):
@@ -424,6 +505,8 @@ def main(argv=None):
         return run_once(args)
     if args.mode == "handshake-bench":
         return run_handshake_bench(args)
+    if args.mode == "hold-many":
+        return run_hold_many(args)
     return run_hold(args)
 
 
