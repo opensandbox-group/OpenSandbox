@@ -270,6 +270,16 @@ while (info.status.state === "Creating") {
   info = await manager.getSnapshot(snapshot.id);
 }
 
+// `mode` selects what the snapshot persists. The default "full" also
+// captures memory and process state; "rootfsOnly" keeps only the writable
+// filesystem — restoring boots a fresh sandbox and re-runs the entrypoint
+// (requires the fast-sandbox backend; a deployment that cannot produce one
+// fails the request instead of silently saving a full snapshot).
+const rootfsSnapshot = await manager.createSnapshot(sandboxId, {
+  name: "clean-baseline",
+  mode: "rootfsOnly",
+});
+
 // List all snapshots
 const page = await manager.listSnapshots();
 
