@@ -1,0 +1,25 @@
+# OpenSandbox server configuration for Docker Egress Forward Mode + agentgateway.
+# Replace <version> tags and demo credentials before use outside local testing.
+
+[server]
+host = "127.0.0.1"
+port = 8080
+api_key = "opensandbox-demo-key"
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:<version>"
+
+[docker]
+network_mode = "bridge"
+drop_capabilities = ["NET_ADMIN", "NET_RAW"]
+
+[egress]
+image = "opensandbox/egress:<version>"
+mode = "forward"
+
+[egress.upstream_proxy]
+# On Docker Desktop / OrbStack, host.docker.internal reaches a host-published port.
+# On Linux Docker Engine, use the agentgateway bridge IP or host gateway IP instead.
+url = "http://host.docker.internal:3128"
+authorization = "Bearer opensandbox-demo-token"

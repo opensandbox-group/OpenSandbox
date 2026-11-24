@@ -1,0 +1,31 @@
+# OpenSandbox server configuration for Kubernetes Egress Forward Mode + agentgateway.
+# Replace <version> tags and demo credentials before use outside local testing.
+
+[server]
+host = "127.0.0.1"
+port = 8080
+api_key = "opensandbox-demo-key"
+
+[runtime]
+type = "kubernetes"
+execd_image = "opensandbox/execd:<version>"
+
+[kubernetes]
+namespace = "opensandbox"
+# kubeconfig_path = "/absolute/path/to/kubeconfig"  # optional when running in-cluster
+workload_provider = "batchsandbox"                  # or "agent-sandbox"
+sandbox_create_timeout_seconds = 120
+
+[egress]
+image = "opensandbox/egress:<version>"
+mode = "forward"
+
+[egress.upstream_proxy]
+# Option 1: Kubernetes Gateway API deployment (kubernetes/gateway-api.yaml)
+url = "http://opensandbox-egress.opensandbox.svc.cluster.local:3128"
+authorization = "Bearer opensandbox-demo-token"
+
+# Option 2: Standalone outer-HTTPS deployment (kubernetes/standalone-https.yaml)
+# url = "https://agentgateway-standalone.opensandbox.svc.cluster.local:3128"
+# authorization = "Bearer opensandbox-demo-token"
+# ca_secret_name = "gateway-ca"

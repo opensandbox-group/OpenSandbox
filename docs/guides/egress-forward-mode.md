@@ -5,7 +5,7 @@ description: Relay every sandbox TCP connection to a centralized egress gateway 
 
 # Egress Forward Mode
 
-Forward mode ([OSEP-0030](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0030-egress-upstream-proxy-forward-mode.md)) hands egress policy to a centralized gateway such as [agentgateway](https://github.com/agentgateway/agentgateway). OpenSandbox only guarantees that sandbox traffic reaches the gateway and cannot bypass it. The gateway decides, per connection, whether to pass TLS through, terminate and inspect it, inject credentials, or deny.
+Forward mode ([OSEP-0030](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0030-egress-upstream-proxy-forward-mode.md)) hands egress policy to a centralized gateway such as [agentgateway](https://github.com/agentgateway/agentgateway) (see the [Agentgateway Egress example](/examples/agentgateway-egress) for runnable Docker and Kubernetes setups). OpenSandbox only guarantees that sandbox traffic reaches the gateway and cannot bypass it. The gateway decides, per connection, whether to pass TLS through, terminate and inspect it, inject credentials, or deny.
 
 ::: warning
 This release supports the Docker bridge runtime and Kubernetes non-pooled workloads (`BatchSandbox` template mode and `AgentSandbox`). Kubernetes pool mode (`extensions.poolRef`) and Fast Sandbox are rejected until follow-up phases.
