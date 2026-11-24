@@ -15,11 +15,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/spf13/cobra"
@@ -225,7 +227,10 @@ func (a *App) newRunCmd() *cobra.Command {
 				}
 				if teardown {
 					defer func() {
-						if _, downErr := prov.Down(ctx, prof, provOpts); downErr != nil {
+						// Use an independent bounded context so cancellation/timeout still tears down the environment.
+						downCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+						defer cancel()
+						if _, downErr := prov.Down(downCtx, prof, provOpts); downErr != nil {
 							if retErr == nil {
 								retErr = fmt.Errorf("env down: %w", downErr)
 							} else {
@@ -251,7 +256,10 @@ func (a *App) newRunCmd() *cobra.Command {
 			}
 			if !keepRunner {
 				defer func() {
-					if delErr := rem.DeleteRunnerPod(ctx, ns, podName); delErr != nil {
+					// Use an independent bounded context so Ctrl-C or worker timeout still cleans up the Runner Pod.
+					delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					if delErr := rem.DeleteRunnerPod(delCtx, ns, podName); delErr != nil {
 						a.Logger.Warn("failed to delete runner pod", "namespace", ns, "pod", podName, "error", delErr)
 					}
 				}()
@@ -286,14 +294,16 @@ func (a *App) newRunCmd() *cobra.Command {
 				return err
 			}
 
+			effectiveServer := serverDomain
+			if effectiveServer == "" {
+				effectiveServer = defaultServerDomain(prof)
+			}
 			workerArgs := []string{
 				"worker", "run",
 				"--profile", runner.DefaultRemoteProfilePath,
 				"--suite", strings.Join(suiteNames, ","),
 				"--output", runner.DefaultRemoteBundleDir,
-			}
-			if serverDomain != "" {
-				workerArgs = append(workerArgs, "--server", serverDomain)
+				"--server", effectiveServer,
 			}
 			if apiKey != "" {
 				if err := rem.InjectBytes(ctx, ns, podName, []byte(apiKey), runner.DefaultRemoteAPIKeyPath, 0o600); err != nil {
@@ -531,8 +541,13 @@ func (a *App) newWorkerCmd() *cobra.Command {
 				resolvedAPIKey = strings.TrimSpace(string(rawKey))
 			}
 
+			resolvedServer := serverDomain
+			if resolvedServer == "" {
+				resolvedServer = defaultServerDomain(prof)
+			}
+
 			sdkCfg := opensandbox.ConnectionConfig{
-				Domain:   serverDomain,
+				Domain:   resolvedServer,
 				Protocol: "http",
 				APIKey:   resolvedAPIKey,
 			}
@@ -557,7 +572,7 @@ func (a *App) newWorkerCmd() *cobra.Command {
 	runWorkerCmd.Flags().StringVar(&profilePath, "profile", "", "Path to BenchmarkProfile YAML")
 	runWorkerCmd.Flags().StringVar(&suitesFlag, "suite", "all", "Comma-separated suite names or 'all'")
 	runWorkerCmd.Flags().StringVar(&outputDir, "output", "/tmp/run-bundle", "Output directory inside Runner Pod")
-	runWorkerCmd.Flags().StringVar(&serverDomain, "server", "opensandbox-server.opensandbox-system.svc:8080", "In-cluster opensandbox-server host:port")
+	runWorkerCmd.Flags().StringVar(&serverDomain, "server", "", "In-cluster opensandbox-server host:port (defaults to opensandbox-server.<systemNamespace>.svc:8080)")
 	runWorkerCmd.Flags().StringVar(&apiKey, "api-key", "", "OpenSandbox API key")
 	runWorkerCmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "Path to file containing OpenSandbox API key (preferred over --api-key)")
 	runWorkerCmd.Flags().StringVar(&runID, "run-id", "", "Benchmark run identifier")
@@ -574,6 +589,14 @@ func (a *App) newVersionCmd() *cobra.Command {
 			version.Print(cmd.OutOrStdout(), "opensandbox-bench")
 		},
 	}
+}
+
+func defaultServerDomain(prof *profile.BenchmarkProfile) string {
+	ns := prof.Environment.SystemNamespace
+	if ns == "" {
+		ns = "opensandbox-system"
+	}
+	return fmt.Sprintf("opensandbox-server.%s.svc:8080", ns)
 }
 
 func splitCSV(v string) []string {

@@ -98,22 +98,29 @@ func WriteBytesTar(w io.Writer, entryName string, data []byte, mode int64) error
 	return nil
 }
 
-// ExtractTar safely extracts regular files and directories from a tar stream into destDir
-// using DefaultExtractLimits.
+// ExtractTar safely extracts regular files and directories from a tar stream into an empty
+// or non-existent destDir using DefaultExtractLimits.
 func ExtractTar(r io.Reader, destDir string) error {
 	return ExtractTarWithLimits(r, destDir, DefaultExtractLimits())
 }
 
-// ExtractTarWithLimits safely extracts regular files and directories from a tar stream into destDir,
-// rejecting path traversal entries, symlinks/device nodes, and archives exceeding size or entry caps.
+// ExtractTarWithLimits safely extracts regular files and directories from a tar stream into destDir.
+// It rejects non-empty or symlink destination directories, path traversal entries, symlinks/device nodes,
+// pre-existing symlinks (via os.OpenRoot + O_EXCL), and archives exceeding size or entry caps.
 func ExtractTarWithLimits(r io.Reader, destDir string, limits ExtractLimits) error {
 	absDest, err := filepath.Abs(destDir)
 	if err != nil {
 		return fmt.Errorf("resolve dest dir %q: %w", destDir, err)
 	}
-	if err := os.MkdirAll(absDest, 0o755); err != nil {
-		return fmt.Errorf("create dest dir %q: %w", absDest, err)
+	if err := ensureCleanExtractDest(absDest); err != nil {
+		return err
 	}
+
+	root, err := os.OpenRoot(absDest)
+	if err != nil {
+		return fmt.Errorf("open root %q: %w", absDest, err)
+	}
+	defer root.Close()
 
 	var (
 		entries    int
@@ -143,16 +150,10 @@ func ExtractTarWithLimits(r io.Reader, destDir string, limits ExtractLimits) err
 			return fmt.Errorf("unsafe tar entry path %q", hdr.Name)
 		}
 
-		targetPath := filepath.Join(absDest, cleanName)
-		rel, err := filepath.Rel(absDest, targetPath)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("tar entry %q escapes destination %q", hdr.Name, absDest)
-		}
-
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(targetPath, 0o755); err != nil {
-				return fmt.Errorf("create dir %q: %w", targetPath, err)
+			if err := mkdirAllInRoot(root, cleanName, 0o755); err != nil {
+				return fmt.Errorf("create dir %q: %w", cleanName, err)
 			}
 		case tar.TypeReg, tar.TypeRegA:
 			if limits.MaxEntryBytes > 0 && hdr.Size > limits.MaxEntryBytes {
@@ -162,16 +163,19 @@ func ExtractTarWithLimits(r io.Reader, destDir string, limits ExtractLimits) err
 				return fmt.Errorf("tar archive exceeds max total size (%d)", limits.MaxTotalBytes)
 			}
 
-			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
-				return fmt.Errorf("create parent dir for %q: %w", targetPath, err)
+			if parent := filepath.Dir(cleanName); parent != "." && parent != "" {
+				if err := mkdirAllInRoot(root, parent, 0o755); err != nil {
+					return fmt.Errorf("create parent dir for %q: %w", cleanName, err)
+				}
 			}
 			perm := os.FileMode(hdr.Mode).Perm()
 			if perm == 0 {
 				perm = 0o644
 			}
-			out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+			// O_EXCL inside os.Root guarantees we never follow or truncate a pre-existing symlink or duplicate entry.
+			out, err := root.OpenFile(cleanName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
 			if err != nil {
-				return fmt.Errorf("open %q: %w", targetPath, err)
+				return fmt.Errorf("create %q: %w", cleanName, err)
 			}
 
 			var src io.Reader = tr
@@ -192,14 +196,14 @@ func ExtractTarWithLimits(r io.Reader, destDir string, limits ExtractLimits) err
 			written, copyErr := io.Copy(out, src)
 			closeErr := out.Close()
 			if copyErr != nil {
-				_ = os.Remove(targetPath)
-				return fmt.Errorf("extract %q: %w", targetPath, copyErr)
+				_ = root.Remove(cleanName)
+				return fmt.Errorf("extract %q: %w", cleanName, copyErr)
 			}
 			if closeErr != nil {
-				return fmt.Errorf("close %q: %w", targetPath, closeErr)
+				return fmt.Errorf("close %q: %w", cleanName, closeErr)
 			}
 			if maxAllowed >= 0 && written > maxAllowed {
-				_ = os.Remove(targetPath)
+				_ = root.Remove(cleanName)
 				return fmt.Errorf("tar entry %q exceeded size limit (%d bytes)", hdr.Name, maxAllowed)
 			}
 			totalBytes += written
@@ -207,4 +211,50 @@ func ExtractTarWithLimits(r io.Reader, destDir string, limits ExtractLimits) err
 			return fmt.Errorf("unsupported tar entry type %q for %q", hdr.Typeflag, hdr.Name)
 		}
 	}
+}
+
+func ensureCleanExtractDest(absDest string) error {
+	info, err := os.Lstat(absDest)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if mkErr := os.MkdirAll(absDest, 0o755); mkErr != nil {
+				return fmt.Errorf("create dest dir %q: %w", absDest, mkErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("stat dest dir %q: %w", absDest, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("dest dir %q must not be a symlink", absDest)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("dest path %q exists and is not a directory", absDest)
+	}
+	existing, err := os.ReadDir(absDest)
+	if err != nil {
+		return fmt.Errorf("read dest dir %q: %w", absDest, err)
+	}
+	if len(existing) > 0 {
+		return fmt.Errorf("dest dir %q is not empty; specify a fresh --output directory to avoid mixing previous run artifacts", absDest)
+	}
+	return nil
+}
+
+func mkdirAllInRoot(root *os.Root, relDir string, perm os.FileMode) error {
+	parts := strings.Split(filepath.Clean(relDir), string(filepath.Separator))
+	cur := ""
+	for _, p := range parts {
+		if p == "" || p == "." {
+			continue
+		}
+		if cur == "" {
+			cur = p
+		} else {
+			cur = filepath.Join(cur, p)
+		}
+		if err := root.Mkdir(cur, perm); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+	}
+	return nil
 }

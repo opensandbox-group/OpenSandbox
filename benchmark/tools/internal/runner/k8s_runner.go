@@ -17,6 +17,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -130,9 +131,9 @@ func NewK8sRunner(kc *KubeClients, log *slog.Logger) *K8sRunner {
 	}
 }
 
-// EnsureRunnerPod ensures the benchmark namespace and a Ready Runner Pod matching the profile exist,
-// reusing a matching Ready pod or recreating terminated / drifted pods.
-// If this call created or recreated the pod and readiness fails, it best-effort deletes the pod to avoid orphaning it.
+// EnsureRunnerPod ensures the benchmark namespace exists and launches a fresh, per-invocation
+// Runner Pod matching the profile so concurrent runs never share credentials, binaries, or bundles.
+// If readiness fails, it best-effort deletes the pod to avoid orphaning it.
 func (r *K8sRunner) EnsureRunnerPod(ctx context.Context, prof *profile.BenchmarkProfile) (string, error) {
 	ns := prof.Environment.BenchNamespace
 	if ns == "" {
@@ -142,60 +143,31 @@ func (r *K8sRunner) EnsureRunnerPod(ctx context.Context, prof *profile.Benchmark
 		return "", err
 	}
 
-	podName := DefaultRunnerPodName
-	desiredHash := runnerSpecHash(prof)
-	createdByUs := false
-
-	existing, err := r.Clientset.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
-	if err == nil {
-		specMatches := existing.Annotations[RunnerSpecHashAnnotation] == desiredHash
-		switch {
-		case existing.Status.Phase == corev1.PodRunning && isPodReady(existing) && specMatches:
-			r.Logger.Info("reusing existing runner pod", "namespace", ns, "pod", podName)
-			return podName, nil
-		case (existing.Status.Phase == corev1.PodRunning || existing.Status.Phase == corev1.PodPending) && specMatches:
-			// Matching pod is still starting; wait for readiness below.
-		default:
-			reason := string(existing.Status.Phase)
-			if !specMatches {
-				reason = "profile-drift"
-			}
-			r.Logger.Info("recreating runner pod", "namespace", ns, "pod", podName, "reason", reason)
-			if err := r.recreateRunnerPod(ctx, ns, podName, prof); err != nil {
-				return "", err
-			}
-			createdByUs = true
-		}
-	} else if apierrors.IsNotFound(err) {
-		if createErr := r.createRunnerPod(ctx, ns, podName, prof); createErr != nil {
-			return "", createErr
-		}
-		createdByUs = true
-	} else {
-		return "", fmt.Errorf("get runner pod %s/%s: %w", ns, podName, err)
+	podName, err := generateRunnerPodName()
+	if err != nil {
+		return "", err
+	}
+	if err := r.createRunnerPod(ctx, ns, podName, prof); err != nil {
+		return "", err
 	}
 
 	if err := r.waitForPodReady(ctx, ns, podName); err != nil {
-		if createdByUs {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			if delErr := r.DeleteRunnerPod(cleanupCtx, ns, podName); delErr != nil {
-				r.Logger.Warn("failed to clean up unready runner pod", "namespace", ns, "pod", podName, "error", delErr)
-			}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if delErr := r.DeleteRunnerPod(cleanupCtx, ns, podName); delErr != nil {
+			r.Logger.Warn("failed to clean up unready runner pod", "namespace", ns, "pod", podName, "error", delErr)
 		}
 		return "", err
 	}
 	return podName, nil
 }
 
-func (r *K8sRunner) recreateRunnerPod(ctx context.Context, ns, podName string, prof *profile.BenchmarkProfile) error {
-	if err := r.DeleteRunnerPod(ctx, ns, podName); err != nil {
-		return err
+func generateRunnerPodName() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate runner pod suffix: %w", err)
 	}
-	if err := r.waitForPodDeleted(ctx, ns, podName); err != nil {
-		return err
-	}
-	return r.createRunnerPod(ctx, ns, podName, prof)
+	return fmt.Sprintf("%s-%s", DefaultRunnerPodName, hex.EncodeToString(b[:])), nil
 }
 
 // DeleteRunnerPod removes the Runner Pod if it exists.

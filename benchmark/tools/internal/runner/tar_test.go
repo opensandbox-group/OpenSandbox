@@ -147,3 +147,28 @@ func TestExtractTarEnforcesLimits(t *testing.T) {
 		require.Contains(t, err.Error(), "exceeds max entry count")
 	})
 }
+
+func TestExtractTarRejectsNonEmptyOrSymlinkDest(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, WriteBytesTar(&buf, "report.json", []byte(`{}`), 0o644))
+
+	t.Run("non-empty destination rejected", func(t *testing.T) {
+		dest := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dest, "stale.json"), []byte("old"), 0o644))
+		err := ExtractTar(bytes.NewReader(buf.Bytes()), dest)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not empty")
+	})
+
+	t.Run("symlink destination rejected", func(t *testing.T) {
+		parent := t.TempDir()
+		realDir := filepath.Join(parent, "real")
+		require.NoError(t, os.MkdirAll(realDir, 0o755))
+		linkDir := filepath.Join(parent, "link")
+		require.NoError(t, os.Symlink(realDir, linkDir))
+
+		err := ExtractTar(bytes.NewReader(buf.Bytes()), linkDir)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "must not be a symlink")
+	})
+}

@@ -65,6 +65,8 @@ type injectedFile struct {
 type mockRemoteRunner struct {
 	ensured       bool
 	deleted       bool
+	deleteCtxErr  error
+	execCancel    context.CancelFunc
 	injectedBin   string
 	injectedFiles map[string]injectedFile
 	workerArgs    []string
@@ -73,11 +75,12 @@ type mockRemoteRunner struct {
 
 func (m *mockRemoteRunner) EnsureRunnerPod(_ context.Context, _ *profile.BenchmarkProfile) (string, error) {
 	m.ensured = true
-	return runner.DefaultRunnerPodName, nil
+	return runner.DefaultRunnerPodName + "-test", nil
 }
 
-func (m *mockRemoteRunner) DeleteRunnerPod(_ context.Context, _, _ string) error {
+func (m *mockRemoteRunner) DeleteRunnerPod(ctx context.Context, _, _ string) error {
 	m.deleted = true
+	m.deleteCtxErr = ctx.Err()
 	return nil
 }
 
@@ -103,6 +106,10 @@ func (m *mockRemoteRunner) InjectBytes(_ context.Context, _, _ string, data []by
 
 func (m *mockRemoteRunner) ExecWorker(_ context.Context, _, _, _ string, args []string, stdout, _ io.Writer) error {
 	m.workerArgs = append([]string(nil), args...)
+	if m.execCancel != nil {
+		m.execCancel()
+		return context.Canceled
+	}
 	_, _ = io.WriteString(stdout, "worker executed\n")
 	return nil
 }
@@ -145,10 +152,38 @@ func TestCLIRunOrchestratesRemoteRunnerAndProtectsAPIKey(t *testing.T) {
 	require.Contains(t, mock.workerArgs, "--api-key-file")
 	require.Contains(t, mock.workerArgs, runner.DefaultRemoteAPIKeyPath)
 	require.NotContains(t, mock.workerArgs, "super-secret-token")
+	require.Contains(t, mock.workerArgs, "--server")
+	require.Contains(t, mock.workerArgs, "opensandbox-server.opensandbox-system.svc:8080")
 	require.Contains(t, mock.workerArgs, "schedule-burst")
 	require.Contains(t, mock.workerArgs, "run-123")
 	require.Equal(t, outDir, mock.pulledDir)
 	require.Contains(t, stdout.String(), "worker executed")
+}
+
+func TestCLIRunUsesLiveContextForCleanupAndDerivesServerNamespace(t *testing.T) {
+	raw, err := profile.EmbeddedRaw(profile.DefaultProfileName)
+	require.NoError(t, err)
+	customYAML := bytes.ReplaceAll(raw, []byte("systemNamespace: opensandbox-system"), []byte("systemNamespace: custom-osb-sys"))
+	profFile := filepath.Join(t.TempDir(), "custom-profile.yaml")
+	require.NoError(t, os.WriteFile(profFile, customYAML, 0o644))
+
+	binPath := filepath.Join(t.TempDir(), "worker-linux")
+	require.NoError(t, os.WriteFile(binPath, []byte("fake"), 0o755))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mock := &mockRemoteRunner{execCancel: cancel}
+	app := NewDefaultApp()
+	app.NewRemoteRunner = func(_ string) (runner.RemoteRunner, *runner.KubeClients, error) {
+		return mock, nil, nil
+	}
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{"run", "--profile", profFile, "--suite", "schedule-burst", "--worker-binary", binPath})
+	err = cmd.ExecuteContext(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.True(t, mock.deleted)
+	require.NoError(t, mock.deleteCtxErr, "deferred runner cleanup must receive a live context")
+	require.Contains(t, mock.workerArgs, "opensandbox-server.custom-osb-sys.svc:8080")
 }
 
 type failingUpProvisioner struct {

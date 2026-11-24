@@ -27,7 +27,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -65,73 +64,46 @@ func TestBuildRunnerPodSpecAndAffinity(t *testing.T) {
 	require.Equal(t, []string{"true"}, expr.Values)
 }
 
-func TestEnsureRunnerPodReusesReadyAndRecreatesFailed(t *testing.T) {
+func TestEnsureRunnerPodIsolatesPerInvocationAndCleansUpOnTimeout(t *testing.T) {
 	prof, err := profile.LoadEmbedded(profile.DefaultProfileName)
 	require.NoError(t, err)
 
-	t.Run("reuses ready running pod when spec hash matches", func(t *testing.T) {
-		cs := fake.NewSimpleClientset(
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "opensandbox-bench"}},
-			&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        DefaultRunnerPodName,
-					Namespace:   "opensandbox-bench",
-					Annotations: map[string]string{RunnerSpecHashAnnotation: runnerSpecHash(prof)},
-				},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
-					Conditions: []corev1.PodCondition{
-						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-					},
-				},
-			},
-		)
-		r := &K8sRunner{Clientset: cs, Logger: slog.Default(), PollInterval: 5 * time.Millisecond, ReadyTimeout: time.Second}
-		podName, err := r.EnsureRunnerPod(context.Background(), prof)
-		require.NoError(t, err)
-		require.Equal(t, DefaultRunnerPodName, podName)
-	})
+	t.Run("creates isolated pods per invocation and waits for ready", func(t *testing.T) {
+		cs := fake.NewSimpleClientset()
+		r := &K8sRunner{Clientset: cs, Logger: slog.Default(), PollInterval: 10 * time.Millisecond, ReadyTimeout: 2 * time.Second}
 
-	t.Run("recreates ready running pod on profile drift", func(t *testing.T) {
-		cs := fake.NewSimpleClientset(
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "opensandbox-bench"}},
-			&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        DefaultRunnerPodName,
-					Namespace:   "opensandbox-bench",
-					Annotations: map[string]string{RunnerSpecHashAnnotation: "stale-hash"},
-				},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
-					Conditions: []corev1.PodCondition{
-						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-					},
-				},
-			},
-		)
-		r := &K8sRunner{Clientset: cs, Logger: slog.Default(), PollInterval: 5 * time.Millisecond, ReadyTimeout: 2 * time.Second, DeleteTimeout: time.Second}
-
+		stop := make(chan struct{})
 		go func() {
-			for i := 0; i < 50; i++ {
-				time.Sleep(10 * time.Millisecond)
-				pod, err := cs.CoreV1().Pods("opensandbox-bench").Get(context.Background(), DefaultRunnerPodName, metav1.GetOptions{})
-				if err != nil || pod.Annotations[RunnerSpecHashAnnotation] == "stale-hash" {
-					continue
+			for {
+				select {
+				case <-stop:
+					return
+				case <-time.After(10 * time.Millisecond):
+					list, err := cs.CoreV1().Pods("opensandbox-bench").List(context.Background(), metav1.ListOptions{})
+					if err != nil {
+						continue
+					}
+					for i := range list.Items {
+						p := &list.Items[i]
+						if isPodReady(p) {
+							continue
+						}
+						p.Status.Phase = corev1.PodRunning
+						p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+						_, _ = cs.CoreV1().Pods("opensandbox-bench").UpdateStatus(context.Background(), p, metav1.UpdateOptions{})
+					}
 				}
-				pod.Status.Phase = corev1.PodRunning
-				pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
-				_, _ = cs.CoreV1().Pods("opensandbox-bench").UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
-				return
 			}
 		}()
+		defer close(stop)
 
-		podName, err := r.EnsureRunnerPod(context.Background(), prof)
+		pod1, err := r.EnsureRunnerPod(context.Background(), prof)
 		require.NoError(t, err)
-		require.Equal(t, DefaultRunnerPodName, podName)
-
-		pod, err := cs.CoreV1().Pods("opensandbox-bench").Get(context.Background(), DefaultRunnerPodName, metav1.GetOptions{})
+		pod2, err := r.EnsureRunnerPod(context.Background(), prof)
 		require.NoError(t, err)
-		require.Equal(t, runnerSpecHash(prof), pod.Annotations[RunnerSpecHashAnnotation])
+		require.NotEqual(t, pod1, pod2, "concurrent invocations must use distinct runner pods")
+		require.Contains(t, pod1, DefaultRunnerPodName+"-")
+		require.Contains(t, pod2, DefaultRunnerPodName+"-")
 	})
 
 	t.Run("deletes newly created pod when readiness times out", func(t *testing.T) {
@@ -142,31 +114,9 @@ func TestEnsureRunnerPodReusesReadyAndRecreatesFailed(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "timed out waiting for runner pod")
 
-		_, getErr := cs.CoreV1().Pods("opensandbox-bench").Get(context.Background(), DefaultRunnerPodName, metav1.GetOptions{})
-		require.True(t, apierrors.IsNotFound(getErr), "newly created unready pod should be cleaned up")
-	})
-
-	t.Run("creates namespace and waits for ready", func(t *testing.T) {
-		cs := fake.NewSimpleClientset()
-		r := &K8sRunner{Clientset: cs, Logger: slog.Default(), PollInterval: 10 * time.Millisecond, ReadyTimeout: 2 * time.Second}
-
-		go func() {
-			for i := 0; i < 50; i++ {
-				time.Sleep(15 * time.Millisecond)
-				pod, err := cs.CoreV1().Pods("opensandbox-bench").Get(context.Background(), DefaultRunnerPodName, metav1.GetOptions{})
-				if err != nil {
-					continue
-				}
-				pod.Status.Phase = corev1.PodRunning
-				pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
-				_, _ = cs.CoreV1().Pods("opensandbox-bench").UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
-				return
-			}
-		}()
-
-		podName, err := r.EnsureRunnerPod(context.Background(), prof)
-		require.NoError(t, err)
-		require.Equal(t, DefaultRunnerPodName, podName)
+		list, listErr := cs.CoreV1().Pods("opensandbox-bench").List(context.Background(), metav1.ListOptions{})
+		require.NoError(t, listErr)
+		require.Empty(t, list.Items, "newly created unready pod should be cleaned up")
 	})
 }
 
