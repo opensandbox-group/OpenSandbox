@@ -17,6 +17,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,6 +26,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/provisioner"
+	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/report"
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/runner"
 )
 
@@ -54,11 +57,16 @@ func TestCLIProfileValidateAndSuites(t *testing.T) {
 	}
 }
 
+type injectedFile struct {
+	data []byte
+	mode int64
+}
+
 type mockRemoteRunner struct {
 	ensured       bool
 	deleted       bool
 	injectedBin   string
-	injectedBytes []byte
+	injectedFiles map[string]injectedFile
 	workerArgs    []string
 	pulledDir     string
 }
@@ -82,8 +90,14 @@ func (m *mockRemoteRunner) InjectBinary(_ context.Context, _, _, localBinaryPath
 	return nil
 }
 
-func (m *mockRemoteRunner) InjectBytes(_ context.Context, _, _ string, data []byte, _ string, _ int64) error {
-	m.injectedBytes = append([]byte(nil), data...)
+func (m *mockRemoteRunner) InjectBytes(_ context.Context, _, _ string, data []byte, remotePath string, mode int64) error {
+	if m.injectedFiles == nil {
+		m.injectedFiles = make(map[string]injectedFile)
+	}
+	m.injectedFiles[remotePath] = injectedFile{
+		data: append([]byte(nil), data...),
+		mode: mode,
+	}
 	return nil
 }
 
@@ -98,7 +112,7 @@ func (m *mockRemoteRunner) PullBundle(_ context.Context, _, _, _, localOutputDir
 	return nil
 }
 
-func TestCLIRunOrchestratesRemoteRunner(t *testing.T) {
+func TestCLIRunOrchestratesRemoteRunnerAndProtectsAPIKey(t *testing.T) {
 	binPath := filepath.Join(t.TempDir(), "worker-linux")
 	require.NoError(t, os.WriteFile(binPath, []byte("fake"), 0o755))
 	outDir := filepath.Join(t.TempDir(), "bundle")
@@ -117,6 +131,7 @@ func TestCLIRunOrchestratesRemoteRunner(t *testing.T) {
 		"--suite", "schedule-burst",
 		"--worker-binary", binPath,
 		"--output", outDir,
+		"--api-key", "super-secret-token",
 		"--run-id", "run-123",
 	})
 	require.NoError(t, cmd.Execute())
@@ -124,9 +139,49 @@ func TestCLIRunOrchestratesRemoteRunner(t *testing.T) {
 	require.True(t, mock.ensured)
 	require.True(t, mock.deleted)
 	require.Equal(t, binPath, mock.injectedBin)
-	require.Contains(t, string(mock.injectedBytes), "fast-sandbox-overlaybd-ref")
+	require.Contains(t, string(mock.injectedFiles[runner.DefaultRemoteProfilePath].data), "fast-sandbox-overlaybd-ref")
+	require.Equal(t, []byte("super-secret-token"), mock.injectedFiles[runner.DefaultRemoteAPIKeyPath].data)
+	require.Equal(t, int64(0o600), mock.injectedFiles[runner.DefaultRemoteAPIKeyPath].mode)
+	require.Contains(t, mock.workerArgs, "--api-key-file")
+	require.Contains(t, mock.workerArgs, runner.DefaultRemoteAPIKeyPath)
+	require.NotContains(t, mock.workerArgs, "super-secret-token")
 	require.Contains(t, mock.workerArgs, "schedule-burst")
 	require.Contains(t, mock.workerArgs, "run-123")
 	require.Equal(t, outDir, mock.pulledDir)
 	require.Contains(t, stdout.String(), "worker executed")
+}
+
+type failingUpProvisioner struct {
+	downCalled bool
+}
+
+func (p *failingUpProvisioner) Name() string { return profile.RuntimeFastSandboxOverlayBD }
+func (p *failingUpProvisioner) Preflight(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) (*report.EnvironmentFingerprint, error) {
+	return &report.EnvironmentFingerprint{}, nil
+}
+func (p *failingUpProvisioner) Up(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) error {
+	return errors.New("partial deploy failure")
+}
+func (p *failingUpProvisioner) Down(_ context.Context, _ *profile.BenchmarkProfile, _ provisioner.Options) (*report.LeakAudit, error) {
+	p.downCalled = true
+	return nil, errors.New("down cleanup warning")
+}
+
+func TestCLIRunTearsDownOnPartialProvisionFailure(t *testing.T) {
+	prov := &failingUpProvisioner{}
+	reg := provisioner.NewRegistry()
+	reg.MustRegister(prov)
+
+	app := NewDefaultApp()
+	app.Provisioners = reg
+	app.NewRemoteRunner = func(_ string) (runner.RemoteRunner, *runner.KubeClients, error) {
+		return &mockRemoteRunner{}, nil, nil
+	}
+
+	cmd := app.RootCmd()
+	cmd.SetArgs([]string{"run", "--suite", "schedule-burst", "--provision", "--teardown"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "partial deploy failure")
+	require.True(t, prov.downCalled, "Down must run even when Up fails midway")
 }

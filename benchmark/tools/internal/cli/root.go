@@ -223,6 +223,17 @@ func (a *App) newRunCmd() *cobra.Command {
 				if kc != nil {
 					provOpts.Client = kc.Clientset
 				}
+				if teardown {
+					defer func() {
+						if _, downErr := prov.Down(ctx, prof, provOpts); downErr != nil {
+							if retErr == nil {
+								retErr = fmt.Errorf("env down: %w", downErr)
+							} else {
+								a.Logger.Warn("failed to tear down environment after run error", "error", downErr)
+							}
+						}
+					}()
+				}
 				if provision {
 					if _, err := prov.Preflight(ctx, prof, provOpts); err != nil {
 						return fmt.Errorf("preflight: %w", err)
@@ -230,13 +241,6 @@ func (a *App) newRunCmd() *cobra.Command {
 					if err := prov.Up(ctx, prof, provOpts); err != nil {
 						return fmt.Errorf("env up: %w", err)
 					}
-				}
-				if teardown {
-					defer func() {
-						if _, downErr := prov.Down(ctx, prof, provOpts); downErr != nil && retErr == nil {
-							retErr = fmt.Errorf("env down: %w", downErr)
-						}
-					}()
 				}
 			}
 
@@ -292,7 +296,10 @@ func (a *App) newRunCmd() *cobra.Command {
 				workerArgs = append(workerArgs, "--server", serverDomain)
 			}
 			if apiKey != "" {
-				workerArgs = append(workerArgs, "--api-key", apiKey)
+				if err := rem.InjectBytes(ctx, ns, podName, []byte(apiKey), runner.DefaultRemoteAPIKeyPath, 0o600); err != nil {
+					return err
+				}
+				workerArgs = append(workerArgs, "--api-key-file", runner.DefaultRemoteAPIKeyPath)
 			}
 			if runID != "" {
 				workerArgs = append(workerArgs, "--run-id", runID)
@@ -307,6 +314,8 @@ func (a *App) newRunCmd() *cobra.Command {
 					}
 					a.Logger.Warn("failed to pull partial bundle after worker error", "error", pullErr)
 				}
+			} else {
+				a.Logger.Warn("no --output directory specified; run bundle inside runner pod will not be pulled locally")
 			}
 			return execErr
 		},
@@ -499,7 +508,7 @@ func (a *App) newWorkerCmd() *cobra.Command {
 		Short: "In-cluster worker subcommands executed inside the Bench Runner Pod",
 	}
 
-	var profilePath, suitesFlag, outputDir, serverDomain, apiKey, runID string
+	var profilePath, suitesFlag, outputDir, serverDomain, apiKey, apiKeyFile, runID string
 	runWorkerCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Execute benchmark suites directly inside the cluster network",
@@ -513,10 +522,19 @@ func (a *App) newWorkerCmd() *cobra.Command {
 				return err
 			}
 
+			resolvedAPIKey := apiKey
+			if apiKeyFile != "" {
+				rawKey, err := os.ReadFile(apiKeyFile)
+				if err != nil {
+					return fmt.Errorf("read api-key-file %q: %w", apiKeyFile, err)
+				}
+				resolvedAPIKey = strings.TrimSpace(string(rawKey))
+			}
+
 			sdkCfg := opensandbox.ConnectionConfig{
 				Domain:   serverDomain,
 				Protocol: "http",
-				APIKey:   apiKey,
+				APIKey:   resolvedAPIKey,
 			}
 
 			rc := suite.RunContext{
@@ -541,6 +559,7 @@ func (a *App) newWorkerCmd() *cobra.Command {
 	runWorkerCmd.Flags().StringVar(&outputDir, "output", "/tmp/run-bundle", "Output directory inside Runner Pod")
 	runWorkerCmd.Flags().StringVar(&serverDomain, "server", "opensandbox-server.opensandbox-system.svc:8080", "In-cluster opensandbox-server host:port")
 	runWorkerCmd.Flags().StringVar(&apiKey, "api-key", "", "OpenSandbox API key")
+	runWorkerCmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "Path to file containing OpenSandbox API key (preferred over --api-key)")
 	runWorkerCmd.Flags().StringVar(&runID, "run-id", "", "Benchmark run identifier")
 
 	workerCmd.AddCommand(runWorkerCmd)

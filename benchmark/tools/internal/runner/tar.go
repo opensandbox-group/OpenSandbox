@@ -25,6 +25,21 @@ import (
 	"strings"
 )
 
+// ExtractLimits bounds tar extraction against malformed or unexpectedly huge bundles.
+type ExtractLimits struct {
+	MaxEntries    int
+	MaxEntryBytes int64
+	MaxTotalBytes int64
+}
+
+func DefaultExtractLimits() ExtractLimits {
+	return ExtractLimits{
+		MaxEntries:    10000,
+		MaxEntryBytes: 512 << 20, // 512 MiB per file
+		MaxTotalBytes: 2 << 30,   // 2 GiB total
+	}
+}
+
 // WriteSingleFileTar streams a single local file into w as a tar archive entry named entryName.
 func WriteSingleFileTar(w io.Writer, srcPath, entryName string, mode int64) error {
 	f, err := os.Open(srcPath)
@@ -83,9 +98,15 @@ func WriteBytesTar(w io.Writer, entryName string, data []byte, mode int64) error
 	return nil
 }
 
-// ExtractTar safely extracts regular files and directories from a tar stream into destDir,
-// rejecting path traversal entries and symlinks/device nodes.
+// ExtractTar safely extracts regular files and directories from a tar stream into destDir
+// using DefaultExtractLimits.
 func ExtractTar(r io.Reader, destDir string) error {
+	return ExtractTarWithLimits(r, destDir, DefaultExtractLimits())
+}
+
+// ExtractTarWithLimits safely extracts regular files and directories from a tar stream into destDir,
+// rejecting path traversal entries, symlinks/device nodes, and archives exceeding size or entry caps.
+func ExtractTarWithLimits(r io.Reader, destDir string, limits ExtractLimits) error {
 	absDest, err := filepath.Abs(destDir)
 	if err != nil {
 		return fmt.Errorf("resolve dest dir %q: %w", destDir, err)
@@ -93,6 +114,11 @@ func ExtractTar(r io.Reader, destDir string) error {
 	if err := os.MkdirAll(absDest, 0o755); err != nil {
 		return fmt.Errorf("create dest dir %q: %w", absDest, err)
 	}
+
+	var (
+		entries    int
+		totalBytes int64
+	)
 
 	tr := tar.NewReader(r)
 	for {
@@ -102,6 +128,11 @@ func ExtractTar(r io.Reader, destDir string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("read tar entry: %w", err)
+		}
+
+		entries++
+		if limits.MaxEntries > 0 && entries > limits.MaxEntries {
+			return fmt.Errorf("tar archive exceeds max entry count (%d)", limits.MaxEntries)
 		}
 
 		cleanName := filepath.Clean(hdr.Name)
@@ -124,6 +155,13 @@ func ExtractTar(r io.Reader, destDir string) error {
 				return fmt.Errorf("create dir %q: %w", targetPath, err)
 			}
 		case tar.TypeReg, tar.TypeRegA:
+			if limits.MaxEntryBytes > 0 && hdr.Size > limits.MaxEntryBytes {
+				return fmt.Errorf("tar entry %q size %d exceeds max entry limit (%d)", hdr.Name, hdr.Size, limits.MaxEntryBytes)
+			}
+			if limits.MaxTotalBytes > 0 && totalBytes+hdr.Size > limits.MaxTotalBytes {
+				return fmt.Errorf("tar archive exceeds max total size (%d)", limits.MaxTotalBytes)
+			}
+
 			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 				return fmt.Errorf("create parent dir for %q: %w", targetPath, err)
 			}
@@ -135,13 +173,36 @@ func ExtractTar(r io.Reader, destDir string) error {
 			if err != nil {
 				return fmt.Errorf("open %q: %w", targetPath, err)
 			}
-			if _, err := io.Copy(out, tr); err != nil {
-				_ = out.Close()
-				return fmt.Errorf("extract %q: %w", targetPath, err)
+
+			var src io.Reader = tr
+			maxAllowed := int64(-1)
+			if limits.MaxEntryBytes > 0 {
+				maxAllowed = limits.MaxEntryBytes
 			}
-			if err := out.Close(); err != nil {
-				return fmt.Errorf("close %q: %w", targetPath, err)
+			if limits.MaxTotalBytes > 0 {
+				rem := limits.MaxTotalBytes - totalBytes
+				if maxAllowed < 0 || rem < maxAllowed {
+					maxAllowed = rem
+				}
 			}
+			if maxAllowed >= 0 {
+				src = io.LimitReader(tr, maxAllowed+1)
+			}
+
+			written, copyErr := io.Copy(out, src)
+			closeErr := out.Close()
+			if copyErr != nil {
+				_ = os.Remove(targetPath)
+				return fmt.Errorf("extract %q: %w", targetPath, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("close %q: %w", targetPath, closeErr)
+			}
+			if maxAllowed >= 0 && written > maxAllowed {
+				_ = os.Remove(targetPath)
+				return fmt.Errorf("tar entry %q exceeded size limit (%d bytes)", hdr.Name, maxAllowed)
+			}
+			totalBytes += written
 		default:
 			return fmt.Errorf("unsupported tar entry type %q for %q", hdr.Typeflag, hdr.Name)
 		}

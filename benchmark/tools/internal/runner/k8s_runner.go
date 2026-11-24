@@ -17,6 +17,8 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,8 +44,10 @@ const (
 	DefaultRunnerContainerName = "runner"
 	DefaultRemoteBinaryPath    = "/tmp/opensandbox-bench"
 	DefaultRemoteProfilePath   = "/tmp/bench-profile.yaml"
+	DefaultRemoteAPIKeyPath    = "/tmp/.opensandbox-api-key"
 	DefaultRemoteBundleDir     = "/tmp/run-bundle"
 	FirecrackerNodeLabelKey    = "fast-sandbox.io/firecracker-node"
+	RunnerSpecHashAnnotation   = "bench.opensandbox.io/runner-spec-hash"
 )
 
 // ExecRequest describes a single command executed inside a container via pods/exec.
@@ -99,11 +103,13 @@ func (e *SPDYPodExecer) Exec(ctx context.Context, req ExecRequest) error {
 
 // K8sRunner implements RemoteRunner using client-go and pods/exec tar streaming.
 type K8sRunner struct {
-	Clientset    kubernetes.Interface
-	Execer       PodExecer
-	Logger       *slog.Logger
-	PollInterval time.Duration
-	ReadyTimeout time.Duration
+	Clientset     kubernetes.Interface
+	Execer        PodExecer
+	Logger        *slog.Logger
+	PollInterval  time.Duration
+	ReadyTimeout  time.Duration
+	DeleteTimeout time.Duration
+	ExtractLimits ExtractLimits
 }
 
 func NewK8sRunner(kc *KubeClients, log *slog.Logger) *K8sRunner {
@@ -116,14 +122,17 @@ func NewK8sRunner(kc *KubeClients, log *slog.Logger) *K8sRunner {
 			RestConfig: kc.RestConfig,
 			Clientset:  kc.Clientset,
 		},
-		Logger:       log,
-		PollInterval: 500 * time.Millisecond,
-		ReadyTimeout: 2 * time.Minute,
+		Logger:        log,
+		PollInterval:  500 * time.Millisecond,
+		ReadyTimeout:  2 * time.Minute,
+		DeleteTimeout: 30 * time.Second,
+		ExtractLimits: DefaultExtractLimits(),
 	}
 }
 
-// EnsureRunnerPod ensures the benchmark namespace and Ready Runner Pod exist,
-// reusing an already-running pod or recreating a terminated one.
+// EnsureRunnerPod ensures the benchmark namespace and a Ready Runner Pod matching the profile exist,
+// reusing a matching Ready pod or recreating terminated / drifted pods.
+// If this call created or recreated the pod and readiness fails, it best-effort deletes the pod to avoid orphaning it.
 func (r *K8sRunner) EnsureRunnerPod(ctx context.Context, prof *profile.BenchmarkProfile) (string, error) {
 	ns := prof.Environment.BenchNamespace
 	if ns == "" {
@@ -134,39 +143,59 @@ func (r *K8sRunner) EnsureRunnerPod(ctx context.Context, prof *profile.Benchmark
 	}
 
 	podName := DefaultRunnerPodName
+	desiredHash := runnerSpecHash(prof)
+	createdByUs := false
+
 	existing, err := r.Clientset.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
 	if err == nil {
-		switch existing.Status.Phase {
-		case corev1.PodRunning:
-			if isPodReady(existing) {
-				r.Logger.Info("reusing existing runner pod", "namespace", ns, "pod", podName)
-				return podName, nil
-			}
-			// Pod is Running but not yet Ready; wait for readiness below.
-		case corev1.PodPending:
-			// Wait for readiness below.
+		specMatches := existing.Annotations[RunnerSpecHashAnnotation] == desiredHash
+		switch {
+		case existing.Status.Phase == corev1.PodRunning && isPodReady(existing) && specMatches:
+			r.Logger.Info("reusing existing runner pod", "namespace", ns, "pod", podName)
+			return podName, nil
+		case (existing.Status.Phase == corev1.PodRunning || existing.Status.Phase == corev1.PodPending) && specMatches:
+			// Matching pod is still starting; wait for readiness below.
 		default:
-			// Failed / Succeeded / Unknown: recreate cleanly.
-			r.Logger.Info("recreating terminated runner pod", "namespace", ns, "pod", podName, "phase", existing.Status.Phase)
-			if delErr := r.DeleteRunnerPod(ctx, ns, podName); delErr != nil {
-				return "", delErr
+			reason := string(existing.Status.Phase)
+			if !specMatches {
+				reason = "profile-drift"
 			}
-			if createErr := r.createRunnerPod(ctx, ns, podName, prof); createErr != nil {
-				return "", createErr
+			r.Logger.Info("recreating runner pod", "namespace", ns, "pod", podName, "reason", reason)
+			if err := r.recreateRunnerPod(ctx, ns, podName, prof); err != nil {
+				return "", err
 			}
+			createdByUs = true
 		}
 	} else if apierrors.IsNotFound(err) {
 		if createErr := r.createRunnerPod(ctx, ns, podName, prof); createErr != nil {
 			return "", createErr
 		}
+		createdByUs = true
 	} else {
 		return "", fmt.Errorf("get runner pod %s/%s: %w", ns, podName, err)
 	}
 
 	if err := r.waitForPodReady(ctx, ns, podName); err != nil {
+		if createdByUs {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if delErr := r.DeleteRunnerPod(cleanupCtx, ns, podName); delErr != nil {
+				r.Logger.Warn("failed to clean up unready runner pod", "namespace", ns, "pod", podName, "error", delErr)
+			}
+		}
 		return "", err
 	}
 	return podName, nil
+}
+
+func (r *K8sRunner) recreateRunnerPod(ctx context.Context, ns, podName string, prof *profile.BenchmarkProfile) error {
+	if err := r.DeleteRunnerPod(ctx, ns, podName); err != nil {
+		return err
+	}
+	if err := r.waitForPodDeleted(ctx, ns, podName); err != nil {
+		return err
+	}
+	return r.createRunnerPod(ctx, ns, podName, prof)
 }
 
 // DeleteRunnerPod removes the Runner Pod if it exists.
@@ -215,7 +244,7 @@ func (r *K8sRunner) InjectBinary(ctx context.Context, namespace, podName, localB
 	})
 }
 
-// InjectBytes streams in-memory content (e.g. BenchmarkProfile YAML) into the Runner Pod at remotePath.
+// InjectBytes streams in-memory content (e.g. BenchmarkProfile YAML or API key) into the Runner Pod at remotePath.
 func (r *K8sRunner) InjectBytes(ctx context.Context, namespace, podName string, data []byte, remotePath string, mode int64) error {
 	return r.injectTarStream(ctx, namespace, podName, remotePath, func(w io.Writer) error {
 		return WriteBytesTar(w, path.Base(remotePath), data, mode)
@@ -228,23 +257,32 @@ func (r *K8sRunner) injectTarStream(ctx context.Context, namespace, podName, rem
 		remoteDir = "/tmp"
 	}
 
-	var tarBuf bytes.Buffer
-	if err := writeTar(&tarBuf); err != nil {
-		return err
-	}
+	pr, pw := io.Pipe()
+	writeErrCh := make(chan error, 1)
+	go func() {
+		err := writeTar(pw)
+		_ = pw.CloseWithError(err)
+		writeErrCh <- err
+	}()
 
 	var stderr bytes.Buffer
 	cmd := []string{"sh", "-c", fmt.Sprintf("mkdir -p %s && tar -xf - -C %s", shellQuote(remoteDir), shellQuote(remoteDir))}
-	err := r.Execer.Exec(ctx, ExecRequest{
+	execErr := r.Execer.Exec(ctx, ExecRequest{
 		Namespace: namespace,
 		PodName:   podName,
 		Container: DefaultRunnerContainerName,
 		Command:   cmd,
-		Stdin:     &tarBuf,
+		Stdin:     pr,
 		Stderr:    &stderr,
 	})
-	if err != nil {
-		return fmt.Errorf("inject %q into %s/%s: %w (stderr: %s)", remotePath, namespace, podName, err, strings.TrimSpace(stderr.String()))
+	_ = pr.Close()
+	writeErr := <-writeErrCh
+
+	if writeErr != nil && execErr == nil {
+		return fmt.Errorf("stream tar for %q into %s/%s: %w", remotePath, namespace, podName, writeErr)
+	}
+	if execErr != nil {
+		return fmt.Errorf("inject %q into %s/%s: %w (stderr: %s)", remotePath, namespace, podName, execErr, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }
@@ -262,24 +300,38 @@ func (r *K8sRunner) ExecWorker(ctx context.Context, namespace, podName, remoteBi
 	})
 }
 
-// PullBundle streams remoteBundleDir out of the Runner Pod as a tar archive and unpacks it to localOutputDir.
+// PullBundle streams remoteBundleDir out of the Runner Pod as a tar archive and unpacks it directly to localOutputDir.
 func (r *K8sRunner) PullBundle(ctx context.Context, namespace, podName, remoteBundleDir, localOutputDir string) error {
-	var tarOut bytes.Buffer
-	var stderr bytes.Buffer
+	limits := r.ExtractLimits
+	if limits.MaxEntries == 0 && limits.MaxEntryBytes == 0 && limits.MaxTotalBytes == 0 {
+		limits = DefaultExtractLimits()
+	}
 
+	pr, pw := io.Pipe()
+	extractErrCh := make(chan error, 1)
+	go func() {
+		err := ExtractTarWithLimits(pr, localOutputDir, limits)
+		_ = pr.CloseWithError(err)
+		extractErrCh <- err
+	}()
+
+	var stderr bytes.Buffer
 	cmd := []string{"tar", "-cf", "-", "-C", remoteBundleDir, "."}
-	err := r.Execer.Exec(ctx, ExecRequest{
+	execErr := r.Execer.Exec(ctx, ExecRequest{
 		Namespace: namespace,
 		PodName:   podName,
 		Container: DefaultRunnerContainerName,
 		Command:   cmd,
-		Stdout:    &tarOut,
+		Stdout:    pw,
 		Stderr:    &stderr,
 	})
-	if err != nil {
-		return fmt.Errorf("pull bundle %q from %s/%s: %w (stderr: %s)", remoteBundleDir, namespace, podName, err, strings.TrimSpace(stderr.String()))
+	_ = pw.CloseWithError(execErr)
+	extractErr := <-extractErrCh
+
+	if execErr != nil {
+		return fmt.Errorf("pull bundle %q from %s/%s: %w (stderr: %s)", remoteBundleDir, namespace, podName, execErr, strings.TrimSpace(stderr.String()))
 	}
-	return ExtractTar(&tarOut, localOutputDir)
+	return extractErr
 }
 
 func (r *K8sRunner) ensureNamespace(ctx context.Context, ns string) error {
@@ -351,6 +403,9 @@ func BuildRunnerPodSpec(namespace, podName string, prof *profile.BenchmarkProfil
 				"app.kubernetes.io/name":       "opensandbox-bench-runner",
 				"app.kubernetes.io/managed-by": "opensandbox-bench",
 			},
+			Annotations: map[string]string{
+				RunnerSpecHashAnnotation: runnerSpecHash(prof),
+			},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
@@ -387,6 +442,16 @@ func BuildRunnerPodSpec(namespace, podName string, prof *profile.BenchmarkProfil
 	}, nil
 }
 
+func runnerSpecHash(prof *profile.BenchmarkProfile) string {
+	image := prof.Environment.Runner.BaseImage
+	if image == "" {
+		image = "alpine:3.20"
+	}
+	raw := fmt.Sprintf("image=%s|cpu=%s|mem=%s", image, prof.Environment.Runner.CPULimit, prof.Environment.Runner.MemoryLimit)
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:8])
+}
+
 func (r *K8sRunner) waitForPodReady(ctx context.Context, ns, podName string) error {
 	timeout := r.ReadyTimeout
 	if timeout <= 0 {
@@ -418,6 +483,39 @@ func (r *K8sRunner) waitForPodReady(ctx context.Context, ns, podName string) err
 		select {
 		case <-waitCtx.Done():
 			return fmt.Errorf("timed out waiting for runner pod %s/%s to become Ready: %w", ns, podName, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *K8sRunner) waitForPodDeleted(ctx context.Context, ns, podName string) error {
+	timeout := r.DeleteTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	interval := r.PollInterval
+	if interval <= 0 {
+		interval = 500 * time.Millisecond
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		_, err := r.Clientset.CoreV1().Pods(ns).Get(waitCtx, podName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("wait for runner pod %s/%s deletion: %w", ns, podName, err)
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("timed out waiting for runner pod %s/%s to terminate: %w", ns, podName, waitCtx.Err())
 		case <-ticker.C:
 		}
 	}

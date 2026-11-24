@@ -107,3 +107,43 @@ func TestExtractTarRejectsPathTraversalAndSymlinks(t *testing.T) {
 		require.Contains(t, err.Error(), "unsupported tar entry type")
 	})
 }
+
+func TestExtractTarEnforcesLimits(t *testing.T) {
+	makeArchive := func(files map[string][]byte) *bytes.Buffer {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		for name, data := range files {
+			require.NoError(t, tw.WriteHeader(&tar.Header{
+				Name:     name,
+				Typeflag: tar.TypeReg,
+				Mode:     0o644,
+				Size:     int64(len(data)),
+			}))
+			_, err := tw.Write(data)
+			require.NoError(t, err)
+		}
+		require.NoError(t, tw.Close())
+		return &buf
+	}
+
+	t.Run("max entry size exceeded", func(t *testing.T) {
+		buf := makeArchive(map[string][]byte{"big.txt": []byte("0123456789")})
+		err := ExtractTarWithLimits(buf, t.TempDir(), ExtractLimits{MaxEntries: 10, MaxEntryBytes: 5, MaxTotalBytes: 100})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exceeds max entry limit")
+	})
+
+	t.Run("max total size exceeded", func(t *testing.T) {
+		buf := makeArchive(map[string][]byte{"a.txt": []byte("12345"), "b.txt": []byte("67890")})
+		err := ExtractTarWithLimits(buf, t.TempDir(), ExtractLimits{MaxEntries: 10, MaxEntryBytes: 10, MaxTotalBytes: 8})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exceeds max total size")
+	})
+
+	t.Run("max entry count exceeded", func(t *testing.T) {
+		buf := makeArchive(map[string][]byte{"a.txt": []byte("1"), "b.txt": []byte("2")})
+		err := ExtractTarWithLimits(buf, t.TempDir(), ExtractLimits{MaxEntries: 1, MaxEntryBytes: 100, MaxTotalBytes: 100})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "exceeds max entry count")
+	})
+}
