@@ -18,6 +18,21 @@ func TestNftRemovedSingletonPortAtOptIn(t *testing.T) {
 		return
 	}
 	startWithdrawalEchoPeer(t, ctx, "443", "8443")
+	t.Run("without-explicit-deny", func(t *testing.T) {
+		const host = "198.18.0.2"
+		m := NewManagerWithOptions(Options{})
+		old := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"198.18.0.2","ports":[443,8443]}]}`)
+		require.NoError(t, m.ApplyStatic(ctx, old))
+		cut := openWithdrawalStream(t, host, "443")
+		sibling := openWithdrawalStream(t, host, "8443")
+		next := mustPolicy(t, `{"defaultAction":"deny","egress":[{"action":"allow","target":"198.18.0.2","ports":[8443]}]}`)
+		_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, next)
+		require.NoError(t, err)
+		// Both defaults deny, so there is neither a catch-all withdrawal nor an
+		// explicit 443 deny that could hide a missing removed-port rule.
+		requireWithdrawalDrop(t, ctx, cut, 2)
+		require.NoError(t, withdrawalEcho(sibling, 2))
+	})
 	const target = "198.18.0.2"
 	m := NewManagerWithOptions(Options{})
 	allowAll := mustPolicy(t, `{"defaultAction":"allow"}`)
