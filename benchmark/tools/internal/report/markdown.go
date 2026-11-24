@@ -69,6 +69,10 @@ func RenderSummaryMarkdown(r *Report) string {
 		b.WriteString("\n")
 	}
 
+	if r.LoadProfiles != nil {
+		renderLoadProfilesMarkdown(&b, r.LoadProfiles)
+	}
+
 	if r.LeakAudit != nil {
 		status := "PASS"
 		if !r.LeakAudit.Passed {
@@ -82,4 +86,69 @@ func RenderSummaryMarkdown(r *Report) string {
 	}
 
 	return b.String()
+}
+
+func renderLoadProfilesMarkdown(b *strings.Builder, lp *LoadProfiles) {
+	components := []struct {
+		name string
+		data *ComponentLoadSummary
+	}{
+		{"host", lp.Host},
+		{"fastlet", lp.Fastlet},
+		{"egress", lp.Egress},
+		{"fastlet_proxy", lp.FastletProxy},
+		{"firecracker_runtime", lp.FirecrackerRuntime},
+		{"opensandbox_server", lp.OpenSandboxServer},
+		{"ingress_gateway", lp.IngressGateway},
+	}
+
+	hasComp := false
+	for _, c := range components {
+		if c.data != nil {
+			hasComp = true
+			break
+		}
+	}
+
+	if !hasComp && len(lp.DensityFrontier) == 0 {
+		return
+	}
+
+	b.WriteString("## Load Profiles\n\n")
+	if hasComp {
+		b.WriteString("| Component | CPU Cores (Avg / P95 / Max) | RSS MiB (Avg / P95 / Max) | Per-Sandbox RSS (MiB) |\n")
+		b.WriteString("|---|---|---|---|\n")
+		for _, c := range components {
+			if c.data == nil {
+				continue
+			}
+			cpu := "-"
+			if c.data.CPUCores != nil {
+				cpu = fmt.Sprintf("%.2f / %.2f / %.2f", c.data.CPUCores.Avg, c.data.CPUCores.P95, c.data.CPUCores.Max)
+			}
+			rss := "-"
+			if c.data.RSSMiB != nil {
+				rss = fmt.Sprintf("%.1f / %.1f / %.1f", c.data.RSSMiB.Avg, c.data.RSSMiB.P95, c.data.RSSMiB.Max)
+			}
+			perSbx := "-"
+			if c.data.PerSandboxResidentMiB > 0 {
+				perSbx = fmt.Sprintf("%.2f", c.data.PerSandboxResidentMiB)
+			}
+			fmt.Fprintf(b, "| `%s` | %s | %s | %s |\n", c.name, cpu, rss, perSbx)
+		}
+		b.WriteString("\n")
+	}
+
+	if len(lp.DensityFrontier) > 0 {
+		b.WriteString("### Density Frontier\n\n")
+		b.WriteString("| Oversell | Active Sandboxes | Resident MiB/Sbx | CPU PSI (some avg60) | Mem PSI (full avg60) | MemAvail Min (MiB) | Denials | OOM | P99 Exec (ms) | Recovery (s) |\n")
+		b.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
+		for _, row := range lp.DensityFrontier {
+			fmt.Fprintf(b, "| %.2fx | %d | %.1f | %.2f | %.2f | %.0f | %d | %d | %.1f | %.1f |\n",
+				row.OversellRatio, row.ActiveSandboxes, row.ResidentMiBPerSandbox,
+				row.CPUPressureSomeAvg60, row.MemPressureFullAvg60, row.MemAvailableMinMiB,
+				row.AdmissionDenials, row.OOMKills, row.P99ExecLatencyMs, row.RecoveryTimeSeconds)
+		}
+		b.WriteString("\n")
+	}
 }

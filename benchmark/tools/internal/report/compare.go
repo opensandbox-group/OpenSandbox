@@ -69,7 +69,7 @@ func Compare(base, cand *Report, th CompareThresholds) *ComparisonResult {
 		bs := base.Suites[name]
 		cs := cand.Suites[name]
 
-		if bs.ThroughputRPS > 0 && cs.ThroughputRPS > 0 {
+		if bs.ThroughputRPS > 0 {
 			delta := pctChange(bs.ThroughputRPS, cs.ThroughputRPS)
 			reg := delta < -th.MaxThroughputDropPct
 			res.Rows = append(res.Rows, DiffRow{

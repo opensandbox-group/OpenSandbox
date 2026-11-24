@@ -223,7 +223,7 @@ func (r *Report) WriteBundle(outputDir string) error {
 	return nil
 }
 
-// Load reads a JSON report file from disk.
+// Load reads a JSON report file from disk and verifies its schema_version.
 func Load(path string) (*Report, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -232,6 +232,9 @@ func Load(path string) (*Report, error) {
 	var r Report
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("unmarshal report %q: %w", path, err)
+	}
+	if r.SchemaVersion != SchemaVersion {
+		return nil, fmt.Errorf("unsupported report schema_version %d in %q (expected %d)", r.SchemaVersion, path, SchemaVersion)
 	}
 	return &r, nil
 }

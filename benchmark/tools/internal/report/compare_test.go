@@ -15,6 +15,7 @@
 package report
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -91,4 +92,44 @@ func TestCompareDetectsRegressionsAndRoundTrip(t *testing.T) {
 	require.True(t, res.HasRegression)
 	require.GreaterOrEqual(t, len(res.Regressions), 3)
 	require.Contains(t, res.MarkdownSummary, "REGRESSION")
+}
+
+func TestCompareDetectsZeroCandidateThroughput(t *testing.T) {
+	base := New(Provenance{RunID: "base"})
+	base.Suites["steady-churn"] = SuiteResult{Name: "steady-churn", ThroughputRPS: 10.0}
+
+	cand := New(Provenance{RunID: "cand"})
+	cand.Suites["steady-churn"] = SuiteResult{Name: "steady-churn", ThroughputRPS: 0}
+
+	res := Compare(base, cand, DefaultCompareThresholds())
+	require.True(t, res.HasRegression)
+	require.Len(t, res.Rows, 1)
+	require.Equal(t, -100.0, res.Rows[0].DeltaPct)
+}
+
+func TestLoadRejectsUnsupportedSchemaVersion(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "bad.json")
+	require.NoError(t, os.WriteFile(p, []byte(`{"schema_version": 1}`), 0o644))
+	_, err := Load(p)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported report schema_version")
+}
+
+func TestRenderSummaryIncludesLoadProfiles(t *testing.T) {
+	r := New(Provenance{RunID: "run-1", ProfileName: "ref", Runtime: "fast-sandbox-overlaybd"})
+	r.LoadProfiles = &LoadProfiles{
+		Fastlet: &ComponentLoadSummary{
+			CPUCores:              &StatSummary{Avg: 1.2, P95: 2.0, Max: 2.5},
+			RSSMiB:                &StatSummary{Avg: 256, P95: 300, Max: 320},
+			PerSandboxResidentMiB: 12.5,
+		},
+		DensityFrontier: []DensityTierRow{
+			{OversellRatio: 1.5, ActiveSandboxes: 48, ResidentMiBPerSandbox: 64.0, P99ExecLatencyMs: 22.3},
+		},
+	}
+	md := RenderSummaryMarkdown(r)
+	require.Contains(t, md, "## Load Profiles")
+	require.Contains(t, md, "`fastlet`")
+	require.Contains(t, md, "### Density Frontier")
+	require.Contains(t, md, "1.50x")
 }

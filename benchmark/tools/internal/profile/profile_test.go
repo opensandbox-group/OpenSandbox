@@ -62,3 +62,13 @@ func TestValidateRejectsWakeStormWithoutRedis(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "redis")
 }
+
+func TestParseRejectsUnknownKeys(t *testing.T) {
+	raw, err := EmbeddedRaw(DefaultProfileName)
+	require.NoError(t, err)
+
+	bad := []byte(string(raw) + "\nunknownTopLevelKey: true\n")
+	_, err = Parse(bad)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknownTopLevelKey")
+}

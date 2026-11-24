@@ -35,3 +35,19 @@ func TestRenderWaterfall(t *testing.T) {
 	require.Contains(t, out, "[opensandbox-bench] bench.create  100.00ms (self 10.00ms, 100.0%)")
 	require.Contains(t, out, "[fsb-vm] fsb_vm.ublkd_acquire  40.00ms (self 40.00ms, 40.0%)")
 }
+
+func TestRenderWaterfallOverlappingChildrenSelfTime(t *testing.T) {
+	// Parent is [0, 100ms]; two overlapping children cover [0, 70ms] (union = 70ms),
+	// leaving 30ms of uncovered parent self-time.
+	tr := &Trace{
+		TraceID: "overlap",
+		Spans: []Span{
+			{TraceID: "overlap", SpanID: "p", ServiceName: "svc", Name: "parent", StartTimeUs: 0, DurationUs: 100000},
+			{TraceID: "overlap", SpanID: "c1", ParentSpanID: "p", ServiceName: "svc", Name: "child1", StartTimeUs: 0, DurationUs: 60000},
+			{TraceID: "overlap", SpanID: "c2", ParentSpanID: "p", ServiceName: "svc", Name: "child2", StartTimeUs: 10000, DurationUs: 60000},
+		},
+	}
+
+	out := RenderWaterfall(tr)
+	require.Contains(t, out, "[svc] parent  100.00ms (self 30.00ms, 100.0%)")
+}

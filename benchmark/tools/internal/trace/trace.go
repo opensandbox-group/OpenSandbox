@@ -150,11 +150,8 @@ func RenderWaterfall(t *Trace) string {
 	var walk func(s Span, prefix string, isLast bool, isRoot bool)
 	walk = func(s Span, prefix string, isLast bool, isRoot bool) {
 		kids := children[s.SpanID]
-		var childSum int64
-		for _, k := range kids {
-			childSum += k.DurationUs
-		}
-		selfUs := s.DurationUs - childSum
+		coveredUs := coveredChildDurationUs(s, kids)
+		selfUs := s.DurationUs - coveredUs
 		if selfUs < 0 {
 			selfUs = 0
 		}
@@ -196,4 +193,55 @@ func RenderWaterfall(t *Trace) string {
 		walk(r, "", i == len(roots)-1, true)
 	}
 	return b.String()
+}
+
+type interval struct {
+	start int64
+	end   int64
+}
+
+// coveredChildDurationUs computes the union length of child span intervals
+// clipped to the parent span window so concurrent sibling spans are not double-counted.
+func coveredChildDurationUs(parent Span, kids []Span) int64 {
+	if len(kids) == 0 || parent.DurationUs <= 0 {
+		return 0
+	}
+	pStart := parent.StartTimeUs
+	pEnd := parent.StartTimeUs + parent.DurationUs
+
+	intervals := make([]interval, 0, len(kids))
+	for _, k := range kids {
+		if k.DurationUs <= 0 {
+			continue
+		}
+		s := max(k.StartTimeUs, pStart)
+		e := min(k.StartTimeUs+k.DurationUs, pEnd)
+		if e > s {
+			intervals = append(intervals, interval{start: s, end: e})
+		}
+	}
+	if len(intervals) == 0 {
+		return 0
+	}
+	sort.Slice(intervals, func(i, j int) bool {
+		if intervals[i].start == intervals[j].start {
+			return intervals[i].end < intervals[j].end
+		}
+		return intervals[i].start < intervals[j].start
+	})
+
+	var total int64
+	cur := intervals[0]
+	for _, iv := range intervals[1:] {
+		if iv.start <= cur.end {
+			if iv.end > cur.end {
+				cur.end = iv.end
+			}
+			continue
+		}
+		total += cur.end - cur.start
+		cur = iv
+	}
+	total += cur.end - cur.start
+	return total
 }

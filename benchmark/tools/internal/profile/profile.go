@@ -15,9 +15,11 @@
 package profile
 
 import (
+	"bytes"
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -236,10 +238,13 @@ func EmbeddedRaw(name string) ([]byte, error) {
 	return data, nil
 }
 
-// Parse decodes YAML bytes into a BenchmarkProfile, applies defaults, and validates invariants.
+// Parse decodes YAML bytes into a BenchmarkProfile with strict field checking,
+// applies defaults, and validates invariants.
 func Parse(data []byte) (*BenchmarkProfile, error) {
 	var p BenchmarkProfile
-	if err := yaml.Unmarshal(data, &p); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&p); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse profile yaml: %w", err)
 	}
 	p.ApplyDefaults()
