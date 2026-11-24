@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # OpenSandbox server configuration for Docker Egress Forward Mode + agentgateway.
-# Replace <version> tags and demo credentials before use outside local testing.
+# Replace demo credentials before use outside local testing.
 
 [server]
 host = "127.0.0.1"
@@ -22,14 +22,14 @@ api_key = "opensandbox-demo-key"
 
 [runtime]
 type = "docker"
-execd_image = "opensandbox/execd:<version>"
+execd_image = "opensandbox/execd:release-1.3.0-rc.3"
 
 [docker]
 network_mode = "bridge"
 drop_capabilities = ["NET_ADMIN", "NET_RAW"]
 
 [egress]
-image = "opensandbox/egress:<version>"
+image = "opensandbox/egress:release-1.3.0-rc.3"
 mode = "forward"
 
 [egress.upstream_proxy]

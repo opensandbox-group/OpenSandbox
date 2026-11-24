@@ -26,9 +26,10 @@ upstream origin (dialed via DNS on authorized hostname, never the raw CONNECT IP
 
 ## Prerequisites
 
-- OpenSandbox server and `opensandbox/egress` images supporting Egress Forward Mode ([OSEP-0030](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0030-egress-upstream-proxy-forward-mode.md)).
+- OpenSandbox `release-1.3.0-rc.3` (or newer) supporting Egress Forward Mode ([OSEP-0030](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0030-egress-upstream-proxy-forward-mode.md)) — see the [1.3.0-rc.3 release manifest](https://github.com/opensandbox-group/OpenSandbox/releases/download/release-1.3.0-rc.3/1.3.0-rc.3.yaml) (`opensandbox/server:release-1.3.0-rc.3`, `opensandbox/execd:release-1.3.0-rc.3`, `opensandbox/egress:release-1.3.0-rc.3`).
+  - Note: PyPI `opensandbox-server==1.2.1` rejects `egress.mode = "forward"`. Until `1.3.0` is published to PyPI, run the server from this repository checkout (`uv run --project server opensandbox-server ...`) or deploy the `opensandbox/server:release-1.3.0-rc.3` container image.
 - `ghcr.io/agentgateway/agentgateway:v1.7.0` (or newer).
-- Python 3.10+ with `opensandbox` SDK (`uv pip install opensandbox`).
+- Python 3.10+ with `opensandbox` SDK (`uv pip install opensandbox`; `1.2.1` works).
 - For Docker walkthrough: Docker Engine / Docker Desktop / OrbStack with bridge networking.
 - For Kubernetes Gateway API walkthrough: Kubernetes **1.30+**, Gateway API `v1.6.3` standard CRDs, `agentgateway` `v1.7.0+` Helm charts, and OpenSandbox controller (`batchsandbox` or `agent-sandbox` provider).
 - For Kubernetes Standalone outer-HTTPS walkthrough: any Kubernetes cluster with OpenSandbox controller and `openssl` (no Gateway API CRDs required).
@@ -58,10 +59,16 @@ docker run -d --name agentgateway-egress \
 
 ### 2. Start OpenSandbox server
 
-Edit [docker/server.toml](https://github.com/opensandbox-group/OpenSandbox/blob/main/examples/agentgateway-egress/docker/server.toml) to set concrete `execd_image` and `egress.image` tags (and on Linux Docker Engine, set `egress.upstream_proxy.url` to the `agentgateway-egress` bridge IP or host gateway IP instead of `host.docker.internal`), then start the server:
+[docker/server.toml](https://github.com/opensandbox-group/OpenSandbox/blob/main/examples/agentgateway-egress/docker/server.toml) already pins `execd_image` and `egress.image` to `release-1.3.0-rc.3`. On Linux Docker Engine, edit `egress.upstream_proxy.url` to use the `agentgateway-egress` bridge IP or host gateway IP instead of `host.docker.internal`. If your Docker daemon uses a non-default socket (such as OrbStack), export `DOCKER_HOST` before starting the server from the repository checkout:
 
 ```shell
-opensandbox-server --config examples/agentgateway-egress/docker/server.toml
+# On OrbStack (when using its non-default socket instead of /var/run/docker.sock):
+export DOCKER_HOST="unix://${HOME}/.orbstack/run/docker.sock"
+# Or resolve the active Docker context endpoint automatically:
+# export DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+
+uv run --project server opensandbox-server \
+  --config examples/agentgateway-egress/docker/server.toml
 ```
 
 ### 3. Run the verification script
@@ -106,11 +113,26 @@ kubectl wait --for=condition=Programmed gateway/opensandbox-egress -n opensandbo
 
 ### 3. Start OpenSandbox server and run the verification script
 
-Update `execd_image` and `egress.image` in [kubernetes/server.toml](https://github.com/opensandbox-group/OpenSandbox/blob/main/examples/agentgateway-egress/kubernetes/server.toml), start the server, and run `main.py` with `SANDBOX_USE_SERVER_PROXY=true` and `EXPECTED_NAMESPACE=opensandbox`:
+[kubernetes/server.toml](https://github.com/opensandbox-group/OpenSandbox/blob/main/examples/agentgateway-egress/kubernetes/server.toml) already pins `execd_image` and `egress.image` to `release-1.3.0-rc.3`.
 
-```shell
-opensandbox-server --config examples/agentgateway-egress/kubernetes/server.toml
-```
+Because `SANDBOX_USE_SERVER_PROXY=true` proxies SDK calls through `opensandbox-server`, the server itself must be able to reach sandbox Pod IPs directly. On local `kind` clusters (or any cluster whose Pod CIDR is not routable from the host), running `opensandbox-server` on the host will time out waiting for sandbox readiness even when `SANDBOX_USE_SERVER_PROXY=true` is set.
+
+Choose one of the following server setups:
+
+1. **In-cluster + `kubectl port-forward` (recommended; verified on local `kind`)**: Deploy `opensandbox-server` inside the cluster using `opensandbox/server:release-1.3.0-rc.3` (for example with `./manifests/charts/server`, keeping `[server] host = "0.0.0.0"`, `port = 80`, and `[kubernetes].kubeconfig_path` unset in `configToml` while copying `[runtime]`, `[kubernetes]`, `[egress]`, and `[egress.upstream_proxy]` from `examples/agentgateway-egress/kubernetes/server.toml`), then forward port `8080`:
+
+   ```shell
+   kubectl port-forward -n opensandbox-system svc/opensandbox-server 8080:80
+   ```
+
+2. **Host-side server (only when the host can route directly to sandbox Pod IPs)**: Uncomment and explicitly set `[kubernetes].kubeconfig_path` in [kubernetes/server.toml](https://github.com/opensandbox-group/OpenSandbox/blob/main/examples/agentgateway-egress/kubernetes/server.toml) (leaving it unset falls back to in-cluster configuration and fails outside a Pod), then start the server from the repository checkout:
+
+   ```shell
+   uv run --project server opensandbox-server \
+     --config examples/agentgateway-egress/kubernetes/server.toml
+   ```
+
+Run `main.py` with `SANDBOX_USE_SERVER_PROXY=true` and `EXPECTED_NAMESPACE=opensandbox`:
 
 ```shell
 SANDBOX_DOMAIN=127.0.0.1:8080 \
@@ -156,7 +178,9 @@ kubectl rollout status deployment/agentgateway-standalone -n opensandbox --timeo
 
 ### 3. Switch `kubernetes/server.toml` to Option 2 and verify
 
-Uncomment the Option 2 `[egress.upstream_proxy]` block (`https://agentgateway-standalone.opensandbox.svc.cluster.local:3128` + `ca_secret_name = "gateway-ca"`) in `examples/agentgateway-egress/kubernetes/server.toml`, start the server, and run HTTPS verification:
+In `examples/agentgateway-egress/kubernetes/server.toml`, **first comment out Option 1's `url` and `authorization` keys**, and then uncomment the Option 2 `[egress.upstream_proxy]` block (`url = "https://agentgateway-standalone.opensandbox.svc.cluster.local:3128"`, `authorization`, and `ca_secret_name = "gateway-ca"`). Leaving Option 1 active causes a duplicate-key TOML parse error (`Cannot overwrite a value`).
+
+Apply the updated config to your in-cluster server (keeping `kubectl port-forward` active) or restart the host-side server via `uv run --project server opensandbox-server --config examples/agentgateway-egress/kubernetes/server.toml`, then run HTTPS verification:
 
 ```shell
 SANDBOX_DOMAIN=127.0.0.1:8080 \
@@ -168,6 +192,8 @@ uv run python examples/agentgateway-egress/main.py
 
 ## Expected output
 
+Options A and B (HTTPS + HTTP):
+
 ```text
 Created sandbox: <sandbox-id>
 [PASS] HTTPS passthrough allowed: https://example.com -> 200
@@ -175,6 +201,18 @@ Created sandbox: <sandbox-id>
 [PASS] Anti-spoofing SNI routing: 1.1.1.1:443 (SNI=example.com) -> HTTP/1.1 200 OK
 [PASS] HTTP allowed + CONNECT identity headers injected: x-opensandbox-sandbox-id=<sandbox-id>
 [PASS] HTTP denied domain rejected by agentgateway: http://example.org -> 404
+[PASS] Link-local metadata address dropped: 169.254.169.254 (BLOCKED:TimeoutError)
+All agentgateway egress checks passed.
+Sandbox <sandbox-id> destroyed.
+```
+
+Option C (`VERIFY_HTTP=false`):
+
+```text
+Created sandbox: <sandbox-id>
+[PASS] HTTPS passthrough allowed: https://example.com -> 200
+[PASS] HTTPS denied domain blocked: https://example.org
+[PASS] Anti-spoofing SNI routing: 1.1.1.1:443 (SNI=example.com) -> HTTP/1.1 200 OK
 [PASS] Link-local metadata address dropped: 169.254.169.254 (BLOCKED:TimeoutError)
 All agentgateway egress checks passed.
 Sandbox <sandbox-id> destroyed.
