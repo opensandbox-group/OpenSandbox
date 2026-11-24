@@ -91,6 +91,16 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// HTTP/1 is half duplex by default: before the first response write, the
+	// server consumes and closes any unread request body. The Transport may
+	// still be reading that body for the sandbox, which can answer before the
+	// body ends, and after a body of declared length the Transport reads once
+	// more to see EOF. That read then fails and the Transport closes the
+	// upstream connection, cutting the response being streamed back. HTTP/2
+	// is always full duplex, and writers that do not expose a net/http server
+	// response have nothing to enable.
+	_ = http.NewResponseController(w).EnableFullDuplex()
+
 	start := time.Now()
 	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 	proxyType := httpScheme

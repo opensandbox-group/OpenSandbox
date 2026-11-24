@@ -16,15 +16,19 @@ package proxy
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type stubNoSecureProvider struct{}
@@ -120,6 +124,68 @@ func TestServeHTTPRejectsInvalidHostRoutePort(t *testing.T) {
 		proxy.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://"+host+"/", nil))
 		assert.Equal(t, http.StatusBadRequest, rec.Code, host)
 	}
+}
+
+func TestServeHTTPStreamsResponseWhileRequestBodyIsSent(t *testing.T) {
+	const head, tail, started = "first part,", " second part", "started\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Like a sandbox process that streams output while still reading its
+		// input, answer before the request body ends.
+		controller := http.NewResponseController(w)
+		if err := controller.EnableFullDuplex(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		received := make([]byte, len(head))
+		if _, err := io.ReadFull(r.Body, received); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_, _ = io.WriteString(w, started)
+		if err := controller.Flush(); err != nil {
+			return
+		}
+		rest, err := io.ReadAll(r.Body)
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(w, "received %s%s\n", received, rest)
+	}))
+	defer upstream.Close()
+	ingress := httptest.NewServer(NewProxy(context.Background(), stubNoSecureProvider{}, ModeHeader, nil, nil, nil))
+	defer ingress.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The body has no declared length and ends only after the client has
+	// read the start of the response.
+	responseStarted := make(chan struct{})
+	body, bodyWriter := io.Pipe()
+	go func() {
+		_, _ = io.WriteString(bodyWriter, head)
+		select {
+		case <-responseStarted:
+			_, _ = io.WriteString(bodyWriter, tail)
+			_ = bodyWriter.Close()
+		case <-ctx.Done():
+			_ = bodyWriter.CloseWithError(ctx.Err())
+		}
+	}()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, ingress.URL+"/run", body)
+	require.NoError(t, err)
+	request.Header.Set(SandboxIngress, fmt.Sprintf("sandbox-%d", upstream.Listener.Addr().(*net.TCPAddr).Port))
+
+	response, err := ingress.Client().Do(request)
+	require.NoError(t, err, "the response must start while the request body is still being sent")
+	defer response.Body.Close()
+	first := make([]byte, len(started))
+	_, err = io.ReadFull(response.Body, first)
+	require.NoError(t, err)
+	require.Equal(t, started, string(first))
+	close(responseStarted)
+	rest, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Equal(t, "received "+head+tail+"\n", string(rest))
 }
 
 func TestGetClientIP(t *testing.T) {
