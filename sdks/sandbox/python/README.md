@@ -343,7 +343,9 @@ result = await sandbox.commands.run(
 )
 
 # Foreground runs carry an exit code: 0 on success, the command's exit
-# status on failure, and -1 when terminated by a signal
+# status on failure, and -1 when terminated by a signal. A stream that ends
+# before the command's terminal event raises instead of returning a partial
+# execution
 print(f"exit_code: {result.exit_code}")
 ```
 

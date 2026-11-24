@@ -214,7 +214,8 @@ const execution = await sandbox.commands.run(
 );
 
 // Foreground runs carry exitCode: 0 on success, the command's exit status
-// on failure, -1 when terminated by a signal
+// on failure, -1 when terminated by a signal. A stream that ends before the
+// command's terminal event raises instead of returning a partial execution
 console.log("exitCode:", execution.exitCode);
 ```
 
