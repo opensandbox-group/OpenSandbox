@@ -246,7 +246,7 @@ jobs:
         timeout-minutes: 45
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
 
-      # OSEP-0023 cost measurements (M1/M2), only in the matching live mode.
+      # OSEP-0023 cost measurements (M1-M4), only in the matching live mode.
       - name: Run default cost bench (OSEP-0023)
         id: bench_default
         if: env.FSB_BENCH == 'true' && matrix.egress_interception_mode == ''
@@ -298,7 +298,7 @@ jobs:
           "PYTEST_ADDOPTS=-k 'test_02_sandbox_surface_and_egress_methods or test_02b_network_policy_port_scoped_contract or test_02c_network_policy_port_scoped_enforcement'"
           ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
-      # OSEP-0023 cost measurements (M1/M2), only in the matching live mode.
+      # OSEP-0023 cost measurements (M1-M4), only in the matching live mode.
       - name: Run credential-bound cost bench (OSEP-0023)
         id: bench_credential_bound
         if: env.FSB_BENCH == 'true' && (matrix.egress_interception_mode == 'credential-bound' || needs.egress-modes.outputs.run_credential_bound_delta == 'true')
