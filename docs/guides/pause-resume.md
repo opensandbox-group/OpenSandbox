@@ -388,7 +388,7 @@ Templates must produce valid tagged OCI image references without a digest. Custo
 
 ### Runtime compatibility
 
-The built-in `rootfs-v1` image committer requires a container runtime that exposes compatible containerd task pause/resume and writable-snapshot APIs. gVisor RuntimeClasses whose handler is `runsc` do not currently satisfy that contract. The Lifecycle server rejects public snapshot creation for those workloads before it persists a snapshot record or creates a `SandboxSnapshot` resource, leaving the running sandbox untouched.
+The built-in `rootfs-v1` image committer requires a container runtime that exposes compatible containerd task pause/resume and writable-snapshot APIs. gVisor RuntimeClasses whose handler is `runsc` do not currently satisfy that contract. The Lifecycle server rejects public snapshot creation for those workloads before it persists a snapshot record or creates a `SandboxSnapshot` resource, leaving the running sandbox untouched. Pause commits the rootfs with the same committer, so the Lifecycle server also answers HTTP 409 to a pause of a BatchSandbox whose RuntimeClass handler is `runsc` or starts with `runsc-`, or whose runtime it cannot verify, and leaves the sandbox running.
 
 Native gVisor checkpoint/restore requires a dedicated snapshot backend and is not provided by the `rootfs-v1` committer.
 
