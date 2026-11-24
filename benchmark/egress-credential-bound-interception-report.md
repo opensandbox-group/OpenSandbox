@@ -1,11 +1,6 @@
----
-title: Credential-Bound Interception Benchmark
-description: Cost of Fast Sandbox credential-bound egress interception compared with intercept-all, measured in KVM integration environments (OSEP-0023).
----
+# Egress Credential-Bound Interception Benchmark Report
 
-# Credential-Bound Interception Benchmark
-
-This page answers two questions about the experimental Fast Sandbox `credential-bound` interception mode (see [Egress](/architecture/network/egress)): how much the mode adds to sandbox creation latency, and what the per-subject and process connection budgets should be. The same bench ran in two KVM integration environments (`scripts/fast-sandbox-env`): CI workflow run [44396818387](https://github.com/opensandbox-group/OpenSandbox/actions/runs/44396818387) on the self-hosted `kvm` runner (2026-11-18), and a rerun on a shared bare-metal host (2026-11-19) with the CI parameters (set A) and with larger samples (set B). Neither environment is the ACK cluster used on the [Fast Sandbox performance page](/architecture/fast-sandbox/performance), so absolute values are not comparable with that page, and the create-latency comparison here measures the effect of the interception mode, not the ACK lifecycle path. The two environments also differ in hardware, kernel and background load; compare each environment's two legs, not absolute values across environments.
+This report answers two questions about the experimental Fast Sandbox `credential-bound` interception mode (see [Egress](../docs/architecture/network/egress.md)): how much the mode adds to sandbox creation latency, and what the per-subject and process connection budgets should be. The same bench ran in two KVM integration environments (`scripts/fast-sandbox-env`): CI workflow run [44396818387](https://github.com/opensandbox-group/OpenSandbox/actions/runs/44396818387) on the self-hosted `kvm` runner (2026-11-18), and a rerun on a shared bare-metal host (2026-11-19) with the CI parameters (set A) and with larger samples (set B). Neither environment is the ACK cluster used on the [Fast Sandbox performance page](../docs/architecture/fast-sandbox/performance.md), so absolute values are not comparable with that page, and the create-latency comparison here measures the effect of the interception mode, not the ACK lifecycle path. The two environments also differ in hardware, kernel and background load; compare each environment's two legs, not absolute values across environments.
 
 ## Summary
 
@@ -58,7 +53,7 @@ M1 writes no Vault: `create-bench.py` has no Vault step. The cost of binding a c
 
 M3 runs on a bench-only Pool render that raises the egress container memory limit to 2Gi and `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` to the per-subject budget above, so that the largest step fits. The default render and the verify lanes are unchanged, and the default Pool is re-applied after M3. If a step cannot be reached, the report keeps every point collected so far, the largest K reached, and the closed failure kinds. The step is never dropped from the report, and only steps whose held count equals the target enter the fit. An egress container restart or OOM kill also stops the series and is recorded.
 
-The TLS origin fixture holds one socket per held connection, so M3 also needs the origin container's open-file soft limit well above the largest K. The container inherits the Docker daemon's default. On the bare-metal host that default was 1024, and the first `credential-bound` set A attempt reported M3 `PARTIAL`: 1,896 of 2,000 connections held and 876 alive at release. The origin's soft limit was raised to 65536 and the whole set was rerun; the `PARTIAL` attempt is not used on this page.
+The TLS origin fixture holds one socket per held connection, so M3 also needs the origin container's open-file soft limit well above the largest K. The container inherits the Docker daemon's default. On the bare-metal host that default was 1024, and the first `credential-bound` set A attempt reported M3 `PARTIAL`: 1,896 of 2,000 connections held and 876 alive at release. The origin's soft limit was raised to 65536 and the whole set was rerun; the `PARTIAL` attempt is not used in this report.
 
 ## Environment
 
@@ -182,7 +177,7 @@ Passthrough-dominated load, 95% of requests to an unbound host:
 | Bare metal, set B | default (`all`) | 5000/5000 | 0.108 | 18.01 ms | 813.0 ms (18) |
 | Bare metal, set B | `credential-bound` | 5000/5000 | 0.054 | 8.22 ms | 1,930.1 ms (28) |
 
-`credential-bound` used 57% (CI), 54.3% (set A) and 54.4% (set B) less egress CPU per request than `all`, because unbound connections are passed through instead of being decrypted and re-encrypted. Every request's leaf and credential evidence matched its path. Per-request CPU within one environment changed by about 2% between sets A and B. Each set has one load window per leg, so the page reports no confidence interval.
+`credential-bound` used 57% (CI), 54.3% (set A) and 54.4% (set B) less egress CPU per request than `all`, because unbound connections are passed through instead of being decrypted and re-encrypted. Every request's leaf and credential evidence matched its path. Per-request CPU within one environment changed by about 2% between sets A and B. Each set has one load window per leg, so this report gives no confidence interval.
 
 Average load stayed at or below 0.11 cores, below the 500m limit, but CFS throttling occurred in short bursts in every run. The values are CPU time, not request latency, and the load windows do not measure maximum throughput.
 
@@ -190,7 +185,7 @@ The saving depends on the traffic mix. Assuming that a bound request costs the s
 
 ## Budget sizing
 
-The per-subject default `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` is 32. The process default `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` is 32768; it was lowered from 131072 in #3053 after these measurements. At 158–166 KB per held connection, 131072 connections need 20.7–21.7 GB of connection memory, far above the 256Mi, 2Gi and 8Gi egress memory limits considered on this page. The budget model, including the relationship between the per-subject and process caps, the worst-case memory each implies, and why the process budget is the bound that protects the container, is described in [Fast Sandbox networking](/architecture/fast-sandbox/networking#interception-mode). The operator procedure and example values are in the [Credential Vault guide](/guides/credential-vault#sizing-the-connection-budgets-operators). This section gives the measured inputs.
+The per-subject default `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` is 32. The process default `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` is 32768; it was lowered from 131072 in #3053 after these measurements. At 158–166 KB per held connection, 131072 connections need 20.7–21.7 GB of connection memory, far above the 256Mi, 2Gi and 8Gi egress memory limits considered in this report. The budget model, including the relationship between the per-subject and process caps, the worst-case memory each implies, and why the process budget is the bound that protects the container, is described in [Fast Sandbox networking](../docs/architecture/fast-sandbox/networking.md#interception-mode). The operator procedure and example values are in the [Credential Vault guide](../docs/guides/credential-vault.md#sizing-the-connection-budgets-operators). This section gives the measured inputs.
 
 `m` uses the highest `memory.current` slope measured, because the container memory limit is enforced on `memory.current`, and `B` uses the highest `memory.current` baseline. A different egress image, mitmproxy version or kernel can change both values; rerun M3 before relying on them there.
 
@@ -205,7 +200,7 @@ Passthrough connections are not charged to either budget, but each costs about 3
 
 ## Supplemental measurements
 
-These measurements, labelled M3x and M5–M10, cover what the first runs did not. They ran from 2026-11-20 to 2026-11-23 on the same shared bare-metal host, with the same isolation as set B: a private Docker daemon and containerd, kind, and one cgroup capped at 24 CPUs and 64 GiB. The bench is not part of this repository; its method, parameters and acceptance rules are in [`SUPPLEMENTAL.md`](https://github.com/hpliStartAgain/OpenSandbox/blob/6bf7d46e6cf2b76564b12098d6fe1fb65e2841d1/scripts/fast-sandbox-env/SUPPLEMENTAL.md) on a reproduction branch. The measurements used three frozen versions of it, listed below. Each version passed an independent code review and an independent test pass before it ran, and all summary values on this page were recomputed independently from the raw reports. The raw reports are not published; the method and the frozen bench versions below are the reproducible record. Performance was not remeasured on current `main`.
+These measurements, labelled M3x and M5–M10, cover what the first runs did not. They ran from 2026-11-20 to 2026-11-23 on the same shared bare-metal host, with the same isolation as set B: a private Docker daemon and containerd, kind, and one cgroup capped at 24 CPUs and 64 GiB. The bench is not part of this repository; its method, parameters and acceptance rules are in [`SUPPLEMENTAL.md`](https://github.com/hpliStartAgain/OpenSandbox/blob/6bf7d46e6cf2b76564b12098d6fe1fb65e2841d1/scripts/fast-sandbox-env/SUPPLEMENTAL.md) on a reproduction branch. The measurements used three frozen versions of it, listed below. Each version passed an independent code review and an independent test pass before it ran, and all summary values in this report were recomputed independently from the raw reports. The raw reports are not published; the method and the frozen bench versions below are the reproducible record. Performance was not remeasured on current `main`.
 
 | Measurements | Frozen bench version | Code under test |
 |---|---|---|
@@ -329,7 +324,7 @@ Run after `up` and the verify actions, with the same `EGRESS_INTERCEPTION_MODE` 
 EGRESS_INTERCEPTION_MODE=credential-bound ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound
 ```
 
-The `bench-credential-bound` action and its CI wiring are added by #3054 (framework, M1 and M2) and #3062 (M3 and M4); until they merge, run these commands from those branches. In CI, the bench runs when the `bench` dispatch input is set or the pull request carries the `fast-sandbox-bench` label: the default-mode bench runs before the workflow switches the Pool to `credential-bound`, and the `credential-bound` bench runs after the switch. The reports are uploaded as `fast-sandbox-bench-<leg>-<attempt>` artifacts. The `BENCH_*` variables listed in the [environment README](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/README.md) change sample counts, steps and the M3 render. The defaults are set A; set B on this page used:
+The `bench-credential-bound` action and its CI wiring were added by #3054 (framework, M1 and M2) and #3062 (M3 and M4). In CI, the bench runs when the `bench` dispatch input is set or the pull request carries the `fast-sandbox-bench` label: the default-mode bench runs before the workflow switches the Pool to `credential-bound`, and the `credential-bound` bench runs after the switch. The reports are uploaded as `fast-sandbox-bench-<leg>-<attempt>` artifacts. The `BENCH_*` variables listed in the [environment README](https://github.com/opensandbox-group/OpenSandbox/blob/main/scripts/fast-sandbox-env/README.md) change sample counts, steps and the M3 render. The defaults are set A; set B in this report used:
 
 ```bash
 BENCH_CREATE_ROUNDS=5 BENCH_CREATE_N=400 BENCH_HANDSHAKES=1000 \

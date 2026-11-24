@@ -249,10 +249,6 @@ export default withMermaid(defineConfig({
               text: "Kubernetes Resume Benchmark",
               link: "/guides/kubernetes-resume-benchmark",
             },
-            {
-              text: "Credential-Bound Interception Benchmark",
-              link: "/guides/credential-bound-benchmark",
-            },
             { text: "Pod Provision Failure Recovery", link: "/guides/pod-recovery" },
             {
               text: "QEMU VMState Snapshots",
