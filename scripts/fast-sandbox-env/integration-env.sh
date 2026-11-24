@@ -62,6 +62,7 @@
 #   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # native boot-path + egress-rules + rootfs-only snapshot verify (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + full scenario matrix (needs up)
 #   ./scripts/fast-sandbox-env/integration-env.sh pool           # re-apply the pool only
+#   ./scripts/fast-sandbox-env/integration-env.sh bench-credential-bound  # OSEP-0023 cost measurements (needs up; either leg)
 #   ./scripts/fast-sandbox-env/integration-env.sh status         # component/pool/DART/OpenSandbox health
 #   ./scripts/fast-sandbox-env/integration-env.sh down           # teardown, host left clean
 #   ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean   # down on failure
@@ -4881,6 +4882,42 @@ exchange_stage() { # <description> <template-id>
 	run_stage "$1" exchange_resolver_verify "$2"
 }
 
+# Read the declared mode and every live Pod before any measurement creates a
+# sandbox: a delta step can switch the Pool without changing the matrix env.
+bench_require_egress_mode() {
+	local expected="${EGRESS_INTERCEPTION_MODE:-all}" pool pods matches
+	matches='
+		def matches:
+			[.containers[]? | select(.name == "egress")] as $c |
+			($c | length) == 1 and
+			([$c[0].env[]? | select(.name == "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")] as $v |
+			 ($v | length) <= 1 and ($v | all(has("valueFrom") | not)) and
+			 (($v[0].value // "all" | if . == "" then "all" else . end) == $expected));'
+	pool="$(kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" -o json)" \
+		|| fail "bench: live SandboxPool mode could not be read"
+	printf '%s' "$pool" | jq -e --arg expected "$expected" \
+		"$matches .spec.fastletTemplate.spec | matches" >/dev/null \
+		|| fail "bench: live SandboxPool mode differs from expected $expected"
+	pods="$(kubectl -n "$RESOURCE_NS" get pods \
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o json)" \
+		|| fail "bench: live Pod modes could not be read"
+	printf '%s' "$pods" | jq -e --arg expected "$expected" \
+		"$matches (.items | length) > 0 and (.items | all(.spec | matches))" >/dev/null \
+		|| fail "bench: live Pod modes differ from expected $expected (or no Pods found)"
+}
+
+# OSEP-0023 cost measurements (credential-bound-bench.sh): M1/M2 reports
+# under $WORK/bench/<leg>; runs in either interception leg.
+bench_credential_bound() {
+	# Failed preflights must never leave reports from a previous invocation.
+	rm -rf "${BENCH_REPORT_DIR:-$WORK/bench/${EGRESS_INTERCEPTION_MODE:-default}}"
+	require_live_stack
+	bench_require_egress_mode
+	# shellcheck source=credential-bound-bench.sh
+	source "$SCRIPT_DIR/credential-bound-bench.sh"
+	credential_bound_bench
+}
+
 credential_bound_stage() { # <description> <template-id>
 	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] || return 0
 	# shellcheck source=verify/credential-bound.sh
@@ -5554,7 +5591,7 @@ down() {
 
 usage() {
 	cat <<'EOF'
-usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|verify-resourceaware|verify-credential-bound|down|status|pool|sdk-e2e|idle-e2e}
+usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|verify-resourceaware|verify-credential-bound|bench-credential-bound|down|status|pool|sdk-e2e|idle-e2e}
 
   up       initialize the environment: fast-sandbox@pinned-commit images,
            two-node kind cluster (KVM), RustFS, control plane, firecracker
@@ -5586,6 +5623,11 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
                    credential-bound on native + overlaybd, vault, MITM CA,
                    exchange BLOCKED I1) reusing existing templates; requires
                    `up` and EGRESS_INTERCEPTION_MODE=credential-bound
+  bench-credential-bound
+                   OSEP-0023 cost measurements in the current leg
+                   (EGRESS_INTERCEPTION_MODE): M1 create latency, M2 guest
+                   TLS connect latency per path;
+                   JSON reports under $WORK/bench/<leg>; requires `up`
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
   status   nodes / pods / pool / DART P2P counters / RustFS / OpenSandbox health
   sdk-e2e  run the Python SDK e2e suite (tests/python/tests/test_fsb_e2e.py)
@@ -5624,7 +5666,7 @@ EOF
 for arg in "$@"; do
 	case "$arg" in
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd|verify-resourceaware|verify-credential-bound) ACTION="$arg" ;;
+		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd|verify-resourceaware|bench-credential-bound|verify-credential-bound) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
@@ -5767,6 +5809,14 @@ case "$ACTION" in
 		log "=== fast-sandbox-env verify-credential-bound ($(date -u +%FT%TZ)) ==="
 		trap 'on_error verify-credential-bound' ERR
 		verify_credential_bound
+		trap - ERR
+		stage_summary
+		;;
+	bench-credential-bound)
+		exec > >(tee -a "$WORK/run.log") 2>&1
+		log "=== fast-sandbox-env bench-credential-bound ($(date -u +%FT%TZ)) ==="
+		trap 'on_error bench-credential-bound' ERR
+		bench_credential_bound
 		trap - ERR
 		stage_summary
 		;;
