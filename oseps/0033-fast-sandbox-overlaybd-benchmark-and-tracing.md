@@ -237,7 +237,7 @@ All latency distributions are reported as **P50, P90, P95, P99, Max, and Mean** 
 
 | Path | Layer | Metrics / Stages |
 |---|---|---|
-| **Create / Resume** | Client black-box | `t_api_ack`, `t_running`, `t_route_ready` (ingress `/ping` 200), `t_first_exec` (first `execd` command + disk read verification) |
+| **Create / Resume** | Client black-box | `t_api_ack` (API/FastPath gRPC return; sandbox is already running on completion), `t_first_ping` (first `200` from guest `/ping` via ingress gateway — replaces status-poll `Running` tracking, which only reflects control-plane projection lag), `t_first_exec` (first `execd` command + disk read verification) |
 | **Create / Resume** | Control Plane (`FastPath`) | `candidate_selection`, `crd_create`, `idempotency_read`, `fastlet_create`, `assignment_projection_wait` (`fast_sandbox_create_stage_latency_seconds`) |
 | **Create / Resume** | Fastlet & OverlayBD (`fsb-vm` + Firecracker) | `validation`, `admission`, `runtime_ensure`, `oci_prepare` (`ping`, `resolveTpl`, `cred`, `resolveImg`, `snapfiles`, `vmmCheck`, `rootfsCfg`, `ublkdAcquire`), `launch` (`waitSocket`), `configure`, `boot` (`snapshot/load` for Full vs. kernel cold boot for `RootfsOnly`), `data_plane_ready` |
 | **Pause / Snapshot (`Full`)** | Stop-the-world vs. Async | **Interruption window**: `snapshotMu` wait, `vcpu_pause`, `snapshot_create` (RAM dump, spill hit/miss), `capture_oci_upper` (`reflink` vs. `extents` vs. `sparse_scan`), `vcpu_resume`. **Async publish**: `fsb-vm pack` (`overlaybd-commit`, `snapfiles` ext4, optional `squashRootfsTail`), `oci_push`, `cache_oci_checkpoint` (note: completes before `Paused` is reported) |
