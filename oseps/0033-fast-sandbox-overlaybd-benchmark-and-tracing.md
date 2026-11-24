@@ -19,7 +19,7 @@ status: draft
   - [Notes/Constraints/Caveats](#notesconstraintscaveats)
   - [Risks and Mitigations](#risks-and-mitigations)
 - [Design Details](#design-details)
-  - [1. CLI Packaging and Command Surface (osb bench)](#1-cli-packaging-and-command-surface-osb-bench)
+  - [1. CLI Packaging, Repository Layout, and Command Surface (osb bench)](#1-cli-packaging-repository-layout-and-command-surface-osb-bench)
   - [2. Full-Stack Provisioning and Preflight Pipeline (OverlayBD)](#2-full-stack-provisioning-and-preflight-pipeline-overlaybd)
   - [3. Phase 1 Workload Suites (OverlayBD Only)](#3-phase-1-workload-suites-overlaybd-only)
   - [4. Standardized Metrics Specification](#4-standardized-metrics-specification)
@@ -86,7 +86,7 @@ Today, validating and protecting this stack before each release has four structu
 | R5 | End-to-end OTel tracing propagates W3C `traceparent` from `osb bench` through `server` / `ingress-gateway` into `fast-sandbox` (`FastPath`, `fastlet`, `fastlet-proxy`, `fsb-vm`) and `execd`, with spans covering Create, Resume, Pause, Snapshot (`Full` and `RootfsOnly`), and Wake-on-Access | Must Have |
 | R6 | `osb bench run` records `trace_id` per operation and automatically queries the in-cluster trace backend to attach span-level waterfall breakdowns for top slow (P99) and failed operations in the output bundle | Must Have |
 | R7 | High-density suites collect time-series load and saturation telemetry for the host node, `fastlet`, `egress`, and `fastlet-proxy` alongside sandbox latency and throughput | Must Have |
-| R8 | Every run emits a self-contained JSON report (recording full environment fingerprint, metrics, load summaries, leak audit, and trace drill-downs) plus Markdown summary, and `osb bench compare` highlights regressions against a baseline JSON | Must Have |
+| R8 | Every stage/release run emits a self-contained JSON report and Markdown summary explicitly stamped with exact `OpenSandbox` and `fast-sandbox` git `commit` SHAs and `tag`s, archived under `benchmark/reports/`, and `osb bench compare` highlights regressions against a baseline JSON | Must Have |
 | R9 | Tracing adds negligible overhead when disabled (no-op provider by default) and bounded overhead when enabled (configurable sampler and batch exporter) | Must Have |
 | R10 | `osb bench env down` cleanly removes all benchmark-provisioned resources and verifies zero leaked sandboxes or `ublk` devices | Should Have |
 
@@ -168,9 +168,11 @@ flowchart TB
 
 ## Design Details
 
-### 1. CLI Packaging and Command Surface (`osb bench`)
+### 1. CLI Packaging, Repository Layout, and Command Surface (`osb bench`)
 
-`osb bench` is implemented as an official Python package (`opensandbox-bench`, located in-repo under `tools/bench/` or `cli/plugins/bench/`) registered under the `opensandbox.cli.plugins` entry-point group consumed by `cli/src/opensandbox_cli/plugins.py`.
+Repository layout under a dedicated top-level `benchmark/` directory:
+- `benchmark/tools/`: houses the `osb bench` Python plugin package (`opensandbox-bench`, registered under the `opensandbox.cli.plugins` entry-point group consumed by `cli/src/opensandbox_cli/plugins.py`), in-cluster runner assets, and reference profile YAMLs.
+- `benchmark/reports/`: archives milestone and pre-release baseline reports, organized with explicit version provenance (e.g., `benchmark/reports/<tag-or-date>-<short-commit>/` containing `report.json`, `summary.md`, and sampled `traces/`), where every report stamps exact `OpenSandbox` and `fast-sandbox` git `commit` SHAs and `tag`s.
 
 Command surface:
 
@@ -184,13 +186,13 @@ osb bench env up --kubeconfig <path> --profile <profile.yaml> [--prepare-nodes]
 # 3. Execute benchmark suites via in-cluster runner + white-box metrics + trace drill-down + leak audit
 osb bench run --kubeconfig <path> --profile <profile.yaml> \
   --suite <all|schedule-burst|steady-churn|pause-resume|rootfs-only-restore|wake-storm|high-density-soak> \
-  --output <dir-or-json>
+  --output benchmark/reports/<tag>-<commit>
 
 # 4. Inspect a specific slow/failed operation's trace tree from a saved run bundle
-osb bench trace <run-bundle-dir> [--trace-id <id> | --top-slow 5]
+osb bench trace benchmark/reports/<tag>-<commit> [--trace-id <id> | --top-slow 5]
 
 # 5. Compare two benchmark reports and emit Markdown diff + exit non-zero on regression thresholds
-osb bench compare <baseline.json> <candidate.json> [--fail-on-regression]
+osb bench compare benchmark/reports/<base>/report.json benchmark/reports/<cand>/report.json [--fail-on-regression]
 
 # 6. Tear down benchmark-provisioned resources and run post-teardown leak check
 osb bench env down --kubeconfig <path> --profile <profile.yaml>
@@ -479,10 +481,11 @@ suites:
     traceSamplerArg: 0.02 # 2% head sampling + tail-sampling on slow/error traces to avoid observer effect
 ```
 
-Structured JSON report (`schema_version: 2`, backward-aligned with `fast-sandbox-ack-2026-10-08.json`) contains:
+Structured JSON report (`schema_version: 2`, archived under `benchmark/reports/<tag-or-date>-<short-commit>/report.json` alongside `summary.md`) contains:
+- `provenance` (**required**): explicit `opensandbox_tag`, `opensandbox_commit`, `fast_sandbox_tag`, `fast_sandbox_commit` (matching `manifests/third-party/fast-sandbox.commit` or explicit override), `cli_version`, and UTC `timestamp`.
 - `environment`: cluster/node inventory, deployed image digests, Firecracker version, `StateRoot` reflink status, spill dir, OverlayBD cache/pool settings, pool mode, runner spec.
 - `suites.<name>`: throughput, error breakdown, client latencies, Prometheus metric deltas, OverlayBD `/v1/pool` deltas, trace-derived stage attribution (P50 vs. P99 critical path), and `trace_drilldowns[]`.
-- `load_profiles`: time-series summaries (Avg/P95/Max) for `host`, `fastlet`, `egress`, `fastlet_proxy`, and `firecracker_runtime`.
+- `load_profiles`: time-series summaries (Avg/P95/Max) for `host`, `fastlet`, `egress`, `fastlet_proxy`, `firecracker_runtime`, `opensandbox_server`, and `ingress_gateway`.
 - `leak_audit`: pass/fail assertions and post-run residual counts.
 
 `osb bench compare <baseline.json> <candidate.json>` diffs throughput, P50/P95/P99 latencies, OverlayBD pool hit rates, high-density CPU/RSS per sandbox, and trace critical-path shifts, highlighting regressions exceeding configurable thresholds (default: >15% P95/P99 latency increase, >10% throughput drop, >15% per-sandbox overhead increase, or any leak audit failure).
@@ -497,18 +500,17 @@ Structured JSON report (`schema_version: 2`, backward-aligned with `fast-sandbox
 
 ## Test Plan
 
-1. **Unit tests (`opensandbox-bench`)**:
-   - Plugin discovery and registration under `opensandbox.cli.plugins` (`osb bench --help`).
-   - Profile validation (including hard rejection when `template.diskGiB != runtime.oci.poolSizeGB`).
-   - Percentile calculation, JSON schema validation, trace critical-path attribution math, and `osb bench compare` regression detection.
-2. **Tracing integration tests**:
-   - Verify W3C `traceparent` propagation end-to-end across `server -> FastPath -> fastlet -> fsb-vm` and `ingress -> fastlet-proxy -> execd` against an in-memory / local OTLP collector, asserting a single connected `trace_id` and expected OverlayBD span attributes.
-   - Verify zero-export no-op behavior when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset.
-   - Verify `fsb-vm` flushes spans within the bounded timeout and succeeds normally when the OTLP collector is unreachable.
-3. **End-to-end validation on a 2-node KVM + ublk cluster**:
-   - Run full `osb bench preflight -> env up -> run --suite all -> compare -> env down` on the reference 2-node OverlayBD cluster.
+Exhaustive unit tests for the benchmark harness itself (`benchmark/tools/`) are intentionally unnecessary; validation focuses on core runtime/tracing behavior and live-cluster end-to-end execution:
+
+1. **Minimal CLI smoke check**:
+   - Verify plugin registration (`osb bench --help`) and profile fail-fast checks (e.g., rejecting `template.diskGiB != runtime.oci.poolSizeGB`).
+2. **Tracing integration tests (component level)**:
+   - Verify W3C `traceparent` propagation end-to-end across `server -> FastPath -> fastlet -> fsb-vm` (including async CRD annotation carriers) and `ingress -> fastlet-proxy -> execd` against a local OTLP collector, asserting a single connected `trace_id` and expected OverlayBD span attributes.
+   - Verify zero-export no-op behavior when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, and verify `fsb-vm` bounded flush succeeds normally when the collector is unreachable.
+3. **Live-cluster end-to-end validation and report archiving**:
+   - Run `osb bench preflight -> env up -> run --suite all -> compare -> env down` on a 2-node KVM + ublk cluster.
    - Confirm `osb bench trace` renders complete multi-hop waterfalls for Create, Full Pause/Resume, RootfsOnly Snapshot/Boot, and Wake-on-Access.
-   - Confirm high-density soak captures host, `fastlet`, `egress`, and `fastlet-proxy` load profiles and passes leak audit cleanly.
+   - Archive the resulting stage/release report (with explicit `commit` and `tag` provenance) under `benchmark/reports/` and verify `osb bench compare` against it.
 
 ## Drawbacks
 
@@ -525,8 +527,8 @@ Structured JSON report (`schema_version: 2`, backward-aligned with `fast-sandbox
 ## Infrastructure Needed
 
 - A fixed reference 2+ node bare-metal Kubernetes cluster (Linux KVM, `CONFIG_BLK_DEV_UBLK`, XFS `reflink=1` `StateRoot`, homogeneous CPUs) for pre-release baseline runs prior to each `release-X.Y.Z` GA.
-- Publication pipeline for the `opensandbox-bench` Python package (aligned with `opensandbox-cli` release governance in OSEP-0016) and a lightweight container image for the in-cluster `osb bench` runner Pod.
-- Standard `docs/benchmarks/` directory (or release-note tables under `docs/releases/<version>.md`) to archive signed-off pre-release baseline JSON reports and Markdown summaries.
+- Publication pipeline for the `opensandbox-bench` Python package under `benchmark/tools/` (aligned with `opensandbox-cli` release governance in OSEP-0016) and a lightweight container image for the in-cluster `osb bench` runner Pod.
+- Dedicated `benchmark/reports/` directory in the repository to archive milestone and pre-release baseline reports stamped with explicit `commit` SHAs and `tag`s (referenced from `docs/releases/<version>.md`).
 
 ## Upgrade & Migration Strategy
 
