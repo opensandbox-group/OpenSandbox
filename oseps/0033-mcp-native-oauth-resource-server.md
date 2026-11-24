@@ -7,7 +7,7 @@ last-updated: 2026-11-23
 status: draft
 ---
 
-# OSEP-0035: Native OAuth 2.1 Resource-Server Support for OpenSandbox MCP
+# OSEP-0033: Native OAuth 2.1 Resource-Server Support for OpenSandbox MCP
 
 <!-- toc -->
 - [Summary](#summary)
