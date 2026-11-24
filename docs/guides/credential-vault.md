@@ -115,11 +115,11 @@ The mode's design constraints — legacy-gate compatibility, the admission capac
 
 ### Sizing the connection budgets (operators)
 
-Credential-bound admission caps decrypted connections at two levels: `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` per sandbox (subject, default 32) and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` per egress process (default 32768). Exhausting either budget rejects only new bound handshakes; existing connections and passthrough traffic are unaffected. Size the process budget from the egress container memory limit instead of relying on the default:
+Credential-bound admission caps decrypted connections at two levels: `OPENSANDBOX_EGRESS_FSB_TLS_CAPACITY` per sandbox (subject, default 32) and `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` per egress process (default 32768). Exhausting either budget rejects only new bound handshakes; existing connections and passthrough traffic are unaffected. Size the process budget from the egress container memory limit instead of relying on the default. The budget model behind these steps is described in [Fast Sandbox networking](/architecture/fast-sandbox/networking#interception-mode).
 
 1. Take the per-connection memory `m` and the idle baseline `B` measured for your egress image. The [measurements](/guides/credential-bound-benchmark#budget-sizing) give `m` = 166 KB and `B` ≈ 70 MB; rerun them after changing the egress image, mitmproxy version or kernel.
-2. Set `P` to the smaller of `S × maxSandboxesPerPod`, rounded up to a power of two, and about two thirds of `(L − B) / m`, where `S` is the per-subject budget and `L` is the egress container memory limit.
-3. Keep `P` at least `S × maxSandboxesPerPod`, so that every sandbox on a Pod can reach its per-subject budget.
+2. Compute the memory ceiling `C`, about two thirds of `(L − B) / m`, and the demand `D` = `S × maxSandboxesPerPod`, where `S` is the per-subject budget and `L` is the egress container memory limit.
+3. If `D` is at most `C`, set `P` to `D` rounded up to a power of two, without exceeding `C`. If `D` is larger than `C`, the Pool cannot give every sandbox its full per-subject budget within the memory limit: lower `S` or the number of sandboxes per Pod, or raise `L`, until `D` fits. Do not raise `P` above `C` to make room for `D`; the egress container could then reach its memory limit before the process budget rejects handshakes.
 4. Leave room in `L` for passthrough connections (about 35 KB each) and size it for the peak number of concurrent connections. The egress process kept the memory of closed connections for at least 240 seconds in the measurements.
 
 | Pool | Value |
