@@ -27,6 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - module: benchmark/tools
           - module: components/execd
           - module: components/egress
           - module: components/ingress
@@ -48,6 +49,7 @@ jobs:
           # it, and whichever matrix leg finishes first populates it for the
           # rest. examples/chrome has no go.sum and is intentionally omitted.
           cache-dependency-path: |
+            benchmark/tools/go.sum
             components/execd/go.sum
             components/egress/go.sum
             components/ingress/go.sum
