@@ -77,6 +77,13 @@ server:
     # -- Public serving CA ConfigMap (ca.crt); mounted at /etc/opensandbox/fastpath-ca/ca.crt. Set kubernetes.fastpath_tls_ca_file in configToml to this path.
     caConfigMap: ""
 
+  execdAuth:
+    # -- Name of an existing Secret holding versioned HMAC master keys (keys.json).
+    # Mounted read-only (mode 0400) at /var/run/secrets/opensandbox/execd-signing/keys.json.
+    # Set [execd].auth_signing_key_file in configToml to this path to enable
+    # sha256:<kid>:<nonce>:<verifier> execd access token derivation.
+    existingSecret: ""
+
   # Ingress gateway announcement (components/ingress runs in its own
   # ingress-gateway chart). When enabled, writes config [ingress] mode = "gateway"
   # and wires secure-access env, so the server returns the gateway address to clients.

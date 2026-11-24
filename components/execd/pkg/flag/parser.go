@@ -70,7 +70,7 @@ func InitFlags() {
 	flag.StringVar(&JupyterServerToken, "jupyter-token", JupyterServerToken, "Jupyter server authentication token")
 	flag.IntVar(&ServerPort, "port", ServerPort, "Server listening port (default: 44772)")
 	flag.IntVar(&ServerLogLevel, "log-level", ServerLogLevel, "Server log level (0=LevelEmergency, 1=LevelAlert, 2=LevelCritical, 3=LevelError, 4=LevelWarning, 5=LevelNotice, 6=LevelInformational, 7=LevelDebug, default: 6)")
-	flag.StringVar(&ServerAccessToken, "access-token", ServerAccessToken, "Server access token for API authentication")
+	flag.StringVar(&ServerAccessToken, "access-token", ServerAccessToken, "Server access token verifier (sha256:<kid>:<nonce>:<hex>) or deprecated plaintext token")
 
 	if graceShutdownTimeout := os.Getenv(gracefulShutdownTimeoutEnv); graceShutdownTimeout != "" {
 		duration, err := time.ParseDuration(graceShutdownTimeout)
@@ -143,6 +143,10 @@ func InitFlags() {
 	if JupyterReplyFinalizeTimeout <= 0 {
 		stdlog.Printf("Invalid --jupyter-reply-finalize-timeout=%s; fallback to default %s", JupyterReplyFinalizeTimeout, 2*time.Second)
 		JupyterReplyFinalizeTimeout = 2 * time.Second
+	}
+
+	if ServerAccessToken != "" && !strings.HasPrefix(strings.TrimSpace(ServerAccessToken), "sha256:") {
+		log.Warn("execd: plaintext EXECD_ACCESS_TOKEN / --access-token is deprecated; use sha256:<kid>:<nonce>:<verifier> or /internal/init accessTokenHash")
 	}
 
 	log.Info("jupyter: server host=%s", JupyterServerHost)

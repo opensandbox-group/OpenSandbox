@@ -910,6 +910,28 @@ class KubernetesRuntimeConfig(BaseModel):
     )
 
 
+class ExecdConfig(BaseModel):
+    """Top-level configuration for the in-sandbox execd daemon."""
+
+    auth_signing_key_file: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path to a JSON key ring file (typically mounted read-only from a K8s Secret) "
+            "containing versioned HMAC master keys. When set on Kubernetes, server injects "
+            "a one-way verifier (sha256:<kid>:<nonce>:<verifier>) into EXECD_ACCESS_TOKEN "
+            "and derives the raw token on GetEndpoint(44772)."
+        ),
+    )
+
+    @field_validator("auth_signing_key_file")
+    @classmethod
+    def _normalize_auth_signing_key_file(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+
 class ExecdInitResources(BaseModel):
     limits: Optional[Dict[str, str]] = Field(
         default=None,
@@ -1720,6 +1742,10 @@ class AppConfig(BaseModel):
         description="Persistence backend configuration for server-managed resources.",
     )
     egress: Optional[EgressConfig] = None
+    execd: Optional[ExecdConfig] = Field(
+        default=None,
+        description="Configuration for the in-sandbox execd daemon ([execd]).",
+    )
     secure_runtime: Optional[SecureRuntimeConfig] = Field(
         default=None,
         description="Secure container runtime configuration (gVisor, Kata, Firecracker).",

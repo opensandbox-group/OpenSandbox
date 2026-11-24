@@ -34,6 +34,7 @@ from opensandbox_server.config import (
 )
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     SandboxErrorCodes,
 )
@@ -167,6 +168,7 @@ class BatchSandboxProvider(WorkloadProvider):
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
         self.image_pull_policy = k8s_config.image_pull_policy if k8s_config else "IfNotPresent"
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
+        self._execd_token_manager: Optional[Any] = None
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
@@ -179,6 +181,9 @@ class BatchSandboxProvider(WorkloadProvider):
 
         self.template_manager = BatchSandboxTemplateManager(template_file_path)
         self._warn_on_restartable_template_policy()
+
+    def set_execd_token_manager(self, manager: Optional[Any]) -> None:
+        self._execd_token_manager = manager
 
     def sync_pod_metadata_labels(
         self, workload: Dict[str, Any], namespace: str, patch: Dict[str, Optional[str]]
@@ -451,6 +456,8 @@ class BatchSandboxProvider(WorkloadProvider):
         
         main_env = dict(env)
         main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            main_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
         if self.execd_run_as_init:
             main_env["EXECD_INIT"] = "1"
         if egress_settings is not None and egress_settings.credential_proxy_enabled:
@@ -850,10 +857,13 @@ class BatchSandboxProvider(WorkloadProvider):
 
         wrapped_command = ["/bin/sh", "-c", user_process_cmd]
 
+        merged_env = dict(env) if env else {}
         if self.execd_run_as_init:
-            env = {**env, "EXECD_INIT": "1"}
-        env_list = [{"name": k, "value": v} for k, v in env.items()] if env else []
-        env_list.append({"name": "OPENSANDBOX_ID", "value": sandbox_id})
+            merged_env["EXECD_INIT"] = "1"
+        merged_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            merged_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
+        env_list = [{"name": k, "value": v} for k, v in merged_env.items()]
 
         return {
             "spec": {

@@ -194,6 +194,10 @@ class WorkloadProvider(ABC):
         """Return a PoolService for ``/pools`` management routes, or None if unsupported."""
         return None
 
+    def set_execd_token_manager(self, manager: Optional[Any]) -> None:
+        """Attach an optional ExecdTokenManager for injecting EXECD_ACCESS_TOKEN verifiers."""
+        return None
+
     def get_internal_endpoint(self, workload: Any, port: int, sandbox_id: str) -> Optional[Endpoint]:
         """Get the workload endpoint used by the server-side proxy.
 
