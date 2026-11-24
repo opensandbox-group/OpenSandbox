@@ -18,6 +18,7 @@ package nftables
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -29,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/stretchr/testify/require"
 )
 
@@ -191,4 +193,47 @@ func TestNftFirstDNSGrantAfterPlainReload(t *testing.T) {
 		require.ErrorIs(t, echo(cut, before+1), os.ErrDeadlineExceeded)
 		require.NoError(t, echo(spared, before+1))
 	}
+}
+
+// A fragmented platform floor must not make an otherwise loadable replacement
+// too large for a single kernel transaction after a pool of DNS grants is revoked.
+func TestNftReloadFragmentedHostWithdrawals(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if !isolatedNftTest(t, ctx) {
+		return
+	}
+	var ranges []policy.PortRange
+	for i := range 256 {
+		ranges = append(ranges, policy.PortRange{Lo: 3*i + 2, Hi: 3*i + 3})
+	}
+	withFloor := func(rules string) *policy.NetworkPolicy {
+		p := mustPolicy(t, `{"egress":[`+rules+`]}`)
+		p.Egress = append(p.Egress, policy.NewPortFloorDenyRule(ranges))
+		return p
+	}
+	old := withFloor(`{"action":"allow","target":"*.example.com"}`)
+	m := NewManagerWithOptions(Options{})
+	require.NoError(t, m.ApplyStatic(ctx, old))
+	var rules []string
+	for group := range 16 {
+		var ips []ResolvedIP
+		for j := range 64 {
+			i := 64*group + j
+			a := netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)})
+			ips = append(ips, ResolvedIP{Addr: a, TTL: time.Minute})
+			rules = append(rules, fmt.Sprintf(`{"action":"allow","target":"%s","ports":[%d]}`, a, 10000+i))
+		}
+		require.NoError(t, m.AddResolvedDomain(ctx, fmt.Sprintf("pool%d.example.com", group), ips))
+	}
+	require.Len(t, readKernelLeaseExpiry(t, ctx), 1024)
+	optIn := withFloor(`{"action":"allow","target":"marker.example.com"}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, optIn)
+	require.NoError(t, err)
+	require.Empty(t, readKernelLeaseExpiry(t, ctx), "opt-in must retire the seeded pool")
+	marker := netip.MustParseAddr("192.0.2.7")
+	require.NoError(t, m.AddResolvedDomain(ctx, "marker.example.com", []ResolvedIP{{Addr: marker, TTL: time.Minute}}))
+	require.Contains(t, readKernelLeaseExpiry(t, ctx), marker.String())
+	require.NoError(t, m.ApplyStatic(ctx, withFloor(strings.Join(rules, ","))))
+	require.Empty(t, readKernelLeaseExpiry(t, ctx), "the replacement must retire the marker in the kernel")
 }

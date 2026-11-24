@@ -15,6 +15,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func optInFromAllowAll(t *testing.T, ctx context.Context, m *Manager, next *policy.NetworkPolicy) {
+	t.Helper()
+	old := mustPolicy(t, `{"defaultAction":"allow"}`)
+	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, next)
+	require.NoError(t, err)
+}
+
 func TestApplyStatic_NamedHostFollowsItsEffectiveTCPVerdict(t *testing.T) {
 	const whole = `{"action":"allow","target":"192.0.2.10"}`
 	const scoped = `{"action":"allow","target":"192.0.2.10/32","ports":[8443]}`
@@ -63,10 +70,8 @@ func TestApplyStatic_LaterHostAllowsSpareOnlyTheirUnion(t *testing.T) {
 	ctx := context.Background()
 	addr := netip.MustParseAddr("192.0.2.10")
 	m, _ := recordingManager()
-	old := mustPolicy(t, `{"defaultAction":"allow"}`)
 	first := mustPolicy(t, `{"defaultAction":"allow","egress":[{"action":"deny","ports":[80,81,82,83,84]}]}`)
-	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
-	require.NoError(t, err)
+	optInFromAllowAll(t, ctx, m, first)
 	partial := mustPolicy(t, `{"egress":[{"action":"allow","target":"192.0.2.10","ports":[82,84]},{"action":"allow","target":"192.0.2.10/32","ports":[80,82]}]}`)
 	for _, p := range []*policy.NetworkPolicy{partial, policy.DefaultDenyPolicy()} {
 		require.NoError(t, m.ApplyStatic(ctx, p))
@@ -182,10 +187,8 @@ func TestApplyStatic_TeardownOutlivesBothDNSRecords(t *testing.T) {
 			m, _ := recordingManager()
 			now := time.Now()
 			m.tracker.now = func() time.Time { return now }
-			old := mustPolicy(t, `{"defaultAction":"allow"}`)
 			first := mustPolicy(t, `{"defaultAction":"`+action+`","egress":[{"action":"allow","target":"cdn.example"},{"action":"deny","target":"192.0.2.0/24","ports":[443]}]}`)
-			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
-			require.NoError(t, err)
+			optInFromAllowAll(t, ctx, m, first)
 			require.NoError(t, m.AddResolvedDomain(ctx, domain, []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
 			now = now.Add(2 * time.Minute)
 			require.NoError(t, m.tracker.refreshActiveConnections(ctx, nil, m))
@@ -206,10 +209,8 @@ func TestApplyStatic_TeardownOutlivesBothDNSRecords(t *testing.T) {
 func TestApplyStatic_OnlyEffectiveBroadAllowsRetireTCP(t *testing.T) {
 	ctx := context.Background()
 	m, _ := recordingManager()
-	old := mustPolicy(t, `{"defaultAction":"allow"}`)
 	first := mustPolicy(t, `{"egress":[{"action":"allow","ports":[8443]}]}`)
-	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
-	require.NoError(t, err)
+	optInFromAllowAll(t, ctx, m, first)
 	for _, raw := range []string{
 		`{"egress":[{"action":"allow","target":"192.0.2.0/24"},{"action":"deny","target":"192.0.2.0/25","ports":[443,8443]}]}`,
 		`{"defaultAction":"allow","egress":[{"action":"deny","ports":[443]}]}`,
@@ -227,10 +228,8 @@ func TestApplyStatic_OnlyEffectiveBroadAllowsRetireTCP(t *testing.T) {
 func TestPlainReloadKeepsEffectiveCIDRDenyWithoutNewDenyRule(t *testing.T) {
 	m, _ := recordingManager()
 	ctx := context.Background()
-	old := mustPolicy(t, `{"defaultAction":"allow"}`)
 	first := mustPolicy(t, `{"egress":[{"action":"allow","ports":[443,8443]},{"action":"deny","target":"192.0.2.0/24","ports":[443]}]}`)
-	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
-	require.NoError(t, err)
+	optInFromAllowAll(t, ctx, m, first)
 	p := mustPolicy(t, `{"egress":[{"action":"deny","target":"192.0.2.10","ports":[443]}]}`)
 	for _, next := range []*policy.NetworkPolicy{policy.DefaultDenyPolicy(), p, policy.DefaultDenyPolicy()} {
 		require.NoError(t, m.ApplyStatic(ctx, next))
@@ -243,9 +242,7 @@ func TestPlainReloadKeepsEffectiveCIDRDenyWithoutNewDenyRule(t *testing.T) {
 func TestPlainReloadReusesDNSWithdrawalCapacityAfterPartialReallow(t *testing.T) {
 	m, _ := recordingManager()
 	ctx := context.Background()
-	old := mustPolicy(t, `{"defaultAction":"allow"}`)
-	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, policy.DefaultDenyPolicy())
-	require.NoError(t, err)
+	optInFromAllowAll(t, ctx, m, policy.DefaultDenyPolicy())
 	ips := make([]ResolvedIP, maxResolvedDomains*maxDomainAddresses)
 	for i := range ips {
 		ips[i] = ResolvedIP{Addr: netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)}), TTL: time.Minute}
@@ -265,8 +262,7 @@ func TestPlainReloadDoesNotRetainRedundantDNSHosts(t *testing.T) {
 	m, _ := recordingManager()
 	ctx := context.Background()
 	p := mustPolicy(t, `{"egress":[{"action":"allow","target":"198.18.0.0/16"},{"action":"allow","target":"r.example"}]}`)
-	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, mustPolicy(t, `{"defaultAction":"allow"}`), p)
-	require.NoError(t, err)
+	optInFromAllowAll(t, ctx, m, p)
 	now := time.Now()
 	m.tracker.now = func() time.Time { return now }
 	for i := byte(1); i <= 6; i++ {
@@ -287,8 +283,7 @@ func TestDNSWithdrawalCapacityAppliesOnlyToAffectedACKs(t *testing.T) {
 	ctx := context.Background()
 	const masked = `{"action":"allow","target":"masked.example"}`
 	first := mustPolicy(t, `{"egress":[`+masked+`,{"action":"deny","target":"203.0.113.0/24"},{"action":"allow","target":"192.0.2.0/24"}]}`)
-	_, err := m.ApplyStaticComputingEstablishedDrops(ctx, mustPolicy(t, `{"defaultAction":"allow"}`), first)
-	require.NoError(t, err)
+	optInFromAllowAll(t, ctx, m, first)
 	input := make([]ResolvedIP, maxResolvedDomains*maxDomainAddresses)
 	for i := range input {
 		input[i] = ResolvedIP{Addr: netip.AddrFrom4([4]byte{198, 18, byte(i >> 8), byte(i)}), TTL: time.Minute}
@@ -327,10 +322,8 @@ func TestApplyStatic_PollCannotTurnPastDNSAdmissionIntoTeardown(t *testing.T) {
 			m, _ := recordingManager()
 			now := time.Now()
 			m.tracker.now = func() time.Time { return now }
-			old := mustPolicy(t, `{"defaultAction":"allow"}`)
 			first := mustPolicy(t, `{"egress":[`+domain+`]}`)
-			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
-			require.NoError(t, err)
+			optInFromAllowAll(t, ctx, m, first)
 			require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[`+domain+`,{"action":"deny","ports":[443]}]}`)))
 			require.NoError(t, m.AddResolvedDomain(ctx, "cdn.example", []ResolvedIP{{Addr: addr, TTL: time.Minute}}))
 			now = now.Add(2 * time.Minute)
@@ -410,10 +403,8 @@ func TestApplyStatic_KeepsExactWithdrawalsAcrossBroadCoverage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			m, _ := recordingManager()
-			old := mustPolicy(t, `{"defaultAction":"allow"}`)
 			first := mustPolicy(t, `{"defaultAction":"allow","egress":[`+tt.first+`]}`)
-			_, err := m.ApplyStaticComputingEstablishedDrops(ctx, old, first)
-			require.NoError(t, err)
+			optInFromAllowAll(t, ctx, m, first)
 			require.True(t, m.lastDrops.MatchesFlow(addr, 443))
 			for _, rules := range []string{tt.reload, ""} {
 				require.NoError(t, m.ApplyStatic(ctx, mustPolicy(t, `{"egress":[`+rules+`]}`)))

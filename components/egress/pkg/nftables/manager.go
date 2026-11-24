@@ -692,7 +692,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 			exemptions.add(netip.PrefixFrom(a, a.BitLen()), keep, "accept")
 		}
 		exemptions.write(&b, chainName)
-		drops.tcp.early.writePhase(&b, true)
+		drops.tcp.early.writePhase(&b, true, nil)
 		writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, nil, "meta l4proto != tcp drop")
 	} else {
 		writeEstablishedTargets(&b, drops.DenyAddrs, drops.DenyPrefixes, drops.DenyPortDrops, "drop")
@@ -700,7 +700,9 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
 	if drops.carried {
-		drops.tcp.late.writePhase(&b, false)
+		if len(drops.tcp.late.rules) != 0 {
+			drops.tcp.late.writePhase(&b, false, drops.tcp.early.alwaysDropped())
+		}
 		if drops.CatchAll || len(drops.Addrs)+len(drops.Prefixes) != 0 {
 			fmt.Fprintf(&b, "add rule inet %s %s meta l4proto tcp ct state established,related accept\n", tableName, chainName)
 		}
