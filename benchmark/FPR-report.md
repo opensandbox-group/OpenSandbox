@@ -70,16 +70,9 @@ After JVM exit, FPR dropped host PSS from `3,726.4 MiB` to `1,991.2 MiB` within 
 
 ![Default 90%/80% Watermark Dual-VM Burst & Admission Recovery](./assets/fpr/default-admission.png)
 
-## `overcommitRatio.memory` Sizing Guidance
+## `overcommitRatio.memory` Implications
 
-For pools configured via [Resource-Aware Scheduling](../docs/guides/resource-aware-scheduling.md):
-
-| Workload Profile | Suggested `overcommitRatio.memory` | Rationale |
-| --- | :---: | --- |
-| **Bursty, anonymous-memory agents with long idle gaps** | **1.5× – 2.0×** | ~97% net return in ~13–16 s; leave headroom for overlapping bursts |
-| **JVM / Maven / build workloads** | **1.25× – 1.5×** | ~50% (~1.94 GiB) residual remained after Maven exit |
-| **File-cache-heavy or frequent pause/resume** | **1.0× – 1.25×** | Guest and host page caches persist in cgroup accounting |
-| **4.0× high overcommit** | **Not recommended** | Caused Fastlet `OOMKilled` under two concurrent spikes |
+The authoritative workload-specific `overcommitRatio.memory` sizing table is maintained in [Resource-Aware Scheduling](../docs/guides/resource-aware-scheduling.md#choosing-overcommit-ratios). In summary, these measurements support `1.5–2.0×` for bursty anonymous-memory agents, `1.25–1.5×` for JVM/Maven builds (~50% residual observed), and `1.0–1.25×` for file-cache-heavy or frequent pause/resume workloads, while avoiding `≥ 4.0×` overcommit in production.
 
 ## Limits & Uncovered Scope
 
