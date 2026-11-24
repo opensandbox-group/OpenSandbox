@@ -15,11 +15,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/spf13/cobra"
@@ -36,16 +38,25 @@ import (
 // App holds the extensible registries used by the CLI.
 // Callers can register additional Provisioner or Suite implementations before executing.
 type App struct {
-	Suites       *suite.Registry
-	Provisioners *provisioner.Registry
-	Logger       *slog.Logger
+	Suites          *suite.Registry
+	Provisioners    *provisioner.Registry
+	Logger          *slog.Logger
+	NewRemoteRunner func(kubeconfig string) (runner.RemoteRunner, *runner.KubeClients, error)
 }
 
 func NewDefaultApp() *App {
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	return &App{
 		Suites:       suite.DefaultRegistry(),
 		Provisioners: provisioner.DefaultRegistry(),
-		Logger:       slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		Logger:       log,
+		NewRemoteRunner: func(kubeconfig string) (runner.RemoteRunner, *runner.KubeClients, error) {
+			kc, err := runner.LoadKubeClients(kubeconfig)
+			if err != nil {
+				return nil, nil, err
+			}
+			return runner.NewK8sRunner(kc, log), kc, nil
+		},
 	}
 }
 
@@ -176,13 +187,15 @@ func (a *App) newEnvCmd() *cobra.Command {
 
 func (a *App) newRunCmd() *cobra.Command {
 	var kubeconfig, profilePath, suitesFlag, outputDir string
-	var provision, teardown bool
+	var workerBinary, moduleDir, serverDomain, apiKey, runID string
+	var provision, teardown, keepRunner bool
 
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Inject static worker binary into in-cluster Runner Pod and execute benchmark suites",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			prof, err := profile.Load(profilePath)
+		RunE: func(cmd *cobra.Command, _ []string) (retErr error) {
+			ctx := cmd.Context()
+			prof, profileBytes, err := loadProfileWithRaw(profilePath)
 			if err != nil {
 				return err
 			}
@@ -190,21 +203,175 @@ func (a *App) newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			names := make([]string, 0, len(selected))
+			suiteNames := make([]string, 0, len(selected))
 			for _, s := range selected {
-				names = append(names, s.Name())
+				suiteNames = append(suiteNames, s.Name())
 			}
-			return fmt.Errorf("remote runner orchestration for suites %v (profile=%q, provision=%v, teardown=%v, output=%q) is scaffolded and not yet implemented",
-				names, prof.Metadata.Name, provision, teardown, outputDir)
+
+			rem, kc, err := a.NewRemoteRunner(kubeconfig)
+			if err != nil {
+				return err
+			}
+
+			if provision || teardown {
+				prov, err := a.Provisioners.Get(prof.Runtime)
+				if err != nil {
+					return err
+				}
+				provOpts := provisioner.Options{
+					Kubeconfig: kubeconfig,
+					Logger:     a.Logger,
+				}
+				if kc != nil {
+					provOpts.Client = kc.Clientset
+				}
+				if teardown {
+					defer func() {
+						// Use an independent bounded context so cancellation/timeout still tears down the environment.
+						downCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+						defer cancel()
+						if _, downErr := prov.Down(downCtx, prof, provOpts); downErr != nil {
+							if retErr == nil {
+								retErr = fmt.Errorf("env down: %w", downErr)
+							} else {
+								a.Logger.Warn("failed to tear down environment after run error", "error", downErr)
+							}
+						}
+					}()
+				}
+				if provision {
+					if _, err := prov.Preflight(ctx, prof, provOpts); err != nil {
+						return fmt.Errorf("preflight: %w", err)
+					}
+					if err := prov.Up(ctx, prof, provOpts); err != nil {
+						return fmt.Errorf("env up: %w", err)
+					}
+				}
+			}
+
+			ns := prof.Environment.BenchNamespace
+			podName, err := rem.EnsureRunnerPod(ctx, prof)
+			if err != nil {
+				return err
+			}
+			if !keepRunner {
+				defer func() {
+					// Use an independent bounded context so Ctrl-C or worker timeout still cleans up the Runner Pod.
+					delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					if delErr := rem.DeleteRunnerPod(delCtx, ns, podName); delErr != nil {
+						a.Logger.Warn("failed to delete runner pod", "namespace", ns, "pod", podName, "error", delErr)
+					}
+				}()
+			}
+
+			binPath := workerBinary
+			if binPath == "" {
+				arch, err := rem.DetectClusterArch(ctx, ns, podName)
+				if err != nil {
+					return err
+				}
+				resolvedDir, err := resolveToolsModuleDir(moduleDir)
+				if err != nil {
+					return err
+				}
+				tmpDir, err := os.MkdirTemp("", "opensandbox-bench-worker-*")
+				if err != nil {
+					return fmt.Errorf("create temp build dir: %w", err)
+				}
+				defer os.RemoveAll(tmpDir)
+				binPath = filepath.Join(tmpDir, "opensandbox-bench-linux-"+arch)
+				a.Logger.Info("cross-compiling static linux worker binary", "arch", arch, "moduleDir", resolvedDir)
+				if err := runner.CrossCompileLinuxBinary(ctx, resolvedDir, arch, binPath); err != nil {
+					return err
+				}
+			}
+
+			if err := rem.InjectBinary(ctx, ns, podName, binPath, runner.DefaultRemoteBinaryPath); err != nil {
+				return err
+			}
+			if err := rem.InjectBytes(ctx, ns, podName, profileBytes, runner.DefaultRemoteProfilePath, 0o644); err != nil {
+				return err
+			}
+
+			effectiveServer := serverDomain
+			if effectiveServer == "" {
+				effectiveServer = defaultServerDomain(prof)
+			}
+			workerArgs := []string{
+				"worker", "run",
+				"--profile", runner.DefaultRemoteProfilePath,
+				"--suite", strings.Join(suiteNames, ","),
+				"--output", runner.DefaultRemoteBundleDir,
+				"--server", effectiveServer,
+			}
+			if apiKey != "" {
+				if err := rem.InjectBytes(ctx, ns, podName, []byte(apiKey), runner.DefaultRemoteAPIKeyPath, 0o600); err != nil {
+					return err
+				}
+				workerArgs = append(workerArgs, "--api-key-file", runner.DefaultRemoteAPIKeyPath)
+			}
+			if runID != "" {
+				workerArgs = append(workerArgs, "--run-id", runID)
+			}
+
+			execErr := rem.ExecWorker(ctx, ns, podName, runner.DefaultRemoteBinaryPath, workerArgs, cmd.OutOrStdout(), cmd.ErrOrStderr())
+
+			if outputDir != "" {
+				if pullErr := rem.PullBundle(ctx, ns, podName, runner.DefaultRemoteBundleDir, outputDir); pullErr != nil {
+					if execErr == nil {
+						return pullErr
+					}
+					a.Logger.Warn("failed to pull partial bundle after worker error", "error", pullErr)
+				}
+			} else {
+				a.Logger.Warn("no --output directory specified; run bundle inside runner pod will not be pulled locally")
+			}
+			return execErr
 		},
 	}
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
 	cmd.Flags().StringVar(&profilePath, "profile", "", "Path to BenchmarkProfile YAML")
 	cmd.Flags().StringVar(&suitesFlag, "suite", "all", "Comma-separated suite names or 'all'")
 	cmd.Flags().StringVar(&outputDir, "output", "", "Output directory for run bundle (report.json, summary.md, traces/)")
+	cmd.Flags().StringVar(&workerBinary, "worker-binary", "", "Optional pre-built static Linux opensandbox-bench binary (skips local cross-compilation)")
+	cmd.Flags().StringVar(&moduleDir, "module-dir", "", "Path to benchmark/tools Go module when auto cross-compiling")
+	cmd.Flags().StringVar(&serverDomain, "server", "", "Override in-cluster opensandbox-server host:port passed to worker")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "OpenSandbox API key passed to worker")
+	cmd.Flags().StringVar(&runID, "run-id", "", "Benchmark run identifier passed to worker")
 	cmd.Flags().BoolVar(&provision, "provision", false, "Run preflight + env up before executing suites")
 	cmd.Flags().BoolVar(&teardown, "teardown", false, "Run env down after executing suites (preserving bundle on failure)")
+	cmd.Flags().BoolVar(&keepRunner, "keep-runner", false, "Keep the in-cluster Runner Pod after execution for debugging")
 	return cmd
+}
+
+func loadProfileWithRaw(path string) (*profile.BenchmarkProfile, []byte, error) {
+	if strings.TrimSpace(path) == "" {
+		raw, err := profile.EmbeddedRaw(profile.DefaultProfileName)
+		if err != nil {
+			return nil, nil, err
+		}
+		p, err := profile.Parse(raw)
+		return p, raw, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read profile %q: %w", path, err)
+	}
+	p, err := profile.Parse(raw)
+	return p, raw, err
+}
+
+func resolveToolsModuleDir(explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	for _, candidate := range []string{".", filepath.Join("benchmark", "tools")} {
+		if _, err := os.Stat(filepath.Join(candidate, "cmd", "opensandbox-bench", "main.go")); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not locate benchmark/tools module directory; pass --module-dir or --worker-binary")
 }
 
 func (a *App) newTraceCmd() *cobra.Command {
@@ -351,7 +518,7 @@ func (a *App) newWorkerCmd() *cobra.Command {
 		Short: "In-cluster worker subcommands executed inside the Bench Runner Pod",
 	}
 
-	var profilePath, suitesFlag, outputDir, serverDomain, apiKey, runID string
+	var profilePath, suitesFlag, outputDir, serverDomain, apiKey, apiKeyFile, runID string
 	runWorkerCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Execute benchmark suites directly inside the cluster network",
@@ -365,10 +532,24 @@ func (a *App) newWorkerCmd() *cobra.Command {
 				return err
 			}
 
+			resolvedAPIKey := apiKey
+			if apiKeyFile != "" {
+				rawKey, err := os.ReadFile(apiKeyFile)
+				if err != nil {
+					return fmt.Errorf("read api-key-file %q: %w", apiKeyFile, err)
+				}
+				resolvedAPIKey = strings.TrimSpace(string(rawKey))
+			}
+
+			resolvedServer := serverDomain
+			if resolvedServer == "" {
+				resolvedServer = defaultServerDomain(prof)
+			}
+
 			sdkCfg := opensandbox.ConnectionConfig{
-				Domain:   serverDomain,
+				Domain:   resolvedServer,
 				Protocol: "http",
-				APIKey:   apiKey,
+				APIKey:   resolvedAPIKey,
 			}
 
 			rc := suite.RunContext{
@@ -391,8 +572,9 @@ func (a *App) newWorkerCmd() *cobra.Command {
 	runWorkerCmd.Flags().StringVar(&profilePath, "profile", "", "Path to BenchmarkProfile YAML")
 	runWorkerCmd.Flags().StringVar(&suitesFlag, "suite", "all", "Comma-separated suite names or 'all'")
 	runWorkerCmd.Flags().StringVar(&outputDir, "output", "/tmp/run-bundle", "Output directory inside Runner Pod")
-	runWorkerCmd.Flags().StringVar(&serverDomain, "server", "opensandbox-server.opensandbox-system.svc:8080", "In-cluster opensandbox-server host:port")
+	runWorkerCmd.Flags().StringVar(&serverDomain, "server", "", "In-cluster opensandbox-server host:port (defaults to opensandbox-server.<systemNamespace>.svc:8080)")
 	runWorkerCmd.Flags().StringVar(&apiKey, "api-key", "", "OpenSandbox API key")
+	runWorkerCmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "Path to file containing OpenSandbox API key (preferred over --api-key)")
 	runWorkerCmd.Flags().StringVar(&runID, "run-id", "", "Benchmark run identifier")
 
 	workerCmd.AddCommand(runWorkerCmd)
@@ -407,6 +589,14 @@ func (a *App) newVersionCmd() *cobra.Command {
 			version.Print(cmd.OutOrStdout(), "opensandbox-bench")
 		},
 	}
+}
+
+func defaultServerDomain(prof *profile.BenchmarkProfile) string {
+	ns := prof.Environment.SystemNamespace
+	if ns == "" {
+		ns = "opensandbox-system"
+	}
+	return fmt.Sprintf("opensandbox-server.%s.svc:8080", ns)
 }
 
 func splitCSV(v string) []string {

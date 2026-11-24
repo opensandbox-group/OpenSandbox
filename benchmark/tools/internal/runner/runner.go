@@ -17,6 +17,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,7 +91,10 @@ func CrossCompileLinuxBinary(ctx context.Context, moduleDir, goArch, outputPath 
 // workload traffic and white-box scraping execute inside the cluster network.
 type RemoteRunner interface {
 	EnsureRunnerPod(ctx context.Context, prof *profile.BenchmarkProfile) (podName string, err error)
+	DeleteRunnerPod(ctx context.Context, namespace, podName string) error
+	DetectClusterArch(ctx context.Context, namespace, podName string) (string, error)
 	InjectBinary(ctx context.Context, namespace, podName, localBinaryPath, remotePath string) error
-	ExecWorker(ctx context.Context, namespace, podName, remoteBinaryPath string, args []string) error
+	InjectBytes(ctx context.Context, namespace, podName string, data []byte, remotePath string, mode int64) error
+	ExecWorker(ctx context.Context, namespace, podName, remoteBinaryPath string, args []string, stdout, stderr io.Writer) error
 	PullBundle(ctx context.Context, namespace, podName, remoteBundleDir, localOutputDir string) error
 }
