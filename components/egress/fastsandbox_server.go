@@ -462,9 +462,9 @@ func (s *fastSandboxPolicyServer) resolveVaultAccess(r *http.Request) (credentia
 		return s.resolveAdmittedVaultAccess(*admission)
 	}
 	s.mu.Lock()
-	live := s.subjectDrain != nil && s.subjectDrain.current != nil && s.subjectDrain.current.handoff.TLSAdmission
+	credentialBound := s.subjectDrain != nil && s.subjectDrain.tlsAdmission
 	s.mu.Unlock()
-	if live {
+	if credentialBound {
 		return credentialvault.ResolveAccess{}, &credentialvault.ResolveAccessError{Status: http.StatusBadRequest, Reason: "resolve admission required"}
 	}
 
