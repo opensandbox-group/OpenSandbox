@@ -64,8 +64,8 @@ bench_credential_bound
 
     def test_workflow_collects_only_current_attempt_even_if_startup_fails(self):
         import yaml
-        workflow = yaml.safe_load((Path(REPO) / ".github/workflows/fast-sandbox-test.yml").read_text())
-        steps = {step["name"]: step for step in workflow["jobs"]["integration"]["steps"]}
+        workflow = yaml.safe_load((Path(REPO) / ".github/workflows/fast-sandbox-e2e.yml").read_text())
+        steps = {step["name"]: step for step in workflow["jobs"]["e2e"]["steps"]}
         root = Path(self.tmp)
         bindir = root / "bin"
         bindir.mkdir()

@@ -93,7 +93,7 @@ def map_create_request(
     """
     _reject_unsupported_fields(request)
 
-    if request._resolved_rootfs_only:
+    if request._resolved_rootfs_only and pool_is_resource_aware:
         if pool_resources is not None and request.resource_limits is not None and "pids" in request.resource_limits.root:
             pids = request.resource_limits.root["pids"]
             if "pids" not in pool_resources or not _quantities_equal(pids, pool_resources["pids"]):

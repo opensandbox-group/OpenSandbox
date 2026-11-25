@@ -69,6 +69,7 @@ jobs:
                 path === "scripts/python-execd-hardening-e2e.sh",
               "fast-sandbox": (path) =>
                 workflowChanged(path, "fast-sandbox-test.yml") ||
+                path === ".github/workflows/fast-sandbox-e2e.yml" ||
                 path.startsWith("scripts/fast-sandbox-env/") ||
                 ((path.startsWith("manifests/charts/base/") ||
                   path.startsWith("manifests/charts/fast-sandbox/") ||
