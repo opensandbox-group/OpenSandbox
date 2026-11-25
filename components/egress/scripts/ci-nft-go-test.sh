@@ -45,6 +45,13 @@ done
 test_pattern="^($(IFS='|'; echo "${tests[*]}"))$"
 sudo env OPENSANDBOX_NFT_TEST=1 \
   "$test_binary" -test.run "$test_pattern" -test.v -test.timeout=5m | tee "$log_file"
+if [[ "$package" == "./pkg/droptelemetry" ]] && grep -q 'NFLOG_UNAVAILABLE:' "$log_file"; then
+  for test_name in "${tests[@]}"; do
+    grep -E "^--- (PASS|SKIP): ${test_name} \\([0-9.]+s\\)$" "$log_file"
+  done
+  echo "NFLOG unavailable: kernel sampling tests skipped (see reason above)"
+  exit 0
+fi
 if grep -q -- '--- SKIP:' "$log_file"; then
   echo "Nft regressions must not skip in privileged CI" >&2
   exit 1

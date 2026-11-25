@@ -126,6 +126,9 @@ func EgressLogFields() []slogger.Field {
 
 func registerEgressMetrics() error {
 	meter = otel.Meter("opensandbox/egress")
+	if err := registerDropMetrics(); err != nil {
+		return err
+	}
 
 	var err error
 	dnsQueryDur, err = meter.Float64Histogram(
