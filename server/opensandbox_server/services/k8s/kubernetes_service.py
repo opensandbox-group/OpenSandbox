@@ -141,6 +141,19 @@ def _is_namespace_not_found(exc: Exception) -> bool:
         return False
 
 
+def _deleted_before_ready_error(sandbox_id: str, detail: Optional[str] = None) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": SandboxErrorCodes.INVALID_PARAMETER,
+            "message": (
+                f"Sandbox {sandbox_id} was deleted before it was ready"
+                + (f" ({detail})" if detail else "")
+            ),
+        },
+    )
+
+
 class KubernetesSandboxService(
     K8sDiagnosticsMixin, K8sStartupDiagnosticsMixin, SandboxService, ExtensionService
 ):
@@ -488,6 +501,9 @@ class KubernetesSandboxService(
                         )
 
                     if not workload:
+                        if last_workload is not None:
+                            # It existed and is gone: deleted while we waited.
+                            raise _deleted_before_ready_error(sandbox_id)
                         logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
                         await wait_for_change()
                         continue
@@ -531,6 +547,10 @@ class KubernetesSandboxService(
                                 ),
                             },
                         )
+                    if current_state == "Stopping":
+                        # A delete (user or TTL) arrived first; the workload
+                        # will not become Running.
+                        raise _deleted_before_ready_error(sandbox_id, current_message)
                     if current_state == "Terminated":
                         # expireTime can pass while the CR is still readable.
                         # That is already final; do not poll until POD_READY_TIMEOUT.
