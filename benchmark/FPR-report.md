@@ -1,83 +1,78 @@
-# Firecracker `virtio-balloon` Free-Page Reporting (FPR) Benchmark Report
+---
+title: Firecracker FPR Benchmark
+description: Native and OCI memory reclamation, admission recovery, snapshot persistence, and OOM boundaries, including matched November 2026 tests.
+---
 
-- **Revision**: `opensandbox-group/fast-sandbox#114` (`ca82e10b`) vs. `main` (`d941c7ba`)
-- **Run**: `2026-10-28` · ACK bare-metal/KVM cluster · Native object-store snapshots · 11 microVMs
+# Firecracker Free-Page Reporting (FPR) Benchmark
 
-## Executive Summary
-
-Fast Sandbox enables zero-target (`amount_mib=0`) `virtio-balloon` Free-Page Reporting (FPR) by default on newly built Native object-store golden templates (`release-1.2.1`, [fast-sandbox#114](https://github.com/opensandbox-group/fast-sandbox/pull/114)). This report summarizes A/B host memory reclamation, admission recovery, pause/resume persistence, and OOM boundary measurements under `ResourceAware` memory oversubscription ([OSEP-0026](../oseps/0026-resource-oversubscription-accounting-for-fast-sandbox.md)).
-
-**Bottom line**: FPR reliably returns guest-freed anonymous memory (**97.3%** net return on a 3 GiB burst, **-93.7%** idle VM PSS vs. disabled baseline) and restores Fastlet admission in **14–16 s**. However, **FPR does not prevent OOM when admitted VMs concurrently spike active memory past their shared cgroup limit**, reclaims less under JVM/Maven workloads (**-42.6%** idle PSS), and does not evict guest or host page cache.
-
-| Metric | No-FPR (`main`) | Default-FPR (`#114`) | Delta / Finding |
-| --- | ---: | ---: | --- |
-| **3 GiB anonymous burst — Dwell PSS / cgroup** | 3,232.1 / 3,222.7 MiB | **203.8 / 182.4 MiB** | **-93.7%** idle PSS (**97.3%** net return, `t90 = 12.73 s`) |
-| **Maven 2.5 GiB heap — Dwell PSS / cgroup** | 3,471.7 / 3,575.4 MiB | **1,991.2 / 2,096.3 MiB** | **-42.6%** idle PSS (**49.1%** net return; ~1.94 GiB residual) |
-| **Repeated 3 GiB re-allocation (3 cycles)** | 1.91–1.93 s / cycle | 2.64–2.65 s / cycle | **+0.73 s (+38%)** host re-fault cost after `MADV_DONTNEED` |
-| **Maven build duration** | 29.28 s | 30.52 s | **+1.24 s (+4.2%)**; both `BUILD SUCCESS` |
-| **Admission recovery (70%/50% watermarks)** | Never (`BLOCKED`) | **14.12 s** after free | New VM admitted on same Fastlet |
-| **Admission recovery (default 90%/80%, 2 VMs)** | — | **16.22 s** after free | Shared cgroup `3,949.3 → 301.4 MiB`; 3rd VM admitted |
-| **Pause / Resume FPR persistence** | — | Preserved | Needed host page-cache eviction to resume; post-resume `t90 = 6.26 s` |
-| **Concurrent spike (6 GiB in 4.25 GiB cgroup)** | — | `oom=2`, `oom_kill=4` | 1 Fastlet `OOMKilled` restart; execution interrupted |
-
-![A/B Idle Memory Comparison](./assets/fpr/idle-comparison.png)
-
-## Test Environment
-
-| Dimension | Configuration |
-| --- | --- |
-| **Hardware & OS** | 2-node ACK cluster (`AMD EPYC 9T95`, 192 CPUs, ~755 GiB RAM/node), host kernel `5.10.134-19.6.1.lifsea8.x86_64`, Fastlets pinned to one node |
-| **Runtime & Guest** | Firecracker `1.16.1`, Guest Linux `6.18.36+`, Native snapshots (`FAST_SANDBOX_OCI_ENABLED=false`) on RustFS; identical control plane/runtime (`d941c7ba`) |
-| **A/B Variable** | Baseline template: no balloon device. FPR template: `free_page_reporting=true`, `amount_mib=0`, `deflate_on_oom=true`, `stats_polling_interval_s=0` |
-| **Pool Profile** | `ResourceAware`, `maxSandboxesPerPod: 4`, per-VM limit `2 vCPU / 4 GiB`, `overcommitRatio: cpu=2, memory=4` → shared Fastlet container limit **4.25 GiB (`4,352 MiB`)** (stress test setting, not a production default) |
-| **Sampling** | 1 Hz host Firecracker PSS/RSS and Fastlet cgroup `memory.current` / `memory.events`, correlated with FastPath gRPC and heartbeat admission state |
+**FPR reduces idle VM memory and restores admission after bursts in both Native and OCI / OverlayBD. It cannot prevent OOM when admitted VMs concurrently exceed their shared memory budget.** The 2026-11-25 Native and OCI tests use the same code, runtime, workload image, and resource settings.
 
 ## Memory Reclamation
 
-### 1. Controlled 3 GiB Anonymous Burst (`mmap` → Hold 20 s → Free)
+Each row compares enabled and disabled FPR within its own cohort. Sizes are MiB; idle values are median host VMM PSS.
 
-| Post-Free Window | No-FPR PSS / cgroup | Default-FPR PSS / cgroup |
-| --- | ---: | ---: |
-| Peak (`t + 0 s`) | 3,231.0 / 3,222.3 MiB | 3,242.2 / 3,221.2 MiB |
-| `t + 2 s` | 3,231.2 / 3,222.7 MiB | 2,630.3 / 2,609.5 MiB |
-| `t + 4 s` | 3,231.2 / 3,222.1 MiB | 1,990.3 / 1,969.0 MiB |
-| `t + 10 s` | 3,231.3 / 3,222.6 MiB | 538.4 / 518.0 MiB |
-| `t + 15 s` | 3,231.9 / 3,222.4 MiB | 203.2 / 181.9 MiB |
-| **Dwell (50–60 s median)** | **3,232.1 / 3,222.7 MiB** (0.0% returned) | **203.8 / 182.4 MiB** (**97.3%** returned, `t90 = 12.73 s`) |
+| Cohort | Workload | FPR disabled | FPR enabled | Idle PSS reduction |
+| --- | --- | ---: | ---: | ---: |
+| Native, 2026-11-25 | Allocate/touch 3 GiB, hold 20 s, free | 3,235.3 | 205.1 | **93.7%** |
+| Native, 2026-11-25 | Offline Maven/JUnit, 2.5 GiB heap burst | 3,428.5 | 1,936.8 | **43.5%** |
+| OCI, 2026-11-25 | Allocate/touch 3 GiB, hold 20 s, free | 3,195.6 | 195.1 | **93.9%** |
+| OCI, 2026-11-25 | Offline Maven/JUnit, 2.5 GiB heap burst | 3,429.8 | 1,886.6 | **45.0%** |
 
-![Controlled 3 GiB mmap A/B Reclamation Curve](./assets/fpr/mmap-ab.png)
+The 3 GiB workload reached 90% of its observed peak-to-idle PSS drop in **11.9 s (Native)** and **12.3 s (OCI)** after free. Maven builds succeeded in both variants, but enabled VMs retained **1.89 GiB (Native)** and **1.84 GiB (OCI)**; the full cause remains unresolved.
 
-### 2. Offline Maven / JUnit 2.5 GiB Heap Burst
+![Matched Native and OCI idle PSS comparison](../docs/public/images/fpr-matched-20261125-memory-comparison.png)
 
-After JVM exit, FPR dropped host PSS from `3,726.4 MiB` to `1,991.2 MiB` within 10 s (`t+2s: 3,113.2`, `t+4s: 2,473.2`, `t+10s: 1,991.2 MiB`), a **42.6%** reduction vs. the baseline (`3,471.7 MiB`), with a **+4.2%** build time delta (`30.52 s` vs. `29.28 s`). The ~1.94 GiB residual reproduced on a fresh VM (`MemFree ≈ 3.63 GiB` inside guest) and did not improve when lowering `page_reporting_order` from `9` to `0`; its root cause remains open.
+**Metric basis:** A/B reduction is `(disabled_idle − enabled_idle) / disabled_idle`. Both cohorts use 15–25 s after free with one VMM per group. Maven uses 30–50 s after command completion. Memory was sampled at approximately 1 Hz; recovery times are first observed states, not latency guarantees.
 
-![Maven 2.5 GiB Heap Burst A/B Curve](./assets/fpr/maven-ab.png)
+## Admission Recovery
 
-### 3. Regrowth, Live Data & Page Cache Behavior
+The anonymous-memory cases recovered admission and created a new VM on the **same Fastlet/node**, followed by a successful 768 MiB content check. Disabled controls remained blocked during the corresponding observations.
 
-- **Repeated growth (3 × 3 GiB)**: FPR returned **97.2%** of net delta (`t90 = 5.64 s`) with zero data corruption and zero OOM kills, at a **+38% (+0.73 s)** per-cycle re-allocation cost from host page re-faulting.
-- **Active working sets**: Holding 1 GiB live memory for 30 s preserved all page contents and sentinels intact, then returned 100% after free (`t90 = 6.40 s`).
-- **Guest file cache**: A 512 MiB guest file cache returned only **4.9%** while idle; explicit guest `drop_caches` was required to reclaim it (~599 MiB drop from peak).
+| Test | Native | OCI |
+| --- | --- | --- |
+| Single 3 GiB burst, high/recovery watermarks 70%/50% | **15.9 s** after free | **17.7 s** after free |
+| Dual-VM burst, default 90%/80% | **13.1 s**; cgroup 3,769 → 265 MiB | **14.0 s**; cgroup ~4,096 → 614 MiB |
+| Separate Maven probe, default watermarks | Below the high watermark; post-build create/content check passed | Recovered **19.8 s** after completion; create/content check passed |
 
-## Admission Recovery, OOM & Pause/Resume Boundaries
+Both dual-VM tests used **1,780 MiB per VM**. At the Native Maven high probe, shared usage was **3,629 MiB**, below the **3,686 MiB (90%)** threshold, so admitting an idle VM was expected. No recovery delay is reported for that unblocked case.
 
-| Aspect | Observed Behavior |
+Under strict 70%/50% watermarks, Maven left **1,972 MiB** charged in Native, below the **2,048 MiB** recovery line; its heartbeat reopened. OCI retained **2,295 MiB** and stayed blocked. Admission uses shared cgroup `memory.current`, including charged caches, rather than VMM PSS. FPR does not evict guest/host file caches or release static commitments.
+
+![Matched Native and OCI default admission recovery](../docs/public/images/fpr-matched-20261125-default-admission.png)
+
+## Regrowth, Snapshots, and OOM
+
+| Check | Key evidence |
 | --- | --- |
-| **Watermark recovery** | Under 70%/50% watermarks, FPR recovered admission **14.12 s** after free (baseline stayed `BLOCKED`). Under default 90%/80% watermarks with two concurrent 1,856 MiB VMs, shared cgroup dropped from `3,949.3 → 301.4 MiB` and recovered in **16.22 s**, admitting a 3rd VM. |
-| **Static ledger** | FPR only relieves dynamic memory watermarks; static commitment limits (`4` VMs max, `4 GiB` per-VM cap) still rejected excess or oversized requests. |
-| **Oversubscribed OOM** | Two admitted VMs concurrently requesting 6 GiB inside the 4.25 GiB Fastlet cgroup triggered `oom=2`, `oom_kill=4`, and **1 Fastlet `OOMKilled` restart** (exit 137). |
-| **Pause / Resume** | A 7.0 GiB Native checkpoint (~18.34 s VM dump freeze) preserved balloon/FPR config and live process state, and post-resume 3 GiB cycles still reclaimed (`t90 = 6.26 s`). However, host checkpoint/golden page cache (`file = 2,447.9 MiB`) kept cgroup `memory.current` above watermark, requiring targeted `posix_fadvise` eviction to unblock resume. After post-resume workloads, VM PSS dropped to **1.82 GiB** while cgroup remained **2.94 GiB** — confirming admission must use cgroup usage, not VM PSS alone. |
+| Reuse after reclamation | Three consecutive 3 GiB cycles passed content checks in both cohorts, with no recorded OOM kills in normal-workload tests. |
+| Pause/resume | Both paths preserved a 128 MiB process memory hash, file contents, and FPR with statistics polling off. Two subsequent 3 GiB cycles passed; final PSS was ~343 MiB Native / ~292 MiB OCI. Neither required forced host cache eviction in these cases. |
+| Full cross-node restore | Both paths preserved file contents and FPR configuration, then passed 3 GiB growth/free; idle PSS was **195 MiB Native / 186 MiB OCI**. |
+| RootfsOnly capture | Unvalidated in both runs: the fixture's relocated StateRoot did not satisfy the required capability/storage contract. |
+| Static capacity | A fifth idle VM and a 5 GiB request were rejected by the commitment and runtime-budget checks, respectively. |
 
-![Default 90%/80% Watermark Dual-VM Burst & Admission Recovery](./assets/fpr/default-admission.png)
+Two admitted VMs concurrently attempting **6 GiB** exceeded their shared hard budgets:
 
-## `overcommitRatio.memory` Implications
+| Cohort | Hard budget / layout | Host cgroup event deltas | Impact |
+| --- | --- | --- | --- |
+| Native | 4 GiB VM subtree, outside Fastlet's container | `oom=4`, `oom_kill=4` | Commands interrupted; Fastlet/Proxy restarts stayed at 0 |
+| OCI | Same 4 GiB VM layout | `oom=4`, `oom_kill=4` | Commands interrupted; Fastlet/Proxy restarts stayed at 0 |
 
-The authoritative workload-specific `overcommitRatio.memory` sizing table is maintained in [Resource-Aware Scheduling](../docs/guides/resource-aware-scheduling.md#choosing-overcommit-ratios). In summary, these measurements support `1.5–2.0×` for bursty anonymous-memory agents, `1.25–1.5×` for JVM/Maven builds (~50% residual observed), and `1.0–1.25×` for file-cache-heavy or frequent pause/resume workloads, while avoiding `≥ 4.0×` overcommit in production.
+`oom_kill` counts host-process kills, not guest OOMs. Fastlet and Proxy survived in both tests; VM workloads failed.
 
-## Limits & Uncovered Scope
+Native allocation times were **1.91–1.93 s disabled / 2.61–3.35 s enabled** across three cycles; Maven took **29.30 s / 30.63 s**. These small samples do not establish stable overhead or isolate its cause.
 
-- **Native snapshots only**: OCI OverlayBD template FPR (`fast-sandbox#248`) has not been benchmarked yet.
-- **Host PSI unavailable**: The test kernel lacked `CONFIG_PSI` (`EOPNOTSUPP`); an empty PSI file fixture was bind-mounted in each Fastlet's private mount namespace. Memory usage, limits, and OOM events were real, but real `memory_psi_some_avg10` gating was not validated.
-- **Small sample & no soak**: 11 VMs total; 16–50 concurrent multi-sandbox soak, cross-node resume, and post-reclaim `execd` P50/P95/P99 command latency distributions remain to be measured.
-- **Uncollected VMM counters**: `stats_polling_interval_s=0` and Firecracker native metrics were not enabled; unobserved reclaim failures must not be assumed to be zero.
-- **Open investigation**: Root cause of the ~1.94 GiB post-Maven residual memory remains unestablished.
+## Test Configuration and Limits
+
+Both cohorts used the same two-node ACK/KVM cluster: 192 CPUs and ~755 GiB physical RAM per node, no swap, guest Linux 6.18.36+. Lifecycle operations used FastPath gRPC and commands used Fastlet Proxy. Limits were **2 vCPU / 4 GiB per VM**, four slots, and `overcommitRatio: cpu=2, memory=4`, deriving **1 CPU / 1 GiB commitment per VM**. VM hard budgets were **4 GiB**, with a separate 4.25 GiB Fastlet container limit. The whole node was not memory-saturated.
+
+Both paths used all Fast Sandbox components from [main `15178de2`](https://github.com/opensandbox-group/fast-sandbox/commit/15178de2dfbbb270a60b21fcf758e3617cb486ad), Firecracker **1.17.0**, and the same workload-image digest. Each disabled control used the same source and zero-target balloon, changing only `free_page_reporting=false`.
+
+Runtime API checks confirmed enabled FPR and **`stats_polling_interval_s=0`**, including after pause/resume and Full restore. Native sampling was moved into the cluster after client disconnects; incomplete timing attempts were excluded. An initial Native Full import hit cache-disk `ENOSPC`; it passed after unreferenced checkpoint caches were evicted. Valid A/B windows were collected without node DiskPressure.
+
+Host PSI was unavailable and replaced by an empty-file fixture in test Fastlets. Real PSI admission, long-duration soak, full-node pressure, and ratio sweeps were not validated. Firecracker-native reclaimed-byte/failure counters were not collected: PSS drops are host-memory evidence, and missing failure counters cannot be reported as zero. Raw samples remain local.
+
+## Sizing Implication
+
+**The fixed 4× memory ratio was a stress-test setting, not a validated production recommendation.** Budget for simultaneous active demand, guest/VMM overhead, charged caches, and headroom. If overlap is unknown or every VM must reach its limit at once, start with `overcommitRatio.memory: "1"` and provision those costs. Validate higher ratios with representative concurrent bursts, regrowth, snapshots, OOM events, and command latency.
+
+See [Resource-Aware Scheduling](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/resource-aware-scheduling.md#choosing-overcommit-ratios) for configuration guidance.
