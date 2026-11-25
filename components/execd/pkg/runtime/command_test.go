@@ -567,3 +567,31 @@ func TestCombinedOutputDescriptor_AutoCreatesTempDir(t *testing.T) {
 	require.NoError(t, err, "expected temp dir to be created, stat error")
 	require.True(t, info.IsDir(), "expected %s to be a directory", missingDir)
 }
+
+func TestForegroundFailurePublishesStatusBeforeError(t *testing.T) {
+	controller := NewController("", "")
+	var id string
+	var status *CommandStatus
+	var statusErr error
+	var executionError *execute.ErrorOutput
+	request := &ExecuteCodeRequest{
+		Language: Command,
+		Code:     "exit 7",
+		Hooks: ExecuteResultHook{
+			OnExecuteInit: func(session string) { id = session },
+			OnExecuteError: func(event *execute.ErrorOutput) {
+				executionError = event
+				status, statusErr = controller.GetCommandStatus(id)
+			},
+		},
+	}
+	request.SetDefaultHooks()
+	require.NoError(t, controller.Execute(request))
+	require.NotNil(t, executionError)
+	require.NoError(t, statusErr)
+	require.NotNil(t, status)
+	require.False(t, status.Running)
+	require.NotNil(t, status.ExitCode)
+	require.Equal(t, 7, *status.ExitCode)
+	require.NotNil(t, status.FinishedAt)
+}

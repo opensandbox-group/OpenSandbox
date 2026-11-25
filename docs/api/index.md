@@ -231,6 +231,8 @@ Code execution and command execution interfaces use SSE for real-time streaming 
 - `execution_count` - Execution count
 - `error` - Error information
 
+For foreground `POST /command` calls, execd drains stdout and stderr and records the exit status before emitting the terminal event. The response can close immediately after the terminal event. Use `GET /command/status/{id}` to query the final status of a command that started.
+
 For Jupyter-backed `POST /code` executions, `execution_complete` is a success-only terminal event sent after the execution's output and result events. Failed executions report `error` without `execution_complete`. Read the stream through its terminal event; an earlier status update or the end of a connection alone does not establish success.
 
 ### Resource Limits

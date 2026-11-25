@@ -132,6 +132,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		errorMessage = fmt.Sprintf("command timed out after %s: %s", request.Timeout, errorMessage)
 	}
 
+	c.markCommandFinished(session, eCode, errorMessage)
 	request.Hooks.OnExecuteError(&execute.ErrorOutput{
 		EName:     eName,
 		EValue:    eValue,
@@ -140,7 +141,6 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	})
 
 	log.ErrorWithCommandID(session, "command: run failed: %s", errorMessage)
-	c.markCommandFinished(session, eCode, errorMessage)
 	return nil
 }
 
