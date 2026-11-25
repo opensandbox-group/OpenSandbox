@@ -44,12 +44,14 @@ from opensandbox_server.api.schema import (
 )
 from opensandbox_server.config import AppConfig, INGRESS_MODE_GATEWAY, SecureAccessConfig, get_config
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_TENANT_LABEL,
     SandboxErrorCodes,
 )
 from opensandbox_server.services.endpoint_auth import generate_egress_token, generate_secure_access_token
+from opensandbox_server.services.execd_auth import ExecdTokenManager
 from opensandbox_server.services.extension_service import ExtensionService
 from opensandbox_server.services.helpers import (
     build_list_sandboxes_response,
@@ -67,7 +69,11 @@ from opensandbox_server.services.k8s.k8s_diagnostics import (
     K8sDiagnosticsMixin,
     K8sStartupDiagnosticsMixin,
 )
-from opensandbox_server.services.k8s.endpoint_resolver import _attach_egress_auth_headers, _attach_secure_access_headers
+from opensandbox_server.services.k8s.endpoint_resolver import (
+    _attach_egress_auth_headers,
+    _attach_execd_auth_headers,
+    _attach_secure_access_headers,
+)
 from opensandbox_server.services.k8s.list_helpers import build_sandbox_label_selector
 from opensandbox_server.services.k8s.status_helpers import (
     _is_pool_capacity_exhausted_status,
@@ -152,6 +158,14 @@ class KubernetesSandboxService(
 
         self.namespace = self.app_config.kubernetes.namespace
         self.execd_image = runtime_config.execd_image
+        self._execd_token_manager: Optional[ExecdTokenManager] = None
+        execd_cfg = self.app_config.execd
+        if execd_cfg and execd_cfg.auth_signing_key_file:
+            self._execd_token_manager = ExecdTokenManager(execd_cfg)
+            logger.info(
+                "Initialized execd HMAC token manager from %s",
+                execd_cfg.auth_signing_key_file,
+            )
         self._tenant_provider: Optional[TenantProvider] = None
         # Monotonic timestamp of the last RBAC-forbidden cluster-wide lookup;
         # lookups are skipped until the backoff window elapses. Thread-race
@@ -178,6 +192,7 @@ class KubernetesSandboxService(
                 k8s_client=self.k8s_client,
                 app_config=self.app_config,
             )
+            self.workload_provider.set_execd_token_manager(self._execd_token_manager)
             logger.info(
                 f"Initialized workload provider: {self.workload_provider.__class__.__name__}"
             )
@@ -198,6 +213,22 @@ class KubernetesSandboxService(
 
     def set_tenant_provider(self, provider: object) -> None:
         self._tenant_provider = provider  # type: ignore[assignment]
+
+    def _ensure_execd_auth_env_allowed(self, request: CreateSandboxRequest) -> None:
+        if self._execd_token_manager is None:
+            return
+        if request.env and EXECD_ACCESS_TOKEN_ENV in request.env:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"Environment variable '{EXECD_ACCESS_TOKEN_ENV}' cannot be set in "
+                        "create request when execd.auth_signing_key_file is enabled; "
+                        "execd access tokens are managed by the server."
+                    ),
+                },
+            )
 
     def _resolve_namespace(self) -> str:
         tenant = get_current_tenant()
@@ -1041,6 +1072,7 @@ class KubernetesSandboxService(
         self._ensure_secure_access_support(request)
         self._ensure_image_auth_support(request)
         self._ensure_idle_policy_support(request)
+        self._ensure_execd_auth_env_allowed(request)
 
         sandbox_id = self.generate_sandbox_id()
 
@@ -1704,6 +1736,7 @@ class KubernetesSandboxService(
             if expires is None:
                 _attach_secure_access_headers(endpoint, workload)
             _attach_egress_auth_headers(endpoint, workload, port)
+            _attach_execd_auth_headers(endpoint, workload, port, self._execd_token_manager)
             return endpoint
 
         except HTTPException:

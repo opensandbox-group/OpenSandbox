@@ -26,6 +26,8 @@ var (
 	ServerLogLevel int
 
 	// ServerAccessToken guards API entrypoints when set.
+	// Supports hashed verifier format "sha256:<kid>:<nonce>:<hex>" (or
+	// "sha256:<hex>") as well as deprecated plaintext tokens.
 	ServerAccessToken string
 
 	// ApiGracefulShutdownTimeout waits before tearing down SSE streams.

@@ -26,7 +26,10 @@ from kubernetes.client import ApiException
 
 from opensandbox_server.config import AppConfig, EGRESS_MODE_FORWARD
 from opensandbox_server.extensions.keys import BOOTSTRAP_EXECD_ISOLATION_KEY
-from opensandbox_server.services.constants import OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT
+from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
+    OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
+)
 from opensandbox_server.services.helpers import format_ingress_endpoint
 from opensandbox_server.api.schema import Endpoint, ImageSpec, PlatformSpec, Volume
 from opensandbox_server.services.k8s.agent_sandbox_template import AgentSandboxTemplateManager
@@ -117,11 +120,15 @@ class AgentSandboxProvider(WorkloadProvider):
         self.ingress_config = app_config.ingress if app_config else None
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
+        self._execd_token_manager: Optional[Any] = None
 
         self.resolver = SecureRuntimeResolver(app_config) if app_config else None
         self.runtime_class = (
             self.resolver.get_k8s_runtime_class() if self.resolver else None
         )
+
+    def set_execd_token_manager(self, manager: Optional[Any]) -> None:
+        self._execd_token_manager = manager
 
     def _resource_name(self, sandbox_id: str) -> str:
         return _to_dns1035_label(sandbox_id, prefix="sandbox")
@@ -327,6 +334,8 @@ class AgentSandboxProvider(WorkloadProvider):
         )
         main_env = dict(env)
         main_env["OPENSANDBOX_ID"] = sandbox_id
+        if self._execd_token_manager is not None:
+            main_env[EXECD_ACCESS_TOKEN_ENV] = self._execd_token_manager.mint_env_value()
         if self.execd_run_as_init:
             main_env["EXECD_INIT"] = "1"
         if egress_settings is not None and egress_settings.credential_proxy_enabled:

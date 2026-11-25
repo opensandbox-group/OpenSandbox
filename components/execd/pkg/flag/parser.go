@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alibaba/opensandbox/execd/pkg/binding"
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
@@ -70,7 +71,7 @@ func InitFlags() {
 	flag.StringVar(&JupyterServerToken, "jupyter-token", JupyterServerToken, "Jupyter server authentication token")
 	flag.IntVar(&ServerPort, "port", ServerPort, "Server listening port (default: 44772)")
 	flag.IntVar(&ServerLogLevel, "log-level", ServerLogLevel, "Server log level (0=LevelEmergency, 1=LevelAlert, 2=LevelCritical, 3=LevelError, 4=LevelWarning, 5=LevelNotice, 6=LevelInformational, 7=LevelDebug, default: 6)")
-	flag.StringVar(&ServerAccessToken, "access-token", ServerAccessToken, "Server access token for API authentication")
+	flag.StringVar(&ServerAccessToken, "access-token", ServerAccessToken, "Server access token verifier (sha256:<kid>:<nonce>:<hex>) or deprecated plaintext token")
 
 	if graceShutdownTimeout := os.Getenv(gracefulShutdownTimeoutEnv); graceShutdownTimeout != "" {
 		duration, err := time.ParseDuration(graceShutdownTimeout)
@@ -145,8 +146,16 @@ func InitFlags() {
 		JupyterReplyFinalizeTimeout = 2 * time.Second
 	}
 
+	warnDeprecatedPlaintextAccessToken()
+
 	log.Info("jupyter: server host=%s", JupyterServerHost)
 	log.Info("jupyter: server token=%s", log.MaskToken(JupyterServerToken))
+}
+
+func warnDeprecatedPlaintextAccessToken() {
+	if ServerAccessToken != "" && !strings.HasPrefix(strings.TrimSpace(ServerAccessToken), binding.AccessTokenHashPrefix) {
+		log.Warn("execd: plaintext EXECD_ACCESS_TOKEN / --access-token is deprecated; use sha256:<kid>:<nonce>:<verifier> or /internal/init accessTokenHash")
+	}
 }
 
 // Args returns the non-flag arguments after flag.Parse — in init mode this is

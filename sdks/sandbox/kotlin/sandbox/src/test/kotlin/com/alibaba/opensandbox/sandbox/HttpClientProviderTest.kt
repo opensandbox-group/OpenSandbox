@@ -105,4 +105,26 @@ class HttpClientProviderTest {
             assertFalse(provider.authenticatedClient.interceptors.any { it is RetryInterceptor })
         }
     }
+
+    @Test
+    fun `debug logging interceptor redacts X-EXECD-ACCESS-TOKEN header`() {
+        HttpClientProvider(
+            ConnectionConfig.builder()
+                .debug(true)
+                .build(),
+        ).use { provider ->
+            val loggingInterceptor =
+                provider.httpClient.interceptors
+                    .filterIsInstance<okhttp3.logging.HttpLoggingInterceptor>()
+                    .single()
+            val field = okhttp3.logging.HttpLoggingInterceptor::class.java.getDeclaredField("headersToRedact")
+            field.isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            val redacted = field.get(loggingInterceptor) as Set<String>
+            assertTrue(
+                redacted.any { it.equals("X-EXECD-ACCESS-TOKEN", ignoreCase = true) },
+                "Expected X-EXECD-ACCESS-TOKEN to be in headersToRedact, got: $redacted",
+            )
+        }
+    }
 }
