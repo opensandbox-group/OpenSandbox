@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # verify/credential-bound.sh — OSEP-0023 credential-bound interception verify
-# (EGRESS_INTERCEPTION_MODE=credential-bound only).
+# (default or explicit credential-bound).
 #
 # Real stack, no simulation: two sandboxes reach a persistent HTTP/1.1 TLS
 # origin (verify/credential-bound-origin.py, a container on the kind network
@@ -565,8 +565,8 @@ cb_log_scan() { # <values-file> <since-time>
 
 credential_bound_verify() {
 	CB_TEMPLATE_ID="${1:-$TEMPLATE_ID}"
-	[[ "${EGRESS_INTERCEPTION_MODE:-}" == "credential-bound" ]] \
-		|| fail "credential-bound verify requires EGRESS_INTERCEPTION_MODE=credential-bound"
+	[[ "$(effective_egress_interception_mode)" == "credential-bound" ]] \
+		|| fail "credential-bound verify requires default or EGRESS_INTERCEPTION_MODE=credential-bound"
 	# Credential values must never reach a trace.
 	[[ "$-" != *x* ]] || fail "credential-bound verify refuses to run under xtrace"
 	load_mitm_ca_fingerprint

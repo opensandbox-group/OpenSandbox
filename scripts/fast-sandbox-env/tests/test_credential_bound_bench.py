@@ -550,7 +550,7 @@ bench_pool_object_gone && echo GONE-ON-ERROR || echo NOT-GONE-ON-ERROR
         self.assertIn("bench-credential-bound", proc.stdout + proc.stderr)
         with open(ENV_SH) as handle:
             text = handle.read()
-        self.assertIn("|verify-resourceaware|bench-credential-bound|verify-credential-bound) ACTION=\"$arg\" ;;", text)
+        self.assertIn("|verify-resourceaware|bench-credential-bound|verify-egress-mode|verify-credential-bound) ACTION=\"$arg\" ;;", text)
         self.assertIn("\tbench-credential-bound)\n", text)
 
 
@@ -572,6 +572,19 @@ class WorkflowBenchGateTest(unittest.TestCase):
     def step(self, name):
         return self.steps[self.names.index(name)]
 
+    def test_verify_timeouts_follow_the_effective_mode(self):
+        for mode in ("", "credential-bound", "all"):
+            for name, bound_timeout, all_timeout in (
+                    ("Run native template verify", 60, 45),
+                    ("Run overlaybd template verify", 120, 90)):
+                with self.subTest(mode=mode, step=name):
+                    expression = self.step(name)["timeout-minutes"]
+                    self.assertTrue(expression.startswith("${{") and expression.endswith("}}"))
+                    expression = expression[3:-2].replace("inputs.egress_interception_mode", repr(mode))
+                    actual = eval(expression.replace("&&", " and ").replace("||", " or "),
+                                  {"__builtins__": {}})
+                    self.assertEqual(actual, all_timeout if mode == "all" else bound_timeout)
+
     def test_bench_is_opt_in_and_after_the_verify_steps(self):
         dispatch = self.doc[True]["workflow_dispatch"]["inputs"]["bench"]
         self.assertEqual((dispatch["type"], dispatch["default"]), ("boolean", False))
@@ -579,16 +592,16 @@ class WorkflowBenchGateTest(unittest.TestCase):
         gate = self.caller_job["with"]["bench"]
         self.assertIn("inputs.bench", gate)
         self.assertIn("'fast-sandbox-bench'", gate)
-        delta = self.names.index("Run credential-bound egress verify (OSEP-0023)")
-        sdk = self.names.index("Run credential-bound SDK egress e2e (OSEP-0023)")
-        for leg, mode in (("default", ""), ("credential-bound", "credential-bound")):
+        delta = self.names.index("Run all fallback egress verify (OSEP-0023)")
+        sdk = self.names.index("Run all fallback SDK egress e2e (OSEP-0023)")
+        for leg, mode in (("initial", "${{ inputs.egress_interception_mode }}"), ("all fallback", "all")):
             bench = self.step("Run %s cost bench (OSEP-0023)" % leg)
             index = self.steps.index(bench)
             self.assertEqual(bench["env"]["EGRESS_INTERCEPTION_MODE"], mode)
             self.assertIn("inputs.bench", bench["if"])
             self.assertIn("integration-env.sh bench-credential-bound", bench["run"])
             self.assertIsInstance(bench["timeout-minutes"], int)
-            if leg == "default":
+            if leg == "initial":
                 self.assertLess(self.names.index("Run idle-pause SDK e2e"), index)
                 self.assertLess(index, delta)
             else:
@@ -599,17 +612,20 @@ class WorkflowBenchGateTest(unittest.TestCase):
                 self.assertGreater(self.steps.index(report), index)
                 self.assertLess(self.steps.index(report), self.names.index("Teardown"))
             upload = self.step("Upload %s bench reports" % leg)["with"]
-            self.assertIn("fast-sandbox-bench-%s-" % leg, upload["name"])
-            self.assertEqual(upload["path"], "bench-reports/%s/" % leg)
+            self.assertIn("fast-sandbox-bench-", upload["name"])
+            self.assertIn("default-credential-bound" if leg == "initial" else "all-", upload["name"])
+            self.assertEqual(upload["path"], "bench-reports/%s/" % ("initial" if leg == "initial" else "all"))
         self.assertEqual(self.caller_job["with"]["timeout_minutes"], 240)
 
     def test_matrix_conditions_select_each_requested_bench_once(self):
         script = self.doc["jobs"]["egress-modes"]["steps"][0]["run"]
         code = script.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
         for event, requested, expected in (
-                ("pull_request", "", ["default", "credential-bound"]),
-                ("workflow_dispatch", "default,credential-bound", ["default", "credential-bound"]),
-                ("workflow_dispatch", "credential-bound", ["credential-bound"])):
+                ("pull_request", "", ["initial", "all fallback"]),
+                ("workflow_dispatch", "default,all", ["initial", "all fallback"]),
+                ("workflow_dispatch", "all", ["initial"]),
+                ("workflow_dispatch", "default,credential-bound", ["initial"]),
+                ("workflow_dispatch", "credential-bound", ["initial"])):
             with self.subTest(event=event, requested=requested), tempfile.TemporaryDirectory() as tmp:
                 output = os.path.join(tmp, "output")
                 env = dict(os.environ, EVENT_NAME=event, REQUESTED=requested, GITHUB_OUTPUT=output)
@@ -620,16 +636,76 @@ class WorkflowBenchGateTest(unittest.TestCase):
                 for enabled in (False, True):
                     selected = []
                     for mode in json.loads(values["matrix"]):
-                        for leg in ("default", "credential-bound"):
+                        for leg in ("initial", "all fallback"):
                             condition = self.step("Run %s cost bench (OSEP-0023)" % leg)["if"]
                             for key, value in (("inputs.bench", enabled),
                                                ("inputs.egress_interception_mode", mode),
-                                               ("inputs.run_credential_bound_delta",
-                                                values["run_credential_bound_delta"] == "true")):
+                                               ("inputs.run_all_delta",
+                                                values["run_all_delta"] == "true")):
                                 condition = condition.replace(key, repr(value))
                             if eval(condition.replace("&&", " and ").replace("||", " or "), {"__builtins__": {}}):
                                 selected.append(leg)
                     self.assertEqual(selected, expected if enabled else [])
+
+    def test_bench_steps_match_the_live_pool_before_and_after_switch(self):
+        # Execute the workflow shell calls against one disposable Pool model.
+        # This checks command ordering/env wiring, not kernel or performance behavior.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "workspace")
+            entry = os.path.join(root, "scripts/fast-sandbox-env/integration-env.sh")
+            os.makedirs(os.path.dirname(entry))
+            with open(entry, "w") as handle:
+                handle.write("""#!/bin/bash
+set -eu
+mode="${EGRESS_INTERCEPTION_MODE:-credential-bound}"
+if [[ "$1" == verify-egress-mode ]]; then printf '%s' "$mode" > "$POOL_STATE"; fi
+live="$(cat "$POOL_STATE")"
+[[ "$mode" == "$live" ]] || exit 91
+printf '%s|%s|%s\n' "$1" "$mode" "$live" >> "$TRACE"
+""")
+            os.chmod(entry, 0o755)
+            bindir = os.path.join(tmp, "bin")
+            os.makedirs(bindir)
+            sudo = os.path.join(bindir, "sudo")
+            with open(sudo, "w") as handle:
+                handle.write('#!/bin/bash\n[[ "${1:-}" != -E ]] || shift\nexec "$@"\n')
+            os.chmod(sudo, 0o755)
+            for initial, delta in (("", True), ("credential-bound", True), ("all", False), ("credential-bound", False)):
+                with self.subTest(initial=initial, delta=delta):
+                    state, trace = os.path.join(tmp, "pool"), os.path.join(tmp, "trace")
+                    with open(state, "w") as handle:
+                        handle.write(initial or "credential-bound")
+                    open(trace, "w").close()
+                    env = dict(os.environ, EGRESS_INTERCEPTION_MODE=initial, POOL_STATE=state,
+                               TRACE=trace, RUNNER_TEMP=tmp, GITHUB_OUTPUT=os.path.join(tmp, "output"),
+                               PATH=bindir+os.pathsep+os.environ["PATH"])
+                    for step in self.steps:
+                        if step.get("name") not in ("Run initial cost bench (OSEP-0023)",
+                                "Run all fallback egress verify (OSEP-0023)",
+                                "Run all fallback SDK egress e2e (OSEP-0023)",
+                                "Run all fallback cost bench (OSEP-0023)"):
+                            continue
+                        condition = step["if"]
+                        for key, value in (("inputs.bench", True), ("inputs.run_all_delta", delta),
+                                           ("inputs.egress_interception_mode", initial)):
+                            condition = condition.replace(key, repr(value))
+                        if not eval(condition.replace("&&", " and "), {"__builtins__": {}}):
+                            continue
+                        scoped = dict(env)
+                        for key, value in step.get("env", {}).items():
+                            scoped[key] = value.replace("${{ inputs.egress_interception_mode }}", initial).replace(
+                                "${{ inputs.egress_interception_mode || 'default-credential-bound' }}",
+                                initial or "default-credential-bound")
+                        result = subprocess.run(["bash", "-eu", "-c", step["run"]], cwd=root,
+                                                env=scoped, capture_output=True, text=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                    with open(trace) as handle:
+                        calls = handle.read().splitlines()
+                    mode = initial or "credential-bound"
+                    expected = ["bench-credential-bound|%s|%s" % (mode, mode)]
+                    if delta:
+                        expected += ["verify-egress-mode|all|all", "sdk-e2e|all|all", "bench-credential-bound|all|all"]
+                    self.assertEqual(calls, expected)
 
 
 

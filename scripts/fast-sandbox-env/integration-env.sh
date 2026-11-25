@@ -90,11 +90,11 @@
 #                    the server's fastpath_resource_pool follow the profile
 #   MAX_SANDBOXES_PER_POD per-fastlet sandbox capacity (default 8)
 #   EGRESS_INTERCEPTION_MODE  OSEP-0023 Fast Sandbox interception switch
-#                    (experimental): empty (default — the Pool renders
+#                    empty (default credential-bound — the Pool renders
 #                    unchanged, no switch is passed), all, or
 #                    credential-bound; non-empty renders
 #                    OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE into the
-#                    pool's egress container only. credential-bound also
+#                    pool's egress container only. default/credential-bound also
 #                    registers the credential-bound verify stage on both
 #                    lanes; overlaybd runs the real exchange verification
 #   XFS_STATEROOT / XFS_SIZE  reflink StateRoot on/off and virtual size
@@ -209,6 +209,10 @@ case "$EGRESS_INTERCEPTION_MODE" in
 		printf '[fast-sandbox-env] ERROR: EGRESS_INTERCEPTION_MODE must be empty, all or credential-bound (got: %s)\n' "$EGRESS_INTERCEPTION_MODE" >&2
 		exit 1 ;;
 esac
+# Keep raw empty for rendering; the runtime default still needs bound checks.
+effective_egress_interception_mode() {
+	printf '%s' "${EGRESS_INTERCEPTION_MODE:-credential-bound}"
+}
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:
@@ -2826,8 +2830,7 @@ pool_up() {
 		fi
 	fi
 	log "applying SandboxPool $POOL_NAME (runtime=firecracker, mode=$POOL_MODE, egress attached, MITM CA pinned, poolMin=$POOL_MIN)"
-	[[ -z "$EGRESS_INTERCEPTION_MODE" ]] \
-		|| log "egress OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE=$EGRESS_INTERCEPTION_MODE (OSEP-0023, experimental)"
+	log "egress interception raw=${EGRESS_INTERCEPTION_MODE:-unset} effective=$(effective_egress_interception_mode) (OSEP-0023)"
 	kubectl apply -f "$GEN_DIR/$POOL_PROFILE.yaml" >/dev/null
 	wait_for "fastlet pods Ready (poolMin=$POOL_MIN)" 300 fastlet_pods_ready
 	wait_for "egress container ready in every fastlet pod" 180 egress_containers_ready
@@ -4076,7 +4079,7 @@ exchange_guest_status() { # <path>
 }
 
 exchange_vault_fails_closed() {
-	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+	if [[ "$(effective_egress_interception_mode)" == "credential-bound" ]]; then
 		# In subject mode the addon kills the transport instead of returning 407.
 		# A timeout or an unreachable origin is not evidence of a denied resolve.
 		local out
@@ -4874,10 +4877,8 @@ require_live_stack() {
 	[[ -x "$OSB_BIN" ]] || die "osb not found at $OSB_BIN (run up first, or set OSB_BIN)"
 }
 
-# OSEP-0023 lane gates. Off/all: the exchange stage runs exactly as before
-# and no credential-bound stage exists. credential-bound: exchange also
-# runs, followed by the credential-bound stage (verify/credential-bound.sh,
-# one implementation sourced into this shell) on the lane's template.
+# OSEP-0023: exchange runs in both modes; default and explicit credential-bound
+# also register the single credential-bound verifier implementation.
 exchange_stage() { # <description> <template-id>
 	run_stage "$1" exchange_resolver_verify "$2"
 }
@@ -4885,14 +4886,16 @@ exchange_stage() { # <description> <template-id>
 # Read the declared mode and every live Pod before any measurement creates a
 # sandbox: a delta step can switch the Pool without changing the matrix env.
 bench_require_egress_mode() {
-	local expected="${EGRESS_INTERCEPTION_MODE:-all}" pool pods matches
+	local expected pool pods matches
+	expected="$EGRESS_INTERCEPTION_MODE"
 	matches='
 		def matches:
 			[.containers[]? | select(.name == "egress")] as $c |
 			($c | length) == 1 and
 			([$c[0].env[]? | select(.name == "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")] as $v |
-			 ($v | length) <= 1 and ($v | all(has("valueFrom") | not)) and
-			 (($v[0].value // "all" | if . == "" then "all" else . end) == $expected));'
+			 if $expected == "" then ($v | length) == 0
+			 else ($v | length) == 1 and ($v[0] | has("valueFrom") | not) and
+			      $v[0].value == $expected end);'
 	pool="$(kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" -o json)" \
 		|| fail "bench: live SandboxPool mode could not be read"
 	printf '%s' "$pool" | jq -e --arg expected "$expected" \
@@ -4919,7 +4922,7 @@ bench_credential_bound() {
 }
 
 credential_bound_stage() { # <description> <template-id>
-	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] || return 0
+	[[ "$(effective_egress_interception_mode)" == "credential-bound" ]] || return 0
 	# shellcheck source=verify/credential-bound.sh
 	source "$SCRIPT_DIR/verify/credential-bound.sh"
 	run_stage "$1" credential_bound_verify "$2"
@@ -5363,17 +5366,16 @@ pool_fastlet_pods_gone() {
 }
 
 egress_interception_mode_applied() {
-	local pods pod val
+	local pods
 	pods="$(kubectl -n "$RESOURCE_NS" get pods \
-		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" \
-		-o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" || return 1
-	[[ -n "$pods" ]] || return 1
-	for pod in $pods; do
-		val="$(kubectl -n "$RESOURCE_NS" get pod "$pod" \
-			-o jsonpath='{.spec.containers[?(@.name=="egress")].env[?(@.name=="OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")].value}' 2>/dev/null)" || return 1
-		[[ "$val" == "$EGRESS_INTERCEPTION_MODE" ]] || return 1
-	done
-	return 0
+		-l "app=sandbox-fastlet,fast-sandbox.io/pool=$POOL_NAME" -o json)" || return 1
+	printf '%s' "$pods" | jq -e --arg raw "$EGRESS_INTERCEPTION_MODE" '
+		(.items | length) > 0 and (.items | all(
+			[.spec.containers[]? | select(.name == "egress")] as $c |
+			($c | length) == 1 and
+			([$c[0].env[]? | select(.name == "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE")] as $v |
+			 if $raw == "" then ($v | length) == 0
+			 else ($v | length) == 1 and ($v[0] | has("valueFrom") | not) and $v[0].value == $raw end)))' >/dev/null
 }
 
 switch_pool_egress_mode() {
@@ -5392,14 +5394,12 @@ switch_pool_egress_mode() {
 
 # Reuses the live cluster and already-built native + overlaybd templates to
 # exercise egress-mode-sensitive stages (plus snapshot restore into a new
-# sandbox) under credential-bound without duplicating cluster setup.
-verify_credential_bound() {
+# sandbox) under either mode without duplicating cluster setup.
+verify_egress_mode() {
 	require_live_stack
-	[[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]] \
-		|| die "verify-credential-bound requires EGRESS_INTERCEPTION_MODE=credential-bound (got: ${EGRESS_INTERCEPTION_MODE:-empty})"
 	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
-	run_stage "SandboxPool $POOL_NAME switch (egress interception=credential-bound)" switch_pool_egress_mode
+	run_stage "SandboxPool $POOL_NAME switch (egress interception=${EGRESS_INTERCEPTION_MODE:-default})" switch_pool_egress_mode
 	run_stage "egress network-security-rules verify (configmap -> kernel -> live traffic)" "$SCRIPT_DIR/verify/network-security-rules.sh"
 	credential_bound_stage "credential-bound interception verify (native template, OSEP-0023)" "$TEMPLATE_ID"
 	if [[ "$OCI_STACK" == 1 ]]; then
@@ -5414,6 +5414,13 @@ verify_credential_bound() {
 		run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
 		credential_bound_stage "credential-bound interception verify (overlaybd template, OSEP-0023)" "$OCI_TEMPLATE_ID"
 	fi
+}
+
+# Retain the existing command for callers explicitly verifying bound mode.
+verify_credential_bound() {
+	[[ "$(effective_egress_interception_mode)" == "credential-bound" ]] \
+		|| die "verify-credential-bound requires default or EGRESS_INTERCEPTION_MODE=credential-bound"
+	verify_egress_mode
 }
 
 # --- status / summary
@@ -5499,7 +5506,7 @@ env_summary() {
 	printf '  %-22s %s\n' "kind cluster" "$KIND_CLUSTER ($(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ') nodes)"
 	printf '  %-22s %s\n' "fast-sandbox" "pinned $(git -C "$FSB_DIR" rev-parse --short HEAD 2>/dev/null || echo "$FSB_COMMIT") ($FSB_DIR)"
 	printf '  %-22s %s\n' "RustFS endpoint" "$RUSTFS_ENDPOINT"
-	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE${EGRESS_INTERCEPTION_MODE:+, interception=$EGRESS_INTERCEPTION_MODE}, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
+	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, mode=$POOL_MODE, interception=${EGRESS_INTERCEPTION_MODE:-default}, effective=$(effective_egress_interception_mode), poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
 	# The echo endpoint line is conditional: the standalone pool action
 	# loads the fingerprint pin but never re-derives the echo container IP.
 	local mitm_echo_at=""
@@ -5616,13 +5623,14 @@ usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|veri
                    -> 400, snapshot round-trip with recorded-limit replay,
                    capacity saturation -> 429; requires `up` with
                    POOL_MODE=resource-aware
+  verify-egress-mode
+                   Recreates the live Pool in EGRESS_INTERCEPTION_MODE (empty
+                   means default credential-bound, or explicit all), then runs
+                   egress-sensitive control, exchange and snapshot stages using
+                   existing templates. Bound modes also run TLS admission checks.
   verify-credential-bound
-                   OSEP-0023 delta on a live stack: recreates SandboxPool with
-                   EGRESS_INTERCEPTION_MODE=credential-bound and runs all
-                   egress-mode-sensitive stages (network-security-rules,
-                   credential-bound on native + overlaybd, vault, MITM CA,
-                   exchange BLOCKED I1) reusing existing templates; requires
-                   `up` and EGRESS_INTERCEPTION_MODE=credential-bound
+                   Compatibility alias for verify-egress-mode, restricted to
+                   default or explicit credential-bound.
   bench-credential-bound
                    OSEP-0023 cost measurements in the current leg
                    (EGRESS_INTERCEPTION_MODE): M1 create latency, M2 guest
@@ -5668,7 +5676,7 @@ EOF
 for arg in "$@"; do
 	case "$arg" in
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd|verify-resourceaware|bench-credential-bound|verify-credential-bound) ACTION="$arg" ;;
+		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd|verify-resourceaware|bench-credential-bound|verify-egress-mode|verify-credential-bound) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
@@ -5803,14 +5811,14 @@ case "$ACTION" in
 		trap - ERR
 		stage_summary
 		;;
-	verify-credential-bound)
+	verify-egress-mode|verify-credential-bound)
 		reap_active_run
-		register_active_run verify-credential-bound
+		register_active_run "$ACTION"
 		trap 'clear_active_run' EXIT
 		exec > >(tee -a "$WORK/run.log") 2>&1
-		log "=== fast-sandbox-env verify-credential-bound ($(date -u +%FT%TZ)) ==="
-		trap 'on_error verify-credential-bound' ERR
-		verify_credential_bound
+		log "=== fast-sandbox-env $ACTION ($(date -u +%FT%TZ)) ==="
+		trap 'on_error "$ACTION"' ERR
+		if [[ "$ACTION" == verify-credential-bound ]]; then verify_credential_bound; else verify_egress_mode; fi
 		trap - ERR
 		stage_summary
 		;;

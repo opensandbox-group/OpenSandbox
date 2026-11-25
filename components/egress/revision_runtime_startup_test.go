@@ -30,6 +30,9 @@ import (
 
 func TestRevisionRuntimeStartupConfiguration(t *testing.T) {
 	clearFSBInterceptionEnv(t)
+	old := fsbMitmproxyHome
+	fsbMitmproxyHome = func() (string, error) { return t.TempDir(), nil }
+	t.Cleanup(func() { fsbMitmproxyHome = old })
 	for _, item := range []struct {
 		name, profile, live, extras string
 		wantError                   bool
@@ -45,11 +48,14 @@ func TestRevisionRuntimeStartupConfiguration(t *testing.T) {
 		{"nonlive-false-extra", "", "false", "8443", false},
 		{"nonlive-invalid-still-validated-by-launcher", "", "", "bad", false},
 		{"fast-live", constants.ProfileFastSandbox, "true", "", false},
-		{"fast-live-extra", constants.ProfileFastSandbox, "true", "8443", false},
-		{"fast-nonlive-extra", constants.ProfileFastSandbox, "", "8443", false},
+		{"fast-live-extra", constants.ProfileFastSandbox, "true", "8443", true},
+		{"fast-nonlive-extra", constants.ProfileFastSandbox, "", "8443", true},
 	} {
 		t.Run(item.name, func(t *testing.T) {
 			t.Setenv(constants.EnvExperimentalRevisionRuntime, item.live)
+			if item.live == "" {
+				require.NoError(t, os.Unsetenv(constants.EnvExperimentalRevisionRuntime))
+			}
 			t.Setenv(constants.EnvMitmproxyExtraPorts, item.extras)
 			if item.name == "live-unset" {
 				require.NoError(t, os.Unsetenv(constants.EnvMitmproxyExtraPorts))
@@ -73,6 +79,7 @@ func TestRevisionRuntimeStartupConfiguration(t *testing.T) {
 func TestRevisionRuntimeStartupRejectsBeforeProfileOrNetwork(t *testing.T) {
 	const child = "OPENSANDBOX_TEST_REVISION_STARTUP_CHILD"
 	if os.Getenv(child) == "1" {
+		fsbMitmproxyHome = func() (string, error) { return os.TempDir(), nil }
 		main()
 		return
 	}
@@ -114,6 +121,7 @@ func TestFSBInterceptionStartupRejections(t *testing.T) {
 		{"sidecar-bound", "", "credential-bound", "", "", "", "", modeEnv},
 		{"invalid-mode", "fast-sandbox", "invalid-private-value", "", "", "", "", modeEnv},
 		{"explicit-empty", "fast-sandbox", "", "", "", "", "", modeEnv},
+		{"whitespace-mode", "fast-sandbox", "  ", "", "", "", "", modeEnv},
 		{"all-revision", "fast-sandbox", "all", "true", "", "", "", constants.EnvExperimentalRevisionRuntime},
 		{"all-admission", "fast-sandbox", "all", "", "true", "", "", constants.EnvExperimentalFSBTLSAdmission},
 		{"bound-revision-false", "fast-sandbox", "credential-bound", "false", "", "", "", constants.EnvExperimentalRevisionRuntime},
@@ -193,16 +201,16 @@ func TestFSBInterceptionModeCombinations(t *testing.T) {
 						mode, err := resolveFastSandboxInterceptionMode(profile)
 						invalid := public != "absent" && profile != constants.ProfileFastSandbox
 						invalid = invalid || public == "all" && (revision == "true" || admission == "true")
-						invalid = invalid || public == "credential-bound" && (revision == "false" || admission == "false")
-						invalid = invalid || public == "absent" && admission == "true" && (revision != "true" || profile != constants.ProfileFastSandbox)
+						invalid = invalid || (public == "credential-bound" || public == "absent" && profile == constants.ProfileFastSandbox) && (revision == "false" || admission == "false")
+						invalid = invalid || public == "absent" && admission == "true" && profile != constants.ProfileFastSandbox
 						if invalid {
 							require.Error(t, err)
 							return
 						}
 						require.NoError(t, err)
-						install := profile == constants.ProfileFastSandbox && (public == "credential-bound" || public == "absent" && revision == "true")
-						bound := profile == constants.ProfileFastSandbox && (public == "credential-bound" || public == "absent" && admission == "true")
-						require.Equal(t, fastSandboxInterceptionMode{installReceiver: install, credentialBound: bound, deprecatedAlias: public == "absent" && bound}, mode)
+						install := profile == constants.ProfileFastSandbox && (public == "credential-bound" || public == "absent")
+						bound := profile == constants.ProfileFastSandbox && (public == "credential-bound" || public == "absent")
+						require.Equal(t, fastSandboxInterceptionMode{installReceiver: install, credentialBound: bound, deprecatedAlias: public == "absent" && bound && revision == "true" && admission == "true"}, mode)
 					})
 				}
 			}
@@ -233,13 +241,13 @@ func TestFSBInterceptionMitmproxyOptions(t *testing.T) {
 		{"yml-secure-overrides", "ssl_insecure: true", "ssl_insecure: false", ""},
 		{"unreadable", "directory", "", "cannot read mitmproxy configuration"},
 	} {
-		for _, legacy := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/legacy=%v", tc.name, legacy), func(t *testing.T) {
+		for _, entry := range []string{"default", "explicit", "legacy"} {
+			t.Run(fmt.Sprintf("%s/%s", tc.name, entry), func(t *testing.T) {
 				clearFSBInterceptionEnv(t)
-				if legacy {
+				if entry == "legacy" {
 					t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
 					t.Setenv(constants.EnvExperimentalFSBTLSAdmission, "true")
-				} else {
+				} else if entry == "explicit" {
 					t.Setenv(constants.EnvFSBInterceptionMode, "credential-bound")
 				}
 				home := t.TempDir()
@@ -270,6 +278,7 @@ func TestFSBInterceptionMitmproxyOptions(t *testing.T) {
 
 func TestFSBInterceptionDisabledStartupUnchanged(t *testing.T) {
 	clearFSBInterceptionEnv(t)
+	t.Setenv(constants.EnvFSBInterceptionMode, "all")
 	oldLookup, oldMode := fsbMitmproxyHome, startupFSBInterceptionMode
 	fsbMitmproxyHome = func() (string, error) {
 		t.Fatal("disabled switch must not read mitmproxy configuration")
@@ -304,41 +313,52 @@ func TestFSBInterceptionStartupRejectsBeforeDispatch(t *testing.T) {
 		{"allow", "", "", "allow_hosts: ['private.invalid']", "allow_hosts"},
 		{"alias", constants.EnvFSBInterceptionMode, "all", "", constants.EnvExperimentalRevisionRuntime},
 		{"deprecated", "", "", "", "fast-sandbox Actions protocol:"},
+		{"default-ready", "", "", "", "fast-sandbox Actions protocol:"},
+		{"revision-false", constants.EnvExperimentalRevisionRuntime, "false", "", constants.EnvExperimentalRevisionRuntime},
+		{"admission-false", constants.EnvExperimentalFSBTLSAdmission, "false", "", constants.EnvExperimentalFSBTLSAdmission},
+		{"malformed", "", "", "private: [", "invalid mitmproxy configuration"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			clearFSBInterceptionEnv(t)
-			t.Setenv(child, "1")
-			t.Setenv(constants.EnvEgressProfile, constants.ProfileFastSandbox)
-			t.Setenv(constants.EnvFSBInterceptionMode, "credential-bound")
-			t.Setenv(constants.EnvFastSandboxActionsAPIVersion, "invalid")
-			home := t.TempDir()
-			t.Setenv("OPENSANDBOX_TEST_FSB_HOME", home)
-			require.NoError(t, os.Mkdir(filepath.Join(home, ".mitmproxy"), 0700))
-			require.NoError(t, os.WriteFile(filepath.Join(home, ".mitmproxy", "config.yaml"), []byte(tc.config), 0600))
-			if tc.name == "deprecated" {
-				require.NoError(t, os.Unsetenv(constants.EnvFSBInterceptionMode))
-				t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
-				t.Setenv(constants.EnvExperimentalFSBTLSAdmission, "true")
-			}
-			if tc.name == "alias" {
-				t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
-			}
-			if tc.key != "" {
-				t.Setenv(tc.key, tc.value)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			output, err := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFSBInterceptionStartupRejectsBeforeDispatch$").CombinedOutput()
-			require.Error(t, err)
-			require.NoError(t, ctx.Err())
-			require.Contains(t, string(output), tc.diagnostic)
-			require.NotContains(t, string(output), "private")
-			if tc.name == "deprecated" {
-				require.Equal(t, 1, strings.Count(string(output), "are deprecated"))
-			} else {
-				require.NotContains(t, string(output), "fast-sandbox Actions protocol:")
-			}
-		})
+		for _, entry := range []string{"default", "explicit"} {
+			t.Run(tc.name+"/"+entry, func(t *testing.T) {
+				clearFSBInterceptionEnv(t)
+				t.Setenv(child, "1")
+				t.Setenv(constants.EnvEgressProfile, constants.ProfileFastSandbox)
+				if entry == "explicit" {
+					t.Setenv(constants.EnvFSBInterceptionMode, "credential-bound")
+				}
+				t.Setenv(constants.EnvFastSandboxActionsAPIVersion, "invalid")
+				home := t.TempDir()
+				t.Setenv("OPENSANDBOX_TEST_FSB_HOME", home)
+				require.NoError(t, os.Mkdir(filepath.Join(home, ".mitmproxy"), 0700))
+				require.NoError(t, os.WriteFile(filepath.Join(home, ".mitmproxy", "config.yaml"), []byte(tc.config), 0600))
+				if tc.name == "deprecated" {
+					require.NoError(t, os.Unsetenv(constants.EnvFSBInterceptionMode))
+					t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
+					t.Setenv(constants.EnvExperimentalFSBTLSAdmission, "true")
+				}
+				if tc.name == "alias" {
+					t.Setenv(constants.EnvExperimentalRevisionRuntime, "true")
+				}
+				if tc.key != "" {
+					t.Setenv(tc.key, tc.value)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				output, err := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestFSBInterceptionStartupRejectsBeforeDispatch$").CombinedOutput()
+				require.Error(t, err)
+				require.NoError(t, ctx.Err())
+				require.Contains(t, string(output), tc.diagnostic)
+				require.NotContains(t, string(output), "private")
+				if tc.name == "deprecated" {
+					require.Equal(t, 1, strings.Count(string(output), "are deprecated"))
+				} else if tc.name == "default-ready" {
+					require.NotContains(t, string(output), "are deprecated")
+				} else {
+					require.Contains(t, string(output), constants.EnvFSBInterceptionMode+"=all")
+					require.NotContains(t, string(output), "fast-sandbox Actions protocol:")
+				}
+			})
+		}
 	}
 }
 
@@ -349,5 +369,6 @@ func TestFSBInterceptionConfigurationLookupFailure(t *testing.T) {
 	fsbMitmproxyHome = func() (string, error) { return "", fmt.Errorf("private hostname and uid") }
 	t.Cleanup(func() { fsbMitmproxyHome = old })
 	err := validateRevisionRuntimeStartup(constants.ProfileFastSandbox)
-	require.EqualError(t, err, "Fast Sandbox credential-bound: mitmproxy configuration unavailable")
+	require.ErrorContains(t, err, "Fast Sandbox credential-bound: mitmproxy configuration unavailable")
+	require.ErrorContains(t, err, constants.EnvFSBInterceptionMode+"=all")
 }

@@ -467,7 +467,7 @@ exchange_guest_status() { # <path>
 }
 
 exchange_vault_fails_closed() {
-	if [[ "$EGRESS_INTERCEPTION_MODE" == "credential-bound" ]]; then
+	if [[ "$(effective_egress_interception_mode)" == "credential-bound" ]]; then
 		# Subject admission terminates the transport on resolve failure. Only
 		# an empty reply/reset counts; timeouts and unreachable origins do not.
 		local out
@@ -598,5 +598,5 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 	run_stage "MITM CA chain verify (baked CA -> injection -> pinning)" mitm_ca_chain_verify
 	# exchange_stage (lib.sh) runs in both interception modes.
 	exchange_stage "exchange resolver verify (OSEP-0025: relay -> per-request resolve -> guest)" ""
-	[[ "$EGRESS_INTERCEPTION_MODE" != "credential-bound" ]] || stage_summary
+	[[ "$(effective_egress_interception_mode)" != "credential-bound" ]] || stage_summary
 fi

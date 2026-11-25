@@ -48,23 +48,38 @@ echo ACCEPTED
                             GUARD_ACTION=extra.get("action", "bench_require_egress_mode"))
 
     def test_live_mode_accepts_matching_pool_and_every_pod(self):
-        for expected, pool, pods in (("", None, [None, "all"]), ("all", "all", [None, "all"]),
-                                     ("credential-bound", "credential-bound", ["credential-bound"] * 2)):
+        for expected, pool, pods in (("", None, [None, None]), ("all", "all", ["all", "all"]),
+                                     ("credential-bound", "credential-bound", ["credential-bound", "credential-bound"])):
             with self.subTest(expected=expected):
                 proc = self.run_guard(expected, pool, pods)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertIn("ACCEPTED", proc.stdout)
 
     def test_entry_rejects_live_mode_drift_before_measurement(self):
-        proc = self.run_guard("", "credential-bound", ["credential-bound"], action="bench_credential_bound")
+        proc = self.run_guard("", "all", ["all"], action="bench_credential_bound")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("bench: live SandboxPool mode differs", proc.stderr)
         self.assertNotIn("ACCEPTED", proc.stdout)
 
+    def test_default_and_explicit_bound_configuration_drift_is_rejected(self):
+        for expected, pool, pods in (
+                ("", "credential-bound", ["credential-bound"]),
+                ("", None, [None, "credential-bound"]),
+                ("credential-bound", None, [None]),
+                ("credential-bound", "credential-bound", [None, "credential-bound"])):
+            with self.subTest(expected=expected, pool=pool, pods=pods):
+                proc = self.run_guard(expected, pool, pods)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("bench: live", proc.stderr)
+                self.assertNotIn("ACCEPTED", proc.stdout)
+                self.assertNotIn("wait_for", self.calls_made())
+
     def test_live_mode_rejects_mismatch_and_incomplete_evidence(self):
-        cases = [("", "credential-bound", ["credential-bound"], {}),
+        cases = [("", "all", ["all"], {}),
+                 ("all", None, ["all"], {}),
+                 ("", "", [""], {}),
+                 ("credential-bound", "credential-bound", [""], {}),
                  ("credential-bound", "credential-bound", ["credential-bound", "all"], {}),
-                 ("credential-bound", None, ["credential-bound"], {}),
                  ("", None, [], {}), ("", None, [None], {"pool": {"spec": {}}}),
                  ("", None, [None], {"pods": {"items": [{"spec": {}}]}}),
                  ("", None, [None], {"pods": {"items": [{"spec": {"containers": [{"name": "egress", "env": [
@@ -76,6 +91,44 @@ echo ACCEPTED
                 self.assertNotIn("ACCEPTED", proc.stdout)
                 self.assertIn("bench: live", proc.stderr)
                 self.assertNotIn("wait_for", self.calls_made())
+
+
+class BenchEffectiveModeTest(ShellCase):
+    def test_m2_uses_effective_mode_and_keeps_raw_default_label(self):
+        body = r'''
+source "$SCRIPT_DIR/credential-bound-bench.sh"
+BENCH_LEG="${EGRESS_INTERCEPTION_MODE:-default}"
+BENCH_DIR="$WORK/report"; BENCH_RAW="$BENCH_DIR/raw"; mkdir -p "$BENCH_RAW"
+BENCH_U=u; BENCH_B=b; CB_ORIGIN_LEAF=fixture; BENCH_HANDSHAKES=1; BENCH_HANDSHAKE_WARMUP=0
+bench_handshakes() { :; }
+bench_report() { cat "$2"; }
+bench_m2 fixture-credential-code
+'''
+        for raw in ("", "credential-bound", "all"):
+            with self.subTest(raw=raw):
+                proc = self.sourced(body, EGRESS_INTERCEPTION_MODE=raw)
+                report = json.loads(proc.stdout)
+                self.assertEqual(report["leg"], raw or "default")
+                measured = {p["name"]: p for p in report["paths"] if "not_run" not in p}
+                prefix = "all" if raw == "all" else "cb"
+                self.assertEqual(set(measured), {prefix+"_bound", prefix+"_unbound"})
+                self.assertEqual(measured[prefix+"_unbound"]["expect_leaf"], "mitm" if raw == "all" else "origin")
+                self.assertEqual(measured[prefix+"_unbound"]["expect_cred"], "absent")
+
+    def test_switch_convergence_distinguishes_missing_and_explicit_empty(self):
+        body = r'''
+kubectl() { printf '%s' "$PODS_FIXTURE"; }
+if egress_interception_mode_applied; then echo ACCEPTED; else echo REJECTED; fi
+'''
+        key = "OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE"
+        for raw, env, expected in (("", [], "ACCEPTED"), ("", [{"name": key, "value": ""}], "REJECTED"),
+                                   ("all", [{"name": key, "value": "all"}], "ACCEPTED"),
+                                   ("all", [], "REJECTED"),
+                                   ("all", [{"name": key, "valueFrom": {}}], "REJECTED")):
+            with self.subTest(raw=raw, env=env):
+                fixture = {"items": [{"spec": {"containers": [{"name": "egress", "env": env}]}}]}
+                proc = self.sourced(body, EGRESS_INTERCEPTION_MODE=raw, PODS_FIXTURE=json.dumps(fixture))
+                self.assertEqual(proc.stdout.strip(), expected)
 
 
 if __name__ == "__main__":

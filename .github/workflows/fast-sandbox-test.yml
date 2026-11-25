@@ -17,7 +17,7 @@ on:
         type: string
         default: resource-aware
       egress_modes:
-        description: Comma-separated egress modes (default, credential-bound); PRs always run both
+        description: Comma-separated egress modes (default, all, credential-bound); PRs run default + all
         required: false
         type: string
         default: default
@@ -89,16 +89,14 @@ jobs:
       - name: Run verifier regression tests
         run: python -m unittest discover -v -s scripts/fast-sandbox-env/tests -p 'test_*.py'
 
-  # Emits the integration matrix: PRs exercise both default and OSEP-0023
-  # credential-bound in a single KVM run (reusing the cluster and built
-  # templates via an in-place SandboxPool switch); standalone
-  # egress_modes=credential-bound dispatches keep a dedicated full leg.
+  # One KVM environment: default credential-bound first, explicit all in-place.
+  # An explicit credential-bound dispatch still runs the full initial leg.
   egress-modes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.modes.outputs.matrix }}
-      run_credential_bound_delta: ${{ steps.modes.outputs.run_credential_bound_delta }}
+      run_all_delta: ${{ steps.modes.outputs.run_all_delta }}
     steps:
       - id: modes
         env:
@@ -110,10 +108,10 @@ jobs:
           import os
           import sys
 
-          values = {"default": "", "credential-bound": "credential-bound"}
+          values = {"default": "", "all": "all", "credential-bound": "credential-bound"}
           requested = os.environ["REQUESTED"]
           if os.environ["EVENT_NAME"] == "pull_request":
-              requested = "default,credential-bound"
+              requested = "default,all"
           modes = []
           for part in (p.strip() for p in requested.split(",")):
               if not part:
@@ -125,18 +123,15 @@ jobs:
                   modes.append(values[part])
           if not modes:
               modes = [""]
-          # When both default and credential-bound are requested, run a single
-          # KVM leg and switch the SandboxPool in-place for the OSEP-0023
-          # egress-sensitive delta instead of rebuilding the whole stack twice.
-          if "" in modes and "credential-bound" in modes:
-              matrix = [""]
-              run_cb_delta = "true"
-          else:
-              matrix = modes
-              run_cb_delta = "false"
+          # Default and explicit credential-bound share runtime semantics.
+          # Prefer unset to test the real default; reuse this environment for all.
+          bound = "" if "" in modes else "credential-bound"
+          has_bound = any(mode != "all" for mode in modes)
+          matrix = [bound] if has_bound else ["all"]
+          run_all_delta = "true" if has_bound and "all" in modes else "false"
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
               out.write(f"matrix={json.dumps(matrix)}\n")
-              out.write(f"run_credential_bound_delta={run_cb_delta}\n")
+              out.write(f"run_all_delta={run_all_delta}\n")
           PY
 
   integration:
@@ -151,11 +146,8 @@ jobs:
       ( github.event.action != 'labeled' ||
       github.event.label.name == 'ok-to-test' ||
       github.event.label.name == 'test-disk-hotplug' ) )
-    # OSEP-0023 (experimental): the default leg ('' = switch unset, Pool
-    # rendered unchanged) plus an opt-in credential-bound leg (see
-    # egress-modes). Strictly serial: each leg owns the runner for a full
-    # up -> verify -> teardown, so the pool is never switched under live
-    # Pods and the legs never share a host.
+    # The initial leg renders the switch unset for default coverage; the all
+    # delta drains sandboxes and recreates only the Pool on the same KVM host.
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -167,7 +159,7 @@ jobs:
       # default; LegacySlot regression lives in the nightly full-stack run.
       pool_mode: ${{ inputs.pool_mode || github.event.client_payload.pool_mode || 'resource-aware' }}
       egress_interception_mode: ${{ matrix.egress_interception_mode }}
-      run_credential_bound_delta: ${{ needs.egress-modes.outputs.run_credential_bound_delta == 'true' }}
+      run_all_delta: ${{ needs.egress-modes.outputs.run_all_delta == 'true' }}
       fsb_commit_override: ${{ inputs.fsb_commit || github.event.client_payload.fsb_commit || '' }}
       verify_disk_hotplug: ${{ (github.event_name == 'workflow_dispatch' && inputs.verify_disk_hotplug) || (github.event_name == 'pull_request' && matrix.egress_interception_mode == '' && contains(github.event.pull_request.labels.*.name, 'test-disk-hotplug')) }}
       bench: ${{ (github.event_name == 'workflow_dispatch' && inputs.bench) || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fast-sandbox-bench')) }}

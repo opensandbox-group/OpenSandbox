@@ -252,8 +252,13 @@ func validateRevisionRuntimeStartup(profile string) error {
 	return err
 }
 
-func revisionRuntimeStartup(profile string) (fastSandboxInterceptionMode, error) {
-	mode, err := resolveFastSandboxInterceptionMode(profile)
+func revisionRuntimeStartup(profile string) (mode fastSandboxInterceptionMode, err error) {
+	defer func() {
+		if err != nil && profile == constants.ProfileFastSandbox {
+			err = fmt.Errorf("%w; correct the configuration or set %s=all and remove both legacy experimental gates", err, constants.EnvFSBInterceptionMode)
+		}
+	}()
+	mode, err = resolveFastSandboxInterceptionMode(profile)
 	if err != nil {
 		return mode, err
 	}

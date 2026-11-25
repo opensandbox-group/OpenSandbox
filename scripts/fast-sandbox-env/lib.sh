@@ -102,6 +102,10 @@ case "$EGRESS_INTERCEPTION_MODE" in
 		printf '[fast-sandbox-env] ERROR: EGRESS_INTERCEPTION_MODE must be empty, all or credential-bound (got: %s)\n' "$EGRESS_INTERCEPTION_MODE" >&2
 		exit 1 ;;
 esac
+# Keep raw empty for rendering; the runtime default still needs bound checks.
+effective_egress_interception_mode() {
+	printf '%s' "${EGRESS_INTERCEPTION_MODE:-credential-bound}"
+}
 MAX_SANDBOXES_PER_POD="${MAX_SANDBOXES_PER_POD:-8}"
 if [[ -n "${POOL_MIN:-}" && -n "${POOL_MAX:-}" ]]; then
 	:

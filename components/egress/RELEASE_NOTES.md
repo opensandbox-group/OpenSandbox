@@ -1,5 +1,7 @@
 # Unreleased
 
+- Fast Sandbox: an absent `OPENSANDBOX_EGRESS_FSB_INTERCEPTION_MODE` now enables credential-bound receiver/admission and fail-closed startup validation. Use explicit `all` and remove legacy gates to retain intercept-all; removing the mode no longer rolls back. Sidecar defaults are unchanged. See the [operator migration guide](../../docs/guides/credential-vault.md#enabling-and-rolling-back-credential-bound-operators) for audit visibility, rolling upgrades, HTTP/1.1 and Actions v1 recovery limits.
+
 - Fast Sandbox credential-bound (experimental): lower the default `OPENSANDBOX_EGRESS_FSB_PROCESS_TLS_CAPACITY` from 131072 to 32768. Measurements in two KVM environments found 158–166 KB of egress memory per held decrypted connection, so the old default allowed about 21 GB. Set the variable explicitly to keep a different budget.
 - Report upstream TLS failures with a connection ID and a bounded certificate verification reason. Unknown transport failures remain unclassified; request and credential data are not logged by this diagnostic.
 

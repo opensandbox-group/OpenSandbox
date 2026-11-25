@@ -349,7 +349,8 @@ bench_environment() {
 	git_commit="${GITHUB_SHA:-$(git -C "$OSB_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
 	jq -n \
 		--arg leg "$BENCH_LEG" \
-		--arg mode "${EGRESS_INTERCEPTION_MODE:-unset (all)}" \
+		--arg mode "$(effective_egress_interception_mode)" \
+		--arg raw_mode "${EGRESS_INTERCEPTION_MODE:-unset}" \
 		--arg recorded "$(date -u +%FT%TZ)" \
 		--arg commit "$git_commit" \
 		--arg fsb "$FSB_COMMIT" \
@@ -364,7 +365,7 @@ bench_environment() {
 		--arg egress_image "$IMG_EGRESS" \
 		--argjson egress "${egress:-null}" \
 		--arg template "native (\$WORK/template-id)" \
-		'{leg: $leg, interception_mode: $mode, recorded_at: $recorded, opensandbox_commit: $commit,
+		'{leg: $leg, interception_mode: $mode, configured_interception_mode: $raw_mode, recorded_at: $recorded, opensandbox_commit: $commit,
 		  fast_sandbox_commit: $fsb, pool: {name: $pool, mode: $pool_mode, pool_min: $pool_min,
 		  max_sandboxes_per_pod: $per_pod}, oci_stack: $oci, host: {kernel: $kernel, cpu_model: $cpu,
 		  cpus: $cpus, mem_total: $mem}, kubernetes: $k8s, egress_image: $egress_image,
@@ -413,7 +414,7 @@ bench_pair() {
 	bench_bind "$b" "$cred_b" "bench vault for B"
 	cb_until "bench: bound sandbox B injected over a MITM leaf" 60 "$b" bench-b-ready "$code_b"
 	unbound_leaf=mitm
-	[[ "$BENCH_LEG" != credential-bound ]] || unbound_leaf=origin
+	[[ "$(effective_egress_interception_mode)" != credential-bound ]] || unbound_leaf=origin
 	bench_until_reachable "$u" bench-u-ready "$unbound_leaf"
 	BENCH_U="$u"; BENCH_B="$b"
 }
@@ -427,7 +428,7 @@ bench_m2() {
 		  sandboxes: "unbound U and bound B on the same Fastlet Pod"}, paths: [], vault_bind_ack_ms: $bind,
 		  notes: ["warmup samples are discarded (first-use MITM leaf generation and caches)"]}' > "$spec"
 	local -a run=() skip=()
-	if [[ "$BENCH_LEG" == credential-bound ]]; then
+	if [[ "$(effective_egress_interception_mode)" == credential-bound ]]; then
 		run=("cb_bound|$BENCH_B|mitm|$code_b|credential-bound, bound host: decrypt + inject"
 			"cb_unbound|$BENCH_U|origin|absent|credential-bound, unbound host: opaque passthrough")
 		skip=("all_unbound|interception all, unbound host: decrypt" "all_bound|interception all, bound host: decrypt + inject")
@@ -457,7 +458,7 @@ bench_m2() {
 bench_m4() {
 	local code_b="$1" spec="$BENCH_RAW/m4-spec.json" idle0 idle1 load0 load1 t0 idle_ms load_ms leaf ident0 ident1
 	leaf=mitm
-	[[ "$BENCH_LEG" != credential-bound ]] || leaf=origin
+	[[ "$(effective_egress_interception_mode)" != credential-bound ]] || leaf=origin
 	# cgroup counters reset with the container: both windows count only when
 	# one egress container instance spans them.
 	ident0="$(bench_egress_identity "$BENCH_POD")" || ident0=""
@@ -670,7 +671,7 @@ credential_bound_bench() {
 	run_stage "bench: colocated unbound/bound sandbox pair" bench_pair "$cred_b" "$code_b"
 	run_stage "bench M2: guest TLS connect latency ($BENCH_HANDSHAKES per path)" bench_m2 "$code_b"
 	run_stage "bench M4: egress CPU under passthrough-dominated load" bench_m4 "$code_b"
-	if [[ "$BENCH_LEG" == credential-bound ]]; then
+	if [[ "$(effective_egress_interception_mode)" == credential-bound ]]; then
 		# M3 recreates the pool; scan the current Pods' egress logs before they go.
 		run_stage "bench: no fake credential value in the logs before the M3 pool recreate" cb_log_scan "$CB_WORK_DIR/values" "$since"
 		run_stage "bench M3: egress memory per held bound connection (K: $BENCH_MEM_STEPS)" bench_m3
