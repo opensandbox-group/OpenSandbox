@@ -18,10 +18,12 @@ package controller
 
 import (
 	"errors"
-	"os"
 
 	"golang.org/x/sys/unix"
 )
+
+// openat2Fn allows tests to exercise the fallback and EXDEV error paths.
+var openat2Fn = unix.Openat2
 
 // isBlockedFSMagic reports whether fsType belongs to a Linux pseudo-filesystem
 // that must never be served or mutated via /files/* or /directories/*.
@@ -42,75 +44,44 @@ func isBlockedFSMagic(fsType uint64) bool {
 	}
 }
 
-func openGuardedReadFile(absPath string) (*os.File, error) {
-	return openGuardedFile(absPath, unix.O_RDONLY, 0, true)
-}
-
-func openGuardedWriteFile(absPath string, flags int, perm os.FileMode) (*os.File, error) {
-	return openGuardedFile(absPath, flags, perm, false)
-}
-
-// openGuardedFile opens absPath with openat2(RESOLVE_NO_MAGICLINKS) when
-// supported (falling back to open on older kernels or restricted seccomp
-// profiles), then verifies the opened descriptor with fstatfs and fstat to
-// prevent TOCTOU symlink swaps onto pseudo-filesystems or blocking on devices
-// and FIFOs.
-func openGuardedFile(absPath string, flags int, perm os.FileMode, allowDir bool) (*os.File, error) {
-	openFlags := flags | unix.O_CLOEXEC | unix.O_NONBLOCK
-	var mode uint64
-	if flags&(unix.O_CREAT|unix.O_TMPFILE) != 0 {
-		mode = uint64(perm.Perm())
-	}
-
-	how := &unix.OpenHow{
-		Flags:   uint64(openFlags),
-		Mode:    mode,
-		Resolve: unix.RESOLVE_NO_MAGICLINKS,
-	}
-	fd, err := unix.Openat2(unix.AT_FDCWD, absPath, how)
-	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EINVAL) {
-		fd, err = unix.Open(absPath, openFlags, uint32(perm.Perm()))
-	}
-	if err != nil {
-		if errors.Is(err, unix.EXDEV) {
-			return nil, &forbiddenPathError{path: absPath}
-		}
-		return nil, &os.PathError{Op: "open", Path: absPath, Err: err}
-	}
-
-	if err := verifyOpenedFD(fd, absPath, allowDir); err != nil {
-		_ = unix.Close(fd)
-		return nil, err
-	}
-
-	// Clear O_NONBLOCK after verifying the descriptor is not a FIFO/device.
-	_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags&^unix.O_NONBLOCK)
-	return os.NewFile(uintptr(fd), absPath), nil
-}
-
-func verifyOpenedFD(fd int, absPath string, allowDir bool) error {
+// verifyDirFD fails closed if fstatfs fails or reports a blocked pseudo-fs.
+func verifyDirFD(fd int, absPath string) error {
 	var stfs unix.Statfs_t
-	if err := unix.Fstatfs(fd, &stfs); err == nil {
-		if isBlockedFSMagic(uint64(stfs.Type)) {
-			return &forbiddenPathError{path: absPath}
-		}
-	}
-
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return &os.PathError{Op: "fstat", Path: absPath, Err: err}
-	}
-	switch st.Mode & unix.S_IFMT {
-	case unix.S_IFREG:
-		return nil
-	case unix.S_IFDIR:
-		if allowDir {
-			return nil
-		}
-		return &os.PathError{Op: "open", Path: absPath, Err: unix.EISDIR}
-	default:
-		// Reject char/block devices, FIFOs, and sockets to avoid hangs and
-		// device-node reads/writes.
+	if err := unix.Fstatfs(fd, &stfs); err != nil {
 		return &forbiddenPathError{path: absPath}
 	}
+	if isBlockedFSMagic(uint64(stfs.Type)) {
+		return &forbiddenPathError{path: absPath}
+	}
+	return nil
+}
+
+// isBlockedDirFS reports whether dirPath resides on a blocked pseudo-filesystem
+// (such as a bind-mounted /proc or /sys alias under an allowed directory).
+func isBlockedDirFS(dirPath string) bool {
+	fd, err := unix.Open(dirPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return false
+	}
+	defer unix.Close(fd)
+	var stfs unix.Statfs_t
+	if err := unix.Fstatfs(fd, &stfs); err != nil {
+		return true
+	}
+	return isBlockedFSMagic(uint64(stfs.Type))
+}
+
+func openLeafAt(dirfd int, name string, flags int, perm uint32) (int, error) {
+	how := &unix.OpenHow{
+		Flags:   uint64(flags),
+		Resolve: unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,
+	}
+	fd, err := openat2Fn(dirfd, name, how)
+	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EINVAL) {
+		return unix.Openat(dirfd, name, flags, perm)
+	}
+	if errors.Is(err, unix.EXDEV) {
+		return -1, &forbiddenPathError{path: name}
+	}
+	return fd, err
 }

@@ -38,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
+	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
@@ -333,4 +334,34 @@ func TestFilesystemIdentityCannotSwitch(t *testing.T) {
 	}
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(output))
+}
+
+func TestFilesystemIdentityPropagatesGuardPolicy(t *testing.T) {
+	_, a, _ := identityFixture(t)
+	secret := filepath.Join(a, "guarded.txt")
+	require.NoError(t, os.WriteFile(secret, []byte("secret-content"), 0o640))
+	require.NoError(t, os.Chown(secret, 41001, 41000))
+
+	prev := controller.CurrentFilesystemGuardPolicy()
+	t.Cleanup(func() { _ = controller.InitFilesystemGuard(prev) })
+	require.NoError(t, controller.InitFilesystemGuard(controller.FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{secret},
+		DenyGlobs:         []string{"**/.aws/credentials"},
+	}))
+
+	router := identityTestRouter()
+	resp := identityRequest(router, 41001, http.MethodGet, "/files/download?path="+url.QueryEscape(secret), nil, "")
+	require.Equal(t, http.StatusForbidden, resp.Code, resp.Body.String())
+	require.NotContains(t, resp.Body.String(), "secret-content")
+
+	awsDir := filepath.Join(a, ".aws")
+	require.NoError(t, os.MkdirAll(awsDir, 0o750))
+	require.NoError(t, os.Chown(awsDir, 41001, 41000))
+	cred := filepath.Join(awsDir, "credentials")
+	require.NoError(t, os.WriteFile(cred, []byte("aws-key"), 0o640))
+	require.NoError(t, os.Chown(cred, 41001, 41000))
+
+	credResp := identityRequest(router, 41001, http.MethodGet, "/files/download?path="+url.QueryEscape(cred), nil, "")
+	require.Equal(t, http.StatusForbidden, credResp.Code, credResp.Body.String())
+	require.NotContains(t, credResp.Body.String(), "aws-key")
 }

@@ -26,7 +26,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -393,32 +392,71 @@ func TestFilesystemControllerWalkSkipsBlockedSubtrees(t *testing.T) {
 	})
 }
 
-func TestFilesystemControllerRejectsFIFO(t *testing.T) {
+func TestFilesystemGuardSymlinkDotDotTraversalBlocked(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("FIFO not supported on Windows")
+		t.Skip("POSIX symlink test")
 	}
-	withTestFilesystemGuard(t, FilesystemGuardPolicy{})
+	tmp := t.TempDir()
+	blockedDir := filepath.Join(tmp, "blocked")
+	require.NoError(t, os.MkdirAll(blockedDir, 0o755))
+	secretFile := filepath.Join(blockedDir, "keep.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte("keep"), 0o600))
 
-	fifoPath := filepath.Join(t.TempDir(), "hang.fifo")
-	require.NoError(t, syscall.Mkfifo(fifoPath, 0o600))
+	ws := filepath.Join(tmp, "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+	linkPath := filepath.Join(ws, "l")
+	require.NoError(t, os.Symlink(blockedDir, linkPath))
 
-	// On Linux openGuardedReadFile uses O_NONBLOCK + fstat to reject FIFOs
-	// immediately without blocking. On non-Linux (macOS) os.Open without
-	// O_NONBLOCK would block on a FIFO with no writer, so only run the
-	// non-blocking open test on Linux.
-	if runtime.GOOS != "linux" {
-		t.Skip("non-blocking FIFO rejection via openat2/O_NONBLOCK is Linux-specific")
-	}
-
-	ctrl, rec := newFilesystemController(t, http.MethodGet, "/files/download?path="+url.QueryEscape(fifoPath), nil)
-	ctrl.DownloadFile()
-	assertForbiddenResponse(t, rec)
-
-	body, err := json.Marshal(map[string]model.ReplaceFileContentItem{
-		fifoPath: {Old: "a", New: "b"},
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{blockedDir},
 	})
+
+	// S1: DELETE /directories with symlink/.. must not remove the blocked tree.
+	dotDotDelete := linkPath + "/../blocked"
+	ctrl, _ := newFilesystemController(t, http.MethodDelete, "/directories?path="+url.QueryEscape(dotDotDelete), nil)
+	ctrl.RemoveDirs()
+	_, err := os.Stat(secretFile)
+	require.NoError(t, err, "blocked directory must survive symlink/.. RemoveDirs")
+
+	// S2: POST /files/upload with symlink/.. must not write into the blocked directory.
+	dotDotUpload := linkPath + "/../blocked/injected.txt"
+	body, contentType := buildUploadMultipart(t, dotDotUpload, []byte("injected"))
+	ctx, _ := newTestContext(http.MethodPost, "/files/upload", body.Bytes())
+	ctx.Request.Header.Set("Content-Type", contentType)
+	NewFilesystemController(ctx).UploadFile()
+	_, err = os.Stat(filepath.Join(blockedDir, "injected.txt"))
+	require.True(t, os.IsNotExist(err), "upload must not create file inside blocked dir via symlink/..")
+}
+
+func TestFilesystemGuardPolicyNormalizesRelativePathsAndFailClosedHops(t *testing.T) {
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{"relative/secret.txt"},
+	})
+	exported := CurrentFilesystemGuardPolicy()
+	require.Len(t, exported.ExtraBlockedPaths, 1)
+	require.True(t, filepath.IsAbs(exported.ExtraBlockedPaths[0]), "propagated path must be absolute: %q", exported.ExtraBlockedPaths[0])
+
+	if runtime.GOOS != "windows" {
+		ws := t.TempDir()
+		loopA := filepath.Join(ws, "a")
+		loopB := filepath.Join(ws, "b")
+		require.NoError(t, os.Symlink(loopB, loopA))
+		require.NoError(t, os.Symlink(loopA, loopB))
+		require.ErrorIs(t, checkFilesystemPath(loopA), errForbiddenPath)
+	}
+}
+
+func TestFilesystemGuardWindowsNormalization(t *testing.T) {
+	g, err := buildFilesystemGuardForOS(FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{`C:\OpenSandbox\secret`},
+		DenyGlobs:         []string{"**/.kube/config", "**/.aws/credentials", "**/.git-credentials"},
+	}, true)
 	require.NoError(t, err)
-	ctrl2, rec2 := newFilesystemController(t, http.MethodPost, "/files/replace", body)
-	ctrl2.ReplaceContent()
-	assertForbiddenResponse(t, rec2)
+
+	require.True(t, g.matchesPath(`c:\opensandbox\SECRET`))
+	require.True(t, g.matchesPath(`C:\OpenSandbox\secret\token.json`))
+	require.True(t, g.matchesPath(`C:\Users\Alice\.aws\credentials`))
+	require.True(t, g.matchesPath(`C:\Users\Alice\.KUBE\config`))
+	require.True(t, g.matchesPath(`C:\Users\Alice\.git-credentials`))
+	require.False(t, g.matchesPath(`C:\Users\Alice\workspace\main.go`))
 }

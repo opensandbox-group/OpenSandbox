@@ -218,6 +218,12 @@ func validateHook(name string, hook Hook) error {
 	return nil
 }
 
+// ResolveConfigPath returns the effective persisted lifecycle config path
+// (EXECD_LIFECYCLE_CONFIG when set, otherwise $HOME/.execd/lifecycle.toml).
+func ResolveConfigPath() (string, error) {
+	return resolveConfigPath()
+}
+
 func resolveConfigPath() (string, error) {
 	if configuredPath := os.Getenv(ConfigPathEnv); configuredPath != "" {
 		return configuredPath, nil

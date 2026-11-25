@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -165,8 +166,16 @@ func (f *FilesystemConfig) Validate() error {
 		return nil
 	}
 	for _, p := range f.DenyPaths {
-		if strings.TrimSpace(p) == "" {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" {
 			return fmt.Errorf("filesystem: deny_paths entries must not be empty")
+		}
+		if !filepath.IsAbs(trimmed) {
+			return fmt.Errorf("filesystem: deny_paths entry %q must be an absolute path", p)
+		}
+		cleaned := filepath.Clean(trimmed)
+		if cleaned == filepath.Dir(cleaned) {
+			return fmt.Errorf("filesystem: deny_paths entry %q must not be the filesystem root", p)
 		}
 	}
 	for _, pattern := range f.DenyGlobs {

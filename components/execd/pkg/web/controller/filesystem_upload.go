@@ -168,7 +168,7 @@ func resolveUploadTarget(targetPath string, perm model.Permission) (string, *upl
 	if err := checkFilesystemPath(absPath); err != nil {
 		return "", newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
 	}
-	targetDir := filepath.Dir(resolvedPath)
+	targetDir := filepath.Dir(absPath)
 	if err := MkdirAllWithOwnership(targetDir, os.ModePerm, perm.Owner, perm.Group); err != nil {
 		return "", newUploadError(
 			http.StatusInternalServerError,
@@ -176,7 +176,7 @@ func resolveUploadTarget(targetPath string, perm model.Permission) (string, *upl
 			fmt.Sprintf("error creating target directory %s. %v", targetDir, err),
 		)
 	}
-	return resolvedPath, nil
+	return absPath, nil
 }
 
 func writeUploadFile(resolvedPath string, fileHeader *multipart.FileHeader) *uploadError {

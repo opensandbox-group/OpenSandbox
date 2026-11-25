@@ -231,7 +231,7 @@ func (c *FilesystemController) RemoveDirs() {
 			c.handleFileError(err)
 			return
 		}
-		if err := os.RemoveAll(resolvedDir); err != nil {
+		if err := os.RemoveAll(absDir); err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,
 				model.ErrorCodeRuntimeError,
@@ -346,7 +346,7 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 				continue
 			}
 			entryPath := filepath.Join(dir, entry.Name())
-			if isFilesystemPathBlocked(entryPath) {
+			if isWalkEntryBlocked(entryPath, entry) {
 				continue
 			}
 			info, err := entry.Info()
@@ -422,7 +422,7 @@ func (c *FilesystemController) SearchFiles() {
 
 	files := make([]model.FileInfo, 0, 16)
 	err = filepath.WalkDir(path, func(filePath string, entry fs.DirEntry, err error) error {
-		if isFilesystemPathBlocked(filePath) {
+		if isWalkEntryBlocked(filePath, entry) {
 			if entry != nil && entry.IsDir() {
 				return filepath.SkipDir
 			}
@@ -560,7 +560,7 @@ func (c *FilesystemController) ReplaceContent() {
 			c.handleFileError(err)
 			return
 		}
-		_, writeErr := writeFile.Write([]byte(newContent))
+		_, writeErr := writeFile.WriteString(newContent)
 		closeErr := writeFile.Close()
 		if writeErr != nil {
 			c.handleFileError(writeErr)

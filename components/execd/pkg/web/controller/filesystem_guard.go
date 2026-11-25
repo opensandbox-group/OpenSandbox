@@ -17,8 +17,10 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 
@@ -73,6 +75,7 @@ type filesystemGuard struct {
 	policy       FilesystemGuardPolicy
 	blockedRoots []string
 	denyGlobs    []string
+	windowsMode  bool
 }
 
 var (
@@ -89,63 +92,136 @@ func mustBuildFilesystemGuard(policy FilesystemGuardPolicy) *filesystemGuard {
 }
 
 func buildFilesystemGuard(policy FilesystemGuardPolicy) (*filesystemGuard, error) {
+	return buildFilesystemGuardForOS(policy, runtime.GOOS == "windows")
+}
+
+func buildFilesystemGuardForOS(policy FilesystemGuardPolicy, windowsMode bool) (*filesystemGuard, error) {
 	seen := make(map[string]struct{}, len(defaultBlockedRoots)+len(policy.ExtraBlockedPaths))
 	var roots []string
-	addRoot := func(raw string) {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
+	var normalizedExtras []string
+	extraSeen := make(map[string]struct{}, len(policy.ExtraBlockedPaths))
+
+	addRoot := func(raw string, recordExtra bool) {
+		cleaned, ok := normalizeBlockedRootInput(raw, windowsMode)
+		if !ok {
 			return
 		}
-		cleaned := filepath.Clean(raw)
-		if !filepath.IsAbs(cleaned) {
-			if abs, err := filepath.Abs(cleaned); err == nil {
-				cleaned = abs
+		if recordExtra {
+			if _, exists := extraSeen[cleaned]; !exists {
+				extraSeen[cleaned] = struct{}{}
+				normalizedExtras = append(normalizedExtras, cleaned)
 			}
 		}
-		if cleaned == string(filepath.Separator) || cleaned == "." {
-			return
-		}
-		if _, ok := seen[cleaned]; !ok {
-			seen[cleaned] = struct{}{}
-			roots = append(roots, cleaned)
-		}
-		if canonical := canonicalizeExistingPrefix(cleaned); canonical != "" &&
-			canonical != string(filepath.Separator) {
-			if _, ok := seen[canonical]; !ok {
-				seen[canonical] = struct{}{}
-				roots = append(roots, canonical)
+		appendNormalizedRoot(&roots, seen, cleaned, windowsMode)
+		if !windowsMode || runtime.GOOS == "windows" {
+			if canonical := canonicalizeExistingPrefix(cleaned); canonical != "" &&
+				canonical != filepath.Dir(canonical) {
+				appendNormalizedRoot(&roots, seen, canonical, windowsMode)
 			}
 		}
 	}
 
 	for _, r := range defaultBlockedRoots {
-		addRoot(r)
+		addRoot(r, false)
 	}
 	for _, r := range policy.ExtraBlockedPaths {
-		addRoot(r)
+		addRoot(r, true)
 	}
 
-	var denyGlobs []string
-	for _, pattern := range policy.DenyGlobs {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" {
-			continue
-		}
-		if !glob.ValidPattern(pattern) {
-			return nil, fmt.Errorf("filesystem guard: invalid deny glob %q", pattern)
-		}
-		denyGlobs = append(denyGlobs, pattern)
+	denyGlobs, err := normalizeDenyGlobs(policy.DenyGlobs, windowsMode)
+	if err != nil {
+		return nil, err
 	}
 
 	copiedPolicy := FilesystemGuardPolicy{
-		ExtraBlockedPaths: append([]string(nil), policy.ExtraBlockedPaths...),
+		ExtraBlockedPaths: normalizedExtras,
 		DenyGlobs:         append([]string(nil), denyGlobs...),
 	}
 	return &filesystemGuard{
 		policy:       copiedPolicy,
 		blockedRoots: roots,
 		denyGlobs:    denyGlobs,
+		windowsMode:  windowsMode,
 	}, nil
+}
+
+func normalizeBlockedRootInput(raw string, windowsMode bool) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	if windowsMode && isWindowsAbsPath(raw) {
+		trimmed := strings.TrimRight(strings.ReplaceAll(raw, "\\", "/"), "/")
+		if len(trimmed) <= 2 { // e.g. "C:"
+			return "", false
+		}
+		return raw, true
+	}
+	cleaned := filepath.Clean(raw)
+	if !filepath.IsAbs(cleaned) {
+		if abs, err := filepath.Abs(cleaned); err == nil {
+			cleaned = abs
+		}
+	}
+	if cleaned == "." || cleaned == filepath.Dir(cleaned) {
+		return "", false
+	}
+	return cleaned, true
+}
+
+func isWindowsAbsPath(p string) bool {
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') {
+		c := p[0]
+		return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')
+	}
+	return strings.HasPrefix(p, `\\`)
+}
+
+func appendNormalizedRoot(roots *[]string, seen map[string]struct{}, path string, windowsMode bool) {
+	key := normalizeForMatch(path, windowsMode)
+	if key == "" || key == "/" {
+		return
+	}
+	if _, ok := seen[key]; ok {
+		return
+	}
+	seen[key] = struct{}{}
+	*roots = append(*roots, key)
+}
+
+func normalizeDenyGlobs(patterns []string, windowsMode bool) ([]string, error) {
+	var out []string
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		normalized := normalizeGlobPattern(pattern, windowsMode)
+		if !glob.ValidPattern(normalized) {
+			return nil, fmt.Errorf("filesystem guard: invalid deny glob %q", pattern)
+		}
+		out = append(out, normalized)
+	}
+	return out, nil
+}
+
+// normalizeForMatch converts paths into a canonical slash-separated form for
+// prefix and glob comparisons, folding case on Windows.
+func normalizeForMatch(p string, windowsMode bool) string {
+	s := strings.ReplaceAll(p, "\\", "/")
+	if !windowsMode {
+		s = filepath.ToSlash(p)
+	} else {
+		s = strings.ToLower(s)
+	}
+	return strings.TrimRight(s, "/")
+}
+
+func normalizeGlobPattern(pattern string, windowsMode bool) string {
+	if !windowsMode {
+		return pattern
+	}
+	return strings.ToLower(strings.ReplaceAll(pattern, "\\", "/"))
 }
 
 // canonicalizeExistingPrefix resolves symlinks on the longest existing prefix
@@ -187,7 +263,8 @@ func InitFilesystemGuard(policy FilesystemGuardPolicy) error {
 }
 
 // CurrentFilesystemGuardPolicy returns the extra rules currently installed on
-// top of defaultBlockedRoots so --filesystem-worker children inherit them.
+// top of defaultBlockedRoots (with absolute normalized paths) so
+// --filesystem-worker children inherit them identically regardless of cwd.
 func CurrentFilesystemGuardPolicy() FilesystemGuardPolicy {
 	g := getFilesystemGuard()
 	return FilesystemGuardPolicy{
@@ -207,14 +284,31 @@ func checkFilesystemPath(absPath string) error {
 	return getFilesystemGuard().CheckPath(absPath)
 }
 
-func isFilesystemPathBlocked(absPath string) bool {
-	return getFilesystemGuard().CheckPath(absPath) != nil
+// isWalkEntryBlocked checks a directory-walk entry without performing an
+// extra Lstat walk for ordinary non-symlink files. Symlinks are resolved
+// fully, and directories are checked for blocked pseudo-filesystem mounts.
+func isWalkEntryBlocked(entryPath string, entry fs.DirEntry) bool {
+	g := getFilesystemGuard()
+	cleaned := filepath.Clean(entryPath)
+	if g.matchesPath(cleaned) {
+		return true
+	}
+	if entry == nil {
+		return g.CheckPath(cleaned) != nil
+	}
+	if entry.Type()&fs.ModeSymlink != 0 {
+		return g.CheckPath(cleaned) != nil
+	}
+	if entry.IsDir() {
+		return isBlockedDirFS(cleaned)
+	}
+	return false
 }
 
 func (g *filesystemGuard) matchesBlockedRoot(candidate string) bool {
-	sep := string(filepath.Separator)
+	norm := normalizeForMatch(candidate, g.windowsMode)
 	for _, root := range g.blockedRoots {
-		if candidate == root || strings.HasPrefix(candidate, root+sep) {
+		if norm == root || strings.HasPrefix(norm, root+"/") {
 			return true
 		}
 	}
@@ -222,12 +316,30 @@ func (g *filesystemGuard) matchesBlockedRoot(candidate string) bool {
 }
 
 func (g *filesystemGuard) matchesDenyGlob(candidate string) bool {
+	if len(g.denyGlobs) == 0 {
+		return false
+	}
+	norm := normalizeForMatch(candidate, g.windowsMode)
 	for _, pattern := range g.denyGlobs {
-		if matched, err := glob.PathMatch(pattern, candidate); err == nil && matched {
+		if matchGuardGlob(pattern, norm, g.windowsMode) {
 			return true
 		}
 	}
 	return false
+}
+
+func matchGuardGlob(pattern, normalizedPath string, windowsMode bool) bool {
+	if windowsMode {
+		// On Windows filepath.Separator is '\', whereas normalizedPath uses '/'.
+		// Convert both to filepath.Separator for glob.PathMatch.
+		sep := string(filepath.Separator)
+		p := strings.ReplaceAll(pattern, "/", sep)
+		c := strings.ReplaceAll(normalizedPath, "/", sep)
+		matched, err := glob.PathMatch(p, c)
+		return err == nil && matched
+	}
+	matched, err := glob.PathMatch(pattern, normalizedPath)
+	return err == nil && matched
 }
 
 func (g *filesystemGuard) matchesPath(candidate string) bool {
@@ -242,17 +354,12 @@ func (g *filesystemGuard) CheckPath(absPath string) error {
 		return &forbiddenPathError{path: absPath}
 	}
 
-	vol := filepath.VolumeName(cleaned)
-	rest := strings.TrimPrefix(cleaned, vol)
-	sep := string(filepath.Separator)
-	if !strings.HasPrefix(rest, sep) {
+	cur, remaining, ok := splitAbsolutePath(cleaned)
+	if !ok {
 		return nil
 	}
 
-	cur := vol + sep
-	remaining := splitPathSegments(strings.TrimPrefix(rest, sep))
 	hops := 0
-
 	for len(remaining) > 0 {
 		part := remaining[0]
 		remaining = remaining[1:]
@@ -261,63 +368,36 @@ func (g *filesystemGuard) CheckPath(absPath string) error {
 		}
 
 		next := filepath.Join(cur, part)
-		if g.matchesBlockedRoot(next) || (len(remaining) == 0 && g.matchesDenyGlob(next)) {
+		if g.isStepBlocked(next, len(remaining) == 0) {
 			return &forbiddenPathError{path: absPath}
 		}
 
 		fi, err := os.Lstat(next)
 		if err != nil {
-			// Entry does not exist yet or cannot be lstat'd; check the full
-			// remaining lexical path and stop resolving.
-			final := joinRemaining(next, remaining)
-			if g.matchesPath(final) {
+			if g.matchesPath(joinRemaining(next, remaining)) {
 				return &forbiddenPathError{path: absPath}
 			}
 			return nil
 		}
 
-		if fi.Mode()&os.ModeSymlink != 0 {
-			hops++
-			if hops > maxGuardSymlinkDepth {
-				// Leave symlink loops to the underlying filesystem call's ELOOP.
-				return nil
-			}
-			target, err := os.Readlink(next)
-			if err != nil {
-				final := joinRemaining(next, remaining)
-				if g.matchesPath(final) {
-					return &forbiddenPathError{path: absPath}
-				}
-				return nil
-			}
-
-			var resolvedTarget string
-			if filepath.IsAbs(target) {
-				resolvedTarget = filepath.Clean(target)
-			} else {
-				// cur is already canonical (symlink-free), so Join+Clean matches
-				// POSIX relative symlink resolution.
-				resolvedTarget = filepath.Clean(filepath.Join(cur, target))
-			}
-
-			if g.matchesBlockedRoot(resolvedTarget) ||
-				(len(remaining) == 0 && g.matchesDenyGlob(resolvedTarget)) {
-				return &forbiddenPathError{path: absPath}
-			}
-			fullTarget := joinRemaining(resolvedTarget, remaining)
-			if g.matchesPath(fullTarget) {
-				return &forbiddenPathError{path: absPath}
-			}
-
-			targetVol := filepath.VolumeName(resolvedTarget)
-			targetRest := strings.TrimPrefix(resolvedTarget, targetVol)
-			cur = targetVol + sep
-			targetSegs := splitPathSegments(strings.TrimPrefix(targetRest, sep))
-			remaining = append(targetSegs, remaining...)
+		if fi.Mode()&os.ModeSymlink == 0 {
+			cur = next
 			continue
 		}
 
-		cur = next
+		hops++
+		if hops > maxGuardSymlinkDepth {
+			return &forbiddenPathError{path: absPath}
+		}
+
+		nextCur, nextRem, done, err := g.resolveSymlinkStep(absPath, cur, next, remaining)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+		cur, remaining = nextCur, nextRem
 	}
 
 	if g.matchesPath(cur) {
@@ -326,11 +406,54 @@ func (g *filesystemGuard) CheckPath(absPath string) error {
 	return nil
 }
 
-func splitPathSegments(rel string) []string {
-	if rel == "" {
-		return nil
+func (g *filesystemGuard) isStepBlocked(path string, isFinal bool) bool {
+	return g.matchesBlockedRoot(path) || (isFinal && g.matchesDenyGlob(path))
+}
+
+func (g *filesystemGuard) resolveSymlinkStep(
+	origPath, curDir, linkPath string,
+	remaining []string,
+) (string, []string, bool, error) {
+	target, err := os.Readlink(linkPath)
+	if err != nil {
+		if g.matchesPath(joinRemaining(linkPath, remaining)) {
+			return "", nil, false, &forbiddenPathError{path: origPath}
+		}
+		return "", nil, true, nil
 	}
-	return strings.Split(rel, string(filepath.Separator))
+
+	resolvedTarget := resolveSymlinkTarget(curDir, target)
+	if g.isStepBlocked(resolvedTarget, len(remaining) == 0) ||
+		g.matchesPath(joinRemaining(resolvedTarget, remaining)) {
+		return "", nil, false, &forbiddenPathError{path: origPath}
+	}
+
+	nextCur, targetSegs, ok := splitAbsolutePath(resolvedTarget)
+	if !ok {
+		return "", nil, true, nil
+	}
+	return nextCur, append(targetSegs, remaining...), false, nil
+}
+
+func resolveSymlinkTarget(curDir, target string) string {
+	if filepath.IsAbs(target) {
+		return filepath.Clean(target)
+	}
+	return filepath.Clean(filepath.Join(curDir, target))
+}
+
+func splitAbsolutePath(cleaned string) (string, []string, bool) {
+	vol := filepath.VolumeName(cleaned)
+	rest := strings.TrimPrefix(cleaned, vol)
+	sep := string(filepath.Separator)
+	if !strings.HasPrefix(rest, sep) {
+		return "", nil, false
+	}
+	rel := strings.TrimPrefix(rest, sep)
+	if rel == "" {
+		return vol + sep, nil, true
+	}
+	return vol + sep, strings.Split(rel, sep), true
 }
 
 func joinRemaining(base string, remaining []string) string {

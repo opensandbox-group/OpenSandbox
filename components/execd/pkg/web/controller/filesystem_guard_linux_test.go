@@ -17,6 +17,8 @@
 package controller
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,4 +57,33 @@ func TestOpenGuardedReadFileRejectsProcDescriptor(t *testing.T) {
 		_ = f.Close()
 	}
 	require.ErrorIs(t, err, errForbiddenPath)
+}
+
+func TestOpenLeafAtFallbackAndEXDEV(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "ok.txt")
+	require.NoError(t, os.WriteFile(target, []byte("hello"), 0o644))
+
+	orig := openat2Fn
+	t.Cleanup(func() { openat2Fn = orig })
+
+	t.Run("ENOSYS falls back to openat", func(t *testing.T) {
+		openat2Fn = func(int, string, *unix.OpenHow) (int, error) {
+			return -1, unix.ENOSYS
+		}
+		f, err := openGuardedReadFile(target)
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+	})
+
+	t.Run("EXDEV maps to forbiddenPathError", func(t *testing.T) {
+		openat2Fn = func(int, string, *unix.OpenHow) (int, error) {
+			return -1, unix.EXDEV
+		}
+		f, err := openGuardedReadFile(target)
+		if f != nil {
+			_ = f.Close()
+		}
+		require.ErrorIs(t, err, errForbiddenPath)
+	})
 }

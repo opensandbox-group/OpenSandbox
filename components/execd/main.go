@@ -99,7 +99,7 @@ func run() int {
 
 	// Materialize the internal environment transport before the HTTP server
 	// can launch user code, then remove it from execd's process environment.
-	lifecycleConfigPath := os.Getenv(lifecycle.ConfigPathEnv)
+	lifecycleConfigPath, _ := lifecycle.ResolveConfigPath()
 	lifecycleConfig, err := lifecycle.LoadConfig()
 	if err != nil {
 		log.Error("lifecycle: config: %v", err)

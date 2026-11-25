@@ -624,6 +624,8 @@ paths:
                 type: object
                 additionalProperties:
                   $ref: "#/components/schemas/FileInfo"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -653,6 +655,8 @@ paths:
       responses:
         "200":
           description: Files deleted successfully
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -688,6 +692,8 @@ paths:
           description: Permissions changed successfully
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -719,6 +725,8 @@ paths:
           description: Files renamed/moved successfully
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -759,6 +767,8 @@ paths:
                   $ref: "#/components/schemas/FileInfo"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -818,6 +828,8 @@ paths:
                   replacedCount: 0
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -857,6 +869,8 @@ paths:
           description: Files uploaded successfully
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -950,6 +964,8 @@ paths:
               description: Length of the returned range
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "416":
@@ -972,9 +988,13 @@ paths:
 
         Symbolic links are reported with `type=symlink` and are not traversed:
         the listing never descends into a link target, even when `depth` would
-        otherwise allow it. For the same reason, when `path` itself resolves to
-        a symbolic link the request is rejected with `400`; callers must pass
-        the real directory path they want listed.
+        otherwise allow it, and symlinks whose target resolves to a blocked
+        pseudo-filesystem, internal platform path, or operator-denied path/glob
+        are omitted from the listing. Blocked subtrees are pruned during broad
+        walks instead of failing the request. For the same reason, when `path`
+        itself resolves to a symbolic link the request is rejected with `400`
+        (or `403` when its target is blocked); callers must pass the real
+        directory path they want listed.
 
         Entries are returned in lexical order by entry name within each
         directory. Descendants reported via `depth>1` follow their parent in
@@ -1029,6 +1049,8 @@ paths:
                   mode: 644
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -1066,6 +1088,8 @@ paths:
           description: Directories created successfully
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -1092,6 +1116,8 @@ paths:
       responses:
         "200":
           description: Directories deleted successfully
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -1136,6 +1162,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1187,6 +1215,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1236,6 +1266,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1281,6 +1313,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1329,6 +1363,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1395,6 +1431,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1461,6 +1499,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1532,6 +1572,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1606,9 +1648,13 @@ paths:
 
         Symbolic links are reported with `type=symlink` and are not traversed:
         the listing never descends into a link target, even when `depth` would
-        otherwise allow it. For the same reason, when `path` itself resolves to
-        a symbolic link the request is rejected with `400`; callers must pass
-        the real directory path they want listed.
+        otherwise allow it, and symlinks whose target resolves to a blocked
+        pseudo-filesystem, internal platform path, or operator-denied path/glob
+        are omitted from the listing. Blocked subtrees are pruned during broad
+        walks instead of failing the request. For the same reason, when `path`
+        itself resolves to a symbolic link the request is rejected with `400`
+        (or `403` when its target is blocked); callers must pass the real
+        directory path they want listed.
 
         Entries are returned in lexical order by entry name within each
         directory. Descendants reported via `depth>1` follow their parent in
@@ -1638,6 +1684,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1712,6 +1760,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -1744,6 +1794,8 @@ paths:
       responses:
         "501":
           description: Filesystem execution identity requires Linux.
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: The requested identity could not be established or the worker failed; no fallback to Execd identity occurs.
         "200":
@@ -3467,6 +3519,16 @@ components:
           example:
             code: FILE_NOT_FOUND
             message: "file not found"
+
+    Forbidden:
+      description: Access to the requested path or special file is forbidden (pseudo-filesystems, internal platform paths, operator-denied paths/globs, or special device/FIFO/socket nodes)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: FORBIDDEN_PATH
+            message: 'access to path "/proc/1/environ" is forbidden'
 
     InternalServerError:
       description: Runtime server error during operation

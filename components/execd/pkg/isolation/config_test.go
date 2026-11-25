@@ -183,6 +183,9 @@ func TestLoadConfigFilesystemInvalid(t *testing.T) {
 		content string
 	}{
 		{name: "empty deny_paths entry", content: "[filesystem]\ndeny_paths = ['']"},
+		{name: "relative deny_paths entry", content: "[filesystem]\ndeny_paths = ['secret.txt']"},
+		{name: "dot deny_paths entry", content: "[filesystem]\ndeny_paths = ['.']"},
+		{name: "root deny_paths entry", content: "[filesystem]\ndeny_paths = ['/']"},
 		{name: "empty deny_globs entry", content: "[filesystem]\ndeny_globs = [' ']"},
 		{name: "invalid glob syntax", content: "[filesystem]\ndeny_globs = ['[unclosed']"},
 	} {

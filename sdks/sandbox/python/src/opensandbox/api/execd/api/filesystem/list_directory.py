@@ -69,6 +69,14 @@ def _parse_response(
 
         return response_400
 
+    if response.status_code == 403:
+        try:
+            response_403 = ErrorResponse.from_dict(response.json())
+        except (ValueError, TypeError, KeyError):
+            return None
+
+        return response_403
+
     if response.status_code == 404:
         try:
             response_404 = ErrorResponse.from_dict(response.json())
@@ -117,9 +125,13 @@ def sync_detailed(
 
     Symbolic links are reported with `type=symlink` and are not traversed:
     the listing never descends into a link target, even when `depth` would
-    otherwise allow it. For the same reason, when `path` itself resolves to
-    a symbolic link the request is rejected with `400`; callers must pass
-    the real directory path they want listed.
+    otherwise allow it, and symlinks whose target resolves to a blocked
+    pseudo-filesystem, internal platform path, or operator-denied path/glob
+    are omitted from the listing. Blocked subtrees are pruned during broad
+    walks instead of failing the request. For the same reason, when `path`
+    itself resolves to a symbolic link the request is rejected with `400`
+    (or `403` when its target is blocked); callers must pass the real
+    directory path they want listed.
 
     Entries are returned in lexical order by entry name within each
     directory. Descendants reported via `depth>1` follow their parent in
@@ -165,9 +177,13 @@ def sync(
 
     Symbolic links are reported with `type=symlink` and are not traversed:
     the listing never descends into a link target, even when `depth` would
-    otherwise allow it. For the same reason, when `path` itself resolves to
-    a symbolic link the request is rejected with `400`; callers must pass
-    the real directory path they want listed.
+    otherwise allow it, and symlinks whose target resolves to a blocked
+    pseudo-filesystem, internal platform path, or operator-denied path/glob
+    are omitted from the listing. Blocked subtrees are pruned during broad
+    walks instead of failing the request. For the same reason, when `path`
+    itself resolves to a symbolic link the request is rejected with `400`
+    (or `403` when its target is blocked); callers must pass the real
+    directory path they want listed.
 
     Entries are returned in lexical order by entry name within each
     directory. Descendants reported via `depth>1` follow their parent in
@@ -208,9 +224,13 @@ async def asyncio_detailed(
 
     Symbolic links are reported with `type=symlink` and are not traversed:
     the listing never descends into a link target, even when `depth` would
-    otherwise allow it. For the same reason, when `path` itself resolves to
-    a symbolic link the request is rejected with `400`; callers must pass
-    the real directory path they want listed.
+    otherwise allow it, and symlinks whose target resolves to a blocked
+    pseudo-filesystem, internal platform path, or operator-denied path/glob
+    are omitted from the listing. Blocked subtrees are pruned during broad
+    walks instead of failing the request. For the same reason, when `path`
+    itself resolves to a symbolic link the request is rejected with `400`
+    (or `403` when its target is blocked); callers must pass the real
+    directory path they want listed.
 
     Entries are returned in lexical order by entry name within each
     directory. Descendants reported via `depth>1` follow their parent in
@@ -254,9 +274,13 @@ async def asyncio(
 
     Symbolic links are reported with `type=symlink` and are not traversed:
     the listing never descends into a link target, even when `depth` would
-    otherwise allow it. For the same reason, when `path` itself resolves to
-    a symbolic link the request is rejected with `400`; callers must pass
-    the real directory path they want listed.
+    otherwise allow it, and symlinks whose target resolves to a blocked
+    pseudo-filesystem, internal platform path, or operator-denied path/glob
+    are omitted from the listing. Blocked subtrees are pruned during broad
+    walks instead of failing the request. For the same reason, when `path`
+    itself resolves to a symbolic link the request is rejected with `400`
+    (or `403` when its target is blocked); callers must pass the real
+    directory path they want listed.
 
     Entries are returned in lexical order by entry name within each
     directory. Descendants reported via `depth>1` follow their parent in

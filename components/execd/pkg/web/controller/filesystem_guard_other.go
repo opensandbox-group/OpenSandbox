@@ -12,13 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !linux
+//go:build !unix
 
 package controller
 
 import (
 	"os"
 )
+
+func isBlockedDirFS(_ string) bool {
+	return false
+}
+
+func checkRootDirFS(_ string) error {
+	return nil
+}
 
 func openGuardedReadFile(absPath string) (*os.File, error) {
 	f, err := os.Open(absPath)

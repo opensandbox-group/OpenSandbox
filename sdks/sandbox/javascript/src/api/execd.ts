@@ -507,9 +507,13 @@ export interface paths {
          *
          *     Symbolic links are reported with `type=symlink` and are not traversed:
          *     the listing never descends into a link target, even when `depth` would
-         *     otherwise allow it. For the same reason, when `path` itself resolves to
-         *     a symbolic link the request is rejected with `400`; callers must pass
-         *     the real directory path they want listed.
+         *     otherwise allow it, and symlinks whose target resolves to a blocked
+         *     pseudo-filesystem, internal platform path, or operator-denied path/glob
+         *     are omitted from the listing. Blocked subtrees are pruned during broad
+         *     walks instead of failing the request. For the same reason, when `path`
+         *     itself resolves to a symbolic link the request is rejected with `400`
+         *     (or `403` when its target is blocked); callers must pass the real
+         *     directory path they want listed.
          *
          *     Entries are returned in lexical order by entry name within each
          *     directory. Descendants reported via `depth>1` follow their parent in
@@ -796,9 +800,13 @@ export interface paths {
          *
          *     Symbolic links are reported with `type=symlink` and are not traversed:
          *     the listing never descends into a link target, even when `depth` would
-         *     otherwise allow it. For the same reason, when `path` itself resolves to
-         *     a symbolic link the request is rejected with `400`; callers must pass
-         *     the real directory path they want listed.
+         *     otherwise allow it, and symlinks whose target resolves to a blocked
+         *     pseudo-filesystem, internal platform path, or operator-denied path/glob
+         *     are omitted from the listing. Blocked subtrees are pruned during broad
+         *     walks instead of failing the request. For the same reason, when `path`
+         *     itself resolves to a symbolic link the request is rejected with `400`
+         *     (or `403` when its target is blocked); callers must pass the real
+         *     directory path they want listed.
          *
          *     Entries are returned in lexical order by entry name within each
          *     directory. Descendants reported via `depth>1` follow their parent in
@@ -1937,6 +1945,21 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description Access to the requested path or special file is forbidden (pseudo-filesystems, internal platform paths, operator-denied paths/globs, or special device/FIFO/socket nodes) */
+        Forbidden: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                /**
+                 * @example {
+                 *       "code": "FORBIDDEN_PATH",
+                 *       "message": "access to path \"/proc/1/environ\" is forbidden"
+                 *     }
+                 */
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description Runtime server error during operation */
         InternalServerError: {
             headers: {
@@ -2409,6 +2432,7 @@ export interface operations {
                     };
                 };
             };
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
         };
@@ -2437,6 +2461,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
         };
     };
@@ -2477,6 +2502,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
         };
     };
@@ -2513,6 +2539,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
         };
@@ -2541,6 +2568,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
         };
@@ -2600,6 +2628,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
         };
     };
@@ -2635,6 +2664,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
         };
     };
@@ -2700,6 +2730,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description Requested range not satisfiable */
             416: {
@@ -2767,6 +2798,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
         };
@@ -2808,6 +2840,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
         };
     };
@@ -2835,6 +2868,7 @@ export interface operations {
                 };
                 content?: never;
             };
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
         };
     };
@@ -2867,6 +2901,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
@@ -2915,6 +2950,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
             501: {
@@ -2974,6 +3010,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
             501: {
@@ -3029,6 +3066,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
@@ -3076,6 +3114,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
@@ -3154,6 +3193,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
             501: {
@@ -3208,6 +3248,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
             501: {
@@ -3292,6 +3333,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             /** @description Requested range not satisfiable */
             416: {
@@ -3378,6 +3420,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
@@ -3438,6 +3481,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
             501: {
@@ -3485,6 +3529,7 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalServerError"];
             /** @description Filesystem execution identity requires Linux. */
             501: {

@@ -200,6 +200,15 @@ All keys are optional. A missing file or a missing key falls back to the default
 | `extra_writable` | []string | `[]` | Additional read-write paths beyond the built-in set (see the [default allowlist](#built-in-landlock-allowlist)). Each path **must exist** in the image: an uninstallable rule disables the whole Landlock layer (`degraded`) rather than weakening confinement. |
 | `extra_readable` | []string | `[]` | Additional read-only (read + exec) paths beyond the built-in set. Same exists-check semantics. |
 
+### `[filesystem]`
+
+Execd unconditionally guards `/files/*`, `/directories/*`, and `/v1/filesystem/{uid}/{gid}/*` against pseudo-filesystems (`/proc`, `/sys`, `/dev`, `/sys/fs/cgroup`) and platform internal paths (`/var/lib/execd`, `/etc/execd`, `/etc/opensandbox`, `/opt/opensandbox`, `/var/log/opensandbox`, plus dynamic `upper_root`, `EXECD_ISOLATION_CONFIG`, `EXECD_LIFECYCLE_CONFIG` / `$HOME/.execd/lifecycle.toml`, `--lifecycle-startup-status-file`, and `ebpf.audit_file`). Direct access returns `403 FORBIDDEN_PATH`; broad directory walks (`GET /directories/list` and `GET /files/search`) prune blocked subtrees and hide symlinks pointing to blocked targets instead of failing the request. Special non-regular files (FIFOs, devices, sockets) are refused on download, upload, and replace.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `deny_paths` | []string | `[]` | Extra absolute subtree prefixes to block with `403 FORBIDDEN_PATH` on top of the built-in roots. Relative paths, `.`, and `/` are rejected at startup. |
+| `deny_globs` | []string | `[]` | Doublestar glob patterns (for example `**/.kube/config`, `**/.aws/credentials`, `**/.git-credentials`) blocked across all filesystem endpoints. Invalid patterns fail startup. |
+
 ## Built-in defaults you inherit
 
 These are deliberately **not** configuration keys — they are applied whenever the relevant switch is on.

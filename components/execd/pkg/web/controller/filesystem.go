@@ -254,7 +254,7 @@ func (c *FilesystemController) RemoveDirs() {
 			c.handleFileError(err)
 			return
 		}
-		if err := os.RemoveAll(resolvedDir); err != nil {
+		if err := os.RemoveAll(absDir); err != nil {
 			c.RespondError(
 				http.StatusInternalServerError,
 				model.ErrorCodeRuntimeError,
@@ -307,6 +307,10 @@ func (c *FilesystemController) ListDirectory() {
 	}
 
 	if err := checkFilesystemPath(path); err != nil {
+		c.handleFileError(err)
+		return
+	}
+	if err := checkRootDirFS(path); err != nil {
 		c.handleFileError(err)
 		return
 	}
@@ -369,7 +373,7 @@ func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
 				continue
 			}
 			entryPath := filepath.Join(dir, entry.Name())
-			if isFilesystemPathBlocked(entryPath) {
+			if isWalkEntryBlocked(entryPath, entry) {
 				continue
 			}
 			info, err := entry.Info()
@@ -423,6 +427,10 @@ func (c *FilesystemController) SearchFiles() {
 		c.handleFileError(err)
 		return
 	}
+	if err := checkRootDirFS(path); err != nil {
+		c.handleFileError(err)
+		return
+	}
 
 	_, err = os.Stat(path)
 	if err != nil {
@@ -443,9 +451,24 @@ func (c *FilesystemController) SearchFiles() {
 		return
 	}
 
+	files, err := searchFilesInDir(path, pattern)
+	if err != nil {
+		c.RespondError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error searching files. %v", err),
+		)
+		return
+	}
+
+	rec.MarkSuccess()
+	c.RespondSuccess(files)
+}
+
+func searchFilesInDir(root, pattern string) ([]model.FileInfo, error) {
 	files := make([]model.FileInfo, 0, 16)
-	err = filepath.WalkDir(path, func(filePath string, entry fs.DirEntry, err error) error {
-		if isFilesystemPathBlocked(filePath) {
+	err := filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, err error) error {
+		if isWalkEntryBlocked(filePath, entry) {
 			if entry != nil && entry.IsDir() {
 				return filepath.SkipDir
 			}
@@ -457,10 +480,7 @@ func (c *FilesystemController) SearchFiles() {
 		if err != nil {
 			return fmt.Errorf("error accessing path %s: %w", filePath, err)
 		}
-		if entry.IsDir() {
-			return nil
-		}
-		if isAnyStagingName(entry.Name()) {
+		if entry.IsDir() || isAnyStagingName(entry.Name()) {
 			return nil
 		}
 
@@ -488,21 +508,9 @@ func (c *FilesystemController) SearchFiles() {
 			return err
 		}
 		files = append(files, fileInfo)
-
 		return nil
 	})
-
-	if err != nil {
-		c.RespondError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error searching files. %v", err),
-		)
-		return
-	}
-
-	rec.MarkSuccess()
-	c.RespondSuccess(files)
+	return files, err
 }
 
 func (c *FilesystemController) ReplaceContent() {
@@ -528,76 +536,17 @@ func (c *FilesystemController) ReplaceContent() {
 
 	for file, item := range request {
 		origPath := file
-		file, err := pathutil.ExpandAbsPath(file)
+		count, badReq, err := replaceSingleFile(file, item)
+		if badReq != "" {
+			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, badReq)
+			return
+		}
 		if err != nil {
 			c.handleFileError(err)
 			return
 		}
-		if err := rejectStagingPath(file); err != nil {
-			c.handleFileError(err)
-			return
-		}
-		if err := checkFilesystemPath(file); err != nil {
-			c.handleFileError(err)
-			return
-		}
-
-		readFile, err := openGuardedReadFile(file)
-		if err != nil {
-			c.handleFileError(err)
-			return
-		}
-		fileInfo, err := readFile.Stat()
-		if err != nil {
-			_ = readFile.Close()
-			c.handleFileError(err)
-			return
-		}
-		if fileInfo.IsDir() {
-			_ = readFile.Close()
-			c.handleFileError(fmt.Errorf("path is a directory: %s", file))
-			return
-		}
-		content, err := io.ReadAll(readFile)
-		_ = readFile.Close()
-		if err != nil {
-			c.handleFileError(err)
-			return
-		}
-		mode := fileInfo.Mode()
-
-		if item.Old == "" {
-			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "old content must not be empty")
-			return
-		}
-
-		contentStr := string(content)
-		newContent := strings.ReplaceAll(contentStr, item.Old, item.New)
-
-		if err := checkFilesystemPath(file); err != nil {
-			c.handleFileError(err)
-			return
-		}
-		writeFile, err := openGuardedWriteFile(file, os.O_WRONLY|os.O_TRUNC, mode)
-		if err != nil {
-			c.handleFileError(err)
-			return
-		}
-		_, writeErr := writeFile.Write([]byte(newContent))
-		closeErr := writeFile.Close()
-		if writeErr != nil {
-			c.handleFileError(writeErr)
-			return
-		}
-		if closeErr != nil {
-			c.handleFileError(closeErr)
-			return
-		}
-
 		if verbose {
-			results[origPath] = model.ReplaceFileContentResult{
-				ReplacedCount: strings.Count(contentStr, item.Old),
-			}
+			results[origPath] = model.ReplaceFileContentResult{ReplacedCount: count}
 		}
 	}
 
@@ -607,4 +556,66 @@ func (c *FilesystemController) ReplaceContent() {
 	} else {
 		c.RespondSuccess(nil)
 	}
+}
+
+func replaceSingleFile(rawPath string, item model.ReplaceFileContentItem) (int, string, error) {
+	file, err := pathutil.ExpandAbsPath(rawPath)
+	if err != nil {
+		return 0, "", err
+	}
+	if err := rejectStagingPath(file); err != nil {
+		return 0, "", err
+	}
+	if err := checkFilesystemPath(file); err != nil {
+		return 0, "", err
+	}
+
+	content, mode, err := readGuardedRegularFile(file)
+	if err != nil {
+		return 0, "", err
+	}
+	if item.Old == "" {
+		return 0, "old content must not be empty", nil
+	}
+
+	contentStr := string(content)
+	newContent := strings.ReplaceAll(contentStr, item.Old, item.New)
+	if err := writeGuardedRegularFile(file, newContent, mode); err != nil {
+		return 0, "", err
+	}
+	return strings.Count(contentStr, item.Old), "", nil
+}
+
+func readGuardedRegularFile(file string) ([]byte, os.FileMode, error) {
+	readFile, err := openGuardedReadFile(file)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer readFile.Close()
+
+	fileInfo, err := readFile.Stat()
+	if err != nil {
+		return nil, 0, err
+	}
+	if fileInfo.IsDir() {
+		return nil, 0, fmt.Errorf("path is a directory: %s", file)
+	}
+	content, err := io.ReadAll(readFile)
+	if err != nil {
+		return nil, 0, err
+	}
+	return content, fileInfo.Mode(), nil
+}
+
+func writeGuardedRegularFile(file, content string, mode os.FileMode) error {
+	writeFile, err := openGuardedWriteFile(file, os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	_, writeErr := writeFile.WriteString(content)
+	closeErr := writeFile.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
 }

@@ -159,6 +159,9 @@ allowed_writable = ["/workspace", "/mnt", "/media", "/data"]
 # ALWAYS blocked unconditionally. Use [filesystem] to deny extra paths or
 # credential globs.
 #
+# deny_paths entries must be absolute subtree prefixes (relative paths, ".",
+# and the filesystem root "/" are rejected at startup).
+#
 # [filesystem]
 #   deny_paths = ["/etc/shadow"]
 #   deny_globs = ["**/.kube/config", "**/.aws/credentials", "**/.git-credentials"]
