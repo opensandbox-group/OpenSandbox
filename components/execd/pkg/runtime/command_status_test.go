@@ -263,3 +263,63 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 	require.Empty(t, output2, "expected no new output")
 	require.GreaterOrEqual(t, cursor2, cursor, "cursor should not move backwards")
 }
+
+func TestSeekBackgroundCommandOutput_DefersIncompleteUTF8WhileRunning(t *testing.T) {
+	controller := NewController("", "")
+	path := filepath.Join(t.TempDir(), "growing.log")
+	const id = "background-utf8"
+	controller.storeCommandKernel(id, &commandKernel{
+		stdoutPath:   path,
+		isBackground: true,
+		running:      true,
+	})
+	checkGrowingBackgroundLogUTF8(t, path, func(cursor int64) ([]byte, int64, error) {
+		return controller.SeekBackgroundCommandOutput(id, cursor)
+	}, func() {
+		controller.markCommandFinished(id, 0, "")
+	})
+}
+
+// Both log readers must keep a partial character behind the cursor until it
+// arrives in full, and let a final read make progress over a truncated tail.
+func checkGrowingBackgroundLogUTF8(
+	t *testing.T,
+	path string,
+	read func(int64) ([]byte, int64, error),
+	finish func(),
+) {
+	t.Helper()
+	const prefix, character = "start:", "🌍"
+	require.NoError(t, os.WriteFile(path, []byte(prefix), 0o644))
+	appendOutput := func(output string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+		require.NoError(t, err)
+		_, writeErr := file.WriteString(output)
+		require.NoError(t, file.Close())
+		require.NoError(t, writeErr)
+	}
+	checkPage := func(start int64, expected string, next int64) int64 {
+		t.Helper()
+		data, cursor, err := read(start)
+		require.NoError(t, err)
+		require.Equal(t, expected, string(data))
+		require.Equal(t, next, cursor)
+		return cursor
+	}
+
+	appendOutput(character[:1])
+	cursor := checkPage(0, prefix, int64(len(prefix)))
+	appendOutput(character[1:3])
+	cursor = checkPage(cursor, "", cursor)
+	appendOutput(character[3:] + "\n")
+	cursor = checkPage(cursor, character+"\n", int64(len(prefix+character+"\n")))
+
+	// An incomplete suffix held while the process is alive still belongs to
+	// the raw log if the process exits without writing the rest.
+	appendOutput(character[:2])
+	cursor = checkPage(cursor, "", cursor)
+	finish()
+	cursor = checkPage(cursor, character[:2], cursor+2)
+	checkPage(cursor, "", cursor)
+}

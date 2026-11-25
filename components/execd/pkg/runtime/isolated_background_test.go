@@ -1011,3 +1011,24 @@ func TestCapIsolatedRunLog_RefusesSymlinkTarget(t *testing.T) {
 		t.Errorf("symlink target truncated to %d bytes, want untouched %d", st.Size(), 32<<20)
 	}
 }
+
+func TestSeekIsolatedBackgroundOutput_DefersIncompleteUTF8WhileRunning(t *testing.T) {
+	runner := newTestRunner(t)
+	dir := t.TempDir()
+	run := &IsolatedBackgroundRun{
+		ID:        "background-utf8",
+		SessionID: "session-utf8",
+		logRoot:   dir,
+		running:   true,
+	}
+	path := filepath.Join(dir, run.relLogPath())
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	runner.bgRuns.Store(run.ID, run)
+
+	checkGrowingBackgroundLogUTF8(t, path, func(cursor int64) ([]byte, int64, error) {
+		return runner.SeekIsolatedBackgroundOutput(run.SessionID, run.ID, cursor)
+	}, func() {
+		code := 0
+		run.markFinished(&code, "")
+	})
+}
