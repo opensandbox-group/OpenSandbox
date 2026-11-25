@@ -3,11 +3,11 @@ title: Workspace-only Kubernetes pause with a bucket-backed volume
 authors:
   - "@LuisQin01"
 creation-date: 2026-11-21
-last-updated: 2026-11-24
+last-updated: 2026-11-25
 status: draft
 ---
 
-# OSEP-0033 Workspace-only Kubernetes pause with a bucket-backed volume
+# OSEP-0034 Workspace-only Kubernetes pause with a bucket-backed volume
 
 ## Summary
 

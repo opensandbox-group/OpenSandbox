@@ -177,7 +177,7 @@ func registerEgressMetrics() error {
 		return err
 	}
 	// The SDK default buckets stop at 10000, below the default process budget
-	// (131072), collapsing process budgets and larger occupancies into +Inf.
+	// (32768), collapsing process budgets and larger occupancies into +Inf.
 	// Cover the validated 0..1<<20 slot range, with finer steps around the
 	// default subject capacity of 32. Both instruments use the same ladder.
 	tlsSlotBuckets := metric.WithExplicitBucketBoundaries(

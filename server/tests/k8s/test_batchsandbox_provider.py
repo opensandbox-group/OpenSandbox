@@ -2769,6 +2769,7 @@ spec:
             "metadata": {"name": "test-id", "namespace": "test-ns"},
             "status": {"phase": "Succeed", "conditions": []},
         }
+        mock_k8s_client.read_pod.return_value = {"spec": {}, "status": {"phase": "Running"}}
         mock_k8s_client.patch_custom_object.return_value = {}
 
         provider.pause_sandbox("test-id", "test-ns")
@@ -2789,6 +2790,7 @@ spec:
                 ],
             },
         }
+        mock_k8s_client.read_pod.return_value = {"spec": {}, "status": {"phase": "Running"}}
         mock_k8s_client.patch_custom_object.return_value = {}
 
         provider.pause_sandbox("test-id", "test-ns")

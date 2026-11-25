@@ -64,6 +64,8 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+Besides the base `SandboxException`, a rate-limited API raises `SandboxRateLimitException` (HTTP 429) carrying the server-supplied `retry_after` as a `timedelta`, so fast-fail callers can back off on schedule.
+
 ### Synchronous Quick Start
 
 If you prefer a synchronous API, use `SandboxSync` / `SandboxManagerSync` and `ConnectionConfigSync`:
@@ -339,6 +341,12 @@ result = await sandbox.commands.run(
     "for i in {1..5}; do echo \"Count $i\"; sleep 0.5; done",
     handlers=handlers
 )
+
+# Foreground runs carry an exit code: 0 on success, the command's exit
+# status on failure, and -1 when terminated by a signal. A stream that ends
+# before the command's terminal event raises instead of returning a partial
+# execution
+print(f"exit_code: {result.exit_code}")
 ```
 
 ### 4. Comprehensive File Operations
@@ -412,6 +420,14 @@ async with await SandboxManager.create(connection_config=config) as manager:
 ```
 
 A `Sandbox` can also snapshot itself directly: `await sandbox.create_snapshot(name="checkpoint-1")`.
+
+Both forms take an optional `mode`: `"full"` (the default) also captures memory and process state, while `"rootfsOnly"` persists only the writable filesystem — restoring boots a fresh sandbox and re-runs the entrypoint, and requires the fast-sandbox backend (a deployment that cannot produce one fails the request instead of silently saving a full snapshot):
+
+```python
+snapshot = await manager.create_snapshot(
+    sandbox_id, name="clean-baseline", mode="rootfsOnly"
+)
+```
 
 ### 6. Isolated Sessions
 
