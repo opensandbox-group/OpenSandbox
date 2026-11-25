@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -163,6 +164,125 @@ var _ = Describe("PauseResume", Ordered, Label("PauseResume"), func() {
 	})
 
 	Context("Pause and Resume", func() {
+		It("recreates a pinned sidecar without losing the main RootFS across two cycles", func() {
+			const name = "test-pause-recreate-sidecar"
+			pinned := "docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+			if utils.IsKind() {
+				// Use the Alpine image already loaded by suite setup rather than
+				// requiring Docker Hub access from inside the Kind node.
+				cluster := os.Getenv("KIND_CLUSTER")
+				if cluster == "" {
+					cluster = "kind"
+				}
+				node := cluster + "-control-plane"
+				image, err := reference.ParseNormalizedNamed(utils.AlpineImage())
+				Expect(err).NotTo(HaveOccurred())
+				tagged := reference.TagNameOnly(image).String()
+				output, err := utils.Run(exec.Command("docker", "exec", node, "ctr", "-n", "k8s.io", "images", "ls", "name=="+tagged))
+				Expect(err).NotTo(HaveOccurred())
+				var digest string
+				for _, line := range strings.Split(output, "\n") {
+					if fields := strings.Fields(line); len(fields) >= 3 && fields[0] == tagged {
+						digest = fields[2]
+						break
+					}
+				}
+				Expect(digest).To(HavePrefix("sha256:"))
+				pinned = reference.TrimNamed(image).String() + "@" + digest
+				if pinned != tagged {
+					_, err = utils.Run(exec.Command("docker", "exec", node, "ctr", "-n", "k8s.io", "images", "tag", "--force", tagged, pinned))
+					Expect(err).NotTo(HaveOccurred())
+				}
+			}
+			kubectl := func(args ...string) (string, error) {
+				return utils.Run(exec.Command("kubectl", append([]string{"-n", pauseResumeNamespace}, args...)...))
+			}
+			create := exec.Command("kubectl", "-n", pauseResumeNamespace, "create", "-f", "-")
+			create.Stdin = strings.NewReader(fmt.Sprintf(`apiVersion: sandbox.opensandbox.io/v1alpha1
+kind: BatchSandbox
+metadata:
+  name: %s
+spec:
+  replicas: 1
+  recreateContainersOnResume:
+  - name: sidecar
+    image: %s
+  template:
+    spec:
+      containers:
+      - name: main
+        image: %s
+        command: ["sleep", "3600"]
+      - name: sidecar
+        image: %s
+        command: ["sleep", "3600"]
+`, name, pinned, utils.SandboxImage, pinned))
+			_, err := utils.Run(create)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() {
+				_, err := kubectl("delete", "batchsandbox", name, "--ignore-not-found")
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			podName := name + "-0"
+			waitForPhase := func(phase string) {
+				Eventually(func(g Gomega) {
+					v, err := kubectl("get", "batchsandbox", name, "-o", "jsonpath={.status.phase}")
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(v).To(Equal(phase))
+				}).Should(Succeed())
+			}
+			waitForPhase("Succeed")
+			for cycle := 1; cycle <= 2; cycle++ {
+				By(fmt.Sprintf("writing markers and restoring cycle %d", cycle))
+				oldUID, err := kubectl("get", "pod", podName, "-o", "jsonpath={.metadata.uid}")
+				Expect(err).NotTo(HaveOccurred())
+				marker := fmt.Sprintf("cycle-%d", cycle)
+				for _, container := range []string{"main", "sidecar"} {
+					_, err := kubectl("exec", podName, "-c", container, "--", "sh", "-c", "echo "+marker+" > /tmp/recreate-test")
+					Expect(err).NotTo(HaveOccurred())
+				}
+				_, err = kubectl("patch", "batchsandbox", name, "--type=merge", "-p", `{"spec":{"pause":true}}`)
+				Expect(err).NotTo(HaveOccurred())
+				waitForPhase("Paused")
+				targets, err := kubectl("get", "sandboxsnapshot", name+"-pause", "-o", "jsonpath={.status.containers[*].containerName}")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(targets).To(Equal("main"))
+
+				_, err = kubectl("patch", "batchsandbox", name, "--type=merge", "-p", `{"spec":{"pause":false}}`)
+				Expect(err).NotTo(HaveOccurred())
+				waitForPhase("Succeed")
+				newUID, err := kubectl("get", "pod", podName, "-o", "jsonpath={.metadata.uid}")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(newUID).NotTo(Equal(oldUID))
+				image, err := kubectl("get", "pod", podName, "-o", `jsonpath={.spec.containers[?(@.name=="sidecar")].image}`)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(image).To(Equal(pinned))
+				got, err := kubectl("exec", podName, "-c", "main", "--", "cat", "/tmp/recreate-test")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(strings.TrimSpace(got)).To(Equal(marker))
+				_, err = kubectl("exec", podName, "-c", "sidecar", "--", "test", "!", "-e", "/tmp/recreate-test")
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("keeping the source Pod when the creation-time policy is removed")
+			sourceUID, err := kubectl("get", "pod", podName, "-o", "jsonpath={.metadata.uid}")
+			Expect(err).NotTo(HaveOccurred())
+			_, err = kubectl("patch", "batchsandbox", name, "--type=json", "-p",
+				`[{"op":"remove","path":"/spec/recreateContainersOnResume"},{"op":"replace","path":"/spec/pause","value":true}]`)
+			Expect(err).NotTo(HaveOccurred())
+			Eventually(func(g Gomega) {
+				condition, err := kubectl("get", "batchsandbox", name, "-o", `jsonpath={.status.conditions[?(@.type=="PauseFailed")].status}`)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(condition).To(Equal("True"))
+			}).Should(Succeed())
+			currentUID, err := kubectl("get", "pod", podName, "-o", "jsonpath={.metadata.uid}")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(currentUID).To(Equal(sourceUID))
+			_, err = kubectl("exec", podName, "-c", "main", "--", "test", "-f", "/tmp/recreate-test")
+			Expect(err).NotTo(HaveOccurred())
+		})
+
 		DescribeTable("should complete the full pause-resume flow via spec.pause trigger", func(waitForDeletion bool) {
 			const sandboxName = "test-pause-resume"
 

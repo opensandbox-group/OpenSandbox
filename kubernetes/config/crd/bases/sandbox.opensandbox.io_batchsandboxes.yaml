@@ -108,6 +108,33 @@ spec:
                   PoolRef references the Pool resource name for pooled sandbox creation.
                   Mutually exclusive with Template - use PoolRef for pool-based allocation or Template for direct sandbox creation.
                 type: string
+              recreateContainersOnResume:
+                description: |-
+                  RecreateContainersOnResume lists regular containers restarted from their
+                  creation-time images instead of restoring their writable layers.
+                items:
+                  properties:
+                    image:
+                      description: Image is the digest-pinned creation-time image
+                        of the container.
+                      maxLength: 512
+                      pattern: ^[^@[:space:]]+@sha256:[a-f0-9]{64}$
+                      type: string
+                    name:
+                      description: Name identifies a regular container in the template.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                  required:
+                  - image
+                  - name
+                  type: object
+                maxItems: 32
+                minItems: 1
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               replicas:
                 default: 1
                 description: Replicas is the number of desired replicas.
@@ -216,6 +243,31 @@ spec:
                 description: "\tReady is the number of actual Ready Pod"
                 format: int32
                 type: integer
+              recreateContainersOnResume:
+                description: |-
+                  RecreateContainersOnResume records the creation-time policy. Pause and
+                  resume reject changes to the policy after the controller has recorded it.
+                items:
+                  properties:
+                    image:
+                      description: Image is the digest-pinned creation-time image
+                        of the container.
+                      maxLength: 512
+                      pattern: ^[^@[:space:]]+@sha256:[a-f0-9]{64}$
+                      type: string
+                    name:
+                      description: Name identifies a regular container in the template.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                  required:
+                  - image
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               replicas:
                 description: Replicas is the number of actual Pods
                 format: int32

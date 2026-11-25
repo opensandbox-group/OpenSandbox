@@ -154,6 +154,10 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	if recorded, err := r.recordInitialRecreatePolicy(ctx, batchSbx); err != nil || recorded {
+		return ctrl.Result{Requeue: recorded}, err
+	}
+
 	taskStrategy := strategy.NewTaskSchedulingStrategy(batchSbx)
 
 	poolStrategy := strategy.NewPoolStrategy(batchSbx)
@@ -245,7 +249,10 @@ func (r *BatchSandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	// current generation without requiring a dedicated API call.
 	// Skip during Resuming: a newer generation may carry a queued pause request
 	// that must remain unacknowledged until resume completes and handlePause runs.
-	if batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseResuming &&
+	// Also leave an opted-in pause pending while its source Pod is provisioning.
+	pendingRecreatePause := hasRecreatePolicy(batchSbx) && batchSbx.Spec.Pause != nil && *batchSbx.Spec.Pause &&
+		batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhasePaused
+	if !pendingRecreatePause && batchSbx.Status.Phase != sandboxv1alpha1.BatchSandboxPhaseResuming &&
 		runtimeView.status.PauseObservedGeneration < batchSbx.Generation {
 		runtimeView.status.PauseObservedGeneration = batchSbx.Generation
 	}
