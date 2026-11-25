@@ -39,3 +39,4 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0031](0031-in-sandbox-process-qos-and-saturation-diagnostics.md) |      In-Sandbox Process QoS and Saturation Diagnostics            | implementing  |  2026-11-25  |
 | [OSEP-0032](0032-fastpath-caller-authentication.md) | FastPath Caller Authentication | implementing | 2026-11-23 |
 | [OSEP-0033](0033-mcp-native-oauth-resource-server.md)          |      Native OAuth 2.1 Resource-Server Support for OpenSandbox MCP |     draft     |  2026-11-23  |
+| [OSEP-0034](0034-near-end-runtime-init-for-fast-sandbox.md)    |      Near-End Runtime Initialization for Fast Sandbox             |     draft     |  2026-11-25  |
