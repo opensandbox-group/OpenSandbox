@@ -36,6 +36,7 @@ import (
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/revision"
@@ -822,6 +823,8 @@ func TestRevisionVaultMutationIPCChildOversizedSnapshotKeepsSession(t *testing.T
 func TestRevisionExchangeResolveAdmission(t *testing.T) {
 	t.Setenv(constants.EnvSandboxID, "sidecar-sandbox")
 	s := revisionIntegrationServer(t)
+	s.mitmGate.SetReady(true)
+	s.credentialVault = credentialvault.NewLiveStore(s.mitmGate, func() bool { return true }, mitmpassthrough.Config{})
 	s.credentialVault.SetResolverConfig(credentialvault.ResolverConfig{TimeoutConfigured: true})
 	m, child, _ := revisionIntegrationLaunchConfig(t, s, func(cfg *revisionruntime.ProcessSessionConfig) {
 		cfg.LiveAdmission, cfg.TLSCapacity, cfg.RequestCapacity, cfg.DrainTimeoutSeconds = true, 64, 256, 1

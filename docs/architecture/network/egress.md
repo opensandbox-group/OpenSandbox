@@ -110,6 +110,8 @@ The internal sidecar experiment covers bound HTTPS/443 HTTP/1.1 traffic and expe
 - Any uncertain outcome (unconfirmed mutation, session cleanup failure, unexpected child exit) latches a sticky recovery-required state: readiness drops, nft writes quiesce, and an independent quarantine table is installed for the process lifetime. Restarting the sidecar is not a verified recovery — destroy and recreate the sandbox instead.
 - Updates are not one atomic visibility boundary: nft rules can affect traffic before receiver acknowledgement, and a committed update is not rolled back if the API response is lost. Retired connections drain within a bounded window (default 30 seconds).
 
+The experimental live sidecar admits exchange-sourced credentials when the resolver operator configuration is ready; malformed configuration and bindings that overlap static TLS passthrough still fail closed. Local Docker image regression against a protocol test resolver verifies live credential injection, resolver outage with no origin request, and recovery in the same sidecar and Vault. This evidence does not establish external production resolver compatibility or change the Fast Sandbox acceptance boundary.
+
 Full contract, including the egress-owned policy-file storage requirements when `OPENSANDBOX_EGRESS_POLICY_FILE` is set: [credential vault guide](/guides/credential-vault#experimental-live-credential-bound-admission-osep-0023), [OSEP-0023](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0023-credential-bound-tls-interception.md), and the [HTTP/2 integration boundary](/architecture/network/osep-0023-h2-integration).
 :::
 

@@ -756,61 +756,45 @@ func TestCredentialVaultMixedStaticAndExchangeHandler(t *testing.T) {
 	require.NotContains(t, createdBody, "unix:///run/spi")
 }
 
-// OSEP-0025 T4: the live runtime (NewLiveStore, selected in startPolicyServer
-// when EnvExperimentalRevisionRuntime is truthy) rejects exchange creates with
-// the fixed vocabulary even with a ready resolver configuration; the live
-// write handler sanitizes every prepare failure to its fixed boundary, and
-// inline-only vaults keep working.
-func TestCredentialVaultLiveRevisionRuntimeRejectsExchangeHandler(t *testing.T) {
-	liveWriteFixtureEnv(t)
-	gate := mitmproxy.NewHealthGate()
-	gate.SetReady(true)
-	store := credentialvault.NewLiveStore(gate, func() bool { return true }, mitmpassthrough.Config{})
-	config, configErr := credentialvault.ResolverConfigFromEnv()
-	require.NoError(t, configErr)
-	require.True(t, config.Ready())
-	store.SetResolverConfig(config)
-
-	// NewLiveStore admission: exchange is rejected even with ready resolver env.
-	exchangeRequest := credentialvault.CreateRequest{
-		Credentials: []credentialvault.Credential{{
-			Name:   "spi-signer",
-			Source: json.RawMessage(`{"type":"exchange","endpoint":"unix:///run/spi/spi-signer.sock"}`),
-		}},
-		Bindings: []credentialvault.Binding{{
-			Name:  "internal-api",
-			Match: credentialvault.Match{Hosts: []string{"api.internal.example.com"}, Methods: []string{"GET"}},
-			Auth:  credentialvault.Auth{Credential: "spi-signer"},
-		}},
+func TestCredentialVaultLiveRevisionRuntimeExchangeHandler(t *testing.T) {
+	for _, timeout := range []string{"5", "", "invalid"} {
+		t.Run("timeout="+timeout, func(t *testing.T) {
+			liveWriteFixtureEnv(t)
+			t.Setenv(constants.EnvCredentialResolverTimeout, timeout)
+			gate := mitmproxy.NewHealthGate()
+			gate.SetReady(true)
+			store := credentialvault.NewLiveStore(gate, func() bool { return true }, mitmpassthrough.Config{})
+			config, configErr := credentialvault.ResolverConfigFromEnv()
+			if timeout == "invalid" {
+				require.Error(t, configErr)
+			}
+			store.SetResolverConfig(config)
+			s := &policyServer{proxy: &stubProxy{updated: exchangeHandlerPolicy(t)}, mitmGate: gate, credentialVault: store}
+			require.NoError(t, s.initRevisionRecoveryLocked(effectivePolicyInputs{user: s.proxy.CurrentPolicy()}))
+			session := &mutationTestSession{fakeRevisionProcessSession: fakeRevisionProcessSession{config: validFakeRevisionIPCConfig()}}
+			session.update = func(_ context.Context, snapshot credentialvault.ActiveSnapshot, epoch int64) (revision.Identity, error) {
+				require.Equal(t, &credentialvault.ExchangeRef{Credential: "spi-signer"}, snapshot.Bindings[0].Exchange)
+				return mutationIdentity(t, snapshot, epoch), nil
+			}
+			s.mitm = &mitmTransparent{running: &mitmproxy.Running{}, revisionSession: session, currentGen: 7, revisionOwner: &revisionLaunchOwner{stop: func(*mitmproxy.Running) { t.Error("unexpected stop") }}}
+			response := liveWriteDo(t, s, http.MethodPost, exchangeVaultJSON())
+			require.NotContains(t, response.Body.String(), "unix:///run/spi")
+			if !config.Ready() {
+				require.Equal(t, http.StatusBadRequest, response.Code)
+				require.Contains(t, response.Body.String(), "invalid credential vault mutation")
+				require.Zero(t, session.updateCalls)
+				_, err := store.Sanitized()
+				require.ErrorIs(t, err, credentialvault.ErrNotFound)
+				return
+			}
+			require.Equal(t, http.StatusCreated, response.Code, response.Body.String())
+			require.Equal(t, 1, session.updateCalls)
+			state, err := store.Sanitized()
+			require.NoError(t, err)
+			require.Equal(t, int64(1), state.Revision)
+			require.Contains(t, response.Body.String(), `"sourceType":"exchange"`)
+		})
 	}
-	_, err := store.Create(exchangeRequest, exchangeHandlerPolicy(t))
-	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
-	_, err = store.PrepareCreate(exchangeRequest, exchangeHandlerPolicy(t))
-	require.ErrorContains(t, err, "exchange credentials are not supported in the live revision runtime")
-
-	// Handler wiring: the live write path sanitizes every prepare failure to
-	// its fixed vocabulary — including the exchange admission rejection.
-	s := &policyServer{proxy: &stubProxy{updated: policy.DefaultDenyPolicy()}, mitmGate: gate, credentialVault: store}
-	require.NoError(t, s.initRevisionRecoveryLocked(effectivePolicyInputs{user: s.proxy.CurrentPolicy()}))
-	session := &mutationTestSession{fakeRevisionProcessSession: fakeRevisionProcessSession{config: validFakeRevisionIPCConfig()}}
-	session.update = func(_ context.Context, snapshot credentialvault.ActiveSnapshot, epoch int64) (revision.Identity, error) {
-		return mutationIdentity(t, snapshot, epoch), nil
-	}
-	s.mitm = &mitmTransparent{running: &mitmproxy.Running{}, revisionSession: session, currentGen: 7, revisionOwner: &revisionLaunchOwner{stop: func(*mitmproxy.Running) { t.Error("unexpected stop") }}}
-
-	rejected := liveWriteDo(t, s, http.MethodPost, exchangeVaultJSON())
-	require.Equal(t, http.StatusBadRequest, rejected.Code)
-	require.Contains(t, rejected.Body.String(), "invalid credential vault mutation")
-	require.NotContains(t, rejected.Body.String(), "unix:///run/spi")
-	require.Zero(t, session.updateCalls)
-	_, err = store.Sanitized()
-	require.ErrorIs(t, err, credentialvault.ErrNotFound)
-
-	// The live runtime still admits inline-only vaults unchanged.
-	setMutationFixturePolicy(t, s, liveWritePolicy(t, true))
-	accepted := liveWriteDo(t, s, http.MethodPost, liveWriteCreateBody())
-	require.Equal(t, http.StatusCreated, accepted.Code)
-	require.Equal(t, 1, session.updateCalls)
 }
 
 // liveWriteFixtureEnv isolates the live-runtime env without importing the
