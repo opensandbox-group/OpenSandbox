@@ -43,6 +43,11 @@ var (
 	// stream open with pings forever.
 	JupyterReplyFinalizeTimeout time.Duration
 
+	// JupyterExecuteAcknowledgmentTimeout bounds how long an execution waits
+	// for the kernel's first message matching the execute_request before the
+	// stream fails with KernelAcknowledgmentTimeout.
+	JupyterExecuteAcknowledgmentTimeout time.Duration
+
 	// IsolationConfigPath points to the TOML isolation config file.
 	// Empty means use built-in defaults.
 	IsolationConfigPath string

@@ -31,7 +31,19 @@ import (
 	execdflag "github.com/alibaba/opensandbox/execd/pkg/flag"
 )
 
-const executeAcknowledgmentTimeout = 5 * time.Second
+// defaultExecuteAcknowledgmentTimeout is the fallback first-message deadline
+// used when the flag package defaults have not been applied (only execd main
+// calls flag.InitFlags).
+const defaultExecuteAcknowledgmentTimeout = 5 * time.Second
+
+// acknowledgmentTimeout returns the configured deadline for the kernel's first
+// message matching an execute_request.
+func acknowledgmentTimeout() time.Duration {
+	if execdflag.JupyterExecuteAcknowledgmentTimeout > 0 {
+		return execdflag.JupyterExecuteAcknowledgmentTimeout
+	}
+	return defaultExecuteAcknowledgmentTimeout
+}
 
 type HTTPClient interface {
 	Do(req *http.Request) (*http.Response, error)
@@ -236,7 +248,7 @@ func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult
 		return fmt.Errorf("failed to send execution request: %w", err)
 	}
 
-	timer := time.NewTimer(executeAcknowledgmentTimeout)
+	timer := time.NewTimer(acknowledgmentTimeout())
 	safego.Go(func() {
 		defer timer.Stop()
 		select {
@@ -248,7 +260,7 @@ func (c *Client) ExecuteCodeStream(code string, resultChan chan *ExecutionResult
 			if expired {
 				c.failExecution(state, resultChan, ErrorOutput{
 					EName:  "KernelAcknowledgmentTimeout",
-					EValue: "the kernel did not acknowledge the execution request within " + executeAcknowledgmentTimeout.String(),
+					EValue: "the kernel did not acknowledge the execution request within " + acknowledgmentTimeout().String(),
 				})
 			}
 		}
