@@ -145,7 +145,7 @@ func stepGuardedUnixPath(
 }
 
 func stepUnixParentDir(g *filesystemGuard, dirfd int, curPath, absPath string, isFinal bool) (int, string, error) {
-	parentFD, err := unix.Openat(dirfd, "..", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	parentFD, err := unix.Openat(dirfd, "..", parentDirOpenFlags, 0)
 	if err != nil {
 		return -1, "", &os.PathError{Op: "open", Path: absPath, Err: err}
 	}
@@ -197,11 +197,11 @@ func stepUnixSymlink(
 }
 
 func openRootDirFD() (int, error) {
-	return unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	return unix.Open("/", rootDirOpenFlags, 0)
 }
 
 func openGuardedDirComponent(dirfd int, part, absPath string) (int, bool, error) {
-	fd, err := unix.Openat(dirfd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(dirfd, part, dirTraversalFlags, 0)
 	if err != nil {
 		if isSymlinkComponentErr(err) && isSymlinkAt(dirfd, part) {
 			return -1, true, nil

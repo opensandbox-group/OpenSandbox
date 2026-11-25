@@ -16,7 +16,18 @@
 
 package controller
 
-import "golang.org/x/sys/unix"
+import (
+	"fmt"
+	"os"
+
+	"golang.org/x/sys/unix"
+)
+
+const dirTraversalFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+const rootDirOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
+
+const parentDirOpenFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
 
 func verifyDirFD(_ int, _ string) error {
 	return nil
@@ -28,4 +39,22 @@ func isBlockedDirFS(_ string) bool {
 
 func openLeafAt(dirfd int, name string, flags int, perm uint32) (int, error) {
 	return unix.Openat(dirfd, name, flags, perm)
+}
+
+func chmodChownPinnedLeaf(parentFD int, base, absPath string, mode os.FileMode, hasMode bool, uid, gid int, hasOwner bool) error {
+	if hasMode {
+		if err := unix.Fchmodat(parentFD, base, uint32(mode), unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return &os.PathError{Op: "chmod", Path: absPath, Err: err}
+		}
+	}
+	if hasOwner {
+		if err := unix.Fchownat(parentFD, base, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("failed to set owner/group for %s: %w", absPath, err)
+		}
+	}
+	return nil
+}
+
+func renameNoReplaceAt(srcParentFD int, srcBase string, dstParentFD int, dstBase string) error {
+	return unix.Renameat(srcParentFD, srcBase, dstParentFD, dstBase)
 }

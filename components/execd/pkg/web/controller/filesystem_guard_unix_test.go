@@ -159,3 +159,27 @@ func TestGuardedMutationsParentSymlinkSwapTOCTOU(t *testing.T) {
 	require.NoError(t, err, "blocked secret file must still exist")
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "TOCTOU chmodded blocked secret file")
 }
+
+func TestChmodAllowsFIFOAndWriteOnlyFile(t *testing.T) {
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{})
+	tmp := t.TempDir()
+
+	fifoPath := filepath.Join(tmp, "pipe.fifo")
+	require.NoError(t, syscall.Mkfifo(fifoPath, 0o600))
+	chmodFIFO, err := json.Marshal(map[string]model.Permission{fifoPath: {Mode: 660}})
+	require.NoError(t, err)
+	ctrl1, rec1 := newFilesystemController(t, http.MethodPost, "/files/permissions", chmodFIFO)
+	ctrl1.ChmodFiles()
+	require.Equal(t, http.StatusOK, rec1.Code, rec1.Body.String())
+
+	woFile := filepath.Join(tmp, "writeonly.txt")
+	require.NoError(t, os.WriteFile(woFile, []byte("x"), 0o200))
+	chmodWO, err := json.Marshal(map[string]model.Permission{woFile: {Mode: 644}})
+	require.NoError(t, err)
+	ctrl2, rec2 := newFilesystemController(t, http.MethodPost, "/files/permissions", chmodWO)
+	ctrl2.ChmodFiles()
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+	info, err := os.Stat(woFile)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+}

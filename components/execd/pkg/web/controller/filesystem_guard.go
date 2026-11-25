@@ -321,20 +321,43 @@ func checkNotBlockedOrAncestor(absPath string) error {
 }
 
 // CheckNotBlockedOrAncestor rejects absPath if it is blocked itself, is the
-// filesystem root, or is an ancestor of any blocked root (preventing recursive
-// directory deletion or parent rename from removing/relocating blocked trees).
+// filesystem root, is an ancestor of any blocked root, or (when deny_globs is
+// configured) is a directory containing a glob-denied descendant.
 func (g *filesystemGuard) CheckNotBlockedOrAncestor(absPath string) error {
 	if err := g.CheckPath(absPath); err != nil {
 		return err
 	}
 	cleaned := filepath.Clean(absPath)
-	if g.isRootOrBlockedAncestor(cleaned) {
+	if g.isRootOrBlockedAncestor(cleaned) || g.hasGlobBlockedDescendant(cleaned) {
 		return &forbiddenPathError{path: absPath}
 	}
-	if canonical := canonicalizeExistingPrefix(cleaned); canonical != "" && g.isRootOrBlockedAncestor(canonical) {
+	if canonical := canonicalizeExistingPrefix(cleaned); canonical != "" &&
+		(g.isRootOrBlockedAncestor(canonical) || g.hasGlobBlockedDescendant(canonical)) {
 		return &forbiddenPathError{path: absPath}
 	}
 	return nil
+}
+
+var errGlobDescendantBlocked = errors.New("glob-protected descendant")
+
+func (g *filesystemGuard) hasGlobBlockedDescendant(dir string) bool {
+	if len(g.denyGlobs) == 0 {
+		return false
+	}
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	walkErr := filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if g.matchesDenyGlob(p) {
+			return errGlobDescendantBlocked
+		}
+		return nil
+	})
+	return errors.Is(walkErr, errGlobDescendantBlocked)
 }
 
 func (g *filesystemGuard) isRootOrBlockedAncestor(candidate string) bool {

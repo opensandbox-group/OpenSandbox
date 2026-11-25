@@ -18,11 +18,23 @@ package controller
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
+
+// dirTraversalFlags uses O_PATH on Linux so non-root identity workers can
+// traverse execute-only (0733/0111) ancestor directories without requiring
+// read permission, while still supporting openat/fstatat/readlinkat/fstatfs.
+const dirTraversalFlags = unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+
+const rootDirOpenFlags = unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC
+
+const parentDirOpenFlags = unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC
 
 // openat2Fn allows tests to exercise the fallback and EXDEV error paths.
 var openat2Fn = unix.Openat2
@@ -88,4 +100,45 @@ func openLeafAt(dirfd int, name string, flags int, perm uint32) (int, error) {
 		return -1, &forbiddenPathError{path: name}
 	}
 	return fd, err
+}
+
+// chmodChownPinnedLeaf applies mode and/or ownership to an already-verified
+// non-symlink leaf under parentFD using an O_PATH descriptor, so non-root
+// workers can chmod owned 0200 files / 0300 dirs and metadata ops on FIFOs or
+// sockets still work without following swapped symlinks.
+func chmodChownPinnedLeaf(parentFD int, base, absPath string, mode os.FileMode, hasMode bool, uid, gid int, hasOwner bool) error {
+	leafFD, err := openLeafAt(parentFD, base, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, errForbiddenPath) {
+			return err
+		}
+		return &os.PathError{Op: "open", Path: absPath, Err: err}
+	}
+	defer unix.Close(leafFD)
+
+	if err := verifyDirFD(leafFD, absPath); err != nil {
+		return err
+	}
+	if hasMode {
+		// /proc/self/fd/<fd> addresses the pinned inode directly without
+		// following user symlinks and works on every Linux kernel for O_PATH fds.
+		procPath := "/proc/self/fd/" + strconv.Itoa(leafFD)
+		if err := unix.Chmod(procPath, uint32(mode)); err != nil {
+			return &os.PathError{Op: "chmod", Path: absPath, Err: err}
+		}
+	}
+	if hasOwner {
+		if err := unix.Fchownat(leafFD, "", uid, gid, unix.AT_EMPTY_PATH); err != nil {
+			return fmt.Errorf("failed to set owner/group for %s: %w", absPath, err)
+		}
+	}
+	return nil
+}
+
+func renameNoReplaceAt(srcParentFD int, srcBase string, dstParentFD int, dstBase string) error {
+	err := unix.Renameat2(srcParentFD, srcBase, dstParentFD, dstBase, unix.RENAME_NOREPLACE)
+	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) {
+		return unix.Renameat(srcParentFD, srcBase, dstParentFD, dstBase)
+	}
+	return err
 }

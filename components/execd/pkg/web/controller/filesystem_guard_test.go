@@ -579,3 +579,38 @@ func TestFilesystemGuardBlocksAncestorDeleteAndRename(t *testing.T) {
 	_, err = os.Stat(filepath.Join(ws, "relocated"))
 	require.True(t, os.IsNotExist(err))
 }
+
+func TestFilesystemGuardBlocksAnchoredGlobAncestorMoveAndDelete(t *testing.T) {
+	tmp := t.TempDir()
+	aliceDir := filepath.Join(tmp, "home", "alice")
+	awsDir := filepath.Join(aliceDir, ".aws")
+	require.NoError(t, os.MkdirAll(awsDir, 0o755))
+	credFile := filepath.Join(awsDir, "credentials")
+	require.NoError(t, os.WriteFile(credFile, []byte("TOP-SECRET-CRED"), 0o600))
+
+	ws := filepath.Join(tmp, "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+
+	anchoredGlob := filepath.Join(tmp, "home", "*", ".aws", "credentials")
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		DenyGlobs: []string{anchoredGlob},
+	})
+
+	// POST /files/mv moving an ancestor of an anchored-glob file -> 403.
+	body, err := json.Marshal([]model.RenameFileItem{{
+		Src:  aliceDir,
+		Dest: filepath.Join(ws, "alice"),
+	}})
+	require.NoError(t, err)
+	ctrlMv, recMv := newFilesystemController(t, http.MethodPost, "/files/mv", body)
+	ctrlMv.RenameFiles()
+	assertForbiddenResponse(t, recMv)
+
+	// DELETE /directories on an ancestor of an anchored-glob file -> 403.
+	ctrlRm, recRm := newFilesystemController(t, http.MethodDelete, "/directories?path="+url.QueryEscape(aliceDir), nil)
+	ctrlRm.RemoveDirs()
+	assertForbiddenResponse(t, recRm)
+
+	_, err = os.Stat(credFile)
+	require.NoError(t, err, "glob-protected credential file must remain intact")
+}

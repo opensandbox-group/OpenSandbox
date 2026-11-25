@@ -365,3 +365,34 @@ func TestFilesystemIdentityPropagatesGuardPolicy(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, credResp.Code, credResp.Body.String())
 	require.NotContains(t, credResp.Body.String(), "aws-key")
 }
+
+func TestFilesystemIdentityTraverseOnlyDirAndUnreadableChmod(t *testing.T) {
+	root, a, _ := identityFixture(t)
+	traverseDir := filepath.Join(root, "traverse-only")
+	require.NoError(t, os.Mkdir(traverseDir, 0o733))
+	require.NoError(t, os.Chmod(traverseDir, 0o733))
+	readable := filepath.Join(traverseDir, "hello.txt")
+	require.NoError(t, os.WriteFile(readable, []byte("hello-traverse"), 0o644))
+
+	writeOnly := filepath.Join(a, "wo.txt")
+	require.NoError(t, os.WriteFile(writeOnly, []byte("wo"), 0o200))
+	require.NoError(t, os.Chown(writeOnly, 41001, 41000))
+	require.NoError(t, os.Chmod(writeOnly, 0o200))
+
+	router := identityTestRouter()
+
+	infoResp := identityRequest(router, 41001, http.MethodGet, "/files/info?path="+url.QueryEscape(readable), nil, "")
+	require.Equal(t, http.StatusOK, infoResp.Code, infoResp.Body.String())
+
+	dlResp := identityRequest(router, 41001, http.MethodGet, "/files/download?path="+url.QueryEscape(readable), nil, "")
+	require.Equal(t, http.StatusOK, dlResp.Code, dlResp.Body.String())
+	require.Equal(t, "hello-traverse", dlResp.Body.String())
+
+	chmodBody, err := json.Marshal(map[string]any{writeOnly: map[string]any{"mode": 640}})
+	require.NoError(t, err)
+	chmodResp := identityRequest(router, 41001, http.MethodPost, "/files/permissions", bytes.NewReader(chmodBody), "application/json")
+	require.Equal(t, http.StatusOK, chmodResp.Code, chmodResp.Body.String())
+	info, err := os.Stat(writeOnly)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o640), info.Mode().Perm())
+}

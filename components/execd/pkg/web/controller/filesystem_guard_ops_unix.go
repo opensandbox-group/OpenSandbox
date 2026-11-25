@@ -19,6 +19,7 @@ package controller
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -161,24 +162,105 @@ func deleteGuardedUnixFile(absPath, origPath string) error {
 }
 
 func chmodGuardedUnixFile(absPath string, mode os.FileMode, hasMode bool, uid, gid int, hasOwner bool) error {
-	f, err := openGuardedUnixFile(absPath, unix.O_RDONLY, true)
+	parentFD, base, err := openGuardedTargetParentFD(absPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer unix.Close(parentFD)
 
-	fd := int(f.Fd())
-	if hasMode {
-		if err := unix.Fchmod(fd, uint32(mode)); err != nil {
-			return &os.PathError{Op: "chmod", Path: absPath, Err: err}
+	return chmodChownPinnedLeaf(parentFD, base, absPath, mode, hasMode, uid, gid, hasOwner)
+}
+
+// openGuardedTargetParentFD resolves absPath (including final-component
+// symlinks) via dirfds and returns a pinned parent directory fd and the
+// non-symlink final entry name.
+func openGuardedTargetParentFD(absPath string) (int, string, error) {
+	g := getFilesystemGuard()
+	cleaned := filepath.Clean(absPath)
+	if g.matchesPath(cleaned) {
+		return -1, "", &forbiddenPathError{path: absPath}
+	}
+	curPath, remaining, ok := splitAbsolutePath(cleaned)
+	if !ok || len(remaining) == 0 {
+		return -1, "", &forbiddenPathError{path: absPath}
+	}
+
+	dirfd, err := openRootDirFD()
+	if err != nil {
+		return -1, "", &os.PathError{Op: "open", Path: absPath, Err: err}
+	}
+	okReturn := false
+	defer func() {
+		if !okReturn && dirfd >= 0 {
+			_ = unix.Close(dirfd)
+		}
+	}()
+
+	hops := 0
+	for len(remaining) > 0 {
+		part := remaining[0]
+		remaining = remaining[1:]
+		if part == "" || part == "." {
+			continue
+		}
+		res, doneBase, err := stepTargetParent(g, dirfd, part, curPath, absPath, remaining, &hops)
+		if err != nil {
+			return -1, "", err
+		}
+		if doneBase != "" {
+			okReturn = true
+			return dirfd, doneBase, nil
+		}
+		if res.nextFD != dirfd {
+			_ = unix.Close(dirfd)
+			dirfd = res.nextFD
+		}
+		curPath, remaining = res.nextCur, res.nextRem
+	}
+	return -1, "", &forbiddenPathError{path: absPath}
+}
+
+func stepTargetParent(
+	g *filesystemGuard,
+	dirfd int,
+	part, curPath, absPath string,
+	remaining []string,
+	hops *int,
+) (unixStepResult, string, error) {
+	isFinal := len(remaining) == 0
+	if part == ".." {
+		parentFD, nextCur, err := stepUnixParentDir(g, dirfd, curPath, absPath, isFinal)
+		if err != nil {
+			return unixStepResult{}, "", err
+		}
+		return unixStepResult{nextFD: parentFD, nextCur: nextCur, nextRem: remaining}, "", nil
+	}
+
+	nextPath := filepath.Join(curPath, part)
+	if g.isStepBlocked(nextPath, isFinal) {
+		return unixStepResult{}, "", &forbiddenPathError{path: absPath}
+	}
+
+	if isFinal {
+		if !isSymlinkAt(dirfd, part) {
+			return unixStepResult{}, part, nil
+		}
+	} else {
+		nextFD, sym, err := openGuardedDirComponent(dirfd, part, absPath)
+		if err != nil {
+			return unixStepResult{}, "", err
+		}
+		if !sym {
+			return unixStepResult{nextFD: nextFD, nextCur: nextPath, nextRem: remaining}, "", nil
 		}
 	}
-	if hasOwner {
-		if err := unix.Fchown(fd, uid, gid); err != nil {
-			return fmt.Errorf("failed to set owner/group for %s: %w", absPath, err)
-		}
+
+	*hops++
+	newFD, nextCur, nextRem, err := stepUnixSymlink(g, dirfd, part, curPath, absPath, remaining, *hops)
+	if err != nil {
+		return unixStepResult{}, "", err
 	}
-	return nil
+	return unixStepResult{nextFD: newFD, nextCur: nextCur, nextRem: nextRem}, "", nil
 }
 
 func renameGuardedUnixFile(srcPath, dstPath, origSrc, origDest string) error {
@@ -229,7 +311,10 @@ func renameGuardedUnixFile(srcPath, dstPath, origSrc, origDest string) error {
 	if err := unix.Fstatat(dstParentFD, dstBase, &dstSt, unix.AT_SYMLINK_NOFOLLOW); err == nil {
 		return fmt.Errorf("destination path already exists: %s", origDest)
 	}
-	if err := unix.Renameat(srcParentFD, srcBase, dstParentFD, dstBase); err != nil {
+	if err := renameNoReplaceAt(srcParentFD, srcBase, dstParentFD, dstBase); err != nil {
+		if errors.Is(err, unix.EEXIST) {
+			return fmt.Errorf("destination path already exists: %s", origDest)
+		}
 		return fmt.Errorf("failed to rename file: %w", err)
 	}
 	return nil
@@ -322,9 +407,9 @@ func openOrCreateGuardedDir(dirfd int, part, origPath string, perm os.FileMode, 
 		return fd, sym, err
 	}
 	if created && (uid != -1 || gid != -1) {
-		if chErr := unix.Fchown(fd, uid, gid); chErr != nil {
+		if chErr := chmodChownPinnedLeaf(dirfd, part, origPath, 0, false, uid, gid, true); chErr != nil {
 			_ = unix.Close(fd)
-			return -1, false, fmt.Errorf("failed to set owner/group for %s: %w", origPath, chErr)
+			return -1, false, chErr
 		}
 	}
 	return fd, false, nil
@@ -381,24 +466,26 @@ func removeDirTreeAt(parentFD int, name, origPath string) error {
 		return err
 	}
 	dirFile := os.NewFile(uintptr(dirfd), origPath)
-	entries, readErr := dirFile.ReadDir(-1)
-	if readErr != nil {
-		_ = dirFile.Close()
-		return readErr
-	}
-	for _, entry := range entries {
-		child := entry.Name()
-		if entry.IsDir() {
-			if err := removeDirTreeAt(dirfd, child, filepath.Join(origPath, child)); err != nil {
-				_ = dirFile.Close()
+	defer dirFile.Close()
+	for {
+		entries, readErr := dirFile.ReadDir(256)
+		for _, entry := range entries {
+			child := entry.Name()
+			if entry.IsDir() {
+				if err := removeDirTreeAt(dirfd, child, filepath.Join(origPath, child)); err != nil {
+					return err
+				}
+			} else if err := unix.Unlinkat(dirfd, child, 0); err != nil && !errors.Is(err, unix.ENOENT) {
 				return err
 			}
-		} else if err := unix.Unlinkat(dirfd, child, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-			_ = dirFile.Close()
-			return err
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return readErr
 		}
 	}
-	_ = dirFile.Close()
 	if err := unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
 		return err
 	}
@@ -426,7 +513,7 @@ func lstatGuardedUnixFile(absPath string) (os.FileInfo, error) {
 	resolvedEntry := filepath.Join(resolvedParent, base)
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFDIR:
-		fd, openErr := unix.Openat(parentFD, base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		fd, openErr := unix.Openat(parentFD, base, dirTraversalFlags, 0)
 		if openErr == nil {
 			verifyErr := verifyDirFD(fd, absPath)
 			_ = unix.Close(fd)
