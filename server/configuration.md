@@ -399,6 +399,7 @@ Key ring JSON format:
 - Key IDs (`active` and keys in `keys`) must match `^[0-9a-zA-Z_-]{1,16}$`, and `active` must exist in `keys`.
 - Each key must decode from standard Base64 to at least 32 bytes (e.g. `openssl rand -base64 32`).
 - **Hot reload & rotation**: the server detects file `mtime`/`inode` updates automatically (retaining the previous valid key ring if a reload fails). To rotate without breaking running sandboxes, add the new key ID and switch `active` while **retaining old key IDs in `keys` until every sandbox minted under them has terminated**.
+- **Rollout order**: upgrade `runtime.execd_image` to a release that verifies `sha256:<kid>:<nonce>:<verifier>` and replace existing prewarmed pool pods **before** enabling `[execd].auth_signing_key_file`. Older `execd` releases compare `X-EXECD-ACCESS-TOKEN` literally against the environment variable and will reject derived tokens with `401`.
 
 ---
 

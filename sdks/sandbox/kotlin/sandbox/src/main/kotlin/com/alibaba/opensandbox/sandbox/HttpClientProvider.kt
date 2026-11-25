@@ -185,6 +185,7 @@ class HttpClientProvider(
                     redactHeader("OPEN-SANDBOX-API-KEY")
                     redactHeader("Authorization")
                     redactHeader(SECURE_ACCESS_HEADER)
+                    redactHeader("X-EXECD-ACCESS-TOKEN")
                 }
             addInterceptor(loggingInterceptor)
         }

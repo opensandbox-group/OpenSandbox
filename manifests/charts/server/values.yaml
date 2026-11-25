@@ -83,6 +83,8 @@ server:
     # For non-root server.containerSecurityContext.runAsUser, set a matching server.podSecurityContext.fsGroup.
     # Set [execd].auth_signing_key_file in configToml to this path to enable
     # sha256:<kid>:<nonce>:<verifier> execd access token derivation.
+    # Rollout order: upgrade runtime.execd_image to a version supporting sha256:<kid>:<nonce>:<verifier>
+    # and replace existing prewarmed pool pods before enabling [execd].auth_signing_key_file.
     existingSecret: ""
 
   # Ingress gateway announcement (components/ingress runs in its own
