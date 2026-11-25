@@ -339,7 +339,8 @@ func (g *filesystemGuard) CheckNotBlockedOrAncestor(absPath string) error {
 	if g.isRootOrBlockedAncestor(cleaned) || g.hasGlobBlockedDescendant(cleaned) {
 		return &forbiddenPathError{path: absPath}
 	}
-	if canonical := canonicalizeExistingPrefix(cleaned); canonical != "" &&
+	canonical := canonicalizeExistingPrefix(cleaned)
+	if canonical != "" && canonical != cleaned &&
 		(g.isRootOrBlockedAncestor(canonical) || g.hasGlobBlockedDescendant(canonical)) {
 		return &forbiddenPathError{path: absPath}
 	}
@@ -353,7 +354,8 @@ var errGlobDescendantBlocked = errors.New("glob-protected descendant")
 // hasGlobBlockedDescendant scans dir only when anchored deny_globs (patterns
 // without a leading "**/") are configured, because unanchored "**/" globs
 // continue to match after directory relocation. The scan is capped to bound
-// synchronous walk latency and fails closed if the cap is exceeded.
+// synchronous walk latency and fails closed on unreadable subdirectories or
+// if the cap is exceeded.
 func (g *filesystemGuard) hasGlobBlockedDescendant(dir string) bool {
 	if len(g.anchoredDenyGlobs) == 0 {
 		return false
@@ -365,7 +367,12 @@ func (g *filesystemGuard) hasGlobBlockedDescendant(dir string) bool {
 	visited := 0
 	walkErr := filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
 		if err != nil {
-			return nil //nolint:nilerr // skip unreadable entries while scanning for glob-protected descendants
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil //nolint:nilerr // entry disappeared concurrently during walk
+			}
+			// Fail closed on EACCES/unreadable subdirectories so a caller cannot
+			// chmod a subdir to 0333 to hide a glob-protected file from the walk.
+			return errGlobDescendantBlocked
 		}
 		visited++
 		if visited > maxGlobAncestorWalkEntries {

@@ -119,6 +119,13 @@ func chmodChownPinnedLeaf(parentFD int, base, absPath string, mode os.FileMode, 
 	if err := verifyDirFD(leafFD, absPath); err != nil {
 		return err
 	}
+	var st unix.Stat_t
+	if err := unix.Fstat(leafFD, &st); err != nil {
+		return &os.PathError{Op: "fstat", Path: absPath, Err: err}
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return &forbiddenPathError{path: absPath}
+	}
 	if hasMode {
 		// /proc/self/fd/<fd> addresses the pinned inode directly without
 		// following user symlinks and works on every Linux kernel for O_PATH fds.
@@ -137,7 +144,7 @@ func chmodChownPinnedLeaf(parentFD int, base, absPath string, mode os.FileMode, 
 
 func renameNoReplaceAt(srcParentFD int, srcBase string, dstParentFD int, dstBase string) error {
 	err := unix.Renameat2(srcParentFD, srcBase, dstParentFD, dstBase, unix.RENAME_NOREPLACE)
-	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) {
+	if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.EPERM) {
 		return unix.Renameat(srcParentFD, srcBase, dstParentFD, dstBase)
 	}
 	return err

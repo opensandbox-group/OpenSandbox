@@ -264,9 +264,6 @@ func stepTargetParent(
 }
 
 func renameGuardedUnixFile(srcPath, dstPath, origSrc, origDest string) error {
-	if err := checkNotBlockedOrAncestor(srcPath); err != nil {
-		return err
-	}
 	srcParentFD, srcBase, srcResolvedParent, err := openGuardedParentDirFD(srcPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -277,8 +274,10 @@ func renameGuardedUnixFile(srcPath, dstPath, origSrc, origDest string) error {
 	defer unix.Close(srcParentFD)
 
 	resolvedSrc := filepath.Join(srcResolvedParent, srcBase)
-	if err := checkNotBlockedOrAncestor(resolvedSrc); err != nil {
-		return err
+	if resolvedSrc != filepath.Clean(srcPath) {
+		if err := checkNotBlockedOrAncestor(resolvedSrc); err != nil {
+			return err
+		}
 	}
 
 	var srcSt unix.Stat_t
@@ -416,9 +415,6 @@ func openOrCreateGuardedDir(dirfd int, part, origPath string, perm os.FileMode, 
 }
 
 func removeAllGuardedUnix(absPath string) error {
-	if err := checkNotBlockedOrAncestor(absPath); err != nil {
-		return err
-	}
 	parentFD, base, resolvedParent, err := openGuardedParentDirFD(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -429,8 +425,10 @@ func removeAllGuardedUnix(absPath string) error {
 	defer unix.Close(parentFD)
 
 	resolvedEntry := filepath.Join(resolvedParent, base)
-	if err := checkNotBlockedOrAncestor(resolvedEntry); err != nil {
-		return err
+	if resolvedEntry != filepath.Clean(absPath) {
+		if err := checkNotBlockedOrAncestor(resolvedEntry); err != nil {
+			return err
+		}
 	}
 
 	var st unix.Stat_t

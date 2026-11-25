@@ -183,3 +183,33 @@ func TestChmodAllowsFIFOAndWriteOnlyFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 }
+
+func TestAnchoredGlobAncestorWalkFailsClosedOnUnreadableSubdir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores 0333 directory read restriction; covered by identity worker test")
+	}
+	tmp := t.TempDir()
+	aliceDir := filepath.Join(tmp, "home", "alice")
+	hiddenDir := filepath.Join(aliceDir, ".aws")
+	require.NoError(t, os.MkdirAll(hiddenDir, 0o755))
+	credFile := filepath.Join(hiddenDir, "credentials")
+	require.NoError(t, os.WriteFile(credFile, []byte("TOP-SECRET-CRED"), 0o600))
+	require.NoError(t, os.Chmod(hiddenDir, 0o333))
+	t.Cleanup(func() { _ = os.Chmod(hiddenDir, 0o755) })
+
+	ws := filepath.Join(tmp, "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		DenyGlobs: []string{filepath.Join(tmp, "home", "*", ".aws", "credentials")},
+	})
+
+	mvBody, err := json.Marshal([]model.RenameFileItem{{
+		Src:  aliceDir,
+		Dest: filepath.Join(ws, "alice"),
+	}})
+	require.NoError(t, err)
+	ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", mvBody)
+	ctrl.RenameFiles()
+	assertForbiddenResponse(t, rec)
+}
