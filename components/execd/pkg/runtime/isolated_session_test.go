@@ -48,21 +48,24 @@ func (s *stubIsolator) WrapWithLifecycle(
 	if err := s.Wrap(cmd, opts); err != nil {
 		return nil, err
 	}
-	return newStubWorkloadLifecycle(), nil
+	return newStubWorkloadLifecycle(cmd), nil
 }
 
 type stubWorkloadLifecycle struct {
+	// cmd is the unwrapped shell, which is therefore also the workload and
+	// leads its own process group.
+	cmd  *exec.Cmd
 	done chan struct{}
 	once sync.Once
 }
 
-func newStubWorkloadLifecycle() *stubWorkloadLifecycle {
-	return &stubWorkloadLifecycle{done: make(chan struct{})}
+func newStubWorkloadLifecycle(cmd *exec.Cmd) *stubWorkloadLifecycle {
+	return &stubWorkloadLifecycle{cmd: cmd, done: make(chan struct{})}
 }
 
-func (*stubWorkloadLifecycle) WaitForIdentity(context.Context) (isolation.WorkloadIdentity, error) {
+func (s *stubWorkloadLifecycle) WaitForIdentity(context.Context) (isolation.WorkloadIdentity, error) {
 	return isolation.WorkloadIdentity{
-		PID:                   2,
+		PID:                   s.cmd.Process.Pid,
 		SandboxPID:            1,
 		NetNamespaceID:        1,
 		ProcessStartTimeTicks: 1,
