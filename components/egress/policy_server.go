@@ -1047,9 +1047,11 @@ func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, 
 			err = s.nft.ApplyStatic(nftCtx, effective)
 		}
 		if err != nil {
+			// A stalled log sink must not delay rollback of the policy file.
+			restoreErr := restore()
 			logEgressUpdateFailedError(fmt.Sprintf("nftables apply (%s): %v", op, err))
 			log.Errorf("policy API: nftables apply failed (%s): %v", op, err)
-			if restoreErr := restore(); restoreErr != nil {
+			if restoreErr != nil {
 				log.Errorf("policy API: restore policy file after failed apply: %v", restoreErr)
 			}
 			http.Error(w, fmt.Sprintf("failed to apply nftables policy: %v", err), http.StatusInternalServerError)
