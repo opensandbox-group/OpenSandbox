@@ -51,8 +51,8 @@ helm install opensandbox ./opensandbox \
 
 This chart installs:
 
-1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`)
-   and their RBAC (cluster-scoped)
+1. **Base** (`base`) — OpenSandbox CRDs, fast-sandbox CRDs (`sandbox.fast.io`),
+   shared namespaces, and user-facing OpenSandbox CRD RBAC (cluster-scoped)
 2. **OpenSandbox Controller** (`opensandbox-controller`)
    - Manages Pool and BatchSandbox CRDs
    - Handles resource pooling and batch delivery
@@ -82,7 +82,7 @@ The following table lists the configurable parameters of the chart and their def
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| base.enabled | bool | `true` | Whether the cluster-scoped resources (CRDs + RBAC) are installed. |
+| base.enabled | bool | `true` | Whether the cluster-scoped resources (CRDs + namespaces + user-facing CRD RBAC) are installed. |
 | fast-sandbox.enabled | bool | `false` | Whether the fast-sandbox control plane + node runtime is enabled. |
 | global | object | `{}` | Global values passed to all sub-charts (e.g. shared imagePullSecrets). |
 | ingress-gateway.enabled | bool | `false` | Whether the ingress gateway is enabled. |

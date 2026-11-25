@@ -17,7 +17,7 @@ boxlite, containerd-based runtimes and the upstream central sandbox-proxy are ou
 
 - Kubernetes 1.22+ (control authentication requires the TokenRequest API and OIDC discovery; 1.24+ is the practical floor)
 - Helm 3.0+
-- The `sandbox.fast.io` CRDs and component RBAC, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here.
+- The `sandbox.fast.io` CRDs and shared namespaces, installed by the [base chart](../base) (`helm install base manifests/charts/base` from the repository root). Keep the namespace values in sync: `fastSandbox.namespaces.*` in base vs `systemNamespace` / `resourceNamespace` here. Control-plane ServiceAccounts and RBAC are installed by this chart (`rbac.create`, default `true`).
 - Install this chart **before the lifecycle server** when the server will serve sandboxes through this runtime: the server's `[runtime]`/fsb configuration points at the FastPath gRPC endpoint (`fast-sandbox-fastpath` Service) created here.
 - The companion images built from the source pinned in [`manifests/third-party/fast-sandbox.commit`](../third-party/fast-sandbox.commit):
 
@@ -89,7 +89,7 @@ There are two distinct key systems in a fast-sandbox-on-OpenSandbox deployment; 
 helm delete fast-sandbox
 ```
 
-The CRDs and component RBAC are owned by the base release and are not affected (CRDs carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards).
+The CRDs and shared namespaces are owned by the base release and are not affected (they carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards). Control-plane RBAC created by this chart is removed with the release.
 
 ## License
 

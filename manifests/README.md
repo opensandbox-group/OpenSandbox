@@ -25,7 +25,7 @@ manifests/
 
 | Chart | Purpose | Install gate |
 |---|---|---|
-| `base` | Cluster-scoped resources only: the three CRDs, the fast-sandbox CRDs (`sandbox.fast.io`) with their component RBAC, and admin/editor/viewer ClusterRoles. Install once per cluster, before any component. | — |
+| `base` | Cluster-scoped resources only: the three CRDs, the fast-sandbox CRDs (`sandbox.fast.io`), shared namespaces, and user-facing admin/editor/viewer ClusterRoles. Install once per cluster, before any component. | — |
 | `controller` | BatchSandbox/Pool reconciler, pooling, pause/resume snapshot orchestration. | requires `base` |
 | `server` | Lifecycle REST API server; announces the ingress gateway through its `[ingress]` config. | requires `base` |
 | `ingress-gateway` | Proxies sandbox traffic; can be deployed standalone and scaled independently. | optional |
