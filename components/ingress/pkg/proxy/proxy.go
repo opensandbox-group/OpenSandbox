@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	slogger "github.com/alibaba/opensandbox/internal/logger"
@@ -103,6 +104,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	// Full duplex also turns off the server's announcement that it will close
+	// the connection because the request body is unread, so the response
+	// writer makes it from what has been read of the body.
+	if r.Body != nil && r.ContentLength != 0 {
+		body := &requestBody{ReadCloser: r.Body, size: r.ContentLength}
+		r.Body = body
+		sw.requestBody = body
+	}
 	proxyType := httpScheme
 	if p.isWebSocketRequest(r) {
 		proxyType = "websocket"
@@ -440,10 +449,60 @@ func joinURLPath(base, suffix string) string {
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(suffix, "/")
 }
 
+// maxUnreadRequestBody is net/http's maxPostHandlerReadBytes: after the
+// handler, the server reads at most this much more of a request body to reach
+// its end and reuse the connection, and closes the connection otherwise.
+const maxUnreadRequestBody = 256 << 10
+
+// requestBody counts what is read of a request body. The Transport reads it
+// while the handler writes the response, so the count is atomic.
+type requestBody struct {
+	io.ReadCloser
+	size  int64 // the declared length, or -1 when the body has none
+	read  atomic.Int64
+	ended atomic.Bool
+}
+
+func (b *requestBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.read.Add(int64(n))
+	if err == io.EOF {
+		b.ended.Store(true)
+	}
+	return n, err
+}
+
+// closesConnection reports whether the server may close the connection after
+// the response because of what is still unread of the body. In half duplex,
+// the server decides this when the response starts and announces it with
+// Connection: close: when maxUnreadRequestBody or more of a declared length
+// is unread, or when reading up to that much of a chunked body does not reach
+// its end. The proxy cannot read ahead in a chunked body, so any unread part
+// of one counts.
+func (b *requestBody) closesConnection() bool {
+	if b.size < 0 {
+		return !b.ended.Load()
+	}
+	return b.size-b.read.Load() >= maxUnreadRequestBody
+}
+
 type statusCapturingResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
 	written    bool
+	// requestBody is the body of the request being answered, or nil when it
+	// has none.
+	requestBody *requestBody
+}
+
+// commit records that the response starts with code, and has it announce
+// that the connection closes after it when the request body leaves it so.
+func (w *statusCapturingResponseWriter) commit(code int) {
+	w.statusCode = code
+	w.written = true
+	if code != http.StatusSwitchingProtocols && w.requestBody != nil && w.requestBody.closesConnection() {
+		w.Header().Set("Connection", "close")
+	}
 }
 
 func (w *statusCapturingResponseWriter) WriteHeader(code int) {
@@ -451,17 +510,22 @@ func (w *statusCapturingResponseWriter) WriteHeader(code int) {
 	// ReverseProxy, is informational: the final status is still to come.
 	informational := code >= 100 && code < 200 && code != http.StatusSwitchingProtocols
 	if !w.written && !informational {
-		w.statusCode = code
-		w.written = true
+		w.commit(code)
 	}
 	w.ResponseWriter.WriteHeader(code)
 }
 
 func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {
 	if !w.written {
-		w.written = true
+		w.commit(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap gives http.ResponseController the server's writer, so it can reach
+// the server's response through this one.
+func (w *statusCapturingResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func (w *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
@@ -478,6 +542,10 @@ func (w *statusCapturingResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, e
 
 func (w *statusCapturingResponseWriter) Flush() {
 	if fl, ok := w.ResponseWriter.(http.Flusher); ok {
+		// A flush before any write starts a 200 response.
+		if !w.written {
+			w.commit(http.StatusOK)
+		}
 		fl.Flush()
 	}
 }

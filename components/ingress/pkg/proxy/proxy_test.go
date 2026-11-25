@@ -15,6 +15,7 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -186,6 +188,57 @@ func TestServeHTTPStreamsResponseWhileRequestBodyIsSent(t *testing.T) {
 	rest, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Equal(t, "received "+head+tail+"\n", string(rest))
+}
+
+func TestServeHTTPAnnouncesCloseWhenRequestBodyIsLeftUnread(t *testing.T) {
+	ingress := httptest.NewServer(NewProxy(context.Background(), stubNoSecureProvider{}, ModeHeader, nil, nil, nil))
+	defer ingress.Close()
+
+	// The requests name no sandbox, so the gateway answers 400 without
+	// reading their bodies.
+	for _, tc := range []struct {
+		name   string
+		header string // the header that frames the body
+		sent   string // the part of the body sent before the response is read
+		rest   string // the part sent after it
+		closes bool
+	}{
+		{name: "declared length, 300 KiB unread", header: "Content-Length: 307200", closes: true},
+		{name: "declared length, 100 KiB unread", header: "Content-Length: 102400", sent: strings.Repeat("x", 102400)},
+		{name: "chunked, unfinished", header: "Transfer-Encoding: chunked", sent: "5\r\nhello\r\n", rest: "0\r\n\r\n", closes: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", ingress.Listener.Addr().String())
+			require.NoError(t, err)
+			defer conn.Close()
+			require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+			_, err = io.WriteString(conn, "POST /run HTTP/1.1\r\nHost: gateway\r\n"+tc.header+"\r\n\r\n"+tc.sent)
+			require.NoError(t, err)
+			reader := bufio.NewReader(conn)
+			response, err := http.ReadResponse(reader, &http.Request{Method: http.MethodPost})
+			require.NoError(t, err)
+			_, err = io.Copy(io.Discard, response.Body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, response.StatusCode)
+			require.Equal(t, tc.closes, response.Close, "whether the response announces Connection: close")
+
+			_, err = io.WriteString(conn, tc.rest)
+			require.NoError(t, err)
+			if tc.closes {
+				_, err = reader.ReadByte()
+				require.ErrorIs(t, err, io.EOF, "the server closes the connection after the response")
+				return
+			}
+			// The server discards the rest of the body and answers the next
+			// request on the same connection.
+			_, err = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: gateway\r\n\r\n")
+			require.NoError(t, err)
+			next, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
+			require.NoError(t, err)
+			require.NoError(t, next.Body.Close())
+			require.Equal(t, http.StatusBadRequest, next.StatusCode)
+		})
+	}
 }
 
 func TestGetClientIP(t *testing.T) {
