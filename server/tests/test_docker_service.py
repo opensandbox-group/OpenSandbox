@@ -190,6 +190,51 @@ async def test_create_sandbox_applies_security_defaults(mock_docker):
     assert "no-new-privileges=true" in host_config.get("security_opt", [])
     assert host_config.get("cap_drop") == service.app_config.docker.drop_capabilities
     assert host_config.get("pids_limit") == service.app_config.docker.pids_limit
+    assert "cap_add" not in mock_client.api.create_host_config.call_args.kwargs
+    assert "device_cgroup_rules" not in mock_client.api.create_host_config.call_args.kwargs
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_create_sandbox_adds_configured_capabilities_and_device_rules(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.create_host_config.side_effect = lambda **kwargs: kwargs
+    mock_client.api.create_container.return_value = {"Id": "cid"}
+    mock_client.containers.get.return_value = MagicMock()
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.drop_capabilities = []
+    cfg.docker.add_capabilities = ["SYS_ADMIN", "NET_ADMIN"]
+    cfg.docker.device_cgroup_rules = ["a *:* rwm"]
+    service = DockerSandboxService(config=cfg)
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+    )
+
+    with (
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 40001),
+                "8080": ("0.0.0.0", 40002),
+            },
+        ),
+    ):
+        await service.create_sandbox(request)
+
+    host_config = mock_client.api.create_container.call_args.kwargs["host_config"]
+    assert set(host_config["cap_add"]) == {"SYS_ADMIN", "NET_ADMIN"}
+    assert "cap_drop" not in host_config
+    assert host_config["device_cgroup_rules"] == ["a *:* rwm"]
 
 
 @pytest.mark.asyncio
@@ -1213,6 +1258,56 @@ async def test_request_volume_at_runtime_path_replaces_runtime_mount(mock_docker
 
 @pytest.mark.asyncio
 @patch("opensandbox_server.services.docker.docker_service.docker")
+async def test_egress_sidecar_keeps_net_admin_out_of_added_capabilities(mock_docker):
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    mock_client.api.create_host_config.side_effect = lambda **kwargs: kwargs
+    mock_client.api.create_container.side_effect = [
+        {"Id": "sidecar-id"},
+        {"Id": "main-id"},
+    ]
+    mock_client.containers.get.side_effect = [MagicMock(id="sidecar-id"), MagicMock(id="main-id")]
+    mock_docker.from_env.return_value = mock_client
+
+    cfg = _app_config()
+    cfg.docker.network_mode = "bridge"
+    cfg.docker.add_capabilities = ["SYS_ADMIN", "CAP_NET_ADMIN"]
+    cfg.egress = EgressConfig(image="egress:latest")
+    service = DockerSandboxService(config=cfg)
+
+    req = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        timeout=120,
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        metadata={},
+        entrypoint=["python"],
+        networkPolicy=NetworkPolicy(default_action="deny", egress=[]),
+    )
+
+    with (
+        patch("opensandbox_server.services.docker.docker_service.generate_egress_token", return_value="egress-token"),
+        patch(
+            "opensandbox_server.services.docker.docker_service.allocate_port_bindings",
+            return_value={
+                "44772": ("0.0.0.0", 44772),
+                "8080": ("0.0.0.0", 8080),
+                "18080": ("0.0.0.0", 18080),
+            },
+        ),
+        patch.object(service, "_ensure_image_available"),
+        patch.object(service, "_prepare_sandbox_runtime"),
+        patch.object(service, "_wait_for_egress_sidecar_ready"),
+    ):
+        await service.create_sandbox(req)
+
+    main_host_config = mock_client.api.create_container.call_args_list[1].kwargs["host_config"]
+    assert main_host_config["cap_add"] == ["SYS_ADMIN"]
+    assert "NET_ADMIN" in set(main_host_config["cap_drop"])
+
+
+@pytest.mark.asyncio
+@patch("opensandbox_server.services.docker.docker_service.docker")
 async def test_egress_sidecar_injection_and_capabilities(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
@@ -1281,6 +1376,7 @@ async def test_egress_sidecar_injection_and_capabilities(mock_docker):
     assert labels.get("opensandbox.io/embedding-proxy-port")
     assert labels.get("opensandbox.io/http-port")
     assert labels[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] == "egress-token"
+
 
     sidecar_env = sidecar_kwargs["environment"]
     assert f"{OPENSANDBOX_EGRESS_TOKEN}=egress-token" in sidecar_env
