@@ -21,6 +21,7 @@ package main
 // isolation across IP takeover.
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -522,6 +523,23 @@ func TestFastSandboxSubjectExchangeResolveAdmission(t *testing.T) {
 	s.mu.Lock()
 	admission := credentialvault.ResolveAdmission{SubjectKey: string(subj), Revision: s.subjectDrain.acked[subj].identity}
 	s.mu.Unlock()
+	access, accessErr := s.resolveAdmittedVaultAccess(admission)
+	require.Nil(t, accessErr)
+	_, tag, _, err := access.Store.ActiveSnapshotIfChanged(context.Background(), "")
+	require.NoError(t, err)
+	require.NotEmpty(t, tag)
+	require.Equal(t, tag, access.ExpectedVaultTag)
+
+	t.Run("matching wire digest requires matching Vault commit", func(t *testing.T) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		ack := s.subjectDrain.acked[subj]
+		defer func() { s.subjectDrain.acked[subj] = ack }()
+		stale := ack
+		stale.vaultTag = "previous-commit"
+		s.subjectDrain.acked[subj] = stale
+		require.False(t, s.subjectSnapshotAcknowledgedLocked(subj, ack.fence))
+	})
 	handler := resolveHandlerFor(s)
 	resolve := func(value credentialvault.ResolveAdmission, clientIP bool) *httptest.ResponseRecorder {
 		raw, err := json.Marshal(value)

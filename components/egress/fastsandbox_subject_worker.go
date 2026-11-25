@@ -96,12 +96,14 @@ type fastSandboxSubjectIntent struct {
 
 type fastSandboxSubjectSnapshot struct {
 	payload                    []byte
+	vaultTag                   string // local Store commit; exchange endpoints are absent from the wire digest
 	digest                     [sha256.Size]byte
 	vaultRevision, policyEpoch int64
 }
 
 type fastSandboxSubjectACK struct {
 	identity            revision.Identity
+	vaultTag            string
 	fence               subject.Fencing
 	controlEpoch        string
 	digest              [sha256.Size]byte
@@ -144,12 +146,16 @@ func (s *fastSandboxPolicyServer) subjectSnapshotAcknowledgedLocked(subj subject
 	if d == nil {
 		return true
 	}
-	if !s.subjectVaultAuthoritativeLocked(subj) || d.snapshotFailures[subj] || d.current == nil || d.snapshots[subj] == nil {
+	snapshot := d.snapshots[subj]
+	if !s.subjectVaultAuthoritativeLocked(subj) || d.snapshotFailures[subj] || d.current == nil || snapshot == nil {
 		return false
 	}
 	ack, ok := d.acked[subj]
 	registration := d.registrations[subj]
-	return ok && registration != 0 && ack.registration == registration && ack.authorityGeneration == d.authorityGenerations[subj] && ack.fence.Matches(fence) && ack.controlEpoch == d.current.handoff.ControlGeneration && ack.digest == d.snapshots[subj].digest
+	return ok && registration != 0 && ack.registration == registration &&
+		ack.authorityGeneration == d.authorityGenerations[subj] && ack.fence.Matches(fence) &&
+		ack.controlEpoch == d.current.handoff.ControlGeneration &&
+		ack.digest == snapshot.digest && ack.vaultTag == snapshot.vaultTag
 }
 
 func (s *fastSandboxPolicyServer) startSubjectDrain() {
@@ -365,9 +371,10 @@ func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subje
 		return
 	}
 	var snapshot credentialvault.ActiveSnapshot
+	var vaultTag string
 	var err error
 	if entry, ok := s.vaults[subj]; ok && entry.store != nil {
-		snapshot, err = entry.store.ActiveSnapshot()
+		snapshot, vaultTag, _, err = entry.store.ActiveSnapshotIfChanged(context.Background(), "")
 	}
 	if err != nil && !errors.Is(err, credentialvault.ErrNotFound) {
 		d.markSnapshotFailureLocked(subj, "subject_snapshot_invalid")
@@ -386,7 +393,13 @@ func (s *fastSandboxPolicyServer) recordSubjectSnapshotLocked(subj subject.Subje
 		d.markSnapshotFailureLocked(subj, "subject_snapshot_too_large")
 		return
 	}
-	frozen := &fastSandboxSubjectSnapshot{payload: payload, digest: sha256.Sum256(payload), vaultRevision: snapshot.Revision, policyEpoch: policyEpoch}
+	frozen := &fastSandboxSubjectSnapshot{
+		payload:       payload,
+		vaultTag:      vaultTag,
+		digest:        sha256.Sum256(payload),
+		vaultRevision: snapshot.Revision,
+		policyEpoch:   policyEpoch,
+	}
 	d.snapshots[subj] = frozen
 	delete(d.snapshotFailures, subj)
 	delete(d.unknownVaults, subj)
@@ -917,7 +930,15 @@ func (d *fastSandboxSubjectDrain) install(ctx context.Context, s *fastSandboxPol
 				// coordinator-local one returned by Apply after a rebind.
 				wire := candidate
 				wire.DecisionEpoch += installer.transport.base
-				d.acked[intent.subj] = fastSandboxSubjectACK{identity: wire, fence: intent.fence, controlEpoch: epoch.handoff.ControlGeneration, digest: intent.snapshot.digest, registration: intent.registration, authorityGeneration: intent.authorityGeneration}
+				d.acked[intent.subj] = fastSandboxSubjectACK{
+					identity:            wire,
+					vaultTag:            intent.snapshot.vaultTag,
+					fence:               intent.fence,
+					controlEpoch:        epoch.handoff.ControlGeneration,
+					digest:              intent.snapshot.digest,
+					registration:        intent.registration,
+					authorityGeneration: intent.authorityGeneration,
+				}
 				d.wakeACKWaitersLocked(intent.subj)
 			}
 			if installed || terminal {

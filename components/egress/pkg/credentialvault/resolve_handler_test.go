@@ -170,6 +170,42 @@ func TestResolveHandlerHappyPath(t *testing.T) {
 	require.Equal(t, "sbx_01HZYEXAMPLE", h.audits[0].Subject)
 }
 
+func TestResolveHandlerPinnedVaultTag(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		changeOnRead, wantCalls int
+	}{
+		{"capture", 1, 0},
+		{"recheck", 2, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newResolveHarness(t)
+			snapshot, tag, _, err := h.store.ActiveSnapshotIfChanged(context.Background(), "")
+			require.NoError(t, err)
+			require.NotEmpty(t, tag)
+			h.access.ExpectedRevision = &snapshot.Revision
+			h.access.ExpectedVaultTag = tag
+			reads := 0
+			h.handler.access = func(*http.Request) (ResolveAccess, *ResolveAccessError) {
+				reads++
+				if reads == tc.changeOnRead {
+					// Change only the Store commit tag at the access-to-capture boundary.
+					h.store.mu.Lock()
+					h.store.activeTag = "next-commit"
+					h.store.mu.Unlock()
+				}
+				return h.access, nil
+			}
+			h.client.decision = &ResolverDecision{Headers: map[string]string{"authorization": "test-header"}}
+			h.client.unblock()
+			result := h.postResolve(validResolveBody())
+			require.Equal(t, http.StatusConflict, result.Code, result.Body.String())
+			require.NotContains(t, result.Body.String(), "test-header")
+			require.Len(t, h.client.recorded(), tc.wantCalls)
+		})
+	}
+}
+
 func TestResolveHandlerPortAuthorityNormalization(t *testing.T) {
 	h := newResolveHarness(t)
 	h.client.decision = &ResolverDecision{Headers: map[string]string{}, Suppress: map[string]struct{}{}, Redactions: []string{}}

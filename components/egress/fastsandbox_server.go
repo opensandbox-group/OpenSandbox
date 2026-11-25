@@ -544,7 +544,12 @@ func (s *fastSandboxPolicyServer) resolveAdmittedVaultAccess(admission credentia
 	if sandboxID == "" || entry.store == nil {
 		return credentialvault.ResolveAccess{}, denied
 	}
-	return credentialvault.ResolveAccess{SandboxID: sandboxID, Store: entry.store, ExpectedRevision: &admission.Revision.VaultRevision}, nil
+	return credentialvault.ResolveAccess{
+		SandboxID:        sandboxID,
+		Store:            entry.store,
+		ExpectedRevision: &admission.Revision.VaultRevision,
+		ExpectedVaultTag: d.acked[subj].vaultTag,
+	}, nil
 }
 
 // applyPolicy applies a policy to a subject. Ordering: nft FIRST, registry

@@ -55,6 +55,13 @@ type ResolveAccess struct {
 	Store     *Store
 	// ExpectedRevision fences a live request to its pinned decision snapshot.
 	ExpectedRevision *int64
+	// ExpectedVaultTag pins fast-sandbox access across Store reads when revisions repeat.
+	ExpectedVaultTag string
+}
+
+func (a ResolveAccess) matchesCapture(c ResolveCapture) bool {
+	return (a.ExpectedRevision == nil || *a.ExpectedRevision == c.Revision) &&
+		(a.ExpectedVaultTag == "" || a.ExpectedVaultTag == c.vaultTag)
 }
 
 // ResolveAccessError is a fixed-vocabulary access failure.
@@ -187,7 +194,7 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeResolveError(w, http.StatusNotFound, "binding not found")
 		return
 	}
-	if access.ExpectedRevision != nil && capture.Revision != *access.ExpectedRevision {
+	if !access.matchesCapture(capture) {
 		writeResolveError(w, http.StatusConflict, "resolution invalidated")
 		return
 	}
@@ -240,7 +247,7 @@ func (h *ResolveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	recheck, err := recheckAccess.Store.CaptureResolve(document.Binding)
 	if err != nil || recheck.Fingerprint != capture.Fingerprint ||
-		access.ExpectedRevision != nil && recheck.Revision != *access.ExpectedRevision {
+		!access.matchesCapture(recheck) {
 		writeResolveError(w, http.StatusConflict, "resolution invalidated")
 		return
 	}
@@ -561,15 +568,15 @@ func writeResolveJSON(w http.ResponseWriter, status int, document resolveEndpoin
 }
 
 // ResolveCapture is the per-binding resolve state captured under the Store
-// read lock and released before the resolver call. Fingerprint digests the
-// binding plus the referenced credential's source: same-name replacement and
-// delete/recreate wraparound are detectable, unrelated mutations do not
-// invalidate (D12). No active-snapshot tag — it flips on unrelated mutations.
+// read lock and released before the resolver call. Fingerprint covers the
+// binding and its credential source. Admitted Fast Sandbox requests also
+// match vaultTag against the acknowledged Store commit.
 type ResolveCapture struct {
 	Credential  string
 	Endpoint    string
 	Revision    int64
 	Fingerprint [sha256.Size]byte
+	vaultTag    string
 }
 
 // CaptureResolve captures an exchange binding's resolve inputs; static
@@ -597,6 +604,7 @@ func (v *Store) CaptureResolve(bindingName string) (ResolveCapture, error) {
 		Endpoint:    exchange.endpoint,
 		Revision:    v.revision,
 		Fingerprint: resolveFingerprint(binding, credential.raw),
+		vaultTag:    v.activeTag,
 	}, nil
 }
 
