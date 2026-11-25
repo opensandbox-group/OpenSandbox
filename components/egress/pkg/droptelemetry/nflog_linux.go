@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	"github.com/florianl/go-nflog/v2"
 )
 
@@ -42,6 +43,7 @@ func Bind(ctx context.Context, c Config, onPacket func(Packet), onError func(err
 	err = nf.RegisterWithErrorFunc(receiveCtx, func(a nflog.Attribute) int {
 		signalStopped()
 		if receiveCtx.Err() != nil {
+			telemetry.SetDropSampler(false, "disabled")
 			return 1
 		}
 		if a.Payload == nil || a.Prefix == nil || !strings.HasPrefix(*a.Prefix, "osb:") {
@@ -59,6 +61,11 @@ func Bind(ctx context.Context, c Config, onPacket func(Packet), onError func(err
 	}, func(e error) int {
 		signalStopped()
 		if receiveCtx.Err() != nil || errors.Is(e, net.ErrClosed) || errors.Is(e, os.ErrClosed) || errors.Is(e, syscall.EBADF) {
+			cause := "receive"
+			if receiveCtx.Err() != nil {
+				cause = "disabled"
+			}
+			telemetry.SetDropSampler(false, cause)
 			cancel()
 			return 1
 		}
@@ -79,6 +86,7 @@ func Bind(ctx context.Context, c Config, onPacket func(Packet), onError func(err
 	return func() {
 		once.Do(func() {
 			cancel()
+			telemetry.SetDropSampler(false, "disabled")
 			timer := time.NewTimer(time.Second)
 			defer timer.Stop()
 			// Callbacks follow go-nflog's background WaitGroup.Add, ordering it before Close's Wait.

@@ -17,8 +17,10 @@ package telemetry
 import (
 	"context"
 	"math"
+	"slices"
 	"sync"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -28,20 +30,22 @@ var dropSamplerMu sync.RWMutex
 var dropSamplerValue int64
 var dropSamplerCause = "disabled"
 
-func registerDropMetrics() error {
+// RegisterDropMetrics enables drop instruments after the meter provider is initialized.
+func RegisterDropMetrics() error {
+	meter := otel.Meter("opensandbox/egress")
 	var err error
-	blockedPackets, err = meter.Int64Counter("egress.blocked.packets")
+	blockedPackets, err = meter.Int64Counter("egress.blocked.packets", metric.WithDescription("Kernel-enforced dropped packets"))
 	if err != nil {
 		return err
 	}
-	blockedSamples, err = meter.Int64Counter("egress.blocked.samples")
+	blockedSamples, err = meter.Int64Counter("egress.blocked.samples", metric.WithDescription("Sampled blocked IP packets"))
 	if err != nil {
 		return err
 	}
-	_, err = meter.Int64ObservableGauge("egress.drop_telemetry.sampler_up", metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
+	_, err = meter.Int64ObservableGauge("egress.drop_telemetry.sampler_up", metric.WithDescription("Whether kernel drop sampling is available"), metric.WithInt64Callback(func(_ context.Context, o metric.Int64Observer) error {
 		dropSamplerMu.RLock()
 		defer dropSamplerMu.RUnlock()
-		o.Observe(dropSamplerValue, metric.WithAttributes(attribute.String("cause", dropSamplerCause)))
+		o.Observe(dropSamplerValue, egressMetricOptWith(attribute.String("cause", dropSamplerCause)))
 		return nil
 	}))
 	return err
@@ -50,7 +54,7 @@ func RecordBlockedPackets(reason string, n uint64) {
 	if blockedPackets == nil {
 		return
 	}
-	opts := metric.WithAttributes(attribute.String("reason", reason))
+	opts := egressMetricOptWith(attribute.String("reason", normalizeDropReason(reason)))
 	for n > math.MaxInt64 {
 		blockedPackets.Add(context.Background(), math.MaxInt64, opts)
 		n -= math.MaxInt64
@@ -59,7 +63,7 @@ func RecordBlockedPackets(reason string, n uint64) {
 }
 func RecordBlockedSample(reason string) {
 	if blockedSamples != nil {
-		blockedSamples.Add(context.Background(), 1, metric.WithAttributes(attribute.String("reason", reason)))
+		blockedSamples.Add(context.Background(), 1, egressMetricOptWith(attribute.String("reason", normalizeDropReason(reason))))
 	}
 }
 func SetDropSampler(up bool, cause string) {
@@ -69,5 +73,31 @@ func SetDropSampler(up bool, cause string) {
 	if up {
 		dropSamplerValue = 1
 	}
-	dropSamplerCause = cause
+	dropSamplerCause = normalizeDropCause(cause)
+}
+
+var dropReasons = []string{
+	"deny_set", "port_deny", "dot", "doh", "default_deny", "established_revoke",
+	"subject_input_deny", "unmarked_failclosed", "gateway_mitm_direct", "upstream_proxy_deny",
+}
+
+// DropReasons returns a copy of the accepted packet-drop metric labels.
+func DropReasons() []string {
+	return slices.Clone(dropReasons)
+}
+
+func normalizeDropReason(reason string) string {
+	if slices.Contains(dropReasons, reason) {
+		return reason
+	}
+	return "unknown"
+}
+
+func normalizeDropCause(cause string) string {
+	switch cause {
+	case "bind", "ruleset", "receive", "disabled", "":
+		return cause
+	default:
+		return "unknown"
+	}
 }

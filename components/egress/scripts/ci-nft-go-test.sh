@@ -45,11 +45,20 @@ done
 test_pattern="^($(IFS='|'; echo "${tests[*]}"))$"
 sudo env OPENSANDBOX_NFT_TEST=1 \
   "$test_binary" -test.run "$test_pattern" -test.v -test.timeout=5m | tee "$log_file"
-if [[ "$package" == "./pkg/droptelemetry" ]] && grep -q 'NFLOG_UNAVAILABLE:' "$log_file"; then
+if [[ "$package" == "./pkg/droptelemetry" ]]; then
   for test_name in "${tests[@]}"; do
-    grep -E "^--- (PASS|SKIP): ${test_name} \\([0-9.]+s\\)$" "$log_file"
+    grep -Fx -- "=== RUN   $test_name" "$log_file"
+    awk -v name="$test_name" '
+      /^=== RUN   / { active = ($0 == "=== RUN   " name); reason = 0 }
+      active && /NFLOG_UNAVAILABLE:/ { reason = 1 }
+      $0 ~ "^--- PASS: " name " \\([0-9.]+s\\)$" { passed = active }
+      $0 ~ "^--- SKIP: " name " \\([0-9.]+s\\)$" {
+        skipped = active && reason
+        if (!skipped) bad = 1
+      }
+      END { exit (bad || !(passed || skipped)) }
+    ' "$log_file"
   done
-  echo "NFLOG unavailable: kernel sampling tests skipped (see reason above)"
   exit 0
 fi
 if grep -q -- '--- SKIP:' "$log_file"; then

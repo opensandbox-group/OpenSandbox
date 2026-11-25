@@ -104,11 +104,14 @@ func (r *Runtime) pollLocked(ctx context.Context) {
 	r.last = counts
 }
 func (r *Runtime) Poll(ctx context.Context) {
-	if r == nil || r.config.Mode == Off || r.config.Mode == "" {
+	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.config.Mode == Off || r.config.Mode == "" {
+		return
+	}
 	r.pollLocked(ctx)
 }
 
@@ -117,28 +120,35 @@ type replacementContextKey struct{}
 // BeginReplacement reads counters before lease planning and excludes periodic
 // reads until finish. Only use the returned context within that guarded scope.
 func (r *Runtime) BeginReplacement(ctx context.Context) (context.Context, func()) {
-	if r == nil || r.config.Mode == Off || r.config.Mode == "" {
+	if r == nil {
 		return ctx, func() {}
 	}
 	if ctx.Value(replacementContextKey{}) == r {
 		return ctx, func() {}
 	}
 	r.mu.Lock()
+	if r.config.Mode == Off || r.config.Mode == "" {
+		r.mu.Unlock()
+		return ctx, func() {}
+	}
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	r.pollLocked(readCtx)
 	cancel()
-	return context.WithValue(ctx, replacementContextKey{}, r), r.mu.Unlock
+	return context.WithValue(ctx, replacementContextKey{}, r), sync.OnceFunc(r.mu.Unlock)
 }
 
 // Replacement callers must acquire BeginReplacement before rendering their script.
 func (r *Runtime) Wrap(run Runner, reasonFor func(string) Reason) Runner {
-	if r == nil || r.config.Mode == Off || r.config.Mode == "" {
+	if r == nil {
 		return run
 	}
 	return func(ctx context.Context, script string) ([]byte, error) {
 		if ctx.Value(replacementContextKey{}) != r {
 			r.mu.Lock()
 			defer r.mu.Unlock()
+		}
+		if r.config.Mode == Off || r.config.Mode == "" {
+			return run(ctx, script)
 		}
 		rendered, err := Instrument(script, r.config, reasonFor)
 		if err != nil {
@@ -157,12 +167,26 @@ func (r *Runtime) Wrap(run Runner, reasonFor func(string) Reason) Runner {
 // Start binds before probing nft support. Failed sampling never changes the
 // enforcement transaction: subsequent scripts are rendered in counter mode.
 func (r *Runtime) Start(ctx context.Context, run Runner, bind Binder, onPacket func(Packet)) func() {
-	if r == nil || r.config.Mode == Off || r.config.Mode == "" {
+	if r == nil {
+		return func() {}
+	}
+	r.mu.Lock()
+	cfg := r.config
+	r.mu.Unlock()
+	if cfg.Mode == Off || cfg.Mode == "" {
 		return func() {}
 	}
 	stop := func() {}
-	if r.config.Mode == Sample {
-		closeNF, err := bind(ctx, r.config, onPacket, func(err error) {
+	stopped := false
+	if cfg.Mode == Sample {
+		closeNF, err := bind(ctx, cfg, func(p Packet) {
+			r.mu.Lock()
+			if !stopped && r.config.Mode == Sample && ctx.Err() == nil {
+				telemetry.SetDropSampler(true, "")
+			}
+			r.mu.Unlock()
+			onPacket(p)
+		}, func(err error) {
 			telemetry.SetDropSampler(false, "receive")
 			log.Warnf("drop telemetry receiver: %v", err)
 		})
@@ -170,7 +194,7 @@ func (r *Runtime) Start(ctx context.Context, run Runner, bind Binder, onPacket f
 		if err == nil {
 			cause = "ruleset"
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			probe := fmt.Sprintf("add table inet opensandbox_drop_probe\nadd counter inet opensandbox_drop_probe probe\nadd chain inet opensandbox_drop_probe probe\nadd rule inet opensandbox_drop_probe probe limit rate %s burst %d packets counter name probe log group %d snaplen 128 prefix \"osb:probe\"\ndelete table inet opensandbox_drop_probe\n", r.config.Rate, r.config.Burst, r.config.Group)
+			probe := fmt.Sprintf("add table inet opensandbox_drop_probe\nadd counter inet opensandbox_drop_probe probe\nadd chain inet opensandbox_drop_probe probe\nadd rule inet opensandbox_drop_probe probe limit rate %s burst %d packets counter name probe log group %d snaplen 128 prefix \"osb:probe\"\ndelete table inet opensandbox_drop_probe\n", cfg.Rate, cfg.Burst, cfg.Group)
 			_, err = run(probeCtx, probe)
 			cancel()
 		}
@@ -178,7 +202,9 @@ func (r *Runtime) Start(ctx context.Context, run Runner, bind Binder, onPacket f
 			if closeNF != nil {
 				closeNF()
 			}
+			r.mu.Lock()
 			r.config.Mode = Counter
+			r.mu.Unlock()
 			telemetry.SetDropSampler(false, cause)
 			log.Warnf("drop telemetry: sampling disabled (cause=%s): %v", cause, err)
 		} else {
@@ -189,11 +215,17 @@ func (r *Runtime) Start(ctx context.Context, run Runner, bind Binder, onPacket f
 		telemetry.SetDropSampler(false, "disabled")
 	}
 	safego.Go(func() {
-		ticker := time.NewTicker(r.config.Poll)
+		ticker := time.NewTicker(cfg.Poll)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
+				r.mu.Lock()
+				if !stopped {
+					stopped = true
+					telemetry.SetDropSampler(false, "disabled")
+				}
+				r.mu.Unlock()
 				return
 			case <-ticker.C:
 				pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -202,7 +234,15 @@ func (r *Runtime) Start(ctx context.Context, run Runner, bind Binder, onPacket f
 			}
 		}
 	})
-	return stop
+	return sync.OnceFunc(func() {
+		r.mu.Lock()
+		stopped = true
+		telemetry.SetDropSampler(false, "disabled")
+		r.mu.Unlock()
+		if stop != nil {
+			stop()
+		}
+	})
 }
 
 func hasTableStatement(script, verb, table string) bool {

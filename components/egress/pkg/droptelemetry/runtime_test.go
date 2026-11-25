@@ -21,12 +21,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 func TestConfig(t *testing.T) {
@@ -261,4 +266,127 @@ func TestReplacementExcludesPollingUntilCommit(t *testing.T) {
 	}
 	require.Equal(t, []string{"read", "apply", "read"}, order)
 	require.EqualValues(t, 22, total, "successful replacement resets the counter baseline")
+}
+
+func dropMetricReader(t *testing.T) *sdkmetric.ManualReader {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prior := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prior)
+		telemetry.SetDropSampler(false, "disabled")
+		_ = provider.Shutdown(context.Background())
+	})
+	require.NoError(t, telemetry.RegisterDropMetrics())
+	return reader
+}
+
+func TestSamplerRecoversAfterReceiveError(t *testing.T) {
+	reader := dropMetricReader(t)
+	check := func(value int64, cause string) {
+		var data metricdata.ResourceMetrics
+		require.NoError(t, reader.Collect(context.Background(), &data))
+		for _, scope := range data.ScopeMetrics {
+			for _, m := range scope.Metrics {
+				if m.Name == "egress.drop_telemetry.sampler_up" {
+					dp := m.Data.(metricdata.Gauge[int64]).DataPoints[0]
+					require.Equal(t, value, dp.Value)
+					got, ok := dp.Attributes.Value("cause")
+					require.True(t, ok)
+					require.Equal(t, cause, got.AsString())
+					return
+				}
+			}
+		}
+		t.Fatal("sampler gauge missing")
+	}
+	cfg := DefaultConfig()
+	cfg.Mode = Sample
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var packet func(Packet)
+	var failure func(error)
+	stop := New(cfg, "test").Start(ctx, func(context.Context, string) ([]byte, error) { return nil, nil }, func(_ context.Context, _ Config, hook func(Packet), errfn func(error)) (func(), error) {
+		packet, failure = hook, errfn
+		return func() {}, nil
+	}, func(Packet) {})
+	defer stop()
+	check(1, "")
+	failure(errors.New("transient receive error"))
+	check(0, "receive")
+	packet(Packet{})
+	check(1, "")
+	stop()
+	check(0, "disabled")
+	cancel()
+	packet(Packet{})
+	check(0, "disabled")
+}
+
+func TestDropMetricReasonSetMatches(t *testing.T) {
+	want := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		want = append(want, string(reason))
+	}
+	require.ElementsMatch(t, want, telemetry.DropReasons())
+	reader := dropMetricReader(t)
+	for _, reason := range reasons {
+		telemetry.RecordBlockedSample(string(reason))
+	}
+	telemetry.RecordBlockedSample("unbounded-input")
+	var data metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &data))
+	for _, scope := range data.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name == "egress.blocked.samples" {
+				points := m.Data.(metricdata.Sum[int64]).DataPoints
+				require.Len(t, points, len(reasons)+1)
+				for _, dp := range points {
+					r, _ := dp.Attributes.Value("reason")
+					require.True(t, ValidReason(Reason(r.AsString())) || r.AsString() == "unknown")
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("sample counter missing")
+}
+
+func TestReplacementReleaseIsIdempotent(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = Counter
+	r := New(cfg, "test")
+	r.read = func(context.Context) (map[string]uint64, error) { return nil, nil }
+	_, release := r.BeginReplacement(context.Background())
+	release()
+	require.NotPanics(t, release)
+	r.Poll(context.Background())
+}
+
+func TestFallbackConcurrentWithReaders(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Mode = Sample
+	r := New(cfg, "test")
+	r.read = func(context.Context) (map[string]uint64, error) { return nil, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 100; i++ {
+			r.Poll(ctx)
+			_, _ = r.Wrap(func(context.Context, string) ([]byte, error) { return nil, nil }, nil)(ctx, "")
+		}
+	}()
+	stop := r.Start(ctx, nil, func(context.Context, Config, func(Packet), func(error)) (func(), error) {
+		return nil, errors.New("bind failed")
+	}, nil)
+	stop()
+	wg.Wait()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	require.Equal(t, Counter, r.config.Mode)
 }
