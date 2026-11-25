@@ -227,7 +227,7 @@ func (c *FilesystemController) RemoveDirs() {
 			c.handleFileError(err)
 			return
 		}
-		if err := checkNotBlockedOrAncestor(absDir); err != nil {
+		if err := checkNotBlockedOrAncestorForDelete(absDir); err != nil {
 			c.handleFileError(err)
 			return
 		}

@@ -122,8 +122,10 @@ func buildFilesystemGuardForOS(policy FilesystemGuardPolicy, windowsMode bool) (
 		}
 	}
 
-	for _, r := range defaultBlockedRoots {
-		addRoot(r, false)
+	if !windowsMode {
+		for _, r := range defaultBlockedRoots {
+			addRoot(r, false)
+		}
 	}
 	for _, r := range policy.ExtraBlockedPaths {
 		addRoot(r, true)
@@ -324,24 +326,29 @@ func checkFilesystemPath(absPath string) error {
 	return getFilesystemGuard().CheckPath(absPath)
 }
 
-func checkNotBlockedOrAncestor(absPath string) error {
-	return getFilesystemGuard().CheckNotBlockedOrAncestor(absPath)
+func checkNotBlockedOrAncestorForDelete(absPath string) error {
+	return getFilesystemGuard().CheckNotBlockedOrAncestor(absPath, true)
+}
+
+func checkNotBlockedOrAncestorForRename(absPath string) error {
+	return getFilesystemGuard().CheckNotBlockedOrAncestor(absPath, false)
 }
 
 // CheckNotBlockedOrAncestor rejects absPath if it is blocked itself, is the
-// filesystem root, is an ancestor of any blocked root, or (when deny_globs is
-// configured) is a directory containing a glob-denied descendant.
-func (g *filesystemGuard) CheckNotBlockedOrAncestor(absPath string) error {
+// filesystem root, is an ancestor of any blocked root, or is a directory
+// containing a glob-protected descendant (all deny_globs for deletion;
+// anchored deny_globs only for rename).
+func (g *filesystemGuard) CheckNotBlockedOrAncestor(absPath string, checkAllGlobs bool) error {
 	if err := g.CheckPath(absPath); err != nil {
 		return err
 	}
 	cleaned := filepath.Clean(absPath)
-	if g.isRootOrBlockedAncestor(cleaned) || g.hasGlobBlockedDescendant(cleaned) {
+	if g.isRootOrBlockedAncestor(cleaned) || g.hasGlobBlockedDescendant(cleaned, checkAllGlobs) {
 		return &forbiddenPathError{path: absPath}
 	}
 	canonical := canonicalizeExistingPrefix(cleaned)
 	if canonical != "" && canonical != cleaned &&
-		(g.isRootOrBlockedAncestor(canonical) || g.hasGlobBlockedDescendant(canonical)) {
+		(g.isRootOrBlockedAncestor(canonical) || g.hasGlobBlockedDescendant(canonical, checkAllGlobs)) {
 		return &forbiddenPathError{path: absPath}
 	}
 	return nil
@@ -351,13 +358,17 @@ const maxGlobAncestorWalkEntries = 100_000
 
 var errGlobDescendantBlocked = errors.New("glob-protected descendant")
 
-// hasGlobBlockedDescendant scans dir only when anchored deny_globs (patterns
-// without a leading "**/") are configured, because unanchored "**/" globs
-// continue to match after directory relocation. The scan is capped to bound
+// hasGlobBlockedDescendant scans dir against either all deny_globs (for
+// recursive deletion) or anchored deny_globs only (for rename, where "**/"
+// globs continue to match after relocation). The scan is capped to bound
 // synchronous walk latency and fails closed on unreadable subdirectories or
 // if the cap is exceeded.
-func (g *filesystemGuard) hasGlobBlockedDescendant(dir string) bool {
-	if len(g.anchoredDenyGlobs) == 0 {
+func (g *filesystemGuard) hasGlobBlockedDescendant(dir string, checkAll bool) bool {
+	patterns := g.anchoredDenyGlobs
+	if checkAll {
+		patterns = g.denyGlobs
+	}
+	if len(patterns) == 0 {
 		return false
 	}
 	info, err := os.Lstat(dir)
@@ -378,7 +389,7 @@ func (g *filesystemGuard) hasGlobBlockedDescendant(dir string) bool {
 		if visited > maxGlobAncestorWalkEntries {
 			return errGlobDescendantBlocked
 		}
-		if g.matchesAnchoredDenyGlob(p) {
+		if g.matchesGlobList(p, patterns) {
 			return errGlobDescendantBlocked
 		}
 		return nil
@@ -386,9 +397,9 @@ func (g *filesystemGuard) hasGlobBlockedDescendant(dir string) bool {
 	return errors.Is(walkErr, errGlobDescendantBlocked)
 }
 
-func (g *filesystemGuard) matchesAnchoredDenyGlob(candidate string) bool {
+func (g *filesystemGuard) matchesGlobList(candidate string, patterns []string) bool {
 	norm := normalizeForMatch(candidate, g.windowsMode)
-	for _, pattern := range g.anchoredDenyGlobs {
+	for _, pattern := range patterns {
 		if matchGuardGlob(pattern, norm, g.windowsMode) {
 			return true
 		}
@@ -557,7 +568,7 @@ func (g *filesystemGuard) resolveSymlinkStep(
 
 	// Preserve raw target segments (including "..") so intermediate symlinks
 	// inside target are resolved before ".." is applied, matching kernel semantics.
-	nextCur, targetSegs, ok := expandRawSymlinkTarget(curDir, target)
+	nextCur, targetSegs, ok := expandRawSymlinkTarget(curDir, target, g.windowsMode)
 	if !ok {
 		return "", nil, false, &forbiddenPathError{path: origPath}
 	}
@@ -571,29 +582,32 @@ func (g *filesystemGuard) resolveSymlinkStep(
 	return nextCur, append(targetSegs, remaining...), false, nil
 }
 
-func expandRawSymlinkTarget(curDir, target string) (string, []string, bool) {
+func expandRawSymlinkTarget(curDir, target string, windowsMode bool) (string, []string, bool) {
 	sep := string(filepath.Separator)
-	if filepath.IsAbs(target) || isWindowsAbsPath(target) {
+	if filepath.IsAbs(target) || (windowsMode && isWindowsAbsPath(target)) {
 		vol := filepath.VolumeName(target)
-		if vol == "" && len(target) >= 2 && target[1] == ':' {
+		if windowsMode && vol == "" && len(target) >= 2 && target[1] == ':' {
 			vol = target[:2]
 		}
 		rest := strings.TrimPrefix(target, vol)
-		if !strings.HasPrefix(rest, sep) && !strings.HasPrefix(rest, "/") {
+		if !strings.HasPrefix(rest, sep) && !(windowsMode && strings.HasPrefix(rest, "/")) {
 			return "", nil, false
 		}
-		trimmed := strings.TrimLeft(rest, sep+"/")
-		return vol + sep, splitRawSegments(trimmed), true
+		trimmed := strings.TrimPrefix(rest, sep)
+		if windowsMode {
+			trimmed = strings.TrimLeft(rest, sep+"/")
+		}
+		return vol + sep, splitRawSegments(trimmed, windowsMode), true
 	}
-	return curDir, splitRawSegments(target), true
+	return curDir, splitRawSegments(target, windowsMode), true
 }
 
-func splitRawSegments(p string) []string {
+func splitRawSegments(p string, windowsMode bool) []string {
 	if p == "" {
 		return nil
 	}
 	raw := strings.FieldsFunc(p, func(r rune) bool {
-		return r == filepath.Separator || r == '/'
+		return r == filepath.Separator || (windowsMode && r == '/')
 	})
 	out := make([]string, 0, len(raw))
 	for _, s := range raw {

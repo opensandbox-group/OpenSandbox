@@ -83,6 +83,17 @@ func openGuardedUnixFile(absPath string, flags int, allowDir bool) (*os.File, er
 	if err := verifyOpenedFD(dirfd, absPath, allowDir); err != nil {
 		return nil, err
 	}
+	if flags&unix.O_DIRECTORY != 0 && dirTraversalFlags != unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC {
+		readFD, err := unix.Openat(dirfd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return nil, &os.PathError{Op: "open", Path: absPath, Err: err}
+		}
+		if err := verifyDirFD(readFD, absPath); err != nil {
+			_ = unix.Close(readFD)
+			return nil, err
+		}
+		return os.NewFile(uintptr(readFD), absPath), nil
+	}
 	fd := dirfd
 	dirfd = -1
 	return os.NewFile(uintptr(fd), absPath), nil
@@ -182,7 +193,7 @@ func stepUnixSymlink(
 			return -1, "", nil, &forbiddenPathError{path: absPath}
 		}
 	}
-	nextCur, targetSegs, ok := expandRawSymlinkTarget(curPath, target)
+	nextCur, targetSegs, ok := expandRawSymlinkTarget(curPath, target, false)
 	if !ok {
 		return -1, "", nil, &forbiddenPathError{path: absPath}
 	}

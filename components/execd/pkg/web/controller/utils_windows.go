@@ -98,7 +98,7 @@ func RenameFile(item model.RenameFileItem) error {
 	if err != nil {
 		return fmt.Errorf("invalid destination path: %w", err)
 	}
-	if err := checkNotBlockedOrAncestor(srcPath); err != nil {
+	if err := checkNotBlockedOrAncestorForRename(srcPath); err != nil {
 		return err
 	}
 	if err := checkFilesystemPath(dstPath); err != nil {

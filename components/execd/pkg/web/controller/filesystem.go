@@ -250,7 +250,7 @@ func (c *FilesystemController) RemoveDirs() {
 			c.handleFileError(err)
 			return
 		}
-		if err := checkNotBlockedOrAncestor(absDir); err != nil {
+		if err := checkNotBlockedOrAncestorForDelete(absDir); err != nil {
 			c.handleFileError(err)
 			return
 		}
@@ -360,47 +360,7 @@ func (c *FilesystemController) ListDirectory() {
 }
 
 func listDirectoryEntries(root string, maxDepth int) ([]model.FileInfo, error) {
-	entries := make([]model.FileInfo, 0, 16)
-	if maxDepth == 0 {
-		return entries, nil
-	}
-
-	var walk func(string, int) error
-	walk = func(dir string, currentDepth int) error {
-		dirEntries, err := os.ReadDir(dir)
-		if err != nil {
-			return err
-		}
-
-		for _, entry := range dirEntries {
-			if isAnyStagingName(entry.Name()) {
-				continue
-			}
-			entryPath := filepath.Join(dir, entry.Name())
-			if isWalkEntryBlocked(entryPath, entry) {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				return err
-			}
-
-			entryInfo, err := buildFileInfo(entryPath, info)
-			if err != nil {
-				return err
-			}
-			entries = append(entries, entryInfo)
-
-			if entry.IsDir() && currentDepth+1 < maxDepth {
-				if err := walk(entryPath, currentDepth+1); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-
-	return entries, walk(root, 0)
+	return listDirectoryEntriesPinned(root, maxDepth)
 }
 
 func (c *FilesystemController) SearchFiles() {
@@ -470,51 +430,7 @@ func (c *FilesystemController) SearchFiles() {
 }
 
 func searchFilesInDir(root, pattern string) ([]model.FileInfo, error) {
-	files := make([]model.FileInfo, 0, 16)
-	err := filepath.WalkDir(root, func(filePath string, entry fs.DirEntry, err error) error {
-		if isWalkEntryBlocked(filePath, entry) {
-			if entry != nil && entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("error accessing path %s: %w", filePath, err)
-		}
-		if entry.IsDir() || isAnyStagingName(entry.Name()) {
-			return nil
-		}
-
-		match, err := glob.PathMatch(pattern, entry.Name())
-		if err != nil {
-			return fmt.Errorf("invalid pattern %s: %w", pattern, err)
-		}
-		if !match {
-			return nil
-		}
-
-		// Unmatched entries need no metadata; matched entries may have disappeared.
-		info, err := os.Lstat(filePath)
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("error accessing path %s: %w", filePath, err)
-		}
-		if info.IsDir() {
-			return nil
-		}
-		fileInfo, err := buildFileInfo(filePath, info)
-		if err != nil {
-			return err
-		}
-		files = append(files, fileInfo)
-		return nil
-	})
-	return files, err
+	return searchFilesInDirPinned(root, pattern)
 }
 
 func (c *FilesystemController) ReplaceContent() {

@@ -463,6 +463,10 @@ func TestFilesystemGuardWindowsNormalization(t *testing.T) {
 	require.True(t, g.matchesPath(`C:\Users\Alice\.KUBE\config`))
 	require.True(t, g.matchesPath(`C:\Users\Alice\.git-credentials`))
 	require.False(t, g.matchesPath(`C:\Users\Alice\workspace\main.go`))
+	// POSIX-only default roots must not be blocked on Windows drives.
+	require.False(t, g.matchesPath(`C:\proc`))
+	require.False(t, g.matchesPath(`C:\proc\self\environ`))
+	require.False(t, g.matchesPath(`C:\etc\opensandbox\config.toml`))
 }
 
 func TestFilesystemGuardSymlinkTargetWithNestedDotDotBlocked(t *testing.T) {
@@ -615,10 +619,17 @@ func TestFilesystemGuardBlocksAnchoredGlobAncestorMoveAndDelete(t *testing.T) {
 	require.NoError(t, err, "glob-protected credential file must remain intact")
 
 	// Unanchored "**/" globs still match after relocation and must not over-block
-	// moving a directory containing a matching fixture.
+	// moving a directory containing a matching fixture, while recursive deletion
+	// of an ancestor must still be blocked so the protected file is not destroyed.
 	withTestFilesystemGuard(t, FilesystemGuardPolicy{
 		DenyGlobs: []string{"**/.aws/credentials"},
 	})
+	ctrlRmUnanchored, recRmUnanchored := newFilesystemController(t, http.MethodDelete, "/directories?path="+url.QueryEscape(aliceDir), nil)
+	ctrlRmUnanchored.RemoveDirs()
+	assertForbiddenResponse(t, recRmUnanchored)
+	_, err = os.Stat(credFile)
+	require.NoError(t, err, "unanchored glob-protected credential file must remain intact after RemoveDirs")
+
 	relocatedAlice := filepath.Join(ws, "alice-unanchored")
 	body2, err := json.Marshal([]model.RenameFileItem{{
 		Src:  aliceDir,
@@ -633,8 +644,14 @@ func TestFilesystemGuardBlocksAnchoredGlobAncestorMoveAndDelete(t *testing.T) {
 }
 
 func TestExpandRawSymlinkTargetAcceptsForwardSlashes(t *testing.T) {
-	cur, segs, ok := expandRawSymlinkTarget(`/workspace`, `C:/Windows/System32/../Temp`)
+	cur, segs, ok := expandRawSymlinkTarget(`/workspace`, `C:/Windows/System32/../Temp`, true)
 	require.True(t, ok)
 	require.Equal(t, "C:"+string(filepath.Separator), cur)
 	require.Equal(t, []string{"Windows", "System32", "..", "Temp"}, segs)
+
+	// On Unix, a drive-letter prefix like "C:/..." is a relative path, not a root.
+	curUnix, segsUnix, okUnix := expandRawSymlinkTarget(`/workspace`, `C:/secret/token`, false)
+	require.True(t, okUnix)
+	require.Equal(t, `/workspace`, curUnix)
+	require.Equal(t, []string{"C:", "secret", "token"}, segsUnix)
 }

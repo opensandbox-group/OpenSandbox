@@ -17,14 +17,21 @@
 package controller
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/alibaba/opensandbox/execd/pkg/util/glob"
+	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
 // openGuardedDirFD walks dirPath component-by-component with O_NOFOLLOW and
@@ -275,7 +282,7 @@ func renameGuardedUnixFile(srcPath, dstPath, origSrc, origDest string) error {
 
 	resolvedSrc := filepath.Join(srcResolvedParent, srcBase)
 	if resolvedSrc != filepath.Clean(srcPath) {
-		if err := checkNotBlockedOrAncestor(resolvedSrc); err != nil {
+		if err := checkNotBlockedOrAncestorForRename(resolvedSrc); err != nil {
 			return err
 		}
 	}
@@ -426,7 +433,7 @@ func removeAllGuardedUnix(absPath string) error {
 
 	resolvedEntry := filepath.Join(resolvedParent, base)
 	if resolvedEntry != filepath.Clean(absPath) {
-		if err := checkNotBlockedOrAncestor(resolvedEntry); err != nil {
+		if err := checkNotBlockedOrAncestorForDelete(resolvedEntry); err != nil {
 			return err
 		}
 	}
@@ -524,7 +531,256 @@ func lstatGuardedUnixFile(absPath string) (os.FileInfo, error) {
 			return nil, err
 		}
 	}
-	return os.Lstat(resolvedEntry)
+	return newUnixStatFileInfo(base, &st), nil
+}
+
+type unixStatFileInfo struct {
+	name    string
+	size    int64
+	mode    os.FileMode
+	modTime time.Time
+	sys     *syscall.Stat_t
+}
+
+func newUnixStatFileInfo(name string, st *unix.Stat_t) os.FileInfo {
+	sys, modTime := statTFromUnix(st)
+	return &unixStatFileInfo{
+		name:    name,
+		size:    st.Size,
+		mode:    fileModeFromUnix(uint32(st.Mode)),
+		modTime: modTime,
+		sys:     sys,
+	}
+}
+
+func (fi *unixStatFileInfo) Name() string       { return fi.name }
+func (fi *unixStatFileInfo) Size() int64        { return fi.size }
+func (fi *unixStatFileInfo) Mode() os.FileMode  { return fi.mode }
+func (fi *unixStatFileInfo) ModTime() time.Time { return fi.modTime }
+func (fi *unixStatFileInfo) IsDir() bool        { return fi.mode.IsDir() }
+func (fi *unixStatFileInfo) Sys() any           { return fi.sys }
+
+func fileModeFromUnix(m uint32) os.FileMode {
+	mode := os.FileMode(m & 0o777)
+	switch m & unix.S_IFMT {
+	case unix.S_IFDIR:
+		mode |= os.ModeDir
+	case unix.S_IFLNK:
+		mode |= os.ModeSymlink
+	case unix.S_IFIFO:
+		mode |= os.ModeNamedPipe
+	case unix.S_IFSOCK:
+		mode |= os.ModeSocket
+	case unix.S_IFCHR:
+		mode |= os.ModeDevice | os.ModeCharDevice
+	case unix.S_IFBLK:
+		mode |= os.ModeDevice
+	}
+	if m&unix.S_ISUID != 0 {
+		mode |= os.ModeSetuid
+	}
+	if m&unix.S_ISGID != 0 {
+		mode |= os.ModeSetgid
+	}
+	if m&unix.S_ISVTX != 0 {
+		mode |= os.ModeSticky
+	}
+	return mode
+}
+
+// openReadableGuardedDirFile opens dirPath via the guarded O_NOFOLLOW walk with
+// O_RDONLY|O_DIRECTORY on the final component so ReadDir works even on
+// read-only (0400) directories without requiring +x on dirPath itself.
+func openReadableGuardedDirFile(dirPath string) (*os.File, error) {
+	return openGuardedUnixFile(dirPath, unix.O_RDONLY|unix.O_DIRECTORY, true)
+}
+
+func readSortedDirEntries(dirFile *os.File) ([]os.DirEntry, error) {
+	dirEntries, err := dirFile.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(dirEntries, func(a, b os.DirEntry) int {
+		return cmp.Compare(a.Name(), b.Name())
+	})
+	return dirEntries, nil
+}
+
+func openReadableChildDirFD(parentFD int, name, childPath string) (int, bool, error) {
+	childFD, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) || isSymlinkComponentErr(err) {
+			return -1, false, nil
+		}
+		return -1, false, &os.PathError{Op: "open", Path: childPath, Err: err}
+	}
+	if err := verifyDirFD(childFD, childPath); err != nil {
+		_ = unix.Close(childFD)
+		return -1, false, nil
+	}
+	return childFD, true, nil
+}
+
+func listDirectoryEntriesPinned(root string, maxDepth int) ([]model.FileInfo, error) {
+	entries := make([]model.FileInfo, 0, 16)
+	if maxDepth == 0 {
+		return entries, nil
+	}
+	rootFile, err := openReadableGuardedDirFile(root)
+	if err != nil {
+		return nil, err
+	}
+	return entries, walkListPinned(rootFile, root, 0, maxDepth, &entries)
+}
+
+func walkListPinned(dirFile *os.File, dirPath string, depth, maxDepth int, out *[]model.FileInfo) error {
+	defer dirFile.Close()
+	dirFD := int(dirFile.Fd())
+
+	dirEntries, err := readSortedDirEntries(dirFile)
+	if err != nil {
+		return err
+	}
+	for _, entry := range dirEntries {
+		name := entry.Name()
+		if isAnyStagingName(name) {
+			continue
+		}
+		entryPath := filepath.Join(dirPath, name)
+		if isWalkEntryBlocked(entryPath, entry) {
+			continue
+		}
+		info, err := statEntryAt(dirFD, name, entryPath)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		entryInfo, err := buildFileInfo(entryPath, info)
+		if err != nil {
+			return err
+		}
+		*out = append(*out, entryInfo)
+
+		if info.IsDir() && depth+1 < maxDepth {
+			childFD, ok, err := openReadableChildDirFD(dirFD, name, entryPath)
+			if err != nil {
+				return err
+			}
+			if ok {
+				if err := walkListPinned(os.NewFile(uintptr(childFD), entryPath), entryPath, depth+1, maxDepth, out); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func searchFilesInDirPinned(root, pattern string) ([]model.FileInfo, error) {
+	files := make([]model.FileInfo, 0, 16)
+	rootInfo, err := lstatGuardedUnixFile(root)
+	if err != nil {
+		return nil, err
+	}
+	if !rootInfo.IsDir() {
+		return searchSingleFile(root, rootInfo, pattern)
+	}
+	rootFile, err := openReadableGuardedDirFile(root)
+	if err != nil {
+		return nil, err
+	}
+	return files, walkSearchPinned(rootFile, root, pattern, &files)
+}
+
+func searchSingleFile(path string, info os.FileInfo, pattern string) ([]model.FileInfo, error) {
+	files := make([]model.FileInfo, 0, 1)
+	if isAnyStagingName(info.Name()) {
+		return files, nil
+	}
+	match, err := glob.PathMatch(pattern, info.Name())
+	if err != nil {
+		return nil, fmt.Errorf("invalid pattern %s: %w", pattern, err)
+	}
+	if !match {
+		return files, nil
+	}
+	fi, err := buildFileInfo(path, info)
+	if err != nil {
+		return nil, err
+	}
+	return append(files, fi), nil
+}
+
+func walkSearchPinned(dirFile *os.File, dirPath, pattern string, out *[]model.FileInfo) error {
+	defer dirFile.Close()
+	dirFD := int(dirFile.Fd())
+
+	dirEntries, err := readSortedDirEntries(dirFile)
+	if err != nil {
+		return fmt.Errorf("error accessing path %s: %w", dirPath, err)
+	}
+	for _, entry := range dirEntries {
+		name := entry.Name()
+		entryPath := filepath.Join(dirPath, name)
+		if isWalkEntryBlocked(entryPath, entry) {
+			continue
+		}
+		if entry.IsDir() {
+			childFD, ok, err := openReadableChildDirFD(dirFD, name, entryPath)
+			if err != nil {
+				return fmt.Errorf("error accessing path %s: %w", entryPath, err)
+			}
+			if ok {
+				if err := walkSearchPinned(os.NewFile(uintptr(childFD), entryPath), entryPath, pattern, out); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := matchAndAppendPinned(dirFD, name, entryPath, pattern, out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func matchAndAppendPinned(dirFD int, name, entryPath, pattern string, out *[]model.FileInfo) error {
+	if isAnyStagingName(name) {
+		return nil
+	}
+	match, err := glob.PathMatch(pattern, name)
+	if err != nil {
+		return fmt.Errorf("invalid pattern %s: %w", pattern, err)
+	}
+	if !match {
+		return nil
+	}
+	info, err := statEntryAt(dirFD, name, entryPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("error accessing path %s: %w", entryPath, err)
+	}
+	if info.IsDir() {
+		return nil
+	}
+	fileInfo, err := buildFileInfo(entryPath, info)
+	if err != nil {
+		return err
+	}
+	*out = append(*out, fileInfo)
+	return nil
+}
+
+func statEntryAt(dirFD int, name, fullPath string) (os.FileInfo, error) {
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirFD, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil, &os.PathError{Op: "lstat", Path: fullPath, Err: err}
+	}
+	return newUnixStatFileInfo(name, &st), nil
 }
 
 func renameStagedUpload(tmpName, absTarget string) error {

@@ -19,6 +19,8 @@ package controller
 import (
 	"fmt"
 	"os"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -57,4 +59,20 @@ func chmodChownPinnedLeaf(parentFD int, base, absPath string, mode os.FileMode, 
 
 func renameNoReplaceAt(srcParentFD int, srcBase string, dstParentFD int, dstBase string) error {
 	return unix.Renameat(srcParentFD, srcBase, dstParentFD, dstBase)
+}
+
+func statTFromUnix(st *unix.Stat_t) (*syscall.Stat_t, time.Time) {
+	mtim := syscall.Timespec{Sec: st.Mtim.Sec, Nsec: st.Mtim.Nsec}
+	ctim := syscall.Timespec{Sec: st.Ctim.Sec, Nsec: st.Ctim.Nsec}
+	sys := &syscall.Stat_t{
+		Dev:       st.Dev,
+		Ino:       st.Ino,
+		Mode:      st.Mode,
+		Uid:       st.Uid,
+		Gid:       st.Gid,
+		Size:      st.Size,
+		Mtimespec: mtim,
+		Ctimespec: ctim,
+	}
+	return sys, time.Unix(st.Mtim.Sec, st.Mtim.Nsec)
 }
