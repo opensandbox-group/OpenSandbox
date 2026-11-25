@@ -556,12 +556,16 @@ const config2 = new ConnectionConfig({
 });
 ```
 
+When `debug` is enabled, the SDK logs each outgoing request with the values of
+`OPEN-SANDBOX-API-KEY` and `X-EXECD-ACCESS-TOKEN` redacted.
+
 #### Redirects and protected headers
 
 The SDK strips OpenSandbox credentials before following a cross-origin redirect.
 Same-origin redirects preserve request headers, while cross-origin redirects remove
 every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-`
-(case-insensitive), such as `OPEN-SANDBOX-API-KEY` and `OPENSANDBOX-EGRESS-AUTH`. In
+(case-insensitive), such as `OPEN-SANDBOX-API-KEY` and `OPENSANDBOX-EGRESS-AUTH`,
+as well as the endpoint-issued execd access token `X-EXECD-ACCESS-TOKEN`. In
 addition, the standard credential headers `Authorization`, `Cookie`, and
 `Proxy-Authorization` are removed, matching native `fetch`. An origin is the
 combination of scheme, host, and port, so changing any of those values is

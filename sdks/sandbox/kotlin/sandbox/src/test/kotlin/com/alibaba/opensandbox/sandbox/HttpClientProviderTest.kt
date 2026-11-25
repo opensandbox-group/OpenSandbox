@@ -17,10 +17,17 @@
 package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import com.alibaba.opensandbox.sandbox.domain.models.execd.EXECD_ACCESS_TOKEN_HEADER
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
+import com.alibaba.opensandbox.sandbox.infrastructure.factory.AdapterFactory
 import com.alibaba.opensandbox.sandbox.transport.RetryInterceptor
 import com.alibaba.opensandbox.sandbox.transport.RetryPolicy
+import okhttp3.Request
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -125,6 +132,100 @@ class HttpClientProviderTest {
                 redacted.any { it.equals("X-EXECD-ACCESS-TOKEN", ignoreCase = true) },
                 "Expected X-EXECD-ACCESS-TOKEN to be in headersToRedact, got: $redacted",
             )
+        }
+    }
+
+    @Test
+    fun `cross-origin redirect strips the endpoint execd access token`() {
+        MockWebServer().use { target ->
+            MockWebServer().use { source ->
+                target.enqueue(MockResponse().setBody("ok"))
+                source.enqueue(
+                    MockResponse()
+                        .setResponseCode(302)
+                        .setHeader("Location", target.url("/final")),
+                )
+
+                val endpoint =
+                    SandboxEndpoint(
+                        "${source.hostName}:${source.port}",
+                        // Endpoint resolution and callers may spell the header any way they like.
+                        headers = mapOf("x-execd-access-token" to "endpoint-secret"),
+                    )
+
+                HttpClientProvider(ConnectionConfig.builder().build()).use { provider ->
+                    assertTrue(AdapterFactory(provider).createHealth(endpoint).ping("sandbox-id"))
+                }
+
+                // The endpoint that issued the token still authenticates with it...
+                assertEquals("endpoint-secret", source.takeRequest().getHeader(EXECD_ACCESS_TOKEN_HEADER))
+                // ...but the redirect target never receives it.
+                assertNull(target.takeRequest().getHeader(EXECD_ACCESS_TOKEN_HEADER))
+            }
+        }
+    }
+
+    @Test
+    fun `same-origin redirect keeps the endpoint execd access token`() {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "/final"))
+            server.enqueue(MockResponse().setBody("ok"))
+            val endpoint =
+                SandboxEndpoint(
+                    "${server.hostName}:${server.port}",
+                    headers = mapOf(EXECD_ACCESS_TOKEN_HEADER to "endpoint-secret"),
+                )
+
+            HttpClientProvider(ConnectionConfig.builder().build()).use { provider ->
+                assertTrue(AdapterFactory(provider).createHealth(endpoint).ping("sandbox-id"))
+            }
+
+            repeat(2) {
+                assertEquals("endpoint-secret", server.takeRequest().getHeader(EXECD_ACCESS_TOKEN_HEADER))
+            }
+        }
+    }
+
+    @Test
+    fun `every provider client keeps the execd access token off later foreign hops`() {
+        // OkHttp rebuilds each redirect hop from the application-level request,
+        // so the token reappears on every hop and must be stripped on each one.
+        MockWebServer().use { target ->
+            MockWebServer().use { source ->
+                HttpClientProvider(ConnectionConfig.builder().build()).use { provider ->
+                    val clients =
+                        mapOf(
+                            "http" to provider.httpClient,
+                            "transfer" to provider.transferClient,
+                            "sse" to provider.sseClient,
+                        )
+
+                    for ((label, client) in clients) {
+                        target.enqueue(MockResponse().setResponseCode(302).setHeader("Location", "/final"))
+                        target.enqueue(MockResponse().setBody("ok"))
+                        source.enqueue(
+                            MockResponse()
+                                .setResponseCode(302)
+                                .setHeader("Location", target.url("/hop")),
+                        )
+
+                        // Isolated-session and transfer adapters set endpoint headers on the
+                        // request itself rather than through an interceptor.
+                        val request =
+                            Request.Builder()
+                                .url(source.url("/ping"))
+                                .header(EXECD_ACCESS_TOKEN_HEADER, "endpoint-secret")
+                                .build()
+                        client.newCall(request).execute().use { response ->
+                            assertEquals(200, response.code, label)
+                        }
+
+                        assertEquals("endpoint-secret", source.takeRequest().getHeader(EXECD_ACCESS_TOKEN_HEADER), label)
+                        assertNull(target.takeRequest().getHeader(EXECD_ACCESS_TOKEN_HEADER), "$label /hop")
+                        assertNull(target.takeRequest().getHeader(EXECD_ACCESS_TOKEN_HEADER), "$label /final")
+                    }
+                }
+            }
         }
     }
 }
