@@ -103,6 +103,9 @@ spec:
             - "--provider-type={{ .Values.gateway.providerType }}"
             - "--mode={{ .Values.gateway.gatewayRouteMode }}"
             - "--log-level={{ .Values.gateway.logLevel }}"
+            {{- if .Values.gateway.h2cEnabled }}
+            - "--h2c-enabled=true"
+            {{- end }}
             {{/* 默认发布镜像尚不支持新参数；仅传入偏离默认值的配置，显式 0 仍保留。 */}}
             {{- if ne (toString $maxIdleConns) "100" }}
             - "--http-max-idle-conns={{ $maxIdleConns }}"

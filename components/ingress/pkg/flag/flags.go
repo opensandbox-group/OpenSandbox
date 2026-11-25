@@ -32,6 +32,10 @@ var (
 	// Mode specifies the sandbox service discovery mode (header or uri).
 	Mode string
 
+	// H2CEnabled accepts cleartext HTTP/2 (h2c prior knowledge) on the
+	// listener port, which native gRPC clients need.
+	H2CEnabled bool
+
 	ClientConfig environment.ClientConfig
 )
 

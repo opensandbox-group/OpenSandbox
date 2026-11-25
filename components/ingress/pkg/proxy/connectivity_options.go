@@ -108,8 +108,7 @@ func newHTTPTransport(observer connectivity.Observer, pool *httpConnectionPoolCo
 
 // newGRPCTransport returns the upstream transport for native gRPC requests:
 // HTTP/2 over cleartext (h2c) only, with the same pool settings and dial
-// observation as the HTTP/1.1 transport. Unlike newHTTPTransport it never
-// returns nil, because http.DefaultTransport cannot speak h2c.
+// observation as the HTTP/1.1 transport.
 func newGRPCTransport(observer connectivity.Observer, pool *httpConnectionPoolConfig) http.RoundTripper {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Protocols = new(http.Protocols)

@@ -30,11 +30,13 @@ When routing cannot proceed, the failure is precise — clients can branch on st
 | `503` | Sandbox exists but is not ready — no reachable endpoint yet |
 | `502` | Infrastructure-level failure (cluster API errors and the like) |
 
+Native gRPC callers get these failures as gRPC status codes instead (`404` → `NOT_FOUND`, `503`/`502` → `UNAVAILABLE`, `401` → `UNAUTHENTICATED`), sent as a trailers-only response because gRPC clients ignore `grpc-status` on a non-200 HTTP status. Ingress metrics still record the HTTP status.
+
 Once a sandbox is reached, its responses pass through **verbatim**, including redirects and errors. The ingress never follows a redirect itself, so a stale `Location` can never leak credentials to an unrelated endpoint.
 
 ## Upstream HTTP connection reuse
 
-Each ingress replica reuses one HTTP transport across requests to different sandbox upstreams. Its idle connection pool can be configured independently of connection observation; WebSocket traffic keeps a separate transport. See [Ingress HTTP connection pool](/guides/ingress-connection-pool) for configuration and zero-value semantics, and the [defaults decision](/architecture/network/ingress-http-pool-defaults) for compatibility and resource trade-offs.
+Each ingress replica reuses one HTTP transport across requests to different sandbox upstreams. Its idle connection pool can be configured independently of connection observation; WebSocket traffic keeps a separate transport, and native gRPC uses its own h2c transport with the same pool settings. See [Ingress HTTP connection pool](/guides/ingress-connection-pool) for configuration and zero-value semantics, and the [defaults decision](/architecture/network/ingress-http-pool-defaults) for compatibility and resource trade-offs.
 
 ## WebSocket support
 
@@ -46,9 +48,19 @@ WebSocket is a first-class path, not an upgrade hack bolted onto HTTP proxying:
 - Single messages up to 64 MiB work in either direction, sized for terminal and Jupyter traffic.
 - `Connection` header tokens are matched case-insensitively, and both directions stream without buffering the peer.
 
+## gRPC support
+
+Native gRPC reaches sandbox ports over cleartext HTTP/2 (h2c prior knowledge) on the same listener port as HTTP/1.1 and WebSocket. It is off by default: start the ingress with `--h2c-enabled` (Helm: `gateway.h2cEnabled: true`). Without it, h2c connections are rejected and HTTP/1.1 and WebSocket behave exactly as before.
+
+- Unary, server-streaming, client-streaming, and bidirectional streaming calls are supported; streams flow message by message, and `grpc-status` trailers reach the client unchanged.
+- A request is treated as gRPC when it arrives over HTTP/2 with `Content-Type: application/grpc` or `application/grpc+<codec>`; it is forwarded to the sandbox over h2c. gRPC-Web and all other HTTP keep the HTTP/1.1 upstream path.
+- Route with the `:authority` `<sandbox-id>-<port>.<domain>` or with the `opensandbox-ingress-to` metadata key. Platform metadata (`opensandbox-ingress-to`, `opensandbox-secure-access`, `opensandbox-access-renew`) is stripped before forwarding, as for HTTP headers.
+- Wake-on-access parks the call before it is forwarded. gRPC calls are `POST`, so a call that already reached a stale upstream is never replayed.
+- Fast Sandbox routes also need h2c on the Fastlet proxy hop, which is provided by the fast-sandbox platform.
+
 ## Fronting ingress with TLS
 
-The ingress speaks cleartext HTTP/1.1 and never terminates TLS. Put an L7 proxy in front of it — but mind the WebSocket constraint:
+The ingress speaks cleartext HTTP/1.1 (plus h2c with `--h2c-enabled`) and never terminates TLS. Put an L7 proxy in front of it — but mind the WebSocket constraint:
 
 ![Ingress behind TLS](../../public/images/ingress-tls-l7.svg)
 
@@ -58,7 +70,7 @@ WebSocket-over-HTTP/2 (RFC 8441) is **not** accepted, and RFC 7540 forbids the `
 2. Per-WebSocket HTTP/1.1 fallback, if the proxy supports it while keeping h2 for other traffic.
 3. RFC 8441 → RFC 6455 translation — proxy-specific; verify with a real browser before trusting it.
 
-Never forward HTTP/2 to the ingress itself: the upgrade never reaches the WebSocket handler and the plain proxy path cannot complete the handshake either.
+Never forward a WebSocket upgrade to the ingress over HTTP/2: the upgrade never reaches the WebSocket handler and the plain proxy path cannot complete the handshake either. With `--h2c-enabled`, gRPC (`application/grpc*`) must be forwarded as h2c and other HTTP may use either HTTP/1.1 or h2c; without it, forward everything as HTTP/1.1.
 
 ## Health and network readiness
 

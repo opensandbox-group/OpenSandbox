@@ -142,7 +142,7 @@ func TestIngressServerServesHTTP1AndH2C(t *testing.T) {
 	}
 	server := newIngressServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, r.Proto+" upgrade="+r.Header.Get("Upgrade"))
-	}))
+	}), true)
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 	url := "http://" + listener.Addr().String() + "/"
@@ -180,4 +180,27 @@ func TestIngressServerServesHTTP1AndH2C(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIngressServerRejectsH2CWhenDisabled(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newIngressServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), false)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	url := "http://" + listener.Addr().String() + "/"
+
+	h2c := &http.Transport{Protocols: new(http.Protocols)}
+	h2c.Protocols.SetUnencryptedHTTP2(true)
+	if resp, err := (&http.Client{Transport: h2c}).Get(url); err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("h2c request got %s; want it rejected while h2c is disabled", resp.Proto)
+	}
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("HTTP/1.1 request: %v", err)
+	}
+	_ = resp.Body.Close()
 }
