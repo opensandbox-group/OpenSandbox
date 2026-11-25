@@ -205,7 +205,7 @@ class CodesAdapter(Codes):
             return CodeExecutionConverter.from_api_code_context(parsed)
 
         except Exception as e:
-            logger.error("Failed to create context", exc_info=e)
+            logger.debug("Failed to create context", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def get_context(self, context_id: str) -> CodeContext:
@@ -224,7 +224,7 @@ class CodesAdapter(Codes):
             parsed = require_parsed(response_obj, ApiCodeContext, "Get code context")
             return CodeExecutionConverter.from_api_code_context(parsed)
         except Exception as e:
-            logger.error("Failed to get context", exc_info=e)
+            logger.debug("Failed to get context", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def list_contexts(self, language: str) -> list[CodeContext]:
@@ -242,7 +242,7 @@ class CodesAdapter(Codes):
                 CodeExecutionConverter.from_api_code_context(c) for c in parsed_list
             ]
         except Exception as e:
-            logger.error("Failed to list contexts", exc_info=e)
+            logger.debug("Failed to list contexts", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def delete_context(self, context_id: str) -> None:
@@ -256,7 +256,7 @@ class CodesAdapter(Codes):
             )
             handle_api_error(response_obj, "Delete code context")
         except Exception as e:
-            logger.error("Failed to delete context", exc_info=e)
+            logger.debug("Failed to delete context", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def delete_contexts(self, language: str) -> None:
@@ -272,7 +272,7 @@ class CodesAdapter(Codes):
             )
             handle_api_error(response_obj, "Delete code contexts by language")
         except Exception as e:
-            logger.error("Failed to delete contexts", exc_info=e)
+            logger.debug("Failed to delete contexts", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def run(
@@ -326,9 +326,6 @@ class CodesAdapter(Codes):
             async with client.stream("POST", url, json=api_request) as response:
                 if response.status_code != 200:
                     await response.aread()
-                    logger.error(
-                        f"Failed to run code. Status: {response.status_code}, Body: {response.text}"
-                    )
                     raise build_api_exception_from_httpx(response, "Run code")
 
                 dispatcher = ExecutionEventDispatcher(execution, handlers)
@@ -359,7 +356,7 @@ class CodesAdapter(Codes):
             return execution
 
         except Exception as e:
-            logger.error(f"Failed to run code (length: {len(code)})", exc_info=e)
+            logger.debug(f"Failed to run code (length: {len(code)})", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def interrupt(self, execution_id: str) -> None:
@@ -380,7 +377,7 @@ class CodesAdapter(Codes):
             handle_api_error(response_obj, "Interrupt code execution")
 
         except Exception as e:
-            logger.error("Failed to interrupt code execution", exc_info=e)
+            logger.debug("Failed to interrupt code execution", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     async def ping(self) -> bool:

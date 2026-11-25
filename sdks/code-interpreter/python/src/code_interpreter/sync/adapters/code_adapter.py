@@ -186,7 +186,7 @@ class CodesAdapterSync(CodesSync):
             context_id = None if isinstance(parsed.id, Unset) else parsed.id
             return CodeContextSync(id=context_id, language=parsed.language)
         except Exception as e:
-            logger.error("Failed to create context", exc_info=e)
+            logger.debug("Failed to create context", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def get_context(self, context_id: str) -> CodeContextSync:
@@ -206,7 +206,7 @@ class CodesAdapterSync(CodesSync):
             context_id_val = None if isinstance(parsed.id, Unset) else parsed.id
             return CodeContextSync(id=context_id_val, language=parsed.language)
         except Exception as e:
-            logger.error("Failed to get context", exc_info=e)
+            logger.debug("Failed to get context", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def list_contexts(self, language: str) -> list[CodeContextSync]:
@@ -227,7 +227,7 @@ class CodesAdapterSync(CodesSync):
                 result.append(CodeContextSync(id=context_id_val, language=c.language))
             return result
         except Exception as e:
-            logger.error("Failed to list contexts", exc_info=e)
+            logger.debug("Failed to list contexts", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def delete_context(self, context_id: str) -> None:
@@ -240,7 +240,7 @@ class CodesAdapterSync(CodesSync):
             )
             handle_api_error(response_obj, "Delete code context")
         except Exception as e:
-            logger.error("Failed to delete context", exc_info=e)
+            logger.debug("Failed to delete context", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def delete_contexts(self, language: str) -> None:
@@ -255,7 +255,7 @@ class CodesAdapterSync(CodesSync):
             )
             handle_api_error(response_obj, "Delete code contexts by language")
         except Exception as e:
-            logger.error("Failed to delete contexts", exc_info=e)
+            logger.debug("Failed to delete contexts", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def run(
@@ -341,7 +341,7 @@ class CodesAdapterSync(CodesSync):
             execution.exit_code = infer_foreground_exit_code(execution)
             return execution
         except Exception as e:
-            logger.error(f"Failed to run code (length: {len(code)})", exc_info=e)
+            logger.debug(f"Failed to run code (length: {len(code)})", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def interrupt(self, execution_id: str) -> None:
@@ -359,7 +359,7 @@ class CodesAdapterSync(CodesSync):
             )
             handle_api_error(response_obj, "Interrupt code execution")
         except Exception as e:
-            logger.error("Failed to interrupt code execution", exc_info=e)
+            logger.debug("Failed to interrupt code execution", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
 
     def ping(self) -> bool:
