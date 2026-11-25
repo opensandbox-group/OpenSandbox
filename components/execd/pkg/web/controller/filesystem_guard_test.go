@@ -448,15 +448,93 @@ func TestFilesystemGuardPolicyNormalizesRelativePathsAndFailClosedHops(t *testin
 
 func TestFilesystemGuardWindowsNormalization(t *testing.T) {
 	g, err := buildFilesystemGuardForOS(FilesystemGuardPolicy{
-		ExtraBlockedPaths: []string{`C:\OpenSandbox\secret`},
-		DenyGlobs:         []string{"**/.kube/config", "**/.aws/credentials", "**/.git-credentials"},
+		ExtraBlockedPaths: []string{
+			`C:\OpenSandbox\sub\..\secret\.\\`,
+			`\\fileserver\share\a\..\vault\\`,
+		},
+		DenyGlobs: []string{"**/.kube/config", "**/.aws/credentials", "**/.git-credentials"},
 	}, true)
 	require.NoError(t, err)
 
 	require.True(t, g.matchesPath(`c:\opensandbox\SECRET`))
 	require.True(t, g.matchesPath(`C:\OpenSandbox\secret\token.json`))
+	require.True(t, g.matchesPath(`\\FILESERVER\Share\vault\key.pem`))
 	require.True(t, g.matchesPath(`C:\Users\Alice\.aws\credentials`))
 	require.True(t, g.matchesPath(`C:\Users\Alice\.KUBE\config`))
 	require.True(t, g.matchesPath(`C:\Users\Alice\.git-credentials`))
 	require.False(t, g.matchesPath(`C:\Users\Alice\workspace\main.go`))
+}
+
+func TestFilesystemGuardSymlinkTargetWithNestedDotDotBlocked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink test")
+	}
+	tmp := t.TempDir()
+	blockedDir := filepath.Join(tmp, "blocked")
+	require.NoError(t, os.MkdirAll(blockedDir, 0o755))
+	secretFile := filepath.Join(blockedDir, "secret.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte("secret"), 0o600))
+
+	ws := filepath.Join(tmp, "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+	dirLink := filepath.Join(ws, "dirlink")
+	require.NoError(t, os.Symlink(blockedDir, dirLink))
+	// Symlink target contains "<symlink>/.." which lexical Clean would collapse
+	// to "<ws>/blocked" (allowed), while the kernel resolves dirlink first.
+	xLink := filepath.Join(ws, "x")
+	require.NoError(t, os.Symlink(dirLink+"/../blocked", xLink))
+
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{blockedDir},
+	})
+
+	targetViaX := filepath.Join(xLink, "secret.txt")
+	require.ErrorIs(t, checkFilesystemPath(targetViaX), errForbiddenPath)
+
+	// GET /files/info
+	ctrlInfo, recInfo := newFilesystemController(t, http.MethodGet, "/files/info?path="+url.QueryEscape(targetViaX), nil)
+	ctrlInfo.GetFilesInfo()
+	assertForbiddenResponse(t, recInfo)
+
+	// POST /files/permissions
+	chmodBody, err := json.Marshal(map[string]model.Permission{targetViaX: {Mode: 777}})
+	require.NoError(t, err)
+	ctrlChmod, recChmod := newFilesystemController(t, http.MethodPost, "/files/permissions", chmodBody)
+	ctrlChmod.ChmodFiles()
+	assertForbiddenResponse(t, recChmod)
+
+	// POST /files/mv
+	mvBody, err := json.Marshal([]model.RenameFileItem{{Src: targetViaX, Dest: filepath.Join(ws, "exfil.txt")}})
+	require.NoError(t, err)
+	ctrlMv, recMv := newFilesystemController(t, http.MethodPost, "/files/mv", mvBody)
+	ctrlMv.RenameFiles()
+	assertForbiddenResponse(t, recMv)
+
+	// DELETE /files
+	ctrlDel, recDel := newFilesystemController(t, http.MethodDelete, "/files?path="+url.QueryEscape(targetViaX), nil)
+	ctrlDel.RemoveFiles()
+	assertForbiddenResponse(t, recDel)
+
+	// POST /files/upload
+	upBody, upCT := buildUploadMultipart(t, filepath.Join(xLink, "injected.txt"), []byte("bad"))
+	ctxUp, recUp := newTestContext(http.MethodPost, "/files/upload", upBody.Bytes())
+	ctxUp.Request.Header.Set("Content-Type", upCT)
+	NewFilesystemController(ctxUp).UploadFile()
+	assertForbiddenResponse(t, recUp)
+
+	// POST /directories & DELETE /directories
+	mkBody, err := json.Marshal(map[string]model.Permission{filepath.Join(xLink, "sub"): {Mode: 755}})
+	require.NoError(t, err)
+	ctrlMk, recMk := newFilesystemController(t, http.MethodPost, "/directories", mkBody)
+	ctrlMk.MakeDirs()
+	assertForbiddenResponse(t, recMk)
+
+	ctrlRm, recRm := newFilesystemController(t, http.MethodDelete, "/directories?path="+url.QueryEscape(xLink), nil)
+	ctrlRm.RemoveDirs()
+	assertForbiddenResponse(t, recRm)
+
+	// Verify secret file is intact and untouched.
+	info, err := os.Stat(secretFile)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }

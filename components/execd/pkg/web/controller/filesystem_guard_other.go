@@ -28,6 +28,10 @@ func checkRootDirFS(_ string) error {
 	return nil
 }
 
+func renameStagedUpload(tmpName, absTarget string) error {
+	return os.Rename(tmpName, absTarget)
+}
+
 func openGuardedReadFile(absPath string) (*os.File, error) {
 	f, err := os.Open(absPath)
 	if err != nil {

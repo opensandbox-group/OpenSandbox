@@ -311,7 +311,10 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 	if err := tmp.Close(); err != nil {
 		return uploadWriteError(resolvedTarget, err)
 	}
-	if err := os.Rename(tmpName, resolvedTarget); err != nil {
+	if err := renameStagedUpload(tmpName, absTarget); err != nil {
+		if errors.Is(err, errForbiddenPath) {
+			return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
+		}
 		return uploadWriteError(resolvedTarget, err)
 	}
 	committed = true

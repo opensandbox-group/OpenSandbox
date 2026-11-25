@@ -25,7 +25,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/alibaba/opensandbox/execd/pkg/util/pathutil"
@@ -40,24 +39,7 @@ func DeleteFile(filePath string) error {
 	if err := checkFilesystemPath(absPath); err != nil {
 		return err
 	}
-
-	fileInfo, err := os.Stat(absPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-
-	if fileInfo.IsDir() {
-		return fmt.Errorf("path is a directory: %s", filePath)
-	}
-
-	if err := os.Remove(absPath); err != nil {
-		return fmt.Errorf("failed to remove file: %w", err)
-	}
-
-	return nil
+	return deleteGuardedUnixFile(absPath, filePath)
 }
 
 func ChmodFile(file string, perms model.Permission) error {
@@ -69,33 +51,35 @@ func ChmodFile(file string, perms model.Permission) error {
 		return err
 	}
 
-	if perms.Mode != 0 {
-		mode, err := strconv.ParseUint(strconv.Itoa(perms.Mode), 8, 32)
-		if err != nil {
-			return err
-		}
-		err = os.Chmod(abs, os.FileMode(mode))
+	hasMode := perms.Mode != 0
+	var mode uint64
+	if hasMode {
+		mode, err = strconv.ParseUint(strconv.Itoa(perms.Mode), 8, 32)
 		if err != nil {
 			return err
 		}
 	}
-	return SetFileOwnership(abs, perms.Owner, perms.Group)
-}
-
-func SetFileOwnership(absPath string, owner string, group string) error {
-	if owner == "" && group == "" {
+	hasOwner := perms.Owner != "" || perms.Group != ""
+	if !hasMode && !hasOwner {
 		return nil
 	}
+	uid, gid, err := lookupOwnerGroupIDs(perms.Owner, perms.Group)
+	if err != nil {
+		return err
+	}
+	return chmodGuardedUnixFile(abs, os.FileMode(mode), hasMode, uid, gid, hasOwner)
+}
 
+func lookupOwnerGroupIDs(owner, group string) (int, int, error) {
 	uid := -1
 	if owner != "" {
 		userInfo, err := user.Lookup(owner)
 		if err != nil {
-			return fmt.Errorf("failed to lookup user %s: %w", owner, err)
+			return -1, -1, fmt.Errorf("failed to lookup user %s: %w", owner, err)
 		}
 		uid, err = strconv.Atoi(userInfo.Uid)
 		if err != nil {
-			return fmt.Errorf("failed to convert uid for user %s: %w", owner, err)
+			return -1, -1, fmt.Errorf("failed to convert uid for user %s: %w", owner, err)
 		}
 	}
 
@@ -103,19 +87,25 @@ func SetFileOwnership(absPath string, owner string, group string) error {
 	if group != "" {
 		groupInfo, err := user.LookupGroup(group)
 		if err != nil {
-			return fmt.Errorf("failed to lookup group %s: %w", group, err)
+			return -1, -1, fmt.Errorf("failed to lookup group %s: %w", group, err)
 		}
 		gid, err = strconv.Atoi(groupInfo.Gid)
 		if err != nil {
-			return fmt.Errorf("failed to convert gid for group %s: %w", group, err)
+			return -1, -1, fmt.Errorf("failed to convert gid for group %s: %w", group, err)
 		}
 	}
+	return uid, gid, nil
+}
 
-	if err := os.Chown(absPath, uid, gid); err != nil {
-		return fmt.Errorf("failed to set owner/group for %s: %w", absPath, err)
+func SetFileOwnership(absPath string, owner string, group string) error {
+	if owner == "" && group == "" {
+		return nil
 	}
-
-	return nil
+	uid, gid, err := lookupOwnerGroupIDs(owner, group)
+	if err != nil {
+		return err
+	}
+	return chmodGuardedUnixFile(absPath, 0, false, uid, gid, true)
 }
 
 func RenameFile(item model.RenameFileItem) error {
@@ -135,73 +125,21 @@ func RenameFile(item model.RenameFileItem) error {
 		return err
 	}
 
-	if _, err := os.Stat(srcPath); os.IsNotExist(err) {
-		return fmt.Errorf("source path not found: %s: %w", item.Src, err)
-	}
-
-	dstDir := filepath.Dir(dstPath)
-
-	if err := os.MkdirAll(dstDir, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	if _, err := os.Stat(dstPath); err == nil {
-		return fmt.Errorf("destination path already exists: %s", item.Dest)
-	}
-
-	if err := os.Rename(srcPath, dstPath); err != nil {
-		return fmt.Errorf("failed to rename file: %w", err)
-	}
-
-	return nil
+	return renameGuardedUnixFile(srcPath, dstPath, item.Src, item.Dest)
 }
 
 // MkdirAllWithOwnership creates targetDir and any missing parents, then applies
 // owner/group only to the directories that were actually created (not pre-existing ones).
 func MkdirAllWithOwnership(targetDir string, dirPerm os.FileMode, owner, group string) error {
-	// Walk up to find the first directory that needs to be created.
-	firstNew := ""
-	cur := targetDir
-	for {
-		if _, err := os.Stat(cur); err == nil {
-			break
-		}
-		firstNew = cur
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			break
-		}
-		cur = parent
-	}
-
-	if err := os.MkdirAll(targetDir, dirPerm); err != nil {
-		return err
-	}
-
-	if firstNew == "" || (owner == "" && group == "") {
-		return nil
-	}
-
-	// Apply ownership to every newly created directory from firstNew down to targetDir.
-	rel, err := filepath.Rel(firstNew, targetDir)
+	absDir, err := filepath.Abs(targetDir)
 	if err != nil {
 		return err
 	}
-	parts := strings.Split(rel, string(filepath.Separator))
-	cur = firstNew
-	if err := SetFileOwnership(cur, owner, group); err != nil {
+	uid, gid, err := lookupOwnerGroupIDs(owner, group)
+	if err != nil {
 		return err
 	}
-	for _, p := range parts {
-		if p == "." {
-			continue
-		}
-		cur = filepath.Join(cur, p)
-		if err := SetFileOwnership(cur, owner, group); err != nil {
-			return err
-		}
-	}
-	return nil
+	return mkdirAllGuardedUnix(absDir, dirPerm, uid, gid)
 }
 
 func MakeDir(dir string, perm model.Permission) error {
@@ -228,7 +166,7 @@ func MakeDir(dir string, perm model.Permission) error {
 		if err != nil {
 			return err
 		}
-		return os.Chmod(abs, os.FileMode(mode))
+		return chmodGuardedUnixFile(abs, os.FileMode(mode), true, -1, -1, false)
 	}
 	return nil
 }
@@ -285,8 +223,11 @@ func GetFileInfo(filePath string) (model.FileInfo, error) {
 		return model.FileInfo{}, err
 	}
 
-	fileInfo, err := os.Lstat(absPath)
+	fileInfo, err := lstatGuardedUnixFile(absPath)
 	if err != nil {
+		if errors.Is(err, errForbiddenPath) {
+			return model.FileInfo{}, err
+		}
 		if errors.Is(err, fs.ErrNotExist) {
 			return model.FileInfo{}, fmt.Errorf("file not found: %s: %w", filePath, err)
 		}

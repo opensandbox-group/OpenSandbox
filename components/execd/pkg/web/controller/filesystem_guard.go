@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	stdpath "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -151,11 +152,7 @@ func normalizeBlockedRootInput(raw string, windowsMode bool) (string, bool) {
 		return "", false
 	}
 	if windowsMode && isWindowsAbsPath(raw) {
-		trimmed := strings.TrimRight(strings.ReplaceAll(raw, "\\", "/"), "/")
-		if len(trimmed) <= 2 { // e.g. "C:"
-			return "", false
-		}
-		return raw, true
+		return cleanWindowsAbsPath(raw)
 	}
 	cleaned := filepath.Clean(raw)
 	if !filepath.IsAbs(cleaned) {
@@ -167,6 +164,25 @@ func normalizeBlockedRootInput(raw string, windowsMode bool) (string, bool) {
 		return "", false
 	}
 	return cleaned, true
+}
+
+func cleanWindowsAbsPath(raw string) (string, bool) {
+	slashed := strings.ReplaceAll(raw, "\\", "/")
+	if strings.HasPrefix(slashed, "//") {
+		rest := strings.TrimPrefix(slashed, "//")
+		cleaned := stdpath.Clean("/" + rest)
+		parts := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
+		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+			return "", false
+		}
+		return "//" + strings.Join(parts, "/"), true
+	}
+	drive := slashed[:2]
+	rest := stdpath.Clean(slashed[2:])
+	if rest == "/" || rest == "." {
+		return "", false
+	}
+	return drive + rest, true
 }
 
 func isWindowsAbsPath(p string) bool {
@@ -366,6 +382,13 @@ func (g *filesystemGuard) CheckPath(absPath string) error {
 		if part == "" || part == "." {
 			continue
 		}
+		if part == ".." {
+			cur = filepath.Dir(cur)
+			if g.isStepBlocked(cur, len(remaining) == 0) {
+				return &forbiddenPathError{path: absPath}
+			}
+			continue
+		}
 
 		next := filepath.Join(cur, part)
 		if g.isStepBlocked(next, len(remaining) == 0) {
@@ -422,17 +445,47 @@ func (g *filesystemGuard) resolveSymlinkStep(
 		return "", nil, true, nil
 	}
 
-	resolvedTarget := resolveSymlinkTarget(curDir, target)
-	if g.isStepBlocked(resolvedTarget, len(remaining) == 0) ||
-		g.matchesPath(joinRemaining(resolvedTarget, remaining)) {
-		return "", nil, false, &forbiddenPathError{path: origPath}
-	}
-
-	nextCur, targetSegs, ok := splitAbsolutePath(resolvedTarget)
+	// Preserve raw target segments (including "..") so intermediate symlinks
+	// inside target are resolved before ".." is applied, matching kernel semantics.
+	nextCur, targetSegs, ok := expandRawSymlinkTarget(curDir, target)
 	if !ok {
 		return "", nil, true, nil
 	}
+	if !strings.Contains(target, "..") {
+		resolvedTarget := resolveSymlinkTarget(curDir, target)
+		if g.isStepBlocked(resolvedTarget, len(remaining) == 0) ||
+			g.matchesPath(joinRemaining(resolvedTarget, remaining)) {
+			return "", nil, false, &forbiddenPathError{path: origPath}
+		}
+	}
 	return nextCur, append(targetSegs, remaining...), false, nil
+}
+
+func expandRawSymlinkTarget(curDir, target string) (string, []string, bool) {
+	sep := string(filepath.Separator)
+	if filepath.IsAbs(target) {
+		vol := filepath.VolumeName(target)
+		rest := strings.TrimPrefix(target, vol)
+		if !strings.HasPrefix(rest, sep) {
+			return "", nil, false
+		}
+		return vol + sep, splitRawSegments(strings.TrimPrefix(rest, sep)), true
+	}
+	return curDir, splitRawSegments(target), true
+}
+
+func splitRawSegments(p string) []string {
+	if p == "" {
+		return nil
+	}
+	raw := strings.Split(p, string(filepath.Separator))
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		if s != "" && s != "." {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func resolveSymlinkTarget(curDir, target string) string {

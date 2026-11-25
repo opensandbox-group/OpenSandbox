@@ -254,7 +254,11 @@ func (c *FilesystemController) RemoveDirs() {
 			c.handleFileError(err)
 			return
 		}
-		if err := os.RemoveAll(absDir); err != nil {
+		if err := removeAllGuardedUnix(absDir); err != nil {
+			if errors.Is(err, errForbiddenPath) {
+				c.handleFileError(err)
+				return
+			}
 			c.RespondError(
 				http.StatusInternalServerError,
 				model.ErrorCodeRuntimeError,

@@ -101,3 +101,61 @@ func TestOpenGuardedFileSymlinkSwapTOCTOU(t *testing.T) {
 	stop.Store(true)
 	wg.Wait()
 }
+
+func TestGuardedMutationsParentSymlinkSwapTOCTOU(t *testing.T) {
+	tmp := t.TempDir()
+	blockedDir := filepath.Join(tmp, "blocked")
+	require.NoError(t, os.MkdirAll(blockedDir, 0o755))
+	secretFile := filepath.Join(blockedDir, "secret.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte("SECRET"), 0o600))
+
+	realDir := filepath.Join(tmp, "realdir")
+	require.NoError(t, os.MkdirAll(realDir, 0o755))
+	realFile := filepath.Join(realDir, "secret.txt")
+	require.NoError(t, os.WriteFile(realFile, []byte("PUBLIC"), 0o600))
+
+	slot := filepath.Join(tmp, "slot")
+	require.NoError(t, os.Symlink(realDir, slot))
+
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{blockedDir},
+	})
+
+	var stop atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		swapTmp := filepath.Join(tmp, "slot.tmp")
+		for i := 0; !stop.Load(); i++ {
+			target := realDir
+			if i%2 == 0 {
+				target = blockedDir
+			}
+			_ = os.Remove(swapTmp)
+			if err := os.Symlink(target, swapTmp); err == nil {
+				_ = os.Rename(swapTmp, slot)
+			}
+		}
+	}()
+
+	targetPath := filepath.Join(slot, "secret.txt")
+	exfilDest := filepath.Join(tmp, "exfil.txt")
+	for range 1500 {
+		_ = ChmodFile(targetPath, model.Permission{Mode: 777})
+		_ = RenameFile(model.RenameFileItem{Src: targetPath, Dest: exfilDest})
+		// Restore realFile if it was legitimately moved out of realDir.
+		if _, err := os.Stat(exfilDest); err == nil {
+			data, _ := os.ReadFile(exfilDest)
+			require.NotEqual(t, "SECRET", string(data), "TOCTOU exfiltrated blocked file via RenameFile")
+			_ = os.Rename(exfilDest, realFile)
+		}
+	}
+
+	stop.Store(true)
+	wg.Wait()
+
+	info, err := os.Stat(secretFile)
+	require.NoError(t, err, "blocked secret file must still exist")
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "TOCTOU chmodded blocked secret file")
+}

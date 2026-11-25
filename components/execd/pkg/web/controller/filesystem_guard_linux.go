@@ -20,6 +20,8 @@ import (
 	"errors"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/alibaba/opensandbox/execd/pkg/log"
 )
 
 // openat2Fn allows tests to exercise the fallback and EXDEV error paths.
@@ -48,6 +50,7 @@ func isBlockedFSMagic(fsType uint64) bool {
 func verifyDirFD(fd int, absPath string) error {
 	var stfs unix.Statfs_t
 	if err := unix.Fstatfs(fd, &stfs); err != nil {
+		log.Warn("filesystem guard: fstatfs failed on %s: %v (rejecting fail-closed)", absPath, err)
 		return &forbiddenPathError{path: absPath}
 	}
 	if isBlockedFSMagic(uint64(stfs.Type)) {
@@ -66,6 +69,7 @@ func isBlockedDirFS(dirPath string) bool {
 	defer unix.Close(fd)
 	var stfs unix.Statfs_t
 	if err := unix.Fstatfs(fd, &stfs); err != nil {
+		log.Warn("filesystem guard: fstatfs failed on directory %s: %v (treating as blocked)", dirPath, err)
 		return true
 	}
 	return isBlockedFSMagic(uint64(stfs.Type))

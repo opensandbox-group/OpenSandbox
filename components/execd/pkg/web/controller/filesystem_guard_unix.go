@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
@@ -65,40 +66,18 @@ func openGuardedUnixFile(absPath string, flags int, allowDir bool) (*os.File, er
 			continue
 		}
 
-		isFinal := len(remaining) == 0
-		nextPath := filepath.Join(curPath, part)
-		if g.isStepBlocked(nextPath, isFinal) {
-			return nil, &forbiddenPathError{path: absPath}
-		}
-
-		if isFinal {
-			fd, sym, err := openGuardedLeaf(dirfd, part, absPath, flags, allowDir)
-			if err != nil {
-				return nil, err
-			}
-			if !sym {
-				return finishGuardedFile(fd, absPath, flags), nil
-			}
-		} else {
-			nextFD, sym, err := openGuardedDirComponent(dirfd, part, absPath)
-			if err != nil {
-				return nil, err
-			}
-			if !sym {
-				_ = unix.Close(dirfd)
-				dirfd = nextFD
-				curPath = nextPath
-				continue
-			}
-		}
-
-		hops++
-		newFD, nextCur, nextRem, err := stepUnixSymlink(g, dirfd, part, curPath, absPath, remaining, hops)
+		res, err := stepGuardedUnixPath(g, dirfd, part, curPath, absPath, remaining, flags, allowDir, &hops)
 		if err != nil {
 			return nil, err
 		}
-		_ = unix.Close(dirfd)
-		dirfd, curPath, remaining = newFD, nextCur, nextRem
+		if res.leaf != nil {
+			return res.leaf, nil
+		}
+		if res.nextFD != dirfd {
+			_ = unix.Close(dirfd)
+			dirfd = res.nextFD
+		}
+		curPath, remaining = res.nextCur, res.nextRem
 	}
 
 	if err := verifyOpenedFD(dirfd, absPath, allowDir); err != nil {
@@ -107,6 +86,79 @@ func openGuardedUnixFile(absPath string, flags int, allowDir bool) (*os.File, er
 	fd := dirfd
 	dirfd = -1
 	return os.NewFile(uintptr(fd), absPath), nil
+}
+
+type unixStepResult struct {
+	leaf    *os.File
+	nextFD  int
+	nextCur string
+	nextRem []string
+}
+
+func stepGuardedUnixPath(
+	g *filesystemGuard,
+	dirfd int,
+	part, curPath, absPath string,
+	remaining []string,
+	flags int,
+	allowDir bool,
+	hops *int,
+) (unixStepResult, error) {
+	isFinal := len(remaining) == 0
+	if part == ".." {
+		parentFD, nextCur, err := stepUnixParentDir(g, dirfd, curPath, absPath, isFinal)
+		if err != nil {
+			return unixStepResult{}, err
+		}
+		return unixStepResult{nextFD: parentFD, nextCur: nextCur, nextRem: remaining}, nil
+	}
+
+	nextPath := filepath.Join(curPath, part)
+	if g.isStepBlocked(nextPath, isFinal) {
+		return unixStepResult{}, &forbiddenPathError{path: absPath}
+	}
+
+	if isFinal {
+		fd, sym, err := openGuardedLeaf(dirfd, part, absPath, flags, allowDir)
+		if err != nil {
+			return unixStepResult{}, err
+		}
+		if !sym {
+			return unixStepResult{leaf: finishGuardedFile(fd, absPath, flags)}, nil
+		}
+	} else {
+		nextFD, sym, err := openGuardedDirComponent(dirfd, part, absPath)
+		if err != nil {
+			return unixStepResult{}, err
+		}
+		if !sym {
+			return unixStepResult{nextFD: nextFD, nextCur: nextPath, nextRem: remaining}, nil
+		}
+	}
+
+	*hops++
+	newFD, nextCur, nextRem, err := stepUnixSymlink(g, dirfd, part, curPath, absPath, remaining, *hops)
+	if err != nil {
+		return unixStepResult{}, err
+	}
+	return unixStepResult{nextFD: newFD, nextCur: nextCur, nextRem: nextRem}, nil
+}
+
+func stepUnixParentDir(g *filesystemGuard, dirfd int, curPath, absPath string, isFinal bool) (int, string, error) {
+	parentFD, err := unix.Openat(dirfd, "..", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, "", &os.PathError{Op: "open", Path: absPath, Err: err}
+	}
+	if err := verifyDirFD(parentFD, absPath); err != nil {
+		_ = unix.Close(parentFD)
+		return -1, "", err
+	}
+	nextCur := filepath.Dir(curPath)
+	if g.isStepBlocked(nextCur, isFinal) {
+		_ = unix.Close(parentFD)
+		return -1, "", &forbiddenPathError{path: absPath}
+	}
+	return parentFD, nextCur, nil
 }
 
 func stepUnixSymlink(
@@ -119,15 +171,29 @@ func stepUnixSymlink(
 	if hops > maxGuardSymlinkDepth {
 		return -1, "", nil, &forbiddenPathError{path: absPath}
 	}
-	nextCur, nextRem, err := followUnixSymlinkAt(g, dirfd, part, curPath, absPath, remaining)
+	target, err := readlinkAt(dirfd, part)
 	if err != nil {
-		return -1, "", nil, err
+		return -1, "", nil, &os.PathError{Op: "readlink", Path: absPath, Err: err}
 	}
-	newRoot, err := openRootDirFD()
-	if err != nil {
-		return -1, "", nil, &os.PathError{Op: "open", Path: absPath, Err: err}
+	if !strings.Contains(target, "..") {
+		resolvedTarget := resolveSymlinkTarget(curPath, target)
+		if g.isStepBlocked(resolvedTarget, len(remaining) == 0) ||
+			g.matchesPath(joinRemaining(resolvedTarget, remaining)) {
+			return -1, "", nil, &forbiddenPathError{path: absPath}
+		}
 	}
-	return newRoot, nextCur, nextRem, nil
+	nextCur, targetSegs, ok := expandRawSymlinkTarget(curPath, target)
+	if !ok {
+		return -1, "", nil, &forbiddenPathError{path: absPath}
+	}
+	if filepath.IsAbs(target) {
+		newRoot, err := openRootDirFD()
+		if err != nil {
+			return -1, "", nil, &os.PathError{Op: "open", Path: absPath, Err: err}
+		}
+		return newRoot, nextCur, append(targetSegs, remaining...), nil
+	}
+	return dirfd, nextCur, append(targetSegs, remaining...), nil
 }
 
 func openRootDirFD() (int, error) {
@@ -171,28 +237,6 @@ func openGuardedLeaf(dirfd int, part, absPath string, flags int, allowDir bool) 
 func finishGuardedFile(fd int, absPath string, flags int) *os.File {
 	_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags&^unix.O_NONBLOCK)
 	return os.NewFile(uintptr(fd), absPath)
-}
-
-func followUnixSymlinkAt(
-	g *filesystemGuard,
-	dirfd int,
-	part, curPath, absPath string,
-	remaining []string,
-) (string, []string, error) {
-	target, err := readlinkAt(dirfd, part)
-	if err != nil {
-		return "", nil, &os.PathError{Op: "readlink", Path: absPath, Err: err}
-	}
-	resolvedTarget := resolveSymlinkTarget(curPath, target)
-	if g.isStepBlocked(resolvedTarget, len(remaining) == 0) ||
-		g.matchesPath(joinRemaining(resolvedTarget, remaining)) {
-		return "", nil, &forbiddenPathError{path: absPath}
-	}
-	nextCur, targetSegs, ok := splitAbsolutePath(resolvedTarget)
-	if !ok {
-		return "", nil, &forbiddenPathError{path: absPath}
-	}
-	return nextCur, append(targetSegs, remaining...), nil
 }
 
 func isSymlinkComponentErr(err error) bool {
