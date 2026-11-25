@@ -182,6 +182,9 @@ func chmodGuardedUnixFile(absPath string, mode os.FileMode, hasMode bool, uid, g
 }
 
 func renameGuardedUnixFile(srcPath, dstPath, origSrc, origDest string) error {
+	if err := checkNotBlockedOrAncestor(srcPath); err != nil {
+		return err
+	}
 	srcParentFD, srcBase, srcResolvedParent, err := openGuardedParentDirFD(srcPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -191,6 +194,11 @@ func renameGuardedUnixFile(srcPath, dstPath, origSrc, origDest string) error {
 	}
 	defer unix.Close(srcParentFD)
 
+	resolvedSrc := filepath.Join(srcResolvedParent, srcBase)
+	if err := checkNotBlockedOrAncestor(resolvedSrc); err != nil {
+		return err
+	}
+
 	var srcSt unix.Stat_t
 	if err := unix.Fstatat(srcParentFD, srcBase, &srcSt, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 		if errors.Is(err, unix.ENOENT) {
@@ -199,7 +207,7 @@ func renameGuardedUnixFile(srcPath, dstPath, origSrc, origDest string) error {
 		return &os.PathError{Op: "lstat", Path: srcPath, Err: err}
 	}
 	if srcSt.Mode&unix.S_IFMT == unix.S_IFLNK {
-		if err := checkFilesystemPath(filepath.Join(srcResolvedParent, srcBase)); err != nil {
+		if err := checkFilesystemPath(resolvedSrc); err != nil {
 			return err
 		}
 	}
@@ -323,6 +331,9 @@ func openOrCreateGuardedDir(dirfd int, part, origPath string, perm os.FileMode, 
 }
 
 func removeAllGuardedUnix(absPath string) error {
+	if err := checkNotBlockedOrAncestor(absPath); err != nil {
+		return err
+	}
 	parentFD, base, resolvedParent, err := openGuardedParentDirFD(absPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -331,6 +342,11 @@ func removeAllGuardedUnix(absPath string) error {
 		return err
 	}
 	defer unix.Close(parentFD)
+
+	resolvedEntry := filepath.Join(resolvedParent, base)
+	if err := checkNotBlockedOrAncestor(resolvedEntry); err != nil {
+		return err
+	}
 
 	var st unix.Stat_t
 	if err := unix.Fstatat(parentFD, base, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
@@ -341,7 +357,7 @@ func removeAllGuardedUnix(absPath string) error {
 	}
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFLNK:
-		if err := checkFilesystemPath(filepath.Join(resolvedParent, base)); err != nil {
+		if err := checkFilesystemPath(resolvedEntry); err != nil {
 			return err
 		}
 		return unix.Unlinkat(parentFD, base, 0)

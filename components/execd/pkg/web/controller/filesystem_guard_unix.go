@@ -29,7 +29,7 @@ func openGuardedReadFile(absPath string) (*os.File, error) {
 	return openGuardedUnixFile(absPath, unix.O_RDONLY, true)
 }
 
-func openGuardedWriteFile(absPath string, flags int, _ os.FileMode) (*os.File, error) {
+func openGuardedWriteFile(absPath string, flags int) (*os.File, error) {
 	return openGuardedUnixFile(absPath, flags, false)
 }
 

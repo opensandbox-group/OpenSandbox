@@ -227,7 +227,7 @@ func (c *FilesystemController) RemoveDirs() {
 			c.handleFileError(err)
 			return
 		}
-		if err := checkFilesystemPath(absDir); err != nil {
+		if err := checkNotBlockedOrAncestor(absDir); err != nil {
 			c.handleFileError(err)
 			return
 		}
@@ -541,7 +541,6 @@ func (c *FilesystemController) ReplaceContent() {
 			c.handleFileError(err)
 			return
 		}
-		mode := fileInfo.Mode()
 
 		if item.Old == "" {
 			c.RespondError(http.StatusBadRequest, model.ErrorCodeInvalidRequest, "old content must not be empty")
@@ -555,7 +554,7 @@ func (c *FilesystemController) ReplaceContent() {
 			c.handleFileError(err)
 			return
 		}
-		writeFile, err := openGuardedWriteFile(file, os.O_WRONLY|os.O_TRUNC, mode)
+		writeFile, err := openGuardedWriteFile(file, os.O_WRONLY|os.O_TRUNC)
 		if err != nil {
 			c.handleFileError(err)
 			return

@@ -250,7 +250,7 @@ func (c *FilesystemController) RemoveDirs() {
 			c.handleFileError(err)
 			return
 		}
-		if err := checkFilesystemPath(absDir); err != nil {
+		if err := checkNotBlockedOrAncestor(absDir); err != nil {
 			c.handleFileError(err)
 			return
 		}
@@ -574,7 +574,7 @@ func replaceSingleFile(rawPath string, item model.ReplaceFileContentItem) (int, 
 		return 0, "", err
 	}
 
-	content, mode, err := readGuardedRegularFile(file)
+	content, err := readGuardedRegularFile(file)
 	if err != nil {
 		return 0, "", err
 	}
@@ -584,35 +584,31 @@ func replaceSingleFile(rawPath string, item model.ReplaceFileContentItem) (int, 
 
 	contentStr := string(content)
 	newContent := strings.ReplaceAll(contentStr, item.Old, item.New)
-	if err := writeGuardedRegularFile(file, newContent, mode); err != nil {
+	if err := writeGuardedRegularFile(file, newContent); err != nil {
 		return 0, "", err
 	}
 	return strings.Count(contentStr, item.Old), "", nil
 }
 
-func readGuardedRegularFile(file string) ([]byte, os.FileMode, error) {
+func readGuardedRegularFile(file string) ([]byte, error) {
 	readFile, err := openGuardedReadFile(file)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	defer readFile.Close()
 
 	fileInfo, err := readFile.Stat()
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	if fileInfo.IsDir() {
-		return nil, 0, fmt.Errorf("path is a directory: %s", file)
+		return nil, fmt.Errorf("path is a directory: %s", file)
 	}
-	content, err := io.ReadAll(readFile)
-	if err != nil {
-		return nil, 0, err
-	}
-	return content, fileInfo.Mode(), nil
+	return io.ReadAll(readFile)
 }
 
-func writeGuardedRegularFile(file, content string, mode os.FileMode) error {
-	writeFile, err := openGuardedWriteFile(file, os.O_WRONLY|os.O_TRUNC, mode)
+func writeGuardedRegularFile(file, content string) error {
+	writeFile, err := openGuardedWriteFile(file, os.O_WRONLY|os.O_TRUNC)
 	if err != nil {
 		return err
 	}

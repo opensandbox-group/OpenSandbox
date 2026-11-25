@@ -538,3 +538,44 @@ func TestFilesystemGuardSymlinkTargetWithNestedDotDotBlocked(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
+
+func TestFilesystemGuardBlocksAncestorDeleteAndRename(t *testing.T) {
+	tmp := t.TempDir()
+	parentDir := filepath.Join(tmp, "parent")
+	blockedDir := filepath.Join(parentDir, "blocked")
+	require.NoError(t, os.MkdirAll(blockedDir, 0o755))
+	secretFile := filepath.Join(blockedDir, "secret.txt")
+	require.NoError(t, os.WriteFile(secretFile, []byte("secret"), 0o600))
+
+	ws := filepath.Join(tmp, "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		ExtraBlockedPaths: []string{blockedDir},
+	})
+
+	// DELETE /directories on ancestor of blocked root or filesystem root -> 403.
+	for _, target := range []string{parentDir, string(filepath.Separator)} {
+		ctrl, rec := newFilesystemController(t, http.MethodDelete, "/directories?path="+url.QueryEscape(target), nil)
+		ctrl.RemoveDirs()
+		assertForbiddenResponse(t, rec)
+	}
+	_, err := os.Stat(secretFile)
+	require.NoError(t, err, "ancestor RemoveDirs must not remove blocked subtree")
+
+	// POST /files/mv relocating ancestor of blocked root or filesystem root -> 403.
+	for _, src := range []string{parentDir, string(filepath.Separator)} {
+		body, err := json.Marshal([]model.RenameFileItem{{
+			Src:  src,
+			Dest: filepath.Join(ws, "relocated"),
+		}})
+		require.NoError(t, err)
+		ctrl, rec := newFilesystemController(t, http.MethodPost, "/files/mv", body)
+		ctrl.RenameFiles()
+		assertForbiddenResponse(t, rec)
+	}
+	_, err = os.Stat(secretFile)
+	require.NoError(t, err, "ancestor RenameFiles must not relocate blocked subtree")
+	_, err = os.Stat(filepath.Join(ws, "relocated"))
+	require.True(t, os.IsNotExist(err))
+}

@@ -44,8 +44,8 @@ func openGuardedReadFile(absPath string) (*os.File, error) {
 	return f, nil
 }
 
-func openGuardedWriteFile(absPath string, flags int, perm os.FileMode) (*os.File, error) {
-	f, err := os.OpenFile(absPath, flags, perm)
+func openGuardedWriteFile(absPath string, flags int) (*os.File, error) {
+	f, err := os.OpenFile(absPath, flags, 0)
 	if err != nil {
 		return nil, err
 	}

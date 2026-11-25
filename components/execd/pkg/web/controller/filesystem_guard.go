@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	stdpath "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -170,7 +169,7 @@ func cleanWindowsAbsPath(raw string) (string, bool) {
 	slashed := strings.ReplaceAll(raw, "\\", "/")
 	if strings.HasPrefix(slashed, "//") {
 		rest := strings.TrimPrefix(slashed, "//")
-		cleaned := stdpath.Clean("/" + rest)
+		cleaned := cleanSlashPath("/" + rest)
 		parts := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
 		if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 			return "", false
@@ -178,11 +177,28 @@ func cleanWindowsAbsPath(raw string) (string, bool) {
 		return "//" + strings.Join(parts, "/"), true
 	}
 	drive := slashed[:2]
-	rest := stdpath.Clean(slashed[2:])
+	rest := cleanSlashPath(slashed[2:])
 	if rest == "/" || rest == "." {
 		return "", false
 	}
 	return drive + rest, true
+}
+
+func cleanSlashPath(p string) string {
+	var stack []string
+	for _, seg := range strings.Split(p, "/") {
+		switch seg {
+		case "", ".":
+			continue
+		case "..":
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		default:
+			stack = append(stack, seg)
+		}
+	}
+	return "/" + strings.Join(stack, "/")
 }
 
 func isWindowsAbsPath(p string) bool {
@@ -298,6 +314,41 @@ func getFilesystemGuard() *filesystemGuard {
 
 func checkFilesystemPath(absPath string) error {
 	return getFilesystemGuard().CheckPath(absPath)
+}
+
+func checkNotBlockedOrAncestor(absPath string) error {
+	return getFilesystemGuard().CheckNotBlockedOrAncestor(absPath)
+}
+
+// CheckNotBlockedOrAncestor rejects absPath if it is blocked itself, is the
+// filesystem root, or is an ancestor of any blocked root (preventing recursive
+// directory deletion or parent rename from removing/relocating blocked trees).
+func (g *filesystemGuard) CheckNotBlockedOrAncestor(absPath string) error {
+	if err := g.CheckPath(absPath); err != nil {
+		return err
+	}
+	cleaned := filepath.Clean(absPath)
+	if g.isRootOrBlockedAncestor(cleaned) {
+		return &forbiddenPathError{path: absPath}
+	}
+	if canonical := canonicalizeExistingPrefix(cleaned); canonical != "" && g.isRootOrBlockedAncestor(canonical) {
+		return &forbiddenPathError{path: absPath}
+	}
+	return nil
+}
+
+func (g *filesystemGuard) isRootOrBlockedAncestor(candidate string) bool {
+	norm := normalizeForMatch(candidate, g.windowsMode)
+	if norm == "" || (g.windowsMode && len(norm) == 2 && norm[1] == ':') {
+		return true
+	}
+	prefix := norm + "/"
+	for _, root := range g.blockedRoots {
+		if root == norm || strings.HasPrefix(root, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // isWalkEntryBlocked checks a directory-walk entry without performing an

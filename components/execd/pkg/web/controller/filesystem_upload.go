@@ -226,37 +226,9 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 		return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
 	}
 
-	existing, statErr := os.Stat(resolvedTarget)
-	switch {
-	case statErr == nil && !existing.Mode().IsRegular():
-		// A device or a FIFO cannot be staged and renamed over without replacing
-		// the node with a regular file, so refuse them.
-		return newUploadError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error opening destination file %s. not a regular file", resolvedTarget),
-		)
-	case statErr == nil:
-		// A rename only needs a writable directory, so probe the file itself to
-		// keep rejecting a read-only destination the way an in-place write did.
-		probe, err := openGuardedWriteFile(absTarget, os.O_WRONLY, 0)
-		if err != nil {
-			if errors.Is(err, errForbiddenPath) {
-				return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
-			}
-			return newUploadError(
-				http.StatusInternalServerError,
-				model.ErrorCodeRuntimeError,
-				fmt.Sprintf("error opening destination file %s. %v", resolvedTarget, err),
-			)
-		}
-		_ = probe.Close()
-	case !errors.Is(statErr, fs.ErrNotExist):
-		return newUploadError(
-			http.StatusInternalServerError,
-			model.ErrorCodeRuntimeError,
-			fmt.Sprintf("error opening destination file %s. %v", resolvedTarget, statErr),
-		)
+	existing, statErr, uerr := probeUploadDestination(absTarget, resolvedTarget)
+	if uerr != nil {
+		return uerr
 	}
 
 	stagingPerm := os.FileMode(os.ModePerm)
@@ -312,10 +284,7 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 		return uploadWriteError(resolvedTarget, err)
 	}
 	if err := renameStagedUpload(tmpName, absTarget); err != nil {
-		if errors.Is(err, errForbiddenPath) {
-			return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
-		}
-		return uploadWriteError(resolvedTarget, err)
+		return uploadRenameError(resolvedTarget, err)
 	}
 	committed = true
 
@@ -330,6 +299,49 @@ func writeUploadStream(target string, r io.Reader) *uploadError {
 		_ = d.Close()
 	}
 	return nil
+}
+
+func probeUploadDestination(absTarget, resolvedTarget string) (os.FileInfo, error, *uploadError) {
+	existing, statErr := os.Stat(resolvedTarget)
+	switch {
+	case statErr == nil && !existing.Mode().IsRegular():
+		// A device or a FIFO cannot be staged and renamed over without replacing
+		// the node with a regular file, so refuse them.
+		return nil, statErr, newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error opening destination file %s. not a regular file", resolvedTarget),
+		)
+	case statErr == nil:
+		// A rename only needs a writable directory, so probe the file itself to
+		// keep rejecting a read-only destination the way an in-place write did.
+		probe, err := openGuardedWriteFile(absTarget, os.O_WRONLY)
+		if err != nil {
+			if errors.Is(err, errForbiddenPath) {
+				return nil, statErr, newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
+			}
+			return nil, statErr, newUploadError(
+				http.StatusInternalServerError,
+				model.ErrorCodeRuntimeError,
+				fmt.Sprintf("error opening destination file %s. %v", resolvedTarget, err),
+			)
+		}
+		_ = probe.Close()
+	case !errors.Is(statErr, fs.ErrNotExist):
+		return nil, statErr, newUploadError(
+			http.StatusInternalServerError,
+			model.ErrorCodeRuntimeError,
+			fmt.Sprintf("error opening destination file %s. %v", resolvedTarget, statErr),
+		)
+	}
+	return existing, statErr, nil
+}
+
+func uploadRenameError(path string, err error) *uploadError {
+	if errors.Is(err, errForbiddenPath) {
+		return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
+	}
+	return uploadWriteError(path, err)
 }
 
 // uploadDestinationMode keeps the permission bits an in-place write preserved,
@@ -354,7 +366,7 @@ func writeUploadInPlace(target string, r io.Reader) *uploadError {
 	if err := checkFilesystemPath(absTarget); err != nil {
 		return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
 	}
-	file, err := openGuardedWriteFile(absTarget, os.O_WRONLY|os.O_TRUNC, 0)
+	file, err := openGuardedWriteFile(absTarget, os.O_WRONLY|os.O_TRUNC)
 	if err != nil {
 		if errors.Is(err, errForbiddenPath) {
 			return newUploadError(http.StatusForbidden, model.ErrorCodePermissionDenied, err.Error())
