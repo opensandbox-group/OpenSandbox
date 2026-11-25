@@ -45,6 +45,11 @@ import (
 func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
+	if snapshot.Annotations[workspacePauseAnnotation] == "true" {
+		// The separate workspace controller owns exports; keep this queue available for other snapshots and finalizers.
+		return ctrl.Result{}, nil
+	}
+
 	// A retry must keep the targets already recorded for an existing commit Job.
 	existingJob := &batchv1.Job{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: snapshot.Namespace, Name: r.getJobName(snapshot)}, existingJob); err == nil {
@@ -72,6 +77,10 @@ func (r *SandboxSnapshotReconciler) handlePending(ctx context.Context, snapshot 
 		msg := fmt.Sprintf("failed to get BatchSandbox %s: %v", snapshot.Spec.SandboxName, err)
 		_ = r.updateSnapshotStatus(ctx, snapshot, sandboxv1alpha1.SandboxSnapshotPhaseFailed, "BatchSandboxLookupFailed", msg)
 		return ctrl.Result{}, nil
+	}
+
+	if hasBatchSandboxControllerOwner(snapshot) && workspaceModeChanged(bs, snapshot) {
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 
 	pod, err := r.findPodForSandbox(ctx, bs, snapshot.Namespace)
@@ -194,6 +203,11 @@ func findJobCondition(conditions []batchv1.JobCondition, conditionType batchv1.J
 // handleDeletion cleans up the commit job and removes the finalizer.
 func (r *SandboxSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *sandboxv1alpha1.SandboxSnapshot) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+
+	if snapshot.Annotations[workspacePauseAnnotation] == "true" {
+		// PVC data has an independent retention policy. No controller Jobs exist for this format.
+		return ctrl.Result{}, utils.UpdateFinalizer(r.Client, snapshot, utils.RemoveFinalizerOpType, sandboxSnapshotFinalizer)
+	}
 
 	jobName := r.getJobName(snapshot)
 	job := &batchv1.Job{}

@@ -1045,9 +1045,8 @@ class BatchSandboxProvider(WorkloadProvider):
         - Failed + PauseFailed=True: not allowed (sandbox unavailable)
         - Completed: not allowed (workload finished, terminal)
 
-        A pause commits the rootfs with the same committer as public snapshots,
-        so it is refused for a gVisor runtime, and when the runtime cannot be
-        verified, before anything is patched.
+        A rootfs pause uses the public snapshot committer and requires a
+        supported runtime. A workspace-only pause archives files from the Pod.
         """
         batchsandbox = self.get_workload(sandbox_id, namespace)
         if not batchsandbox:
@@ -1079,7 +1078,8 @@ class BatchSandboxProvider(WorkloadProvider):
         else:
             raise ValueError(f"Cannot pause sandbox in phase {phase}")
 
-        self._reject_unsupported_pause_runtime(batchsandbox, sandbox_id, namespace)
+        if batchsandbox.get("spec", {}).get("workspacePause") is None:
+            self._reject_unsupported_pause_runtime(batchsandbox, sandbox_id, namespace)
 
         if pause_failed:
             self._patch_pause_with_retry_bridge(sandbox_id, namespace, True)

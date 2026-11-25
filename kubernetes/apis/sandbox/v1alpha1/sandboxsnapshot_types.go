@@ -16,6 +16,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // +kubebuilder:validation:Enum=Pending;Committing;Succeed;Failed
@@ -42,12 +43,13 @@ const (
 
 // SandboxSnapshotFormat identifies the persisted snapshot representation.
 // Existing snapshots without this field are interpreted as rootfs-v1.
-// +kubebuilder:validation:Enum=rootfs-v1;qemu-v1
+// +kubebuilder:validation:Enum=rootfs-v1;qemu-v1;workspace-v1
 type SandboxSnapshotFormat string
 
 const (
-	SandboxSnapshotFormatRootfsV1 SandboxSnapshotFormat = "rootfs-v1"
-	SandboxSnapshotFormatQEMUV1   SandboxSnapshotFormat = "qemu-v1"
+	SandboxSnapshotFormatWorkspaceV1 SandboxSnapshotFormat = "workspace-v1"
+	SandboxSnapshotFormatRootfsV1    SandboxSnapshotFormat = "rootfs-v1"
+	SandboxSnapshotFormatQEMUV1      SandboxSnapshotFormat = "qemu-v1"
 )
 
 // ContainerSnapshot records the snapshot result for a single container.
@@ -149,6 +151,10 @@ type SandboxSnapshotStatus struct {
 	// +optional
 	Format SandboxSnapshotFormat `json:"format,omitempty"`
 
+	// Workspace identifies a durable workspace archive on a namespaced PVC.
+	// +optional
+	Workspace *WorkspaceCheckpoint `json:"workspace,omitempty"`
+
 	// Containers holds per-container snapshot results, filled after Succeed.
 	// +optional
 	Containers []ContainerSnapshot `json:"containers,omitempty"`
@@ -203,4 +209,17 @@ type SandboxSnapshotList struct {
 
 func init() {
 	SchemeBuilder.Register(&SandboxSnapshot{}, &SandboxSnapshotList{})
+}
+
+// WorkspaceCheckpoint pins the archive, backing claim and target captured at pause.
+type WorkspaceCheckpoint struct {
+	SourcePodUID       types.UID `json:"sourcePodUID"`
+	WorkspacePauseSpec `json:",inline"`
+	ClaimName          string `json:"claimName"`
+	Archive            string `json:"archive"`
+	SHA256             string `json:"sha256"`
+	// SizeBytes is the uncompressed tar size. Older checkpoints omit it.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
 }

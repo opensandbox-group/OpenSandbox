@@ -99,6 +99,20 @@ def test_pause_retry_after_pause_failed_also_refuses_gvisor() -> None:
     client.patch_custom_object.assert_not_called()
 
 
+def test_workspace_pause_on_gvisor_does_not_require_the_rootfs_committer() -> None:
+    client = _client({"runtimeClassName": "sandboxed"}, {"sandboxed": {"handler": "runsc"}})
+    client.get_custom_object.return_value["spec"] = {
+        "replicas": 1,
+        "workspacePause": {"containerName": "sandbox", "volumeName": "checkpoints"},
+    }
+
+    BatchSandboxProvider(client).pause_sandbox(SANDBOX_ID, NAMESPACE)
+
+    client.read_runtime_class.assert_not_called()
+    client.patch_custom_object.assert_called_once()
+    assert client.patch_custom_object.call_args.kwargs["body"] == {"spec": {"pause": True}}
+
+
 def test_pause_refuses_gvisor_handler_of_allocated_pool_pod() -> None:
     client = _client(
         {},

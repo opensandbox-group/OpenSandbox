@@ -140,6 +140,10 @@ type BatchSandboxSpec struct {
 	// Controller never clears this field; Server may temporarily patch nil to force a new generation for retries.
 	// +optional
 	Pause *bool `json:"pause,omitempty"`
+
+	// WorkspacePause opts in to archiving /workspace on a mounted PVC for pause/resume.
+	// +optional
+	WorkspacePause *WorkspacePauseSpec `json:"workspacePause,omitempty"`
 }
 
 type TaskResourcePolicy string
@@ -377,4 +381,10 @@ type TaskStateTerminated struct {
 	// Time at which the task last terminated
 	// +optional
 	FinishedAt metav1.Time `json:"finishedAt,omitempty"`
+}
+
+// WorkspacePauseSpec selects the application container and its mounted checkpoint PVC.
+type WorkspacePauseSpec struct {
+	ContainerName string `json:"containerName"`
+	VolumeName    string `json:"volumeName"`
 }

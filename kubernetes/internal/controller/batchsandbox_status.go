@@ -109,11 +109,11 @@ func recordCompletedReadyCondition(status *sandboxv1alpha1.BatchSandboxStatus, m
 	status.Conditions = append(status.Conditions, updated)
 }
 
-func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus) {
+func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus, pods ...*corev1.Pod) {
 	switch status.Phase {
 	case sandboxv1alpha1.BatchSandboxPhasePending:
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionFalse, "Creating", "Sandbox is being created")
-		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionTrue, "Creating", "Sandbox is being created")
+		setProgressingCondition(status, pods, "Creating", "Sandbox is being created")
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
 	case sandboxv1alpha1.BatchSandboxPhaseSucceed:
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionTrue, "PodsReady", "Sandbox is running")
@@ -129,7 +129,7 @@ func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionTrue, "Paused", "Sandbox is paused")
 	case sandboxv1alpha1.BatchSandboxPhaseResuming:
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionFalse, "ResumeInProgress", "Resuming sandbox")
-		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionTrue, "ResumeInProgress", "Resuming sandbox")
+		setProgressingCondition(status, pods, "ResumeInProgress", "Resuming sandbox")
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
 	case sandboxv1alpha1.BatchSandboxPhaseFailed:
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionReady, sandboxv1alpha1.ConditionFalse, "Failed", "Sandbox is unavailable")
@@ -142,6 +142,33 @@ func applyBatchSandboxPhaseConditions(status *sandboxv1alpha1.BatchSandboxStatus
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionFalse, "", "")
 		setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionPaused, sandboxv1alpha1.ConditionFalse, "", "")
 	}
+}
+
+// A retrying workspace init is still progressing. Publishing a terminal failure here
+// would prevent recovery when the archive becomes available on a later attempt.
+func setProgressingCondition(status *sandboxv1alpha1.BatchSandboxStatus, pods []*corev1.Pod, reason, message string) {
+	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil || !hasRestoredWorkspace(&pod.Spec) {
+			continue
+		}
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if cs.Name != restoreName {
+				continue
+			}
+			exit := cs.State.Terminated
+			if cs.State.Waiting != nil {
+				exit = cs.LastTerminationState.Terminated
+			}
+			if exit != nil && exit.ExitCode != 0 {
+				reason = "WorkspaceRestoreRetrying"
+				message = fmt.Sprintf("Pod %s init container %s exited with code %d: %s", pod.Name, cs.Name, exit.ExitCode, exit.Message)
+			} else if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+				reason = "WorkspaceRestoreRetrying"
+				message = fmt.Sprintf("Pod %s init container %s: %s", pod.Name, cs.Name, cs.State.Waiting.Reason)
+			}
+		}
+	}
+	setConditionInStatus(status, sandboxv1alpha1.BatchSandboxConditionProgressing, sandboxv1alpha1.ConditionTrue, reason, message)
 }
 
 func getPodFailureReasonAndMessage(pod *corev1.Pod) (string, string, bool) {
@@ -387,7 +414,7 @@ func buildRuntimeView(batchSbx *sandboxv1alpha1.BatchSandbox, pods []*corev1.Pod
 		applySteadyRuntimePhase(batchSbx, newStatus, pods)
 	}
 
-	applyBatchSandboxPhaseConditions(newStatus)
+	applyBatchSandboxPhaseConditions(newStatus, pods...)
 
 	return runtimeView{
 		status:          newStatus,

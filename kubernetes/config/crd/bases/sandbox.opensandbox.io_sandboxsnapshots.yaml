@@ -132,6 +132,7 @@ spec:
                 enum:
                 - rootfs-v1
                 - qemu-v1
+                - workspace-v1
                 type: string
               observedGeneration:
                 description: ObservedGeneration is the most recent spec generation
@@ -236,6 +237,40 @@ spec:
                 - manifestDigest
                 - payloadDigest
                 - sizeBytes
+                type: object
+              workspace:
+                description: Workspace identifies a durable workspace archive on a
+                  namespaced PVC.
+                properties:
+                  archive:
+                    type: string
+                  claimName:
+                    type: string
+                  containerName:
+                    type: string
+                  sha256:
+                    type: string
+                  sizeBytes:
+                    description: SizeBytes is the uncompressed tar size. Older checkpoints
+                      omit it.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  sourcePodUID:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                  volumeName:
+                    type: string
+                required:
+                - archive
+                - claimName
+                - containerName
+                - sha256
+                - sourcePodUID
+                - volumeName
                 type: object
             type: object
         type: object
