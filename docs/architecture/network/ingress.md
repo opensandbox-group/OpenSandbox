@@ -26,6 +26,7 @@ When routing cannot proceed, the failure is precise — clients can branch on st
 
 | Status | Meaning |
 |---|---|
+| `403` | Route or path is forbidden through ingress (for example `/internal/init` on execd port `44772`, which is a control-plane-only local endpoint) |
 | `404` | No such sandbox (or no longer exists) |
 | `503` | Sandbox exists but is not ready — no reachable endpoint yet |
 | `502` | Infrastructure-level failure (cluster API errors and the like) |

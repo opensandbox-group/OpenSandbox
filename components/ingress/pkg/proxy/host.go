@@ -18,6 +18,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,6 +28,10 @@ import (
 	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 	"github.com/alibaba/opensandbox/ingress/pkg/telemetry"
 )
+
+const execdInternalInitPath = "/internal/init"
+
+var errForbiddenExecdInternalPath = errors.New("/internal/init on port 44772 is not accessible through ingress")
 
 func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
 	start := time.Now()
@@ -65,17 +71,8 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 		}
 		return nil, ingressRouteErrHTTPStatus(err), fmt.Errorf("invalid ingress route: %w", err)
 	}
-	if pr.routeKind == sandbox.RouteKindLegacy && strings.HasPrefix(pr.sandboxID, "fsb-") {
-		err = fmt.Errorf("%w: Fast Sandbox routes require a signed scope or configured wildcard Host routing", routescope.ErrUnauthorized)
-		return nil, ingressRouteErrHTTPStatus(err), err
-	}
-	if pr.routeKind == sandbox.RouteKindFastSandbox && p.fastSandboxNamespace != "" && pr.namespace != p.fastSandboxNamespace {
-		err = fmt.Errorf("%w: Fast Sandbox namespace is not allowed", routescope.ErrUnauthorized)
-		return nil, ingressRouteErrHTTPStatus(err), err
-	}
-	if _, required := p.sandboxProvider.(sandbox.AuthenticatedRouteProvider); required && pr.namespace == "" {
-		err = fmt.Errorf("%w: Fast Sandbox provider requires an authenticated route scope", routescope.ErrUnauthorized)
-		return nil, ingressRouteErrHTTPStatus(err), err
+	if status, err := p.validateParsedRoute(pr, r); err != nil {
+		return nil, status, err
 	}
 
 	target := sandbox.EndpointTarget{
@@ -113,6 +110,9 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 			return nil, ingressRouteErrHTTPStatus(err), err
 		}
 		pr.requestRawPath = escapedPathSuffix(r.URL.EscapedPath(), 2)
+		if err := checkBlockedExecdInternalPath(pr, r.URL); err != nil {
+			return nil, http.StatusForbidden, err
+		}
 	}
 
 	present, accessTok := signature.SecureAccessHeaderInfo(r)
@@ -273,4 +273,73 @@ type sandboxHost struct {
 	info           *sandbox.EndpointInfo
 	requestURI     string
 	requestRawPath string
+}
+
+func (p *Proxy) validateParsedRoute(pr parsedRoute, r *http.Request) (int, error) {
+	if pr.routeKind == sandbox.RouteKindLegacy && strings.HasPrefix(pr.sandboxID, "fsb-") {
+		err := fmt.Errorf("%w: Fast Sandbox routes require a signed scope or configured wildcard Host routing", routescope.ErrUnauthorized)
+		return ingressRouteErrHTTPStatus(err), err
+	}
+	if pr.routeKind == sandbox.RouteKindFastSandbox && p.fastSandboxNamespace != "" && pr.namespace != p.fastSandboxNamespace {
+		err := fmt.Errorf("%w: Fast Sandbox namespace is not allowed", routescope.ErrUnauthorized)
+		return ingressRouteErrHTTPStatus(err), err
+	}
+	if _, required := p.sandboxProvider.(sandbox.AuthenticatedRouteProvider); required && pr.namespace == "" {
+		err := fmt.Errorf("%w: Fast Sandbox provider requires an authenticated route scope", routescope.ErrUnauthorized)
+		return ingressRouteErrHTTPStatus(err), err
+	}
+	// /internal/init is a control-plane-only protocol meant to be invoked
+	// directly on the pod/node, never through the external ingress gateway.
+	// Reject before endpoint resolution so blocked requests never wake paused
+	// sandboxes or record activity.
+	if err := checkBlockedExecdInternalPath(pr, r.URL); err != nil {
+		return http.StatusForbidden, err
+	}
+	return 0, nil
+}
+
+func checkBlockedExecdInternalPath(pr parsedRoute, requestURL *url.URL) error {
+	reqPath, reqRawPath := effectiveRequestPaths(pr, requestURL)
+	if isBlockedExecdInternalPath(pr.port, reqPath, reqRawPath) {
+		return errForbiddenExecdInternalPath
+	}
+	return nil
+}
+
+func effectiveRequestPaths(pr parsedRoute, requestURL *url.URL) (string, string) {
+	if pr.requestURI != "" {
+		return pr.requestURI, pr.requestRawPath
+	}
+	if requestURL == nil {
+		return "", ""
+	}
+	return requestURL.Path, requestURL.EscapedPath()
+}
+
+func isBlockedExecdInternalPath(port int, requestPath, rawPath string) bool {
+	if port != sandbox.ExecdPort {
+		return false
+	}
+	return matchesExecdInternalInitPath(requestPath) || matchesExecdInternalInitPath(rawPath)
+}
+
+func matchesExecdInternalInitPath(candidate string) bool {
+	if candidate == "" {
+		return false
+	}
+	if matchesCleanedExecdInternalInitPath(candidate) {
+		return true
+	}
+	if unescaped, err := url.PathUnescape(candidate); err == nil && unescaped != candidate {
+		return matchesCleanedExecdInternalInitPath(unescaped)
+	}
+	return false
+}
+
+func matchesCleanedExecdInternalInitPath(raw string) bool {
+	if !strings.HasPrefix(raw, "/") {
+		raw = "/" + raw
+	}
+	cleaned := strings.ToLower(filepath.ToSlash(filepath.Clean(raw)))
+	return cleaned == execdInternalInitPath || strings.HasPrefix(cleaned, execdInternalInitPath+"/")
 }
