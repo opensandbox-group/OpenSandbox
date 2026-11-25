@@ -632,7 +632,10 @@ class WorkflowBaselineTest(ShellCase):
                 self.assertEqual(kv["run_credential_bound_delta"], want_delta)
 
         steps = wf["jobs"]["integration"]["steps"]
-        delta_steps = [s for s in steps if s.get("name", "").startswith("Run credential-bound ")]
+        delta_steps = [s for s in steps if s.get("name") in (
+            "Run credential-bound egress verify (OSEP-0023)",
+            "Run credential-bound SDK egress e2e (OSEP-0023)",
+        )]
         self.assertEqual(len(delta_steps), 2)
         for step in delta_steps:
             self.assertEqual(

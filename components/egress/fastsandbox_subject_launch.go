@@ -289,7 +289,7 @@ func (o *fastSandboxSubjectLaunchOwner) close(running *mitmproxy.Running) error 
 
 // attach is called once after initial launch, before the watcher/actions start.
 func (o *fastSandboxSubjectLaunchOwner) attach(s *fastSandboxPolicyServer, running *mitmproxy.Running) {
-	s.startSubjectDrain()
+	s.startSubjectDrainWithTLSAdmission(o.cfg.tlsAdmission)
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.server = s
