@@ -348,3 +348,37 @@ class TestK8sExecdAuthWiring:
 
         # Non-execd ports are unaffected
         proxy._reject_proxy_if_execd_auth_enabled(8080)
+
+    def test_create_sandbox_rejects_client_execd_access_token_env_when_enabled(
+        self, tmp_path: Path
+    ) -> None:
+        from opensandbox_server.api.schema import CreateSandboxRequest, ResourceLimits
+        from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
+
+        manager = self._make_manager(tmp_path)
+        svc = KubernetesSandboxService.__new__(KubernetesSandboxService)
+        svc._execd_token_manager = manager
+
+        req_with_token = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["sleep", "3600"],
+            resourceLimits=ResourceLimits(root={"cpu": "500m", "memory": "512Mi"}),
+            env={EXECD_ACCESS_TOKEN_ENV: "client-supplied-token"},
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            svc._ensure_execd_auth_env_allowed(req_with_token)
+        assert exc_info.value.status_code == 400
+        assert EXECD_ACCESS_TOKEN_ENV in exc_info.value.detail["message"]
+
+        # Request without EXECD_ACCESS_TOKEN is allowed
+        req_clean = CreateSandboxRequest(
+            image=ImageSpec(uri="python:3.11"),
+            entrypoint=["sleep", "3600"],
+            resourceLimits=ResourceLimits(root={"cpu": "500m", "memory": "512Mi"}),
+            env={"OTHER_VAR": "ok"},
+        )
+        svc._ensure_execd_auth_env_allowed(req_clean)
+
+        # When execd auth is disabled, client-supplied EXECD_ACCESS_TOKEN is allowed
+        svc._execd_token_manager = None
+        svc._ensure_execd_auth_env_allowed(req_with_token)

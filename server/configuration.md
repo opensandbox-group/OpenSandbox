@@ -383,7 +383,7 @@ Server-side configuration for the in-sandbox `execd` daemon.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `auth_signing_key_file` | string \| null | `null` | Path to a JSON key ring file (typically mounted read-only from a Kubernetes Secret via `server.execdAuth.existingSecret`) containing versioned HMAC-SHA256 master keys. Supported only when `runtime.type = "kubernetes"`. When set, the server injects a one-way verifier (`sha256:<kid>:<nonce>:<verifier>`) into `EXECD_ACCESS_TOKEN` on workload creation and derives the raw `X-EXECD-ACCESS-TOKEN` header on `GetEndpoint(44772)`. Incompatible with `use_server_proxy=true` on port `44772` and with the Windows sandbox profile. |
+| `auth_signing_key_file` | string \| null | `null` | Path to a JSON key ring file (typically mounted read-only from a Kubernetes Secret via `server.execdAuth.existingSecret`) containing versioned HMAC-SHA256 master keys. Supported only when `runtime.type = "kubernetes"`. When set, the server injects a one-way verifier (`sha256:<kid>:<nonce>:<verifier>`) into `EXECD_ACCESS_TOKEN` on workload creation, rejects create requests that explicitly set `env["EXECD_ACCESS_TOKEN"]` with `400 INVALID_PARAMETER`, and derives the raw `X-EXECD-ACCESS-TOKEN` header on `GetEndpoint(44772)`. Incompatible with `use_server_proxy=true` on port `44772` and with the Windows sandbox profile. |
 
 Key ring JSON format:
 

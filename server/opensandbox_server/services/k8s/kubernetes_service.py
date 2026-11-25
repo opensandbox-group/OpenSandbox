@@ -44,6 +44,7 @@ from opensandbox_server.api.schema import (
 )
 from opensandbox_server.config import AppConfig, INGRESS_MODE_GATEWAY, SecureAccessConfig, get_config
 from opensandbox_server.services.constants import (
+    EXECD_ACCESS_TOKEN_ENV,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_TENANT_LABEL,
@@ -212,6 +213,22 @@ class KubernetesSandboxService(
 
     def set_tenant_provider(self, provider: object) -> None:
         self._tenant_provider = provider  # type: ignore[assignment]
+
+    def _ensure_execd_auth_env_allowed(self, request: CreateSandboxRequest) -> None:
+        if self._execd_token_manager is None:
+            return
+        if request.env and EXECD_ACCESS_TOKEN_ENV in request.env:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"Environment variable '{EXECD_ACCESS_TOKEN_ENV}' cannot be set in "
+                        "create request when execd.auth_signing_key_file is enabled; "
+                        "execd access tokens are managed by the server."
+                    ),
+                },
+            )
 
     def _resolve_namespace(self) -> str:
         tenant = get_current_tenant()
@@ -1055,6 +1072,7 @@ class KubernetesSandboxService(
         self._ensure_secure_access_support(request)
         self._ensure_image_auth_support(request)
         self._ensure_idle_policy_support(request)
+        self._ensure_execd_auth_env_allowed(request)
 
         sandbox_id = self.generate_sandbox_id()
 
