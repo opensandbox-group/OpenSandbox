@@ -18,13 +18,13 @@ This is the complete list of OpenSandbox Enhancement Proposals:
 | [OSEP-0010](0010-opentelemetry-instrumentation.md)             |      OpenTelemetry Metrics and Logs (execd, egress, and ingress)           |  implemented  |  2026-07-03  |
 | [OSEP-0011](0011-secure-access-endpoint.md)                    |      Secure Access on GetEndpoint and Signed Endpoint                     |  implemented  |  2026-04-25  |
 | [OSEP-0012](0012-credential-vault.md)                          |      Credential Vault and Credential Proxy                                |  implemented  |  2026-06-23  |
-| [OSEP-0013](0013-isolated-execution-api.md)                    |      Isolated Execution API                                               |  implemented  |  2026-11-25  |
+| [OSEP-0013](0013-isolated-execution-api.md)                    |      Isolated Execution API                                               | implementing  |  2026-06-23  |
 | [OSEP-0014](0014-multi-tenancy.md)                             |      Multi-Tenancy Support for Kubernetes Runtime                         |  implemented  |  2026-07-27  |
 | [OSEP-0015](0015-pod-snapshot.md)                              |      Spec-Driven Pod Snapshot for Pause and Resume                        |  implemented  |  2026-06-27  |
 | [OSEP-0016](0016-unified-umbrella-release-governance.md)       |      Unified Umbrella Release Governance                                  |  implemented  |  2026-09-21  |
 | [OSEP-0017](0017-resilient-sdk-transport.md)                   |      Resilient SDK Transport                                              |  implemented  |  2026-07-22  |
 | [OSEP-0018](0018-execd-as-sandbox-init.md)                     |      execd as Sandbox Init                                                | implementing  |  2026-11-13  |
-| [OSEP-0019](0019-node-agent-sandbox-collection.md)             |      Node Agent for Node-Level Sandbox Collection                         |  implemented  |  2026-11-25  |
+| [OSEP-0019](0019-node-agent-sandbox-collection.md)             |      Node Agent for Node-Level Sandbox Collection                         | implementing  |  2026-08-27  |
 | [OSEP-0020](0020-sandbox-lifecycle-hooks.md)                   |      Sandbox Lifecycle Hooks                                             | implementing  |  2026-08-26  |
 | [OSEP-0021](0021-scalable-asynchronous-client-side-pool-warmup.md) |      Scalable Asynchronous Client-Side Pool Warmup                      |  implemented  |  2026-08-19  |
 | [OSEP-0022](0022-multi-sandbox-egress-control-plane.md)        |      Multi-Sandbox Egress Control Plane                                  | implementing  |  2026-10-19  |
