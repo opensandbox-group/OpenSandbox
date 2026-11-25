@@ -546,6 +546,8 @@ ConnectionConfig sharedConfig = ConnectionConfig.builder()
     .build();
 ```
 
+OkHttp follows redirects automatically. A redirect that changes the origin (scheme, host, or effective port) drops the endpoint-issued execd access token `X-EXECD-ACCESS-TOKEN`, while same-origin redirects keep it.
+
 ::: tip SDK Telemetry
 `Sandbox.builder()...build()` reports create latency to `POST /v1/metrics/events` by default. Call `ConnectionConfig.builder().disableMetrics(true)` or export `OPENSANDBOX_DISABLE_METRICS=1` to opt out. See [SDK Telemetry](/sdks/observability#creation-metrics).
 :::

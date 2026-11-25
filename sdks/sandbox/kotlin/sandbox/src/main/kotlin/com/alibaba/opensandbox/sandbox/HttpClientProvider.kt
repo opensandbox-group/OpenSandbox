@@ -17,6 +17,7 @@
 package com.alibaba.opensandbox.sandbox
 
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
+import com.alibaba.opensandbox.sandbox.domain.models.execd.EXECD_ACCESS_TOKEN_HEADER
 import com.alibaba.opensandbox.sandbox.domain.models.execd.SECURE_ACCESS_HEADER
 import com.alibaba.opensandbox.sandbox.transport.RetryInterceptor
 import io.opentelemetry.api.GlobalOpenTelemetry
@@ -58,6 +59,7 @@ class HttpClientProvider(
                     .addInterceptor(UserAgentInterceptor(config.userAgent))
                     .addInterceptor(ExtraHeadersInterceptor(config.headers))
                     .addInterceptor(ClientIpInterceptor { ClientIpDetector.clientIp() })
+                    .addNetworkInterceptor(ExecdAccessTokenRedirectInterceptor())
             if (config.enableTracing) {
                 // Propagate the active trace context (W3C traceparent) so the
                 // lifecycle server can join the same trace. No-op when there
@@ -185,7 +187,7 @@ class HttpClientProvider(
                     redactHeader("OPEN-SANDBOX-API-KEY")
                     redactHeader("Authorization")
                     redactHeader(SECURE_ACCESS_HEADER)
-                    redactHeader("X-EXECD-ACCESS-TOKEN")
+                    redactHeader(EXECD_ACCESS_TOKEN_HEADER)
                 }
             addInterceptor(loggingInterceptor)
         }
@@ -241,6 +243,34 @@ class HttpClientProvider(
                     .header(ClientIpDetector.CLIENT_IP_HEADER, ip)
                     .build(),
             )
+        }
+    }
+
+    /**
+     * Keeps the endpoint-scoped execd access token off cross-origin redirect hops.
+     *
+     * OkHttp drops `Authorization` on a redirect that changes the origin but replays
+     * every other header, and it rebuilds each hop from the application-level request,
+     * so the token must be stripped again on every hop. A network interceptor runs once
+     * per exchange, which is the only hook that also sees those redirect hops.
+     */
+    private class ExecdAccessTokenRedirectInterceptor : Interceptor {
+        override fun intercept(chain: Interceptor.Chain): Response {
+            val request = chain.request()
+            if (request.header(EXECD_ACCESS_TOKEN_HEADER) == null) {
+                return chain.proceed(request)
+            }
+            // Compare each hop with the request that started the call (scheme, host,
+            // and effective port), so later hops on another origin stay protected too.
+            val origin = chain.call().request().url
+            val sameOrigin =
+                origin.scheme == request.url.scheme &&
+                    origin.host == request.url.host &&
+                    origin.port == request.url.port
+            if (sameOrigin) {
+                return chain.proceed(request)
+            }
+            return chain.proceed(request.newBuilder().removeHeader(EXECD_ACCESS_TOKEN_HEADER).build())
         }
     }
 
