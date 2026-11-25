@@ -16,17 +16,20 @@ package main
 
 import (
 	"context"
+	"net/netip"
 	"os"
+	"strings"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/subject"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
-func startDropTelemetry(ctx context.Context, table string, run droptelemetry.Runner) (*droptelemetry.Runtime, func(), error) {
-	return startDropTelemetryWith(ctx, table, run, droptelemetry.Bind, auditBlockedPacket)
+func startDropTelemetry(ctx context.Context, table string, run droptelemetry.Runner, resolve func(netip.Addr) (string, bool)) (*droptelemetry.Runtime, func(), error) {
+	return startDropTelemetryWith(ctx, table, run, droptelemetry.Bind, func(p droptelemetry.Packet) { auditBlockedPacket(p, resolve) })
 }
 
 func startDropTelemetryWith(ctx context.Context, table string, run droptelemetry.Runner, bind droptelemetry.Binder, audit func(droptelemetry.Packet)) (*droptelemetry.Runtime, func(), error) {
@@ -40,7 +43,7 @@ func startDropTelemetryWith(ctx context.Context, table string, run droptelemetry
 	rt := droptelemetry.New(cfg, table)
 	return rt, rt.Start(ctx, run, bind, audit), nil
 }
-func auditBlockedPacket(p droptelemetry.Packet) {
+func auditBlockedPacket(p droptelemetry.Packet, resolve func(netip.Addr) (string, bool)) {
 	sandboxID := os.Getenv(constants.EnvSandboxID)
 	fields := []slogger.Field{
 		{Key: "opensandbox.event", Value: "egress.blocked_ip"},
@@ -50,7 +53,21 @@ func auditBlockedPacket(p droptelemetry.Packet) {
 		{Key: "proto", Value: p.Proto},
 		{Key: "reason", Value: string(p.Reason)},
 	}
+	if resolve != nil {
+		if id, ok := resolve(p.SrcIP); ok {
+			fields = append(fields, slogger.Field{Key: "subject_id", Value: id})
+			sandboxID = strings.TrimPrefix(id, "s-")
+		} else {
+			sandboxID = ""
+		}
+	}
 	fields = append(fields, slogger.Field{Key: "sandbox_id", Value: sandboxID})
 	telemetry.RecordBlockedSample(string(p.Reason))
 	log.Logger.With(fields...).Infof("egress blocked IP")
+}
+func subjectDropResolver(reg *subject.MemoryRegistry) func(netip.Addr) (string, bool) {
+	return func(ip netip.Addr) (string, bool) {
+		s, ok := reg.Resolve(subject.SubjectKey{SourceIP: ip})
+		return string(s), ok
+	}
 }

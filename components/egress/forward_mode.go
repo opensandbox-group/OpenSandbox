@@ -293,7 +293,7 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 	}
 
 	ep, gatewayIsLiteral := buildForwardEndpoint(fm.gateway.Host, fm.gateway.Port, constants.ForwarderMarkValue, hostsPath)
-	dropRuntime, closeDrop, err := startDropTelemetry(ctx, nftables.TableName, nftables.RunDropProbe)
+	dropRuntime, closeDrop, err := startDropTelemetry(ctx, nftables.TableName, nftables.RunDropProbe, nil)
 	if err != nil {
 		log.Fatalf("drop telemetry configuration: %v", err)
 	}

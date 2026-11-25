@@ -77,7 +77,15 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	}
 	log.Infof("loaded %d always-deny rule(s), %d always-allow rule(s) from /var/egress/rules", len(alwaysDeny), len(alwaysAllow))
 
-	podNft := fastsandboxnft.NewApplier(nil, fastSandboxNftOptions(upstreamSpec))
+	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
+	dropRuntime, closeDrop, err := startDropTelemetry(ctx, fastsandboxnft.TableName, fastsandboxnft.DefaultRunner, subjectDropResolver(reg))
+	if err != nil {
+		log.Fatalf("drop telemetry configuration: %v", err)
+	}
+	defer closeDrop()
+	nftOptions := fastSandboxNftOptions(upstreamSpec)
+	nftOptions.DropTelemetry = dropRuntime
+	podNft := fastsandboxnft.NewApplier(nil, nftOptions)
 	// Construct the resolver without starting its listener. Seed hostname
 	// containment BEFORE touching the previous generation's kernel table.
 	dnsAddr := ":15353"
@@ -101,7 +109,6 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	}
 	log.Infof("fast-sandbox nftables table reset (stale rules cleared)")
 
-	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
 	fastSandboxSrv.SetActionsAPIVersion(actionsAPIVersion)
 	// The startup snapshot above is re-staged by the reload job every minute,

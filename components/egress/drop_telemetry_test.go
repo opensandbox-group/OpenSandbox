@@ -28,6 +28,7 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/droptelemetry"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/subject"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
@@ -45,17 +46,29 @@ func (l *dropAuditCapture) With(fields ...slogger.Field) slogger.Logger {
 	return l
 }
 func (l *dropAuditCapture) Infof(string, ...any) { l.events++ }
-func TestDropAuditSidecar(t *testing.T) {
+func TestDropAuditSubjectResolution(t *testing.T) {
 	prior := log.Logger
 	capture := &dropAuditCapture{Logger: prior, fields: map[string]any{}}
 	log.Logger = capture
 	t.Cleanup(func() { log.Logger = prior })
 	t.Setenv(constants.EnvSandboxID, "process-id")
-	p := droptelemetry.Packet{SrcIP: netip.MustParseAddr("10.0.0.5"), DstIP: netip.MustParseAddr("192.0.2.1"), DstPort: 443, Proto: "tcp", Reason: droptelemetry.DenySet}
-	auditBlockedPacket(p)
+	src := netip.MustParseAddr("10.0.0.5")
+	p := droptelemetry.Packet{SrcIP: src, DstIP: netip.MustParseAddr("192.0.2.1"), DstPort: 443, Proto: "tcp", Reason: droptelemetry.DenySet}
+	reg := subject.NewRegistry(nil, nil)
+	reg.Register(subject.FromSandboxUID("guest-uid"), subject.SubjectKey{SourceIP: src}, subject.Fencing{})
+	auditBlockedPacket(p, subjectDropResolver(reg))
 	require.Equal(t, 1, capture.events)
 	require.Equal(t, "egress.blocked_ip", capture.fields["opensandbox.event"])
+	require.Equal(t, "guest-uid", capture.fields["sandbox_id"])
+	require.Equal(t, "s-guest-uid", capture.fields["subject_id"])
 	require.Equal(t, "192.0.2.1", capture.fields["dst_ip"])
+	capture.fields = map[string]any{}
+	p.SrcIP = netip.MustParseAddr("10.0.0.6")
+	auditBlockedPacket(p, subjectDropResolver(reg))
+	require.Equal(t, "", capture.fields["sandbox_id"])
+	require.NotContains(t, capture.fields, "subject_id")
+	capture.fields = map[string]any{}
+	auditBlockedPacket(p, nil)
 	require.Equal(t, "process-id", capture.fields["sandbox_id"])
 	require.NotContains(t, capture.fields, "subject_id")
 }
@@ -111,12 +124,12 @@ func TestDropReceiveErrorGauge(t *testing.T) {
 func TestStartDropTelemetry(t *testing.T) {
 	t.Setenv(droptelemetry.EnvMode, "off")
 	t.Setenv(droptelemetry.EnvRate, "invalid")
-	rt, stop, err := startDropTelemetry(context.Background(), "unused", nil)
+	rt, stop, err := startDropTelemetry(context.Background(), "unused", nil, nil)
 	require.NoError(t, err)
 	require.Nil(t, rt)
 	stop()
 	t.Setenv(droptelemetry.EnvMode, "invalid")
-	_, _, err = startDropTelemetry(context.Background(), "unused", nil)
+	_, _, err = startDropTelemetry(context.Background(), "unused", nil, nil)
 	require.Error(t, err)
 	t.Setenv(droptelemetry.EnvMode, "sample")
 	ctx, cancel := context.WithCancel(context.Background())

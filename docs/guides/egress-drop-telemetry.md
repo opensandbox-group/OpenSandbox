@@ -29,7 +29,7 @@ Only new TCP SYN packets and UDP packets are sampled. ICMP, other protocols, est
 
 ### Deployment paths
 
-In the fast-sandbox profile these variables are ignored until the Fast Sandbox integration in the next part is merged.
+The fast-sandbox profile supports these variables through the Pool configuration described below.
 
 For Kubernetes and Docker sidecars, supply the three variables in the sandbox create request's `env` map. The lifecycle server's egress allowlist routes them to the egress container, keeping them out of the workload environment. Select `dns+nft` or `forward` enforcement to observe kernel drops; DNS-only mode has no nft drop rules to instrument. The default remains `off` when the mode variable is absent.
 
@@ -45,6 +45,8 @@ For Kubernetes and Docker sidecars, supply the three variables in the sandbox cr
 
 The fragment above shows only the environment portion of a create request. The server does not provide an operator `[egress.env]` map; its Kubernetes `egress_settings.env` and Docker `extra_env` maps come from these request variables.
 
+For Fast Sandbox, add the variables to the `egress` container's `env` in the Pool's `fastletTemplate`. The shared process owns the telemetry configuration for all Subjects; per-sandbox request variables do not configure it. The repository's `scripts/fast-sandbox-env/manifests/pool/firecracker-egress-pool.yaml` shows the egress container placement. The tuple is the packet header at the drop hook; an INPUT drop after MITM DNAT can show the translated gateway/listener destination.
+
 ## Observe blocked traffic
 
 Enable the existing [OpenTelemetry export](/guides/telemetry) to collect:
@@ -55,9 +57,11 @@ Enable the existing [OpenTelemetry export](/guides/telemetry) to collect:
 | `egress.blocked.samples` | `reason` | Parsed TCP/UDP NFLOG samples emitted to the audit logger |
 | `egress.drop_telemetry.sampler_up` | `cause` | `1` when sampling starts; `0` when disabled or unavailable |
 
-Sampled audit logs use `opensandbox.event="egress.blocked_ip"`, with `sandbox_id`, `src_ip`, `dst_ip`, `dst_port`, `proto`, and `reason`.
+The new metrics have no Subject attribute. Fast Sandbox audit logs resolve the packet's source IP through the live Subject registry and include `subject_id` when resolution succeeds. `sandbox_id` is the Subject ID without its `s-` prefix. An unresolved source has an empty `sandbox_id`; it is not attributed to the process-level sandbox resource.
 
-Reasons are `deny_set`, `port_deny`, `dot`, `doh`, `default_deny`, and `established_revoke`.
+Sampled audit logs use `opensandbox.event="egress.blocked_ip"`, with `sandbox_id`, `src_ip`, `dst_ip`, `dst_port`, `proto`, and `reason`. Fast Sandbox also supplies `subject_id` for registered sources.
+
+Reasons are `deny_set`, `port_deny`, `dot`, `doh`, `default_deny`, `established_revoke`, and, for Fast Sandbox, `subject_input_deny`, `unmarked_failclosed`, `gateway_mitm_direct`, and `upstream_proxy_deny`.
 
 Counters are not durable. Egress reads them before planning a table replacement, then resets its difference baseline after a successful replacement. Counter collection finishes before remaining DNS lease timeouts are calculated. Packets arriving between the last read and replacement, including the delete/add transition, can be missing from the exported total. Process restarts, polling failures, and counter resets also limit accuracy. Production kernel compatibility and sample loss under high packet rates require environment-specific validation.
 

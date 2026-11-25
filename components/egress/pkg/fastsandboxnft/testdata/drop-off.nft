@@ -1,0 +1,99 @@
+delete table inet opensandbox-fast-sandbox
+add table inet opensandbox-fast-sandbox
+add chain inet opensandbox-fast-sandbox marking { type filter hook prerouting priority 0; }
+add chain inet opensandbox-fast-sandbox dispatch { type filter hook forward priority 0; policy accept; }
+add set inet opensandbox-fast-sandbox upstream_proxy_v4 { type ipv4_addr; flags timeout; }
+add set inet opensandbox-fast-sandbox upstream_proxy_v6 { type ipv6_addr; flags timeout; }
+add element inet opensandbox-fast-sandbox upstream_proxy_v4 { 192.0.2.9 }
+add rule inet opensandbox-fast-sandbox dispatch ip daddr @upstream_proxy_v4 tcp dport 3128 drop
+add rule inet opensandbox-fast-sandbox dispatch ip6 daddr @upstream_proxy_v6 tcp dport 3128 drop
+add rule inet opensandbox-fast-sandbox dispatch ct state established,related accept
+add rule inet opensandbox-fast-sandbox dispatch tcp dport 853 drop
+add rule inet opensandbox-fast-sandbox dispatch udp dport 853 drop
+add chain inet opensandbox-fast-sandbox input { type filter hook input priority 0; policy accept; }
+add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip daddr @upstream_proxy_v4 ct original proto-dst 3128 drop
+add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip6 daddr @upstream_proxy_v6 ct original proto-dst 3128 drop
+add rule inet opensandbox-fast-sandbox input ct state established,related accept
+add set inet opensandbox-fast-sandbox doh_block_v4 { type ipv4_addr; flags interval; }
+add element inet opensandbox-fast-sandbox doh_block_v4 { 192.0.2.1 }
+add rule inet opensandbox-fast-sandbox dispatch ip daddr @doh_block_v4 tcp dport 443 drop
+add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip daddr @doh_block_v4 ct original proto-dst 443 drop
+add set inet opensandbox-fast-sandbox doh_block_v6 { type ipv6_addr; flags interval; }
+add element inet opensandbox-fast-sandbox doh_block_v6 { 2001:db8:1::1 }
+add rule inet opensandbox-fast-sandbox dispatch ip6 daddr @doh_block_v6 tcp dport 443 drop
+add rule inet opensandbox-fast-sandbox input ct status dnat meta l4proto tcp ct original ip6 daddr @doh_block_v6 ct original proto-dst 443 drop
+add rule inet opensandbox-fast-sandbox dispatch tcp dport { 1-21 } drop
+add rule inet opensandbox-fast-sandbox input ct status dnat tcp dport 18081 ct original proto-dst { 1-21 } drop
+add rule inet opensandbox-fast-sandbox dispatch meta mark & 0x2 != 0x2 drop
+# next transaction
+add set inet opensandbox-fast-sandbox subj_s_u_1_allow_v4 { type ipv4_addr; flags interval; }
+add set inet opensandbox-fast-sandbox subj_s_u_1_allow_v6 { type ipv6_addr; flags interval; }
+add set inet opensandbox-fast-sandbox subj_s_u_1_deny_v4 { type ipv4_addr; flags interval; }
+add set inet opensandbox-fast-sandbox subj_s_u_1_deny_v6 { type ipv6_addr; flags interval; }
+add set inet opensandbox-fast-sandbox subj_s_u_1_dyn_v4 { type ipv4_addr; timeout 360s; }
+add set inet opensandbox-fast-sandbox subj_s_u_1_dyn_v6 { type ipv6_addr; timeout 360s; }
+add chain inet opensandbox-fast-sandbox subj_s_u_1
+add chain inet opensandbox-fast-sandbox mark_s_u_1
+add chain inet opensandbox-fast-sandbox subj_s_u_1_in
+add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.5 jump subj_s_u_1
+add rule inet opensandbox-fast-sandbox marking ip saddr 10.0.0.5 jump mark_s_u_1
+add rule inet opensandbox-fast-sandbox input ip saddr 10.0.0.5 tcp dport 18081 ct status dnat jump subj_s_u_1_in
+add rule inet opensandbox-fast-sandbox input ip saddr 10.0.0.5 ip daddr 10.0.0.1 tcp dport 18081 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1 ip daddr @subj_s_u_1_deny_v4 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1 ip6 daddr @subj_s_u_1_deny_v6 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_deny_v4 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_deny_v6 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_dyn_v4 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_dyn_v6 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_allow_v4 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_allow_v6 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in drop
+# next transaction
+flush chain inet opensandbox-fast-sandbox subj_s_u_1
+flush chain inet opensandbox-fast-sandbox mark_s_u_1
+flush chain inet opensandbox-fast-sandbox subj_s_u_1_in
+flush set inet opensandbox-fast-sandbox subj_s_u_1_allow_v4
+flush set inet opensandbox-fast-sandbox subj_s_u_1_allow_v6
+flush set inet opensandbox-fast-sandbox subj_s_u_1_deny_v4
+flush set inet opensandbox-fast-sandbox subj_s_u_1_deny_v6
+add element inet opensandbox-fast-sandbox subj_s_u_1_deny_v6 { 2001:db8::/64 }
+add rule inet opensandbox-fast-sandbox subj_s_u_1 ip daddr 192.0.2.8 tcp dport { 22 } drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1 ip daddr @subj_s_u_1_deny_v4 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1 ip6 daddr @subj_s_u_1_deny_v6 drop
+add rule inet opensandbox-fast-sandbox mark_s_u_1 ip daddr @subj_s_u_1_allow_v4 meta mark set 0x2
+add rule inet opensandbox-fast-sandbox mark_s_u_1 ip6 daddr @subj_s_u_1_allow_v6 meta mark set 0x2
+add rule inet opensandbox-fast-sandbox mark_s_u_1 ip daddr @subj_s_u_1_dyn_v4 meta mark set 0x2
+add rule inet opensandbox-fast-sandbox mark_s_u_1 ip6 daddr @subj_s_u_1_dyn_v6 meta mark set 0x2
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr 192.0.2.8 meta l4proto tcp ct original proto-dst { 22 } drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_deny_v4 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_deny_v6 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_dyn_v4 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_dyn_v6 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_allow_v4 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_allow_v6 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in drop
+# next transaction
+flush chain inet opensandbox-fast-sandbox subj_s_u_1
+flush chain inet opensandbox-fast-sandbox mark_s_u_1
+flush chain inet opensandbox-fast-sandbox subj_s_u_1_in
+flush set inet opensandbox-fast-sandbox subj_s_u_1_allow_v4
+flush set inet opensandbox-fast-sandbox subj_s_u_1_allow_v6
+flush set inet opensandbox-fast-sandbox subj_s_u_1_deny_v4
+flush set inet opensandbox-fast-sandbox subj_s_u_1_deny_v6
+flush set inet opensandbox-fast-sandbox subj_s_u_1_dyn_v4
+flush set inet opensandbox-fast-sandbox subj_s_u_1_dyn_v6
+add rule inet opensandbox-fast-sandbox dispatch ip saddr 10.0.0.6 jump subj_s_u_1
+add rule inet opensandbox-fast-sandbox marking ip saddr 10.0.0.6 jump mark_s_u_1
+add rule inet opensandbox-fast-sandbox input ip saddr 10.0.0.6 tcp dport 18081 ct status dnat jump subj_s_u_1_in
+add rule inet opensandbox-fast-sandbox input ip saddr 10.0.0.6 ip daddr 10.0.0.1 tcp dport 18081 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1 ip daddr @subj_s_u_1_deny_v4 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1 ip6 daddr @subj_s_u_1_deny_v6 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_deny_v4 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_deny_v6 drop
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_dyn_v4 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_dyn_v6 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip daddr @subj_s_u_1_allow_v4 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in ct original ip6 daddr @subj_s_u_1_allow_v6 accept
+add rule inet opensandbox-fast-sandbox subj_s_u_1_in drop
