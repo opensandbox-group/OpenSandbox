@@ -24,6 +24,7 @@ This roadmap describes the intended project direction for roughly the next 12 mo
 | Fast Sandbox ultra-high density and memory oversubscription | Implementing | [OSEP-0026](oseps/0026-resource-oversubscription-accounting-for-fast-sandbox.md), [resource-aware scheduling](docs/guides/resource-aware-scheduling.md), [PR #2915](https://github.com/opensandbox-group/OpenSandbox/pull/2915) | Extend the implemented overcommit accounting and virtio-balloon free-page reporting with working-set-aware admission, bounded active reclaim, and OOM-isolation guarantees. |
 | Fast Sandbox cross-CPU-model memory snapshots and scheduling | Planned | TBD / OSEP needed | Build full-state memory-snapshot template variants per CPU microarchitecture and schedule restores onto matching Fastlet hosts across heterogeneous fleets (RootfsOnly snapshots already avoid CPU-model pinning for cold-boot restores). |
 | In-sandbox privilege reduction and process QoS | Implementing | [OSEP-0018](oseps/0018-execd-as-sandbox-init.md), [OSEP-0031](oseps/0031-in-sandbox-process-qos-and-saturation-diagnostics.md), [privilege reduction guide](docs/guides/privilege-reduction.md) | Build on default-on `execd`-as-init hardening with server-managed `execd-ebpf` observation wiring, Fast Sandbox default hardening, and cgroup v2 process QoS isolation. |
+| Isolated execution sessions | Implementing | [OSEP-0013](oseps/0013-isolated-execution-api.md), [isolation sessions guide](docs/guides/isolation-sessions.md) | Complete remaining phase 2 artifact diff and commit workflows on top of the implemented bubblewrap isolated-session runtime and SDK APIs. |
 
 ### Security and Egress
 
@@ -47,6 +48,7 @@ This roadmap describes the intended project direction for roughly the next 12 mo
 
 | Area | Status | Tracking | Notes |
 |------|--------|----------|-------|
+| Sandbox stdout/stderr collection | Implementing | [OSEP-0019](oseps/0019-node-agent-sandbox-collection.md), [node agent guide](docs/guides/node-agent.md) | Node-level container log, Firecracker `vm-console`, and optional syscall collection with Helm chart are implemented; complete the real-OSS fault suite and published 24-hour soak report before GA. |
 | Agent in-sandbox audit trail | Planned | TBD / OSEP needed | Define auditable records for agent actions inside sandboxes—command/session execution, file operations, network access, identity context, retention, and privacy boundaries—building on [OSEP-0018](oseps/0018-execd-as-sandbox-init.md), [OSEP-0019](oseps/0019-node-agent-sandbox-collection.md), and [OSEP-0029](oseps/0029-optional-postgresql-sandbox-lifecycle-history.md). |
 | Performance benchmarking and regression baselines | Implementing | [benchmark/](benchmark/README.md), [PR #3065](https://github.com/opensandbox-group/OpenSandbox/pull/3065) | Standardize repeatable in-cluster latency, throughput, density, and tracing benchmarks via `opensandbox-bench` with archived release baselines. |
 | Kubernetes deployment | Ongoing | [kubernetes/](kubernetes/README.md), [Helm charts](manifests/charts/) | Keep self-hosted deployment, umbrella chart, and operational documentation current. |
