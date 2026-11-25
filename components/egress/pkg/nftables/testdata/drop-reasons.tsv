@@ -1,0 +1,10 @@
+established_revoke	add rule inet opensandbox egress ct state established,related drop
+default_deny	add rule inet opensandbox egress drop
+port_deny	add rule inet opensandbox egress ip daddr 192.0.2.8 tcp dport { 22 } drop
+established_revoke	add rule inet opensandbox egress ip daddr 203.0.113.1 ct state established,related drop
+deny_set	add rule inet opensandbox egress ip daddr @deny_v4 drop
+doh	add rule inet opensandbox egress ip daddr @doh_block_v4 tcp dport 443 drop
+deny_set	add rule inet opensandbox egress ip6 daddr @deny_v6 drop
+doh	add rule inet opensandbox egress ip6 daddr @doh_block_v6 tcp dport 443 drop
+dot	add rule inet opensandbox egress tcp dport 853 drop
+dot	add rule inet opensandbox egress udp dport 853 drop

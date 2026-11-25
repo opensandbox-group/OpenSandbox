@@ -254,10 +254,15 @@ Meter: `opensandbox/egress` · Service name: `opensandbox-egress-<version>`.
 | `egress.nftables.rules.count` | Observable Gauge | `{element}` | Approximate policy size after last successful static apply (fast-sandbox profile: summed across every installed subject's policy, 0 while deny-first). |
 | `egress.nftables.updates.count` | Counter | - | Number of successful nftables updates (static apply + dynamic IP add). |
 | `egress.nftables.updates.failed_total` | Counter | - | nftables updates that failed, by `operation`. |
+| `egress.blocked.packets` | Counter | - | Kernel drop counter deltas, by bounded `reason`. |
+| `egress.blocked.samples` | Counter | - | Sampled blocked IP packets, by bounded `reason`. |
+| `egress.drop_telemetry.sampler_up` | Observable Gauge | - | Sampling availability (`1` up, `0` disabled or unavailable), by bounded `cause`. |
 | `egress.system.memory.usage_bytes` | Observable Gauge | `By` | **Node** memory used bytes (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.system.cpu.utilization` | Observable Gauge | `1` | **Node** CPU busy ratio in `[0,1]` (Linux: gopsutil; non-Linux build: `0`). |
 | `egress.process.memory.usage_bytes` | Observable Gauge | `By` | Memory charged to the sidecar's own cgroup. Only present when cgroupfs is readable. |
 | `egress.process.cpu.time` | Observable Counter | `s` | CPU seconds consumed by the sidecar's own cgroup. Only present when cgroupfs is readable. |
+
+The drop instruments are registered with egress metrics initialization. When metrics export is enabled, `egress.drop_telemetry.sampler_up` reports `0` with `cause=disabled` even when [kernel drop telemetry](/guides/egress-drop-telemetry) is off; the counters export observations only when drops or samples are recorded. All three retain the shared `sandbox_id` and configured extra metric attributes. Unknown reasons or causes become `unknown`; sampler causes are `bind`, `ruleset`, `receive`, `disabled`, or empty when healthy. A successful sample clears a transient receive failure.
 
 ### Experimental TLS admission decisions
 

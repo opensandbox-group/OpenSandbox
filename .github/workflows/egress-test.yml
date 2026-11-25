@@ -120,6 +120,7 @@ jobs:
           sudo modprobe nfnetlink_log || true
           bash scripts/ci-nft-go-test.sh ./pkg/droptelemetry \
             TestDropTelemetryKernel \
+            TestDropTelemetryRulesetKernel \
             TestDropTelemetryBindCloseKernel
 
       - name: Run privileged quarantine packet regressions

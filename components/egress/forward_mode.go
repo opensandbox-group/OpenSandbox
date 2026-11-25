@@ -293,7 +293,10 @@ func runForwardSidecar(ctx context.Context, fm *forwardMode) {
 	}
 
 	ep, gatewayIsLiteral := buildForwardEndpoint(fm.gateway.Host, fm.gateway.Port, constants.ForwarderMarkValue, hostsPath)
+	dropRuntime, closeDrop := startDropTelemetry(ctx, "opensandbox", nftables.RunDropProbe)
+	defer closeDrop()
 	nftMgr := nftables.NewManagerWithOptions(nftables.Options{
+		DropTelemetry:       dropRuntime,
 		UpstreamProxy:       ep,
 		Telemetry:           telemetryEP,
 		ForwardRedirectPort: constants.DefaultForwarderPort,
