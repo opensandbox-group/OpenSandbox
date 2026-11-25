@@ -17,6 +17,9 @@ from __future__ import annotations
 from typing import Any, Dict
 
 POOL_CAPACITY_EXHAUSTED_REASON = "POOL_CAPACITY_EXHAUSTED"
+IMAGE_PULL_FAILING_REASON = "IMAGE_PULL_FAILING"
+# The reasons the controller puts on the Progressing condition of a Pending sandbox.
+IMAGE_PULL_CONDITION_REASONS = frozenset({"ErrImagePull", "ImagePullBackOff"})
 
 
 def _normalize_create_status(status_info: Dict[str, Any]) -> Dict[str, Any]:

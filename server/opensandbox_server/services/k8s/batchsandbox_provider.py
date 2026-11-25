@@ -85,6 +85,8 @@ from opensandbox_server.services.k8s.provider_common import (
     _workload_platform_constraint_scope,
 )
 from opensandbox_server.services.k8s.status_helpers import (
+    IMAGE_PULL_CONDITION_REASONS,
+    IMAGE_PULL_FAILING_REASON,
     POOL_CAPACITY_EXHAUSTED_REASON,
 )
 from opensandbox_server.services.k8s.windows_profile import (
@@ -993,6 +995,25 @@ class BatchSandboxProvider(WorkloadProvider):
         return None
 
     @staticmethod
+    def _image_pull_progress_message(conditions: List[Dict[str, Any]]) -> Optional[str]:
+        """The controller's report that a Pending sandbox cannot pull its image.
+
+        It rides on the Progressing condition, whose reason is the kubelet's
+        ErrImagePull or ImagePullBackOff. The sandbox stays Pending: a failed pull
+        can recover, so the state is not terminal.
+        """
+        for cond in conditions:
+            if (
+                cond.get("type") == "Progressing"
+                and cond.get("status") == "True"
+                and cond.get("reason") in IMAGE_PULL_CONDITION_REASONS
+            ):
+                message = cond.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message
+        return None
+
+    @staticmethod
     def _completed_condition(conditions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """The Ready condition (reason=Completed) that the controller records when
         the main container exits 0. Its message carries the exit detail (pod,
@@ -1353,6 +1374,9 @@ class BatchSandboxProvider(WorkloadProvider):
 
         if phase == "Pending":
             reason, message = phase_map[phase]
+            image_pull_message = self._image_pull_progress_message(conditions)
+            if image_pull_message is not None:
+                reason, message = IMAGE_PULL_FAILING_REASON, image_pull_message
             return {
                 "state": _PUBLIC_STATE_BY_PHASE[phase],
                 "reason": reason,

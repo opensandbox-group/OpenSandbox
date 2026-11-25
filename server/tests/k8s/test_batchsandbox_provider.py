@@ -1520,6 +1520,49 @@ spec:
         assert result["state"] == "Pending"
         assert result["reason"] == "BATCHSANDBOX_PENDING"
 
+    @pytest.mark.parametrize("kubelet_reason", ["ErrImagePull", "ImagePullBackOff"])
+    def test_get_status_pending_reports_image_pull_failure(self, kubelet_reason):
+        provider = BatchSandboxProvider(MagicMock())
+        message = f"Pod sbx-0: {kubelet_reason} - manifest unknown"
+        workload = {
+            "status": {
+                "phase": "Pending",
+                "replicas": 1,
+                "ready": 0,
+                "allocated": 1,
+                "conditions": [
+                    {"type": "Progressing", "status": "True", "reason": kubelet_reason, "message": message},
+                ],
+            },
+            "metadata": {"creationTimestamp": "2025-12-24T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Pending"
+        assert result["reason"] == "IMAGE_PULL_FAILING"
+        assert result["message"] == message
+
+    def test_get_status_pending_keeps_creating_for_ordinary_progress(self):
+        provider = BatchSandboxProvider(MagicMock())
+        workload = {
+            "status": {
+                "phase": "Pending",
+                "replicas": 1,
+                "ready": 0,
+                "allocated": 1,
+                "conditions": [
+                    {"type": "Progressing", "status": "True", "reason": "Creating", "message": "Sandbox is being created"},
+                ],
+            },
+            "metadata": {"creationTimestamp": "2025-12-24T10:00:00Z"},
+        }
+
+        result = provider.get_status(workload)
+
+        assert result["state"] == "Pending"
+        assert result["reason"] == "CREATING"
+
     def test_get_status_reports_pool_capacity_condition(self):
         provider = BatchSandboxProvider(MagicMock())
         workload = {
