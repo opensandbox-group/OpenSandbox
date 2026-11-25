@@ -365,6 +365,7 @@ var bootstrapStripEnv = []string{
 	"OPENSANDBOX_LIFECYCLE",
 	"EXECD_LIFECYCLE_CONFIG",
 	"EXECD_RUNTIME_INIT",
+	"EXECD_INIT_AUTH",
 }
 
 // launchManagedWith applies eligible hardening/QoS policies and holds the reaper lock across start and registration.

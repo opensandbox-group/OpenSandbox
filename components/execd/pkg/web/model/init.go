@@ -47,7 +47,9 @@ type RuntimeInitRequest struct {
 
 	// AccessTokenHash is "sha256:<hex>" of the raw execd API token. The raw
 	// token never reaches execd; after apply, API auth verifies request
-	// tokens against this hash.
+	// tokens against this hash. Subsequent authenticated /internal/init calls
+	// may rotate this hash; omitting it preserves the active hash only when
+	// sandboxId is unchanged (never across a sandbox rebind).
 	AccessTokenHash string `json:"accessTokenHash,omitempty"`
 
 	// Envs are the sandbox-level user envs, applied with replace semantics:

@@ -66,6 +66,14 @@ var (
 	// preserving legacy behavior for control planes that never call it.
 	RuntimeInit bool
 
+	// InitAuth enforces access-token authentication on POST /internal/init
+	// whenever a RuntimeBinding token hash or EXECD_ACCESS_TOKEN is active.
+	// Enabled via --init-auth or EXECD_INIT_AUTH; defaults to false for backward
+	// compatibility with control planes that do not yet send
+	// X-EXECD-ACCESS-TOKEN on /internal/init. When neither token source is
+	// configured, /internal/init remains open for initial bootstrap.
+	InitAuth bool
+
 	// SseLegacyCompat omits the exit_code field from execution_complete and
 	// error SSE events so that clients whose EventNode schemas predate the
 	// field never observe an unknown key. Successful foreground commands

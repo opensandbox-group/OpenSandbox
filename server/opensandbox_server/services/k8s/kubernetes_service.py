@@ -45,6 +45,7 @@ from opensandbox_server.api.schema import (
 from opensandbox_server.config import AppConfig, INGRESS_MODE_GATEWAY, SecureAccessConfig, get_config
 from opensandbox_server.services.constants import (
     EXECD_ACCESS_TOKEN_ENV,
+    EXECD_INIT_AUTH_ENV,
     SANDBOX_ID_LABEL,
     SANDBOX_MANAGED_VOLUMES_LABEL,
     SANDBOX_TENANT_LABEL,
@@ -215,6 +216,17 @@ class KubernetesSandboxService(
         self._tenant_provider = provider  # type: ignore[assignment]
 
     def _ensure_execd_auth_env_allowed(self, request: CreateSandboxRequest) -> None:
+        if request.env and any(k.upper() == EXECD_INIT_AUTH_ENV for k in request.env):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"Environment variable '{EXECD_INIT_AUTH_ENV}' cannot be set in "
+                        "create request; execd init authentication is controlled by the platform."
+                    ),
+                },
+            )
         if self._execd_token_manager is None:
             return
         if request.env and EXECD_ACCESS_TOKEN_ENV in request.env:
