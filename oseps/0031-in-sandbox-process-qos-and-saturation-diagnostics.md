@@ -3,8 +3,8 @@ title: In-Sandbox Process QoS and Saturation Diagnostics
 authors:
   - "@hittyt"
 creation-date: 2026-11-17
-last-updated: 2026-11-19
-status: draft
+last-updated: 2026-11-25
+status: implementing
 ---
 
 # OSEP-0031: In-Sandbox Process QoS and Saturation Diagnostics

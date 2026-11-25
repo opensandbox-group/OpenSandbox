@@ -3,8 +3,8 @@ title: Egress Upstream Proxy Forward Mode
 authors:
   - "@hittyt"
 creation-date: 2026-11-13
-last-updated: 2026-11-19
-status: draft
+last-updated: 2026-11-25
+status: implementing
 ---
 
 # OSEP-0030: Egress Upstream Proxy Forward Mode

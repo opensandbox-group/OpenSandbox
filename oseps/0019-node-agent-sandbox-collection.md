@@ -3,8 +3,8 @@ title: Node Agent for Node-Level Sandbox Collection
 authors:
   - "@peijianping"
 creation-date: 2026-07-23
-last-updated: 2026-08-27
-status: implementing
+last-updated: 2026-11-25
+status: implemented
 ---
 
 # OSEP-0019: Node Agent for Node-Level Sandbox Collection
