@@ -81,6 +81,8 @@ SANDBOX_IMAGE=ubuntu SANDBOX_DOMAIN=localhost:8080 uv run python examples/docker
 
 ## Expected Output
 
+The script exits with a nonzero status if a required command or verification fails. The read-only scenario passes when the filesystem rejects the write.
+
 ```text
 OpenSandbox server : localhost:8080
 Sandbox image      : ubuntu
