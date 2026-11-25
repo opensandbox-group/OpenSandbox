@@ -41,6 +41,7 @@ REPORT_PY = os.path.join(ENV_DIR, "bench-report.py")
 BENCH_SH = os.path.join(ENV_DIR, "credential-bound-bench.sh")
 ENV_SH = os.path.join(ENV_DIR, "integration-env.sh")
 WORKFLOW = os.path.join(REPO, ".github", "workflows", "fast-sandbox-test.yml")
+REUSABLE_WORKFLOW = os.path.join(REPO, ".github", "workflows", "fast-sandbox-e2e.yml")
 
 
 def load_report_module():
@@ -561,7 +562,10 @@ class WorkflowBenchGateTest(unittest.TestCase):
             self.skipTest("PyYAML not installed")
         with open(WORKFLOW) as handle:
             self.doc = yaml.safe_load(handle)
-        self.job = self.doc["jobs"]["integration"]
+        with open(REUSABLE_WORKFLOW) as handle:
+            self.reusable = yaml.safe_load(handle)
+        self.caller_job = self.doc["jobs"]["integration"]
+        self.job = self.reusable["jobs"]["e2e"]
         self.steps = self.job["steps"]
         self.names = [s.get("name") for s in self.steps]
 
@@ -571,7 +575,8 @@ class WorkflowBenchGateTest(unittest.TestCase):
     def test_bench_is_opt_in_and_after_the_verify_steps(self):
         dispatch = self.doc[True]["workflow_dispatch"]["inputs"]["bench"]
         self.assertEqual((dispatch["type"], dispatch["default"]), ("boolean", False))
-        gate = self.job["env"]["FSB_BENCH"]
+        self.assertEqual(self.caller_job.get("uses"), "./.github/workflows/fast-sandbox-e2e.yml")
+        gate = self.caller_job["with"]["bench"]
         self.assertIn("inputs.bench", gate)
         self.assertIn("'fast-sandbox-bench'", gate)
         delta = self.names.index("Run credential-bound egress verify (OSEP-0023)")
@@ -580,7 +585,7 @@ class WorkflowBenchGateTest(unittest.TestCase):
             bench = self.step("Run %s cost bench (OSEP-0023)" % leg)
             index = self.steps.index(bench)
             self.assertEqual(bench["env"]["EGRESS_INTERCEPTION_MODE"], mode)
-            self.assertIn("env.FSB_BENCH == 'true'", bench["if"])
+            self.assertIn("inputs.bench", bench["if"])
             self.assertIn("integration-env.sh bench-credential-bound", bench["run"])
             self.assertIsInstance(bench["timeout-minutes"], int)
             if leg == "default":
@@ -596,7 +601,7 @@ class WorkflowBenchGateTest(unittest.TestCase):
             upload = self.step("Upload %s bench reports" % leg)["with"]
             self.assertIn("fast-sandbox-bench-%s-" % leg, upload["name"])
             self.assertEqual(upload["path"], "bench-reports/%s/" % leg)
-        self.assertEqual(self.job["timeout-minutes"], 240)
+        self.assertEqual(self.caller_job["with"]["timeout_minutes"], 240)
 
     def test_matrix_conditions_select_each_requested_bench_once(self):
         script = self.doc["jobs"]["egress-modes"]["steps"][0]["run"]
@@ -612,19 +617,19 @@ class WorkflowBenchGateTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 with open(output) as handle:
                     values = dict(line.rstrip().split("=", 1) for line in handle)
-                for enabled in ("false", "true"):
+                for enabled in (False, True):
                     selected = []
                     for mode in json.loads(values["matrix"]):
                         for leg in ("default", "credential-bound"):
                             condition = self.step("Run %s cost bench (OSEP-0023)" % leg)["if"]
-                            for key, value in (("env.FSB_BENCH", enabled),
-                                               ("matrix.egress_interception_mode", mode),
-                                               ("needs.egress-modes.outputs.run_credential_bound_delta",
-                                                values["run_credential_bound_delta"])):
+                            for key, value in (("inputs.bench", enabled),
+                                               ("inputs.egress_interception_mode", mode),
+                                               ("inputs.run_credential_bound_delta",
+                                                values["run_credential_bound_delta"] == "true")):
                                 condition = condition.replace(key, repr(value))
                             if eval(condition.replace("&&", " and ").replace("||", " or "), {"__builtins__": {}}):
                                 selected.append(leg)
-                    self.assertEqual(selected, expected if enabled == "true" else [])
+                    self.assertEqual(selected, expected if enabled else [])
 
 
 

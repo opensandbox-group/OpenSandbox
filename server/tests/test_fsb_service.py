@@ -82,6 +82,8 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
         self.create_time_remaining: float | None = None
         self.diagnostic_runtime_state = pb2.RUNTIME_STATE_READY
         self.pool_has_resources = True
+        self.pool_is_resource_aware = False
+        self.rootfs_request: pb2.CreateRootfsSandboxRequest | None = None
         self.get_error_by_namespace: dict[str, grpc.StatusCode] = {}
         # Per-sandbox recorded policy state, simulating the egress-held
         # /policy/{uid} surface: seeded at create from the egress binding
@@ -103,6 +105,11 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
     def CreateRootfsSandbox(self, request, context):
         if getattr(self, "rootfs_rpc_unavailable", False):
             context.abort(grpc.StatusCode.UNIMPLEMENTED, "unknown method")
+        if not self.pool_is_resource_aware:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "rootfs resource overrides require active ResourceAware placement on a Firecracker pool",
+            )
         self.rootfs_request = request
         return self.CreateSandbox(request.create, context)
 
@@ -360,11 +367,17 @@ class _FakeFastPathService(pb2_grpc.FastPathServiceServicer):
     def GetPool(self, request, context):
         if not self.pool_has_resources:
             return pb2.PoolInfo(namespace=request.namespace, name=request.pool_name)
+        mode = (
+            pb2.SANDBOX_RESOURCE_MODE_RESOURCE_AWARE
+            if self.pool_is_resource_aware
+            else pb2.SANDBOX_RESOURCE_MODE_LEGACY_SLOT
+        )
         return pb2.PoolInfo(
             namespace=request.namespace,
             name=request.pool_name,
             sandbox_cpu="500m",
             sandbox_memory="512Mi",
+            sandbox_resource_profile=pb2.SandboxResourceProfileInfo(mode=mode),
         )
 
 
@@ -1917,6 +1930,7 @@ def test_rootfs_http_forwards_partial_limits_to_distinct_rpc(http_fsb, monkeypat
     )
 
     client, fake, _ = http_fsb
+    fake.pool_is_resource_aware = True
     record = SnapshotRecord(
         id="snap-size", source_sandbox_id="old", mode="rootfsOnly",
         restore_config=SnapshotRestoreConfig(backend="fsb", image="native-source",
@@ -1946,3 +1960,62 @@ def test_rootfs_http_forwards_partial_limits_to_distinct_rpc(http_fsb, monkeypat
     record.mode = "full"
     response = client.post("/v1/sandboxes", json=data, headers={"OPEN-SANDBOX-API-KEY": "x"})
     assert response.status_code == 422
+
+
+def test_rootfs_http_legacy_pool_falls_back_to_standard_create_and_rejects_overrides(
+    http_fsb, monkeypatch
+):
+    from opensandbox_server.services.snapshot_models import (
+        SnapshotRecord,
+        SnapshotRestoreConfig,
+        SnapshotState,
+        SnapshotStatusRecord,
+    )
+
+    client, fake, _ = http_fsb
+    fake.pool_is_resource_aware = False
+    record = SnapshotRecord(
+        id="snap-legacy",
+        source_sandbox_id="old",
+        mode="rootfsOnly",
+        restore_config=SnapshotRestoreConfig(
+            backend="fsb",
+            image="native-source",
+            limits={"cpu": "500m", "memory": "512Mi"},
+        ),
+        status=SnapshotStatusRecord(state=SnapshotState.READY),
+    )
+    repo = Mock()
+    repo.get.return_value = record
+    monkeypatch.setattr(
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository", lambda: repo
+    )
+
+    # Matching limits on a LegacySlot pool must use standard CreateSandbox.
+    matching = {
+        "snapshotId": record.id,
+        "timeout": 600,
+        "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+    }
+    response = client.post("/v1/sandboxes", json=matching, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 202, response.text
+    assert fake.rootfs_request is None
+    assert fake.last_create is not None
+    assert fake.last_create.image == "native-source"
+    assert not fake.last_create.HasField("resources")
+
+    # Omitting resourceLimits on a LegacySlot pool also falls back to standard CreateSandbox.
+    omitted = {"snapshotId": record.id, "timeout": 600}
+    response = client.post("/v1/sandboxes", json=omitted, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 202, response.text
+    assert fake.rootfs_request is None
+
+    # Requesting a CPU/memory override on a LegacySlot pool must still be rejected.
+    override = {
+        "snapshotId": record.id,
+        "timeout": 600,
+        "resourceLimits": {"memory": "2Gi"},
+    }
+    response = client.post("/v1/sandboxes", json=override, headers={"OPEN-SANDBOX-API-KEY": "x"})
+    assert response.status_code == 400, response.text
+    assert fake.rootfs_request is None

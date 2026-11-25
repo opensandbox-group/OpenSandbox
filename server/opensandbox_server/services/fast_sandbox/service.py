@@ -429,6 +429,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         # Template mode: the resolved artifact reference becomes
         # the FastPath image; workload shape comes from the golden image.
         template_entrypoint: Optional[list[str]] = None
+        pool_is_resource_aware = False
         if request.template_id and request.template_id.strip():
             image_ref, template_entrypoint, template_machine = (
                 self.resolve_template_service().resolve_template_artifact(
@@ -493,6 +494,7 @@ class FastSandboxService(SandboxService, ExtensionService):
                     },
                 ) from exc
             pool = self._pool_info(create_request.namespace, create_request.pool_ref)
+            pool_is_resource_aware = self._pool_is_resource_aware(pool)
             snapshot_limits = request.resolved_snapshot_limits
             try:
                 create_request = map_create_request(
@@ -506,7 +508,7 @@ class FastSandboxService(SandboxService, ExtensionService):
                     # the same profile as a plain create).
                     pool_resources=self._pool_resources_from_info(pool),
                     snapshot_limits=snapshot_limits,
-                    pool_is_resource_aware=self._pool_is_resource_aware(pool),
+                    pool_is_resource_aware=pool_is_resource_aware,
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(
@@ -518,7 +520,10 @@ class FastSandboxService(SandboxService, ExtensionService):
                 ) from exc
 
         rootfs_request = None
-        if request._resolved_rootfs_only:
+        # OSEP-0028: CreateRootfsSandbox is only accepted by FastPath on
+        # ResourceAware Firecracker pools; LegacySlot pools restore RootfsOnly
+        # snapshots through standard CreateSandbox with pool-fixed resources.
+        if request._resolved_rootfs_only and pool_is_resource_aware:
             from opensandbox_server.services.k8s.snapshot_runtime import build_public_snapshot_name
 
             if not request.snapshot_id:
