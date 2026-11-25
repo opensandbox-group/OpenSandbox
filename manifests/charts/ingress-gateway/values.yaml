@@ -58,6 +58,9 @@ gateway:
   # -- Routing mode: header (including wildcard hosts) or uri.
   gatewayRouteMode: "header"
 
+  # -- Accept cleartext HTTP/2 (h2c) on the gateway port so native gRPC clients can reach sandboxes. Requires an ingress image that supports --h2c-enabled.
+  h2cEnabled: false
+
   # -- FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise.
   fastpathEndpoint: ""
   fastpathAuth:

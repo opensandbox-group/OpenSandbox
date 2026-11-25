@@ -212,9 +212,19 @@ func main() {
 	)
 	handler := newIngressHandler(reverseProxy, networkReadiness)
 
-	if err := http.ListenAndServe(fmt.Sprintf(":%v", flag.Port), handler); err != nil {
+	if err := newIngressServer(fmt.Sprintf(":%v", flag.Port), handler, flag.H2CEnabled).ListenAndServe(); err != nil {
 		log.Panicf("Error starting http server: %v", err)
 	}
+}
+
+// newIngressServer serves cleartext HTTP/1.1 (including WebSocket upgrades)
+// and, when h2c is true, h2c prior-knowledge on the same port, so native
+// gRPC clients can connect.
+func newIngressServer(addr string, handler http.Handler, h2c bool) *http.Server {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(h2c)
+	return &http.Server{Addr: addr, Handler: handler, Protocols: protocols}
 }
 
 // newActivityRecorder wires the OSEP-0024 auto-pause activity recorder

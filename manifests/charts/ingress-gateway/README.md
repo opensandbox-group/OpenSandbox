@@ -40,6 +40,7 @@ Kubernetes: `>=1.22.0-0`
 | gateway.fastpathAuth.serverName | string | `""` | Expected FastPath certificate DNS name. Empty uses the endpoint hostname. |
 | gateway.fastpathEndpoint | string | `""` | FastPath gRPC endpoint; required for fast-sandbox, enables mixed routing otherwise. |
 | gateway.gatewayRouteMode | string | `"header"` | Routing mode: header (including wildcard hosts) or uri. |
+| gateway.h2cEnabled | bool | `false` | Accept cleartext HTTP/2 (h2c) on the gateway port so native gRPC clients can reach sandboxes. Requires an ingress image that supports --h2c-enabled. |
 | gateway.httpConnectionPool.idleConnTimeout | string | `"90s"` | Maximum HTTP connection idle time (Go duration). Zero disables idle expiration; must be nonnegative. |
 | gateway.httpConnectionPool.maxIdleConns | int | `100` | Maximum idle HTTP connections across all upstream hosts. Zero means no total limit; must be nonnegative. |
 | gateway.httpConnectionPool.maxIdleConnsPerHost | int | `2` | Maximum idle HTTP connections per upstream host. Zero uses Go's default of 2; must be nonnegative. |

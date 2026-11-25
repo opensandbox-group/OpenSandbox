@@ -63,6 +63,7 @@ type Proxy struct {
 	fastSandboxNamespace string
 
 	httpTransport             http.RoundTripper
+	grpcTransport             http.RoundTripper
 	websocketClient           *http.Client
 	websocketMessageSizeLimit int64
 }
@@ -86,6 +87,7 @@ func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, re
 		scope:                     scope,
 		fastSandboxNamespace:      options.fastSandboxNamespace,
 		httpTransport:             newHTTPTransport(options.connectObserver, options.httpConnectionPool),
+		grpcTransport:             newGRPCTransport(options.connectObserver, options.httpConnectionPool),
 		websocketClient:           newObservedWebSocketHTTPClient(options.connectObserver),
 		websocketMessageSizeLimit: options.webSocketMessageSizeLimit,
 	}
@@ -161,7 +163,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		if errors.As(err, &detailed) {
 			Logger.With(slogger.Field{Key: "error", Value: detailed.InternalCause()}).Errorf("ingress: provider resolution failed")
 		}
-		if respondWakeTimeout(sw, err) {
+		if respondWakeTimeout(sw, r, err) {
 			return
 		}
 		if status == 0 {
@@ -170,7 +172,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		if status == http.StatusServiceUnavailable {
 			sw.Header().Set("Retry-After", "1")
 		}
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+		writeIngressError(sw, r, status, fmt.Sprintf("OpenSandbox Ingress: %v", err))
 		return
 	}
 
@@ -183,7 +185,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 
 	targetURL, code, err := p.resolveRealHost(host, r.URL)
 	if err != nil {
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
+		writeIngressError(sw, r, code, fmt.Sprintf("OpenSandbox Ingress: %v", err))
 		return
 	}
 
@@ -231,7 +233,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 			if status == http.StatusServiceUnavailable {
 				sw.Header().Set("Retry-After", "1")
 			}
-			http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", replay.wakeErr), status)
+			writeIngressError(sw, r, status, fmt.Sprintf("OpenSandbox Ingress: %v", replay.wakeErr))
 		}
 		return
 	}
@@ -251,13 +253,13 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 			// other 503 branch carries.
 			sw.Header().Set("Retry-After", "1")
 		}
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
+		writeIngressError(sw, r, status, fmt.Sprintf("OpenSandbox Ingress: %v", err))
 		return
 	}
 	host.info = endpoint
 	targetURL, code, err = p.resolveRealHost(host, r.URL)
 	if err != nil {
-		http.Error(sw, fmt.Sprintf("OpenSandbox Ingress: %v", err), code)
+		writeIngressError(sw, r, code, fmt.Sprintf("OpenSandbox Ingress: %v", err))
 		return
 	}
 	p.applyUpstreamRequest(r, host, targetURL)
@@ -325,6 +327,9 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 		httpProxy := NewHTTPProxy(append([]func(*http.Response){stripWakeMarkerObserver()}, append(extraResponseObservers, p.upstreamResponseObserver(target))...)...) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 		httpProxy.errorObserver = p.upstreamErrorObserver(target)
 		httpProxy.transport = p.httpTransport
+		if isGRPCRequest(r) {
+			httpProxy.transport = p.grpcTransport
+		}
 		httpProxy.ServeHTTP(w, r)
 	}
 }
@@ -513,6 +518,15 @@ func (w *statusCapturingResponseWriter) WriteHeader(code int) {
 		w.commit(code)
 	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+// commitStatus records code as the final status without writing it, for
+// responses whose wire status differs from what metrics should report.
+func (w *statusCapturingResponseWriter) commitStatus(code int) {
+	if !w.written {
+		w.statusCode = code
+		w.written = true
+	}
 }
 
 func (w *statusCapturingResponseWriter) Write(b []byte) (int, error) {

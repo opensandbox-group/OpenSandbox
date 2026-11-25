@@ -106,6 +106,24 @@ func newHTTPTransport(observer connectivity.Observer, pool *httpConnectionPoolCo
 	return transport
 }
 
+// newGRPCTransport returns the upstream transport for native gRPC requests:
+// HTTP/2 over cleartext (h2c) only, with the same pool settings and dial
+// observation as the HTTP/1.1 transport.
+func newGRPCTransport(observer connectivity.Observer, pool *httpConnectionPoolConfig) http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Protocols = new(http.Protocols)
+	transport.Protocols.SetUnencryptedHTTP2(true)
+	if pool != nil {
+		transport.MaxIdleConns = pool.maxIdleConns
+		transport.MaxIdleConnsPerHost = pool.maxIdleConnsPerHost
+		transport.IdleConnTimeout = pool.idleConnTimeout
+	}
+	if observer != nil {
+		transport.DialContext = connectivity.WrapDialContext(transport.DialContext, observer, "http")
+	}
+	return transport
+}
+
 // newObservedWebSocketHTTPClient returns the *http.Client that coder/websocket
 // uses to dial backends. Its Transport's DialContext is wrapped so each TCP
 // connection attempt is recorded by the connectivity observer under the

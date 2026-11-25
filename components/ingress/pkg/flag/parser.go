@@ -37,6 +37,7 @@ func InitFlags() {
 	flag.StringVar(&deprecatedNamespace, "namespace", "opensandbox", "Deprecated compatibility flag (ingress now watches sandbox resources across all namespaces)")
 	flag.StringVar(&ProviderType, "provider-type", "batchsandbox", "The sandbox provider type (batchsandbox, agent-sandbox, fast-sandbox)")
 	flag.StringVar(&Mode, "mode", "header", "The sandbox service discovery mode")
+	flag.BoolVar(&H2CEnabled, "h2c-enabled", false, "Accept cleartext HTTP/2 (h2c prior knowledge) alongside HTTP/1.1 on the listener port, for native gRPC")
 
 	// HTTP upstream connection pooling.
 	flag.IntVar(&HTTPMaxIdleConns, "http-max-idle-conns", 100, "Maximum idle upstream HTTP connections across all hosts per ingress replica (0 = no limit)")

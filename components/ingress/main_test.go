@@ -15,6 +15,8 @@
 package main
 
 import (
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -131,4 +133,74 @@ func TestIngressHandlerServesStatusPaths(t *testing.T) {
 	if got != "proxy GET /status.ok/network-readiness" {
 		t.Errorf("/status.ok%%2Fnetwork-readiness handled as %q; want it proxied", got)
 	}
+}
+
+func TestIngressServerServesHTTP1AndH2C(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newIngressServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, r.Proto+" upgrade="+r.Header.Get("Upgrade"))
+	}), true)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	url := "http://" + listener.Addr().String() + "/"
+
+	h2c := &http.Transport{Protocols: new(http.Protocols)}
+	h2c.Protocols.SetUnencryptedHTTP2(true)
+
+	upgrade, _ := http.NewRequest(http.MethodGet, url, nil)
+	upgrade.Header.Set("Connection", "Upgrade")
+	upgrade.Header.Set("Upgrade", "websocket")
+
+	for _, test := range []struct {
+		name   string
+		client *http.Client
+		req    *http.Request
+		want   string
+	}{
+		{name: "http1", client: http.DefaultClient, want: "HTTP/1.1 upgrade="},
+		{name: "h2c prior knowledge", client: &http.Client{Transport: h2c}, want: "HTTP/2.0 upgrade="},
+		{name: "websocket upgrade stays http1", client: http.DefaultClient, req: upgrade, want: "HTTP/1.1 upgrade=websocket"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := test.req
+			if req == nil {
+				req, _ = http.NewRequest(http.MethodGet, url, nil)
+			}
+			resp, err := test.client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if string(body) != test.want {
+				t.Fatalf("body = %q, want %q", body, test.want)
+			}
+		})
+	}
+}
+
+func TestIngressServerRejectsH2CWhenDisabled(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newIngressServer("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}), false)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+	url := "http://" + listener.Addr().String() + "/"
+
+	h2c := &http.Transport{Protocols: new(http.Protocols)}
+	h2c.Protocols.SetUnencryptedHTTP2(true)
+	if resp, err := (&http.Client{Transport: h2c}).Get(url); err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("h2c request got %s; want it rejected while h2c is disabled", resp.Proto)
+	}
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("HTTP/1.1 request: %v", err)
+	}
+	_ = resp.Body.Close()
 }
