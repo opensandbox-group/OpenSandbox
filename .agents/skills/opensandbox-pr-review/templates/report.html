@@ -21,11 +21,15 @@ limitations under the License.
 <title>PR #{{N}} Review · {{title}}</title>
 <!--
   opensandbox-pr-review report skeleton.
-  Fill every {{placeholder}}. Keep sections 1–3 and their order. Keep ONE value-card
-  block and delete the other two, then delete the rows that do not apply. Keep the
-  collapsed evidence section only when a card row or a finding depends on it.
+  Fill every {{placeholder}}. Keep sections 1–4 and their order (1. What changed,
+  2. Security report [priority #2, mandatory], 3. Findings, 4. Verification log).
+  Keep ONE value-card block and delete the other two, then delete the rows that do
+  not apply. Keep section 5 (collapsed evidence) only when a card row or a finding
+  depends on it.
   Verdict banner classes: .verdict (default pass/green), .verdict.v-warn (amber),
   .verdict.v-fail (red).
+  Security card classes: .card.card-sec (default pass/green), .card.card-sec.sec-warn
+  (amber), .card.card-sec.sec-fail (red).
   Verdict & severity badges: b-pass ✓, b-part △, b-fail ✗, b-crit, b-high, b-med,
   b-low, b-warn, b-info — set the class and glyph to match each row.
   Key emphasis: use <strong> for key conclusions/metrics and <strong class="hl-red">
@@ -33,7 +37,7 @@ limitations under the License.
   Escape untrusted values (PR title, author, branch names, commit subjects, quoted
   body text, command output) before substitution; <pre> escapes nothing by itself.
   Length limits: a card row is at most 2 lines, a finding at most 2 lines, and the
-  default-language view fits in about two screens before the verification log.
+  default-language view stays compact and scannable before the verification log.
 -->
 <style>
   :root {
@@ -209,7 +213,7 @@ limitations under the License.
   strong { color: var(--fg); font-weight: 650; }
   .hl-red { color: var(--fail); font-weight: 650; }
 
-  /* Value Card: structured label/value grid for low visual density */
+  /* Value Card & Security Card: structured label/value grid for low visual density */
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -219,6 +223,9 @@ limitations under the License.
     overflow: hidden;
     margin: 0 0 18px;
   }
+  .card-sec { border-left: 3px solid var(--pass-bar); }
+  .card-sec.sec-warn { border-color: var(--part-bd); border-left-color: var(--part-bar); }
+  .card-sec.sec-fail { border-color: var(--fail-bd); border-left-color: var(--fail-bar); }
   .cell {
     display: grid;
     grid-template-columns: 152px minmax(0, 1fr);
@@ -445,15 +452,51 @@ limitations under the License.
 </section>
 
 <section>
-  <h2><span class="zh">2. 发现</span><span class="en">2. Findings</span></h2>
+  <h2>
+    <span class="zh">2. 安全报告</span><span class="en">2. Security report</span>
+    <span class="sec-tag">{{PASS / WARN / BLOCK}}</span>
+  </h2>
+
+  <!-- SECURITY CARD: default .card-sec (green), .card-sec.sec-warn (amber), .card-sec.sec-fail (red) -->
+  <div class="card card-sec">
+    <div class="cell">
+      <div class="label"><span class="zh">安全结论</span><span class="en">Security verdict</span></div>
+      <div class="val"><span class="badge {{b-pass|b-warn|b-fail}}">{{✓ PASS|⚠ WARN|✗ BLOCK}}</span><span class="zh">{{一句话安全结论与涉及的攻击面}}</span><span class="en">{{one-line security verdict and touched attack surface}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">沙箱逃逸与内核隔离</span><span class="en">Sandbox &amp; kernel isolation</span></div>
+      <div class="val"><span class="badge {{b-pass|b-warn|b-fail|b-info}}">{{✓|⚠|✗|N/A}}</span><span class="zh">{{namespace / cgroup / seccomp / capabilities / 挂载 / 路径穿越 / runtime 隔离边界核对（附 file:line）}}</span><span class="en">{{namespaces / cgroups / seccomp / capabilities / mounts / path traversal / runtime boundary check (with file:line)}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">网络安全与边界</span><span class="en">Network security</span></div>
+      <div class="val"><span class="badge {{b-pass|b-warn|b-fail|b-info}}">{{✓|⚠|✗|N/A}}</span><span class="zh">{{egress 绕过 / SSRF / ingress 路由与鉴权 / TLS 与 MITM / 跨沙箱流量隔离核对（附 file:line）}}</span><span class="en">{{egress bypass / SSRF / ingress routing &amp; auth / TLS &amp; MITM / cross-sandbox isolation check (with file:line)}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">恶意脚本与注入风险</span><span class="en">Script &amp; injection</span></div>
+      <div class="val"><span class="badge {{b-pass|b-warn|b-fail|b-info}}">{{✓|⚠|✗|N/A}}</span><span class="zh">{{命令与 Shell 注入 / CI workflow 注入 / 模板、脚本与供应链篡改核对（附 file:line）}}</span><span class="en">{{command/shell injection / CI workflow injection / template, script &amp; supply-chain tampering check (with file:line)}}</span></div>
+    </div>
+    <div class="cell">
+      <div class="label"><span class="zh">凭据、权限与多租户</span><span class="en">Secrets, auth &amp; tenancy</span></div>
+      <div class="val"><span class="badge {{b-pass|b-warn|b-fail|b-info}}">{{✓|⚠|✗|N/A}}</span><span class="zh">{{凭据/token 泄露 / env 隔离 / RBAC 最小权限 / 跨租户越权 / DoS 核对（附 file:line）}}</span><span class="en">{{secret/token leakage / env stripping / least-privilege RBAC / cross-tenant access / DoS check (with file:line)}}</span></div>
+    </div>
+  </div>
+
   <ul class="findings-list">
-    <!-- most severe first; at most 2 lines each; write "无" when there is nothing to report -->
+    <!-- security findings only, most severe first; at most 2 lines each; write "无新增安全发现" / "No new security findings" when clean -->
+    <li><span class="badge b-pass">NONE</span><span class="zh">无新增安全发现。</span><span class="en">No new security findings.</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2><span class="zh">3. 发现</span><span class="en">3. Findings</span></h2>
+  <ul class="findings-list">
+    <!-- non-security findings, most severe first; at most 2 lines each; write "无" when there is nothing to report -->
     <li><span class="badge b-low">LOW</span><code>{{path:line}}</code> <span class="zh">{{现象 → 建议}}（{{本次引入 / 基线已有}}）</span><span class="en">{{issue → suggestion}} ({{introduced by this PR / pre-existing}})</span></li>
   </ul>
 </section>
 
 <section>
-  <h2><span class="zh">3. 验证记录</span><span class="en">3. Verification log</span></h2>
+  <h2><span class="zh">4. 验证记录</span><span class="en">4. Verification log</span></h2>
   <div class="table-wrap">
     <table>
       <tr><th><span class="zh">检查</span><span class="en">Check</span></th><th><span class="zh">位置</span><span class="en">Where</span></th><th><span class="zh">结果</span><span class="en">Result</span></th></tr>
@@ -465,10 +508,10 @@ limitations under the License.
 
 <section>
   <details>
-    <summary><span class="zh">4. 证据（按需展开）</span><span class="en">4. Evidence (expand)</span></summary>
+    <summary><span class="zh">5. 证据（按需展开）</span><span class="en">5. Evidence (expand)</span></summary>
     <div class="evidence-body">
       <ul>
-        <li><span class="zh">{{base 复现输出 / 机制追踪 / 边界与并发推理，仅保留卡片行或发现所依赖的部分}}</span><span class="en">{{base reproduction output / mechanism trace / edge-case and concurrency reasoning — only what a card row or a finding depends on}}</span></li>
+        <li><span class="zh">{{base 复现输出 / 机制追踪 / 安全验证路径 / 边界与并发推理，仅保留卡片行或发现所依赖的部分}}</span><span class="en">{{base reproduction output / mechanism trace / security trace / edge-case and concurrency reasoning — only what a card row or a finding depends on}}</span></li>
       </ul>
       <pre><code>{{command output}}</code></pre>
     </div>
