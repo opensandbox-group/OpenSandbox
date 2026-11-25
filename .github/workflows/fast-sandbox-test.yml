@@ -7,6 +7,10 @@ on:
         description: Optional fast-sandbox commit SHA to test instead of the pinned commit (full 40-char SHA; a PR head SHA works)
         required: false
         type: string
+      verify_disk_hotplug:
+        description: Test native-template PCI disk hotplug and exec session continuity (requires a PCI-capable fast-sandbox commit)
+        type: boolean
+        default: false
       pool_mode:
         description: SandboxPool profile (resource-aware | legacy)
         required: false
@@ -40,7 +44,7 @@ permissions:
 # shared group would let cancel-in-progress kill an in-flight KVM run before
 # the gate gets a chance to skip.
 concurrency:
-  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test') && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '' && format('fsb-pr-{0}', github.event.client_payload.pr)) || github.run_id }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ok-to-test' && (github.event.label.name != 'test-disk-hotplug' || !contains(github.event.pull_request.labels.*.name, 'ok-to-test'))) && format('{0}-label-noise', github.event.pull_request.number) || github.event.pull_request.number || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '' && format('fsb-pr-{0}', github.event.client_payload.pr)) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'repository_dispatch' && github.event.client_payload.pr != '') }}
 
 jobs:
@@ -145,12 +149,13 @@ jobs:
       ( needs.changes.outputs.relevant == 'true' &&
       contains(github.event.pull_request.labels.*.name, 'ok-to-test') &&
       ( github.event.action != 'labeled' ||
-      github.event.label.name == 'ok-to-test' ) )
-    # OSEP-0023 (experimental): when a single mode is requested, one leg owns
-    # the runner for a full up -> verify -> teardown. When both default and
-    # credential-bound are requested (including PRs), egress-modes collapses
-    # the matrix to [''] and runs the credential-bound delta in-place after
-    # active sandboxes drain and the SandboxPool is recreated.
+      github.event.label.name == 'ok-to-test' ||
+      github.event.label.name == 'test-disk-hotplug' ) )
+    # OSEP-0023 (experimental): the default leg ('' = switch unset, Pool
+    # rendered unchanged) plus an opt-in credential-bound leg (see
+    # egress-modes). Strictly serial: each leg owns the runner for a full
+    # up -> verify -> teardown, so the pool is never switched under live
+    # Pods and the legs never share a host.
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -223,6 +228,14 @@ jobs:
         # larger budgets are reserved upper bounds, not measured durations.
         timeout-minutes: ${{ matrix.egress_interception_mode == 'credential-bound' && 60 || 30 }}
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
+
+      - name: Verify disk hotplug on a running native-template VM
+        if: >-
+          (github.event_name == 'workflow_dispatch' && inputs.verify_disk_hotplug) ||
+          (github.event_name == 'pull_request' && matrix.egress_interception_mode == '' &&
+          contains(github.event.pull_request.labels.*.name, 'test-disk-hotplug'))
+        timeout-minutes: 10
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/verify/disk-hotplug.sh
 
       - name: Run overlaybd template verify
         # Builds the overlaybd template first; no-op when OCI_STACK=0.

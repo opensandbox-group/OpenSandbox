@@ -82,6 +82,14 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fast-sand
 - **On-demand loading**: the pool has no `warmImages`; the verify sandbox's create pulls the golden snapshot set through DART. `WARM_IMAGES=1` preheats instead.
 - **fast-sandbox @ pinned commit**: env-owned clone at `$WORK/fast-sandbox`, cloned on first `up` and checked out at the pinned commit afterwards; relocate it with `FSB_DIR`. The source itself has no override — bump the commit in `manifests/third-party/fast-sandbox.commit`.
 
+### Native-template disk hotplug probe
+
+The **Fast Sandbox Integration Tests** workflow has an opt-in `verify_disk_hotplug` input for [#2941](https://github.com/opensandbox-group/OpenSandbox/issues/2941). Dispatch a ref containing the probe and set `fsb_commit` to the full SHA of the fast-sandbox candidate. On a relevant OpenSandbox PR, maintainers can select the same probe by applying both `ok-to-test` and `test-disk-hotplug`. The default matrix leg tests the fast-sandbox pin from that PR. The standalone command after `integration-env.sh up` is `sudo -E ./scripts/fast-sandbox-env/verify/disk-hotplug.sh`. The runner needs `mkfs.ext4` and `debugfs` from e2fsprogs.
+
+At fast-sandbox commit `96e41031`, the [template builder](https://github.com/opensandbox-group/fast-sandbox/blob/96e41031cb091d099ab6f15d4da5528835d065b0/cmd/sandboxtemplate-builder/snapshot_stage.go#L133) boots with `pci=off` and the [restore launcher](https://github.com/opensandbox-group/fast-sandbox/blob/96e41031cb091d099ab6f15d4da5528835d065b0/internal/runtime/firecracker/launcher.go#L189-L209) omits `--enable-pci`. This pin is expected to fail the guest PCI check. A candidate needs a freshly built PCI-capable template, guest virtio-pci and virtio-blk drivers, and a compatible restore path.
+
+The probe starts a named exec session, observes two ticks from one live command, then hotplugs a disposable ext4 image and rescans PCI in the guest. The original command must see the seeded marker at `/data`, write back to the disk, and finish with the same PID and an uninterrupted sequence. After unmount, the runner checks the write directly in the image. CSI provisioning and PVC lifetime are separate tests.
+
 ## Layout
 
 ```
