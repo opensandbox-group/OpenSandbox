@@ -103,6 +103,7 @@ jobs:
             TestNftQuiescenceAfterCommittedStaticError \
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback \
+            TestNftRemovedSingletonPortAtOptIn \
             TestNftEstablishedDropKernelRuleOrder
           bash scripts/ci-nft-go-test.sh ./pkg/fastsandboxnft \
             TestResolvedIPRenewalExtendsKernelExpiry
