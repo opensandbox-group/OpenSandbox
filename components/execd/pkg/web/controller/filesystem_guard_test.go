@@ -613,4 +613,28 @@ func TestFilesystemGuardBlocksAnchoredGlobAncestorMoveAndDelete(t *testing.T) {
 
 	_, err = os.Stat(credFile)
 	require.NoError(t, err, "glob-protected credential file must remain intact")
+
+	// Unanchored "**/" globs still match after relocation and must not over-block
+	// moving a directory containing a matching fixture.
+	withTestFilesystemGuard(t, FilesystemGuardPolicy{
+		DenyGlobs: []string{"**/.aws/credentials"},
+	})
+	relocatedAlice := filepath.Join(ws, "alice-unanchored")
+	body2, err := json.Marshal([]model.RenameFileItem{{
+		Src:  aliceDir,
+		Dest: relocatedAlice,
+	}})
+	require.NoError(t, err)
+	ctrlMv2, recMv2 := newFilesystemController(t, http.MethodPost, "/files/mv", body2)
+	ctrlMv2.RenameFiles()
+	require.Equal(t, http.StatusOK, recMv2.Code, recMv2.Body.String())
+	// The relocated credentials file remains blocked by the "**/" glob.
+	require.ErrorIs(t, checkFilesystemPath(filepath.Join(relocatedAlice, ".aws", "credentials")), errForbiddenPath)
+}
+
+func TestExpandRawSymlinkTargetAcceptsForwardSlashes(t *testing.T) {
+	cur, segs, ok := expandRawSymlinkTarget(`/workspace`, `C:/Windows/System32/../Temp`)
+	require.True(t, ok)
+	require.Equal(t, "C:"+string(filepath.Separator), cur)
+	require.Equal(t, []string{"Windows", "System32", "..", "Temp"}, segs)
 }

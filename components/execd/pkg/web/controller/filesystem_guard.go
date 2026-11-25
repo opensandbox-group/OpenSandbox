@@ -72,10 +72,11 @@ func (p FilesystemGuardPolicy) IsZero() bool {
 }
 
 type filesystemGuard struct {
-	policy       FilesystemGuardPolicy
-	blockedRoots []string
-	denyGlobs    []string
-	windowsMode  bool
+	policy            FilesystemGuardPolicy
+	blockedRoots      []string
+	denyGlobs         []string
+	anchoredDenyGlobs []string
+	windowsMode       bool
 }
 
 var (
@@ -132,16 +133,23 @@ func buildFilesystemGuardForOS(policy FilesystemGuardPolicy, windowsMode bool) (
 	if err != nil {
 		return nil, err
 	}
+	var anchoredGlobs []string
+	for _, pattern := range denyGlobs {
+		if !strings.HasPrefix(pattern, "**/") {
+			anchoredGlobs = append(anchoredGlobs, pattern)
+		}
+	}
 
 	copiedPolicy := FilesystemGuardPolicy{
 		ExtraBlockedPaths: normalizedExtras,
 		DenyGlobs:         append([]string(nil), denyGlobs...),
 	}
 	return &filesystemGuard{
-		policy:       copiedPolicy,
-		blockedRoots: roots,
-		denyGlobs:    denyGlobs,
-		windowsMode:  windowsMode,
+		policy:            copiedPolicy,
+		blockedRoots:      roots,
+		denyGlobs:         denyGlobs,
+		anchoredDenyGlobs: anchoredGlobs,
+		windowsMode:       windowsMode,
 	}, nil
 }
 
@@ -338,26 +346,47 @@ func (g *filesystemGuard) CheckNotBlockedOrAncestor(absPath string) error {
 	return nil
 }
 
+const maxGlobAncestorWalkEntries = 100_000
+
 var errGlobDescendantBlocked = errors.New("glob-protected descendant")
 
+// hasGlobBlockedDescendant scans dir only when anchored deny_globs (patterns
+// without a leading "**/") are configured, because unanchored "**/" globs
+// continue to match after directory relocation. The scan is capped to bound
+// synchronous walk latency and fails closed if the cap is exceeded.
 func (g *filesystemGuard) hasGlobBlockedDescendant(dir string) bool {
-	if len(g.denyGlobs) == 0 {
+	if len(g.anchoredDenyGlobs) == 0 {
 		return false
 	}
 	info, err := os.Lstat(dir)
 	if err != nil || !info.IsDir() {
 		return false
 	}
+	visited := 0
 	walkErr := filepath.WalkDir(dir, func(p string, _ fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // skip unreadable entries while scanning for glob-protected descendants
 		}
-		if g.matchesDenyGlob(p) {
+		visited++
+		if visited > maxGlobAncestorWalkEntries {
+			return errGlobDescendantBlocked
+		}
+		if g.matchesAnchoredDenyGlob(p) {
 			return errGlobDescendantBlocked
 		}
 		return nil
 	})
 	return errors.Is(walkErr, errGlobDescendantBlocked)
+}
+
+func (g *filesystemGuard) matchesAnchoredDenyGlob(candidate string) bool {
+	norm := normalizeForMatch(candidate, g.windowsMode)
+	for _, pattern := range g.anchoredDenyGlobs {
+		if matchGuardGlob(pattern, norm, g.windowsMode) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *filesystemGuard) isRootOrBlockedAncestor(candidate string) bool {
@@ -523,7 +552,7 @@ func (g *filesystemGuard) resolveSymlinkStep(
 	// inside target are resolved before ".." is applied, matching kernel semantics.
 	nextCur, targetSegs, ok := expandRawSymlinkTarget(curDir, target)
 	if !ok {
-		return "", nil, true, nil
+		return "", nil, false, &forbiddenPathError{path: origPath}
 	}
 	if !strings.Contains(target, "..") {
 		resolvedTarget := resolveSymlinkTarget(curDir, target)
@@ -537,13 +566,17 @@ func (g *filesystemGuard) resolveSymlinkStep(
 
 func expandRawSymlinkTarget(curDir, target string) (string, []string, bool) {
 	sep := string(filepath.Separator)
-	if filepath.IsAbs(target) {
+	if filepath.IsAbs(target) || isWindowsAbsPath(target) {
 		vol := filepath.VolumeName(target)
+		if vol == "" && len(target) >= 2 && target[1] == ':' {
+			vol = target[:2]
+		}
 		rest := strings.TrimPrefix(target, vol)
-		if !strings.HasPrefix(rest, sep) {
+		if !strings.HasPrefix(rest, sep) && !strings.HasPrefix(rest, "/") {
 			return "", nil, false
 		}
-		return vol + sep, splitRawSegments(strings.TrimPrefix(rest, sep)), true
+		trimmed := strings.TrimLeft(rest, sep+"/")
+		return vol + sep, splitRawSegments(trimmed), true
 	}
 	return curDir, splitRawSegments(target), true
 }
@@ -552,7 +585,9 @@ func splitRawSegments(p string) []string {
 	if p == "" {
 		return nil
 	}
-	raw := strings.Split(p, string(filepath.Separator))
+	raw := strings.FieldsFunc(p, func(r rune) bool {
+		return r == filepath.Separator || r == '/'
+	})
 	out := make([]string, 0, len(raw))
 	for _, s := range raw {
 		if s != "" && s != "." {
