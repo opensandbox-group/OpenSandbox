@@ -117,11 +117,7 @@ func newWithRotate(cfg Config, extra ...zapcore.Core) (Logger, error) {
 		}
 	}
 
-	encoderCfg := zap.NewProductionEncoderConfig()
-	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
-	encoderCfg.CallerKey = ""
-	encoderCfg.StacktraceKey = ""
-	encoder := zapcore.NewJSONEncoder(encoderCfg)
+	encoder := productionEncoder()
 
 	atom := zap.NewAtomicLevelAt(parseLevel(cfg.Level))
 
@@ -142,13 +138,24 @@ func newWithRotate(cfg Config, extra ...zapcore.Core) (Logger, error) {
 		errSinks = append(errSinks, rotateWriter(path, cfg.Rotate))
 	}
 
-	base := zap.New(core,
-		zap.ErrorOutput(zapcore.NewMultiWriteSyncer(errSinks...)),
+	return buildLogger(core, zapcore.NewMultiWriteSyncer(errSinks...)), nil
+}
+
+func productionEncoder() zapcore.Encoder {
+	cfg := zap.NewProductionEncoderConfig()
+	cfg.EncodeTime = zapcore.ISO8601TimeEncoder
+	cfg.CallerKey = ""
+	cfg.StacktraceKey = ""
+	return zapcore.NewJSONEncoder(cfg)
+}
+
+func buildLogger(core zapcore.Core, errs zapcore.WriteSyncer) Logger {
+	base := zap.New(core, zap.ErrorOutput(errs),
 		zap.WrapCore(func(c zapcore.Core) zapcore.Core {
 			return zapcore.NewSamplerWithOptions(c, time.Second, 100, 100)
 		}),
 	)
-	return &zapLogger{base: base, sugar: base.Sugar()}, nil
+	return &zapLogger{base: base, sugar: base.Sugar()}
 }
 
 // validateOutputPath fails fast on bad paths/permissions by trying to open the
@@ -173,24 +180,32 @@ func rotateWriter(path string, rc *RotateConfig) zapcore.WriteSyncer {
 	case "stderr":
 		return zapcore.AddSync(os.Stderr)
 	default:
-		return zapcore.AddSync(&lumberjack.Logger{
-			Filename:   path,
-			MaxSize:    rc.MaxSize,
-			MaxAge:     rc.MaxAge,
-			MaxBackups: rc.MaxBackups,
-			Compress:   rc.Compress,
-		})
+		return zapcore.AddSync(rotatingFile(path, rc))
 	}
+}
+
+func rotatingFile(path string, rc *RotateConfig) *lumberjack.Logger {
+	return &lumberjack.Logger{
+		Filename:   path,
+		MaxSize:    rc.MaxSize,
+		MaxAge:     rc.MaxAge,
+		MaxBackups: rc.MaxBackups,
+		Compress:   rc.Compress,
+	}
+}
+
+func fallbackCore(out zapcore.WriteSyncer) zapcore.Core {
+	return zapcore.NewCore(
+		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+		out,
+		zap.NewAtomicLevelAt(zapcore.InfoLevel),
+	)
 }
 
 func teeCores(cores []zapcore.Core) zapcore.Core {
 	switch len(cores) {
 	case 0:
-		return zapcore.NewCore(
-			zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
-			zapcore.AddSync(os.Stdout),
-			zap.NewAtomicLevelAt(zapcore.InfoLevel),
-		)
+		return fallbackCore(zapcore.AddSync(os.Stdout))
 	case 1:
 		return cores[0]
 	default:
