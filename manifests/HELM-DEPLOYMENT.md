@@ -539,6 +539,8 @@ The optional `fast-sandbox` chart deploys the fast-sandbox Firecracker chain (`s
 
 The CRDs (`sandbox.fast.io`) and shared namespaces ship in the `base` chart (gated by `fastSandbox.*` values), so install `base` first; control-plane ServiceAccounts and RBAC are owned by the `fast-sandbox` chart itself (`rbac.create`, default `true`).
 
+> **Upgrading from pre-1.3.0-rc.3**: In earlier revisions, `base` owned the fast-sandbox control-plane ServiceAccounts and RBAC. Single umbrella releases (`base.enabled=true`) upgrade in place. For standalone `base` + `fast-sandbox` (or standalone `base` + umbrella with `base.enabled=false`), upgrade `base` first during a brief maintenance window and immediately upgrade `fast-sandbox` so it takes ownership (roll back `base` via `helm rollback base` if the second upgrade fails). If your values previously set `fastSandbox.rbac.create=false` on `base`, remove it when `fast-sandbox` is unused or move it to `rbac.create=false` (`fast-sandbox.rbac.create=false` in the umbrella chart).
+
 ### 1. Build the companion images from the pinned source
 
 The upstream source is pinned Git-LFS-pointer style in [`manifests/third-party/fast-sandbox.commit`](third-party/fast-sandbox.commit) (repo + commit). The build script materializes a checkout of exactly that commit and builds the six Firecracker-scope images (controller, fastlet, fastlet-proxy, janitor, firecracker-runtime, sandboxtemplate-builder):

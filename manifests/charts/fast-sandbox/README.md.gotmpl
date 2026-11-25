@@ -91,6 +91,17 @@ helm delete fast-sandbox
 
 The CRDs and shared namespaces are owned by the base release and are not affected (they carry the `helm.sh/resource-policy: keep` annotation, so they must be deleted manually afterwards). Control-plane RBAC created by this chart is removed with the release.
 
+## Upgrading from pre-1.3.0-rc.3 (RBAC Ownership Migration)
+
+Before `1.3.0-rc.3`, the `base` chart owned the fast-sandbox control-plane ServiceAccounts, ClusterRoles, ClusterRoleBindings, and token-minter Roles/RoleBindings (`fast-sandbox-controller`, `fast-sandbox-fastpath`, `fast-sandbox-fastlet-issuer-discovery`). Ownership now lives in this chart (`rbac.create`, default `true`).
+
+- **Single umbrella release (`base.enabled=true`, `fast-sandbox.enabled=true`)**: All objects stay within the same Helm release; run a normal `helm upgrade`.
+- **Per-component releases (standalone `base` + standalone `fast-sandbox`) or standalone `base` + umbrella (`base.enabled=false`, `fast-sandbox.enabled=true`)**: Upgrading `fast-sandbox` first fails Helm's ownership check because the existing objects are annotated as owned by `base`. Perform the upgrade in a short maintenance window:
+  1. Upgrade `base` first so it releases the old control-plane RBAC objects (`helm upgrade base manifests/charts/base ...`). Note that the live fast-sandbox control-plane ServiceAccounts and roles are temporarily removed until step 2 completes.
+  2. Immediately upgrade `fast-sandbox` (or the `base.enabled=false` umbrella release) so this chart recreates and owns the control-plane RBAC (`helm upgrade fast-sandbox manifests/charts/fast-sandbox ...`).
+  3. **Recovery**: If step 2 fails and cannot be completed immediately, roll back `base` (`helm rollback base`) to restore the previous RBAC objects before retrying.
+- **Previously opted-out RBAC (`fastSandbox.rbac.create=false`)**: The legacy `base` flag now fails fast so an upgrade cannot silently re-enable cluster-wide RBAC. Remove `fastSandbox.rbac.create=false` if `fast-sandbox` is not installed, or switch to `rbac.create=false` (`fast-sandbox.rbac.create=false` in the umbrella chart) when managing RBAC externally.
+
 ## License
 
 Apache 2.0 License

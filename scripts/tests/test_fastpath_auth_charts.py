@@ -334,6 +334,31 @@ class FastPathAuthChartsTest(unittest.TestCase):
         self.assertTrue(expected_rbac.issubset(enabled_identities))
         self.assertNotIn("system:unauthenticated", str(enabled_resources))
 
+    def test_legacy_base_fast_sandbox_rbac_opt_out_fails_with_migration_message(self):
+        for chart, flag in (
+            ("base", "fastSandbox.rbac.create=false"),
+            ("opensandbox", "base.fastSandbox.rbac.create=false"),
+        ):
+            result = subprocess.run(
+                [
+                    HELM,
+                    "template",
+                    "test",
+                    str(ROOT / "manifests/charts" / chart),
+                    "--set",
+                    flag,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fast-sandbox.rbac.create=false", result.stderr)
+
+        # Legacy `--reuse-values` upgrades from pre-move base releases carry
+        # `fastSandbox.rbac.create=true`; keep those rendering cleanly.
+        reused_base = self.render("base", "fastSandbox.rbac.create=true")
+        self.assertTrue(reused_base)
+
 
 if __name__ == "__main__":
     unittest.main()

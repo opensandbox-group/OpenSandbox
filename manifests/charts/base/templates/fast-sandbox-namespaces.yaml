@@ -5,6 +5,11 @@ Control-plane ServiceAccounts and RBAC are owned by the fast-sandbox chart so
 that disabling fast-sandbox.enabled in the umbrella chart installs no
 fast-sandbox RBAC.
 */}}
+{{- $fsb := .Values.fastSandbox | default dict }}
+{{- $fsbRbac := $fsb.rbac | default dict }}
+{{- if and (hasKey $fsbRbac "create") (not $fsbRbac.create) }}
+{{- fail "fastSandbox.rbac.create=false is no longer supported in the base chart: fast-sandbox control-plane RBAC moved to the fast-sandbox chart. Remove fastSandbox.rbac.create=false if fast-sandbox is not installed, or set rbac.create=false (fast-sandbox.rbac.create=false in the umbrella chart) when fast-sandbox is enabled." }}
+{{- end }}
 {{- if .Values.fastSandbox.namespaces.createSystem }}
 ---
 # The shared system namespace hosts the OpenSandbox controller/server releases
