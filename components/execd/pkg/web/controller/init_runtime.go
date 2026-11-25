@@ -27,6 +27,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/alibaba/opensandbox/execd/pkg/binding"
+	"github.com/alibaba/opensandbox/execd/pkg/cabundle"
 	"github.com/alibaba/opensandbox/execd/pkg/ebpf"
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
 	"github.com/alibaba/opensandbox/execd/pkg/lifecycle"
@@ -63,6 +64,10 @@ type RuntimeInitConfig struct {
 	// AppendStartupStatus reports lifecycle progress to the bootstrap
 	// watchdog file (no-op when no status file is configured).
 	AppendStartupStatus func(string) error
+
+	// CABundleManager reconciles runtime-delivered custom CA certificates into
+	// the guest trust store. When nil, DefaultConfig() is used on demand.
+	CABundleManager *cabundle.Manager
 }
 
 // RuntimeInitManager serializes POST /internal/init handling and owns the active
@@ -165,6 +170,7 @@ func (c *InitController) Ready() {
 	if b := binding.Current(); b != nil {
 		resp.SandboxID = b.SandboxID
 		resp.Generation = b.Generation
+		resp.CAFingerprints = b.CAFingerprints
 	}
 	c.ctx.JSON(status, resp)
 }
@@ -216,12 +222,24 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 		}
 		tokenHash = digest
 	}
+	var parsedCACerts []cabundle.Certificate
+	if req.CABundle != nil {
+		parsedCACerts, err = cabundle.ParsePEMBundle(*req.CABundle)
+		if err != nil {
+			return nil, model.ErrorCodeInvalidRequest, http.StatusBadRequest, err
+		}
+	}
 	policy := req.EntrypointPolicy
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	caRes, err := m.reconcileCABundleLocked(req.CABundle != nil, parsedCACerts, req.PreserveRuntimeState)
+	if err != nil {
+		return warnings, model.ErrorCodeRuntimeError, http.StatusInternalServerError, fmt.Errorf("runtime init caBundle: %w", err)
+	}
+	warnings = append(warnings, caRes.Warnings...)
 	if req.PreserveRuntimeState {
-		m.applyBinding(req, tokenHash, hasToken)
+		m.applyBinding(req, tokenHash, hasToken, caRes)
 		m.MarkReady()
 		log.Info("runtime init: binding replaced with runtime state preserved sandbox_id=%s generation=%d", req.SandboxID, req.Generation)
 		return warnings, "", http.StatusOK, nil
@@ -252,7 +270,7 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 
 	// 2. Apply the RuntimeBinding atomically: auth, env resolution, and
 	// telemetry attribution switch to the new sandbox in one swap.
-	m.applyBinding(req, tokenHash, hasToken)
+	m.applyBinding(req, tokenHash, hasToken, caRes)
 	log.Info("runtime init: binding applied sandbox_id=%s generation=%d", req.SandboxID, req.Generation)
 
 	// 3. Run preStart, then start periodic hooks. An omitted lifecycle keeps
@@ -295,13 +313,40 @@ func (m *RuntimeInitManager) Apply(req *model.RuntimeInitRequest) ([]string, mod
 	return warnings, "", http.StatusOK, nil
 }
 
-func (m *RuntimeInitManager) applyBinding(req *model.RuntimeInitRequest, tokenHash [32]byte, hasToken bool) {
+func (m *RuntimeInitManager) reconcileCABundleLocked(provided bool, certs []cabundle.Certificate, preserveRuntimeState bool) (cabundle.Result, error) {
+	if !provided {
+		if prev := binding.Current(); prev != nil {
+			return cabundle.Result{
+				BundlePath:   prev.CABundlePath,
+				ExtraPath:    prev.CAExtraPath,
+				Fingerprints: append([]string(nil), prev.CAFingerprints...),
+			}, nil
+		}
+		if m.cfg.CABundleManager != nil {
+			return m.cfg.CABundleManager.LoadActive()
+		}
+		return cabundle.Result{}, nil
+	}
+	caMgr := m.cfg.CABundleManager
+	if caMgr == nil {
+		caMgr = cabundle.NewManager(cabundle.DefaultConfig())
+		m.cfg.CABundleManager = caMgr
+	}
+	return caMgr.ReconcileWithOptions(certs, cabundle.ReconcileOptions{
+		PreserveBundleFilesOnClear: preserveRuntimeState,
+	})
+}
+
+func (m *RuntimeInitManager) applyBinding(req *model.RuntimeInitRequest, tokenHash [32]byte, hasToken bool, caRes cabundle.Result) {
 	newBinding := &binding.RuntimeBinding{
 		SandboxID:       req.SandboxID,
 		Generation:      req.Generation,
 		AccessTokenHash: tokenHash,
 		HasAccessToken:  hasToken,
 		Envs:            req.Envs,
+		CABundlePath:    caRes.BundlePath,
+		CAExtraPath:     caRes.ExtraPath,
+		CAFingerprints:  caRes.Fingerprints,
 	}
 	if req.Telemetry != nil {
 		newBinding.TelemetryAttrs = req.Telemetry.Attributes

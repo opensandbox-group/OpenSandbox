@@ -507,7 +507,7 @@ func (c *IsolatedSessionController) Capabilities() {
 			Message: hardeningReport.Ebpf.Message,
 		},
 	}
-	runtimeInit := &model.RuntimeInitStatus{Version: 1}
+	runtimeInit := &model.RuntimeInitStatus{Version: 1, CABundle: true}
 	if isolatedRunner == nil {
 		resp := model.CapabilitiesResponse{
 			Available:       false,

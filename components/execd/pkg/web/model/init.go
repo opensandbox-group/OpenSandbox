@@ -64,6 +64,12 @@ type RuntimeInitRequest struct {
 	// attached to metrics alongside sandbox_id/generation.
 	Telemetry *RuntimeInitTelemetry `json:"telemetry,omitempty"`
 
+	// CABundle delivers one or more PEM-encoded CA certificates to install
+	// into the sandbox trust store and expose to language runtimes via default
+	// CA environment variables. Omitted (nil) preserves the currently installed
+	// bundle; an explicit empty string clears previously managed certificates.
+	CABundle *string `json:"caBundle,omitempty"`
+
 	// PreserveRuntimeState skips the destructive runtime reset and only
 	// replaces the sandbox-scoped binding. Control planes restoring a runtime
 	// snapshot set this explicitly so restored processes and sessions survive.
@@ -96,13 +102,16 @@ type RuntimeInitResponse struct {
 
 // RuntimeReadyResponse reports runtime-init readiness on GET /ready.
 type RuntimeReadyResponse struct {
-	Initialized bool   `json:"initialized"`
-	SandboxID   string `json:"sandboxId,omitempty"`
-	Generation  uint64 `json:"generation,omitempty"`
+	Initialized    bool     `json:"initialized"`
+	SandboxID      string   `json:"sandboxId,omitempty"`
+	Generation     uint64   `json:"generation,omitempty"`
+	CAFingerprints []string `json:"caFingerprints,omitempty"`
 }
 
-// RuntimeInitStatus advertises the runtime-init protocol version on the
-// capabilities endpoint so control planes can detect support.
+// RuntimeInitStatus advertises the runtime-init protocol version and optional
+// feature support on the capabilities endpoint so control planes can detect
+// support during rolling upgrades.
 type RuntimeInitStatus struct {
-	Version int `json:"version"`
+	Version  int  `json:"version"`
+	CABundle bool `json:"caBundle,omitempty"`
 }

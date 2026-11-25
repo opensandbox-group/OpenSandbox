@@ -256,15 +256,39 @@ func bindingSandboxEnvs() map[string]string {
 	return b.Envs
 }
 
+// bindingCADefaultEnvs returns default TLS CA environment variables when
+// /internal/init installed a custom CA bundle. Layered below user envs so
+// explicit user overrides still win.
+func bindingCADefaultEnvs() map[string]string {
+	b := binding.Current()
+	if b == nil || (b.CABundlePath == "" && b.CAExtraPath == "") {
+		return nil
+	}
+	envs := make(map[string]string, 5)
+	if b.CABundlePath != "" {
+		envs["SSL_CERT_FILE"] = b.CABundlePath
+		envs["REQUESTS_CA_BUNDLE"] = b.CABundlePath
+		envs["CURL_CA_BUNDLE"] = b.CABundlePath
+		envs["PIP_CERT"] = b.CABundlePath
+	}
+	if b.CAExtraPath != "" {
+		envs["NODE_EXTRA_CA_CERTS"] = b.CAExtraPath
+	}
+	return envs
+}
+
 // UserEnvOverlay builds the standard user-workload env overlay, layered
 // with the /internal/init RuntimeBinding as the authoritative source:
 //
-//	sandbox envs (/internal/init) < EXECD_ENVS file < extras (session/request)
+//	CA defaults (/internal/init) < sandbox envs (/internal/init) < EXECD_ENVS file < extras (session/request)
 //
 // Binding-authoritative values (OPENSANDBOX_ID) are forced on top so user
 // envs cannot spoof sandbox attribution.
 func UserEnvOverlay(extras ...map[string]string) map[string]string {
-	layers := make([]map[string]string, 0, len(extras)+2)
+	layers := make([]map[string]string, 0, len(extras)+3)
+	if caEnvs := bindingCADefaultEnvs(); caEnvs != nil {
+		layers = append(layers, caEnvs)
+	}
 	if envs := bindingSandboxEnvs(); envs != nil {
 		layers = append(layers, envs)
 	}
