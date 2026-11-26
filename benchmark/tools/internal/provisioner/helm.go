@@ -34,16 +34,20 @@ const (
 	// (https://github.com/opensandbox-group/OpenSandbox/releases/tag/release-1.3.0-rc.3).
 	BaselineReleaseTag = "release-1.3.0-rc.3"
 
+	// FastSandboxBaselineTag is the fast-sandbox image tag pinned for the benchmark baseline
+	// (includes plainHTTP registry support from fast-sandbox PR #281).
+	FastSandboxBaselineTag = "586ca2d62d7ffae0c806433b695f0f9b6b23fc70"
+
 	defaultServerImageRepo                = "opensandbox/server"
 	defaultIngressImageRepo               = "opensandbox/ingress"
 	defaultExecdImage                     = "opensandbox/execd:" + BaselineReleaseTag
 	defaultEgressImage                    = "opensandbox/egress:" + BaselineReleaseTag
 	defaultFSBControllerImageRepo         = "opensandbox/fsb-controller"
-	defaultFSBFastletImage                = "opensandbox/fsb-fastlet:" + BaselineReleaseTag
-	defaultFSBFastletProxyImage           = "opensandbox/fsb-fastlet-proxy:" + BaselineReleaseTag
+	defaultFSBFastletImage                = "opensandbox/fsb-fastlet:" + FastSandboxBaselineTag
+	defaultFSBFastletProxyImage           = "opensandbox/fsb-fastlet-proxy:" + FastSandboxBaselineTag
 	defaultFSBJanitorImageRepo            = "opensandbox/fsb-janitor"
 	defaultFSBFirecrackerRuntimeImageRepo = "opensandbox/fsb-firecracker-runtime"
-	defaultFSBTemplateBuilderImage        = "opensandbox/fsb-sandboxtemplate-builder:" + BaselineReleaseTag
+	defaultFSBTemplateBuilderImage        = "opensandbox/fsb-sandboxtemplate-builder:" + FastSandboxBaselineTag
 )
 
 // BuildHelmValues constructs the profile-pinned Helm values map matching the
@@ -127,7 +131,7 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		"enabled": true,
 		"image": map[string]any{
 			"repository": applyImageMirror(prof, defaultFSBFirecrackerRuntimeImageRepo),
-			"tag":        BaselineReleaseTag,
+			"tag":        FastSandboxBaselineTag,
 		},
 		"registrySecret": agentRegistrySecretName,
 		"stateRoot":      defaultStateRoot,
@@ -157,14 +161,14 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 	janitorValues := map[string]any{
 		"image": map[string]any{
 			"repository": applyImageMirror(prof, defaultFSBJanitorImageRepo),
-			"tag":        BaselineReleaseTag,
+			"tag":        FastSandboxBaselineTag,
 		},
 	}
 
 	controllerValues := map[string]any{
 		"image": map[string]any{
 			"repository": applyImageMirror(prof, defaultFSBControllerImageRepo),
-			"tag":        BaselineReleaseTag,
+			"tag":        FastSandboxBaselineTag,
 		},
 		"sandboxtemplateBuilderImage": applyImageMirror(prof, defaultFSBTemplateBuilderImage),
 		"fastletProxyImage":           applyImageMirror(prof, defaultFSBFastletProxyImage),

@@ -241,13 +241,13 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.False(t, hasPool, "fast-sandbox chart has no top-level pool key")
 
 	rt := fsb["runtime"].(map[string]any)
-	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-firecracker-runtime", "tag": BaselineReleaseTag}, rt["image"])
+	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-firecracker-runtime", "tag": FastSandboxBaselineTag}, rt["image"])
 	assert.Equal(t, agentRegistrySecretName, rt["registrySecret"])
 	_, hasCABundle := rt["registryCABundleSecret"]
 	assert.False(t, hasCABundle)
 
 	jan := fsb["janitor"].(map[string]any)
-	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-janitor", "tag": BaselineReleaseTag}, jan["image"])
+	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-janitor", "tag": FastSandboxBaselineTag}, jan["image"])
 
 	// firecracker-runtime DaemonSet resources: requests only (no limits) to avoid BestEffort eviction.
 	rtRes := rt["resources"].(map[string]any)
@@ -271,11 +271,11 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.Equal(t, 64, oci["poolHigh"])
 	assert.Equal(t, 2, oci["poolSizeGB"])
 
-	// Controller tuning: release-1.3.0-rc.3 images, resources, client-go QPS/Burst, and fastletProxy Guaranteed resources.
+	// Controller tuning: pinned fast-sandbox images, resources, client-go QPS/Burst, and fastletProxy Guaranteed resources.
 	ctrl := fsb["controller"].(map[string]any)
-	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-controller", "tag": BaselineReleaseTag}, ctrl["image"])
-	assert.Equal(t, "opensandbox/fsb-sandboxtemplate-builder:release-1.3.0-rc.3", ctrl["sandboxtemplateBuilderImage"])
-	assert.Equal(t, "opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.3", ctrl["fastletProxyImage"])
+	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-controller", "tag": FastSandboxBaselineTag}, ctrl["image"])
+	assert.Equal(t, "opensandbox/fsb-sandboxtemplate-builder:"+FastSandboxBaselineTag, ctrl["sandboxtemplateBuilderImage"])
+	assert.Equal(t, "opensandbox/fsb-fastlet-proxy:"+FastSandboxBaselineTag, ctrl["fastletProxyImage"])
 	assert.Equal(t, 200, ctrl["kubeClientQPS"])
 	assert.Equal(t, 400, ctrl["kubeClientBurst"])
 	ctrlRes := ctrl["resources"].(map[string]any)
@@ -337,8 +337,8 @@ func TestBuildHelmValues(t *testing.T) {
 	mVals := BuildHelmValues(mirrorProf)
 	mFSB := mVals["fast-sandbox"].(map[string]any)
 	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-controller", mFSB["controller"].(map[string]any)["image"].(map[string]any)["repository"])
-	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-sandboxtemplate-builder:release-1.3.0-rc.3", mFSB["controller"].(map[string]any)["sandboxtemplateBuilderImage"])
-	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.3", mFSB["controller"].(map[string]any)["fastletProxyImage"])
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-sandboxtemplate-builder:"+FastSandboxBaselineTag, mFSB["controller"].(map[string]any)["sandboxtemplateBuilderImage"])
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-fastlet-proxy:"+FastSandboxBaselineTag, mFSB["controller"].(map[string]any)["fastletProxyImage"])
 	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-janitor", mFSB["janitor"].(map[string]any)["image"].(map[string]any)["repository"])
 	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-firecracker-runtime", mFSB["runtime"].(map[string]any)["image"].(map[string]any)["repository"])
 	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server", mVals["opensandbox-server"].(map[string]any)["server"].(map[string]any)["image"].(map[string]any)["repository"])
@@ -607,23 +607,36 @@ func TestUpFullFlow(t *testing.T) {
 	assert.Equal(t, "a", saSec.StringData["active-key"])
 	assert.True(t, strings.HasPrefix(saSec.StringData["keys"], "a="))
 
-	// Verify fast-sandbox-registry ConfigMap created in resourceNS for fastlet OCI pulls/pushes.
+	// Verify fast-sandbox-registry ConfigMap created in resourceNS for fastlet OCI pulls/pushes over plain HTTP.
 	regCM, err := cs.CoreV1().ConfigMaps(resourceNS).Get(context.Background(), fastSandboxRegistryConfigMapName, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Contains(t, regCM.Data["registries.yaml"], ephemeralRegistryHost(benchNS))
+	assert.Contains(t, regCM.Data["registries.yaml"], "plainHTTP: true")
 	assert.Contains(t, regCM.Data["registries.yaml"], ociPublishSecretName)
 
-	// Verify ephemeral registry + Redis + secrets created with NVMe hostPath and tuned resources.
+	// Verify ephemeral plain-HTTP registry + Redis + secrets created with NVMe hostPath and tuned resources.
 	regDep, err := cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Len(t, regDep.Spec.Template.Spec.Containers, 1)
-	regRes := regDep.Spec.Template.Spec.Containers[0].Resources
+	regC := regDep.Spec.Template.Spec.Containers[0]
+	require.Len(t, regC.Ports, 1)
+	assert.Equal(t, "http", regC.Ports[0].Name)
+	assert.Equal(t, int32(ephemeralRegistryPort), regC.Ports[0].ContainerPort)
+	for _, env := range regC.Env {
+		assert.NotEqual(t, "REGISTRY_HTTP_TLS_CERTIFICATE", env.Name)
+		assert.NotEqual(t, "REGISTRY_HTTP_TLS_KEY", env.Name)
+	}
+	for _, vm := range regC.VolumeMounts {
+		assert.NotEqual(t, "registry-certs", vm.Name)
+	}
+	regRes := regC.Resources
 	assert.Equal(t, resource.MustParse("2"), regRes.Requests[corev1.ResourceCPU])
 	assert.Equal(t, resource.MustParse("4Gi"), regRes.Requests[corev1.ResourceMemory])
 	assert.Equal(t, resource.MustParse("4"), regRes.Limits[corev1.ResourceCPU])
 	assert.Equal(t, resource.MustParse("8Gi"), regRes.Limits[corev1.ResourceMemory])
 	var regDataVol *corev1.Volume
 	for i := range regDep.Spec.Template.Spec.Volumes {
+		assert.NotEqual(t, "registry-certs", regDep.Spec.Template.Spec.Volumes[i].Name)
 		if regDep.Spec.Template.Spec.Volumes[i].Name == "registry-data" {
 			regDataVol = &regDep.Spec.Template.Spec.Volumes[i]
 		}
@@ -638,14 +651,19 @@ func TestUpFullFlow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, pvcs.Items, "no PVC should be created when hostPath is used")
 
-	_, err = cs.CoreV1().Services(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
+	regSvc, err := cs.CoreV1().Services(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
 	require.NoError(t, err)
-	_, err = cs.CoreV1().Secrets(systemNS).Get(context.Background(), agentRegistrySecretName, metav1.GetOptions{})
+	require.Len(t, regSvc.Spec.Ports, 1)
+	assert.Equal(t, "http", regSvc.Spec.Ports[0].Name)
+	agentRegSec, err := cs.CoreV1().Secrets(systemNS).Get(context.Background(), agentRegistrySecretName, metav1.GetOptions{})
 	require.NoError(t, err)
+	assert.Contains(t, string(agentRegSec.Data["registry.json"]), "http://"+ephemeralRegistryHost(benchNS))
 	_, err = cs.CoreV1().Secrets(resourceNS).Get(context.Background(), ociPublishSecretName, metav1.GetOptions{})
 	require.NoError(t, err)
+	_, err = cs.CoreV1().Secrets(benchNS).Get(context.Background(), ephemeralRegistryTLSSecret, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "plain-HTTP ephemeral registry must not create TLS secret")
 	_, err = cs.CoreV1().Secrets(systemNS).Get(context.Background(), ephemeralRegistryCASecret, metav1.GetOptions{})
-	require.NoError(t, err)
+	assert.True(t, apierrors.IsNotFound(err), "plain-HTTP ephemeral registry must not create CA secret")
 	redisDep, err := cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRedisName, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Len(t, redisDep.Spec.Template.Spec.Containers, 1)
@@ -855,6 +873,14 @@ func TestPoolAndTemplateCustomOverrides(t *testing.T) {
 	sec, err := cs.CoreV1().Secrets("opensandbox-system").Get(context.Background(), agentRegistrySecretName, metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Contains(t, sec.StringData["registry.json"], `"registries":[]`)
+
+	// Verify explicit external publish target omits plainHTTP: true in fast-sandbox-registry ConfigMap.
+	require.NoError(t, prov.ensureFastSandboxRegistryConfig(context.Background(), cs, prof, "opensandbox-dataplane", "opensandbox-bench"))
+	regCM, err := cs.CoreV1().ConfigMaps("opensandbox-dataplane").Get(context.Background(), fastSandboxRegistryConfigMapName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Contains(t, regCM.Data["registries.yaml"], "host: acr.example.com")
+	assert.Contains(t, regCM.Data["registries.yaml"], "name: custom-publish-secret")
+	assert.NotContains(t, regCM.Data["registries.yaml"], "plainHTTP")
 }
 
 func TestUpRejectsNonOCIManifestRef(t *testing.T) {

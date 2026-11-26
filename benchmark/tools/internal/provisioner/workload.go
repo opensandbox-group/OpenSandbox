@@ -34,7 +34,7 @@ import (
 const leakAuditContainerName = "audit"
 
 // Up provisions the full Phase 1 fast-sandbox OverlayBD benchmark stack:
-// namespaces + Runner RBAC, optional host preparation, ephemeral HTTPS registry,
+// namespaces + Runner RBAC, optional host preparation, ephemeral HTTP registry,
 // conditional Redis, OpenSandbox + fast-sandbox Helm chart (tracing disabled),
 // readiness checks, golden OverlayBD SandboxTemplate, and ResourceAware SandboxPool.
 func (p *OverlayBDProvisioner) Up(ctx context.Context, prof *profile.BenchmarkProfile, opts Options) error {

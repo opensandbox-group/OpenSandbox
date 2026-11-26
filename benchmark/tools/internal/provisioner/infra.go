@@ -181,11 +181,13 @@ func (p *OverlayBDProvisioner) ensureSecureAccessSecret(ctx context.Context, cli
 // pause/resume & rootfs-only snapshots using the configured publish registry Secret.
 func (p *OverlayBDProvisioner) ensureFastSandboxRegistryConfig(ctx context.Context, client kubernetes.Interface, prof *profile.BenchmarkProfile, resourceNS, benchNS string) error {
 	publishTarget := strings.TrimSpace(prof.Stack.Template.Publish)
+	plainHTTP := false
 	if publishTarget == "" {
 		if !prof.Environment.Registry.EphemeralInCluster {
 			return nil
 		}
 		publishTarget = fmt.Sprintf("oci://%s/opensandbox/templates", ephemeralRegistryHost(benchNS))
+		plainHTTP = true
 	}
 	raw := strings.TrimPrefix(publishTarget, "oci://")
 	host, repoPath, ok := strings.Cut(raw, "/")
@@ -203,6 +205,9 @@ func (p *OverlayBDProvisioner) ensureFastSandboxRegistryConfig(ctx context.Conte
 	fmt.Fprintf(&b, "  - host: %s\n", host)
 	if repoPrefix != "" {
 		fmt.Fprintf(&b, "    repositoryPrefix: %s\n", repoPrefix)
+	}
+	if plainHTTP {
+		b.WriteString("    plainHTTP: true\n")
 	}
 	b.WriteString("    secretRef:\n")
 	fmt.Fprintf(&b, "      name: %s\n", secretName)
@@ -387,57 +392,13 @@ func ephemeralRegistryHost(benchNS string) string {
 }
 
 func (p *OverlayBDProvisioner) deployEphemeralRegistry(ctx context.Context, rc *resolvedClients, prof *profile.BenchmarkProfile, systemNS, resourceNS, benchNS string) error {
-	bundle, err := GenerateRegistryCertBundle(ephemeralRegistryName, benchNS, 7*24*time.Hour)
-	if err != nil {
-		return err
-	}
-
 	labels := map[string]string{
 		"app.kubernetes.io/name": ephemeralRegistryName,
 		managedByLabelKey:        managedByLabelValue,
 	}
 
-	// TLS secret in benchNamespace for registry:2 server.
-	if err := upsertSecret(ctx, rc.kube, &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      ephemeralRegistryTLSSecret,
-			Namespace: benchNS,
-			Labels:    labels,
-		},
-		Type: corev1.SecretTypeTLS,
-		Data: map[string][]byte{
-			corev1.TLSCertKey:       bundle.ServerCertPEM,
-			corev1.TLSPrivateKeyKey: bundle.ServerKeyPEM,
-			"ca.crt":                bundle.CACertPEM,
-		},
-	}); err != nil {
-		return err
-	}
-
-	// CA bundle secret distributed across bench, system, and resource namespaces.
-	seenNS := map[string]bool{}
-	for _, ns := range []string{benchNS, systemNS, resourceNS} {
-		if seenNS[ns] {
-			continue
-		}
-		seenNS[ns] = true
-		if err := upsertSecret(ctx, rc.kube, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      ephemeralRegistryCASecret,
-				Namespace: ns,
-				Labels:    labels,
-			},
-			Type: corev1.SecretTypeOpaque,
-			Data: map[string][]byte{
-				"ca.crt": bundle.CACertPEM,
-			},
-		}); err != nil {
-			return err
-		}
-	}
-
 	regHost := ephemeralRegistryHost(benchNS)
-	agentRegJSON, err := buildAgentRegistryJSON("https://" + regHost)
+	agentRegJSON, err := buildAgentRegistryJSON("http://" + regHost)
 	if err != nil {
 		return fmt.Errorf("marshal fast-sandbox-agent-registry payload: %w", err)
 	}
@@ -555,16 +516,13 @@ func (p *OverlayBDProvisioner) deployEphemeralRegistry(ctx context.Context, rc *
 							Image:           regImage,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Ports: []corev1.ContainerPort{
-								{Name: "https", ContainerPort: ephemeralRegistryPort, Protocol: corev1.ProtocolTCP},
+								{Name: "http", ContainerPort: ephemeralRegistryPort, Protocol: corev1.ProtocolTCP},
 							},
 							Env: []corev1.EnvVar{
 								{Name: "REGISTRY_STORAGE_DELETE_ENABLED", Value: "true"},
 								{Name: "REGISTRY_HTTP_ADDR", Value: fmt.Sprintf("0.0.0.0:%d", ephemeralRegistryPort)},
-								{Name: "REGISTRY_HTTP_TLS_CERTIFICATE", Value: "/certs/tls.crt"},
-								{Name: "REGISTRY_HTTP_TLS_KEY", Value: "/certs/tls.key"},
 							},
 							VolumeMounts: []corev1.VolumeMount{
-								{Name: "registry-certs", MountPath: "/certs", ReadOnly: true},
 								{Name: "registry-data", MountPath: "/var/lib/registry"},
 							},
 							Resources: corev1.ResourceRequirements{
@@ -587,12 +545,6 @@ func (p *OverlayBDProvisioner) deployEphemeralRegistry(ctx context.Context, rc *
 						},
 					},
 					Volumes: []corev1.Volume{
-						{
-							Name: "registry-certs",
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{SecretName: ephemeralRegistryTLSSecret},
-							},
-						},
 						dataVolume,
 					},
 				},
@@ -614,7 +566,7 @@ func (p *OverlayBDProvisioner) deployEphemeralRegistry(ctx context.Context, rc *
 			Selector: map[string]string{"app.kubernetes.io/name": ephemeralRegistryName},
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "https",
+					Name:       "http",
 					Port:       ephemeralRegistryPort,
 					TargetPort: intstr.FromInt32(ephemeralRegistryPort),
 					Protocol:   corev1.ProtocolTCP,
