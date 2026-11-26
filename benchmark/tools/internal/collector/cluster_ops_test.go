@@ -45,7 +45,7 @@ func TestEvictOverlayBDCachesAndRewarm(t *testing.T) {
 	poolPolls := 0
 	execer := &fakeExecer{fn: func(_ context.Context, req runner.ExecRequest) error {
 		cmdStr := strings.Join(req.Command, " ")
-		if strings.Contains(cmdStr, "shared_snapfiles") {
+		if strings.Contains(cmdStr, "shared_snapfiles") && strings.Contains(cmdStr, "$SR/overlaybd/cache") {
 			evicted = true
 			return nil
 		}

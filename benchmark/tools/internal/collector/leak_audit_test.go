@@ -193,3 +193,47 @@ func TestLeakAuditorCaptureBaselineSubtractsHistoricalOOMs(t *testing.T) {
 		t.Fatalf("expected clean pass with 0 delta host OOM kills, got %+v", res)
 	}
 }
+
+func TestLeakAuditorPrefersPrometheusForPodCgroupOOM(t *testing.T) {
+	cs := fake.NewSimpleClientset(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pool-fastlet-0",
+			Namespace: DefaultResourceNamespace,
+			Labels:    map[string]string{"fast-sandbox.io/pool": "bench-pool"},
+		},
+		Spec:   corev1.PodSpec{NodeName: "node-1", Containers: []corev1.Container{{Name: "fastlet"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.20"},
+	})
+
+	promOOM := "2"
+	httpClient := &fakeHTTPDoer{fn: func(_ *http.Request) (*http.Response, error) {
+		body := "fast_sandbox_runtime_cgroup_oom_kills_total{sandbox_uid=\"\"} " + promOOM + "\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	}}
+	execCalls := 0
+	execer := &fakeExecer{fn: func(_ context.Context, _ runner.ExecRequest) error {
+		execCalls++
+		return nil
+	}}
+
+	auditor := NewLeakAuditor(DefaultConfig(), &Clients{Clientset: cs, Execer: execer, HTTPClient: httpClient})
+	_, cgBase := auditor.CaptureBaseline(context.Background())
+	if cgBase != 2 {
+		t.Fatalf("expected baseline cgroup OOM=2 from Prometheus, got %d", cgBase)
+	}
+	promOOM = "5"
+	res, err := auditor.Audit(context.Background(), LeakAuditOptions{BaselineCgroupOOMKills: cgBase})
+	if err != nil {
+		t.Fatalf("Audit failed: %v", err)
+	}
+	if execCalls != 0 {
+		t.Fatalf("expected zero podcgroup exec fallbacks when Prometheus provides OOM counter, got %d", execCalls)
+	}
+	if res.Passed || res.PodCgroupOOMKills != 3 {
+		t.Fatalf("expected PodCgroupOOMKills=3 and audit failure, got %+v", res)
+	}
+}

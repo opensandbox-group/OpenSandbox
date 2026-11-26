@@ -32,8 +32,9 @@ import (
 )
 
 const (
-	DefaultSamplerInterval = 2 * time.Second
-	bytesPerMiB            = 1024 * 1024
+	DefaultSamplerInterval  = 2 * time.Second
+	bytesPerMiB             = 1024 * 1024
+	maxConcurrentNodeProbes = 8
 )
 
 // PSIMetrics captures Linux /proc/pressure/{cpu,memory,io} some/full averages.
@@ -69,6 +70,7 @@ type HostSample struct {
 	ActiveUblkDevices     int
 	FirecrackerPIDCount   int
 	cpuStat               *procStatSample // internal for delta CPU utilization
+	cpuDeltaPending       bool            // true on tick 0 before a prior /proc/stat exists
 }
 
 // CgroupMemoryEvents models cgroup v2 memory.events counters.
@@ -99,6 +101,7 @@ type ComponentSample struct {
 	OpenFDs          float64
 	PodCgroup        *PodCgroupSample
 	ExtraMetrics     map[string]float64
+	cpuDeltaPending  bool // true on tick 0 before a prior process_cpu_seconds_total exists
 }
 
 // LoadSample bundles one synchronized sampling tick across host and stack components.
@@ -254,16 +257,16 @@ func (s *LoadSampler) LatestHostSnapshot() (HostSample, bool) {
 			if h.Load1m > agg.Load1m {
 				agg.Load1m = h.Load1m
 			}
-			if h.MemAvailableMiB < agg.MemAvailableMiB {
+			if h.MemAvailableMiB > 0 && (agg.MemAvailableMiB <= 0 || h.MemAvailableMiB < agg.MemAvailableMiB) {
 				agg.MemAvailableMiB = h.MemAvailableMiB
 			}
-			if h.PageCacheMiB < agg.PageCacheMiB {
+			if h.PageCacheMiB > 0 && (agg.PageCacheMiB <= 0 || h.PageCacheMiB < agg.PageCacheMiB) {
 				agg.PageCacheMiB = h.PageCacheMiB
 			}
 			agg.CPUPSI = maxPSI(agg.CPUPSI, h.CPUPSI)
 			agg.MemoryPSI = maxPSI(agg.MemoryPSI, h.MemoryPSI)
 			agg.IOPSI = maxPSI(agg.IOPSI, h.IOPSI)
-			if h.StateRootFreeGiB < agg.StateRootFreeGiB {
+			if h.StateRootFreeGiB > 0 && (agg.StateRootFreeGiB <= 0 || h.StateRootFreeGiB < agg.StateRootFreeGiB) {
 				agg.StateRootFreeGiB = h.StateRootFreeGiB
 			}
 			if h.ConntrackCount > agg.ConntrackCount {
@@ -293,6 +296,71 @@ func (s *LoadSampler) oomDeltaLocked(h HostSample) int64 {
 		return delta
 	}
 	return h.OOMKillTotal
+}
+
+// LatestPodCgroupOOMDelta returns the delta in fastlet sandbox-parent cgroup OOM kills
+// relative to the first recorded fastlet podcgroup sample.
+func (s *LoadSampler) LatestPodCgroupOOMDelta() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var (
+		hasBase bool
+		base    int64
+		maxD    int64
+	)
+	for _, sm := range s.samples {
+		cs, ok := sm.Components[ComponentFSBFastlet]
+		if !ok || cs.PodCgroup == nil {
+			continue
+		}
+		cur := cs.PodCgroup.MemoryEvents.OOMKill
+		if !hasBase {
+			base = cur
+			hasBase = true
+			continue
+		}
+		if d := cur - base; d > maxD {
+			maxD = d
+		}
+	}
+	return maxD
+}
+
+// LatestDeletingSlots returns the most recently scraped fastlet admission deleting slot count.
+func (s *LoadSampler) LatestDeletingSlots() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.samples) - 1; i >= 0; i-- {
+		cs, ok := s.samples[i].Components[ComponentFSBFastlet]
+		if !ok || cs.ExtraMetrics == nil {
+			continue
+		}
+		if v, exists := cs.ExtraMetrics["admission_slots_deleting"]; exists {
+			return int(math.Round(v)), true
+		}
+	}
+	return 0, false
+}
+
+// PeakActiveSandboxes returns the peak active sandbox count observed across all samples,
+// considering both SetActiveSandboxes and total host Firecracker PID counts.
+func (s *LoadSampler) PeakActiveSandboxes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	peak := 0
+	for _, sm := range s.samples {
+		if sm.ActiveSandboxes > peak {
+			peak = sm.ActiveSandboxes
+		}
+		fcSum := 0
+		for _, h := range sm.Hosts {
+			fcSum += h.FirecrackerPIDCount
+		}
+		if fcSum > peak {
+			peak = fcSum
+		}
+	}
+	return peak
 }
 
 func maxPSI(a, b PSIMetrics) PSIMetrics {
@@ -334,19 +402,36 @@ func (s *LoadSampler) collectOnce(ctx context.Context) {
 		Components:      make(map[string]ComponentSample),
 	}
 
-	// 1. Sample host nodes via firecracker-runtime DaemonSet pods (hostPID + StateRoot mounted).
+	// 1. Sample host nodes concurrently (bounded) via firecracker-runtime DaemonSet pods (hostPID + StateRoot mounted).
 	if s.clients != nil && s.clients.Clientset != nil && s.clients.Execer != nil {
 		rtPods, err := listFirecrackerRuntimePods(ctx, s.clients.Clientset, s.cfg.SystemNamespace, s.cfg.ResourceNamespace)
 		if err != nil {
 			sample.Warnings = append(sample.Warnings, fmt.Sprintf("list firecracker-runtime pods: %v", err))
-		} else {
+		} else if len(rtPods) > 0 {
+			type nodeProbeRes struct {
+				hs   *HostSample
+				warn string
+			}
+			results := make([]nodeProbeRes, len(rtPods))
+			sem := make(chan struct{}, maxConcurrentNodeProbes)
+			var wg sync.WaitGroup
 			for i := range rtPods {
-				hs, warn := s.sampleHostNode(ctx, &rtPods[i])
-				if warn != "" {
-					sample.Warnings = append(sample.Warnings, warn)
+				wg.Add(1)
+				go func(idx int, p *corev1.Pod) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					hs, warn := s.sampleHostNode(ctx, p)
+					results[idx] = nodeProbeRes{hs: hs, warn: warn}
+				}(i, &rtPods[i])
+			}
+			wg.Wait()
+			for _, r := range results {
+				if r.warn != "" {
+					sample.Warnings = append(sample.Warnings, r.warn)
 				}
-				if hs != nil {
-					sample.Hosts = append(sample.Hosts, *hs)
+				if r.hs != nil {
+					sample.Hosts = append(sample.Hosts, *r.hs)
 				}
 			}
 		}
@@ -407,7 +492,7 @@ df -B1 %q 2>/dev/null | awk 'NR==2 {print $4}' || echo 0
 echo "===UBLK_COUNT==="
 ls -1 /dev/ublkb* 2>/dev/null | wc -l | tr -d ' '
 echo "===FC_PIDS==="
-grep -l '^firecracker$' /proc/[0-9]*/comm 2>/dev/null | wc -l | tr -d ' '
+(pgrep -xc firecracker 2>/dev/null || pidof firecracker 2>/dev/null | wc -w || echo 0) | tr -d ' '
 `, s.cfg.StateRoot)
 
 	stdout, stderr, err := execCommand(ctx, s.clients.Execer, pod.Namespace, pod.Name, container, []string{"/bin/sh", "-c", script}, s.cfg.ExecTimeout)
@@ -426,6 +511,8 @@ grep -l '^firecracker$' /proc/[0-9]*/comm 2>/dev/null | wc -l | tr -d ' '
 		s.mu.Unlock()
 		if ok {
 			computeCPUUtilDelta(prev, *hs.cpuStat, &hs)
+		} else {
+			hs.cpuDeltaPending = true
 		}
 	}
 	return &hs, ""
@@ -436,16 +523,58 @@ func (s *LoadSampler) sampleFastletPodCgroups(ctx context.Context) (*PodCgroupSa
 	if err != nil {
 		return nil, fmt.Sprintf("list fastlet pods for podcgroup: %v", err)
 	}
-	var agg PodCgroupSample
-	found := false
-	script := `
-CG="/sys/fs/cgroup"
-for candidate in /sys/fs/cgroup/fast-sandbox /sys/fs/cgroup/sandboxes /sys/fs/cgroup; do
-  if [ -f "$candidate/memory.current" ]; then
-    CG="$candidate"
-    break
+	var fastletPods []*corev1.Pod
+	for i := range podList.Items {
+		pod := &podList.Items[i]
+		if pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil || !isFastletPod(pod) {
+			continue
+		}
+		fastletPods = append(fastletPods, pod)
+	}
+	if len(fastletPods) == 0 {
+		return nil, ""
+	}
+
+	results := make([]*PodCgroupSample, len(fastletPods))
+	sem := make(chan struct{}, maxConcurrentNodeProbes)
+	var wg sync.WaitGroup
+	for i, pod := range fastletPods {
+		wg.Add(1)
+		go func(idx int, p *corev1.Pod) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			uid := string(p.UID)
+			uidUS := strings.ReplaceAll(uid, "-", "_")
+			// Real sandbox-parent cgroup is /host/sys/fs/cgroup/<podPath>/fast-sandbox (podcgroup/layout.go).
+			script := fmt.Sprintf(`
+POD_UID=%q
+POD_UID_US=%q
+CG=""
+if [ -d /host/sys/fs/cgroup ]; then
+  if [ -n "$POD_UID" ]; then
+    for d in $(find /host/sys/fs/cgroup -maxdepth 5 -type d \( -name "*${POD_UID}*" -o -name "*${POD_UID_US}*" \) 2>/dev/null); do
+      if [ -f "$d/fast-sandbox/memory.current" ]; then
+        CG="$d/fast-sandbox"
+        break
+      fi
+    done
   fi
-done
+  if [ -z "$CG" ]; then
+    for f in $(find /host/sys/fs/cgroup -maxdepth 6 -path "*/fast-sandbox/memory.current" 2>/dev/null | head -n 1); do
+      CG=$(dirname "$f")
+      break
+    done
+  fi
+fi
+if [ -z "$CG" ]; then
+  for candidate in /sys/fs/cgroup/fast-sandbox /sys/fs/cgroup/sandboxes /sys/fs/cgroup; do
+    if [ -f "$candidate/memory.current" ]; then
+      CG="$candidate"
+      break
+    fi
+  done
+fi
 echo "===MEM_CUR==="
 cat "$CG/memory.current" 2>/dev/null || echo 0
 echo "===MEM_MAX==="
@@ -456,30 +585,32 @@ echo "===MEM_PSI==="
 cat "$CG/memory.pressure" 2>/dev/null || true
 echo "===CPU_PSI==="
 cat "$CG/cpu.pressure" 2>/dev/null || true
-`
-	for i := range podList.Items {
-		pod := &podList.Items[i]
-		if pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil || !isFastletPod(pod) {
+`, uid, uidUS)
+			container := pickRuntimeContainer(p, "fastlet", "fsb-fastlet")
+			stdout, _, execErr := execCommand(ctx, s.clients.Execer, p.Namespace, p.Name, container, []string{"/bin/sh", "-c", script}, s.cfg.ExecTimeout)
+			if execErr != nil {
+				return
+			}
+			cg := ParsePodCgroupOutput(stdout)
+			results[idx] = &cg
+		}(i, pod)
+	}
+	wg.Wait()
+
+	var agg PodCgroupSample
+	found := false
+	for _, cg := range results {
+		if cg == nil {
 			continue
 		}
-		container := pickRuntimeContainer(pod, "fastlet", "fsb-fastlet")
-		stdout, _, execErr := execCommand(ctx, s.clients.Execer, pod.Namespace, pod.Name, container, []string{"/bin/sh", "-c", script}, s.cfg.ExecTimeout)
-		if execErr != nil {
-			continue
-		}
-		cg := ParsePodCgroupOutput(stdout)
 		agg.MemoryCurrentMiB += cg.MemoryCurrentMiB
 		agg.MemoryMaxMiB += cg.MemoryMaxMiB
 		agg.MemoryEvents.High += cg.MemoryEvents.High
 		agg.MemoryEvents.Max += cg.MemoryEvents.Max
 		agg.MemoryEvents.OOM += cg.MemoryEvents.OOM
 		agg.MemoryEvents.OOMKill += cg.MemoryEvents.OOMKill
-		if cg.MemoryPSI.SomeAvg60 > agg.MemoryPSI.SomeAvg60 {
-			agg.MemoryPSI = cg.MemoryPSI
-		}
-		if cg.CPUPSI.SomeAvg60 > agg.CPUPSI.SomeAvg60 {
-			agg.CPUPSI = cg.CPUPSI
-		}
+		agg.MemoryPSI = maxPSI(agg.MemoryPSI, cg.MemoryPSI)
+		agg.CPUPSI = maxPSI(agg.CPUPSI, cg.CPUPSI)
 		found = true
 	}
 	if !found {
@@ -490,13 +621,11 @@ cat "$CG/cpu.pressure" 2>/dev/null || true
 
 func (s *LoadSampler) populateComponentsFromProm(snap *PromSnapshot, sample *LoadSample) {
 	now := snap.Timestamp
+	// 1. Direct Prometheus /metrics components (fast-sandbox Go binaries).
 	for _, comp := range []string{
 		ComponentFSBFastlet,
-		ComponentEgress,
 		ComponentFSBFastletProxy,
 		ComponentFirecrackerRuntime,
-		ComponentOpenSandboxServer,
-		ComponentIngressGateway,
 	} {
 		ms := snap.ByComponent[comp]
 		if ms == nil {
@@ -511,24 +640,8 @@ func (s *LoadSampler) populateComponentsFromProm(snap *PromSnapshot, sample *Loa
 		}
 		cpuSec := ms.Sum("process_cpu_seconds_total", nil)
 		if cpuSec > 0 {
-			s.mu.Lock()
-			prev, ok := s.prevProcCPU[comp]
-			s.prevProcCPU[comp] = procCPUReading{ts: now, cpuSeconds: cpuSec}
-			s.mu.Unlock()
-			if ok {
-				dt := now.Sub(prev.ts).Seconds()
-				if dt > 0 && cpuSec >= prev.cpuSeconds {
-					cs.CPUCores = (cpuSec - prev.cpuSeconds) / dt
-				}
-			}
+			s.computeComponentCPUDelta(comp, now, cpuSec, &cs)
 		}
-		if v := ms.Sum("container_cpu_cfs_throttled_periods_total", nil); v > 0 {
-			cs.NrThrottled = int64(v)
-		}
-		if v := ms.Sum("container_cpu_cfs_throttled_seconds_total", nil); v > 0 {
-			cs.ThrottledUsec = int64(v * 1e6)
-		}
-		// Capture component-specific domain metrics when exposed.
 		switch comp {
 		case ComponentFSBFastlet:
 			for state, val := range ms.SumByLabel("fast_sandbox_fastlet_admission_slots", "state") {
@@ -542,33 +655,129 @@ func (s *LoadSampler) populateComponentsFromProm(snap *PromSnapshot, sample *Loa
 					cs.NrThrottled = throttled
 				}
 			}
-		case ComponentEgress:
-			if v := ms.Sum("egress_dns_queries_total", nil); v > 0 {
-				cs.ExtraMetrics["dns_queries_total"] = v
-			}
-			if v := ms.Sum("egress_nftables_rules", nil); v > 0 {
-				cs.ExtraMetrics["nftables_rules"] = v
-			}
-			if v := ms.Sum("egress_mitm_active_connections", nil); v > 0 {
-				cs.ExtraMetrics["mitm_active_connections"] = v
-			}
 		case ComponentFSBFastletProxy:
-			if v := ms.Sum("fast_sandbox_sandbox_proxy_active_connections", nil); v > 0 {
-				cs.ExtraMetrics["active_connections"] = v
-			}
-			if v := ms.Sum("fast_sandbox_sandbox_proxy_route_latency_seconds_count", nil); v > 0 {
-				cs.ExtraMetrics["route_requests_total"] = v
-			}
-		case ComponentOpenSandboxServer:
-			if v := ms.Sum("http_requests_in_progress", nil); v > 0 {
-				cs.ExtraMetrics["requests_in_progress"] = v
-			}
-		case ComponentIngressGateway:
-			if v := ms.Sum("ingress_wake_parked_requests", nil); v > 0 {
-				cs.ExtraMetrics["wake_parked_requests"] = v
+			if v := ms.Sum("fast_sandbox_fastlet_proxy_upstream_latency_seconds_count", nil); v > 0 {
+				cs.ExtraMetrics["upstream_requests_total"] = v
 			}
 		}
 		sample.Components[comp] = cs
+	}
+
+	// 2. OSEP-0010 OTLP-only components (egress, ingress-gateway, opensandbox-server),
+	// scraped from the in-cluster OTel Collector Prometheus exporter (:8889/metrics).
+	otelMS := snap.ByComponent[ComponentOTelCollector]
+	if otelMS == nil {
+		otelMS = snap.Merged
+	}
+	if otelMS != nil {
+		s.populateOTLPComponents(otelMS, now, sample)
+	}
+}
+
+func (s *LoadSampler) computeComponentCPUDelta(comp string, now time.Time, cpuSec float64, cs *ComponentSample) {
+	s.mu.Lock()
+	prev, ok := s.prevProcCPU[comp]
+	s.prevProcCPU[comp] = procCPUReading{ts: now, cpuSeconds: cpuSec}
+	s.mu.Unlock()
+	if !ok {
+		cs.cpuDeltaPending = true
+		return
+	}
+	dt := now.Sub(prev.ts).Seconds()
+	if dt > 0 && cpuSec >= prev.cpuSeconds {
+		cs.CPUCores = (cpuSec - prev.cpuSeconds) / dt
+	}
+}
+
+func firstNonZeroMetricSum(ms *MetricSet, names ...string) (float64, bool) {
+	for _, n := range names {
+		if len(ms.Samples[n]) > 0 {
+			return ms.Sum(n, nil), true
+		}
+	}
+	return 0, false
+}
+
+func (s *LoadSampler) populateOTLPComponents(ms *MetricSet, now time.Time, sample *LoadSample) {
+	// Egress OTLP metrics (components/egress/pkg/telemetry/metrics.go).
+	egress := ComponentSample{Timestamp: now, ExtraMetrics: make(map[string]float64)}
+	egressSeen := false
+	if v, ok := firstNonZeroMetricSum(ms, "egress_process_memory_usage_bytes", "egress_process_memory_usage_bytes_bytes"); ok {
+		egress.RSSMiB = v / float64(bytesPerMiB)
+		egressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "egress_process_cpu_time_seconds_total", "egress_process_cpu_time_total"); ok && v > 0 {
+		s.computeComponentCPUDelta(ComponentEgress, now, v, &egress)
+		egressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "egress_dns_query_duration_seconds_count", "egress_dns_query_duration_count"); ok {
+		egress.ExtraMetrics["dns_queries_total"] = v
+		egressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "egress_dns_query_failed_total"); ok {
+		egress.ExtraMetrics["dns_query_failed_total"] = v
+		egressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "egress_policy_denied_total"); ok {
+		egress.ExtraMetrics["policy_denied_total"] = v
+		egressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "egress_nftables_rules_count", "egress_nftables_rules_count_element", "egress_nftables_rules_count_elements"); ok {
+		egress.ExtraMetrics["nftables_rules"] = v
+		egressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "egress_nftables_updates_count_total", "egress_nftables_updates_count"); ok {
+		egress.ExtraMetrics["nftables_updates_total"] = v
+		egressSeen = true
+	}
+	if egressSeen {
+		sample.Components[ComponentEgress] = egress
+	}
+
+	// Ingress Gateway OTLP metrics (components/ingress/pkg/telemetry/metrics.go).
+	ingress := ComponentSample{Timestamp: now, ExtraMetrics: make(map[string]float64)}
+	ingressSeen := false
+	if v, ok := firstNonZeroMetricSum(ms, "ingress_system_memory_usage_bytes", "ingress_system_memory_usage_bytes_bytes"); ok {
+		ingress.RSSMiB = v / float64(bytesPerMiB)
+		ingressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "ingress_park_active"); ok {
+		ingress.ExtraMetrics["wake_parked_requests"] = v
+		ingressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "ingress_wake_restore_active"); ok {
+		ingress.ExtraMetrics["wake_restore_active"] = v
+		ingressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "ingress_park_shed_total", "ingress_park_shed"); ok {
+		ingress.ExtraMetrics["wake_park_shed_total"] = v
+		ingressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "ingress_wake_flights_total", "ingress_wake_flights"); ok {
+		ingress.ExtraMetrics["wake_flights_total"] = v
+		ingressSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "ingress_connections_active"); ok {
+		ingress.ExtraMetrics["active_connections"] = v
+		ingressSeen = true
+	}
+	if ingressSeen {
+		sample.Components[ComponentIngressGateway] = ingress
+	}
+
+	// OpenSandbox Server OTLP metrics (server/opensandbox_server/integrations/otel/metrics.py).
+	srv := ComponentSample{Timestamp: now, ExtraMetrics: make(map[string]float64)}
+	srvSeen := false
+	if v, ok := firstNonZeroMetricSum(ms, "server_http_request_duration_milliseconds_count", "server_http_request_duration_count"); ok {
+		srv.ExtraMetrics["http_requests_total"] = v
+		srvSeen = true
+	}
+	if v, ok := firstNonZeroMetricSum(ms, "opensandbox_sandbox_create_duration_milliseconds_count", "opensandbox_sandbox_create_duration_count"); ok {
+		srv.ExtraMetrics["sandbox_creates_total"] = v
+		srvSeen = true
+	}
+	if srvSeen {
+		sample.Components[ComponentOpenSandboxServer] = srv
 	}
 }
 
@@ -647,17 +856,24 @@ func (s *LoadSampler) Aggregate() *report.LoadProfiles {
 
 func aggregateHostSamples(samples []LoadSample, baselineOOM map[string]int64, warnings []string) *report.ComponentLoadSummary {
 	var (
-		cpuUtil, load1m, memAvail, pageCache              []float64
-		cpuPSISome10, cpuPSISome60, cpuPSISome300         []float64
-		memPSISome10, memPSISome60, memPSIFull60          []float64
-		ioPSISome60, ioPSIFull60                          []float64
-		stateRootFree, conntrackRatio, openFDs            []float64
-		ublkCounts, fcPIDCounts                           []float64
-		maxOOMDeltaByNode                                 = make(map[string]int64)
+		cpuUtil, cpuUser, cpuSys, cpuIOWait, cpuSteal []float64
+		load1m, memAvail, pageCache                   []float64
+		cpuPSISome10, cpuPSISome60, cpuPSISome300     []float64
+		memPSISome10, memPSISome60, memPSIFull60      []float64
+		ioPSISome60, ioPSIFull60                      []float64
+		stateRootFree, conntrackRatio, openFDs        []float64
+		ublkCounts, fcPIDCounts                       []float64
+		maxOOMDeltaByNode                             = make(map[string]int64)
 	)
 	for _, sm := range samples {
 		for _, h := range sm.Hosts {
-			cpuUtil = append(cpuUtil, h.CPUUtilPct)
+			if !h.cpuDeltaPending {
+				cpuUtil = append(cpuUtil, h.CPUUtilPct)
+				cpuUser = append(cpuUser, h.CPUUserPct)
+				cpuSys = append(cpuSys, h.CPUSysPct)
+				cpuIOWait = append(cpuIOWait, h.CPUIOWaitPct)
+				cpuSteal = append(cpuSteal, h.CPUStealPct)
+			}
 			load1m = append(load1m, h.Load1m)
 			if h.MemAvailableMiB > 0 {
 				memAvail = append(memAvail, h.MemAvailableMiB)
@@ -694,7 +910,7 @@ func aggregateHostSamples(samples []LoadSample, baselineOOM map[string]int64, wa
 			}
 		}
 	}
-	if len(cpuUtil) == 0 && len(warnings) == 0 {
+	if len(load1m) == 0 && len(cpuUtil) == 0 && len(warnings) == 0 {
 		return nil
 	}
 
@@ -704,19 +920,23 @@ func aggregateHostSamples(samples []LoadSample, baselineOOM map[string]int64, wa
 	}
 
 	metrics := map[string]any{
-		"cpu_util_pct":               SummarizeStats(cpuUtil),
-		"load_1m":                    SummarizeStats(load1m),
-		"cpu_psi_some_avg10":         SummarizeStats(cpuPSISome10),
-		"cpu_psi_some_avg60":         SummarizeStats(cpuPSISome60),
-		"cpu_psi_some_avg300":        SummarizeStats(cpuPSISome300),
-		"mem_psi_some_avg10":         SummarizeStats(memPSISome10),
-		"mem_psi_some_avg60":         SummarizeStats(memPSISome60),
-		"mem_psi_full_avg60":         SummarizeStats(memPSIFull60),
-		"io_psi_some_avg60":          SummarizeStats(ioPSISome60),
-		"io_psi_full_avg60":          SummarizeStats(ioPSIFull60),
-		"host_oom_kills":             totalOOMKills,
-		"active_ublk_devices":        SummarizeStats(ublkCounts),
-		"firecracker_pid_count":      SummarizeStats(fcPIDCounts),
+		"cpu_util_pct":          SummarizeStats(cpuUtil),
+		"cpu_user_pct":          SummarizeStats(cpuUser),
+		"cpu_sys_pct":           SummarizeStats(cpuSys),
+		"cpu_iowait_pct":        SummarizeStats(cpuIOWait),
+		"cpu_steal_pct":         SummarizeStats(cpuSteal),
+		"load_1m":               SummarizeStats(load1m),
+		"cpu_psi_some_avg10":    SummarizeStats(cpuPSISome10),
+		"cpu_psi_some_avg60":    SummarizeStats(cpuPSISome60),
+		"cpu_psi_some_avg300":   SummarizeStats(cpuPSISome300),
+		"mem_psi_some_avg10":    SummarizeStats(memPSISome10),
+		"mem_psi_some_avg60":    SummarizeStats(memPSISome60),
+		"mem_psi_full_avg60":    SummarizeStats(memPSIFull60),
+		"io_psi_some_avg60":     SummarizeStats(ioPSISome60),
+		"io_psi_full_avg60":     SummarizeStats(ioPSIFull60),
+		"host_oom_kills":        totalOOMKills,
+		"active_ublk_devices":   SummarizeStats(ublkCounts),
+		"firecracker_pid_count": SummarizeStats(fcPIDCounts),
 	}
 	if len(memAvail) > 0 {
 		metrics["mem_available_mib"] = SummarizeStats(memAvail)
@@ -748,22 +968,30 @@ func aggregateHostSamples(samples []LoadSample, baselineOOM map[string]int64, wa
 
 func aggregateComponentSamples(samples []LoadSample, component string) *report.ComponentLoadSummary {
 	var (
-		cpus, rss, goroutines, fds []float64
-		perSbxRSS, perSbxCPUMilli  []float64
-		cgMemCur, cgMemMax         []float64
-		maxThrottled               int64
-		maxThrottledUsec           int64
-		maxCGHigh, maxCGMax        int64
-		maxCGOOM, maxCGOOMKill     int64
-		hasPodCgroup               bool
-		extraSeries                = make(map[string][]float64)
+		cpus, rss, goroutines, fds                []float64
+		perSbxRSS, perSbxCPUMilli                 []float64
+		cgMemCur, cgMemMax                        []float64
+		cgMemPSI10, cgMemPSI60, cgMemPSIFull60    []float64
+		cgCPUPSI10, cgCPUPSI60                    []float64
+		hasBaseThrottle                           bool
+		baseThrottled, baseThrottledUsec          int64
+		maxThrottledDelta, maxThrottledUsecDelta  int64
+		hasBaseCG                                 bool
+		baseCGHigh, baseCGMax                     int64
+		baseCGOOM, baseCGOOMKill                  int64
+		maxCGHighDelta, maxCGMaxDelta             int64
+		maxCGOOMDelta, maxCGOOMKillDelta          int64
+		hasPodCgroup                              bool
+		extraSeries                               = make(map[string][]float64)
 	)
 	for _, sm := range samples {
 		cs, ok := sm.Components[component]
 		if !ok {
 			continue
 		}
-		cpus = append(cpus, cs.CPUCores)
+		if !cs.cpuDeltaPending {
+			cpus = append(cpus, cs.CPUCores)
+		}
 		rss = append(rss, cs.RSSMiB)
 		if cs.Goroutines > 0 {
 			goroutines = append(goroutines, cs.Goroutines)
@@ -771,18 +999,31 @@ func aggregateComponentSamples(samples []LoadSample, component string) *report.C
 		if cs.OpenFDs > 0 {
 			fds = append(fds, cs.OpenFDs)
 		}
-		if cs.NrThrottled > maxThrottled {
-			maxThrottled = cs.NrThrottled
-		}
-		if cs.ThrottledUsec > maxThrottledUsec {
-			maxThrottledUsec = cs.ThrottledUsec
-		}
-		if sm.ActiveSandboxes > 0 {
-			if cs.RSSMiB > 0 {
-				perSbxRSS = append(perSbxRSS, cs.RSSMiB/float64(sm.ActiveSandboxes))
+		if !hasBaseThrottle {
+			baseThrottled = cs.NrThrottled
+			baseThrottledUsec = cs.ThrottledUsec
+			hasBaseThrottle = true
+		} else {
+			if d := cs.NrThrottled - baseThrottled; d > maxThrottledDelta {
+				maxThrottledDelta = d
 			}
-			if cs.CPUCores > 0 {
-				perSbxCPUMilli = append(perSbxCPUMilli, (cs.CPUCores*1000.0)/float64(sm.ActiveSandboxes))
+			if d := cs.ThrottledUsec - baseThrottledUsec; d > maxThrottledUsecDelta {
+				maxThrottledUsecDelta = d
+			}
+		}
+
+		activeSbx := sm.ActiveSandboxes
+		if activeSbx <= 0 {
+			for _, h := range sm.Hosts {
+				activeSbx += h.FirecrackerPIDCount
+			}
+		}
+		if activeSbx > 0 {
+			if cs.RSSMiB > 0 {
+				perSbxRSS = append(perSbxRSS, cs.RSSMiB/float64(activeSbx))
+			}
+			if !cs.cpuDeltaPending && cs.CPUCores > 0 {
+				perSbxCPUMilli = append(perSbxCPUMilli, (cs.CPUCores*1000.0)/float64(activeSbx))
 			}
 		}
 		if cs.PodCgroup != nil {
@@ -791,24 +1032,38 @@ func aggregateComponentSamples(samples []LoadSample, component string) *report.C
 			if cs.PodCgroup.MemoryMaxMiB > 0 {
 				cgMemMax = append(cgMemMax, cs.PodCgroup.MemoryMaxMiB)
 			}
-			if cs.PodCgroup.MemoryEvents.High > maxCGHigh {
-				maxCGHigh = cs.PodCgroup.MemoryEvents.High
-			}
-			if cs.PodCgroup.MemoryEvents.Max > maxCGMax {
-				maxCGMax = cs.PodCgroup.MemoryEvents.Max
-			}
-			if cs.PodCgroup.MemoryEvents.OOM > maxCGOOM {
-				maxCGOOM = cs.PodCgroup.MemoryEvents.OOM
-			}
-			if cs.PodCgroup.MemoryEvents.OOMKill > maxCGOOMKill {
-				maxCGOOMKill = cs.PodCgroup.MemoryEvents.OOMKill
+			cgMemPSI10 = append(cgMemPSI10, cs.PodCgroup.MemoryPSI.SomeAvg10)
+			cgMemPSI60 = append(cgMemPSI60, cs.PodCgroup.MemoryPSI.SomeAvg60)
+			cgMemPSIFull60 = append(cgMemPSIFull60, cs.PodCgroup.MemoryPSI.FullAvg60)
+			cgCPUPSI10 = append(cgCPUPSI10, cs.PodCgroup.CPUPSI.SomeAvg10)
+			cgCPUPSI60 = append(cgCPUPSI60, cs.PodCgroup.CPUPSI.SomeAvg60)
+
+			if !hasBaseCG {
+				baseCGHigh = cs.PodCgroup.MemoryEvents.High
+				baseCGMax = cs.PodCgroup.MemoryEvents.Max
+				baseCGOOM = cs.PodCgroup.MemoryEvents.OOM
+				baseCGOOMKill = cs.PodCgroup.MemoryEvents.OOMKill
+				hasBaseCG = true
+			} else {
+				if d := cs.PodCgroup.MemoryEvents.High - baseCGHigh; d > maxCGHighDelta {
+					maxCGHighDelta = d
+				}
+				if d := cs.PodCgroup.MemoryEvents.Max - baseCGMax; d > maxCGMaxDelta {
+					maxCGMaxDelta = d
+				}
+				if d := cs.PodCgroup.MemoryEvents.OOM - baseCGOOM; d > maxCGOOMDelta {
+					maxCGOOMDelta = d
+				}
+				if d := cs.PodCgroup.MemoryEvents.OOMKill - baseCGOOMKill; d > maxCGOOMKillDelta {
+					maxCGOOMKillDelta = d
+				}
 			}
 		}
 		for k, v := range cs.ExtraMetrics {
 			extraSeries[k] = append(extraSeries[k], v)
 		}
 	}
-	if len(cpus) == 0 && len(rss) == 0 && !hasPodCgroup {
+	if len(cpus) == 0 && len(rss) == 0 && !hasPodCgroup && len(extraSeries) == 0 {
 		return nil
 	}
 
@@ -823,11 +1078,11 @@ func aggregateComponentSamples(samples []LoadSample, component string) *report.C
 	if len(perSbxCPUMilli) > 0 {
 		summary.PerSandboxCPUMilli = meanFloat(perSbxCPUMilli)
 	}
-	if maxThrottled > 0 {
-		summary.Metrics["nr_throttled"] = maxThrottled
+	if maxThrottledDelta > 0 {
+		summary.Metrics["nr_throttled"] = maxThrottledDelta
 	}
-	if maxThrottledUsec > 0 {
-		summary.Metrics["throttled_usec"] = maxThrottledUsec
+	if maxThrottledUsecDelta > 0 {
+		summary.Metrics["throttled_usec"] = maxThrottledUsecDelta
 	}
 	if len(goroutines) > 0 {
 		summary.Metrics["goroutines"] = SummarizeStats(goroutines)
@@ -839,11 +1094,16 @@ func aggregateComponentSamples(samples []LoadSample, component string) *report.C
 		cgMap := map[string]any{
 			"memory_current_mib": SummarizeStats(cgMemCur),
 			"memory_events": map[string]int64{
-				"high":     maxCGHigh,
-				"max":      maxCGMax,
-				"oom":      maxCGOOM,
-				"oom_kill": maxCGOOMKill,
+				"high":     maxCGHighDelta,
+				"max":      maxCGMaxDelta,
+				"oom":      maxCGOOMDelta,
+				"oom_kill": maxCGOOMKillDelta,
 			},
+			"memory_psi_some_avg10": SummarizeStats(cgMemPSI10),
+			"memory_psi_some_avg60": SummarizeStats(cgMemPSI60),
+			"memory_psi_full_avg60": SummarizeStats(cgMemPSIFull60),
+			"cpu_psi_some_avg10":    SummarizeStats(cgCPUPSI10),
+			"cpu_psi_some_avg60":    SummarizeStats(cgCPUPSI60),
 		}
 		if len(cgMemMax) > 0 {
 			cgMap["memory_max_mib"] = maxFloat(cgMemMax)

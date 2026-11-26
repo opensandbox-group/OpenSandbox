@@ -24,11 +24,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+const maxConcurrentScrapes = 16
 
 // Component identifiers used when scraping Prometheus /metrics across the stack.
 const (
@@ -39,6 +42,8 @@ const (
 	ComponentOpenSandboxServer  = "opensandbox-server"
 	ComponentIngressGateway     = "ingress-gateway"
 	ComponentFirecrackerRuntime = "firecracker-runtime"
+	ComponentOverlayBDUblkd     = "overlaybd-ublkd"
+	ComponentOTelCollector      = "otel-collector"
 )
 
 // MetricType mirrors Prometheus exposition metric types.
@@ -400,7 +405,8 @@ func NewPrometheusScraper(cfg Config, clients *Clients) *PrometheusScraper {
 	return &PrometheusScraper{cfg: cfg, clients: clients}
 }
 
-// DiscoverTargets lists pods in systemNamespace and resourceNamespace and resolves their /metrics endpoints.
+// DiscoverTargets lists pods in systemNamespace, resourceNamespace, and obsNamespace
+// and resolves their Prometheus /metrics endpoints.
 func (s *PrometheusScraper) DiscoverTargets(ctx context.Context) ([]ScrapeTarget, []string) {
 	var targets []ScrapeTarget
 	var warnings []string
@@ -409,7 +415,7 @@ func (s *PrometheusScraper) DiscoverTargets(ctx context.Context) ([]ScrapeTarget
 		return nil, []string{"prometheus discovery skipped: kubernetes clientset not configured"}
 	}
 
-	namespaces := uniqueNonEmpty(s.cfg.SystemNamespace, s.cfg.ResourceNamespace)
+	namespaces := uniqueNonEmpty(s.cfg.SystemNamespace, s.cfg.ResourceNamespace, s.cfg.ObsNamespace)
 	for _, ns := range namespaces {
 		podList, err := s.clients.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -457,35 +463,32 @@ func resolvePodScrapeTargets(pod *corev1.Pod) []ScrapeTarget {
 		})
 	}
 
-	// Fastlet pods may host fsb-fastlet, fsb-fastlet-proxy, and egress sidecar containers.
+	// Fastlet pods host fsb-fastlet (serves /metrics on FASTLET_CONTROL_PORT=:5758)
+	// and optionally fsb-fastlet-proxy (:9093). Egress is OTLP-only (exported via OTel Collector).
 	if isFastletPod(pod) {
-		addTarget(ComponentFSBFastlet, resolveContainerMetricsPort(pod, []string{"fastlet", "fsb-fastlet"}, annotPort, 9090))
+		addTarget(ComponentFSBFastlet, resolveContainerMetricsPort(pod, []string{"fastlet", "fsb-fastlet"}, annotPort, 5758))
 		if hasContainerMatching(pod, "fastlet-proxy", "proxy") {
 			if p := resolveContainerMetricsPort(pod, []string{"fastlet-proxy", "fsb-fastlet-proxy", "proxy"}, 0, 9093); p > 0 {
 				addTarget(ComponentFSBFastletProxy, p)
-			}
-		}
-		if hasContainerMatching(pod, "egress") {
-			if p := resolveContainerMetricsPort(pod, []string{"egress"}, 0, 9094); p > 0 {
-				addTarget(ComponentEgress, p)
 			}
 		}
 		return targets
 	}
 
 	switch {
+	case podMatchesKeywords(pod, "opensandbox-bench-otel-collector", "otel-collector"):
+		addTarget(ComponentOTelCollector, resolveContainerMetricsPort(pod, []string{"otel-collector", "collector"}, annotPort, 8889))
 	case podMatchesKeywords(pod, "fast-sandbox-controller", "fsb-controller") || pod.Labels["app.kubernetes.io/component"] == "controller":
 		addTarget(ComponentFSBController, resolveContainerMetricsPort(pod, []string{"manager", "controller"}, annotPort, 9091))
 	case podMatchesKeywords(pod, "firecracker-runtime"):
 		addTarget(ComponentFirecrackerRuntime, resolveContainerMetricsPort(pod, []string{"janitor", "firecracker-agent"}, annotPort, 9092))
-	case podMatchesKeywords(pod, "opensandbox-server", "sandbox-server") || pod.Labels["app.kubernetes.io/component"] == "server":
-		addTarget(ComponentOpenSandboxServer, resolveContainerMetricsPort(pod, []string{"server", "opensandbox-server"}, annotPort, 80))
-	case podMatchesKeywords(pod, "ingress-gateway", "opensandbox-ingress"):
-		addTarget(ComponentIngressGateway, resolveContainerMetricsPort(pod, []string{"ingress", "ingress-gateway"}, annotPort, 28888))
+		if hasContainerMatching(pod, "overlaybd-ublkd", "ublkd") {
+			if p := resolveContainerMetricsPort(pod, []string{"overlaybd-ublkd", "ublkd"}, 0, 9863); p > 0 {
+				addTarget(ComponentOverlayBDUblkd, p)
+			}
+		}
 	case podMatchesKeywords(pod, "fastlet-proxy"):
 		addTarget(ComponentFSBFastletProxy, resolveContainerMetricsPort(pod, []string{"fastlet-proxy", "proxy"}, annotPort, 9093))
-	case podMatchesKeywords(pod, "egress"):
-		addTarget(ComponentEgress, resolveContainerMetricsPort(pod, []string{"egress"}, annotPort, 9094))
 	}
 	return targets
 }
@@ -580,7 +583,8 @@ func (s *PrometheusScraper) Snapshot(ctx context.Context) (*PromSnapshot, error)
 	return snap, nil
 }
 
-// ScrapeTargets scrapes an explicit list of targets and aggregates them into a PromSnapshot.
+// ScrapeTargets scrapes an explicit list of targets concurrently (bounded by maxConcurrentScrapes)
+// and aggregates them into a PromSnapshot.
 func (s *PrometheusScraper) ScrapeTargets(ctx context.Context, targets []ScrapeTarget) *PromSnapshot {
 	snap := &PromSnapshot{
 		Timestamp:   time.Now().UTC(),
@@ -589,24 +593,47 @@ func (s *PrometheusScraper) ScrapeTargets(ctx context.Context, targets []ScrapeT
 		Merged:      NewMetricSet(),
 		Targets:     append([]ScrapeTarget(nil), targets...),
 	}
-	for _, t := range targets {
-		ms, err := s.ScrapeURL(ctx, t.URL)
-		if err != nil {
-			msg := fmt.Sprintf("scrape %s (%s/%s @ %s): %v", t.Component, t.Namespace, t.PodName, t.URL, err)
+	if len(targets) == 0 {
+		return snap
+	}
+
+	type scrapeResult struct {
+		target ScrapeTarget
+		ms     *MetricSet
+		err    error
+	}
+	results := make([]scrapeResult, len(targets))
+	sem := make(chan struct{}, maxConcurrentScrapes)
+	var wg sync.WaitGroup
+	for i, t := range targets {
+		wg.Add(1)
+		go func(idx int, tgt ScrapeTarget) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			ms, err := s.ScrapeURL(ctx, tgt.URL)
+			results[idx] = scrapeResult{target: tgt, ms: ms, err: err}
+		}(i, t)
+	}
+	wg.Wait()
+
+	for _, r := range results {
+		if r.err != nil {
+			msg := fmt.Sprintf("scrape %s (%s/%s @ %s): %v", r.target.Component, r.target.Namespace, r.target.PodName, r.target.URL, r.err)
 			snap.Warnings = append(snap.Warnings, msg)
-			s.clients.logger().Warn("prometheus scrape degraded", "component", t.Component, "pod", t.PodName, "error", err)
+			s.clients.logger().Warn("prometheus scrape degraded", "component", r.target.Component, "pod", r.target.PodName, "error", r.err)
 			continue
 		}
-		if snap.ByComponent[t.Component] == nil {
-			snap.ByComponent[t.Component] = NewMetricSet()
+		if snap.ByComponent[r.target.Component] == nil {
+			snap.ByComponent[r.target.Component] = NewMetricSet()
 		}
-		snap.ByComponent[t.Component].Merge(ms)
-		podKey := t.Namespace + "/" + t.PodName
+		snap.ByComponent[r.target.Component].Merge(r.ms)
+		podKey := r.target.Namespace + "/" + r.target.PodName
 		if snap.ByPod[podKey] == nil {
 			snap.ByPod[podKey] = NewMetricSet()
 		}
-		snap.ByPod[podKey].Merge(ms)
-		snap.Merged.Merge(ms)
+		snap.ByPod[podKey].Merge(r.ms)
+		snap.Merged.Merge(r.ms)
 	}
 	return snap
 }
@@ -630,13 +657,9 @@ func ComputeDeltas(before, after *PromSnapshot) map[string]float64 {
 	addCounterWithLabelBreakdown(deltas, beforeMS, afterMS, "fast_sandbox_topk_retry_total", "result")
 	addCounterWithMultiLabelBreakdown(deltas, beforeMS, afterMS, "fast_sandbox_fastlet_admission_total", []string{"operation", "result", "reason"})
 
-	// 2. OSEP-0034 §4.3 gauges (end-of-window values).
-	if v, ok := afterMS.Max("fast_sandbox_registry_heartbeat_age_seconds", nil); ok {
-		deltas["fast_sandbox_registry_heartbeat_age_seconds_max"] = v
-	}
-	if v, ok := afterMS.Max("fast_sandbox_registry_candidate_count", nil); ok {
-		deltas["fast_sandbox_registry_candidate_count"] = v
-	}
+	// 2. OSEP-0034 §4.3 placement histograms & admission gauges.
+	addHistogramDelta(deltas, beforeMS, afterMS, "fast_sandbox_registry_heartbeat_age_seconds")
+	addHistogramDelta(deltas, beforeMS, afterMS, "fast_sandbox_registry_candidate_count")
 	for state, val := range afterMS.SumByLabel("fast_sandbox_fastlet_admission_slots", "state") {
 		if state != "" {
 			deltas[fmt.Sprintf("fast_sandbox_fastlet_admission_slots{state=%q}", state)] = val
@@ -645,8 +668,16 @@ func ComputeDeltas(before, after *PromSnapshot) map[string]float64 {
 	addGaugeMultiLabel(deltas, afterMS, "fast_sandbox_fastlet_resource_admission_state", []string{"state", "reason"})
 
 	// 3. OSEP-0034 §4.1 & §4.4 latency histograms.
-	addHistogramDelta(deltas, beforeMS, afterMS, "fast_sandbox_sandbox_proxy_route_latency_seconds")
-	addHistogramDelta(deltas, beforeMS, afterMS, "fast_sandbox_create_stage_latency_seconds")
+	addHistogramDelta(deltas, beforeMS, afterMS, "fast_sandbox_fastlet_proxy_upstream_latency_seconds")
+	addHistogramDeltaByLabel(deltas, beforeMS, afterMS, "fast_sandbox_create_stage_latency_seconds", "stage")
+
+	// 4. OSEP-0010 OTLP metrics exported via OTel Collector Prometheus exporter (:8889/metrics).
+	addCounterWithLabelBreakdown(deltas, beforeMS, afterMS, "ingress_wake_flights_total", "outcome")
+	addCounterWithLabelBreakdown(deltas, beforeMS, afterMS, "ingress_wake_flights", "outcome")
+	addCounterWithLabelBreakdown(deltas, beforeMS, afterMS, "egress_dns_query_failed_total", "reason")
+	if v := counterDelta(beforeMS.Sum("egress_policy_denied_total", nil), afterMS.Sum("egress_policy_denied_total", nil)); len(afterMS.Samples["egress_policy_denied_total"]) > 0 {
+		deltas["egress_policy_denied_total"] = v
+	}
 
 	return deltas
 }
@@ -726,33 +757,67 @@ func sumByLabelTuple(ms *MetricSet, metricName string, keys []string) map[string
 }
 
 func addHistogramDelta(out map[string]float64, before, after *MetricSet, baseName string) {
+	addHistogramDeltaFiltered(out, before, after, baseName, nil, "")
+}
+
+// addHistogramDeltaByLabel computes per-label-value histogram deltas when labelKey is present
+// (e.g. stage on fast_sandbox_create_stage_latency_seconds), falling back to an unlabeled
+// aggregate if no samples carry labelKey.
+func addHistogramDeltaByLabel(out map[string]float64, before, after *MetricSet, baseName, labelKey string) {
+	if after == nil {
+		return
+	}
+	seen := make(map[string]struct{})
+	for _, sampleName := range []string{baseName + "_count", baseName + "_bucket"} {
+		for _, s := range after.Samples[sampleName] {
+			if lv := s.Labels[labelKey]; lv != "" {
+				seen[lv] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		addHistogramDeltaFiltered(out, before, after, baseName, nil, "")
+		return
+	}
+	vals := make([]string, 0, len(seen))
+	for lv := range seen {
+		vals = append(vals, lv)
+	}
+	sort.Strings(vals)
+	for _, lv := range vals {
+		filter := map[string]string{labelKey: lv}
+		suffix := fmt.Sprintf("{%s=%q}", labelKey, lv)
+		addHistogramDeltaFiltered(out, before, after, baseName, filter, suffix)
+	}
+}
+
+func addHistogramDeltaFiltered(out map[string]float64, before, after *MetricSet, baseName string, filter map[string]string, keySuffix string) {
 	countName := baseName + "_count"
 	sumName := baseName + "_sum"
 	bucketName := baseName + "_bucket"
 
-	afterCount := after.Sum(countName, nil)
-	beforeCount := before.Sum(countName, nil)
+	afterCount := after.Sum(countName, filter)
+	beforeCount := before.Sum(countName, filter)
 	countDelta := counterDelta(beforeCount, afterCount)
 
-	afterSum := after.Sum(sumName, nil)
-	beforeSum := before.Sum(sumName, nil)
+	afterSum := after.Sum(sumName, filter)
+	beforeSum := before.Sum(sumName, filter)
 	sumDelta := counterDelta(beforeSum, afterSum)
 
-	if countDelta == 0 && len(after.Samples[countName]) == 0 && len(after.Samples[bucketName]) == 0 {
+	afterBuckets := aggregateHistogramBuckets(after, bucketName, filter)
+	if countDelta == 0 && len(afterBuckets) == 0 && !hasMatchingSample(after, countName, filter) {
 		return
 	}
-	out[countName] = countDelta
-	out[sumName] = sumDelta
+	out[countName+keySuffix] = countDelta
+	out[sumName+keySuffix] = sumDelta
 	if countDelta > 0 {
-		out[baseName+"_avg"] = sumDelta / countDelta
+		out[baseName+"_avg"+keySuffix] = sumDelta / countDelta
 	}
 
-	// Aggregate cumulative histogram buckets across all series for delta quantile estimation.
-	afterBuckets := aggregateHistogramBuckets(after, bucketName)
-	beforeBuckets := aggregateHistogramBuckets(before, bucketName)
 	if len(afterBuckets) == 0 {
 		return
 	}
+	beforeBuckets := aggregateHistogramBuckets(before, bucketName, filter)
 	var buckets []histBucket
 	for le, ac := range afterBuckets {
 		bc := beforeBuckets[le]
@@ -777,16 +842,31 @@ func addHistogramDelta(out map[string]float64, before, after *MetricSet, baseNam
 		{"_p95", 0.95},
 		{"_p99", 0.99},
 	} {
-		out[baseName+q.name] = estimateHistogramQuantile(buckets, total, q.p)
+		out[baseName+q.name+keySuffix] = estimateHistogramQuantile(buckets, total, q.p)
 	}
 }
 
-func aggregateHistogramBuckets(ms *MetricSet, bucketName string) map[float64]float64 {
+func hasMatchingSample(ms *MetricSet, metricName string, filter map[string]string) bool {
+	if ms == nil {
+		return false
+	}
+	for _, s := range ms.Samples[metricName] {
+		if matchesLabels(s.Labels, filter) {
+			return true
+		}
+	}
+	return false
+}
+
+func aggregateHistogramBuckets(ms *MetricSet, bucketName string, filter map[string]string) map[float64]float64 {
 	out := make(map[float64]float64)
 	if ms == nil {
 		return out
 	}
 	for _, s := range ms.Samples[bucketName] {
+		if !matchesLabels(s.Labels, filter) {
+			continue
+		}
 		leStr, ok := s.Labels["le"]
 		if !ok {
 			continue

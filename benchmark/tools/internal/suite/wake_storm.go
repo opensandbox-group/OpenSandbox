@@ -276,6 +276,7 @@ func (s *WakeStormSuite) Run(ctx context.Context, rc RunContext) (*report.SuiteR
 	}
 
 	var totalWakeReqs int
+	var reqsWithParkTimeout int
 	var totalParkTimeouts int
 	var totalSheds int
 	var totalRetries int
@@ -283,6 +284,9 @@ func (s *WakeStormSuite) Run(ctx context.Context, rc RunContext) (*report.SuiteR
 
 	recordWakeResult := func(opName, extraKey string, r wakeProbeResult) {
 		totalWakeReqs++
+		if r.parkTimeouts > 0 {
+			reqsWithParkTimeout++
+		}
 		totalParkTimeouts += r.parkTimeouts
 		totalSheds += r.sheds
 		totalRetries += r.retryCount
@@ -389,11 +393,10 @@ func (s *WakeStormSuite) Run(ctx context.Context, rc RunContext) (*report.SuiteR
 	if resumeBeforeOK && resumeCounter != nil {
 		if resumeAfter, err := resumeCounter(ctx); err == nil {
 			delta := resumeAfter - resumeBefore
-			if delta < 1 {
-				delta = 1
+			if delta > 0 {
+				coalesceRatio = float64(sfBurst) / float64(delta)
+				coalesceSource = "fastpath_resume_counter"
 			}
-			coalesceRatio = float64(sfBurst) / float64(delta)
-			coalesceSource = "fastpath_resume_counter"
 		}
 	}
 	if coalesceSource == "estimated" {
@@ -409,9 +412,9 @@ func (s *WakeStormSuite) Run(ctx context.Context, rc RunContext) (*report.SuiteR
 	var shedRate float64
 	var avgRetries float64
 	if totalWakeReqs > 0 {
-		// Rates are fraction of wake requests that experienced a park timeout or shed.
-		parkTimeoutRate = float64(totalParkTimeouts) / float64(totalWakeReqs+totalParkTimeouts+totalSheds)
-		shedRate = float64(totalSheds) / float64(totalWakeReqs+totalParkTimeouts+totalSheds)
+		// Rates are the fraction of logical wake requests that experienced a park timeout or shed.
+		parkTimeoutRate = float64(reqsWithParkTimeout) / float64(totalWakeReqs)
+		shedRate = float64(totalSheds) / float64(totalWakeReqs)
 		avgRetries = float64(totalRetries) / float64(totalWakeReqs)
 	}
 

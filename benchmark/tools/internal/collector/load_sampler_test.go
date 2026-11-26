@@ -352,3 +352,117 @@ func TestLatestHostSnapshotMultiNodeWorstCaseAggregation(t *testing.T) {
 		t.Fatalf("expected summed ublk=30 fc=30, got %d / %d", agg.ActiveUblkDevices, agg.FirecrackerPIDCount)
 	}
 }
+
+func TestLoadSamplerTick0CPUBiasAndPodCgroupBaselineAndBreakdown(t *testing.T) {
+	sampler := NewLoadSampler(DefaultConfig(), nil, time.Second)
+	// Tick 0: cpuDeltaPending=true should NOT inject 0.0 into CPU averages;
+	// podcgroup cumulative events establish baseline (high=5, oom_kill=2, nr_throttled=10).
+	sampler.RecordSample(LoadSample{
+		ActiveSandboxes: 10,
+		Hosts: []HostSample{
+			{
+				NodeName:        "node-1",
+				CPUUtilPct:      0,
+				cpuDeltaPending: true,
+				Load1m:          1.0,
+				MemAvailableMiB: 8000,
+			},
+			{
+				// Partial probe failure on node-2 returns 0 for MemAvailableMiB / StateRootFreeGiB.
+				NodeName:         "node-2",
+				MemAvailableMiB:  0,
+				StateRootFreeGiB: 0,
+				cpuDeltaPending:  true,
+			},
+		},
+		Components: map[string]ComponentSample{
+			ComponentFSBFastlet: {
+				CPUCores:        0,
+				cpuDeltaPending: true,
+				RSSMiB:          100,
+				NrThrottled:     10,
+				PodCgroup: &PodCgroupSample{
+					MemoryCurrentMiB: 512,
+					MemoryEvents:     CgroupMemoryEvents{High: 5, Max: 1, OOM: 2, OOMKill: 2},
+					MemoryPSI:        PSIMetrics{SomeAvg10: 1.0, SomeAvg60: 2.0, FullAvg60: 0.5},
+					CPUPSI:           PSIMetrics{SomeAvg10: 0.2, SomeAvg60: 0.4},
+				},
+			},
+		},
+	})
+	// Tick 1: real CPU deltas and +1 podcgroup oom_kill, +3 high, +5 nr_throttled.
+	sampler.RecordSample(LoadSample{
+		ActiveSandboxes: 10,
+		Hosts: []HostSample{
+			{
+				NodeName:         "node-1",
+				CPUUtilPct:       60.0,
+				CPUUserPct:       40.0,
+				CPUSysPct:        15.0,
+				CPUIOWaitPct:     3.0,
+				CPUStealPct:      2.0,
+				Load1m:           2.0,
+				MemAvailableMiB:  7000,
+				StateRootFreeGiB: 40.0,
+			},
+			{
+				NodeName:         "node-2",
+				CPUUtilPct:       60.0,
+				CPUUserPct:       40.0,
+				CPUSysPct:        15.0,
+				CPUIOWaitPct:     3.0,
+				CPUStealPct:      2.0,
+				MemAvailableMiB:  0, // partial failure must be skipped
+				StateRootFreeGiB: 0, // partial failure must be skipped
+			},
+		},
+		Components: map[string]ComponentSample{
+			ComponentFSBFastlet: {
+				CPUCores:    2.0,
+				RSSMiB:      120,
+				NrThrottled: 15,
+				PodCgroup: &PodCgroupSample{
+					MemoryCurrentMiB: 600,
+					MemoryEvents:     CgroupMemoryEvents{High: 8, Max: 1, OOM: 3, OOMKill: 3},
+					MemoryPSI:        PSIMetrics{SomeAvg10: 3.0, SomeAvg60: 4.0, FullAvg60: 1.5},
+					CPUPSI:           PSIMetrics{SomeAvg10: 0.6, SomeAvg60: 0.8},
+				},
+			},
+		},
+	})
+
+	lp := sampler.Aggregate()
+	if lp.Host == nil || lp.Fastlet == nil {
+		t.Fatalf("expected non-nil host and fastlet summaries")
+	}
+	// Tick 0 cpuDeltaPending was skipped, so Host CPU avg must be 60.0 (not 30.0).
+	if math.Abs(lp.Host.CPUCores.Avg-60.0) > 1e-6 {
+		t.Fatalf("expected host CPU avg=60.0 without tick-0 zero bias, got %v", lp.Host.CPUCores.Avg)
+	}
+	if lp.Host.Metrics["cpu_user_pct"] == nil || lp.Host.Metrics["cpu_sys_pct"] == nil ||
+		lp.Host.Metrics["cpu_iowait_pct"] == nil || lp.Host.Metrics["cpu_steal_pct"] == nil {
+		t.Fatalf("expected host CPU breakdown metrics to be preserved: %+v", lp.Host.Metrics)
+	}
+	// Fastlet tick-0 CPU was skipped, so avg must be 2.0 (not 1.0).
+	if math.Abs(lp.Fastlet.CPUCores.Avg-2.0) > 1e-6 {
+		t.Fatalf("expected fastlet CPU avg=2.0 without tick-0 zero bias, got %v", lp.Fastlet.CPUCores.Avg)
+	}
+	if lp.Fastlet.Metrics["nr_throttled"] != int64(5) {
+		t.Fatalf("expected nr_throttled delta=5, got %v", lp.Fastlet.Metrics["nr_throttled"])
+	}
+	cgMap := lp.Fastlet.Metrics["podcgroup"].(map[string]any)
+	evMap := cgMap["memory_events"].(map[string]int64)
+	if evMap["high"] != 3 || evMap["max"] != 0 || evMap["oom"] != 1 || evMap["oom_kill"] != 1 {
+		t.Fatalf("expected baseline-subtracted podcgroup events {high:3 max:0 oom:1 oom_kill:1}, got %+v", evMap)
+	}
+	if cgMap["memory_psi_some_avg60"] == nil || cgMap["cpu_psi_some_avg60"] == nil {
+		t.Fatalf("expected podcgroup PSI metrics to be preserved: %+v", cgMap)
+	}
+	if got := sampler.LatestPodCgroupOOMDelta(); got != 1 {
+		t.Fatalf("expected LatestPodCgroupOOMDelta=1, got %d", got)
+	}
+	latest, ok := sampler.LatestHostSnapshot()
+	if !ok || latest.MemAvailableMiB != 7000 || latest.StateRootFreeGiB != 40.0 {
+		t.Fatalf("expected LatestHostSnapshot to skip 0 partial probe failures, got %+v", latest)
+	}
+}

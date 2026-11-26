@@ -38,6 +38,7 @@ const (
 	DefaultSystemNamespace   = "opensandbox-system"
 	DefaultResourceNamespace = "opensandbox-dataplane"
 	DefaultBenchNamespace    = "opensandbox-bench"
+	DefaultObsNamespace      = "opensandbox-bench-obs"
 
 	DefaultStateRoot   = "/var/lib/fast-sandbox/firecracker"
 	DefaultUblkdSocket = "/run/fast-sandbox/overlaybd/ublkd.sock"
@@ -84,6 +85,7 @@ type Config struct {
 	SystemNamespace   string
 	ResourceNamespace string
 	BenchNamespace    string
+	ObsNamespace      string
 	StateRoot         string
 	UblkdSocketPath   string
 	PoolLow           int
@@ -118,6 +120,7 @@ func DefaultConfig() Config {
 		SystemNamespace:   DefaultSystemNamespace,
 		ResourceNamespace: DefaultResourceNamespace,
 		BenchNamespace:    DefaultBenchNamespace,
+		ObsNamespace:      DefaultObsNamespace,
 		StateRoot:         DefaultStateRoot,
 		UblkdSocketPath:   DefaultUblkdSocket,
 		PoolLow:           8,
@@ -136,6 +139,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.BenchNamespace == "" {
 		c.BenchNamespace = def.BenchNamespace
+	}
+	if c.ObsNamespace == "" {
+		c.ObsNamespace = def.ObsNamespace
 	}
 	if c.StateRoot == "" {
 		c.StateRoot = def.StateRoot

@@ -100,9 +100,21 @@ func (a *LeakAuditor) CaptureBaseline(ctx context.Context) (map[string]int64, in
 			}
 		}
 	}
-	sampler := NewLoadSampler(a.cfg, a.clients, DefaultSamplerInterval)
-	if cg, _ := sampler.sampleFastletPodCgroups(ctx); cg != nil {
-		cgroupOOM = cg.MemoryEvents.OOMKill
+	// Prefer fastlet Prometheus fast_sandbox_runtime_cgroup_oom_kills_total; fall back to podcgroup exec probe.
+	promOOMFound := false
+	if a.scraper != nil {
+		if promSnap, _ := a.scraper.Snapshot(ctx); promSnap != nil {
+			if cgOOM, ok := podCgroupOOMFromPromSnapshot(promSnap); ok {
+				cgroupOOM = cgOOM
+				promOOMFound = true
+			}
+		}
+	}
+	if !promOOMFound {
+		sampler := NewLoadSampler(a.cfg, a.clients, DefaultSamplerInterval)
+		if cg, _ := sampler.sampleFastletPodCgroups(ctx); cg != nil {
+			cgroupOOM = cg.MemoryEvents.OOMKill
+		}
 	}
 	return hostOOM, cgroupOOM
 }
@@ -129,9 +141,10 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 		}
 	}
 
-	// 2. Stuck deleting slots on fastlets via Prometheus scrape.
+	// 2. Stuck deleting slots and podcgroup OOM kills on fastlets via Prometheus scrape.
+	var promSnap *PromSnapshot
 	if a.scraper != nil && a.clients != nil && a.clients.Clientset != nil {
-		promSnap, _ := a.scraper.Snapshot(ctx)
+		promSnap, _ = a.scraper.Snapshot(ctx)
 		if promSnap != nil && promSnap.Merged != nil {
 			m.StuckDeletingSlots = int(math.Round(promSnap.Merged.Sum("fast_sandbox_fastlet_admission_slots", map[string]string{"state": "deleting"})))
 		}
@@ -160,7 +173,7 @@ func (a *LeakAuditor) Audit(ctx context.Context, opts LeakAuditOptions) (*report
 				container := pickRuntimeContainer(pod, DefaultFirecrackerAgentContainer, DefaultJanitorContainer, DefaultUblkdContainer)
 				script := fmt.Sprintf(`
 echo "ublk_count=$(ls -1 /dev/ublkb* 2>/dev/null | wc -l | tr -d ' ')"
-echo "fc_pids=$(grep -l '^firecracker$' /proc/[0-9]*/comm 2>/dev/null | wc -l | tr -d ' ')"
+echo "fc_pids=$((pgrep -xc firecracker 2>/dev/null || pidof firecracker 2>/dev/null | wc -w || echo 0) | tr -d ' ')"
 echo "oom_kill=$(awk '$1=="oom_kill"{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
 echo "stateroot_free_bytes=$(df -B1 %q 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)"
 `, a.cfg.StateRoot)
@@ -200,19 +213,44 @@ echo "stateroot_free_bytes=$(df -B1 %q 2>/dev/null | awk 'NR==2 {print $4}' || e
 			}
 		}
 
-		// 4. Fastlet sandbox-parent cgroup oom_kill check.
-		sampler := NewLoadSampler(a.cfg, a.clients, DefaultSamplerInterval)
-		if cg, warn := sampler.sampleFastletPodCgroups(ctx); cg != nil {
-			delta := cg.MemoryEvents.OOMKill - opts.BaselineCgroupOOMKills
+		// 4. Fastlet sandbox-parent cgroup oom_kill check (Prometheus first, exec fallback).
+		if cgOOM, ok := podCgroupOOMFromPromSnapshot(promSnap); ok {
+			delta := cgOOM - opts.BaselineCgroupOOMKills
 			if delta > 0 {
 				m.PodCgroupOOMKills = int(delta)
 			}
-		} else if warn != "" {
-			m.Warnings = append(m.Warnings, warn)
+		} else {
+			sampler := NewLoadSampler(a.cfg, a.clients, DefaultSamplerInterval)
+			if cg, warn := sampler.sampleFastletPodCgroups(ctx); cg != nil {
+				delta := cg.MemoryEvents.OOMKill - opts.BaselineCgroupOOMKills
+				if delta > 0 {
+					m.PodCgroupOOMKills = int(delta)
+				}
+			} else if warn != "" {
+				m.Warnings = append(m.Warnings, warn)
+			}
 		}
 	}
 
 	return EvaluateLeakAudit(m, opts.MinStateRootFreeGiB), nil
+}
+
+func podCgroupOOMFromPromSnapshot(snap *PromSnapshot) (int64, bool) {
+	if snap == nil {
+		return 0, false
+	}
+	ms := snap.ByComponent[ComponentFSBFastlet]
+	if ms == nil {
+		ms = snap.Merged
+	}
+	if ms == nil {
+		return 0, false
+	}
+	poolFilter := map[string]string{"sandbox_uid": ""}
+	if !hasMatchingSample(ms, "fast_sandbox_runtime_cgroup_oom_kills_total", poolFilter) {
+		return 0, false
+	}
+	return int64(math.Round(ms.Sum("fast_sandbox_runtime_cgroup_oom_kills_total", poolFilter))), true
 }
 
 // EvaluateLeakAudit applies OSEP-0034 §4.6 zero-OOM, headroom, and leak-free pass/fail gates

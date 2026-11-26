@@ -156,14 +156,16 @@ func (p *OverlayBDProbe) ProbeNodeStorage(ctx context.Context, pod *corev1.Pod) 
 	sr := p.cfg.StateRoot
 
 	// Single lightweight shell invocation returning key=value lines so we avoid multiple exec round-trips.
+	// Use df for StateRoot used/free bytes (O(1) statfs; avoids du metadata I/O storms and XFS reflink double-counting).
 	script := fmt.Sprintf(`
 SR=%q
-FREE=$(df -B1 "$SR" 2>/dev/null | awk 'NR==2 {print $4}')
-USED=$(du -sb "$SR" 2>/dev/null | awk '{print $1}')
+DF_LINE=$(df -B1 "$SR" 2>/dev/null | awk 'NR==2 {print $3, $4}')
+USED=$(echo "$DF_LINE" | awk '{print $1}')
+FREE=$(echo "$DF_LINE" | awk '{print $2}')
 OBD_CACHE=0
-for d in "$SR/overlaybd-cache" "$SR/cache" "$SR/oci/cache" /var/cache/overlaybd; do
+for d in "$SR/overlaybd/cache" "$SR/overlaybd-cache" "$SR/cache" "$SR/oci/cache" /var/cache/overlaybd; do
   if [ -d "$d" ]; then
-    OBD_CACHE=$(du -sb "$d" 2>/dev/null | awk '{print $1}')
+    OBD_CACHE=$(du -sB1 "$d" 2>/dev/null | awk '{print $1}')
     break
   fi
 done
@@ -171,7 +173,7 @@ BLOB_DIR="$SR/oci/blobs/sha256"
 BLOB_BYTES=0
 BLOB_FILES=0
 if [ -d "$BLOB_DIR" ]; then
-  BLOB_BYTES=$(du -sb "$BLOB_DIR" 2>/dev/null | awk '{print $1}')
+  BLOB_BYTES=$(du -sB1 "$BLOB_DIR" 2>/dev/null | awk '{print $1}')
   BLOB_FILES=$(find "$BLOB_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
 fi
 echo "stateroot_free_bytes=${FREE:-0}"
@@ -242,6 +244,8 @@ func ComputeOverlayBDMetrics(before, after *OverlayBDSnapshot, observedIdleMin i
 	var hitsDelta, missesDelta int64
 	var idleEnd, restartsDelta int
 	var totalUsedBytesDelta int64
+	var totalBlockCacheBytes, totalBlobCacheBytes int64
+	var totalBlobCacheFiles int
 	minFreeGiB := math.Inf(1)
 	minIdle := math.MaxInt
 
@@ -298,6 +302,9 @@ func ComputeOverlayBDMetrics(before, after *OverlayBDSnapshot, observedIdleMin i
 				totalUsedBytesDelta += usedDelta
 			}
 		}
+		totalBlockCacheBytes += afterNode.Storage.OverlayBDBlockCacheBytes
+		totalBlobCacheBytes += afterNode.Storage.FSBBlobCacheBytes
+		totalBlobCacheFiles += afterNode.Storage.FSBBlobCacheFileCount
 	}
 
 	var hitRate float64
@@ -319,13 +326,16 @@ func ComputeOverlayBDMetrics(before, after *OverlayBDSnapshot, observedIdleMin i
 	}
 
 	return &report.OverlayBDMetrics{
-		UblkdPoolHitsDelta:      hitsDelta,
-		UblkdPoolMissesDelta:    missesDelta,
-		UblkdPoolHitRate:        hitRate,
-		UblkdPoolIdleMin:        minIdle,
-		UblkdPoolIdleEnd:        idleEnd,
-		UblkdDaemonRestarts:     restartsDelta,
-		StateRootDuBytesPerSbx:  duPerSbx,
-		StateRootFreeHeadroomGi: minFreeGiB,
+		UblkdPoolHitsDelta:       hitsDelta,
+		UblkdPoolMissesDelta:     missesDelta,
+		UblkdPoolHitRate:         hitRate,
+		UblkdPoolIdleMin:         minIdle,
+		UblkdPoolIdleEnd:         idleEnd,
+		UblkdDaemonRestarts:      restartsDelta,
+		StateRootDuBytesPerSbx:   duPerSbx,
+		StateRootFreeHeadroomGi:  minFreeGiB,
+		OverlayBDBlockCacheBytes: totalBlockCacheBytes,
+		FSBBlobCacheBytes:        totalBlobCacheBytes,
+		FSBBlobCacheFileCount:    totalBlobCacheFiles,
 	}
 }

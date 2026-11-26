@@ -199,7 +199,7 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 		}
 
 		suiteCtx := suite.WithBenchHooks(ctx, suiteHooks)
-		res, _, runErr := s.Run(suiteCtx, rc)
+		res, opSamples, runErr := s.Run(suiteCtx, rc)
 
 		var sampledProfiles *report.LoadProfiles
 		if loadSampler != nil {
@@ -233,7 +233,8 @@ func (a *App) runWorker(ctx context.Context, opts workerRunOptions) error {
 					}
 				}
 				if obdAfter, oErr := obdProbe.Snapshot(ctx); oErr == nil && res.OverlayBDMetrics == nil {
-					res.OverlayBDMetrics = collector.ComputeOverlayBDMetrics(obdBefore, obdAfter, -1, res.SucceededOps)
+					peakActive := resolvePeakActiveSandboxes(res, opSamples, loadSampler, obdAfter)
+					res.OverlayBDMetrics = collector.ComputeOverlayBDMetrics(obdBefore, obdAfter, -1, peakActive)
 				}
 			}
 			rep.Suites[suiteName] = *res
@@ -412,13 +413,16 @@ func buildClusterBenchHooks(
 		WakeResumeCounter: func(rCtx context.Context) (int64, error) {
 			snap, err := scraper.Snapshot(rCtx)
 			if err != nil || snap == nil || snap.Merged == nil {
-				return 0, fmt.Errorf("scrape resume counter: %w", err)
+				return 0, fmt.Errorf("scrape ingress wake flights counter: %w", err)
 			}
-			total := snap.Merged.Sum("fast_sandbox_controller_fastpath_requests_total", map[string]string{"op": "resume"})
-			if total == 0 {
-				total = snap.Merged.Sum("fast_sandbox_fastpath_resume_total", nil)
+			// Query real OSEP-0010 ingress OTLP wake-flights counter exported via OTel Collector (:8889/metrics).
+			triggeredFilter := map[string]string{"outcome": "triggered"}
+			for _, metricName := range []string{"ingress_wake_flights_total", "ingress_wake_flights"} {
+				if len(snap.Merged.Samples[metricName]) > 0 {
+					return int64(math.Round(snap.Merged.Sum(metricName, triggeredFilter))), nil
+				}
 			}
-			return int64(math.Round(total)), nil
+			return 0, fmt.Errorf("ingress wake flights metric unavailable")
 		},
 		SoakNodeMemoryMiB: detectSoakNodeMemoryMiB(ctx, clients),
 	}
@@ -556,6 +560,56 @@ func extractFastletPodNameFromSandbox(u *unstructured.Unstructured) string {
 	return ""
 }
 
+func resolvePeakActiveSandboxes(res *report.SuiteResult, samples []suite.OperationSample, loadSampler *collector.LoadSampler, obdAfter *collector.OverlayBDSnapshot) int {
+	peak := 0
+	if loadSampler != nil {
+		if p := loadSampler.PeakActiveSandboxes(); p > peak {
+			peak = p
+		}
+	}
+	if res != nil && res.Extra != nil {
+		if df, ok := res.Extra["density_frontier"].([]report.DensityTierRow); ok {
+			for _, row := range df {
+				if row.ActiveSandboxes > peak {
+					peak = row.ActiveSandboxes
+				}
+			}
+		}
+		if fs, ok := res.Extra["fleet_size"].(int); ok && fs > peak {
+			peak = fs
+		}
+	}
+	if peak > 0 {
+		return peak
+	}
+	if obdAfter != nil {
+		inUse := 0
+		for _, n := range obdAfter.Nodes {
+			if n.Pool != nil {
+				inUse += n.Pool.InUse
+			}
+		}
+		if inUse > peak {
+			peak = inUse
+		}
+	}
+	if peak > 0 {
+		return peak
+	}
+	if len(samples) > 0 {
+		uniq := make(map[string]struct{})
+		for _, sm := range samples {
+			if sm.SandboxID != "" {
+				uniq[sm.SandboxID] = struct{}{}
+			}
+		}
+		if len(uniq) > peak {
+			peak = len(uniq)
+		}
+	}
+	return peak
+}
+
 func newCollectorSoakSampler(sampler *collector.LoadSampler, scraper *collector.PrometheusScraper) suite.SoakLoadSampler {
 	return suite.SoakLoadSamplerFunc(func(ctx context.Context) (*suite.SoakLoadSample, error) {
 		out := &suite.SoakLoadSample{
@@ -568,10 +622,13 @@ func newCollectorSoakSampler(sampler *collector.LoadSampler, scraper *collector.
 			out.StateRootFreeGiB = host.StateRootFreeGiB
 			out.OOMKills = int(host.OOMKillTotal)
 		}
+		out.OOMKills += int(sampler.LatestPodCgroupOOMDelta())
 		if out.LoadProfiles != nil && out.LoadProfiles.Fastlet != nil {
 			out.ResidentMiBPerSandbox = out.LoadProfiles.Fastlet.PerSandboxResidentMiB
 		}
-		if scraper != nil {
+		if deleting, ok := sampler.LatestDeletingSlots(); ok {
+			out.DeletingSlots = deleting
+		} else if scraper != nil {
 			if snap, err := scraper.Snapshot(ctx); err == nil && snap != nil && snap.Merged != nil {
 				out.DeletingSlots = int(math.Round(snap.Merged.Sum("fast_sandbox_fastlet_admission_slots", map[string]string{"state": "deleting"})))
 			}

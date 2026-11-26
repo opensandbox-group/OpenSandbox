@@ -111,6 +111,9 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 			"maxIdleConnsPerHost": 512,
 		},
 	}
+	if prof.Environment.Tracing.InCluster {
+		gatewayValues["env"] = otelMetricsEnvMaps()
+	}
 
 	ociValues := map[string]any{
 		"enabled":     oci.Enabled,
@@ -191,6 +194,16 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		"runtime":           runtimeValues,
 	}
 
+	serverEnv := []any{
+		map[string]any{
+			"name":  "OPENSANDBOX_INSECURE_SERVER",
+			"value": "YES",
+		},
+	}
+	if prof.Environment.Tracing.InCluster {
+		serverEnv = append(serverEnv, otelMetricsEnvMaps()...)
+	}
+
 	values := map[string]any{
 		"base": map[string]any{
 			"enabled": true,
@@ -228,12 +241,7 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 						"memory": "16Gi",
 					},
 				},
-				"env": []any{
-					map[string]any{
-						"name":  "OPENSANDBOX_INSECURE_SERVER",
-						"value": "YES",
-					},
-				},
+				"env": serverEnv,
 				"gateway": map[string]any{
 					"enabled":          true,
 					"host":             gatewayHost,

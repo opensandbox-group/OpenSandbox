@@ -711,6 +711,274 @@ func (p *OverlayBDProvisioner) deployRedis(ctx context.Context, rc *resolvedClie
 	return p.waitForDeploymentReady(ctx, rc.kube, benchNS, ephemeralRedisName)
 }
 
+func otelCollectorOTLPEndpoint() string {
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", otelCollectorName, otelObsNamespace, otelCollectorOTLPGRPCPort)
+}
+
+func otelMetricsEnvMaps() []any {
+	return []any{
+		map[string]any{
+			"name":  "OTEL_EXPORTER_OTLP_ENDPOINT",
+			"value": otelCollectorOTLPEndpoint(),
+		},
+		map[string]any{
+			"name":  "OTEL_EXPORTER_OTLP_PROTOCOL",
+			"value": "grpc",
+		},
+	}
+}
+
+func (p *OverlayBDProvisioner) deployOTelStack(ctx context.Context, rc *resolvedClients, prof *profile.BenchmarkProfile) error {
+	if err := ensureNamespace(ctx, rc.kube, otelObsNamespace); err != nil {
+		return err
+	}
+
+	jaegerLabels := map[string]string{
+		"app.kubernetes.io/name": otelJaegerName,
+		managedByLabelKey:        managedByLabelValue,
+	}
+	jaegerImage := applyImageMirror(prof, otelJaegerImage)
+
+	jaegerDep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      otelJaegerName,
+			Namespace: otelObsNamespace,
+			Labels:    jaegerLabels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(1),
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": otelJaegerName}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: jaegerLabels},
+				Spec: corev1.PodSpec{
+					Affinity: nonFirecrackerNodeAffinity(),
+					Containers: []corev1.Container{
+						{
+							Name:            "jaeger",
+							Image:           jaegerImage,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Ports: []corev1.ContainerPort{
+								{Name: "otlp-grpc", ContainerPort: otelJaegerOTLPGRPCPort, Protocol: corev1.ProtocolTCP},
+								{Name: "query-http", ContainerPort: otelJaegerQueryHTTPPort, Protocol: corev1.ProtocolTCP},
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2"),
+									corev1.ResourceMemory: resource.MustParse("4Gi"),
+								},
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(otelJaegerOTLPGRPCPort)},
+								},
+								InitialDelaySeconds: 2,
+								PeriodSeconds:       5,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := upsertDeployment(ctx, rc.kube, jaegerDep); err != nil {
+		return err
+	}
+
+	jaegerSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      otelJaegerName,
+			Namespace: otelObsNamespace,
+			Labels:    jaegerLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: map[string]string{"app.kubernetes.io/name": otelJaegerName},
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "otlp-grpc",
+					Port:       otelJaegerOTLPGRPCPort,
+					TargetPort: intstr.FromInt32(otelJaegerOTLPGRPCPort),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "query-http",
+					Port:       otelJaegerQueryHTTPPort,
+					TargetPort: intstr.FromInt32(otelJaegerQueryHTTPPort),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+	if err := upsertService(ctx, rc.kube, jaegerSvc); err != nil {
+		return err
+	}
+
+	collectorLabels := map[string]string{
+		"app.kubernetes.io/name": otelCollectorName,
+		managedByLabelKey:        managedByLabelValue,
+	}
+	collectorConfigYAML := fmt.Sprintf(`receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:%d
+      http:
+        endpoint: 0.0.0.0:%d
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1536
+    spike_limit_mib: 384
+  batch: {}
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:%d
+  otlp/jaeger:
+    endpoint: %s:%d
+    tls:
+      insecure: true
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger]
+`, otelCollectorOTLPGRPCPort, otelCollectorOTLPHTTPPort, otelCollectorPrometheusPort, otelJaegerName, otelJaegerOTLPGRPCPort)
+
+	collectorCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      otelCollectorConfigMapName,
+			Namespace: otelObsNamespace,
+			Labels:    collectorLabels,
+		},
+		Data: map[string]string{
+			"config.yaml": collectorConfigYAML,
+		},
+	}
+	if err := upsertConfigMap(ctx, rc.kube, collectorCM); err != nil {
+		return err
+	}
+
+	collectorImage := applyImageMirror(prof, otelCollectorImage)
+	collectorDep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      otelCollectorName,
+			Namespace: otelObsNamespace,
+			Labels:    collectorLabels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(1),
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app.kubernetes.io/name": otelCollectorName}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: collectorLabels,
+					Annotations: map[string]string{
+						"prometheus.io/scrape": "true",
+						"prometheus.io/port":   fmt.Sprintf("%d", otelCollectorPrometheusPort),
+					},
+				},
+				Spec: corev1.PodSpec{
+					Affinity: nonFirecrackerNodeAffinity(),
+					Containers: []corev1.Container{
+						{
+							Name:            "otel-collector",
+							Image:           collectorImage,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Args:            []string{"--config=/etc/otelcol-contrib/config.yaml"},
+							Ports: []corev1.ContainerPort{
+								{Name: "otlp-grpc", ContainerPort: otelCollectorOTLPGRPCPort, Protocol: corev1.ProtocolTCP},
+								{Name: "otlp-http", ContainerPort: otelCollectorOTLPHTTPPort, Protocol: corev1.ProtocolTCP},
+								{Name: "metrics", ContainerPort: otelCollectorPrometheusPort, Protocol: corev1.ProtocolTCP},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "otel-config", MountPath: "/etc/otelcol-contrib", ReadOnly: true},
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("512Mi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("2"),
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(otelCollectorOTLPGRPCPort)},
+								},
+								InitialDelaySeconds: 2,
+								PeriodSeconds:       5,
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "otel-config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: otelCollectorConfigMapName},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := upsertDeployment(ctx, rc.kube, collectorDep); err != nil {
+		return err
+	}
+
+	collectorSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      otelCollectorName,
+			Namespace: otelObsNamespace,
+			Labels:    collectorLabels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type:     corev1.ServiceTypeClusterIP,
+			Selector: map[string]string{"app.kubernetes.io/name": otelCollectorName},
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "otlp-grpc",
+					Port:       otelCollectorOTLPGRPCPort,
+					TargetPort: intstr.FromInt32(otelCollectorOTLPGRPCPort),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "otlp-http",
+					Port:       otelCollectorOTLPHTTPPort,
+					TargetPort: intstr.FromInt32(otelCollectorOTLPHTTPPort),
+					Protocol:   corev1.ProtocolTCP,
+				},
+				{
+					Name:       "metrics",
+					Port:       otelCollectorPrometheusPort,
+					TargetPort: intstr.FromInt32(otelCollectorPrometheusPort),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+	if err := upsertService(ctx, rc.kube, collectorSvc); err != nil {
+		return err
+	}
+
+	if err := p.waitForDeploymentReady(ctx, rc.kube, otelObsNamespace, otelJaegerName); err != nil {
+		return err
+	}
+	return p.waitForDeploymentReady(ctx, rc.kube, otelObsNamespace, otelCollectorName)
+}
+
 func (p *OverlayBDProvisioner) waitForDeploymentReady(ctx context.Context, client kubernetes.Interface, namespace, name string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, p.readyTimeout())
 	defer cancel()

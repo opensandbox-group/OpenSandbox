@@ -552,3 +552,37 @@ func TestCollectorNodeResolver_FastletPodLookup(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "worker-direct-1", directNode)
 }
+
+func TestCollectorSoakSamplerIncludesPodCgroupOOMAndPeakActive(t *testing.T) {
+	ls := collector.NewLoadSampler(collector.DefaultConfig(), nil, time.Second)
+	ls.RecordSample(collector.LoadSample{
+		ActiveSandboxes: 4,
+		Hosts:           []collector.HostSample{{NodeName: "n1", OOMKillTotal: 2, MemAvailableMiB: 4000}},
+		Components: map[string]collector.ComponentSample{
+			collector.ComponentFSBFastlet: {
+				ExtraMetrics: map[string]float64{"admission_slots_deleting": 2},
+				PodCgroup:    &collector.PodCgroupSample{MemoryEvents: collector.CgroupMemoryEvents{OOMKill: 1}},
+			},
+		},
+	})
+	ls.RecordSample(collector.LoadSample{
+		ActiveSandboxes: 6,
+		Hosts:           []collector.HostSample{{NodeName: "n1", OOMKillTotal: 3, MemAvailableMiB: 3500}},
+		Components: map[string]collector.ComponentSample{
+			collector.ComponentFSBFastlet: {
+				ExtraMetrics: map[string]float64{"admission_slots_deleting": 1},
+				PodCgroup:    &collector.PodCgroupSample{MemoryEvents: collector.CgroupMemoryEvents{OOMKill: 3}},
+			},
+		},
+	})
+
+	soakSampler := newCollectorSoakSampler(ls, nil)
+	sm, err := soakSampler.Sample(context.Background())
+	require.NoError(t, err)
+	// Host OOM delta = 1 (3-2) + PodCgroup OOM delta = 2 (3-1) => 3 total.
+	require.Equal(t, 3, sm.OOMKills)
+	require.Equal(t, 1, sm.DeletingSlots)
+
+	peak := resolvePeakActiveSandboxes(&report.SuiteResult{SucceededOps: 100}, nil, ls, nil)
+	require.Equal(t, 6, peak)
+}

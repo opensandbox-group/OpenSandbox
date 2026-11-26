@@ -294,7 +294,7 @@ func (s *HighDensitySoakSuite) Run(ctx context.Context, rc RunContext) (*report.
 			recStart := time.Now()
 			s.deleteAllBestEffort(client, active)
 			active = nil
-			s.waitDrainAndRecovery(ctx, client)
+			s.waitDrainAndRecovery(ctx, client, sampler)
 			recSec := time.Since(recStart).Seconds()
 			row.RecoveryTimeSeconds = recSec
 			recoveryByTier[fmt.Sprintf("%.2fx", tier)] = recSec
@@ -578,9 +578,17 @@ func (s *HighDensitySoakSuite) runTierWorkload(
 		}
 
 		// (4) Background churn: create -> ping -> delete a short-lived sandbox.
+		// Skip starting a new churn sandbox if the tier window has already elapsed, and
+		// use the parent ctx for CreateSandbox so a tier-deadline expiry mid-POST cannot
+		// orphan a newly created sandbox without returning its ID for deletion.
+		if tierCtx.Err() != nil {
+			return
+		}
 		churnStart := time.Now()
 		churnReq := scaleBuildBaseCreateRequest(prof, scaleDefaultTimeoutSec, nil)
-		churnInfo, err := client.lifecycle.CreateSandbox(tierCtx, churnReq)
+		churnCreateCtx, churnCreateCancel := context.WithTimeout(ctx, scaleDefaultReadyTimeout)
+		churnInfo, err := client.lifecycle.CreateSandbox(churnCreateCtx, churnReq)
+		churnCreateCancel()
 		if err == nil {
 			_, _, readyErr := client.waitSandboxRunningAndPing(tierCtx, churnInfo.ID, s.pollInterval)
 			client.deleteSandboxBestEffort(churnInfo.ID)
@@ -637,14 +645,14 @@ func (s *HighDensitySoakSuite) deleteAllBestEffort(client *scaleClient, sandboxe
 	wg.Wait()
 }
 
-func (s *HighDensitySoakSuite) waitDrainAndRecovery(ctx context.Context, client *scaleClient) {
+func (s *HighDensitySoakSuite) waitDrainAndRecovery(ctx context.Context, client *scaleClient, sampler SoakLoadSampler) {
 	drainCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	for {
 		slotsDrained := true
-		if s.sampler != nil {
-			if sm, err := s.sampler.Sample(drainCtx); err == nil && sm != nil && sm.DeletingSlots > 0 {
+		if sampler != nil {
+			if sm, err := sampler.Sample(drainCtx); err == nil && sm != nil && sm.DeletingSlots > 0 {
 				slotsDrained = false
 			}
 		}

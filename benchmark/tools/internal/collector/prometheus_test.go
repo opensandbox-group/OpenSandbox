@@ -95,11 +95,29 @@ fast_sandbox_image_affinity_result_total{result="miss"} 2
 fast_sandbox_topk_retry_total{result="conflict"} 5
 fast_sandbox_fastlet_admission_total{operation="create",result="allowed",reason="ok"} 100
 fast_sandbox_fastlet_admission_total{operation="create",result="denied",reason="memory"} 1
-fast_sandbox_sandbox_proxy_route_latency_seconds_bucket{le="0.01"} 10
-fast_sandbox_sandbox_proxy_route_latency_seconds_bucket{le="0.05"} 20
-fast_sandbox_sandbox_proxy_route_latency_seconds_bucket{le="+Inf"} 20
-fast_sandbox_sandbox_proxy_route_latency_seconds_sum 0.2
-fast_sandbox_sandbox_proxy_route_latency_seconds_count 20
+fast_sandbox_registry_heartbeat_age_seconds_bucket{le="0.5"} 5
+fast_sandbox_registry_heartbeat_age_seconds_bucket{le="2.0"} 10
+fast_sandbox_registry_heartbeat_age_seconds_bucket{le="+Inf"} 10
+fast_sandbox_registry_heartbeat_age_seconds_sum 6.0
+fast_sandbox_registry_heartbeat_age_seconds_count 10
+fast_sandbox_registry_candidate_count_bucket{le="2"} 4
+fast_sandbox_registry_candidate_count_bucket{le="8"} 10
+fast_sandbox_registry_candidate_count_bucket{le="+Inf"} 10
+fast_sandbox_registry_candidate_count_sum 40
+fast_sandbox_registry_candidate_count_count 10
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_bucket{le="0.01"} 10
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_bucket{le="0.05"} 20
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_bucket{le="+Inf"} 20
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_sum 0.2
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_count 20
+fast_sandbox_create_stage_latency_seconds_bucket{stage="candidate_selection",le="0.01"} 5
+fast_sandbox_create_stage_latency_seconds_bucket{stage="candidate_selection",le="+Inf"} 5
+fast_sandbox_create_stage_latency_seconds_sum{stage="candidate_selection"} 0.02
+fast_sandbox_create_stage_latency_seconds_count{stage="candidate_selection"} 5
+fast_sandbox_create_stage_latency_seconds_bucket{stage="fastlet_create",le="0.1"} 5
+fast_sandbox_create_stage_latency_seconds_bucket{stage="fastlet_create",le="+Inf"} 5
+fast_sandbox_create_stage_latency_seconds_sum{stage="fastlet_create"} 0.4
+fast_sandbox_create_stage_latency_seconds_count{stage="fastlet_create"} 5
 `
 	afterText := `
 fast_sandbox_image_affinity_result_total{result="hit"} 35
@@ -107,16 +125,32 @@ fast_sandbox_image_affinity_result_total{result="miss"} 7
 fast_sandbox_topk_retry_total{result="conflict"} 2
 fast_sandbox_fastlet_admission_total{operation="create",result="allowed",reason="ok"} 140
 fast_sandbox_fastlet_admission_total{operation="create",result="denied",reason="memory"} 4
-fast_sandbox_registry_heartbeat_age_seconds 1.25
-fast_sandbox_registry_candidate_count 4
+fast_sandbox_registry_heartbeat_age_seconds_bucket{le="0.5"} 10
+fast_sandbox_registry_heartbeat_age_seconds_bucket{le="2.0"} 20
+fast_sandbox_registry_heartbeat_age_seconds_bucket{le="+Inf"} 20
+fast_sandbox_registry_heartbeat_age_seconds_sum 18.5
+fast_sandbox_registry_heartbeat_age_seconds_count 20
+fast_sandbox_registry_candidate_count_bucket{le="2"} 6
+fast_sandbox_registry_candidate_count_bucket{le="8"} 20
+fast_sandbox_registry_candidate_count_bucket{le="+Inf"} 20
+fast_sandbox_registry_candidate_count_sum 80
+fast_sandbox_registry_candidate_count_count 20
 fast_sandbox_fastlet_admission_slots{state="running"} 12
 fast_sandbox_fastlet_admission_slots{state="deleting"} 0
 fast_sandbox_fastlet_resource_admission_state{state="normal",reason="none"} 1
-fast_sandbox_sandbox_proxy_route_latency_seconds_bucket{le="0.01"} 15
-fast_sandbox_sandbox_proxy_route_latency_seconds_bucket{le="0.05"} 30
-fast_sandbox_sandbox_proxy_route_latency_seconds_bucket{le="+Inf"} 30
-fast_sandbox_sandbox_proxy_route_latency_seconds_sum 0.5
-fast_sandbox_sandbox_proxy_route_latency_seconds_count 30
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_bucket{le="0.01"} 15
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_bucket{le="0.05"} 30
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_bucket{le="+Inf"} 30
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_sum 0.5
+fast_sandbox_fastlet_proxy_upstream_latency_seconds_count 30
+fast_sandbox_create_stage_latency_seconds_bucket{stage="candidate_selection",le="0.01"} 15
+fast_sandbox_create_stage_latency_seconds_bucket{stage="candidate_selection",le="+Inf"} 15
+fast_sandbox_create_stage_latency_seconds_sum{stage="candidate_selection"} 0.07
+fast_sandbox_create_stage_latency_seconds_count{stage="candidate_selection"} 15
+fast_sandbox_create_stage_latency_seconds_bucket{stage="fastlet_create",le="0.1"} 15
+fast_sandbox_create_stage_latency_seconds_bucket{stage="fastlet_create",le="+Inf"} 15
+fast_sandbox_create_stage_latency_seconds_sum{stage="fastlet_create"} 1.2
+fast_sandbox_create_stage_latency_seconds_count{stage="fastlet_create"} 15
 `
 	beforeMS, err := ParsePrometheusText(strings.NewReader(beforeText))
 	if err != nil {
@@ -142,24 +176,37 @@ fast_sandbox_sandbox_proxy_route_latency_seconds_count 30
 	if got := deltas[`fast_sandbox_fastlet_admission_total{operation="create",result="denied",reason="memory"}`]; got != 3 {
 		t.Fatalf("expected admission denied delta=3, got %v", got)
 	}
-	if got := deltas["fast_sandbox_registry_heartbeat_age_seconds_max"]; got != 1.25 {
-		t.Fatalf("expected heartbeat age=1.25, got %v", got)
+	if got := deltas["fast_sandbox_registry_heartbeat_age_seconds_count"]; got != 10 {
+		t.Fatalf("expected heartbeat age histogram count=10, got %v", got)
+	}
+	if got := deltas["fast_sandbox_registry_heartbeat_age_seconds_avg"]; math.Abs(got-1.25) > 1e-9 {
+		t.Fatalf("expected heartbeat age avg=1.25, got %v", got)
+	}
+	if got := deltas["fast_sandbox_registry_candidate_count_avg"]; math.Abs(got-4.0) > 1e-9 {
+		t.Fatalf("expected candidate count avg=4.0, got %v", got)
 	}
 	if got := deltas[`fast_sandbox_fastlet_admission_slots{state="running"}`]; got != 12 {
 		t.Fatalf("expected running slots=12, got %v", got)
 	}
-	if got := deltas["fast_sandbox_sandbox_proxy_route_latency_seconds_count"]; got != 10 {
+	if got := deltas["fast_sandbox_fastlet_proxy_upstream_latency_seconds_count"]; got != 10 {
 		t.Fatalf("expected histogram count delta=10, got %v", got)
 	}
-	if got := deltas["fast_sandbox_sandbox_proxy_route_latency_seconds_avg"]; math.Abs(got-0.03) > 1e-9 {
+	if got := deltas["fast_sandbox_fastlet_proxy_upstream_latency_seconds_avg"]; math.Abs(got-0.03) > 1e-9 {
 		t.Fatalf("expected histogram avg=0.03, got %v", got)
 	}
 	// 5 of 10 delta samples in <=0.01, 5 in (0.01, 0.05] -> P50 = 0.01, P95 = 0.01 + (4.5/5)*0.04 = 0.046
-	if got := deltas["fast_sandbox_sandbox_proxy_route_latency_seconds_p50"]; math.Abs(got-0.01) > 1e-9 {
+	if got := deltas["fast_sandbox_fastlet_proxy_upstream_latency_seconds_p50"]; math.Abs(got-0.01) > 1e-9 {
 		t.Fatalf("expected histogram p50=0.01, got %v", got)
 	}
-	if got := deltas["fast_sandbox_sandbox_proxy_route_latency_seconds_p95"]; math.Abs(got-0.046) > 1e-9 {
+	if got := deltas["fast_sandbox_fastlet_proxy_upstream_latency_seconds_p95"]; math.Abs(got-0.046) > 1e-9 {
 		t.Fatalf("expected histogram p95=0.046, got %v", got)
+	}
+	// Stage labels on fast_sandbox_create_stage_latency_seconds must be preserved separately.
+	if got := deltas[`fast_sandbox_create_stage_latency_seconds_avg{stage="candidate_selection"}`]; math.Abs(got-0.005) > 1e-9 {
+		t.Fatalf("expected candidate_selection avg=0.005, got %v", got)
+	}
+	if got := deltas[`fast_sandbox_create_stage_latency_seconds_avg{stage="fastlet_create"}`]; math.Abs(got-0.08) > 1e-9 {
+		t.Fatalf("expected fastlet_create avg=0.08, got %v", got)
 	}
 }
 
@@ -198,12 +245,56 @@ func TestPrometheusScraperDiscoverAndGracefulDegradation(t *testing.T) {
 			},
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Name: "fastlet", Ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: 9090}}},
+					{Name: "fastlet"},
 					{Name: "fastlet-proxy"},
 					{Name: "egress"},
 				},
 			},
 			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.20"},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "firecracker-runtime-n1",
+				Namespace: "opensandbox-system",
+				Labels:    map[string]string{"app": "fast-sandbox", "component": "firecracker-runtime"},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "firecracker-agent"},
+					{Name: "overlaybd-ublkd"},
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.30"},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "opensandbox-bench-otel-collector-0",
+				Namespace: "opensandbox-bench-obs",
+				Labels:    map[string]string{"app": "opensandbox-bench-otel-collector"},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "otel-collector"}},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.40"},
+		},
+		// OTLP-only pods must NOT be scraped on phantom /metrics endpoints.
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "opensandbox-server-0",
+				Namespace: "opensandbox-system",
+				Labels:    map[string]string{"app.kubernetes.io/component": "server"},
+			},
+			Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "server"}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.50"},
+		},
+		&corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ingress-gateway-0",
+				Namespace: "opensandbox-system",
+				Labels:    map[string]string{"app": "ingress-gateway"},
+			},
+			Spec:   corev1.PodSpec{Containers: []corev1.Container{{Name: "ingress"}}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.60"},
 		},
 	)
 
@@ -212,15 +303,33 @@ func TestPrometheusScraperDiscoverAndGracefulDegradation(t *testing.T) {
 	if len(warns) != 0 {
 		t.Fatalf("unexpected discovery warnings: %v", warns)
 	}
-	// Expect controller (1) + fastlet (1) + fastlet-proxy (1) + egress (1) = 4 targets.
-	if len(targets) != 4 {
-		t.Fatalf("expected 4 discovered targets, got %d: %+v", len(targets), targets)
+	// Expect controller (1) + fastlet:5758 (1) + fastlet-proxy:9093 (1) + firecracker-runtime:9092 (1) + overlaybd-ublkd:9863 (1) + otel-collector:8889 (1) = 6 targets.
+	if len(targets) != 6 {
+		t.Fatalf("expected 6 discovered targets, got %d: %+v", len(targets), targets)
+	}
+	byComp := make(map[string]ScrapeTarget, len(targets))
+	for _, tgt := range targets {
+		byComp[tgt.Component] = tgt
+	}
+	if got := byComp[ComponentFSBFastlet].URL; got != "http://10.0.0.20:5758/metrics" {
+		t.Fatalf("expected fastlet on port 5758, got %q", got)
+	}
+	if got := byComp[ComponentOverlayBDUblkd].URL; got != "http://10.0.0.30:9863/metrics" {
+		t.Fatalf("expected overlaybd-ublkd on port 9863, got %q", got)
+	}
+	if got := byComp[ComponentOTelCollector].URL; got != "http://10.0.0.40:8889/metrics" {
+		t.Fatalf("expected otel-collector on port 8889, got %q", got)
+	}
+	for _, forbidden := range []string{ComponentEgress, ComponentOpenSandboxServer, ComponentIngressGateway} {
+		if _, ok := byComp[forbidden]; ok {
+			t.Fatalf("unexpected phantom /metrics target for OTLP-only component %q", forbidden)
+		}
 	}
 
 	// Scrape one live target and one unreachable target to verify graceful degradation.
 	snap := scraper.ScrapeTargets(context.Background(), []ScrapeTarget{
 		{Component: ComponentFSBController, Namespace: "opensandbox-system", PodName: "ctrl-0", URL: "http://10.0.0.10:9091/metrics"},
-		{Component: ComponentFSBFastlet, Namespace: "opensandbox-dataplane", PodName: "fastlet-0", URL: "http://10.0.0.20:9090/metrics"},
+		{Component: ComponentFSBFastlet, Namespace: "opensandbox-dataplane", PodName: "fastlet-0", URL: "http://10.0.0.20:5758/metrics"},
 	})
 	if len(snap.Warnings) != 1 {
 		t.Fatalf("expected 1 warning for failed target, got %v", snap.Warnings)

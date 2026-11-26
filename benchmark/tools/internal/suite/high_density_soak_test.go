@@ -302,3 +302,58 @@ func TestBuildEgressProbeCommand(t *testing.T) {
 	require.Less(t, idxWget, idxPy)
 	require.Less(t, idxPy, idxBash)
 }
+
+func TestHighDensitySoakSuite_WaitDrainChecksHookSampler(t *testing.T) {
+	mock, ts := newMockSoakServer(0)
+	defer ts.Close()
+
+	var drainPolls atomic.Int32
+	hookSampler := SoakLoadSamplerFunc(func(_ context.Context) (*SoakLoadSample, error) {
+		n := drainPolls.Add(1)
+		deleting := 0
+		if n <= 3 {
+			deleting = 1
+		}
+		return &SoakLoadSample{
+			MemAvailableMiB: 2048,
+			DeletingSlots:   deleting,
+		}, nil
+	})
+
+	prof := &profile.BenchmarkProfile{
+		Runtime: profile.RuntimeFastSandboxOverlayBD,
+		Stack: profile.StackSpec{
+			Template: profile.TemplateSpec{MemoryMiB: 1024},
+		},
+		Suites: profile.SuitesSpec{
+			HighDensitySoak: &profile.HighDensitySoakSuiteSpec{
+				OversellTiers:          []float64{0.25},
+				DurationSecondsPerTier: 1,
+				MeasureRecovery:        true,
+				SamplerIntervalSeconds: 5,
+			},
+		},
+	}
+
+	// Note: s.sampler is nil; sampler is injected solely via BenchHooks in context.
+	s := NewHighDensitySoakSuite(
+		WithSoakNodeMemoryMiB(4096),
+		WithSoakEgressProbeURL("none"),
+		WithSoakPollInterval(5*time.Millisecond),
+		WithSoakTickInterval(200*time.Millisecond),
+	)
+	ctx := WithBenchHooks(context.Background(), BenchHooks{SoakLoadSampler: hookSampler})
+	res, _, err := s.Run(ctx, RunContext{
+		RunID:   "test-soak-hook-drain",
+		Profile: prof,
+		SDKConfig: opensandbox.ConnectionConfig{
+			Domain:     ts.URL,
+			HTTPClient: ts.Client(),
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "passed", res.Status)
+	// Hook sampler must have been polled at least 4 times (1 during tier + 3+ during drain until DeletingSlots == 0).
+	require.GreaterOrEqual(t, drainPolls.Load(), int32(4))
+	require.Empty(t, mock.sandboxes)
+}

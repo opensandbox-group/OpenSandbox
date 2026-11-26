@@ -275,3 +275,41 @@ func TestWakeStormSuite_TracksShedRate(t *testing.T) {
 	require.Greater(t, res.Errors["wake_shed_503"], 0)
 	require.Empty(t, mock.sandboxes)
 }
+
+func TestWakeStormSuite_ZeroDeltaCounterFallsBackToFlightHeader(t *testing.T) {
+	mock, ts := newMockWakeServer(0, false)
+	defer ts.Close()
+
+	prof := &profile.BenchmarkProfile{
+		Runtime: profile.RuntimeFastSandboxOverlayBD,
+		Suites: profile.SuitesSpec{
+			WakeStorm: &profile.WakeStormSuiteSpec{
+				FleetSize:            2,
+				IdleThresholdSeconds: 30,
+				FanoutConcurrency:    1,
+				SingleflightBurst:    4,
+			},
+		},
+	}
+
+	// Simulate a missing/unchanging counter returning constant 0: must fall back to flight_header, not fake delta=1.
+	s := NewWakeStormSuite(
+		WithWakePollInterval(2*time.Millisecond),
+		WithWakeResumeCounter(func(_ context.Context) (int64, error) {
+			return 0, nil
+		}),
+	)
+	res, _, err := s.Run(context.Background(), RunContext{
+		RunID:   "test-wake-fallback",
+		Profile: prof,
+		SDKConfig: opensandbox.ConnectionConfig{
+			Domain:     ts.URL,
+			HTTPClient: ts.Client(),
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "passed", res.Status)
+	require.Equal(t, "flight_header", res.Extra["singleflight_source"])
+	require.InDelta(t, 4.0, res.Extra["singleflight_coalesce_ratio"].(float64), 0.01)
+	require.Empty(t, mock.sandboxes)
+}

@@ -106,16 +106,19 @@ type LatencyDist struct {
 }
 
 type OverlayBDMetrics struct {
-	UblkdPoolHitsDelta      int64   `json:"ublkd_pool_hits_delta"`
-	UblkdPoolMissesDelta    int64   `json:"ublkd_pool_misses_delta"`
-	UblkdPoolHitRate        float64 `json:"ublkd_pool_hit_rate"`
-	UblkdPoolIdleMin        int     `json:"ublkd_pool_idle_min"`
-	UblkdPoolIdleEnd        int     `json:"ublkd_pool_idle_end"`
-	UblkdDaemonRestarts     int     `json:"ublkd_daemon_restarts"`
-	SquashTriggeredCount    int     `json:"squash_triggered_count,omitempty"`
-	UpperCopyMode           string  `json:"upper_copy_mode,omitempty"`
-	StateRootDuBytesPerSbx  int64   `json:"stateroot_du_bytes_per_sandbox,omitempty"`
-	StateRootFreeHeadroomGi float64 `json:"stateroot_free_headroom_gib,omitempty"`
+	UblkdPoolHitsDelta       int64   `json:"ublkd_pool_hits_delta"`
+	UblkdPoolMissesDelta     int64   `json:"ublkd_pool_misses_delta"`
+	UblkdPoolHitRate         float64 `json:"ublkd_pool_hit_rate"`
+	UblkdPoolIdleMin         int     `json:"ublkd_pool_idle_min"`
+	UblkdPoolIdleEnd         int     `json:"ublkd_pool_idle_end"`
+	UblkdDaemonRestarts      int     `json:"ublkd_daemon_restarts"`
+	SquashTriggeredCount     int     `json:"squash_triggered_count,omitempty"`
+	UpperCopyMode            string  `json:"upper_copy_mode,omitempty"`
+	StateRootDuBytesPerSbx   int64   `json:"stateroot_du_bytes_per_sandbox,omitempty"`
+	StateRootFreeHeadroomGi  float64 `json:"stateroot_free_headroom_gib,omitempty"`
+	OverlayBDBlockCacheBytes int64   `json:"overlaybd_block_cache_bytes,omitempty"`
+	FSBBlobCacheBytes        int64   `json:"fsb_blob_cache_bytes,omitempty"`
+	FSBBlobCacheFileCount    int     `json:"fsb_blob_cache_file_count,omitempty"`
 }
 
 type StageAttribution struct {

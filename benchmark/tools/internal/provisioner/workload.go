@@ -75,7 +75,7 @@ func (p *OverlayBDProvisioner) Up(ctx context.Context, prof *profile.BenchmarkPr
 		}
 	}
 
-	// 3. Supporting infrastructure in benchNamespace (tracing stack intentionally skipped).
+	// 3. Supporting infrastructure in benchNamespace and optional in-cluster OTel stack.
 	if prof.Environment.Registry.EphemeralInCluster {
 		if err := p.deployEphemeralRegistry(ctx, rc, prof, systemNS, resourceNS, benchNS); err != nil {
 			return err
@@ -90,6 +90,11 @@ func (p *OverlayBDProvisioner) Up(ctx context.Context, prof *profile.BenchmarkPr
 	}
 	if prof.Environment.Redis.Enabled {
 		if err := p.deployRedis(ctx, rc, prof, benchNS); err != nil {
+			return err
+		}
+	}
+	if prof.Environment.Tracing.InCluster {
+		if err := p.deployOTelStack(ctx, rc, prof); err != nil {
 			return err
 		}
 	}
@@ -401,16 +406,20 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 			egressImage = defaultEgressImage
 		}
 		egressImage = applyImageMirror(prof, egressImage)
+		egressEnv := []any{
+			map[string]any{"name": "OPENSANDBOX_EGRESS_PROFILE", "value": "fast-sandbox"},
+			map[string]any{"name": "OPENSANDBOX_EGRESS_MODE", "value": "dns+nft"},
+			map[string]any{"name": "OPENSANDBOX_EGRESS_VAULT_DIR", "value": "/var/lib/opensandbox-egress/vault"},
+			map[string]any{"name": "OPENSANDBOX_EGRESS_POLICY_DIR", "value": "/var/lib/opensandbox-egress/policy"},
+		}
+		if prof.Environment.Tracing.InCluster {
+			egressEnv = append(egressEnv, otelMetricsEnvMaps()...)
+		}
 		containers = append(containers, map[string]any{
 			"name":            "egress",
 			"image":           egressImage,
 			"imagePullPolicy": "IfNotPresent",
-			"env": []any{
-				map[string]any{"name": "OPENSANDBOX_EGRESS_PROFILE", "value": "fast-sandbox"},
-				map[string]any{"name": "OPENSANDBOX_EGRESS_MODE", "value": "dns+nft"},
-				map[string]any{"name": "OPENSANDBOX_EGRESS_VAULT_DIR", "value": "/var/lib/opensandbox-egress/vault"},
-				map[string]any{"name": "OPENSANDBOX_EGRESS_POLICY_DIR", "value": "/var/lib/opensandbox-egress/policy"},
-			},
+			"env":             egressEnv,
 			"volumeMounts": []any{
 				map[string]any{"name": "egress-vault", "mountPath": "/var/lib/opensandbox-egress"},
 				map[string]any{"name": "firecracker-state", "mountPath": defaultStateRoot},
@@ -625,6 +634,14 @@ func (p *OverlayBDProvisioner) deleteBenchResources(ctx context.Context, rc *res
 
 	ignoreNotFound(rc.kube.AppsV1().Deployments(benchNS).Delete(ctx, ephemeralRedisName, metav1.DeleteOptions{}), "deployment/"+ephemeralRedisName)
 	ignoreNotFound(rc.kube.CoreV1().Services(benchNS).Delete(ctx, ephemeralRedisName, metav1.DeleteOptions{}), "service/"+ephemeralRedisName)
+
+	// Ephemeral OTel Collector + Jaeger stack in opensandbox-bench-obs.
+	ignoreNotFound(rc.kube.AppsV1().Deployments(otelObsNamespace).Delete(ctx, otelCollectorName, metav1.DeleteOptions{}), otelObsNamespace+"/deployment/"+otelCollectorName)
+	ignoreNotFound(rc.kube.CoreV1().Services(otelObsNamespace).Delete(ctx, otelCollectorName, metav1.DeleteOptions{}), otelObsNamespace+"/service/"+otelCollectorName)
+	ignoreNotFound(rc.kube.CoreV1().ConfigMaps(otelObsNamespace).Delete(ctx, otelCollectorConfigMapName, metav1.DeleteOptions{}), otelObsNamespace+"/configmap/"+otelCollectorConfigMapName)
+	ignoreNotFound(rc.kube.AppsV1().Deployments(otelObsNamespace).Delete(ctx, otelJaegerName, metav1.DeleteOptions{}), otelObsNamespace+"/deployment/"+otelJaegerName)
+	ignoreNotFound(rc.kube.CoreV1().Services(otelObsNamespace).Delete(ctx, otelJaegerName, metav1.DeleteOptions{}), otelObsNamespace+"/service/"+otelJaegerName)
+	ignoreNotFound(rc.kube.CoreV1().Namespaces().Delete(ctx, otelObsNamespace, metav1.DeleteOptions{}), "namespace/"+otelObsNamespace)
 
 	// Distributed CA and registry secrets.
 	for _, ns := range uniqueStrings(benchNS, systemNS, resourceNS) {

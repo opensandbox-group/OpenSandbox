@@ -51,6 +51,29 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func assertEnvVar(t *testing.T, envs []any, name, wantVal string) {
+	t.Helper()
+	for _, raw := range envs {
+		m, ok := raw.(map[string]any)
+		if ok && m["name"] == name {
+			assert.Equal(t, wantVal, m["value"], "env var %s", name)
+			return
+		}
+	}
+	assert.Failf(t, "missing env var", "expected env var %q=%q in %v", name, wantVal, envs)
+}
+
+func assertNoEnvVar(t *testing.T, envs []any, name string) {
+	t.Helper()
+	for _, raw := range envs {
+		m, ok := raw.(map[string]any)
+		if ok && m["name"] == name {
+			assert.Failf(t, "unexpected env var", "did not expect env var %q (value=%v)", name, m["value"])
+			return
+		}
+	}
+}
+
 func testProfile(t *testing.T) *profile.BenchmarkProfile {
 	t.Helper()
 	prof, err := profile.LoadEmbedded(profile.DefaultProfileName)
@@ -277,6 +300,12 @@ func TestBuildHelmValues(t *testing.T) {
 	gwPool := gw["httpConnectionPool"].(map[string]any)
 	assert.Equal(t, 2048, gwPool["maxIdleConns"])
 	assert.Equal(t, 512, gwPool["maxIdleConnsPerHost"])
+	gwEnv, ok := gw["env"].([]any)
+	require.True(t, ok, "ingress-gateway.gateway.env must be populated when tracing.inCluster is true")
+	assertEnvVar(t, gwEnv, "OTEL_EXPORTER_OTLP_ENDPOINT", otelCollectorOTLPEndpoint())
+	assertEnvVar(t, gwEnv, "OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+	assertNoEnvVar(t, gwEnv, "OTEL_TRACES_ENABLED")
+	assertNoEnvVar(t, gwEnv, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
 
 	// Server image, resources, configToml, and secureAccess secret.
 	srv := vals["opensandbox-server"].(map[string]any)
@@ -286,9 +315,12 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, srvRes["requests"])
 	assert.Equal(t, map[string]any{"cpu": "8", "memory": "16Gi"}, srvRes["limits"])
 	srvEnv := srvSpec["env"].([]any)
-	require.Len(t, srvEnv, 1)
-	assert.Equal(t, "OPENSANDBOX_INSECURE_SERVER", srvEnv[0].(map[string]any)["name"])
-	assert.Equal(t, "YES", srvEnv[0].(map[string]any)["value"])
+	require.Len(t, srvEnv, 3)
+	assertEnvVar(t, srvEnv, "OPENSANDBOX_INSECURE_SERVER", "YES")
+	assertEnvVar(t, srvEnv, "OTEL_EXPORTER_OTLP_ENDPOINT", otelCollectorOTLPEndpoint())
+	assertEnvVar(t, srvEnv, "OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+	assertNoEnvVar(t, srvEnv, "OTEL_TRACES_ENABLED")
+	assertNoEnvVar(t, srvEnv, "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
 	srvGW := srvSpec["gateway"].(map[string]any)
 	assert.Equal(t, secureAccessSecretName, srvGW["secureAccess"].(map[string]any)["existingSecret"])
 	toml := srv["configToml"].(string)
@@ -314,6 +346,16 @@ func TestBuildHelmValues(t *testing.T) {
 	mToml := mVals["opensandbox-server"].(map[string]any)["configToml"].(string)
 	assert.Contains(t, mToml, `execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.3"`)
 	assert.Contains(t, mToml, `image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.3"`)
+
+	// Verify tracing.inCluster=false omits OTLP env vars from server and ingress-gateway.
+	noOTelProf := testProfile(t)
+	noOTelProf.Environment.Tracing.InCluster = false
+	noOTelVals := BuildHelmValues(noOTelProf)
+	noOTelSrvEnv := noOTelVals["opensandbox-server"].(map[string]any)["server"].(map[string]any)["env"].([]any)
+	require.Len(t, noOTelSrvEnv, 1)
+	assertEnvVar(t, noOTelSrvEnv, "OPENSANDBOX_INSECURE_SERVER", "YES")
+	_, noOTelGWHasEnv := noOTelVals["ingress-gateway"].(map[string]any)["gateway"].(map[string]any)["env"]
+	assert.False(t, noOTelGWHasEnv)
 
 	// Merged HelmValues override preserves sibling defaults while overriding targeted keys.
 	prof.Stack.HelmValues = map[string]any{
@@ -613,6 +655,51 @@ func TestUpFullFlow(t *testing.T) {
 	assert.Equal(t, resource.MustParse("2"), redisRes.Limits[corev1.ResourceCPU])
 	assert.Equal(t, resource.MustParse("2Gi"), redisRes.Limits[corev1.ResourceMemory])
 
+	// Verify ephemeral OTel Collector + Jaeger stack created in opensandbox-bench-obs.
+	_, err = cs.CoreV1().Namespaces().Get(context.Background(), otelObsNamespace, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	jaegerDep, err := cs.AppsV1().Deployments(otelObsNamespace).Get(context.Background(), otelJaegerName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, jaegerDep.Spec.Template.Spec.Containers, 1)
+	assert.Equal(t, otelJaegerImage, jaegerDep.Spec.Template.Spec.Containers[0].Image)
+	assert.NotNil(t, jaegerDep.Spec.Template.Spec.Affinity)
+	jaegerRes := jaegerDep.Spec.Template.Spec.Containers[0].Resources
+	assert.Equal(t, resource.MustParse("500m"), jaegerRes.Requests[corev1.ResourceCPU])
+	assert.Equal(t, resource.MustParse("512Mi"), jaegerRes.Requests[corev1.ResourceMemory])
+	assert.Equal(t, resource.MustParse("2"), jaegerRes.Limits[corev1.ResourceCPU])
+	assert.Equal(t, resource.MustParse("4Gi"), jaegerRes.Limits[corev1.ResourceMemory])
+
+	jaegerSvc, err := cs.CoreV1().Services(otelObsNamespace).Get(context.Background(), otelJaegerName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, jaegerSvc.Spec.Ports, 2)
+	assert.Equal(t, int32(4317), jaegerSvc.Spec.Ports[0].Port)
+	assert.Equal(t, int32(16686), jaegerSvc.Spec.Ports[1].Port)
+
+	otelCM, err := cs.CoreV1().ConfigMaps(otelObsNamespace).Get(context.Background(), otelCollectorConfigMapName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Contains(t, otelCM.Data["config.yaml"], "0.0.0.0:4317")
+	assert.Contains(t, otelCM.Data["config.yaml"], "0.0.0.0:4318")
+	assert.Contains(t, otelCM.Data["config.yaml"], "0.0.0.0:8889")
+	assert.Contains(t, otelCM.Data["config.yaml"], "opensandbox-bench-jaeger:4317")
+	assert.Contains(t, otelCM.Data["config.yaml"], "exporters: [prometheus]")
+	assert.Contains(t, otelCM.Data["config.yaml"], "exporters: [otlp/jaeger]")
+
+	otelDep, err := cs.AppsV1().Deployments(otelObsNamespace).Get(context.Background(), otelCollectorName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, otelDep.Spec.Template.Spec.Containers, 1)
+	assert.Equal(t, otelCollectorImage, otelDep.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, "true", otelDep.Spec.Template.Annotations["prometheus.io/scrape"])
+	assert.Equal(t, "8889", otelDep.Spec.Template.Annotations["prometheus.io/port"])
+	assert.NotNil(t, otelDep.Spec.Template.Spec.Affinity)
+
+	otelSvc, err := cs.CoreV1().Services(otelObsNamespace).Get(context.Background(), otelCollectorName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Len(t, otelSvc.Spec.Ports, 3)
+	assert.Equal(t, int32(4317), otelSvc.Spec.Ports[0].Port)
+	assert.Equal(t, int32(4318), otelSvc.Spec.Ports[1].Port)
+	assert.Equal(t, int32(8889), otelSvc.Spec.Ports[2].Port)
+
 	// Verify Helm called with kubeconfig and tracing disabled.
 	require.Len(t, cmdRunner.calls, 1)
 	assert.Equal(t, "helm", cmdRunner.calls[0].Name)
@@ -717,6 +804,10 @@ func TestPoolAndTemplateCustomOverrides(t *testing.T) {
 	assert.False(t, hasRes, "ResourceAware fastlet container must not set explicit resources")
 	egressC := containers[1].(map[string]any)
 	assert.Equal(t, "acr.example.com/opensandbox/egress:custom", egressC["image"])
+	egressEnv := egressC["env"].([]any)
+	assertEnvVar(t, egressEnv, "OTEL_EXPORTER_OTLP_ENDPOINT", otelCollectorOTLPEndpoint())
+	assertEnvVar(t, egressEnv, "OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+	assertNoEnvVar(t, egressEnv, "OTEL_TRACES_ENABLED")
 	egressRes := egressC["resources"].(map[string]any)
 	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, egressRes["requests"])
 	assert.Equal(t, map[string]any{"cpu": "4", "memory": "16Gi"}, egressRes["limits"])
@@ -748,6 +839,15 @@ func TestPoolAndTemplateCustomOverrides(t *testing.T) {
 	_, hasOvercommit, _ := unstructured.NestedMap(legacyCR.Object, "spec", "sandboxResources", "overcommitRatio")
 	assert.False(t, hasOvercommit)
 
+	// Verify tracing.inCluster=false omits OTLP env vars from egress sidecar.
+	prof.Environment.Tracing.InCluster = false
+	noOTelPoolCR := buildResourceAwarePoolCR(prof, "opensandbox-dataplane")
+	noOTelContainers, _, _ := unstructured.NestedSlice(noOTelPoolCR.Object, "spec", "fastletTemplate", "spec", "containers")
+	require.Len(t, noOTelContainers, 2)
+	noOTelEgressEnv := noOTelContainers[1].(map[string]any)["env"].([]any)
+	assertNoEnvVar(t, noOTelEgressEnv, "OTEL_EXPORTER_OTLP_ENDPOINT")
+	assertNoEnvVar(t, noOTelEgressEnv, "OTEL_EXPORTER_OTLP_PROTOCOL")
+
 	// Verify ensureAgentRegistrySecretIfMissing creates fallback secret when absent and preserves existing.
 	cs := k8sfake.NewSimpleClientset()
 	prov := NewOverlayBDProvisioner()
@@ -761,6 +861,7 @@ func TestUpRejectsNonOCIManifestRef(t *testing.T) {
 	prof := testProfile(t)
 	prof.Environment.Registry.EphemeralInCluster = false
 	prof.Environment.Redis.Enabled = false
+	prof.Environment.Tracing.InCluster = false
 	prof.Suites.WakeStorm = nil
 	prof.Stack.FastSandbox.Runtime.OCI.PoolLow = 0
 	systemNS := prof.Environment.SystemNamespace
@@ -816,8 +917,14 @@ func TestDownCleanAndLeakDetection(t *testing.T) {
 		cs := k8sfake.NewSimpleClientset(
 			makeReadyNode("node-1", "amd64", true),
 			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: benchNS}},
+			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: otelObsNamespace}},
 			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ephemeralRegistryName, Namespace: benchNS}},
 			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ephemeralRegistryName, Namespace: benchNS}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: otelJaegerName, Namespace: otelObsNamespace}},
+			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: otelJaegerName, Namespace: otelObsNamespace}},
+			&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: otelCollectorName, Namespace: otelObsNamespace}},
+			&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: otelCollectorName, Namespace: otelObsNamespace}},
+			&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: otelCollectorConfigMapName, Namespace: otelObsNamespace}},
 			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: agentRegistrySecretName, Namespace: systemNS}},
 		)
 		cs.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -864,6 +971,18 @@ func TestDownCleanAndLeakDetection(t *testing.T) {
 
 		_, err = cs.AppsV1().Deployments(benchNS).Get(context.Background(), ephemeralRegistryName, metav1.GetOptions{})
 		assert.True(t, apierrors.IsNotFound(err))
+		_, err = cs.AppsV1().Deployments(otelObsNamespace).Get(context.Background(), otelJaegerName, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err))
+		_, err = cs.CoreV1().Services(otelObsNamespace).Get(context.Background(), otelJaegerName, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err))
+		_, err = cs.AppsV1().Deployments(otelObsNamespace).Get(context.Background(), otelCollectorName, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err))
+		_, err = cs.CoreV1().Services(otelObsNamespace).Get(context.Background(), otelCollectorName, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err))
+		_, err = cs.CoreV1().ConfigMaps(otelObsNamespace).Get(context.Background(), otelCollectorConfigMapName, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err))
+		_, err = cs.CoreV1().Namespaces().Get(context.Background(), otelObsNamespace, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(err))
 	})
 
 	t.Run("orphaned ublk and leaked firecracker PIDs fail audit", func(t *testing.T) {
@@ -896,4 +1015,32 @@ func TestDownCleanAndLeakDetection(t *testing.T) {
 		assert.Equal(t, 1, audit.LeakedFirecrackerPIDs)
 		assert.Len(t, audit.Failures, 2)
 	})
+}
+
+func TestDeployOTelStackImageMirror(t *testing.T) {
+	prof := testProfile(t)
+	prof.Environment.ImageRegistryMirror = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com"
+
+	cs := k8sfake.NewSimpleClientset()
+	cs.PrependReactor("create", "deployments", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		dep := action.(k8stesting.CreateAction).GetObject().(*appsv1.Deployment)
+		dep.Status.ReadyReplicas = 1
+		dep.Status.AvailableReplicas = 1
+		return false, nil, nil
+	})
+
+	prov := NewOverlayBDProvisioner()
+	prov.PollInterval = time.Millisecond
+	prov.ReadyTimeout = 5 * time.Second
+	rc := &resolvedClients{kube: cs, logger: testLogger()}
+
+	require.NoError(t, prov.deployOTelStack(context.Background(), rc, prof))
+
+	jaegerDep, err := cs.AppsV1().Deployments(otelObsNamespace).Get(context.Background(), otelJaegerName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/"+otelJaegerImage, jaegerDep.Spec.Template.Spec.Containers[0].Image)
+
+	otelDep, err := cs.AppsV1().Deployments(otelObsNamespace).Get(context.Background(), otelCollectorName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/"+otelCollectorImage, otelDep.Spec.Template.Spec.Containers[0].Image)
 }

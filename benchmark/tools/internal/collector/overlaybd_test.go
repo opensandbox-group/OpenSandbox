@@ -110,4 +110,10 @@ func TestOverlayBDProbeSnapshotAndMetrics(t *testing.T) {
 	if after.Nodes["node-1"].Storage.FSBBlobCacheFileCount != 14 {
 		t.Fatalf("expected 14 blob cache files, got %d", after.Nodes["node-1"].Storage.FSBBlobCacheFileCount)
 	}
+	if metrics.OverlayBDBlockCacheBytes != 536870912 {
+		t.Fatalf("expected OverlayBDBlockCacheBytes=536870912, got %d", metrics.OverlayBDBlockCacheBytes)
+	}
+	if metrics.FSBBlobCacheBytes != 1073741824 || metrics.FSBBlobCacheFileCount != 14 {
+		t.Fatalf("unexpected blob cache metrics: bytes=%d files=%d", metrics.FSBBlobCacheBytes, metrics.FSBBlobCacheFileCount)
+	}
 }

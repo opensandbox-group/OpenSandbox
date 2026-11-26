@@ -117,6 +117,7 @@ for d in \
   "$SR/manifest-cache" \
   "$SR/shared_snapfiles" \
   "$SR/oci/shared_snapfiles" \
+  "$SR/overlaybd/cache" \
   "$SR/overlaybd-cache" \
   "$SR/cache" \
   "$SR/oci/cache" \

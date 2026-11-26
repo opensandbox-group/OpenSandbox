@@ -133,3 +133,41 @@ func TestRenderSummaryIncludesLoadProfiles(t *testing.T) {
 	require.Contains(t, md, "### Density Frontier")
 	require.Contains(t, md, "1.50x")
 }
+
+func TestRenderSummaryIncludesOverlayBDAndKeyLatencies(t *testing.T) {
+	r := New(Provenance{RunID: "run-2", ProfileName: "ref", Runtime: "fast-sandbox-overlaybd"})
+	r.Suites["schedule-burst"] = SuiteResult{
+		Name:          "schedule-burst",
+		Status:        "passed",
+		TotalOps:      10,
+		SucceededOps:  10,
+		ThroughputRPS: 5.0,
+		Latencies: map[string]LatencyDist{
+			"t_api_ack":    {Count: 10, P50Ms: 12.0, P95Ms: 25.0, P99Ms: 30.0},
+			"t_first_ping": {Count: 10, P50Ms: 120.0, P95Ms: 220.0, P99Ms: 310.0},
+			"t_first_exec": {Count: 10, P50Ms: 140.0, P95Ms: 250.0, P99Ms: 350.0},
+		},
+		OverlayBDMetrics: &OverlayBDMetrics{
+			UblkdPoolHitsDelta:       9,
+			UblkdPoolMissesDelta:     1,
+			UblkdPoolHitRate:         0.9,
+			UblkdPoolIdleMin:         6,
+			UblkdPoolIdleEnd:         8,
+			UblkdDaemonRestarts:      0,
+			StateRootDuBytesPerSbx:   64 * 1024 * 1024,
+			StateRootFreeHeadroomGi:  42.5,
+			OverlayBDBlockCacheBytes: 256 * 1024 * 1024,
+			FSBBlobCacheBytes:        512 * 1024 * 1024,
+			FSBBlobCacheFileCount:    12,
+		},
+	}
+	md := RenderSummaryMarkdown(r)
+	require.Contains(t, md, "`t_api_ack`")
+	require.Contains(t, md, "`t_first_exec`")
+	require.Contains(t, md, "12.0 / 25.0 / 30.0")
+	require.Contains(t, md, "140.0 / 250.0 / 350.0")
+	require.Contains(t, md, "### OverlayBD & Storage Metrics")
+	require.Contains(t, md, "90.0% (9/10)")
+	require.Contains(t, md, "256.0")
+	require.Contains(t, md, "512.0 / 12")
+}
