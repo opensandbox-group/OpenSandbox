@@ -79,14 +79,24 @@ async def main(keep: bool) -> None:
                 )
             print("[PASS] HTTPS passthrough allowed: https://example.com -> 200", flush=True)
 
-            # 2. Denied HTTPS domain fails closed without falling back to direct dial.
+            # 2. Denied HTTPS domain fails closed at the TLS/connection layer without reaching the origin.
             out, err, exec_err = await _run_python(
                 sandbox,
-                "import urllib.request; "
-                "urllib.request.urlopen('https://example.org', timeout=10)",
+                "import urllib.error, urllib.request\n"
+                "try:\n"
+                "    r = urllib.request.urlopen('https://example.org', timeout=10)\n"
+                "    print(f'REACHED_ORIGIN:{r.status}')\n"
+                "except urllib.error.HTTPError as e:\n"
+                "    print(f'REACHED_ORIGIN:{e.code}')\n"
+                "except (urllib.error.URLError, OSError) as e:\n"
+                "    reason = e.reason if isinstance(e, urllib.error.URLError) else e\n"
+                "    print(f'BLOCKED:{type(reason).__name__}')\n",
             )
-            if exec_err is None:
-                raise RuntimeError(f"Expected https://example.org to be blocked, got out={out!r}")
+            if exec_err is not None or not out.startswith("BLOCKED:"):
+                raise RuntimeError(
+                    "Expected https://example.org to be blocked at the TLS/connection layer, "
+                    f"got exec_err={exec_err!r} out={out!r} err={err!r}"
+                )
             print("[PASS] HTTPS denied domain blocked: https://example.org", flush=True)
 
             # 3. Anti-spoofing: connecting to an arbitrary IP with an allowed SNI must

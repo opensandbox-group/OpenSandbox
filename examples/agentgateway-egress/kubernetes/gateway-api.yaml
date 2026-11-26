@@ -94,9 +94,7 @@ spec:
       action: Require
       policy:
         matchExpressions:
-          - 'source.connectHeaders["proxy-authorization"] == "Bearer opensandbox-demo-token"'
-          - '"opensandbox-sandbox-id" in source.connectHeaders'
-          - 'source.connectHeaders["opensandbox-sandbox-namespace"] == "opensandbox"'
+          - 'source.connectHeaders["proxy-authorization"] == "Bearer opensandbox-demo-token" && "opensandbox-sandbox-id" in source.connectHeaders && source.connectHeaders["opensandbox-sandbox-namespace"] == "opensandbox"'
     accessLog:
       attributes:
         add:
