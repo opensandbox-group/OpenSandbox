@@ -15,6 +15,7 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -33,17 +34,15 @@ const execdInternalInitPath = "/internal/init"
 
 var errForbiddenExecdInternalPath = errors.New("/internal/init on port 44772 is not accessible through ingress")
 
-func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
+func (p *Proxy) resolveEndpoint(ctx context.Context, target sandbox.EndpointTarget) (*sandbox.EndpointInfo, error) {
 	start := time.Now()
-	host, status, err := p.doGetSandboxHostDefinition(r)
-	durationMs := float64(time.Since(start)) / float64(time.Millisecond)
-
+	endpoint, err := p.sandboxProvider.ResolveEndpoint(ctx, target)
 	result := "success"
 	if err != nil {
 		result = routingResultFromErr(err)
 	}
-	telemetry.RecordRouting(result, durationMs)
-	return host, status, err
+	telemetry.RecordRouting(result, float64(time.Since(start))/float64(time.Millisecond))
+	return endpoint, err
 }
 
 func routingResultFromErr(err error) string {
@@ -56,7 +55,7 @@ func routingResultFromErr(err error) string {
 	return "error"
 }
 
-func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
+func (p *Proxy) getSandboxHostDefinition(r *http.Request) (*sandboxHost, int, error) {
 	pr, status, err := p.parseRequestedRoute(r)
 	if status != 0 {
 		if err == nil {
@@ -81,12 +80,12 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 		SandboxID: pr.sandboxID,
 		Port:      pr.port,
 	}
-	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), target)
+	endpoint, err := p.resolveEndpoint(r.Context(), target)
 	if err != nil {
 		// Resume invalidates cached routes, so resolve again after a successful wake.
 		if p.waker != nil && pr.routeKind == sandbox.RouteKindFastSandbox && errors.Is(err, sandbox.ErrSandboxNotReady) {
 			if wakeErr := p.waker.Wake(r.Context(), target); wakeErr == nil {
-				endpoint, err = p.sandboxProvider.ResolveEndpoint(r.Context(), target)
+				endpoint, err = p.resolveEndpoint(r.Context(), target)
 			} else {
 				return nil, httpStatusForWakeErr(wakeErr), &wakeGateError{target: target, err: fmt.Errorf("wake sandbox: %w", wakeErr)}
 			}

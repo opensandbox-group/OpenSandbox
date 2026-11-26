@@ -94,7 +94,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).EnableFullDuplex()
 
 	start := time.Now()
-	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+	sw := &statusCapturingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK, outcome: "ingress_error"}
 	// Full duplex disables net/http's unread-body close announcement; restore it in the writer.
 	if r.Body != nil && r.ContentLength != 0 {
 		body := &requestBody{ReadCloser: r.Body, size: r.ContentLength}
@@ -106,12 +106,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		proxyType = "websocket"
 	}
 
+	telemetry.RecordRequestDelta(proxyType, 1)
+	defer func() {
+		telemetry.RecordRequestDelta(proxyType, -1)
+		if r.Context().Err() != nil {
+			sw.outcome = "canceled"
+		}
+		telemetry.RecordHTTPRequest(r.Method, sw.statusCode, proxyType, sw.outcome, float64(time.Since(start))/float64(time.Millisecond))
+	}()
 	defer func() {
 		if rcv := recover(); rcv != nil {
 			// Let net/http abort broken upstream streams without injecting an error body.
 			if err, ok := rcv.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				sw.outcome = "stream_aborted"
 				panic(http.ErrAbortHandler)
 			}
+			sw.outcome = "ingress_error"
 
 			panicErr := fmt.Sprintf("%v", rcv)
 			if err, ok := rcv.(error); ok {
@@ -129,7 +139,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(sw, panicErr, http.StatusBadGateway)
 			}
 		}
-		telemetry.RecordHTTPRequest(r.Method, sw.statusCode, proxyType, float64(time.Since(start))/float64(time.Millisecond))
 	}()
 
 	p.handle(sw, r)
@@ -138,6 +147,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 	host, status, err := p.getSandboxHostDefinition(r)
 	if err != nil {
+		sw.outcome = "routing_error"
+		var wakeErr *wakeGateError
+		if errors.As(err, &wakeErr) {
+			sw.outcome = "wake_error"
+		}
 		var detailed interface{ InternalCause() error }
 		if errors.As(err, &detailed) {
 			Logger.With(slogger.Field{Key: "error", Value: detailed.InternalCause()}).Errorf("ingress: provider resolution failed")
@@ -159,6 +173,7 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 
 	targetURL, code, err := p.resolveRealHost(host, r.URL)
 	if err != nil {
+		sw.outcome = "routing_error"
 		writeIngressError(sw, err, code)
 		return
 	}
@@ -189,15 +204,16 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 		replay = newWakeReplay(p, sw, host, r, target)
 	}
 	if replay != nil {
-		p.serve(replay, r, target, replay.observeStale()) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		p.serve(replay, r, target, sw.setOutcome, replay.observeStale()) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 	} else {
-		p.serve(sw, r, target) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
+		p.serve(sw, r, target, sw.setOutcome) //nolint:bodyclose // httputil.ReverseProxy owns response bodies.
 	}
 
 	if replay == nil || !replay.intercepted.Load() {
 		return
 	}
 	if replay.wakeErr != nil {
+		sw.outcome = "wake_error"
 		if status := httpStatusForWakeErr(replay.wakeErr); status != 0 {
 			writeIngressError(sw, replay.wakeErr, status)
 		}
@@ -208,19 +224,21 @@ func (p *Proxy) handle(sw *statusCapturingResponseWriter, r *http.Request) {
 	*r.URL = originalURL
 	r.Host = originalHost
 	r.Body = io.NopCloser(bytes.NewReader(replay.copied))
-	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), target)
+	endpoint, err := p.resolveEndpoint(r.Context(), target)
 	if err != nil {
+		sw.outcome = "routing_error"
 		writeIngressError(sw, err, providerErrHTTPStatus(err))
 		return
 	}
 	host.info = endpoint
 	targetURL, code, err = p.resolveRealHost(host, r.URL)
 	if err != nil {
+		sw.outcome = "routing_error"
 		writeIngressError(sw, err, code)
 		return
 	}
 	p.applyUpstreamRequest(r, host, targetURL)
-	p.serve(sw, r, target)
+	p.serve(sw, r, target, sw.setOutcome)
 }
 
 // Rewriting must be idempotent for stale-route replay.
@@ -242,7 +260,21 @@ func (p *Proxy) applyUpstreamRequest(r *http.Request, host *sandboxHost, targetU
 }
 
 //nolint:bodyclose // HTTP and WebSocket proxies own upstream response bodies.
-func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget, extraResponseObservers ...func(*http.Response)) {
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.EndpointTarget, recordOutcome func(string), extraResponseObservers ...func(*http.Response)) {
+	recordOutcome("ingress_error")
+	errorObserver := p.upstreamErrorObserver(target)
+	observeError := func(err error) {
+		recordOutcome("upstream_error")
+		if errorObserver != nil {
+			errorObserver(err)
+		}
+	}
+	observeResponse := func(response *http.Response) {
+		recordOutcome("upstream_response")
+		if target.RouteKind == sandbox.RouteKindFastSandbox && response.StatusCode >= http.StatusBadRequest && sandbox.IsStaleFastPathResponse(response.Header) {
+			recordOutcome("routing_error")
+		}
+	}
 	if p.isWebSocketRequest(r) {
 		if r.URL == nil {
 			http.Error(w, "invalid request URL", http.StatusBadRequest)
@@ -261,8 +293,15 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 				r.URL.Scheme = "ws"
 			}
 		}
-		websocketProxy := newWebSocketProxy(r.URL, p.upstreamResponseObserver(target))
-		websocketProxy.errorObserver = p.upstreamErrorObserver(target)
+		responseObserver := p.upstreamResponseObserver(target)
+		websocketProxy := newWebSocketProxy(r.URL, func(response *http.Response) {
+			observeResponse(response)
+			if responseObserver != nil {
+				responseObserver(response)
+			}
+		})
+		websocketProxy.errorObserver = observeError
+		websocketProxy.outcomeObserver = recordOutcome
 		websocketProxy.httpClient = p.websocketClient
 		websocketProxy.messageSizeLimit = p.websocketMessageSizeLimit
 		websocketProxy.ServeHTTP(w, r)
@@ -274,12 +313,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, target sandbox.End
 				r.URL.Scheme = httpScheme
 			}
 		}
-		observers := []func(*http.Response){stripWakeMarkerObserver()}
+		observers := []func(*http.Response){observeResponse, stripWakeMarkerObserver()}
 		observers = append(observers, extraResponseObservers...)
 		observers = append(observers, p.upstreamResponseObserver(target))
 		proxy := &httpProxy{
 			responseObservers: observers,
-			errorObserver:     p.upstreamErrorObserver(target),
+			errorObserver:     observeError,
 			transport:         p.httpTransport,
 		}
 		proxy.ServeHTTP(w, r)
