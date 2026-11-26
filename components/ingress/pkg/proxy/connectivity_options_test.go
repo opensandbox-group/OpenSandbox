@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
+	"github.com/alibaba/opensandbox/ingress/pkg/connectivity"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -111,6 +111,9 @@ func TestObservedHTTPTransportHandlesReplacedDefault(t *testing.T) {
 			t.Fatalf("transport = %T, want nil fallback for non-standard default transport", transport)
 		}
 	}
+	if client := newObservedWebSocketHTTPClient(observer); client != nil {
+		t.Fatalf("WebSocket client = %v, want nil fallback for non-standard default transport", client)
+	}
 }
 
 func TestHTTPConnectionPoolLeavesOtherTransportsUnchanged(t *testing.T) {
@@ -146,6 +149,10 @@ func TestObservedHTTPTransportHandlesNilDefaultDialer(t *testing.T) {
 	}
 	if transport.DialContext == nil {
 		t.Fatal("observed transport has nil DialContext")
+	}
+	client := newObservedWebSocketHTTPClient(observer)
+	if client == nil || client.Transport.(*http.Transport).DialContext == nil {
+		t.Fatal("observed WebSocket transport has nil DialContext")
 	}
 }
 

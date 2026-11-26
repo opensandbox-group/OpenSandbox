@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package idlepolicy parses the per-sandbox idle policy gating OSEP-0024
-// wake-on-access, carried as the sandbox.opensandbox.io/idle-policy
-// annotation on the fast-sandbox Sandbox CR. Parsing fails safe: anything
-// invalid is treated as no policy.
+// Package idlepolicy validates Sandbox CR idle policies; invalid policies deny wake-on-access.
 package idlepolicy
 
 import (

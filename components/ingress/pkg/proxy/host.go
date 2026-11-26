@@ -83,10 +83,7 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 	}
 	endpoint, err := p.sandboxProvider.ResolveEndpoint(r.Context(), target)
 	if err != nil {
-		// OSEP-0024 wake-on-access: before answering 503 for a fast-sandbox
-		// target, check whether the sandbox is merely paused and park until
-		// it resumes. A nil wake error means the sandbox is ready to serve
-		// and the route is resolved again (the restore invalidated it).
+		// Resume invalidates cached routes, so resolve again after a successful wake.
 		if p.waker != nil && pr.routeKind == sandbox.RouteKindFastSandbox && errors.Is(err, sandbox.ErrSandboxNotReady) {
 			if wakeErr := p.waker.Wake(r.Context(), target); wakeErr == nil {
 				endpoint, err = p.sandboxProvider.ResolveEndpoint(r.Context(), target)
@@ -101,9 +98,7 @@ func (p *Proxy) doGetSandboxHostDefinition(r *http.Request) (*sandboxHost, int, 
 
 	need := endpoint.AccessVerificationRequired()
 
-	// The sandbox does not require secure access, so a four-segment signed path
-	// must not have its leading segments stripped: re-parse as legacy and keep
-	// the full path for the upstream.
+	// Unsigned sandboxes must retain path segments that only resemble a signed route.
 	if p.mode == ModeURI && !need && pr.signedRoute {
 		pr, err = parseURILegacy(r.URL.Path)
 		if err != nil {
@@ -169,16 +164,10 @@ func (p *Proxy) parseRequestedHeaderRoute(r *http.Request) (parsedRoute, int, er
 	if err != nil {
 		return pr, 0, err
 	}
-	// Fast Sandbox IDs are Kubernetes object names, so always lowercase. Only
-	// the Host is folded above; a label a front proxy copied from a
-	// mixed-case Host into the routing header must route the same way.
+	// Fast Sandbox IDs are lowercase Kubernetes names, including labels copied from Host.
 	if fastSandboxID := strings.ToLower(pr.sandboxID); strings.HasPrefix(fastSandboxID, "fsb-") {
 		pr.sandboxID = fastSandboxID
-		// The unsigned route label may arrive via the Host or the routing
-		// header: front proxies that own the external wildcard domain often
-		// derive the label from the Host and forward it as the routing header
-		// after stripping their own prefix. Only a signed label keeps the
-		// signed path mandatory; --fast-sandbox-namespace stays the boundary.
+		// Unsigned labels use the fixed namespace; signed labels must use scope verification.
 		if p.fastSandboxNamespace == "" || pr.signature != "" {
 			return parsedRoute{}, 0, fmt.Errorf("%w: unsigned Fast Sandbox routes require --fast-sandbox-namespace and an unsigned route label", routescope.ErrUnauthorized)
 		}
@@ -288,10 +277,7 @@ func (p *Proxy) validateParsedRoute(pr parsedRoute, r *http.Request) (int, error
 		err := fmt.Errorf("%w: Fast Sandbox provider requires an authenticated route scope", routescope.ErrUnauthorized)
 		return ingressRouteErrHTTPStatus(err), err
 	}
-	// /internal/init is a control-plane-only protocol meant to be invoked
-	// directly on the pod/node, never through the external ingress gateway.
-	// Reject before endpoint resolution so blocked requests never wake paused
-	// sandboxes or record activity.
+	// Reject control-plane-only paths before resolution can wake sandboxes or record activity.
 	if err := checkBlockedExecdInternalPath(pr, r.URL); err != nil {
 		return http.StatusForbidden, err
 	}
@@ -299,21 +285,11 @@ func (p *Proxy) validateParsedRoute(pr parsedRoute, r *http.Request) (int, error
 }
 
 func checkBlockedExecdInternalPath(pr parsedRoute, requestURL *url.URL) error {
-	reqPath, reqRawPath := effectiveRequestPaths(pr, requestURL)
+	reqPath, reqRawPath := effectiveRequestPaths(pr.requestURI, pr.requestRawPath, requestURL)
 	if isBlockedExecdInternalPath(pr.port, reqPath, reqRawPath) {
 		return errForbiddenExecdInternalPath
 	}
 	return nil
-}
-
-func effectiveRequestPaths(pr parsedRoute, requestURL *url.URL) (string, string) {
-	if pr.requestURI != "" {
-		return pr.requestURI, pr.requestRawPath
-	}
-	if requestURL == nil {
-		return "", ""
-	}
-	return requestURL.Path, requestURL.EscapedPath()
 }
 
 func isBlockedExecdInternalPath(port int, requestPath, rawPath string) bool {

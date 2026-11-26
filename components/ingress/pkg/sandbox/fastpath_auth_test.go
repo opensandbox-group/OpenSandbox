@@ -92,8 +92,11 @@ func TestFastPathCredentialSingleFlightAndExpiry(t *testing.T) {
 	fail = true
 	_, err := source.GetRequestMetadata(t.Context())
 	require.NoError(t, err)
+	// Wait for refresh completion before advancing the test clock.
 	require.Eventually(t, func() bool {
-		return count.Load() == 2
+		source.mu.Lock()
+		defer source.mu.Unlock()
+		return count.Load() == 2 && source.flight == nil
 	}, time.Second, 5*time.Millisecond)
 	now = source.expires.Add(time.Second)
 	_, err = source.GetRequestMetadata(t.Context())
