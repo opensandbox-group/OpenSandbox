@@ -1,6 +1,6 @@
 # OpenSandbox Benchmark
 
-This directory hosts the standalone OpenSandbox benchmark harness (`opensandbox-bench`) and archived milestone/release baseline reports, as specified in [OSEP-0033](https://github.com/opensandbox-group/OpenSandbox/pull/3065).
+This directory hosts the standalone OpenSandbox benchmark harness (`opensandbox-bench`) and archived milestone/release baseline reports, as specified in [OSEP-0034](https://github.com/opensandbox-group/OpenSandbox/pull/3065).
 
 ## Layout
 

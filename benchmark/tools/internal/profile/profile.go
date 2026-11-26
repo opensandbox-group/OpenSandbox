@@ -288,7 +288,7 @@ func (p *BenchmarkProfile) ApplyDefaults() {
 	}
 }
 
-// Validate enforces fail-fast profile invariants from OSEP-0033.
+// Validate enforces fail-fast profile invariants from OSEP-0034.
 func (p *BenchmarkProfile) Validate() error {
 	var errs []error
 
@@ -325,7 +325,7 @@ func (p *BenchmarkProfile) Validate() error {
 		if p.Stack.Template.DiskGiB <= 0 {
 			errs = append(errs, fmt.Errorf("stack.template.diskGiB must be > 0, got %d", p.Stack.Template.DiskGiB))
 		}
-		// OSEP-0033 invariant: overlaybd-ublkd warm pool devices only match when poolSizeGB == template.diskGiB.
+		// OSEP-0034 invariant: overlaybd-ublkd warm pool devices only match when poolSizeGB == template.diskGiB.
 		if oci.PoolSizeGB > 0 && p.Stack.Template.DiskGiB > 0 && oci.PoolSizeGB != p.Stack.Template.DiskGiB {
 			errs = append(errs, fmt.Errorf("stack.template.diskGiB (%d) must strictly equal stack.fastSandbox.runtime.oci.poolSizeGB (%d) to prevent silent ublk warm-pool fallback", p.Stack.Template.DiskGiB, oci.PoolSizeGB))
 		}
