@@ -26,3 +26,4 @@ Use these guides to add capabilities to a working [sandbox application](/getting
 ## Operations
 
 - [Telemetry](/guides/telemetry)
+- [GPU sandbox health checks](/guides/gpu-health)

@@ -272,6 +272,10 @@ export default withMermaid(defineConfig({
               text: "Telemetry",
               link: "/guides/telemetry",
             },
+            {
+              text: "GPU Health Checks",
+              link: "/guides/gpu-health",
+            },
           ],
         },
       ],
@@ -330,6 +334,7 @@ export default withMermaid(defineConfig({
             { text: "Scheduled Client Pool", link: "/examples/client-pool-schedule" },
             { text: "AIO Sandbox", link: "/examples/aio-sandbox" },
             { text: "Agent Sandbox", link: "/examples/agent-sandbox" },
+            { text: "GPU Health Probe", link: "/examples/gpu-health-probe" },
             { text: "Windows", link: "/examples/windows" },
             { text: "AKS Kata", link: "/examples/aks-kata" },
             { text: "ACK PeerPods", link: "/examples/ack-peerpods" },
