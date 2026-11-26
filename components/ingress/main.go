@@ -81,9 +81,9 @@ func main() {
 	ctx = withLogger(ctx, flag.LogLevel)
 	providerType := sandbox.ProviderType(flag.ProviderType)
 
-	otelShutdown, err := telemetry.Init(ctx)
-	if err != nil {
-		log.Printf("OpenTelemetry metrics disabled (continuing without OTLP): %v", err)
+	otelShutdown, otelErr := telemetry.Init(ctx)
+	if otelErr != nil {
+		log.Printf("OpenTelemetry metrics disabled (continuing without OTLP): %v", otelErr)
 		otelShutdown = nil
 	}
 	if otelShutdown != nil {
@@ -112,6 +112,7 @@ func main() {
 	}
 
 	var kubeConfig *rest.Config
+	var err error
 	if providerType != sandbox.ProviderTypeFastSandbox || flag.WakeEnabled || flag.FastPathAuthEnabled {
 		kubeConfig, err = flag.ClientConfig.GetRESTConfig()
 		if err != nil {

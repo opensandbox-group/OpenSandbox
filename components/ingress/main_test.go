@@ -15,12 +15,90 @@
 package main
 
 import (
+	"context"
+	"encoding/pem"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
 )
+
+func TestFastSandboxStartupAfterTelemetryFailure(t *testing.T) {
+	if os.Getenv("OPENSANDBOX_TEST_MAIN") == "1" {
+		os.Args = append([]string{os.Args[0]}, os.Args[3:]...)
+		main()
+		return
+	}
+
+	fastPathListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fastPathServer := grpc.NewServer()
+	go func() { _ = fastPathServer.Serve(fastPathListener) }()
+	t.Cleanup(fastPathServer.Stop)
+
+	// An occupied HTTP port stops main only after provider initialization succeeds.
+	httpListener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = httpListener.Close() })
+	_, port, err := net.SplitHostPort(httpListener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	certServer := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(certServer.Close)
+	certificate := filepath.Join(t.TempDir(), "otlp-ca.pem")
+	if err := os.WriteFile(certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certServer.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENSANDBOX_TEST_MAIN", "1")
+	t.Setenv("OTEL_SDK_DISABLED", "false")
+	t.Setenv("OTEL_METRICS_EXPORTER", "otlp")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://127.0.0.1:4318")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "http/protobuf")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_CERTIFICATE", certificate)
+
+	for _, test := range []struct {
+		name, accessMode, wantError string
+	}{
+		{name: "valid provider", accessMode: "direct-fastlet-proxy", wantError: "Error starting http server:"},
+		{name: "invalid provider", accessMode: "invalid", wantError: "Failed to create sandbox provider: unsupported FastPath access mode"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, executable, "-test.run=^TestFastSandboxStartupAfterTelemetryFailure$", "--",
+				"--provider-type=fast-sandbox", "--fastpath-endpoint="+fastPathListener.Addr().String(),
+				"--fast-sandbox-namespace=test", "--mode=header", "--wake-enabled=false", "--fastpath-auth-enabled=false",
+				"--fastpath-access-mode="+test.accessMode, "--port="+port)
+			output, err := command.CombinedOutput()
+			if ctx.Err() != nil || err == nil {
+				t.Fatalf("startup did not reach its expected error: %v\n%s", err, output)
+			}
+			if !strings.Contains(string(output), "OpenTelemetry metrics disabled (continuing without OTLP): insecure HTTP endpoint cannot use TLS client configuration") {
+				t.Fatalf("telemetry initialization did not fail as expected:\n%s", output)
+			}
+			if !strings.Contains(string(output), test.wantError) {
+				t.Fatalf("startup did not reach %q:\n%s", test.wantError, output)
+			}
+		})
+	}
+}
 
 func TestNewRedisClient(t *testing.T) {
 	for _, test := range []struct {
