@@ -616,7 +616,7 @@ func openReadableChildDirFD(parentFD int, name, childPath string) (int, bool, er
 	}
 	if err := verifyDirFD(childFD, childPath); err != nil {
 		_ = unix.Close(childFD)
-		return -1, false, nil
+		return -1, false, nil //nolint:nilerr // skip subdirectories backed by blocked pseudo-filesystems
 	}
 	return childFD, true, nil
 }
