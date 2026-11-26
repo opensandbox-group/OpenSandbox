@@ -85,7 +85,7 @@ CAPABILITIES_URL="http://127.0.0.1:44772/v1/isolated/capabilities"
 # execd's own configuration env (isolation.ExecdConfigEnvBlacklist) — the
 # launcher unsets this exact set before execve. JUPYTER_HOST/JUPYTER_TOKEN
 # are not set on the fsb golden image but the strip must hold regardless.
-HARDENING_ENV_BLACKLIST="EXECD_ACCESS_TOKEN EXECD_ISOLATION_CONFIG EXECD_ENVS EXECD_LIFECYCLE_CONFIG EXECD_RUNTIME_INIT OPENSANDBOX_LIFECYCLE JUPYTER_HOST JUPYTER_TOKEN"
+HARDENING_ENV_BLACKLIST="EXECD_ACCESS_TOKEN EXECD_ISOLATION_CONFIG EXECD_ENVS EXECD_LIFECYCLE_CONFIG EXECD_RUNTIME_INIT EXECD_INIT_AUTH OPENSANDBOX_LIFECYCLE JUPYTER_HOST JUPYTER_TOKEN"
 # Pid files for the fork-heavy mix: the /command shell records the sleeper
 # pids it spawned (kill(2) needs no /proc enumeration, which Landlock denies).
 HARDENING_SLEEPER_DIR="/tmp/hardening-sleepers"

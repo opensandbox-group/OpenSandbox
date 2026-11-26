@@ -119,3 +119,49 @@ func TestInitFlagsSseLegacyCompatFromEnv(t *testing.T) {
 
 	require.True(t, SseLegacyCompat)
 }
+
+func TestInitFlagsInitAuthFromEnvAndCLI(t *testing.T) {
+	reset := func(t *testing.T, args ...string) {
+		t.Helper()
+		previousArgs := os.Args
+		previousCommandLine := flag.CommandLine
+		flag.CommandLine = flag.NewFlagSet(previousArgs[0], flag.ContinueOnError)
+		os.Args = append([]string{previousArgs[0]}, args...)
+		t.Cleanup(func() {
+			os.Args = previousArgs
+			flag.CommandLine = previousCommandLine
+		})
+	}
+
+	t.Run("defaults false when unset", func(t *testing.T) {
+		reset(t)
+		t.Setenv(initAuthEnv, "")
+		InitFlags()
+		require.False(t, InitAuth)
+	})
+
+	t.Run("parses true and 0 from env", func(t *testing.T) {
+		reset(t)
+		t.Setenv(initAuthEnv, "true")
+		InitFlags()
+		require.True(t, InitAuth)
+
+		reset(t)
+		t.Setenv(initAuthEnv, "0")
+		InitFlags()
+		require.False(t, InitAuth)
+	})
+
+	t.Run("cli flag overrides env", func(t *testing.T) {
+		reset(t, "--init-auth=false")
+		t.Setenv(initAuthEnv, "true")
+		InitFlags()
+		require.False(t, InitAuth)
+	})
+
+	t.Run("invalid env panics", func(t *testing.T) {
+		reset(t)
+		t.Setenv(initAuthEnv, "notabool")
+		require.Panics(t, InitFlags)
+	})
+}

@@ -33,6 +33,7 @@ from opensandbox_server.api.schema import (
     PlatformSpec,
 )
 from opensandbox_server.services.constants import (
+    EXECD_INIT_AUTH_ENV,
     RESERVED_LABEL_PREFIX,
     SANDBOX_EXPIRES_AT_LABEL,
     SANDBOX_ID_LABEL,
@@ -302,6 +303,17 @@ class DockerContainerOpsMixin:
         )
         apply_extensions_to_mapping(labels, request.extensions)
 
+        if request.env and any(k.upper() == EXECD_INIT_AUTH_ENV for k in request.env):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": (
+                        f"Environment variable '{EXECD_INIT_AUTH_ENV}' cannot be set in "
+                        "create request; execd init authentication is controlled by the platform."
+                    ),
+                },
+            )
         config = self.app_config
         env_dict = {**(config.docker.sandbox_env or {}), **(request.env or {})}
         apply_execd_isolation_config(env_dict, config.runtime.execd_isolation_config)
