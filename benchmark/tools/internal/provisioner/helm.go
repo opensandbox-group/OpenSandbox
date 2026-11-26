@@ -29,6 +29,23 @@ import (
 	"github.com/opensandbox-group/OpenSandbox/benchmark/tools/internal/profile"
 )
 
+const (
+	// BaselineReleaseTag is the OpenSandbox umbrella release tag pinned for the benchmark baseline
+	// (https://github.com/opensandbox-group/OpenSandbox/releases/tag/release-1.3.0-rc.3).
+	BaselineReleaseTag = "release-1.3.0-rc.3"
+
+	defaultServerImageRepo                = "opensandbox/server"
+	defaultIngressImageRepo               = "opensandbox/ingress"
+	defaultExecdImage                     = "opensandbox/execd:" + BaselineReleaseTag
+	defaultEgressImage                    = "opensandbox/egress:" + BaselineReleaseTag
+	defaultFSBControllerImageRepo         = "opensandbox/fsb-controller"
+	defaultFSBFastletImage                = "opensandbox/fsb-fastlet:" + BaselineReleaseTag
+	defaultFSBFastletProxyImage           = "opensandbox/fsb-fastlet-proxy:" + BaselineReleaseTag
+	defaultFSBJanitorImageRepo            = "opensandbox/fsb-janitor"
+	defaultFSBFirecrackerRuntimeImageRepo = "opensandbox/fsb-firecracker-runtime"
+	defaultFSBTemplateBuilderImage        = "opensandbox/fsb-sandboxtemplate-builder:" + BaselineReleaseTag
+)
+
 // BuildHelmValues constructs the profile-pinned Helm values map matching the
 // exact value keys of manifests/charts/opensandbox and its subcharts
 // (base, fast-sandbox, opensandbox-server, ingress-gateway).
@@ -42,12 +59,16 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 
 	execdImage := strings.TrimSpace(prof.Stack.Template.ExecdImage)
 	if execdImage == "" {
-		execdImage = applyImageMirror(prof, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.3")
+		execdImage = defaultExecdImage
 	}
+	execdImage = applyImageMirror(prof, execdImage)
+
 	egressImage := strings.TrimSpace(prof.Stack.FastSandbox.Pool.EgressImage)
 	if egressImage == "" {
-		egressImage = applyImageMirror(prof, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.3")
+		egressImage = defaultEgressImage
 	}
+	egressImage = applyImageMirror(prof, egressImage)
+
 	publishSecret := strings.TrimSpace(prof.Stack.Template.PublishSecretRef)
 	if publishSecret == "" {
 		publishSecret = ociPublishSecretName
@@ -56,6 +77,10 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 	configToml := buildServerConfigToml(resourceNS, fastpathEndpoint, defaultPoolName, execdImage, egressImage, publishSecret, prof.Environment.Redis.Enabled, redisDSN)
 
 	gatewayValues := map[string]any{
+		"image": map[string]any{
+			"repository": applyImageMirror(prof, defaultIngressImageRepo),
+			"tag":        BaselineReleaseTag,
+		},
 		"dataplaneNamespace":   resourceNS,
 		"providerType":         "fast-sandbox",
 		"gatewayRouteMode":     "header",
@@ -96,7 +121,11 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 	}
 
 	runtimeValues := map[string]any{
-		"enabled":        true,
+		"enabled": true,
+		"image": map[string]any{
+			"repository": applyImageMirror(prof, defaultFSBFirecrackerRuntimeImageRepo),
+			"tag":        BaselineReleaseTag,
+		},
 		"registrySecret": agentRegistrySecretName,
 		"stateRoot":      defaultStateRoot,
 		"oci":            ociValues,
@@ -122,7 +151,20 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		},
 	}
 
+	janitorValues := map[string]any{
+		"image": map[string]any{
+			"repository": applyImageMirror(prof, defaultFSBJanitorImageRepo),
+			"tag":        BaselineReleaseTag,
+		},
+	}
+
 	controllerValues := map[string]any{
+		"image": map[string]any{
+			"repository": applyImageMirror(prof, defaultFSBControllerImageRepo),
+			"tag":        BaselineReleaseTag,
+		},
+		"sandboxtemplateBuilderImage": applyImageMirror(prof, defaultFSBTemplateBuilderImage),
+		"fastletProxyImage":           applyImageMirror(prof, defaultFSBFastletProxyImage),
 		"resources": map[string]any{
 			"requests": map[string]any{
 				"cpu":    "2",
@@ -145,6 +187,7 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		"systemNamespace":   systemNS,
 		"resourceNamespace": resourceNS,
 		"controller":        controllerValues,
+		"janitor":           janitorValues,
 		"runtime":           runtimeValues,
 	}
 
@@ -171,6 +214,10 @@ func BuildHelmValues(prof *profile.BenchmarkProfile) map[string]any {
 		"opensandbox-server": map[string]any{
 			"server": map[string]any{
 				"replicaCount": 1,
+				"image": map[string]any{
+					"repository": applyImageMirror(prof, defaultServerImageRepo),
+					"tag":        BaselineReleaseTag,
+				},
 				"resources": map[string]any{
 					"requests": map[string]any{
 						"cpu":    "2",

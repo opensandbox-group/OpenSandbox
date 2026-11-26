@@ -198,9 +198,11 @@ func buildGoldenTemplateCR(prof *profile.BenchmarkProfile, resourceNS, benchNS s
 			"warmupSeconds": int64(60),
 		},
 	}
-	if execdImg := strings.TrimSpace(tpl.ExecdImage); execdImg != "" {
-		spec["execd"] = execdImg
+	execdImg := strings.TrimSpace(tpl.ExecdImage)
+	if execdImg == "" {
+		execdImg = defaultExecdImage
 	}
+	spec["execd"] = applyImageMirror(prof, execdImg)
 
 	return &unstructured.Unstructured{
 		Object: map[string]any{
@@ -314,8 +316,9 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 
 	fastletImage := strings.TrimSpace(pool.FastletImage)
 	if fastletImage == "" {
-		fastletImage = applyImageMirror(prof, "opensandbox/fsb-fastlet:release-1.3.0-rc.3")
+		fastletImage = defaultFSBFastletImage
 	}
+	fastletImage = applyImageMirror(prof, fastletImage)
 
 	containers := []any{
 		map[string]any{
@@ -395,8 +398,9 @@ func buildResourceAwarePoolCR(prof *profile.BenchmarkProfile, resourceNS string)
 	if pool.EgressEnabled {
 		egressImage := strings.TrimSpace(pool.EgressImage)
 		if egressImage == "" {
-			egressImage = applyImageMirror(prof, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.3")
+			egressImage = defaultEgressImage
 		}
+		egressImage = applyImageMirror(prof, egressImage)
 		containers = append(containers, map[string]any{
 			"name":            "egress",
 			"image":           egressImage,

@@ -61,8 +61,11 @@ stack:
       podAntiAffinity: true
       spillDir: /dev/shm/fsb-spill
       blobCacheMaxBytes: 68719476736
+      fastletImage: opensandbox/fsb-fastlet:release-1.3.0-rc.3
+      egressImage: opensandbox/egress:release-1.3.0-rc.3
   template:
     baseImage: opensandbox/fsb-sandbox-golden:latest
+    execdImage: opensandbox/execd:release-1.3.0-rc.3
     vcpus: 2
     memoryMiB: 4096
     diskGiB: 2

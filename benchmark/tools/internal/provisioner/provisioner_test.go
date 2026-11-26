@@ -218,9 +218,13 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.False(t, hasPool, "fast-sandbox chart has no top-level pool key")
 
 	rt := fsb["runtime"].(map[string]any)
+	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-firecracker-runtime", "tag": BaselineReleaseTag}, rt["image"])
 	assert.Equal(t, agentRegistrySecretName, rt["registrySecret"])
 	_, hasCABundle := rt["registryCABundleSecret"]
 	assert.False(t, hasCABundle)
+
+	jan := fsb["janitor"].(map[string]any)
+	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-janitor", "tag": BaselineReleaseTag}, jan["image"])
 
 	// firecracker-runtime DaemonSet resources: requests only (no limits) to avoid BestEffort eviction.
 	rtRes := rt["resources"].(map[string]any)
@@ -244,8 +248,11 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.Equal(t, 64, oci["poolHigh"])
 	assert.Equal(t, 2, oci["poolSizeGB"])
 
-	// Controller tuning: resources, client-go QPS/Burst, and fastletProxy Guaranteed resources.
+	// Controller tuning: release-1.3.0-rc.3 images, resources, client-go QPS/Burst, and fastletProxy Guaranteed resources.
 	ctrl := fsb["controller"].(map[string]any)
+	assert.Equal(t, map[string]any{"repository": "opensandbox/fsb-controller", "tag": BaselineReleaseTag}, ctrl["image"])
+	assert.Equal(t, "opensandbox/fsb-sandboxtemplate-builder:release-1.3.0-rc.3", ctrl["sandboxtemplateBuilderImage"])
+	assert.Equal(t, "opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.3", ctrl["fastletProxyImage"])
 	assert.Equal(t, 200, ctrl["kubeClientQPS"])
 	assert.Equal(t, 400, ctrl["kubeClientBurst"])
 	ctrlRes := ctrl["resources"].(map[string]any)
@@ -255,10 +262,11 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, proxyRes["requests"])
 	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, proxyRes["limits"])
 
-	// Ingress & Redis wiring, resources, and upstream HTTP connection pool tuning.
+	// Ingress & Redis wiring, release-1.3.0-rc.3 image, resources, and upstream HTTP connection pool tuning.
 	ig := vals["ingress-gateway"].(map[string]any)
 	assert.Equal(t, true, ig["enabled"])
 	gw := ig["gateway"].(map[string]any)
+	assert.Equal(t, map[string]any{"repository": "opensandbox/ingress", "tag": BaselineReleaseTag}, gw["image"])
 	assert.Equal(t, "opensandbox-dataplane", gw["dataplaneNamespace"])
 	assert.Equal(t, true, gw["activity"].(map[string]any)["enabled"])
 	assert.Equal(t, true, gw["wake"].(map[string]any)["enabled"])
@@ -270,9 +278,10 @@ func TestBuildHelmValues(t *testing.T) {
 	assert.Equal(t, 2048, gwPool["maxIdleConns"])
 	assert.Equal(t, 512, gwPool["maxIdleConnsPerHost"])
 
-	// Server resources, configToml, and secureAccess secret.
+	// Server image, resources, configToml, and secureAccess secret.
 	srv := vals["opensandbox-server"].(map[string]any)
 	srvSpec := srv["server"].(map[string]any)
+	assert.Equal(t, map[string]any{"repository": "opensandbox/server", "tag": BaselineReleaseTag}, srvSpec["image"])
 	srvRes := srvSpec["resources"].(map[string]any)
 	assert.Equal(t, map[string]any{"cpu": "2", "memory": "4Gi"}, srvRes["requests"])
 	assert.Equal(t, map[string]any{"cpu": "8", "memory": "16Gi"}, srvRes["limits"])
@@ -283,12 +292,28 @@ func TestBuildHelmValues(t *testing.T) {
 	srvGW := srvSpec["gateway"].(map[string]any)
 	assert.Equal(t, secureAccessSecretName, srvGW["secureAccess"].(map[string]any)["existingSecret"])
 	toml := srv["configToml"].(string)
-	assert.Contains(t, toml, `execd_image = "`)
+	assert.Contains(t, toml, `execd_image = "opensandbox/execd:release-1.3.0-rc.3"`)
 	assert.Contains(t, toml, `template_oci_publish_secret = "template-oci-publish-secret"`)
 	assert.Contains(t, toml, `workload_provider = "batchsandbox"`)
 	assert.Contains(t, toml, `[egress]`)
-	assert.Contains(t, toml, `image = "`)
+	assert.Contains(t, toml, `image = "opensandbox/egress:release-1.3.0-rc.3"`)
 	assert.Contains(t, toml, `[automation.idle_pause]`)
+
+	// Verify imageRegistryMirror prefixes all pinned baseline repos/images cleanly.
+	mirrorProf := testProfile(t)
+	mirrorProf.Environment.ImageRegistryMirror = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com"
+	mVals := BuildHelmValues(mirrorProf)
+	mFSB := mVals["fast-sandbox"].(map[string]any)
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-controller", mFSB["controller"].(map[string]any)["image"].(map[string]any)["repository"])
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-sandboxtemplate-builder:release-1.3.0-rc.3", mFSB["controller"].(map[string]any)["sandboxtemplateBuilderImage"])
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-fastlet-proxy:release-1.3.0-rc.3", mFSB["controller"].(map[string]any)["fastletProxyImage"])
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-janitor", mFSB["janitor"].(map[string]any)["image"].(map[string]any)["repository"])
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/fsb-firecracker-runtime", mFSB["runtime"].(map[string]any)["image"].(map[string]any)["repository"])
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/server", mVals["opensandbox-server"].(map[string]any)["server"].(map[string]any)["image"].(map[string]any)["repository"])
+	assert.Equal(t, "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/ingress", mVals["ingress-gateway"].(map[string]any)["gateway"].(map[string]any)["image"].(map[string]any)["repository"])
+	mToml := mVals["opensandbox-server"].(map[string]any)["configToml"].(string)
+	assert.Contains(t, mToml, `execd_image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/execd:release-1.3.0-rc.3"`)
+	assert.Contains(t, mToml, `image = "sandbox-registry.cn-zhangjiakou.cr.aliyuncs.com/opensandbox/egress:release-1.3.0-rc.3"`)
 
 	// Merged HelmValues override preserves sibling defaults while overriding targeted keys.
 	prof.Stack.HelmValues = map[string]any{
