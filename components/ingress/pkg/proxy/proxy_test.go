@@ -317,3 +317,87 @@ func TestStatusCapturingResponseWriterInformationalStatusDoesNotCommit(t *testin
 	assert.True(t, sw.written)
 	assert.Equal(t, http.StatusSwitchingProtocols, sw.statusCode)
 }
+
+type countingProvider struct {
+	calls int
+}
+
+func (c *countingProvider) GetEndpoint(string) (*sandbox.EndpointInfo, error) {
+	c.calls++
+	return &sandbox.EndpointInfo{Endpoint: "127.0.0.1"}, nil
+}
+
+func (c *countingProvider) ResolveEndpoint(_ context.Context, target sandbox.EndpointTarget) (*sandbox.EndpointInfo, error) {
+	return c.GetEndpoint(target.SandboxID)
+}
+
+func (c *countingProvider) Start(context.Context) error { return nil }
+
+func TestServeHTTPBlocksExecdInternalInitOnPort44772(t *testing.T) {
+	blockedPaths := []string{
+		"/internal/init",
+		"/internal/init/",
+		"/internal/init/extra",
+		"//internal//init",
+		"/foo/../internal/init",
+		"/internal/./init",
+		"/INTERNAL/INIT",
+		"/internal%2Finit",
+		"/%69nternal/init",
+	}
+
+	t.Run("header mode blocks without resolving endpoint", func(t *testing.T) {
+		provider := &countingProvider{}
+		p := NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil)
+
+		for _, rawPath := range blockedPaths {
+			for _, method := range []string{http.MethodPost, http.MethodGet} {
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(method, "http://sandbox-44772.example.com"+rawPath, nil)
+				p.ServeHTTP(rec, req)
+				require.Equal(t, http.StatusForbidden, rec.Code, "method=%s path=%s", method, rawPath)
+				require.Contains(t, rec.Body.String(), "/internal/init")
+			}
+		}
+		require.Zero(t, provider.calls, "blocked /internal/init must not resolve or wake sandbox")
+	})
+
+	t.Run("uri mode blocks without resolving endpoint", func(t *testing.T) {
+		provider := &countingProvider{}
+		p := NewProxy(context.Background(), provider, ModeURI, nil, nil, nil)
+
+		for _, rawPath := range blockedPaths {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "http://ingress.local/sandbox/44772"+rawPath, nil)
+			p.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusForbidden, rec.Code, "path=%s", rawPath)
+		}
+		require.Zero(t, provider.calls, "blocked /internal/init must not resolve or wake sandbox")
+	})
+
+	t.Run("allows /internal/init on non-execd ports and other paths on 44772", func(t *testing.T) {
+		provider := &countingProvider{}
+		pHeader := NewProxy(context.Background(), provider, ModeHeader, nil, nil, nil)
+
+		for _, targetURL := range []string{
+			"http://sandbox-8080.example.com/internal/init",
+			"http://sandbox-44772.example.com/ping",
+			"http://sandbox-44772.example.com/ready",
+			"http://sandbox-44772.example.com/command",
+			"http://sandbox-44772.example.com/internal/initialize",
+		} {
+			req := httptest.NewRequest(http.MethodPost, targetURL, nil)
+			host, status, err := pHeader.getSandboxHostDefinition(req)
+			require.NoError(t, err, targetURL)
+			require.Zero(t, status, targetURL)
+			require.NotNil(t, host, targetURL)
+		}
+
+		pURI := NewProxy(context.Background(), provider, ModeURI, nil, nil, nil)
+		req := httptest.NewRequest(http.MethodPost, "http://ingress.local/sandbox/8080/internal/init", nil)
+		host, status, err := pURI.getSandboxHostDefinition(req)
+		require.NoError(t, err)
+		require.Zero(t, status)
+		require.NotNil(t, host)
+	})
+}

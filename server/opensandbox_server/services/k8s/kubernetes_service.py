@@ -141,6 +141,19 @@ def _is_namespace_not_found(exc: Exception) -> bool:
         return False
 
 
+def _deleted_before_ready_error(sandbox_id: str, detail: Optional[str] = None) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": SandboxErrorCodes.INVALID_PARAMETER,
+            "message": (
+                f"Sandbox {sandbox_id} was deleted before it was ready"
+                + (f" ({detail})" if detail else "")
+            ),
+        },
+    )
+
+
 class KubernetesSandboxService(
     K8sDiagnosticsMixin, K8sStartupDiagnosticsMixin, SandboxService, ExtensionService
 ):
@@ -370,6 +383,7 @@ class KubernetesSandboxService(
         timeout_seconds: int = 60,
         poll_interval_seconds: float = 1.0,
         pool_acquisition_timeout_seconds: float | None = None,
+        workload_created: bool = False,
     ) -> Dict[str, Any]:
         """
         Wait until the workload reports Running (or pool-Allocated), raising
@@ -378,6 +392,9 @@ class KubernetesSandboxService(
         Args:
             pool_acquisition_timeout_seconds: Maximum cumulative time to wait
                 while the controller reports exhausted Pool capacity
+            workload_created: The workload is known to exist already, so a
+                not-found read means it was deleted, not that it is not
+                visible yet
 
         Raises:
             HTTPException: If timeout or Pod fails
@@ -404,6 +421,7 @@ class KubernetesSandboxService(
 
         pending_workload: Dict[str, Any] | None = None
         last_workload: Any = None
+        workload_seen = workload_created
         reading_workload = True
         workload_identity: tuple[str, str] | None = None
 
@@ -488,10 +506,14 @@ class KubernetesSandboxService(
                         )
 
                     if not workload:
+                        if workload_seen:
+                            # It existed and is gone: deleted while we waited.
+                            raise _deleted_before_ready_error(sandbox_id)
                         logger.debug(f"Workload not found yet for sandbox {sandbox_id}")
                         await wait_for_change()
                         continue
                     last_workload = workload
+                    workload_seen = True
 
                     status_info = _normalize_create_status(
                         self.workload_provider.get_status(workload)
@@ -531,6 +553,10 @@ class KubernetesSandboxService(
                                 ),
                             },
                         )
+                    if current_state == "Stopping":
+                        # A delete (user or TTL) arrived first; the workload
+                        # will not become Running.
+                        raise _deleted_before_ready_error(sandbox_id, current_message)
                     if current_state == "Terminated":
                         # expireTime can pass while the CR is still readable.
                         # That is already final; do not poll until POD_READY_TIMEOUT.
@@ -1204,6 +1230,7 @@ class KubernetesSandboxService(
                     timeout_seconds=kubernetes_config.sandbox_create_timeout_seconds,
                     poll_interval_seconds=kubernetes_config.sandbox_create_poll_interval_seconds,
                     pool_acquisition_timeout_seconds=kubernetes_config.pool_acquisition_timeout_seconds,
+                    workload_created=True,
                 )
                 
                 status_info = _normalize_create_status(

@@ -59,6 +59,18 @@ class UnsupportedFieldError(ValueError):
         self.reason = reason
 
 
+def resolve_pool_ref(request: CreateSandboxRequest, fastpath_resource_pool: str) -> str:
+    """The SandboxPool a create targets, before the request is mapped.
+
+    Normalized so a whitespace-only poolRef selects the default pool instead
+    of an invalid one, and a padded name never reaches FastPath as-is. The
+    service resolves the pool snapshot through the same rule the mapping uses
+    for ``CreateSandboxRequest.pool_ref``.
+    """
+    pool_ref = ((request.extensions or {}).get("poolRef") or "").strip()
+    return pool_ref or fastpath_resource_pool
+
+
 def map_create_request(
     request: CreateSandboxRequest,
     sandbox_id: str,
@@ -166,11 +178,7 @@ def map_create_request(
             input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
-    extensions = request.extensions or {}
-    # Normalize before forwarding: a whitespace-only poolRef must not select
-    # an invalid pool, and a padded name must not reach FastPath as-is.
-    pool_ref = (extensions.get("poolRef") or "").strip()
-    create.pool_ref = pool_ref or fastpath_resource_pool
+    create.pool_ref = resolve_pool_ref(request, fastpath_resource_pool)
 
     # fast-sandbox persists metadata as labels (metadata.sandbox.fast.io/<key>)
     # and validates every entry; reject incompatible keys/values here so users
@@ -241,9 +249,7 @@ def map_template_create_request(
             handler="egress", input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
-    extensions = request.extensions or {}
-    pool_ref = (extensions.get("poolRef") or "").strip()
-    create.pool_ref = pool_ref or fastpath_resource_pool
+    create.pool_ref = resolve_pool_ref(request, fastpath_resource_pool)
 
     _validate_metadata(create.metadata)
 

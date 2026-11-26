@@ -93,7 +93,7 @@ type SuiteResult struct {
 	Extra              map[string]any         `json:"extra,omitempty"`
 }
 
-// LatencyDist uses nearest-rank percentiles matching OSEP-0033 §4.
+// LatencyDist uses nearest-rank percentiles matching OSEP-0034 §4.
 type LatencyDist struct {
 	Count  int     `json:"count"`
 	MinMs  float64 `json:"min_ms"`

@@ -49,10 +49,15 @@ rules:
   # Fsb: Sandbox CR reads power Get/List, and patch persists the OSEP-0024
   # idle-policy annotation at create; SandboxTemplate
   # CRUD powers the /templates management API; SandboxSnapshot
-  # watches power fsb snapshot status convergence.
+  # watches power fsb snapshot status convergence; SandboxPool
+  # reads (informer LIST/WATCH) resolve the pool resource mode, default
+  # resources and action handlers at create.
   - apiGroups: ["sandbox.fast.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["sandbox.fast.io"]
+    resources: ["sandboxpools"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["sandbox.fast.io"]
     resources: ["sandboxtemplates"]
     verbs: ["create", "delete", "get", "list", "watch"]

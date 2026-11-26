@@ -7,7 +7,7 @@ last-updated: 2026-11-26
 status: draft
 ---
 
-# OSEP-0034: Near-End Runtime Initialization for Fast Sandbox
+# OSEP-0035: Near-End Runtime Initialization for Fast Sandbox
 
 <!-- toc -->
 - [Summary](#summary)
@@ -146,7 +146,7 @@ sequenceDiagram
 ### Risks and Mitigations
 
 - **Server rollout ahead of Helm RBAC update (`403` on `sandboxpools`)**: If the `opensandbox-server` image upgrades before the Helm chart adds `sandboxpools` `get/list/watch` to its `ClusterRole`, `PoolCRReader` catches `ApiException(status=403)`, logs a structured warning, and falls back to `FastPath.GetPool` for `is_resource_aware` and `resources` (treating `action_handlers` as empty), preserving existing traffic while failing closed (`400`) on deferred-entrypoint templates that strictly require `runtime-init`.
-- **Pre-existing Golden Templates (pre-`/internal/init` `execd` vs pre-OSEP-0034 `/internal/init`-capable `execd`)**:
+- **Pre-existing Golden Templates (pre-`/internal/init` `execd` vs pre-OSEP-0035 `/internal/init`-capable `execd`)**:
   - Golden VM snapshots restore the exact `execd` binary frozen in guest memory at template-build time (`spec.execd`). Templates built **before `execd` added `POST /internal/init`** do not expose the endpoint at all and would fail with HTTP `404` (`FailSandbox`) if scheduled onto a pool that emits `runtime-init`; operators must either rebuild those legacy templates with a current `execd` image before adding `runtime-init` to an existing pool, or roll out `runtime-init` on a new `SandboxPool` and migrate traffic once templates are rebuilt.
   - Templates already built with an `/internal/init`-capable `execd` image (`EXECD_INIT=1`) but predating this OSEP simply lack the `"entrypointPrewarmed"` flag in `spec_json`; the server defaults missing metadata to `entrypointPolicy = "keep"`, applying `RuntimeBinding` (`sandboxId`, `accessTokenHash`, `envs` for new `/command` executions) without restarting the already-running entrypoint.
 - **Transient guest readiness delay, lost-response retry, and deterministic init error**: `curl --fail-with-body` returns exit code `22` on HTTP `4xx/5xx` (mapped via `nonRetryableExitCodes: [22]` + `failurePolicy: FailSandbox` to immediate sandbox teardown, `Sandbox` CR cleanup, and direct `FailedPrecondition` failure back to the caller without penalizing the `Fastlet` node or retrying other candidates), whereas TCP connect refusal (`7`) or transfer timeout (`28`) retries locally with backoff inside `Fastlet`. If `execd` applied `/internal/init` just before a response timeout (`28`), the retry executes while `FastPath.ResolveEndpoint` is still fail-closed (`Ready=false`, zero external traffic or user sessions): `RuntimeInitManager.Apply` serializes under `m.mu`, performing a pure atomic `RuntimeBinding` swap when `preserveRuntimeState=true` and cleanly restarting the not-yet-exposed `entrypoint` when `preserveRuntimeState=false`.
