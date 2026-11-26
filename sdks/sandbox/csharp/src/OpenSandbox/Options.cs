@@ -158,8 +158,9 @@ public class SandboxCreateOptions
 /// resources, volumes, platform and lifecycle hooks come from the template's
 /// golden image and cannot be overridden here. Metadata, network policy,
 /// extensions, idle policy and env may accompany the template id, and the
-/// timeout is required. Non-empty env requires pool runtime-init support and applies
-/// only to new commands and sessions; it does not restart the entrypoint.
+/// timeout is required. Every create requires a runtime-init-capable pool to bind
+/// the new sandbox ID, even without env or authentication. Env applies only to
+/// new commands and sessions; it does not restart the entrypoint.
 /// </remarks>
 public class SandboxCreateFromTemplateOptions
 {
@@ -189,7 +190,7 @@ public class SandboxCreateFromTemplateOptions
     /// </summary>
     public required int TimeoutSeconds { get; set; }
 
-    /// <summary>Non-empty env requires pool runtime-init support; applies to new commands/sessions without restarting the entrypoint.</summary>
+    /// <summary>Env applies only to new commands/sessions without restarting the entrypoint.</summary>
     public IReadOnlyDictionary<string, string>? Env { get; set; }
 
     /// <summary>

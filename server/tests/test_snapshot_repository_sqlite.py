@@ -23,6 +23,7 @@ from opensandbox_server.repositories.snapshots.sqlite import (
     SQLiteSnapshotRepository,
 )
 from opensandbox_server.config import AppConfig, RuntimeConfig, StoreConfig
+from opensandbox_server.services.snapshot_models import SnapshotRecord
 from tests.snapshot_repository_contract import SnapshotRepositoryContract
 
 
@@ -30,6 +31,20 @@ class TestSQLiteSnapshotRepositoryContract(SnapshotRepositoryContract):
     @pytest.fixture
     def repository(self, tmp_path) -> SQLiteSnapshotRepository:
         return SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+
+
+def test_legacy_restore_config_defaults_without_schema_changes(tmp_path) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    repo.create(SnapshotRecord(id="legacy", source_sandbox_id="fsb-source"))
+    with repo._connect() as conn:
+        conn.execute(
+            "UPDATE snapshots SET restore_config = ? WHERE id = ?",
+            ('{"image": "legacy-template", "backend": "fsb"}', "legacy"),
+        )
+    restored = SQLiteSnapshotRepository(repo.db_path).get("legacy")
+    assert restored.restore_config.image == "legacy-template"
+    assert restored.restore_config.runtime_envs is None
+    assert restored.restore_config.execd_auth_enabled is False
 
 
 def test_sqlite_snapshot_repository_enables_wal_and_busy_timeout(tmp_path) -> None:

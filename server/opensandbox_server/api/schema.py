@@ -1092,6 +1092,8 @@ class CreateSandboxRequest(BaseModel):
     _resolved_rootfs_only: bool = PrivateAttr(default=False)
     # The snapshot's recorded source limits, set by restore resolution.
     _resolved_snapshot_limits: Optional[dict] = PrivateAttr(default=None)
+    _resolved_snapshot_runtime_envs: Optional[dict[str, str]] = PrivateAttr(default=None)
+    _resolved_snapshot_execd_auth_enabled: bool = PrivateAttr(default=False)
 
     image: Optional[ImageSpec] = Field(
         None,
@@ -1099,7 +1101,14 @@ class CreateSandboxRequest(BaseModel):
     )
     snapshot_id: Optional[str] = Field(
         None,
-        description="Snapshot identifier to restore from",
+        description=(
+            "Snapshot identifier to restore from. FSB Full and RootfsOnly creates "
+            "always require a runtime-init-capable default pool and guest, even "
+            "without env or authentication. The new identity and merged runtime env "
+            "apply to new commands and sessions; existing processes and restored "
+            "sessions are preserved. Snapshots without captured runtime env must "
+            "be captured again before use."
+        ),
     )
     platform: Optional[PlatformSpec] = Field(
         None,
@@ -1200,11 +1209,11 @@ class CreateSandboxRequest(BaseModel):
             "resourceLimits, resourceRequests, volumes, platform, credentialProxy, "
             "secureAccess and lifecycle hooks are rejected. lifecycle.idlePolicy "
             "is allowed (control-plane state, not workload shape). timeout is "
-            "required. Non-empty env requires a runtime-init action handler on "
-            "the selected SandboxPool and an execd supporting /internal/init. "
-            "Env is delivered with entrypointPolicy=keep for new commands and "
-            "sessions; running processes keep their existing environment. "
-            "Empty or omitted env does not trigger runtime initialization."
+            "required. Every template create requires a runtime-init action handler on "
+            "the selected SandboxPool and an execd supporting /internal/init, even "
+            "without env or execd authentication. The new sandbox identity and "
+            "optional env are bound with entrypointPolicy=keep for new commands and "
+            "sessions; running processes keep their existing environment."
         ),
     )
 

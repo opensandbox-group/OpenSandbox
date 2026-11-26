@@ -259,8 +259,9 @@ public sealed class Sandbox : IAsyncDisposable
     /// come from the template's golden image and cannot be overridden here.
     /// Metadata, network policy, extensions, env and the OSEP-0024 idle policy
     /// (control-plane state, not workload shape) may accompany the template
-    /// id, and the timeout is required. Non-empty env requires pool runtime-init support
-    /// and applies only to new commands and sessions; it does not restart the
+    /// id, and the timeout is required. Every create requires a runtime-init-capable
+    /// pool to bind the new sandbox ID, even without env or authentication.
+    /// Env applies only to new commands and sessions; it does not restart the
     /// entrypoint. The created sandbox routes egress policy operations through
     /// the lifecycle control plane.
     /// </remarks>

@@ -13,6 +13,9 @@
 # limitations under the License.
 
 from datetime import datetime
+import json
+
+import pytest
 
 from opensandbox_server.services.snapshot_models import (
     SnapshotRecord,
@@ -69,6 +72,8 @@ def test_snapshot_restore_config_serialization_ignores_unknown_fields() -> None:
         "image": "registry.example.com/snapshots/snap-003:latest",
         "backend": None,
         "limits": None,
+        "runtime_envs": None,
+        "execd_auth_enabled": False,
     }
     assert (
         SnapshotRestoreConfig.from_dict(
@@ -79,6 +84,17 @@ def test_snapshot_restore_config_serialization_ignores_unknown_fields() -> None:
         )
         == config
     )
+
+
+@pytest.mark.parametrize("envs", [None, {}, {"UNICODE": "你好 café", "EMPTY": ""}])
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_snapshot_restore_config_json_roundtrip(envs, auth_enabled) -> None:
+    config = SnapshotRestoreConfig(
+        image="snapshot-template", backend="fsb",
+        runtime_envs=envs, execd_auth_enabled=auth_enabled,
+    )
+    encoded = json.dumps(config.to_dict(), ensure_ascii=False)
+    assert SnapshotRestoreConfig.from_dict(json.loads(encoded)) == config
 
 
 def test_snapshot_restore_config_roundtrips_recorded_limits() -> None:

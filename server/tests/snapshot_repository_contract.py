@@ -90,6 +90,27 @@ class SnapshotRepositoryContract:
         assert loaded.updated_at == record.updated_at
         assert repository.get("missing") is None
 
+    @pytest.mark.parametrize("envs", [None, {}, {"UNICODE": "你好 café", "EMPTY": ""}])
+    @pytest.mark.parametrize("auth_enabled", [False, True])
+    def test_runtime_config_roundtrip(
+        self, repository: SnapshotRepository, envs, auth_enabled
+    ) -> None:
+        record = snapshot_record("snap-runtime-config", "fsb-source", datetime.now(timezone.utc))
+        record.restore_config = SnapshotRestoreConfig(
+            backend="fsb", runtime_envs=envs, execd_auth_enabled=auth_enabled
+        )
+        repository.create(record)
+        assert repository.get(record.id).restore_config == record.restore_config
+        assert repository.list(SnapshotListQuery(page=1, page_size=10)).items[0].restore_config == record.restore_config
+
+        record.status.state = SnapshotState.READY
+        record.restore_config.image = "snapshot-template"
+        assert repository.update_if_state(record, SnapshotState.CREATING)
+        assert repository.get(record.id).restore_config == record.restore_config
+        record.name = "updated"
+        repository.update(record)
+        assert repository.get(record.id).restore_config == record.restore_config
+
     def test_lists_and_updates_records(self, repository: SnapshotRepository) -> None:
         now = datetime.now(timezone.utc)
         first = snapshot_record("snap-001", "sbx-001", now, namespace="tenant-a")

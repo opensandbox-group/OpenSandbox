@@ -97,6 +97,73 @@ async def test_snapshot_restore_records_fsb_backend_hint(monkeypatch, tmp_path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["fsb", None])
+@pytest.mark.parametrize("runtime_envs,auth", [
+    (None, False), ({}, False), ({}, True), ({"CAPTURED": "你好", "EMPTY": ""}, True),
+])
+async def test_snapshot_restore_private_runtime_metadata_from_sqlite(
+    monkeypatch, tmp_path, backend, runtime_envs, auth,
+) -> None:
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    repo.create(SnapshotRecord(
+        id="snap-runtime", source_sandbox_id="deleted-source",
+        restore_config=SnapshotRestoreConfig(
+            image="registry.example.com/snapshot:index", backend=backend,
+            runtime_envs=runtime_envs, execd_auth_enabled=auth,
+        ),
+        status=SnapshotStatusRecord(state=SnapshotState.READY),
+    ))
+    monkeypatch.setattr(
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository", lambda: repo,
+    )
+    request = CreateSandboxRequest.model_validate({
+        "snapshotId": "snap-runtime", "resourceLimits": {"cpu": "500m"},
+        "env": {"REQUEST": "override"},
+        "_resolved_snapshot_runtime_envs": {"FORGED": "untrusted"},
+        "resolvedSnapshotRuntimeEnvs": {"FORGED": "untrusted"},
+        "_resolved_snapshot_execd_auth_enabled": not auth,
+        "resolvedSnapshotExecdAuthEnabled": not auth,
+    })
+    assert request._resolved_snapshot_runtime_envs is None
+    assert request._resolved_snapshot_execd_auth_enabled is False
+
+    resolved = await resolve_sandbox_image_from_request(request)
+    assert resolved._resolved_snapshot_runtime_envs == (runtime_envs if backend == "fsb" else None)
+    assert resolved._resolved_snapshot_execd_auth_enabled is (auth if backend == "fsb" else False)
+    assert resolved.env == {"REQUEST": "override"}
+    for by_alias in (False, True):
+        public = resolved.model_dump_json(by_alias=by_alias)
+        for private in ("runtime_envs", "runtimeEnvs", "execd_auth_enabled", "execdAuthEnabled",
+                        "resolved_snapshot", "resolvedSnapshot", "FORGED", "CAPTURED"):
+            assert private not in public
+    if backend == "fsb" and runtime_envs is not None:
+        resolved._resolved_snapshot_runtime_envs["LOCAL"] = "changed"
+        assert repo.get("snap-runtime").restore_config.runtime_envs == runtime_envs
+
+
+@pytest.mark.asyncio
+async def test_snapshot_restore_copies_runtime_env_from_record(monkeypatch) -> None:
+    from unittest.mock import Mock
+
+    record = SnapshotRecord(
+        id="snap-copy", source_sandbox_id="deleted-source",
+        restore_config=SnapshotRestoreConfig(image="native-source", backend="fsb", runtime_envs={}),
+        status=SnapshotStatusRecord(state=SnapshotState.READY),
+    )
+    repo = Mock()
+    repo.get.return_value = record
+    monkeypatch.setattr(
+        "opensandbox_server.services.snapshot_restore.get_snapshot_repository", lambda: repo,
+    )
+    request = CreateSandboxRequest(snapshotId=record.id, resourceLimits={"cpu": "500m"})
+    resolved = await resolve_sandbox_image_from_request(request)
+    assert resolved._resolved_snapshot_runtime_envs == {}
+    assert resolved._resolved_snapshot_runtime_envs is not record.restore_config.runtime_envs
+    resolved._resolved_snapshot_runtime_envs["LOCAL"] = "changed"
+    assert record.restore_config.runtime_envs == {}
+
+
+@pytest.mark.asyncio
 async def test_snapshot_restore_preserves_explicit_entrypoint(monkeypatch, tmp_path) -> None:
     repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
     repo.create(

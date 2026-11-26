@@ -17,6 +17,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import asdict
+import json
 from typing import cast
 import pytest
 
@@ -210,6 +213,110 @@ def test_create_snapshot_submits_intent_without_waiting() -> None:
     assert request.sandbox.namespaced_name.namespace == "tenant-a"
     assert request.sandbox.namespaced_name.name == SANDBOX_ID
     assert request.metadata[SNAPSHOT_ID_METADATA_KEY] == SNAPSHOT_ID
+
+
+@pytest.mark.parametrize("mode", ["full", "rootfsOnly"])
+@pytest.mark.parametrize("image", ["native-template", "oci://registry/template@sha256:abc"])
+@pytest.mark.parametrize(
+    "payload, expected_envs, expected_auth",
+    [
+        (None, {}, False),
+        ({}, {}, False),
+        ({"envs": {}}, {}, False),
+        (
+            {"envs": {"GREETING": "你好 café", "EMPTY": ""}},
+            {"GREETING": "你好 café", "EMPTY": ""},
+            False,
+        ),
+        ({"accessTokenHash": "old-hash"}, {}, True),
+        ({"accessTokenVerifier": "old-verifier"}, {}, True),
+        ({"accessTokenHash": None}, {}, True),
+        (
+            {
+                "envs": {"A": "1"},
+                "accessTokenHash": "old-hash",
+                "accessTokenVerifier": "old-verifier",
+                "accessToken": "old-raw-token",
+            },
+            {"A": "1"},
+            True,
+        ),
+    ],
+)
+def test_create_captures_runtime_init_without_credentials(
+    mode, image, payload, expected_envs, expected_auth
+) -> None:
+    runtime, fastpath, k8s = _runtime()
+    source = _sandbox_cr(image)
+    if payload is not None:
+        source["spec"]["actionBindings"] = [
+            {"handler": "runtime-init", "input": json.dumps(payload, ensure_ascii=False)}
+        ]
+    k8s.sandbox_crs[("default", SANDBOX_ID)] = source
+    original = deepcopy(source)
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, mode=mode)
+
+    assert status.state == SnapshotState.CREATING
+    assert status.runtime_envs == expected_envs
+    assert status.execd_auth_enabled is expected_auth
+    assert len(k8s.custom_object_reads) == 1
+    assert source == original
+    request = fastpath.create_requests[0]
+    assert dict(request.metadata) == {SNAPSHOT_ID_METADATA_KEY: SNAPSHOT_ID}
+    serialized = json.dumps(asdict(status)) + str(request)
+    for secret in ("old-hash", "old-verifier", "old-raw-token", "accessToken"):
+        assert secret not in serialized
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {"handler": "runtime-init", "input": "private-payload-not-json"},
+        {"handler": "runtime-init", "input": "[]"},
+        {"handler": "runtime-init", "input": "null"},
+        {"handler": "runtime-init", "input": '"private-payload"'},
+        {"handler": "runtime-init", "input": '{"envs": null}'},
+        {"handler": "runtime-init", "input": '{"envs": []}'},
+        {"handler": "runtime-init", "input": '{"envs": "private-payload"}'},
+        {"handler": "runtime-init", "input": '{"envs": {"SECRET": 123}}'},
+        {"handler": "runtime-init", "input": '{"envs": {"SECRET": false}}'},
+        {"handler": "runtime-init", "input": '{"envs": {"SECRET": null}}'},
+        {"handler": "runtime-init", "input": {"envs": {}}},
+        {"handler": "runtime-init"},
+        {},
+        None,
+    ],
+)
+def test_invalid_runtime_init_fails_before_snapshot_rpc(binding, caplog) -> None:
+    runtime, fastpath, k8s = _runtime()
+    k8s.sandbox_crs[("default", SANDBOX_ID)]["spec"]["actionBindings"] = [binding]
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status.state == SnapshotState.FAILED
+    assert fastpath.create_requests == []
+    assert fastpath.get_sandbox_calls == []
+    assert "private-payload" not in (status.message or "") + caplog.text
+    assert "SECRET" not in (status.message or "") + caplog.text
+
+
+@pytest.mark.parametrize(
+    "bindings",
+    [
+        None, {}, "invalid",
+        [
+            {"handler": "runtime-init", "input": "{}"},
+            {"handler": "runtime-init", "input": "{}"},
+        ],
+    ],
+)
+def test_invalid_action_bindings_fail_before_snapshot_rpc(bindings) -> None:
+    runtime, fastpath, k8s = _runtime()
+    k8s.sandbox_crs[("default", SANDBOX_ID)]["spec"]["actionBindings"] = bindings
+
+    assert runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID).state == SnapshotState.FAILED
+    assert fastpath.create_requests == []
 
 
 def test_create_snapshot_records_source_sandbox_limits() -> None:
@@ -445,7 +552,7 @@ def test_inspect_treats_unspecified_mode_as_unknown() -> None:
     assert status.mode is None
 
 
-def test_create_snapshot_unreadable_sandbox_cr_fails_without_rpc() -> None:
+def test_create_snapshot_unreadable_sandbox_cr_fails_without_rpc(caplog) -> None:
     fastpath = FakeFastPathClient()
     k8s = WatchRecordingK8sClient()
     k8s.sandbox_cr_error = KeyError("api unavailable")
@@ -455,7 +562,8 @@ def test_create_snapshot_unreadable_sandbox_cr_fails_without_rpc() -> None:
 
     assert status.state == SnapshotState.FAILED
     assert status.reason == "snapshot_runtime_create_failed"
-    assert "image could not be read" in (status.message or "")
+    assert "configuration could not be read" in (status.message or "")
+    assert "api unavailable" not in (status.message or "") + caplog.text
     assert fastpath.create_requests == []
 
 
@@ -639,6 +747,78 @@ def test_close_stops_informers_when_client_supports_it() -> None:
     runtime.close()
 
     assert k8s.stopped == 1
+
+
+@pytest.mark.parametrize("mode", ["full", "rootfsOnly"])
+@pytest.mark.parametrize("image", ["native-template", "oci://registry/template@sha256:abc"])
+@pytest.mark.parametrize("envs", [{}, {"GREETING": "你好 café", "EMPTY": ""}])
+@pytest.mark.parametrize("auth_enabled", [False, True])
+def test_ready_preserves_captured_config_after_source_deletion(
+    tmp_path, mode, image, envs, auth_enabled
+) -> None:
+    runtime, fastpath, k8s = _runtime()
+    payload = {"envs": envs}
+    if auth_enabled:
+        payload.update(
+            accessTokenHash="old-hash", accessTokenVerifier="old-verifier",
+            accessToken="old-raw-token",
+        )
+    k8s.sandbox_crs[("default", SANDBOX_ID)] = {
+        "spec": {
+            "image": image,
+            "actionBindings": [{"handler": "runtime-init", "input": json.dumps(payload)}],
+        }
+    }
+    fastpath.sandbox_limits = ("2", "1Gi")
+
+    class _SandboxService:
+        @staticmethod
+        def get_sandbox(sandbox_id: str):
+            return {"id": sandbox_id, "status": {"state": "Running"}}
+
+    repo = SQLiteSnapshotRepository(tmp_path / "snapshots.db")
+    service = PersistedSnapshotService(repo, _SandboxService(), snapshot_runtime=runtime)
+    try:
+        created = service.create_snapshot(SANDBOX_ID, CreateSnapshotRequest(mode=mode))
+        stored = repo.get(created.id)
+        assert stored.status.state == SnapshotState.CREATING
+        assert stored.restore_config.runtime_envs == envs
+        assert stored.restore_config.execd_auth_enabled is auth_enabled
+        with repo._connect() as conn:
+            metadata = conn.execute("SELECT restore_config FROM snapshots").fetchone()[0]
+        for secret in ("old-hash", "old-verifier", "old-raw-token", "accessToken"):
+            assert secret not in metadata
+
+        k8s.sandbox_crs.clear()
+        k8s.sandbox_cr_error = KeyError("source deleted")
+        fastpath.get_sandbox_error = FastPathNotFound("NOT_FOUND", "source deleted")
+        snapshot_name = build_public_snapshot_name(created.id)
+        restore_image = (
+            "oci://registry/snapshot@sha256:def" if image.startswith("oci://") else snapshot_name
+        )
+        fastpath.get_by_name[("default", snapshot_name)] = _Response(
+            _Info(
+                pb2.SNAPSHOT_PHASE_SUCCEEDED,
+                template_name="" if image.startswith("oci://") else restore_image,
+                manifest_ref=restore_image if image.startswith("oci://") else "",
+                mode=(
+                    pb2.SNAPSHOT_MODE_ROOTFS_ONLY
+                    if mode == "rootfsOnly" else pb2.SNAPSHOT_MODE_FULL
+                ),
+            )
+        )
+        status = runtime.inspect_snapshot(created.id, source_sandbox_id=SANDBOX_ID)
+        assert status.state == SnapshotState.READY
+        assert status.runtime_envs is None
+        assert service.get_snapshot(created.id).status.state == "Ready"
+        ready = repo.get(created.id)
+        assert ready.restore_config.runtime_envs == envs
+        assert ready.restore_config.execd_auth_enabled is auth_enabled
+        assert ready.restore_config.limits == {"cpu": "2", "memory": "1Gi"}
+        assert ready.restore_config.image == restore_image
+        assert len(k8s.custom_object_reads) == 1
+    finally:
+        service.close()
 
 
 def test_inspect_ready_attaches_source_limits_for_retry() -> None:

@@ -174,8 +174,9 @@ interface Sandboxes {
      * Creates a sandbox from a fsb golden-image template.
      *
      * Template mode fixes the workload shape on the server, and [timeout] is required.
-     * Use the env overload for runtime overrides: non-empty env requires pool runtime-init
-     * support, affects only new commands and sessions, and does not restart the entrypoint.
+     * Every create requires a runtime-init-capable pool to bind the new sandbox ID,
+     * even without env or authentication. Use the env overload for overrides that
+     * affect only new commands and sessions without restarting the entrypoint.
      *
      * @param templateId Unique identifier of a `Succeeded` template owned by the requester
      * @param timeout Sandbox lifetime. Required in template mode.
@@ -207,8 +208,9 @@ interface Sandboxes {
      *
      * Template mode fixes the workload shape on the server, and [timeout] is required.
      * The idle policy is control-plane state (OSEP-0024), not workload shape.
-     * Use the env overload for runtime overrides requiring pool runtime-init support;
-     * they affect only new commands and sessions without restarting the entrypoint.
+     * Every create requires a runtime-init-capable pool to bind the new sandbox ID,
+     * even without env or authentication. Use the env overload for overrides that
+     * affect only new commands and sessions without restarting the entrypoint.
      *
      * @param templateId Unique identifier of a `Succeeded` template owned by the requester
      * @param timeout Sandbox lifetime. Required in template mode.

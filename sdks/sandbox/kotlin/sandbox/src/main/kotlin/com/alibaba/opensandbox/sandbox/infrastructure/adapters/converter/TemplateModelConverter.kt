@@ -105,8 +105,9 @@ internal object TemplateModelConverter {
      *
      * Template mode fixes the workload shape on the server: only the template id,
      * timeout, metadata, network policy, extensions, env and the idle policy may
-     * accompany the request. Non-empty env requires pool runtime-init support and
-     * affects only new commands and sessions, without restarting the entrypoint
+     * accompany the request. Every create requires a runtime-init-capable pool to bind
+     * the new sandbox ID, even without env or authentication. Env affects only
+     * new commands and sessions, without restarting the entrypoint
      * or changing running processes. Workload-shaping fields (image, snapshotId,
      * entrypoint, resource limits, volumes, platform, credential proxy,
      * lifecycle hooks) must stay unset because the server rejects them in

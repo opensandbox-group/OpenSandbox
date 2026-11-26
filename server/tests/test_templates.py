@@ -88,7 +88,10 @@ def _pool_cr(*, resource_aware: bool = False) -> dict:
         "apiVersion": "sandbox.fast.io/v1alpha2",
         "kind": "SandboxPool",
         "metadata": {"name": "default-pool", "namespace": "ns-1", "uid": "pool-uid"},
-        "spec": {"sandboxResources": profile},
+        "spec": {
+            "sandboxResources": profile,
+            "actionHandlers": [{"name": "egress"}, {"name": "runtime-init"}],
+        },
     }
 
 
@@ -1100,20 +1103,20 @@ def execd_auth_config(tmp_path):
 @pytest.mark.parametrize(
     "env, runtime_init, forbidden, rejected",
     [
-        (None, False, False, False),
-        ({}, False, False, False),
+        (None, False, False, True),
+        ({}, False, False, True),
         ({"A": "1"}, False, False, True),
         ({"A": "1"}, True, False, False),
         ({"A": "1"}, True, True, True),
-        (None, True, True, False),
-        ({}, True, True, False),
+        (None, True, True, True),
+        ({}, True, True, True),
         (None, True, False, False),
         ({}, True, False, False),
         ({"A": None}, True, False, True),
         ({"EXECD_INIT_AUTH": "false"}, True, False, True),
     ],
 )
-def test_template_env_requires_selected_pool_runtime_init(
+def test_template_create_requires_selected_pool_runtime_init(
     service, crs, monkeypatch, execd_auth_config, auth_enabled,
     pool_ref, env, runtime_init, forbidden, rejected
 ):
@@ -1141,7 +1144,6 @@ def test_template_env_requires_selected_pool_runtime_init(
     config = _config()
     if auth_enabled:
         config.execd = execd_auth_config
-        rejected = rejected or not runtime_init or forbidden
     sandbox_service = FastSandboxService(
         config, fastpath_client=stub, k8s_client=k8s, template_service=service
     )
@@ -1177,27 +1179,24 @@ def test_template_env_requires_selected_pool_runtime_init(
             assert stub.last_create is not None
             assert stub.last_create.pool_ref == pool_ref
             bindings = stub.last_create.action_bindings
-            assert [binding.handler for binding in bindings] == (
-                ["egress", "runtime-init"] if env or auth_enabled else ["egress"]
-            )
-            if env or auth_enabled:
-                expected = {
-                    "sandboxId": response.id,
-                    "generation": 1,
-                    "entrypointPolicy": "keep",
-                    "preserveRuntimeState": False,
-                    "envs": env or {},
-                }
-                if auth_enabled:
-                    verifier = json.loads(bindings[1].input)["accessTokenVerifier"]
-                    algorithm, kid, nonce, digest = verifier.split(":")
-                    assert (algorithm, kid) == ("sha256", "v1")
-                    assert nonce
-                    raw_token = manager.resolve_raw_token(verifier)
-                    assert hashlib.sha256(raw_token.encode()).hexdigest() == digest
-                    expected.update(accessTokenVerifier=verifier, accessTokenHash=f"sha256:{digest}")
-                    assert raw_token.encode() not in stub.last_create.SerializeToString()
-                assert json.loads(bindings[1].input) == expected
+            assert [binding.handler for binding in bindings] == ["egress", "runtime-init"]
+            expected = {
+                "sandboxId": response.id,
+                "generation": 1,
+                "entrypointPolicy": "keep",
+                "preserveRuntimeState": False,
+                "envs": env or {},
+            }
+            if auth_enabled:
+                verifier = json.loads(bindings[1].input)["accessTokenVerifier"]
+                algorithm, kid, nonce, digest = verifier.split(":")
+                assert (algorithm, kid) == ("sha256", "v1")
+                assert nonce
+                raw_token = manager.resolve_raw_token(verifier)
+                assert hashlib.sha256(raw_token.encode()).hexdigest() == digest
+                expected.update(accessTokenVerifier=verifier, accessTokenHash=f"sha256:{digest}")
+                assert raw_token.encode() not in stub.last_create.SerializeToString()
+            assert json.loads(bindings[1].input) == expected
             assert not stub.last_create.envs
             if auth_enabled:
                 mint.assert_called_once_with()
@@ -1213,6 +1212,8 @@ def test_template_env_requires_selected_pool_runtime_init(
 
 
 @pytest.mark.parametrize("auth_enabled, env", [
+    (False, None),
+    (False, {}),
     (False, {"APP_ENV": "production"}),
     (True, None),
     (True, {}),

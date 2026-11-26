@@ -25,6 +25,7 @@ from __future__ import annotations
 # pyright: reportAttributeAccessIssue=false
 # protobuf-generated modules expose dynamic attributes.
 
+import json
 import logging
 from dataclasses import replace
 from threading import Lock
@@ -163,19 +164,17 @@ class FastSandboxSnapshotRuntime:
         ns = namespace if namespace is not None else self._namespace
         self._ensure_namespace_watch(ns)
 
-        source_image = self._source_sandbox_image(ns, sandbox_id)
-        if source_image is None:
-            # The encoding decides template_name semantics; guessing wrong is
-            # a guaranteed upstream rejection.
+        source_config = self._source_sandbox_config(ns, sandbox_id)
+        if source_config is None:
             return SnapshotRuntimeStatus(
                 state=SnapshotState.FAILED,
                 reason="snapshot_runtime_create_failed",
                 message=(
                     f"Cannot snapshot sandbox {sandbox_id}: its Sandbox CR "
-                    "image could not be read to determine the artifact "
-                    "encoding (native vs OCI)."
+                    "image or runtime-init configuration could not be read or is invalid."
                 ),
             )
+        source_image, runtime_envs, execd_auth_enabled = source_config
 
         request = pb2.CreateSandboxSnapshotRequest(
             request_id=snapshot_name,
@@ -234,6 +233,8 @@ class FastSandboxSnapshotRuntime:
             backend=_BACKEND_FSB,
             resource_limits=self._source_sandbox_limits(ns, sandbox_id),
             mode=normalize_snapshot_mode(mode),
+            runtime_envs=runtime_envs,
+            execd_auth_enabled=execd_auth_enabled,
         )
 
     def _source_sandbox_limits(self, namespace: str, sandbox_id: str) -> Optional[dict]:
@@ -253,8 +254,10 @@ class FastSandboxSnapshotRuntime:
             )
             return None
 
-    def _source_sandbox_image(self, namespace: str, sandbox_id: str) -> Optional[str]:
-        """The source Sandbox CR's image, or None when unreadable."""
+    def _source_sandbox_config(
+        self, namespace: str, sandbox_id: str
+    ) -> tuple[str, dict[str, str], bool] | None:
+        """Capture image and immutable runtime-init configuration from one CR read."""
         try:
             cr = self._k8s_client.get_custom_object(
                 group=GROUP,
@@ -263,15 +266,50 @@ class FastSandboxSnapshotRuntime:
                 plural=SANDBOX_PLURAL,
                 name=sandbox_id,
             )
-        except Exception as exc:  # noqa: BLE001 - unreadable means unclassifiable
+        except Exception:  # noqa: BLE001 - never log source payloads from API errors
             logger.warning(
-                f"Failed to read Sandbox CR {namespace}/{sandbox_id} before "
-                f"snapshot: {exc}"
+                f"Failed to read Sandbox CR {namespace}/{sandbox_id} before snapshot"
             )
             return None
         spec = cr.get("spec") if isinstance(cr, dict) else None
-        image = spec.get("image") if isinstance(spec, dict) else None
-        return str(image) if image else None
+        if not isinstance(spec, dict):
+            return None
+        image = spec.get("image")
+        if not isinstance(image, str) or not image:
+            return None
+        bindings = spec.get("actionBindings", [])
+        if not isinstance(bindings, list):
+            return None
+        runtime_envs = {}
+        execd_auth_enabled = False
+        found_runtime_init = False
+        for binding in bindings:
+            if not isinstance(binding, dict) or not isinstance(binding.get("handler"), str):
+                return None
+            if binding["handler"] != "runtime-init":
+                continue
+            if found_runtime_init:
+                return None
+            found_runtime_init = True
+            raw_input = binding.get("input")
+            if not isinstance(raw_input, str):
+                return None
+            try:
+                payload = json.loads(raw_input)
+            except ValueError:
+                return None
+            if not isinstance(payload, dict):
+                return None
+            envs = payload.get("envs", {})
+            if not isinstance(envs, dict) or any(
+                not isinstance(key, str) or not isinstance(value, str)
+                for key, value in envs.items()
+            ):
+                return None
+            runtime_envs = dict(envs)
+            # Presence is authoritative even without local signing-key configuration.
+            execd_auth_enabled = "accessTokenHash" in payload or "accessTokenVerifier" in payload
+        return image, runtime_envs, execd_auth_enabled
 
     def get_snapshot_status(self, snapshot_id: str) -> SnapshotRuntimeStatus:
         return self.inspect_snapshot(snapshot_id)

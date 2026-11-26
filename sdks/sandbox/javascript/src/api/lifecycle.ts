@@ -1636,6 +1636,15 @@ export interface components {
             /**
              * @description Snapshot identifier to restore from.
              *     Mutually exclusive with `image`.
+             *     For FSB snapshots, both Full and RootfsOnly creates require a
+             *     `runtime-init` handler on the default SandboxPool and an execd
+             *     supporting `/internal/init`, even without env or authentication.
+             *     The handler binds a new sandbox identity with `entrypointPolicy=keep`
+             *     and `preserveRuntimeState=true`; existing processes and restored
+             *     sessions retain their environment, while new commands and sessions
+             *     receive the new `OPENSANDBOX_ID` and captured env with request overrides.
+             *     Missing pool capability or captured runtime env metadata returns 400;
+             *     legacy snapshots must be captured again before use.
              */
             snapshotId?: string;
             /**
@@ -1646,13 +1655,15 @@ export interface components {
              *     `entrypoint`, `resourceLimits`, `resourceRequests`,
              *     `volumes`, `platform`, `secureAccess` and
              *     lifecycle hooks are rejected (400), and `timeout` is required.
-             *     Non-empty `env` requires a `runtime-init` action handler on the
+             *     Every template create requires a `runtime-init` action handler on the
              *     selected SandboxPool; otherwise the server returns 400 INVALID_PARAMETER.
-             *     The handler delivers env to an `/internal/init`-capable execd with
-             *     `entrypointPolicy=keep`: new commands and sessions receive the env,
-             *     but the running entrypoint is not restarted and keeps its existing env.
-             *     Empty or omitted env does not trigger runtime initialization.
-             *     This path does not provision execd tokens and requires init auth disabled.
+             *     The handler binds the new sandbox identity and optional env to an
+             *     `/internal/init`-capable execd with `entrypointPolicy=keep`: new commands
+             *     and sessions receive the new `OPENSANDBOX_ID` and env, but the running
+             *     entrypoint is not restarted and keeps its existing env.
+             *     Initialization is required even without env or execd authentication.
+             *     When server signing is configured, it also binds a new execd token.
+             *     Initialization authentication must remain disabled for this handler.
              *     Null values, reserved execd env names, invalid keys, and runtime-init
              *     binding payloads exceeding 64 KiB are rejected with 400.
              *     `credentialProxy` is accepted and ignored: the vault is not

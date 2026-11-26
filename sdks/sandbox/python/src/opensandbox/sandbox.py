@@ -643,7 +643,9 @@ class Sandbox:
         from the template's golden image and cannot be overridden here. Only
         env, metadata, network policy, extensions and the control-plane
         ``idle_policy`` (OSEP-0024 ``lifecycle.idlePolicy``) may accompany the
-        template id, and the timeout is required.
+        template id, and the timeout is required. Every create requires a
+        runtime-init-capable pool to bind the new sandbox ID, even without env
+        or authentication.
 
         Args:
             template_id: ID of a ``Succeeded`` fsb template (see
@@ -651,8 +653,7 @@ class Sandbox:
             timeout: Maximum sandbox lifetime (required in template mode)
             ready_timeout: Total budget for endpoint publication and health checks.
             env: Runtime environment overrides for new commands/sessions; does not
-                restart the entrypoint. Non-empty env requires a runtime-init-capable
-                pool, validated by the server. None or {} skips runtime initialization.
+                restart the entrypoint.
             metadata: Custom metadata for the sandbox
             network_policy: Optional outbound network policy (egress).
             extensions: Opaque extension parameters passed through to the server as-is.

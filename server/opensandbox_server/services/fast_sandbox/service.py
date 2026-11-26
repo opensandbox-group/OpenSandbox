@@ -482,10 +482,10 @@ class FastSandboxService(SandboxService, ExtensionService):
             pool = await self._pool_snapshot_async(namespace, pool_ref)
             pool_is_resource_aware = pool.is_resource_aware
             try:
-                if (request.env or self._execd_token_manager is not None) and "runtime-init" not in pool.action_handlers:
+                if "runtime-init" not in pool.action_handlers:
                     raise UnsupportedFieldError(
                         "templateId",
-                        f"template environment variables or execd authentication require a 'runtime-init' "
+                        f"template runtime initialization requires a 'runtime-init' "
                         f"action handler on SandboxPool {pool_ref!r}",
                     )
                 create_request = map_template_create_request(
@@ -515,7 +515,21 @@ class FastSandboxService(SandboxService, ExtensionService):
         else:
             pool = await self._pool_snapshot_async(namespace, pool_ref)
             pool_is_resource_aware = pool.is_resource_aware
+            if request.snapshot_id and request._resolved_snapshot_execd_auth_enabled and self._execd_token_manager is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={
+                        "code": SandboxErrorCodes.FSB_API_ERROR,
+                        "message": "Execd signing keys are required to restore an authenticated snapshot.",
+                    },
+                )
             try:
+                if request.snapshot_id and "runtime-init" not in pool.action_handlers:
+                    raise UnsupportedFieldError(
+                        "snapshotId",
+                        f"snapshot runtime initialization requires a 'runtime-init' "
+                        f"action handler on SandboxPool {pool_ref!r}",
+                    )
                 create_request = map_create_request(
                     request,
                     sandbox_id=self.generate_sandbox_id(),
@@ -528,6 +542,11 @@ class FastSandboxService(SandboxService, ExtensionService):
                     pool_resources=pool.resources,
                     snapshot_limits=request.resolved_snapshot_limits,
                     pool_is_resource_aware=pool_is_resource_aware,
+                    execd_access_token_verifier=(
+                        self._execd_token_manager.mint_env_value()
+                        if request.snapshot_id and self._execd_token_manager is not None
+                        else None
+                    ),
                 )
             except UnsupportedFieldError as exc:
                 raise HTTPException(

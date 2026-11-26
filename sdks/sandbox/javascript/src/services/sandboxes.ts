@@ -46,8 +46,9 @@ export interface Sandboxes {
    *
    * Template mode fixes the workload shape on the server: env overrides,
    * metadata, network policy, extensions and the idle policy may accompany
-   * the template id, and the timeout is required. Non-empty env requires pool
-   * runtime-init support and applies only to new commands/sessions without
+   * the template id, and the timeout is required. Every create requires a
+   * runtime-init-capable pool to bind the new sandbox ID, even without env or
+   * authentication. Env applies only to new commands/sessions without
    * restarting the restored entrypoint.
    */
   createSandboxFromTemplate(

@@ -537,9 +537,17 @@ def test_map_template_delivers_env_as_runtime_init_after_egress():
 
 
 @pytest.mark.parametrize("env", [None, {}])
-def test_map_template_without_env_omits_runtime_init(env):
+def test_map_template_without_env_or_token_initializes_identity(env):
     create = _map_template(_template_request(env=env))
-    assert [binding.handler for binding in create.action_bindings] == ["egress"]
+    assert [binding.handler for binding in create.action_bindings] == ["egress", "runtime-init"]
+    assert json.loads(create.action_bindings[1].input) == {
+        "sandboxId": create.request_id,
+        "generation": 1,
+        "entrypointPolicy": "keep",
+        "preserveRuntimeState": False,
+        "envs": {},
+    }
+    assert not create.envs
 
 
 @pytest.mark.parametrize("key", [
@@ -749,6 +757,145 @@ def test_map_create_rejects_snapshot_restore_key_outside_both_baselines():
             pool_resources={"cpu": "1", "memory": "512Mi", "pids": "128"},
             snapshot_limits={"cpu": "2", "memory": "1Gi"},
         )
+
+
+@pytest.mark.parametrize("rootfs_only", [False, True])
+@pytest.mark.parametrize("env", [None, {}, {"APP": "override", "EMPTY": "", "UNICODE": "环境"}])
+def test_map_snapshot_rebinds_token_and_inherits_env(execd_token_manager, rootfs_only, env):
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    request.snapshot_id = "snap-1"
+    request._resolved_snapshot_backend = "fsb"
+    request._resolved_rootfs_only = rootfs_only
+    captured = {"APP": "original", "INHERITED": "source"}
+    request._resolved_snapshot_runtime_envs = captured
+    request._resolved_snapshot_execd_auth_enabled = True
+    request.env = env
+    verifier = execd_token_manager.mint_env_value()
+    raw_token = execd_token_manager.resolve_raw_token(verifier)
+
+    create = map_create_request(
+        request, "clone-1", "ns-1", now=NOW,
+        execd_access_token_verifier=verifier,
+        snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+
+    assert [binding.handler for binding in create.action_bindings] == ["egress", "runtime-init"]
+    assert json.loads(create.action_bindings[1].input) == {
+        "sandboxId": "clone-1",
+        "generation": 1,
+        "entrypointPolicy": "keep",
+        "preserveRuntimeState": True,
+        "envs": {**captured, **(env or {})},
+        "accessTokenHash": "sha256:" + hashlib.sha256(raw_token.encode()).hexdigest(),
+        "accessTokenVerifier": verifier,
+    }
+    assert not create.envs
+    assert raw_token.encode() not in create.SerializeToString()
+    assert captured == {"APP": "original", "INHERITED": "source"}
+    assert request.env == env
+    repeated = map_create_request(
+        request, "clone-1", "ns-1",
+        expires_at_unix_seconds=create.expires_at_unix_seconds,
+        execd_access_token_verifier=verifier,
+        snapshot_limits={"cpu": "2", "memory": "1Gi"},
+        pool_is_resource_aware=True,
+    )
+    assert repeated.SerializeToString() == create.SerializeToString()
+
+
+@pytest.mark.parametrize("rootfs_only", [False, True])
+@pytest.mark.parametrize("env", [None, {}])
+def test_map_snapshot_without_env_or_token_initializes_identity(rootfs_only, env):
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    request.snapshot_id = "snap-1"
+    request._resolved_rootfs_only = rootfs_only
+    request._resolved_snapshot_runtime_envs = {}
+    request.env = env
+    create = map_create_request(request, "clone-1", "ns-1", now=NOW)
+    assert [binding.handler for binding in create.action_bindings] == ["egress", "runtime-init"]
+    assert json.loads(create.action_bindings[1].input) == {
+        "sandboxId": "clone-1",
+        "generation": 1,
+        "entrypointPolicy": "keep",
+        "preserveRuntimeState": True,
+        "envs": {},
+    }
+    assert not create.envs
+
+
+@pytest.mark.parametrize("with_token", [False, True])
+@pytest.mark.parametrize("env", [None, {}, {"APP": "override"}])
+@pytest.mark.parametrize("rootfs_only", [False, True])
+def test_map_snapshot_rejects_unknown_runtime_env(execd_token_manager, with_token, env, rootfs_only):
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    request.snapshot_id = "snap-1"
+    request._resolved_rootfs_only = rootfs_only
+    request.env = env
+    with pytest.raises(UnsupportedFieldError, match="capture a new snapshot"):
+        map_create_request(
+            request, "clone-1", "ns-1", now=NOW,
+            execd_access_token_verifier=execd_token_manager.mint_env_value() if with_token else None,
+        )
+
+
+def test_map_snapshot_rejects_authentication_downgrade():
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    request.snapshot_id = "snap-1"
+    request._resolved_snapshot_runtime_envs = {}
+    request._resolved_snapshot_execd_auth_enabled = True
+    with pytest.raises(UnsupportedFieldError, match="requires a new execd token"):
+        map_create_request(request, "clone-1", "ns-1", now=NOW)
+
+
+@pytest.mark.parametrize("env", [
+    {"APP": None}, {"": "x"}, {"A" * 257: "x"}, {"环" * 86: "x"},
+    {"\ud800": "x"}, {"execd_access_token": "forbidden"}, {"EXECD_RUNTIME_INIT": "1"},
+])
+@pytest.mark.parametrize("inherited", [False, True])
+def test_map_snapshot_validates_merged_runtime_env(env, inherited):
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    request.snapshot_id = "snap-1"
+    request._resolved_snapshot_runtime_envs = env if inherited else {}
+    request.env = {} if inherited else env
+    with pytest.raises(UnsupportedFieldError, match="env"):
+        map_create_request(request, "clone-1", "ns-1", now=NOW)
+
+
+@pytest.mark.parametrize("with_token", [False, True])
+def test_map_snapshot_limits_combined_runtime_env_payload(execd_token_manager, with_token):
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    request.snapshot_id = "snap-1"
+    request._resolved_snapshot_runtime_envs = {"INHERITED": "x" * 1024}
+    request.env = {"OVERRIDE": ""}
+    verifier = execd_token_manager.mint_env_value() if with_token else None
+    baseline = map_create_request(
+        request, "clone-1", "ns-1", now=NOW, execd_access_token_verifier=verifier,
+    ).action_bindings[1].input
+    capacity = 64 * 1024 - len(baseline.encode("utf-8"))
+    request.env["OVERRIDE"] = "x" * capacity
+    create = map_create_request(
+        request, "clone-1", "ns-1", now=NOW, execd_access_token_verifier=verifier,
+    )
+    assert len(create.action_bindings[1].input.encode("utf-8")) == 64 * 1024
+    request.env["OVERRIDE"] += "x"
+    with pytest.raises(UnsupportedFieldError, match="64 KiB"):
+        map_create_request(
+            request, "clone-1", "ns-1", now=NOW, execd_access_token_verifier=verifier,
+        )
+
+
+def test_map_snapshot_without_token_replays_inherited_runtime_env():
+    request = _snapshot_restore_request({"cpu": "2", "memory": "1Gi"})
+    request.snapshot_id = "snap-1"
+    request._resolved_snapshot_runtime_envs = {"APP": "captured"}
+    create = map_create_request(request, "clone-1", "ns-1", now=NOW)
+    payload = json.loads(create.action_bindings[1].input)
+    assert payload["envs"] == {"APP": "captured"}
+    assert payload["preserveRuntimeState"] is True
+    assert "accessTokenHash" not in payload
+    assert "accessTokenVerifier" not in payload
+    assert not create.envs
 
 
 def test_map_create_snapshot_without_caller_limits_is_valid():

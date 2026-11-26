@@ -90,6 +90,7 @@ def map_create_request(
     pool_resources: Optional[dict] = None,
     snapshot_limits: Optional[dict] = None,
     pool_is_resource_aware: bool = False,
+    execd_access_token_verifier: Optional[str] = None,
 ) -> pb2.CreateSandboxRequest:
     """Map the accepted request subset to a FastPath v2 CreateSandboxRequest.
 
@@ -156,7 +157,7 @@ def map_create_request(
         completion=pb2.CREATE_COMPLETION_READY,
     )
 
-    if request.env:
+    if request.env and not request.snapshot_id:
         for key, value in request.env.items():
             if value is None:
                 raise UnsupportedFieldError(
@@ -195,6 +196,22 @@ def map_create_request(
 
     if not request._resolved_rootfs_only and snapshot_limits is not None and pool_is_resource_aware:
         _set_resource_limits(create, snapshot_limits, "snapshotLimits")
+
+    if request.snapshot_id:
+        if request._resolved_snapshot_runtime_envs is None:
+            raise UnsupportedFieldError(
+                "snapshotId",
+                "snapshot lacks captured runtime env; capture a new snapshot before using runtime initialization",
+            )
+        if request._resolved_snapshot_execd_auth_enabled and not execd_access_token_verifier:
+            raise UnsupportedFieldError("snapshotId", "authenticated snapshot requires a new execd token")
+        envs = {**request._resolved_snapshot_runtime_envs, **(request.env or {})}
+        create.action_bindings.add(
+            handler="runtime-init",
+            input=_runtime_init_input(
+                sandbox_id, envs, execd_access_token_verifier, preserve_runtime_state=True,
+            ),
+        )
 
     return create
 
@@ -265,19 +282,20 @@ def map_template_create_request(
     if pool_is_resource_aware:
         _set_resource_limits(create, template_machine, "templateMachine")
 
-    if request.env or execd_access_token_verifier:
-        create.action_bindings.add(
-            handler="runtime-init",
-            input=_template_runtime_init_input(sandbox_id, request.env or {}, execd_access_token_verifier),
-        )
+    create.action_bindings.add(
+        handler="runtime-init",
+        input=_runtime_init_input(sandbox_id, request.env or {}, execd_access_token_verifier),
+    )
 
     return create
 
 
-def _template_runtime_init_input(
+def _runtime_init_input(
     sandbox_id: str,
     env: dict[str, Optional[str]],
     execd_access_token_verifier: Optional[str] = None,
+    *,
+    preserve_runtime_state: bool = False,
 ) -> str:
     for key, value in env.items():
         try:
@@ -296,7 +314,7 @@ def _template_runtime_init_input(
         "sandboxId": sandbox_id,
         "generation": 1,
         "entrypointPolicy": "keep",
-        "preserveRuntimeState": False,
+        "preserveRuntimeState": preserve_runtime_state,
         "envs": env,
     }
     if execd_access_token_verifier:

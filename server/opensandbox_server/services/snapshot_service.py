@@ -263,6 +263,9 @@ class PersistedSnapshotService(SnapshotService):
         try:
             if runtime_status.resource_limits:
                 record.restore_config.limits = dict(runtime_status.resource_limits)
+            if runtime_status.runtime_envs is not None:
+                record.restore_config.runtime_envs = dict(runtime_status.runtime_envs)
+            record.restore_config.execd_auth_enabled = runtime_status.execd_auth_enabled
             self._snapshot_repository.create(record)
         except Exception as exc:
             logger.warning(
@@ -798,6 +801,8 @@ class PersistedSnapshotService(SnapshotService):
                     # Fill-if-missing: a transient source read at creation may
                     # have dropped the limits; terminal transition retries.
                     limits=record.restore_config.limits or runtime_status.resource_limits,
+                    runtime_envs=record.restore_config.runtime_envs,
+                    execd_auth_enabled=record.restore_config.execd_auth_enabled,
                 ),
                 status=SnapshotStatusRecord(
                     state=SnapshotState.READY,

@@ -1714,9 +1714,10 @@ class Sandbox internal constructor(
      * Fluent launcher for creating sandbox instances from fsb golden-image templates.
      *
      * Template mode fixes the workload shape on the server. Metadata, network policy,
-     * extensions, idle policy and env may accompany the template id. Non-empty env
-     * requires a pool with runtime-init support and applies only to new commands and
-     * sessions; it does not restart the entrypoint or change running processes.
+     * extensions, idle policy and env may accompany the template id. Every create
+     * requires a runtime-init-capable pool to bind the new sandbox ID, even without
+     * env or authentication. Env applies only to new commands and sessions;
+     * it does not restart the entrypoint or change running processes.
      * Workload-shaping options (image, entrypoint, resources, volumes, platform,
      * lifecycle hooks, credential proxy) are not available, and [timeout] is required.
      *
@@ -1801,7 +1802,7 @@ class Sandbox internal constructor(
             return this
         }
 
-        /** Non-empty env requires pool runtime-init support; affects new commands/sessions without restarting the entrypoint. */
+        /** Env affects only new commands/sessions without restarting the entrypoint. */
         fun env(
             key: String,
             value: String,
