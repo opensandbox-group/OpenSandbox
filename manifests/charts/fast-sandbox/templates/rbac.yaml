@@ -53,7 +53,6 @@ rules:
   - ""
   resources:
   - pods
-  - nodes
   verbs:
   - get
   - list
@@ -66,6 +65,14 @@ rules:
   - ""
   resources:
   - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+- apiGroups:
+  - ""
+  resources:
   - secrets
   verbs:
   - get
@@ -74,7 +81,6 @@ rules:
   - create
   - update
   - patch
-  - delete
 - apiGroups:
   - ""
   resources:
@@ -101,14 +107,6 @@ rules:
   - create
   - patch
   - update
-- apiGroups:
-  - node.k8s.io
-  resources:
-  - runtimeclasses
-  verbs:
-  - get
-  - list
-  - watch
 - apiGroups:
   - sandbox.fast.io
   resources:
@@ -192,12 +190,6 @@ rules:
   - update
   - patch
   - delete
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
