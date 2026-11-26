@@ -46,6 +46,7 @@ from opensandbox_server.config import (
 )
 from opensandbox_server.middleware.request_id import RequestIdMiddleware
 from opensandbox_server.services.constants import SandboxErrorCodes
+from opensandbox_server.services.fast_sandbox import create_mapping
 from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathClient,
     FastPathResourceExhausted,
@@ -921,6 +922,36 @@ def test_http_create_follows_recreated_pool_mode_in_real_time(http_fsb, monkeypa
     assert fake.rootfs_request is not None
     assert _pool_cr_reads(service) == reads
     assert fake.get_pool_calls == 0
+
+
+def test_http_create_expiry_stays_anchored_at_created_at(http_fsb, monkeypatch):
+    """A cold or stale pool cache makes the create wait on a live API-server GET
+    before the request is mapped; that wait must not extend the sandbox TTL."""
+
+    class LaterDatetime(datetime):
+        """The clock as the mapping would read it once that wait is over."""
+
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(seconds=5)
+
+    monkeypatch.setattr(create_mapping, "datetime", LaterDatetime)
+    client, _, _ = http_fsb
+
+    response = client.post(
+        "/v1/sandboxes",
+        json={
+            "image": {"uri": "python:3.11"},
+            "entrypoint": ["python"],
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    created = datetime.fromisoformat(response.json()["createdAt"].replace("Z", "+00:00"))
+    expires = datetime.fromisoformat(response.json()["expiresAt"].replace("Z", "+00:00"))
+    assert expires == created.replace(microsecond=0) + timedelta(seconds=3600)
 
 
 def test_http_read_and_metadata_patch_use_cr_fields(http_fsb):

@@ -19,7 +19,7 @@
 template-based sandbox creation."""
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -47,6 +47,7 @@ from opensandbox_server.services.templates.template_service import (
 )
 from opensandbox_server.services.k8s.client import K8sClient
 from opensandbox_server.services.k8s.informer import WorkloadInformer
+from opensandbox_server.services.fast_sandbox import create_mapping
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 
 
@@ -1111,6 +1112,41 @@ def test_template_mode_create_reads_pool_mode_from_cr_without_get_pool(service, 
         assert stub.get_pool_calls == 0
     finally:
         sandbox_service.close()
+
+
+def test_template_mode_create_expiry_stays_anchored_at_created_at(service, crs, monkeypatch):
+    """The pool read precedes the mapping; a slow read must not extend the TTL."""
+    import asyncio
+
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
+
+    class LaterDatetime(datetime):
+        """The clock as the mapping would read it after a slow pool read."""
+
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(seconds=5)
+
+    monkeypatch.setattr(create_mapping, "datetime", LaterDatetime)
+    record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
+
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    sandbox_service = FastSandboxService(
+        _config(), fastpath_client=_StubFastPath(), k8s_client=k8s, template_service=service
+    )
+    request = CreateSandboxRequest.model_validate(
+        {"templateId": record.template_id, "timeout": 3600}
+    )
+    try:
+        response = asyncio.run(sandbox_service.create_sandbox(request))
+    finally:
+        sandbox_service.close()
+
+    assert response.expires_at == response.created_at.replace(microsecond=0) + timedelta(seconds=3600)
 
 
 def test_template_mode_create_rejects_unknown_template(service):

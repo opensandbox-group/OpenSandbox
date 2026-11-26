@@ -444,6 +444,8 @@ class FastSandboxService(SandboxService, ExtensionService):
             self._reject_network_policy_with_upstream_proxy()
         # Validate the opt-in before any side effect.
         idle_policy_annotation = self._validated_idle_policy_annotation(request)
+        # Expiry is anchored here: the pool read below can wait on a live
+        # API-server GET, and that wait must not extend the sandbox's life.
         created_at = datetime.now(timezone.utc)
         namespace = self._resolve_namespace()
         pool_ref = resolve_pool_ref(request, self._k8s.fastpath_resource_pool)
@@ -465,6 +467,7 @@ class FastSandboxService(SandboxService, ExtensionService):
                     request,
                     sandbox_id=self.generate_sandbox_id(),
                     namespace=namespace,
+                    now=created_at,
                     image_ref=image_ref,
                     entrypoint=template_entrypoint,
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
@@ -487,6 +490,7 @@ class FastSandboxService(SandboxService, ExtensionService):
                     request,
                     sandbox_id=self.generate_sandbox_id(),
                     namespace=namespace,
+                    now=created_at,
                     fastpath_resource_pool=self._k8s.fastpath_resource_pool,
                     # A snapshot restore fixes cpu/memory to the recorded
                     # source limits; pids stays pool-owned (validated against
